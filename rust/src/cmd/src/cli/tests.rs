@@ -3016,7 +3016,7 @@ fn root_path_reaches_config_from_serve_args_and_args_json() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args));
     assert_eq!(config.root_path.as_deref(), Some("/llm"));
 
     let cli = Cli::try_parse_from([
