@@ -344,6 +344,31 @@ output = llm.encode("Hello, my name is")
 print(output)
 ```
 
+### Per-model Hub selection
+
+Use `hf://owner/model` or `modelscope://owner/model` for the model, `--tokenizer`,
+or the `model` field in `--speculative-config`, including corresponding `LLM` arguments.
+A ModelScope target can use a Hugging Face draft:
+
+```shell
+vllm serve modelscope://Qwen/Qwen3-8B \
+  --speculative-config '{"method":"eagle3","model":"hf://RedHatAI/Qwen3-8B-speculator.eagle3","num_speculative_tokens":3}'
+```
+
+Prefixes override `VLLM_USE_MODELSCOPE` per model; bare IDs and local paths are
+unchanged. Install `modelscope` for `modelscope://`. The default served name omits
+the prefix. Each SDK retains its authentication and cache, with no cross-Hub fallback.
+Use existing revision and download-directory options; URI revisions, subpaths,
+and queries are not supported.
+Explicit sources download a local repository snapshot before loading, which may
+include multiple weight formats. Tokenizer-only sources download metadata without
+weights. For independently downloaded Mistral tokenizers, set
+`--tokenizer-mode mistral` explicitly. The initial implementation supports single-node Python serving
+with `auto`, `hf`, `safetensors` or `pt` checkpoints. Cross-repository `auto_map`
+and separate code revisions require locally prepared repositories. Specify both
+the target and draft explicitly instead of using speculators target inference.
+Other loaders and distributed deployments should use pre-downloaded local paths.
+
 ## Feature Status Legend
 
 - ✅︎ indicates that the feature is supported for the model.

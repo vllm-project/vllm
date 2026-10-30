@@ -5,6 +5,7 @@ from argparse import Namespace
 from starlette.datastructures import State
 
 from vllm.config import VllmConfig
+from vllm.config.model import get_served_model_name
 from vllm.entrypoints.common.cli_args import resolve_default_chat_template_kwargs
 from vllm.entrypoints.mcp.tool_server import init_tool_server
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
@@ -31,7 +32,9 @@ async def init_render_app_state(
     preprocessing pipeline (renderer, input_processor)
     directly from the :class:`~vllm.config.VllmConfig`.
     """
-    served_model_names = args.served_model_name or [args.model]
+    served_model_names = args.served_model_name or [
+        get_served_model_name(args.model, None)
+    ]
     model_registry = OpenAIModelRegistry(
         model_config=vllm_config.model_config,
         base_model_paths=[

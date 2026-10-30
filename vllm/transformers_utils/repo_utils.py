@@ -13,6 +13,7 @@ from typing import Any, TypeVar
 
 import huggingface_hub
 from huggingface_hub import HfApi, try_to_load_from_cache
+from huggingface_hub import snapshot_download as _hf_snapshot_download
 from huggingface_hub.utils import (
     EntryNotFoundError,
     HfHubHTTPError,
@@ -26,6 +27,14 @@ from vllm.logger import init_logger
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
+
+
+def hf_snapshot_download(repo_id: str, **kwargs) -> str:
+    """Use the original HF downloader even when ModelScope patches the Hub."""
+    return _hf_snapshot_download(
+        repo_id, library_name="vllm", library_version=VLLM_VERSION, **kwargs
+    )
+
 
 _hf_api: HfApi | None = None
 
