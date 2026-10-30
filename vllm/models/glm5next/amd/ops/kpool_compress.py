@@ -16,7 +16,6 @@ from typing import Any
 
 import torch
 
-from vllm.model_executor.warmup.jit_warmup import WarmupChoices
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     DispatchSpec,
     TritonWarmupTensor,
@@ -77,7 +76,7 @@ def _hadamard128(x):
 # Fused pool compression and cache write.
 
 
-@triton.jit
+@triton.jit(do_not_specialize_on_alignment=["loc_ptr"])
 def _kpool_softmax_rotate_write_cache_kernel(
     buf_fp8_ptr,
     buf_fp32_ptr,
@@ -207,7 +206,6 @@ def _kpool_compress_warmup_inputs(
     page_size = kv_cache.shape[1]
     buf_numel_per_page = kv_cache.stride(0)
     buf_ptr_range_bytes = triton_ptr_range(kv_cache)
-    loc_aligned: Any = WarmupChoices(True, False)
     # With return_compressed=False the compressed outputs alias the cache views.
     buf_fp8 = TritonWarmupTensor(FP8_DTYPE, ptr_range_bytes=buf_ptr_range_bytes)
     buf_fp32 = TritonWarmupTensor(torch.float32, ptr_range_bytes=buf_ptr_range_bytes)
@@ -219,7 +217,7 @@ def _kpool_compress_warmup_inputs(
             torch.bfloat16, shape=(1, pool_size, head_dim)
         ),
         ape_ptr=TritonWarmupTensor(torch.float32, shape=(pool_size, head_dim)),
-        loc_ptr=TritonWarmupTensor(torch.int64, aligned=loc_aligned),
+        loc_ptr=TritonWarmupTensor(torch.int64),
         write_mask_ptr=TritonWarmupTensor(torch.bool),
         compressed_k_ptr=buf_fp8,
         compressed_scale_ptr=buf_fp32,
@@ -390,7 +388,9 @@ def kpool_compress_and_write_cache(
 # Seed each request's incomplete pool into its paged tail during prefill.
 
 
-@triton.jit
+@triton.jit(
+    do_not_specialize=["n_tokens"], do_not_specialize_on_alignment=["tslot_ptr"]
+)
 def _kpool_tail_seed_kernel(
     key_ptr,
     score_ptr,
@@ -444,15 +444,14 @@ def _kpool_tail_seed_warmup_inputs(
     kpool_head = tail_kv_cache.stride(1)
     ring = tail_kv_cache.shape[2]
     tail_ptr_range_bytes = triton_ptr_range(tail_kv_cache)
-    tslot_aligned: Any = WarmupChoices(True, False)
     return dict(
         key_ptr=TritonWarmupTensor(torch.bfloat16),
         score_ptr=TritonWarmupTensor(torch.bfloat16),
-        tslot_ptr=TritonWarmupTensor(torch.int64, aligned=tslot_aligned),
+        tslot_ptr=TritonWarmupTensor(torch.int64),
         tail_ptr=TritonWarmupTensor(
             torch.bfloat16, ptr_range_bytes=tail_ptr_range_bytes
         ),
-        n_tokens=WarmupChoices(1, 16, 2),
+        n_tokens=1,
         tail_block_elems=tail_block_elems,
         kpool_head=kpool_head,
         head_dim=head_dim,
