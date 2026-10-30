@@ -275,7 +275,8 @@ def test_encoder_contract():
         "_process_video_input",
         "_process_audio_input",
         "embed_multimodal",
-        "_encoder_chunk",
+        "_pack_vision",
+        "_embed_vision",
     ]
 
     for name in borrowed_methods:
@@ -329,7 +330,8 @@ def test_instance_attribute_access(vllm_runner):
         "_process_video_input",
         "_process_audio_input",
         "embed_multimodal",
-        "_encoder_chunk",
+        "_pack_vision",
+        "_embed_vision",
     ]
     attrs_accessed = set()
     for name in borrowed_methods:
