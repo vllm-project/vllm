@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 import weakref
 from collections import deque
 from types import SimpleNamespace
@@ -82,9 +83,18 @@ def test_non_output_model_step_rpc_exception_stops_worker(method):
     worker_proc.handle_output = lambda output: pytest.fail(
         "non-output workers must not publish a successful response"
     )
+    exit_codes = []
 
-    with pytest.raises(RuntimeError, match="non-output rank failure"):
-        worker_proc._execute_worker_rpc((method, (), {}, 1))
+    def exit_worker(code):
+        exit_codes.append(code)
+        raise _ExitWorkerLoop
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(os, "_exit", exit_worker)
+        with pytest.raises(_ExitWorkerLoop):
+            worker_proc._execute_worker_rpc((method, (), {}, 1))
+
+    assert exit_codes == [1]
 
 
 def test_non_output_non_model_rpc_exception_does_not_stop_worker():
@@ -101,7 +111,7 @@ def test_non_output_non_model_rpc_exception_does_not_stop_worker():
     worker_proc._execute_worker_rpc(("take_draft_token_ids", (), {}, 1))
 
 
-def test_model_step_rpc_exception_prevents_next_dequeue():
+def test_model_step_rpc_exception_prevents_next_dequeue(monkeypatch):
     marker_executed = False
     dequeue_count = 0
 
@@ -127,10 +137,18 @@ def test_model_step_rpc_exception_prevents_next_dequeue():
     worker_proc.rank = 0
     worker_proc.worker = SimpleNamespace(execute_model=fail, marker=marker)
     worker_proc.handle_output = lambda output: None
+    exit_codes = []
 
-    with pytest.raises(RuntimeError, match="non-output rank failure"):
+    def exit_worker(code):
+        exit_codes.append(code)
+        raise _ExitWorkerLoop
+
+    monkeypatch.setattr(os, "_exit", exit_worker)
+
+    with pytest.raises(_ExitWorkerLoop):
         worker_proc.worker_busy_loop()
 
+    assert exit_codes == [1]
     assert not marker_executed
     assert dequeue_count == 1
 

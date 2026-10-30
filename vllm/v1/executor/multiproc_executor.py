@@ -1074,8 +1074,9 @@ class WorkerProc:
                 # dequeue loop on a failed non-output rank would let it enter
                 # the next collective while its peers are still handling the
                 # failed one, causing rank desynchronization and potentially a
-                # cross-rank deadlock.
-                raise
+                # cross-rank deadlock. Do not run distributed teardown here:
+                # peers may already be blocked in another collective.
+                os._exit(1)
 
     @staticmethod
     def setup_proc_title_and_log_prefix(enable_ep: bool) -> None:
