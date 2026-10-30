@@ -3,7 +3,7 @@
 
 from typing import TYPE_CHECKING, Self
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 
 from vllm.config.utils import config, get_hash_factors, hash_factors
 
@@ -37,6 +37,12 @@ class EngramConfig:
     cpu_offload: bool = True
     """Store embedding weights in pinned CPU memory for UVA lookup."""
 
+    host_prefetch_threads: int = Field(default=0, ge=0)
+    """CPU threads for DeepSeek V4.1 eager-prefill row prefetch (V2 runner).
+    Zero disables it. Requires unsharded, CPU-offloaded tables and CUDA.
+    Helps GPUs that read host memory over PCIe; with NVLink-C2C (e.g. GH200,
+    GB200) direct host reads are already fast, so leave it disabled there."""
+
     embedding_across_dp: bool = False
     """Shard embeddings across TP and all DP ranks when enabled.
     Otherwise, each DP rank has a separate TP-sharded embedding replica."""
@@ -58,6 +64,8 @@ class EngramConfig:
 
     @model_validator(mode="after")
     def _validate_shared_memory(self) -> Self:
+        if self.host_prefetch_threads and not self.cpu_offload:
+            raise ValueError("host_prefetch_threads requires cpu_offload=True")
         if self.dp_shared_memory and not self.cpu_offload:
             raise ValueError("dp_shared_memory requires cpu_offload=True")
         if self.use_thp and (not self.cpu_offload or self.dp_shared_memory):
@@ -68,6 +76,12 @@ class EngramConfig:
 
     def verify_model_config(self, model_config: "ModelConfig | None") -> None:
         """Reject Engram configuration for models without n-gram embeddings."""
+        if (
+            self.host_prefetch_threads
+            and model_config is not None
+            and model_config.architecture != "DeepseekV41ForCausalLM"
+        ):
+            raise ValueError("Host prefetch requires DeepSeek V4.1")
         field = (
             _NGRAM_LAYER_FIELDS.get(model_config.architecture)
             if model_config is not None
@@ -95,6 +109,17 @@ class EngramConfig:
 
     def verify_parallel_config(self, parallel_config: "ParallelConfig") -> None:
         """Reject unsupported embedding parallel topologies."""
+        if self.host_prefetch_threads and (
+            parallel_config.tensor_parallel_size > 1
+            or parallel_config.pipeline_parallel_size > 1
+            or parallel_config.prefill_context_parallel_size > 1
+            or (parallel_config.data_parallel_size > 1 and not self.dp_shared_memory)
+        ):
+            raise ValueError(
+                "host_prefetch_threads requires tensor, pipeline and prefill "
+                "context parallel sizes of 1, and dp_shared_memory with data "
+                "parallelism."
+            )
         if self.dp_shared_memory:
             if parallel_config.data_parallel_size <= 1:
                 raise ValueError("dp_shared_memory requires data_parallel_size > 1.")
@@ -118,4 +143,5 @@ class EngramConfig:
 
     def compute_hash(self) -> str:
         """Hash settings that affect embedding execution and graph structure."""
-        return hash_factors(get_hash_factors(self, set()))
+        # Prefetch only changes where eager lookups read rows from.
+        return hash_factors(get_hash_factors(self, {"host_prefetch_threads"}))

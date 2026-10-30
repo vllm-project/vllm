@@ -96,6 +96,35 @@ vllm serve deepseek-ai/DeepSeek-V4.1-Flash \
 CPU offload requires a GPU with UVA support;
 vLLM fails fast when it is unavailable.
 
+### Host row prefetch (DeepSeek V4.1)
+
+Set `--engram-config.host_prefetch_threads 8` to hash prompt tokens and gather
+CPU table rows in a background worker using eight Numba threads. The default
+is `0` (disabled). This requires CUDA, model runner V2, `cpu_offload`,
+tensor, pipeline and prefill context parallel sizes of 1, and, with data
+parallelism, `dp_shared_memory`. Other topologies are rejected at startup.
+
+Prefetch targets GPUs that read host memory over PCIe, where scattered row
+reads are slow and a bulk copy of gathered rows is much faster. Leave it
+disabled on NVLink-C2C systems such as GH200 and GB200: their GPUs already
+read host rows at far higher bandwidth, so prefetch would mostly add CPU
+gather work and host memory traffic.
+
+Prefetch applies to prompt-only steps larger than the maximum CUDA graph
+capture size. Steps containing image markers or unknown token history use
+the regular lookup. The GPU reads a staged row only when its step marker and
+hash match; otherwise it reads the host table without waiting for the worker.
+When both staging slots are busy, that step also uses the regular lookup.
+CPU gather failures are logged and use the regular lookup for unpublished
+layers. CUDA errors are surfaced on the runner thread.
+
+Each rank reserves two slots in both pinned host memory and GPU memory.
+Per memory type, this costs approximately
+`2 × max_num_batched_tokens × sum_over_layers(hash_columns × (head_dim + head_dim / 32 + 4))`
+bytes. With two layers, 24 columns, 256-byte rows, and 16,384 tokens, this is
+402 MiB in each memory type. Gains depend on available CPU and host memory
+bandwidth; choose the thread count to leave capacity for the serving process.
+
 ## Data-parallel topologies (DeepSeek V4.1)
 
 By default (`embedding_across_dp: false`), each DP replica keeps its own
