@@ -3213,6 +3213,7 @@ class GPUModelRunner(
             req_ids=self.input_batch.req_ids.copy(),
             req_id_to_index=self.input_batch.req_id_to_index.copy(),
             kv_connector_output=kv_connector_output,
+            lora_load_event=self.take_lora_load_event(),
         )
 
         if raw_pooler_output is None or not any(finished_mask):
@@ -4494,6 +4495,7 @@ class GPUModelRunner(
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
+                lora_load_event=self.take_lora_load_event(),
             )
 
         if not self.use_async_scheduling:
