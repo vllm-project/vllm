@@ -901,6 +901,17 @@ async def _cpu_ep_inspect(server):
     return response.json()["results"][0]
 
 
+def _check_cpu_ep_default_runner(shards):
+    for shard in shards:
+        assert shard["use_v2_model_runner"] == shard["has_triton"]
+        expected_runner = (
+            "vllm.v1.worker.cpu.model_runner.CPUModelRunner"
+            if shard["has_triton"]
+            else "vllm.v1.worker.cpu_model_runner.CPUModelRunner"
+        )
+        assert shard["runner"] == expected_runner
+
+
 @pytest.mark.cpu_test
 @pytest.mark.asyncio
 @pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU serving required")
@@ -950,6 +961,7 @@ async def test_cpu_ep_internal_lb_matches_reference_after_idle(
     }
     monkeypatch.delenv("VLLM_CPU_KVCACHE_SPACE", raising=False)
     monkeypatch.delenv("VLLM_CPU_CI_ENV", raising=False)
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
     long_prompt = "Describe a tiny robot exploring a forest. " * 8
     short_prompt = "Hello, my name is"
     workloads = [
@@ -987,6 +999,7 @@ async def test_cpu_ep_internal_lb_matches_reference_after_idle(
         shards = await _cpu_ep_inspect(server)
         print("CPU_EP_EXECUTION", shards, flush=True)
         assert len(shards) == 2
+        _check_cpu_ep_default_runner(shards)
         if not enforce_eager:
             assert all(shard["cache_dir"] for shard in shards)
             assert len({shard["cache_dir"] for shard in shards}) == 2
@@ -1049,6 +1062,7 @@ async def test_cpu_ep_internal_lb_matches_reference_after_idle(
     with RemoteOpenAIServer(model, ep_args, env_dict=env) as restarted:
         restarted_shards = await _cpu_ep_inspect(restarted)
         print("CPU_EP_RESTARTED", restarted_shards, flush=True)
+        _check_cpu_ep_default_runner(restarted_shards)
         if not enforce_eager:
             assert {
                 shard["rank"]: shard["cache_dir"] for shard in restarted_shards
