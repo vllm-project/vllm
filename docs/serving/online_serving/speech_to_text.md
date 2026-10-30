@@ -237,35 +237,49 @@ vllm serve mistralai/Voxtral-Mini-4B-Realtime-2602 --tokenizer-mode mistral \
 | Audio (encoder) | `audio_config.sliding_window` | frame (20 ms of audio) | 750 (15 s) |
 
 Smaller windows use less KV cache per session, so more sessions fit in the same
-memory.
+memory. A session holds about 32 MiB + 0.125 MiB per text token + 0.25 MiB per
+audio frame: 224 MiB with 1024 and 256, 1.2 GiB with the defaults.
 
 !!! warning
-    Keep the text window at 1024 or more. In our tests on long read speech, with a
-    256 text window the model dropped punctuation and capitals for up to 3 min at a
-    time, and over 8 streams in 90 min it output nothing over real speech for 20 min
-    in total ([#47614](https://github.com/vllm-project/vllm/issues/47614)). At 1024,
-    punctuation came back within 50 s, as with the default window, and 1.3 min was
-    lost. Changing the audio window (256 or 750) made no difference.
+    Keep the text window at 1024 or more. On long read speech, with a 256 text window
+    the model sometimes output nothing over real speech for minutes
+    ([#47614](https://github.com/vllm-project/vllm/issues/47614)). A 90 min run going
+    from 2 to 8 streams lost 20 min of text this way. It did not happen at 1024.
+    Stretches without punctuation or capitals reached 3 min at 256, 77 s at 1024 with
+    or without shifts, and about 30 s from 2048 up. The audio window (256 or 750) made
+    no difference.
 
 **Session length.** By default, `--max-model-len` caps a session: one text token
 per 80 ms of audio, so about 2 h 55 at 131072 (the default) and 11 min at 8192. At
-the cap, the server ends the session with `transcription.done`. The client has to
-reconnect, and the model starts again without context.
+the cap, the server ends the session with `transcription.done`. To go on, the client
+sends a new `input_audio_buffer.commit` or reconnects, and the model starts again
+without context.
 
-`--enable-unbounded-streaming-input` removes the cap. Before a session reaches
-`--max-model-len`, its positions are shifted down and its cached keys are
-re-rotated to match, so the attention scores do not change. The KV cache of the
-session stays bounded by the windows.
+`--enable-unbounded-streaming-input` (off by default) removes the cap. Before a
+session reaches `--max-model-len`, its positions are shifted down and its cached
+keys are re-rotated to match, so the attention scores stay the same apart from
+rounding. The KV cache of the session stays bounded by the windows.
 
 - Requirements, checked at startup: every attention layer uses a sliding window
-  and RoPE (plain, Llama 3 or YaRN), the KV cache is not quantized, prefix caching
-  is off (`--no-enable-prefix-caching`), and the platform is CUDA. Nothing is
-  specific to Voxtral: any streaming-input session on such a model works the same
-  way, for example on Mistral-7B-v0.1.
-- `--unbounded-streaming-input-margin-tokens` (default 4096): the shift happens this many tokens
-  before `--max-model-len`. `max_model_len - margin - text window` must be at
-  least one KV cache block. It is also roughly the number of tokens between two
-  shifts: with 8192, 4096 and 1024, 3072 tokens, about 4 min.
+  and RoPE (plain, Llama 3 or YaRN) over its whole key, the KV cache is not
+  quantized, prefix caching is off (`--disable-prefix-caching`), and the platform
+  is CUDA. KV connectors, KV offloading, encoder cache connectors, speculative
+  decoding, pipeline parallelism and prefill context parallelism are refused. Any
+  streaming-input session on such a model works the same way.
+- `--max-model-len` must be at least the text window plus 2 KV cache blocks (256
+  tokens on Voxtral), so `--max-model-len 8192` with the default text window of
+  8192 is refused. It no longer limits the session, and a large value costs CPU:
+  every token resends the session since the last shift. 8192 is enough with a 1024
+  text window.
+- `--unbounded-streaming-input-margin-tokens` (default: half of
+  `max_model_len - text window`): the shift happens this many tokens before
+  `--max-model-len`. The rest of the room is roughly the distance between two
+  shifts: with 8192 and 1024, a shift every 3456 tokens, about 4.5 min.
+- A shift only happens when a new input chunk arrives. A chunk can hold up to
+  `max_model_len - text window - 1 block` input tokens. If it generates more
+  tokens than the margin, the turn ends early with `finish_reason` `length` and
+  the session continues with the next chunk. Voxtral sends and generates one token
+  per chunk, so this only concerns other models.
 
 **16 GiB GPU.** This command starts on an RTX 4090 Laptop (16 GiB):
 
@@ -274,11 +288,24 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 vllm serve mistralai/Voxtral-Mini-4B-Realtime-2602 --tokenizer-mode mistral \
   --hf-overrides '{"text_config":{"sliding_window":1024},"audio_config":{"sliding_window":256}}' \
   --max-model-len 8192 --max-num-batched-tokens 512 --max-num-seqs 12 \
-  --gpu-memory-utilization 0.82 --no-enable-prefix-caching \
+  --gpu-memory-utilization 0.82 --disable-prefix-caching \
   --compilation-config '{"cudagraph_mode":"PIECEWISE"}' \
   --enable-unbounded-streaming-input
 ```
 
-CUDA graphs are captured for batches of up to 2 x `--max-num-seqs` tokens, so set
-`--max-num-seqs` to the number of sessions you need. `expandable_segments` reduces
-memory fragmentation and leaves about 1 GiB more for the KV cache on this card.
+CUDA graphs are captured for batches of up to 2 x `--max-num-seqs` tokens, so keep
+`--max-num-seqs` close to the number of sessions you need. `expandable_segments`
+reduces memory fragmentation.
+
+`--max-num-seqs` must also stay under what fits in the KV cache: `Available KV cache
+memory` in the startup log divided by the KV cache of a session. On this card that
+line says 3.4 to 4.2 GiB, so 15 to 19 sessions fit with windows of 1024 and 256.
+Sessions above `--max-num-seqs` wait for a free slot. If more sessions run than fit,
+all of them stall ([#60137](https://github.com/vllm-project/vllm/issues/60137)).
+`Maximum concurrency` in the startup log does not limit sessions: it is the worst
+case for a request of `--max-model-len` tokens with full batches in flight. The
+startup check needs that worst case free, so a large `--max-num-batched-tokens` can
+stop the server from starting.
+
+Each session needs 12.5 tokens/s (`Avg generation throughput` in the log). If the
+GPU does not deliver that, all sessions fall behind real time.
