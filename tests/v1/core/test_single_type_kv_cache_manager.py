@@ -20,7 +20,6 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
     CircularBufferManager,
     FullAttentionManager,
-    KpoolTailManager,
     MambaManager,
     RSWAManager,
     SlidingWindowManager,
@@ -29,7 +28,6 @@ from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     CircularBufferSpec,
     FullAttentionSpec,
-    KpoolTailSpec,
     MambaSpec,
     RSWASpec,
     SlidingWindowSpec,
@@ -399,22 +397,21 @@ def test_circular_buffer_allocates_one_block_for_the_request_lifetime():
 
     manager.cache_blocks(request_id, 1024, replay_boundaries=(0,))
     manager.remove_skipped_blocks(request_id, 1024)
-    assert manager.get_num_common_prefix_blocks(request_id) == 0
     assert manager.get_num_skipped_tokens(1024) == 0
     assert manager.req_to_blocks[request_id] == blocks
 
 
 @pytest.mark.parametrize("record_for_zeroing", [True, False])
 def test_external_kpool_tail_zeroing(record_for_zeroing):
-    """A transferred ring at index zero skips zeroing even with a local hit."""
-    spec = KpoolTailSpec(
+    """The kpool tail ring is never zeroed, transferred or not: a pool only
+    reads ring slots its own request wrote."""
+    spec = CircularBufferSpec(
         block_size=4,
         num_kv_heads=2,
         head_size=8,
         dtype=torch.bfloat16,
-        sliding_window=4,
     )
-    manager = KpoolTailManager(
+    manager = CircularBufferManager(
         spec,
         block_pool=BlockPool(10, enable_caching=True, hash_block_size=4),
         enable_caching=True,
@@ -428,9 +425,7 @@ def test_external_kpool_tail_zeroing(record_for_zeroing):
     )
     blocks = manager.req_to_blocks["request"]
     assert len(blocks) == 1
-    assert manager.take_new_block_ids() == (
-        [blocks[0].block_id] if record_for_zeroing else []
-    )
+    assert manager.take_new_block_ids() == []
     assert manager.allocate_new_blocks("request", 20, 20) == []
     assert manager.take_new_block_ids() == []
 
@@ -1017,3 +1012,35 @@ def test_predictor_matches_allocator_blocks_calculation_with_admission_cap():
             f"but allocator pulled {len(new_blocks)}"
         )
         total_computed = num_tokens
+
+
+def test_pop_blocks_for_free_trims_null_head():
+    block_size = 2
+    spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=4,
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=10, enable_caching=True, hash_block_size=block_size
+    )
+    manager = get_sliding_window_manager(spec, block_pool)
+    null = block_pool.null_block
+    real = block_pool.get_new_blocks(2)
+    manager.req_to_blocks["swa"] = [null] * 3 + real
+    manager.req_to_blocks["dense"] = dense = block_pool.get_new_blocks(2)
+
+    assert manager.pop_blocks_for_free("swa") == real
+    assert manager.pop_blocks_for_free("dense") is dense  # no null head, no copy
+    assert "swa" not in manager.req_to_blocks
+    assert all(b.ref_cnt == 1 for b in real + dense)
+
+    # The null block is never pooled, so touch / free_blocks leave it alone.
+    null_ref_cnt = null.ref_cnt
+    num_free_blocks = block_pool.get_num_free_blocks()
+    block_pool.touch([null])
+    block_pool.free_blocks([null])
+    assert null.ref_cnt == null_ref_cnt
+    assert block_pool.get_num_free_blocks() == num_free_blocks

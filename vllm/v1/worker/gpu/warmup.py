@@ -106,7 +106,6 @@ def run_mixed_prefill_decode_warmup(
     prefill_token_ids = list(range(prefill_len))
 
     kv_cache_groups = model_runner.kv_cache_config.kv_cache_groups
-    num_kv_cache_groups = len(kv_cache_groups)
     block_count = _warmup_block_counter(model_runner)
     kv_cache_specs = [g.kv_cache_spec for g in kv_cache_groups]
     decode_prefill_block_counts = [
@@ -166,7 +165,6 @@ def run_mixed_prefill_decode_warmup(
         decode_req_id: decode_prompt_len,
     }
     decode_prefill_output.total_num_scheduled_tokens = decode_prompt_len
-    decode_prefill_output.num_common_prefix_blocks = [0] * num_kv_cache_groups
 
     decode_new_blocks = tuple(_alloc_blocks(n) for n in decode_block_deltas)
     cached_decode_req = CachedRequestData.make_empty()
@@ -198,7 +196,6 @@ def run_mixed_prefill_decode_warmup(
         prefill_req_id: prefill_len,
     }
     mixed_output.total_num_scheduled_tokens = num_tokens
-    mixed_output.num_common_prefix_blocks = [0] * num_kv_cache_groups
 
     cleanup_output = SchedulerOutput.make_empty()
     cleanup_output.finished_req_ids = {decode_req_id, prefill_req_id}
@@ -241,17 +238,32 @@ def warmup_kernels(
         rejection_sampler.enable_adaptive_verification = False
     try:
         _warmup_kernels(model_runner, worker_execute_model, worker_sample_tokens)
+        # All PP ranks must run the same forwards to match sends and receives.
+        if model_runner.speculative_config is not None:
+            # Greedy batches skip logits processing, so rejection kernels
+            # also see model-dtype logits instead of FP32.
+            _warmup_kernels(
+                model_runner, worker_execute_model, worker_sample_tokens, greedy=True
+            )
     finally:
         model_runner.adaptive_verification = adaptive_verification
         if adaptive_sampling:
             assert rejection_sampler is not None
             rejection_sampler.enable_adaptive_verification = True
+    if adaptive_verification is not None:
+        adaptive_verification.warmup_budget_kernel()
+    acceptance_estimator = getattr(
+        model_runner.speculator, "acceptance_estimator", None
+    )
+    if acceptance_estimator is not None:
+        acceptance_estimator.warmup()
 
 
 def _warmup_kernels(
     model_runner: GPUModelRunner,
     worker_execute_model: Callable[[SchedulerOutput], Any],
     worker_sample_tokens: Callable[[GrammarOutput | None], Any],
+    greedy: bool = False,
 ) -> None:
     if model_runner.vllm_config.is_mm_encoder_only:
         return
@@ -272,7 +284,6 @@ def _warmup_kernels(
     decode_len = prompt_len + num_decode_steps * decode_query_len
 
     kv_cache_groups = model_runner.kv_cache_config.kv_cache_groups
-    num_kv_cache_groups = len(kv_cache_groups)
 
     # Encoder-decoder models: give each warmup request a dummy encoder input so
     # cross-attention warms up over a realistic, non-empty key sequence.
@@ -325,7 +336,11 @@ def _warmup_kernels(
         pooling_params = PoolingParams(task=pooling_task)
         pooling_params.verify(model_runner.model_config)
     else:
-        sampling_params = SamplingParams.for_sampler_warmup()
+        sampling_params = (
+            SamplingParams(temperature=0)
+            if greedy
+            else SamplingParams.for_sampler_warmup()
+        )
         pooling_params = None
 
     # Assign distinct block IDs per request per group. 0 null block, start from 1.
@@ -361,7 +376,6 @@ def _warmup_kernels(
     prefill_output.scheduled_new_reqs = new_reqs
     prefill_output.num_scheduled_tokens = {rid: prompt_len for rid in req_ids}
     prefill_output.total_num_scheduled_tokens = prompt_len * num_reqs
-    prefill_output.num_common_prefix_blocks = [0] * num_kv_cache_groups
 
     # Disable KV connector for warmup run.
     model_runner.kv_connector.set_disabled(True)
@@ -377,7 +391,9 @@ def _warmup_kernels(
             vocab_size = model_runner.model_config.get_vocab_size()
             bitmask_width = (vocab_size + 31) // 32
             grammar_bitmask = np.full(
-                (len(req_ids), bitmask_width), fill_value=-1, dtype=np.int32
+                (len(req_ids) * model_runner.decode_query_len, bitmask_width),
+                fill_value=-1,
+                dtype=np.int32,
             )
             grammar_output = GrammarOutput(
                 structured_output_request_ids=req_ids, grammar_bitmask=grammar_bitmask
@@ -424,7 +440,6 @@ def _warmup_kernels(
             decode_output.total_num_scheduled_tokens = sum(
                 step_num_scheduled_tokens.values()
             )
-            decode_output.num_common_prefix_blocks = [0] * num_kv_cache_groups
 
             worker_execute_model(decode_output)
             worker_sample_tokens(None)

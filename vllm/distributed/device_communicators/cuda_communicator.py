@@ -151,6 +151,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             self.aiter_ar_comm = AiterCustomAllreduce(
                 group=self.cpu_group,
                 device=self.device,
+                register_graph_buffers=register,
             )
 
         if use_custom_allreduce and self.aiter_ar_comm is None and self.world_size > 1:
@@ -164,9 +165,15 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 register_graph_buffers=register,
             )
 
-        # AITER custom all-gather/reduce-scatter DP-attention dispatch/combine
+        # AITER custom all-gather/reduce-scatter DP-attention dispatch/combine.
+        # AITER requires a torch.distributed-registered group and exchanges IPC
+        # handles via the default store; stateless groups satisfy neither.
+        # Only StatelessGroupCoordinator passes tcp_store_group, so this checks
+        # the property AITER depends on rather than the feature that currently
+        # creates stateless groups (elastic EP).
         if (
             "dp" in unique_name
+            and tcp_store_group is None
             and self.world_size in (2, 4, 8)
             and current_platform.is_rocm()
             and rocm_aiter_ops.is_custom_all_reduce_enabled()
@@ -174,6 +181,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             self.aiter_ar_comm = AiterCustomAllreduce(
                 group=self.cpu_group,
                 device=self.device,
+                register_graph_buffers=register,
             )
             if self.aiter_ar_comm.disabled:
                 self.aiter_ar_comm = None
@@ -411,6 +419,17 @@ class CudaCommunicator(DeviceCommunicatorBase):
             out = ca_comm.custom_all_reduce(input_)
             assert out is not None
             return out
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and current_platform.is_rocm()
+            and input_.is_floating_point()
+        ):
+            # Integer sums are exact in any order and stay on RCCL.
+            from vllm.model_executor.determinism.batch_invariant import (
+                all_reduce_batch_invariant,
+            )
+
+            return all_reduce_batch_invariant(input_, self.device_group)
         symm_mem_comm = self.symm_mem_comm
         if symm_mem_comm is not None and symm_mem_comm.should_use_symm_mem(input_):
             out = symm_mem_comm.all_reduce(input_)
@@ -496,7 +515,17 @@ class CudaCommunicator(DeviceCommunicatorBase):
         chunk_size = input_tensor.shape[0] // world_size
         output_shape = (chunk_size,) + input_tensor.shape[1:]
 
-        if should_nccl_symm_mem_ag_rs():
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and current_platform.is_rocm()
+            and input_.is_floating_point()
+        ):
+            from vllm.model_executor.determinism.batch_invariant import (
+                reduce_scatter_batch_invariant,
+            )
+
+            output = reduce_scatter_batch_invariant(input_tensor, self.device_group)
+        elif should_nccl_symm_mem_ag_rs():
             output = self._reduce_scatter_symm_mem(input_tensor)
         else:
             output = torch.empty(
@@ -560,6 +589,22 @@ class CudaCommunicator(DeviceCommunicatorBase):
             assert output.dtype == input_tensor.dtype
             assert output.device == input_tensor.device
             assert output.is_contiguous()
+
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and current_platform.is_rocm()
+            and input_.is_floating_point()
+        ):
+            from vllm.model_executor.determinism.batch_invariant import (
+                reduce_scatter_batch_invariant,
+            )
+
+            result = reduce_scatter_batch_invariant(
+                input_tensor, self.device_group, sizes=sizes
+            )
+            if output is not None:
+                return output.copy_(result)
+            return result.movedim(0, dim).contiguous()
 
         if self._can_use_aiter_ag_rs(sizes):
             aiter_comm = self.aiter_ar_comm
@@ -636,11 +681,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
         geometric growth bounds their total capacity to less than twice the
         current allocation.
 
-        Safe across serial MoE layers and eager sequence parallelism: the
-        producer and collective are ordered on the same stream before the next
-        same-role operation reuses the buffer. DBO microbatches use distinct
-        cache entries. Any future cross-layer communication overlap must also
-        use distinct roles.
+        These buffers are internal scratch. Returning one would let a later
+        collective with the same cache key overwrite an earlier live result.
+        MoE combines may reuse scratch when the producer and collective are
+        ordered on the same stream. DBO microbatches use distinct cache entries.
         """
         from vllm.distributed.device_communicators.pynccl_allocator import (
             nccl_symm_mem_context,
@@ -698,12 +742,13 @@ class CudaCommunicator(DeviceCommunicatorBase):
             )
             symm_input.copy_(input_tensor)
 
+        scratch_output = output is None
         if output is None:
             output = self._get_symm_scratch(
                 "rs_out", output_shape, input_tensor.dtype, input_tensor.device
             )
         pynccl_comm.reduce_scatter(output, symm_input)
-        return output
+        return output.clone() if scratch_output else output
 
     def get_symmetric_memory_buffer(
         self,
@@ -812,12 +857,19 @@ class CudaCommunicator(DeviceCommunicatorBase):
         return bd is not None and bd.uniform
 
     def suspend(self) -> None:
+        from .flashinfer_all_reduce import checkpoint_prepare_fi_ar_workspaces
+
+        # FlashInfer AR syncs over the gloo cpu_group, so order vs. NCCL is free.
+        checkpoint_prepare_fi_ar_workspaces(self.cpu_group, skip_unsupported=True)
         if self.pynccl_comm is not None:
             self.pynccl_comm.suspend()
 
     def resume(self) -> None:
+        from .flashinfer_all_reduce import checkpoint_restore_fi_ar_workspaces
+
         if self.pynccl_comm is not None:
             self.pynccl_comm.resume()
+        checkpoint_restore_fi_ar_workspaces(self.cpu_group, skip_unsupported=True)
 
     def checkpoint_prepare(self) -> None:
         # Only FlashInfer all-reduce and FlashInfer all2all are supported for now.
@@ -921,7 +973,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             "ag_out", out_size, input_.dtype, input_.device
         )
         pynccl_comm.all_gather(symm_output, input_)
-        return symm_output
+        return symm_output.clone()
 
     def _all_gather_batched_symm_mem(
         self, inputs: list[torch.Tensor]

@@ -9,10 +9,17 @@ import pytest
 import torch
 from transformers import Qwen4ExpConfig, Qwen4ExpTextConfig
 
+from vllm.config import CacheConfig, ParallelConfig
 from vllm.config.speculative import SpeculativeConfig
+from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
+    should_ignore_layer,
+)
 from vllm.model_executor.models.config import (
-    Qwen3_5ForConditionalGenerationConfig,
     Qwen4ExpForConditionalGenerationConfig,
+)
+from vllm.models.qwen4_exp.nvidia.model import (
+    Qwen4ExpForCausalLM,
+    Qwen4ExpForConditionalGeneration,
 )
 from vllm.models.qwen4_exp.nvidia.model_state import Qwen4ExpModelState
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
@@ -48,23 +55,57 @@ def _text_config(**kwargs) -> Qwen4ExpTextConfig:
     return Qwen4ExpTextConfig(**values)
 
 
-def test_qwen4_exp_mtp_returns_sample_and_multi_streams() -> None:
-    from vllm.models.qwen4_exp.nvidia.mtp import (
-        Qwen4ExpMultiTokenPredictor,
+def test_moe_sp_rejects_pipeline_parallel() -> None:
+    """Automatic MoE SP must validate HC topology even without --enable-hc-sp."""
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_text_config=_text_config(num_experts=4, ple_layer_ids=[]),
+        ),
+        cache_config=CacheConfig(),
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=2,
+            pipeline_parallel_size=2,
+            data_parallel_size=2,
+            enable_expert_parallel=True,
+            all2all_backend="allgather_reducescatter",
+        ),
     )
+    with (
+        patch("vllm.platforms.current_platform.is_cuda_alike", return_value=True),
+        pytest.raises(ValueError, match="MoE SP requires PP=1"),
+    ):
+        Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(config)
 
-    model = object.__new__(Qwen4ExpMultiTokenPredictor)
+
+@spawn_new_process_for_each_test
+@pytest.mark.parametrize("backend", ["amd", "nvidia"])
+@pytest.mark.parametrize("use_sp", [False, True])
+def test_qwen4_exp_mtp_returns_sample_and_multi_streams(
+    backend: str, use_sp: bool
+) -> None:
+    """MTP returns complete, contiguous outputs after gathering padded SP shards."""
+    mtp_module = f"vllm.models.qwen4_exp.{backend}.mtp"
+    model = object.__new__(import_module(mtp_module).Qwen4ExpMultiTokenPredictor)
+    model.use_hc_sequence_parallel = use_sp
+    model.use_sequence_parallel = False
     torch.nn.Module.__init__(model)
     model.hc_count = 2
     model.hidden_size = 4
     model.num_mtp_layers = 1
-    model.layers = [
-        lambda **kwargs: (
-            kwargs["hidden_states"],
-            kwargs["hidden_states"],
-            torch.zeros(kwargs["hidden_states"].shape[0], 2),
-        ),
-    ]
+    model.pre_fc_norm_embedding = torch.nn.Identity()
+    model.pre_fc_norm_hidden = torch.nn.Identity()
+    model.fc_embedding = torch.nn.Identity()
+    model.fc_hidden = torch.nn.Identity()
+
+    def decoder(**kwargs):
+        """Check that the embedding residual shares the hidden state's token slice."""
+        hidden = kwargs["hidden_states"]
+        if backend == "nvidia":
+            prev_block_output = kwargs["prev_block_output"]
+            assert prev_block_output.shape == (hidden.shape[0], model.hidden_size)
+        return hidden, hidden, torch.zeros(hidden.shape[0], model.hc_count)
+
+    model.layers = [decoder]
     model.hyper_connection_mixer = SimpleNamespace(
         combine_and_mix=lambda hidden_states, block_output, injection: (
             hidden_states,
@@ -72,24 +113,32 @@ def test_qwen4_exp_mtp_returns_sample_and_multi_streams() -> None:
             None,
         ),
     )
-    multi_hidden = torch.arange(16, dtype=torch.float32).reshape(2, 8)
-    pp_group = SimpleNamespace(is_first_rank=False, is_last_rank=True)
+    multi_hidden = torch.arange(24, dtype=torch.float32).reshape(3, 8)
+    expected_sample = multi_hidden.unflatten(-1, (2, 4)).mean(-2)
+    pp_group = SimpleNamespace(is_first_rank=True, is_last_rank=True)
 
-    with patch(
-        "vllm.models.qwen4_exp.nvidia.mtp.get_pp_group",
-        return_value=pp_group,
+    def gather(local):
+        """Supply rank 1's last token and padding for a simulated two-rank gather."""
+        assert local.shape[0] == 2
+        remote = torch.cat([expected_sample[2:], multi_hidden[2:]], dim=-1)
+        return torch.cat([local, remote, torch.full_like(remote, float("nan"))])
+
+    with (
+        patch(f"{mtp_module}.get_pp_group", return_value=pp_group),
+        patch(f"{mtp_module}.sp_shard", side_effect=lambda x: x[:2]),
+        patch(f"{mtp_module}.sp_all_gather", side_effect=gather),
     ):
         sample_hidden, returned_multi_hidden = model.forward(
             input_ids=None,
-            positions=torch.arange(2),
-            intermediate_tensors={"hidden_states": multi_hidden},
+            positions=torch.arange(3),
+            hidden_states=multi_hidden,
+            inputs_embeds=torch.zeros(3, 4),
         )
 
-    torch.testing.assert_close(
-        sample_hidden,
-        multi_hidden.unflatten(-1, (2, 4)).mean(dim=-2),
-    )
-    assert returned_multi_hidden is multi_hidden
+    torch.testing.assert_close(sample_hidden, expected_sample)
+    torch.testing.assert_close(returned_multi_hidden, multi_hidden)
+    assert sample_hidden.is_contiguous()
+    assert returned_multi_hidden.is_contiguous()
 
 
 @spawn_new_process_for_each_test
@@ -138,33 +187,6 @@ def test_qwen4_exp_mtp_override_sets_draft_config(
     assert draft_config.architectures == ["Qwen4ExpMTP"]
     assert draft_config.hc_mult == 2
     assert draft_config.n_predict == 1
-
-
-@pytest.mark.parametrize("ple_layer_ids", [[1], []])
-def test_qwen4_exp_rejects_pipeline_parallel_only_with_ple(ple_layer_ids) -> None:
-    """PLE needs raw input_ids, which non-first pipeline ranks never see. The
-    rest of the architecture is PP-capable, so the refusal must be conditional
-    -- and must land before the engine spends time loading weights."""
-    vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(
-            hf_text_config=_text_config(ple_layer_ids=ple_layer_ids),
-            multimodal_config=None,
-        ),
-        parallel_config=SimpleNamespace(
-            pipeline_parallel_size=2, enable_dbo=False, ubatch_size=1
-        ),
-        speculative_config=None,
-    )
-    with patch.object(
-        Qwen3_5ForConditionalGenerationConfig, "verify_and_update_config"
-    ):
-        if ple_layer_ids:
-            with pytest.raises(NotImplementedError, match="pipeline_parallel_size=1"):
-                Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(
-                    vllm_config
-                )
-        else:
-            Qwen4ExpForConditionalGenerationConfig.verify_and_update_config(vllm_config)
 
 
 def test_qwen4_exp_model_state_prepares_ngram_context() -> None:
@@ -246,3 +268,19 @@ def test_qwen4_exp_model_state_prepares_stable_dummy_ngram_inputs() -> None:
     )
     assert second["query_start_loc"].data_ptr() == query_start_loc_ptr
     assert second["ngram_context"].data_ptr() == ngram_context_ptr
+
+
+@pytest.mark.parametrize(
+    "model_cls", [Qwen4ExpForCausalLM, Qwen4ExpForConditionalGeneration]
+)
+def test_qkv_proj_mapping_allows_bf16_indexer(model_cls) -> None:
+    """Regression test for https://github.com/vllm-project/vllm/issues/62308.
+
+    Layout of e.g. ukisai/Swift-1.5-Qwen3.8-Flash-Next-W4A16-AWQ: q/k/v are
+    quantized and only the indexer projection is in `ignore`.
+    """
+    assert not should_ignore_layer(
+        "model.layers.3.self_attn.qkv_proj",
+        ignore=["model.layers.3.self_attn.indexer.index_qk_proj"],
+        fused_mapping=model_cls.packed_modules_mapping,
+    )

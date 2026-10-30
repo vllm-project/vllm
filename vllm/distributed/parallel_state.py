@@ -50,6 +50,7 @@ from vllm.distributed.device_communicators.base_device_communicator import (
 )
 from vllm.distributed.utils import (
     StatelessProcessGroup,
+    cpu_all_reduce_,
     create_tcp_store,
     get_cached_tcp_store_client,
 )
@@ -476,6 +477,13 @@ class GroupCoordinator:
         self_device_group = None
         self_cpu_group = None
 
+        from vllm.distributed.utils import (
+            get_cpu_distributed_timeout_or_none,
+            get_distributed_timeout_or_none,
+        )
+
+        self.cpu_timeout = get_cpu_distributed_timeout_or_none()
+
         # VLLM_DISTRIBUTED_USE_SPLIT_GROUP gates the new ``split_group``
         # codepath. Default (False) preserves the legacy ``new_group`` path.
         if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
@@ -489,12 +497,6 @@ class GroupCoordinator:
                     self.rank_in_group = ranks.index(self.rank)
                     break
         else:
-            from vllm.distributed.utils import (
-                get_cpu_distributed_timeout_or_none,
-                get_distributed_timeout_or_none,
-            )
-
-            timeout = get_cpu_distributed_timeout_or_none()
             device_timeout = get_distributed_timeout_or_none()
 
             for ranks in group_ranks:
@@ -507,7 +509,7 @@ class GroupCoordinator:
                 # processes through the CPU.
                 with suppress_stdout():
                     cpu_group = torch.distributed.new_group(
-                        ranks, backend="gloo", timeout=timeout
+                        ranks, backend="gloo", timeout=self.cpu_timeout
                     )
                 if self.rank in ranks:
                     self.ranks = ranks
@@ -1376,6 +1378,10 @@ class GroupCoordinator:
         """
         torch.distributed.barrier(group=self.cpu_group)
 
+    def cpu_all_reduce_(self, tensor: torch.Tensor) -> torch.Tensor:
+        """In-place SUM all-reduce of a small CPU tensor over `cpu_group`."""
+        return cpu_all_reduce_(tensor, self.cpu_group, self.cpu_timeout)
+
     def send(self, tensor: torch.Tensor, dst: int | None = None) -> None:
         """Sends a tensor to the destination rank in a blocking way."""
         """NOTE: `dst` is the local rank of the destination rank."""
@@ -1680,8 +1686,13 @@ def get_pcp_group() -> GroupCoordinator:
     return _PCP
 
 
+def _aiter_registers_graph_buffers(group: GroupCoordinator) -> bool:
+    comm = getattr(group.device_communicator, "aiter_ar_comm", None)
+    return comm is not None and comm.registers_graph_buffers
+
+
 @contextmanager
-def graph_capture(device: torch.device):
+def graph_capture(device: torch.device, stream: torch.cuda.Stream | None = None):
     """`graph_capture` is a context manager which should surround the code that
     is capturing the CUDA graph. Its main purpose is to ensure that some
     operations will be run after the graph is captured, before the graph
@@ -1693,12 +1704,26 @@ def graph_capture(device: torch.device):
     the graph capture is running on a separate stream from the default stream,
     in order to explicitly distinguish the kernels to capture
     from other kernels possibly launched on background in the default stream.
+    A given ``stream`` is reused instead, so graphs captured on it share the
+    caching allocator's free blocks of the graph pool.
     """
-    context = GraphCaptureContext(torch.cuda.Stream(device=device))
+    from vllm.device_allocator.alloc_conf import non_expandable_allocations
+    from vllm.platforms import current_platform
+
+    tp, pp, dp = get_tp_group(), get_pp_group(), get_dp_group()
+    context = GraphCaptureContext(stream or torch.cuda.Stream(device=device))
+    # Let AITER all-reduce register captured buffers instead of copying them.
+    # Not with DP AITER collectives: they reduce workspaces allocated earlier.
+    non_expandable = (
+        current_platform.is_rocm()
+        and _aiter_registers_graph_buffers(tp)
+        and not _aiter_registers_graph_buffers(dp)
+    )
     with (
-        get_tp_group().graph_capture(context),
-        get_pp_group().graph_capture(context),
-        get_dp_group().graph_capture(context),
+        non_expandable_allocations() if non_expandable else nullcontext(),
+        tp.graph_capture(context),
+        pp.graph_capture(context),
+        dp.graph_capture(context),
     ):
         yield context
 
@@ -2190,14 +2215,23 @@ def initialize_model_parallel(
         and config.model_config.architecture == "DeepseekV41ForCausalLM"
         and not enable_elastic_ep
     ):
-        engram_dp_size = _engram_dp_shard_size(
-            world_size,
-            data_parallel_size,
-            tensor_model_parallel_size
-            * pipeline_model_parallel_size
-            * prefill_context_model_parallel_size,
-        )
-    if engram_dp_size > 1:
+        if (
+            not engram_config.cpu_offload
+            and engram_config.embedding_across_dp
+            and tensor_model_parallel_size == 1
+        ):
+            # GPU tables are read from peers' HBM, so every DP rank must share
+            # one NVLink domain (e.g. GB200 NVL72).
+            engram_dp_size = data_parallel_size
+        else:
+            engram_dp_size = _engram_dp_shard_size(
+                world_size,
+                data_parallel_size,
+                tensor_model_parallel_size
+                * pipeline_model_parallel_size
+                * prefill_context_model_parallel_size,
+            )
+    if 1 < engram_dp_size < data_parallel_size:
         group_ranks = (
             all_ranks.permute(0, 2, 3, 4, 1).reshape(-1, engram_dp_size).unbind(0)
         )
@@ -2285,6 +2319,9 @@ def initialize_model_parallel(
         _DP = init_model_parallel_group(
             group_ranks, get_world_group().local_rank, backend, group_name="dp"
         )
+    if 1 < engram_dp_size == data_parallel_size:
+        # Same ranks as the DP group: reuse its communicators.
+        _ENGRAM_DP = _DP
 
     global _EP
     assert _EP is None, "expert parallel group is already initialized"
@@ -2444,6 +2481,11 @@ def get_tensor_model_parallel_rank() -> int:
     return get_tp_group().rank_in_group
 
 
+def get_pipeline_model_parallel_rank() -> int:
+    """Return my rank for the pipeline model parallel group."""
+    return get_pp_group().rank_in_group
+
+
 def get_node_count() -> int:
     """Return the total number of nodes in the distributed environment."""
     assert _NODE_COUNT is not None, "distributed environment is not initialized"
@@ -2462,11 +2504,6 @@ def destroy_model_parallel():
         _TP.destroy()
     _TP = None
 
-    global _ENGRAM_DP
-    if _ENGRAM_DP:
-        _ENGRAM_DP.destroy()
-    _ENGRAM_DP = None
-
     global _DCP
     if _DCP:
         _DCP.destroy()
@@ -2482,7 +2519,10 @@ def destroy_model_parallel():
         _PP.destroy()
     _PP = None
 
-    global _DP
+    global _DP, _ENGRAM_DP
+    if _ENGRAM_DP and _ENGRAM_DP is not _DP:
+        _ENGRAM_DP.destroy()
+    _ENGRAM_DP = None
     if _DP:
         _DP.destroy()
     _DP = None

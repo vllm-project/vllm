@@ -62,6 +62,23 @@ def test_non_dcp_size_is_unchanged():
     assert computed == _DEFAULT_WORKSPACE_BUFFER_SIZE
 
 
+def test_dcp_size_is_capped_at_one_launch():
+    # Launches cover at most 65535 tokens, so larger token budgets reuse the slab.
+    at_limit = compute_trtllm_sparse_mla_workspace_bytes(
+        base_workspace_bytes=0,
+        dcp_world_size=2,
+        num_heads_per_rank=8,
+        max_num_batched_tokens=65535,
+    )
+    above_limit = compute_trtllm_sparse_mla_workspace_bytes(
+        base_workspace_bytes=0,
+        dcp_world_size=2,
+        num_heads_per_rank=8,
+        max_num_batched_tokens=131072,
+    )
+    assert above_limit == at_limit
+
+
 def test_combined_pcp_dcp_rejects_flashinfer_sparse():
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(
