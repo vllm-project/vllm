@@ -369,6 +369,30 @@ class TestBakeRecording:
         # would NOT have sent.
         assert 2 * torch.float32.itemsize == 8 != 2 * torch.bfloat16.itemsize
 
+    def test_a_constant_records_a_fill_and_fetches_nothing(self):
+        """A loader filling rows it owns (``new_ones`` / ``new_full`` on a
+        fake) records a fill; its name is not live."""
+        rec, fake = self._recorder_and_fake()
+        layer = _FakeLayer("scale")
+        rec.current = (layer, "weight_scale_inv")
+        param = torch.empty((8, 6), dtype=torch.float32, device=META)
+        param.narrow(0, 4, 4).copy_(fake.new_ones((4, 6), dtype=torch.float32))
+        param.narrow(0, 0, 4).copy_(fake.new_full((4, 6), 2.0, dtype=torch.float32))
+        ones, twos = rec.copies_by_layer[layer]
+        assert (ones.fill, ones.offset, ones.shape) == (1.0, 24, (4, 6))
+        assert (twos.fill, twos.offset) == (2.0, 0)
+        assert rec.copied_names == set()
+
+    def test_a_copy_into_a_reinterpreting_view_is_refused_at_bake(self):
+        """The replay writes ``param.data`` in the parameter's dtype, so a copy
+        recorded through a view of another dtype would land elsewhere."""
+        rec, fake = self._recorder_and_fake(shape=(4, 6))
+        rec.current = (_FakeLayer("fp8_rows"), "weight")
+        rec.current_dtype = torch.float8_e4m3fn
+        param = torch.empty((4, 6), dtype=torch.bfloat16, device=META)
+        with pytest.raises(_UnsupportedFakeOp, match="view of 'weight'"):
+            param.copy_(fake)
+
     def test_a_broadcasting_copy_is_refused_at_bake(self):
         """The packed layout sizes each slice from the DESTINATION shape while
         the producer packs what the chain yields, and nothing downstream can

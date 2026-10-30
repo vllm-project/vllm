@@ -793,36 +793,6 @@ def _row_scales_to_blocks(
     return _requantize_fp8(grouped, weight.shape[0], block, weight.dtype)
 
 
-def _shard_fp8_qkv_proj(
-    w_full: torch.Tensor,
-    s_full: torch.Tensor,
-    num_heads: int,
-    num_kv_heads: int,
-    head_dim: int,
-    v_head_dim: int,
-    tp_rank: int,
-    tp_size: int,
-    ckpt_tp: int,
-    block: int = 128,
-    kv_chunk_rows: int = 0,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Shard the fp8 qkv_proj weights for ``tp_rank``, as the weight loader
-    and post-load processing of `_Fp8RowScalesLinearMethod` do together."""
-    geometry = (num_heads, num_kv_heads, head_dim, v_head_dim)
-    rows = _fused_qkv_rank_rows(
-        *geometry, tp_rank, tp_size, ckpt_tp, block, kv_chunk_rows
-    )
-    row_scales, requantize = _fused_qkv_row_scales(
-        s_full, *geometry, rows, tp_size, ckpt_tp, block, kv_chunk_rows
-    )
-    return _row_scales_to_blocks(
-        _fused_qkv_weight_rows(w_full, *geometry, rows, ckpt_tp),
-        row_scales,
-        requantize,
-        block,
-    )
-
-
 def _fused_qkv_weight_rows(
     w_full: torch.Tensor,
     num_heads: int,
@@ -887,6 +857,15 @@ class _Fp8RowScalesLinearMethod(Fp8LinearMethod):
     turns the row scales into block scales in the same storage, requantizing
     the rows when they do not form whole checkpoint blocks."""
 
+    @classmethod
+    def adopt(cls, method: Fp8LinearMethod) -> "_Fp8RowScalesLinearMethod":
+        """The same method, with row-scale processing: ``method`` already built
+        the layer's weights and its kernel, so its state is copied, not
+        rebuilt."""
+        adopted = cls.__new__(cls)
+        adopted.__dict__.update(method.__dict__)
+        return adopted
+
     def process_weights_after_loading(self, layer: nn.Module) -> None:
         if not is_weights_pre_processed():
             _process_row_scales(layer)
@@ -917,6 +896,8 @@ def _use_row_scales(layer: LinearBase) -> None:
     """Load a block-fp8 ``qkv_proj`` from a fused checkpoint pre-sharded for
     another TP size, as rows and row scales (`_Fp8RowScalesLinearMethod`)."""
     scale = layer.weight_scale_inv
+    # Fp8LinearMethod's block scale carries only its dims and loader, set here
+    # (`_load_fused_fp8_qkv` hands both tensors over in this rank's layout)
     row_scales = BlockQuantScaleParameter(
         data=scale.new_empty(layer.weight.shape[0], scale.shape[1]),
         input_dim=1,
@@ -924,9 +905,10 @@ def _use_row_scales(layer: LinearBase) -> None:
         weight_loader=default_weight_loader,
     )
     layer.register_parameter("weight_scale_inv", row_scales)
-    # `_load_fused_fp8_qkv` hands both over in this rank's layout
     layer.weight.weight_loader = default_weight_loader
-    layer.quant_method.__class__ = _Fp8RowScalesLinearMethod
+    method = layer.quant_method
+    assert isinstance(method, Fp8LinearMethod)
+    layer.quant_method = _Fp8RowScalesLinearMethod.adopt(method)
 
 
 def _load_fused_fp8_qkv(

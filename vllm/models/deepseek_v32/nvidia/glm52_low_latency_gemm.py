@@ -461,9 +461,7 @@ def enable_glm52_low_latency_gemm(
         ):
             continue
         weight = getattr(child, "weight", None)
-        if weight is None or weight.dim() != 2:
-            continue
-        if getattr(weight, "runtime_dtype", weight.dtype) != torch.bfloat16:
+        if weight is None or weight.dim() != 2 or weight.dtype != torch.bfloat16:
             continue
         spec = table.get(tuple(weight.shape))
         if spec is None:

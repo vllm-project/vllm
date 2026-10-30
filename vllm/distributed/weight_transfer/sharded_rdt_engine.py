@@ -933,10 +933,13 @@ class ShardedRDTWeightTransferEngine(
             @functools.wraps(inner)  # keep ``inner``'s signature (incl. ``param``)
             def stamp(*args, **kwargs):
                 recorder.current = (layer, name)
+                param = args[0] if args else kwargs.get("param")
+                recorder.current_dtype = getattr(param, "dtype", None)
                 try:
                     return inner(*args, **kwargs)
                 finally:
                     recorder.current = None
+                    recorder.current_dtype = None
 
             # Tag so _restore_after_dry_run can detect and unwrap leaked stamps,
             # and so a second bake doesn't double-wrap.
@@ -1359,7 +1362,7 @@ class ShardedRDTWeightTransferEngine(
                             "update_weights)."
                         )
                     materialize_layer(layer, info)
-                    _reset_fp8_rows(layer)
+                    _reset_load_state(layer)
                     _apply_fills(layer, self._layer_fills.get(layer, ()))
                 for sc in chunk.scatters:
                     param = getattr(sc.layer, sc.param_name)
@@ -1482,14 +1485,14 @@ class ShardedRDTWeightTransferEngine(
         self._dest_buffers = [{} for _ in range(self._ring_depth)]
 
 
-def _reset_fp8_rows(layer: Any) -> None:
-    """The replay writes no FP8 rows into a BF16 layer loaded from block-FP8
-    (Fp8DequantLinearMethod refuses FP8 at bake): clear rows an earlier,
-    aborted load may have marked, so post-load processing keeps the bytes."""
+def _reset_load_state(layer: Any) -> None:
+    """The replay writes ``param.data`` without the parameters' loaders: let
+    parameters that track what their loaders wrote (``reset_load_state``) drop
+    state left by an earlier, aborted load."""
     for param in layer.parameters(recurse=False):
-        fp8_rows = getattr(param, "fp8_rows", None)
-        if fp8_rows is not None:
-            fp8_rows.zero_()
+        reset = getattr(param, "reset_load_state", None)
+        if reset is not None:
+            reset()
 
 
 def _apply_fills(layer: Any, fills: "Iterable[_Scatter]") -> None:

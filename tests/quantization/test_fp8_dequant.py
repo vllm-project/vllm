@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.distributed.weight_transfer.sharded_rdt_fake import _UnsupportedFakeOp
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     RowParallelLinear,
@@ -57,7 +58,7 @@ def _tp(monkeypatch, request):
 def _block_fp8(rows: int, cols: int, seed: int) -> tuple[torch.Tensor, torch.Tensor]:
     gen = torch.Generator().manual_seed(seed)
     weight = torch.randn(rows, cols, generator=gen).to(torch.float8_e4m3fn)
-    scale = torch.rand(-(-rows // 128), -(-cols // 128), generator=gen) + 0.5
+    scale = torch.rand(cdiv(rows, 128), cdiv(cols, 128), generator=gen) + 0.5
     return weight.to(_DEVICE), scale.to(_DEVICE)
 
 
@@ -219,12 +220,14 @@ def test_bf16_shard_next_to_fp8_shard():
 
 
 def test_bf16_checkpoint_needs_no_scale():
-    ckpt = {k: v for k, v in _checkpoint(3).items() if "scale" not in k}
-    for name, weight in list(ckpt.items()):
-        prefix = name.removesuffix(".weight")
-        ckpt[name] = _dequant(weight, _checkpoint(3)[f"{prefix}.weight_scale_inv"])
-    model = _cold_start(ckpt)
-    torch.testing.assert_close(model.o.weight, ckpt["o.-.weight"], rtol=0, atol=0)
+    fp8 = _checkpoint(3)
+    bf16 = {
+        name: _dequant(weight, fp8[f"{name.removesuffix('.weight')}.weight_scale_inv"])
+        for name, weight in fp8.items()
+        if name.endswith(".weight")
+    }
+    model = _cold_start(bf16)
+    _assert_runtime(model, _expected(bf16))
 
 
 @pytest.mark.parametrize("_tp", [(1, 2)], indirect=True)
@@ -584,7 +587,7 @@ def test_sharded_rdt_bf16_indexer_update():
 def test_sharded_rdt_refuses_fp8():
     """FP8 rows would need the loader at replay: refused at bake."""
     model = _cold_start(_checkpoint(34))
-    with pytest.raises(NotImplementedError, match="sharded RDT"):
+    with pytest.raises(_UnsupportedFakeOp, match="view of 'weight'"):
         _sharded_rdt_sync(model, {"o.-.weight": _checkpoint(35)["o.-.weight"]})
 
 
@@ -636,17 +639,17 @@ def test_indexer_bf16_rows_of_odd_width():
 def test_sharded_rdt_replay_clears_fp8_rows():
     """Rows an aborted FP8 load marked do not make a baked BF16 sync
     dequantize BF16 bytes."""
-    from vllm.distributed.weight_transfer.sharded_rdt_engine import _reset_fp8_rows
+    from vllm.distributed.weight_transfer.sharded_rdt_engine import _reset_load_state
 
     model = _cold_start(_checkpoint(41))
     model.o.weight.fp8_rows[:5] = True
-    _reset_fp8_rows(model.o)
+    _reset_load_state(model.o)
     assert not model.o.weight.fp8_rows.any()
 
 
 def test_sharded_rdt_refused_bake_restores_the_model():
     model = _cold_start(_checkpoint(42))
-    with pytest.raises(NotImplementedError, match="sharded RDT"):
+    with pytest.raises(_UnsupportedFakeOp, match="view of 'weight'"):
         _sharded_rdt_sync(model, {"o.-.weight": _checkpoint(43)["o.-.weight"]})
     assert all(not p.is_meta for p in model.parameters())
     _assert_runtime(model, _expected(_checkpoint(42)))

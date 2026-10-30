@@ -65,13 +65,8 @@ def _fp8_view_of(runtime: torch.Tensor, rows: int, cols: int) -> torch.Tensor:
 
 
 def _set_data(param: torch.nn.Parameter, tensor: torch.Tensor) -> None:
+    # assigning `self.data` inside the subclass trips mypy's [has-type]
     param.data = tensor
-
-
-def _is_sharded_rdt_fake(tensor: torch.Tensor) -> bool:
-    from vllm.distributed.weight_transfer.sharded_rdt_fake import FakeRDTTensor
-
-    return isinstance(tensor, FakeRDTTensor)
 
 
 class Fp8DequantWeightParameter(ModelWeightParameter):
@@ -115,13 +110,6 @@ class Fp8DequantWeightParameter(ModelWeightParameter):
 
     def _load(self, load, loaded_weight: torch.Tensor, rows: slice, **kwargs):
         fp8 = loaded_weight.dtype == torch.float8_e4m3fn
-        if fp8 and _is_sharded_rdt_fake(loaded_weight):
-            # it replays recorded copies into `data`, not into the FP8 view,
-            # and never marks the FP8 rows
-            raise NotImplementedError(
-                "sharded RDT weight transfer cannot load block-FP8 checkpoint "
-                "weights of a BF16 layer (Fp8DequantLinearMethod); send BF16"
-            )
         if fp8:
             runtime = self.data
             _set_data(self, self.fp8_view())
@@ -132,6 +120,11 @@ class Fp8DequantWeightParameter(ModelWeightParameter):
         else:
             load(loaded_weight, **kwargs)
         self.fp8_rows[rows] = fp8
+
+    def reset_load_state(self) -> None:
+        """For a load that writes ``data`` without this parameter's loaders
+        (sharded RDT replay, BF16 only): no row holds FP8 bytes."""
+        self.fp8_rows.zero_()
 
     def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
         self._load(super().load_column_parallel_weight, loaded_weight, slice(None))
@@ -214,7 +207,9 @@ def _scale_groups(scale: torch.Tensor, rows: int, cols: int) -> torch.Tensor:
 
 class Fp8DequantScaleParameter(BlockQuantScaleParameter):
     """The scale of a replicated weight that accepts any checkpoint scale
-    layout, stored per ``_ANY_LAYOUT_BLOCK`` (see `_scale_groups`)."""
+    layout, stored per ``_ANY_LAYOUT_BLOCK`` (see `_scale_groups`). Only for
+    replicated (``disable_tp``) layers: a checkpoint scale is expanded before
+    it is sliced, so it must hold the whole weight's rows."""
 
     cols: int
 
@@ -261,12 +256,9 @@ def load_unneeded_scale(
     layer = param.layer_ref()
     assert layer is not None
     scale = layer.weight_scale_inv
-    from vllm.distributed.weight_transfer.sharded_rdt_fake import constant_like
-
     block_n, block_k = scale.weight_block_size
     shape = (cdiv(tensor.shape[0], block_n), cdiv(tensor.shape[1], block_k))
-    # a sharded RDT bake records it as a fill
-    ones = constant_like(tensor, shape, 1.0, torch.float32)
+    ones = tensor.new_ones(shape, dtype=torch.float32)  # sharded RDT: a fill
     scale.weight_loader(scale, ones, *(() if shard_id is None else (shard_id,)))
     loaded.add(name.removesuffix("weight") + "weight_scale_inv")
 
@@ -276,7 +268,13 @@ class Fp8DequantLinearMethod(UnquantizedLinearMethod):
     """Loads block-FP8 (or BF16) checkpoint weights; runs in BF16.
 
     ``weight_block_size`` None: the layer is replicated and accepts the scale
-    in any checkpoint layout (see `_scale_groups`)."""
+    in any checkpoint layout (see `_scale_groups`).
+
+    Model loaders call `load_unneeded_scale` after loading a tensor into such a
+    weight, as a separate loader call: a BF16 tensor then loads ones into the
+    scale rows it owns, so every element of the layer is loaded (layerwise
+    reload counts each loader call; a copy nested in the weight's own call
+    would count against the weight)."""
 
     def __init__(self, weight_block_size: list[int] | None):
         super().__init__()
@@ -368,6 +366,7 @@ class Fp8DequantConfig(QuantizationConfig):
         return cls(list(block_size) if block_size else [128, 128])
 
     def get_name(self) -> QuantizationMethods:
+        # never the model's quantization config, so nothing selects on it
         return "fp8"
 
     def get_supported_act_dtypes(self) -> list[torch.dtype]:
@@ -383,7 +382,8 @@ class Fp8DequantConfig(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "Fp8DequantConfig":
-        return cls(config["weight_block_size"])
+        # built by models (`for_checkpoint`), never read from a checkpoint
+        raise NotImplementedError
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str

@@ -319,6 +319,9 @@ steps:
     - tests/v1
     - tests/watermarking
     - examples/disaggregated/mooncake_connector/mooncake_connector_proxy.py
+    - vllm/model_executor/layers/quantization/fp8_dequant.py
+    - vllm/model_executor/model_loader/reload/
+    - tests/quantization/test_fp8_dequant.py
   device: cpu-small
   commands:
     # split the test to avoid interference
@@ -333,6 +336,7 @@ steps:
     - pytest -v -s -m 'cpu_test' v1/ec_connector/unit
     - pytest -v -s -m 'cpu_test' v1/metrics
     - pytest -v -s watermarking
+    - pytest -v -s quantization/test_fp8_dequant.py
 
 - label: ":nvidia: (H200 MIG 18GB) Extract Hidden States Integration"
   key: extract-hidden-states-integration

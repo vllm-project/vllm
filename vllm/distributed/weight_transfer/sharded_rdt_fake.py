@@ -107,6 +107,8 @@ class BakeSink:
         default_factory=lambda: defaultdict(list)
     )
     current: "tuple[Any, str] | None" = None
+    # dtype of ``current``'s parameter when its loader was entered
+    current_dtype: torch.dtype | None = None
     # Source names whose ``copy_`` fired during the bake. Names not here never
     # moved data (e.g. experts owned by another EP rank) and are skipped; names
     # here but unbaked fail the plan build.
@@ -117,6 +119,16 @@ class BakeSink:
             self.copied_names.add(src._name)
         if self.current is not None:
             layer, param_name = self.current
+            if self.current_dtype is not None and dest.dtype != self.current_dtype:
+                # The replay writes ``param.data.as_strided(...)`` in the
+                # parameter's dtype; a region recorded in a reinterpreting view
+                # (e.g. an FP8 view of a BF16 weight) would land elsewhere.
+                raise _UnsupportedFakeOp(
+                    f"FakeRDTTensor: copy_ into a {dest.dtype} view of "
+                    f"{param_name!r} of {type(layer).__name__}, a "
+                    f"{self.current_dtype} parameter; the sharded RDT backend "
+                    "replays copies in the parameter's own dtype."
+                )
             if dest.numel() != src.numel():
                 # The packed layout sizes each slice from the DESTINATION shape,
                 # while the producer packs what the replayed chain produces. A
@@ -236,6 +248,12 @@ class FakeRDTTensor(torch.Tensor):
             if isinstance(src, cls) and src._sink is not None:
                 return src._sink.accept_copy(dest, src)
 
+        # A constant built from a fake (a loader filling rows it owns): a fill
+        # fake, whose copy_ records a fill and fetches nothing.
+        fill = _CONSTANTS.get(func)
+        if fill is not None and isinstance(args[0], cls):
+            return fill(args[0], *args[1:], **kwargs)
+
         # Allowlisted slice/view/shape ops: append to chain and return child.
         op_name = SUPPORTED_OPS.get(func)
         if op_name is not None:
@@ -310,21 +328,24 @@ class FakeRDTTensor(torch.Tensor):
         return func(*args, **kwargs)
 
 
-def constant_like(
-    like: torch.Tensor, shape: tuple[int, ...], value: float, dtype: torch.dtype
-) -> torch.Tensor:
-    """``torch.full(shape, value)`` on ``like``'s device, for a loader that
-    writes a constant next to a checkpoint tensor (e.g. the scale of a BF16
-    weight). During a sharded RDT bake ``like`` is a fake, and so is the
-    constant: its copy_ records a fill that the replay applies, with nothing to
-    fetch."""
-    if isinstance(like, FakeRDTTensor):
-        return FakeRDTTensor(
-            name=f"<constant {value}>",
-            shape=torch.Size(shape),
-            dtype=dtype,
-            device=like.device,
-            sink=like._sink,
-            fill=value,
-        )
-    return torch.full(shape, value, dtype=dtype, device=like.device)
+def _constant(
+    like: FakeRDTTensor, size, value: float, dtype: torch.dtype | None = None, **_
+) -> FakeRDTTensor:
+    shape = torch.Size(size if isinstance(size, (tuple, list, torch.Size)) else [size])
+    return FakeRDTTensor(
+        name=f"<constant {value}>",
+        shape=shape,
+        dtype=dtype or like.dtype,
+        device=like.device,
+        sink=like._sink,
+        fill=float(value),
+    )
+
+
+_CONSTANTS: dict[Callable, Callable[..., FakeRDTTensor]] = {
+    torch.Tensor.new_ones: lambda like, size, **kw: _constant(like, size, 1, **kw),
+    torch.Tensor.new_zeros: lambda like, size, **kw: _constant(like, size, 0, **kw),
+    torch.Tensor.new_full: lambda like, size, value, **kw: _constant(
+        like, size, value, **kw
+    ),
+}

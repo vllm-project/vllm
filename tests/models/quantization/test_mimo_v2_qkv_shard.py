@@ -29,7 +29,10 @@ from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.mimo_v2 import (
     _fused_qkv_kv_chunk_rows,
-    _shard_fp8_qkv_proj,
+    _fused_qkv_rank_rows,
+    _fused_qkv_row_scales,
+    _fused_qkv_weight_rows,
+    _row_scales_to_blocks,
     _split_qkv,
 )
 from vllm.utils.math_utils import cdiv
@@ -63,6 +66,36 @@ def single_threaded_cpu_ops():
     # Do not prime the parent's thread pool before later engine forks.
     with set_default_torch_num_threads(1):
         yield
+
+
+def _shard_fp8_qkv_proj(
+    w_full: torch.Tensor,
+    s_full: torch.Tensor,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    v_head_dim: int,
+    tp_rank: int,
+    tp_size: int,
+    ckpt_tp: int,
+    block: int = 128,
+    kv_chunk_rows: int = 0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """A rank's shard of the fused fp8 qkv_proj, as the weight loader and
+    post-load processing of `_Fp8RowScalesLinearMethod` produce it together."""
+    geometry = (num_heads, num_kv_heads, head_dim, v_head_dim)
+    rows = _fused_qkv_rank_rows(
+        *geometry, tp_rank, tp_size, ckpt_tp, block, kv_chunk_rows
+    )
+    row_scales, requantize = _fused_qkv_row_scales(
+        s_full, *geometry, rows, tp_size, ckpt_tp, block, kv_chunk_rows
+    )
+    return _row_scales_to_blocks(
+        _fused_qkv_weight_rows(w_full, *geometry, rows, ckpt_tp),
+        row_scales,
+        requantize,
+        block,
+    )
 
 
 def _chunk_rows(num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp):

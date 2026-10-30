@@ -1047,10 +1047,9 @@ def test_glm52_installer_keeps_fp8_dequant_processing(
         def __init__(self) -> None:
             super().__init__()
             self.weight = nn.Parameter(
-                torch.empty(spec.n, spec.k, dtype=torch.float8_e4m3fn, device="meta"),
+                torch.empty(spec.n, spec.k, dtype=torch.bfloat16, device="meta"),
                 requires_grad=False,
             )
-            self.weight.runtime_dtype = torch.bfloat16
             self.quant_method = Fp8DequantLinearMethod(None)
 
     root = nn.Module()
