@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import json
 from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
@@ -14,6 +13,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.warmup.triton_autotune import (
     atomic_write_json,
     get_autotune_cache_dir,
+    read_config_json,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import triton
@@ -183,10 +183,10 @@ def get_lora_autotune_config_file_path(op_type: str, add_inputs: bool | None) ->
     return str(Path(get_autotune_cache_dir("lora")) / file_name)
 
 
-def _read_lora_config(path: str | Path) -> dict:
-    with open(path) as f:
-        config = json.load(f)
-    config.pop("triton_version", None)
+def _read_lora_config(path: str | Path) -> dict | None:
+    config = read_config_json(str(path))
+    if config is not None:
+        config.pop("triton_version", None)
     return config
 
 
@@ -206,9 +206,10 @@ def load_lora_op_config(op_type: str, add_inputs: bool | None) -> dict | None:
         )
 
     for config_path in config_paths:
-        if config_path.exists():
+        config = _read_lora_config(config_path)
+        if config is not None:
             logger.info_once(f"Using tuned LoRA kernel configs from {config_path}.")
-            return _read_lora_config(config_path)
+            return config
 
     if user_folder is not None:
         logger.warning_once(f"No LoRA kernel configs found in {config_paths[0]}")
@@ -216,10 +217,8 @@ def load_lora_op_config(op_type: str, add_inputs: bool | None) -> dict | None:
 
 
 def load_lora_autotune_configs(op_type: str, add_inputs: bool | None) -> dict:
-    path = Path(get_lora_autotune_config_file_path(op_type, add_inputs))
-    if not path.exists():
-        return {}
-    return _read_lora_config(path)
+    path = get_lora_autotune_config_file_path(op_type, add_inputs)
+    return _read_lora_config(path) or {}
 
 
 def save_lora_configs(op_type: str, add_inputs: bool | None, configs: dict) -> str:
