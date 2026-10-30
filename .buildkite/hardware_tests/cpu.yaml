@@ -158,6 +158,7 @@ steps:
   - tests/distributed/test_cpu_moe_ep.py
   - tests/kernels/moe/test_cpu_fused_moe.py
   - tests/v1/distributed/test_internal_lb_dp.py
+  - tests/v1/distributed/test_dense_dp_world_size.py
   - tests/utils.py
   - tests/models/utils.py
   - tests/compile/test_aot_compile.py
@@ -184,6 +185,7 @@ steps:
       tests/compile/test_aot_compile.py::test_compile_opt_out_preserves_native_aot_roundtrip
       tests/compile/test_aot_compile.py::test_compile_opt_out_respected_in_dynamo_trace_once
       tests/v1/distributed/test_internal_lb_dp.py::test_cpu_ep_internal_lb_matches_reference_after_idle
+      tests/v1/distributed/test_dense_dp_world_size.py::test_cpu_dense_dp_compiled_matches_reference
       tests/compile/test_inductor_operator_str_patch.py
       tests/model_executor/test_utils.py
       tests/kernels/moe/test_moe_weight_loading_padded.py::TestLoadWeightsExpertBias
