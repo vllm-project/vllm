@@ -99,7 +99,7 @@ vllm serve deepseek-ai/DeepSeek-V4-Pro \
 
 | `VLLM_MORI_EP_V2` | Behavior |
 | ----------------- | -------- |
-| unset | EPv2, falling back to EPv1 with a warning when the EP size exceeds 8 (except on gfx1250, whose UALink team can span hosts), `MORI_ENABLE_SDMA=1`, `--moe-backend aiter_mega_moe`, or a non-BF16 model |
+| unset | EPv2, falling back to EPv1 with a warning when MoRI is older than 1.2.4, the GPU is not gfx950 or gfx1250, EP spans hosts (except on gfx1250, whose UALink team can span hosts), `MORI_ENABLE_SDMA=1`, `--moe-backend aiter_mega_moe`, the model is not BF16, or MoE activations use per-tensor FP8 |
 | `1` | Always EPv2. The checks above only log a warning; startup fails if the EP ranks are not in one CCO-LSA team |
 | `0` | EPv1 |
 
@@ -118,7 +118,7 @@ Within one node, all EPv1 options run the same IntraNode kernel. To pin the inte
 EPv2 limitations:
 
 - All EP ranks must be in one MoRI CCO-LSA team, i.e. GPUs that can load and store each other's memory: one node, or one UALink fabric. Startup fails otherwise; there is no multi-node RDMA path yet.
-- Activations are dispatched in BF16, so the model dtype must be BF16 and the experts must take unquantized inputs (AITER fused MoE, which quantizes after the all-to-all, or BF16 experts). Experts that expect activations quantized before dispatch, such as FP8 or INT8 Triton experts, are rejected at startup.
+- Activations are dispatched in BF16, so the model dtype must be BF16 and the experts must take unquantized inputs (AITER fused MoE, which quantizes after the all-to-all, or BF16 experts). Experts that expect activations quantized before dispatch, such as FP8 or INT8 Triton experts, are rejected at startup. Block FP8 and MXFP4 weights work; per-tensor FP8 activations (`--quantization fp8` without blocks, ModelOpt FP8) do not, since AITER cannot quantize the received rows per tensor.
 - AITER shared-expert fusion is not supported: set `VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0`.
 - Install a MoRI build that ships `mori.ops.dispatch_combine_v2`. On NICs that limit a registered memory region to 2 GiB, the window registration fails once the dispatch arena outgrows that limit (DeepSeek-V4-Pro at EP8 already does at the default 16k batched tokens).
 - Older MoRI builds leave a stale HIP error behind when the fabric-handle probe fails (e.g. on a single MI355X node), and the next PyTorch allocation raises `operation not supported`.
