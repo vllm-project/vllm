@@ -1170,11 +1170,16 @@ def get_mamba_prefill_checkpoint_position(
     num_tokens: int,
     hash_block_size: int,
     drop_eagle_block: bool,
+    num_hash_lookahead_tokens: int = 0,
 ) -> int:
     """Return the reusable Mamba checkpoint boundary for a prefill."""
-    # Without EAGLE, leave one token to recompute on resend.
+    # Leave tokens for logits recomputation and the checkpoint's hash.
     # EAGLE's block drop already leaves tokens to recompute.
-    proof_limit = num_tokens if drop_eagle_block else num_tokens - 1
+    proof_limit = (
+        num_tokens
+        if drop_eagle_block
+        else num_tokens - max(1, num_hash_lookahead_tokens)
+    )
     checkpoint_position = proof_limit // hash_block_size * hash_block_size
     if drop_eagle_block:
         checkpoint_position -= hash_block_size
