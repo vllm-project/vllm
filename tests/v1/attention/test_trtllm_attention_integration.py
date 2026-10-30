@@ -26,7 +26,12 @@ from vllm.utils.torch_utils import (
     set_random_seed,
 )
 from vllm.v1.attention.backends.utils import PerLayerParameters
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheLayout, KVQuantMode
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheLayout,
+    KVQuantMode,
+    SlidingWindowSpec,
+)
 
 if not current_platform.is_device_capability_family(100):
     pytest.skip(
@@ -82,11 +87,13 @@ BATCH_SPECS = {
 }
 
 
-def _mock_get_per_layer_parameters(vllm_config, layer_names, impl_cls, head_size=None):
+def _mock_get_per_layer_parameters(
+    vllm_config, layer_names, impl_cls, head_size=None, window_left=-1
+):
     head_size = head_size or vllm_config.model_config.get_head_size()
     return {
         name: PerLayerParameters(
-            window_left=-1,
+            window_left=window_left,
             logits_soft_cap=0.0,
             sm_scale=1.0 / (head_size**0.5),
         )
@@ -280,9 +287,10 @@ def _run_trtllm_integration(
     head_size=None,
     block_size=BLOCK_SIZE,
     num_spec_tokens=0,
+    sliding_window=None,
 ):
     """Run TRTLLM attention through the full FlashInfer pipeline
-    and compare against an SDPA reference."""
+    and compare against an SDPA reference. Returns the output."""
     set_random_seed(42)
     device = torch.device(f"{DEVICE_TYPE}:0")
 
@@ -334,7 +342,10 @@ def _run_trtllm_integration(
             v_sdpa = v_sdpa.repeat_interleave(repeats, dim=1)
 
         def causal_mask_mod(b, h, q_idx, kv_idx, *, context_len):
-            return (q_idx + context_len) >= kv_idx
+            causal = (q_idx + context_len) >= kv_idx
+            if sliding_window is None:
+                return causal
+            return causal & ((q_idx + context_len - kv_idx) < sliding_window)
 
         mask_fn = partial(causal_mask_mod, context_len=ctx_len)
         block_mask = create_block_mask(
@@ -402,13 +413,20 @@ def _run_trtllm_integration(
     is_nvfp4 = kv_cache_dtype == "nvfp4"
     kv_quant_mode = KVQuantMode.NVFP4 if is_nvfp4 else KVQuantMode.NONE
     spec_dtype = torch.uint8 if is_nvfp4 else dtype
-    kv_cache_spec = FullAttentionSpec(
+    spec_kwargs = dict(
         block_size=block_size,
         num_kv_heads=num_kv_heads,
         head_size=head_size,
         dtype=spec_dtype,
         kv_quant_mode=kv_quant_mode,
     )
+    kv_cache_spec = (
+        FullAttentionSpec(**spec_kwargs)
+        if sliding_window is None
+        else SlidingWindowSpec(**spec_kwargs, sliding_window=sliding_window)
+    )
+    # NVFP4 KV that decodes on PrimTS and prefills on an FP8 copy.
+    prims_ts = is_nvfp4 and (head_size == 512 or sliding_window is not None)
     layer_names = ["test_layer_0"]
 
     with (
@@ -419,7 +437,11 @@ def _run_trtllm_integration(
         ),
         unittest.mock.patch(
             "vllm.v1.attention.backends.flashinfer.get_per_layer_parameters",
-            partial(_mock_get_per_layer_parameters, head_size=head_size),
+            partial(
+                _mock_get_per_layer_parameters,
+                head_size=head_size,
+                window_left=-1 if sliding_window is None else sliding_window - 1,
+            ),
         ),
     ):
         builder = FlashInferMetadataBuilder(
@@ -443,10 +465,9 @@ def _run_trtllm_integration(
             assert isinstance(attn_metadata.decode, FlashInferTrtllmAPIDecode), (
                 f"Expected FlashInferTrtllmAPIDecode, got {type(attn_metadata.decode)}"
             )
-            # trtllm-gen has no NVFP4-KV kernel at head_dim 512; PrimTS decodes it.
             expected_kernel = (
                 FlashInferDecodeKernel.PRIMS_TS
-                if is_nvfp4 and head_size == 512
+                if prims_ts
                 else FlashInferDecodeKernel.TRTLLM_GEN
             )
             assert attn_metadata.decode.kernel == expected_kernel
@@ -457,7 +478,7 @@ def _run_trtllm_integration(
             scale=scale,
             num_kv_heads=num_kv_heads,
             alibi_slopes=None,
-            sliding_window=None,
+            sliding_window=sliding_window,
             kv_cache_dtype=kv_cache_dtype,
         )
 
@@ -506,12 +527,12 @@ def _run_trtllm_integration(
         )
 
     # 4. Compare against SDPA reference
-    if is_nvfp4 and head_size == 512:
+    if prims_ts:
         # Every reference value is below 1, so atol=1 would accept any output.
         ref = sdpa_output.float()
         rel_err = ((output.float() - ref).norm() / ref.norm()).item()
         assert rel_err < NVFP4_HEAD_DIM_512_MAX_REL_ERR, rel_err
-        return
+        return output
     if is_nvfp4:
         atol, rtol = 1.0, 1.0  # nvfp4 has higher quantization error
     else:
@@ -585,6 +606,32 @@ def test_trtllm_gen_nvfp4_kv_head_dim_512_spec_decode():
         block_size=64,
         num_spec_tokens=2,
     )
+
+
+@needs_flashinfer_nvfp4_head_dim_512
+@pytest.mark.usefixtures("workspace_init")
+@torch.inference_mode()
+def test_trtllm_gen_nvfp4_kv_head_dim_256_sliding_window(monkeypatch):
+    """Sliding-window head_dim 256 NVFP4 KV (Gemma 4 local layers): PrimTS
+    decode and prefill on an FP8 copy of the pages inside the window. Starting
+    the prefills at their first visible page (12, 4 and 8 here, which keeps the
+    kernel's 128-token KV tiles in place) matches the copy of every page."""
+    run = partial(
+        _run_trtllm_integration,
+        BatchSpec(seq_lens=[700, 1024, 464, 733], query_lens=[1, 100, 64, 33]),
+        kv_cache_dtype="nvfp4",
+        model_name=MODEL_NVFP4,
+        head_size=256,
+        block_size=64,
+        sliding_window=128,
+    )
+    windowed = run()
+    monkeypatch.setattr(
+        FlashInferMetadataBuilder,
+        "_window_nvfp4_prefill",
+        lambda self, prefill, qo_indptr_cpu, page_counts: (prefill, page_counts),
+    )
+    torch.testing.assert_close(windowed, run(), atol=0, rtol=0)
 
 
 @needs_flashinfer_nvfp4_head_dim_512
