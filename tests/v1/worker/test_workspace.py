@@ -19,6 +19,11 @@ class _SpecConfig:
     def use_dspark(self) -> bool:
         return self._dspark
 
+    @property
+    def uses_separate_workspace_lane(self) -> bool:
+        # Only DSpark drafts in a separate workspace lane.
+        return self._dspark
+
 
 class _VllmConfig:
     def __init__(self, spec_config: _SpecConfig | None) -> None:
