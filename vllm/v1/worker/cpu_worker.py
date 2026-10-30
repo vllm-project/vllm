@@ -19,7 +19,7 @@ from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.cpu_resource_utils import (
     get_allowed_cpu_list,
     get_memory_node_info,
-    get_visible_memory_node,
+    get_worker_memory_nodes,
 )
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import set_random_seed
@@ -45,7 +45,7 @@ class CPUWorker(Worker):
         # TODO: use numactl for process setup
         # TODO: optimize for `interleaved` policy
         # Bind memory node
-        allowed_memory_nodes = get_visible_memory_node(
+        allowed_memory_nodes = get_worker_memory_nodes(
             vllm_config.parallel_config.assigned_physical_gpu_ids
         )
         allowed_cpu_list = get_allowed_cpu_list()
