@@ -30,6 +30,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Dynamic,
     kMxfp4Static,
 )
+from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from aiter import ActivationType
@@ -691,3 +692,127 @@ class AiterMxfp4Experts(AiterExperts):
         if (weight_key, activation_key) not in SUPPORTED_W_A:
             return False
         return on_gfx950() and not on_gfx1250()
+
+
+class AiterFlydslMxfp4Experts(AiterExperts):
+    """Native MXFP4 weights with BF16 clamped-SiLU activations on gfx942."""
+
+    consumes_expert_mask = False
+
+    def __init__(self, moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig):
+        super().__init__(moe_config, quant_config)
+        from aiter.ops.flydsl.kernels.moe_2stage_a16wmix import flydsl_a16w4_moe
+
+        if quant_config.w1_bias is not None or quant_config.w2_bias is not None:
+            raise ValueError("AITER FlyDSL MXFP4 does not support expert bias")
+        self.clamp_limit = quant_config.gemm1_clamp_limit
+        if self.clamp_limit is None:
+            self.clamp_limit = moe_config.swiglu_limit
+        if self.clamp_limit is None or not self.clamp_limit > 0:
+            raise ValueError("AITER FlyDSL MXFP4 requires a positive clamp limit")
+        self._moe = flydsl_a16w4_moe
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        if not current_platform.is_rocm():
+            return False
+        from vllm.platforms.rocm import on_gfx942
+
+        return on_gfx942() and rocm_aiter_ops.is_fused_moe_enabled()
+
+    @staticmethod
+    def _supports_activation(activation: MoEActivation) -> bool:
+        return activation == MoEActivation.SILU
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None, activation_key: QuantKey | None
+    ) -> bool:
+        return (weight_key, activation_key) == (kMxfp4Static, None)
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        return (
+            not moe_parallel_config.use_ep
+            and moe_parallel_config.ep_size == 1
+            and not moe_parallel_config.enable_eplb
+        )
+
+    @staticmethod
+    def _supports_shape(hidden_dim: int) -> bool:
+        return hidden_dim % 256 == 0
+
+    @staticmethod
+    def is_supported_config(
+        cls, moe_config, weight_key, activation_key, activation_format
+    ):
+        supported, reason = super().is_supported_config(
+            cls, moe_config, weight_key, activation_key, activation_format
+        )
+        if not supported:
+            return supported, reason
+        if moe_config.in_dtype != torch.bfloat16 or moe_config.has_bias:
+            return False, "AITER FlyDSL MXFP4 requires BF16 inputs and no bias"
+        if moe_config.num_local_experts != moe_config.num_experts:
+            return False, "AITER FlyDSL MXFP4 requires all experts on each TP rank"
+        if moe_config.swiglu_limit is None or not moe_config.swiglu_limit > 0:
+            return False, "AITER FlyDSL MXFP4 requires a positive clamp limit"
+        if moe_config.swiglu_alpha not in (None, 1.0) or moe_config.swiglu_beta not in (
+            None,
+            0.0,
+        ):
+            return False, "AITER FlyDSL MXFP4 requires unit-slope SiLU with no offset"
+        try:
+            from aiter.ops.flydsl.kernels import moe_2stage_a16wmix
+        except ImportError:
+            return False, "AITER FlyDSL MXFP4 requires AITER PR #6995"
+        if not hasattr(moe_2stage_a16wmix, "flydsl_a16w4_moe"):
+            return False, "AITER FlyDSL MXFP4 requires AITER PR #6995"
+        return True, None
+
+    def apply(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        apply_router_weight_on_input: bool,
+    ):
+        if (
+            activation != MoEActivation.SILU
+            or apply_router_weight_on_input
+            or expert_map is not None
+            or expert_tokens_meta is not None
+            or a1q_scale is not None
+            or a2_scale is not None
+        ):
+            raise ValueError("Unsupported AITER FlyDSL MXFP4 routing or activation")
+        if hidden_states.shape[0] == 0:
+            return
+        assert self.quant_config.w1_scale is not None
+        assert self.quant_config.w2_scale is not None
+        self._moe(
+            hidden_states=hidden_states,
+            w1=w1.view(torch.uint8),
+            w2=w2.view(torch.uint8),
+            w1_scale=self.quant_config.w1_scale.view(torch.uint8),
+            w2_scale=self.quant_config.w2_scale.view(torch.uint8),
+            topk_ids=topk_ids.to(torch.int32),
+            topk_weights=topk_weights.to(torch.float32),
+            swiglu_limit=self.clamp_limit,
+            logical_inter_dim=(
+                self.moe_config.intermediate_size_per_partition_unpadded
+            ),
+            activation_bf16=True,
+            out=output,
+        )

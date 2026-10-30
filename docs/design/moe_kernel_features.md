@@ -103,6 +103,31 @@ To be used with a particular `FusedMoEPrepareAndFinalizeModular` subclass, MoE k
     5. The `activation` parameter is ignored and SwiGlu is used by default instead.
     6. Only handled by or supported when used with modular kernels.
 
+### AITER FlyDSL Native MXFP4
+
+`--moe-backend aiter_flydsl_mxfp4_bf16` explicitly selects AITER's native
+MXFP4-weight, BF16-activation clamped-SiLU experts on gfx942 (MI300/MI325).
+It does not change `auto` or the existing `aiter`, `flydsl`, and
+`aiter_triton_mxfp4_bf16` choices. Enable `VLLM_ROCM_USE_AITER=1` and
+`VLLM_ROCM_USE_AITER_MOE=1` and install an AITER build exposing
+`flydsl_a16w4_moe` from [AITER PR #6995](https://github.com/ROCm/aiter/pull/6995).
+Older AITER builds reject this explicit choice.
+
+The supported configuration is BF16 input/output, native MXFP4 weights with
+E8M0 scales, SiLU with a positive model-provided clamp bound, and TP without
+expert parallelism. Bias, LoRA, expert load balancing, GPT-OSS SwiGLU, quantized
+activations and routing weights applied to the input are not supported.
+The activation rounds GEMM1 results to BF16 before computing
+`silu(min(gate, limit)) * clamp(up, -limit, limit)`; it does not add an up-branch
+offset. BF16 atomic accumulation is not bitwise deterministic.
+
+AITER owns sorting, paired tile selection, output zeroing and the same-math
+fallback. Weights remain MXFP4 and are preshuffled once at load time; they are
+not requantized to INT4. The hidden dimension aligns to 256 and the per-rank
+intermediate dimension to 128, including separate gate/up zero padding.
+Kernel and CUDA-graph tests do not establish full-model quality or serving
+throughput; those require a checkpoint-specific end-to-end evaluation.
+
 ## Modular Kernel "families"
 
 The following table shows "families" of modular kernels that are intended to work together. There are some combinations which may work but have not yet been tested, e.g. flashinfer with other fp8 experts.

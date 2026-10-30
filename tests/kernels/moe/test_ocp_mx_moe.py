@@ -2032,6 +2032,174 @@ def test_aiter_mxfp4_w4a4_moe_pad_masks_only_padding(
 # -----------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="ROCm-specific backend")
+@pytest.mark.parametrize("num_tokens", [0, 1, 8, 33])
+def test_aiter_flydsl_clamped_mxfp4_oracle_and_graph(
+    num_tokens, monkeypatch, workspace_init
+):
+    """The opt-in backend preserves clamped BF16 math through graph replay."""
+    from vllm.platforms.rocm import on_gfx942
+
+    if not on_gfx942():
+        pytest.skip("The AITER FlyDSL MXFP4 backend is restricted to gfx942")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+    from aiter import QuantType, dtypes, get_torch_quant
+
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterFlydslMxfp4Experts,
+    )
+    from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        Mxfp4MoeBackend,
+        convert_weight_to_mxfp4_moe_kernel_format,
+        make_mxfp4_moe_quant_config,
+        mxfp4_round_up_hidden_size_and_intermediate_size,
+        select_deepseek_v4_mxfp4_moe_backend,
+    )
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep import (
+        MoEPrepareAndFinalizeNoDPEPModular,
+    )
+
+    torch.manual_seed(103)
+    num_experts, hidden_dim, inter_dim, topk = 8, 256, 384, 6
+    config = replace(
+        make_dummy_moe_config(
+            num_experts=num_experts,
+            experts_per_token=topk,
+            hidden_dim=hidden_dim,
+            intermediate_size=inter_dim,
+        ),
+        moe_backend="aiter_flydsl_mxfp4_bf16",
+        swiglu_limit=10.0,
+        intermediate_size_per_partition_unpadded=288,
+    )
+    backend, expert_cls = select_deepseek_v4_mxfp4_moe_backend(config)
+    assert backend == Mxfp4MoeBackend.AITER_FLYDSL_MXFP4_BF16
+    assert expert_cls is AiterFlydslMxfp4Experts
+    assert mxfp4_round_up_hidden_size_and_intermediate_size(
+        backend, hidden_dim, 288, MoEActivation.SILU
+    ) == (hidden_dim, inter_dim)
+    for unsupported in (
+        replace(config, has_bias=True),
+        replace(config, in_dtype=torch.float16),
+        replace(config, swiglu_limit=None),
+        replace(config, activation=MoEActivation.SWIGLUOAI),
+        replace(
+            config,
+            moe_parallel_config=replace(
+                config.moe_parallel_config, use_ep=True, ep_size=2
+            ),
+        ),
+    ):
+        with pytest.raises(ValueError):
+            select_deepseek_v4_mxfp4_moe_backend(unsupported)
+
+    hidden = torch.randn((num_tokens, hidden_dim), dtype=torch.bfloat16, device="cuda")
+    weight1 = torch.randn(
+        (num_experts, 2 * inter_dim, hidden_dim),
+        dtype=hidden.dtype,
+        device=hidden.device,
+    )
+    weight2 = torch.randn(
+        (num_experts, hidden_dim, inter_dim),
+        dtype=hidden.dtype,
+        device=hidden.device,
+    )
+    weight1[:, 288:inter_dim] = 0
+    weight1[:, inter_dim + 288 :] = 0
+    weight2[:, :, 288:] = 0
+    quantize = get_torch_quant(QuantType.per_1x32)
+    packed1, scale1 = quantize(weight1, quant_dtype=dtypes.fp4x2)
+    packed2, scale2 = quantize(weight2, quant_dtype=dtypes.fp4x2)
+    packed1 = packed1.view(torch.uint8).reshape(num_experts, 2 * inter_dim, -1)
+    packed2 = packed2.view(torch.uint8).reshape(num_experts, hidden_dim, -1)
+    scale1 = scale1.view(torch.uint8).reshape(num_experts, 2 * inter_dim, -1)
+    scale2 = scale2.view(torch.uint8).reshape(num_experts, hidden_dim, -1)
+    reference1 = mxfp4_dequantize(packed1, scale1).to(hidden.dtype).float()
+    reference2 = mxfp4_dequantize(packed2, scale2).to(hidden.dtype).float()
+    packed1, packed2, scale1, scale2, _, _ = convert_weight_to_mxfp4_moe_kernel_format(
+        backend,
+        torch.nn.Module(),
+        packed1,
+        packed2,
+        scale1,
+        scale2,
+        activation=MoEActivation.SILU,
+    )
+    quant_config = make_mxfp4_moe_quant_config(
+        backend, scale1, scale2, swiglu_limit=10.0
+    )
+    expert = expert_cls(config, quant_config)
+    kernel = FusedMoEKernel(MoEPrepareAndFinalizeNoDPEPModular(), expert)
+    routing_ids = (
+        torch.randn((num_tokens, num_experts), device=hidden.device)
+        .topk(topk, dim=-1)
+        .indices.int()
+    )
+    routing_weights = torch.rand((num_tokens, topk), device=hidden.device)
+    routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
+    projected = (
+        torch.einsum("beck,bk->bec", reference1[routing_ids.long()], hidden.float())
+        .to(hidden.dtype)
+        .float()
+    )
+    gate, up = projected.chunk(2, dim=-1)
+    activated = (
+        (torch.nn.functional.silu(gate.clamp(max=10.0)) * up.clamp(-10.0, 10.0))
+        .to(hidden.dtype)
+        .float()
+    )
+    contributions = torch.einsum(
+        "beck,bek->bec", reference2[routing_ids.long()], activated
+    )
+    expected = (contributions * routing_weights.unsqueeze(-1)).sum(dim=1)
+    expected = expected.to(hidden.dtype).float()
+    rms = expected.square().mean(dim=-1, keepdim=True).sqrt().clamp_min(1e-6)
+    output = torch.empty_like(hidden)
+
+    def run():
+        output.copy_(
+            kernel.apply(
+                hidden_states=hidden,
+                w1=packed1,
+                w2=packed2,
+                topk_weights=routing_weights,
+                topk_ids=routing_ids,
+                activation=MoEActivation.SILU,
+                global_num_experts=num_experts,
+                apply_router_weight_on_input=False,
+                expert_map=None,
+            )
+        )
+
+    run()
+    torch.testing.assert_close(
+        output.float() / rms, expected / rms, rtol=0.03, atol=0.03
+    )
+    if num_tokens == 0:
+        assert output.shape == (0, hidden_dim)
+        return
+    warmup = torch.cuda.Stream()
+    warmup.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(warmup):
+        for _ in range(3):
+            run()
+    torch.cuda.current_stream().wait_stream(warmup)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run()
+    for initial in (0.0, 17.0):
+        output.fill_(initial)
+        graph.replay()
+        torch.accelerator.synchronize()
+        assert torch.isfinite(output).all()
+        torch.testing.assert_close(
+            output.float() / rms, expected / rms, rtol=0.03, atol=0.03
+        )
+
+
 @pytest.mark.skipif(not ROCM_AVAILABLE, reason="ROCm-specific test")
 @pytest.mark.skipif(
     not is_aiter_found_and_supported(), reason="AITER is not installed or supported"
