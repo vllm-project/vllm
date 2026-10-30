@@ -544,7 +544,7 @@ class QkvFrontKernel:
     def send(self, acc, s_recv, rb, warp, lane, rank, ntok_max, active_m) -> None:
         """This CTA's partial of rows 16 warp + g (+8) for tokens 8 nt + 2 t
         (+1), the k-block sets summed in fixed order, into the owner rank's
-        receive slot [rank][token / splits][row]: rows (r, r + 1) of one token
+        receive slot `[rank][token / splits][row]`: rows (r, r + 1) of one token
         per lane, paired by one xor-4 shuffle (lanes g and g ^ 1 share t)."""
         splits = self.splits
         g = lane >> 2
