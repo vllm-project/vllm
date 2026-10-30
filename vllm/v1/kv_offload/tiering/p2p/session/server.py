@@ -58,6 +58,13 @@ class StoreResult(NamedTuple):
     success: bool
 
 
+class StoreDrainResult(NamedTuple):
+    """Failed queued stores and PD ids whose handoffs cannot be resumed."""
+
+    stores: list[StoreResult]
+    reaped_pd_ids: set[str]
+
+
 class _MatchResult(NamedTuple):
     """Result of block matching: pairs ready for transfer."""
 
@@ -759,18 +766,32 @@ class ServerRole:
                 continue
             self._finalize_outbound(kv_request_id, key)
 
-    def drain_stores(self) -> list[StoreResult]:
-        """Withdraw unfetched supply while preserving pins for active writes."""
-        for kv_request_id, st in list(self._requests.items()):
+    def drain_stores(
+        self, kv_request_ids: Iterable[str] | None = None
+    ) -> StoreDrainResult:
+        """Withdraw supply, keeping empty lookup rounds for their late fetch."""
+        reaped_pd_ids: set[str] = set()
+        ids = list(self._requests) if kv_request_ids is None else kv_request_ids
+        for kv_request_id in ids:
+            st = self._requests.get(kv_request_id)
+            if st is None:
+                continue
             for round_key, rnd in list(st.outbound.items()):
+                if not rnd.lookup_supplied:
+                    reaped_pd_ids.add(kv_request_id)
                 rnd.available.clear()
                 rnd.finishing = True
                 self._pending_store_results.extend(self._fail_unwritten_round_jobs(rnd))
-                if not rnd.inflight:
-                    self._finalize_outbound(kv_request_id, round_key, success=False)
+                # A lookup HIT may already be on the wire. Preserve its empty
+                # round so on_fetch fails it promptly, without affecting a
+                # fresh lookup round under the same kv_request_id.
+                if not rnd.inflight and (
+                    rnd.demand_received or not rnd.lookup_supplied
+                ):
+                    self._finalize_cancelled(kv_request_id, round_key)
         results = self._pending_store_results
         self._pending_store_results = []
-        return results
+        return StoreDrainResult(results, reaped_pd_ids)
 
     def collect_results(self) -> list[StoreResult]:
         """Drain timeouts, deferred results, and transport completions.

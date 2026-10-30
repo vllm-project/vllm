@@ -3846,16 +3846,16 @@ def test_drain_stores_keeps_inflight_pins_until_transport_finishes(success):
     assert session.poll().stores == []
     (tid,) = transport._transfers
 
-    assert session.drain_stores() == [StoreResult(2, False)]
+    assert session.drain_stores().stores == [StoreResult(2, False)]
     assert session.has_pending_work
-    assert session.drain_stores() == []
+    assert session.drain_stores().stores == []
     assert session.poll().stores == []
     assert transport._cancel_calls == []
 
     (transport._poll_done if success else transport._poll_failed).append(tid)
     assert session.poll().stores == [StoreResult(1, success)]
     assert not session.has_pending_work
-    assert session.drain_stores() == []
+    assert session.drain_stores().stores == []
     # The completed job also supplied an unmatched block. Drain must remove
     # that reference before its primary slot can be reused.
     _fetch(conn, "req-1", [b"extra"], [6])
@@ -3866,3 +3866,84 @@ def test_drain_stores_keeps_inflight_pins_until_transport_finishes(success):
     done = [m for m in conn._sent if m[TYPE_KEY] == TransferDoneMsg.TYPE]
     assert done[-1][TransferDoneMsg.SUCCESS] is False
     assert session.poll().stores == []
+
+
+def test_drain_rejects_unfetched_lookup_round_without_timeout():
+    """Withdrawn lookup supply must fail a late FetchMsg in one poll."""
+    session, conn, transport = _make_session()
+    _activate(session, conn)
+    key = OffloadKey(b"lookup")
+    parent = FakeParent(stored={key: 0})
+    conn.enqueue(
+        {
+            TYPE_KEY: LookupMsg.TYPE,
+            LookupMsg.KV_REQUEST_ID: "sym",
+            LookupMsg.KEYS: [key],
+            LookupMsg.ROUND_SEQ: 0,
+        }
+    )
+    session.poll()
+    _serve(session, parent)
+    assert conn._sent[-1][LookupRespMsg.HITS] == [True]
+    session.drain_stores()
+    _fetch(conn, "sym", [key], [0])
+    session.poll()
+    assert transport._transfers == {}
+    done = [m for m in conn._sent if m[TYPE_KEY] == TransferDoneMsg.TYPE]
+    assert len(done) == 1
+    assert done[0][TransferDoneMsg.SUCCESS] is False
+
+    # Withdrawal belongs to round 0; a fresh HIT under the same id is valid.
+    conn.enqueue(
+        {
+            TYPE_KEY: LookupMsg.TYPE,
+            LookupMsg.KV_REQUEST_ID: "sym",
+            LookupMsg.KEYS: [key],
+            LookupMsg.ROUND_SEQ: 1,
+        }
+    )
+    session.poll()
+    _serve(session, parent)
+    assert conn._sent[-1][LookupRespMsg.HITS] == [True]
+    conn.enqueue(
+        {
+            TYPE_KEY: FetchMsg.TYPE,
+            FetchMsg.KV_REQUEST_ID: "sym",
+            FetchMsg.KEYS: [key],
+            FetchMsg.BLOCK_INDEXES: [1],
+            FetchMsg.ROUND_SEQ: 1,
+        }
+    )
+    session.poll()
+    (tid,) = transport._transfers
+    transport._poll_done.append(tid)
+    assert session.poll().stores == [StoreResult(1001, True)]
+    assert conn._sent[-1][TransferDoneMsg.SUCCESS] is True
+
+
+def test_drain_aborted_round_sends_only_abort_ack():
+    """An abort parked behind a WRITE must get exactly one terminal message."""
+    session, conn, transport = _make_session()
+    _activate(session, conn)
+    key = OffloadKey(b"active")
+    session.add_stored_blocks("req", [key], [0], job_id=1)
+    _fetch(conn, "req", [key], [0])
+    session.poll()
+    (tid,) = transport._transfers
+    transport._cancel_still_inflight.add(tid)
+    conn.enqueue(
+        {
+            TYPE_KEY: AbortFetchMsg.TYPE,
+            AbortFetchMsg.KV_REQUEST_ID: "req",
+            AbortFetchMsg.ROUND_SEQ: 0,
+        }
+    )
+    session.poll()
+    session.drain_stores()
+    transport._poll_done.append(tid)
+    result = session.poll()
+    assert result.stores == [StoreResult(1, False)]
+    terminals = [
+        m for m in conn._sent if m[TYPE_KEY] in (TransferDoneMsg.TYPE, AbortAckMsg.TYPE)
+    ]
+    assert [m[TYPE_KEY] for m in terminals] == [AbortAckMsg.TYPE]

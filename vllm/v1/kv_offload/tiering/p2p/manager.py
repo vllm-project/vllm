@@ -675,8 +675,8 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     def drain_jobs(self) -> None:
         """Block until every submitted load/store job has completed or failed.
 
-        Fail stores still waiting for a fetch, then loop calling ``_poll_once()`` until no session has outstanding
-        inbound loads or in-flight outbound stores, and no reaped session's
+        Fail stores still waiting for a fetch, then poll until no session has
+        outstanding inbound loads or in-flight outbound stores, and no reaped session's
         transfer is still retained (bounded by its hold cap). Mid-flight
         transfers are NOT cancelled — the caller
         (``TieringOffloadingManager.reset_cache``) needs the primary
@@ -689,22 +689,14 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         the reap's close() sets the event, so every event is set on return.
         """
         start = time.monotonic()
-        self._reaped_stores.update(dict.fromkeys(self._kv_to_session, start))
+        self._reap_unbound_stores(force=True)
         self._kv_to_session.clear()
-        for kid, batches in self._unbound_stores.items():
-            self._reaped_stores[kid] = start
-            for batch in batches:
-                self._finished_jobs.append(JobResult(batch.job_id, success=False))
-        self._unbound_stores.clear()
+        for session in self._sessions.values():
+            self._drain_session_stores(session)
 
         warned = False
         while True:
-            for session in self._sessions.values():
-                for result in session.drain_stores():
-                    self._finished_jobs.append(
-                        JobResult(result.job_id, success=result.success)
-                    )
-            self._poll_once()
+            self._poll_once(draining=True)
             pending = bool(self._retained) or any(
                 s.has_pending_work for s in self._sessions.values()
             )
@@ -717,6 +709,18 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 )
                 warned = True
             time.sleep(_DRAIN_SLEEP_S)
+
+    def _drain_session_stores(
+        self, session: P2PSession, kv_request_ids: Iterable[str] | None = None
+    ) -> None:
+        result = session.drain_stores(kv_request_ids)
+        self._finished_jobs.extend(
+            JobResult(store.job_id, success=store.success) for store in result.stores
+        )
+        now = time.monotonic()
+        for kid in result.reaped_pd_ids:
+            self._reaped_stores[kid] = now
+            self._kv_to_session.pop(kid, None)
 
     @override
     def serve_external_requests(self, parent: ParentManager) -> None:
@@ -1017,7 +1021,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         entry = self._reconnect_backoff.get(peer_id)
         return 0.0 if entry is None else entry[1] - time.monotonic()
 
-    def _reap_unbound_stores(self) -> None:
+    def _reap_unbound_stores(self, *, force: bool = False) -> None:
         """Time out submit_store batches that no peer has ever fetched.
 
         Walks `_unbound_stores` for entries whose oldest batch is older
@@ -1029,6 +1033,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         Also expires `_reaped_stores` entries whose consumer can no longer
         be waiting, which is why this runs before the empty check below.
         """
+        # Reset uses the same failure/tombstone path as timeout reaping.
         now = time.monotonic()
         if self._reaped_stores:
             retention_deadline = now - _REAPED_ID_RETENTION_S
@@ -1041,7 +1046,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
 
         if not self._unbound_stores:
             return
-        deadline = now - self._unbound_store_timeout_s
+        deadline = float("inf") if force else now - self._unbound_store_timeout_s
         expired: list[str] | None = None
         for kid, batches in self._unbound_stores.items():
             # Batches are appended in arrival order, so the head is oldest.
@@ -1058,14 +1063,15 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 self._finished_jobs.append(
                     JobResult(job_id=batch.job_id, success=False)
                 )
-            logger.warning(
-                "P2P %s: unbound store kv_request_id=%s timed out after %.0fs "
-                "without a fetch — failing %d job(s)",
-                self._local_id,
-                kid,
-                self._unbound_store_timeout_s,
-                len(batches),
-            )
+            if not force:
+                logger.warning(
+                    "P2P %s: unbound store kv_request_id=%s timed out after %.0fs "
+                    "without a fetch — failing %d job(s)",
+                    self._local_id,
+                    kid,
+                    self._unbound_store_timeout_s,
+                    len(batches),
+                )
 
     def _reap_idle_sessions(self) -> None:
         """Evict idle sessions when remaining peer slots are scarce.
@@ -1119,7 +1125,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     # Polling
     # ------------------------------------------------------------------
 
-    def _poll_once(self) -> None:
+    def _poll_once(self, *, draining: bool = False) -> None:
         """One sweep of the polling work.
 
         Drains the control transport, polls every session, accumulates
@@ -1154,6 +1160,10 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 self._finished_jobs.append(
                     JobResult(job_id=sr.job_id, success=sr.success)
                 )
+            if draining:
+                if result.new_fetch_ids:
+                    self._drain_session_stores(session, result.new_fetch_ids)
+                continue
             # Bind kv_request_id → session for any FetchMsg this tick and
             # replay any submit_store batches parked while no peer was
             # asking. ServerRole.on_fetch already recorded the demand
