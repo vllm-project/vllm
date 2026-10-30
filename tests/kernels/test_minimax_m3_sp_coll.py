@@ -124,11 +124,13 @@ def _run(rank: int, init_file: str):
     rccl = _NoRccl()
     coll = sp_coll.Collectives(pools, 1)
     send = coll.alloc((WORLD * ROWS, q + q // 32), torch.uint8)
+    assert send is not None
     send.copy_(rnd_u8(WORLD * ROWS, q + q // 32))
     recv = torch.empty((WORLD * ROWS, q + q // 32), dtype=torch.uint8, device=dev)
     coll.bind(stream, rccl).all_to_all(recv, send)
     coll = sp_coll.Collectives(pools, 1)
     part = coll.alloc((padded, HIDDEN), torch.bfloat16)
+    assert part is not None
     part.copy_((torch.randn((padded, HIDDEN), generator=gen) * 3).bfloat16())
     h = torch.empty((ROWS, HIDDEN), dtype=torch.bfloat16, device=dev)
     coll.bind(stream, rccl).reduce_scatter(h, part)
@@ -151,7 +153,9 @@ def _run(rank: int, init_file: str):
     recv = torch.empty_like(send)
     coll.all_to_all(recv, send)
     coll = sp_coll.Collectives(pools, 0).bind(stream, rccl)
-    codes, scales = coll.all_to_all_unpack(send, q)
+    unpacked = coll.all_to_all_unpack(send, q)
+    assert unpacked is not None
+    codes, scales = unpacked
     torch.accelerator.synchronize()
     ref_codes, ref_scales = mxfp8_unpack(recv, WORLD, ROWS, q)
     assert torch.equal(codes.view(torch.uint8), ref_codes.view(torch.uint8))
