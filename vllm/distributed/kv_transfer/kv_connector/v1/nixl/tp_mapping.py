@@ -27,6 +27,8 @@ class ReadSpec:
     local_block_ids: BlockIds
     remote_block_ids: BlockIds
     block_ids_by_region: bool = False
+    # Block lists already paired 1:1, local ones in remote-sized sub-blocks.
+    paired: bool = False
 
 
 def _is_attention_spec(spec_type: type[KVCacheSpec]) -> bool:
