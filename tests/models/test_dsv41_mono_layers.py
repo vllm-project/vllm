@@ -25,6 +25,7 @@ Every layer takes the whole-layer path (K1 + K2); the five hold each variant:
 - 4: ratio-1 index source over 3's candidates and KV
 """
 
+import os
 import zlib
 from functools import partial
 
@@ -255,6 +256,9 @@ class MonoProbe:
         return {
             "layers": layers,
             "epoch": -1 if runner is None else int(runner.epoch[0]),
+            "aiter": all(
+                m.attn._use_aiter_sparse_mla for m in self._decoder_layers().values()
+            ),
         }
 
 
@@ -328,11 +332,15 @@ def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp, r
     _compare(vllm_runner, monkeypatch, tmp_path, tp, rows)
 
 
-def test_mono_decode_matches_the_model_nvfp4(vllm_runner, monkeypatch, tmp_path):
+@pytest.mark.parametrize(("tp", "aiter_sparse"), [(2, False), (2, True), (8, True)])
+def test_mono_decode_matches_the_model_nvfp4(
+    vllm_runner, monkeypatch, tmp_path, tp, aiter_sparse
+):
     """V4.1's NVFP4 compressed cache beside its MXFP8 window cache (CDNA4)."""
     if _arch() != "cdna4":
         pytest.skip("the NVFP4 compressed cache is CDNA4's")
-    _compare(vllm_runner, monkeypatch, tmp_path, 2, 8, "nvfp4_ds_mla")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA", str(int(aiter_sparse)))
+    _compare(vllm_runner, monkeypatch, tmp_path, tp, 8, "nvfp4_ds_mla")
 
 
 def _compare(vllm_runner, monkeypatch, tmp_path, tp, rows, kv_cache_dtype="auto"):
@@ -363,6 +371,14 @@ def _compare(vllm_runner, monkeypatch, tmp_path, tp, rows, kv_cache_dtype="auto"
     )
     on, probe_on = decode(True, prompts, f"{tmp_path}/on")
     off, probe_off = decode(False, prompts, f"{tmp_path}/off")
+    if kv_cache_dtype == "nvfp4_ds_mla":
+        try:
+            from aiter.ops.triton.attention.sparse_mla import DSV4_RECORD_BYTES
+        except ImportError:
+            DSV4_RECORD_BYTES = ()
+        aiter = os.environ.get("VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA") == "1"
+        aiter = aiter and {528, 288}.issubset(DSV4_RECORD_BYTES)
+        assert all(p["aiter"] == aiter for p in probe_on + probe_off)
 
     # both layer kinds took the mono path on every rank, at every decode step,
     # and on gfx942 from the weight copies made at load

@@ -331,13 +331,23 @@ def test_aiter_sparse_mla_stays_off_with_kv_connector(monkeypatch, model) -> Non
     assert not rocm._aiter_sparse_mla_enabled(has_kv_transfer=True)
 
 
-def test_aiter_sparse_mla_stays_off_with_nvfp4_cache(monkeypatch) -> None:
+def test_aiter_nvfp4_follows_installed_reader(monkeypatch) -> None:
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.models.deepseek_v41.amd import rocm
 
-    monkeypatch.setattr(rocm_aiter_ops, "is_triton_sparse_mla_enabled", lambda: True)
-    assert rocm._aiter_sparse_mla_enabled(False, "fp8_ds_mla")
-    assert not rocm._aiter_sparse_mla_enabled(False, "nvfp4_ds_mla")
+    try:
+        from aiter.ops.triton.attention.sparse_mla import DSV4_RECORD_BYTES
+    except ImportError:
+        DSV4_RECORD_BYTES = ()
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA", "1")
+    rocm_aiter_ops.refresh_env_variables()
+    try:
+        supported = rocm._ON_GFX950 and {528, 288}.issubset(DSV4_RECORD_BYTES)
+        assert rocm._aiter_sparse_mla_enabled(False, "nvfp4_ds_mla") == supported
+    finally:
+        monkeypatch.undo()
+        rocm_aiter_ops.refresh_env_variables()
 
 
 @pytest.mark.parametrize(

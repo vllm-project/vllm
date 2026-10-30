@@ -53,6 +53,7 @@ from vllm.v1.attention.backends.mla.sparse_swa import (
 )
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     _V41_MXFP8_BYTES_PER_TOKEN,
+    _V41_NVFP4_BYTES_PER_TOKEN,
     build_prefill_topk_ragged_indices,
     build_ragged_indices_from_dense,
     rocm_inv_rope_einsum,
@@ -100,23 +101,27 @@ def _aiter_sparse_mla_enabled(
             "connector; DeepSeek V4 keeps the Triton sparse attention."
         )
         return False
-    # NVFP4 serving with aiter remains unqualified.
-    if kv_cache_dtype == "nvfp4_ds_mla":
+    if kv_cache_dtype == "nvfp4_ds_mla" and not (
+        _ON_GFX950
+        and _aiter_reads_v41_record(_V41_MXFP8_BYTES_PER_TOKEN)
+        and _aiter_reads_v41_record(_V41_NVFP4_BYTES_PER_TOKEN)
+    ):
         logger.warning_once(
             "VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA is ignored with the "
-            "nvfp4_ds_mla KV cache; DeepSeek V4 keeps the Triton sparse attention."
+            "nvfp4_ds_mla KV cache without both V4.1 aiter readers; "
+            "keeping Triton sparse attention."
         )
         return False
     return True
 
 
 @functools.cache
-def _aiter_reads_v41_mxfp8() -> bool:
+def _aiter_reads_v41_record(size: int) -> bool:
     try:
         from aiter.ops.triton.attention.sparse_mla import DSV4_RECORD_BYTES
     except ImportError:
         return False
-    return _V41_MXFP8_BYTES_PER_TOKEN in DSV4_RECORD_BYTES
+    return size in DSV4_RECORD_BYTES
 
 
 def _rocm_v41_mxfp8_kv_record(vllm_config: VllmConfig) -> bool:
@@ -125,7 +130,7 @@ def _rocm_v41_mxfp8_kv_record(vllm_config: VllmConfig) -> bool:
             vllm_config.kv_transfer_config is not None,
             vllm_config.cache_config.cache_dtype,
         )
-        or _aiter_reads_v41_mxfp8()
+        or _aiter_reads_v41_record(_V41_MXFP8_BYTES_PER_TOKEN)
     )
 
 
