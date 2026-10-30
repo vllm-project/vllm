@@ -30,9 +30,9 @@ use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::Request;
 pub use config::{
-    AccessLogConfig, ApiServerOptions, Config, CoordinatorMode, CorsConfig,
-    DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL, DEFAULT_REQUEST_BODY_LIMIT_BYTES,
-    HttpListenerMode, LoraModulePath, OutputLogConfig, OutputLogging, TlsConfig,
+    AccessLogConfig, ApiServerOptions, CoordinatorMode, CorsConfig, DEFAULT_KEEP_ALIVE_TIMEOUT,
+    DEFAULT_LOG_STATS_INTERVAL, DEFAULT_REQUEST_BODY_LIMIT_BYTES, EngineCoreConfig,
+    HttpListenerMode, LoraModulePath, OutputLogConfig, OutputLogging, ServerConfig, TlsConfig,
 };
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
@@ -80,7 +80,10 @@ fn effective_served_model_names(model: &str, served_model_name: &[String]) -> Ve
 
 /// Build the shared application state for one configured model and one engine
 /// client, including any static LoRA adapters from `--lora-modules`.
-async fn build_state(config: &Config) -> Result<Arc<AppState>> {
+async fn build_state(
+    config: &ServerConfig,
+    engine_core: &EngineCoreConfig,
+) -> Result<Arc<AppState>> {
     // Fix the histogram buckets before the engine connection records metrics.
     METRICS.set_custom_histogram_buckets(config.custom_histogram_buckets.clone());
 
@@ -116,29 +119,29 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     let text_backend = loaded.text_backend;
     let chat_backend = loaded.chat_backend;
 
-    let coordinator_mode = config.effective_coordinator_mode(text_backend.is_moe());
+    let coordinator_mode = engine_core.effective_coordinator_mode(text_backend.is_moe());
     info!(
-        engine_count = config.engine_count(),
+        engine_count = engine_core.engine_count(),
         model_is_moe = text_backend.is_moe(),
         ?coordinator_mode,
         "resolved coordinator mode"
     );
 
     let client = EngineCoreClient::connect(EngineCoreClientConfig {
-        transport_mode: config.transport_mode.clone(),
+        transport_mode: engine_core.transport_mode.clone(),
         coordinator_mode,
         model_name: metrics_model_name,
         client_index: 0,
-        engine_stats_enabled: !config.disable_log_stats,
+        engine_stats_enabled: !engine_core.disable_log_stats,
     })
     .await
     .context("failed to connect to engine core")?;
-    let server_info = ServerInfoSnapshot::new(config, &client);
+    let server_info = ServerInfoSnapshot::new(config, engine_core, &client);
 
     let llm = EngineCoreLlm::new(client)
-        .with_log_stats(config.log_stats_interval.filter(|_| !config.disable_log_stats))
-        .with_request_id_randomization(!config.disable_request_id_randomization)
-        .with_stream_interval(config.stream_interval);
+        .with_log_stats(engine_core.log_stats_interval.filter(|_| !engine_core.disable_log_stats))
+        .with_request_id_randomization(!engine_core.disable_request_id_randomization)
+        .with_stream_interval(engine_core.stream_interval);
     let text = TextLlm::new(llm, text_backend)
         .with_max_logprobs(config.max_logprobs)
         .with_structured_outputs_backend(config.structured_outputs_backend);
@@ -164,12 +167,12 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
             .with_api_keys(config.api_keys.clone())
             .with_cors(config.cors.clone())
             .with_access_log(config.access_log.clone())
-            .with_profiler(config.profiler.clone()),
+            .with_profiler(engine_core.profiler.clone()),
     );
 
     // Load operator-configured static LoRA adapters before serving, failing
     // startup on any error like Python's `init_static_loras` does.
-    load_static_loras(&state, &config.lora_modules).await?;
+    load_static_loras(&state, &engine_core.lora_modules).await?;
 
     Ok(state)
 }
@@ -192,28 +195,63 @@ async fn load_static_loras(state: &AppState, modules: &[LoraModulePath]) -> Resu
     Ok(())
 }
 
-/// Run the OpenAI-compatible HTTP server until the supplied shutdown token is
-/// cancelled.
+/// Extra routes merged into the finalized vLLM router.
+type RouterExtension = Box<dyn FnOnce(Router) -> Router + Send>;
+
+/// Where the server's [`Llm`](vllm_llm::Llm) comes from.
+pub enum LlmSource {
+    /// The server connects to engine-core and serves it through an
+    /// [`EngineCoreLlm`].
+    EngineCore(EngineCoreConfig),
+}
+
+/// The OpenAI-compatible HTTP server, with an optional gRPC server.
 ///
 /// The server owns one `vllm-chat` facade, which in turn owns the lower
 /// `vllm-text` and `vllm-llm` layers, and shuts them down before returning.
-pub async fn serve(config: Config, shutdown: CancellationToken) -> Result<()> {
-    serve_with_router_extension(config, shutdown, |router| router).await
+pub struct Server {
+    config: ServerConfig,
+    llm: LlmSource,
+    extend_router: RouterExtension,
 }
 
-/// Run the OpenAI-compatible HTTP server with an opt-in router extension.
-///
-/// The extension receives the finalized vLLM router and can merge additional
-/// routes before the server starts accepting requests.
-pub async fn serve_with_router_extension<F>(
-    config: Config,
+impl Server {
+    /// Serve the `Llm` that `llm` describes, configured by `config`.
+    pub fn new(config: ServerConfig, llm: LlmSource) -> Self {
+        Self {
+            config,
+            llm,
+            extend_router: Box::new(|router| router),
+        }
+    }
+
+    /// Add an opt-in router extension.
+    ///
+    /// The extension receives the finalized vLLM router and can merge additional
+    /// routes before the server starts accepting requests.
+    pub fn router_extension(
+        mut self,
+        extend_router: impl FnOnce(Router) -> Router + Send + 'static,
+    ) -> Self {
+        self.extend_router = Box::new(extend_router);
+        self
+    }
+
+    /// Run the server until the supplied shutdown token is cancelled.
+    pub async fn serve(self, shutdown: CancellationToken) -> Result<()> {
+        serve(self.config, self.llm, shutdown, self.extend_router).await
+    }
+}
+
+async fn serve(
+    config: ServerConfig,
+    llm: LlmSource,
     shutdown: CancellationToken,
-    extend_router: F,
-) -> Result<()>
-where
-    F: FnOnce(Router) -> Router,
-{
+    extend_router: RouterExtension,
+) -> Result<()> {
+    let LlmSource::EngineCore(engine_core) = llm;
     config.validate().context("invalid OpenAI frontend configuration")?;
+    (engine_core.validate(&config)).context("invalid engine-core configuration")?;
 
     // Build the TLS server config once, up front, so a bad cert/key fails fast
     // before the (potentially long) engine handshake.
@@ -227,7 +265,7 @@ where
     // Also check shutdown during the (potentially long) startup handshake and
     // static LoRA loading.
     let state = tokio::select! {
-        result = build_state(&config) => result?,
+        result = build_state(&config, &engine_core) => result?,
         _ = shutdown.cancelled() => return Ok(()),
     };
     let model = state.primary_model_name().to_owned();
@@ -264,7 +302,7 @@ where
         health_reporter.set_serving::<grpc::ControlGrpcService>().await;
         let control_service = grpc::ControlGrpcService::new(
             grpc::ControlServiceImpl::new(state.clone())
-                .with_engine_shutdown(config.manages_engine.then(|| shutdown.clone())),
+                .with_engine_shutdown(engine_core.manages_engine.then(|| shutdown.clone())),
         )
         .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
         let inference_service =
