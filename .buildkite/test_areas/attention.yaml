@@ -37,6 +37,7 @@ steps:
         pytest -v -s
         v1/attention
         --ignore=v1/attention/test_sparse_mla_backends.py
+        --deselect=v1/attention/test_mla_backends.py::test_triton_mla_packed_fp8_generation
       - VLLM_ROCM_USE_AITER=1 pytest -v -s v1/attention/test_sparse_mla_backends.py
 
 - label: ":nvidia: (B200) V1 Attention"
@@ -79,6 +80,21 @@ steps:
         VLLM_ROCM_USE_AITER=1 pytest -v -s
         v1/attention/test_mla_backends.py
         v1/attention/test_sparse_mla_backends.py
+        --deselect=v1/attention/test_mla_backends.py::test_triton_mla_packed_fp8_generation
+
+- label: ":nvidia: (A100) Packed FP8 Triton MLA"
+  key: packed-fp8-triton-mla-a100
+  device: a100
+  timeout_in_minutes: 35
+  source_file_dependencies:
+  - vllm/v1/attention/backends/mla/triton_mla.py
+  - vllm/v1/attention/ops/triton_fp8_ds_mla.py
+  - vllm/model_executor/layers/attention/mla_attention.py
+  - tests/kernels/attention/test_triton_decode_attention.py
+  - tests/v1/attention/test_mla_backends.py
+  commands:
+  - pytest -v -s kernels/attention/test_triton_decode_attention.py -k packed_fp8
+  - VLLM_GPU_SYNC_CHECK=error pytest -v -s v1/attention/test_mla_backends.py::test_triton_mla_packed_fp8_generation
 
 - label: ":nvidia: (DGX Spark) [Nightly] FlashInfer NVFP4 XQA"
   key: flashinfer-nvfp4-xqa-dgx-spark

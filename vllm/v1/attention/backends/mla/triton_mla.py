@@ -27,6 +27,7 @@ from vllm.v1.attention.backend import (
     max_decode_query_len,
 )
 from vllm.v1.attention.ops.triton_decode_attention import decode_attention_fwd
+from vllm.v1.attention.ops.triton_fp8_ds_mla import decode_attention_fwd_fp8_ds_mla
 from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 from vllm.v1.worker.workspace import (
     current_workspace_manager,
@@ -104,6 +105,7 @@ class TritonMLABackend(MLACommonBackend):
         "bfloat16",
         "fp8",
         "fp8_e4m3",
+        "fp8_ds_mla",
     ]
 
     @classmethod
@@ -195,12 +197,27 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 "are not implemented for "
                 "TritonMLAImpl"
             )
+        if self.kv_cache_dtype == "fp8_ds_mla":
+            if (
+                not current_platform.is_cuda()
+                or not current_platform.has_device_capability(80)
+            ):
+                raise ValueError(
+                    "Triton MLA fp8_ds_mla requires a CUDA device with SM80+."
+                )
+            if self.kv_lora_rank != 512 or self.qk_rope_head_dim != 64:
+                raise ValueError(
+                    "Triton MLA fp8_ds_mla requires latent rank 512 "
+                    "and RoPE dimension 64."
+                )
+            if get_current_vllm_config().model_config.dtype != torch.bfloat16:
+                raise ValueError("Triton MLA fp8_ds_mla requires bfloat16 model dtype.")
 
         if current_platform.is_cuda():
             cap = current_platform.get_device_capability()
             cap_str = cap.as_version_str() if cap is not None else "unknown"
             dev = current_platform.get_device_name()
-            if self.kv_cache_dtype.startswith("fp8") and not (
+            if self.kv_cache_dtype in ("fp8", "fp8_e4m3") and not (
                 current_platform.has_device_capability(89)
             ):
                 suggested = (
@@ -288,11 +305,6 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 logits_shape, dtype=torch.float32, device=q.device
             )
 
-        # Add a head dim of 1
-        kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.unsqueeze(2)
-        kv_c_cache = kv_c_and_k_pe_cache[..., : self.kv_lora_rank]
-        PAGE_SIZE = kv_c_and_k_pe_cache.size(1)
-
         block_table = attn_metadata.decode.block_table
         seq_lens = attn_metadata.decode.seq_lens
         # decode_attention_fwd has no causal flag: it launches one program per
@@ -322,6 +334,24 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             else:
                 # Non-causal draft block: every row sees the same prefix.
                 seq_lens = seq_lens.repeat_interleave(query_len)
+        if self.kv_cache_dtype == "fp8_ds_mla":
+            decode_attention_fwd_fp8_ds_mla(
+                q,
+                kv_c_and_k_pe_cache,
+                o,
+                lse,
+                block_table,
+                seq_lens,
+                attn_logits,
+                num_kv_splits,
+                self.scale,
+            )
+            return o, lse
+
+        # Add a head dim of 1
+        kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.unsqueeze(2)
+        kv_c_cache = kv_c_and_k_pe_cache[..., : self.kv_lora_rank]
+        PAGE_SIZE = kv_c_and_k_pe_cache.size(1)
 
         # Run MQA — always pass layer scales. When KV cache is
         # BF16 the kernel's `if dtype.is_fp8()` check is a no-op.
