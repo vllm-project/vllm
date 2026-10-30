@@ -891,23 +891,31 @@ class _StubLinear(torch.nn.Module):
         self.weight_block_size = None
 
 
-def _prefix_replay_attention_cls(attn):
+def _prefix_replay_attention_cls():
+    from vllm.models.deepseek_v41.attention import DeepseekV4Attention
+
     class _Backend:
         @staticmethod
         def get_name() -> str:
             return "STUB"
 
-    class Layer(attn.DeepseekV4Attention):
+    class Layer(DeepseekV4Attention):
         backend_cls = _Backend
 
         @classmethod
         def get_padded_num_q_heads(cls, num_heads: int) -> int:
             return num_heads
 
-        def forward_mqa(self, q, kv, positions, output) -> None:
+        def forward_mqa(
+            self,
+            q: torch.Tensor,
+            kv: torch.Tensor,
+            positions: torch.Tensor,
+            output: torch.Tensor,
+        ) -> None:
             return None
 
-        def _o_proj(self, attn_out, positions):
+        def _o_proj(self, attn_out: torch.Tensor, positions: torch.Tensor):
             return attn_out
 
     return Layer
@@ -966,7 +974,7 @@ def test_prefix_cache_replays_the_swa_window(
         sliding_window=window,
         compress_ratios=[0],
     )
-    layer_cls = _prefix_replay_attention_cls(attn)
+    layer_cls = _prefix_replay_attention_cls()
     with set_current_vllm_config(vllm_config):
         layer = layer_cls(vllm_config, prefix="model.layers.0.self_attn")
     spec = layer.swa_cache_layer.get_kv_cache_spec(vllm_config)
