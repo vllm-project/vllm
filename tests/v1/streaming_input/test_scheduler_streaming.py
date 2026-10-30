@@ -26,6 +26,7 @@ from vllm.v1.core.kv_cache_utils import (
     hash_block_tokens,
     init_none_hash,
 )
+from vllm.v1.core.sched.reanchor import SessionReanchor
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import FinishReason
 from vllm.v1.kv_cache_interface import (
@@ -807,7 +808,13 @@ def _unbounded_scheduler(max_model_len: int, margin: int | None = None, **kwargs
     )
     scheduler.scheduler_config.enable_unbounded_streaming_input = True
     scheduler.scheduler_config.unbounded_streaming_input_margin_tokens = margin
-    scheduler._init_reanchor()
+    scheduler.session_reanchor = SessionReanchor(
+        scheduler.scheduler_config,
+        scheduler.kv_cache_manager,
+        scheduler.encoder_cache_manager,
+        max_model_len,
+        scheduler.block_size,
+    )
     return scheduler
 
 
@@ -815,20 +822,23 @@ def _unbounded_scheduler(max_model_len: int, margin: int | None = None, **kwargs
     "max_model_len, margin, trigger",
     [
         (256, None, 160),  # half of 256 - 64
-        (96, None, 80),  # smallest legal without a margin: 2 blocks over the window
+        (96, None, 80),  # 2 blocks over the window
+        (95, None, 80),  # smallest legal without a margin
         (256, 24, 232),
         (256, 176, 80),  # one block between the window and the trigger
     ],
 )
 def test_unbounded_trigger(max_model_len, margin, trigger):
-    assert _unbounded_scheduler(max_model_len, margin).reanchor_trigger == trigger
+    scheduler = _unbounded_scheduler(max_model_len, margin)
+    assert scheduler.session_reanchor.trigger == trigger
 
 
 @pytest.mark.parametrize(
-    "max_model_len, margin", [(64, None), (32, None), (94, None), (256, 177)]
+    "max_model_len, margin, minimum",
+    [(64, None, 95), (32, None, 95), (94, None, 95), (256, 177, 257)],
 )
-def test_unbounded_rejects_max_model_len_too_small(max_model_len, margin):
-    with pytest.raises(ValueError, match="must be at least the sliding window"):
+def test_unbounded_rejects_max_model_len_too_small(max_model_len, margin, minimum):
+    with pytest.raises(ValueError, match=f"max_model_len >= {minimum} "):
         _unbounded_scheduler(max_model_len, margin)
 
 
@@ -836,8 +846,9 @@ def test_unbounded_rejects_max_model_len_too_small(max_model_len, margin):
 @pytest.mark.parametrize(
     "chunk_tokens, max_tokens",
     # (40, 1) computes more than one block per step: the blocks below the window
-    # are only freed when the next step allocates.
-    [(1, 1), (40, 1), (100, 8), (127, 2)],
+    # are only freed when the next step allocates. 432 is the largest legal chunk:
+    # max_model_len - window - 1 block.
+    [(1, 1), (40, 1), (100, 8), (127, 2), (432, 1)],
 )
 def test_unbounded_session_stays_under_max_model_len(
     chunk_tokens, max_tokens, async_scheduling
@@ -864,8 +875,8 @@ def test_unbounded_session_stays_under_max_model_len(
 
 
 def test_unbounded_shift_keeps_the_window_of_a_step_in_flight():
-    """A stop can leave a step in flight, which still reads the blocks of its own
-    window. The shift is computed from that step's frontier."""
+    """A stop can leave a step in flight. It runs at the frontier, so it reads what
+    the next step reads and the shift leaves its window in place."""
     scheduler = _unbounded_scheduler(256, async_scheduling=True)
     session = DummyRequest("session", prompt_token_ids=[1] * 176)
     scheduler.add_request(session)
@@ -878,11 +889,59 @@ def test_unbounded_shift_keeps_the_window_of_a_step_in_flight():
     scheduler.add_request(DummyRequest("session", prompt_token_ids=[1]))
     output = scheduler.schedule()
 
-    # 175 - 64 rounded down to a block, where 176 - 64 would give 112.
-    assert output.reanchor_reqs == {"session": 96}
+    # The window of position 176 starts in the block of position 113.
+    assert output.reanchor_reqs == {"session": 112}
+    assert all(
+        not block.is_null
+        for block in scheduler.kv_cache_manager.get_blocks("session").blocks[0]
+    )
     scheduler.update_from_output(in_flight, _model_output("session", [2]))
-    assert session.num_computed_tokens == 176 - 96 + 1
+    assert session.num_computed_tokens == 176 - 112 + 1
     scheduler.update_from_output(output, _model_output("session", [2]))
+
+
+def test_unbounded_largest_chunk_fits_with_a_step_in_flight():
+    scheduler = _unbounded_scheduler(256, async_scheduling=True)
+    session = DummyRequest("session", prompt_token_ids=[1] * 96)
+    scheduler.add_request(session)
+    first = scheduler.schedule()
+    scheduler.schedule()
+    scheduler.update_from_output(first, _model_output("session", [STOP_TOKEN]))
+
+    # max_model_len - window - 1 block.
+    scheduler.add_request(DummyRequest("session", prompt_token_ids=[1] * 176))
+    output = scheduler.schedule()
+
+    assert output.reanchor_reqs == {"session": 32}
+    assert session.num_tokens == 240
+
+
+@pytest.mark.parametrize(
+    "chunk_tokens, num_tokens",
+    [
+        (20, 170),  # Fits: a plain re-prefill.
+        (120, 78),  # 270 - (269 - 64 rounded down to a block).
+    ],
+)
+def test_unbounded_chunk_on_a_preempted_session(chunk_tokens, num_tokens):
+    """A preempted session holds no keys, so nothing is rotated. If the re-prefill
+    would not fit under max_model_len, it starts past the oldest tokens."""
+    scheduler = _unbounded_scheduler(256, async_scheduling=True)
+    session = DummyRequest("session", prompt_token_ids=[1] * 150)
+    scheduler.add_request(session)
+    first = scheduler.schedule()
+    scheduler.schedule()
+    scheduler.running.remove(session)
+    scheduler._preempt_request(session, timestamp=0.0)
+    scheduler.update_from_output(first, _model_output("session", [STOP_TOKEN]))
+    assert session.num_computed_tokens == 0
+
+    scheduler.add_request(DummyRequest("session", prompt_token_ids=[1] * chunk_tokens))
+    output = scheduler.schedule()
+
+    assert output.reanchor_reqs is None
+    assert session.num_tokens == num_tokens
+    assert output.num_scheduled_tokens["session"] == num_tokens
 
 
 def _mm_feature(offset: int, identifier: str) -> MultiModalFeatureSpec:
@@ -897,6 +956,7 @@ def _mm_feature(offset: int, identifier: str) -> MultiModalFeatureSpec:
 def _with_encoder_budget(scheduler):
     scheduler.max_num_encoder_input_tokens = 100
     scheduler.encoder_cache_manager = EncoderCacheManager(cache_size=100)
+    scheduler.session_reanchor.encoder_cache_manager = scheduler.encoder_cache_manager
     return scheduler
 
 

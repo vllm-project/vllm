@@ -2695,7 +2695,9 @@ class EngineArgs:
                 self.long_prefill_token_threshold_adaptive
             ),
             enable_unbounded_streaming_input=self.enable_unbounded_streaming_input,
-            unbounded_streaming_input_margin_tokens=self.unbounded_streaming_input_margin_tokens,
+            unbounded_streaming_input_margin_tokens=(
+                self.unbounded_streaming_input_margin_tokens
+            ),
             scheduler_reserve_full_isl=self.scheduler_reserve_full_isl,
             watermark=self.watermark,
             prefill_schedule_interval=self.prefill_schedule_interval,

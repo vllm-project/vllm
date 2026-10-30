@@ -186,7 +186,7 @@ from vllm.v1.worker.gpu.ubatch_utils import (
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.reanchor_rotary import (
     init_reanchor_rotary_specs,
-    rerotate_cached_keys,
+    rerotate_shifted_sessions,
 )
 from vllm.v1.worker.utils import (
     KVBlockZeroer,
@@ -1307,24 +1307,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.sampler is not None:
                 self.sampler.apply_staged_writes()
 
-    def _reanchor_requests(self, reanchor_reqs: dict[str, int]) -> None:
-        """Re-rotate the cached keys of requests whose positions the scheduler
-        shifted down (--enable-unbounded-streaming-input)."""
-        num_blocks = self.block_tables.num_blocks.np
-        for req_id, d in reanchor_reqs.items():
-            req_index = self.req_states.req_id_to_index[req_id]
-            group_block_ids = [
-                table.gpu[req_index, : num_blocks[gid, req_index]].long()
-                for gid, table in enumerate(self.block_tables.block_tables)
-            ]
-            rerotate_cached_keys(
-                self.compilation_config.static_forward_context,
-                self.kv_cache_config.kv_cache_groups,
-                group_block_ids,
-                d,
-                self.reanchor_rotary_specs,
-            )
-
     def update_requests(self, scheduler_output: SchedulerOutput) -> None:
         # Add new blocks and update num_computed_tokens for the existing requests.
         reqs = scheduler_output.scheduled_cached_reqs
@@ -1837,8 +1819,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.encoder_cache.update_encoder_inputs(req_id, updates)
             self.block_tables.apply_staged_writes()
             if scheduler_output.reanchor_reqs:
-                # After the block table writes, before the forward.
-                self._reanchor_requests(scheduler_output.reanchor_reqs)
+                # Before this step's forward writes new keys.
+                rerotate_shifted_sessions(
+                    scheduler_output,
+                    self.compilation_config.static_forward_context,
+                    self.kv_cache_config.kv_cache_groups,
+                    self.reanchor_rotary_specs,
+                    self.device,
+                )
             if self.aux_output_connector is not None:
                 # Register this step before the GPU forward.
                 self.aux_output_connector.begin_step(

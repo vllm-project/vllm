@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """--enable-unbounded-streaming-input on a generic sliding-window model.
 
-One streaming-input session runs twice on a small Mistral-architecture model
-(dummy weights, float32): with a small max_model_len and the flag on, then with
-a max_model_len that needs no shift. The greedy outputs must match.
+One streaming-input session runs twice on a tiny model with random weights: with a
+small max_model_len and the flag on, then with a max_model_len that needs no shift.
+The greedy outputs must match. Rounding from the rotation stays far below the gaps
+between logits in fp32.
 """
 
-import asyncio
 import random
 
 import pytest
@@ -24,18 +24,13 @@ from vllm.v1.engine.async_llm import AsyncLLM
 if not current_platform.is_cuda():
     pytest.skip(reason="Re-anchoring is CUDA only.", allow_module_level=True)
 
-MODEL = "mistralai/Mistral-7B-v0.1"
+MODEL = "hmellor/tiny-random-LlamaForCausalLM"
 SLIDING_WINDOW = 512
 CHUNK_TOKENS = 120
-NUM_CHUNKS = 40  # ~5000 session tokens: ~9 shifts at max_model_len 1536
+NUM_CHUNKS = 40  # 8 to 11 shifts at max_model_len 1536
 
 HF_OVERRIDES = {
-    "num_hidden_layers": 2,
-    "hidden_size": 1024,
-    "intermediate_size": 2048,
-    "num_attention_heads": 8,
-    "num_key_value_heads": 2,
-    "head_dim": 128,
+    "layer_types": ["sliding_attention"] * 2,
     "sliding_window": SLIDING_WINDOW,
 }
 
@@ -43,7 +38,6 @@ HF_OVERRIDES = {
 async def _run_session(gen_tokens: int, **engine_kwargs) -> list[int]:
     engine_args = AsyncEngineArgs(
         model=MODEL,
-        load_format="dummy",
         hf_overrides=HF_OVERRIDES,
         dtype="float32",
         seed=0,
@@ -78,7 +72,6 @@ async def _run_session(gen_tokens: int, **engine_kwargs) -> list[int]:
                 tokens.extend(completion.token_ids)
     finally:
         engine.shutdown()
-        await asyncio.sleep(0.1)
     return tokens
 
 
@@ -92,6 +85,7 @@ async def test_reanchoring_matches_reference(
     monkeypatch, use_v2_model_runner, gen_tokens
 ):
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(use_v2_model_runner)))
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
     envs.disable_envs_cache()
 
     reanchored = await _run_session(

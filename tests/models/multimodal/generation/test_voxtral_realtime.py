@@ -12,6 +12,7 @@ from mistral_common.tokens.tokenizers.audio import Audio
 from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
 from mistral_common.tokens.tokenizers.tekken import SpecialTokenPolicy
 
+import vllm.envs as envs
 from vllm import LLM, SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.config import CUDAGraphMode
@@ -263,15 +264,23 @@ async def _stream_transcribe(engine_args, tokenizer, audio_asset) -> list[int]:
         llm.shutdown()
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Re-anchoring is CUDA only.")
 @pytest.mark.asyncio
-async def test_voxtral_realtime_reanchor_parity(audio_assets, tokenizer):
+async def test_voxtral_realtime_reanchor_parity(monkeypatch, audio_assets, tokenizer):
     """With --enable-unbounded-streaming-input and a max_model_len shorter than the
     session, the output matches a run without re-anchoring."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    envs.disable_envs_cache()
     audio_asset = audio_assets[1]  # winning_call (longer clip)
 
     # Reference: no re-anchoring, max_model_len large enough for the clip.
     ref_args = AsyncEngineArgs(
-        **{**ENGINE_CONFIG, "max_model_len": 2048, "hf_overrides": _REANCHOR_WINDOW}
+        **{
+            **ENGINE_CONFIG,
+            "max_model_len": 2048,
+            "enable_prefix_caching": False,
+            "hf_overrides": _REANCHOR_WINDOW,
+        }
     )
     ref_tokens = await _stream_transcribe(ref_args, tokenizer, audio_asset)
 

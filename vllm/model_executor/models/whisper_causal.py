@@ -474,8 +474,6 @@ class WhisperCausalAttention(nn.Module):
         assert block_pool_size > 1, (
             f"Causal attention only supports block_pool_size>1, not {block_pool_size}."
         )
-        # Encoder positions advance block_pool_size per decoder token.
-        self.reanchor_position_scale = block_pool_size
         self.attn = WhisperCausalAttentionWithBlockPooling(
             self.num_heads,
             self.head_dim,

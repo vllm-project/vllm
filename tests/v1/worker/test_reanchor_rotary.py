@@ -6,6 +6,9 @@ A key rotated at position ``p`` and then by ``R(-d)`` equals the key rotated at
 ``p - d``. Query and keys shift together, so attention scores do not change.
 """
 
+from fractions import Fraction
+from types import SimpleNamespace
+
 import pytest
 import torch
 from torch import nn
@@ -27,6 +30,7 @@ from vllm.v1.worker.reanchor_rotary import (
     collect_rotary_specs,
     init_reanchor_rotary_specs,
     rerotate_cached_keys,
+    rerotate_shifted_sessions,
 )
 
 pytestmark = pytest.mark.cpu_test
@@ -55,23 +59,32 @@ _STYLES = [
     pytest.param(128, 128, 1e4, True, id="mistral-neox-1e4"),
     pytest.param(96, 32, 1e4, True, id="partial-rotary"),
 ]
-_POS_SHIFTS = [
-    pytest.param(5000, 4096, id="p5000-d4096"),
-    pytest.param(9000, 7000, id="p9000-d7000"),
-    pytest.param(120000, 100000, id="p120000-d100000"),
-]
 
 
 @pytest.mark.parametrize("head_size, rotary_dim, base, is_neox", _STYLES)
-@pytest.mark.parametrize("p, d", _POS_SHIFTS)
-def test_reanchor_identity(head_size, rotary_dim, base, is_neox, p, d):
+def test_reanchor_identity(head_size, rotary_dim, base, is_neox):
     """R(-d) . R(p) . k == R(p-d) . k, pass-through dims untouched."""
     torch.manual_seed(0)
+    p, d = 120000, 100000
     spec = _spec(rotary_dim, base, is_neox)
     k = torch.randn(4, head_size, dtype=torch.float32)
     reanchored = apply_inverse_rotary(_forward_rotary(k, p, spec), d, spec)
     target = _forward_rotary(k, p - d, spec)
-    assert (reanchored - target).abs().max().item() < 1e-3
+    assert (reanchored - target).abs().max().item() < 1e-5
+
+
+def test_reanchor_bf16_keeps_the_scale_of_each_frequency():
+    """Rounding to bf16 is per element. Cos and sin rounded to bf16 would scale
+    all the keys of a frequency by up to 0.4 %."""
+    torch.manual_seed(0)
+    spec = _spec(128, 1e6, True)
+    k = torch.randn(4096, 128, dtype=torch.float64).to(torch.bfloat16)
+    rotated = apply_inverse_rotary(k, 2048, spec).double()
+    k = k.double()
+    x1, x2 = k[..., :64], k[..., 64:]
+    y1, y2 = rotated[..., :64], rotated[..., 64:]
+    scale = ((y1**2 + y2**2).sum(0) / (x1**2 + x2**2).sum(0)).sqrt()
+    assert (scale - 1).abs().max().item() < 2e-4
 
 
 def _attention(prefix: str, head_size: int = 128, **kwargs) -> Attention:
@@ -120,21 +133,58 @@ def test_rerotate_cached_keys_uses_each_layer_spec(default_vllm_config):
         expected = apply_inverse_rotary(
             old[row, ..., :head_size], spec.position_scale * d, spec
         )
-        assert torch.allclose(kv[row, ..., :head_size], expected, atol=1e-5)
+        assert torch.equal(kv[row, ..., :head_size], expected)
         assert torch.equal(kv[..., head_size:], old[..., head_size:])
         others = [b for b in range(kv.shape[0]) if b not in row.tolist()]
         assert torch.equal(kv[others], old[others])
 
 
+def test_rerotate_shifted_sessions_skips_null_blocks_and_other_sessions(
+    default_vllm_config, monkeypatch
+):
+    monkeypatch.setattr("vllm.utils.torch_utils.PIN_MEMORY", False)
+    torch.manual_seed(0)
+    attn = _attention("dec")
+    _bind_kv_cache(attn)
+    spec = _spec(128, 1e4, True)
+    window = SlidingWindowSpec(
+        sliding_window=64,
+        block_size=4,
+        num_kv_heads=2,
+        head_size=128,
+        dtype=torch.float32,
+    )
+    before = attn.kv_cache.clone()
+    scheduler_output = SimpleNamespace(
+        reanchor_reqs={"shifted": 2048},
+        scheduled_new_reqs=[
+            SimpleNamespace(req_id="other", block_ids=([1],)),
+            SimpleNamespace(req_id="shifted", block_ids=([0, 0, 3, 5],)),
+        ],
+    )
+
+    rerotate_shifted_sessions(
+        scheduler_output,
+        default_vllm_config.compilation_config.static_forward_context,
+        [KVCacheGroupSpec(["dec"], window)],
+        {"dec": spec},
+        torch.device("cpu"),
+    )
+
+    row = torch.tensor([3, 5])
+    expected = apply_inverse_rotary(before[row, ..., :128], 2048, spec)
+    assert torch.equal(attn.kv_cache[row, ..., :128], expected)
+    others = [0, 1, 2, 4, 6, 7]
+    assert torch.equal(attn.kv_cache[others], before[others])
+
+
 class _SelfAttention(nn.Module):
     """A vLLM attention layer with its RoPE on the parent module."""
 
-    def __init__(self, prefix: str, rotary_emb: nn.Module, scale: int | None = None):
+    def __init__(self, prefix: str, rotary_emb: nn.Module):
         super().__init__()
         self.rotary_emb = rotary_emb
         self.attn = _attention(f"{prefix}.attn", head_size=rotary_emb.head_size)
-        if scale is not None:
-            self.reanchor_position_scale = scale
 
 
 def _model(*self_attns: _SelfAttention) -> nn.Module:
@@ -180,7 +230,7 @@ def test_collect_rotary_specs_matches_forward_rope(rope_parameters):
         dtype=torch.float32,
     )
     model = _model(_SelfAttention("layers.0", rope))
-    spec = collect_rotary_specs(model, ["layers.0.attn"])["layers.0.attn"]
+    spec = collect_rotary_specs(model, {"layers.0.attn": 1})["layers.0.attn"]
 
     assert (spec.rotary_dim, spec.is_neox, spec.position_scale) == (128, True, 1)
     mscale = getattr(rope, "mscale", 1.0)
@@ -195,18 +245,6 @@ def test_collect_rotary_specs_matches_forward_rope(rope_parameters):
 
 
 @pytest.mark.usefixtures("default_vllm_config")
-def test_collect_rotary_specs_position_scale():
-    rope = get_rope(64, max_position=4096, is_neox_style=False, dtype=torch.float32)
-    model = _model(
-        _SelfAttention("layers.0", rope),
-        _SelfAttention("encoder.0", rope, scale=4),
-    )
-    specs = collect_rotary_specs(model, ["layers.0.attn", "encoder.0.attn"])
-    assert specs["layers.0.attn"].position_scale == 1
-    assert specs["encoder.0.attn"].position_scale == 4
-
-
-@pytest.mark.usefixtures("default_vllm_config")
 def test_collect_rotary_specs_rejects_unsupported_rope():
     rope = get_rope(
         128,
@@ -216,23 +254,23 @@ def test_collect_rotary_specs_rejects_unsupported_rope():
     )
     model = _model(_SelfAttention("layers.0", rope))
     with pytest.raises(ValueError, match="does not support"):
-        collect_rotary_specs(model, ["layers.0.attn"])
+        collect_rotary_specs(model, {"layers.0.attn": 1})
 
 
 @pytest.mark.usefixtures("default_vllm_config")
 def test_collect_rotary_specs_rejects_layer_without_rope():
     model = _model(_SelfAttention("layers.0", get_rope(128, max_position=4096)))
     with pytest.raises(ValueError, match="no rotary_emb"):
-        collect_rotary_specs(model, ["layers.0.attn", "mamba.0"])
+        collect_rotary_specs(model, {"layers.0.attn": 1, "mamba.0": 1})
 
 
 @pytest.mark.usefixtures("default_vllm_config")
-def test_collect_rotary_specs_rejects_rope_on_part_of_the_key():
+def test_collect_rotary_specs_rejects_rope_of_another_head_size():
     self_attn = nn.Module()
     self_attn.rotary_emb = get_rope(64, max_position=4096)
     self_attn.attn = _attention("layers.0.attn", head_size=128)
-    with pytest.raises(ValueError, match="part of its keys"):
-        collect_rotary_specs(self_attn, ["layers.0.attn"])
+    with pytest.raises(ValueError, match="head size 128, its RoPE 64"):
+        collect_rotary_specs(self_attn, {"layers.0.attn": 1})
 
 
 _SPEC_ARGS = dict(block_size=4, num_kv_heads=2, head_size=128, dtype=torch.float32)
@@ -255,6 +293,36 @@ def test_init_reanchor_rotary_specs_returns_each_layer(default_vllm_config):
         default_vllm_config.compilation_config.static_forward_context,
     )
     assert set(specs) == {"layers.0.attn"}
+    assert specs["layers.0.attn"].position_scale == 1
+
+
+def test_init_reanchor_rotary_specs_reads_position_scale(default_vllm_config):
+    """A block-pooled layer stores several states per token."""
+    model = _model(_SelfAttention("layers.0", get_rope(128, max_position=4096)))
+    _bind_kv_cache(model.layers[0].attn)
+    specs = init_reanchor_rotary_specs(
+        model,
+        _kv_cache_config(
+            SlidingWindowSpec(
+                sliding_window=64, tokens_per_state=Fraction(1, 4), **_SPEC_ARGS
+            )
+        ),
+        default_vllm_config.compilation_config.static_forward_context,
+    )
+    assert specs["layers.0.attn"].position_scale == 4
+
+
+def test_init_reanchor_rotary_specs_rejects_compressed_states(default_vllm_config):
+    model = _model(_SelfAttention("layers.0", get_rope(128, max_position=4096)))
+    _bind_kv_cache(model.layers[0].attn)
+    with pytest.raises(ValueError, match="tokens_per_state 2"):
+        init_reanchor_rotary_specs(
+            model,
+            _kv_cache_config(
+                SlidingWindowSpec(sliding_window=64, tokens_per_state=2, **_SPEC_ARGS)
+            ),
+            default_vllm_config.compilation_config.static_forward_context,
+        )
 
 
 @pytest.mark.parametrize(

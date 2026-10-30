@@ -212,7 +212,7 @@ from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunne
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.reanchor_rotary import (
     init_reanchor_rotary_specs,
-    rerotate_cached_keys,
+    rerotate_shifted_sessions,
 )
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
@@ -1149,26 +1149,6 @@ class GPUModelRunner(
         """Zero the KV cache memory for the given block IDs."""
         if hasattr(self, "_kv_block_zeroer"):
             self._kv_block_zeroer.zero_block_ids(block_ids)
-
-    def _reanchor_requests(self, reanchor_reqs: dict[str, int]) -> None:
-        """Re-rotate the cached keys of requests whose positions the scheduler
-        shifted down (--enable-unbounded-streaming-input)."""
-        ib = self.input_batch
-        for req_id, d in reanchor_reqs.items():
-            idx = ib.req_id_to_index[req_id]
-            group_block_ids = [
-                bt.block_table.cpu[idx, : bt.num_blocks_per_row[idx]].to(
-                    self.device, torch.long
-                )
-                for bt in ib.block_table.block_tables
-            ]
-            rerotate_cached_keys(
-                self.compilation_config.static_forward_context,
-                self.kv_cache_config.kv_cache_groups,
-                group_block_ids,
-                d,
-                self.reanchor_rotary_specs,
-            )
 
     # Note: used for model runner override.
     def _sync_device(self) -> None:
@@ -3970,7 +3950,13 @@ class GPUModelRunner(
 
             # Before this step's forward writes new keys.
             if scheduler_output.reanchor_reqs:
-                self._reanchor_requests(scheduler_output.reanchor_reqs)
+                rerotate_shifted_sessions(
+                    scheduler_output,
+                    self.compilation_config.static_forward_context,
+                    self.kv_cache_config.kv_cache_groups,
+                    self.reanchor_rotary_specs,
+                    self.device,
+                )
 
             if has_ec_transfer() and not get_ec_transfer().is_consumer:
                 with self.maybe_get_ec_connector_output(
