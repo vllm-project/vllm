@@ -249,6 +249,8 @@ class DeepGemmMegaMoEExperts(nn.Module):
         weight_format: Routed-expert precision, a row of the feature matrix.
         shared_experts: Shared MLP to fuse if it is unsharded and in one of
             the ``weight_format.shared`` precisions; ``None`` never fuses.
+        localize_weights: Allocate weight rows across DeepGEMM locality domains.
+            Scales retain their existing layout.
         max_num_tokens: Most tokens one rank passes to ``forward``; the
             symmetric buffer is sized for it. Defaults to
             ``max_num_batched_tokens``. A caller that hands this layer only its
@@ -275,6 +277,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
         num_logical_experts: int | None = None,
         fast_math: bool = True,
         max_num_tokens: int | None = None,
+        localize_weights: bool = False,
         prefix: str = "",
     ):
         super().__init__()
@@ -321,7 +324,23 @@ class DeepGemmMegaMoEExperts(nn.Module):
         self.num_shared_experts, self.shared_spec = self._fusable_shared_experts(
             shared_experts
         )
-        self._create_weights()
+        self.localize_weights = localize_weights
+        if localize_weights:
+            from vllm.utils.deep_gemm import _import_deep_gemm
+
+            deep_gemm = _import_deep_gemm()
+            if weight_format.uses_nvfp4_api:
+                raise ValueError("MegaMoE NVFP4 does not support localized weights.")
+            if torch.get_default_device().type != "cuda":
+                raise ValueError("Localized MegaMoE weights require CUDA allocation.")
+            if not deep_gemm.is_localization_available():
+                raise ValueError("DeepGEMM locality-domain allocation is unavailable.")
+            try:
+                self._create_weights()
+            finally:
+                deep_gemm.destroy_localizer()
+        else:
+            self._create_weights()
         for name, param in self.named_parameters(recurse=False):
             shared = name.startswith("shared_")
             loader = self.shared_weight_loader if shared else self.weight_loader
@@ -415,7 +434,8 @@ class DeepGemmMegaMoEExperts(nn.Module):
     def _create_weights(self) -> None:
         """Register the routed and fused shared-expert parameters.
 
-        Routed parameters are indexed by local expert on dim 0, which EPLB moves.
+        Localized weights put the domain before the local expert dimension.
+        EPLB receives a contiguous expert-major view of each domain.
         """
         e, h, i = self.num_local_experts, self.hidden_size, self.intermediate_size
         fmt = self.weight_format
@@ -442,10 +462,20 @@ class DeepGemmMegaMoEExperts(nn.Module):
             self.register_parameter(name, nn.Parameter(data, requires_grad=False))
 
         *outer, n, k = shape
-        register(
-            f"{name}_weight",
-            torch.zeros(*outer, n, k // spec.values_per_element, dtype=spec.dtype),
-        )
+        packed_k = k // spec.values_per_element
+        if self.localize_weights:
+            from vllm.utils.deep_gemm import _import_deep_gemm
+
+            dg = _import_deep_gemm()
+            domains = dg.get_num_locality_domains()
+            assert n % domains == 0
+            weight = dg.locality_domain.empty_per_domain(
+                (*outer, n // domains, packed_k), spec.dtype
+            )
+            weight.zero_()
+        else:
+            weight = torch.zeros(*outer, n, packed_k, dtype=spec.dtype)
+        register(f"{name}_weight", weight)
         if spec.scale_group_k is not None:
             # Block scales, MN-major, four per int32 along K.
             scale_k = k // (4 * spec.scale_group_k)
@@ -496,9 +526,12 @@ class DeepGemmMegaMoEExperts(nn.Module):
             if is_global_scale:
                 param.data[local_expert_id].copy_(loaded_weight.reshape(()))
             else:
-                self._load_weight(
-                    param.data[local_expert_id], loaded_weight, shard_id, is_scale
+                dst = (
+                    param.data[:, local_expert_id]
+                    if self.localize_weights and not is_scale
+                    else param.data[local_expert_id]
                 )
+                self._load_weight(dst, loaded_weight, shard_id, is_scale)
         return True if return_success else None
 
     def _record_global_scale(
@@ -561,6 +594,10 @@ class DeepGemmMegaMoEExperts(nn.Module):
         """
         if shard_id not in ("w1", "w2", "w3"):
             raise ValueError(f"Unsupported expert shard id: {shard_id}")
+        if not is_scale and dst.ndim == 3:
+            for domain, shard in zip(dst.unbind(0), src.chunk(dst.shape[0], 0)):
+                self._load_weight(domain, shard, shard_id, is_scale=False)
+            return
         rows = dst.shape[0] // (1 if shard_id == "w2" else 2)
         if is_scale:
             src = self._pack_scale(src, rows, dst.shape[1] * 4)
@@ -703,9 +740,10 @@ class DeepGemmMegaMoEExperts(nn.Module):
             )
 
         return [
-            _to_eplb_view(name, param)
+            _to_eplb_view(name, shard)
             for name, param in self.named_parameters(recurse=False)
             if not name.startswith("shared_")
+            for shard in (param.unbind(0) if param.ndim == 4 else (param,))
         ]
 
     def update_expert_map(self) -> None:

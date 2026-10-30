@@ -10,6 +10,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from vllm.config import VllmConfig
+from vllm.config.scheduler import SchedulerConfig
 from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
     MEGA_MOE_BF16,
     MEGA_MOE_MXFP4,
@@ -1279,18 +1281,30 @@ def _calc_diff(x: torch.Tensor, y: torch.Tensor) -> float:
         for shared in (None, *(spec.dtype for spec in fmt.shared))
     ],
 )
-def test_deep_gemm_mega_moe_matches_reference(dist_init, fmt_name, shared, act_name):
+@pytest.mark.parametrize("localize_weights", [False, True])
+def test_deep_gemm_mega_moe_matches_reference(
+    dist_init, fmt_name, shared, act_name, localize_weights
+):
     """``shared`` is the fused shared-expert dtype; None runs it unfused."""
     fmt, act = MEGA_MOE_WEIGHT_FORMATS[fmt_name], ACTIVATIONS[act_name]
+    if localize_weights:
+        from vllm.utils.deep_gemm import _import_deep_gemm
+
+        if fmt.uses_nvfp4_api or not _import_deep_gemm().is_localization_available():
+            pytest.skip("This format/device does not support localized MegaMoE.")
     shared_spec = next(
         (spec for spec in fmt.shared if spec.dtype == shared), fmt.shared[0]
     )
     fuse_shared = shared is not None
     torch.manual_seed(0)
     device = torch.device("cuda")
-    vllm_config = SimpleNamespace(
-        scheduler_config=SimpleNamespace(max_num_batched_tokens=NUM_TOKENS),
-        compilation_config=SimpleNamespace(static_forward_context={}),
+    vllm_config = VllmConfig(
+        scheduler_config=SchedulerConfig(
+            max_num_batched_tokens=NUM_TOKENS,
+            max_model_len=NUM_TOKENS,
+            max_num_seqs=1,
+            is_encoder_decoder=False,
+        )
     )
 
     def randn(*shape, fan_in):
@@ -1323,6 +1337,7 @@ def test_deep_gemm_mega_moe_matches_reference(dist_init, fmt_name, shared, act_n
             intermediate_size=INTER,
             activation=act,
             weight_format=fmt,
+            localize_weights=localize_weights,
             shared_experts=shared_mlp if fuse_shared else None,
             prefix=f"model.layers.0.{fmt_name}.{act_name}.{shared}",
         )
@@ -1402,3 +1417,45 @@ def test_deep_gemm_mega_moe_matches_reference(dist_init, fmt_name, shared, act_n
     assert output.dtype == torch.bfloat16
     assert _calc_diff(output, expected) < 1e-3
     assert F.cosine_similarity(output.float(), expected, dim=-1).min() > 0.99
+
+
+@requires_sm100
+def test_deep_gemm_mega_moe_localized_reload_and_eplb_views():
+    """Reload and EPLB writes reach the sole localized copy of each weight."""
+    from vllm.utils.deep_gemm import _import_deep_gemm
+
+    dg = _import_deep_gemm()
+    if not dg.is_localization_available():
+        pytest.skip("DeepGEMM locality allocation is unavailable on this device.")
+    with torch.device("cuda"):
+        experts = DeepGemmMegaMoEExperts(
+            VllmConfig(),
+            num_experts=4,
+            num_local_experts=4,
+            experts_start_idx=0,
+            num_logical_experts=3,
+            top_k=1,
+            hidden_size=256,
+            intermediate_size=384,
+            activation=MegaMoEActivation(),
+            weight_format=MEGA_MOE_MXFP4,
+            localize_weights=True,
+        )
+    pointers = [p.data_ptr() for p in experts.parameters()]
+    for seed in (0, 1):
+        ckpt = _load_mega_moe_checkpoint_shuffled(experts, 3, seed)
+        expected = _expected_mega_moe_layout(ckpt, 4, 3)
+        for tensor, ref in zip((*experts.l1_weights, *experts.l2_weights), expected):
+            if tensor.ndim == 4:
+                assert dg.is_localized(tensor)
+                tensor = tensor.movedim(0, 1).flatten(1, 2)
+            assert torch.equal(tensor.cpu().view(ref.dtype), ref)
+        assert [p.data_ptr() for p in experts.parameters()] == pointers
+    for view in experts.get_expert_weights():
+        assert view.is_contiguous() and view.shape[0] == 4
+        view[1].copy_(view[0])
+    for tensor in (*experts.l1_weights, *experts.l2_weights):
+        if tensor.ndim == 4:
+            assert torch.equal(tensor[:, 1], tensor[:, 0])
+        else:
+            assert torch.equal(tensor[1], tensor[0])

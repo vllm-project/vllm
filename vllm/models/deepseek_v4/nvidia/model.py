@@ -389,6 +389,7 @@ class DeepseekV4MoE(nn.Module):
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
             weight_format=MEGA_MOE_MXFP4,
+            localize_weights=vllm_config.kernel_config.mega_moe_localize_weights,
             activation=MegaMoEActivation(
                 "swiglu",
                 clamp=None if self.swiglu_limit is None else float(self.swiglu_limit),

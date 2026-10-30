@@ -7,6 +7,7 @@ import pytest
 import torch
 from transformers import DeepseekV4Config
 
+from vllm.config import KernelConfig
 from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
     DeepGemmMegaMoEExperts,
     MegaMoEActivation,
@@ -68,7 +69,7 @@ def v41_moe_config(dist_init):
             ),
         ),
         quant_config=None,
-        kernel_config=SimpleNamespace(moe_backend="deep_gemm_mega_moe"),
+        kernel_config=KernelConfig(moe_backend="deep_gemm_mega_moe"),
         parallel_config=SimpleNamespace(
             enable_expert_parallel=True,
             enable_eplb=False,
@@ -363,7 +364,7 @@ def v4_dspark_config(dist_init):
     return SimpleNamespace(
         model_config=model_config,
         quant_config=None,
-        kernel_config=SimpleNamespace(
+        kernel_config=KernelConfig(
             moe_backend="deep_gemm_mega_moe",
             enable_jit_warmup=False,
         ),

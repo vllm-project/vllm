@@ -362,3 +362,24 @@ removed rank hosted the DP store, also provide a reachable surviving
 Scale-down restores service with fewer ranks; it does not restart the removed
 engines or restore their capacity. The previous `/fault_tolerance/apply`
 endpoint is no longer registered.
+
+## DeepSeek MegaMoE weight placement
+
+On GPUs supported by DeepGEMM's locality-domain allocator, DeepSeek V4 and
+V4.1 can place expert weight rows in the memory domain used by the consuming
+SMs. Enable this explicitly with:
+
+```bash
+--kernel-config '{"moe_backend":"deep_gemm_mega_moe","mega_moe_localize_weights":true}'
+```
+
+This option defaults to `false`. It applies to routed and fused shared-expert
+weights, including draft layers. It keeps the checkpoint quantization and
+scales unchanged and loads directly into one resident copy of the weights.
+The locality allocator must be available; unsupported systems fail at startup.
+CPU weight offloading, sleep mode, and meta-device loading are not supported
+with this option. Engram embedding offloading is independent of expert weight
+placement.
+
+Measure the effect on your workload before enabling it: the benefit depends
+on the GPU and batch shape.
