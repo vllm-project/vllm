@@ -1762,6 +1762,7 @@ def test_grouped_o_projection_applies_each_tokens_adapter(
     default_vllm_config, dist_init, groups, fp8
 ):
     """The fused base path must include the matching group's nonzero LoRA-B."""
+    from vllm.models.deepseek_v4.common.grouped_wo_a import DeepseekV4GroupedWoA
     from vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant import (
         fused_inv_rope_fp8_quant,
     )
@@ -1771,7 +1772,7 @@ def test_grouped_o_projection_applies_each_tokens_adapter(
     tokens, columns, outputs, rank = 17, 256, 128, 8
     config = LoRAConfig(max_loras=2, max_lora_rank=rank, lora_dtype=torch.bfloat16)
     with torch.device("cuda"), torch.inference_mode():
-        base = ColumnParallelLinear(
+        base = DeepseekV4GroupedWoA(
             columns,
             groups * outputs,
             bias=False,
@@ -1832,21 +1833,33 @@ def test_grouped_o_projection_applies_each_tokens_adapter(
         torch.testing.assert_close(actual[inactive], baseline[inactive], rtol=0, atol=0)
 
 
+def test_dsv4_rope_quant_is_off_with_lora():
+    """RopeQuant writes only FP8 attention output, which wo_a's adapter can't use."""
+    from vllm.config import VllmConfig
+    from vllm.models.deepseek_v4.nvidia.ops.o_proj import rope_quant_unsupported_reason
+
+    vllm_config = object.__new__(VllmConfig)
+    vllm_config.lora_config = LoRAConfig(max_lora_rank=8)
+    reason = rope_quant_unsupported_reason(torch.nn.Module(), vllm_config)
+    assert reason is not None and "LoRA" in reason
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA compressor projection")
 @pytest.mark.parametrize("has_gate", [False, True])
 @pytest.mark.parametrize("aux_stream", [False, True])
 def test_compressor_projection_applies_lora_with_fp32_output(
     default_vllm_config, dist_init, has_gate, aux_stream
 ):
-    """Direct FP32-output GEMM must retain adapters for both compressed KV and gate."""
+    """The FP32 compressor projection must keep adapters for compressed KV and gate."""
     from vllm.models.deepseek_v41.attention import DeepseekV4Attention
+    from vllm.models.deepseek_v41.compressor import DeepseekV4CompressorKVScoreLinear
 
     torch.manual_seed(1)
     tokens, columns, outputs, rank = 17, 256, 128, 8
     config = LoRAConfig(max_loras=2, max_lora_rank=rank, lora_dtype=torch.bfloat16)
     with torch.device("cuda"), torch.inference_mode():
         sizes = [outputs] * (2 if has_gate else 1)
-        base = MergedColumnParallelLinear(
+        base = DeepseekV4CompressorKVScoreLinear(
             columns,
             sizes,
             bias=False,
