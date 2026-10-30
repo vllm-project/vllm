@@ -206,7 +206,11 @@ class Worker(WorkerBase):
         is_driver_worker: bool = False,
     ):
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
-        if self.use_v2_model_runner and not HAS_TRITON:
+        if (
+            self.use_v2_model_runner
+            and not HAS_TRITON
+            and not current_platform.uses_standalone_cpu_model_runner()
+        ):
             raise ValueError("Model Runner V2 requires Triton.")
 
         super().__init__(
