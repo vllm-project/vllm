@@ -1,15 +1,21 @@
-# DeepSeek-V4.1 KV records on ROCm
+# DeepSeek-V4.1 Mono decode on ROCm
 
-On gfx950, `--kv-cache-dtype fp8` uses the 528-byte MXFP8 record. A single
-instance with `--monokernel` or aiter sparse MLA enabled retains the 584-byte
-V4 record for those readers. The aiter environment variable has no effect on
-the record when that backend is disabled.
+On gfx950, `--monokernel` lets DeepSeek-V4.1 use Mono decode with its
+528-byte MXFP8 KV record. Enable it with `--monokernel --kv-cache-dtype fp8`.
+The record includes all 512 dimensions and 16 scale bytes per token.
+Without `--monokernel`, vLLM uses its ordinary attention path.
 
-`--kv-cache-dtype nvfp4_ds_mla` uses a 528-byte MXFP8 sliding-window record
-and a 288-byte NVFP4 compressed record. It uses vLLM's Triton attention;
-aiter sparse MLA remains disabled for this cache type.
+With `VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA=1`, aiter uses MXFP8 only if
+its installed reader advertises the 528-byte record. Older aiter versions
+retain the 584-byte V4 record. aiter sparse MLA stays disabled for NVFP4.
 
-With a KV connector, both prefill and decode use the 528-byte window record,
-independent of `--monokernel` and the aiter sparse MLA flag. Use the same
-model and cache dtype on both peers. The current Mono reader falls back to
-FFN-only acceleration for this record; full Mono support is a follow-up.
+With a KV connector, prefill and decode use the same 528-byte window record
+regardless of their Mono/aiter flags. Use the same model and cache dtype on
+both peers. Mono can read that record without the previous FFN-only fallback.
+
+The implementation also adds Mono reads of the 288-byte NVFP4 compressed
+record with `--kv-cache-dtype nvfp4_ds_mla`. Its sliding-window cache stays
+in the 528-byte MXFP8 format. This combination passes layer numerical tests,
+but full-model serving has an unresolved timeout. It is not yet validated
+for production use. Prefix caching and mixed prefill/decode need further
+validation. NVFP4 Mono support is limited to gfx950.

@@ -34,7 +34,14 @@ from .attention.device import (
     memrealtime,
     rsrc,
 )
-from .attention.plan import HIDDEN, WINDOW, Dims, back_scratch, front_scratch
+from .attention.plan import (
+    HIDDEN,
+    V4_REC,
+    WINDOW,
+    Dims,
+    back_scratch,
+    front_scratch,
+)
 from .common.mx import clamp_fp8
 from .common.ops import butterfly, fp8_pack4, peer_bases, traced
 from .common.plan import WAVES, first_task, key_tuple
@@ -89,6 +96,8 @@ class MonoBuild:
     topk: int = TOPK
     ug_groups: int = 2
     swa_width: int = WINDOW
+    rec: int = V4_REC
+    nvfp4: bool = False
 
 
 def _moe_key(key: MonoBuild) -> MoeBuild:
@@ -113,7 +122,13 @@ def _ffn_symbol_params(key: MonoBuild) -> dict:
 
 def _front_key(key: MonoBuild):
     return mb_front.FrontBuild(
-        key.tokens, key.tp, key.ratio, key.timeline, key.swa_width
+        key.tokens,
+        key.tp,
+        key.ratio,
+        key.timeline,
+        key.swa_width,
+        key.rec,
+        key.nvfp4,
     )
 
 
@@ -128,11 +143,17 @@ def _symbol_params(key: MonoBuild) -> dict:
         out["g"] = key.ug_groups
     if key.swa_width != WINDOW:
         out["w"] = key.swa_width
+    if key.rec != V4_REC:
+        out["rec"] = key.rec
+    if key.nvfp4:
+        out["nv"] = True
     return out
 
 
 def _back_key(key: MonoBuild):
-    return mb_back.BackBuild(key.tokens, key.tp, key.ratio, key.timeline)
+    return mb_back.BackBuild(
+        key.tokens, key.tp, key.ratio, key.timeline, key.rec, key.nvfp4
+    )
 
 
 def scratch_layout(
@@ -811,6 +832,7 @@ def build_mono_k2(key: MonoBuild):
                 "tid": c["tid"],
                 "dev": True,
                 "ratio": key.ratio,
+                "nvfp4": key.nvfp4,
                 "swa_width": key.swa_width,
                 "args": {
                     "slot": slot,

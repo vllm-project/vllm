@@ -34,6 +34,13 @@ MAX_TOKENS = 48
 # KV record (V4 fp8_ds_mla): 576 B data rows (448 e4m3 | 64 bf16), then 8 B of
 # scales a token (7 UE8M0 + pad) after the block's rows
 DATA = 576
+V4_REC = DATA + 8
+# The V4.1 fp8_ds_mla record: 512 e4m3 (rope included), then that token's 16
+# UE8M0 scales (one per 32 dims)
+V41_REC = KV_DIM + KV_DIM // 32
+# The V4.1 nvfp4_ds_mla compressed record: 256 B of e2m1 pairs (even dim in the
+# low nibble), then that token's 32 e4m3 scales (one per 16 dims)
+V41_NVFP4_REC = KV_DIM // 2 + KV_DIM // 16
 
 # attention: a split is 16 keys; a token has at most TOPK + WINDOW keys
 BK = 16

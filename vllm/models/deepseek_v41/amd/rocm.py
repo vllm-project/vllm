@@ -52,6 +52,7 @@ from vllm.v1.attention.backends.mla.sparse_swa import (
     DeepseekSparseSWAMetadata,
 )
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+    _V41_MXFP8_BYTES_PER_TOKEN,
     build_prefill_topk_ragged_indices,
     build_ragged_indices_from_dense,
     rocm_inv_rope_einsum,
@@ -99,7 +100,7 @@ def _aiter_sparse_mla_enabled(
             "connector; DeepSeek V4 keeps the Triton sparse attention."
         )
         return False
-    # The aiter kernel decodes only the 584 B V4 record.
+    # NVFP4 serving with aiter remains unqualified.
     if kv_cache_dtype == "nvfp4_ds_mla":
         logger.warning_once(
             "VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA is ignored with the "
@@ -109,20 +110,22 @@ def _aiter_sparse_mla_enabled(
     return True
 
 
+@functools.cache
+def _aiter_reads_v41_mxfp8() -> bool:
+    try:
+        from aiter.ops.triton.attention.sparse_mla import DSV4_RECORD_BYTES
+    except ImportError:
+        return False
+    return _V41_MXFP8_BYTES_PER_TOKEN in DSV4_RECORD_BYTES
+
+
 def _rocm_v41_mxfp8_kv_record(vllm_config: VllmConfig) -> bool:
-    has_kv_transfer = vllm_config.kv_transfer_config is not None
-    cache_dtype = vllm_config.cache_config.cache_dtype
-    # Transfer peers need one record regardless of decode flags. Legacy Mono
-    # uses its FFN-only path when attention has the V4.1 record.
-    mono = (
-        vllm_config.kernel_config.monokernel
-        and not has_kv_transfer
-        and cache_dtype != "nvfp4_ds_mla"
-    )
-    return (
-        _ON_GFX950
-        and not mono
-        and not _aiter_sparse_mla_enabled(has_kv_transfer, cache_dtype)
+    return _ON_GFX950 and (
+        not _aiter_sparse_mla_enabled(
+            vllm_config.kv_transfer_config is not None,
+            vllm_config.cache_config.cache_dtype,
+        )
+        or _aiter_reads_v41_mxfp8()
     )
 
 

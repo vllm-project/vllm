@@ -52,7 +52,10 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-RECORD = 584  # an fp8_ds_mla KV record: 576 data bytes, 8 scale bytes
+RECORD = 584  # V4's fp8_ds_mla KV record: 576 data bytes, 8 scale bytes
+V41_RECORD = 528  # V4.1's: 512 data bytes, then the token's 16 scale bytes
+# V4.1's nvfp4_ds_mla compressed record: 256 data bytes, then 32 scale bytes
+V41_NVFP4_RECORD = 288
 SWA_WIDTH = 128  # a causal decode token's window slots
 MAX_ROWS = 48  # the kernels' step rows at most: 8 requests x (1 + 5 DSpark drafts)
 # A gfx942 workgroup has 64 KB of LDS, not 160 KB as on gfx950. Its kernels
@@ -123,12 +126,12 @@ def _mono_runner(device: torch.device, draft: "MonoDecodeLayer | None" = None):
     return _runner
 
 
-def _record_view(kv: torch.Tensor, block: int) -> torch.Tensor:
-    """A layer's fp8_ds_mla cache as [blocks, block, RECORD] bytes (a block's
-    data rows, then its scale words: the kernels index both from it)."""
+def _record_view(kv: torch.Tensor, block: int, record: int) -> torch.Tensor:
+    """A layer's fp8_ds_mla cache as [blocks, block, record] bytes (the kernels
+    index a token's data and scales from it)."""
     kv = kv if kv.dtype == torch.uint8 else kv.view(torch.uint8)
-    assert kv.stride(0) >= block * RECORD, (tuple(kv.shape), kv.stride(), block)
-    return torch.as_strided(kv, (kv.shape[0], block, RECORD), (kv.stride(0), RECORD, 1))
+    assert kv.stride(0) >= block * record, (tuple(kv.shape), kv.stride(), block)
+    return torch.as_strided(kv, (kv.shape[0], block, record), (kv.stride(0), record, 1))
 
 
 def _scale_bytes(scale: torch.Tensor) -> torch.Tensor:
@@ -456,7 +459,9 @@ class MonoDecodeLayer:
             why = f"a {type(attn.indexer).__name__}"
         elif attn.compress_ratio not in (0, 1, 2):
             why = f"compress ratio {attn.compress_ratio}"
-        elif attn.kv_mxfp8 or attn.kv_cache_dtype != "fp8_ds_mla":
+        elif attn.kv_cache_dtype not in ("fp8_ds_mla", "nvfp4_ds_mla") or (
+            attn.kv_cache_dtype == "nvfp4_ds_mla" and (gfx942 or not attn.kv_mxfp8)
+        ):
             why = f"a {attn.kv_cache_dtype} KV cache"
         elif draft and (attn.compress_ratio or attn.indexer is not None):
             why = "a draft layer with compressed keys"
@@ -711,6 +716,10 @@ class MonoDecodeLayer:
             hashes = engram_hashes[:, layer.engram.layer_hash_index]
             residual = layer.engram(residual, hashes, engram_mask)
             fold = False
+        record = V41_RECORD if attn.kv_mxfp8 else RECORD
+        comp_record = (
+            V41_NVFP4_RECORD if attn.kv_cache_dtype == "nvfp4_ds_mla" else record
+        )
         kw: dict[str, Any] = {}
         if attn.indexer is not None:
             kw["select"] = lambda normed, qr: _select(layer, positions, normed, qr)
@@ -719,7 +728,9 @@ class MonoDecodeLayer:
             kw.update(
                 topk_indices=attn.topk_indices_buffer,
                 comp_cache=_record_view(
-                    attn._compressed_kv_cache(), comp.block_size // attn.compress_ratio
+                    attn._compressed_kv_cache(),
+                    comp.block_size // attn.compress_ratio,
+                    comp_record,
                 ),
                 comp_block_table=comp.block_table,
             )
@@ -732,7 +743,7 @@ class MonoDecodeLayer:
             pre_mix,
             positions,
             swa.slot_mapping,
-            _record_view(attn.swa_cache_layer.kv_cache, swa.block_size),
+            _record_view(attn.swa_cache_layer.kv_cache, swa.block_size, record),
             swa.decode_swa_indices,
             swa.decode_swa_lens,
             swa.token_to_req_indices,

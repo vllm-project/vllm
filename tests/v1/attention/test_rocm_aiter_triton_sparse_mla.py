@@ -344,7 +344,7 @@ def test_aiter_sparse_mla_stays_off_with_nvfp4_cache(monkeypatch) -> None:
     ("cache_dtype", "mono", "aiter", "role", "record"),
     [
         ("fp8", False, False, None, 528),
-        ("fp8", True, False, None, 584),
+        ("fp8", True, False, None, 528),
         ("fp8", False, True, None, 584),
         ("fp8", True, True, None, 584),
         *[
@@ -372,6 +372,12 @@ def test_v41_record_follows_effective_backend(
 
     if not on_gfx950():
         pytest.skip("the V4.1 record is gfx950-only")
+    try:
+        from aiter.ops.triton.attention.sparse_mla import DSV4_RECORD_BYTES
+    except ImportError:
+        DSV4_RECORD_BYTES = ()
+    if cache_dtype == "fp8" and aiter and role is None and 528 in DSV4_RECORD_BYTES:
+        record = 528
     config = VllmConfig(
         cache_config=CacheConfig(cache_dtype=cache_dtype),
         kernel_config=KernelConfig(monokernel=mono),
