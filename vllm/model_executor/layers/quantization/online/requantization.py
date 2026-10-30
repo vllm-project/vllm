@@ -1,9 +1,34 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+
 import torch
 
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+
+_requantization_source: ContextVar[bool] = ContextVar(
+    "requantization_source", default=False
+)
+
+
+@contextmanager
+def requantization_source_scope() -> Iterator[None]:
+    """Mark quantization methods created in this scope as requantization sources.
+
+    Their weights are only dequantized, so oracles can skip backend selection.
+    """
+    token = _requantization_source.set(True)
+    try:
+        yield
+    finally:
+        _requantization_source.reset(token)
+
+
+def is_requantization_source() -> bool:
+    return _requantization_source.get()
 
 
 class OnlineRequantizationMixin:
