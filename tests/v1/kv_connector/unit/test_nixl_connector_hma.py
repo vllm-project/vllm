@@ -24,6 +24,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
     NixlConnectorWorker,
 )
+from vllm.v1.attention.backends.gdn_attn import GDNSpec
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
     SlidingWindowManager,
@@ -1166,24 +1167,13 @@ def _make_mock_worker_for_desc_ids(
     worker._has_mamba = has_mamba
     worker._group_spec_types = group_spec_types
     worker.block_len_per_layer = block_len_per_layer or [100]
-    worker._conv_decomp = None
     worker._is_csa_linear = False
     worker._ssm_region_indices = [0] if has_mamba else []
     worker._group_region_indices = []
     worker._ple_group_index = None
     worker._ple_region_index = None
-    if has_mamba:
-        from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (  # noqa: E501
-            MambaConvSplitInfo,
-        )
-
-        # Mamba2/GDN layout: 3 conv sub-projections -> 4 NIXL regions per layer.
-        worker._conv_decomp = MambaConvSplitInfo(
-            conv_rows=3,
-            local_proj_dims=(1, 1, 1),
-            conv_dtype_size=2,
-            ssm_sizes=(0, 0),
-        )
+    # Mamba2/GDN layout: 3 conv sub-projections + SSM -> 4 NIXL regions per layer.
+    worker._local_mamba_runs.return_value = ((0, 0, 1),) * 4
     worker._compute_desc_ids = NixlConnectorWorker._compute_desc_ids.__get__(
         worker, NixlConnectorWorker
     )
@@ -1742,190 +1732,6 @@ def test_has_mamba_init(
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    "ssm_sizes,block_len,expected_ratio",
-    [
-        # Nemotron 30B TP=1: ceil((36864 + 2097152) / 8192) = 261
-        ((36864, 2097152), 8192, 261),
-        # Nemotron 30B TP=2: ceil((18432 + 1048576) / 4096) = 261
-        ((18432, 1048576), 4096, 261),
-        # Nemotron 30B TP=4: ceil((9216 + 524288) / 4096) = 131
-        ((9216, 524288), 4096, 131),
-    ],
-)
-def test_compute_physical_blocks_per_logical(ssm_sizes, block_len, expected_ratio):
-    """Verify that compute_physical_blocks_per_logical is TP-dependent.
-
-    With dimension-sharded Mamba state, the ratio differs across TP sizes
-    (e.g. TP=1 → 261, TP=4 → 131 for Nemotron 30B). This is why
-    _physical_blocks_per_logical must be stored per-engine.
-    """
-    from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
-        compute_physical_blocks_per_logical,
-    )
-
-    assert compute_physical_blocks_per_logical(ssm_sizes, block_len) == expected_ratio
-
-
-@pytest.mark.cpu_test
-@pytest.mark.parametrize(
-    "mamba_type,local_tp,conv_dim_local,conv_rows,temporal_shape,expected_proj_dims",
-    [
-        # nvidia/Nemotron-H-8B-Base-8K (Mamba2)
-        # mamba_num_heads=128, head_dim=64, n_groups=8, ssm_state_size=128
-        pytest.param(
-            "mamba2",
-            1,
-            10240,
-            3,
-            (128, 64, 128),
-            (8192, 1024, 1024),
-            id="nemotron_h_8b_tp1",
-        ),
-        pytest.param(
-            "mamba2",
-            4,
-            2560,
-            3,
-            (32, 64, 128),
-            (2048, 256, 256),
-            id="nemotron_h_8b_tp4",
-        ),
-        # nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B (Mamba2)
-        # mamba_num_heads=64, head_dim=64, n_groups=8, ssm_state_size=128
-        pytest.param(
-            "mamba2",
-            1,
-            6144,
-            3,
-            (64, 64, 128),
-            (4096, 1024, 1024),
-            id="nemotron_nano_30b_tp1",
-        ),
-        # Qwen/Qwen3.5-0.8B (GDN, symmetric: num_v=num_k=16)
-        # key_dim=2048, value_dim=2048, conv_dim=6144
-        pytest.param(
-            "gdn_attention",
-            1,
-            6144,
-            3,
-            (16, 128, 128),
-            (2048, 2048, 2048),
-            id="qwen35_08b_tp1",
-        ),
-        pytest.param(
-            "gdn_attention",
-            4,
-            1536,
-            3,
-            (4, 128, 128),
-            (512, 512, 512),
-            id="qwen35_08b_tp4",
-        ),
-        # Qwen/Qwen3.5-4B (GDN, asymmetric: num_v=32, num_k=16, K:V=1:2)
-        # key_dim=2048, value_dim=4096, conv_dim=8192
-        pytest.param(
-            "gdn_attention",
-            1,
-            8192,
-            3,
-            (32, 128, 128),
-            (2048, 2048, 4096),
-            id="qwen35_4b_tp1",
-        ),
-        # Qwen/Qwen3.5-27B (GDN, asymmetric: num_v=48, num_k=16, K:V=1:3)
-        # key_dim=2048, value_dim=6144, conv_dim=10240
-        pytest.param(
-            "gdn_attention",
-            1,
-            10240,
-            3,
-            (48, 128, 128),
-            (2048, 2048, 6144),
-            id="qwen35_27b_tp1",
-        ),
-        pytest.param(
-            "gdn_attention",
-            8,
-            1280,
-            3,
-            (6, 128, 128),
-            (256, 256, 768),
-            id="qwen35_27b_tp8",
-        ),
-        # ai21labs/AI21-Jamba2-Mini (Mamba1)
-        # mamba d_inner = mamba_expand(2) * hidden_size(4096) = 8192
-        # mamba_d_state=16, mamba_d_conv=4 → conv_rows=3.
-        # Conv state holds only x: a single contiguous sub-projection.
-        pytest.param(
-            "mamba1",
-            1,
-            8192,
-            3,
-            (8192, 16),
-            (8192,),
-            id="jamba_mini_tp1",
-        ),
-        pytest.param(
-            "mamba1",
-            4,
-            2048,
-            3,
-            (2048, 16),
-            (2048,),
-            id="jamba_mini_tp4",
-        ),
-        pytest.param(
-            "mamba1",
-            8,
-            1024,
-            3,
-            (1024, 16),
-            (1024,),
-            id="jamba_mini_tp8",
-        ),
-    ],
-)
-def test_derive_mamba_conv_split(
-    monkeypatch,
-    mamba_type,
-    local_tp,
-    conv_dim_local,
-    conv_rows,
-    temporal_shape,
-    expected_proj_dims,
-):
-    """Parametrized test for derive_mamba_conv_split with real model configs.
-
-    Values generated by verify_conv_split.py which loads HuggingFace configs
-    and calls vLLM's derive_mamba_conv_split directly.
-    """
-    from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
-        derive_mamba_conv_split,
-    )
-    from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-    from vllm.v1.kv_cache_interface import MambaSpec
-
-    _TYPE_MAP = {
-        "mamba1": MambaAttentionBackendEnum.MAMBA1,
-        "mamba2": MambaAttentionBackendEnum.MAMBA2,
-        "gdn_attention": MambaAttentionBackendEnum.GDN_ATTN,
-    }
-    mamba_type_enum = _TYPE_MAP[mamba_type]
-
-    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "DS")
-    spec = MambaSpec(
-        block_size=64,
-        shapes=((conv_dim_local, conv_rows), temporal_shape),
-        dtypes=(torch.bfloat16, torch.bfloat16),
-        mamba_type=mamba_type_enum,
-    )
-    out = derive_mamba_conv_split(spec, local_tp=local_tp)
-    assert out.local_proj_dims == expected_proj_dims
-    assert out.conv_rows == conv_rows
-
-
-@pytest.mark.cpu_test
-@pytest.mark.parametrize(
     "mamba_enabled,swa_enabled,"
     "local_physical_per_logical,remote_physical_per_logical,"
     "logical_block_ids,expected_kernel_block_ids",
@@ -2089,7 +1895,6 @@ def _make_hybrid_mla_kv_cache_config(num_blocks: int = 4):
         KVCacheConfig,
         KVCacheGroupSpec,
         KVCacheTensor,
-        MambaSpec,
         MLAAttentionSpec,
     )
 
@@ -2098,10 +1903,10 @@ def _make_hybrid_mla_kv_cache_config(num_blocks: int = 4):
         block_size=12, num_kv_heads=1, head_size=6, dtype=torch.float16
     )
     unified_page = mla_spec.page_size_bytes
-    kda_spec = MambaSpec(
+    kda_spec = GDNSpec(
         block_size=12,
         # GDN-decomposable conv (Q|K|V = 2|2|4 cols x 3 rows) + fp32 temporal.
-        shapes=((8, 3), (1, 4, 4)),
+        shapes=((8, 3), (2, 2, 4)),
         dtypes=(torch.float16, torch.float32),
         page_size_padded=unified_page,
         mamba_type=MambaAttentionBackendEnum.GDN_ATTN,

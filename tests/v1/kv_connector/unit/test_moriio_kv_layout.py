@@ -40,10 +40,6 @@ moriio_layout = importlib.import_module(
     "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_layout"
 )
 msgpack = importlib.import_module("msgpack")
-ssm_conv_transfer_utils = importlib.import_module(
-    "vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils"
-)
-MambaConvSplitInfo = ssm_conv_transfer_utils.MambaConvSplitInfo
 
 ROLE = moriio_common.ROLE
 MoRIIOError = moriio_common.MoRIIOError
@@ -896,23 +892,14 @@ def _slot_strided(num_slots, per_slot_shape, slot_stride, dtype=torch.bfloat16):
     )
 
 
-def _gdn_split_info(conv_rows=3, key_dim=4, value_dim=8, dtype_size=2):
-    """A GDN-style conv split: sub-projections (key, key, value)."""
-    conv_dim = 2 * key_dim + value_dim
-    conv_state_bytes = conv_dim * conv_rows * dtype_size
-    ssm_state_bytes = 64  # opaque here; ssm size is taken from the tensor
-    return MambaConvSplitInfo(
-        conv_rows=conv_rows,
-        local_proj_dims=(key_dim, key_dim, value_dim),
-        conv_dtype_size=dtype_size,
-        ssm_sizes=(conv_state_bytes, ssm_state_bytes),
-    )
+# A GDN-style bf16 conv state: sub-projections (key, key, value) x 3 rows.
+CONV_ROWS = 3
+CONV_PROJ_DIMS = (4, 4, 8)
+CONV_PROJ_BYTES = tuple(dim * CONV_ROWS * 2 for dim in CONV_PROJ_DIMS)
 
 
 def test_mamba_transfer_geometry_is_slot_strided():
-    split = _gdn_split_info()
-    conv_dim = sum(split.local_proj_dims)
-    conv = _slot_strided(5, (conv_dim, split.conv_rows), slot_stride=200)
+    conv = _slot_strided(5, (sum(CONV_PROJ_DIMS), CONV_ROWS), slot_stride=200)
     ssm = _slot_strided(5, (2, 4, 4), slot_stride=64)
 
     geom = moriio_layout.get_mamba_transfer_geometry(conv, ssm)
@@ -1024,36 +1011,36 @@ def test_mamba_transfer_geometry_rejects_empty_caches():
 
 
 def test_mamba_conv_ssm_offsets_homogeneous_tp():
-    split = _gdn_split_info()
-    conv_dim = sum(split.local_proj_dims)
-    conv = _slot_strided(6, (conv_dim, split.conv_rows), slot_stride=200)
+    conv = _slot_strided(6, (sum(CONV_PROJ_DIMS), CONV_ROWS), slot_stride=200)
     ssm = _slot_strided(6, (2, 4, 4), slot_stride=64)
     geom = moriio_layout.get_mamba_transfer_geometry(conv, ssm)
 
     local_slots = [1, 2]
     remote_slots = [1, 2]
-    template = moriio_layout.build_mamba_offset_template(conv, ssm, split, tp_ratio=1)
+    template = moriio_layout.build_mamba_offset_template(
+        conv, ssm, CONV_PROJ_BYTES, tp_ratio=1
+    )
     local_offs, remote_offs, sizes = moriio_layout.apply_mamba_offset_template(
         template, local_slots, remote_slots
     )
 
-    n_conv = moriio_layout.compute_mamba_conv_split_count(local_slots, split)
-    assert n_conv == len(local_slots) * len(split.local_proj_dims)
+    n_conv = moriio_layout.compute_mamba_conv_split_count(local_slots, CONV_PROJ_BYTES)
+    assert n_conv == len(local_slots) * len(CONV_PROJ_DIMS)
     assert len(local_offs) == n_conv + len(local_slots)
 
     # Homogeneous TP: remote conv slices equal local slices; since local==remote
     # slots, conv local and remote offsets coincide.
-    loc_co = split.local_conv_offsets
-    rem_co = split.remote_conv_offsets(0, 1)
     k = 0
     esz = conv.element_size()
     for ls, rs in zip(local_slots, remote_slots):
         lbase = ls * geom.conv_slot_stride * esz
         rbase = rs * geom.conv_slot_stride * esz
-        for (loff, _), (roff, rsz) in zip(loc_co, rem_co):
-            assert local_offs[k] == lbase + loff
-            assert remote_offs[k] == rbase + roff
-            assert sizes[k] == rsz
+        offset = 0
+        for size in CONV_PROJ_BYTES:
+            assert local_offs[k] == lbase + offset
+            assert remote_offs[k] == rbase + offset
+            assert sizes[k] == size
+            offset += size
             k += 1
 
     # SSM: whole per-slot block, no head sharding at tp_ratio == 1.
@@ -1069,20 +1056,20 @@ def test_mamba_conv_ssm_offsets_heterogeneous_tp_is_gated():
     # stride + multi-rank fan-in gather). Until then the offset helper must fail
     # loudly rather than silently transfer wrong bytes, since the mamba path
     # bypasses the attention KV-head validator.
-    split = _gdn_split_info()
-    conv_dim = sum(split.local_proj_dims)
-    conv = _slot_strided(4, (conv_dim, split.conv_rows), slot_stride=200)
+    conv = _slot_strided(4, (sum(CONV_PROJ_DIMS), CONV_ROWS), slot_stride=200)
     ssm = _slot_strided(4, (2, 4, 4), slot_stride=64)
     with pytest.raises(NotImplementedError):
-        moriio_layout.build_mamba_offset_template(conv, ssm, split, tp_ratio=2)
+        moriio_layout.build_mamba_offset_template(
+            conv, ssm, CONV_PROJ_BYTES, tp_ratio=2
+        )
 
 
 def test_local_mamba_slots_must_fit_registered_regions():
-    split = _gdn_split_info()
-    conv_dim = sum(split.local_proj_dims)
-    conv = _slot_strided(6, (conv_dim, split.conv_rows), slot_stride=200)
+    conv = _slot_strided(6, (sum(CONV_PROJ_DIMS), CONV_ROWS), slot_stride=200)
     ssm = _slot_strided(6, (2, 4, 4), slot_stride=64)
-    template = moriio_layout.build_mamba_offset_template(conv, ssm, split, tp_ratio=1)
+    template = moriio_layout.build_mamba_offset_template(
+        conv, ssm, CONV_PROJ_BYTES, tp_ratio=1
+    )
 
     with pytest.raises(ValueError, match="local mamba slot 6"):
         moriio_layout.apply_mamba_offset_template(template, [6], [0])
@@ -1093,22 +1080,22 @@ def test_local_mamba_slots_must_fit_registered_regions():
     [([1, 2], [3]), ([1], [2, 3])],
 )
 def test_mamba_slot_counts_must_match(local_slots, remote_slots):
-    split = _gdn_split_info()
-    conv_dim = sum(split.local_proj_dims)
-    conv = _slot_strided(6, (conv_dim, split.conv_rows), slot_stride=200)
+    conv = _slot_strided(6, (sum(CONV_PROJ_DIMS), CONV_ROWS), slot_stride=200)
     ssm = _slot_strided(6, (2, 4, 4), slot_stride=64)
-    template = moriio_layout.build_mamba_offset_template(conv, ssm, split, tp_ratio=1)
+    template = moriio_layout.build_mamba_offset_template(
+        conv, ssm, CONV_PROJ_BYTES, tp_ratio=1
+    )
 
     with pytest.raises(ValueError, match="slot counts must match"):
         moriio_layout.apply_mamba_offset_template(template, local_slots, remote_slots)
 
 
 def test_remote_mamba_slots_must_be_non_negative():
-    split = _gdn_split_info()
-    conv_dim = sum(split.local_proj_dims)
-    conv = _slot_strided(6, (conv_dim, split.conv_rows), slot_stride=200)
+    conv = _slot_strided(6, (sum(CONV_PROJ_DIMS), CONV_ROWS), slot_stride=200)
     ssm = _slot_strided(6, (2, 4, 4), slot_stride=64)
-    template = moriio_layout.build_mamba_offset_template(conv, ssm, split, tp_ratio=1)
+    template = moriio_layout.build_mamba_offset_template(
+        conv, ssm, CONV_PROJ_BYTES, tp_ratio=1
+    )
 
     with pytest.raises(ValueError, match="must be non-negative"):
         moriio_layout.apply_mamba_offset_template(template, [1], [-1])

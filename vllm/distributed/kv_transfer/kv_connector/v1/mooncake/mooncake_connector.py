@@ -29,6 +29,9 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     TransferTopology,
     get_current_attn_backends,
     get_current_attn_backends_and_specs,
+    kv_head_transfer,
+    mamba_tp_transfer_chunks,
+    tp_transfer_chunks,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -274,36 +277,39 @@ def _compute_sender_transfer_plan(
     if tp_ratio == 1:
         return True, 0, 0, local_kv_block_len
 
-    if total_num_kv_heads is not None:
-        consumer_cache_replicated = remote_tp_size > total_num_kv_heads
-        if producer_cache_replicated != consumer_cache_replicated:
-            local_head_count = max(total_num_kv_heads // local_tp_size, 1)
-            local_replica_count = max(local_tp_size // total_num_kv_heads, 1)
+    if total_num_kv_heads is not None or producer_cache_replicated:
+        # A replicated cache (MLA) is one KV head held by every rank.
+        num_heads = total_num_kv_heads or 1
+        heads = kv_head_transfer(
+            num_heads,
+            local_tp_size,
+            local_tp_rank,
+            remote_tp_size,
+            remote_tp_rank,
+            receiving=False,
+        )
+        if heads is None:
+            return False, 0, 0, 0
+        local_heads, remote_heads = heads
+        local_num_heads = max(num_heads // local_tp_size, 1)
+        remote_num_heads = max(num_heads // remote_tp_size, 1)
+        return (
+            True,
+            local_heads.start * local_kv_block_len // local_num_heads,
+            remote_heads.start * remote_kv_block_len // remote_num_heads,
+            (local_heads.stop - local_heads.start)
+            * local_kv_block_len
+            // local_num_heads,
+        )
 
-            local_head = local_tp_rank * total_num_kv_heads // local_tp_size
-            remote_head = remote_tp_rank * total_num_kv_heads // remote_tp_size
-            bytes_per_head = local_kv_block_len // local_head_count
-
-            return (
-                local_tp_rank % local_replica_count == 0,
-                max(remote_head - local_head, 0) * bytes_per_head,
-                max(local_head - remote_head, 0) * bytes_per_head,
-                bytes_per_head,
-            )
-
+    # Contiguous per-rank shards without head metadata (e.g. hybrid-model KV).
     if tp_ratio > 0:
-        if producer_cache_replicated:
-            return local_tp_rank % tp_ratio == 0, 0, 0, local_kv_block_len
         return (
             True,
             0,
             (local_tp_rank % tp_ratio) * local_kv_block_len,
             local_kv_block_len,
         )
-
-    if producer_cache_replicated:
-        return True, 0, 0, local_kv_block_len
-
     ratio_abs = -tp_ratio
     return (
         True,
@@ -1394,6 +1400,10 @@ class MooncakeConnectorWorker:
         self.region_shared_groups: list[tuple[int, ...]] = []
         # Parallel to registered regions. -1 is not a packed row view.
         self.region_row_offsets: list[int] = []
+        # Meta view of one block of each attention layer registered as whole
+        # pages, which hetero TP slices by the layer's spec.
+        self._layer_block_views: dict[str, torch.Tensor] = {}
+        self._tp_chunks: dict[tuple[str, int, int], list[tuple[int, int, int]]] = {}
         self.opaque_packed_storages: set[int] = set()
         self.seen_base_addresses: list[int] = []
         self._kv_data_lens: list[int] = []
@@ -2130,59 +2140,52 @@ class MooncakeConnectorWorker:
                 if len(local_ids) == 0:
                     continue
 
-                (
-                    should_transfer,
-                    src_region_offset,
-                    dst_region_offset,
-                    transfer_len,
-                ) = self._get_sender_transfer_plan(
-                    local_kv_block_len=local_region.kv_block_len,
-                    remote_kv_block_len=remote_region.kv_block_len,
+                chunks = self._get_sender_transfer_chunks(
+                    local_region,
+                    remote_region,
                     remote_tp_rank=agent_meta.remote_tp_rank,
                     remote_tp_size=agent_meta.remote_tp_size,
                 )
-                if not should_transfer:
-                    # Replicated KV cache: only one producer rank in the TP group
-                    # needs to send the actual bytes for this paired decoder rank.
-                    # TODO: Account for replicated producer KV in
-                    # get_target_remote_ranks() so we can avoid sending
-                    # unnecessary ZMQ requests and remove this branch.
-                    continue
-
-                assert src_region_offset + transfer_len <= local_region.kv_block_len, (
-                    "Computed source transfer region exceeds local KV block size."
-                )
-                assert dst_region_offset + transfer_len <= remote_region.kv_block_len, (
-                    "Destination transfer region exceeds remote KV block size."
-                )
-                # Collapse one contiguous block group into a single larger
-                # transfer descriptor when the per-block copy is identical.
-                can_coalesce = _can_coalesce_block_transfers(
-                    local_region_block_len=local_region.block_len,
-                    remote_region_block_len=remote_region.block_len,
-                    src_region_offset=src_region_offset,
-                    dst_region_offset=dst_region_offset,
-                    transfer_len=transfer_len,
-                )
-
-                if can_coalesce:
-                    local_ids = local_ids[run_starts]
-                    remote_ids = remote_ids[run_starts]
-                    lengths.extend((run_lens * transfer_len).tolist())
-                else:
-                    lengths.extend([transfer_len] * len(local_ids))
-                src_ptrs.extend(
-                    (
-                        local_ids * local_region.block_len
-                        + (local_region.base_addr + src_region_offset)
-                    ).tolist()
-                )
-                dst_ptrs.extend(
-                    (
-                        remote_ids * remote_region.block_len
-                        + (remote_region.base_addr + dst_region_offset)
-                    ).tolist()
-                )
+                # Empty for replicated KV: only one producer rank in the TP
+                # group sends the bytes for this paired decoder rank.
+                # TODO: Account for replicated producer KV in
+                # get_target_remote_ranks() so we can avoid sending
+                # unnecessary ZMQ requests.
+                for src_region_offset, dst_region_offset, transfer_len in chunks:
+                    assert (
+                        src_region_offset + transfer_len <= local_region.kv_block_len
+                    ), "Computed source transfer region exceeds local KV block size."
+                    assert (
+                        dst_region_offset + transfer_len <= remote_region.kv_block_len
+                    ), "Destination transfer region exceeds remote KV block size."
+                    # Collapse one contiguous block group into a single larger
+                    # transfer descriptor when the per-block copy is identical.
+                    can_coalesce = len(chunks) == 1 and _can_coalesce_block_transfers(
+                        local_region_block_len=local_region.block_len,
+                        remote_region_block_len=remote_region.block_len,
+                        src_region_offset=src_region_offset,
+                        dst_region_offset=dst_region_offset,
+                        transfer_len=transfer_len,
+                    )
+                    src_ids, dst_ids = local_ids, remote_ids
+                    if can_coalesce:
+                        src_ids = local_ids[run_starts]
+                        dst_ids = remote_ids[run_starts]
+                        lengths.extend((run_lens * transfer_len).tolist())
+                    else:
+                        lengths.extend([transfer_len] * len(local_ids))
+                    src_ptrs.extend(
+                        (
+                            src_ids * local_region.block_len
+                            + (local_region.base_addr + src_region_offset)
+                        ).tolist()
+                    )
+                    dst_ptrs.extend(
+                        (
+                            dst_ids * remote_region.block_len
+                            + (remote_region.base_addr + dst_region_offset)
+                        ).tolist()
+                    )
 
             logger.debug(
                 "Sending kv_caches for request %s (%d blocks) to %s",
@@ -2245,6 +2248,8 @@ class MooncakeConnectorWorker:
         self.registered_group_indices = []
         self.region_shared_groups = []
         self.region_row_offsets = []
+        self._layer_block_views = {}
+        self._tp_chunks = {}
         self.opaque_packed_storages = set()
         self._prepared_transfer_regions.clear()
         self._layout_by_peer.clear()
@@ -2332,6 +2337,7 @@ class MooncakeConnectorWorker:
                 if page_contiguous:
                     view_addr = cache.data_ptr()
                     kv_block_len = cache[0].nbytes
+                    self._record_block_view(layer_name, layer_spec, cache)
                 else:
                     # NIXL branch B: length is the row, base is the allocation.
                     view_addr = storage_addr
@@ -2379,6 +2385,7 @@ class MooncakeConnectorWorker:
                 )
             else:
                 region_caches = [cache]
+                self._record_block_view(layer_name, layer_spec, cache)
 
             for region_cache in region_caches:
                 base_addr = region_cache.data_ptr()
@@ -3226,9 +3233,22 @@ class MooncakeConnectorWorker:
                     "Mooncake KV-head re-sharding is not supported for padded "
                     f"KV pages (layer {region.layer_name})."
                 )
-            if spec.kv_quant_mode.is_nvfp4:
+            if region.layer_name not in self._layer_block_views:
+                if spec.kv_quant_mode.is_nvfp4:
+                    return (
+                        "Mooncake KV-head re-sharding is not supported for NVFP4 "
+                        "KV cache split across regions."
+                    )
+                continue
+            try:
+                for remote_tp_rank in range(remote_tp_size):
+                    self._spec_tp_chunks(
+                        region.layer_name, remote_tp_rank, remote_tp_size
+                    )
+            except NotImplementedError as e:
                 return (
-                    "Mooncake KV-head re-sharding is not supported for NVFP4 KV cache."
+                    "Mooncake KV-head re-sharding is not supported for layer "
+                    f"{region.layer_name}: {e}"
                 )
         return None
 
@@ -3259,27 +3279,89 @@ class MooncakeConnectorWorker:
             row_offsets=row_offsets,
         )
 
-    def _get_sender_transfer_plan(
+    @property
+    def _total_head_sharded_kv_heads(self) -> int | None:
+        """Total KV heads when attention KV is head-sharded across TP."""
+        if self.use_mla or self.kv_cache_config.has_mamba_layers:
+            return None
+        return self.transfer_topo.total_num_kv_heads
+
+    def _record_block_view(
+        self, layer_name: str, spec: KVCacheSpec, cache: torch.Tensor
+    ) -> None:
+        if isinstance(spec, AttentionSpec) and cache.ndim == 4:
+            self._layer_block_views[layer_name] = torch.empty_strided(
+                (1, *cache.shape[1:]),
+                cache.stride(),
+                dtype=cache.dtype,
+                device="meta",
+            )
+
+    def _spec_tp_chunks(
+        self, layer_name: str, remote_tp_rank: int, remote_tp_size: int
+    ) -> list[tuple[int, int, int]] | None:
+        """Per-block runs sent to a remote rank of another TP size, sliced by
+        the layer's spec; None if the layer is not a Mamba page or head-sharded
+        whole pages."""
+        spec = self._layer_specs[layer_name]
+        if isinstance(spec, MambaSpec):
+            return list(
+                mamba_tp_transfer_chunks(
+                    spec,
+                    self.tp_size,
+                    self.tp_rank,
+                    remote_tp_size,
+                    remote_tp_rank,
+                    receiving=False,
+                )
+            )
+        block = self._layer_block_views.get(layer_name)
+        total_num_kv_heads = self._total_head_sharded_kv_heads
+        if block is None or total_num_kv_heads is None:
+            return None
+        key = (layer_name, remote_tp_rank, remote_tp_size)
+        if key not in self._tp_chunks:
+            assert isinstance(spec, AttentionSpec)
+            self._tp_chunks[key] = tp_transfer_chunks(
+                spec,
+                block,
+                total_num_kv_heads,
+                self.tp_size,
+                self.tp_rank,
+                remote_tp_size,
+                remote_tp_rank,
+                receiving=False,
+            )
+        return self._tp_chunks[key]
+
+    def _get_sender_transfer_chunks(
         self,
-        local_kv_block_len: int,
-        remote_kv_block_len: int,
+        local_region: TransferRegion,
+        remote_region: TransferRegion,
         remote_tp_rank: int,
         remote_tp_size: int,
-    ) -> tuple[bool, int, int, int]:
-        return _compute_sender_transfer_plan(
-            local_tp_rank=self.tp_rank,
-            local_tp_size=self.tp_size,
-            remote_tp_rank=remote_tp_rank,
-            remote_tp_size=remote_tp_size,
-            local_kv_block_len=local_kv_block_len,
-            remote_kv_block_len=remote_kv_block_len,
-            producer_cache_replicated=self._producer_cache_is_replicated(),
-            total_num_kv_heads=(
-                None
-                if self.use_mla or self.kv_cache_config.has_mamba_layers
-                else self.transfer_topo.total_num_kv_heads
-            ),
+    ) -> list[tuple[int, int, int]]:
+        """``(src offset, dst offset, length)`` runs of each block sent to the
+        remote rank; empty if this rank sends it nothing."""
+        if remote_tp_size != self.tp_size:
+            chunks = self._spec_tp_chunks(
+                local_region.layer_name, remote_tp_rank, remote_tp_size
+            )
+            if chunks is not None:
+                return chunks
+        should_transfer, src_offset, dst_offset, transfer_len = (
+            _compute_sender_transfer_plan(
+                local_tp_rank=self.tp_rank,
+                local_tp_size=self.tp_size,
+                remote_tp_rank=remote_tp_rank,
+                remote_tp_size=remote_tp_size,
+                local_kv_block_len=local_region.kv_block_len,
+                remote_kv_block_len=remote_region.kv_block_len,
+                producer_cache_replicated=self._producer_cache_is_replicated(),
+                total_num_kv_heads=self._total_head_sharded_kv_heads,
+            )
         )
+        return [(src_offset, dst_offset, transfer_len)] if should_transfer else []
 
     def _log_debug_cache_registration(
         self, layer_name: str, cache: torch.Tensor

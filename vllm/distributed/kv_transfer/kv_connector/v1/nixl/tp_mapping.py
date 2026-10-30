@@ -6,11 +6,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import numpy as np
-
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
     TransferTopology,
+    kv_head_transfer,
+    mamba_tp_transfer_chunks,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec, MambaSpec
 
@@ -51,7 +51,7 @@ class TPMapping:
     # Superset of all source ranks (union of all groups).
     all_source_ranks: tuple[int, ...]
 
-    # Maps each source rank to its FA head slot index.
+    # Maps each head-sharded attention source rank to its FA head slot index.
     rank_to_attention_slot: dict[int, int]
 
     # FA head offset factor for hetero-TP (D_TP > P_TP).
@@ -67,26 +67,13 @@ class TPMapping:
 # ======================================================================
 
 
-def compute_head_offset(
-    tp_rank: int, tp_size: int, remote_tp_size: int, total_num_kv_heads: int
-) -> int:
-    """Return the offset in local head slices within the remote KV block."""
-    if tp_size <= remote_tp_size:
-        return 0
-    if tp_size > total_num_kv_heads:
-        remote_rank = tp_rank * remote_tp_size // tp_size
-        local_head = tp_rank * total_num_kv_heads // tp_size
-        remote_head = remote_rank * total_num_kv_heads // remote_tp_size
-        return local_head - remote_head
-    return tp_rank % (tp_size // remote_tp_size)
-
-
 def compute_tp_mapping(
     transfer_topology: TransferTopology,
     remote_tp_size: int,
     group_spec_types: tuple[type[KVCacheSpec], ...],
     remote_dcp_size: int = 1,
     head_sharded_kv_heads: int | None = None,
+    mamba_spec: MambaSpec | None = None,
 ) -> TPMapping:
     """Build the complete local-to-remote TP mapping.
 
@@ -98,45 +85,42 @@ def compute_tp_mapping(
 
     ``head_sharded_kv_heads`` maps head-sharded KV with that many total KV heads
     instead of the topology's, e.g. a GQA draft under an MLA target.
+    ``mamba_spec`` is the spec of the sharded Mamba layers, required with SSM
+    groups.
     """
     tp_rank = transfer_topology.tp_rank
     tp_size = transfer_topology.tp_size
     is_mla = transfer_topology.is_mla and head_sharded_kv_heads is None
     total_num_kv_heads = head_sharded_kv_heads or transfer_topology.total_num_kv_heads
     # --- Attention source ranks ---
-    if is_mla or tp_size >= remote_tp_size:
-        if is_mla and remote_dcp_size > 1:
-            attn_ranks = transfer_topology.dcp_source_ranks(
-                remote_tp_size, remote_dcp_size
-            )
-        else:
-            # D (local TP) > P (remote TP): multiple local ranks read different chunks
-            # from *one* remote rank, corresponding to different kv heads.
-            # For MLA, we only need one remote since cache is duplicated. When
-            # P TP=k*TP k, this will spread mla ranks to read from remote k*tp_rank.
-            attn_ranks = [tp_rank * remote_tp_size // tp_size]
+    if is_mla and remote_dcp_size > 1:
+        attn_ranks = transfer_topology.dcp_source_ranks(remote_tp_size, remote_dcp_size)
+        reads = {}
     else:
-        # P (remote TP) > D (local TP): one local rank
-        # reads from multiple remote ranks.
-        # GQA dedup: when K < remote_tp_size, several remote ranks
-        # hold the same KV head.  np.unique keeps only the first
-        # rank per unique head so we don't issue redundant reads.
-        abs_tp = remote_tp_size // tp_size
-        start = tp_rank * abs_tp
-        heads = np.arange(start, start + abs_tp) * total_num_kv_heads // remote_tp_size
-        _, unique_idx = np.unique(heads, return_index=True)
-        attn_ranks = (start + np.sort(unique_idx)).tolist()
+        # MLA is one KV head replicated on every rank.
+        num_heads = 1 if is_mla else total_num_kv_heads
+        reads = {
+            rank: heads
+            for rank in range(remote_tp_size)
+            if (
+                heads := kv_head_transfer(
+                    num_heads, tp_size, tp_rank, remote_tp_size, rank, receiving=True
+                )
+            )
+        }
+        attn_ranks = list(reads)
 
     # --- SSM source ranks ---
-    has_ssm = any(_is_ssm_spec(t) for t in group_spec_types)
-    if has_ssm:
-        if tp_size < remote_tp_size:
-            abs_tp = remote_tp_size // tp_size
-            ssm_ranks = list(range(tp_rank * abs_tp, (tp_rank + 1) * abs_tp))
-        else:
-            ssm_ranks = list(attn_ranks)
-    else:
-        ssm_ranks = []
+    ssm_ranks = []
+    if any(_is_ssm_spec(t) for t in group_spec_types):
+        assert mamba_spec is not None
+        ssm_ranks = [
+            rank
+            for rank in range(remote_tp_size)
+            if mamba_tp_transfer_chunks(
+                mamba_spec, tp_size, tp_rank, remote_tp_size, rank, receiving=True
+            )
+        ]
 
     all_ranks = sorted(set(attn_ranks) | set(ssm_ranks))
 
@@ -146,21 +130,15 @@ def compute_tp_mapping(
         for t in group_spec_types
     )
 
-    # --- Attention head slots ---
-    head_to_slot: dict[int, int] = {}
-    for i, r in enumerate(attn_ranks):
-        head_to_slot[r * total_num_kv_heads // remote_tp_size] = i
-    rank_to_attention_slot = {
-        r: head_to_slot.get(r * total_num_kv_heads // remote_tp_size, 0)
-        for r in all_ranks
-    }
-
-    # --- Rank offset factor ---
-    rank_offset_factor = (
-        0
-        if is_mla
-        else compute_head_offset(tp_rank, tp_size, remote_tp_size, total_num_kv_heads)
-    )
+    # --- Attention head slots and offset within the remote block ---
+    # Sources split this rank's heads evenly, in head order.
+    rank_offset_factor = 0
+    rank_to_attention_slot = {}
+    for rank, (local_heads, remote_heads) in reads.items():
+        num_read = local_heads.stop - local_heads.start
+        rank_to_attention_slot[rank] = local_heads.start // num_read
+        if len(reads) == 1:
+            rank_offset_factor = remote_heads.start // num_read
 
     local_consumers = transfer_topology.dcp_consumer_count(
         remote_tp_size, remote_dcp_size

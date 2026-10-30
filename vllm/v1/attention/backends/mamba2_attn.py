@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from typing import Any
 
 import torch
@@ -11,6 +11,7 @@ from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointBuilder,
     MambaPrefillCheckpointMetadata,
 )
+from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -92,6 +93,21 @@ def compute_varlen_chunk_metadata(
     return cu_chunk_seqlens, last_chunk_indices_t, seq_idx_chunks_t
 
 
+@dataclass(frozen=True)
+class Mamba2Spec(MambaSpec):
+    """Conv state ``[x | B | C, conv]`` and temporal state ``[heads, head_dim,
+    state]``; ``x``, ``B``, ``C`` and heads are each sharded across TP."""
+
+    def _tp_segments(self) -> tuple[tuple[int, ...], ...] | None:
+        if len(self.shapes) != 2:
+            return None
+        conv, temporal = self.shapes
+        x = temporal[0] * temporal[1]
+        groups = (conv[0] - x) // 2
+        assert x + 2 * groups == conv[0], f"Unexpected Mamba2 state {self.shapes}"
+        return (x, groups, groups), (temporal[0],)
+
+
 class Mamba2AttentionBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
@@ -104,6 +120,13 @@ class Mamba2AttentionBackend(AttentionBackend):
     @classmethod
     def is_ssm(cls) -> bool:
         return True
+
+    @classmethod
+    def customize_mamba_spec(cls, spec: MambaSpec) -> MambaSpec:
+        # Sub-projections are contiguous only with (dim, state_len) conv state.
+        if not is_conv_state_dim_first():
+            return spec
+        return Mamba2Spec(**{f.name: getattr(spec, f.name) for f in fields(spec)})
 
     @classmethod
     def supports_device_cpu_query_lens_mismatch(cls) -> bool:

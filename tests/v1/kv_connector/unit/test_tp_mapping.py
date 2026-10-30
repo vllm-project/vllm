@@ -9,10 +9,12 @@ No GPU or NIXL required.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import torch
 
 from vllm.distributed.kv_transfer.kv_connector.utils import TransferTopology
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
@@ -27,6 +29,14 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 # ======================================================================
 # Test fixtures / helpers
 # ======================================================================
+
+
+@dataclass(frozen=True)
+class _ShardedStateSpec(MambaSpec):
+    """One state sharded across TP along its leading dim."""
+
+    def _tp_segments(self) -> tuple[tuple[int, ...], ...]:
+        return ((self.shapes[0][0],),)
 
 
 def _compute_mapping(
@@ -190,7 +200,12 @@ def _make_mock_worker_for_splits(group_spec_types):
     worker.block_len_per_layer = []
     worker.num_regions = 0
     worker._region_is_mla = []
-    worker._conv_decomp = SimpleNamespace(local_conv_offsets=())
+    # One 400-byte SSM run per layer at TP 1.
+    worker._mamba_spec = _ShardedStateSpec(
+        block_size=1, shapes=((400,),), dtypes=(torch.int8,)
+    )
+    worker.transfer_tp_size = 1
+    worker.transfer_tp_rank = 0
     worker._ssm_region_indices = [0] if MambaSpec in group_spec_types else []
     worker._ple_region_index = None
     return worker
@@ -253,11 +268,15 @@ class TestMambaPlanSplitHandles:
             dtype=np.uint64,
         )
 
-        splits = list(worker._build_local_splits_from_plan(plan, src_blocks_data, 2))
+        splits = list(
+            worker._build_local_splits_from_plan(
+                plan, src_blocks_data, 2, remote_tp_size=2
+            )
+        )
 
         assert len(splits) == 2  # 2 source ranks
 
-        # Rank 0 (FA source, p_idx=0):
+        # Rank 0 (FA source):
         # FA: chunk=200//1=200, slot=0 → (1000, 200), (2000, 200)
         # SSM: chunk=400//2=200, idx=0 → (3000, 200); block stride stays 400
         assert splits[0].tolist() == [
@@ -266,7 +285,7 @@ class TestMambaPlanSplitHandles:
             [3000, 200, 0, 400, 1],
         ]
 
-        # Rank 1 (not FA source, p_idx=1):
+        # Rank 1 (not FA source):
         # FA: chunk=200//1=200, slot=0 (skip_fa) → (1000, 200), (2000, 200)
         # SSM: chunk=400//2=200, idx=1 → (3200, 200); block stride stays 400
         assert splits[1].tolist() == [
@@ -297,7 +316,11 @@ class TestMambaPlanSplitHandles:
             dtype=np.uint64,
         )
 
-        splits = list(worker._build_local_splits_from_plan(plan, src_blocks_data, 4, 2))
+        splits = list(
+            worker._build_local_splits_from_plan(
+                plan, src_blocks_data, 4, 2, remote_tp_size=2
+            )
+        )
 
         assert len(splits) == 2
         fa_passthrough = [[1000, 100, 0, 100, 2], [2000, 100, 0, 100, 2]]

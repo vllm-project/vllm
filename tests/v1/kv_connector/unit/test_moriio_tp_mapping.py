@@ -22,11 +22,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_layout import (
     get_layer_head_layout,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_tp_mapping import (
-    _rank_heads,
     compute_write_tp_mapping,
 )
 from vllm.v1.kv_cache_interface import FullAttentionSpec, compute_layout_strides
 from vllm.v1.kv_cache_layout import KVCacheLayout
+
+from .utils import rank_kv_heads
 
 pytestmark = pytest.mark.cpu_test
 
@@ -133,9 +134,9 @@ def test_every_consumer_head_and_state_slice_is_written_exactly_once(
         mapping = compute_write_tp_mapping(
             p, producer_tp, consumer_tp, heads, mla, mamba
         )
-        p_heads = _rank_heads(p, producer_tp, 1 if mla else heads)
+        p_heads = rank_kv_heads(p, producer_tp, 1 if mla else heads)
         for t in mapping.targets:
-            d_heads = _rank_heads(t.tp_rank, consumer_tp, 1 if mla else heads)
+            d_heads = rank_kv_heads(t.tp_rank, consumer_tp, 1 if mla else heads)
             for i in range(t.num_heads):
                 # The global head sent is the global head it lands on.
                 assert p_heads.start + t.local_head + i == (
@@ -149,7 +150,7 @@ def test_every_consumer_head_and_state_slice_is_written_exactly_once(
             advertised[t.tp_rank].add(t.num_writers)
 
     for d in range(consumer_tp):
-        d_heads = _rank_heads(d, consumer_tp, 1 if mla else heads)
+        d_heads = rank_kv_heads(d, consumer_tp, 1 if mla else heads)
         assert sorted(heads_written[d]) == list(d_heads)
         if mamba:
             ratio = max(1, producer_tp // consumer_tp)
@@ -200,7 +201,7 @@ def test_head_slices_land_byte_exact(
         spec = _spec(total_heads // producer_tp)
         buffer = torch.zeros(spec.page_size_bytes * num_blocks, dtype=torch.uint8)
         view = _view(buffer, spec, num_blocks, local_layout)
-        view.copy_(full[:, _rank_heads(p, producer_tp, total_heads)])
+        view.copy_(full[:, rank_kv_heads(p, producer_tp, total_heads)])
         local = get_layer_head_layout("l", view, {"l": spec})
         mapping = compute_write_tp_mapping(
             p, producer_tp, consumer_tp, total_heads, False, False
@@ -219,7 +220,7 @@ def test_head_slices_land_byte_exact(
             )
             _apply(offsets, buffer, remote_buffer)
     for d, (_, remote_view, _) in consumers.items():
-        d_heads = _rank_heads(d, consumer_tp, total_heads)
+        d_heads = rank_kv_heads(d, consumer_tp, total_heads)
         expected[d] = full[local_blocks][:, d_heads]
         received[d] = remote_view[remote_blocks]
         assert torch.equal(received[d], expected[d])

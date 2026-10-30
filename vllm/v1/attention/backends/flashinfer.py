@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with FlashInfer."""
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields
 from enum import Enum
 from functools import partial
 from typing import ClassVar
@@ -92,9 +92,11 @@ from vllm.v1.attention.ops.dcp import (
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    FullAttentionSpec,
     KVCacheLayout,
     KVCacheSpec,
     KVQuantMode,
+    SlidingWindowSpec,
     is_quantized_kv_cache,
     iter_layer_specs,
 )
@@ -144,6 +146,50 @@ def _nvfp4_kv_views(
         for side in range(2)
     )
     return (k_data, v_data), (k_scale, v_scale), "HND" if hnd else "NHD"
+
+
+class _NVFP4TPSlicing:
+    """A KV head of an NVFP4 page is four runs of it, not a slice of its
+    ``2 * H`` slots (see ``_nvfp4_kv_views``).
+
+    NOTE: one subclass per policy spec only until #61452 folds them into
+    ``AttentionSpec``; then this becomes a single ``NVFP4AttentionSpec``.
+    """
+
+    def slice_for_tp_transfer(
+        self,
+        cache: torch.Tensor,
+        tp_size: int,
+        tp_rank: int,
+        other_spec: KVCacheSpec,
+        other_tp_size: int,
+        other_tp_rank: int,
+        *,
+        receiving: bool,
+    ) -> list[torch.Tensor]:
+        assert isinstance(self, AttentionSpec) and isinstance(other_spec, AttentionSpec)
+        heads = self._transfer_kv_heads(
+            tp_size, tp_rank, other_spec, other_tp_size, other_tp_rank, receiving
+        )
+        if heads.start == heads.stop:
+            return []
+        (k_data, v_data), (k_scale, v_scale), layout = _nvfp4_kv_views(
+            cache, self.num_kv_heads
+        )
+        views = [k_data, k_scale, v_data, v_scale]
+        if layout == "NHD":
+            views = [view.transpose(1, 2) for view in views]
+        return [view[:, heads] for view in views]
+
+
+@dataclass(frozen=True, kw_only=True)
+class NVFP4FullAttentionSpec(_NVFP4TPSlicing, FullAttentionSpec):
+    pass
+
+
+@dataclass(frozen=True, kw_only=True)
+class NVFP4SlidingWindowSpec(_NVFP4TPSlicing, SlidingWindowSpec):
+    pass
 
 
 def _get_trtllm_workspace_buffer():
@@ -563,11 +609,14 @@ class FlashInferBackend(AttentionBackend):
         hs_k = nvfp4_kv_cache_full_dim(spec.head_size)
         hs_v = nvfp4_kv_cache_full_dim(spec.head_size_v)
         assert hs_k == hs_v, "nvfp4 with asymmetric K/V head sizes not yet supported"
-        return replace(
-            spec,
-            num_head_slots=2 * spec.num_kv_heads,
-            state_content_bytes=hs_k * get_dtype_size(spec.dtype),
-        )
+        spec_cls = {
+            FullAttentionSpec: NVFP4FullAttentionSpec,
+            SlidingWindowSpec: NVFP4SlidingWindowSpec,
+        }.get(type(spec), type(spec))
+        kwargs = {f.name: getattr(spec, f.name) for f in fields(spec) if f.init}
+        kwargs["num_head_slots"] = 2 * spec.num_kv_heads
+        kwargs["state_content_bytes"] = hs_k * get_dtype_size(spec.dtype)
+        return spec_cls(**kwargs)
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [

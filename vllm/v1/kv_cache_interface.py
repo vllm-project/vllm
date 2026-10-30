@@ -344,6 +344,34 @@ class KVCacheSpec:
         """
         return True
 
+    def slice_for_tp_transfer(
+        self,
+        cache: torch.Tensor,
+        tp_size: int,
+        tp_rank: int,
+        other_spec: KVCacheSpec,
+        other_tp_size: int,
+        other_tp_rank: int,
+        *,
+        receiving: bool,
+    ) -> list[torch.Tensor]:
+        """Views of ``cache`` moved between this rank and another TP rank.
+
+        ``cache`` is this rank's ``[B, H, N, C]`` view of one layer's cache,
+        real or on the meta device. The other rank's call, given this rank as
+        its peer and the opposite ``receiving``, returns views of the same
+        shapes in the same order, so the two lists pair up for transfer.
+        Empty when the pair moves nothing, so the other rank is not a source
+        (or destination) of this one.
+        """
+        if tp_size == other_tp_size and tp_rank == other_tp_rank:
+            return [cache]
+        if tp_size == other_tp_size:
+            return []
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support heterogeneous TP transfers."
+        )
+
 
 def group_kernel_blocks(cache: torch.Tensor, num_blocks: int) -> torch.Tensor:
     """View a kernel-block-granular layer cache with manager blocks as dim 0.
@@ -581,6 +609,99 @@ class AttentionSpec(KVCacheSpec):
         if self.num_head_slots is not None:
             return self.num_head_slots
         return self.num_kv_heads
+
+    # NOTE: KV-head placement across TP belongs to a GQA spec subclass; it
+    # moves there (or goes away) with the spec split of RFC #42449 (#61452).
+    def _total_kv_heads(
+        self, tp_size: int, other_spec: AttentionSpec, other_tp_size: int
+    ) -> int:
+        totals = {
+            spec.num_kv_heads * min(tp, spec.max_tp_shards or tp)
+            for spec, tp in ((self, tp_size), (other_spec, other_tp_size))
+        }
+        if len(totals) != 1:
+            raise ValueError(
+                f"KV head counts disagree across TP ({sorted(totals)}): with "
+                "replicated KV heads, specs must set max_tp_shards."
+            )
+        return totals.pop()
+
+    def _kv_head_range(self, tp_size: int, tp_rank: int, total: int) -> range:
+        num_shards = total // self.num_kv_heads
+        assert num_shards * self.num_kv_heads == total and tp_size % num_shards == 0
+        start = tp_rank * num_shards // tp_size * self.num_kv_heads
+        return range(start, start + self.num_kv_heads)
+
+    def _transfer_kv_heads(
+        self,
+        tp_size: int,
+        tp_rank: int,
+        other_spec: AttentionSpec,
+        other_tp_size: int,
+        other_tp_rank: int,
+        receiving: bool,
+    ) -> slice:
+        """This rank's local KV heads moved between it and the other rank.
+
+        A receiver takes each head from one sender. Among replicas it prefers
+        ``rank * sender_tp_size // receiver_tp_size`` to spread reads.
+        """
+        total = self._total_kv_heads(tp_size, other_spec, other_tp_size)
+        mine = self._kv_head_range(tp_size, tp_rank, total)
+        theirs = other_spec._kv_head_range(other_tp_size, other_tp_rank, total)
+        if receiving:
+            sender, sender_tp, sender_rank, sent = (
+                other_spec,
+                other_tp_size,
+                other_tp_rank,
+                theirs,
+            )
+            preferred = tp_rank * other_tp_size // tp_size
+        else:
+            sender, sender_tp, sender_rank, sent = self, tp_size, tp_rank, mine
+            preferred = other_tp_rank * tp_size // other_tp_size
+        replicas = [
+            rank
+            for rank in range(sender_tp)
+            if sender._kv_head_range(sender_tp, rank, total) == sent
+        ]
+        if sender_rank != (preferred if preferred in replicas else replicas[0]):
+            return slice(0, 0)
+        start = max(mine.start, theirs.start) - mine.start
+        stop = min(mine.stop, theirs.stop) - mine.start
+        return slice(start, max(start, stop))
+
+    def slice_for_tp_transfer(
+        self,
+        cache: torch.Tensor,
+        tp_size: int,
+        tp_rank: int,
+        other_spec: KVCacheSpec,
+        other_tp_size: int,
+        other_tp_rank: int,
+        *,
+        receiving: bool,
+    ) -> list[torch.Tensor]:
+        """Narrow ``cache`` to the KV heads moved between the two ranks.
+
+        Assumes one head slot per KV head. Pages with custom ``num_head_slots``
+        move whole between ranks holding the same heads; backends that pack
+        heads differently override this to slice their own pages.
+        """
+        assert isinstance(other_spec, AttentionSpec)
+        heads = self._transfer_kv_heads(
+            tp_size, tp_rank, other_spec, other_tp_size, other_tp_rank, receiving
+        )
+        if heads.start == heads.stop:
+            return []
+        if self.num_head_slots is None:
+            return [cache[:, heads]]
+        if heads == slice(0, self.num_kv_heads) == slice(0, other_spec.num_kv_heads):
+            return [cache]
+        raise NotImplementedError(
+            f"{type(self).__name__} with {self.num_head_slots} head slots cannot "
+            "be sliced by KV head."
+        )
 
     @property
     def state_content_size_bytes(self) -> int:
@@ -1131,6 +1252,63 @@ class MambaSpec(KVCacheSpec):
     @property
     def block_table_token_alignment(self) -> int | None:
         return None
+
+    def _tp_segments(self) -> tuple[tuple[int, ...], ...] | None:
+        """Per state, the local sizes of the consecutive leading-dim segments
+        that are each sharded evenly across TP. None if unknown, so only
+        same-TP transfers are supported. Mamba backends override this."""
+        return None
+
+    def slice_for_tp_transfer(
+        self,
+        cache: torch.Tensor,
+        tp_size: int,
+        tp_rank: int,
+        other_spec: KVCacheSpec,
+        other_tp_size: int,
+        other_tp_rank: int,
+        *,
+        receiving: bool,
+    ) -> list[torch.Tensor]:
+        """Narrow each sharded segment of each state to the rows both ranks hold.
+
+        ``cache`` is the layer's ``[B, 1, 1, C]`` int8 page view (see
+        ``MambaBase.bind_kv_cache``); one view is returned per shared segment.
+        """
+        assert isinstance(other_spec, MambaSpec)
+        segments = self._tp_segments()
+        other_segments = other_spec._tp_segments()
+        if self.tp_replicated or segments is None or other_segments is None:
+            return super().slice_for_tp_transfer(
+                cache,
+                tp_size,
+                tp_rank,
+                other_spec,
+                other_tp_size,
+                other_tp_rank,
+                receiving=receiving,
+            )
+        pages = cache.flatten(1)
+        views: list[torch.Tensor] = []
+        offset = 0
+        for shape, dtype, sizes, other_sizes in zip(
+            self.shapes, self.dtypes, segments, other_segments, strict=True
+        ):
+            row_bytes = prod(shape[1:]) * get_dtype_size(dtype)
+            for size, other_size in zip(sizes, other_sizes, strict=True):
+                if size * tp_size != other_size * other_tp_size:
+                    raise NotImplementedError(
+                        f"{type(self).__name__} segment of {size} rows at TP "
+                        f"{tp_size} does not shard evenly with {other_size} "
+                        f"rows at TP {other_tp_size}."
+                    )
+                start = max(tp_rank * size, other_tp_rank * other_size)
+                stop = min((tp_rank + 1) * size, (other_tp_rank + 1) * other_size)
+                if start < stop:
+                    first = offset + (start - tp_rank * size) * row_bytes
+                    views.append(pages[:, first : first + (stop - start) * row_bytes])
+                offset += size * row_bytes
+        return views
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         if vllm_config.cache_config.mamba_cache_mode == "align":

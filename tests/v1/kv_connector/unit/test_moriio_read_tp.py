@@ -18,7 +18,6 @@ import msgspec
 import pytest
 import torch
 
-from vllm.distributed.kv_transfer.kv_connector.v1 import ssm_conv_transfer_utils
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOAgentMetadata,
     MoRIIOConnectorMetadata,
@@ -292,13 +291,6 @@ def _assert_released(releases: dict[int, list], producer_tp: int) -> None:
         ]
         assert resolved and resolved[-1] == "t", (p, releases[p])
         assert resolved.count("t") == 1, (p, releases[p])
-
-
-@pytest.fixture(autouse=True)
-def _conv_dim_first(monkeypatch):
-    monkeypatch.setattr(
-        ssm_conv_transfer_utils, "is_conv_state_dim_first", lambda: True
-    )
 
 
 @pytest.mark.parametrize("layouts", LAYOUTS, ids=LAYOUT_IDS)
