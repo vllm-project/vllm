@@ -800,7 +800,7 @@ class KVCacheManager:
             self.coordinator.cache_blocks(request, num_computed_tokens)
 
     def create_kv_cache_blocks(
-        self, blocks: tuple[list[KVCacheBlock], ...]
+        self, blocks: tuple[Sequence[KVCacheBlock], ...]
     ) -> KVCacheBlocks:
         # Only create new KVCacheBlocks for non-empty blocks
         return KVCacheBlocks(blocks) if any(blocks) else self.empty_kv_cache_blocks

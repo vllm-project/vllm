@@ -453,7 +453,7 @@ class KVCacheCoordinator(ABC):
                 request_id, processed_computed_tokens, num_prompt_tokens
             )
 
-    def get_blocks(self, request_id: str) -> tuple[list[KVCacheBlock], ...]:
+    def get_blocks(self, request_id: str) -> tuple[Sequence[KVCacheBlock], ...]:
         """Get the blocks for the request."""
         return tuple(
             manager.req_to_blocks.get(request_id) or []
@@ -463,7 +463,7 @@ class KVCacheCoordinator(ABC):
     @abstractmethod
     def find_longest_cache_hit(
         self,
-        block_hashes: list[BlockHash],
+        block_hashes: Sequence[BlockHash],
         max_cache_hit_length: int,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
         """Returns the per-group hit blocks, the hit length, and the number of
@@ -518,7 +518,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
 
     def find_longest_cache_hit(
         self,
-        block_hashes: list[BlockHash],
+        block_hashes: Sequence[BlockHash],
         max_cache_hit_length: int,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
         blocks: tuple[list[KVCacheBlock], ...] = tuple(
@@ -581,7 +581,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
 
     def find_longest_cache_hit(
         self,
-        block_hashes: list[BlockHash],
+        block_hashes: Sequence[BlockHash],
         max_cache_hit_length: int,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
         hit_blocks, hit_length = self.single_type_managers[0].find_longest_cache_hit(
@@ -805,7 +805,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 
     def find_longest_cache_hit(
         self,
-        block_hashes: list[BlockHash],
+        block_hashes: Sequence[BlockHash],
         max_cache_hit_length: int,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
         """Find the longest cache hit using an iterative fixed-point algorithm.
@@ -942,7 +942,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 
     def find_longest_cache_hit_per_group(
         self,
-        block_hashes: list[BlockHash],
+        block_hashes: Sequence[BlockHash],
         max_cache_hit_length: int,
     ) -> tuple[tuple[list[KVCacheBlock], ...], tuple[int, ...]]:
         """Like find_longest_cache_hit but evaluates each group independently.

@@ -2449,7 +2449,7 @@ class LookupKeyClient:
         self,
         req_id: str,
         num_tokens: int,
-        block_hashes: list[BlockHash],
+        block_hashes: Sequence[BlockHash],
         non_block: bool = False,
     ) -> MooncakeLookupResult | None:
         """If non_block is True, will return None until the result is ready,

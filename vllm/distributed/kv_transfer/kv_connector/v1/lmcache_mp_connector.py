@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import enum
 import os
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -191,7 +191,7 @@ class LMCacheMPRequestTracker:
 
     # Read-only lists to track the token ids and block hashes
     all_token_ids: ConstantList[int]
-    block_hashes: ConstantList["BlockHash"]
+    block_hashes: Sequence["BlockHash"]
 
     # Block ids and hashes will be updated at update_states_after_alloc and
     # during the generation
@@ -219,7 +219,7 @@ class LMCacheMPRequestTracker:
         self.request_id = request.request_id
         self.cache_salt: str = request.cache_salt or ""
         self.all_token_ids = request.all_token_ids
-        self.block_hashes = ConstantList(request.block_hashes)
+        self.block_hashes = request.block_hashes
         self.allocated_block_ids = []
         self.num_stored_blocks = 0
         self.num_vllm_hit_blocks = 0

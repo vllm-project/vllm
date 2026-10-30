@@ -639,7 +639,7 @@ class ChunkedTokenDatabase:
     def process_tokens(
         self,
         token_len: int,
-        block_hashes: list[BlockHash],
+        block_hashes: Sequence[BlockHash],
         mask_num: int = 0,
         *,
         chunk_mask: list[bool] | None = None,
@@ -790,7 +790,7 @@ class ReqMeta:
     req_id: str
     token_len_chunk: int
     block_ids: tuple[list[int], ...]
-    block_hashes: list[BlockHash]
+    block_hashes: Sequence[BlockHash]
 
     can_save: bool | None = None
     load_spec: LoadSpec | None = None
@@ -825,7 +825,7 @@ class ReqMeta:
         block_size: int,
         load_spec: LoadSpec | None = None,
         skip_save: bool | None = False,
-        block_hashes: list[BlockHash] | None = None,
+        block_hashes: Sequence[BlockHash] | None = None,
         save_partial_tail: bool = False,
         num_prompt_tokens: int | None = None,
     ) -> "ReqMeta | None":
