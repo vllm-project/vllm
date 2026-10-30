@@ -4,7 +4,7 @@ meta:
   provider: "Qwen"
   description: "Qwen3 MoE model with 30.5B total and 3.3B active parameters, validated for BF16 serving on Intel Xeon 6 and Intel Arc Pro B70 and W8A8 serving on Ascend A3."
   date_added: 2026-08-14
-  date_updated: 2026-09-23
+  date_updated: 2026-10-30
   tasks:
     - text
   performance_headline: "Validated on Intel Xeon 6 (GNR), Ascend A3 W8A8 and 4x Intel Arc Pro B70 with BF16 serving"
@@ -14,10 +14,11 @@ meta:
     xeon6: verified
     ascend_910c: verified
     arc_pro_b70: verified
+    h100: supported
 
 model:
   model_id: "Qwen/Qwen3-30B-A3B"
-  min_vllm_version: "0.8.5"
+  min_vllm_version: "0.28.0"
   architecture: moe
   parameter_count: "30.5B"
   active_parameters: "3.3B"
@@ -37,6 +38,22 @@ features:
     args:
       - "--reasoning-parser"
       - "qwen3"
+  spec_decoding:
+    description: "Choose a RedHatAI EAGLE3 or DFlash draft model"
+    default_mode: eagle3
+    modes:
+      eagle3:
+        label: "EAGLE3 (RedHatAI)"
+        description: "RedHatAI EAGLE3 draft model with 5 speculative tokens."
+        args:
+          - "--speculative-config"
+          - '{"model":"RedHatAI/Qwen3-30B-A3B-speculator.eagle3","num_speculative_tokens":5,"method":"eagle3"}'
+      dflash:
+        label: "DFlash (RedHatAI)"
+        description: "RedHatAI DFlash draft model with 15 speculative tokens; requires vLLM DFlash support."
+        args:
+          - "--speculative-config"
+          - '{"model":"RedHatAI/Qwen3-30B-A3B-speculator.dflash","num_speculative_tokens":15,"method":"dflash"}'
   long_context:
     description: "YaRN RoPE scaling to the model card's validated 131,072-token context. Static YaRN holds the scaling factor constant regardless of input length, so leave this off unless you actually serve long prompts — it can cost quality below 32K."
     args:
@@ -46,6 +63,7 @@ features:
       - "131072"
 
 opt_in_features:
+  - spec_decoding
   - long_context
 
 hardware_opt_in_features:
@@ -58,7 +76,7 @@ variants:
     precision: bf16
     vram_minimum_gb: 74
     description: "Full precision BF16"
-    supported_hardware: [xeon6, arc_pro_b70]
+    supported_hardware: [xeon6, arc_pro_b70, h100]
   ascend_w8a8:
     model_id: "Eco-Tech/Qwen3-30B-A3B-w8a8"
     precision: int8
@@ -101,6 +119,33 @@ variants:
     hardware_overrides:
       ascend_910c:
         docker_image: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:v0.23.0-a3"
+  redhat_fp8_dynamic:
+    model_id: "RedHatAI/Qwen3-30B-A3B-FP8-dynamic"
+    precision: fp8
+    label: "FP8 Dynamic (RedHatAI)"
+    vram_minimum_gb: 37
+    description: "RedHatAI FP8 with static per-channel weights and dynamic per-token activation quantization"
+    supported_hardware: [arch:sm90, arch:sm100, arch:sm103]
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+  redhat_fp8_block:
+    model_id: "RedHatAI/Qwen3-30B-A3B-FP8-block"
+    precision: fp8
+    label: "FP8 Block (RedHatAI)"
+    vram_minimum_gb: 37
+    description: "RedHatAI block-quantized FP8 checkpoint"
+    supported_hardware: [arch:sm90, arch:sm100, arch:sm103]
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+  redhat_nvfp4:
+    model_id: "RedHatAI/Qwen3-30B-A3B-NVFP4"
+    precision: nvfp4
+    label: "NVFP4 (RedHatAI)"
+    vram_minimum_gb: 19
+    description: "RedHatAI NVFP4 checkpoint for Blackwell GPUs"
+    supported_hardware: [arch:sm100, arch:sm103]
 
 compatible_strategies:
   - single_node_tp
@@ -224,6 +269,11 @@ guide: |
   ## References
 
   - [Model card](https://huggingface.co/Qwen/Qwen3-30B-A3B)
+  - [RedHatAI FP8 Dynamic checkpoint](https://huggingface.co/RedHatAI/Qwen3-30B-A3B-FP8-dynamic)
+  - [RedHatAI FP8 Block checkpoint](https://huggingface.co/RedHatAI/Qwen3-30B-A3B-FP8-block)
+  - [RedHatAI NVFP4 checkpoint](https://huggingface.co/RedHatAI/Qwen3-30B-A3B-NVFP4)
+  - [RedHatAI DFlash speculator](https://huggingface.co/RedHatAI/Qwen3-30B-A3B-speculator.dflash)
+  - [RedHatAI EAGLE3 speculator](https://huggingface.co/RedHatAI/Qwen3-30B-A3B-speculator.eagle3)
   - [Ascend A3 W8A8 checkpoint](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8)
   - [vLLM Ascend](https://github.com/vllm-project/vllm-ascend)
   - [vLLM CPU installation](https://docs.vllm.ai/en/latest/getting_started/installation/cpu/)
