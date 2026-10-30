@@ -321,3 +321,44 @@ except Exception as e:
 - To simulate the decode deployment of disaggregated serving, pass `--kv-transfer-config '{"kv_connector":"DecodeBenchConnector","kv_role":"kv_both"}'` to the `vllm serve` invocation. The connector populates KV cache with random values so decode can be profiled in isolation. Add `"kv_connector_extra_config":{"startup_fill":true}` to fill the whole KV cache once at startup instead of in the decode steps that admit new requests (see the connector docstring for its limitations).
 
 - **CUDAGraph capture**: Use `--compilation_config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'` to enable CUDA graph capture for decode only and save KV cache.
+
+## Fault tolerance and scale-down recovery
+
+Scale-down reloads every surviving physical replica using the recovered EPLB
+placement. The fused GPT-OSS MXFP4 checkpoint loader is not supported for this
+reload path; recovery rejects it rather than loading weights into the wrong slots.
+
+Fault tolerance lets vLLM recover from certain distributed engine failures without
+restarting the entire deployment. An external orchestrator detects failures and
+coordinates recovery across the engines.
+
+### Configuring recovery
+
+Both retry and scale-down require `--enable-fault-tolerance`,
+`--enable-expert-parallel`, an FT-capable `--all2all-backend` (`nixl_ep` or
+`deepep_low_latency`), and the v2 model runner (`VLLM_USE_V2_MODEL_RUNNER=1`).
+Retry can recover from a fault when all workers remain alive.
+
+For scale-down recovery, also enable `--enable-eplb` and configure enough
+redundant expert slots with `--eplb-config.num_redundant_experts` to fit all
+logical experts on the surviving ranks. The original checkpoint must remain
+accessible to survivors so they can reload expert weights.
+The orchestrator selects the recovery mode when it sends the recovery request.
+
+### Coordinating recovery
+
+Send recovery instructions to `POST /v1/fault_tolerance/apply`, then poll
+`GET /v1/fault_tolerance/status` on each participating engine. Use a new,
+nonempty `request_id` for each recovery round and send the same ID to every
+engine in that round. An HTTP 202 response means the instruction was accepted;
+wait until all participating engines report `healthy` before resuming traffic.
+
+Use `retry` when all workers are still alive. To remove a failed DP rank, stop
+routing traffic to it and send `scale_down` to every surviving engine once they
+report `unhealthy`. Include the original rank IDs in `removed_dp_ranks`. If the
+removed rank hosted the DP store, also provide a reachable surviving
+`dp_master_ip` and a free `dp_store_port`.
+
+Scale-down restores service with fewer ranks; it does not restart the removed
+engines or restore their capacity. The previous `/fault_tolerance/apply`
+endpoint is no longer registered.
