@@ -162,6 +162,15 @@ The number of KV heads must be a multiple or a divisor of each TP size. Blocks a
 !!! note
     On a single node with the xGMI backend, a larger decode TP size does not work yet: MoRI cannot open a session from a prefill rank to memory on a decode rank's second or later visible GPU when the prefill rank sees fewer GPUs, and the transfer fails with an error naming the decode rank. A larger prefill TP size works on xGMI, and the RDMA backend is not affected.
 
+### Decode context parallelism
+
+In WRITE mode a prefill instance without DCP can feed a decode instance with `--decode-context-parallel-size` (DCP) greater than 1, for MLA models without recurrent state. The decode instance deals the tokens of a request to the ranks of a DCP group in groups of `--cp-kv-cache-interleave-size` tokens, and each prefill rank writes a decode rank only the tokens that rank holds, so every token is written once per DCP group instead of once per decode rank.
+
+- `--cp-kv-cache-interleave-size` is optional on the decode instance and must divide the KV cache block size. Each group of interleaved tokens is one copy, so the block size gives the fewest copies. Speculative decoding with DCP on ROCm's MLA attention backend (`ROCM_AITER_MLA`) needs interleave 1.
+- Instances with the same DCP size in WRITE or READ modes work as before with any interleave that is the same on both prefill and decode. Instances whose DCP sizes or interleaves differ in any other way refuse each other at the handshake.
+- A refused handshake logs the reason and fails the requests that need it: the decode instance returns an error for each, or recomputes it with `kv_load_failure_policy` set to `recompute`.
+- Both instances must run a vLLM version with this support: a prefill instance without it cannot detect a DCP decode instance and writes into the wrong blocks.
+
 ### Transport configuration
 
 MoRI has two transport backends: RDMA and xGMI. You can select backend using `--kv-transfer-config.kv_connector_extra_config.backend $BACKEND`, with `$BACKEND` being `rdma` or `xgmi`. RDMA is the default backend and should be used in multi-node deployments.

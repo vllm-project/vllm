@@ -147,9 +147,9 @@ class MoRIIOAgentMetadata(
     # Tokens per block of each attention layer. Hybrid models size attention
     # blocks to the recurrent-state page, which depends on the TP size.
     attention_block_sizes: dict[str, int] = {}
-    # The defaults also stand for older peers that do not send these fields.
-    dcp_size: int = 1
-    cp_kv_cache_interleave_size: int = 1
+    # None: a peer that does not advertise its DCP layout.
+    dcp_size: int | None = None
+    cp_kv_cache_interleave_size: int | None = None
 
 
 class RoleManager:
@@ -218,6 +218,11 @@ class HandshakeError(MoRIIOError):
     """Exception raised when handshake fails."""
 
     pass
+
+
+class HandshakeRefusedError(HandshakeError):
+    """The peer's KV cache layout cannot be transferred with; a retry fails
+    the same way."""
 
 
 class TransferError(MoRIIOError):

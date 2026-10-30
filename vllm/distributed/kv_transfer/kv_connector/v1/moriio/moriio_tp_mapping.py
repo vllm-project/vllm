@@ -21,15 +21,24 @@ ranks than heads every rank holds the single head ``i * num_kv_heads //
 tp_size``.
 
 A consumer with decode context parallelism (DCP) shards the tokens of its MLA
-latent instead. With ``cp_kv_cache_interleave_size == block_size``, block ``j``
-of the producer, which is not DCP-sharded, lives whole on DCP rank
-``j % dcp_size`` (``tp_rank % dcp_size``) in that rank's block ``j // dcp_size``,
-so each block is one write (``dcp_write_block_pairs``).
+caches instead. A producer with the same DCP size holds the same shard on the
+same rank. A producer without DCP writes each consumer DCP rank
+(``tp_rank % dcp_size``) the tokens it holds: with ``I =
+cp_kv_cache_interleave_size``, token ``t`` lives on DCP rank ``(t // I) %
+dcp_size`` at position ``p = (t // (I * dcp_size)) * I + t % I`` of that rank's
+share, i.e. in its block ``p // block_size``. ``I`` divides the block size, so
+each group of ``I`` tokens is contiguous on both sides and is one write
+(``dcp_write_runs``); with ``I == block_size`` a group is a whole block.
 """
 
 from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import cache
+from typing import NamedTuple
+
+import numpy as np
+
+from vllm.utils.math_utils import cdiv
 
 
 @dataclass(frozen=True)
@@ -221,50 +230,109 @@ def compute_write_tp_mapping(
     )
 
 
-def validate_write_dcp_topology(
-    consumer_dcp_size: int,
-    consumer_interleave_size: int,
+def validate_peer_dcp_layout(
+    local_dcp_size: int,
+    local_interleave_size: int,
+    peer_dcp_size: int | None,
+    peer_interleave_size: int | None,
+    *,
+    writes_into_peer: bool,
     block_size: int,
     is_mla: bool,
     has_mamba: bool,
+    whole_block_layer: str | None = None,
 ) -> None:
-    if consumer_dcp_size <= 1:
+    """Refuse a peer whose DCP layout this worker cannot transfer KV with.
+
+    Equal DCP sizes transfer rank to rank. A WRITE producer without DCP can
+    also write into a DCP consumer, one write per group of interleaved tokens;
+    ``whole_block_layer`` names a layer whose blocks can only be written whole,
+    which needs the consumer's interleave to be the block size. A peer that
+    does not advertise its layout predates these checks and is accepted as
+    before.
+    """
+    if peer_dcp_size is None:
         return
+    if peer_dcp_size == local_dcp_size:
+        if (
+            local_dcp_size > 1
+            and peer_interleave_size is not None
+            and peer_interleave_size != local_interleave_size
+        ):
+            raise ValueError(
+                "MoRIIO needs the same --cp-kv-cache-interleave-size on both "
+                f"instances with decode_context_parallel_size={local_dcp_size}: "
+                f"{local_interleave_size} here, {peer_interleave_size} on the peer"
+            )
+        return
+    if not (writes_into_peer and local_dcp_size == 1):
+        raise ValueError(
+            "MoRIIO cannot transfer KV between decode_context_parallel_size="
+            f"{local_dcp_size} here and {peer_dcp_size} on the peer. Use the same "
+            "size on both instances, or a prefill instance without decode "
+            "context parallelism in WRITE mode"
+        )
     if not is_mla or has_mamba:
         raise ValueError(
-            "MoRIIO WRITE into a decode instance with decode context parallelism "
-            f"(decode_context_parallel_size={consumer_dcp_size}) supports MLA "
-            "models without recurrent state only"
+            "MoRIIO WRITE from a prefill instance without decode context "
+            "parallelism into a decode instance with "
+            f"decode_context_parallel_size={peer_dcp_size} supports MLA models "
+            "without recurrent state only"
         )
-    if consumer_interleave_size != block_size:
+    if peer_interleave_size is None or block_size % peer_interleave_size:
         raise ValueError(
             "MoRIIO WRITE into a decode instance with decode context parallelism "
-            f"(decode_context_parallel_size={consumer_dcp_size}) writes whole "
-            "blocks, so it needs cp_kv_cache_interleave_size == block_size; got "
-            f"cp_kv_cache_interleave_size={consumer_interleave_size}, "
-            f"block_size={block_size}. Leave --cp-kv-cache-interleave-size unset "
-            f"or set it to {block_size}"
+            "needs a --cp-kv-cache-interleave-size that divides the block size "
+            f"{block_size}; it uses {peer_interleave_size}"
+        )
+    if whole_block_layer is not None and peer_interleave_size < block_size:
+        raise ValueError(
+            f"MoRIIO writes layer {whole_block_layer} in whole blocks only, so "
+            "the decode instance with decode_context_parallel_size="
+            f"{peer_dcp_size} needs --cp-kv-cache-interleave-size {block_size} "
+            f"(the block size); it uses {peer_interleave_size}"
         )
 
 
-def dcp_write_block_pairs(
+class DCPWriteRuns(NamedTuple):
+    """First token of each run: producer block id and slot, consumer block id
+    and slot."""
+
+    local_blocks: np.ndarray
+    local_slots: np.ndarray
+    remote_blocks: np.ndarray
+    remote_slots: np.ndarray
+
+
+def dcp_write_runs(
     local_block_ids: Sequence[int],
     remote_block_ids: Sequence[int],
+    block_size: int,
     dcp_size: int,
+    interleave_size: int,
     dcp_rank: int,
-) -> tuple[list[int], list[int]]:
-    """Producer blocks that consumer DCP rank ``dcp_rank`` holds, paired with
-    that rank's block ids.
+) -> DCPWriteRuns:
+    """Runs of ``interleave_size`` producer tokens that consumer DCP rank
+    ``dcp_rank`` holds, in the rank's token order.
 
-    A rank that holds none of them (a prompt shorter than ``dcp_size`` blocks)
-    gets two empty lists and must still be sent write_done.
+    A rank that holds none of them (a prompt shorter than ``dcp_size`` runs)
+    gets empty runs and must still be sent write_done.
     """
-    local = list(local_block_ids[dcp_rank::dcp_size])
-    remote = list(remote_block_ids[: len(local)])
-    if len(remote) < len(local):
+    runs = np.arange(
+        dcp_rank, len(local_block_ids) * block_size // interleave_size, dcp_size
+    )
+    tokens = runs * interleave_size
+    positions = runs // dcp_size * interleave_size
+    needed = cdiv(len(runs) * interleave_size, block_size)
+    if len(remote_block_ids) < needed:
         raise ValueError(
-            f"DCP rank {dcp_rank}/{dcp_size} of the consumer needs {len(local)} "
+            f"DCP rank {dcp_rank}/{dcp_size} of the consumer needs {needed} "
             f"blocks for {len(local_block_ids)} producer blocks, but it allocated "
             f"{len(remote_block_ids)}"
         )
-    return local, remote
+    return DCPWriteRuns(
+        np.asarray(local_block_ids, dtype=np.int64)[tokens // block_size],
+        tokens % block_size,
+        np.asarray(remote_block_ids, dtype=np.int64)[positions // block_size],
+        positions % block_size,
+    )

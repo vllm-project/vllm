@@ -41,7 +41,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     zmq_ctx,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_tp_mapping import (
-    dcp_write_block_pairs,
+    dcp_write_runs,
 )
 
 if TYPE_CHECKING:
@@ -112,6 +112,8 @@ class MoRIIOWriter:
         self._scheduled_writes: dict[TransferId, int] = defaultdict(int)
         self._scheduled_layers: dict[TransferId, set[str]] = defaultdict(set)
         self._sealed_writes: dict[TransferId, int] = {}
+        # Transfers whose handshake failed.
+        self._unconnected: set[TransferId] = set()
         self._defer_timeout = worker.moriio_config.defer_timeout
 
     @property
@@ -166,6 +168,16 @@ class MoRIIOWriter:
     def is_scheduled(self, transfer_id: TransferId, layer_name: str) -> bool:
         with self._write_state_lock:
             return layer_name in self._scheduled_layers.get(transfer_id, set())
+
+    def mark_unconnected(self, transfer_id: TransferId) -> None:
+        """Record that a transfer's handshake failed. Its writes still go to
+        decode ranks that are connected; otherwise the transfer fails."""
+        with self._write_state_lock:
+            self._unconnected.add(transfer_id)
+
+    def is_unconnected(self, transfer_id: TransferId) -> bool:
+        with self._write_state_lock:
+            return transfer_id in self._unconnected
 
     def seal_pending_transfers(self) -> None:
         """Seal expected WRITE counts after the model forward has run.
@@ -267,8 +279,12 @@ class MoRIIOWriter:
             task.request_id,
             age,
         )
-        # No remote allocation arrived, so the decode DP rank that owns the
-        # request is unknown. Tell every rank; the others drop it.
+        self._send_write_failed(task)
+
+    def _send_write_failed(self, task: WriteTask) -> None:
+        # Only the remote allocation names the decode DP rank that owns the
+        # request, and it may not have arrived. Tell every rank; the others
+        # drop it.
         for decode_dp_rank in range(max(task.remote_dp_size, 1)):
             for remote_ip, remote_port in self._resolve_notify_endpoints(
                 task, decode_dp_rank
@@ -282,7 +298,7 @@ class MoRIIOWriter:
                     )
                 except Exception:
                     logger.exception(
-                        "Failed to notify decode DP rank %d that transfer %s timed out",
+                        "Failed to notify decode DP rank %d that transfer %s failed",
                         decode_dp_rank,
                         task.transfer_id,
                     )
@@ -292,6 +308,7 @@ class MoRIIOWriter:
             self._scheduled_writes.pop(transfer_id, None)
             self._scheduled_layers.pop(transfer_id, None)
             self._sealed_writes.pop(transfer_id, None)
+            self._unconnected.discard(transfer_id)
 
     def _is_transfer_terminal(self, transfer_id: TransferId) -> bool:
         wrapper = self.worker.moriio_wrapper
@@ -376,6 +393,31 @@ class MoRIIOWriter:
             )
             return
 
+        is_mamba = self.worker._is_mamba_layer(task.layer_name)
+        targets = [
+            target
+            for target in self._write_targets(task)
+            # Another producer rank writes the attention copies of the rest.
+            if target is None or is_mamba or target.num_heads
+        ]
+        engine_ids = [
+            self._target_engine_id(task, request_info.decode_dp_rank, target)
+            for target in targets
+        ]
+        if self.is_unconnected(task.transfer_id) and not all(
+            engine_id in self.worker.remote_moriio_metadata for engine_id in engine_ids
+        ):
+            # Tell the decode ranks, so they do not wait for KV that cannot
+            # arrive.
+            logger.error(
+                "Failing the KV transfer of request %s: the handshake with its "
+                "decode instance failed",
+                task.request_id,
+            )
+            self._mark_request_done(task.transfer_id)
+            self._send_write_failed(task)
+            return
+
         # Wait for CUDA event
         # The attention computation of the current layer cannot
         # overlap with the kv transfer task,
@@ -383,16 +425,9 @@ class MoRIIOWriter:
         # This event is used to synchronize the kv transfer and computation tasks.
         task.event.synchronize()
 
-        is_mamba = self.worker._is_mamba_layer(task.layer_name)
         transfer_statuses: list[Any] = []
         bytes_written = 0
-        for target in self._write_targets(task):
-            if target is not None and not is_mamba and not target.num_heads:
-                # Another producer rank writes this attention copy.
-                continue
-            target_engine_id = self._target_engine_id(
-                task, request_info.decode_dp_rank, target
-            )
+        for target, target_engine_id in zip(targets, engine_ids):
             # Get or create sessions
             sessions, remote_moriio_meta = self.worker._get_built_session(
                 target_engine_id
@@ -458,13 +493,40 @@ class MoRIIOWriter:
             if self.worker._has_mamba:
                 # D can reserve a tail block for the token recomputed locally.
                 remote_blocks = remote_blocks[: len(local_blocks)]
-            dcp_size = remote_moriio_meta.dcp_size
-            if dcp_size > 1 and self.worker.layer_to_spec[task.layer_name].dcp_sharded:
-                tp_rank = self.worker.tp_rank if target is None else target.tp_rank
-                local_blocks, remote_blocks = dcp_write_block_pairs(
-                    local_blocks, remote_blocks, dcp_size, tp_rank % dcp_size
-                )
+            dcp_size = remote_moriio_meta.dcp_size or 1
+            runs = None
             if (
+                dcp_size > 1
+                and self.worker.dcp_size == 1
+                and self.worker.layer_to_spec[task.layer_name].dcp_sharded
+            ):
+                block_size = self.worker.layer_to_spec[task.layer_name].block_size
+                run_tokens = (
+                    remote_moriio_meta.cp_kv_cache_interleave_size or block_size
+                )
+                tp_rank = self.worker.tp_rank if target is None else target.tp_rank
+                runs = dcp_write_runs(
+                    local_blocks,
+                    remote_blocks,
+                    block_size,
+                    dcp_size,
+                    run_tokens,
+                    tp_rank % dcp_size,
+                )
+                if run_tokens == block_size:
+                    # Each run is a whole block.
+                    local_blocks = runs.local_blocks.tolist()
+                    remote_blocks = runs.remote_blocks.tolist()
+                    runs = None
+            if runs is not None:
+                offsets = self.worker._compute_dcp_run_offsets(
+                    task.layer_name,
+                    runs,
+                    run_tokens,
+                    remote_moriio_meta,
+                    remote_engine_id=remote_engine_id,
+                )
+            elif (
                 target is None
                 or task.tp_mapping is None
                 or (

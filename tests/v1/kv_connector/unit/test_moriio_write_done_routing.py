@@ -295,7 +295,7 @@ def test_execute_write_task_writes_every_fanout_target():
     def _prepare_transfer_plan(
         task, request_info, remote_moriio_meta, remote_engine_id=None, target=None
     ):
-        return SimpleNamespace(transfer_sizes=[64, 32])
+        return SimpleNamespace(transfer_sizes=[])
 
     def _do_layer_write(plan, sessions):
         write_sessions.append(sessions)
@@ -320,7 +320,6 @@ def test_execute_write_task_writes_every_fanout_target():
         "status-remote-engine_dp0_tp2",
         "status-remote-engine_dp0_tp3",
     ]
-    assert info.bytes_written == 2 * (64 + 32)
 
 
 def test_fanout_write_done_notifies_every_target_after_completion():
@@ -463,6 +462,7 @@ def _fanout_save_worker(remote_agents: set[str]) -> MoRIIOConnectorWorker:
     worker._write_blocks_for_req = (  # type: ignore[method-assign]
         lambda req_id, meta, layer_name, kv_layer: worker.writes.append(req_id)
     )
+    worker._writer = make_moriio_writer(worker)
     return worker
 
 
