@@ -21,6 +21,7 @@ import vllm.model_executor.layers.vocab_parallel_embedding as embedding_module
 import vllm.model_executor.parameter as parameter_module
 import vllm.models.qwen4_exp.common.ngram_embedding as ngram_embedding_module
 import vllm.models.qwen4_exp.nvidia.ngram_embedding as nvidia_ngram_embedding_module
+import vllm.utils.gpu_sync_debug as gpu_sync_debug
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm.config import SpeculativeConfig, VllmConfig
 from vllm.config.compilation import CUDAGraphMode
@@ -63,6 +64,7 @@ from vllm.models.qwen4_exp.nvidia.ngram_embedding import (
 )
 from vllm.models.qwen4_exp.nvidia.ple_layer import Qwen4ExpPLELayer
 from vllm.platforms import current_platform
+from vllm.utils.gpu_sync_debug import with_gpu_sync_check
 from vllm.utils.torch_utils import weak_ref_tensor
 from vllm.v1.attention.backends.short_conv_attn import (
     PleShortConvAttentionMetadata,
@@ -1220,9 +1222,11 @@ def test_disk_offload_matches_resident_table_under_graph_replay(
     query_start_loc = torch.tensor([0, 5, 8], dtype=torch.int32, device="cuda")
     ngram_context = torch.tensor([[3], [0]], dtype=torch.int32, device="cuda")
     input_ids = torch.randint(1, 64, (8,), device="cuda")
+    monkeypatch.setattr(gpu_sync_debug, "_SYNC_CHECK_MODE", "error")
+    monkeypatch.setattr(gpu_sync_debug, "_sync_check_enabled", True)
 
     def stage() -> None:
-        stage_checkpoint_rows(
+        with_gpu_sync_check(stage_checkpoint_rows)(
             [(gather, gather.ngram_embedding)],
             input_ids,
             query_start_loc,

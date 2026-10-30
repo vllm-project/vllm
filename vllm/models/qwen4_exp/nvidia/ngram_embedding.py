@@ -19,6 +19,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import is_fp8
 from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.models.common.ops.sequence_parallel import sp_reduce_scatter, sp_shard
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import round_up
 
 from ..common.ngram_embedding import (
@@ -745,6 +746,7 @@ def stage_checkpoint_rows(
         ids = module.compute_ngram_ids(input_ids, query_start_loc, ngram_context)
         embedding.copy_ids_to_host(ids)
     if input_ids.device.type != "cpu":
-        torch.accelerator.current_stream().synchronize()
+        with gpu_sync_allowed():
+            torch.accelerator.current_stream().synchronize()
     for _, embedding in modules:
         embedding.stage_rows(num_tokens)
