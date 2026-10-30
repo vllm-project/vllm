@@ -1380,8 +1380,9 @@ def test_b12x_block_quant_relu2_moe_graph(codec, tokens, workspace_init):
     reason="requires b12x MXFP4 CSF kernels on SM120/SM121",
 )
 @pytest.mark.parametrize("enforce_eager", [True, False])
+@pytest.mark.parametrize("intermediate", [192, 256])
 def test_b12x_mxfp4_csf_checkpoint_loading_preserves_generation(
-    tmp_path, monkeypatch, vllm_runner, enforce_eager
+    tmp_path, monkeypatch, vllm_runner, enforce_eager, intermediate
 ):
     """Loading packed weights preserves generation with one routed row per call."""
     from safetensors.torch import save_file
@@ -1392,11 +1393,13 @@ def test_b12x_mxfp4_csf_checkpoint_loading_preserves_generation(
     from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
 
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    # Compare matching GEMM layouts to isolate scale storage from arithmetic.
+    monkeypatch.setenv("B12X_W4A8_CSF_INLINE", str(int(intermediate % 128 == 64)))
     config = Qwen3MoeConfig(
         vocab_size=128,
         hidden_size=256,
         intermediate_size=256,
-        moe_intermediate_size=256,
+        moe_intermediate_size=intermediate,
         num_hidden_layers=2,
         num_attention_heads=4,
         num_key_value_heads=4,
@@ -1419,9 +1422,9 @@ def test_b12x_mxfp4_csf_checkpoint_loading_preserves_generation(
         for index in range(2):
             for expert in range(8):
                 for projection, rows, cols in (
-                    ("gate_proj", 256, 256),
-                    ("up_proj", 256, 256),
-                    ("down_proj", 256, 256),
+                    ("gate_proj", intermediate, 256),
+                    ("up_proj", intermediate, 256),
+                    ("down_proj", 256, intermediate),
                 ):
                     prefix = f"model.layers.{index}.mlp.experts.{expert}.{projection}"
                     weights[f"{prefix}.weight"] = torch.randint(
@@ -1450,7 +1453,11 @@ def test_b12x_mxfp4_csf_checkpoint_loading_preserves_generation(
                 assert layer.w13_weight_scale.numel() == 0
                 assert layer.w2_weight_scale.numel() == 0
                 prepared = layer._b12x_prepared_experts
-                assert (prepared.mxfp4_csf is not None) == compressed
+                inline = intermediate % 128 == 64
+                assert (prepared.mxfp4_csf_inline is not None) == (
+                    compressed and inline
+                )
+                assert (prepared.mxfp4_csf is not None) == (compressed and not inline)
                 pointers.append(
                     (
                         prepared.w1_blockscale.data_ptr(),
@@ -1636,7 +1643,7 @@ def test_b12x_resident_csf_scales_match_decoded_scales(
 @pytest.mark.parametrize(
     "hidden,intermediate,expected",
     [
-        (256, 192, False),
+        (256, 192, True),
         (256, 256, True),
         (4096, 1024, True),
         (256, 224, False),
@@ -1660,15 +1667,17 @@ def test_mxfp4_csf_requires_unpadded_scale_geometry(hidden, intermediate, expect
     reason="requires b12x MXFP4 CSF kernels on SM120/SM121",
 )
 @pytest.mark.parametrize("intermediate", [192, 256])
+@pytest.mark.parametrize("tokens,topk", [(1, 2), (3, 1), (7, 1)])
 @torch.inference_mode()
 def test_b12x_mxfp4_resident_scales_match_plain_scales(
-    intermediate, monkeypatch, workspace_init
+    intermediate, tokens, topk, monkeypatch, workspace_init
 ):
-    """CSF preserves scale bytes and one-token outputs across graph replays."""
+    """CSF preserves scales and outputs for cached live capacities and graph replays."""
     from vllm.v1.worker.workspace import lock_workspace
 
+    monkeypatch.setenv("B12X_W4A8_CSF_INLINE", str(int(intermediate % 128 == 64)))
     set_random_seed(29)
-    num_experts, hidden, topk = 8, 256, 2
+    num_experts, hidden = 8, 256
     config = make_dummy_moe_config(
         num_experts=num_experts,
         experts_per_token=topk,
@@ -1719,25 +1728,21 @@ def test_b12x_mxfp4_resident_scales_match_plain_scales(
         assert isinstance(resident_experts, B12xExperts)
         plain = plain_experts._prepared()
         resident = resident_experts._prepared()
-        assert resident.mxfp4_csf_inline is None
+        inline = intermediate % 128 == 64
+        assert (resident.mxfp4_csf_inline is not None) == inline
         assert (
             layers[1].w13_weight_scale.numel() == layers[1].w2_weight_scale.numel() == 0
         )
 
-        if intermediate % 128:
+        if inline:
             assert resident.mxfp4_csf is None
-            for actual, expected in zip(
-                (resident.w1_blockscale, resident.w2_blockscale),
-                (plain.w1_blockscale, plain.w2_blockscale),
-            ):
-                assert torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
-            return
-        assert resident.mxfp4_csf is not None
-        resident.mxfp4_csf.decode(
-            torch.arange(num_experts, device="cuda", dtype=torch.int32),
-            resident.w1_blockscale,
-            resident.w2_blockscale,
-        )
+        else:
+            assert resident.mxfp4_csf is not None
+            resident.mxfp4_csf.decode(
+                torch.arange(num_experts, device="cuda", dtype=torch.int32),
+                resident.w1_blockscale,
+                resident.w2_blockscale,
+            )
         for expanded, expected in zip(
             (resident.w1_blockscale, resident.w2_blockscale),
             (plain.w1_blockscale, plain.w2_blockscale),
@@ -1746,9 +1751,19 @@ def test_b12x_mxfp4_resident_scales_match_plain_scales(
         with pytest.raises(NotImplementedError, match="reloading"):
             kernels[1].fused_experts.process_weights_after_loading(layers[1])
 
-        x = torch.randn(1, hidden, device="cuda", dtype=torch.bfloat16)
-        ids = torch.tensor([[0, 1]], device="cuda", dtype=torch.int32)
-        routing = torch.tensor([[0.4, 0.6]], device="cuda", dtype=torch.float32)
+        resident_experts._plan(tokens=1, topk=topk, activation=MoEActivation.SILU)
+
+        def reject_runtime_preparation(*args, **kwargs):
+            pytest.fail("a new live batch tried to prepare kernels during inference")
+
+        monkeypatch.setattr(
+            resident_experts._preparation_session, "prepare", reject_runtime_preparation
+        )
+
+        x = torch.randn(tokens, hidden, device="cuda", dtype=torch.bfloat16)
+        ids = torch.arange(tokens * topk, device="cuda", dtype=torch.int32)
+        ids = ids.view(tokens, topk).remainder(num_experts)
+        routing = torch.full((tokens, topk), 1.0 / topk, device="cuda")
 
         def apply(index):
             return kernels[index].apply(
@@ -1770,9 +1785,9 @@ def test_b12x_mxfp4_resident_scales_match_plain_scales(
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph, stream=torch.cuda.Stream()):
             output = apply(1)
-        for routes in ([2, 3], [4, 5]):
+        for _ in range(2):
             x.neg_()
-            ids.copy_(torch.tensor([routes], device="cuda", dtype=torch.int32))
+            ids.add_(2).remainder_(num_experts)
             resident.w1_blockscale.view(torch.uint8).fill_(0x7F)
             resident.w2_blockscale.view(torch.uint8).fill_(0x7F)
             graph.replay()
