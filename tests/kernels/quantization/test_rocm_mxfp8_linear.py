@@ -689,3 +689,85 @@ def test_rocm_mxfp8_linear_flydsl_leaves_other_layers_alone(flydsl):
         kernel.process_weights_after_loading(layer)
         assert not kernel._use_flydsl(layer), name
         assert torch.equal(layer.weight.view(torch.uint8), loaded), name
+
+
+_WARMUP_SWEEP = """
+import glob, os, sys
+from types import SimpleNamespace
+import torch
+from vllm._aiter_ops import rocm_aiter_ops
+from vllm.model_executor.kernels.linear.mxfp8.Mxfp8LinearKernel import (
+    Mxfp8LinearLayerConfig,
+)
+from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
+    RocmDotScaledMxfp8LinearKernel,
+    _flydsl_enabled,
+)
+from vllm.model_executor.warmup.rocm_flydsl_mxfp8_warmup import (
+    rocm_flydsl_mxfp8_warmup,
+)
+{make_layer}
+rocm_aiter_ops.refresh_env_variables()
+if not _flydsl_enabled():
+    print("SKIP"); sys.exit(0)
+n, k, max_tokens = {n}, {k}, {max_tokens}
+torch.set_default_dtype(torch.bfloat16)
+kernel = RocmDotScaledMxfp8LinearKernel(Mxfp8LinearLayerConfig(weight_shape=(n, k)))
+model = torch.nn.Module()
+model.proj = _make_block32_layer(n, k, "cuda")
+model.proj.quant_method = SimpleNamespace(kernel=kernel)
+kernel.process_weights_after_loading(model.proj)
+
+
+def compiled():
+    return len(glob.glob(os.environ["FLYDSL_RUNTIME_CACHE_DIR"] + "/**/*.pkl",
+                         recursive=True))
+
+
+if {warm}:
+    rocm_flydsl_mxfp8_warmup(model, max_tokens)
+warmed = compiled()
+with torch.inference_mode():
+    for m in range(1, max_tokens + 1):
+        kernel.apply_weights(model.proj, torch.randn(m, k, device="cuda"))
+torch.accelerator.synchronize()
+print("COMPILED", warmed, compiled())
+"""
+
+
+@pytest.mark.parametrize("warm", [True, False], ids=["warmup", "no_warmup"])
+def test_rocm_flydsl_mxfp8_warmup_leaves_nothing_to_compile(tmp_path, warm):
+    """After the warmup, serving every token count up to max_num_batched_tokens
+    compiles no FlyDSL kernel; without it, serving compiles them (the cold-start
+    stall). Runs in a subprocess: FlyDSL fixes its cache directory at import."""
+    import inspect
+    import os
+    import subprocess
+    import sys
+
+    script = _WARMUP_SWEEP.format(
+        make_layer=inspect.getsource(_make_block32_layer),
+        n=5120,  # DeepSeek V4.1 shared expert down at TP1
+        k=2304,
+        max_tokens=512,
+        warm=warm,
+    )
+    env = dict(
+        os.environ, VLLM_ROCM_USE_AITER="1", FLYDSL_RUNTIME_CACHE_DIR=str(tmp_path)
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=1800,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    if "SKIP" in proc.stdout:
+        pytest.skip("requires AITER on gfx950")
+    warmed, served = map(int, proc.stdout.split("COMPILED")[1].split())
+    if warm:
+        assert warmed > 0 and served == warmed, (warmed, served)
+    else:
+        assert served > warmed == 0, (warmed, served)
