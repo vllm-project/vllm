@@ -37,12 +37,14 @@ The Rust frontend also serves a `vllm.Render` gRPC service, defined in
 - `Render.Tokenize` renders a chat request into a token-in
   `vllm.GenerateRequest` that can be sent to `Inference.Generate` as is. It
   copies the generation parameters from the caller's `GenerateRequest` and
-  fills in the prompt token IDs and any tool-call grammar.
+  fills in the prompt token IDs and any tool-call grammar. The returned request
+  asks `Inference.Generate` for output token IDs only, without text.
 - `Render.Detokenize` takes the same chat request, the `GenerateRequest` from
   `Tokenize`, and the output token IDs of `Inference.Generate`. It returns the
   answer text, reasoning, and parsed tool calls.
 
-Both RPCs are unary and accept text content only.
+Both RPCs are unary and accept text content only. Like `/inference/v1/generate`,
+this flow does not support stop strings.
 
 ## Get Responses prompt token IDs
 

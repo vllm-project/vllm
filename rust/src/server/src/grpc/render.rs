@@ -143,6 +143,20 @@ async fn tokenize(
             "generate.media is not supported by Tokenize",
         ));
     }
+    // TODO: support stop strings, which need text from Generate.
+    if generate
+        .stopping
+        .as_ref()
+        .is_some_and(|stopping| !stopping.stop_strings.is_empty())
+    {
+        return Err(Status::invalid_argument(
+            "generate.stopping.stop_strings is not supported by Tokenize",
+        ));
+    }
+    // Generate returns token IDs only; Detokenize produces the text.
+    let response = generate.response.get_or_insert_default();
+    response.output_token_ids = true;
+    response.output_text = Some(false);
 
     let chat_request = to_chat_request(state, chat, &generate)?;
     let structured_outputs = chat_request.sampling_params.structured_outputs.clone();
@@ -208,7 +222,9 @@ async fn detokenize(
     let prompt_token_ids = prompt.ids.clone();
     let finish_reason = finish_reason_from_proto(finish_info.as_ref());
 
-    let chat_request = to_chat_request(state, chat.unwrap_or_default(), &generate_request)?;
+    let mut chat_request = to_chat_request(state, chat.unwrap_or_default(), &generate_request)?;
+    // Tokenize turns off text output for Generate, not for Detokenize.
+    chat_request.decode_options.detokenize = true;
     let collected = state
         .chat_processor()
         .detokenize(

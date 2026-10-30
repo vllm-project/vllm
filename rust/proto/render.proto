@@ -24,14 +24,16 @@ service Render {
 message TokenizeRequest {
   ChatRequest chat = 1;
   // Generation parameters, copied into the returned GenerateRequest. The prompt
-  // must be unset; it is filled with the rendered prompt token IDs.
+  // must be unset; it is filled with the rendered prompt token IDs. Stop
+  // strings are not supported.
   GenerateRequest generate = 2;
 }
 
 message TokenizeResponse {
   // `generate` from the request with its prompt set to the rendered token IDs,
   // prompt truncation already applied, and the parser-owned structured output,
-  // `skip_special_tokens` and reasoning gate filled in.
+  // `skip_special_tokens` and reasoning gate filled in. Its response options
+  // request output token IDs without text; pass them to Detokenize.
   GenerateRequest generate_request = 1;
 }
 

@@ -2939,7 +2939,6 @@ async fn render_tokenize_returns_generate_request_with_rendered_prompt() {
         temperature: Some(0.5),
         stopping: Some(pb::StoppingCriteria {
             max_new_tokens: 16,
-            stop_strings: vec!["END".to_string()],
             ..Default::default()
         }),
         priority: 3,
@@ -2960,6 +2959,10 @@ async fn render_tokenize_returns_generate_request_with_rendered_prompt() {
     assert_eq!(rendered.temperature, generate.temperature);
     assert_eq!(rendered.stopping, generate.stopping);
     assert_eq!(rendered.priority, generate.priority);
+    // Generate returns token IDs only, for Detokenize.
+    let response = rendered.response.expect("response options");
+    assert!(response.output_token_ids);
+    assert_eq!(response.output_text, Some(false));
     // The engine's reasoning parser sees the same thinking mode as the template.
     let gate = rendered.engine_reasoning_gate.expect("engine_reasoning_gate");
     assert_eq!(
@@ -3049,48 +3052,22 @@ async fn render_detokenize_parses_reasoning_and_tool_calls() {
 }
 
 #[tokio::test]
-async fn render_detokenize_truncates_at_stop_string() {
-    let service = render_service();
-    let chat = pb::ChatRequest {
-        messages: vec![pb::ChatMessage {
-            role: "user".to_string(),
-            content: Some(pb::chat_message::Content::Text("Say hello".to_string())),
-            ..Default::default()
-        }],
-        chat_template_kwargs: json_to_proto_struct(&serde_json::json!({"enable_thinking": false})),
-        ..Default::default()
-    };
-    let generate_request = render_tokenize(
-        &service,
-        chat.clone(),
-        pb::GenerateRequest {
-            stopping: Some(pb::StoppingCriteria {
-                stop_strings: vec!["END".to_string()],
-                ..Default::default()
-            }),
-            ..Default::default()
-        },
-    )
-    .await;
-
-    // Generate stops at the token completing the stop string.
-    let response = service
-        .detokenize(tonic::Request::new(pb::DetokenizeRequest {
-            chat: Some(chat),
-            generate_request: Some(generate_request),
-            token_ids: render_token_ids("hello END"),
-            finish_info: Some(pb::FinishInfo {
-                finish_reason: pb::finish_info::FinishReason::Stop as i32,
-                stop_reason: Some(pb::finish_info::StopReason::StopString("END".to_string())),
+async fn render_tokenize_rejects_stop_strings() {
+    let status = render_service()
+        .tokenize(tonic::Request::new(pb::TokenizeRequest {
+            chat: Some(weather_chat_request()),
+            generate: Some(pb::GenerateRequest {
+                stopping: Some(pb::StoppingCriteria {
+                    stop_strings: vec!["END".to_string()],
+                    ..Default::default()
+                }),
                 ..Default::default()
             }),
         }))
         .await
-        .expect("detokenize")
-        .into_inner();
+        .expect_err("stop strings need text output");
 
-    assert_eq!(response.content, "hello ");
-    assert!(response.tool_calls.is_empty());
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
 }
 
 #[tokio::test]
