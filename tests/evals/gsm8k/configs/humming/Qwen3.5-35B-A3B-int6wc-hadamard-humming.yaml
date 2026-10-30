@@ -8,6 +8,6 @@ server_args: >-
   --max-model-len 8192
   --tensor-parallel-size 1
   --quantization humming
-  --kernel-config.enable_flashinfer_autotune=False
+  --disable-flashinfer-autotune
 env:
   VLLM_HUMMING_ONLINE_QUANT_CONFIG: '{"dtype":"int6","hadamard_block_size":-1}'

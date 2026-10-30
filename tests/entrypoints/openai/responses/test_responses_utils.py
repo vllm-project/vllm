@@ -153,6 +153,7 @@ class TestResponsesUtils:
         message = messages[0]
         assert message["role"] == "assistant"
         assert message["reasoning"] == "Leroy Jenkins"
+        assert message["tool_calls"] is not None
         assert message["tool_calls"][0]["id"] == "call_123"
         assert message["tool_calls"][0]["function"]["name"] == "python"
         assert (
@@ -886,6 +887,7 @@ class TestConstructChatMessagesCombinePolicy:
         if expected_tool_call_ids is None:
             assert "tool_calls" not in messages[0]
         else:
+            assert messages[0]["tool_calls"] is not None
             assert [tool_call["id"] for tool_call in messages[0]["tool_calls"]] == (
                 expected_tool_call_ids
             )
@@ -991,3 +993,28 @@ class TestConstructInputMessagesInstructionsLeak:
         assert len(msgs) == 2
         assert msgs[0] == {"role": "system", "content": "be helpful"}
         assert msgs[1] == {"role": "user", "content": "hello"}
+
+
+class TestBuildResponseOutputItemsStatus:
+    """Item ``status`` must follow the finish reason of the generation
+    (#57998): a ``length`` cut marks the item that was cut ``incomplete``."""
+
+    _CALLS = [
+        FunctionCall(name="get_weather", arguments='{"city": "Paris"}'),
+        FunctionCall(name="get_weather", arguments='{"city": "Tok'),
+    ]
+
+    def test_length_marks_truncated_message_incomplete(self):
+        (item,) = build_response_output_items(
+            reasoning=None, content="cut mid sen", tool_calls=[], finish_reason="length"
+        )
+        assert item.type == "message"
+        assert item.status == "incomplete"
+
+    def test_length_marks_only_last_tool_call_incomplete(self):
+        message, first, last = build_response_output_items(
+            reasoning=None, content="hi", tool_calls=self._CALLS, finish_reason="length"
+        )
+        assert message.status == "completed"
+        assert first.status == "completed"
+        assert last.status == "incomplete"

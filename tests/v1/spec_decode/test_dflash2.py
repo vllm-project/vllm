@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
+from unittest import mock
 
 import pytest
 import torch
 
-from vllm.model_executor.models.qwen3_dflash import (
-    _add_global_draft_layer_exclusions,
-)
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.qwen3_dflash2 import _grouped_conv, _score_edges
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
@@ -37,6 +37,50 @@ def test_grouped_conv_matches_reference(block_size: int):
             ) * hidden_blocks[:, position - tap]
 
     torch.testing.assert_close(actual, expected.flatten(0, 1).flatten(-2))
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.parametrize(
+    "rows,width,query,group,taps",
+    [
+        (8, 5120, 8, 16, 2),
+        (64, 5120, 8, 16, 2),
+        (256, 5120, 8, 16, 2),
+        (15, 143, 5, 11, 3),
+    ],
+)
+@pytest.mark.parametrize("warps", [None, 4, 8, 16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
+def test_beam_conv_residual_norm(rows, width, query, group, taps, warps, dtype):
+    """Dtype rounding and request boundaries survive residual/norm fusion."""
+    from vllm import _custom_ops as ops
+    from vllm.models.beam.nvidia.dflash2_conv_ops import conv_residual_norm
+
+    torch.manual_seed(42)
+    hidden = torch.randn(rows, width, device="cuda", dtype=dtype)
+    residual = torch.randn_like(hidden)
+    weight = torch.randn(width, device="cuda", dtype=hidden.dtype)
+    base = torch.randn(taps, width, device="cuda", dtype=hidden.dtype)
+    delta = torch.randn(
+        rows, 2, taps, width // group, device="cuda", dtype=hidden.dtype
+    )[:, 1]
+    expected = _grouped_conv(hidden, delta, base, query, width // group, group, taps)
+    expected_residual = residual.clone()
+    ops.fused_add_rms_norm(expected, expected_residual, weight, 1e-6)
+    actual, actual_residual = conv_residual_norm(
+        hidden, delta, base, residual, weight, 1e-6, query, group, num_warps=warps
+    )
+    tolerance = {torch.bfloat16: 0.015625, torch.float16: 0.002, torch.float32: 3e-6}[
+        dtype
+    ]
+    residual_tolerance = 0 if dtype == torch.bfloat16 else tolerance
+    torch.testing.assert_close(
+        actual_residual,
+        expected_residual,
+        rtol=residual_tolerance,
+        atol=residual_tolerance,
+    )
+    torch.testing.assert_close(actual, expected, rtol=tolerance, atol=tolerance)
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
@@ -88,22 +132,119 @@ def test_grouped_conv_triton_matches_reference(
     )
 
 
-def test_draft_quant_exclusions_include_global_layer_indices():
-    quant_config = SimpleNamespace(
-        exclude_modules=[
-            "layers.0.mlp_conv*",
-            "*layers.4.self_attn.q_proj",
-            "layers.88.already_global",
-            "lilicorr.layers.0.mlp.0",
-        ]
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.parametrize("rows,heads", [(8, 1), (64, 2), (256, 1)])
+def test_beam_fused_context_kv(rows, heads):
+    """All layer pointers and strided cache pages match the staged context path."""
+    from vllm import _custom_ops as ops
+    from vllm.models.beam.nvidia.dflash2_context_ops import store_context_kv
+
+    torch.manual_seed(42)
+    layers, dim, page = 5, 128, 16
+    kv = torch.randn(rows, layers, 2, heads, dim, device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn(layers, dim, device="cuda", dtype=kv.dtype)
+    positions = torch.arange(rows, device="cuda", dtype=torch.int64)
+    angles = torch.randn(rows, dim // 2, device="cuda")
+    rope = torch.cat((angles.cos(), angles.sin()), -1).to(kv.dtype)
+    staged = kv.permute(2, 1, 0, 3, 4).contiguous()
+    keys = torch.empty_like(staged[0])
+    ops.rms_norm(keys, staged[0], weight, 1e-6)
+    ops.rotary_embedding(
+        positions.repeat(layers), keys.view(layers * rows, -1), None, dim, rope, True
+    )
+    values = staged[1]
+    storage = torch.randn(
+        (rows + page - 1) // page,
+        layers,
+        heads,
+        page,
+        2 * dim,
+        device="cuda",
+        dtype=kv.dtype,
+    )
+    expected = storage.clone()
+    slots = positions.flip(0)[:-1].contiguous()
+    slots[::3] = -1
+    valid = slots >= 0
+    ids = slots[valid]
+    for layer in range(layers):
+        expected[ids // page, layer, :, ids % page, :dim] = keys[layer, :-1][valid]
+        expected[ids // page, layer, :, ids % page, dim:] = values[layer, :-1][valid]
+    caches = storage.unbind(1)
+    pointers = torch.tensor(
+        [c.data_ptr() for c in caches], device="cuda", dtype=torch.int64
+    )
+    store_context_kv(kv, weight, positions, rope, pointers, slots, caches[0], 1e-6)
+    torch.testing.assert_close(storage, expected, rtol=0.01, atol=0.015625)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.parametrize("rows", [1, 8, 65, 2048])
+@pytest.mark.parametrize("cache_dtype", ["fp8_e4m3", "fp8_e5m2"])
+def test_beam_fp8_context_cache_matches_backend_and_replays(rows, cache_dtype):
+    """Quantize rounded context K/V with each layer's live scales and slot mask."""
+    from vllm import _custom_ops as ops
+    from vllm.models.beam.nvidia.dflash2_context_ops import store_context_kv
+
+    torch.manual_seed(42)
+    layers, heads, dim, page = 3, 2, 128, 16
+    kv = torch.randn(rows, layers, 2, heads, dim, device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn(layers, dim, device="cuda", dtype=kv.dtype)
+    positions = torch.arange(rows, device="cuda")
+    angles = torch.randn(rows, dim // 2, device="cuda")
+    rope = torch.cat((angles.cos(), angles.sin()), -1).to(kv.dtype)
+    shape = ((rows + page - 1) // page, layers, heads, page, 2 * dim)
+    bf16 = torch.zeros(shape, device="cuda", dtype=kv.dtype)
+    actual = torch.zeros(shape, device="cuda", dtype=torch.uint8)
+    expected = torch.zeros_like(actual)
+    dtype = torch.float8_e4m3fn if cache_dtype == "fp8_e4m3" else torch.float8_e5m2
+    scales = torch.tensor([[0.01, 0.02], [0.5, 1.5], [2.0, 3.0]], device="cuda")
+    scale_ptrs = torch.tensor(
+        [s.data_ptr() for pair in scales.unbind() for s in pair.unbind()],
+        device="cuda",
     )
 
-    _add_global_draft_layer_exclusions(quant_config, 88, 5)
+    def pointers(storage):
+        return torch.tensor([c.data_ptr() for c in storage.unbind(1)], device="cuda")
 
-    assert "layers.88.mlp_conv*" in quant_config.exclude_modules
-    assert "*layers.92.self_attn.q_proj" in quant_config.exclude_modules
-    assert quant_config.exclude_modules.count("layers.88.already_global") == 1
-    assert "lilicorr.layers.88.mlp.0" not in quant_config.exclude_modules
+    slots = positions.flip(0).contiguous()
+    slots[1::3] = -1
+    args = (kv, weight, positions, rope)
+    bf16_ptrs, fp8_ptrs = pointers(bf16), pointers(actual)
+
+    def run():
+        store_context_kv(
+            *args,
+            fp8_ptrs,
+            slots,
+            actual[:, 0].view(dtype),
+            1e-6,
+            scale_ptrs,
+        )
+
+    run()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run()
+    for factor in (1.0, 0.5):
+        scales.mul_(factor)
+        kv.mul_(factor)
+        store_context_kv(*args, bf16_ptrs, positions, bf16[:, 0], 1e-6)
+        for layer in range(layers):
+            source = bf16[:, layer].transpose(1, 2).reshape(-1, heads, 2 * dim)
+            cache = expected[:, layer].transpose(1, 2)
+            ops.reshape_and_cache_flash(
+                source[:rows, :, :dim].contiguous(),
+                source[:rows, :, dim:].contiguous(),
+                cache[..., :dim],
+                cache[..., dim:],
+                slots,
+                cache_dtype,
+                scales[layer, 0],
+                scales[layer, 1],
+            )
+        graph.replay()
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 def test_selector_edges_match_sequential_reference():
@@ -140,6 +281,78 @@ def test_selector_edges_match_sequential_reference():
         )
 
     torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.parametrize(
+    "batch,steps,top_k,rank",
+    [(1, 1, 3, 5), (1, 7, 16, 256), (8, 7, 16, 256), (32, 7, 16, 256), (3, 5, 17, 65)],
+)
+@pytest.mark.parametrize("unary_dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("anchor_dtype", [torch.int32, torch.int64])
+def test_beam_fused_candidate_edges(
+    batch, steps, top_k, rank, unary_dtype, anchor_dtype
+):
+    """Keep the anchor, predecessor mapping, and BF16 intermediate rounding."""
+    from vllm.models.beam.nvidia.dflash2_ops import candidate_edges
+
+    torch.manual_seed(1)
+    vocab = 257
+    predecessors = torch.randn(vocab, rank, device="cuda", dtype=torch.bfloat16)
+    successors = torch.randn_like(predecessors)
+    candidates = torch.randint(vocab, (batch, steps, top_k), device="cuda")
+    unary = torch.randn(batch, steps, top_k, device="cuda", dtype=unary_dtype)
+    hidden = torch.randn(batch, steps, rank, device="cuda", dtype=torch.bfloat16)
+    # Production anchors are a strided view of the query token buffer.
+    anchors = torch.randint(vocab, (batch * 8,), device="cuda", dtype=anchor_dtype)[::8]
+    args = (predecessors, successors, candidates, unary, hidden, anchors, top_k)
+    expected = _score_edges(*args)
+    actual = candidate_edges(*args)
+    torch.testing.assert_close(actual, expected, rtol=0.01, atol=0.015625)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.parametrize("rows", [8, 64, 256])
+def test_beam_draft_qk_norm_rope_cache(rows):
+    """Fused query preparation preserves BF16 rounding and ignores padded slots."""
+    from vllm import _custom_ops as ops
+    from vllm.models.beam.nvidia.attention_ops import beam_qk_norm_rope
+
+    torch.manual_seed(42)
+    qkv = torch.randn(rows, 896, device="cuda", dtype=torch.bfloat16)
+    q, k, v = qkv.split((640, 128, 128), -1)
+    qw, kw = torch.randn(2, 128, device="cuda", dtype=q.dtype)
+    positions = torch.arange(rows, device="cuda", dtype=torch.int64)
+    angles = torch.randn(rows, 64, device="cuda")
+    rope = torch.cat((angles.cos(), angles.sin()), -1).to(q.dtype)
+    oq, ok = torch.empty_like(q), torch.empty_like(k)
+    ops.rms_norm(oq.view(-1, 5, 128), q.view(-1, 5, 128), qw, 1e-6)
+    ops.rms_norm(ok.view(-1, 1, 128), k.view(-1, 1, 128), kw, 1e-6)
+    ops.rotary_embedding(positions, oq, ok, 128, rope, True)
+    cache = torch.randn((rows + 15) // 16, 1, 16, 256, device="cuda", dtype=q.dtype)
+    expected_cache = cache.clone()
+    slots = positions.flip(0).contiguous()
+    slots[::3] = -1
+    valid = slots >= 0
+    slot_ids = slots[valid]
+    expected_cache[slot_ids // 16, 0, slot_ids % 16, :128] = ok[valid]
+    expected_cache[slot_ids // 16, 0, slot_ids % 16, 128:] = v[valid]
+    actual = beam_qk_norm_rope(
+        q,
+        k,
+        qw,
+        kw,
+        1e-6,
+        positions,
+        rope,
+        128,
+        128,
+        value=v,
+        kv_cache=cache,
+        slot_mapping=slots,
+    )
+    torch.testing.assert_close(actual, (oq, ok), rtol=0.01, atol=0.015625)
+    torch.testing.assert_close(cache, expected_cache, rtol=0.01, atol=0.015625)
 
 
 def _stub_base(monkeypatch, draft_logits):
@@ -189,20 +402,8 @@ def test_selector_asks_for_fp32_proposal_logits():
     assert fill == float("-inf")
 
 
-@pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize("variant", ["dflash2", "lilicorr", "lilicorr_plain"])
-def test_candidate_model_decoder_layer_cls(monkeypatch, variant):
-    from types import SimpleNamespace
-
-    from vllm.config import set_current_vllm_config
-    from vllm.model_executor.models.lilicorr import LiLiCorr
-    from vllm.model_executor.models.qwen3_dflash import DFlashQwen3DecoderLayer
-    from vllm.model_executor.models.qwen3_dflash2 import (
-        DFlash2Qwen3DecoderLayer,
-        DFlash2Qwen3Model,
-    )
-
-    # 1. Mock get_current_vllm_config and TP groups
+def _mock_draft_configs(monkeypatch, hf_config, dtype=torch.float32):
+    """The current and draft vLLM configs for building a draft model on CPU."""
     mock_current_vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(
             block_size=16,
@@ -231,16 +432,15 @@ def test_candidate_model_decoder_layer_cls(monkeypatch, variant):
             mode=0,  # CompilationMode.NONE is 0
         ),
         model_config=SimpleNamespace(
-            dtype=torch.float32,
+            dtype=dtype,
             is_mm_prefix_lm=False,
             rswa_window=None,
+            head_dtype=None,
         ),
         kernel_config=SimpleNamespace(
             linear_backend="auto",
         ),
     )
-    from vllm.platforms import current_platform
-
     monkeypatch.setattr(
         current_platform,
         "get_attn_backend_cls",
@@ -258,7 +458,42 @@ def test_candidate_model_decoder_layer_cls(monkeypatch, variant):
         MockGroup(),
     )
 
-    # 2. Mock vllm_config
+    vllm_config = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            draft_model_config=SimpleNamespace(
+                hf_config=hf_config,
+                quantization=None,
+            ),
+            num_speculative_tokens=4,
+            enable_adaptive_verification=False,
+        ),
+        model_config=SimpleNamespace(
+            dtype=dtype,
+            is_mm_prefix_lm=False,
+            get_total_num_hidden_layers=lambda: 2,
+            get_vocab_size=lambda: hf_config.vocab_size,
+        ),
+        load_config=SimpleNamespace(
+            quantization=None,
+            quantization_param_path=None,
+        ),
+    )
+    mock_current_vllm_config.speculative_config = vllm_config.speculative_config
+    vllm_config.compilation_config = mock_current_vllm_config.compilation_config
+    return mock_current_vllm_config, vllm_config
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("variant", ["dflash2", "lilicorr", "lilicorr_plain"])
+def test_candidate_model_decoder_layer_cls(monkeypatch, variant):
+    from vllm.config import set_current_vllm_config
+    from vllm.model_executor.models.lilicorr import LiLiCorr
+    from vllm.model_executor.models.qwen3_dflash import DFlashQwen3DecoderLayer
+    from vllm.model_executor.models.qwen3_dflash2 import (
+        DFlash2Qwen3DecoderLayer,
+        DFlash2Qwen3Model,
+    )
+
     hf_config = SimpleNamespace(
         vocab_size=1000,
         hidden_size=256,
@@ -287,33 +522,13 @@ def test_candidate_model_decoder_layer_cls(monkeypatch, variant):
             "use_aux_hidden_state": False,
         },
     )
-    vllm_config = SimpleNamespace(
-        speculative_config=SimpleNamespace(
-            draft_model_config=SimpleNamespace(
-                hf_config=hf_config,
-                quantization=None,
-            ),
-            num_speculative_tokens=4,
-            enable_adaptive_verification=False,
-        ),
-        model_config=SimpleNamespace(
-            dtype=torch.float32,
-            is_mm_prefix_lm=False,
-        ),
-        load_config=SimpleNamespace(
-            quantization=None,
-            quantization_param_path=None,
-        ),
-    )
-    mock_current_vllm_config.speculative_config = vllm_config.speculative_config
-    vllm_config.compilation_config = mock_current_vllm_config.compilation_config
+    current_config, vllm_config = _mock_draft_configs(monkeypatch, hf_config)
 
-    # 3. Instantiate the model under meta device to avoid parameter allocation issues
-    with set_current_vllm_config(mock_current_vllm_config), torch.device("meta"):
+    # Instantiate the model under meta device to avoid parameter allocation issues
+    with set_current_vllm_config(current_config), torch.device("meta"):
         model_cls = DFlash2Qwen3Model if variant == "dflash2" else LiLiCorr
         model = model_cls(vllm_config=vllm_config)
 
-    # 4. Assert that the layers are DFlash2Qwen3DecoderLayer (the subclass)
     assert len(model.layers) == 2
     expected = (
         DFlashQwen3DecoderLayer
@@ -321,6 +536,132 @@ def test_candidate_model_decoder_layer_cls(monkeypatch, variant):
         else DFlash2Qwen3DecoderLayer
     )
     assert type(model.layers[0]) is expected
+
+
+@pytest.mark.skip_global_cleanup
+def test_beam_dflash2_loads_every_checkpoint_tensor(monkeypatch):
+    """The exported checkpoint's names load into every parameter but the
+    embedding and LM head, which alias the target's."""
+    from vllm.config import set_current_vllm_config
+    from vllm.models.beam import DFlash2BeamForCausalLM
+
+    hidden, heads, kv_heads, head_dim, ffn, vocab, rank = 64, 4, 2, 16, 128, 100, 8
+    taps, groups = 2, 4
+    hf_config = SimpleNamespace(
+        vocab_size=vocab,
+        hidden_size=hidden,
+        num_hidden_layers=2,
+        num_attention_heads=heads,
+        num_key_value_heads=kv_heads,
+        head_dim=head_dim,
+        max_position_embeddings=2048,
+        rms_norm_eps=1e-6,
+        rope_parameters={"rope_type": "default", "rope_theta": 10000.0},
+        intermediate_size=ffn,
+        hidden_act="silu",
+        is_causal=False,
+        layer_types=["sliding_attention"] * 2,
+        sliding_window=64,
+        dflash_config={
+            "block_size": 16,
+            "conv_group_size": hidden // groups,
+            "conv_kernel_size": taps,
+            "final_logit_softcapping": 30,
+            "mask_token_id": 99,
+            "selector_rank": rank,
+            "selector_top_k": 3,
+            "target_layer_ids": [0, 1],
+        },
+    )
+    current_config, vllm_config = _mock_draft_configs(monkeypatch, hf_config)
+    with set_current_vllm_config(current_config):
+        model = DFlash2BeamForCausalLM(vllm_config=vllm_config)
+
+    shapes = {
+        "fc.weight": (hidden, 2 * hidden),
+        "hidden_norm.weight": (hidden,),
+        "norm.weight": (hidden,),
+        "candidate_selector.hidden_projection.weight": (rank, hidden),
+        "candidate_selector.predecessor_codebook": (vocab, rank),
+        "candidate_selector.successor_codebook": (vocab, rank),
+    }
+    for layer in range(2):
+        for conv in ("attention_conv", "mlp_conv"):
+            shapes[f"layers.{layer}.{conv}.base_kernel"] = (2, taps, hidden)
+            shapes[f"layers.{layer}.{conv}.kernel_projection.weight"] = (
+                2 * taps * groups,
+                hidden,
+            )
+        shapes |= {
+            f"layers.{layer}.input_layernorm.weight": (hidden,),
+            f"layers.{layer}.post_attention_layernorm.weight": (hidden,),
+            f"layers.{layer}.self_attn.q_proj.weight": (heads * head_dim, hidden),
+            f"layers.{layer}.self_attn.k_proj.weight": (kv_heads * head_dim, hidden),
+            f"layers.{layer}.self_attn.v_proj.weight": (kv_heads * head_dim, hidden),
+            f"layers.{layer}.self_attn.o_proj.weight": (hidden, heads * head_dim),
+            f"layers.{layer}.self_attn.q_norm.weight": (head_dim,),
+            f"layers.{layer}.self_attn.k_norm.weight": (head_dim,),
+            f"layers.{layer}.mlp.gate_proj.weight": (ffn, hidden),
+            f"layers.{layer}.mlp.up_proj.weight": (ffn, hidden),
+            f"layers.{layer}.mlp.down_proj.weight": (hidden, ffn),
+        }
+    torch.manual_seed(0)
+    checkpoint = {name: torch.randn(shape) for name, shape in shapes.items()}
+
+    loaded = model.load_weights(iter(checkpoint.items()))
+
+    assert loaded == {name for name, _ in model.named_parameters()}
+    context_kv = [
+        checkpoint[f"layers.{layer}.self_attn.{proj}_proj.weight"]
+        for layer in range(2)
+        for proj in ("k", "v")
+    ]
+    torch.testing.assert_close(model.model._context_kv_weight, torch.cat(context_kv))
+    # Numbered after the target's two layers, so the KV cache keys stay distinct.
+    assert model.get_draft_kv_cache_layer_names() == [
+        "model.layers.2.self_attn.attn",
+        "model.layers.3.self_attn.attn",
+    ]
+    assert model.get_draft_attn_causal() == [False, False]
+
+
+@pytest.mark.skip_global_cleanup
+def test_dflash_fc_runs_fp32_target_hidden_states_in_draft_dtype(monkeypatch):
+    """A target with an FP32 residual stream (e.g. Muse Spark) hands FP32 aux
+    hidden states to a bf16 drafter."""
+    from vllm.config import set_current_vllm_config
+    from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
+
+    hidden = 64
+    hf_config = SimpleNamespace(
+        vocab_size=100,
+        hidden_size=hidden,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        max_position_embeddings=2048,
+        rms_norm_eps=1e-6,
+        rope_parameters={"rope_type": "default", "rope_theta": 10000.0},
+        intermediate_size=128,
+        hidden_act="silu",
+        dflash_config={"mask_token_id": 99, "target_layer_ids": [0, 1]},
+    )
+    current_config, vllm_config = _mock_draft_configs(
+        monkeypatch, hf_config, dtype=torch.bfloat16
+    )
+    with set_current_vllm_config(current_config):
+        model = DFlashQwen3ForCausalLM(vllm_config=vllm_config)
+    fc = model.model.fc
+    torch.manual_seed(0)
+    torch.nn.init.normal_(fc.weight)
+    fc.quant_method.process_weights_after_loading(fc)
+    aux_hidden_states = torch.randn(3, 2 * hidden, dtype=torch.float32)
+
+    combined = model.combine_hidden_states(aux_hidden_states)
+
+    assert combined.dtype == torch.bfloat16
+    torch.testing.assert_close(combined, fc(aux_hidden_states.to(torch.bfloat16)))
 
 
 def test_conv_projections_use_draft_quant_config(monkeypatch):
@@ -425,6 +766,12 @@ def test_context_kv_uses_quantized_projection_fallback(monkeypatch):
         hidden_norm=SimpleNamespace(weight=nn.Parameter(torch.ones(2))),
         _rms_norm_eps=1e-6,
     )
+    model._normalize_context_states = MethodType(
+        qwen3_dflash.DFlashQwen3Model._normalize_context_states, model
+    )
+    model._project_context_kv_token_major = MethodType(
+        qwen3_dflash.DFlashQwen3Model._project_context_kv_token_major, model
+    )
     layers_attn = [
         SimpleNamespace(
             qkv_proj=projection,
@@ -459,3 +806,57 @@ def test_context_kv_uses_quantized_projection_fallback(monkeypatch):
     torch.testing.assert_close(actual_k, expected_k)
     torch.testing.assert_close(actual_v, expected_v)
     assert [projection.calls for projection in projections] == [1, 1]
+
+
+def test_score_edges_keeps_out_of_vocabulary_anchors_in_range():
+    """A request in chunked prefill anchors on its next prompt token, which can
+    lie past the draft vocabulary (a multimodal placeholder)."""
+    generator = torch.Generator().manual_seed(0)
+    vocab_size, rank, top_k = 8, 4, 3
+    predecessor_table = torch.randn(vocab_size, rank, generator=generator)
+    successor_table = torch.randn(vocab_size, rank, generator=generator)
+    candidate_ids = torch.randint(0, vocab_size, (2, 5, top_k), generator=generator)
+    unary_logits = torch.randn(2, 5, top_k, generator=generator)
+    hidden = torch.randn(2, 5, rank, generator=generator)
+
+    def score(anchor_token_ids: list[int]) -> torch.Tensor:
+        return _score_edges(
+            predecessor_table,
+            successor_table,
+            candidate_ids,
+            unary_logits,
+            hidden,
+            torch.tensor(anchor_token_ids),
+            top_k,
+        )
+
+    torch.testing.assert_close(score([vocab_size, 2]), score([vocab_size - 1, 2]))
+
+
+_EMBEDDING = "vllm.model_executor.layers.vocab_parallel_embedding"
+
+
+def test_top_k_tokens_stay_in_the_processor_vocabulary(default_vllm_config):
+    """A DFlash2 drafter takes candidates from the target's head, which can have
+    rows past the draft vocabulary (a padded multimodal vocabulary). The
+    candidates index the draft's codebooks, so top-k must not return those rows.
+    """
+    head_rows, vocab_size, hidden_size = 140, 128, 16
+    # One vocabulary shard, so the reductions need no process group.
+    with (
+        mock.patch(f"{_EMBEDDING}.get_tensor_model_parallel_rank", return_value=0),
+        mock.patch(
+            f"{_EMBEDDING}.get_tensor_model_parallel_world_size", return_value=1
+        ),
+    ):
+        head = ParallelLMHead(head_rows, hidden_size)
+    with torch.no_grad():
+        head.weight.zero_()
+        head.weight[vocab_size:head_rows] = 1.0
+    head.quant_method.process_weights_after_loading(head)
+    hidden_states = torch.ones(4, hidden_size, dtype=head.weight.dtype)
+    processor = LogitsProcessor(vocab_size)
+
+    _, ids = processor.get_top_k_tokens(head, hidden_states, 4)
+    assert (ids < vocab_size).all()
+    assert (processor.get_top_tokens(head, hidden_states) < vocab_size).all()
