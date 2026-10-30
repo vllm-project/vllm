@@ -217,19 +217,16 @@ def test_voxtral_realtime_cudagraph(
         _assert_expected_text(outputs)
 
 
-# Small enough for a 128-token shift under max_model_len 300. Equal windows put
-# the decoder and encoder layers (different head sizes and RoPE styles) in one
-# KV cache group.
+# Small enough for a 128-token shift under max_model_len 300.
 _REANCHOR_WINDOW = {
     "text_config": {"sliding_window": 128},
     "audio_config": {"sliding_window": 128},
 }
+_REANCHOR_TEST_MML = 300
 
 
 async def _stream_transcribe(engine_args, tokenizer, audio_asset) -> list[int]:
     """Run one greedy streaming session and return its output token ids."""
-    import torch
-
     from vllm.model_executor.models.voxtral_realtime import VoxtralRealtimeBuffer
 
     llm = AsyncLLM.from_engine_args(engine_args)
@@ -264,16 +261,11 @@ async def _stream_transcribe(engine_args, tokenizer, audio_asset) -> list[int]:
         return output_tokens
     finally:
         llm.shutdown()
-        # The next engine needs the memory.
-        torch.accelerator.empty_cache()
-
-
-_REANCHOR_TEST_MML = 300
 
 
 @pytest.mark.asyncio
 async def test_voxtral_realtime_reanchor_parity(audio_assets, tokenizer):
-    """With --enable-unbounded-streaming and a max_model_len shorter than the
+    """With --enable-unbounded-streaming-input and a max_model_len shorter than the
     session, the output matches a run without re-anchoring."""
     audio_asset = audio_assets[1]  # winning_call (longer clip)
 
@@ -287,8 +279,8 @@ async def test_voxtral_realtime_reanchor_parity(audio_assets, tokenizer):
         **{
             **ENGINE_CONFIG,
             "max_model_len": _REANCHOR_TEST_MML,
-            "enable_unbounded_streaming": True,
-            "reanchor_margin_tokens": 24,
+            "enable_unbounded_streaming_input": True,
+            "unbounded_streaming_input_margin_tokens": 24,
             "enable_prefix_caching": False,
             "hf_overrides": _REANCHOR_WINDOW,
         }

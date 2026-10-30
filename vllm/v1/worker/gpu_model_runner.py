@@ -1152,14 +1152,14 @@ class GPUModelRunner(
 
     def _reanchor_requests(self, reanchor_reqs: dict[str, int]) -> None:
         """Re-rotate the cached keys of requests whose positions the scheduler
-        shifted down (--enable-unbounded-streaming)."""
+        shifted down (--enable-unbounded-streaming-input)."""
         ib = self.input_batch
         for req_id, d in reanchor_reqs.items():
             idx = ib.req_id_to_index[req_id]
             group_block_ids = [
-                torch.from_numpy(
-                    bt.block_table.np[idx, : bt.num_blocks_per_row[idx]].copy()
-                ).to(self.device, torch.long)
+                bt.block_table.cpu[idx, : bt.num_blocks_per_row[idx]].to(
+                    self.device, torch.long
+                )
                 for bt in ib.block_table.block_tables
             ]
             rerotate_cached_keys(
@@ -7082,10 +7082,12 @@ class GPUModelRunner(
             kv_transfer_group.register_kv_caches(kv_caches)
             kv_transfer_group.set_host_xfer_buffer_ops(copy_kv_blocks)
 
-        if self.scheduler_config.enable_unbounded_streaming and not is_profiling:
+        if self.scheduler_config.enable_unbounded_streaming_input and not is_profiling:
             # Raises if a layer cannot be re-anchored.
             self.reanchor_rotary_specs = init_reanchor_rotary_specs(
-                self.get_model(), kv_cache_config
+                self.get_model(),
+                kv_cache_config,
+                self.compilation_config.static_forward_context,
             )
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:

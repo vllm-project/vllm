@@ -252,7 +252,7 @@ per 80 ms of audio, so about 2 h 55 at 131072 (the default) and 11 min at 8192. 
 the cap, the server ends the session with `transcription.done`. The client has to
 reconnect, and the model starts again without context.
 
-`--enable-unbounded-streaming` removes the cap. Before a session reaches
+`--enable-unbounded-streaming-input` removes the cap. Before a session reaches
 `--max-model-len`, its positions are shifted down and its cached keys are
 re-rotated to match, so the attention scores do not change. The KV cache of the
 session stays bounded by the windows.
@@ -262,7 +262,7 @@ session stays bounded by the windows.
   is off (`--no-enable-prefix-caching`), and the platform is CUDA. Nothing is
   specific to Voxtral: any streaming-input session on such a model works the same
   way, for example on Mistral-7B-v0.1.
-- `--reanchor-margin-tokens` (default 4096): the shift happens this many tokens
+- `--unbounded-streaming-input-margin-tokens` (default 4096): the shift happens this many tokens
   before `--max-model-len`. `max_model_len - margin - text window` must be at
   least one KV cache block. It is also roughly the number of tokens between two
   shifts: with 8192, 4096 and 1024, 3072 tokens, about 4 min.
@@ -276,7 +276,7 @@ vllm serve mistralai/Voxtral-Mini-4B-Realtime-2602 --tokenizer-mode mistral \
   --max-model-len 8192 --max-num-batched-tokens 512 --max-num-seqs 12 \
   --gpu-memory-utilization 0.82 --no-enable-prefix-caching \
   --compilation-config '{"cudagraph_mode":"PIECEWISE"}' \
-  --enable-unbounded-streaming
+  --enable-unbounded-streaming-input
 ```
 
 CUDA graphs are captured for batches of up to 2 x `--max-num-seqs` tokens, so set

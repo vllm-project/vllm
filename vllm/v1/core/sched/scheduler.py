@@ -32,7 +32,7 @@ from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.multimodal.utils import get_mm_features_in_window
 from vllm.outputs import RequestError
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
@@ -55,6 +55,7 @@ from vllm.v1.core.sched.request_queue import (
     create_request_queue,
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -367,7 +368,7 @@ class Scheduler(SchedulerInterface):
                 self.cache_config.enable_mamba_shared_prefix_checkpoint
             ),
         )
-        if self.scheduler_config.enable_unbounded_streaming:
+        if self.scheduler_config.enable_unbounded_streaming_input:
             self._init_reanchor()
         # Mamba managers already account for their speculative state blocks.
         num_spec_decode_tokens = (
@@ -1307,12 +1308,11 @@ class Scheduler(SchedulerInterface):
                     num_new_tokens = request.num_tokens - num_computed_tokens
 
                     # Shift the session down before it reaches max_model_len.
-                    # num_tokens drops by the same amount: num_new_tokens holds.
+                    # num_tokens drops by d too, so num_new_tokens holds.
                     if (
-                        request.reanchor_stream
-                        and num_computed_tokens + num_new_tokens
-                        >= self.max_model_len
-                        - self.scheduler_config.reanchor_margin_tokens
+                        request.resumable
+                        and self.scheduler_config.enable_unbounded_streaming_input
+                        and request.num_tokens >= self.reanchor_trigger
                         and self._reanchor_session(request)
                     ):
                         num_computed_tokens = request.num_computed_tokens
@@ -1650,13 +1650,11 @@ class Scheduler(SchedulerInterface):
             scheduled_running_reqs
         ) <= len(self.running)
 
-        # A shifted request that did not get scheduled keeps its pending
-        # rotation for the next step it is scheduled in.
+        # Only a WAITING session is shifted. If it did not get scheduled, it
+        # keeps its pending rotation for the next step it is scheduled in.
         reanchor_reqs: dict[str, int] = {}
-        if self.scheduler_config.enable_unbounded_streaming:
-            for req in itertools.chain(
-                scheduled_new_reqs, scheduled_resumed_reqs, scheduled_running_reqs
-            ):
+        if self.scheduler_config.enable_unbounded_streaming_input:
+            for req in scheduled_new_reqs:
                 if req.pending_reanchor_d:
                     reanchor_reqs[req.request_id] = req.pending_reanchor_d
                     req.pending_reanchor_d = 0
@@ -1945,54 +1943,52 @@ class Scheduler(SchedulerInterface):
             session.record_event(EngineCoreEventType.QUEUED)
 
     def _init_reanchor(self) -> None:
-        # The worker has already checked that every KV cache group uses a
-        # sliding window.
-        managers = self.kv_cache_manager.coordinator.single_type_managers
-        self.reanchor_window = max(mgr.sliding_window for mgr in managers)
-        # A shift drops whole blocks, so at least one block must fit between
-        # the window and the trigger point.
-        margin = self.scheduler_config.reanchor_margin_tokens
-        headroom = self.max_model_len - margin - self.reanchor_window
-        if headroom < self.block_size:
+        windows = []
+        for mgr in self.kv_cache_manager.coordinator.single_type_managers:
+            # The worker has already checked every KV cache group.
+            assert isinstance(mgr, SlidingWindowManager)
+            windows.append(mgr.sliding_window + mgr.extra_retained_tokens)
+        self.reanchor_window = max(windows)
+        room = self.max_model_len - self.reanchor_window
+        margin = self.scheduler_config.unbounded_streaming_input_margin_tokens
+        if margin is None:
+            # Half for the tokens generated per input chunk, half between shifts.
+            margin = max(room // 2, 0)
+        # A shift drops whole blocks, so at least one block must fit between the
+        # window and the trigger.
+        if room - margin < self.block_size:
             raise ValueError(
-                "--enable-unbounded-streaming: max_model_len - "
-                "reanchor_margin_tokens - sliding_window = "
-                f"{self.max_model_len} - {margin} - {self.reanchor_window} = "
-                f"{headroom}, must be at least the block size ({self.block_size})."
+                "--enable-unbounded-streaming-input: max_model_len "
+                f"({self.max_model_len}) must be at least the sliding window "
+                f"({self.reanchor_window}) + the margin ({margin}) + one KV cache "
+                f"block ({self.block_size})."
             )
+        self.reanchor_trigger = self.max_model_len - margin
 
     def _reanchor_session(self, request: Request) -> bool:
         """Shift a streaming session's positions down by d, dropping its d
-        oldest tokens, which are already out of the sliding window. The worker
-        re-rotates the cached keys. Returns False if nothing can be dropped."""
+        oldest tokens, which are out of the sliding window. The worker re-rotates
+        the cached keys. Returns False if nothing can be dropped."""
+        # Same frontier as allocate_slots, which has not freed the last step's
+        # blocks yet: a step still in flight reads its own window.
+        processed = request.num_computed_tokens - request.num_in_flight_tokens
         # A multiple of the scheduler block size (the LCM of the group block
         # sizes), so every group drops whole blocks.
-        d = (request.num_computed_tokens - self.reanchor_window) // self.block_size
-        d *= self.block_size
+        d = round_down(processed - self.reanchor_window, self.block_size)
         if d <= 0:
             return False
 
-        managers = self.kv_cache_manager.coordinator.single_type_managers
-        null_block = self.kv_cache_manager.block_pool.null_block
-        for mgr in managers:
-            blocks = mgr.req_to_blocks.get(request.request_id, [])
-            if any(b is not null_block for b in blocks[: d // mgr.block_size]):
-                logger.warning(
-                    "Not re-anchoring %s: a block below position %d is still "
-                    "allocated.",
-                    request.request_id,
-                    d,
-                )
-                return False
+        self.kv_cache_manager.remove_skipped_blocks(request.request_id, processed)
+        self.kv_cache_manager.drop_leading_blocks(request.request_id, d)
 
         request.num_computed_tokens -= d
         del request._all_token_ids[:d]
-        if request.prompt_token_ids is not None and len(request.prompt_token_ids) >= d:
-            del request.prompt_token_ids[:d]
-            request.num_prompt_tokens -= d
+        # Resuming folded the outputs into the prompt.
+        assert request.prompt_token_ids is not None and not request._output_token_ids
+        del request.prompt_token_ids[:d]
+        request.num_prompt_tokens -= d
 
-        # Drop the mm features that end before d and shift the others. The
-        # encoder cache refers to features by list index, so reindex it.
+        # Drop the mm features that end before d and shift the others.
         n_drop = 0
         for mm_feature in request.mm_features:
             pos = mm_feature.mm_position
@@ -2000,24 +1996,15 @@ class Scheduler(SchedulerInterface):
                 break
             n_drop += 1
         if n_drop:
-            ecm = self.encoder_cache_manager
-            for i in list(ecm.get_cached_input_ids(request)):
-                if i < n_drop:
-                    ecm.free_encoder_input(request, i)
-            cached_ids = ecm.request_cached_ids.get(request.request_id)
-            if cached_ids is not None:
-                ecm.request_cached_ids[request.request_id] = {
-                    i - n_drop for i in cached_ids
-                }
-            del request.mm_features[:n_drop]
-        for mm_feature in request.mm_features:
-            pos = mm_feature.mm_position
-            mm_feature.mm_position = replace(pos, offset=pos.offset - d)
-
-        for mgr in managers:
-            blocks = mgr.req_to_blocks.get(request.request_id)
-            if blocks:
-                del blocks[: d // mgr.block_size]
+            self.encoder_cache_manager.drop_leading_inputs(request, n_drop)
+        request.mm_features = [
+            replace(
+                f, mm_position=replace(f.mm_position, offset=f.mm_position.offset - d)
+            )
+            for f in request.mm_features[n_drop:]
+        ]
+        # Holds old indices. A resumed request installs its features again.
+        self._pending_encoder_input_ids.pop(request.request_id, None)
 
         request.pending_reanchor_d += d
         logger.info(
@@ -3041,8 +3028,6 @@ class Scheduler(SchedulerInterface):
         else:
             if request.resumable:
                 request.streaming_queue = deque()
-                if self.scheduler_config.enable_unbounded_streaming:
-                    request.reanchor_stream = True
             self._enqueue_waiting_request(request)
             self.requests[request.request_id] = request
             if self.spec_decode_metrics_level != "none":

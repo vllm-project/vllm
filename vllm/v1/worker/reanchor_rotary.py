@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Key re-rotation for --enable-unbounded-streaming.
+"""Key re-rotation for --enable-unbounded-streaming-input.
 
 When the scheduler shifts a session's positions down by d, its cached keys are
-re-rotated by R(-d). RoPE scores only depend on relative positions, so they do
-not change. Each layer uses its own RoPE, read from the model at startup.
+re-rotated by R(-d). RoPE scores only depend on relative positions, so they stay
+the same apart from rounding. Each layer uses its own RoPE, read from the model
+at startup.
 """
 
 from collections.abc import Iterable, Mapping, Sequence
@@ -19,25 +20,33 @@ from vllm.model_executor.layers.rotary_embedding import (
     RotaryEmbedding,
     YaRNScalingRotaryEmbedding,
 )
-from vllm.v1.kv_cache_interface import KVCacheConfig, UniformTypeKVCacheSpecs
+from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    KVQuantMode,
+    SlidingWindowMLASpec,
+    SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
+)
 
 
-@dataclass(frozen=True, eq=False)
+@dataclass(frozen=True)
 class RotarySpec:
     """How one attention layer rotates its keys."""
 
-    # The layer's RoPE frequencies: float32 like its forward pass, stored as
-    # float64 for d * inv_freq at large d.
+    # The layer's float32 frequencies, widened to float64: in float32,
+    # d * inv_freq is off by up to 3e-3 rad at d ~ 1e5.
     inv_freq: torch.Tensor
     rotary_dim: int
     is_neox: bool
     # Positions this layer advances per scheduled token. 1 for a decoder;
     # Voxtral's block-pooled audio encoder runs at block_pool_size.
-    position_scale: int = 1
+    position_scale: int
 
 
-# RoPE classes whose angle at position p is exactly p * inv_freq. YaRN scales
-# cos and sin by the same mscale, which leaves the rotation itself unchanged.
+# RoPE classes whose angle at position p is p * inv_freq. YaRN scales cos and
+# sin by the same mscale, which leaves the rotation itself unchanged.
 _STATIC_ROPE_INV_FREQ = {
     RotaryEmbedding: lambda rope: rope._compute_inv_freq(rope.base),
     Llama3RotaryEmbedding: lambda rope: rope._compute_inv_freq(rope.base),
@@ -54,10 +63,10 @@ def collect_rotary_specs(
 
     Follows the usual vLLM layout, where the module holding an attention layer
     (any child with a ``layer_name``) also holds its ``rotary_emb``. Raises if a
-    layer has no RoPE, or one whose rotation is not a plain function of the
-    position (dynamic NTK, M-RoPE, ...).
+    layer has no RoPE, or one whose angle is not p * inv_freq (M-RoPE, Fourier,
+    long RoPE, ...), or one that does not cover its whole key.
     """
-    owners: dict[str, tuple[nn.Module, Any]] = {}
+    owners: dict[str, tuple[nn.Module, Any, nn.Module]] = {}
     for module in model.modules():
         rope = getattr(module, "rotary_emb", None)
         if rope is None:
@@ -65,62 +74,87 @@ def collect_rotary_specs(
         for child in module.children():
             layer_name = getattr(child, "layer_name", None)
             if layer_name is not None:
-                owners[layer_name] = (module, rope)
+                owners[layer_name] = (module, rope, child)
 
-    # Layers sharing a RoPE share a spec: cos/sin are computed once per shift.
-    shared: dict[tuple[int, int], RotarySpec] = {}
     specs: dict[str, RotarySpec] = {}
     for layer_name in layer_names:
         if layer_name not in owners:
             raise ValueError(
-                f"RoPE re-anchoring: no rotary embedding found for attention "
-                f"layer {layer_name!r}."
+                "--enable-unbounded-streaming-input: no rotary_emb on the parent "
+                f"module of attention layer {layer_name!r}."
             )
-        module, rope = owners[layer_name]
+        module, rope, attn = owners[layer_name]
         get_inv_freq = _STATIC_ROPE_INV_FREQ.get(type(rope))
         if get_inv_freq is None:
             supported = ", ".join(cls.__name__ for cls in _STATIC_ROPE_INV_FREQ)
             raise ValueError(
-                f"RoPE re-anchoring does not support {type(rope).__name__} "
-                f"(layer {layer_name!r}). Supported: {supported}."
+                "--enable-unbounded-streaming-input does not support "
+                f"{type(rope).__name__} (layer {layer_name!r}). "
+                f"Supported: {supported}."
             )
-        scale = int(getattr(module, "reanchor_position_scale", 1))
-        key = (id(rope), scale)
-        if key not in shared:
-            shared[key] = RotarySpec(
-                inv_freq=get_inv_freq(rope).to("cpu", torch.float64),
-                rotary_dim=rope.rotary_dim,
-                is_neox=rope.is_neox_style,
-                position_scale=scale,
+        # The rotary dims must be the first dims of the key.
+        if rope.head_size != attn.head_size:
+            raise ValueError(
+                f"--enable-unbounded-streaming-input: layer {layer_name!r} applies "
+                "RoPE to part of its keys only."
             )
-        specs[layer_name] = shared[key]
+        # On the device of the forward table: pow differs by 1 ulp across devices.
+        with torch.device(rope.cos_sin_cache.device):
+            inv_freq = get_inv_freq(rope).to(torch.float64)
+        specs[layer_name] = RotarySpec(
+            inv_freq=inv_freq,
+            rotary_dim=rope.rotary_dim,
+            is_neox=rope.is_neox_style,
+            position_scale=getattr(module, "reanchor_position_scale", 1),
+        )
     return specs
 
 
 def init_reanchor_rotary_specs(
-    model: nn.Module, kv_cache_config: KVCacheConfig
+    model: nn.Module,
+    kv_cache_config: KVCacheConfig,
+    forward_context: Mapping[str, Any],
 ) -> dict[str, RotarySpec]:
-    """Check that every KV cache group uses a sliding window and every layer a
-    supported RoPE. Returns the spec of each layer."""
+    """Check that the cached keys of every KV cache layer can be re-rotated in
+    place. Returns the spec of each layer."""
+    layer_names = []
     for group in kv_cache_config.kv_cache_groups:
-        spec = group.kv_cache_spec
-        if isinstance(spec, UniformTypeKVCacheSpecs):
-            spec = spec.first_spec
-        if getattr(spec, "sliding_window", None) is None:
-            raise ValueError(
-                "--enable-unbounded-streaming needs every attention layer to "
-                f"use a sliding window; layers {group.layer_names[:3]}... use "
-                f"{type(spec).__name__}."
-            )
-    layer_names = [
-        name for group in kv_cache_config.kv_cache_groups for name in group.layer_names
-    ]
+        for layer_name in group.layer_names:
+            spec = group.kv_cache_spec
+            if isinstance(spec, UniformTypeKVCacheSpecs):
+                # KV-sharing aliases have no spec of their own.
+                spec = spec.kv_cache_specs.get(layer_name, spec.first_spec)
+            if not isinstance(spec, SlidingWindowSpec) or isinstance(
+                spec, SlidingWindowMLASpec
+            ):
+                raise ValueError(
+                    "--enable-unbounded-streaming-input needs every attention layer "
+                    f"to use a sliding window; {layer_name!r} uses "
+                    f"{type(spec).__name__}."
+                )
+            layer = forward_context[layer_name]
+            kv = layer.kv_cache
+            if (
+                spec.kv_quant_mode != KVQuantMode.NONE
+                or spec.num_head_slots is not None
+                or layer.kv_sharing_target_layer_name is not None
+                or kv.dim() != 4
+                or kv.shape[0] != kv_cache_config.num_blocks
+                or kv.shape[-1] != 2 * layer.head_size
+            ):
+                raise ValueError(
+                    "--enable-unbounded-streaming-input needs an unshared, "
+                    "non-quantized KV cache of (blocks, heads, block_size, "
+                    f"2 * head_size); layer {layer_name!r}: "
+                    f"{spec.kv_quant_mode.name}, {tuple(kv.shape)}."
+                )
+            layer_names.append(layer_name)
     return collect_rotary_specs(model, layer_names)
 
 
 def rerotate_cached_keys(
     forward_context: Mapping[str, Any],
-    kv_cache_groups: Sequence[Any],
+    kv_cache_groups: Sequence[KVCacheGroupSpec],
     group_block_ids: Sequence[torch.Tensor],
     d: int,
     specs: Mapping[str, RotarySpec],
@@ -131,66 +165,20 @@ def rerotate_cached_keys(
     null blocks and the blocks allocated for this step hold no live keys, so
     rotating the whole row is fine.
     """
-    cos_sin: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
     for group, block_ids in zip(kv_cache_groups, group_block_ids):
-        if block_ids.numel() == 0:
-            continue
         for layer_name in group.layer_names:
             layer = forward_context[layer_name]
-            kv = layer.kv_cache
-            if isinstance(kv, (list, tuple)):
-                kv = kv[0]
+            kv, head_size, spec = layer.kv_cache, layer.head_size, specs[layer_name]
             # Layer view (blocks, heads, block_size, 2 * head_size): K then V.
-            head_size = layer.head_size
-            assert kv.dim() == 4 and kv.shape[-1] == 2 * head_size, (
-                f"unexpected KV cache shape {tuple(kv.shape)} for head_size {head_size}"
+            kv[block_ids, ..., :head_size] = apply_inverse_rotary(
+                kv[block_ids, ..., :head_size], spec.position_scale * d, spec
             )
-            assert kv.is_floating_point() and kv.element_size() >= 2, (
-                "RoPE re-anchoring requires a non-quantized KV cache"
-            )
-            spec = specs[layer_name]
-            cs = cos_sin.get(id(spec))
-            if cs is None:
-                cs = inverse_rotary_cos_sin(
-                    spec.position_scale * d, spec.inv_freq, kv.dtype, kv.device
-                )
-                cos_sin[id(spec)] = cs
-            key = kv[block_ids, ..., :head_size]
-            kv[block_ids, ..., :head_size] = apply_inverse_rotary_cos_sin(
-                key, cs[0], cs[1], spec.rotary_dim, spec.is_neox
-            )
-
-
-def inverse_rotary_cos_sin(
-    d: int, inv_freq: torch.Tensor, dtype: torch.dtype, device: torch.device
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """cos/sin of the R(-d) angles. In float64: in float32, d * inv_freq is off
-    by ~1e-2 rad at d ~ 1e5."""
-    angle = float(d) * inv_freq.to(device, torch.float64)
-    return torch.cos(angle).to(dtype), torch.sin(angle).to(dtype)
-
-
-def apply_inverse_rotary_cos_sin(
-    key: torch.Tensor,
-    cos: torch.Tensor,
-    sin: torch.Tensor,
-    rotary_dim: int,
-    is_neox: bool,
-) -> torch.Tensor:
-    """Apply R(-d) to ``key`` with tables from inverse_rotary_cos_sin."""
-    half = rotary_dim // 2
-    rot, passthru = key[..., :rotary_dim], key[..., rotary_dim:]
-    if is_neox:
-        x1, x2 = rot[..., :half], rot[..., half:]
-        out = torch.cat([x1 * cos + x2 * sin, -x1 * sin + x2 * cos], dim=-1)
-    else:  # GPT-J interleaved
-        x1, x2 = rot[..., 0::2], rot[..., 1::2]
-        o1, o2 = x1 * cos + x2 * sin, -x1 * sin + x2 * cos
-        out = torch.stack([o1, o2], dim=-1).flatten(-2)
-    return torch.cat([out, passthru], dim=-1) if passthru.numel() else out
 
 
 def apply_inverse_rotary(key: torch.Tensor, d: int, spec: RotarySpec) -> torch.Tensor:
     """Apply R(-d) to ``key`` ([..., head_size], rotary dims first)."""
-    cos, sin = inverse_rotary_cos_sin(d, spec.inv_freq, key.dtype, key.device)
-    return apply_inverse_rotary_cos_sin(key, cos, sin, spec.rotary_dim, spec.is_neox)
+    angle = d * spec.inv_freq
+    rotated = ApplyRotaryEmb.forward_static(
+        key[..., : spec.rotary_dim], angle.cos(), -angle.sin(), spec.is_neox
+    )
+    return torch.cat((rotated, key[..., spec.rotary_dim :]), dim=-1)

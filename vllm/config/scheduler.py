@@ -76,17 +76,17 @@ class SchedulerConfig:
     be ``<= max_num_seqs``. ``None`` (default) keeps current behavior.
     """
 
-    enable_unbounded_streaming: bool = False
+    enable_unbounded_streaming_input: bool = False
     """[EXPERIMENTAL] Let streaming-input sessions run past max_model_len.
     Before a session reaches max_model_len, its positions are shifted down and
     its cached keys re-rotated to match. Requires every attention layer to use
     a sliding window and RoPE, a non-quantized KV cache, prefix caching off and
     CUDA."""
 
-    reanchor_margin_tokens: int = Field(default=4096, ge=1)
-    """With `enable_unbounded_streaming`, shift a session's positions this many
-    tokens before it reaches max_model_len. max_model_len - margin - sliding
-    window must be at least one KV cache block."""
+    unbounded_streaming_input_margin_tokens: int | None = Field(default=None, ge=1)
+    """With `enable_unbounded_streaming_input`, shift a session's positions this
+    many tokens before it reaches max_model_len. It must hold the tokens generated
+    for one input chunk. Defaults to half of max_model_len - sliding window."""
 
     long_prefill_token_threshold: int = Field(default=0, ge=0)
     """For chunked prefill, a request is considered long if the prompt is

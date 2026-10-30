@@ -845,10 +845,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     )
                 self.aux_output_connector.initialize_output_storage(kv_cache_config)
 
-            if self.scheduler_config.enable_unbounded_streaming:
+            if self.scheduler_config.enable_unbounded_streaming_input:
                 # Raises if a layer cannot be re-anchored.
                 self.reanchor_rotary_specs = init_reanchor_rotary_specs(
-                    self.model, kv_cache_config
+                    self.model,
+                    kv_cache_config,
+                    self.compilation_config.static_forward_context,
                 )
 
     def _init_kv_zero_meta(self) -> None:
@@ -1307,7 +1309,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def _reanchor_requests(self, reanchor_reqs: dict[str, int]) -> None:
         """Re-rotate the cached keys of requests whose positions the scheduler
-        shifted down (--enable-unbounded-streaming)."""
+        shifted down (--enable-unbounded-streaming-input)."""
         num_blocks = self.block_tables.num_blocks.np
         for req_id, d in reanchor_reqs.items():
             req_index = self.req_states.req_id_to_index[req_id]

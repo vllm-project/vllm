@@ -325,7 +325,7 @@ class SchedulerOutput:
     skip_drafts: bool = False
 
     # req_id -> d: positions shifted down by d this step; the worker re-rotates
-    # the request's cached keys to match (--enable-unbounded-streaming).
+    # the request's cached keys to match (--enable-unbounded-streaming-input).
     reanchor_reqs: dict[str, int] | None = None
 
     @classmethod

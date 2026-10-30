@@ -236,10 +236,8 @@ class Request:
         # None entry in the queue means finished.
         self.streaming_queue: deque[StreamingUpdate | None] | None = None
 
-        # --enable-unbounded-streaming: shift positions down before reaching
-        # max_model_len. pending_reanchor_d is the shift not yet sent to the
+        # --enable-unbounded-streaming-input: position shift not yet sent to the
         # worker (kept until the request is scheduled).
-        self.reanchor_stream = False
         self.pending_reanchor_d = 0
 
         # If True, request should be aborted immediately after being added to

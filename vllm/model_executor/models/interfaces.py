@@ -1315,7 +1315,11 @@ class SupportsRealtime(Protocol):
         audio_stream: AsyncGenerator[np.ndarray, None],
         input_stream: asyncio.Queue[list[int]],
         model_config: "ModelConfig",
-    ) -> AsyncGenerator["PromptType", None]: ...
+        unbounded: bool = False,
+    ) -> AsyncGenerator["PromptType", None]:
+        """With ``unbounded``, the stream does not end at max_model_len: the
+        scheduler keeps the session under it."""
+        ...
 
 
 @overload
