@@ -673,8 +673,15 @@ class B12xExperts(mk.FusedMoEExpertsModular):
             hasattr(fused_moe, "Mxfp4CsfWeights")
             and moe_config.is_act_and_mul
             and hidden % 256 == 0
-            and intermediate % (64 if hasattr(fused_moe, "ExecutionCapacity") else 128)
-            == 0
+            and (
+                intermediate % 128 == 0
+                or (
+                    intermediate % 128 == 64
+                    and hasattr(fused_moe, "ExecutionCapacity")
+                    and moe_config.activation == MoEActivation.SILU
+                    and moe_config.in_dtype == torch.bfloat16
+                )
+            )
             and 1 <= hidden // 32 <= 255
             and 1 <= intermediate // 32 <= 255
         )

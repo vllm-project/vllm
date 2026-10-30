@@ -1641,18 +1641,29 @@ def test_b12x_resident_csf_scales_match_decoded_scales(
 
 
 @pytest.mark.parametrize(
-    "hidden,intermediate,expected",
+    "hidden,intermediate,activation,dtype,expected",
     [
-        (256, 192, True),
-        (256, 256, True),
-        (4096, 1024, True),
-        (256, 224, False),
-        (8192, 192, False),
-        (256, 8192, False),
+        (256, 192, MoEActivation.SILU, torch.bfloat16, True),
+        (256, 256, MoEActivation.SILU, torch.bfloat16, True),
+        (4096, 1024, MoEActivation.SILU, torch.bfloat16, True),
+        (256, 224, MoEActivation.SILU, torch.bfloat16, False),
+        (8192, 192, MoEActivation.SILU, torch.bfloat16, False),
+        (256, 8192, MoEActivation.SILU, torch.bfloat16, False),
+        (256, 192, MoEActivation.SITU, torch.bfloat16, False),
+        (256, 192, MoEActivation.SILU, torch.float16, False),
+        (256, 256, MoEActivation.SITU, torch.bfloat16, True),
+        (256, 256, MoEActivation.SILU, torch.float16, True),
     ],
 )
-def test_mxfp4_csf_requires_unpadded_scale_geometry(hidden, intermediate, expected):
-    config = make_dummy_moe_config(hidden_dim=hidden, intermediate_size=intermediate)
+def test_mxfp4_csf_requires_unpadded_scale_geometry(
+    hidden, intermediate, activation, dtype, expected
+):
+    config = make_dummy_moe_config(
+        hidden_dim=hidden,
+        intermediate_size=intermediate,
+        activation=activation,
+        in_dtype=dtype,
+    )
     has_csf = hasattr(get_b12x_fused_moe(), "Mxfp4CsfWeights")
     assert mxfp4_oracle.mxfp4_backend_supports_csf_scales(
         Mxfp4MoeBackend.B12X_MXFP4_MXFP8, config
