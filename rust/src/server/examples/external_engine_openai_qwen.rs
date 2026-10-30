@@ -94,6 +94,7 @@ async fn main() -> Result<()> {
         api_server_options: ApiServerOptions::default(),
         cors: CorsConfig::default(),
         tls: None,
+        root_path: None,
         api_keys: Vec::new(),
         disable_log_stats: false,
         custom_histogram_buckets: Default::default(),
