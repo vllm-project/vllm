@@ -4,8 +4,8 @@
 
 The weight and its scale load independently (any order, any call, no pairing in
 the model's loader); BF16 rows load as is; post-load processing dequantizes in
-the weight's own storage, so cold start, direct reload, layerwise reload and a
-sharded RDT replay all end with the same bytes at the startup address."""
+the weight's own storage, so cold start, layerwise reload and a sharded RDT
+replay all end with the same bytes at the startup address."""
 
 import pytest
 import torch
