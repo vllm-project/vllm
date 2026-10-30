@@ -112,3 +112,62 @@ def test_fused_gated_rms_norm_strided_z_bitwise(
     torch.testing.assert_close(
         out.view(num_tokens, num_heads, head_dim), ref, rtol=0, atol=0
     )
+
+
+# 48/24/12 value heads per rank: TP1/2/4 of a 48-head model.
+@pytest.mark.parametrize("num_heads", [48, 24, 12])
+@pytest.mark.parametrize("num_tokens", [1, 37, 300])
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not current_platform.has_device_capability(89),
+    reason="the FP8 (e4m3fn) output of the fused gated RMS norm requires NVIDIA SM89+",
+)
+@torch.inference_mode()
+def test_fused_gated_rms_norm_fp8_matches_chain(
+    num_tokens: int, num_heads: int
+) -> None:
+    """The FP8 output (fused out_proj input quant) equals the bf16 kernel
+    followed by static scaled_fp8_quant."""
+    from vllm import _custom_ops as ops
+    from vllm.models.qwen3_5.nvidia.ops.fused_gdn_gated_norm import (
+        fused_gdn_gated_rms_norm,
+    )
+
+    g = torch.Generator(device="cuda").manual_seed(num_tokens)
+    dtype = torch.bfloat16
+    head_dim = 128
+    qkvz_row = 2 * (num_heads // 3) * 128 + 2 * num_heads * head_dim
+    qkvz = torch.randn(num_tokens, qkvz_row, generator=g, dtype=dtype, device="cuda")
+    z_view = qkvz[:, qkvz_row - num_heads * head_dim :]
+    x = torch.randn(
+        num_tokens, num_heads * head_dim, generator=g, dtype=dtype, device="cuda"
+    )
+    weight = (torch.rand(head_dim, generator=g, device="cuda") + 0.5).to(dtype)
+    # Small enough that the largest outputs saturate at +-448.
+    scale = torch.tensor([0.004], device="cuda")
+    kwargs = dict(
+        z=z_view,
+        weight=weight,
+        eps=1e-6,
+        num_v_heads=num_heads,
+        head_v_dim=head_dim,
+        norm_before_gate=True,
+        activation="silu",
+    )
+
+    ref = torch.empty_like(x)
+    fused_gdn_gated_rms_norm(x=x, out=ref, **kwargs)
+    ref_q, _ = ops.scaled_fp8_quant(ref, scale, group_shape=(-1, -1))
+    q = torch.empty_like(x, dtype=torch.float8_e4m3fn)
+    fused_gdn_gated_rms_norm(x=x, out=q, scale=scale, **kwargs)
+
+    assert ref_q.float().abs().max().item() == 448.0
+
+    # Arch-dependent compilation flips occasional bf16 rounding boundaries;
+    # codes must be within one FP8 step (+0 == -0).
+    def codes(t: torch.Tensor) -> torch.Tensor:
+        b = t.view(torch.uint8).int()
+        return torch.where(b >= 128, -(b & 0x7F), b)
+
+    dist = (codes(q) - codes(ref_q)).abs()
+    assert dist.max().item() <= 1
+    assert (dist > 0).float().mean().item() <= 1e-4

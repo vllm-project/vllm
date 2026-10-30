@@ -58,6 +58,7 @@ def _build_model(mode: str, has_bias: bool) -> tuple[DFlashQwen3Model, list]:
     model.hidden_norm = RMSNorm(HIDDEN)
     model._rms_norm_eps = 1e-6
     attentions = []
+    checkpoint = []
     for i in range(NUM_LAYERS):
         attn = nn.Module()
         attn.q_size, attn.kv_size = Q_SIZE, KV_SIZE
@@ -74,15 +75,33 @@ def _build_model(mode: str, has_bias: bool) -> tuple[DFlashQwen3Model, list]:
         )
         weight = torch.randn(Q_SIZE + 2 * KV_SIZE, HIDDEN) / 16
         proj = attn.qkv_proj
+        tensors = {}
         if isinstance(proj.quant_method, UnquantizedLinearMethod):
             proj.weight.data.copy_(weight)
         else:
             weight, scale = _mxfp8_e4m3_quantize_torch(weight)
             proj.weight.data.copy_(weight)
             proj.weight_scale.data.copy_(scale)
+            tensors = {"weight": weight, "weight_scale": scale}
         if has_bias:
             proj.bias.data.normal_(std=0.1)
+            tensors["bias"] = proj.bias.data.clone()
         attentions.append(attn)
+        checkpoint.append(tensors)
+    model.layers = nn.ModuleList()
+    for attn in attentions:
+        layer = nn.Module()
+        layer.self_attn = attn
+        model.layers.append(layer)
+    # As __init__ and load_weights do: the MXFP8 context projection exists
+    # from construction and loads the checkpoint's K/V rows.
+    model._context_kv_proj = None
+    if mode == "mxfp8":
+        model._context_kv_proj = model._make_mxfp8_context_kv_proj(attentions)
+        for i, tensors in enumerate(checkpoint):
+            for name, tensor in tensors.items():
+                model._load_context_kv(i, "k", name, tensor[Q_SIZE : Q_SIZE + KV_SIZE])
+                model._load_context_kv(i, "v", name, tensor[Q_SIZE + KV_SIZE :])
     return model, attentions
 
 
@@ -94,14 +113,17 @@ def test_context_kv_matches_qkv_projection(bf16_on_cuda, mode, has_bias):
     after kernel repacking, eagerly and under CUDA graph replay."""
     torch.manual_seed(0)
     model, attentions = _build_model(mode, has_bias)
-    # Load-time order: context buffers are built before kernels repack weights.
-    model._build_context_kv_buffers(attentions, has_bias=has_bias)
-    assert (model._fused_kv_weight is not None) == (mode == "bf16")
-    assert (model._context_kv_proj is not None) == (mode == "mxfp8")
-    for module in [*model.modules(), *(m for a in attentions for m in a.modules())]:
+    context_kv_proj = model._context_kv_proj
+    assert (context_kv_proj is not None) == (mode == "mxfp8")
+    # Load-time order: every module's post-load step (the context projection's
+    # included), then the model-level step that builds the context buffers.
+    for module in model.modules():
         method = getattr(module, "quant_method", None)
         if method is not None:
             method.process_weights_after_loading(module)
+    model._build_context_kv_buffers(attentions, has_bias=has_bias)
+    assert (model._fused_kv_weight is not None) == (mode == "bf16")
+    assert model._context_kv_proj is context_kv_proj
 
     x = torch.randn(NUM_TOKENS, HIDDEN)
     normed = model.hidden_norm(x)

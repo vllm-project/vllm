@@ -9,15 +9,15 @@ namespace vllm {
 namespace topk_histogram_4096 {
 
 // Visit a row with vectorized loads and a scalar tail.
-template <uint32_t BlockSize, uint32_t VecSize, typename Visit>
-__device__ __forceinline__ void scan_scores(const float* __restrict__ scores,
+template <uint32_t BlockSize, uint32_t VecSize, typename InT, typename Visit>
+__device__ __forceinline__ void scan_scores(const InT* __restrict__ scores,
                                             uint32_t length, Visit visit) {
   static_assert(VecSize == 1 || VecSize == 2 || VecSize == 4);
   const uint32_t tx = threadIdx.x;
 
   if constexpr (VecSize == 1) {
     for (uint32_t idx = tx; idx < length; idx += BlockSize) {
-      visit(idx, scores[idx]);
+      visit(idx, to_float(scores[idx]));
     }
     return;
   }
@@ -27,20 +27,20 @@ __device__ __forceinline__ void scan_scores(const float* __restrict__ scores,
   for (uint32_t base = tx * VecSize; base < aligned_length;
        base += BlockSize * VecSize) {
     if constexpr (VecSize == 4) {
-      const float4 values = *reinterpret_cast<const float4*>(scores + base);
+      const float4 values = load_score4(scores + base);
       visit(base, values.x);
       visit(base + 1, values.y);
       visit(base + 2, values.z);
       visit(base + 3, values.w);
     } else {
-      const float2 values = *reinterpret_cast<const float2*>(scores + base);
+      const float2 values = load_score2(scores + base);
       visit(base, values.x);
       visit(base + 1, values.y);
     }
   }
 
   for (uint32_t idx = aligned_length + tx; idx < length; idx += BlockSize) {
-    visit(idx, scores[idx]);
+    visit(idx, to_float(scores[idx]));
   }
 }
 
@@ -70,8 +70,9 @@ constexpr uint32_t kExactCandidateOffset = 16 * 1024;
 // resume at StartRound from a known prefix, and with FinalCandidateCapacity
 // the last round stages its candidates so the output pass skips a row scan.
 template <uint32_t TopK, uint32_t BlockSize, uint32_t VecSize = 1,
-          uint32_t StartRound = 0, uint32_t FinalCandidateCapacity = 0>
-__device__ void exact_topk_rescan(const float* __restrict__ scores,
+          uint32_t StartRound = 0, uint32_t FinalCandidateCapacity = 0,
+          typename InT>
+__device__ void exact_topk_rescan(const InT* __restrict__ scores,
                                   int32_t* __restrict__ output, uint32_t length,
                                   void* _smem, uint32_t initial_prefix = 0,
                                   uint32_t initial_remaining = TopK) {
@@ -215,7 +216,7 @@ __device__ void exact_topk_rescan(const float* __restrict__ scores,
     if (candidate_count <= FinalCandidateCapacity) {
       for (uint32_t i = tx; i < candidate_count; i += BlockSize) {
         const uint32_t idx = final_candidates[i];
-        collect(idx, scores[idx]);
+        collect(idx, to_float(scores[idx]));
       }
     } else if (smem->pivot_count == candidate_count) {
       // Every key under the final prefix equals the pivot (heavy ties), so
@@ -240,9 +241,9 @@ __device__ void exact_topk_rescan(const float* __restrict__ scores,
   __syncthreads();
 }
 
-template <uint32_t TopK, uint32_t BlockSize, uint32_t VecSize>
+template <uint32_t TopK, uint32_t BlockSize, uint32_t VecSize, typename InT>
 __device__ __noinline__ void exact_topk_rescan_cold(
-    const float* __restrict__ scores, int32_t* __restrict__ output,
+    const InT* __restrict__ scores, int32_t* __restrict__ output,
     uint32_t length, void* smem) {
   exact_topk_rescan<TopK, BlockSize, VecSize>(scores, output, length, smem);
 }

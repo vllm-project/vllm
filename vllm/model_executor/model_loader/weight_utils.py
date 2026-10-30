@@ -1506,6 +1506,12 @@ def multi_thread_pt_weights_iterator(
             del state
 
 
+def finalize_model_weights(model: torch.nn.Module) -> None:
+    """Run once after a full load or reload: the model-level post-load hook."""
+    if hasattr(model, "process_weights_after_loading"):
+        model.process_weights_after_loading()
+
+
 def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
     """Default weight loader."""
     try:

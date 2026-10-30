@@ -1987,6 +1987,222 @@ def scaled_int8_quant(
     return output, input_scales, input_azp
 
 
+def gather_block_table_cpu(
+    block_table: torch.Tensor,
+    output: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    num_blocks: torch.Tensor,
+    num_reqs_padded: int,
+) -> None:
+    torch.ops._C.gather_block_table_cpu(
+        block_table,
+        output,
+        idx_mapping,
+        num_blocks,
+        num_reqs_padded,
+    )
+
+
+def compute_slot_mapping_cpu(
+    block_table: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    positions: torch.Tensor,
+    block_size: int,
+    mapping_enabled: bool,
+    pad_slot_id: int,
+) -> None:
+    torch.ops._C.compute_slot_mapping_cpu(
+        block_table,
+        slot_mapping,
+        idx_mapping,
+        query_start_loc,
+        positions,
+        block_size,
+        mapping_enabled,
+        pad_slot_id,
+    )
+
+
+def prepare_prefill_inputs_cpu(
+    input_ids: torch.Tensor,
+    next_prefill_tokens: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    all_token_ids: torch.Tensor,
+    prefill_len: torch.Tensor,
+    num_computed_tokens: torch.Tensor,
+) -> None:
+    torch.ops._C.prepare_prefill_inputs_cpu(
+        input_ids,
+        next_prefill_tokens,
+        idx_mapping,
+        query_start_loc,
+        all_token_ids,
+        prefill_len,
+        num_computed_tokens,
+    )
+
+
+def get_prompt_logprobs_token_ids_cpu(
+    num_tokens: int,
+    query_start_loc: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    num_computed_tokens: torch.Tensor,
+    all_token_ids: torch.Tensor,
+) -> torch.Tensor:
+    return torch.ops._C.get_prompt_logprobs_token_ids_cpu(
+        num_tokens,
+        query_start_loc,
+        idx_mapping,
+        num_computed_tokens,
+        all_token_ids,
+    )
+
+
+def prepare_pos_seq_lens_cpu(
+    idx_mapping: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    num_computed_tokens: torch.Tensor,
+    pos: torch.Tensor,
+    seq_lens: torch.Tensor,
+) -> None:
+    torch.ops._C.prepare_pos_seq_lens_cpu(
+        idx_mapping,
+        query_start_loc,
+        num_computed_tokens,
+        pos,
+        seq_lens,
+    )
+
+
+def prepare_mrope_positions_cpu(
+    positions: torch.Tensor,
+    prefill_positions: torch.Tensor,
+    prefill_delta: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    prefill_lens: torch.Tensor,
+    num_computed_tokens: torch.Tensor,
+) -> None:
+    torch.ops._C.prepare_mrope_positions_cpu(
+        positions,
+        prefill_positions,
+        prefill_delta,
+        idx_mapping,
+        query_start_loc,
+        prefill_lens,
+        num_computed_tokens,
+    )
+
+
+def combine_sampled_and_draft_tokens_cpu(
+    input_ids: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    last_sampled_tokens: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    prefill_len: torch.Tensor,
+    draft_tokens: torch.Tensor,
+    cu_num_logits: torch.Tensor,
+    num_logits: int,
+    num_new_sampled_tokens: int,
+) -> torch.Tensor:
+    return torch.ops._C.combine_sampled_and_draft_tokens_cpu(
+        input_ids,
+        idx_mapping,
+        last_sampled_tokens,
+        query_start_loc,
+        seq_lens,
+        prefill_len,
+        draft_tokens,
+        cu_num_logits,
+        num_logits,
+        num_new_sampled_tokens,
+    )
+
+
+def post_update_cpu(
+    idx_mapping: torch.Tensor,
+    num_computed_tokens: torch.Tensor,
+    last_sampled_tokens: torch.Tensor,
+    output_bin_counts: torch.Tensor | None,
+    sampled_tokens: torch.Tensor,
+    num_sampled: torch.Tensor,
+    num_rejected: torch.Tensor,
+    query_start_loc: torch.Tensor | None,
+    all_token_ids: torch.Tensor,
+    total_len: torch.Tensor,
+) -> None:
+    torch.ops._C.post_update_cpu(
+        idx_mapping,
+        num_computed_tokens,
+        last_sampled_tokens,
+        output_bin_counts,
+        sampled_tokens,
+        num_sampled,
+        num_rejected,
+        query_start_loc,
+        all_token_ids,
+        total_len,
+    )
+
+
+def gumbel_sample_cpu(
+    logits: torch.Tensor,
+    expanded_idx_mapping: torch.Tensor,
+    temperature: torch.Tensor,
+    seeds: torch.Tensor,
+    positions: torch.Tensor,
+    apply_temperature: bool,
+    is_drafting: bool,
+    use_fp64: bool,
+) -> torch.Tensor:
+    return torch.ops._C.gumbel_sample_cpu(
+        logits,
+        expanded_idx_mapping,
+        temperature,
+        seeds,
+        positions,
+        apply_temperature,
+        is_drafting,
+        use_fp64,
+    )
+
+
+def apply_logit_bias_cpu(
+    logits: torch.Tensor,
+    expanded_idx_mapping: torch.Tensor,
+    positions: torch.Tensor,
+    num_allowed_token_ids: torch.Tensor,
+    allowed_token_ids: torch.Tensor,
+    num_logit_bias: torch.Tensor,
+    logit_bias_token_ids: torch.Tensor,
+    logit_bias: torch.Tensor,
+    min_lens: torch.Tensor,
+    num_stop_token_ids: torch.Tensor,
+    restore_when_all_masked: torch.Tensor,
+    stop_token_ids: torch.Tensor,
+    check_all_masked_rows: bool,
+) -> None:
+    torch.ops._C.apply_logit_bias_cpu(
+        logits,
+        expanded_idx_mapping,
+        positions,
+        num_allowed_token_ids,
+        allowed_token_ids,
+        num_logit_bias,
+        logit_bias_token_ids,
+        logit_bias,
+        min_lens,
+        num_stop_token_ids,
+        restore_when_all_masked,
+        stop_token_ids,
+        check_all_masked_rows,
+    )
+
+
 # mamba
 def selective_scan_fwd(
     u: torch.Tensor,

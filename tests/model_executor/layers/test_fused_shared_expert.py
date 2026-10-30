@@ -1264,6 +1264,7 @@ def _build_mtp_model(
         "parallel_drafting": False,
         "enable_adaptive_verification": False,
         "use_dspark": lambda: False,
+        "use_multi_module_mtp": lambda: False,
     }
     if with_target_model:
         speculative_config["target_model_config"] = vllm_config.model_config
