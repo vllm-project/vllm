@@ -77,7 +77,6 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
-    iter_layer_specs,
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
@@ -628,6 +627,12 @@ def _get_tensor_dense_flag(tensor: torch.Tensor) -> bool | None:
     return None
 
 
+class MooncakeRangeRequest(msgspec.Struct):
+    transfer_id: TransferId
+    block_ids: list[list[int]]
+    start_blocks: list[int | None]
+
+
 class MooncakeXferMetadata(
     msgspec.Struct,
     omit_defaults=True,  # type: ignore[call-arg]
@@ -636,7 +641,7 @@ class MooncakeXferMetadata(
     remote_port: int
     remote_tp_size: int
     remote_tp_rank: int
-    req_blocks: dict[ReqId, tuple[TransferId, list[list[int]]]]
+    req_blocks: dict[ReqId, tuple[TransferId, list[list[int]]] | MooncakeRangeRequest]
     kv_caches_base_addr: list[int]
     block_lens: list[int]
     kv_block_lens: list[int]
@@ -719,6 +724,7 @@ class PullReqMeta:
     local_block_ids: list[list[int]]
     remote_engine_id: EngineId
     remote_bootstrap_addr: str
+    start_blocks: list[int | None] | None = None
     # Set expire time to avoid infinitely sending requests.
     expire_time: float = float("inf")
     # Designed for one D pairing to multiple P
@@ -756,6 +762,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
         local_block_ids: list[list[int]],
         kv_transfer_params: dict[str, Any],
         load_remote_cache: bool = True,
+        start_blocks: list[int | None] | None = None,
     ):
         transfer_id = kv_transfer_params["transfer_id"]
         if load_remote_cache:
@@ -766,6 +773,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
                 remote_engine_id=remote_engine_id,
                 remote_bootstrap_addr=kv_transfer_params["remote_bootstrap_addr"],
                 transfer_id=transfer_id,
+                start_blocks=start_blocks,
             )
         else:
             self.reqs_to_send[request_id] = (transfer_id, local_block_ids)
@@ -845,6 +853,14 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     def supports_load_range(self) -> bool:
         return bool(
             self.connector_scheduler and self.connector_scheduler.supports_load_range
+        )
+
+    def get_loadable_window_group_ids(
+        self, request: "Request", end_token: int
+    ) -> tuple[int, ...]:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.get_loadable_window_group_ids(
+            request, end_token
         )
 
     def update_state_after_alloc_for_range(
@@ -1046,9 +1062,14 @@ class MooncakeConnectorScheduler:
         specs = [group.kv_cache_spec for group in transfer_groups]
         # Attention pages are independently addressable. Recurrent-state pages
         # cannot be safely composed from concurrent prefix sources.
-        self.supports_load_range = bool(specs) and all(
-            all(isinstance(inner, AttentionSpec) for inner in iter_layer_specs(spec))
-            for spec in specs
+        parallel = vllm_config.parallel_config
+        self.supports_load_range = (
+            parallel.decode_context_parallel_size == 1
+            and parallel.prefill_context_parallel_size == 1
+            and all(
+                type(g.kv_cache_spec) in (FullAttentionSpec, SlidingWindowSpec)
+                for g in kv_cache_config.kv_cache_groups
+            )
         )
         dcp = vllm_config.parallel_config.decode_context_parallel_size
         self._piecewise_group_block_sizes = tuple(
@@ -1059,6 +1080,7 @@ class MooncakeConnectorScheduler:
         # New requests are added by update_state_after_alloc in
         # the scheduler. Used to make metadata passed to Worker.
         self._reqs_need_recv: dict[ReqId, tuple[Request, list[list[int]]]] = {}
+        self._range_start_blocks: dict[ReqId, list[int | None]] = {}
         self._reqs_need_send: dict[ReqId, tuple[Request, list[list[int]]]] = {}
         # Reqs to remove from processed set because they're not to send after
         # remote prefill or aborted.
@@ -1072,22 +1094,12 @@ class MooncakeConnectorScheduler:
         self._last_heartbeat_time = 0.0
 
         # Compute sliding window block counts per KV cache group.
-        sw_sizes_tokens: list[tuple[int, int]] = []
-        for spec in specs:
-            inner_specs = tuple(iter_layer_specs(spec))
-            windows = {
-                inner.sliding_window
-                for inner in inner_specs
-                if isinstance(inner, SlidingWindowSpec)
-            }
-            is_sliding_group = len(windows) == 1 and all(
-                isinstance(inner, SlidingWindowSpec) for inner in inner_specs
-            )
-            sw_sizes_tokens.append(
-                (windows.pop(), spec.block_size)
-                if is_sliding_group
-                else (0, spec.block_size)
-            )
+        sw_sizes_tokens: list[tuple[int, int]] = [
+            (g.kv_cache_spec.sliding_window, g.kv_cache_spec.block_size)
+            if isinstance(g.kv_cache_spec, SlidingWindowSpec)
+            else (0, self.block_size)
+            for g in kv_cache_config.transfer_groups
+        ]
         # cdiv(n_tokens, block_size) gives blocks/window; add 1 to
         # conservatively account for boundary overlap.
         self.blocks_per_sw = [
@@ -1280,66 +1292,66 @@ class MooncakeConnectorScheduler:
                 # Add an empty list to worker to create event.
                 self._reqs_need_send[request.request_id] = (request, [])
 
+    def get_loadable_window_group_ids(
+        self, request: "Request", end_token: int
+    ) -> tuple[int, ...]:
+        if not self.supports_load_range or end_token != (
+            self._get_remote_prefill_token_count(request.num_prompt_tokens)
+        ):
+            return ()
+        matched, _ = self.get_num_new_matched_tokens(request, 0)
+        if matched != end_token:
+            return ()
+        return tuple(
+            i
+            for i in self.kv_cache_config.transfer_group_ids
+            if isinstance(
+                self.kv_cache_config.kv_cache_groups[i].kv_cache_spec,
+                SlidingWindowSpec,
+            )
+        )
+
     def update_state_after_alloc_for_range(
         self,
         request: "Request",
         blocks: "KVCacheBlocks",
         load_range: KVLoadRange,
     ) -> None:
-        """Receive destination blocks for the terminal prompt suffix."""
         assert self.supports_load_range
-        if not load_range.is_terminal:
-            raise ValueError(
-                "MooncakeConnector only supports a terminal piecewise load range"
-            )
-        if load_range.start_token % self._scheduler_block_size:
-            raise ValueError(
-                f"Piecewise range start {load_range.start_token} is not aligned "
-                f"to scheduler block size {self._scheduler_block_size}"
-            )
-        logger.debug(
-            "MooncakeConnector range load: req_id=%s range=[%d, %d)",
-            request.request_id,
-            load_range.start_token,
-            load_range.end_token,
+        assert not load_range.num_tokens or (
+            load_range.start_token % self._scheduler_block_size == 0
         )
-
         params = request.kv_transfer_params
         assert params and params.get("do_remote_prefill")
         assert not self.is_kv_producer
-        missing = self._missing_remote_prefill_fields(params)
-        if missing:
-            raise ValueError(f"Missing remote prefill fields: {', '.join(missing)}")
-        unhashed_block_ids = self.kv_cache_config.select_transfer_block_ids(
-            blocks.get_unhashed_block_ids_all_groups()
-        )
-        assert len(unhashed_block_ids) == len(self._piecewise_group_block_sizes)
-        range_blocks = [
-            cdiv(load_range.num_tokens, block_size)
-            for block_size in self._piecewise_group_block_sizes
-        ]
-        needed_blocks = []
-        for i, (group, needed) in enumerate(zip(unhashed_block_ids, range_blocks)):
-            if self._is_hma_required and self.blocks_per_sw[i]:
-                # Sliding-window groups may contain fewer real blocks than the
-                # window cap because padding/null blocks are omitted.
-                needed = min(needed, self.blocks_per_sw[i], len(group))
-            needed_blocks.append(needed)
-        if any(
-            len(group) < needed
-            for group, needed in zip(unhashed_block_ids, needed_blocks)
+        block_ids = blocks.get_block_ids()
+        selected: list[list[int]] = []
+        starts: list[int | None] = []
+        for group_id, block_size in zip(
+            self.kv_cache_config.transfer_group_ids,
+            self._piecewise_group_block_sizes,
+            strict=True,
         ):
-            raise ValueError(
-                "Piecewise suffix requires more unhashed blocks than allocated: "
-                f"needed={needed_blocks}, "
-                f"available={[len(group) for group in unhashed_block_ids]}"
-            )
-        local_block_ids = [
-            group[-needed:] if needed else []
-            for group, needed in zip(unhashed_block_ids, needed_blocks)
-        ]
-        local_block_ids = self.get_sw_clipped_blocks(local_block_ids)
-        self._reqs_need_recv[request.request_id] = (request, local_block_ids)
+            spec = self.kv_cache_config.kv_cache_groups[group_id].kv_cache_spec
+            group = block_ids[group_id]
+            if isinstance(spec, SlidingWindowSpec):
+                if group_id in load_range.window_group_ids:
+                    assert load_range.window_end_token is not None
+                    end = cdiv(load_range.window_end_token, block_size)
+                    selected.append(list(group[:end]))
+                else:
+                    selected.append([])
+                starts.append(None)
+            else:
+                start = load_range.start_token // block_size
+                end = cdiv(load_range.end_token, block_size)
+                selected.append(list(group[start:end]) if load_range.num_tokens else [])
+                starts.append(start)
+        self._reqs_need_recv[request.request_id] = (
+            request,
+            self.get_sw_clipped_blocks(selected),
+        )
+        self._range_start_blocks[request.request_id] = starts
         params["do_remote_prefill"] = False
 
     def build_connector_meta(
@@ -1356,6 +1368,7 @@ class MooncakeConnectorScheduler:
                     request_id=req_id,
                     local_block_ids=block_ids,
                     kv_transfer_params=req.kv_transfer_params,
+                    start_blocks=self._range_start_blocks.pop(req_id, None),
                 )
             self._reqs_need_recv.clear()
 
@@ -1628,18 +1641,13 @@ class MooncakeConnectorWorker:
                 self._layer_specs[layer_name] = specs_by_layer.get(
                     layer_name, group_spec
                 )
-        self._layer_group_indices = kv_cache_config.transfer_group_index_by_layer
         self.transfer_topo = TransferTopology(
             tp_rank=self.tp_rank,
             tp_size=self.tp_size,
             block_size=self.block_size,
             engine_id=self.engine_id,
             is_mla=self.use_mla,
-            is_mamba=any(
-                isinstance(inner, MambaSpec)
-                for group in kv_cache_config.transfer_groups
-                for inner in iter_layer_specs(group.kv_cache_spec)
-            ),
+            is_mamba=kv_cache_config.has_mamba_layers,
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
             attn_backends=self.attn_backends,
         )
@@ -1916,7 +1924,12 @@ class MooncakeConnectorWorker:
             await sock.send_multipart((identity, self._encoder.encode(response)))
             return
         expired_reqs: list[ReqId] = []
-        for d_req_id, (transfer_id, _) in meta.req_blocks.items():
+        for d_req_id, request_blocks in meta.req_blocks.items():
+            transfer_id = (
+                request_blocks.transfer_id
+                if isinstance(request_blocks, MooncakeRangeRequest)
+                else request_blocks[0]
+            )
             if transfer_id not in self.reqs_need_send:
                 if transfer_id in self._expired_transfer_ids:
                     expired_reqs.append(d_req_id)
@@ -2131,7 +2144,13 @@ class MooncakeConnectorWorker:
         remote_session = f"{agent_meta.remote_hostname}:{agent_meta.remote_port}"
 
         for d_req_id, send_meta in ready_reqs:
-            _, remote_block_ids_per_group = agent_meta.req_blocks[d_req_id]
+            request_blocks = agent_meta.req_blocks[d_req_id]
+            if isinstance(request_blocks, MooncakeRangeRequest):
+                remote_block_ids_per_group = request_blocks.block_ids
+                start_blocks = request_blocks.start_blocks
+            else:
+                _, remote_block_ids_per_group = request_blocks
+                start_blocks = [None] * len(remote_block_ids_per_group)
 
             if not remote_block_ids_per_group or all(
                 len(g) == 0 for g in remote_block_ids_per_group
@@ -2180,6 +2199,8 @@ class MooncakeConnectorWorker:
                         if block_id != NULL_BLOCK_ID
                     ]
 
+                if (start := start_blocks[group_index]) is not None:
+                    local_group = local_group[start : start + len(remote_group)]
                 n_local = len(local_group)
                 n_remote = len(remote_group)
                 if n_local < n_remote:
@@ -3301,7 +3322,15 @@ class MooncakeConnectorWorker:
         include_layout: bool,
     ) -> MooncakeXferMetadata:
         req_blocks = {
-            req_id: (pull_meta.transfer_id, pull_meta.local_block_ids)
+            req_id: (
+                MooncakeRangeRequest(
+                    pull_meta.transfer_id,
+                    pull_meta.local_block_ids,
+                    pull_meta.start_blocks,
+                )
+                if pull_meta.start_blocks is not None
+                else (pull_meta.transfer_id, pull_meta.local_block_ids)
+            )
             for req_id, pull_meta in pull_metas.items()
         }
         if not include_layout:

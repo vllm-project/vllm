@@ -173,12 +173,19 @@ On the prefiller, use the same connector order with outer and
 
 For example, if Store covers tokens `[0, 1024)` and the prefiller covers
 `[0, 1056)`, the decoder loads `[0, 1024)` from Store and receives
-`[1024, 1056)` from the prefiller. The decoder's suffix block list selects the
-same end-anchored blocks on the prefiller, so the P/D transfer contains only
-that suffix. Boundaries between sources must be scheduler-block aligned; the
-final endpoint may be partial. Piecewise loading supports hybrid attention
-layouts, including packed Full/MLA and sliding-window groups. Requests with
-recurrent-state groups such as Mamba use single-source loading.
+`[1024, 1056)` from the prefiller. Range requests carry source block offsets,
+so a shortened endpoint does not select the prefiller's tail by mistake.
+Boundaries between sources must be scheduler-block aligned; the final
+endpoint may be partial.
+
+Piecewise P/D loading supports ordinary full-attention and sliding-window
+groups with PCP=DCP=1. Store supplies full-attention ranges; a P/D source can
+separately supply an entire SWA window at its original prefill endpoint.
+Missing window coverage, recurrent state, packed/MLA layouts and context
+parallelism use the default single-source path. Both P/D endpoints must run
+this range protocol: range requests use a distinct wire representation so
+an older producer rejects them instead of silently selecting the wrong blocks.
+Ordinary single-source requests retain their existing wire format.
 
 If ranges cannot be composed at aligned boundaries, MultiConnector falls back
 to the single connector with the longest available prefix.

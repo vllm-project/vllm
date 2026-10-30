@@ -7,10 +7,10 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVLoadRange
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (
     MooncakeStoreCoordinator,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVLoadRange
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     BoundaryPut,
     LoadSpec,
@@ -146,7 +146,9 @@ def _make_decode_scheduler_output(
         ),
         num_scheduled_tokens={"req-0": num_scheduled_tokens},
         scheduled_spec_decode_tokens={},
-        kv_connector_block_state=_make_connector_block_state(),
+        # Core exposes the current table for every scheduled request, including
+        # decode steps that fill a block without allocating a new one.
+        kv_connector_block_state=_make_connector_block_state(block_ids=([0, 1, 2],)),
     )
 
 
@@ -378,96 +380,49 @@ def test_update_state_excludes_nontransfer_groups():
     assert scheduler._unfinished_requests["req-1"][1] == ([1, 2],)
 
 
-def test_range_load_group_ids_use_transfer_group_indices():
-    groups = [
-        SimpleNamespace(kv_cache_spec=object(), enable_kv_transfer=False),
-        SimpleNamespace(kv_cache_spec=object(), enable_kv_transfer=True),
-        SimpleNamespace(
-            kv_cache_spec=MambaSpec(
-                block_size=16,
-                shapes=((1,),),
-                dtypes=(torch.float32,),
-                mamba_cache_mode="align",
-            ),
-            enable_kv_transfer=True,
-        ),
-    ]
-    kv_cache_config = KVCacheConfig(
-        num_blocks=0,
-        kv_cache_tensors=[],
-        kv_cache_groups=groups,
-    )
-    vllm_config = SimpleNamespace(
-        kv_transfer_config=SimpleNamespace(
-            kv_role="kv_both",
-            kv_connector_extra_config={},
-        ),
-        kv_events_config=None,
-        parallel_config=SimpleNamespace(
-            decode_context_parallel_size=1,
-            world_size=1,
-        ),
-    )
+@pytest.mark.parametrize("terminal", [False, True])
+@pytest.mark.parametrize("end", [48, 63])
+def test_range_load_trims_payload_clears_stale_store_key_boundary(terminal, end):
+    from .utils import create_request, create_vllm_config, make_kv_cache_config
 
+    config = create_vllm_config(kv_connector="MooncakeStoreConnector")
+    caches = make_kv_cache_config(16, swa_enabled=True)
     module = "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler"
-    with (
-        patch(f"{module}.LookupKeyClient"),
-        patch(f"{module}.resolve_kv_cache_block_sizes", return_value=(16, 16)),
-        patch(f"{module}.partial_hash_hits_enabled", return_value=False),
-    ):
-        scheduler = MooncakeStoreScheduler(vllm_config, kv_cache_config)
+    with patch(f"{module}.LookupKeyClient") as client:
+        client.return_value.lookup.return_value = MooncakeLookupResult(
+            64, (TailKeyBoundary(0, 64), TailKeyBoundary(1, 64))
+        )
+        scheduler = MooncakeStoreScheduler(config, caches)
+        request = create_request(num_tokens=64)
+        assert scheduler.get_num_new_matched_tokens(request, 0)[0] == 64
 
-    assert scheduler._boundary_state_group_ids == frozenset({2})
-    assert scheduler._range_load_group_ids == (0,)
-
-
-def test_range_load_trims_payload_clears_stale_store_key_boundary():
-    scheduler = _make_bare_scheduler()
-    scheduler.load_specs["req-1"] = LoadSpec(
-        vllm_cached_tokens=0,
-        kvpool_cached_tokens=1584,
-        can_load=False,
-        tail_key_boundaries=(
-            TailKeyBoundary(0, 1584),
-            TailKeyBoundary(1, 1600),
-        ),
+    blocks = KVCacheBlocks(
+        tuple(
+            [KVCacheBlock(i) for i in range(start, start + 4)] for start in (100, 200)
+        )
     )
-    request = SimpleNamespace(request_id="req-1")
-    blocks = SimpleNamespace(get_block_ids=lambda: ([1, 2, 3, 4], [9, 10]))
-
     scheduler.update_state_after_alloc_for_range(
-        request,
-        blocks,
-        KVLoadRange(0, 1568, is_terminal=False),
+        request, blocks, KVLoadRange(16, end, is_terminal=terminal)
     )
-
-    load_spec = scheduler.load_specs["req-1"]
-    assert load_spec.kvpool_cached_tokens == 1568
+    load_spec = scheduler.load_specs[request.request_id]
+    assert (load_spec.vllm_cached_tokens, load_spec.kvpool_cached_tokens) == (16, end)
     assert load_spec.load_group_ids == (0,)
-    assert load_spec.tail_key_boundaries == ()
-    assert load_spec.can_load is True
-
-
-def test_nonterminal_range_skips_state_for_pure_recurrent_model():
-    scheduler = _make_bare_scheduler()
-    scheduler._range_load_group_ids = ()
-    scheduler.load_specs["req-1"] = LoadSpec(
-        vllm_cached_tokens=0,
-        kvpool_cached_tokens=64,
-        can_load=False,
+    assert load_spec.tail_key_boundaries == (
+        (TailKeyBoundary(0, 64), TailKeyBoundary(1, 64)) if end == 63 else ()
     )
-
-    scheduler.update_state_after_alloc_for_range(
-        SimpleNamespace(request_id="req-1"),
-        SimpleNamespace(get_block_ids=lambda: ([9],)),
-        KVLoadRange(0, 32, is_terminal=False),
-    )
-
-    load_spec = scheduler.load_specs["req-1"]
-    assert scheduler.supports_load_range
-    assert load_spec.load_group_ids == ()
-    assert load_spec.kvpool_cached_tokens == 32
     assert load_spec.can_load
+
+
+@pytest.mark.parametrize("mamba", [False, True])
+def test_range_capability_excludes_recurrent_state(mamba):
+    from .utils import create_vllm_config, make_kv_cache_config
+
+    config = create_vllm_config(kv_connector="MooncakeStoreConnector")
+    caches = make_kv_cache_config(16, mamba_enabled=mamba, mamba_cache_mode="align")
+    module = "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler"
+    with patch(f"{module}.LookupKeyClient"):
+        scheduler = MooncakeStoreScheduler(config, caches)
+    assert scheduler.supports_load_range is not mamba
 
 
 def _setup_decode_request(
