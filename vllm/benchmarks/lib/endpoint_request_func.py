@@ -544,11 +544,17 @@ def _extract_sse_data(message: str) -> str | None:
 
 # Responses events that carry generated tokens. Reasoning deltas are included
 # because the server is already decoding when it emits them, so excluding them
-# would report the whole reasoning phase as time to first token.
+# would report the whole reasoning phase as time to first token. Tool call
+# arguments and code are generated tokens too, as `tool_calls` deltas are on
+# `openai-chat`; a response that only calls a tool emits nothing else.
 _RESPONSES_TOKEN_DELTA_EVENTS = frozenset(
     {
         "response.output_text.delta",
         "response.reasoning_text.delta",
+        "response.function_call_arguments.delta",
+        "response.custom_tool_call_input.delta",
+        "response.mcp_call_arguments.delta",
+        "response.code_interpreter_call_code.delta",
     }
 )
 
