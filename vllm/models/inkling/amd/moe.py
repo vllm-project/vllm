@@ -601,7 +601,9 @@ class InklingMoE(nn.Module):
             input_scale = getattr(experts, f"{projection}_input_scale")
             input_scale.weight_loader(
                 input_scale,
-                torch.tensor(amax / _MXFP4_INPUT_SCALE_DENOMINATOR),
+                torch.tensor(
+                    amax / _MXFP4_INPUT_SCALE_DENOMINATOR, dtype=torch.float32
+                ),
                 lambda p, w: p.data.copy_(w.expand_as(p.data)),
             )
             return [f"experts.routed_experts.{projection}_input_scale"]

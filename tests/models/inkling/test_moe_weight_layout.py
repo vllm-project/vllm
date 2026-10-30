@@ -12,6 +12,7 @@ from vllm.models.inkling.common.weights import write_loader
 from vllm.models.inkling.nvidia import moe
 from vllm.models.inkling.nvidia.model import _TmlForCausalLMBase
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 
 def _expert_param(data: torch.Tensor) -> torch.nn.Parameter:
@@ -152,11 +153,14 @@ def test_moe_loads_calibrated_input_scale(projection: str, amax: float) -> None:
     )
     layer = SimpleNamespace(experts=SimpleNamespace(routed_experts=experts))
 
-    loaded = moe.InklingMoE.load_expert_weight(
-        layer,
-        f"experts.{projection}_weight.input_amax",
-        torch.tensor([amax]),
-    )
+    # weights load under the model's default dtype; the fp32 scale must not
+    # round through it
+    with set_default_torch_dtype(torch.bfloat16):
+        loaded = moe.InklingMoE.load_expert_weight(
+            layer,
+            f"experts.{projection}_weight.input_amax",
+            torch.tensor([amax]),
+        )
 
     scale = getattr(experts, f"{projection}_input_scale")
     expected = torch.full_like(scale, amax / (448.0 * 6.0))
