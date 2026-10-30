@@ -14,7 +14,7 @@ from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
     fused_mqa_topk_available,
     fused_mqa_topk_min_keys,
     fused_mqa_topk_prefill,
-    get_fused_mqa_topk_workspace,
+    get_fused_mqa_topk_workspaces,
 )
 from vllm.model_executor.layers.sparse_attn_indexer import as_fp32_logits
 from vllm.utils.deep_gemm import (
@@ -223,14 +223,13 @@ def test_multi_request_chunk_matches_dense(lens, topk):
 @pytest.mark.parametrize("rows", [32768, 32770])
 def test_large_chunk_single_call(rows):
     """Prefill chunks above 16384 rows (e.g. --max-num-batched-tokens 32768)
-    run in one launch; the per-row workspace grows to fit."""
+    run in one launch."""
     keys = 65536
     q, k, scales, weights = _inputs(rows, keys, seed=921)
     starts = torch.zeros(rows, device="cuda", dtype=torch.int32)
     ends = torch.arange(keys - rows + 1, keys + 1, device="cuda", dtype=torch.int32)
     out = torch.empty(rows, TOPK, device="cuda", dtype=torch.int32)
     fused_mqa_topk_prefill(q, k, scales, weights, starts, ends, out)
-    assert get_fused_mqa_topk_workspace(q.device, rows).counts.numel() >= rows
     _check(out, q, k, scales, weights, starts, ends)
 
 
@@ -295,11 +294,14 @@ def test_gate_with_common_score_offset():
     starts = torch.zeros(rows, device="cuda", dtype=torch.int32)
     ends = torch.arange(keys - rows + 1, keys + 1, device="cuda", dtype=torch.int32)
     out = torch.empty(rows, topk, device="cuda", dtype=torch.int32)
-    fused_mqa_topk_prefill(q, k, scales, weights, starts, ends, out)
+    workspaces = get_fused_mqa_topk_workspaces(q.device, rows)
+    torch.ops._C.fused_mqa_topk_prefill(
+        q, k, scales, weights, starts, ends, out, *workspaces
+    )
     _check(out, q, k, scales, weights, starts, ends)
     # Per-row candidate counts the kernel left in its workspace: about the gate
     # target (3072 for top-2048 at <= 128K keys), not a multiple of it.
-    counts = get_fused_mqa_topk_workspace(q.device, rows).counts[:rows]
+    counts = workspaces[-2][:rows]
     assert (counts >= topk).all() and (counts <= 16384).all(), "rows rescanned"
     assert counts.float().median() < 2 * 3072
 

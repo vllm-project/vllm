@@ -1052,7 +1052,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         # chunks.
         model_config = self.vllm_config.model_config
         cfg = model_config.hf_text_config if model_config is not None else None
-        self.plan_fused_mqa_topk = cfg is not None and use_fused_mqa_topk(
+        self.fused_mqa_topk_eligible = cfg is not None and use_fused_mqa_topk(
             query_shape=(
                 getattr(cfg, "index_n_heads", 0),
                 getattr(cfg, "index_head_dim", 0),
@@ -1398,7 +1398,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         workspace_size: int,
         max_logits_bytes: int,
         request_offset: int = 0,
-        plan_fused_mqa_topk: bool = False,
+        fused_mqa_topk_eligible: bool = False,
     ) -> list[tuple[slice, slice]]:
         """Split this step's prefill requests into chunks, respecting:
         - N constraint: total_seq_lens <= workspace_size (existing O(N)
@@ -1408,12 +1408,12 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         When a single request-level chunk still exceeds the logits budget,
         sub-chunks on the query dimension (M) to bound peak memory.
 
-        With ``plan_fused_mqa_topk`` (chunks for the fused MQA+top-k kernel, which needs
-        no logits buffer) chunks whose gathered keys fit FUSED_MQA_TOPK_MAX_KEYS
-        are bounded by FUSED_MQA_TOPK_MAX_ROWS rows instead of the logits
-        budget. Requests are never packed past that key limit, so only a single
-        request longer than it takes the logits-budget path. Chunks the dispatch
-        keeps dense are row-split by the indexer.
+        With ``fused_mqa_topk_eligible`` (chunks for the fused MQA+top-k kernel,
+        which needs no logits buffer) chunks whose gathered keys fit
+        FUSED_MQA_TOPK_MAX_KEYS are bounded by FUSED_MQA_TOPK_MAX_ROWS rows
+        instead of the logits budget. Requests are never packed past that key
+        limit, so only a single request longer than it takes the logits-budget
+        path. Chunks the dispatch keeps dense are row-split by the indexer.
 
         Returns list of (req_slice, query_slice) tuples.
         """
@@ -1431,11 +1431,14 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     compressed_seq_lens_cpu[end].item(),
                 )
                 new_m, new_n = chunk_m + q, chunk_n + s
-                if plan_fused_mqa_topk and new_n <= FUSED_MQA_TOPK_MAX_KEYS:
+                if fused_mqa_topk_eligible and new_n <= FUSED_MQA_TOPK_MAX_KEYS:
                     fits = new_m <= FUSED_MQA_TOPK_MAX_ROWS
                 else:
                     # fused_mqa_topk planning never packs past the key limit.
-                    fits = not plan_fused_mqa_topk and new_m * new_n <= max_logits_elems
+                    fits = (
+                        not fused_mqa_topk_eligible
+                        and new_m * new_n <= max_logits_elems
+                    )
                 if new_n <= workspace_size and fits:
                     chunk_m, chunk_n = new_m, new_n
                     end += 1
@@ -1457,7 +1460,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 if chunk_n > 0
                 else max(1, chunk_m)
             )
-            if plan_fused_mqa_topk and chunk_n <= FUSED_MQA_TOPK_MAX_KEYS:
+            if fused_mqa_topk_eligible and chunk_n <= FUSED_MQA_TOPK_MAX_KEYS:
                 max_q = FUSED_MQA_TOPK_MAX_ROWS
             for q_off in range(0, chunk_m, max_q):
                 sub_m = min(max_q, chunk_m - q_off)
@@ -1594,7 +1597,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     self.max_prefill_buffer_size,
                     max_logits_bytes,
                     request_offset=num_decodes,
-                    plan_fused_mqa_topk=self.plan_fused_mqa_topk,
+                    fused_mqa_topk_eligible=self.fused_mqa_topk_eligible,
                 )
 
             chunks = []

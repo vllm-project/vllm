@@ -3,7 +3,6 @@
 """Single-launch fused FP8 MQA-logits + top-k prefill selection (SM100 family)"""
 
 import functools
-from dataclasses import dataclass
 
 import torch
 
@@ -38,33 +37,6 @@ _CANDIDATES_PER_ROW = 16384  # kCandidatesPerRow
 _RETAINED_PER_ROW = 4096  # kRetainedPerRow
 _SLOTS_PER_SM = 2  # candidate slots per persistent CTA
 _BLOCK_ROWS = 8  # kBlockRows: query rows per block, one block per CTA at a time
-
-
-@dataclass
-class FusedMQATopKWorkspace:
-    """Caller-owned scratch of the fused_mqa_topk kernel (see fused_mqa_topk.cu)."""
-
-    counter: torch.Tensor  # [2] int32, zero between calls (the kernel restores it)
-    values: torch.Tensor  # [8S, 16384] uint16 (low 16 bits of fp24 codes), S = 2/SM
-    indices: torch.Tensor  # [8S, 16384] int32
-    retained: torch.Tensor  # [8S, 4096] fp32
-    retained_indices: torch.Tensor  # [8S, 4096] int32
-    counts: torch.Tensor  # [rows] int32, per-row candidate counts
-    defer: torch.Tensor  # [rows / 8] int32, blocks queued for the exact rescan
-
-    def as_args(self) -> tuple[torch.Tensor, ...]:
-        return (
-            self.counter,
-            self.values,
-            self.indices,
-            self.retained,
-            self.retained_indices,
-            self.counts,
-            self.defer,
-        )
-
-
-_WORKSPACES: dict[int, FusedMQATopKWorkspace] = {}
 
 
 @functools.cache
@@ -137,60 +109,30 @@ def fused_mqa_topk_chunk(
     )
 
 
-def get_fused_mqa_topk_workspace(
+def get_fused_mqa_topk_workspaces(
     device: torch.device, rows: int
-) -> FusedMQATopKWorkspace:
-    """Return the per-device workspace, allocating it on first use.
-
-    The per-row part (counts, defer) holds at least ``rows`` query rows and grows
-    when a larger call arrives; the profiling run asks for the largest prefill
-    chunk (max_num_batched_tokens rows) so serving never grows it. The block
-    counter is zeroed once; every launch leaves it zeroed again. The workspace is
-    shared by every call on the device, so calls must not run concurrently (they
-    are issued on one stream).
-    """
-    rows = (rows + 7) // 8 * 8
+) -> list[torch.Tensor]:
+    """The workspaces of one fused_mqa_topk call over ``rows`` query rows, in the
+    op's argument order (see fused_mqa_topk.cu), all fresh: the zeroed block
+    counter, then the scratch."""
     index = (
         device.index
         if device.index is not None
         else torch.accelerator.current_device_index()
     )
-    ws = _WORKSPACES.get(index)
-    if ws is None:
-        dev = torch.device("cuda", index)
-        slots = _SLOTS_PER_SM * _sm_count(index)
-        ws = FusedMQATopKWorkspace(
-            counter=torch.zeros(2, dtype=torch.int32, device=dev),
-            values=torch.empty(
-                (8 * slots, _CANDIDATES_PER_ROW), dtype=torch.uint16, device=dev
-            ),
-            indices=torch.empty(
-                (8 * slots, _CANDIDATES_PER_ROW), dtype=torch.int32, device=dev
-            ),
-            retained=torch.empty(
-                (8 * slots, _RETAINED_PER_ROW), dtype=torch.float32, device=dev
-            ),
-            retained_indices=torch.empty(
-                (8 * slots, _RETAINED_PER_ROW), dtype=torch.int32, device=dev
-            ),
-            counts=torch.empty(rows, dtype=torch.int32, device=dev),
-            defer=torch.empty(rows // 8, dtype=torch.int32, device=dev),
-        )
-        nbytes = sum(t.numel() * t.element_size() for t in ws.as_args())
-        logger.info(
-            "Allocated fused MQA+top-k workspace on cuda:%d (%d slots, %.1f MiB).",
-            index,
-            slots,
-            nbytes / 2**20,
-        )
-        _WORKSPACES[index] = ws
-    elif ws.counts.numel() < rows:
-        ws.counts = torch.empty(rows, dtype=torch.int32, device=ws.counts.device)
-        ws.defer = torch.empty(rows // 8, dtype=torch.int32, device=ws.defer.device)
-        logger.info(
-            "Grew the fused MQA+top-k row workspace on cuda:%d to %d rows.", index, rows
-        )
-    return ws
+    blocks = -(-rows // _BLOCK_ROWS)
+    # One persistent CTA per SM, at most one per block; S = 2 slots per CTA.
+    slot_rows = _BLOCK_ROWS * _SLOTS_PER_SM * min(blocks, _sm_count(index))
+    empty = functools.partial(torch.empty, device=device)
+    return [
+        torch.zeros(2, dtype=torch.int32, device=device),  # block counter
+        empty((slot_rows, _CANDIDATES_PER_ROW), dtype=torch.uint16),  # fp24 lows
+        empty((slot_rows, _CANDIDATES_PER_ROW), dtype=torch.int32),  # indices
+        empty((slot_rows, _RETAINED_PER_ROW), dtype=torch.float32),  # retained
+        empty((slot_rows, _RETAINED_PER_ROW), dtype=torch.int32),  # their indices
+        empty(blocks * _BLOCK_ROWS, dtype=torch.int32),  # per-row candidate counts
+        empty(blocks, dtype=torch.int32),  # blocks queued for the exact rescan
+    ]
 
 
 def fused_mqa_topk_key_scales(scales: torch.Tensor) -> torch.Tensor:
@@ -230,7 +172,13 @@ def fused_mqa_topk_prefill(
         "(FP8, 32 heads, top-k %d).",
         output.shape[1],
     )
-    ws = get_fused_mqa_topk_workspace(q.device, q.shape[0])
     torch.ops._C.fused_mqa_topk_prefill(
-        q, k, scales, weights, starts, ends, output, *ws.as_args()
+        q,
+        k,
+        scales,
+        weights,
+        starts,
+        ends,
+        output,
+        *get_fused_mqa_topk_workspaces(q.device, q.shape[0]),
     )
