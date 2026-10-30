@@ -1,5 +1,8 @@
 # Features
 
+See [DoSA sparse indexer](dosa.md) for certified key screening during
+long-context DSA prefill.
+
 ## KV Cache Offloading
 
 - [UMBPStoreConnector](umbp_store_connector_usage.md)

@@ -43,6 +43,8 @@ steps:
   - vllm/kernels/triton/
   - tests/kernels/test_concat_mla_q.py
   - tests/kernels/test_fused_qk_norm_rope_gate.py
+  - vllm/model_executor/layers/rotary_embedding/
+  - vllm/model_executor/layers/fused_allreduce_gemma_rms_norm.py
   commands:
     - >-
       pytest -v -s
@@ -70,6 +72,7 @@ steps:
       - vllm/model_executor/layers/fused_moe/router/gate_linear.py
       - vllm/model_executor/layers/fused_moe/router/rocm_fp32_router_gemm.py
       - vllm/model_executor/layers/rotary_embedding/
+      - vllm/model_executor/layers/fused_allreduce_gemma_rms_norm.py
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
       - tests/kernels/test_fused_qk_norm_rope_gate.py
@@ -688,6 +691,26 @@ steps:
   commands:
     - pytest -v -s tests/kernels/attention/test_minimax_m3.py -k prefill_sparse_attention_correctness
     - pytest -v -s tests/kernels/test_minimax_m3_sparse_attn_fp8_scale.py
+
+- label: ":nvidia: (B200) DoSA Kernels"
+  key: kernels-dosa-test-b200
+  timeout_in_minutes: 20
+  working_dir: "/vllm-workspace/"
+  device: b200-k8s
+  num_devices: 1
+  source_file_dependencies:
+  - csrc/attention/dosa/
+  - cmake/dosa.cmake
+  - vllm/model_executor/layers/dosa.py
+  - vllm/model_executor/layers/dosa_ops.py
+  - vllm/model_executor/layers/sparse_attn_indexer.py
+  - vllm/v1/attention/backends/mla/indexer.py
+  - vllm/v1/attention/backends/mla/sparse_utils.py
+  - vllm/config/attention.py
+  - tests/kernels/attention/test_dosa.py
+  - tests/conftest.py
+  commands:
+    - pytest -v -s tests/kernels/attention/test_dosa.py
 
 - label: ":nvidia: (B200) Kernels"
   key: kernels-b200

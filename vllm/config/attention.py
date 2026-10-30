@@ -112,6 +112,13 @@ class AttentionConfig:
     ignored with a warning where it does not apply. It pays off from about 4
     concurrent decodes at 128K context and grows with batch and context."""
 
+    indexer_dosa: bool = False
+    """Use DoSA certified sparse scoring for long FP8 indexer prefills on
+    SM100 (CUDA 13). It consumes the same quantized operands and selects with
+    the native BF16 indexer score.
+    Other hardware, short requests, FP4 caches and context-parallel requests
+    retain their original indexer. Disabled by default."""
+
     indexer_sparse_logits: bool | None = None
     """DeepSeek V4.1 two-level indexer: score only the candidate blocks with
     DeepGEMM's sparse MQA-logits kernels instead of computing dense logits over

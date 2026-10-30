@@ -308,6 +308,7 @@ def get_rope(
             is_neox_style,
             scaling_factor,
             dtype,
+            cache_max_position=max_position,
             **extra_kwargs,
         )
     elif scaling_type == "longrope":
