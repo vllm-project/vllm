@@ -273,3 +273,46 @@ def test_xpu_qwen3_5_moe_reload_graph_tp2(vllm_runner, enable_pickle):
         assert model.collective_rpc(_check_xpu_moe_reload) == [2, 2]
         assert model.collective_rpc(_check_xpu_moe_weight_updates) == [2, 2]
         assert model.llm.generate("Hello", params)[0].outputs[0].token_ids
+
+
+def _check_xpu_moe_a8_shared_expert(worker):
+    from tests.kernels.moe.test_moe import _check_xpu_qwen3_5_decode
+    from vllm.models.qwen3_5.xpu.model import Qwen3_5SparseMoeBlock
+
+    model = worker.model_runner.get_model()
+    block = next(m for m in model.modules() if isinstance(m, Qwen3_5SparseMoeBlock))
+    for num_tokens in (1, 8):
+        _check_xpu_qwen3_5_decode(
+            (block, worker.vllm_config, True), num_tokens, should_fuse=False
+        )
+    return block.tp_size
+
+
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
+def test_xpu_qwen3_5_moe_a8_shared_expert_fallback(vllm_runner, enable_pickle):
+    """Real TP2 decode retains A8 shared projections, including graph replay."""
+    from vllm import SamplingParams
+    from vllm.config import CompilationConfig, KernelConfig
+
+    with vllm_runner(
+        os.environ.get("VLLM_TEST_QWEN35_MODEL", "Qwen/Qwen3.5-35B-A3B"),
+        dtype="float16",
+        quantization="fp8_per_tensor",
+        tensor_parallel_size=2,
+        kernel_config=KernelConfig(linear_backend="xpu"),
+        distributed_executor_backend="mp",
+        language_model_only=True,
+        max_model_len=256,
+        max_num_batched_tokens=128,
+        enable_chunked_prefill=True,
+        max_num_seqs=8,
+        kv_cache_memory_bytes=128 * 1024 * 1024,
+        enable_prefix_caching=False,
+        compilation_config=CompilationConfig(
+            mode=0, cudagraph_mode="FULL_DECODE_ONLY", cudagraph_capture_sizes=[1, 8]
+        ),
+    ) as model:
+        params = SamplingParams(temperature=0, max_tokens=4, ignore_eos=True)
+        outputs = model.llm.generate(["Hello"] * 8, params)
+        assert all(len(output.outputs[0].token_ids) == 4 for output in outputs)
+        assert model.collective_rpc(_check_xpu_moe_a8_shared_expert) == [2, 2]

@@ -72,11 +72,20 @@ DEVICE_TYPE = current_platform.device_type
 
 
 @contextmanager
-def _xpu_qwen3_5_moe(tmp_path, dtype, quantized, rank=0, tp=1, reduce_results=True):
+def _xpu_qwen3_5_moe(
+    tmp_path,
+    dtype,
+    quantized,
+    rank=0,
+    tp=1,
+    reduce_results=True,
+    *,
+    linear_backend="auto",
+):
     """Construct and quantize the model's real MoE block and shared linears."""
     from transformers import Qwen3_5MoeConfig, Qwen3_5MoeTextConfig
 
-    from vllm.config import ModelConfig, ParallelConfig
+    from vllm.config import KernelConfig, ModelConfig, ParallelConfig
     from vllm.distributed import (
         cleanup_dist_env_and_memory,
         init_distributed_environment,
@@ -111,6 +120,7 @@ def _xpu_qwen3_5_moe(tmp_path, dtype, quantized, rank=0, tp=1, reduce_results=Tr
             max_model_len=128,
         ),
         parallel_config=ParallelConfig(tensor_parallel_size=tp),
+        kernel_config=KernelConfig(linear_backend=linear_backend),
         quant_config=Fp8Config(is_checkpoint_fp8_serialized=True)
         if quantized
         else None,
@@ -165,7 +175,10 @@ def _check_xpu_qwen3_5_decode(state, num_tokens, should_fuse):
     block, config, _ = state
     torch.manual_seed(17)
     x = torch.randn(
-        num_tokens, 128, dtype=config.model_config.dtype, device=DEVICE_TYPE
+        num_tokens,
+        block.gate.input_size,
+        dtype=config.model_config.dtype,
+        device=DEVICE_TYPE,
     )
     with set_forward_context(None, config), torch.inference_mode():
         expected = Qwen3NextSparseMoeBlock.forward(block, x)
@@ -211,6 +224,22 @@ def test_xpu_qwen3_5_native_shared_expert_decode(xpu_qwen3_5_moe, num_tokens):
 )
 def test_xpu_qwen3_5_unsupported_fallback(xpu_qwen3_5_moe, num_tokens):
     _check_xpu_qwen3_5_decode(xpu_qwen3_5_moe, num_tokens, should_fuse=False)
+
+
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("num_tokens", [1, 2, 4, 8])
+def test_xpu_qwen3_5_a8_shared_expert_fallback(tmp_path, dtype, num_tokens):
+    """Decode must preserve the selected shared linears' activation quantization."""
+    from vllm.model_executor.kernels.linear.scaled_mm.xpu import XPUW8A8FP8LinearKernel
+
+    with _xpu_qwen3_5_moe(tmp_path, dtype, True, linear_backend="xpu") as state:
+        shared = state[0].shared_expert
+        assert all(
+            isinstance(layer.quant_method.fp8_linear, XPUW8A8FP8LinearKernel)
+            for layer in (shared.gate_up_proj, shared.down_proj)
+        )
+        _check_xpu_qwen3_5_decode(state, num_tokens, should_fuse=False)
 
 
 @pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")

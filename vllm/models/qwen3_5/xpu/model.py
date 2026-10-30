@@ -44,6 +44,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.linear.scaled_mm.xpu import XPUW8A16FP8LinearKernel
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExpertsFp8
@@ -184,6 +185,15 @@ class _XpuMoESharedFusion:
             shared.down_proj,
             block.shared_expert_gate,
         )
+        # The fused shared projections retain FP16/BF16 activations.
+        if not all(
+            isinstance(
+                getattr(layer.quant_method, "fp8_linear", None),
+                XPUW8A16FP8LinearKernel,
+            )
+            for layer in (gu, down)
+        ):
+            return None
         s13 = runner.routed_experts.w13_weight_scale
         s2 = runner.routed_experts.w2_weight_scale
         shared_s13 = getattr(gu, "weight_scale", None)
