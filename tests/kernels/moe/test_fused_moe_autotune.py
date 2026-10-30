@@ -212,6 +212,18 @@ def test_configs_beyond_registers_or_shared_memory_are_rejected(monkeypatch):
     assert not fits_hardware({**_CONFIG, "matrix_instr_nonkdim": 32}, case)
 
 
+def test_one_or_two_warps_only_get_short_m_tiles(monkeypatch):
+    _use_backend(monkeypatch, _WITH_OPTIONS)
+    case = _case(4096)
+    tile = {**_CONFIG, "BLOCK_SIZE_N": 16, "BLOCK_SIZE_K": 32, "num_stages": 5}
+    assert fits_hardware({**tile, "BLOCK_SIZE_M": 32, "num_warps": 1}, case)
+    assert fits_hardware({**tile, "BLOCK_SIZE_M": 64, "num_warps": 2}, case)
+    assert fits_hardware({**tile, "BLOCK_SIZE_M": 128, "num_warps": 4}, case)
+    # The candidate that faulted MI355 workers while tuning M=1024.
+    assert not fits_hardware({**tile, "BLOCK_SIZE_M": 128, "num_warps": 1}, case)
+    assert not fits_hardware({**tile, "BLOCK_SIZE_M": 128, "num_warps": 2}, case)
+
+
 @_BACKENDS
 def test_searched_configs_respect_the_quant_block(monkeypatch, backend):
     _use_backend(monkeypatch, backend)

@@ -251,6 +251,11 @@ def fits_hardware(config: Config, case: FusedMoETuningCase) -> bool:
     # Each thread holds block_m * block_n / threads fp32 accumulators.
     if not threads <= block_m * block_n <= 256 * threads:
         return False
+    # No bundled table gives one or two warps more than 32 rows each, and
+    # Triton 3.8 on gfx950 miscompiles those tiles. The wrong addresses can
+    # fault the GPU, which kills the worker before any exception handler runs.
+    if config["num_warps"] <= 2 and block_m > 32 * config["num_warps"]:
+        return False
     if config.get("matrix_instr_nonkdim") == 32 and min(block_m, block_n) < 32:
         return False
     element_size = 1 if case.use_fp8_w8a8 else case.dtype.itemsize
