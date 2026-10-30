@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-End-to-end tests for the streaming input feature in AsyncLLM.
+"""End-to-end tests for the streaming input feature in AsyncLLM.
 
 These tests verify that:
 1. Streaming inputs work correctly with bunched inputs (queued)
@@ -324,6 +323,37 @@ async def test_streaming_input_close_signals_completion(engine: AsyncLLM):
 
 
 @pytest.mark.asyncio(loop_scope="module")
+async def test_streaming_input_close_while_paused(engine: AsyncLLM):
+    """A pause rejects new requests only: closing an open session's input while
+    a `wait` pause drains it still completes the session normally."""
+    close_input = asyncio.Event()
+
+    async def input_generator() -> AsyncGenerator[StreamingInput, None]:
+        yield StreamingInput(prompt="What is 2 + 2? The answer is")
+        await close_input.wait()
+
+    output_gen = engine.generate(
+        input_generator(), get_sampling_params(max_tokens=200), "test_close_paused"
+    )
+    try:
+        first = await asyncio.wait_for(anext(output_gen), timeout=60)
+        pause = asyncio.create_task(
+            engine.pause_generation(mode="wait", clear_cache=False)
+        )
+        # The pause has reached the engine, and the session is still running.
+        assert await asyncio.wait_for(engine.is_paused(), timeout=60)
+        close_input.set()
+        outputs, _ = await asyncio.wait_for(collect_outputs(output_gen), timeout=60)
+        await asyncio.wait_for(pause, timeout=60)
+    finally:
+        await engine.resume_generation()
+
+    num_tokens = sum(len(out.outputs[0].token_ids) for out in [first, *outputs])
+    assert num_tokens == 200
+    assert not engine.output_processor.has_unfinished_requests()
+
+
+@pytest.mark.asyncio(loop_scope="module")
 async def test_streaming_input_abort_queued_inputs(engine: AsyncLLM):
     """Test that aborting the session cancels queued inputs.
 
@@ -492,7 +522,7 @@ async def test_streaming_input_per_chunk_sampling_params(engine: AsyncLLM):
 async def test_streaming_input_empty_generator(engine: AsyncLLM):
     """Test behavior when the input generator yields nothing.
 
-    An empty generator should still produce a finished output.
+    An empty generator should finish without producing output.
     """
     request_id = "test_empty_generator"
     sampling_params = get_sampling_params(max_tokens=10)
@@ -506,9 +536,7 @@ async def test_streaming_input_empty_generator(engine: AsyncLLM):
     async for output in engine.generate(empty_generator(), sampling_params, request_id):
         outputs.append(output)
 
-    # Should still get a finished marker
-    assert len(outputs) >= 1, "Should receive at least one output"
-    assert outputs[-1].finished, "Should have a finished output"
+    assert outputs == []
 
 
 @pytest.mark.asyncio(loop_scope="module")

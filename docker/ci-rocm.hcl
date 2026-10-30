@@ -25,6 +25,10 @@ variable "BUILDKITE_BUILD_ID" {
   default = ""
 }
 
+variable "VLLM_KERNEL_SYMBOL_MAP" {
+  default = "0"
+}
+
 variable "PARENT_COMMIT" {
   default = ""
 }
@@ -83,19 +87,11 @@ variable "UCX_BRANCH" {
   default = ""
 }
 
-variable "ROCSHMEM_BRANCH" {
-  default = ""
-}
-
 variable "DEEPEP_BRANCH" {
   default = ""
 }
 
 variable "NIXL_CACHE_KEY" {
-  default = ""
-}
-
-variable "ROCSHMEM_CACHE_KEY" {
   default = ""
 }
 
@@ -236,7 +232,7 @@ function "get_cache_to_rocm_rust" {
   ])
 }
 
-# Cache functions for upstream dependency stages (NIXL/UCX, ROCShmem, DeepEP).
+# Cache functions for upstream dependency stages (NIXL/UCX, DeepEP).
 # These stages are pinned to specific upstream commit hashes, so cache keys use
 # those hashes rather than the Buildkite commit. This means the cache persists
 # across all vLLM commits as long as the upstream dependency pins don't change.
@@ -245,8 +241,7 @@ function "get_cache_from_rocm_deps" {
   params = []
   result = compact([
     NIXL_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:nixl-rocm-${NIXL_CACHE_KEY}" : (NIXL_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:nixl-rocm-${NIXL_BRANCH}-ucx-${UCX_BRANCH}" : ""),
-    ROCSHMEM_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocshmem-rocm-${ROCSHMEM_CACHE_KEY}" : (ROCSHMEM_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocshmem-rocm-${ROCSHMEM_BRANCH}" : ""),
-    DEEPEP_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:deepep-rocm-${DEEPEP_CACHE_KEY}" : (DEEPEP_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:deepep-rocm-${DEEPEP_BRANCH}-rocshmem-${ROCSHMEM_BRANCH}" : ""),
+    DEEPEP_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:deepep-rocm-${DEEPEP_CACHE_KEY}" : (DEEPEP_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:deepep-rocm-${DEEPEP_BRANCH}" : ""),
   ])
 }
 
@@ -257,17 +252,10 @@ function "get_cache_to_rocm_nixl" {
   ])
 }
 
-function "get_cache_to_rocm_rocshmem" {
-  params = []
-  result = compact([
-    ROCSHMEM_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocshmem-rocm-${ROCSHMEM_CACHE_KEY},mode=min" : (ROCSHMEM_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocshmem-rocm-${ROCSHMEM_BRANCH},mode=min" : ""),
-  ])
-}
-
 function "get_cache_to_rocm_deepep" {
   params = []
   result = compact([
-    DEEPEP_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:deepep-rocm-${DEEPEP_CACHE_KEY},mode=min" : (DEEPEP_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:deepep-rocm-${DEEPEP_BRANCH}-rocshmem-${ROCSHMEM_BRANCH},mode=min" : ""),
+    DEEPEP_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:deepep-rocm-${DEEPEP_CACHE_KEY},mode=min" : (DEEPEP_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:deepep-rocm-${DEEPEP_BRANCH},mode=min" : ""),
   ])
 }
 
@@ -281,7 +269,10 @@ target "_ci-rocm" {
   args = {
     ARG_PYTORCH_ROCM_ARCH = PYTORCH_ROCM_ARCH
     CI_BASE_IMAGE         = CI_BASE_IMAGE
+    ROCM_SMOKE_ID         = BUILDKITE_BUILD_ID
     max_jobs              = CI_MAX_JOBS
+    VLLM_KERNEL_SYMBOL_MAP = VLLM_KERNEL_SYMBOL_MAP
+    buildkite_commit      = BUILDKITE_COMMIT
   }
 }
 
@@ -297,6 +288,15 @@ target "test-rocm-ci" {
   output = ["type=registry"]
 }
 
+# Validate the test image in the shared BuildKit graph and export only the
+# success marker. This avoids pulling the multi-GB image into the host daemon.
+target "smoke-test-rocm-ci" {
+  inherits   = ["_common-rocm", "_ci-rocm"]
+  target     = "export_test_smoke"
+  cache-from = get_cache_from_rocm()
+  output     = ["type=local,dest=./build/rocm-smoke-export"]
+}
+
 # Cache-only target for the source-scoped ROCm native build stage.
 # This persists the csrc-build stage in the registry cache even though the
 # final test image only consumes it indirectly while packaging the wheel.
@@ -306,6 +306,13 @@ target "csrc-rocm-ci" {
   cache-from = get_cache_from_rocm_csrc()
   cache-to   = get_cache_to_rocm_csrc()
   output     = ["type=cacheonly"]
+}
+
+target "kernel-symbol-map-rocm" {
+  inherits   = ["_common-rocm", "_ci-rocm"]
+  target     = "kernel-symbol-map-rocm"
+  cache-from = get_cache_from_rocm_csrc()
+  output     = ["type=local,dest=./kernel-symbol-map-rocm"]
 }
 
 # Cache-only target for the Rust frontend build stage. Final-image cache
@@ -341,7 +348,13 @@ group "test-rocm-ci-with-artifacts" {
 # Full test image + wheel export. Kept for fallback/debugging when a pushed,
 # build-scoped image is useful.
 group "test-rocm-ci-with-wheel" {
-  targets = ["rust-rocm-ci", "csrc-rocm-ci", "test-rocm-ci", "export-wheel-rocm"]
+  targets = [
+    "rust-rocm-ci",
+    "csrc-rocm-ci",
+    "test-rocm-ci",
+    "smoke-test-rocm-ci",
+    "export-wheel-rocm",
+  ]
 }
 
 # Primary output tag for the ci_base build. In Buildkite this is a unique,
@@ -366,14 +379,6 @@ target "nixl-rocm-ci" {
   target     = "build_nixl"
   cache-from = get_cache_from_rocm_deps()
   cache-to   = get_cache_to_rocm_nixl()
-  output     = ["type=cacheonly"]
-}
-
-target "rocshmem-rocm-ci" {
-  inherits   = ["_common-rocm", "_ci-rocm"]
-  target     = "build_rocshmem"
-  cache-from = get_cache_from_rocm_deps()
-  cache-to   = get_cache_to_rocm_rocshmem()
   output     = ["type=cacheonly"]
 }
 
@@ -402,7 +407,7 @@ target "ci-base-rocm-ci" {
       CI_BASE_IMAGE_TAG != "" ? "type=registry,ref=${CI_BASE_IMAGE_TAG}" : "",
       CI_BASE_TRUSTED_CONTENT_REF != "" ? "type=registry,ref=${CI_BASE_TRUSTED_CONTENT_REF}" : "",
     ]),
-    # Import upstream dependency caches so NIXL/ROCShmem/DeepEP stages
+    # Import upstream dependency caches so NIXL/DeepEP stages
     # are cache hits even when ci_base itself needs rebuilding.
     get_cache_from_rocm_deps(),
   )
@@ -415,5 +420,5 @@ target "ci-base-rocm-ci" {
 # Group for ci_base builds -- exports dependency stage caches alongside the
 # ci_base image so future rebuilds can reuse them independently.
 group "ci-base-rocm-ci-with-deps" {
-  targets = ["nixl-rocm-ci", "rocshmem-rocm-ci", "deepep-rocm-ci", "ci-base-rocm-ci"]
+  targets = ["nixl-rocm-ci", "deepep-rocm-ci", "ci-base-rocm-ci"]
 }

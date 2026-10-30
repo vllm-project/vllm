@@ -12,6 +12,7 @@ from unittest import mock
 
 import pytest
 
+from vllm.platforms import current_platform
 from vllm.utils import jit_monitor
 
 pytestmark = pytest.mark.cpu_test
@@ -64,9 +65,12 @@ def _fake_tilelang_import_modules():
             key, _ = self.func.parse_args(*args, **kwargs)
             kernel = self._kernel_cache.get(key)
             if kernel is None:
-                kernel = "compiled"
+                kernel = self.compile(*args, **kwargs)
                 self._kernel_cache[key] = kernel
             return kernel
+
+        def compile(self, *args, **kwargs):
+            return "compiled"
 
     fake_kernel = cast(Any, ModuleType("tilelang.jit.kernel"))
     fake_kernel.JITKernel = FakeJITKernel
@@ -148,7 +152,7 @@ def test_activate_logs_info():
 
 def test_activate_rejects_unknown_mode():
     with pytest.raises(ValueError, match="Unsupported JIT monitor mode"):
-        jit_monitor.activate(mode="panic")  # type: ignore[arg-type]
+        jit_monitor.activate(mode="panic")
 
 
 def test_activate_without_triton():
@@ -322,6 +326,10 @@ def test_cutedsl_subscripted_compile_is_monitored():
 # ------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    current_platform.is_rocm(),
+    reason="TileLang JIT monitoring is disabled on ROCm",
+)
 def test_tilelang_jit_kernel_logs_warning():
     with _patch_jit_modules(_make_fake_knobs()):
         from tilelang.jit.kernel import JITKernel
@@ -337,6 +345,10 @@ def test_tilelang_jit_kernel_logs_warning():
     assert "tl_kernel" in msg
 
 
+@pytest.mark.skipif(
+    current_platform.is_rocm(),
+    reason="TileLang JIT monitoring is disabled on ROCm",
+)
 def test_tilelang_jit_impl_logs_warning():
     with _patch_jit_modules(_make_fake_knobs()):
         from tilelang.jit import JITImpl
@@ -386,6 +398,10 @@ def test_tilelang_jit_impl_logs_warning():
     assert "tilelang_fn" in msg
 
 
+@pytest.mark.skipif(
+    current_platform.is_rocm(),
+    reason="TileLang JIT monitoring is disabled on ROCm",
+)
 def test_tilelang_jit_impl_does_not_log_on_cache_hit():
     with _patch_jit_modules(_make_fake_knobs()):
         from tilelang.jit import JITImpl
@@ -413,6 +429,10 @@ def test_tilelang_jit_impl_does_not_log_on_cache_hit():
     warning_once.assert_called_once()
 
 
+@pytest.mark.skipif(
+    current_platform.is_rocm(),
+    reason="TileLang JIT monitoring is disabled on ROCm",
+)
 def test_tilelang_from_database_does_not_log():
     with _patch_jit_modules(_make_fake_knobs()):
         from tilelang.jit.kernel import JITKernel
@@ -425,6 +445,10 @@ def test_tilelang_from_database_does_not_log():
     warning_once.assert_not_called()
 
 
+@pytest.mark.skipif(
+    current_platform.is_rocm(),
+    reason="TileLang JIT monitoring is disabled on ROCm",
+)
 def test_tilelang_error_mode_raises():
     with _patch_jit_modules(_make_fake_knobs()):
         from tilelang.jit.kernel import JITKernel

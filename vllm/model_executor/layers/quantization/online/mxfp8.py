@@ -8,6 +8,9 @@ from typing import TYPE_CHECKING
 import torch
 from torch.nn import Module
 
+from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+
 if TYPE_CHECKING:
     import vllm.model_executor.layers.fused_moe.modular_kernel as mk
     from vllm.model_executor.layers.fused_moe import (
@@ -21,7 +24,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
     select_mxfp8_moe_backend,
 )
 from vllm.model_executor.layers.quantization.online.fp8 import (
-    _Fp8OnlineLinearBase,
+    OnlineLinearBase,
 )
 from vllm.model_executor.layers.quantization.online.moe_base import (
     OnlineMoEMethodBase,
@@ -31,18 +34,15 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_e4m3_quantize,
 )
 from vllm.model_executor.utils import replace_parameter
-from vllm.platforms import current_platform
 
 
-class Mxfp8OnlineLinearMethod(_Fp8OnlineLinearBase):
+class Mxfp8OnlineLinearMethod(OnlineLinearBase):
     """Online MXFP8 linear method.
     Loads bf16/fp16 checkpoints and quantizes weights to MXFP8 (microscaling
     FP8 with block-32 scales) during weight loading.
     """
 
-    def __init__(self):
-        super().__init__()
-        self.kernel = init_mxfp8_linear_kernel()
+    activation_quant_key: QuantKey | None = None
 
     def create_weights(
         self,
@@ -71,17 +71,21 @@ class Mxfp8OnlineLinearMethod(_Fp8OnlineLinearBase):
             **extra_weight_attrs,
         )
 
+        self.kernel = init_mxfp8_linear_kernel(weight_shape=layer.weight.shape)
+
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
-        weight_fp8, weight_scale = mxfp8_e4m3_quantize(layer.weight.contiguous())
+        weight = self.get_weight_for_quantization(layer)
+        weight_fp8, weight_scale = mxfp8_e4m3_quantize(weight.contiguous())
 
         layer.input_scale = None
         replace_parameter(layer, "weight", weight_fp8.data)
         replace_parameter(layer, "weight_scale", weight_scale.data)
 
         self.kernel.process_weights_after_loading(layer)
+        self.release_requantization_source_weights(layer)
 
         layer._already_called_process_weights_after_loading = True
 
@@ -100,8 +104,8 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
     fp8_backend: "Fp8MoeBackend"
     experts_cls: "type[mk.FusedMoEExperts] | None"
 
-    def __init__(self, *, layer: torch.nn.Module):
-        super().__init__(layer.moe_config)
+    def __init__(self, *, moe: FusedMoEConfig):
+        super().__init__(moe)
         self.weight_block_size: list[int] = [1, MXFP8_BLOCK_SIZE]
         self.weight_scale_name = "weight_scale"
 
@@ -233,14 +237,12 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
-        fp8_dtype = current_platform.fp8_dtype()
-        w13 = torch.empty_like(layer.w13_weight, dtype=fp8_dtype)
-        w2 = torch.empty_like(layer.w2_weight, dtype=fp8_dtype)
+        w13_weight, w2_weight = self.get_weights_for_quantization(layer)
         layer.w13_input_scale = None
         layer.w2_input_scale = None
 
-        w13, w13_scale = self._quantize_mxfp8_moe_weight(layer.w13_weight)
-        w2, w2_scale = self._quantize_mxfp8_moe_weight(layer.w2_weight)
+        w13, w13_scale = self._quantize_mxfp8_moe_weight(w13_weight)
+        w2, w2_scale = self._quantize_mxfp8_moe_weight(w2_weight)
 
         self._setup_kernel(
             layer,
@@ -251,5 +253,6 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
             layer.w13_input_scale,
             layer.w2_input_scale,
         )
+        self.release_requantization_source_weights(layer)
 
         layer._already_called_process_weights_after_loading = True

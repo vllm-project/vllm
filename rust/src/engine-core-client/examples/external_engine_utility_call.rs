@@ -6,7 +6,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
-use vllm_engine_core_client::protocol::utility::PauseMode;
+use vllm_engine_core_client::protocol::utility::{PauseMode, SleepLevel};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, TransportMode};
 
 #[derive(Debug, Parser)]
@@ -68,6 +68,7 @@ async fn main() -> Result<()> {
         coordinator_mode: None,
         model_name: args.model.clone(),
         client_index: args.client_index,
+        engine_stats_enabled: true,
     })
     .await
     .context("failed to connect to external vLLM engine")?;
@@ -110,7 +111,8 @@ async fn main() -> Result<()> {
     if args.skip_sleep_wake {
         println!("sleep_wake=skipped");
     } else {
-        client.sleep(args.sleep_level, args.sleep_mode).await.with_context(|| {
+        let sleep_level = SleepLevel::try_from(args.sleep_level).map_err(anyhow::Error::msg)?;
+        client.sleep(sleep_level, args.sleep_mode).await.with_context(|| {
             format!(
                 "failed to call sleep utility with level={} mode={}",
                 args.sleep_level, args.sleep_mode

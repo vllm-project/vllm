@@ -1,9 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
 import hashlib
+import json
 import os
 import pickle
+import subprocess
+import sys
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -13,6 +17,8 @@ import pytest
 import torch
 
 import vllm.envs as envs
+import vllm.kernels  # noqa: F401 to register kernels
+from vllm import ir
 from vllm.compilation.backends import VllmBackend
 from vllm.compilation.caching import (
     StandaloneCompiledArtifacts,
@@ -28,6 +34,9 @@ from vllm.config import (
 )
 from vllm.envs import disable_envs_cache
 from vllm.forward_context import set_forward_context
+from vllm.ir import ops
+from vllm.model_executor.layers.activation import GeluAndMulSparse
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from ..utils import create_new_process_for_each_test
@@ -75,6 +84,18 @@ class CompiledModTuple(torch.nn.Module):
 
     def forward(self, x: torch.Tensor):
         return reference_fn_tuple(x)
+
+
+@support_torch_compile(dynamic_arg_dims={"x": 0})
+class SparseActivationAotModel(torch.nn.Module):
+    def __init__(self, **kwargs):
+        super().__init__()
+        self.up_proj = torch.nn.Linear(32, 256, bias=False)
+        self.activation = GeluAndMulSparse(0.95, "tanh")
+        self.down_proj = torch.nn.Linear(128, 16, bias=False)
+
+    def forward(self, x: torch.Tensor):
+        return self.down_proj(self.activation(self.up_proj(x)))
 
 
 def make_vllm_config() -> VllmConfig:
@@ -175,6 +196,54 @@ def test_save_and_load(monkeypatch: pytest.MonkeyPatch):
             assert torch.allclose(ret, expected)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not is_torch_equal_or_newer("2.10.0"),
+    reason="requires CUDA and torch 2.10",
+)
+def test_sparse_activation_standalone_aot_preserves_dependencies(
+    monkeypatch: pytest.MonkeyPatch, vllm_tmp_cache: Path
+):
+    def native_reference(model: SparseActivationAotModel, x: torch.Tensor):
+        projected = torch.nn.functional.linear(x, model.up_proj.weight)
+        activated = ops.gelu_and_mul_sparse.impls["native"].impl_fn(
+            projected, model.activation.std_multiplier, "tanh"
+        )
+        return torch.nn.functional.linear(activated, model.down_proj.weight)
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_AOT_COMPILE", "1")
+        m.setenv("VLLM_USE_MEGA_AOT_ARTIFACT", "1")
+        m.setenv("VLLM_USE_STANDALONE_COMPILE", "1")
+        m.setenv("VLLM_CACHE_ROOT", str(vllm_tmp_cache / "vllm_cache"))
+
+        vllm_config = make_vllm_config()
+        torch.manual_seed(0)
+        inputs = [
+            torch.randn(4, 32, device="cuda", dtype=torch.bfloat16),
+            torch.randn(7, 32, device="cuda", dtype=torch.bfloat16),
+        ]
+
+        with (
+            use_vllm_config(vllm_config),
+            vllm_config.kernel_config.ir_op_priority.set_priority(),
+            ir.enable_torch_wrap(True),
+        ):
+            compiled = SparseActivationAotModel(vllm_config=vllm_config).to(
+                device="cuda", dtype=torch.bfloat16
+            )
+            compiled.requires_grad_(False)
+            expected = [native_reference(compiled, x) for x in inputs]
+            actual = [compiled(x) for x in inputs]
+
+        for result, reference in zip(actual, expected):
+            assert torch.isfinite(result).all()
+            torch.testing.assert_close(
+                result,
+                reference,
+                **ops.gelu_and_mul_sparse.get_tolerance(result.dtype),
+            )
+
+
 @pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
 def test_save_and_load_slice(monkeypatch: pytest.MonkeyPatch):
     from torch._subclasses import FakeTensorMode
@@ -203,8 +272,7 @@ def test_save_and_load_slice(monkeypatch: pytest.MonkeyPatch):
 def test_cache_load_returns_tuple_consistency_tuple_output(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """
-    Test that cache loading correctly handles models that return tuples.
+    """Test that cache loading correctly handles models that return tuples.
 
     This verifies that when a model returns a tuple of tensors, the output
     type is preserved as a tuple between fresh compilation and cache load.
@@ -270,8 +338,7 @@ def test_cache_load_returns_tuple_consistency_tuple_output(
 
 @pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
 def test_shape_env(monkeypatch: pytest.MonkeyPatch):
-    """
-    Test that the shape environment is correctly serialized and preserved
+    """Test that the shape environment is correctly serialized and preserved
     when loading from cache.
     """
     with monkeypatch.context() as m:
@@ -309,8 +376,7 @@ def test_shape_env(monkeypatch: pytest.MonkeyPatch):
 def test_partition_wrapper_applied_on_aot_load(
     monkeypatch: pytest.MonkeyPatch, vllm_tmp_cache: Path, mocker
 ):
-    """
-    Test that partition wrappers are applied when loading AOT cached functions.
+    """Test that partition wrappers are applied when loading AOT cached functions.
 
     This test verifies the fix for GitHub issue #31439 where AOT compile
     caused 2x latency regression when use_inductor_graph_partition=True.
@@ -433,14 +499,12 @@ def test_standalone_compile_correctness():
 @pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
 @create_new_process_for_each_test("spawn")
 def test_gpt2_cache_hit(monkeypatch: pytest.MonkeyPatch):
-    """
-    Test that compiling gpt2 twice results in a cache hit.
+    """Test that compiling gpt2 twice results in a cache hit.
 
     Counter values are read from the EngineCore subprocess via
     ``LLM.collective_rpc`` so the test works under default V1
     multiprocessing (no shared memory between test and engine).
     """
-
     from vllm import LLM
 
     def _snap(self):
@@ -576,7 +640,7 @@ class TestStandaloneCompiledArtifacts:
 
     @patch("torch._inductor.standalone_compile.AOTCompiledArtifact.deserialize")
     def test_load_all_success(self, mock_deserialize):
-        """Test successful loading of all artifacts"""
+        """Test successful loading of all artifacts."""
         cache = StandaloneCompiledArtifacts()
 
         mock_artifact1 = Mock()
@@ -593,7 +657,7 @@ class TestStandaloneCompiledArtifacts:
 
     @patch("torch._inductor.standalone_compile.AOTCompiledArtifact.deserialize")
     def test_load_all_already_loaded(self, mock_deserialize):
-        """Test that load_all skips if already loaded"""
+        """Test that load_all skips if already loaded."""
         cache = StandaloneCompiledArtifacts()
 
         mock_artifact = Mock()
@@ -606,7 +670,7 @@ class TestStandaloneCompiledArtifacts:
 
     @patch("torch._inductor.standalone_compile.AOTCompiledArtifact.deserialize")
     def test_get_loaded_artifact(self, mock_deserialize):
-        """Test retrieving loaded artifacts"""
+        """Test retrieving loaded artifacts."""
         cache = StandaloneCompiledArtifacts()
 
         mock_artifact = Mock()
@@ -830,3 +894,176 @@ def test_disable_compile_cache_skips_aot_load(
         mod(*args)
 
     assert not mod.was_aot_compile_fn_loaded_from_disk
+
+
+_CACHE_OFFSET = int(os.environ.get("VLLM_TEST_CACHE_OFFSET", "0"))
+
+
+def _capture_cache_offset(fn):
+    offset = _CACHE_OFFSET
+
+    @functools.wraps(fn)
+    def wrapped(self, x):
+        return fn(self, x) + offset
+
+    return wrapped
+
+
+def _run_graph_cache_probe():
+    """Fresh-process probe; only the vLLM cache root survives between runs."""
+    from torch._inductor.runtime.cache_dir_utils import cache_dir
+
+    @support_torch_compile(dynamic_arg_dims={"x": 0}, use_aot_compile=False)
+    class GraphCacheMod(torch.nn.Module):
+        def __init__(self, **kwargs):
+            super().__init__()
+
+        @_capture_cache_offset
+        def forward(self, x):
+            return x * 2 + 1
+
+    cache_dir()  # Exercise a tmp default populated before backend initialization.
+    config = make_vllm_config()
+    x = torch.arange(64, device=current_platform.device_type).reshape(8, 8).float()
+    expected = x * 2 + 1 + int(os.environ["VLLM_TEST_CACHE_OFFSET"])
+    with use_vllm_config(config):
+        mod = GraphCacheMod(vllm_config=config)
+        assert torch.equal(mod(x), expected)
+        traced = torch._dynamo.utils.counters["stats"]["unique_graphs"]
+        assert traced > 0
+        aot_compiles = compilation_counter.num_aot_compiles
+        assert torch.equal(mod(x), expected)
+        assert torch._dynamo.utils.counters["stats"]["unique_graphs"] == traced
+        assert compilation_counter.num_aot_compiles == aot_compiles == 0
+    for name in (
+        "num_aot_artifacts_saved",
+        "num_aot_artifacts_loaded",
+        "num_compiled_artifacts_saved",
+        "num_compiled_artifacts_loaded",
+    ):
+        assert getattr(compilation_counter, name) == 0
+    assert Path(cache_dir()).is_relative_to(config.compilation_config.cache_dir)
+    assert Path(os.environ["TRITON_CACHE_DIR"]).is_relative_to(
+        config.compilation_config.cache_dir
+    )
+    result = {
+        "inductor_dir": cache_dir(),
+        "cache_dir": config.compilation_config.cache_dir,
+        "fx_hits": torch._dynamo.utils.counters["inductor"]["fxgraph_cache_hit"],
+        "autograd_hits": torch._dynamo.utils.counters["aot_autograd"][
+            "autograd_cache_hit"
+        ],
+    }
+    native = os.environ.get("VLLM_TEST_NATIVE_AOT")
+    if native:
+        if native == "warm":
+            os.environ["VLLM_FORCE_AOT_LOAD"] = "1"
+            disable_envs_cache()
+        with use_vllm_config(config):
+            native_mod = CompiledMod(vllm_config=config)
+            assert torch.equal(native_mod(x), reference_fn(x))
+        assert compilation_counter.num_aot_artifacts_loaded == int(native == "warm")
+        assert compilation_counter.num_aot_artifacts_saved == int(native == "cold")
+        assert compilation_counter.num_aot_compiles == int(native == "cold")
+    Path(os.environ["VLLM_TEST_CACHE_RESULT"]).write_text(json.dumps(result))
+
+
+@pytest.fixture
+def graph_cache_probe(tmp_path):
+    def run(offset, *, standalone="1", native=""):
+        private = Path(tempfile.mkdtemp(dir=tmp_path))
+        env = os.environ.copy()
+        for key in ("TORCHINDUCTOR_CACHE_DIR", "TRITON_CACHE_DIR"):
+            env.pop(key, None)
+        for key in ("HOME", "TMPDIR", "XDG_CACHE_HOME"):
+            directory = private / key
+            directory.mkdir()
+            env[key] = str(directory)
+        result = private / "result.json"
+        env.update(
+            VLLM_CACHE_ROOT=str(tmp_path / "shared"),
+            VLLM_USE_AOT_COMPILE="1",
+            VLLM_USE_MEGA_AOT_ARTIFACT="1",
+            VLLM_USE_STANDALONE_COMPILE=standalone,
+            VLLM_FORCE_AOT_LOAD="0",
+            VLLM_DISABLE_COMPILE_CACHE="0",
+            VLLM_USE_BYTECODE_HOOK="0",
+            VLLM_TEST_CACHE_OFFSET=str(offset),
+            VLLM_TEST_CACHE_RESULT=str(result),
+            VLLM_TEST_NATIVE_AOT=native,
+            TORCHINDUCTOR_FX_GRAPH_REMOTE_CACHE="0",
+            TORCHINDUCTOR_AUTOGRAD_REMOTE_CACHE="0",
+        )
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from tests.compile.test_aot_compile import "
+                "_run_graph_cache_probe; _run_graph_cache_probe()",
+            ],
+            cwd=Path(__file__).resolve().parents[2],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        return json.loads(result.read_text())
+
+    return run
+
+
+@pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
+@pytest.mark.parametrize("standalone", ["0", "1"])
+def test_compile_opt_out_retraces_changed_closure(graph_cache_probe, standalone):
+    """A warm graph is reused, but a changed closure never loads a stale handle."""
+    results = [
+        graph_cache_probe(offset, standalone=standalone) for offset in (0, 0, 7, 7)
+    ]
+    assert len({r["cache_dir"] for r in results}) == 1
+    assert len({r["inductor_dir"] for r in results}) == 1
+    for warm in (results[1], results[3]):
+        assert warm["fx_hits"] > 0
+        if standalone == "1":
+            assert warm["autograd_hits"] > 0
+
+
+@pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
+def test_compile_opt_out_preserves_native_aot_roundtrip(graph_cache_probe):
+    """Native AOT survives an opt-out module compiled first under the same config."""
+    graph_cache_probe(0, native="cold")
+    graph_cache_probe(0, native="warm")
+
+
+@pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
+def test_compile_opt_out_respected_in_dynamo_trace_once(monkeypatch, fresh_vllm_cache):
+    """Opt-out skips model AOT without disabling tracing or causing retracing."""
+    monkeypatch.setenv("VLLM_USE_AOT_COMPILE", "1")
+    monkeypatch.setenv("VLLM_FORCE_AOT_LOAD", "0")
+    monkeypatch.setenv("VLLM_USE_BYTECODE_HOOK", "0")
+    disable_envs_cache()
+
+    @support_torch_compile(dynamic_arg_dims={"x": 0}, use_aot_compile=False)
+    class OptOutMod(torch.nn.Module):
+        def forward(self, x):
+            return x * 2 + 1
+
+    config = VllmConfig(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.DYNAMO_TRACE_ONCE, backend="inductor"
+        )
+    )
+    x = torch.arange(64, device=current_platform.device_type).reshape(8, 8).float()
+    counters = torch._dynamo.utils.counters["stats"]
+    with (
+        use_vllm_config(config),
+        patch.object(OptOutMod, "aot_compile", side_effect=AssertionError("Model AOT")),
+    ):
+        assert envs.VLLM_USE_AOT_COMPILE
+        mod = OptOutMod(vllm_config=config)
+        before = counters["unique_graphs"]
+        assert torch.equal(mod(x), x * 2 + 1)
+        traced = counters["unique_graphs"]
+        assert traced > before
+        assert torch.equal(mod(x + 10), (x + 10) * 2 + 1)
+        assert counters["unique_graphs"] == traced

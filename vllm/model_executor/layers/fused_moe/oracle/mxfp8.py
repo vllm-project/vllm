@@ -8,10 +8,12 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
     backend_to_kernel_cls,
 )
+from vllm.model_executor.layers.quantization.utils.humming import prioritize_humming
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
     kMxfp8Static,
 )
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -111,8 +113,8 @@ def select_mxfp8_moe_backend(
 
     Returns:
         A tuple of (fp8_backend, experts_cls).
-    """
 
+    """
     runner_backend = config.moe_backend
     if runner_backend != "auto":
         backend = _BACKEND_NAME_MAP.get(runner_backend)
@@ -128,14 +130,14 @@ def select_mxfp8_moe_backend(
         )
         return backend, _select_kernel_cls(backend, config)
 
-    # Prefer XPU on Intel GPU before trying CUDA/ROCm backends.
-    backends = _SUPPORTED_BACKENDS
-    if current_platform.is_xpu():
-        backends = (Fp8MoeBackend.XPU,) + tuple(
-            b for b in _SUPPORTED_BACKENDS if b != Fp8MoeBackend.XPU
-        )
-
     # Auto-select: pick the first supported backend.
+    # Humming outranks Marlin on SM90. On XPU, the native backend stays first.
+    backends = prioritize_humming(list(_SUPPORTED_BACKENDS))
+    if current_platform.is_xpu():
+        backends = [Fp8MoeBackend.XPU] + [
+            b for b in backends if b != Fp8MoeBackend.XPU
+        ]
+
     for backend in backends:
         try:
             experts_cls = _select_kernel_cls(backend, config)

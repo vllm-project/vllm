@@ -4,7 +4,7 @@
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
 )
@@ -15,8 +15,7 @@ if TYPE_CHECKING:
 
 
 class GptOssToolParser(ToolParser):
-    """
-    Stub tool parser for gpt-oss/harmony models.
+    """Stub tool parser for gpt-oss/harmony models.
 
     All output parsing is handled by HarmonyParser. This stub exists as a
     capability declaration via HarmonyParser.tool_parser_cls.

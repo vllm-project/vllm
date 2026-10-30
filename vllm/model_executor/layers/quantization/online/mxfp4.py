@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     )
 
 from vllm.model_executor.kernels.linear import init_mxfp4_linear_kernel
+from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     TRITON_BACKENDS,
     Mxfp4MoeBackend,
@@ -27,7 +28,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     select_mxfp4_moe_backend,
 )
 from vllm.model_executor.layers.quantization.online.fp8 import (
-    _Fp8OnlineLinearBase,
+    OnlineLinearBase,
 )
 from vllm.model_executor.layers.quantization.online.moe_base import (
     OnlineMoEMethodBase,
@@ -73,7 +74,7 @@ def _quantize_mxfp4_moe_weight(
     return w_quant, w_scales
 
 
-class Mxfp4OnlineLinearMethod(_Fp8OnlineLinearBase):
+class Mxfp4OnlineLinearMethod(OnlineLinearBase):
     """Online MXFP4 linear method.
     Loads bf16/fp16 checkpoints and quantizes weights to MXFP4 (microscaling
     FP4 with block-32 scales) during weight loading.
@@ -118,13 +119,15 @@ class Mxfp4OnlineLinearMethod(_Fp8OnlineLinearBase):
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
-        weight_fp4, weight_scale = mxfp4_quantize(layer.weight.contiguous())
+        weight = self.get_weight_for_quantization(layer)
+        weight_fp4, weight_scale = mxfp4_quantize(weight.contiguous())
 
         layer.input_scale = None
         replace_parameter(layer, "weight", weight_fp4.data)
         replace_parameter(layer, "weight_scale", weight_scale.data)
 
         self.kernel.process_weights_after_loading(layer)
+        self.release_requantization_source_weights(layer)
 
         layer._already_called_process_weights_after_loading = True
 
@@ -144,8 +147,8 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
     experts_cls: "type[mk.FusedMoEExperts] | None"
     activation_quant_key = kMxfp4Dynamic
 
-    def __init__(self, *, layer: torch.nn.Module):
-        super().__init__(layer.moe_config)
+    def __init__(self, *, moe: FusedMoEConfig):
+        super().__init__(moe)
         self.weight_block_size: list[int] = [1, MXFP4_BLOCK_SIZE]
         self.weight_scale_name = "weight_scale"
 
@@ -219,6 +222,7 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
                 w2_weight_scale=w2_scale,
                 w13_bias=w13_bias,
                 w2_bias=w2_bias,
+                use_separated_a4w4=self.moe.use_mxfp4_w4a4_dsv4,
             )
         )
 
@@ -255,6 +259,7 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
                 experts_cls=self.experts_cls,
                 routing_tables=layer._expert_routing_tables(),
             )
+            self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
@@ -291,7 +296,8 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
-        self._zero_padding(layer)
+        w13_weight, w2_weight = self.get_weights_for_quantization(layer)
+        self._zero_padding(layer, w13_weight, w2_weight)
 
         if self.mxfp4_backend == Mxfp4MoeBackend.NONE:
             layer._already_called_process_weights_after_loading = True
@@ -300,8 +306,8 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
         layer.w13_input_scale = None
         layer.w2_input_scale = None
 
-        w13, w13_scale = _quantize_mxfp4_moe_weight(layer.w13_weight)
-        w2, w2_scale = _quantize_mxfp4_moe_weight(layer.w2_weight)
+        w13, w13_scale = _quantize_mxfp4_moe_weight(w13_weight)
+        w2, w2_scale = _quantize_mxfp4_moe_weight(w2_weight)
 
         self._setup_kernel(
             layer,
@@ -312,5 +318,6 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
             getattr(layer, "w13_bias", None),
             getattr(layer, "w2_bias", None),
         )
+        self.release_requantization_source_weights(layer)
 
         layer._already_called_process_weights_after_loading = True

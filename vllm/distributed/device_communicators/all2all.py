@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 import threading
-from dataclasses import dataclass
-from typing import Any
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.distributed as dist
@@ -17,43 +20,56 @@ from vllm.utils.flashinfer import (
     has_flashinfer_nvlink_one_sided,
     has_flashinfer_nvlink_two_sided,
 )
-from vllm.utils.func_utils import supports_kw
-from vllm.utils.import_utils import has_deep_ep, has_deep_ep_v2, has_mori
+from vllm.utils.import_utils import (
+    check_moonep_system_support,
+    deep_ep_v2_unavailable_reason,
+    has_deep_ep,
+    has_deep_ep_v2,
+    has_mori,
+)
 
 from .base_device_communicator import All2AllManagerBase, Cache
 
-if has_flashinfer_nvlink_two_sided():
-    from flashinfer.comm import Mapping  # type: ignore[import-not-found]
-    from flashinfer.comm.mnnvl import MnnvlConfig  # type: ignore[import-not-found]
-    from flashinfer.comm.trtllm_alltoall import (
-        MnnvlMoe,  # type: ignore[import-not-found]
-    )
-
-if has_flashinfer_nvlink_one_sided():
-    from flashinfer.comm import Mapping  # type: ignore[import-not-found]
-    from flashinfer.comm.mnnvl import MnnvlConfig  # type: ignore[import-not-found]
-    from flashinfer.comm.trtllm_moe_alltoall import (
-        MoeAlltoAll,  # type: ignore[import-not-found]
-        moe_a2a_get_workspace_size_per_rank,
-    )
+if TYPE_CHECKING:
+    from flashinfer.fused_moe import QuantFormat
+    from flashinfer.moe_ep import NVLinkOneSidedAlltoAll
 
 
 logger = init_logger(__name__)
 
 
-class AgRsAll2AllManager(All2AllManagerBase):
+class PassThroughAll2AllManager(All2AllManagerBase):
+    """Placeholder for ``all2all_backend="passthrough"``.
+
+    The MoE backend dispatches and combines itself, so there is no all2all to
+    manage.
     """
-    An implementation of all2all communication based on
+
+    def get_handle(self, kwargs):
+        raise RuntimeError(
+            "passthrough has no all2all handle: dispatch and combine run "
+            "inside the MoE backend."
+        )
+
+
+class AgRsAll2AllManager(All2AllManagerBase):
+    """An implementation of all2all communication based on
     all-gather (dispatch) and reduce-scatter (combine).
     """
 
     def __init__(self, cpu_group, tcp_store_group=None):
         super().__init__(cpu_group, tcp_store_group)
+        self.use_ep = get_current_vllm_config().parallel_config.enable_expert_parallel
 
     def _get_comm_group(self, is_sequence_parallel: bool) -> Any:
         if is_sequence_parallel:
             return get_ep_group()
         if self.dp_world_size > 1:
+            if self.use_ep and get_pcp_group().world_size > 1:
+                assert self.tp_group.world_size == 1, (
+                    "DP+PCP with TP>1 requires sequence-parallel MoE inputs"
+                )
+                return get_ep_group()
             return get_dp_group()
         return get_pcp_group()
 
@@ -65,6 +81,7 @@ class AgRsAll2AllManager(All2AllManagerBase):
         assert dp_metadata is not None
         sizes = dp_metadata.get_chunk_sizes_across_dp_rank()
         assert sizes is not None
+        assert len(sizes) == comm_group.world_size
         return sizes
 
     def dispatch_router_logits(
@@ -77,9 +94,7 @@ class AgRsAll2AllManager(All2AllManagerBase):
         tuple[torch.Tensor, torch.Tensor]
         | tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
-        """
-        Gather hidden_states and router_logits from all dp ranks.
-        """
+        """Gather hidden_states and router_logits from all dp ranks."""
         dist_group = self._get_comm_group(is_sequence_parallel)
         sizes = self._get_sizes(hidden_states.shape[0], dist_group)
         assert sizes[dist_group.rank_in_group] == hidden_states.shape[0]
@@ -109,9 +124,7 @@ class AgRsAll2AllManager(All2AllManagerBase):
         tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
-        """
-        Gather hidden_states and router_logits from all dp ranks.
-        """
+        """Gather hidden_states and router_logits from all dp ranks."""
         dist_group = self._get_comm_group(is_sequence_parallel)
         sizes = self._get_sizes(hidden_states.shape[0], dist_group)
         assert sizes[dist_group.rank_in_group] == hidden_states.shape[0]
@@ -138,9 +151,7 @@ class AgRsAll2AllManager(All2AllManagerBase):
     def combine(
         self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
     ) -> torch.Tensor:
-        """
-        Reduce-scatter hidden_states across all dp ranks.
-        """
+        """Reduce-scatter hidden_states across all dp ranks."""
         dist_group = self._get_comm_group(is_sequence_parallel)
         sizes = self._get_sizes(
             hidden_states.shape[0] // dist_group.world_size,
@@ -149,14 +160,48 @@ class AgRsAll2AllManager(All2AllManagerBase):
         hidden_states = dist_group.reduce_scatterv(hidden_states, dim=0, sizes=sizes)
         return hidden_states
 
+    def allocate_combine_input(
+        self,
+        shape: tuple[int, ...],
+        dtype: torch.dtype,
+        device: torch.device,
+        is_sequence_parallel: bool = False,
+    ) -> torch.Tensor | None:
+        dist_group = self._get_comm_group(is_sequence_parallel)
+        sizes = self._get_sizes(shape[0] // dist_group.world_size, dist_group)
+        if sum(sizes) != shape[0] or any(size != sizes[0] for size in sizes):
+            return None
+        device_communicator = dist_group.device_communicator
+        if device_communicator is None:
+            return None
+        return device_communicator.get_symmetric_memory_buffer(
+            "moe_ag_rs_combine", shape, dtype, device
+        )
+
+    def combine_into_output(
+        self,
+        hidden_states: torch.Tensor,
+        output: torch.Tensor,
+        is_sequence_parallel: bool = False,
+    ) -> torch.Tensor:
+        dist_group = self._get_comm_group(is_sequence_parallel)
+        sizes = self._get_sizes(
+            hidden_states.shape[0] // dist_group.world_size,
+            dist_group,
+        )
+        return dist_group.reduce_scatterv_into_output(
+            hidden_states,
+            output,
+            dim=0,
+            sizes=sizes,
+        )
+
     def destroy(self):
         pass
 
 
 class DeepEPAll2AllManagerBase(All2AllManagerBase):
-    """
-    All2All communication based on DeepEP High-Throughput kernels.
-    """
+    """All2All communication based on DeepEP High-Throughput kernels."""
 
     def __init__(self, cpu_group, tcp_store_group=None):
         assert has_deep_ep(), (
@@ -208,9 +253,7 @@ class DeepEPAll2AllManagerBase(All2AllManagerBase):
 
 
 class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
-    """
-    All2All communication based on DeepEP High-Throughput kernels.
-    """
+    """All2All communication based on DeepEP High-Throughput kernels."""
 
     def __init__(self, cpu_group, tcp_store_group=None):
         super().__init__(cpu_group, tcp_store_group)
@@ -269,9 +312,7 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
 
 
 class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
-    """
-    All2All communication based on DeepEP Low-Latency kernels.
-    """
+    """All2All communication based on DeepEP Low-Latency kernels."""
 
     _buffer: Any = None
     _mask: torch.Tensor | None = None
@@ -291,8 +332,7 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         num_global_experts: int,
         num_local_experts: int,
     ) -> dict[Any, Any]:
-        """
-        max_num_tokens_per_dp_rank : the maximum number of tokens a DP rank
+        """max_num_tokens_per_dp_rank : the maximum number of tokens a DP rank
           can dispatch all the ranks must hold the same value.
         token_hidden_size: the hidden dimension of each token.
         num_ep_ranks: the number of EP group ranks.
@@ -328,8 +368,7 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         return kwargs
 
     def get_handle(self, kwargs):
-        """
-        The kwargs for DeepEPLLAll2AllManager is dictated by
+        """The kwargs for DeepEPLLAll2AllManager is dictated by
         _make_all2all_kwargs.
         """
         import deep_ep  # type: ignore[import-not-found]
@@ -377,13 +416,13 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
 @dataclass
 class _NixlEPBufferState:
     buffer: Any
+    max_num_ep_ranks: int
     connected_ep_size: int
     active_ep_size: int
 
 
 class NixlEPAll2AllManager(All2AllManagerBase):
-    """
-    All2All communication based on NIXL EP kernels.
+    """All2All communication based on NIXL EP kernels.
     This backend supports elastic EP with dynamic rank connection/disconnection.
     """
 
@@ -402,7 +441,10 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         super().__init__(cpu_group, tcp_store_group)
         self.support_fault_tolerance = True
 
-        self.max_num_ep_ranks = envs.VLLM_NIXL_EP_MAX_NUM_RANKS
+    @property
+    def max_num_ep_ranks(self) -> int:
+        assert NixlEPAll2AllManager._buffer is not None
+        return NixlEPAll2AllManager._buffer.max_num_ep_ranks
 
     def _init_buffer(
         self,
@@ -412,11 +454,19 @@ class NixlEPAll2AllManager(All2AllManagerBase):
     ) -> None:
         from nixl_ep import Buffer  # type: ignore[import-not-found]
 
-        max_num_global_experts = self.max_num_ep_ranks * num_experts_per_rank
+        parallel_config = get_current_vllm_config().parallel_config
+        max_num_ep_ranks = (
+            self.world_size
+            * parallel_config.elastic_ep_max_dp_size
+            // parallel_config.data_parallel_size
+            if parallel_config.enable_elastic_ep
+            else self.world_size
+        )
+        max_num_global_experts = max_num_ep_ranks * num_experts_per_rank
         num_rdma_bytes = Buffer.get_rdma_size_hint(
             num_max_dispatch_tokens_per_rank=max_num_tokens_per_dp_rank,
             hidden=token_hidden_size,
-            num_ranks=self.max_num_ep_ranks,
+            num_ranks=max_num_ep_ranks,
             num_experts=max_num_global_experts,
         )
         assert NixlEPAll2AllManager._buffer is None, (
@@ -427,7 +477,7 @@ class NixlEPAll2AllManager(All2AllManagerBase):
             tcp_store_group=self.tcp_store_group.store,
         )
         buffer.update_memory_buffers(
-            num_ranks=self.max_num_ep_ranks,
+            num_ranks=max_num_ep_ranks,
             num_experts_per_rank=num_experts_per_rank,
             num_rdma_bytes=num_rdma_bytes,
         )
@@ -435,6 +485,7 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         buffer.connect_ranks(ranks_to_connect)
         NixlEPAll2AllManager._buffer = _NixlEPBufferState(
             buffer=buffer,
+            max_num_ep_ranks=max_num_ep_ranks,
             connected_ep_size=self.world_size,
             active_ep_size=self.world_size,
         )
@@ -474,6 +525,7 @@ class NixlEPAll2AllManager(All2AllManagerBase):
 
         for rank in range(state.active_ep_size, target_ep_size):
             state.buffer.update_mask_buffer(rank, mask=False)
+        torch.accelerator.synchronize()
         state.active_ep_size = target_ep_size
 
     def _stage_ep_size(self) -> None:
@@ -486,8 +538,12 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         if target_ep_size > state.connected_ep_size:
             self._connect_to_ep_size(target_ep_size, make_active=False)
 
-    def commit_staged_state(self) -> None:
-        """Commit staged NIXL EP state to the active communication set."""
+    def stage_ep_size(self) -> None:
+        with NixlEPAll2AllManager._lock:
+            self._stage_ep_size()
+
+    def commit_ep_size(self) -> None:
+        """Commit the staged EP size to the active communication set."""
         with NixlEPAll2AllManager._lock:
             assert NixlEPAll2AllManager._buffer is not None
             state = NixlEPAll2AllManager._buffer
@@ -500,31 +556,31 @@ class NixlEPAll2AllManager(All2AllManagerBase):
 
             self._unmask_connected_ranks(target_ep_size)
 
-    def _ensure_ep_size(self, *, stage: bool) -> None:
-        if stage:
-            self._stage_ep_size()
-        else:
-            self.commit_staged_state()
+    @contextmanager
+    def mask_remote_ranks(self) -> Iterator[None]:
+        peers = [rank for rank in range(self.world_size) if rank != self.rank]
+        assert NixlEPAll2AllManager._buffer is not None
+        buffer = NixlEPAll2AllManager._buffer.buffer
+        for rank in peers:
+            buffer.update_mask_buffer(rank, mask=True)
+        torch.accelerator.synchronize()
+        try:
+            yield
+        finally:
+            for rank in peers:
+                buffer.update_mask_buffer(rank, mask=False)
+            torch.accelerator.synchronize()
 
     def get_handle(self, kwargs):
         with NixlEPAll2AllManager._lock:
-            stage = bool(kwargs.get("stage", False))
             state = NixlEPAll2AllManager._buffer
             if state is None:
-                assert not stage, (
-                    "NIXL EP staged initialization requires an existing buffer"
-                )
                 max_num_tokens_per_dp_rank = kwargs["max_num_tokens_per_dp_rank"]
-                num_experts_per_rank = (
-                    kwargs["num_global_experts"] // kwargs["num_ep_ranks"]
-                )
                 self._init_buffer(
                     max_num_tokens_per_dp_rank=max_num_tokens_per_dp_rank,
                     token_hidden_size=kwargs["token_hidden_size"],
-                    num_experts_per_rank=num_experts_per_rank,
+                    num_experts_per_rank=kwargs["num_local_experts"],
                 )
-            else:
-                self._ensure_ep_size(stage=stage)
 
             assert NixlEPAll2AllManager._buffer is not None
             handle = NixlEPAll2AllManager._buffer.buffer
@@ -564,7 +620,7 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         assert state is not None
         if NixlEPAll2AllManager._mask is None:
             NixlEPAll2AllManager._mask = torch.zeros(
-                self.max_num_ep_ranks, device="cuda", dtype=torch.int32
+                state.max_num_ep_ranks, device="cuda", dtype=torch.int32
             )
         state.buffer.query_mask_buffer(NixlEPAll2AllManager._mask)
         return NixlEPAll2AllManager._mask[: state.active_ep_size]
@@ -592,9 +648,7 @@ class NixlEPAll2AllManager(All2AllManagerBase):
 
 
 class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
-    """
-    All2All communication based on flashinfer all2allv/two-sided NVLink kernels.
-    """
+    """All2All communication based on flashinfer all2allv/two-sided NVLink kernels."""
 
     # This type lint could be removed after all of the work in
     # https://github.com/vllm-project/vllm/issues/26533 done.
@@ -620,7 +674,11 @@ class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
         rank: int,
         gpus_per_node: int,
     ):
-        """Initialize workspace"""
+        """Initialize workspace."""
+        from flashinfer.comm import Mapping
+        from flashinfer.comm.mnnvl import MnnvlConfig
+        from flashinfer.comm.trtllm_alltoall import MnnvlMoe
+
         if self.initialized:
             return
 
@@ -661,7 +719,7 @@ class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
         )
 
     def ensure_alltoall_workspace_initialized(self):
-        """Ensure workspace is initialized"""
+        """Ensure workspace is initialized."""
         if not has_flashinfer_nvlink_two_sided():
             return False
 
@@ -680,7 +738,7 @@ class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
         return self
 
     def cleanup(self):
-        """Clean up workspace"""
+        """Clean up workspace."""
         if (
             self.initialized
             and self.workspace_tensor is not None
@@ -699,34 +757,18 @@ class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
 
 
 class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
-    """
-    All2All communication based on FlashInfer's MoeAlltoAll/One-sided NVLink kernel.
-    This is a newer kernel from trtllm that should perform better than the kernel
-    used by flashinfer_nvlink_two_sided.
-    """
-
-    rank: int
-    world_size: int
+    """MoE EP communication using FlashInfer's NVLink one-sided wrapper."""
 
     def __init__(self, cpu_group):
         assert has_flashinfer_nvlink_one_sided(), (
-            "flashinfer trtllm_moe_alltoall module not found. "
-            "Please install/check flashinfer"
+            "FlashInfer MoEEpCommunication NVLink one-sided API not found. "
+            "Please install FlashInfer 0.7.2 or later."
         )
         super().__init__(cpu_group)
-        logger.debug(
-            "Initialize FlashInfer One-sided NVLink rank=%d, world size=%d",
-            self.rank,
-            self.world_size,
-        )
         self.initialized = False
-        self.moe_alltoall: MoeAlltoAll | None = None
-        self.mapping = None
-        self.workspace_size = 0
-        self.max_num_tokens = 0
+        self.communication: NVLinkOneSidedAlltoAll | None = None
         self.top_k = 0
         self.num_experts = 0
-        self._combine_supports_output = False
 
     def initialize(
         self,
@@ -734,170 +776,147 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
         top_k: int,
         num_experts: int,
         hidden_size: int,
-        dispatch_dtype_bytes_per_elem: int = 0,
-        dispatch_scale_bytes_per_token: int = 0,
-    ):
-        """Initialize (or grow) the MoeAlltoAll workspace."""
-        if dispatch_dtype_bytes_per_elem == 0:
-            hidden_bytes = hidden_size // 2
-        else:
-            hidden_bytes = hidden_size * dispatch_dtype_bytes_per_elem
-        total_dispatch_payload_size_per_token = (
-            hidden_bytes
-            + dispatch_scale_bytes_per_token
-            + top_k * 4  # int32 topks ids
-            + top_k * 4  # float32 topk weights
+        dispatch_format: "QuantFormat | None" = None,
+        extra_payload_bytes_per_token: int = 0,
+    ) -> None:
+        """Share the largest token, dispatch-row and combine-row capacities."""
+        from flashinfer.moe_ep import (
+            BootstrapConfig,
+            MoEEpCommParams,
+            NVLinkOneSidedAlltoAll,
+            NVLinkOneSidedConfig,
+            create_communication,
         )
-        combine_payload_size_per_token = hidden_size * 2  # bf16 hidden states
-        needed_workspace_size = moe_a2a_get_workspace_size_per_rank(
-            ep_size=self.world_size,
-            max_num_tokens=max_num_tokens,
-            total_dispatch_payload_size_per_token=total_dispatch_payload_size_per_token,
-            combine_payload_size_per_token=combine_payload_size_per_token,
-        )
-        # workspace_size and max_num_tokens are kernel-side max-bounds, so
-        # heterogeneous MoE layers (e.g. NVFP4 base + bf16 MTP head) only
-        # need the shared workspace grown to the union. top_k and num_experts
-        # must match across layers: top_k is a strict-equality assert at
-        # dispatch (FlashInfer csrc/trtllm_moe_alltoall.cu), and num_experts
-        # feeds the expert-to-rank routing math, so any mismatch would crash
-        # or silently corrupt routing. All ranks see the same MoE layers in
-        # the same order with identical shapes, so the skip / rebuild
-        # branches are taken consistently across ranks.
+
         if self.initialized:
             assert top_k == self.top_k, (
-                "FlashInfer one-sided MoeAlltoAll does not support "
-                f"heterogeneous top_k across MoE layers (got {top_k}, "
-                f"was built with {self.top_k})"
+                "FlashInfer one-sided communication does not support "
+                f"heterogeneous top_k (got {top_k}, was built with {self.top_k})"
             )
             assert num_experts == self.num_experts, (
-                "FlashInfer one-sided MoeAlltoAll does not support "
-                f"heterogeneous num_experts across MoE layers (got "
-                f"{num_experts}, was built with {self.num_experts})"
+                "FlashInfer one-sided communication does not support "
+                f"heterogeneous num_experts (got {num_experts}, "
+                f"was built with {self.num_experts})"
+            )
+
+        if extra_payload_bytes_per_token < 0:
+            raise ValueError("extra_payload_bytes_per_token must be non-negative")
+        params = MoEEpCommParams(
+            num_experts=num_experts,
+            top_k=top_k,
+            max_tokens_per_rank=max_num_tokens,
+            hidden_size=hidden_size,
+            dtype=torch.bfloat16,
+            dispatch_format=dispatch_format,
+        )
+        communication = self.communication
+        if communication is not None:
+            previous_max = communication.params.max_tokens_per_rank
+            previous_extra = communication.config.extra_payload_bytes_per_token
+            previous_bytes = (
+                communication.params.dispatch_bytes_per_token + previous_extra
+            )
+            dispatch_bytes = (
+                params.dispatch_bytes_per_token + extra_payload_bytes_per_token
             )
             if (
-                needed_workspace_size <= self.workspace_size
-                and max_num_tokens <= self.max_num_tokens
+                max_num_tokens <= previous_max
+                and hidden_size <= communication.params.hidden_size
+                and dispatch_bytes <= previous_bytes
             ):
                 return
-
-        self.workspace_size = max(self.workspace_size, needed_workspace_size)
-        self.max_num_tokens = max(self.max_num_tokens, max_num_tokens)
-        self.top_k = top_k
-        self.num_experts = num_experts
-
-        self.cleanup()
-        from vllm.platforms.interface import get_assigned_physical_gpu_ids
-
-        assigned_physical_gpu_ids = get_assigned_physical_gpu_ids()
-        gpus_per_node = (
-            len(assigned_physical_gpu_ids)
-            if assigned_physical_gpu_ids is not None
-            else torch.accelerator.device_count()
-        )
-        logger.debug(
-            "Making One-sided NVLink mapping: rank=%d, world size=%d",
-            self.rank,
-            self.world_size,
-        )
-        self.mapping = Mapping(
-            self.world_size,
-            self.rank,
-            gpus_per_node,
-            tp_size=self.world_size,
-            moe_ep_size=self.world_size,
-        )
+            # Use the larger hidden size for combine capacity. Its dispatch
+            # format may need fewer bytes than another layer's actual payload.
+            if hidden_size < communication.params.hidden_size or (
+                hidden_size == communication.params.hidden_size
+                and dispatch_bytes < previous_bytes
+            ):
+                params = communication.params
+            params = replace(
+                params, max_tokens_per_rank=max(max_num_tokens, previous_max)
+            )
+            extra_payload_bytes_per_token = (
+                max(dispatch_bytes, previous_bytes) - params.dispatch_bytes_per_token
+            )
 
         from vllm.distributed.device_communicators.mnnvl_compat import (
             CustomCommunicator,
         )
 
-        # MNNVL workspace is allocated per rank in the comm_backend's group; the
-        # flashinfer kernel asserts workspace.size(0) == moe_ep_size, so the backend
-        # must span the EP group (= DP*PCP*TP), not the DP group.
-        ep_config = MnnvlConfig(
+        # MNNVL handle exchange must cover EP (= DP*PCP*TP), including with PP.
+        bootstrap = BootstrapConfig(
+            world_size=self.world_size,
+            rank=self.rank,
+            device=torch.accelerator.current_device_index(),
+            process_group=self.cpu_group,
+        )
+        config = NVLinkOneSidedConfig(
+            extra_payload_bytes_per_token=extra_payload_bytes_per_token,
+            use_low_precision_combine=envs.VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE,
             comm_backend=CustomCommunicator(self.cpu_group),
         )
-
-        self.moe_alltoall = MoeAlltoAll(
-            mapping=self.mapping,
-            max_num_tokens=self.max_num_tokens,
-            top_k=self.top_k,
-            num_experts=self.num_experts,
-            workspace_size_per_rank=self.workspace_size,
-            mnnvl_config=ep_config,
-        )
-        try:
-            self._combine_supports_output = supports_kw(
-                self.moe_alltoall.combine, "output", allow_var_kwargs=False
-            )
-        except (TypeError, ValueError):
-            self._combine_supports_output = False
-
-        self.gpus_per_node = gpus_per_node
+        if communication is not None:
+            # Growth happens during model initialization, before graph capture.
+            # Destroy the old wrapper on every rank before replacing it;
+            # FlashInfer owns the underlying workspace cache.
+            torch.accelerator.synchronize()
+            dist.barrier(group=self.cpu_group)
+            self.cleanup()
+            dist.barrier(group=self.cpu_group)
+        torch.accelerator.empty_cache()
+        # Bootstrap metadata must stay on the CPU even when model layers are
+        # constructed under a CUDA default-device context.
+        with torch.device("cpu"):
+            replacement = create_communication(bootstrap, params, backend=config)
+        assert isinstance(replacement, NVLinkOneSidedAlltoAll)
+        self.communication = replacement
+        self.top_k = top_k
+        self.num_experts = num_experts
         self.initialized = True
-
         logger.info(
-            "FlashInfer One-sided NVLink initialized for rank %s, size %s",
+            "FlashInfer One-sided NVLink initialized for rank %s, size %s, hidden %s",
             self.rank,
             self.world_size,
+            params.hidden_size,
         )
-        # Scope barrier to the EP group: with PP, different EP groups can
-        # rebuild a different number of times if their MoE layers have
-        # different shape sequences, so a world-level barrier would deadlock.
         dist.barrier(group=self.cpu_group)
 
-    def combine_into(
-        self,
-        payload: torch.Tensor,
-        runtime_max_tokens_per_rank: int,
-        output: torch.Tensor,
-    ) -> None:
-        """Combine into ``output``, with a fallback for older FlashInfer."""
-        assert self.moe_alltoall is not None
-        if self._combine_supports_output:
-            self.moe_alltoall.combine(
-                payload=payload,
-                runtime_max_tokens_per_rank=runtime_max_tokens_per_rank,
-                output=output,
-            )
-        else:
-            combined_output = self.moe_alltoall.combine(
-                payload=payload,
-                runtime_max_tokens_per_rank=runtime_max_tokens_per_rank,
-            )
-            output.copy_(combined_output)
+    def get_communication(self) -> "NVLinkOneSidedAlltoAll":
+        # Resolve at use time: another layer can grow the shared capacity during
+        # model construction, replacing the wrapper created for an earlier layer.
+        assert self.communication is not None, "One-sided communication not initialized"
+        return self.communication
 
     def get_handle(self, kwargs):
         return self
 
     def cleanup(self):
-        """Clean up resources."""
-        if self.initialized and self.moe_alltoall is not None:
-            try:
-                del self.moe_alltoall
-            except Exception as e:
-                logger.warning(
-                    "Failed to cleanup FlashInfer One-sided NVLink workspace: %s", e
-                )
-            finally:
-                self.moe_alltoall = None
-                self.mapping = None
-                self.initialized = False
+        if self.communication is not None:
+            self.communication.destroy()
+            self.communication = None
+        self.initialized = False
 
     def checkpoint_prepare(self) -> None:
-        if self.initialized:
-            assert self.moe_alltoall is not None
-            self.moe_alltoall.checkpoint_prepare()
+        if self.communication is not None:
+            communication = self.communication
+            if hasattr(communication, "checkpoint_prepare"):
+                communication.checkpoint_prepare()
+            else:
+                # FlashInfer 0.7.2 exposes checkpoints on the wrapped backend.
+                communication.alltoall.checkpoint_prepare()
 
     def checkpoint_restore(self) -> None:
         if self.initialized:
-            assert self.moe_alltoall is not None
             from vllm.distributed.device_communicators.mnnvl_compat import (
                 CustomCommunicator,
             )
 
-            self.moe_alltoall.checkpoint_restore(CustomCommunicator(self.cpu_group))
+            communicator = CustomCommunicator(self.cpu_group)
+            communication = self.get_communication()
+            if hasattr(communication, "checkpoint_restore"):
+                communication.checkpoint_restore(communicator)
+            else:
+                communication.alltoall.checkpoint_restore(communicator)
 
 
 class MoriAll2AllManager(All2AllManagerBase):
@@ -917,6 +936,22 @@ class MoriAll2AllManager(All2AllManagerBase):
         self.handle_cache = Cache()
 
         torch._C._distributed_c10d._register_process_group("mori", cpu_group)
+        vllm_config = get_current_vllm_config()
+        if vllm_config.kernel_config.moe_backend == "aiter_mega_moe":
+            # MegaMoEV2 places its dispatch/combine workspaces on the MoRI
+            # symmetric heap, which defaults to 2 GB. MegaMoEV2 requires > 4GB
+            # (> 8GB with a fused shared expert, which needs an mxfp4 target).
+            online_targets = getattr(
+                vllm_config.model_config.quantization_config, "targets", None
+            )
+            may_fuse_shared_expert = (
+                envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
+                and "mxfp4" in (online_targets or {}).values()
+            )
+            heap_size = os.environ.setdefault(
+                "MORI_SHMEM_HEAP_SIZE", "16G" if may_fuse_shared_expert else "8G"
+            )
+            logger.info_once("AITER MegaMoE: MORI_SHMEM_HEAP_SIZE=%s", heap_size)
         mori.shmem.shmem_torch_process_group_init("mori")
 
     def _make_all2all_kwargs(
@@ -1003,16 +1038,12 @@ class MoriAll2AllManager(All2AllManagerBase):
 
 
 class DeepEPV2All2AllManager(All2AllManagerBase):
-    """
-    All2All communication based on DeepEP v2 ElasticBuffer (unified API).
+    """All2All communication based on DeepEP v2 ElasticBuffer (unified API).
     Uses NCCL Gin backend with analytical SM calculation.
     """
 
     def __init__(self, cpu_group, tcp_store_group=None, device_group=None):
-        assert has_deep_ep_v2(), (
-            "DeepEP v2 (ElasticBuffer) not available. Requires DeepEP >= 2.0 "
-            "(https://github.com/deepseek-ai/DeepEP) and NCCL >= 2.30.4."
-        )
+        assert has_deep_ep_v2(), deep_ep_v2_unavailable_reason()
         super().__init__(cpu_group, tcp_store_group)
         self._device_group = device_group
         self.handle_cache = Cache()
@@ -1048,8 +1079,13 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
         # missing GIN support.
         probe = torch.zeros(1, device="cuda")
         torch.distributed.all_reduce(probe, group=group)
+        # DeepEPv2 respects EP_DISABLE_GIN, so skip the GIN requirement check.
+        if os.environ.get("EP_DISABLE_GIN", "0") != "0":
+            return
 
-        gin_type = query_nccl_gin_type(group)
+        gin_type = query_nccl_gin_type(
+            group, railed=envs.VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE
+        )
         if gin_type is None:
             raise RuntimeError(
                 "DeepEPv2 communicator properties query failed; "
@@ -1084,6 +1120,74 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
 
     def max_sms_used(self) -> int | None:
         return self._num_sms
+
+    def destroy(self):
+        with self.handle_cache._lock:
+            for _, handle in self.handle_cache._cache.items():
+                handle.destroy()
+            self.handle_cache._cache.clear()
+
+
+class MoonEPAll2AllManager(All2AllManagerBase):
+    """All2All communication based on MoonEP
+    (https://github.com/MoonshotAI/MoonEP).
+
+    MoonEP keeps token loads perfectly balanced across EP ranks by planning
+    a small number of dynamically redundant experts online and prefetching
+    their weights before expert compute. Every rank receives exactly
+    S x K token slots regardless of router skew, so all communication and
+    compute shapes are static.
+
+    Requires NVLink symmetric-memory / multicast capable topologies
+    (single node NVSwitch, e.g. H100/H200/B200/GB300 class).
+    """
+
+    def __init__(self, cpu_group, tcp_store_group=None, device_group=None):
+        check_moonep_system_support()
+        super().__init__(cpu_group, tcp_store_group)
+        self._device_group = device_group
+        self.handle_cache = Cache()
+
+    def _make_buffer_kwargs(
+        self,
+        max_num_tokens_per_dp_rank: int,
+        token_hidden_size: int,
+        num_topk: int,
+        num_global_experts: int,
+        num_prefetch_slots: int,
+        token_padding: int,
+        num_sms: int,
+    ) -> dict:
+        return dict(
+            S=max_num_tokens_per_dp_rank,
+            H=token_hidden_size,
+            K=num_topk,
+            E=num_global_experts,
+            num_ep_ranks=self.world_size,
+            num_sms=num_sms,
+            token_padding=token_padding,
+            B=num_prefetch_slots,
+            group=self._device_group
+            if self._device_group is not None
+            else self.cpu_group,
+            explicitly_destroy=True,
+        )
+
+    def get_handle(self, kwargs):
+        from vllm.model_executor.layers.fused_moe.prepare_finalize.moonep import (
+            MoonEPBufferPool,
+        )
+
+        buffer_kwargs = self._make_buffer_kwargs(**kwargs)
+        logger.debug("MoonEP all2all args %s", buffer_kwargs)
+
+        def make_pool(**kw):
+            return MoonEPBufferPool(kw, max_tokens_per_rank=kw["S"])
+
+        handle: MoonEPBufferPool = self.handle_cache.get_or_create(
+            buffer_kwargs, make_pool
+        )
+        return handle
 
     def destroy(self):
         with self.handle_cache._lock:

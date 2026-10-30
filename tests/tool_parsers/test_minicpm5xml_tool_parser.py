@@ -9,11 +9,11 @@ from unittest.mock import MagicMock
 import pytest
 
 from tests.tool_parsers.utils import run_tool_extraction_streaming
+from vllm.entrypoints.generate.base.protocol import FunctionCall, ToolCall
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
-from vllm.entrypoints.openai.engine.protocol import FunctionCall, ToolCall
 from vllm.tool_parsers import ToolParser, ToolParserManager
 from vllm.tool_parsers.minicpm5xml_tool_parser import MiniCPM5XMLToolParser
 
@@ -119,7 +119,10 @@ def test_registered_in_tool_parser_manager() -> None:
 
 def test_adjust_request_skip_special_tokens(parser: ToolParser) -> None:
     request = make_request(make_tools_weather())
-    assert request.skip_special_tokens is True
+    assert (
+        request.to_sampling_params(1, default_sampling_params={}).skip_special_tokens
+        is True
+    )
     adjusted = parser.adjust_request(request)
     assert adjusted.skip_special_tokens is False
 
@@ -127,7 +130,10 @@ def test_adjust_request_skip_special_tokens(parser: ToolParser) -> None:
 def test_adjust_request_tool_choice_none(parser: ToolParser) -> None:
     request = make_request(make_tools_weather(), tool_choice="none")
     adjusted = parser.adjust_request(request)
-    assert adjusted.skip_special_tokens is True
+    assert (
+        adjusted.to_sampling_params(1, default_sampling_params={}).skip_special_tokens
+        is True
+    )
 
 
 def test_no_tool_call(parser: ToolParser) -> None:
@@ -394,6 +400,7 @@ def test_extract_tool_calls_streaming_incremental_arguments(
             request,
         )
         if delta and delta.tool_calls:
+            assert delta.tool_calls[0].function is not None
             arg_delta = delta.tool_calls[0].function.arguments
             if arg_delta:
                 arguments += arg_delta

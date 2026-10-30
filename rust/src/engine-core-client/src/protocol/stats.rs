@@ -5,8 +5,6 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::OpaqueValue;
-
 /// Stores cache hit statistics.
 ///
 /// Original Python definition:
@@ -21,6 +19,60 @@ pub struct BaseCacheStats {
     pub queries: u64,
     /// The number of hits in these requests.
     pub hits: u64,
+}
+
+/// Cache-hit tokens per source tier. Python sends a sparse
+/// `dict[CacheHitSource, int]`, so absent tiers default to zero.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CachedTokensBySource {
+    pub device: u64,
+    pub host: u64,
+    pub p2p: u64,
+    pub disk: u64,
+    pub external_unspecified: u64,
+}
+
+impl CachedTokensBySource {
+    /// Label values, in the same order as [`Self::counts`].
+    pub const SOURCES: [&'static str; 5] =
+        ["device", "host", "p2p", "disk", "external_unspecified"];
+
+    pub fn counts(&self) -> [u64; 5] {
+        [
+            self.device,
+            self.host,
+            self.p2p,
+            self.disk,
+            self.external_unspecified,
+        ]
+    }
+}
+
+/// Waiting requests with an async KV load, per load stage. Python sends a
+/// `dict[str, int]` keyed by stage, so absent stages default to zero.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct KvFetchReqsByStage {
+    /// Needs an async KV load that has not started.
+    pub waiting_to_start: u64,
+    /// Load started and not yet reported finished.
+    pub in_progress: u64,
+    /// Load finished, request not running yet.
+    pub completed_waiting: u64,
+}
+
+impl KvFetchReqsByStage {
+    /// Label values, in the same order as [`Self::counts`].
+    pub const STAGES: [&'static str; 3] = ["waiting_to_start", "in_progress", "completed_waiting"];
+
+    pub fn counts(&self) -> [u64; 3] {
+        [
+            self.waiting_to_start,
+            self.in_progress,
+            self.completed_waiting,
+        ]
+    }
 }
 
 /// Stores prefix cache hit statistics.
@@ -40,6 +92,9 @@ pub struct PrefixCacheStats {
     pub preempted_queries: u64,
     /// The `hits` number for preempted requests.
     pub preempted_hits: u64,
+    /// `hits` split by the cache tier that supplied them (connector stats only).
+    #[serde(default)]
+    pub hits_by_source: CachedTokensBySource,
 }
 
 /// Single KV cache block eviction sample.
@@ -158,6 +213,155 @@ pub struct CudagraphStats {
     pub runtime_mode: String,
 }
 
+/// KV connector telemetry DTOs carried by [`SchedulerStats`].
+pub mod kv_connector {
+    use std::collections::BTreeMap;
+
+    use serde::{Deserialize, Serialize};
+
+    use crate::protocol::OpaqueValue;
+
+    /// NIXL connector transfer telemetry.
+    #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+    pub struct NixlStats {
+        /// Time spent transferring each successful request.
+        pub transfer_duration: Vec<f64>,
+        /// Time spent posting each successful transfer.
+        pub post_duration: Vec<f64>,
+        /// Bytes transferred by each successful request.
+        pub bytes_transferred: Vec<u64>,
+        /// Descriptor count for each successful request.
+        pub num_descriptors: Vec<u64>,
+        /// Failure counter increments collected since the previous update.
+        pub num_failed_transfers: Vec<u64>,
+        /// Notification failure counter increments collected since the previous update.
+        pub num_failed_notifications: Vec<u64>,
+        /// Handshake failure counter increments collected since the previous update.
+        #[serde(default)]
+        pub num_failed_handshakes: Vec<u64>,
+        /// Expired-request counter increments collected since the previous update.
+        pub num_kv_expired_reqs: Vec<u64>,
+        /// Late notification counter increments collected since the previous update.
+        #[serde(default)]
+        pub num_notifications_after_expiry: Vec<u64>,
+    }
+
+    /// Mooncake connector transfer telemetry.
+    ///
+    /// Original Python definition: `MooncakeKVConnectorStats` in
+    /// `vllm/distributed/kv_transfer/kv_connector/v1/mooncake/stats.py`.
+    #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+    pub struct MooncakeTransferStats {
+        /// Time spent transferring each successful request.
+        pub transfer_duration: Vec<f64>,
+        /// Bytes transferred by each successful request.
+        pub bytes_transferred: Vec<u64>,
+        /// Descriptor count for each successful request.
+        pub num_descriptors: Vec<u64>,
+        /// Failure counter increments collected since the previous update.
+        pub num_failed_transfers: Vec<u64>,
+        /// Receive failure counter increments collected since the previous update.
+        pub num_failed_recvs: Vec<u64>,
+        /// Expired-request counter increments collected since the previous update.
+        pub num_kv_expired_reqs: Vec<u64>,
+    }
+
+    /// Mooncake store operation name.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum MooncakeOperation {
+        SaveExists,
+        SavePut,
+        LoadGet,
+        LookupExists,
+    }
+
+    impl MooncakeOperation {
+        pub(crate) const fn as_str(self) -> &'static str {
+            match self {
+                Self::SaveExists => "save_exists",
+                Self::SavePut => "save_put",
+                Self::LoadGet => "load_get",
+                Self::LookupExists => "lookup_exists",
+            }
+        }
+    }
+
+    /// Mooncake store operation status.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum MooncakeStatus {
+        Ok,
+        Error,
+        PartialFailure,
+    }
+
+    impl MooncakeStatus {
+        pub(crate) const fn as_str(self) -> &'static str {
+            match self {
+                Self::Ok => "ok",
+                Self::Error => "error",
+                Self::PartialFailure => "partial_failure",
+            }
+        }
+    }
+
+    /// One Mooncake store operation sample.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct MooncakeRecord {
+        pub duration_seconds: f64,
+        pub num_keys: u64,
+        pub num_bytes: u64,
+        pub status: MooncakeStatus,
+        pub num_failed_keys: u64,
+    }
+
+    /// Mooncake store telemetry grouped by operation.
+    #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct MooncakeStats(pub BTreeMap<MooncakeOperation, Vec<MooncakeRecord>>);
+
+    /// Telemetry emitted by a `MultiConnector` with a flat child payload map.
+    #[serde_with::skip_serializing_none]
+    #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+    pub struct MultiConnectorStats {
+        #[serde(rename = "NixlConnector")]
+        pub nixl: Option<NixlStats>,
+        #[serde(rename = "NixlPullConnector")]
+        pub nixl_pull: Option<NixlStats>,
+        #[serde(rename = "NixlPushConnector")]
+        pub nixl_push: Option<NixlStats>,
+        #[serde(rename = "MooncakeConnector")]
+        pub mooncake_transfer: Option<MooncakeTransferStats>,
+        #[serde(rename = "MooncakeStoreConnector")]
+        pub mooncake: Option<MooncakeStats>,
+        /// Child connector payloads without a Rust telemetry implementation.
+        #[serde(flatten)]
+        pub other: BTreeMap<String, OpaqueValue>,
+    }
+
+    /// Connector-specific scheduler telemetry.
+    ///
+    /// Variants are tried in order. `Multi` accepts any map, so every
+    /// connector payload with its own variant must come before it.
+    ///
+    /// The typed payloads ignore unknown fields: Python adds counters to them
+    /// over time, and a strict decode would drop every metric of that
+    /// connector, and of its `MultiConnector` siblings, until Rust caught up.
+    /// The variants stay distinct through the fields each one requires.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(untagged)]
+    pub enum KvConnectorStats {
+        Nixl(NixlStats),
+        MooncakeTransfer(MooncakeTransferStats),
+        Mooncake(MooncakeStats),
+        Multi(Box<MultiConnectorStats>),
+        Other(BTreeMap<String, OpaqueValue>),
+    }
+}
+
+pub use kv_connector::*;
+
 /// Stats associated with the scheduler.
 ///
 /// Original Python definition:
@@ -166,11 +370,14 @@ pub struct CudagraphStats {
 pub struct SchedulerStats {
     /// Number of requests in model execution batches.
     pub num_running_reqs: u64,
-    /// Length of the "waiting" request queue.
+    /// Number of waiting requests not deferred.
     pub num_waiting_reqs: u64,
-    /// Length of the "skipped waiting" queue.
+    /// Number of waiting requests deferred by transient constraints or a blocked status.
     #[serde(default)]
     pub num_skipped_waiting_reqs: u64,
+    /// Waiting requests with an async KV load, by load stage.
+    #[serde(default)]
+    pub num_kv_fetch_reqs_by_stage: KvFetchReqsByStage,
     /// Internal DP load-balancing step counter.
     pub step_counter: u64,
     /// Internal DP load-balancing wave number.
@@ -185,10 +392,103 @@ pub struct SchedulerStats {
     pub kv_cache_eviction_events: Vec<KvCacheEvictionEvent>,
     /// Speculative decoding scheduler stats, when enabled.
     pub spec_decoding_stats: Option<SpecDecodingStats>,
-    /// Connector-specific KV transfer stats, kept opaque for now.
-    pub kv_connector_stats: Option<BTreeMap<String, OpaqueValue>>,
+    /// Connector-specific KV transfer stats.
+    pub kv_connector_stats: Option<KvConnectorStats>,
     /// CUDA graph runtime stats when graph metrics are enabled.
     pub cudagraph_stats: Option<CudagraphStats>,
     /// Estimated MFU/performance stats, when enabled.
     pub perf_stats: Option<PerfStats>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        CachedTokensBySource, KvConnectorStats, KvFetchReqsByStage, PrefixCacheStats,
+        SchedulerStats,
+    };
+
+    #[test]
+    fn prefix_cache_stats_hits_by_source_defaults_and_decodes() {
+        // Engines without per-source attribution omit the field entirely.
+        let legacy = serde_json::json!({
+            "reset": false, "requests": 1, "queries": 8, "hits": 4,
+            "preempted_requests": 0, "preempted_queries": 0, "preempted_hits": 0
+        });
+        let wire = rmp_serde::to_vec_named(&legacy).unwrap();
+        let stats: PrefixCacheStats = rmp_serde::from_slice(&wire).unwrap();
+        assert_eq!(stats.base.hits, 4);
+        assert_eq!(stats.hits_by_source, CachedTokensBySource::default());
+
+        let payload = serde_json::json!({
+            "reset": false, "requests": 1, "queries": 16, "hits": 12,
+            "preempted_requests": 0, "preempted_queries": 0, "preempted_hits": 0,
+            "hits_by_source": {"host": 8, "p2p": 4}
+        });
+        let wire = rmp_serde::to_vec_named(&payload).unwrap();
+        let stats: PrefixCacheStats = rmp_serde::from_slice(&wire).unwrap();
+        assert_eq!(stats.hits_by_source.counts(), [0, 8, 4, 0, 0]);
+        assert_eq!(CachedTokensBySource::SOURCES[1], "host");
+    }
+
+    #[test]
+    fn kv_connector_stats_ignore_unknown_fields() {
+        let decode = |payload: serde_json::Value| -> KvConnectorStats {
+            rmp_serde::from_slice(&rmp_serde::to_vec_named(&payload).unwrap()).unwrap()
+        };
+        let nixl = serde_json::json!({
+            "transfer_duration": [0.5], "post_duration": [0.1], "bytes_transferred": [4096],
+            "num_descriptors": [2], "num_failed_transfers": [], "num_failed_notifications": [],
+            "num_kv_expired_reqs": [], "num_future_counter": [1]
+        });
+        let mooncake_transfer = serde_json::json!({
+            "transfer_duration": [0.5], "bytes_transferred": [4096], "num_descriptors": [2],
+            "num_failed_transfers": [1], "num_failed_recvs": [], "num_kv_expired_reqs": [],
+            "num_future_counter": [1]
+        });
+
+        assert!(matches!(
+            decode(nixl.clone()),
+            KvConnectorStats::Nixl(stats) if stats.bytes_transferred == [4096]
+        ));
+        assert!(matches!(
+            decode(mooncake_transfer.clone()),
+            KvConnectorStats::MooncakeTransfer(stats) if stats.num_failed_transfers == [1]
+        ));
+        // A newer child payload must not drop its siblings.
+        assert!(matches!(
+            decode(serde_json::json!({
+                "NixlConnector": nixl,
+                "MooncakeConnector": mooncake_transfer,
+            })),
+            KvConnectorStats::Multi(stats)
+                if stats.nixl.is_some() && stats.mooncake_transfer.is_some()
+        ));
+    }
+
+    #[test]
+    fn scheduler_stats_kv_fetch_reqs_by_stage_defaults_and_decodes() {
+        let mut payload = serde_json::json!({
+            "num_running_reqs": 1, "num_waiting_reqs": 2,
+            "step_counter": 0, "current_wave": 0, "kv_cache_usage": 0.5,
+            "prefix_cache_stats": {
+                "reset": false, "requests": 0, "queries": 0, "hits": 0,
+                "preempted_requests": 0, "preempted_queries": 0, "preempted_hits": 0
+            },
+            "kv_cache_eviction_events": []
+        });
+
+        // Engines before vllm-project/vllm#58874 omit the field entirely.
+        let wire = rmp_serde::to_vec_named(&payload).unwrap();
+        let stats: SchedulerStats = rmp_serde::from_slice(&wire).unwrap();
+        assert_eq!(
+            stats.num_kv_fetch_reqs_by_stage,
+            KvFetchReqsByStage::default()
+        );
+
+        payload["num_kv_fetch_reqs_by_stage"] =
+            serde_json::json!({"waiting_to_start": 3, "in_progress": 1});
+        let wire = rmp_serde::to_vec_named(&payload).unwrap();
+        let stats: SchedulerStats = rmp_serde::from_slice(&wire).unwrap();
+        assert_eq!(stats.num_kv_fetch_reqs_by_stage.counts(), [3, 1, 0]);
+    }
 }

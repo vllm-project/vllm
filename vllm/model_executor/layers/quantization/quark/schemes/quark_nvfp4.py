@@ -4,7 +4,6 @@
 from collections.abc import Callable
 
 import torch
-from torch.nn.parameter import Parameter
 
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import init_nvfp4_linear_kernel
@@ -14,11 +13,17 @@ from vllm.model_executor.kernels.linear.nvfp4.emulation import (
 from vllm.model_executor.layers.quantization.quark.schemes.quark_scheme import (
     QuarkScheme,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kNvfp4Dynamic,
+    kNvfp4Static,
+)
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     ModelWeightParameter,
     PerTensorScaleParameter,
 )
+from vllm.model_executor.utils import replace_parameter
 
 __all__ = ["QuarkNVFP4"]
 
@@ -26,8 +31,7 @@ logger = init_logger(__name__)
 
 
 class QuarkNVFP4(QuarkScheme):
-    """
-    Quark NVFP4 quantization scheme.
+    """Quark NVFP4 quantization scheme.
 
     Supports loading NVFP4 checkpoints with the following structure:
     - weight: uint8, shape [out_features, in_features // 2] (packed FP4)
@@ -36,9 +40,14 @@ class QuarkNVFP4(QuarkScheme):
     - input_scale_2: bfloat16/float32, scalar (global input scale)
     """
 
+    supported_activation_quant_keys = [kNvfp4Dynamic]
+    supported_weight_quant_keys = [kNvfp4Static]
+
     def __init__(
         self,
+        activation_quant_key: QuantKey | None,
     ):
+        super().__init__(kNvfp4Static, activation_quant_key)
         self.kernel = init_nvfp4_linear_kernel()
         self.group_size = 16
 
@@ -116,7 +125,7 @@ class QuarkNVFP4(QuarkScheme):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         input_global_scale = layer.input_scale_2.max().to(torch.float32)
-        layer.input_global_scale = Parameter(input_global_scale, requires_grad=False)
+        replace_parameter(layer, "input_global_scale", input_global_scale)
         del layer.input_scale_2
 
         weight_global_scale = layer.weight_scale_2.to(torch.float32)
@@ -132,14 +141,16 @@ class QuarkNVFP4(QuarkScheme):
 
         weight_global_scale = weight_global_scale.max()
 
-        layer.weight_global_scale = Parameter(weight_global_scale, requires_grad=False)
+        replace_parameter(layer, "weight_global_scale", weight_global_scale)
         del layer.weight_scale_2
 
-        layer.alpha = Parameter(
-            layer.input_global_scale * layer.weight_global_scale, requires_grad=False
+        replace_parameter(
+            layer, "alpha", layer.input_global_scale * layer.weight_global_scale
         )
-        layer.input_global_scale_inv = Parameter(
-            (1.0 / layer.input_global_scale).to(torch.float32), requires_grad=False
+        replace_parameter(
+            layer,
+            "input_global_scale_inv",
+            (1.0 / layer.input_global_scale).to(torch.float32),
         )
 
         # Convert layer to NVFP4 linear kernel format

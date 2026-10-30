@@ -1,0 +1,207 @@
+meta:
+  title: "Laguna XS-2.1"
+  slug: "laguna-xs-2.1"
+  provider: "Poolside"
+  description: "Poolside's 33B total / 3B activated MoE coding model with mixed sliding-window + global attention, native interleaved reasoning, and 256K context — designed for agentic coding."
+  date_added: 2026-07-02
+  date_updated: 2026-07-02
+  tasks:
+    - text
+  performance_headline: "33B/3B-A MoE for agentic coding with interleaved thinking and tool use"
+  related_recipes:
+    - "poolside/Laguna-XS.2"
+    - "poolside/Laguna-M.1"
+  hardware:
+    h200: verified
+
+model:
+  model_id: "poolside/Laguna-XS-2.1"
+  min_vllm_version: "0.21.0"
+  architecture: moe
+  parameter_count: "33B"
+  active_parameters: "3B"
+  context_length: 262144
+  base_args:
+    - "--trust-remote-code"
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "Enable automatic tool choice with Poolside's tool-call parser"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "poolside_v1"
+  reasoning:
+    description: "Enable interleaved thinking with Poolside's reasoning parser"
+    args:
+      - "--reasoning-parser"
+      - "poolside_v1"
+  spec_decoding:
+    description: "DFlash speculative decoding with the Laguna-XS-2.1 draft model (15 tokens, greedy)"
+    args:
+      - "--speculative-config"
+      - '{"model":"poolside/Laguna-XS-2.1-DFlash","num_speculative_tokens":15,"method":"dflash"}'
+      - "--moe-backend"
+      - "triton"
+
+opt_in_features:
+  - spec_decoding
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 80
+    description: "BF16 weights — fits on a single 80GB+ GPU (H100/H200/B200)"
+  fp8:
+    model_id: "poolside/Laguna-XS-2.1-FP8"
+    precision: fp8
+    vram_minimum_gb: 40
+    min_vllm_version: "0.22.0"
+    description: "Block-FP8 weights + FP8 KV cache — halves VRAM, fits on a single 40GB+ GPU"
+    extra_env:
+      VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: "0"
+  nvfp4:
+    model_id: "poolside/Laguna-XS-2.1-NVFP4"
+    precision: nvfp4
+    vram_minimum_gb: 26
+    min_vllm_version: "0.22.0"
+    description: "NVFP4 weights + FP8 KV cache (Blackwell only) — the most compact variant at ~26GB"
+  int4:
+    model_id: "poolside/Laguna-XS-2.1-INT4"
+    precision: int4
+    vram_minimum_gb: 29
+    min_vllm_version: "0.22.0"
+    description: "INT4 (W4A16) weights + FP8 KV cache — fits on a single 32GB+ GPU"
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+
+hardware_overrides: {}
+
+strategy_overrides:
+  single_node_tp:
+    tp: 1
+
+guide: |
+  ## Overview
+
+  [Laguna XS-2.1](https://huggingface.co/poolside/Laguna-XS-2.1) is Poolside's 33B-total / 3B-activated Mixture-of-Experts model purpose-built for agentic coding and long-horizon work. It combines mixed sliding-window + global attention (3:1 across 40 layers) with sigmoid per-head gating and FP8 KV cache, so it stays compact enough to run locally while supporting a 256K-token context. The 2.1 point release improves coding quality over XS.2 (SWE-bench Multilingual 57.7% → 63.1%, SWE-bench Verified 69.9% → 70.9%).
+
+  ### Key features
+  - **Mixed SWA + global attention**: 30 sliding-window layers (window=512) interleaved with 10 global-attention layers, each with per-layer rotary scaling.
+  - **Native FP8 KV cache**: KV cache is quantized to FP8 to reduce memory per token.
+  - **Interleaved reasoning**: thinking blocks emitted between tool calls; toggled per-request via `enable_thinking`.
+  - **Tool calling**: Poolside-specific XML-style tool-call protocol, parsed via `poolside_v1`.
+  - **256 experts + 1 shared expert** with top-8 routing.
+
+  ## Prerequisites
+
+  Laguna XS-2.1 support is available in vLLM 0.21.0 and later (via [PR #41129](https://github.com/vllm-project/vllm/pull/41129)).
+
+  ### pip
+  ```bash
+  uv pip install -U 'vllm>=0.21.0'
+  ```
+
+  ### Docker
+  ```bash
+  docker pull vllm/vllm-openai:latest
+  ```
+
+  ## Quantized variants
+
+  Pre-quantized checkpoints are published alongside the BF16 weights — select one with the **Variant** control above:
+
+  | Variant | Checkpoint | Weights | ~VRAM | Notes |
+  |---------|-----------|---------|-------|-------|
+  | BF16 | [Laguna-XS-2.1](https://huggingface.co/poolside/Laguna-XS-2.1) | BF16 | 80 GB | Default |
+  | FP8 | [Laguna-XS-2.1-FP8](https://huggingface.co/poolside/Laguna-XS-2.1-FP8) | Block-FP8 | 40 GB | Set `VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER=0` |
+  | NVFP4 | [Laguna-XS-2.1-NVFP4](https://huggingface.co/poolside/Laguna-XS-2.1-NVFP4) | NVFP4 | 26 GB | Blackwell only |
+  | INT4 | [Laguna-XS-2.1-INT4](https://huggingface.co/poolside/Laguna-XS-2.1-INT4) | INT4 (W4A16) | 29 GB | Hopper or Blackwell |
+
+  Quantization is detected automatically from each checkpoint's `quantization_config`, so the launch command is identical — just swap the model ID (select the variant above). All three quantized checkpoints ship an **FP8-quantized KV cache**.
+
+  > **vLLM ≥ 0.22.0 required for the quantized variants.** The FP8 KV cache needs the per-layer attention-head fix in [vllm#42650](https://github.com/vllm-project/vllm/pull/42650); earlier versions produce scrambled output on non-Hopper GPUs. On older vLLM you can disable the FP8 KV cache with `--kv-cache-dtype-skip-layers $(seq 0 39)`.
+
+  Precision-matched DFlash speculators are also available for each quantization — [DFlash-FP8](https://huggingface.co/poolside/Laguna-XS-2.1-DFlash-FP8), [DFlash-NVFP4](https://huggingface.co/poolside/Laguna-XS-2.1-DFlash-NVFP4), and [DFlash-INT4](https://huggingface.co/poolside/Laguna-XS-2.1-DFlash-INT4) — if you want to pair speculative decoding with a quantized base at matching precision.
+
+  ## Launch command
+
+  ### Single GPU (H100/H200/B200, BF16)
+  ```bash
+  vllm serve poolside/Laguna-XS-2.1 \
+    --trust-remote-code \
+    --max-model-len 262144 \
+    --enable-auto-tool-choice \
+    --tool-call-parser poolside_v1 \
+    --reasoning-parser poolside_v1
+  ```
+
+  ### Docker
+  ```bash
+  docker run -itd --name laguna-xs21 \
+    --ipc=host --network host --shm-size 16G --gpus all \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai:latest \
+      --model poolside/Laguna-XS-2.1 \
+      --trust-remote-code \
+      --max-model-len 262144 \
+      --enable-auto-tool-choice \
+      --tool-call-parser poolside_v1 \
+      --reasoning-parser poolside_v1 \
+      --host 0.0.0.0 --port 8000
+  ```
+
+  ## Controlling reasoning
+
+  Reasoning is **off by default** in the chat template. Enable it per-request:
+
+  ```python
+  from openai import OpenAI
+  client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+
+  resp = client.chat.completions.create(
+      model="poolside/Laguna-XS-2.1",
+      messages=[{"role": "user", "content": "Write a Python retry wrapper with exponential backoff."}],
+      extra_body={"chat_template_kwargs": {"enable_thinking": True}},
+      temperature=0.7,
+      top_p=1.0,
+      extra_query={"top_k": 20},
+  )
+  print(resp.choices[0].message.reasoning)
+  print(resp.choices[0].message.content)
+  ```
+
+  Or default-on with `--default-chat-template-kwargs '{"enable_thinking": true}'`.
+
+  ## Speculative decoding (DFlash)
+
+  Enable the **Spec Decoding** toggle above to attach Poolside's [DFlash draft model](https://huggingface.co/poolside/Laguna-XS-2.1-DFlash) — a 5-layer Llama-style speculator that proposes up to 15 tokens per step. Reported end-to-end speedup is 1.67x–2.64x across evaluation datasets, with a mean accepted length of 3.55–4.57 tokens per step.
+
+  Requires:
+  - vLLM built from [PR #46853](https://github.com/vllm-project/vllm/pull/46853) (adds DFlash drafter support for Laguna-XS-2.1) — not yet in a stable release.
+  - `--moe-backend triton` — the default DeepGEMM MoE backend is currently incompatible with the DFlash draft path, so force the Triton MoE backend. Enabling the **Spec Decoding** toggle above adds this flag automatically.
+
+  Example:
+
+  ```bash
+  vllm serve poolside/Laguna-XS-2.1 \
+    --trust-remote-code \
+    --max-model-len 16384 \
+    --enable-auto-tool-choice \
+    --tool-call-parser poolside_v1 \
+    --reasoning-parser poolside_v1 \
+    --speculative-config '{"model":"poolside/Laguna-XS-2.1-DFlash","num_speculative_tokens":15,"method":"dflash"}' \
+    --moe-backend triton
+  ```
+
+  ## References
+
+  - [Model card](https://huggingface.co/poolside/Laguna-XS-2.1)
+  - [Release blog post](https://poolside.ai/blog/laguna-a-deeper-dive)
+  - [vLLM support PR #41129](https://github.com/vllm-project/vllm/pull/41129)
+  - [vLLM DFlash spec-decoding PR #46853](https://github.com/vllm-project/vllm/pull/46853)
+  - [DFlash draft model](https://huggingface.co/poolside/Laguna-XS-2.1-DFlash)
