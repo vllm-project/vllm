@@ -344,6 +344,7 @@ pub(crate) async fn structured_chat_event_stream(
 #[cfg(test)]
 mod tests {
     use futures::{StreamExt as _, stream};
+    use std::assert_matches;
 
     use super::structured_chat_event_stream;
     use crate::FinishReason;
@@ -382,11 +383,8 @@ mod tests {
             .collect::<crate::Result<Vec<_>>>()
             .unwrap();
 
-        assert!(matches!(events[0], ChatEvent::ToolCallStart { .. }));
-        assert!(matches!(
-            events[1],
-            ChatEvent::ToolCallArgumentsDelta { .. }
-        ));
+        assert_matches!(events[0], ChatEvent::ToolCallStart { .. });
+        assert_matches!(events[1], ChatEvent::ToolCallArgumentsDelta { .. });
         let ChatEvent::ToolCallEnd { call, .. } = &events[2] else {
             panic!("expected tool call end");
         };
@@ -439,16 +437,13 @@ mod tests {
             .collect::<crate::Result<Vec<_>>>()
             .unwrap();
 
-        assert!(matches!(events[0], ChatEvent::ToolCallStart { .. }));
-        assert!(matches!(
-            events[1],
-            ChatEvent::ToolCallArgumentsDelta { .. }
-        ));
+        assert_matches!(events[0], ChatEvent::ToolCallStart { .. });
+        assert_matches!(events[1], ChatEvent::ToolCallArgumentsDelta { .. });
         let ChatEvent::ToolCallEnd { call, .. } = &events[2] else {
             panic!("expected first tool call end");
         };
         assert_eq!(call.name, "first");
-        assert!(matches!(events[3], ChatEvent::ToolCallStart { .. }));
+        assert_matches!(events[3], ChatEvent::ToolCallStart { .. });
         let ChatEvent::Done { message, .. } = &events[6] else {
             panic!("expected done");
         };
@@ -494,23 +489,20 @@ mod tests {
             .collect::<crate::Result<Vec<_>>>()
             .unwrap();
 
-        assert!(matches!(
+        assert_matches!(
             events[0],
             ChatEvent::BlockStart {
                 index: 0,
                 kind: AssistantBlockKind::Text,
             }
-        ));
-        assert!(matches!(events[2], ChatEvent::BlockEnd { index: 0, .. }));
-        assert!(matches!(
-            events[3],
-            ChatEvent::ToolCallStart { index: 0, .. }
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(events[2], ChatEvent::BlockEnd { index: 0, .. });
+        assert_matches!(events[3], ChatEvent::ToolCallStart { index: 0, .. });
+        assert_matches!(
             events[4],
             ChatEvent::ToolCallArgumentsDelta { index: 0, .. }
-        ));
-        assert!(matches!(events[5], ChatEvent::ToolCallEnd { index: 0, .. }));
+        );
+        assert_matches!(events[5], ChatEvent::ToolCallEnd { index: 0, .. });
     }
 
     #[tokio::test]
@@ -549,14 +541,14 @@ mod tests {
             .collect::<crate::Result<Vec<_>>>()
             .unwrap();
 
-        assert!(matches!(events[2], ChatEvent::ToolCallEnd { .. }));
-        assert!(matches!(
+        assert_matches!(events[2], ChatEvent::ToolCallEnd { .. });
+        assert_matches!(
             events[3],
             ChatEvent::BlockStart {
                 kind: AssistantBlockKind::Text,
                 ..
             }
-        ));
+        );
         let ChatEvent::Done { message, .. } = &events[6] else {
             panic!("expected done");
         };
@@ -578,7 +570,7 @@ mod tests {
             .expect("expected one event")
             .expect_err("expected invariant error");
 
-        assert!(matches!(err, Error::ToolCallStreamInvariant { .. }));
+        assert_matches!(err, Error::ToolCallStreamInvariant { .. });
     }
 
     #[tokio::test]
@@ -619,15 +611,12 @@ mod tests {
             .collect::<crate::Result<Vec<_>>>()
             .unwrap();
 
-        assert!(matches!(
-            events[0],
-            ChatEvent::ToolCallStart { index: 0, .. }
-        ));
-        assert!(matches!(
+        assert_matches!(events[0], ChatEvent::ToolCallStart { index: 0, .. });
+        assert_matches!(
             events[1],
             ChatEvent::ToolCallArgumentsDelta { index: 0, .. }
-        ));
-        assert!(matches!(events[2], ChatEvent::ToolCallEnd { index: 0, .. }));
+        );
+        assert_matches!(events[2], ChatEvent::ToolCallEnd { index: 0, .. });
         let ChatEvent::Done { message, .. } = &events[3] else {
             panic!("expected done");
         };
@@ -672,15 +661,15 @@ mod tests {
             .collect::<crate::Result<Vec<_>>>()
             .unwrap();
 
-        assert!(matches!(events[0], ChatEvent::Start { .. }));
-        assert!(matches!(
+        assert_matches!(events[0], ChatEvent::Start { .. });
+        assert_matches!(
             events[2],
             ChatEvent::BlockDelta {
                 kind: AssistantBlockKind::Reasoning,
                 token_count: Some(3),
                 ..
             }
-        ));
+        );
         let ChatEvent::Done { usage, .. } = &events[4] else {
             panic!("expected done");
         };

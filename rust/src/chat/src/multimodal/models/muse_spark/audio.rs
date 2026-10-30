@@ -156,6 +156,7 @@ impl AudioPreProcessor for MuseSparkAudioProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     fn decoded(samples: usize, sample_rate: usize) -> DecodedAudio {
         DecodedAudio {
@@ -186,14 +187,14 @@ mod tests {
         assert_eq!(output.encoder_input.shape(), &[24000 + 1921]);
         // ceil(24000/1920) = 13, ceil(1921/1920) = 2
         assert_eq!(output.feature_token_counts, vec![13, 2]);
-        assert!(matches!(
+        assert_matches!(
             output.model_specific.get("audio_token_counts"),
             Some(ModelSpecificValue::IntTensor { data, .. }) if data == &vec![13, 2]
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             output.model_specific.get("audio_sample_counts"),
             Some(ModelSpecificValue::IntTensor { data, .. }) if data == &vec![24000, 1921]
-        ));
+        );
         assert!(output.encoder_input.as_f32().iter().all(|&v| (v - 0.25).abs() < 1e-6));
     }
 

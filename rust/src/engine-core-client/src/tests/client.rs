@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::assert_matches;
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::TryFrom;
 use std::io::Cursor;
@@ -1499,10 +1500,10 @@ async fn client_fail_closes_when_main_output_path_receives_dp_control() {
         .unwrap_err();
     assert!(is_unexpected_dispatcher_output(&error_1));
 
-    assert!(matches!(
+    assert_matches!(
         client.health_error().as_deref(),
         Some(error) if is_unexpected_dispatcher_output(error)
-    ));
+    );
 
     let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
@@ -1564,10 +1565,10 @@ async fn duplicate_request_ids_are_rejected_without_sending_a_second_add() {
         Ok(_) => panic!("expected duplicate request error"),
         Err(error) => error,
     };
-    assert!(matches!(
+    assert_matches!(
         error,
         Error::DuplicateRequestId { request_id } if request_id == "req-1"
-    ));
+    );
 
     let final_output =
         timeout(Duration::from_secs(1), stream.next()).await.unwrap().unwrap().unwrap();
@@ -1632,10 +1633,10 @@ async fn finished_requests_without_final_output_is_treated_as_unexpected_close()
         .unwrap()
         .unwrap()
         .unwrap_err();
-    assert!(matches!(
+    assert_matches!(
         error,
         Error::RequestStreamClosed { request_id } if request_id == "req-1"
-    ));
+    );
     assert!(timeout(Duration::from_secs(1), stream.next()).await.unwrap().is_none());
 
     let _ = shutdown_tx.send(());
@@ -2012,14 +2013,14 @@ async fn call_utility_waits_for_all_engines_before_returning_error() {
 
     let _ = release_second_tx.send(());
     let error = call.await.unwrap().unwrap_err();
-    assert!(matches!(
+    assert_matches!(
         error,
         Error::UtilityCallFailed {
             method,
             message,
             ..
         } if method == "test_mutation" && message == "boom"
-    ));
+    );
 
     let _ = shutdown_tx_0.send(());
     let _ = shutdown_tx_1.send(());
@@ -2207,20 +2208,20 @@ async fn engine_core_dead_sentinel_marks_client_unhealthy_and_sticks() {
     .expect("wait for unhealthy client");
 
     assert!(!client.is_healthy());
-    assert!(matches!(
+    assert_matches!(
         client.health_error().as_deref(),
         Some(Error::EngineCoreDead)
-    ));
+    );
 
     let error = client.call_utility::<bool, _>("is_sleeping", ()).await.unwrap_err();
     assert!(
         is_dispatcher_closed(&error) || is_engine_core_dead(&error),
         "unexpected error: {error:?}"
     );
-    assert!(matches!(
+    assert_matches!(
         client.health_error().as_deref(),
         Some(Error::EngineCoreDead)
-    ));
+    );
 
     let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
@@ -3178,11 +3179,9 @@ async fn is_sleeping_returns_error_when_engines_disagree() {
     .await;
 
     let error = client.is_sleeping().await.unwrap_err();
-    assert!(
-        matches!(
-            &error,
-            Error::InconsistentUtilityResults { method, .. } if method == "is_sleeping"
-        ),
+    assert_matches!(
+        &error,
+        Error::InconsistentUtilityResults { method, .. } if method == "is_sleeping",
         "expected InconsistentUtilityResults, got {error:?}",
     );
 
@@ -3564,22 +3563,22 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
 
     let nixl_stats: KvConnectorStats =
         rmp_serde::from_slice(&hex::decode(nixl_stats_hex).unwrap()).unwrap();
-    assert!(matches!(nixl_stats, KvConnectorStats::Nixl(_)));
+    assert_matches!(nixl_stats, KvConnectorStats::Nixl(_));
 
     let mooncake_stats: KvConnectorStats =
         rmp_serde::from_slice(&hex::decode(mooncake_stats_hex).unwrap()).unwrap();
-    assert!(matches!(
+    assert_matches!(
         mooncake_stats,
         KvConnectorStats::Mooncake(stats)
             if stats.0.contains_key(&MooncakeOperation::LoadGet)
-    ));
+    );
 
     let mooncake_transfer_stats: KvConnectorStats =
         rmp_serde::from_slice(&hex::decode(mooncake_transfer_stats_hex).unwrap()).unwrap();
-    assert!(matches!(
+    assert_matches!(
         mooncake_transfer_stats,
         KvConnectorStats::MooncakeTransfer(stats) if stats.num_failed_transfers == [1]
-    ));
+    );
 
     let multi_connector_stats: KvConnectorStats =
         rmp_serde::from_slice(&hex::decode(multi_connector_stats_hex).unwrap()).unwrap();
@@ -3910,7 +3909,7 @@ async fn bootstrapped_connect_times_out_without_registration() {
         Ok(_) => panic!("bootstrapped connect should time out"),
         Err(error) => error,
     };
-    assert!(matches!(error, Error::InputRegistrationTimeout { .. }));
+    assert_matches!(error, Error::InputRegistrationTimeout { .. });
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

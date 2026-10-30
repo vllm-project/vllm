@@ -406,6 +406,7 @@ mod tests {
         CachedTokensBySource, KvConnectorStats, KvFetchReqsByStage, PrefixCacheStats,
         SchedulerStats,
     };
+    use std::assert_matches;
 
     #[test]
     fn prefix_cache_stats_hits_by_source_defaults_and_decodes() {
@@ -446,23 +447,23 @@ mod tests {
             "num_future_counter": [1]
         });
 
-        assert!(matches!(
+        assert_matches!(
             decode(nixl.clone()),
             KvConnectorStats::Nixl(stats) if stats.bytes_transferred == [4096]
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             decode(mooncake_transfer.clone()),
             KvConnectorStats::MooncakeTransfer(stats) if stats.num_failed_transfers == [1]
-        ));
+        );
         // A newer child payload must not drop its siblings.
-        assert!(matches!(
+        assert_matches!(
             decode(serde_json::json!({
                 "NixlConnector": nixl,
                 "MooncakeConnector": mooncake_transfer,
             })),
             KvConnectorStats::Multi(stats)
                 if stats.nixl.is_some() && stats.mooncake_transfer.is_some()
-        ));
+        );
     }
 
     #[test]

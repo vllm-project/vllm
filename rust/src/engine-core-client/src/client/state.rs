@@ -501,6 +501,7 @@ impl UtilityRegistry {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use std::collections::BTreeSet;
     use std::num::NonZeroU32;
 
@@ -562,10 +563,10 @@ mod tests {
         registry.register("req-1".to_string(), None, None, NonZeroU32::MIN).unwrap();
         let error =
             registry.register("req-1".to_string(), None, None, NonZeroU32::MIN).unwrap_err();
-        assert!(matches!(
+        assert_matches!(
             error,
             crate::error::Error::DuplicateRequestId { request_id } if request_id == "req-1"
-        ));
+        );
     }
 
     #[test]
@@ -1228,13 +1229,13 @@ mod tests {
         let error = registry
             .register("req-1".to_string(), None, Some(2), NonZeroU32::MIN)
             .unwrap_err();
-        assert!(matches!(
+        assert_matches!(
             error,
             crate::error::Error::InvalidDataParallelRank {
                 rank: 2,
                 connected_ranks,
             } if connected_ranks == vec![0, 1]
-        ));
+        );
     }
 
     #[test]
@@ -1249,13 +1250,13 @@ mod tests {
         let error = registry
             .register("req-bad".to_string(), None, Some(0), NonZeroU32::MIN)
             .unwrap_err();
-        assert!(matches!(
+        assert_matches!(
             error,
             crate::error::Error::InvalidDataParallelRank {
                 rank: 0,
                 connected_ranks,
             } if connected_ranks == vec![3]
-        ));
+        );
     }
 
     #[test]
@@ -1303,8 +1304,8 @@ mod tests {
         assert!(!registry.contains(call_id_2));
         assert!(registry.contains(call_id_3));
         // The receivers must observe the sender being dropped (channel closed).
-        assert!(matches!(rx_1.try_recv(), Err(TryRecvError::Closed)));
-        assert!(matches!(rx_2.try_recv(), Err(TryRecvError::Closed)));
+        assert_matches!(rx_1.try_recv(), Err(TryRecvError::Closed));
+        assert_matches!(rx_2.try_recv(), Err(TryRecvError::Closed));
     }
 
     #[test]

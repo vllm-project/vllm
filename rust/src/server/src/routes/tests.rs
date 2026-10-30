@@ -6,6 +6,7 @@
 // response body is fully drained, which closes the mock engine connection too
 // early and causes flaky `closed unexpectedly` failures.
 
+use std::assert_matches;
 use std::collections::BTreeSet;
 use std::future::Future;
 use std::pin::Pin;
@@ -1306,7 +1307,7 @@ async fn static_lora_module_requires_lora_enabled_engine() {
         is_3d_lora_weight: false,
     };
     let error = state.load_static_lora(&module).await.expect_err("engine has no lora");
-    assert!(matches!(error, LoadLoraError::Disabled(_)), "{error:?}");
+    assert_matches!(error, LoadLoraError::Disabled(_), "{error:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1325,10 +1326,7 @@ async fn static_lora_module_fails_when_engine_rejects_it() {
         is_3d_lora_weight: false,
     };
     let error = state.load_static_lora(&module).await.expect_err("engine rejected");
-    assert!(
-        matches!(error, LoadLoraError::NotLoaded { .. }),
-        "{error:?}"
-    );
+    assert_matches!(error, LoadLoraError::NotLoaded { .. }, "{error:?}");
     assert!(state.served_loras().await.is_empty());
 }
 
@@ -1354,10 +1352,7 @@ async fn static_lora_module_rejects_empty_name_or_path() {
             is_3d_lora_weight: false,
         };
         let error = state.load_static_lora(&module).await.expect_err("empty field");
-        assert!(
-            matches!(error, LoadLoraError::InvalidAdapter { .. }),
-            "{error:?}"
-        );
+        assert_matches!(error, LoadLoraError::InvalidAdapter { .. }, "{error:?}");
     }
 }
 
@@ -3666,19 +3661,19 @@ async fn non_stream_chat_image_url_reaches_engine_step5_vl_mm_features() {
             let pixel_values = tensor("pixel_values");
             assert_eq!(pixel_values.dtype, TensorDtype::F32);
             assert_eq!(pixel_values.shape, vec![3, 728, 728]);
-            assert!(matches!(data["pixel_values"].field, MmField::Batched(_)));
+            assert_matches!(data["pixel_values"].field, MmField::Batched(_));
 
             // No patches for a 1x1 image: the flat patch tensors are empty
             // but still carry the step3_vl patch_size layout.
             let patch_pixel_values = tensor("patch_pixel_values");
             assert_eq!(patch_pixel_values.dtype, TensorDtype::F32);
             assert_eq!(patch_pixel_values.shape, vec![0, 3, 504, 504]);
-            assert!(matches!(data["patch_pixel_values"].field, MmField::Flat(_)));
+            assert_matches!(data["patch_pixel_values"].field, MmField::Flat(_));
 
             let patch_newline_mask = tensor("patch_newline_mask");
             assert_eq!(patch_newline_mask.dtype, TensorDtype::U32);
             assert_eq!(patch_newline_mask.shape, vec![0]);
-            assert!(matches!(data["patch_newline_mask"].field, MmField::Flat(_)));
+            assert_matches!(data["patch_newline_mask"].field, MmField::Flat(_));
 
             // Batched fields drop the batch axis, leaving the scalar count.
             let num_patches = tensor("num_patches");
@@ -3688,7 +3683,7 @@ async fn non_stream_chat_image_url_reaches_engine_step5_vl_mm_features() {
                 num_patches.data.as_raw_view().expect("inline num_patches").as_ref(),
                 0_i64.to_ne_bytes()
             );
-            assert!(matches!(data["num_patches"].field, MmField::Batched(_)));
+            assert_matches!(data["num_patches"].field, MmField::Batched(_));
         },
     )
     .await;
@@ -4328,10 +4323,10 @@ async fn health_endpoint_returns_503_after_engine_core_dead_sentinel() {
     let (status, body) = health_status(&app).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert!(body.is_empty(), "expected empty body, got {:?}", body);
-    assert!(matches!(
+    assert_matches!(
         state.chat.engine_core_client().health_error().as_deref(),
         Some(vllm_engine_core_client::Error::EngineCoreDead)
-    ));
+    );
 
     engine_task.await.expect("mock engine task");
 }

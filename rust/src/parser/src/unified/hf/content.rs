@@ -454,6 +454,7 @@ fn default_kv_sep() -> String {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use std::assert_matches;
 
     use super::*;
 
@@ -604,9 +605,9 @@ mod tests {
             error("xml-inline", json!({"tag_pattern": r"<(?P<k>\w+)>"})),
             error("kv-lines", json!({"value_parser": {"name": "yaml"}})),
         ]);
-        assert!(matches!(
+        assert_matches!(
             error("xml-inline", json!({"tag_pattern": r"(?<=a)b"})),
             super::super::HfTemplateError::Unsupported { .. }
-        ));
+        );
     }
 }

@@ -415,6 +415,7 @@ impl<'i, I: MarkerStream<'i>> Parser<I, &'i str, ErrMode<ContextError>> for &Mar
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use vllm_tokenizer::{DecodedText, TokenAnchor, TokenAttribution};
     use winnow::Parser;
     use winnow::error::ErrMode;
@@ -489,7 +490,7 @@ mod tests {
 
         let error = (&close()).parse_next(&mut input).unwrap_err();
 
-        assert!(matches!(error, ErrMode::Backtrack(_)));
+        assert_matches!(error, ErrMode::Backtrack(_));
         assert_eq!(input.remaining(), "<|close|>x", "nothing consumed");
     }
 
@@ -500,7 +501,7 @@ mod tests {
 
         let error = (&close()).parse_next(&mut input).unwrap_err();
 
-        assert!(matches!(error, ErrMode::Backtrack(_)));
+        assert_matches!(error, ErrMode::Backtrack(_));
     }
 
     #[test]
@@ -511,7 +512,7 @@ mod tests {
 
         let error = (&close()).parse_next(&mut input).unwrap_err();
 
-        assert!(matches!(error, ErrMode::Incomplete(_)));
+        assert_matches!(error, ErrMode::Incomplete(_));
     }
 
     #[test]
@@ -521,7 +522,7 @@ mod tests {
 
         let error = (&close()).parse_next(&mut input).unwrap_err();
 
-        assert!(matches!(error, ErrMode::Backtrack(_)));
+        assert_matches!(error, ErrMode::Backtrack(_));
     }
 
     #[test]
@@ -549,7 +550,7 @@ mod tests {
     fn guarded_marker_never_matches_text_only_input() {
         let error = (&close()).parse_next(&mut Partial::new("<|close|>")).unwrap_err();
 
-        assert!(matches!(error, ErrMode::Backtrack(_)));
+        assert_matches!(error, ErrMode::Backtrack(_));
     }
 
     #[test]
@@ -564,10 +565,10 @@ mod tests {
         // Real close, ordinary separator: the strict rule keeps it as content.
         let mixed = pieces(&[("<|close|>", CLOSE_ID), ("think", 5), ("<|sep|>", 902)]);
         let mut input = attributed(&mixed);
-        assert!(matches!(
+        assert_matches!(
             (&marker).parse_next(&mut input).unwrap_err(),
             ErrMode::Backtrack(_)
-        ));
+        );
         assert_eq!(
             input.remaining(),
             "<|close|>think<|sep|>",

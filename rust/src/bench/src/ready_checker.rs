@@ -161,6 +161,7 @@ pub async fn wait_for_endpoint(
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
@@ -194,7 +195,7 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert!(matches!(error, BenchError::Backend(_)));
+        assert_matches!(error, BenchError::Backend(_));
         assert_eq!(attempts.load(Ordering::Relaxed), 1);
     }
 }

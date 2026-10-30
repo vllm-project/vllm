@@ -1059,6 +1059,7 @@ impl TokenResolver for TokenizerResolver {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use std::sync::Arc;
 
     use vllm_tokenizer::test_utils::TestTokenizer;
@@ -1362,18 +1363,18 @@ mod tests {
         let data = feature.data.as_ref().unwrap();
         // The 1x1 image is upscaled to the 1024-patch minimum grid of 16px
         // patches; the 2x2 pixel shuffle turns them into 256 feature tokens.
-        assert!(matches!(
+        assert_matches!(
             data["pixel_values"].data.as_ref(),
             Some(MmKwargValue::Tensor(tensor)) if tensor.shape == [1024, 3 * 16 * 16]
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             data["patches_per_image"].data.as_ref(),
             Some(MmKwargValue::Tensor(tensor)) if tensor.shape.is_empty()
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             data["image_grid_hw"].data.as_ref(),
             Some(MmKwargValue::Tensor(tensor)) if tensor.shape == [2]
-        ));
+        );
     }
 
     #[tokio::test]
@@ -1685,10 +1686,10 @@ mod tests {
         let spec = ResolvedMultimodalSpec::new(raw, Modality::Image);
 
         assert_eq!(spec.primary_key(), "patches");
-        assert!(matches!(
+        assert_matches!(
             spec.field_layout_for("patches"),
             Some(FieldLayout::Flat { sizes_key }) if sizes_key == "patches_per_image"
-        ));
+        );
     }
 
     fn deepseek_v41_info() -> MultimodalModelInfo {

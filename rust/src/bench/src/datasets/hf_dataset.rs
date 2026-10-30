@@ -14,6 +14,7 @@ use crate::error::{BenchError, Result};
 use crate::tokenizer::TokenizerKind;
 
 /// Detected column format for extracting prompts from HF dataset rows.
+#[derive(Debug)]
 enum ColumnFormat {
     /// Column contains chat messages (array of {role, content} or {from, value}).
     Chat(String),
@@ -906,6 +907,7 @@ pub fn load_hf_dataset(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     #[test]
     fn test_detect_chat_conversation() {
@@ -917,7 +919,7 @@ mod tests {
             ]
         });
         let format = detect_column_format(&row, None).unwrap();
-        assert!(matches!(format, ColumnFormat::Chat(ref col) if col == "conversation"));
+        assert_matches!(format, ColumnFormat::Chat(ref col) if col == "conversation");
     }
 
     #[test]
@@ -929,7 +931,7 @@ mod tests {
             ]
         });
         let format = detect_column_format(&row, None).unwrap();
-        assert!(matches!(format, ColumnFormat::Chat(ref col) if col == "messages"));
+        assert_matches!(format, ColumnFormat::Chat(ref col) if col == "messages");
     }
 
     #[test]
@@ -941,7 +943,7 @@ mod tests {
             ]
         });
         let format = detect_column_format(&row, None).unwrap();
-        assert!(matches!(format, ColumnFormat::Chat(ref col) if col == "conversations"));
+        assert_matches!(format, ColumnFormat::Chat(ref col) if col == "conversations");
     }
 
     #[test]
@@ -1049,7 +1051,7 @@ mod tests {
             ]
         });
         let format = detect_column_format(&row, Some("my_chat")).unwrap();
-        assert!(matches!(format, ColumnFormat::Chat(ref col) if col == "my_chat"));
+        assert_matches!(format, ColumnFormat::Chat(ref col) if col == "my_chat");
     }
 
     #[test]

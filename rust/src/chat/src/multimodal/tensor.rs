@@ -281,6 +281,7 @@ fn raw_tensor_bytes(tensor: &WireTensor) -> Result<&[u8]> {
 mod tests {
     use super::*;
     use ndarray::{Array2, s};
+    use std::assert_matches;
 
     #[test]
     fn collect_tensors_lowering_matches_logical_order_across_layouts() {
@@ -418,8 +419,7 @@ mod tests {
             WireTensor::from_raw(TensorDtype::F32, vec![2, 2], vec![0; 3 * size_of::<f32>()]);
         let error = slice_first_axis_range(&tensor, 0, 1, true).unwrap_err();
 
-        assert!(
-            matches!(error, Error::Multimodal(message) if message.contains("does not match expected 16"))
+        assert_matches!(error, Error::Multimodal(message) if message.contains("does not match expected 16")
         );
     }
 

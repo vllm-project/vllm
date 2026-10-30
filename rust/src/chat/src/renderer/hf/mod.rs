@@ -677,6 +677,7 @@ fn to_template_tools(tools: &[ChatTool]) -> Vec<TemplateTool> {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use std::collections::HashMap;
 
     use expect_test::expect;
@@ -904,10 +905,7 @@ mod tests {
         .render(&video_request())
         .unwrap_err();
 
-        assert!(matches!(
-            error,
-            Error::UnsupportedMultimodalContent("video_url")
-        ));
+        assert_matches!(error, Error::UnsupportedMultimodalContent("video_url"));
     }
 
     #[test]
@@ -1046,7 +1044,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(matches!(error, Error::ChatTemplate(_)));
+        assert_matches!(error, Error::ChatTemplate(_));
     }
 
     #[test]
@@ -1059,8 +1057,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(
-            matches!(&error, Error::ChatTemplateThrown { message } if message == "No user query found in messages."),
+        assert_matches!(&error, Error::ChatTemplateThrown { message } if message == "No user query found in messages.",
             "expected an exception thrown by the template, got: {error:?}"
         );
         assert!(error.is_request_validation_error());
@@ -1180,7 +1177,7 @@ mod tests {
         .unwrap();
 
         let error = renderer.render(&request).unwrap_err();
-        assert!(matches!(error, Error::UntrustedRequestChatTemplate));
+        assert_matches!(error, Error::UntrustedRequestChatTemplate);
         assert!(error.is_request_validation_error());
 
         request.chat_options.chat_template = None;
@@ -1220,7 +1217,7 @@ mod tests {
         let request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
         let error = render(None, &request).unwrap_err();
 
-        assert!(matches!(error, Error::MissingChatTemplate));
+        assert_matches!(error, Error::MissingChatTemplate);
     }
 
     #[test]

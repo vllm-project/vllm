@@ -235,6 +235,7 @@ fn resolve_multimodal_render_info(
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -513,10 +514,10 @@ mod tests {
                 .unwrap_err()
         };
         // The HF renderer goes on to its trust check.
-        assert!(matches!(
+        assert_matches!(
             prepare(HF_CONFIG).await,
             crate::Error::UntrustedRequestChatTemplate
-        ));
+        );
         let error = prepare(NATIVE_CONFIG).await;
         assert!(error.is_request_validation_error());
         assert_eq!(error.param(), Some("chat_template"));
@@ -534,7 +535,7 @@ mod tests {
 
         let prompt =
             backend.chat_renderer().render(&request_with_user_text("hello")).unwrap().prompt;
-        assert!(matches!(prompt, Prompt::TokenIds(_)));
+        assert_matches!(prompt, Prompt::TokenIds(_));
 
         let mut request = request_with_user_text("hello");
         let error = match backend.new_chat_output_processor(

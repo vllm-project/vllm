@@ -181,6 +181,7 @@ impl ModelProcessorSpec for Step3VLVisionSpec {
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};
+    use std::assert_matches;
 
     use llm_multimodal::registry::ModelRegistryError;
     use llm_multimodal::{ImageSize, Tokenizer};
@@ -369,10 +370,7 @@ mod tests {
 
         let preprocessed = preprocessed_with_patches(&[1], &[0]);
         let result = Step3VLVisionSpec.prompt_replacements(&metadata, &preprocessed);
-        assert!(matches!(
-            result,
-            Err(ModelRegistryError::TokenNotFound { .. })
-        ));
+        assert_matches!(result, Err(ModelRegistryError::TokenNotFound { .. }));
     }
 
     #[test]

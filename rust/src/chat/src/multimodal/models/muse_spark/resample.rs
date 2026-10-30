@@ -108,6 +108,7 @@ fn greatest_common_divisor(mut lhs: usize, mut rhs: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use llm_multimodal::TransformError;
+    use std::assert_matches;
 
     use super::bandlimited_resample;
 
@@ -180,11 +181,11 @@ mod tests {
     #[test]
     fn bandlimited_resample_rejects_zero_rates() {
         for (source_rate, destination_rate) in [(0, 16_000), (16_000, 0)] {
-            assert!(matches!(
+            assert_matches!(
                 bandlimited_resample(&[0.0], source_rate, destination_rate),
                 Err(TransformError::ShapeError(message))
                     if message == "audio resampling rates must be positive"
-            ));
+            );
         }
     }
 }

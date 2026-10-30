@@ -145,6 +145,7 @@ pub(super) fn expand_prompt_token_ids(
 #[cfg(test)]
 mod tests {
     use llm_multimodal::TokenId;
+    use std::assert_matches;
     use vllm_engine_core_client::protocol::tensor::WireArrayData;
 
     use super::super::tests::{
@@ -320,7 +321,7 @@ mod tests {
 
         let error = expand_prompt_token_ids(&mut prompt_token_ids, &prepared).unwrap_err();
 
-        assert!(matches!(error, Error::Multimodal(message) if message.contains("not found")));
+        assert_matches!(error, Error::Multimodal(message) if message.contains("not found"));
     }
 
     #[test]
@@ -346,7 +347,7 @@ mod tests {
 
         let error = expand_prompt_token_ids(&mut prompt_token_ids, &prepared).unwrap_err();
 
-        assert!(matches!(error, Error::Multimodal(message) if message.contains("not found")));
+        assert_matches!(error, Error::Multimodal(message) if message.contains("not found"));
         assert_eq!(prompt_token_ids, original_prompt_token_ids);
     }
 
@@ -362,8 +363,7 @@ mod tests {
 
         let error = expand_prompt_token_ids(&mut prompt_token_ids, &prepared).unwrap_err();
 
-        assert!(
-            matches!(error, Error::Multimodal(message) if message.contains("expanded to no tokens"))
+        assert_matches!(error, Error::Multimodal(message) if message.contains("expanded to no tokens")
         );
         assert_eq!(prompt_token_ids, original_prompt_token_ids);
     }
@@ -578,11 +578,11 @@ mod tests {
 
         let error = expand_prompt_token_ids(&mut prompt_token_ids, &prepared).unwrap_err();
 
-        assert!(matches!(
+        assert_matches!(
             error,
             Error::Multimodal(message)
                 if message.contains("<|video_pad|>") && message.contains("`video`")
-        ));
+        );
         assert_eq!(prompt_token_ids, original_prompt_token_ids);
     }
 

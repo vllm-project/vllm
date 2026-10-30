@@ -575,6 +575,7 @@ fn parse_gemma4_scalar(value: &str) -> Value {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use std::sync::Arc;
 
     use serde_json::{Value, json};
@@ -749,10 +750,10 @@ mod tests {
             Err(error) => error,
         };
 
-        assert!(matches!(
+        assert_matches!(
             error,
             UnifiedParserError::MissingToken { token } if token == CHANNEL_START
-        ));
+        );
     }
 
     fn collect_stream(chunks: &[&str]) -> UnifiedParserOutput {

@@ -168,6 +168,7 @@ impl PreparedGenerateRequest {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use std::collections::BTreeMap;
 
     use serde_json::json;
@@ -261,10 +262,10 @@ mod tests {
         request.prompt_token_ids.clear();
 
         let error = request.prepare(true).unwrap_err();
-        assert!(matches!(
+        assert_matches!(
             error,
             Error::EmptyPromptTokenIds { request_id } if request_id == "req-1"
-        ));
+        );
     }
 
     #[test]

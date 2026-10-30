@@ -275,6 +275,7 @@ impl futures::Stream for MaybeTlsListener {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use std::net::{Ipv4Addr, SocketAddrV4};
     use std::os::fd::IntoRawFd;
 
@@ -292,7 +293,7 @@ mod tests {
 
         let listener = Listener::bind(&HttpListenerMode::InheritedFd { fd }).await.unwrap();
 
-        assert!(matches!(listener, Listener::Tcp(_)));
+        assert_matches!(listener, Listener::Tcp(_));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -304,7 +305,7 @@ mod tests {
 
         let listener = Listener::bind(&HttpListenerMode::InheritedFd { fd }).await.unwrap();
 
-        assert!(matches!(listener, Listener::Unix(_)));
+        assert_matches!(listener, Listener::Unix(_));
         let _ = std::fs::remove_file(path);
     }
 }

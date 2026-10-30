@@ -58,6 +58,7 @@ impl Drop for ParserRecursionGuard {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
     use winnow::error::ErrMode;
@@ -76,10 +77,10 @@ mod tests {
     #[test]
     fn enforces_limit_and_restores_depth() {
         assert!(enter_recursively(MAX_PARSER_RECURSION_DEPTH).is_ok());
-        assert!(matches!(
+        assert_matches!(
             enter_recursively(MAX_PARSER_RECURSION_DEPTH + 1),
             Err(ErrMode::Cut(_))
-        ));
+        );
         assert!(enter_recursively(MAX_PARSER_RECURSION_DEPTH).is_ok());
     }
 

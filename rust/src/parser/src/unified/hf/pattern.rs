@@ -272,6 +272,7 @@ fn literal_prefixes(hir: &Hir) -> Option<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     const MUSE_INVOKE: &str = r#"<atem:invoke\b[^>]*?\bname="(?P<name>[^"]+)">"#;
     const GEMMA4_CALL: &str = r"<\|tool_call>call:(?P<name>\w+)";
@@ -303,11 +304,9 @@ mod tests {
         );
         for source in [r"(?:^|<think>\s*)", r"(?:<\|m\|>)?[^<]*<\|c\|>", r".*x"] {
             let result = StreamingPattern::new("test", source);
-            assert!(
-                matches!(
-                    result,
-                    Err(super::super::HfTemplateError::Unsupported { .. })
-                ),
+            assert_matches!(
+                result,
+                Err(super::super::HfTemplateError::Unsupported { .. }),
                 "{source}"
             );
         }

@@ -403,6 +403,7 @@ fn merge_unique_token_ids(
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use std::collections::{BTreeSet, HashMap};
     use std::num::NonZeroU32;
 
@@ -527,10 +528,7 @@ mod tests {
             Some(u64::from(u32::MAX) + 1)
         );
         // Other negatives are rejected.
-        assert!(matches!(
-            lower(Some(-2)),
-            Err(Error::InvalidThinkingTokenBudget)
-        ));
+        assert_matches!(lower(Some(-2)), Err(Error::InvalidThinkingTokenBudget));
     }
 
     #[test]
@@ -562,13 +560,13 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(matches!(
+        assert_matches!(
             error,
             Error::MinTokensExceedsMaxTokens {
                 min_tokens: 5,
                 max_tokens: 4,
             }
-        ));
+        );
     }
 
     #[test]
@@ -720,14 +718,12 @@ mod tests {
                 lower_sampling_params_with_limits(sampling_params, sample_sampling_limits())
                     .unwrap_err();
 
-            assert!(
-                matches!(
-                    error,
-                    Error::SamplingParams(SamplingParamsError::OutOfRange {
-                        parameter,
-                        ..
-                    }) if parameter == expected_parameter
-                ),
+            assert_matches!(
+                error,
+                Error::SamplingParams(SamplingParamsError::OutOfRange {
+                    parameter,
+                    ..
+                }) if parameter == expected_parameter,
                 "{expected_parameter} should be rejected"
             );
         }
@@ -755,14 +751,12 @@ mod tests {
                 lower_sampling_params_with_limits(sampling_params, sample_sampling_limits())
                     .unwrap_err();
 
-            assert!(
-                matches!(
-                    error,
-                    Error::SamplingParams(SamplingParamsError::NotFinite {
-                        parameter,
-                        ..
-                    }) if parameter == expected_parameter
-                ),
+            assert_matches!(
+                error,
+                Error::SamplingParams(SamplingParamsError::NotFinite {
+                    parameter,
+                    ..
+                }) if parameter == expected_parameter,
                 "{expected_parameter} should reject non-finite values"
             );
         }
@@ -967,14 +961,14 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(matches!(
+        assert_matches!(
             error,
             Error::TokenIds(TokenIdsError::OutOfVocab {
                 parameter: "prompt",
                 token_ids,
                 vocab_size: 2000,
             }) if token_ids == vec![2000]
-        ));
+        );
     }
 
     #[tokio::test]
@@ -1268,14 +1262,14 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(matches!(
+        assert_matches!(
             error,
             Error::Logprobs(LogprobsError::TooManyCount {
                 parameter: "logprobs",
                 requested: 1000,
                 max_allowed: 20,
             })
-        ));
+        );
     }
 
     #[test]
@@ -1307,14 +1301,14 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(matches!(
+        assert_matches!(
             error,
             Error::TokenIds(TokenIdsError::OutOfVocab {
                 parameter: "logprob_token_ids",
                 token_ids,
                 vocab_size: 1000,
             }) if token_ids == vec![1000]
-        ));
+        );
     }
 
     #[test]
@@ -1385,14 +1379,14 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(matches!(
+        assert_matches!(
             error,
             Error::TokenIds(TokenIdsError::OutOfVocab {
                 parameter: "stop_token_ids",
                 token_ids,
                 vocab_size: 1000,
             }) if token_ids == vec![1000]
-        ));
+        );
     }
 
     #[test]
@@ -1406,14 +1400,14 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(matches!(
+        assert_matches!(
             error,
             Error::TokenIds(TokenIdsError::OutOfVocab {
                 parameter: "allowed_token_ids",
                 token_ids,
                 vocab_size: 2000,
             }) if token_ids == vec![2000]
-        ));
+        );
     }
 
     #[test]
@@ -1427,10 +1421,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(matches!(
-            error,
-            Error::TokenIds(TokenIdsError::EmptyAllowedTokenIds)
-        ));
+        assert_matches!(error, Error::TokenIds(TokenIdsError::EmptyAllowedTokenIds));
     }
 
     #[test]
@@ -1456,14 +1447,14 @@ mod tests {
             )
             .unwrap_err();
 
-            assert!(matches!(
+            assert_matches!(
                 error,
                 Error::TokenIds(TokenIdsError::OutOfVocab {
                     parameter: "bad_words",
                     token_ids,
                     vocab_size: 2000,
                 }) if token_ids == vec![2000]
-            ));
+            );
         }
     }
 
@@ -1501,10 +1492,7 @@ mod tests {
             sample_sampling_limits(),
         )
         .unwrap_err();
-        assert!(matches!(
-            error,
-            Error::TokenIds(TokenIdsError::EmptyBadWordSequence)
-        ));
+        assert_matches!(error, Error::TokenIds(TokenIdsError::EmptyBadWordSequence));
     }
 
     #[test]
@@ -1618,14 +1606,14 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(matches!(
+        assert_matches!(
             error,
             Error::TokenIds(TokenIdsError::OutOfVocab {
                 parameter: "logit_bias",
                 token_ids,
                 vocab_size: 1000,
             }) if token_ids == vec![1000]
-        ));
+        );
     }
 
     #[test]
@@ -1839,21 +1827,21 @@ mod tests {
     #[test]
     fn resolve_max_tokens_prompt_too_long() {
         let result = resolve_max_tokens(Some(10), None, 100, 100);
-        assert!(matches!(
+        assert_matches!(
             result,
             Err(Error::PromptFillsContext { max_model_len: 100 })
-        ));
+        );
     }
 
     #[test]
     fn resolve_max_tokens_prompt_exceeds_model_len() {
         let result = resolve_max_tokens(Some(10), None, 100, 200);
-        assert!(matches!(
+        assert_matches!(
             result,
             Err(Error::PromptTooLong {
                 max_model_len: 100,
                 prompt_len: 200,
             })
-        ));
+        );
     }
 }

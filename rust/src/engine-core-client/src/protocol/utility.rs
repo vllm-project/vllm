@@ -356,6 +356,7 @@ impl UtilityOutput {
 mod tests {
     use rmpv::Value;
     use serde::Serialize;
+    use std::assert_matches;
 
     use super::{EngineCoreUtilityRequest, PauseMode, UtilityOutput, UtilityResultEnvelope};
     use crate::Error;
@@ -461,14 +462,14 @@ mod tests {
         .into_typed_result::<bool>("is_sleeping")
         .unwrap_err();
 
-        assert!(matches!(
+        assert_matches!(
             error,
             Error::UtilityCallFailed {
                 method,
                 call_id,
                 message
             } if method == "is_sleeping" && call_id == 9 && message == "boom"
-        ));
+        );
     }
 
     #[test]

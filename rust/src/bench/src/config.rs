@@ -983,6 +983,7 @@ fn uses_server_default_temperature(
 #[cfg(test)]
 mod tests {
     use clap::Parser;
+    use std::assert_matches;
 
     use super::*;
     use crate::cli::BenchServeArgs;
@@ -1113,10 +1114,10 @@ mod tests {
             "--speed-bench-dataset-subset",
             "throughput_8k",
         ]);
-        assert!(matches!(
+        assert_matches!(
             args.speed_bench_config,
             crate::cli::SpeedBenchConfig::Throughput8k
-        ));
+        );
         assert_eq!(args.speed_bench_output_len, 4096);
     }
 

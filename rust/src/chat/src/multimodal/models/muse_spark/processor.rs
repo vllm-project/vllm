@@ -715,6 +715,7 @@ impl VisionPreProcessor for MuseSparkVisionProcessor {
 #[cfg(test)]
 mod tests {
     use image::Rgb;
+    use std::assert_matches;
 
     use super::*;
 
@@ -758,8 +759,7 @@ mod tests {
         let frames = vec![image(28, 28, Rgb([128; 3])); 8];
         let output = processor.preprocess_video(&frames, &clip()).unwrap();
         assert_eq!(output.feature_token_counts, vec![4]);
-        assert!(
-            matches!(&output.model_specific["video_frame_counts"], ModelSpecificValue::IntTensor { data, .. } if data == &[4])
+        assert_matches!(&output.model_specific["video_frame_counts"], ModelSpecificValue::IntTensor { data, .. } if data == &[4]
         );
     }
 
@@ -879,18 +879,18 @@ mod tests {
         assert_eq!(result.encoder_input.shape(), &[3 * 112 * 56]);
         // White pixels normalize to (1.0 - 0.5) / 0.5 = 1.0.
         assert!(result.encoder_input.as_f32().iter().all(|&v| (v - 1.0).abs() < 1e-6));
-        assert!(matches!(
+        assert_matches!(
             result.model_specific.get("image_patch_counts"),
             Some(ModelSpecificValue::IntTensor { data, .. }) if data == &vec![8]
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             result.model_specific.get("image_pixel_counts"),
             Some(ModelSpecificValue::IntTensor { data, .. }) if data == &vec![3 * 112 * 56]
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             result.model_specific.get("image_target_hw"),
             Some(ModelSpecificValue::IntTensor { data, shape }) if data == &vec![56, 112] && shape == &vec![1, 2]
-        ));
+        );
     }
 
     #[test]
@@ -910,18 +910,18 @@ mod tests {
         // tokens_per_frame: 256-token budget keeps 4x2 grid = 8; 2 clips.
         assert_eq!(result.feature_token_counts, vec![16]);
         assert_eq!(result.encoder_input.shape(), &[4 * 3 * 56 * 112]);
-        assert!(matches!(
+        assert_matches!(
             result.model_specific.get("video_clip_num_clips"),
             Some(ModelSpecificValue::IntTensor { data, .. }) if data == &vec![2]
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             result.model_specific.get("video_clip_patches_per_clip"),
             Some(ModelSpecificValue::IntTensor { data, .. }) if data == &vec![8]
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             result.model_specific.get("video_clip_timestamps"),
             Some(ModelSpecificValue::FloatVec(ts)) if ts == &vec![0.0, 1.0]
-        ));
+        );
     }
 
     #[test]
@@ -932,14 +932,14 @@ mod tests {
 
         // One frame is padded (last frame repeated) to vds=2 -> one clip.
         assert_eq!(result.encoder_input.shape(), &[2 * 3 * 56 * 112]);
-        assert!(matches!(
+        assert_matches!(
             result.model_specific.get("video_clip_num_clips"),
             Some(ModelSpecificValue::IntTensor { data, .. }) if data == &vec![1]
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             result.model_specific.get("video_clip_timestamps"),
             Some(ModelSpecificValue::FloatVec(ts)) if ts == &vec![0.0]
-        ));
+        );
     }
 
     #[test]

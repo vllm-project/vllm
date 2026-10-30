@@ -206,6 +206,7 @@ impl CompiledChatTemplate {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use std::fs;
 
     use expect_test::expect;
@@ -492,7 +493,7 @@ mod tests {
     fn test_resolve_chat_template_rejects_missing_path_like_value() {
         let error = resolve_chat_template("missing_template.jinja").unwrap_err();
 
-        assert!(matches!(error, TemplateError::MissingTemplatePath));
+        assert_matches!(error, TemplateError::MissingTemplatePath);
     }
 
     #[test]

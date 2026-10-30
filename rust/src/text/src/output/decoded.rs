@@ -414,6 +414,7 @@ fn matches_stop_string(stops: &[String], output: &str, new_bytes: usize) -> Opti
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use std::pin::Pin;
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll};
@@ -509,14 +510,14 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert!(matches!(
+        assert_matches!(
             error,
             crate::Error::Llm(vllm_llm::Error::SamplingMaskTokenCountMismatch {
                 token_count: 2,
                 row_count: 1,
                 ..
             })
-        ));
+        );
     }
 
     fn opts(stop: &[&str], min_tokens: u32) -> TextDecodeOptions {

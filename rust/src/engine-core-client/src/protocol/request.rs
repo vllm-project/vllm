@@ -165,6 +165,7 @@ impl EngineCoreRequest {
 #[cfg(test)]
 mod tests {
     use rmpv::Value;
+    use std::assert_matches;
 
     use super::*;
     use crate::protocol::dtype::TensorDtype;
@@ -218,7 +219,7 @@ mod tests {
         assert_eq!(array[10], Value::Nil);
         assert_eq!(array[11], Value::from(7));
         assert_eq!(array[20], Value::from("session-1"));
-        assert!(matches!(&array[21], Value::Map(_)));
+        assert_matches!(&array[21], Value::Map(_));
     }
 
     #[test]
@@ -284,7 +285,7 @@ mod tests {
         else {
             panic!("expected inline tensor");
         };
-        assert!(matches!(inline.data, WireArrayData::RawView(_)));
+        assert_matches!(inline.data, WireArrayData::RawView(_));
         let MmKwargValue::List(nested) =
             feature.data.as_ref().unwrap()["nested"].data.as_ref().unwrap()
         else {

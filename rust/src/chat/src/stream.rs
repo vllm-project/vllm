@@ -140,6 +140,7 @@ trait_set! {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
 
     use futures::stream;
     use vllm_engine_core_client::protocol::output::RequestSpecDecodeMetrics;
@@ -163,11 +164,11 @@ mod tests {
         );
 
         let error = stream.collect_message().await.expect_err("missing done");
-        assert!(matches!(
+        assert_matches!(
             error,
             Error::StreamClosedBeforeTerminalOutput { request_id }
             if request_id == "chat-missing-done"
-        ));
+        );
     }
 
     #[tokio::test]

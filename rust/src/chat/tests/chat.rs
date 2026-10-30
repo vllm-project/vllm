@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::assert_matches;
 use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
@@ -496,13 +497,13 @@ async fn chat_stream_waits_for_complete_utf8_before_emitting() {
 
     let mut stream = chat.chat(sample_request("chat-utf8")).await.unwrap();
 
-    assert!(matches!(
+    assert_matches!(
         next_semantic(&mut stream).await,
         Some(Ok(ChatEvent::Start {
             prompt_logprobs: None,
             ..
         }))
-    ));
+    );
     assert_eq!(
         next_semantic(&mut stream).await.unwrap().unwrap(),
         ChatEvent::BlockStart {
@@ -583,13 +584,13 @@ async fn chat_stream_flushes_held_text_on_finish() {
 
     let mut stream = chat.chat(sample_request("chat-final-flush")).await.unwrap();
 
-    assert!(matches!(
+    assert_matches!(
         next_semantic(&mut stream).await,
         Some(Ok(ChatEvent::Start {
             prompt_logprobs: None,
             ..
         }))
-    ));
+    );
     assert_eq!(
         next_semantic(&mut stream).await.unwrap().unwrap(),
         ChatEvent::BlockStart {
@@ -641,10 +642,10 @@ fn chat_request_rejects_conflicting_generation_modes() {
     request.chat_options.generation_prompt_mode = GenerationPromptMode::ContinueFinalAssistant;
     let error = request.validate().unwrap_err();
 
-    assert!(matches!(
+    assert_matches!(
         error,
         vllm_chat::Error::ContinueFinalAssistantWithoutFinalAssistant
-    ));
+    );
 }
 
 #[test]
@@ -661,7 +662,7 @@ fn backend_requires_a_template() {
     let request = sample_request("chat-3");
     let backend = FakeChatBackend::without_template();
     let error = backend.chat_renderer().render(&request).unwrap_err();
-    assert!(matches!(error, vllm_chat::Error::MissingChatTemplate));
+    assert_matches!(error, vllm_chat::Error::MissingChatTemplate);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -705,13 +706,13 @@ async fn chat_stream_reports_decode_failure_as_error_event() {
 
     let mut stream = chat.chat(sample_request("chat-4")).await.unwrap();
     assert_eq!(stream.request_id(), "chat-4");
-    assert!(matches!(
+    assert_matches!(
         next_semantic(&mut stream).await,
         Some(Ok(ChatEvent::Start {
             prompt_logprobs: None,
             ..
         }))
-    ));
+    );
 
     match timeout(Duration::from_secs(2), stream.next()).await.unwrap() {
         Some(Err(vllm_chat::Error::Text(vllm_text::Error::Tokenizer(message)))) => {
@@ -771,13 +772,13 @@ async fn chat_stream_preserves_terminal_stop_token_when_requested() {
     request.decode_options.include_stop_str_in_output = true;
     let mut stream = chat.chat(request).await.unwrap();
 
-    assert!(matches!(
+    assert_matches!(
         next_semantic(&mut stream).await,
         Some(Ok(ChatEvent::Start {
             prompt_logprobs: None,
             ..
         }))
-    ));
+    );
     assert_eq!(
         next_semantic(&mut stream).await.unwrap().unwrap(),
         ChatEvent::BlockStart {
@@ -869,13 +870,13 @@ async fn chat_stream_separates_reasoning_blocks_automatically() {
 
     let mut stream = chat.chat(sample_request("chat-reasoning")).await.unwrap();
 
-    assert!(matches!(
+    assert_matches!(
         next_semantic(&mut stream).await,
         Some(Ok(ChatEvent::Start {
             prompt_logprobs: None,
             ..
         }))
-    ));
+    );
     assert_eq!(
         next_semantic(&mut stream).await.unwrap().unwrap(),
         ChatEvent::BlockStart {
@@ -1530,11 +1531,11 @@ async fn chat_rejects_unknown_tool_parser_before_engine_request() {
         Err(error) => error,
     };
 
-    assert!(matches!(
+    assert_matches!(
         error,
         vllm_chat::Error::ParserUnavailableByName { name, .. }
         if name == "definitely_missing_tool_parser"
-    ));
+    );
 
     let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
@@ -1571,11 +1572,11 @@ async fn chat_rejects_unknown_reasoning_parser_before_engine_request() {
         Err(error) => error,
     };
 
-    assert!(matches!(
+    assert_matches!(
         error,
         vllm_chat::Error::ParserUnavailableByName { name, .. }
         if name == "definitely_missing_reasoning_parser"
-    ));
+    );
 
     let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
@@ -1610,10 +1611,7 @@ async fn chat_rejects_tool_requests_when_tool_parser_is_disabled() {
         Err(error) => error,
     };
 
-    assert!(matches!(
-        error,
-        vllm_chat::Error::ParserDisabled { kind: "tool" }
-    ));
+    assert_matches!(error, vllm_chat::Error::ParserDisabled { kind: "tool" });
 
     let _ = shutdown_tx.send(());
     engine_task.await.unwrap();

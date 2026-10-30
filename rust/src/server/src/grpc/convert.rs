@@ -568,6 +568,7 @@ impl ResponseOpts {
 #[cfg(test)]
 mod tests {
     use prost::Message as _;
+    use std::assert_matches;
     use vllm_engine_core_client::protocol::output::{RequestError, StopReason};
     use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
     use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
@@ -924,7 +925,7 @@ mod tests {
         let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
         assert_eq!(text.sampling_params.skip_reading_prefix_cache, None);
         // Prompt conversion still succeeds and reaches the expected variant.
-        assert!(matches!(text.prompt, Prompt::Text(s) if s == "hi"));
+        assert_matches!(text.prompt, Prompt::Text(s) if s == "hi");
     }
 
     fn finished(reason: FinishReason) -> Finished {

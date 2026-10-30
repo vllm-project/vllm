@@ -201,6 +201,7 @@ fn build_video_item(
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -286,11 +287,11 @@ mod tests {
             Err(error) => error,
             Ok(_) => panic!("malformed video preprocessor config should fail"),
         };
-        assert!(matches!(
+        assert_matches!(
             error,
             Error::Multimodal(message)
                 if message.contains("failed to parse video_preprocessor_config.json")
-        ));
+        );
     }
 
     #[test]
@@ -323,18 +324,18 @@ mod tests {
         .unwrap();
 
         let primary = &item.data[VIDEO_PRIMARY_KEY];
-        assert!(matches!(
+        assert_matches!(
             &primary.field,
             MmField::Flat(MmFlatField { slices, dim: 0, .. })
                 if matches!(
                     slices.as_slice(),
                     [MmSlice::Slice(SliceSpec { start: Some(0), stop: Some(6), step: None })]
                 )
-        ));
+        );
 
         // Batched metadata drops its singleton batch axis per item.
         let grid = &item.data["video_grid_thw"];
-        assert!(matches!(&grid.field, MmField::Batched(_)));
+        assert_matches!(&grid.field, MmField::Batched(_));
         let MmKwargValue::Tensor(grid_tensor) = grid.data.as_ref().unwrap() else {
             panic!("expected tensor value for video_grid_thw");
         };

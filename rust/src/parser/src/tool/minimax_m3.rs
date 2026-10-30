@@ -388,6 +388,7 @@ fn malformed<T>() -> ModalResult<T> {
 mod tests {
     use expect_test::expect;
     use serde_json::{Value, json};
+    use std::assert_matches;
     use thiserror_ext::AsReport;
 
     use super::{
@@ -524,10 +525,10 @@ mod tests {
     #[test]
     fn minimax_m3_recursion_limit_accepts_boundary_and_rejects_next_depth() {
         assert!(parse_invoke_params(&nested_element(MAX_PARSER_RECURSION_DEPTH)).is_ok());
-        assert!(matches!(
+        assert_matches!(
             parse_invoke_params(&nested_element(MAX_PARSER_RECURSION_DEPTH + 1)),
             Err(winnow::error::ErrMode::Cut(_))
-        ));
+        );
     }
 
     #[test]

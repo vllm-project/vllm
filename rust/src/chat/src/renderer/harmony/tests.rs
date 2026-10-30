@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::assert_matches;
 use std::path::PathBuf;
 
 use expect_test::{ExpectFile, expect, expect_file};
@@ -215,10 +216,7 @@ fn rejects_multimodal_input() {
 
     let error = test_renderer(false).render(&request).unwrap_err();
 
-    assert!(matches!(
-        error,
-        Error::UnsupportedMultimodalContent("image_url")
-    ));
+    assert_matches!(error, Error::UnsupportedMultimodalContent("image_url"));
 }
 
 #[test]

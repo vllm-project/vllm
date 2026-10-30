@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::assert_matches;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -378,7 +379,7 @@ fn rejects_continue_final_message() {
     };
 
     let error = renderer().render(&request).unwrap_err();
-    assert!(matches!(error, Error::ChatTemplate(_)));
+    assert_matches!(error, Error::ChatTemplate(_));
     assert!(error.as_report().to_string().contains("continue_final_message"));
 }
 

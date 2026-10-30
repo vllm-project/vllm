@@ -5,6 +5,7 @@
 //! through the production listener/connection path, with a trivial router since TLS
 //! terminates below the app.
 
+use std::assert_matches;
 use std::pin::Pin;
 use std::time::Duration;
 
@@ -529,8 +530,9 @@ async fn tls_handshake_timeout_drops_silent_client() {
     let start = tokio::time::Instant::now();
     let mut buf = [0u8; 1];
     let read = tcp.read(&mut buf).await;
-    assert!(
-        matches!(read, Ok(0) | Err(_)),
+    assert_matches!(
+        read,
+        Ok(0) | Err(_),
         "server must drop a stalled TLS handshake (expected close, got {read:?})"
     );
     // The close is the handshake deadline, not an earlier one
@@ -568,8 +570,9 @@ async fn keep_alive_timeout_closes_idle_connection() {
         }
     })
     .await;
-    assert!(
-        matches!(drained, Ok(Ok(()))),
+    assert_matches!(
+        drained,
+        Ok(Ok(())),
         "server must close an idle keep-alive connection (got {drained:?})"
     );
     shutdown.cancel();
@@ -624,8 +627,9 @@ async fn idle_timeout_closes_silent_client() {
     let mut tcp = TcpStream::connect(&addr).await.expect("connect");
     let mut buf = [0u8; 1];
     let read = tokio::time::timeout(Duration::from_secs(5), tcp.read(&mut buf)).await;
-    assert!(
-        matches!(read, Ok(Ok(0)) | Ok(Err(_))),
+    assert_matches!(
+        read,
+        Ok(Ok(0)) | Ok(Err(_)),
         "server must close a silent client (expected close, got {read:?})"
     );
     shutdown.cancel();
@@ -675,8 +679,9 @@ async fn disabled_keep_alive_still_closes_silent_client() {
     let mut tcp = TcpStream::connect(&addr).await.expect("connect");
     let mut buf = [0u8; 1];
     let read = tokio::time::timeout(Duration::from_secs(5), tcp.read(&mut buf)).await;
-    assert!(
-        matches!(read, Ok(Ok(0)) | Ok(Err(_))),
+    assert_matches!(
+        read,
+        Ok(Ok(0)) | Ok(Err(_)),
         "disabled keep-alive must still close a silent client (got {read:?})"
     );
     shutdown.cancel();

@@ -74,6 +74,7 @@ impl MultimodalModelInfo {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -193,15 +194,15 @@ mod tests {
             INKLING_AUDIO_EMBED_ID as u32
         );
         assert_eq!(support.spec.primary_key(), AUDIO_PRIMARY_KEY);
-        assert!(matches!(
+        assert_matches!(
             &support.spec.field_layouts.encoder_input,
             llm_multimodal::FieldLayout::Flat { sizes_key }
                 if sizes_key == "tokens_per_item"
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             support.spec.field_layouts.model_specific.get("tokens_per_item"),
             Some(llm_multimodal::FieldLayout::Batched)
-        ));
+        );
     }
 
     #[test]
@@ -223,10 +224,10 @@ mod tests {
         );
         assert_eq!(support.placeholder.marker_token_ids, vec![AUDIO_PAD_ID]);
         assert_eq!(support.placeholder.embed_token_id, AUDIO_PAD_ID);
-        assert!(matches!(
+        assert_matches!(
             support.spec.field_layouts.encoder_input,
             llm_multimodal::FieldLayout::Batched
-        ));
+        );
 
         let preprocessed = PreprocessedEncoderInputs {
             encoder_input: ArrayD::zeros(vec![1, 128, 4]).into(),
@@ -254,10 +255,7 @@ mod tests {
         .pop()
         .unwrap();
 
-        assert!(matches!(
-            &item.data[AUDIO_PRIMARY_KEY].field,
-            MmField::Batched(_)
-        ));
+        assert_matches!(&item.data[AUDIO_PRIMARY_KEY].field, MmField::Batched(_));
     }
 
     #[tokio::test]
@@ -327,19 +325,19 @@ mod tests {
         assert_eq!(item.uuid.as_deref(), Some("audio-1"));
 
         let features = &item.data[AUDIO_PRIMARY_KEY];
-        assert!(matches!(&features.field, MmField::Batched(_)));
-        assert!(matches!(
+        assert_matches!(&features.field, MmField::Batched(_));
+        assert_matches!(
             features.data.as_ref(),
             Some(MmKwargValue::Tensor(tensor))
                 if tensor.dtype.as_str() == "float32" && tensor.shape.first() == Some(&128)
-        ));
+        );
         let lengths = &item.data["audio_feature_lengths"];
-        assert!(matches!(&lengths.field, MmField::Batched(_)));
-        assert!(matches!(
+        assert_matches!(&lengths.field, MmField::Batched(_));
+        assert_matches!(
             lengths.data.as_ref(),
             Some(MmKwargValue::Tensor(tensor))
                 if tensor.dtype.as_str() == "int64" && tensor.shape.is_empty()
-        ));
+        );
     }
 
     #[tokio::test]
@@ -373,18 +371,18 @@ mod tests {
         assert_eq!(item.uuid.as_deref(), Some("audio-1"));
 
         let features = &item.data[AUDIO_PRIMARY_KEY];
-        assert!(matches!(&features.field, MmField::Flat(_)));
-        assert!(matches!(
+        assert_matches!(&features.field, MmField::Flat(_));
+        assert_matches!(
             features.data.as_ref(),
             Some(MmKwargValue::Tensor(tensor))
                 if tensor.dtype.as_str() == "float32" && tensor.shape.get(1) == Some(&80)
-        ));
+        );
         let count = &item.data["tokens_per_item"];
-        assert!(matches!(&count.field, MmField::Batched(_)));
-        assert!(matches!(
+        assert_matches!(&count.field, MmField::Batched(_));
+        assert_matches!(
             count.data.as_ref(),
             Some(MmKwargValue::Tensor(tensor))
                 if tensor.dtype.as_str() == "int64" && tensor.shape.is_empty()
-        ));
+        );
     }
 }

@@ -737,6 +737,7 @@ impl ChatRole {
 #[cfg(test)]
 mod tests {
     use serde_json::{json, to_value};
+    use std::assert_matches;
 
     use super::{
         ChatContent, ChatContentPart, ChatMessage, ChatRole, ChatTool, ChatToolChoice,
@@ -898,7 +899,7 @@ mod tests {
         let error =
             ResolvedToolContext::new(&messages, vec![chat_tool("lookup")], None, true).unwrap_err();
 
-        assert!(matches!(error, Error::DuplicateToolName { name } if name == "lookup"));
+        assert_matches!(error, Error::DuplicateToolName { name } if name == "lookup");
     }
 
     #[test]
@@ -929,9 +930,9 @@ mod tests {
             true,
         )
         .unwrap_err();
-        assert!(matches!(
+        assert_matches!(
             error,
             Error::ToolChoiceFunctionNotFound { name } if name == "missing"
-        ));
+        );
     }
 }

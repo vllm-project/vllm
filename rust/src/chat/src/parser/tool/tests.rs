@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::assert_matches;
 use std::sync::Arc;
 
 use vllm_parser::tool::{Result, ToolParserOutput};
@@ -65,7 +66,7 @@ fn factory_rejects_unknown_parser_names() {
         Ok(_) => panic!("expected parser lookup to fail"),
         Err(error) => error,
     };
-    assert!(matches!(error, Error::ParserUnavailableByName { .. }));
+    assert_matches!(error, Error::ParserUnavailableByName { .. });
 }
 
 #[test]
@@ -75,7 +76,7 @@ fn factory_rejects_unknown_models() {
         Ok(_) => panic!("expected model lookup to fail"),
         Err(error) => error,
     };
-    assert!(matches!(error, Error::ParserUnavailableForModel { .. }));
+    assert_matches!(error, Error::ParserUnavailableForModel { .. });
 }
 
 #[test]

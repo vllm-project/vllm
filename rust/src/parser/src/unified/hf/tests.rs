@@ -8,6 +8,7 @@
 //! dict re-expressed as aggregated unified parser events (`thinking` becomes
 //! `reasoning`).
 
+use std::assert_matches;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -339,10 +340,10 @@ fn patterns_without_literal_prefix_are_unsupported() {
         "fields": {"content": {"open_pattern": r"(?:<\|message_model\|>)?[^<]*<\|content_text\|>", "close": "<|end_message|>"}},
     });
     for template in [ernie, inkling] {
-        assert!(matches!(
+        assert_matches!(
             ResponseTemplate::from_json(&template),
             Err(HfTemplateError::Unsupported { .. })
-        ));
+        );
     }
 }
 
@@ -755,10 +756,7 @@ fn malformed_tool_arguments_fail_the_parser() {
     let template = compile(gemma4_template());
     let error =
         parse_events(&template, &[], "", &["<|tool_call>call:f{a:}<tool_call|>"]).unwrap_err();
-    assert!(
-        matches!(error, UnifiedParserError::ParsingFailed { .. }),
-        "{error:?}"
-    );
+    assert_matches!(error, UnifiedParserError::ParsingFailed { .. }, "{error:?}");
 }
 
 #[test]

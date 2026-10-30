@@ -471,6 +471,7 @@ pub fn incomplete<T>() -> ModalResult<T> {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
 
     use expect_test::expect;
     use winnow::Parser;
@@ -535,7 +536,7 @@ mod tests {
 
         let error = safe_text_len(&mut input, "<tool_call>").unwrap_err();
 
-        assert!(matches!(error, ErrMode::Incomplete(_)));
+        assert_matches!(error, ErrMode::Incomplete(_));
     }
 
     #[test]
@@ -545,7 +546,7 @@ mod tests {
 
         let error = safe_text_len(&mut input, "<tool_call>").unwrap_err();
 
-        assert!(matches!(error, ErrMode::Backtrack(_)));
+        assert_matches!(error, ErrMode::Backtrack(_));
         assert_eq!(input.offset_from(&checkpoint), 0);
     }
 
@@ -592,7 +593,7 @@ mod tests {
         let error =
             safe_text_len_mul(&mut input, &["<|tool_call>", "<|channel>thought\n"]).unwrap_err();
 
-        assert!(matches!(error, ErrMode::Incomplete(_)));
+        assert_matches!(error, ErrMode::Incomplete(_));
     }
 
     #[test]
@@ -618,7 +619,7 @@ mod tests {
             .parse_next(&mut input)
             .unwrap_err();
 
-        assert!(matches!(error, ErrMode::Incomplete(_)));
+        assert_matches!(error, ErrMode::Incomplete(_));
         assert_eq!(state.scan_start, "body".len());
 
         let mut input = Partial::new("body</tool_call>tail");
@@ -639,7 +640,7 @@ mod tests {
             .parse_next(&mut input)
             .unwrap_err();
 
-        assert!(matches!(error, ErrMode::Incomplete(_)));
+        assert_matches!(error, ErrMode::Incomplete(_));
         assert_eq!(state.scan_start, 1024);
     }
 
@@ -651,7 +652,7 @@ mod tests {
 
         let error = take_until_marker(marker, &mut state).parse_next(&mut input).unwrap_err();
 
-        assert!(matches!(error, ErrMode::Incomplete(_)));
+        assert_matches!(error, ErrMode::Incomplete(_));
         assert_eq!(state.scan_start, "prefix ".len());
         assert!("prefix <｜DSML｜fun".is_char_boundary(state.scan_start));
 
@@ -682,7 +683,7 @@ mod tests {
 
         let error = take_until_marker("ababa", &mut state).parse_next(&mut input).unwrap_err();
 
-        assert!(matches!(error, ErrMode::Incomplete(_)));
+        assert_matches!(error, ErrMode::Incomplete(_));
         assert_eq!(state.scan_start, 2);
 
         let mut input = Partial::new("xxababa!");
@@ -837,7 +838,7 @@ mod tests {
 
         let error = take_json_string(&mut input, &mut state).unwrap_err();
 
-        assert!(matches!(error, ErrMode::Incomplete(_)));
+        assert_matches!(error, ErrMode::Incomplete(_));
         assert_eq!(input.offset_from(&checkpoint), 0);
         assert_eq!(state.scanned_len, r#""{\"data\":\"partial"#.len());
 
@@ -855,7 +856,7 @@ mod tests {
 
         let error = take_json_string(&mut input, &mut state).unwrap_err();
 
-        assert!(matches!(error, ErrMode::Incomplete(_)));
+        assert_matches!(error, ErrMode::Incomplete(_));
         assert!(state.escape);
 
         let mut input = Partial::new(r#""abc\"def" tail"#);
@@ -897,7 +898,7 @@ mod tests {
 
         let error = json_str(&mut input).unwrap_err();
 
-        assert!(matches!(error, ErrMode::Incomplete(_)));
+        assert_matches!(error, ErrMode::Incomplete(_));
     }
 
     #[test]

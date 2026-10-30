@@ -549,6 +549,7 @@ pub(crate) async fn run_output_dispatcher_loop(
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use zeromq::{RouterSocket, Socket};
 
     use super::*;
@@ -580,16 +581,10 @@ mod tests {
         health.changed().await.expect("health sender remains open");
         assert!(!inner.is_healthy());
         assert!(!*health.borrow());
-        assert!(matches!(
-            inner.health_error().as_deref(),
-            Some(Error::EngineCoreDead)
-        ));
+        assert_matches!(inner.health_error().as_deref(), Some(Error::EngineCoreDead));
         assert!(!*inner.subscribe_health().borrow());
 
         inner.close_registries(Arc::new(client_closed!("shutdown")));
-        assert!(matches!(
-            inner.health_error().as_deref(),
-            Some(Error::EngineCoreDead)
-        ));
+        assert_matches!(inner.health_error().as_deref(), Some(Error::EngineCoreDead));
     }
 }

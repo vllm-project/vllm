@@ -160,18 +160,19 @@ pub(crate) fn validate_vocab_range(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     #[test]
     fn validate_vocab_range_rejects_out_of_vocab_ids() {
         let error = validate_param("logprob_token_ids", [5_u32, 1000, 1001], 1000).unwrap_err();
 
-        assert!(matches!(
+        assert_matches!(
             error,
             TokenIdsError::OutOfVocab {
                 parameter: "logprob_token_ids",
                 token_ids,
                 vocab_size: 1000,
             } if token_ids == vec![1000, 1001]
-        ));
+        );
     }
 }

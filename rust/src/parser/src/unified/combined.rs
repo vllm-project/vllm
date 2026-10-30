@@ -168,6 +168,7 @@ impl UnifiedParser for CombinedParser {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use std::sync::Arc;
 
     use vllm_tokenizer::test_utils::{TestTokenizer, decode_chunks};
@@ -510,7 +511,7 @@ mod tests {
 
         let error = parser.parse_into(DecodedText::unattributed("bad"), &mut output).unwrap_err();
 
-        assert!(matches!(error, crate::unified::UnifiedParserError::Tool(_)));
+        assert_matches!(error, crate::unified::UnifiedParserError::Tool(_));
         assert_eq!(
             output.events,
             vec![UnifiedParserEvent::Text("committed".to_string())]
@@ -773,6 +774,6 @@ mod tests {
         let ctx = grammar_ctx(&tools, &auto, Some(&answer));
         let composed = parser.build_output_grammar(&ctx).unwrap().unwrap();
         assert_eq!(composed.coverage, GrammarCoverage::FinalOutputOnly);
-        assert!(matches!(composed.format, Format::Or(_)));
+        assert_matches!(composed.format, Format::Or(_));
     }
 }

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::assert_matches;
 use std::collections::BTreeSet;
 use std::num::NonZeroU32;
 use std::sync::{Arc, Once};
@@ -589,14 +590,14 @@ async fn collect_output_rejects_partial_sampling_mask() {
     };
 
     let error = futures::stream::iter([Ok(output)]).collect_output().await.unwrap_err();
-    assert!(matches!(
+    assert_matches!(
         error,
         Error::SamplingMaskTokenCountMismatch {
             token_count: 2,
             row_count: 1,
             ..
         }
-    ));
+    );
 }
 
 /// Prefiller reuse controls response usage while decoder metrics retain KV work.
@@ -740,12 +741,12 @@ async fn generate_propagates_unexpected_close_errors() {
     let internal_id = stream.request_id().to_string();
 
     let error = stream.next().await.unwrap().unwrap_err();
-    assert!(matches!(
+    assert_matches!(
         error,
         Error::EngineCoreClient(vllm_engine_core_client::Error::RequestStreamClosed {
             request_id
         }) if request_id == internal_id
-    ));
+    );
     assert!(stream.next().await.is_none());
 
     let _ = shutdown_tx.send(());

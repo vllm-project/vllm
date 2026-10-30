@@ -349,6 +349,7 @@ impl LoraManager {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -434,8 +435,7 @@ mod tests {
         let error =
             validate_lora_path_access(missing.to_str().expect("utf-8 temp path"), Some(&prefixes))
                 .expect_err("missing adapter path should be rejected");
-        assert!(
-            matches!(&error, LoraPathAccessError::NotFound { lora_path } if *lora_path == missing.to_str().unwrap()),
+        assert_matches!(&error, LoraPathAccessError::NotFound { lora_path } if *lora_path == missing.to_str().unwrap(),
             "{error:?}"
         );
 

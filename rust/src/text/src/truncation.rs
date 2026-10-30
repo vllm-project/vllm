@@ -80,6 +80,7 @@ impl PromptTruncation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     #[test]
     fn parses_wire_limits() {
@@ -97,10 +98,10 @@ mod tests {
                 side: TruncationSide::Right,
             }
         );
-        assert!(matches!(
+        assert_matches!(
             PromptTruncation::from_wire(-2, TruncationSide::Left),
             Err(Error::InvalidTruncatePromptTokens { value: -2 })
-        ));
+        );
     }
 
     #[test]
@@ -145,13 +146,13 @@ mod tests {
         }
         .apply(&mut prompt, 70)
         .unwrap_err();
-        assert!(matches!(
+        assert_matches!(
             error,
             Error::TruncatePromptTokensExceedsMaxModelLen {
                 value: 80,
                 max_model_len: 70
             }
-        ));
+        );
 
         let mut prompt = vec![1, 2, 3];
         PromptTruncation {
