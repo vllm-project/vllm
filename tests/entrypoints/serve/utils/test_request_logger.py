@@ -8,6 +8,8 @@ import pytest
 
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.lora.request import LoRARequest
+from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 
 
 def test_request_logger_log_outputs():
@@ -288,3 +290,31 @@ def test_request_logger_log_request_body_truncation(max_log_len):
     assert mock_logger.log.call_args.args[0] == logging.DEBUG
     logged_body = mock_logger.log.call_args.args[3]
     assert logged_body == full_body[:max_log_len]
+
+
+@pytest.mark.parametrize("ids_only", [False, True])
+def test_request_logger_ids_only_omits_request_content(ids_only):
+    """In ids-only mode no request content reaches the logs, even at DEBUG."""
+    marker = "MARKER-64654"
+    params = SamplingParams(
+        stop=[marker],
+        bad_words=[marker],
+        extra_args={marker: marker},
+        structured_outputs=StructuredOutputsParams(regex=marker),
+    )
+    lora_request = LoRARequest(lora_name=marker, lora_int_id=1, lora_path=marker)
+    request = CompletionRequest(model="test-model", prompt=marker)
+    mock_logger = MagicMock()
+    mock_logger.isEnabledFor.return_value = True
+
+    with patch("vllm.entrypoints.serve.utils.request_logger.logger", mock_logger):
+        request_logger = RequestLogger(max_log_len=None, ids_only=ids_only)
+        request_logger.log_request_body(request)
+        request_logger.log_inputs(
+            "req-1", marker, [1, 2, 3], None, params, lora_request
+        )
+
+    logged = str(mock_logger.mock_calls)
+    assert (marker in logged) != ids_only
+    if ids_only:
+        mock_logger.info.assert_called_once_with("Received request %s.", "req-1")
