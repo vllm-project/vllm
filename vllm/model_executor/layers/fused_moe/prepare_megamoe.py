@@ -253,7 +253,7 @@ def _prepare_megamoe_inputs_kernel(
                 mask=token_mask,
             )
         else:
-            # FP32 scales as raw bits (int32 buffer on DeepGEMM SM90)
+            # FP32 scales; the bitcast fits a float32 or int32 buffer.
             sf_offset = tl.arange(0, num_groups)
             tl.store(
                 x_sf
