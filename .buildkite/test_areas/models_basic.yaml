@@ -511,6 +511,7 @@ steps:
   - tests/models/test_alice_ai.py
   - tests/models/test_alice_ai_config.py
   - tests/models/test_indexer_logits_dtype_config.py
+  - tests/models/test_qwen3_5_slot.py
   - tests/models/test_beam_weight_mapping.py
   - tests/models/test_beam_numerics.py
   - tests/models/transformers/fusers/
@@ -545,6 +546,7 @@ steps:
       models/test_alice_ai.py
       models/test_alice_ai_config.py
       models/test_indexer_logits_dtype_config.py
+      models/test_qwen3_5_slot.py
       models/test_beam_weight_mapping.py
       models/test_beam_numerics.py
       models/test_cohere2_moe_parallel_block.py
