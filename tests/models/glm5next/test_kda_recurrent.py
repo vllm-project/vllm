@@ -395,10 +395,11 @@ def test_aiter_decode_route_follows_replayed_step(dist_init, monkeypatch, dim_fi
         )
 
     def forward_context(step_metadata: GDNAttentionMetadata):
+        # GDNAttentionMetadata does not subclass ForwardContext's AttentionMetadata.
         return override_forward_context(
             ForwardContext(
                 {},
-                {layer.prefix: step_metadata for layer in layers.values()},
+                {layer.prefix: step_metadata for layer in layers.values()},  # type: ignore[misc]
                 {},
                 cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
             )
