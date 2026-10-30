@@ -100,9 +100,7 @@ def test_action_pin_check_accepts_immutable_and_local_actions(tmp_path):
     )
 
 
-@pytest.mark.parametrize(
-    "dockerfile", ["Dockerfile.rocm", "Dockerfile.rocm_72", "Dockerfile.rocm_gfx1250"]
-)
+@pytest.mark.parametrize("dockerfile", ["Dockerfile.rocm", "Dockerfile.rocm_gfx1250"])
 @pytest.mark.parametrize("hash_mode", ["valid", "invalid"])
 def test_rocm_source_rebuild_verifies_requirement_hashes(
     tmp_path, dockerfile, hash_mode
@@ -133,12 +131,14 @@ def test_rocm_source_rebuild_verifies_requirement_hashes(
     target = tmp_path / "installed"
     docker = (ROOT / "docker" / dockerfile).read_text()
     match = re.search(
-        r"RUN --mount=type=cache,target=/root/\.cache/pip \\\n(.*?)(?:\n\n|$)",
+        r"RUN (.*?)(?:\n\n|$)",
         docker.split("# Rebuild fastsafetensors from source", 1)[1],
         re.DOTALL,
     )
     assert match is not None
-    command = match.group(1).replace("/tmp/", str(tmp_path) + "/")
+    command = re.sub(r"--mount=\S+\s*\\\n\s*", "", match.group(1))
+    command = command.replace("/r/test.txt", str(requirements))
+    command = command.replace("/tmp/", str(tmp_path) + "/")
     command = command.replace(
         "python3 -m pip install",
         f"{shlex.quote(sys.executable)} -m pip --isolated install "
