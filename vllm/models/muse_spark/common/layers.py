@@ -333,6 +333,10 @@ def materialize_residual_path_constants(model: nn.Module) -> int:
         if isinstance(module, MuseSpark1xNormPreservingResidualConnection):
             module.materialize_coefficients()
             n_gates += 1
+        else:
+            fold = getattr(module, "fold_router_output_multiplier", None)
+            if callable(fold):
+                fold()
     return n_gates
 
 
