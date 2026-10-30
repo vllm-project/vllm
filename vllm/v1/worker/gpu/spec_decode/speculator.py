@@ -81,6 +81,12 @@ class BaseSpeculator(ABC):
     should subclass `DraftModelSpeculator` (or `TargetDependentARSpeculator` if
     drafting consumes target model state), which the model runner loads and
     allocates draft KV cache for.
+
+    `propose` is not called on a step whose next round verifies no drafts
+    (candidate budget 1, `num_speculative_tokens == 0`), unless another data
+    parallel rank drafts. A drafter that keeps its own KV then has no entries
+    for the tokens accepted on that step; it may catch up in its next `propose`
+    from `input_batch`, or leave them, at a possible cost in acceptance.
     """
 
     num_query_per_req: int = 1

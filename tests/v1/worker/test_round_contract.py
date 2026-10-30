@@ -41,6 +41,7 @@ from vllm.v1.worker.gpu.spec_decode.round import (
     SpecResources,
     VerifyPlan,
 )
+from vllm.v1.worker.gpu.spec_decode.speculator_config import SpeculatorConfig
 
 HAS_GPU = current_platform.is_cuda_alike() or current_platform.is_xpu()
 DEVICE = current_platform.device_type if HAS_GPU else "cpu"
@@ -930,7 +931,57 @@ def test_conv_window_alignment_reads_what_a_chain_order_commit_reads(width, seed
     assert torch.equal(window[untouched], before[untouched])
 
 
-# --- SpecResources ---------------------------------------------------------
+# --- SpecResources and the candidate budget on the speculator config --------
+
+
+class _StaticSpec:
+    """The SpeculativeConfig fields the default resources and budget read."""
+
+    num_speculative_tokens = 3
+    enable_adaptive_verification = False
+    num_speculative_tokens_per_batch_size = None
+
+    def uses_dynamic_speculative_decoding(self) -> bool:
+        return False
+
+
+_BUILTIN_CONFIGS = [
+    "ngram.config.NgramGPUSpeculatorConfig",
+    "eagle.config.EagleSpeculatorConfig",
+    "eagle.config.Eagle3SpeculatorConfig",
+    "mtp.config.MTPSpeculatorConfig",
+    "dflash.config.DFlashSpeculatorConfig",
+    "dspark.config.DSparkSpeculatorConfig",
+    "standalone_ar.config.StandaloneARSpeculatorConfig",
+]
+
+
+@pytest.mark.parametrize("qualname", _BUILTIN_CONFIGS)
+def test_builtin_configs_keep_todays_resources_and_budget(qualname):
+    """Built-in methods draft K per step through the default declaration:
+    K + 1 candidates, the uniform K + 1 decode graph, K state rows, chains,
+    and padded new decodes, at every batch size."""
+    from vllm.utils.import_utils import resolve_obj_by_qualname
+    from vllm.v1.worker.gpu.spec_decode.round import BudgetView
+
+    config_cls = resolve_obj_by_qualname(f"vllm.v1.worker.gpu.spec_decode.{qualname}")
+    config = config_cls(_StaticSpec())
+    assert config.resources(16) == SpecResources(
+        max_candidates=4, capture_shapes=(PlanShape(4),)
+    )
+    assert config.pads_new_decode_rows
+    for num_reqs in (1, 7, 16):
+        assert config.candidate_budget(BudgetView(num_reqs, num_reqs, 0, 0, 16)) == 4
+
+
+def test_speculator_config_with_its_budget_state_pickles():
+    """The scheduler process holds the config: it must cross process
+    boundaries with the VllmConfig."""
+    import pickle
+
+    config = SpeculatorConfig(_StaticSpec())
+    clone = pickle.loads(pickle.dumps(config))
+    assert clone.resources(4) == config.resources(4)
 
 
 @pytest.mark.parametrize(

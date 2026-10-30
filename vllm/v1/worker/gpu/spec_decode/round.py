@@ -93,6 +93,19 @@ class SpecResources:
         return any(s.uniform_count is None for s in self.capture_shapes)
 
 
+@dataclass(frozen=True)
+class BudgetView:
+    """What the scheduler knows when it asks for the step's candidate budget
+    (:meth:`SpeculatorConfig.candidate_budget`). Host integers, read after this
+    step's requests are scheduled and their blocks allocated."""
+
+    num_scheduled_reqs: int
+    num_running: int
+    num_waiting: int
+    num_free_blocks: int
+    max_num_seqs: int
+
+
 @dataclass
 class VerifyPlan:
     """The rows the target verifies this step, per scheduled request, as device tensors.

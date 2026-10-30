@@ -2687,8 +2687,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None
         # The encoder runner exists only on the first PP rank, so later ranks
         # have no cached embeddings to gather.
+        # A step whose next round verifies no drafts (candidate budget 1) does
+        # not run the drafter: its forward over the accepted tokens would propose
+        # nothing. Under data parallelism only when every rank skips, since the
+        # drafter's forward runs in lockstep across ranks. A drafter with its
+        # own KV leaves the skipped tokens' draft KV unwritten; the target
+        # verifies every draft, so outputs do not change.
+        skip_drafter = num_spec_tokens == 0 and (
+            dp_sync_state is None or dp_sync_state.skip_drafts
+        )
         if (
             self.speculator is not None
+            and not skip_drafter
             and self.speculator.supports_mm_inputs
             and self.model_state.supports_mm_inputs
         ):
@@ -2734,6 +2744,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.speculator.prepare_propose(
                     input_batch, num_sampled, num_rejected, self.sampler
                 )
+        if self.speculator is not None and skip_drafter:
+            # index_fill_, not `draft_tokens[idx] = -1`: index_put_ copies the
+            # scalar to the device from pageable memory, a stream sync that
+            # ends the overlap with the next step's scheduling.
+            self.req_states.draft_tokens.index_fill_(
+                0, input_batch.idx_mapping.long(), -1
+            )
+        elif self.speculator is not None:
+            assert self.sampler is not None
             spec_hidden_states = get_drafter_hidden_states(
                 self.model, draft_hidden_states
             )

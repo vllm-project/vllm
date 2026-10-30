@@ -21,7 +21,7 @@ from vllm.utils.import_utils import resolve_obj_by_qualname
 # vllm.config imports this module, so it imports vllm.config lazily.
 if TYPE_CHECKING:
     from vllm.config import ParallelConfig, SpeculativeConfig
-    from vllm.v1.worker.gpu.spec_decode.round import SpecResources
+    from vllm.v1.worker.gpu.spec_decode.round import BudgetView, SpecResources
 
 _PKG = "vllm.v1.worker.gpu.spec_decode"
 
@@ -168,6 +168,30 @@ class SpeculatorConfig:
             # graphs keep the uniform shape.
             shapes += (PlanShape(None),)
         return SpecResources(max_candidates=k + 1, capture_shapes=shapes)
+
+    def candidate_budget(self, view: "BudgetView") -> int:
+        """The rows per request, the root included, that the drafts proposed
+        after this step may take, in ``[1, max_candidates]``.
+
+        The scheduler calls it once per `schedule()` that schedules requests,
+        in the scheduler process: state kept on this object stays there. The
+        drafts proposed now are verified next step, so the budget binds one
+        step later, as the Dynamic SD schedule does. 1 proposes no drafts
+        (`skip_drafts`): the next step is a plain decode, which replays the
+        uniform-1 graph when ``PlanShape(1)`` is among ``capture_shapes``.
+        The default is K + 1, or the Dynamic SD schedule's K + 1 at this
+        batch size.
+        """
+        k = self.num_speculative_tokens
+        if not self.spec_config.uses_dynamic_speculative_decoding():
+            return k + 1
+        return self._dynamic_sd_schedule(view.max_num_seqs)[view.num_scheduled_reqs] + 1
+
+    @property
+    def pads_new_decode_rows(self) -> bool:
+        """Whether the scheduler pads a request that starts decoding to the
+        full K + 1 rows, so that its batch stays a uniform decode."""
+        return not self.spec_config.uses_dynamic_speculative_decoding()
 
     def _dynamic_sd_schedule(self, max_num_seqs: int) -> list[int]:
         if (
