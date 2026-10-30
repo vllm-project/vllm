@@ -6,6 +6,7 @@ import torch
 from PIL import Image
 
 from vllm.config import ModelConfig
+from vllm.model_executor.models.unlimited_ocr import UnlimitedOCRProcessingInfo
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.processing.context import TimingContext
@@ -47,6 +48,7 @@ def test_profiling_tokens_cover_all_crop_grids(model):
         model=model, max_model_len=8192, limit_mm_per_prompt={"image": 1}
     )
     mm_processor = MULTIMODAL_REGISTRY.create_processor(config)
+    assert isinstance(mm_processor.info, UnlimitedOCRProcessingInfo)
     hf_processor = mm_processor.info.get_hf_processor()
     dummy_inputs = mm_processor.get_dummy_mm_inputs({"image": 1})
     budget = dummy_inputs["mm_placeholders"]["image"][0].get_num_embeds()
@@ -74,6 +76,7 @@ def test_image_cache_identity_across_image_counts(
     )
     processor = MULTIMODAL_REGISTRY.create_processor(config)
     tokenizer = processor.info.get_tokenizer()
+    images: list[torch.Tensor] | list[Image.Image]
     if use_embeds:
         images = [torch.ones(8, config.get_hidden_size())] * 3
     else:
@@ -163,6 +166,7 @@ def test_v2_flashinfer_vision_falls_back_without_changing_dash_backend():
         attention_config={"backend": "FLASHINFER"},
         mm_encoder_attn_backend="FLASHINFER",
     ).create_engine_config()
+    assert config.model_config.multimodal_config is not None
     assert config.model_config.multimodal_config.mm_encoder_attn_backend == (
         AttentionBackendEnum.FLASH_ATTN
     )
@@ -192,7 +196,7 @@ async def test_v2_async_rendering_rejects_bad_layout_and_preserves_image_cache()
             with pytest.raises(VLLMValidationError, match="<PAGE><image>"):
                 await renderer.process_for_engine_async(prompt, 0)
         prompt = {
-            "prompt_token_ids": renderer.tokenizer.encode("<PAGE><image>Parse."),
+            "prompt_token_ids": renderer.get_tokenizer().encode("<PAGE><image>Parse."),
             "multi_modal_data": {"image": [image]},
         }
         first = await renderer.process_for_engine_async(prompt, 0)
@@ -223,9 +227,11 @@ def test_v2_rejects_unsupported_runtime_before_loading(
 def test_v2_preprocessed_features_validate_page_layout_at_admission():
     """Pre-rendered scale-out inputs still need admission validation."""
     from copy import deepcopy
+    from typing import cast
 
     from vllm.engine.arg_utils import EngineArgs
     from vllm.exceptions import VLLMValidationError
+    from vllm.inputs import MultiModalInput
     from vllm.sampling_params import SamplingParams
     from vllm.v1.engine.input_processor import InputProcessor
 
@@ -239,13 +245,17 @@ def test_v2_preprocessed_features_validate_page_layout_at_admission():
     try:
         rendered = renderer.process_for_engine(
             {
-                "prompt_token_ids": renderer.tokenizer.encode("<PAGE><image>Parse."),
+                "prompt_token_ids": renderer.get_tokenizer().encode(
+                    "<PAGE><image>Parse."
+                ),
                 "multi_modal_data": {
                     "image": [Image.new("RGB", (1024, 1024), "white")]
                 },
             },
             0,
         )
+        assert rendered["type"] == "multimodal"
+        rendered = cast(MultiModalInput, rendered)
         # InputProcessor receives already expanded image runs, as scale-out does.
         valid = processor.process_inputs(
             "valid", rendered, SamplingParams(), ("generate",)

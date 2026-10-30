@@ -73,9 +73,6 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.inputs import MultiModalHashes
 from vllm.model_executor.layers.dash_attention import DASHAttention
-from vllm.model_executor.layers.fused_moe.utils import (
-    is_model_fused_shared_expert_compatible,
-)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -115,7 +112,11 @@ from .deepseek_ocr import (
     DeepseekOCRProcessingInfo,
     NGramPerReqLogitsProcessor,
 )
-from .utils import make_empty_intermediate_tensors_factory, make_layers
+from .utils import (
+    get_fused_shared_expert_layers,
+    make_empty_intermediate_tensors_factory,
+    make_layers,
+)
 
 __all__ = [
     "NGramPerReqLogitsProcessor",
@@ -374,8 +375,10 @@ class UnlimitedOCR2Model(DeepseekV2Model):
             lambda prefix: UnlimitedOCR2DecoderLayer(vllm_config, prefix),
             prefix=f"{prefix}.layers",
         )
-        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
-            self.layers, DeepseekV2MoE, "mlp"
+        self.fused_shared_expert_layers = get_fused_shared_expert_layers(
+            self,
+            DeepseekV2MoE,
+            enable_eplb=vllm_config.parallel_config.enable_eplb,
         )
         self.norm = RMSNorm(self.hidden_size, eps=config.rms_norm_eps)
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(

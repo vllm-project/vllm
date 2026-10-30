@@ -488,6 +488,7 @@ async fn collect_output_aggregates_raw_tokens_logprobs_and_terminal_metadata() {
                                     num_prompt_tokens: 2,
                                     num_cached_tokens: 1,
                                     num_local_cached_tokens: 1,
+                                    num_cache_creation_tokens: 1,
                                     ..Default::default()
                                 })),
                                 new_sampling_mask: Some(MaybeWireSamplingMask::Direct(
@@ -541,7 +542,11 @@ async fn collect_output_aggregates_raw_tokens_logprobs_and_terminal_metadata() {
     assert_eq!(collected.prompt_token_ids, vec![11, 22]);
     assert_eq!(collected.token_ids, vec![33, 44]);
     assert_eq!(collected.finish_reason, FinishReason::stop_eos());
-    assert_eq!(collected.usage.cached_token_count, 1);
+    assert_eq!(collected.usage.prompt_cache_usage.cached_token_count, 1);
+    assert_eq!(
+        collected.usage.prompt_cache_usage.cache_creation_token_count,
+        1
+    );
     assert_eq!(collected.prompt_logprobs, Some(prompt_logprobs()));
     assert_eq!(
         collected.logprobs.as_ref().map(|lp| lp.positions.len()),
@@ -571,7 +576,7 @@ async fn collect_output_rejects_partial_sampling_mask() {
         token_ids: vec![33, 44],
         logprobs: None,
         finish_reason: Some(FinishReason::Length),
-        cached_token_count: 0,
+        prompt_cache_usage: Default::default(),
         kv_transfer_params: None,
         ec_transfer_params: None,
         sampling_mask: Some(SamplingMask {
@@ -666,11 +671,17 @@ async fn remote_prefill_cache_usage_preserves_decoder_metrics() {
             .generate(request)
             .await
             .unwrap()
-            .inspect(|output| streamed_counts.push(output.as_ref().unwrap().cached_token_count))
+            .inspect(|output| {
+                streamed_counts.push(output.as_ref().unwrap().prompt_cache_usage.cached_token_count)
+            })
             .collect_output()
             .await
             .unwrap();
-        results.push((name, streamed_counts, collected.usage.cached_token_count));
+        results.push((
+            name,
+            streamed_counts,
+            collected.usage.prompt_cache_usage.cached_token_count,
+        ));
         expected.push((
             name,
             vec![remote_count.unwrap_or(7), remote_count.unwrap_or(0)],
@@ -1006,6 +1017,49 @@ async fn abort_by_external_id_aborts_all_internal_requests() {
     engine_task.await.unwrap();
     drop(stream_1);
     drop(stream_2);
+    llm.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn connecting_exports_zero_valued_request_metrics_before_any_request() {
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = EngineId::from_engine_index(3);
+    let model_name = request_metrics_model_name("metrics-startup-model");
+
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id.clone(),
+        |_dealer, _push| Box::pin(async {}),
+    );
+    let llm = connect_async_llm_with_ipc(handshake_address, 0, &model_name, &ipc).await;
+
+    let rendered = METRICS.render().unwrap();
+    let mut series: Vec<_> = rendered
+        .lines()
+        .filter(|line| line.contains(&model_name))
+        .filter(|line| {
+            line.starts_with("vllm:request_success_total")
+                || line.starts_with("vllm:prompt_tokens_total")
+                || line.starts_with("vllm:generation_tokens_total")
+                || line.starts_with("vllm:e2e_request_latency_seconds_count")
+        })
+        .map(|line| line.replace(&model_name, "<model>"))
+        .collect();
+    series.sort();
+    expect_test::expect![[r#"
+        vllm:e2e_request_latency_seconds_count{model_name="<model>",engine="3"} 0
+        vllm:generation_tokens_total{model_name="<model>",engine="3"} 0
+        vllm:prompt_tokens_total{model_name="<model>",engine="3"} 0
+        vllm:request_success_total{model_name="<model>",engine="3",finished_reason="abort"} 0
+        vllm:request_success_total{model_name="<model>",engine="3",finished_reason="error"} 0
+        vllm:request_success_total{model_name="<model>",engine="3",finished_reason="length"} 0
+        vllm:request_success_total{model_name="<model>",engine="3",finished_reason="repetition"} 0
+        vllm:request_success_total{model_name="<model>",engine="3",finished_reason="stop"} 0"#]]
+    .assert_eq(&series.join("\n"));
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
     llm.shutdown().await.unwrap();
 }
 

@@ -38,7 +38,6 @@ from vllm.v1.attention.backends.zentorch_sdpa import (
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     CrossAttentionSpec,
-    EncoderOnlyAttentionSpec,
     KVCacheLayout,
     is_quantized_kv_cache,
 )
@@ -171,8 +170,10 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
         )
         self._set_isa_to_layers(layer_names)
         self.is_cross_attention = isinstance(kv_cache_spec, CrossAttentionSpec)
-        self.is_encoder_only_attention = isinstance(
-            kv_cache_spec, EncoderOnlyAttentionSpec
+        attn_layers = get_layers_from_vllm_config(vllm_config, Attention, layer_names)
+        self.is_encoder_only_attention = any(
+            layer.attn_type == AttentionType.ENCODER_ONLY
+            for layer in attn_layers.values()
         )
 
     def _set_isa_to_layers(self, layer_names: list[str]) -> None:
@@ -226,7 +227,9 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
 
         causal = (
             False
-            if self.is_cross_attention or is_dynamic_casual
+            if self.is_cross_attention
+            or self.is_encoder_only_attention
+            or is_dynamic_casual
             else common_attn_metadata.causal
         )
 
