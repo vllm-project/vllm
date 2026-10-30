@@ -127,6 +127,7 @@ uv.lock
 #   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
 #   However, in case of collaboration, if having platform-specific dependencies or dependencies
 #   having no cross-platform support, pipenv may install dependencies that don't work, or not
+temp_auto_push.bat
 #   install all needed dependencies.
 #Pipfile.lock
 
@@ -196,7 +197,6 @@ cython_debug/
 .idea/
 
 # VSCode
-.vscode/
 
 # Claude
 .claude/*
@@ -257,3 +257,4 @@ csrc/cpu/cpu_attn_dispatch_generated.h
 /.rocm-version/
 /.rocm-wheel/
 /.rocm-kernel-map/
+branch_structure.json

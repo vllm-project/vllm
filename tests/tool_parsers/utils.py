@@ -196,4 +196,11 @@ def run_tool_extraction_streaming(
             reconstructor.append_delta(delta_message)
         previous_text = current_text
         previous_tokens = current_tokens
+
+    finish_streaming = getattr(tool_parser, "finish_streaming", None)
+    if finish_streaming is not None:
+        delta_message = finish_streaming()
+        if delta_message is not None:
+            reconstructor.append_delta(delta_message)
+
     return reconstructor

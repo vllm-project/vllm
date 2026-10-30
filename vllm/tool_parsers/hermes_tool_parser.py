@@ -55,6 +55,7 @@ class Hermes2ProToolParser(ToolParser):
 
         # Streaming state: what has been sent to the client.
         self._sent_content_idx: int = 0
+        self._current_text: str = ""
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
@@ -221,6 +222,7 @@ class Hermes2ProToolParser(ToolParser):
         text preceding any tool call) or one or more ``DeltaToolCall``
         entries, or ``None`` if there is nothing new to send yet."""
         try:
+            self._current_text = current_text
             # Extract any content before tool calls.
             content = self._extract_content(current_text)
             tool_call_jsons = self._extract_tool_call_jsons(current_text)
@@ -272,3 +274,12 @@ class Hermes2ProToolParser(ToolParser):
         except Exception:
             logger.exception("Error trying to handle streaming tool call.")
             return None
+
+    def finish_streaming(self) -> DeltaMessage | None:
+        """Flush held-back prose at stream end if no valid tool calls were formed."""
+        has_tool_calls = any("name" in tc for tc in self.prev_tool_call_arr)
+        if not has_tool_calls and self._sent_content_idx < len(self._current_text):
+            remaining = self._current_text[self._sent_content_idx :]
+            self._sent_content_idx = len(self._current_text)
+            return DeltaMessage(content=remaining)
+        return None

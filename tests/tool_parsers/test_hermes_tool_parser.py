@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from tests.tool_parsers.utils import get_function_delta
+from tests.tool_parsers.utils import get_function_delta, run_tool_extraction
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
@@ -190,6 +190,11 @@ def _simulate_streaming(
             request=request,
         )
         previous_text = current_text
+        if delta is not None:
+            delta_messages.append(delta)
+    finish_streaming = getattr(parser, "finish_streaming", None)
+    if finish_streaming is not None:
+        delta = finish_streaming()
         if delta is not None:
             delta_messages.append(delta)
     return delta_messages
@@ -420,3 +425,54 @@ def test_hermes_streaming_content_and_tool_call_in_single_chunk(
     assert tool_parts[0].function.name == "f"
     args_str = "".join(tc.function.arguments or "" for tc in tool_parts)
     assert json.loads(args_str) == {"x": 1}
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_hermes_parser_literal_tool_call_tag_in_prose(
+    qwen_tokenizer: TokenizerLike,
+    streaming: bool,
+) -> None:
+    """Regression test for #63309: literal <tool_call> in prose
+    must not drop remaining text.
+    """
+    parser = Hermes2ProToolParser(qwen_tokenizer)
+    model_output = "The literal <tool_call> tag opens a call. Done."
+    content, tool_calls = run_tool_extraction(parser, model_output, streaming=streaming)
+    assert content == model_output
+    assert tool_calls == []
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_hermes_parser_invalid_tool_call_drops_to_content(
+    qwen_tokenizer: TokenizerLike,
+    streaming: bool,
+) -> None:
+    """Invalid JSON within tool call tags returns full output as content."""
+    parser = Hermes2ProToolParser(qwen_tokenizer)
+    model_output = "The tag is <tool_call>not_a_tool</tool_call>. Done."
+    content, tool_calls = run_tool_extraction(parser, model_output, streaming=streaming)
+    assert content == model_output
+    assert tool_calls == []
+
+
+@pytest.mark.parametrize("stream_interval", [1, 2, 5])
+def test_hermes_streaming_literal_tool_call_tag_chunks(
+    qwen_tokenizer: TokenizerLike,
+    any_chat_request: ChatCompletionRequest,
+    stream_interval: int,
+) -> None:
+    """Simulated streaming preserves literal <tool_call> in prose
+    at various stream intervals.
+    """
+    text = "The literal <tool_call> tag opens a call. Done."
+    parser = Hermes2ProToolParser(qwen_tokenizer)
+    deltas = _simulate_streaming(
+        qwen_tokenizer,
+        parser,
+        any_chat_request,
+        text,
+        stream_interval=stream_interval,
+    )
+    content = "".join(d.content for d in deltas if d.content)
+    assert content == text
+    assert not any(d.tool_calls for d in deltas)
