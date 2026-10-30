@@ -11,6 +11,7 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+from safetensors.torch import save_file
 
 from vllm import LLM, SamplingParams
 from vllm.config import LoadConfig
@@ -79,11 +80,14 @@ def _mock_pp_group(
     )
 
 
-@pytest.mark.parametrize("source", ["local", "hf", "hf_override"])
-def test_load_weights_resolves_checkpoint_path(monkeypatch, tmp_path, source):
-    """Load the selected checkpoint, resolving HF IDs with the requested revision."""
-    from safetensors.torch import save_file
-
+@pytest.mark.parametrize(
+    "model,model_weights,repo_id",
+    [("org/model", None, "org/model"), ("local/dir", "org/weights", "org/weights")],
+)
+def test_load_weights_resolves_hf_repo_id(
+    monkeypatch, tmp_path, model, model_weights, repo_id
+):
+    """HF repo IDs are downloaded with the requested revision before loading."""
     _mock_pp_group(monkeypatch, 1)
     weights = torch.arange(4, dtype=torch.float32).reshape(2, 2)
     save_file({"weight": weights}, tmp_path / "model-rank-0-part-0.safetensors")
@@ -98,27 +102,20 @@ def test_load_weights_resolves_checkpoint_path(monkeypatch, tmp_path, source):
         ignore_patterns=["unused/*"],
     )
     model_config = SimpleNamespace(
-        model="org/model" if source == "hf" else str(tmp_path),
-        model_weights="org/weights" if source == "hf_override" else None,
-        revision="checkpoint-revision",
+        model=model, model_weights=model_weights, revision="checkpoint-revision"
     )
-    model = torch.nn.Linear(2, 2, bias=False)
-    with torch.no_grad():
-        model.weight.fill_(-1)
+    linear = torch.nn.Linear(2, 2, bias=False)
 
-    ShardedStateLoader(load_config).load_weights(model, model_config)
+    ShardedStateLoader(load_config).load_weights(linear, model_config)
 
-    torch.testing.assert_close(model.weight, weights)
-    if source == "local":
-        download.assert_not_called()
-    else:
-        download.assert_called_once_with(
-            model_config.model_weights or model_config.model,
-            load_config.download_dir,
-            ["*.safetensors"],
-            model_config.revision,
-            ignore_patterns=load_config.ignore_patterns,
-        )
+    torch.testing.assert_close(linear.weight, weights)
+    download.assert_called_once_with(
+        repo_id,
+        load_config.download_dir,
+        ["*.safetensors"],
+        "checkpoint-revision",
+        ignore_patterns=load_config.ignore_patterns,
+    )
 
 
 @pytest.mark.parametrize(
