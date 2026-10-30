@@ -363,7 +363,11 @@ COPY requirements/test/cpu.txt requirements/test/cpu.txt
 # packages unavailable on aarch64 (decord, terratorch) for arm builds. Also
 # drop the generic PyPI triton pulled in transitively (via xgrammar) on x86
 # builds, so it doesn't clobber the triton-cpu wheel from requirements/cpu.txt.
-RUN case "$(uname -m)" in \
+# Join hashed requirement continuations before filtering whole entries.
+RUN awk '/\\$/ {sub(/\\$/, ""); printf "%s", $0; next} {print}' \
+        requirements/test/cpu.txt > requirements/test/cpu.txt.tmp && \
+    mv requirements/test/cpu.txt.tmp requirements/test/cpu.txt && \
+    case "$(uname -m)" in \
     aarch64|arm64) sed -i '/^decord==/d; /^terratorch==/d' requirements/test/cpu.txt ;; \
     x86_64) sed -i '/^triton==/d' requirements/test/cpu.txt ;; \
     esac
