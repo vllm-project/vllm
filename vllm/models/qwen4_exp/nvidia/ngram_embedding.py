@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Qwen4Exp n-gram embeddings with device and pinned-host storage."""
+"""Qwen4Exp n-gram embeddings with device, pinned-host and staged-host storage."""
 
 from collections.abc import Iterable
 
@@ -18,6 +18,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import is_fp8
 from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.models.common.ops.sequence_parallel import sp_reduce_scatter, sp_shard
 from vllm.utils.math_utils import round_up
+from vllm.utils.platform_utils import is_uva_available
 
 from ..common.ngram_embedding import (
     Qwen4ExpPLEDeviceEmbedding,
@@ -26,6 +27,7 @@ from ..common.ngram_embedding import (
     Qwen4ExpPLEFp8EmbeddingMethod,
     Qwen4ExpPLENvFp4EmbeddingMethod,
     Qwen4ExpPLEPinnedHostEmbedding,
+    Qwen4ExpPLEStagedHostEmbedding,
     Qwen4ExpPLEUnquantizedEmbeddingMethod,
 )
 from ..common.ops.ple import ple_ngram_ids
@@ -39,6 +41,7 @@ __all__ = [
     "Qwen4ExpPLEFp8EmbeddingMethod",
     "Qwen4ExpPLENvFp4EmbeddingMethod",
     "Qwen4ExpPLEPinnedHostEmbedding",
+    "Qwen4ExpPLEStagedHostEmbedding",
     "Qwen4ExpPLEUnquantizedEmbeddingMethod",
     "Qwen4ExpNGramEmbedding",
 ]
@@ -214,11 +217,16 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         engram_config = get_current_vllm_config().engram_config
-        embedding_cls = (
-            Qwen4ExpPLEPinnedHostEmbedding
-            if engram_config is not None and engram_config.cpu_offload
-            else Qwen4ExpPLEDeviceEmbedding
-        )
+        embedding_cls: type[Qwen4ExpPLEEmbedding] = Qwen4ExpPLEDeviceEmbedding
+        if engram_config is not None and engram_config.cpu_offload:
+            if is_uva_available():
+                embedding_cls = Qwen4ExpPLEPinnedHostEmbedding
+            else:
+                logger.info_once(
+                    "UVA is unavailable; gathering the CPU-offloaded PLE table "
+                    "on the host and copying its rows to the device."
+                )
+                embedding_cls = Qwen4ExpPLEStagedHostEmbedding
         # A TP reduce-scatter covers all vocabulary owners only when ETP=TP.
         self.use_reduce_scatter = (
             self.use_sequence_parallel
@@ -405,7 +413,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
     ) -> None:
         """Start the pinned lookup while the preceding decoder layer runs."""
         embedding = self.ngram_embedding
-        if not embedding.supports_prefetch:
+        if not embedding.supports_prefetch or embedding.stages_before_forward:
             return
         ngram_ids = self.compute_ngram_ids(
             input_ids,
@@ -414,6 +422,23 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             output=self._prefetch_ids[: input_ids.numel()],
         )
         embedding.start_prefetch(ngram_ids)
+
+    def stage_host_lookup(
+        self,
+        input_ids: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        ngram_context: torch.Tensor,
+    ) -> None:
+        """Stage this step's host-table rows before the forward runs."""
+        embedding = self.ngram_embedding
+        assert isinstance(embedding, Qwen4ExpPLEStagedHostEmbedding)
+        ngram_ids = self.compute_ngram_ids(
+            input_ids,
+            query_start_loc,
+            ngram_context,
+            output=self._prefetch_ids[: input_ids.numel()],
+        )
+        embedding.stage_lookup(ngram_ids)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load hash buffers and checkpoint-split embedding rows."""
