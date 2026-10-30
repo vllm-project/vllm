@@ -214,10 +214,7 @@ steps:
   - csrc/
   commands:
   # The heavy cudagraph test is covered in other steps.
-  - >-
-    pytest -v -s
-    compile/fullgraph
-    --ignore=compile/fullgraph/test_full_cudagraph.py
+  - pytest -v -s compile/fullgraph --ignore=compile/fullgraph/test_full_cudagraph.py
   mirror:
     amd:
       automatic_shard: true
