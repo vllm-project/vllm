@@ -187,3 +187,64 @@ def test_persistent_tensor_preserves_contents_and_rejects_changes() -> None:
     assert manager.get_persistent("locks", (8,), torch.int32) is first
     with pytest.raises(AssertionError, match="was not allocated during warmup"):
         manager.get_persistent("new", (8,), torch.int32)
+
+
+def test_retained_span_survives_small_scratch_at_the_tail(monkeypatch) -> None:
+    """The retained span sits at the workspace end, so head-sized scratch
+    requests leave its bytes intact and the next same-key call reports so."""
+    monkeypatch.setattr(workspace, "dbo_current_ubatch_id", lambda: 0)
+    manager = workspace.WorkspaceManager(torch.device("cpu"))
+    (full,) = manager.get_simultaneous(((4096,), torch.uint8))
+
+    span, intact = manager.get_retained("kv", (256,), torch.int32)
+    assert not intact
+    assert span.data_ptr() == full.data_ptr() + 4096 - 1024
+    span.copy_(torch.arange(256, dtype=torch.int32))
+
+    (head,) = manager.get_simultaneous(((3072,), torch.uint8))
+    head.fill_(7)
+    again, intact = manager.get_retained("kv", (256,), torch.int32)
+    assert intact
+    assert again.data_ptr() == span.data_ptr()
+    assert torch.equal(again, torch.arange(256, dtype=torch.int32))
+
+
+@pytest.mark.parametrize(
+    "disturb",
+    ["scratch_overlap", "other_key", "other_size", "reallocation"],
+)
+def test_retained_span_reports_disturbance(monkeypatch, disturb: str) -> None:
+    monkeypatch.setattr(workspace, "dbo_current_ubatch_id", lambda: 0)
+    manager = workspace.WorkspaceManager(torch.device("cpu"))
+    manager.get_simultaneous(((4096,), torch.uint8))
+    manager.get_retained("kv", (256,), torch.int32)
+
+    if disturb == "scratch_overlap":
+        # One byte past the head of the span is enough.
+        manager.get_simultaneous(((3073,), torch.uint8))
+    elif disturb == "other_key":
+        manager.get_retained("other", (256,), torch.int32)
+    elif disturb == "other_size":
+        manager.get_retained("kv", (128,), torch.int32)
+    else:
+        manager.get_simultaneous(((8192,), torch.uint8))
+
+    _, intact = manager.get_retained("kv", (256,), torch.int32)
+    assert not intact
+    # The call itself re-arms the span.
+    _, intact = manager.get_retained("kv", (256,), torch.int32)
+    assert intact
+
+
+def test_retained_span_is_per_slot(monkeypatch) -> None:
+    monkeypatch.setattr(workspace, "dbo_current_ubatch_id", lambda: 0)
+    manager = workspace.WorkspaceManager(torch.device("cpu"), num_lanes=2)
+    manager.get_simultaneous(((4096,), torch.uint8))
+    manager.get_retained("kv", (256,), torch.int32)
+    with workspace.use_workspace_lane(1):
+        # Another lane's scratch and span requests do not touch lane 0.
+        manager.get_simultaneous(((4096,), torch.uint8))
+        _, intact = manager.get_retained("kv", (256,), torch.int32)
+        assert not intact
+    _, intact = manager.get_retained("kv", (256,), torch.int32)
+    assert intact
