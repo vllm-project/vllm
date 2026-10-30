@@ -67,8 +67,8 @@ class LoRAModelRunnerMixin:
 
     def _set_active_loras(
         self,
-        prompt_lora_mapping: tuple[int, ...],
-        token_lora_mapping: tuple[int, ...],
+        prompt_lora_mapping: np.ndarray | tuple[int, ...],
+        token_lora_mapping: np.ndarray | tuple[int, ...],
         lora_requests: set[LoRARequest],
         mapping_type: LoRAMappingType = LoRAMappingType.LANGUAGE,
     ) -> None:
@@ -100,8 +100,8 @@ class LoRAModelRunnerMixin:
         if num_sampled_tokens is None:
             num_sampled_tokens = np.ones_like(num_scheduled_tokens, dtype=np.int32)
 
-        prompt_lora_mapping: tuple[int, ...]  # of size np.sum(num_sampled_tokens)
-        token_lora_mapping: tuple[int, ...]  # of size np.sum(num_scheduled_tokens)
+        prompt_lora_mapping: np.ndarray  # of size np.sum(num_sampled_tokens)
+        token_lora_mapping: np.ndarray  # of size np.sum(num_scheduled_tokens)
         lora_requests: set[LoRARequest]
         prompt_lora_mapping, token_lora_mapping, lora_requests = (
             input_batch.make_lora_inputs(num_scheduled_tokens, num_sampled_tokens)
