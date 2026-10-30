@@ -68,38 +68,7 @@ def set_weight_attrs(
         setattr(weight, key, value)
 
 
-def _view_in_place(
-    old_param: torch.Tensor, new_tensor: torch.Tensor
-) -> torch.Tensor | None:
-    """Under direct reload, a view of ``old_param``'s storage shaped like
-    ``new_tensor`` when it fits there, so the address survives a layout change.
-    None when it does not fit or ``new_tensor`` already lives in that storage."""
-    from vllm.model_executor.model_loader.reload.direct import keep_addresses
-
-    if (
-        not keep_addresses()
-        or new_tensor.device != old_param.device
-        or old_param.is_meta
-    ):
-        return None
-    shape, stride = tuple(new_tensor.shape), new_tensor.stride()
-    if any(st == 0 and s > 1 for s, st in zip(shape, stride)):
-        return None  # overlapping (expanded) layout: cannot be written in place
-    storage = old_param.untyped_storage()
-    if new_tensor.untyped_storage().data_ptr() == storage.data_ptr():
-        return None  # e.g. a transposed view of the same storage: rebind keeps it
-    itemsize = new_tensor.element_size()
-    offset = old_param.storage_offset() * old_param.element_size()
-    if (
-        offset % itemsize
-        or offset + storage_extent(new_tensor) * itemsize > storage.nbytes()
-    ):
-        return None
-    view = torch.empty(0, dtype=new_tensor.dtype, device=old_param.device)
-    return view.set_(storage, offset // itemsize, shape, stride)
-
-
-def storage_extent(t: torch.Tensor) -> int:
+def _extent(t: torch.Tensor) -> int:
     """Number of elements spanned by ``t`` in its storage."""
     if t.numel() == 0:
         return 0
@@ -117,10 +86,10 @@ def _in_own_storage(old: torch.Tensor, new: torch.Tensor) -> torch.Tensor:
         new.numel() == 0
         or old.device != new.device
         or new.untyped_storage().data_ptr() == storage.data_ptr()
-        or storage_extent(new) != new.numel()  # overlapping or with gaps
-        or storage_extent(old) != old.numel()  # its gaps may hold another tensor's data
+        or _extent(new) != new.numel()  # overlapping or with gaps
+        or _extent(old) != old.numel()  # its gaps may hold another tensor's data
         or offset % size
-        or new.numel() * size > storage_extent(old) * old.element_size()
+        or new.numel() * size > _extent(old) * old.element_size()
     ):
         return new
     view = new.new_empty(0).set_(storage, offset // size, new.shape, new.stride())
@@ -160,10 +129,6 @@ def replace_parameter(
     ``is_shuffled``) are carried over to the parameter, except ``weight_loader``,
     which is always taken from the existing parameter.
 
-    Under direct reload, a ``new_tensor`` larger than the parameter at cold start
-    may be written into the parameter's existing storage on a reload, so do not
-    read a local alias of the old data (``w = layer.weight.data``) after this call.
-
     This function should not be called on weights which are tied/shared
 
     Args:
@@ -190,10 +155,6 @@ def replace_parameter(
     # a loader riding along under that name has to be dropped as well.
     new_tensor_attrs.pop("weight_loader", None)
     new_tensor_attrs.pop("_weight_loader", None)
-    # A checkpoint layout belongs to the parameter it was recorded on (direct
-    # reload); another checkpoint parameter passed as new_tensor must not
-    # overwrite it.
-    new_tensor_attrs.pop("_ckpt_layout", None)
 
     if isinstance(new_tensor, torch.nn.Parameter):
         new_tensor = new_tensor.data
@@ -212,10 +173,6 @@ def replace_parameter(
             and old_param.device == new_tensor.device
         ):
             old_param.data.copy_(new_tensor)
-        elif (view := _view_in_place(old_param, new_tensor)) is not None:
-            # direct reload: keep the address, write into the existing storage
-            view.copy_(new_tensor)
-            old_param.data = view
         elif getattr(getattr(layer, "quant_method", None), "uses_meta_device", False):
             old_param.data = new_tensor  # online quantization frees the source
         else:
