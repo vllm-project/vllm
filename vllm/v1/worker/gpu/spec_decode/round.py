@@ -104,6 +104,14 @@ class BudgetView:
     num_waiting: int
     num_free_blocks: int
     max_num_seqs: int
+    block_size: int = 0
+    """Tokens per block of the unified pool (the scheduler's block size)."""
+    num_spec_blocks_held: int = 0
+    """Recurrent-state blocks running requests hold for draft rows now, summed
+    over the recurrent-state groups: one per draft each verifies, per group
+    (``K * G`` per request at budget ``K + 1`` with ``G`` groups), kept one
+    step longer after the drafts drop, as the next step reads the state they
+    committed."""
 
 
 @dataclass

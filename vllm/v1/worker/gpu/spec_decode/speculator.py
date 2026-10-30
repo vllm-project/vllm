@@ -134,7 +134,14 @@ class BaseSpeculator(ABC):
         is_profile: bool = False,
         num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
-        pass
+        """Propose up to `num_speculative_tokens` drafts per request (the
+        speculator's K when None), -1 where it proposes fewer.
+
+        With `num_speculative_tokens == 0` (budget 1; called only when another
+        data parallel rank drafts) it proposes nothing and may write draft KV
+        only at this step's target positions, which `slot_mappings` cover: it
+        must run no draft decode step, whose KV slots exist for drafts.
+        """
 
     def prepare_watermarking(
         self, sampler: "GPUWatermarkSampler", idx_mapping: torch.Tensor

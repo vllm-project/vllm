@@ -385,6 +385,43 @@ def test_gather_block_tables_nulls_blocks_below_sliding_window():
     assert swa[0, :12].tolist() == swa_ids[0]
 
 
+def test_gather_nulls_recurrent_columns_past_a_shortened_row():
+    """A recurrent-state row that shrinks keeps its dropped ids, and a batch
+    slot keeps the previous step's ids; both may be another live request's
+    blocks by now. The forward-pass row reads the null block past the
+    request's block count, in `null_tail` groups only."""
+    device = torch.device("cuda")
+    # Group 0 is attention, group 1 recurrent state.
+    tables = BlockTables([16, 64], 4, 64, [8, 6], device, null_tail=[False, True])
+    tables.append_block_ids(0, ([1, 2, 3, 4, 5], [11, 12, 13, 14, 15]), True)
+    tables.append_block_ids(1, ([6, 7, 8], [21, 22, 23, 24]), True)
+    tables.apply_staged_writes()
+    one = torch.tensor([0], dtype=torch.int32, device=device)
+    _, state = tables.gather_block_tables(one, num_reqs_padded=1)
+    torch.accelerator.synchronize()
+    assert state[0].tolist() == [11, 12, 13, 14, 15, 0]
+
+    # The drafts drop: truncate to 2, append nothing.
+    tables.truncate(0, group=1, num_blocks=2)
+    tables.append_block_ids(0, ([], []), overwrite=False)
+    tables.apply_staged_writes()
+    attn, state = tables.gather_block_tables(one, num_reqs_padded=1)
+    torch.accelerator.synchronize()
+    assert state[0].tolist() == [11, 12, 0, 0, 0, 0]
+    # Only the forward-pass copy changes; attention rows are copied as before.
+    assert tables.block_tables[1].gpu[0, :5].tolist() == [11, 12, 13, 14, 15]
+    assert attn[0, :5].tolist() == [1, 2, 3, 4, 5]
+
+    # Batch slot 0 now holds a request with fewer blocks than the last one.
+    tables.truncate(1, group=1, num_blocks=1)
+    tables.append_block_ids(1, ([], []), overwrite=False)
+    tables.apply_staged_writes()
+    other = torch.tensor([1], dtype=torch.int32, device=device)
+    _, state = tables.gather_block_tables(other, num_reqs_padded=1)
+    torch.accelerator.synchronize()
+    assert state[0].tolist() == [21, 0, 0, 0, 0, 0]
+
+
 @pytest.fixture
 def populated_block_tables():
     tables = BlockTables([16, 32], 8, 64, [3, 5], torch.device("cuda"))

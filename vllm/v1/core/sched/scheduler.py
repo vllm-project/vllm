@@ -438,6 +438,17 @@ class Scheduler(SchedulerInterface):
         )
 
         self.has_mamba_layers = kv_cache_config.has_mamba_layers
+        # See `dynamic_spec_blocks`. Models without recurrent layers keep
+        # today's allocation; adaptive verification can verify past the
+        # scheduled drafts; connectors and PP keep append-only block tables.
+        self._dynamic_spec_blocks_supported = (
+            speculative_config is not None
+            and self.speculator_config is not None
+            and self.has_mamba_layers
+            and not speculative_config.enable_adaptive_verification
+            and not self.use_pp
+            and self.connector is None
+        )
         self.needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
         self.need_mamba_block_aligned_split = (
             self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
@@ -509,6 +520,13 @@ class Scheduler(SchedulerInterface):
         )
         self._kv_fetch_counts: dict[str, int] = dict.fromkeys(KV_FETCH_STAGES, 0)
 
+    @property
+    def dynamic_spec_blocks(self) -> bool:
+        """Whether recurrent-state blocks for draft rows follow the drafts
+        each request verifies (`allocate_slots(num_draft_tokens=)`). Only the
+        V2 runner shortens its block table rows."""
+        return self._dynamic_spec_blocks_supported and self.use_v2_model_runner
+
     def _candidate_budget(self, num_scheduled_reqs: int) -> int:
         """Ask the speculator's config for this step's candidate budget."""
         assert self.speculator_config is not None
@@ -519,6 +537,8 @@ class Scheduler(SchedulerInterface):
                 num_waiting=len(self.waiting),
                 num_free_blocks=self.kv_cache_manager.block_pool.get_num_free_blocks(),
                 max_num_seqs=self.scheduler_config.max_num_seqs,
+                block_size=self.block_size,
+                num_spec_blocks_held=self.kv_cache_manager.num_spec_blocks_held,
             )
         )
         if not 1 <= budget <= self.max_candidates:
@@ -937,6 +957,19 @@ class Scheduler(SchedulerInterface):
                 req_index += 1
                 continue
 
+            num_draft_tokens = None
+            if self.dynamic_spec_blocks:
+                num_draft_tokens = min(
+                    len(request.spec_token_ids),
+                    max(
+                        num_new_tokens
+                        + request.num_computed_tokens
+                        - request.num_tokens
+                        - request.num_output_placeholders,
+                        0,
+                    ),
+                )
+
             # Schedule newly needed KV blocks for the request.
             with record_function_or_nullcontext("schedule: allocate_slots"):
                 while True:
@@ -944,6 +977,7 @@ class Scheduler(SchedulerInterface):
                         request,
                         num_new_tokens,
                         num_lookahead_tokens=self.num_lookahead_tokens,
+                        num_draft_tokens=num_draft_tokens,
                     )
 
                     if new_blocks is not None:
@@ -1467,6 +1501,11 @@ class Scheduler(SchedulerInterface):
                     num_new_computed_tokens=num_new_local_computed_tokens,
                     new_computed_blocks=new_computed_blocks,
                     num_lookahead_tokens=effective_lookahead_tokens,
+                    num_draft_tokens=(
+                        (self.num_spec_tokens if pad_spec_decode else 0)
+                        if self.dynamic_spec_blocks
+                        else None
+                    ),
                     num_external_computed_tokens=num_external_computed_tokens,
                     delay_cache_blocks=load_kv_async,
                     skip_zeroing_group_ids=(
@@ -1739,6 +1778,8 @@ class Scheduler(SchedulerInterface):
         # request (the root included) when they are verified.
         num_spec_tokens_to_schedule = self.num_spec_tokens
         if self.speculator_config is not None and len(num_scheduled_tokens) > 0:
+            # Chosen after this step's allocation, which reserved the
+            # drafter's full lookahead, so any budget can be proposed now.
             budget = self._candidate_budget(len(num_scheduled_tokens))
             num_spec_tokens_to_schedule = budget - 1
             # Budget 1 is a plain decode next step: no drafts to propose.
@@ -1778,6 +1819,9 @@ class Scheduler(SchedulerInterface):
             kv_connector_block_state=kv_connector_block_state,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
             skip_drafts=not drafts_needed,
+            spec_state_block_counts=(
+                self.kv_cache_manager.take_spec_state_block_counts() or None
+            ),
             ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
         )
 

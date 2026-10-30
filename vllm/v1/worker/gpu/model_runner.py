@@ -747,6 +747,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         slot_mapping_enabled = []
         dcp_sharded = []
         sliding_window_reach = []
+        null_tail = []
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             spec = kv_cache_group.kv_cache_spec
             block_sizes.append(spec.block_size)
@@ -760,6 +761,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 if isinstance(layer_spec, SlidingWindowSpec)
                 else 0
             )
+            # Recurrent-state rows shrink with the drafts (`truncate`).
+            null_tail.append(isinstance(layer_spec, MambaSpec))
             # Let each cache type account for CP. Attention KV is DCP-sharded,
             # while Mamba/GDN recurrent state is replicated across DCP ranks.
             max_num_blocks = spec.max_num_blocks_per_req(
@@ -826,6 +829,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             slot_mapping_enabled=slot_mapping_enabled,
             dcp_sharded=dcp_sharded,
             sliding_window_reach=sliding_window_reach,
+            null_tail=null_tail,
             cp_size=self.dcp_size,
             cp_rank=self.dcp_rank,
             cp_interleave=self.cp_interleave,
@@ -1386,6 +1390,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Add new blocks and update num_computed_tokens for the existing requests.
         reqs = scheduler_output.scheduled_cached_reqs
         num_computed_tokens_np = self.req_states.num_computed_tokens_np
+        # Shorten rows whose draft-row state blocks went back to the pool
+        # before appending this step's blocks after them.
+        for req_id, counts in (scheduler_output.spec_state_block_counts or {}).items():
+            req_index = self.req_states.req_id_to_index.get(req_id)
+            if req_index is None:
+                continue
+            for group, num_blocks in counts.items():
+                self.block_tables.truncate(req_index, group, num_blocks)
         for req_id, num_computed_tokens, req_new_block_ids in zip(
             reqs.req_ids, reqs.num_computed_tokens, reqs.new_block_ids
         ):
