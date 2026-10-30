@@ -40,6 +40,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_int,
     quantize_nvfp4_per_token_input,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import kNvfp4Dynamic
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -355,7 +356,13 @@ class MiniMaxM3CuteDSLMethod(CompressedTensorsW4A4Nvfp4MoEMethod):
                 "MiniMax-M3 moe_backend='flashinfer_cutedsl' is not available "
                 "on SM107 (Rubin); use moe_backend='auto' instead."
             )
-        super().__init__(moe, layer_name=layer_name)
+        super().__init__(
+            moe,
+            layer_name=layer_name,
+            # Nothing in the checkpoint says how its FC1 input was quantized
+            # during QAT, so the model declares it (as in ModelOptNvFp4FusedMoE).
+            activation_key=(moe.qat_activation_key or kNvfp4Dynamic),
+        )
         assert self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL
         self.experts_cls = MiniMaxM3CuteDSLExperts
         # Defer the top-k reduce into the next layer's input norm on TP1 (no
