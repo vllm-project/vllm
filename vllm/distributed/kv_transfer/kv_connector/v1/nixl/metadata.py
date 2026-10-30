@@ -196,6 +196,10 @@ def compute_nixl_compatibility_hash(
         # Attention backend and KV cache dtype affect memory layout
         "attn_backend_name": attn_backend_name,
         "cache_dtype": str(cache_config.cache_dtype),
+        # K/V head-slot split changes the bytes inside every attention page.
+        "flashinfer_separate_kv_head_slots": (
+            vllm_config.attention_config.flashinfer_separate_kv_head_slots
+        ),
         "is_hma_enabled": is_hma_enabled,
         "speculative_config": _get_speculative_compatibility_factors(vllm_config),
         # push (WRITE) and pull (READ) connectors are protocol-incompatible
