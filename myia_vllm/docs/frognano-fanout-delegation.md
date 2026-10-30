@@ -6,11 +6,11 @@ usages où le modèle est **réellement fiable**, livrer des **sous-agents tout 
 Critère d'acceptation d'un usage : **le coût de vérification doit rester très inférieur au coût
 de faire soi-même**.
 
-## 1. Classes d'usage (état mesuré au 30/10 — 22 mesures)
+## 1. Classes d'usage (état mesuré au 30/10 — 25 mesures : la 23ᵉ est dans la PR #277 ouverte, la 24ᵉ et la 25ᵉ ci-dessous)
 
 | Classe | Statut | Preuve |
 |---|---|---|
-| **Extraction verbatim en fan-out** (sortie = sous-ensemble exact de l'entrée) | **VALIDÉE sur corpus de logs — verbatimité NON stable (22e)** | 72/73 au pilote, 216/217 puis 100 % sur 735 lignes, 49/49 sur région inédite, 18/18 post-reboot (21e), **22e : contenu 17/17 exact mais préfixe horodaté supprimé sur 17/17 → 0/17 verbatim** |
+| **Extraction verbatim en fan-out** (sortie = sous-ensemble exact de l'entrée) | **VALIDÉE sur corpus de logs — verbatimité NON stable, variable dans les deux sens (22e/23e/24e/25e)** | 72/73 au pilote, 216/217 puis 100 % sur 735 lignes, 49/49 sur région inédite, 18/18 post-reboot (21e), **22e : contenu 17/17 exact mais préfixe horodaté supprimé sur 17/17 → 0/17 verbatim**, 23e : 12/12 exactes ET 12/12 verbatim (PR #277 ouverte), **24e : 6/6 exactes ET 6/6 verbatim**, **25e : 14/14 exactes ET 14/14 verbatim (md5 identique dans les deux sens) → 3 mesures sur 4 conservent le préfixe ; le mode d'échec est minoritaire mais réel** |
 | **Étiquetage d'un champ structurel** (préfixer chaque ligne par la valeur de son champ, p.ex. `machine=`) | **VALIDÉE — 30/30** | 11e mesure : 30 lignes, distribution recomptée identique, **seau « AUCUN » (champ absent) traité correctement** |
 | Tally catégoriel, étiquette neutre (`FIN`, pas `DONE`) | Validée sur 1 forme (8 lignes, 2/2 exact) | cause `DONE` confirmée 25/10 20:05Z |
 | Extraction verbatim sur **prose** (lignes-paragraphe de 1-2 Ko) | **CONDITIONNELLE** — 23 % seul, 60 % après découpage en phrases, **100 % avec l'étage de vérification** | 9e mesure |
@@ -365,6 +365,66 @@ Trois apports :
 Ce que cette mesure **ne** prouve pas : que le comportement est aléatoire (2 mesures —
 1 passe, 1 échec — ne suffisent pas pour une loi) ; rien sur la prose, le sémantique, ni les
 classes refusées (cf. §1), qui restent refusées.
+
+### Vingt-quatrième mesure — R1 : verbatim conservée (30/10 12:2x locale), la variance est confirmée des deux côtés
+
+Corpus : `myia_vllm/_logs/gpu-thermal.log`, **capture par commande** (`tail -32`), 32 lignes
+couvrant 30/10 04:33 → 10:04 (horloge du logger, locale). Mission : « recopier VERBATIM, dans
+l'ordre, uniquement les lignes qui contiennent le mot `HEARTBEAT` ». Oracle `grep` indépendant
+sur **le corpus exact transmis** = **6**.
+
+Résultat : **6/6 justes mot pour mot** — 0 manquante, 0 extra, 0 fabrication — et **verbatim
+6/6 : le préfixe horodaté (20 caractères) est conservé sur les 6 lignes rendues**. Étiquettes
+contrôlées : `agent_used: mini-summarizer`, `model_used: frognano-4b`.
+
+Comparaison mécanique : `comm` contre le corpus figé = **0 fabrication, 0 manquante, 6 lignes
+identiques** ; contrôle du préfixe par `awk 'substr($0,1,20)'` = 6 horodatages distincts,
+exacts, tous conservés.
+
+**Un nouvel écart d'instrument, côté appelant, dans l'autre sens.** Le premier `comm` a porté
+sur `tail -32` **rejoué quatre heures plus tard** — le journal thermique continue d'écrire, et
+le corpus avait grandi de 4 lignes `HEARTBEAT` (`11:11`, `12:03`, `13:03`, `14:03`). Le
+comparateur a donc reporté **4 lignes attendues et absentes**, ce qui, lu au premier tour,
+ressemblait à un échec du mini. C'était **l'oracle qui avait glissé**, pas le producteur : ces
+4 lignes avaient été **ajoutées au fichier après l'envoi du corpus**. Règle : **l'oracle
+porte sur le corpus figé transmis, jamais sur une source vivante rejouée après l'appel** —
+et le rattacher à l'instant de l'envoi, pas à l'instant du verdict.
+
+C'est la même famille d'erreur que la 22ᵉ mesure — *le juge qui failli avant le producteur* —
+mais en miroir : là, le juge était trop **indulgent** (normalisation qui masquait un préfixe
+supprimé) ; ici, il était trop **exigeant** (oracle glissé). Les deux sens sont mesurés.
+
+**Ce que ça ajoute à la lecture de la classe** : la verbatimité est **variable dans les deux
+sens** sur le même type de corpus et le même preset — 22ᵉ : 0/17 verbatim (préfixe supprimé) ;
+23ᵉ : 12/12 verbatim (PR #277 ouverte) ; 24ᵉ : 6/6 verbatim. Trois mesures ne font pas une
+loi, mais elles **interdisent** d'écrire « le mini normalise les horodates » comme une règle
+de classe. La seule règle qui tient reste : **vérifier la verbatimité à chaque appel, et
+vérifier l'instrument de vérification avant le producteur**.
+
+### Vingt-cinquième mesure — R1 : 14/14 exactes ET 14/14 verbatim (30/10 ~16:4x locale)
+
+Corpus : `myia_vllm/_logs/gpu-governor.log`, **capture par commande** (`tail -40`), 40 lignes.
+Mission : « recopie VERBATIM les lignes qui contiennent `RAM CRITIQUE` ». Oracle `grep`
+indépendant sur **le corpus figé transmis** (`.tmp/corpus25.txt`) = **14**.
+
+Résultat : **14/14 justes mot pour mot** — 0 manquante, 0 extra, 0 fabrication — et **verbatim
+14/14 : le préfixe horodaté (20 caractères) est conservé sur les 14 lignes rendues**. Étiquettes
+contrôlées : `agent_used: mini-summarizer`, `model_used: frognano-4b`.
+
+Comparaison mécanique : `comm` contre le corpus figé = **0 fabrication, 0 manquante, 14 lignes
+communes** ; contrôle du préfixe par `awk 'substr($0,1,20)'` = **14 horodatages distincts**, tous
+conservés ; et **md5 identique dans les deux sens** sur le jeu des 14 lignes communes — l'écart
+est nul, pas seulement « contenu juste ». Trace d'exécution : compteur moteur
+`request_success_total = 1` sur l'instance recréée après le reboot de 15:57:43Z (cette
+délégation est la **seule** requête du compteur).
+
+**Ce que la 25ᵉ mesure ajoute à la lecture de la classe** : avec elle, la verbatimité est
+mesurée **quatre fois** — 22ᵉ : 0/17 (préfixe supprimé) · 23ᵉ : 12/12 · 24ᵉ : 6/6 · 25ᵉ : 14/14.
+Le mode d'échec est **réel mais minoritaire** (1 fois sur 4, sur le même type de corpus et le
+même preset) ; le mode nominal est la conservation du préfixe. La formulation utilisable n'est
+donc pas « le mini conserve les horodates » mais « **3 mesures sur 4 ; à vérifier à chaque
+appel** ». Le corpus qui a échoué (22ᵉ) portait 17 lignes et deux motifs (`WARN` puis `INFO`) ;
+ceux qui passent (23ᵉ-25ᵉ) portent un **motif unique** — hypothèse à tester, pas une règle.
 
 ### Deuxième démo — sweep entropie docs (25/10 soir, `mini-sweeper`)
 

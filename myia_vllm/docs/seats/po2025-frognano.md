@@ -37,10 +37,26 @@
 
 ## Surveillance
 
-- **Cron vigie siège : 5 h à :17** (`17 */5 * * *`, session-only — CronList
+- **Cron vigie siège : 8 h à :17** (`17 */8 * * *`, session-only — CronList
   d'abord, réarmer si absent après un reboot ; le prompt du cron porte la
   check-list complète). Cadence relevée de 4 h à **5 h** par le user le 29/10
-  après le reboot de po-2025 (mesure #207).
+  après le reboot de po-2025 (mesure #207), puis portée à **8 h** par le user
+  le 30/10 (cron `5a547920`, remplaçant `b3ccfc28` 5 h ; prochain tir 16:47
+  locale). **Le cron est session-only : il meurt avec la session** — le
+  re-armement après reboot est une action de la session, pas du système.
+- **Un `/health` 200 ne prouve pas la vivacité du moteur** (30/10, instance
+  recréée) : entre **05:03Z et 09:04Z** le GPU est resté à **100 % / 55-56 °C
+  / 66 W** alors que **zéro** requête n'atteignait le moteur (dernier POST
+  **04:58:36Z**) et que `/metrics` expirait (> 25 s) pendant que `/health`
+  répondait **200**. Cause **non établie** (SUPPOSÉ : contexte CUDA bloqué
+  sous la crise RAM de la nuit, ou blocage du worker pendant le teardown).
+  Effet mesuré : les compteurs repartent à **0** (instance recréée) et le
+  **boot hôte est 10:29:41Z** — les deux conteneurs (moteur + hub claudish)
+  sont revenus à **10:32:02Z**, soit **141 s** après le boot, conforme au
+  ~211 s documenté. Discriminant à retoucher à la prochaine occurrence :
+  `nvidia-smi` **util 100 % + ~66 W** = rotation à vide ; une charge réelle
+  tire 200-300 W sur cette carte. Et le reboot **machine** — pas un restart
+  de conteneur — est le geste qui a rendu le siège.
 - Rapports → **dashboard `workspace-vllm`** (RDV des 3 sièges vllm). DM
   toujours adressés `machine:workspace` (bug RooSync #3960). Escalade
   cross-workspace → dashboard `global` + crossPost.
