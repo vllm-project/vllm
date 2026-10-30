@@ -65,12 +65,13 @@ class CPUOffloadingManager(OffloadingManager):
         enable_events: bool = False,
         store_threshold: int = 1,
         max_tracker_size: int = 64_000,
+        info: CPUOffloadingInfo | None = None,
     ):
         self.medium: Medium = Medium.CPU
         self._num_chunks: int = num_chunks
-        self._config_info: ConfigInfoMapping = CPUOffloadingInfo(
-            cpu_num_chunks=num_chunks
-        ).as_config_info()
+        self._config_info: ConfigInfoMapping = (
+            info.as_config_info() if info is not None else {}
+        )
         self._num_allocated_chunks: int = 0
         self._free_list: list[int] = []
         self.events: list[OffloadingEvent] | None = [] if enable_events else None
@@ -167,6 +168,7 @@ class CPUOffloadingManager(OffloadingManager):
         reused_keys: Iterable[OffloadKey] = (),
     ) -> None:
         state = self._get_request_cache_access(req_context)
+        new_keys = []
         for key in keys:
             if key in state.seen_keys:
                 continue
@@ -176,6 +178,9 @@ class CPUOffloadingManager(OffloadingManager):
             group_idx = get_offload_group_idx(key)
             state.key_groups.setdefault(group_idx, []).append(key)
             state.seen_keys.add(key)
+            new_keys.append(key)
+        if new_keys:
+            self._policy.on_request_access(new_keys, req_context)
         state.inserted_keys.update(inserted_keys)
         # Re-reading a chunk inserted by this request is an internal transfer
         # (for example, a tiering cascade), not a second cache access.
@@ -353,7 +358,7 @@ class CPUOffloadingManager(OffloadingManager):
         )
 
         for key, chunk in zip(keys_to_store, chunks):
-            self._policy.insert(key, chunk)
+            self._policy.insert(key, chunk, req_context)
         self._num_write_pending_chunks += len(keys_to_store)
         state.inserted_keys.update(keys_to_store)
 

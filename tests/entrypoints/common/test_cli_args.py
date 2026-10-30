@@ -431,6 +431,22 @@ def test_middleware(serve_parser, cli_args, expected_middleware):
     assert args.middleware == expected_middleware
 
 
+def test_reasoning_effort_map_parsing(serve_parser):
+    args = serve_parser.parse_args(
+        args=["--reasoning-effort-map", '{"medium": "low", "xhigh": "max"}']
+    )
+    validate_parsed_serve_args(args)
+    assert args.reasoning_effort_map == {"medium": "low", "xhigh": "max"}
+
+
+@pytest.mark.parametrize("value", ['{"ultra": "max"}', '{"medium": 1}', '["medium"]'])
+def test_reasoning_effort_map_rejects_invalid(serve_parser, value):
+    """Typos in the efforts being mapped fail at startup, not silently."""
+    args = serve_parser.parse_args(args=["--reasoning-effort-map", value])
+    with pytest.raises(ValueError, match="--reasoning-effort-map"):
+        validate_parsed_serve_args(args)
+
+
 def test_default_chat_template_kwargs_parsing(serve_parser):
     """Ensure default_chat_template_kwargs JSON is parsed correctly."""
     args = serve_parser.parse_args(

@@ -174,17 +174,12 @@ class MooncakeStoreScheduler:
         }
         self._boundary_state_group_ids = frozenset(mamba_groups)
         if (
-            mamba_groups
-            and self.save_decode_cache
-            and vllm_config.cache_config.prefix_cache_retention_interval == 0
+            self.save_decode_cache
+            and mamba_groups
+            and kv_cache_config.prefix_cache_retention_interval == 0
         ):
-            logger.warning(
-                "save_decode_cache is on for a hybrid model, but "
-                "prefix_cache_retention_interval=0 retains no Mamba boundary, "
-                "so an external prefix hit can never complete. Set "
-                "--prefix-cache-retention-interval=%d to save decode boundaries.",
-                self._block_size,
-            )
+            # Decode checkpoints become reusable Store boundaries.
+            kv_cache_config.prefix_cache_retention_interval = self._block_size
 
         # Mirrors MooncakeStoreConnector._capacity_only.
         self._capacity_only = (
@@ -591,11 +586,7 @@ class MooncakeStoreScheduler:
                 "A null block cannot back a boundary put"
             )
             if req_meta.token_len_chunk:
-                # Normal prefix save: pin all non-Mamba sources for retries.
-                # Every allocated block is referenced, not just the ones covering
-                # this job's token range: a rank resumes from its own last
-                # successful offset, which lags the scheduler's whenever a save was
-                # skipped or failed, so it may read anywhere below the range.
+                # Each rank may retry from an earlier successful save offset.
                 block_ids.extend(
                     block_id
                     for group_id, group in enumerate(req_meta.block_ids)
@@ -630,7 +621,9 @@ class MooncakeStoreScheduler:
                 "Partial-tail offloads for one request must share a boundary"
             )
         boundary_tokens = next(iter(boundaries))
-        if not self._claims_boundary(tracker, boundary_tokens):
+        if not self.save_decode_cache and boundary_tokens > tracker.prefill_end_tokens:
+            # Without decode saves every other group stops saving at
+            # ``prefill_end_tokens``, so a mamba-only key past it is dead weight.
             return False
 
         mamba_puts: list[BoundaryPut] = []
@@ -684,17 +677,6 @@ class MooncakeStoreScheduler:
         # The store job owns exact block refs, so request cleanup need not wait.
         return False
 
-    def _claims_boundary(self, tracker: RequestTracker, boundary_tokens: int) -> bool:
-        """Whether a mamba boundary hand-off can complete a joint hybrid hit.
-
-        Without decode saves every other group stops saving at
-        ``prefill_end_tokens``, so a mamba-only key past it is dead weight; a
-        resumed request re-prefills its generated tokens, which is why that
-        window is not the prompt length. With ``save_decode_cache`` every group
-        saves each block as it fills, so every retained boundary is claimed.
-        """
-        return self.save_decode_cache or boundary_tokens <= tracker.prefill_end_tokens
-
     def _handle_boundary_state_offloads(
         self,
         offloads: dict[str, list[tuple[int, int, int]]],
@@ -719,7 +701,10 @@ class MooncakeStoreScheduler:
                 continue
             accepted: list[BoundaryPut] = []
             for group_id, block_id, boundary_tokens in entries:
-                if not self._claims_boundary(tracker, boundary_tokens):
+                is_decode_boundary = boundary_tokens > tracker.prefill_end_tokens
+                if is_decode_boundary and not self.save_decode_cache:
+                    continue
+                if not is_decode_boundary and self.kv_role == "kv_consumer":
                     continue
                 if block_id == NULL_BLOCK_ID:
                     continue
