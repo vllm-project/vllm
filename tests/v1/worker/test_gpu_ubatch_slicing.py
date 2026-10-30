@@ -29,6 +29,9 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.forward_context import create_forward_context
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsCapturer,
+)
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker import gpu_ubatch_wrapper as legacy_gpu_ubatch_wrapper
@@ -45,6 +48,7 @@ from vllm.v1.worker.gpu.ubatch_utils import (
     UBatchState,
     _slice_input_batch,
     create_ubatch_slices,
+    merge_ubatch_outputs,
     slice_model_inputs,
 )
 from vllm.v1.worker.ubatch_utils import (
@@ -52,7 +56,11 @@ from vllm.v1.worker.ubatch_utils import (
     maybe_create_ubatch_slices,
     split_attn_metadata,
 )
-from vllm.v1.worker.ubatching import dbo_current_ubatch_id, dbo_yield
+from vllm.v1.worker.ubatching import (
+    dbo_current_ubatch_id,
+    dbo_register_recv_hook,
+    dbo_yield,
+)
 
 MAX_NUM_REQS = 32
 MAX_NUM_TOKENS = 128
@@ -592,17 +600,34 @@ def test_runner_allocates_one_buffer_pair_per_microbatch():
 class _YieldingModel(torch.nn.Module):
     """Toy model that hands off to the other microbatch mid-forward."""
 
-    def __init__(self, trace: list[tuple[str, int]]):
+    def __init__(
+        self,
+        trace: list[tuple[str, int]],
+        capturer: RoutedExpertsCapturer | None = None,
+    ):
         super().__init__()
         self.trace = trace
+        self.capturer = capturer
 
     def forward(self, input_ids, positions, intermediate_tensors=None, **kwargs):
         self.trace.append(("enter", dbo_current_ubatch_id()))
         out = input_ids.float().unsqueeze(-1) * 2 + positions.float().unsqueeze(-1)
         # Stands in for the expert all-to-all handoff point.
         dbo_yield()
+        if self.capturer is not None:
+            self.capturer.capture(0, input_ids.view(-1, 1).int())
         self.trace.append(("exit", dbo_current_ubatch_id()))
         return out
+
+
+def _make_capturer(num_tokens: int, device: torch.device) -> RoutedExpertsCapturer:
+    capturer = RoutedExpertsCapturer.__new__(RoutedExpertsCapturer)
+    capturer.dp_rank = 0
+    capturer.tp_size = 1
+    capturer.device_buffer = torch.full(
+        (num_tokens, 1, 1), -1, dtype=torch.int32, device=device
+    )
+    return capturer
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
@@ -622,7 +647,8 @@ def test_ubatch_runner_overlaps_and_matches_single_batch():
     )
 
     trace: list[tuple[str, int]] = []
-    model = _YieldingModel(trace)
+    capturer = _make_capturer(16, device)
+    model = _YieldingModel(trace, capturer)
     output = runner.run(model, model_inputs, ubatch_state)
 
     expected = model_inputs["input_ids"].float().unsqueeze(-1) * 2 + model_inputs[
@@ -632,14 +658,31 @@ def test_ubatch_runner_overlaps_and_matches_single_batch():
 
     # Both microbatches reach the handoff before either finishes.
     assert trace == [("enter", 0), ("enter", 1), ("exit", 0), ("exit", 1)]
+    torch.testing.assert_close(
+        capturer.device_buffer[:, 0, 0], model_inputs["input_ids"].int()
+    )
+
+
+def test_merge_keeps_aux_hidden_states_per_layer():
+    # EAGLE3 and DFlash targets return (hidden_states, [aux per layer]).
+    hidden = torch.arange(6.0).view(6, 1)
+    aux = [torch.arange(6.0).view(6, 1) + 10 * i for i in range(3)]
+    merged_hidden, merged_aux = merge_ubatch_outputs(
+        [(hidden[:2], [x[:2] for x in aux]), (hidden[2:], [x[2:] for x in aux])]
+    )
+    torch.testing.assert_close(merged_hidden, hidden)
+    assert len(merged_aux) == len(aux)
+    for merged, expected in zip(merged_aux, aux):
+        torch.testing.assert_close(merged, expected)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
-def test_ubatch_runner_names_the_microbatch_that_failed():
+@pytest.mark.parametrize("failed_ubatch", [0, 1])
+def test_ubatch_runner_names_the_microbatch_that_failed(failed_ubatch):
     """A failing microbatch surfaces as a named error, not a downstream KeyError.
 
-    The model here never yields, so the microbatches run back to back and no
-    handoff is left outstanding when one of them dies. A microbatch that fails
+    The first recorded failure is reported, not microbatch 0's later error from
+    registering a recv hook on the exited microbatch 1. A microbatch that fails
     *while its sibling is parked at a yield* hangs the step instead -- the
     shared handoff protocol in `ubatching.py` has no way to unwind a parked
     microbatch, and the V1 runner has the same gap. Fixing that means changing
@@ -648,12 +691,19 @@ def test_ubatch_runner_names_the_microbatch_that_failed():
     vllm_config = _make_dbo_config()
     device = torch.device("cuda:0")
     runner = _make_execution_runner(vllm_config)
+    failed_threads: list[threading.Thread] = []
 
     class _FailingModel(torch.nn.Module):
         def forward(self, input_ids, positions, **kwargs):
-            if dbo_current_ubatch_id() == 0:
+            if dbo_current_ubatch_id() == failed_ubatch:
+                failed_threads.append(threading.current_thread())
                 raise ValueError("boom")
-            return input_ids.float().unsqueeze(-1)
+            if failed_ubatch == 0:
+                return input_ids.float().unsqueeze(-1)
+            dbo_yield()
+            failed_threads[0].join(timeout=5.0)
+            assert not failed_threads[0].is_alive()
+            dbo_register_recv_hook(lambda: None)
 
     model_inputs = _make_model_inputs(8, device)
     ubatch_state = _make_ubatch_state(
@@ -680,7 +730,7 @@ def test_ubatch_runner_names_the_microbatch_that_failed():
     assert not caller.is_alive(), "UBatchRunner.run hung on a failing microbatch"
 
     assert isinstance(result["error"], RuntimeError)
-    assert "Microbatch 0" in str(result["error"])
+    assert f"Microbatch {failed_ubatch}" in str(result["error"])
     assert isinstance(result["error"].__cause__, ValueError)
 
 
@@ -850,7 +900,8 @@ def test_capturable_run_replays_as_a_cudagraph():
         ],
     )
 
-    model = _YieldingModel([])
+    capturer = _make_capturer(num_tokens, device)
+    model = _YieldingModel([], capturer)
     graph = torch.cuda.CUDAGraph()
     finish = runner.begin_capturable_run(
         model, model_inputs, ubatch_state, for_capture=True
@@ -867,6 +918,7 @@ def test_capturable_run_replays_as_a_cudagraph():
         (num_tokens, 1), 3 * 2 + 5, dtype=torch.float32, device=device
     )
     torch.testing.assert_close(captured, expected)
+    assert (capturer.device_buffer == 3).all()
 
 
 def _request_slices(input_batch: InputBatch) -> list[slice]:
@@ -964,3 +1016,36 @@ def test_microbatched_graph_needs_every_rank_to_reach_the_split():
     assert desc.cg_mode == CUDAGraphMode.NONE
     assert desc.num_ubatches == 2
     assert dp_sync_state is not None and dp_sync_state.eager
+
+
+@pytest.mark.parametrize("num_reqs", [3, 4, 5])
+def test_uniform_spec_decode_batches_split_on_request_boundaries(num_reqs: int):
+    # Verifying 2 drafts per request: 3 tokens each. A midpoint split would cut
+    # a request in two whenever num_reqs is odd, leaving neither microbatch a
+    # uniform decode.
+    query_len = 3
+    input_batch = _make_input_batch(
+        [query_len] * num_reqs, [64] * num_reqs, _make_buffers()
+    )
+    slices = create_ubatch_slices(input_batch, 2, uniform_token_count=query_len)
+    first, second = slices
+    assert first.token_slice.stop % query_len == 0
+    assert first.request_slice.stop == second.request_slice.start
+    assert first.num_tokens == query_len * (num_reqs // 2)
+    assert second.token_slice.stop == query_len * num_reqs
+
+
+def test_single_token_or_unknown_uniform_count_keeps_midpoint_split():
+    input_batch = _make_input_batch([3] * 5, [64] * 5, _make_buffers())
+    for uniform_token_count in (None, 1):
+        first, _ = create_ubatch_slices(
+            input_batch, 2, uniform_token_count=uniform_token_count
+        )
+        assert first.token_slice.stop == 15 // 2
+
+
+def test_too_few_requests_to_align_keeps_midpoint_split():
+    # One request cannot be split on a request boundary.
+    input_batch = _make_input_batch([4], [64], _make_buffers())
+    first, _ = create_ubatch_slices(input_batch, 2, uniform_token_count=4)
+    assert first.token_slice.stop == 2

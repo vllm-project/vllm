@@ -85,7 +85,8 @@ void get_cutlass_moe_mm_data(
     torch::stable::Tensor& output_permutation, const int64_t num_experts,
     const int64_t n, const int64_t k,
     const std::optional<torch::stable::Tensor>& blockscale_offsets,
-    const bool is_gated);
+    const bool is_gated,
+    const std::optional<torch::stable::Tensor>& sorted_expert_ids);
 
 void get_cutlass_moe_mm_problem_sizes_from_expert_offsets(
     const torch::stable::Tensor& expert_first_token_offset,
@@ -412,7 +413,18 @@ void fused_minimax_m3_qknorm_rope_kv_insert(
     const std::string& kv_cache_dtype, bool skip_index_branch,
     std::optional<torch::stable::Tensor> q_fp8_out, double q_fp8_scale,
     std::optional<torch::stable::Tensor> kv_k_scale,
-    std::optional<torch::stable::Tensor> kv_v_scale);
+    std::optional<torch::stable::Tensor> kv_v_scale, bool write_qkv);
+
+void fused_minimax_m3_dspark_context_kv(
+    torch::stable::Tensor const& all_kv,
+    torch::stable::Tensor const& k_norm_weight,
+    torch::stable::Tensor const& cos_sin_cache,
+    torch::stable::Tensor const& positions,
+    torch::stable::Tensor const& slot_mapping, torch::stable::Tensor& kv_cache,
+    torch::stable::Tensor const& cache_offsets,
+    torch::stable::Tensor const& k_scale,
+    torch::stable::Tensor const& scale_offsets, int64_t rotary_dim, double eps,
+    const std::string& kv_cache_dtype);
 
 #ifdef VLLM_ENABLE_FUSED_KDA_DECODE
 void fused_kda_decode(
@@ -712,7 +724,7 @@ void concat_and_cache_mla(torch::stable::Tensor& kv_c,
                           torch::stable::Tensor& kv_cache,
                           torch::stable::Tensor& slot_mapping,
                           const std::string& kv_cache_dtype,
-                          torch::stable::Tensor& scale);
+                          torch::stable::Tensor& scale, bool skip_scale);
 
 void concat_and_cache_mla_grouped(
     torch::stable::Tensor& kv_c, torch::stable::Tensor& k_pe,
@@ -745,13 +757,15 @@ void hisparse_resolve_residency(
     std::optional<torch::stable::Tensor> const& swap_device_physical_rows,
     std::optional<torch::stable::Tensor> const& swap_counts,
     std::optional<torch::stable::Tensor> const& resident_block_table,
-    int64_t resident_block_size, int64_t resident_null_block);
+    int64_t resident_block_size, int64_t resident_null_block,
+    std::optional<torch::stable::Tensor> const& num_valid_rows);
 
 void hisparse_invalidate_written_slots(
-    torch::stable::Tensor& device_global_indices,
+    torch::stable::Tensor const& device_global_indices_ptrs,
     torch::stable::Tensor const& request_state_indices,
     torch::stable::Tensor const& req_id_per_token,
-    torch::stable::Tensor const& written_slots);
+    torch::stable::Tensor const& written_slots, int64_t num_state_rows,
+    int64_t region_stride);
 
 void hisparse_gather_plan(
     torch::stable::Tensor const& host_cache, torch::stable::Tensor& hot_cache,
@@ -825,7 +839,8 @@ void cp_gather_and_upconvert_nvfp4_kv_cache(
     torch::stable::Tensor const& dst,               // [TOT_TOKENS, 576]
     torch::stable::Tensor const& block_table,       // [BATCH, BLOCK_INDICES]
     torch::stable::Tensor const& workspace_starts,  // [BATCH]
-    int64_t batch_size);
+    int64_t batch_size,
+    std::optional<torch::stable::Tensor> seq_starts = std::nullopt);
 
 // Indexer K quantization and cache function
 void indexer_k_quant_and_cache(
