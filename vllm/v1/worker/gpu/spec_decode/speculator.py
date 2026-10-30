@@ -3,7 +3,7 @@
 import copy
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -44,7 +44,10 @@ from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 from vllm.v1.worker.utils import AttentionGroup
 
 if TYPE_CHECKING:
+    from vllm.sampling_params import SamplingParams
+    from vllm.v1.structured_output.backend_types import StructuredOutputKey
     from vllm.v1.worker.gpu.pcp_manager import PCPManager
+    from vllm.v1.worker.gpu.sample.output import SamplerOutput
     from vllm.v1.worker.gpu.sample.sampler import Sampler
 
 logger = init_logger(__name__)
@@ -63,10 +66,144 @@ def _target_feeds_hc_residual(vllm_config: VllmConfig) -> bool:
     return hasattr(target_cls, "get_mtp_target_hidden_states")
 
 
+@dataclass(frozen=True)
+class DraftProposalGrammarRequest:
+    """Serializable structured-output setup for a worker-local grammar bridge."""
+
+    request_id: str
+    backend: str | None
+    structured_output_key: "StructuredOutputKey | None"
+    stop_token_ids: tuple[int, ...]
+
+    @classmethod
+    def from_sampling_params(
+        cls,
+        request_id: str,
+        sampling_params: "SamplingParams | None",
+    ) -> "DraftProposalGrammarRequest":
+        if sampling_params is None:
+            return cls(request_id, None, None, ())
+
+        structured_outputs = sampling_params.structured_outputs
+        if structured_outputs is None or structured_outputs.all_constraints_none():
+            return cls(request_id, None, None, ())
+
+        from vllm.v1.structured_output.request import get_structured_output_key
+
+        return cls(
+            request_id=request_id,
+            backend=structured_outputs._backend,
+            structured_output_key=get_structured_output_key(structured_outputs),
+            stop_token_ids=tuple(sorted(sampling_params.all_stop_token_ids)),
+        )
+
+
+@dataclass(frozen=True)
+class DraftProposalGrammarContext:
+    """Verified output made available before the next draft proposal.
+
+    ``sampled_token_ids[i, :num_sampled[i]]`` is the verified output for
+    ``request_ids[i]``. A bridge must advance its host state from those tokens
+    and install its next-token device constraint before returning readiness.
+    """
+
+    request_ids: tuple[str, ...]
+    request_state_indices: torch.Tensor
+    sampled_token_ids: torch.Tensor
+    num_sampled: torch.Tensor
+    num_rejected: torch.Tensor
+
+    def __post_init__(self) -> None:
+        num_reqs = len(self.request_ids)
+        if len(set(self.request_ids)) != num_reqs:
+            raise ValueError(
+                "Draft proposal grammar context has duplicate request IDs."
+            )
+        if (
+            self.sampled_token_ids.ndim != 2
+            or self.sampled_token_ids.shape[0] != num_reqs
+        ):
+            raise ValueError(
+                "sampled_token_ids must have one row per draft proposal request."
+            )
+        for name, tensor in (
+            ("request_state_indices", self.request_state_indices),
+            ("num_sampled", self.num_sampled),
+            ("num_rejected", self.num_rejected),
+        ):
+            if tensor.ndim != 1 or tensor.shape[0] != num_reqs:
+                raise ValueError(
+                    f"{name} must have one entry per draft proposal request."
+                )
+            if tensor.device != self.sampled_token_ids.device:
+                raise ValueError(f"{name} must be on the sampled-token device.")
+
+    @classmethod
+    def from_sampler_output(
+        cls,
+        input_batch: InputBatch,
+        sampler_output: "SamplerOutput",
+        num_sampled: torch.Tensor,
+        num_rejected: torch.Tensor,
+    ) -> "DraftProposalGrammarContext":
+        return cls(
+            request_ids=tuple(input_batch.req_ids),
+            request_state_indices=input_batch.idx_mapping,
+            sampled_token_ids=sampler_output.sampled_token_ids,
+            num_sampled=num_sampled,
+            num_rejected=num_rejected,
+        )
+
+
+def resolve_draft_proposal_grammar_readiness(
+    context: DraftProposalGrammarContext,
+    readiness: torch.Tensor | None,
+) -> torch.Tensor:
+    """Validate bridge readiness, withholding every draft when it is absent."""
+    if readiness is None:
+        return torch.zeros(
+            len(context.request_ids),
+            dtype=torch.bool,
+            device=context.sampled_token_ids.device,
+        )
+    if not torch.is_tensor(readiness):
+        raise TypeError("Draft proposal grammar readiness must be a torch.Tensor.")
+    if readiness.dtype != torch.bool:
+        raise ValueError("Draft proposal grammar readiness must have dtype bool.")
+    if readiness.ndim != 1 or readiness.shape[0] != len(context.request_ids):
+        raise ValueError(
+            "Draft proposal grammar readiness must have one entry per request."
+        )
+    if readiness.device != context.sampled_token_ids.device:
+        raise ValueError("Draft proposal grammar readiness is on the wrong device.")
+    return readiness
+
+
+def suppress_unready_draft_tokens(
+    draft_tokens: torch.Tensor,
+    readiness: torch.Tensor,
+) -> None:
+    """Replace every unready proposal row with speculative-padding tokens."""
+    if draft_tokens.ndim != 2:
+        raise ValueError("Draft proposal tokens must be a rank-two tensor.")
+    if readiness.dtype != torch.bool:
+        raise ValueError("Draft proposal grammar readiness must have dtype bool.")
+    if readiness.shape != (draft_tokens.shape[0],):
+        raise ValueError(
+            "Draft proposal grammar readiness must have one entry per draft row."
+        )
+    if readiness.device != draft_tokens.device:
+        raise ValueError("Draft proposal grammar readiness is on the wrong device.")
+    draft_tokens.masked_fill_(~readiness[:, None], -1)
+
+
 class BaseSpeculator(ABC):
     num_query_per_req: int = 1
     # Extra query slots reserved per request outside the regular queries.
     num_extra_query_per_req: int = 0
+    # An opt-in bridge advances host grammar state after verification and
+    # provides device-side constraints for the next proposal.
+    uses_draft_proposal_grammar_bridge: bool = False
 
     @abstractmethod
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
@@ -106,6 +243,30 @@ class BaseSpeculator(ABC):
         num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
         pass
+
+    def add_draft_proposal_grammar_request(
+        self, request: DraftProposalGrammarRequest
+    ) -> None:
+        """Register a request's serializable structured-output setup."""
+        return None
+
+    def remove_draft_proposal_grammar_request(self, request_id: str) -> None:
+        """Discard a request's host grammar state."""
+        return None
+
+    def prepare_draft_proposal_grammar(
+        self, context: DraftProposalGrammarContext
+    ) -> torch.Tensor | None:
+        """Install exact next-token constraints before ``propose``.
+
+        This runs after target verification and request-state postprocessing.
+        The verifier's grammar bitmask is intentionally not provided: its rows
+        precede the accepted bonus token and cannot constrain the next draft.
+        Return a device bool tensor with one entry per request after installing
+        constraints. A false entry, or ``None``, makes the runner withhold that
+        row's draft tokens.
+        """
+        return None
 
 
 class DraftModelSpeculator(BaseSpeculator):
