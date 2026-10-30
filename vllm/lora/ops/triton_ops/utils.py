@@ -12,7 +12,8 @@ import torch
 from vllm import envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.math_utils import next_power_of_2
+from vllm.utils.math_utils import cdiv, next_power_of_2, prev_power_of_2
+from vllm.utils.mem_utils import get_max_shared_memory_bytes
 from vllm.utils.torch_utils import async_tensor_h2d
 
 logger = init_logger(__name__)
@@ -310,6 +311,95 @@ def get_lora_op_configs(
 
     assert config_data is not None
     return config_data
+
+
+FUSED_MOE_LORA_TWO_KERNEL_MAX_TOKENS = 256
+
+
+def get_fused_moe_lora_two_kernel_config(
+    op_type: str,
+    num_tokens: int,
+    top_k: int,
+    num_experts: int,
+    max_loras: int,
+    num_slices: int,
+    in_features: int,
+    out_features: int,
+    rank: int,
+) -> dict[str, int | None]:
+    device = torch.accelerator.current_device_index()
+    max_shared_memory = 0
+    if current_platform.is_cuda_alike():
+        max_shared_memory = get_max_shared_memory_bytes(device)
+    return _fused_moe_lora_two_kernel_config(
+        op_type,
+        num_tokens,
+        top_k,
+        num_experts,
+        max_loras,
+        num_slices,
+        in_features,
+        out_features,
+        rank,
+        current_platform.num_compute_units(device),
+        max_shared_memory,
+    )
+
+
+@functools.lru_cache
+def _fused_moe_lora_two_kernel_config(
+    op_type: str,
+    num_tokens: int,
+    top_k: int,
+    num_experts: int,
+    max_loras: int,
+    num_slices: int,
+    in_features: int,
+    out_features: int,
+    rank: int,
+    num_sms: int,
+    max_shared_memory: int,
+) -> dict[str, int | None]:
+    block_m = 16
+    pairs = num_tokens * top_k
+    m_blocks = max(1, min(pairs, max_loras * num_experts + pairs // block_m))
+    num_stages = 2 if current_platform.is_rocm() else 3
+    if op_type.endswith("shrink"):
+        block_n = max(16, min(64, next_power_of_2(rank)))
+        programs = m_blocks * num_slices * cdiv(rank, block_n)
+        split_k = min(16, max(1, prev_power_of_2(2 * num_sms // programs)))
+        block_k = max(64, min(256, prev_power_of_2(in_features // split_k)))
+        while (
+            block_k > 64
+            and max_shared_memory
+            and num_stages * (block_m + block_n) * block_k * 2 > max_shared_memory
+        ):
+            block_k //= 2
+        split_k = max(split_k, next_power_of_2(cdiv(in_features, 16 * block_k)))
+        split_k = min(split_k, 16, max(1, prev_power_of_2(in_features // block_k)))
+        return {
+            "BLOCK_SIZE_M": block_m,
+            "BLOCK_SIZE_N": block_n,
+            "BLOCK_SIZE_K": block_k,
+            "GROUP_SIZE_M": 1,
+            "SPLIT_K": 1 if is_batch_invariant else split_k,
+            "num_warps": 4,
+            "num_stages": num_stages,
+        }
+    block_n = 256
+    while block_n > 64 and m_blocks * num_slices * cdiv(out_features, block_n) < (
+        num_sms
+    ):
+        block_n //= 2
+    return {
+        "BLOCK_SIZE_M": block_m,
+        "BLOCK_SIZE_N": block_n,
+        "BLOCK_SIZE_K": max(16, min(32, next_power_of_2(rank))),
+        "GROUP_SIZE_M": 1,
+        "SPLIT_K": 1,
+        "num_warps": 4,
+        "num_stages": 2,
+    }
 
 
 @lru_cache
