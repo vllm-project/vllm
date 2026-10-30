@@ -110,16 +110,12 @@ class StandaloneARSpeculator(DraftModelSpeculator):
         cache_config = self.vllm_config.cache_config
         if spec.kv_cache_dtype is not None:
             cache_config = replace(cache_config, cache_dtype=spec.kv_cache_dtype)
-        kernel_config = self.vllm_config.kernel_config
-        if spec.batch_invariant is not None:
-            kernel_config = replace(kernel_config, batch_invariant=spec.batch_invariant)
 
         draft_vllm_config = replace(
             self.vllm_config,
             model_config=self.draft_model_config,
             quant_config=None,
             cache_config=cache_config,
-            kernel_config=kernel_config,
             parallel_config=replace(
                 spec.draft_parallel_config,
                 rank=self.vllm_config.parallel_config.rank,
