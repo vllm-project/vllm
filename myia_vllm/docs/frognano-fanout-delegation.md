@@ -6,11 +6,11 @@ usages où le modèle est **réellement fiable**, livrer des **sous-agents tout 
 Critère d'acceptation d'un usage : **le coût de vérification doit rester très inférieur au coût
 de faire soi-même**.
 
-## 1. Classes d'usage (état mesuré au 29/10 — 21 mesures)
+## 1. Classes d'usage (état mesuré au 30/10 — 22 mesures)
 
 | Classe | Statut | Preuve |
 |---|---|---|
-| **Extraction verbatim en fan-out** (sortie = sous-ensemble exact de l'entrée) | **VALIDÉE sur corpus de logs** | 72/73 au pilote, 216/217 puis 100 % sur 735 lignes, 49/49 sur région inédite, **18/18 post-reboot (21e mesure)** |
+| **Extraction verbatim en fan-out** (sortie = sous-ensemble exact de l'entrée) | **VALIDÉE sur corpus de logs — verbatimité NON stable (22e)** | 72/73 au pilote, 216/217 puis 100 % sur 735 lignes, 49/49 sur région inédite, 18/18 post-reboot (21e), **22e : contenu 17/17 exact mais préfixe horodaté supprimé sur 17/17 → 0/17 verbatim** |
 | **Étiquetage d'un champ structurel** (préfixer chaque ligne par la valeur de son champ, p.ex. `machine=`) | **VALIDÉE — 30/30** | 11e mesure : 30 lignes, distribution recomptée identique, **seau « AUCUN » (champ absent) traité correctement** |
 | Tally catégoriel, étiquette neutre (`FIN`, pas `DONE`) | Validée sur 1 forme (8 lignes, 2/2 exact) | cause `DONE` confirmée 25/10 20:05Z |
 | Extraction verbatim sur **prose** (lignes-paragraphe de 1-2 Ko) | **CONDITIONNELLE** — 23 % seul, 60 % après découpage en phrases, **100 % avec l'étage de vérification** | 9e mesure |
@@ -325,6 +325,46 @@ Trois apports de cette mesure, au-delà du score :
 
 Ce que cette mesure **ne** prouve pas : rien sur la prose, sur le sémantique, ni sur un seuil
 sur une valeur de champ — les classes refusées le restent (cf. §1).
+
+### Vingt-deuxième mesure — R1 : le préfixe horodaté **n'est pas** conservé de façon systématique (30/10 01:0x locale)
+
+Corpus : `myia_vllm/_logs/gpu-governor.log`, **capture par commande** (`tail -40`), 40 lignes
+couvrant 29/10 03:17 → 30/10 01:02. Mission : « verbatim toute ligne contenant `WARN`, puis
+toute ligne contenant `INFO` ». Oracle `grep` indépendant = **16 `WARN` + 1 `INFO` = 17**.
+
+Résultat : **17/17 justes sur le fond** (16 `WARN`, 1 `INFO`, 0 manquante, 0 extra, 0 fabrication)
+mais **0/17 verbatim** — le mini a **supprimé la colonne de tête horodatée** (20 caractères) des
+17 lignes rendues. Étiquette `model_used: frognano-4b` contrôlée sur la réponse.
+
+**Le point qui change la lecture de la classe** : la 21ᵉ mesure (29/10 soir) portait sur **le
+même log, le même type de corpus, 40 lignes sur 40 commençant par une date** — et là, la sortie
+avait **conservé** les horodatages (18/18 exactes, `vigie_out.txt` recontrôlé). L'écart n'est donc
+**pas une propriété du corpus** : c'est une **variabilité d'un appel à l'autre**. « La verbatimité
+est stable sur logs » ne tient plus ; « le contenu est juste » tient sur les deux mesures.
+
+Trois apports :
+
+1. **Ce n'est pas une dérive de contenu, c'est une normalisation de colonne.** Zéro fabrication,
+   zéro manquante, la ligne `INFO boot change` isolée entre deux `HEARTBEAT` est bien rendue et
+   les 23 `HEARTBEAT` bien absents — le filtrage est parfait. Ce que le mini fait, c'est «
+   nettoyer » une colonne uniforme qu'il juge décorative. C'est une **transformation**, donc la
+   sortie **n'est pas** un sous-ensemble de l'entrée : la garantie « sortie = sous-ensemble
+   exact » doit être vérifiée **à chaque appel**, jamais supposée.
+2. **Un préfixe supprimé ne doit pas se lire comme une erreur de sélection.** Le diagnostic
+   « le mini a normalisé » et le diagnostic « le mini s'est trompé » demandent des preuves
+   opposées : ici, `Compare-Object` sur les lignes brutes affiche 34 écarts, et il faut vérifier
+   *puis* normaliser pour conclure que le contenu est juste.
+3. **L'instrument de vérification a failli deux fois avant le modèle.** Mes deux premières
+   comparaisons ont produit **34 faux écarts**, parce que mon `-replace` de normalisation
+   remplaçait le préfixe par **une espace** au lieu de la chaîne vide ; seul un découpage
+   positionnel (`.Substring(20)`) a rendu le verdict (17/17 identiques). *Un préfixe de 20
+   caractères n'est pas un détail cosmétique.* C'est une classe de risque à part, à côté du
+   comptage : l'erreur était dans le juge, pas dans le producteur — et un juge qui sur-déclare
+   34 écarts sur une sortie parfaite fait perdre le temps de la ré-analyse.
+
+Ce que cette mesure **ne** prouve pas : que le comportement est aléatoire (2 mesures —
+1 passe, 1 échec — ne suffisent pas pour une loi) ; rien sur la prose, le sémantique, ni les
+classes refusées (cf. §1), qui restent refusées.
 
 ### Deuxième démo — sweep entropie docs (25/10 soir, `mini-sweeper`)
 
