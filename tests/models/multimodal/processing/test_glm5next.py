@@ -9,9 +9,14 @@ while ``video_grid_thw`` decides how many rows the vision tower produces. If
 the two disagree they collide in ``_merge_multimodal_embeddings``, which raises
 inside a worker and takes the engine down with it.
 
-The checks below are arithmetic: no weights, no GPU.
+The grid checks below are arithmetic: no weights, no GPU.
+``test_glm5_metadata_only_roundtrip`` loads the processor and compares
+raw media with metadata-only prompts.
 """
 
+import json
+
+import numpy as np
 import pytest
 import torch
 from PIL import Image
@@ -21,11 +26,177 @@ from transformers.models.glm5_next.video_processing_glm5_next import (
 )
 from transformers.video_utils import VideoMetadata
 
+from vllm.distributed.ec_transfer.ec_connector.utils import (
+    PlaceholderMetadataResolver,
+    collect_ec_item_metadata,
+)
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.platforms import current_platform
+from vllm.renderers.chat_utils.item_tracker import _get_embeds_data
 
+from ....multimodal.utils import random_image, random_video
 from ...utils import build_model_context
+
+
+def _video_with_metadata(frames: np.ndarray):
+    num_frames = len(frames)
+    return (
+        frames,
+        {
+            "total_num_frames": num_frames,
+            "fps": 2.0,
+            "duration": num_frames / 2.0,
+            "video_backend": "opencv",
+            "frames_indices": list(range(num_frames)),
+            "do_sample_frames": True,
+        },
+    )
+
+
+@pytest.mark.parametrize("modality", ["image", "video"])
+def test_glm5_metadata_only_roundtrip(modality):
+    """EC metadata reproduces the raw prompt for image and video."""
+    rng = np.random.RandomState(0)
+    if modality == "image":
+        mm_data = {"image": random_image(rng, 64, 65)}
+        limit = {"image": 1, "video": 0}
+        grid_key = "image_grid_thw"
+    else:
+        mm_data = {"video": _video_with_metadata(random_video(rng, 4, 5, 64, 65))}
+        limit = {"image": 0, "video": 1}
+        grid_key = "video_grid_thw"
+
+    ctx = build_model_context(
+        "zai-org/GLM-5.3-Flash",
+        limit_mm_per_prompt=limit,
+    )
+    mm_config = ctx.model_config.multimodal_config
+    mm_config.enable_mm_embeds = True
+    mm_config.allow_missing_mm_embeddings = True
+    processor = MULTIMODAL_REGISTRY.create_processor(
+        ctx.model_config,
+        tokenizer=ctx.tokenizer,
+    )
+    prompt = processor.dummy_inputs.get_dummy_text({modality: 1})
+    raw = processor(
+        prompt,
+        mm_items=processor.info.parse_mm_data(mm_data),
+        hf_processor_mm_kwargs={},
+    )
+    features = [
+        MultiModalFeatureSpec(
+            data=item,
+            modality=modality,
+            identifier=str(index),
+            mm_position=position,
+        )
+        for index, (item, position) in enumerate(
+            zip(raw["mm_kwargs"][modality], raw["mm_placeholders"][modality])
+        )
+    ]
+    published = collect_ec_item_metadata(
+        features, PlaceholderMetadataResolver(ctx.model_config)
+    )
+    metadata = json.loads(
+        json.dumps([entry["metadata"] for entry in published.values()])
+    )
+    assert len(metadata) == 1
+    assert grid_key in metadata[0]
+    if modality == "video":
+        assert metadata[0]["timestamps"]
+    mm_data_remote = _get_embeds_data(modality, metadata, processor)
+    remote = processor(
+        prompt,
+        mm_items=processor.info.parse_mm_data({modality: mm_data_remote}),
+        hf_processor_mm_kwargs={},
+    )
+    assert remote["prompt_token_ids"] == raw["prompt_token_ids"]
+    assert remote["mm_placeholders"] == raw["mm_placeholders"]
+
+    mm_config.allow_missing_mm_embeddings = False
+    ordinary_processor = MULTIMODAL_REGISTRY.create_processor(
+        ctx.model_config,
+        tokenizer=ctx.tokenizer,
+    )
+    with pytest.raises(ValueError, match="should contain the fields"):
+        ordinary_processor.info.parse_mm_data({modality: mm_data_remote})
+
+
+def test_glm5_raw_video_timestamps_follow_sampled_frames():
+    """Input frames_indices are the pre-sample range, not the HF sample.
+
+    32 frames at 8 fps with ``frames_indices=range(32)`` and
+    ``do_sample_frames=True`` used to emit 16 timestamps for ``grid_t=4``.
+    """
+    rng = np.random.RandomState(0)
+    num_frames = 32
+    frames = rng.randint(0, 255, size=(num_frames, 64, 64, 3), dtype=np.uint8)
+    metadata = {
+        "total_num_frames": num_frames,
+        "fps": 8.0,
+        "duration": num_frames / 8.0,
+        "frames_indices": list(range(num_frames)),
+        "do_sample_frames": True,
+    }
+    mm_data = {"video": (frames, metadata)}
+    ctx = build_model_context(
+        "zai-org/GLM-5.3-Flash",
+        limit_mm_per_prompt={"image": 0, "video": 1},
+    )
+    mm_config = ctx.model_config.multimodal_config
+    mm_config.enable_mm_embeds = True
+    mm_config.allow_missing_mm_embeddings = True
+    processor = MULTIMODAL_REGISTRY.create_processor(
+        ctx.model_config,
+        tokenizer=ctx.tokenizer,
+    )
+    prompt = processor.dummy_inputs.get_dummy_text({"video": 1})
+    raw = processor(
+        prompt,
+        mm_items=processor.info.parse_mm_data(mm_data),
+        hf_processor_mm_kwargs={},
+    )
+    item = raw["mm_kwargs"]["video"][0].get_data()
+    grid = item["video_grid_thw"]
+    timestamps = item["timestamps"]
+    grid_t = int(grid.reshape(-1)[0] if hasattr(grid, "reshape") else grid[0])
+    if hasattr(timestamps, "reshape"):
+        timestamp_count = int(timestamps.reshape(-1).numel())
+    else:
+        flat = []
+        for entry in timestamps:
+            flat.extend(entry if isinstance(entry, list) else [entry])
+        timestamp_count = len(flat)
+    assert timestamp_count == grid_t
+    assert grid_t != num_frames // 2
+
+    features = [
+        MultiModalFeatureSpec(
+            data=mm_item,
+            modality="video",
+            identifier=str(index),
+            mm_position=position,
+        )
+        for index, (mm_item, position) in enumerate(
+            zip(raw["mm_kwargs"]["video"], raw["mm_placeholders"]["video"])
+        )
+    ]
+    published = collect_ec_item_metadata(
+        features, PlaceholderMetadataResolver(ctx.model_config)
+    )
+    published_metadata = json.loads(
+        json.dumps([entry["metadata"] for entry in published.values()])
+    )
+    mm_data_remote = _get_embeds_data("video", published_metadata, processor)
+    remote = processor(
+        prompt,
+        mm_items=processor.info.parse_mm_data({"video": mm_data_remote}),
+        hf_processor_mm_kwargs={},
+    )
+    assert remote["prompt_token_ids"] == raw["prompt_token_ids"]
+    assert remote["mm_placeholders"] == raw["mm_placeholders"]
 
 
 @pytest.fixture(scope="module")
@@ -143,6 +314,48 @@ def test_video_placeholders_match_encoder_rows_when_presampled(processor):
     assert len(timestamps) == grid_t
 
 
+def test_placeholder_rejects_timestamp_count_mismatch(processor):
+    """A timestamp list that is not one entry per temporal patch is refused."""
+    grid_thw = torch.tensor([4, 36, 46])
+    with pytest.raises(ValueError, match="video_grid_thw"):
+        processor.info._placeholder_from_timestamps([0, 1], grid_thw)
+
+
+def test_video_timestamps_follow_supplied_frame_indices(processor):
+    """When do_sample_frames is false, supplied indices win over a resample."""
+    info = processor.info
+    video_processor = info.get_video_processor()
+    temporal_patch_size = int(getattr(video_processor, "temporal_patch_size", 1) or 1)
+    fps = 8.0
+    indices = [0, 8, 80, 88]
+    metadata = {
+        "total_num_frames": 256,
+        "fps": fps,
+        "duration": 32.0,
+        "do_sample_frames": False,
+        "frames_indices": indices,
+    }
+
+    timestamps = info._get_video_second_idx_glm46v(metadata, 256)
+    resampled = info._get_video_second_idx_glm46v(
+        {
+            **{k: v for k, v in metadata.items() if k != "frames_indices"},
+            "do_sample_frames": True,
+        },
+        256,
+    )
+
+    num_frames = len(indices)
+    num_padded = num_frames + (-num_frames % temporal_patch_size)
+    grid_t = max(num_padded // temporal_patch_size, 1)
+    last = len(indices) - 1
+    expected = [
+        int(indices[min(i * temporal_patch_size, last)] / fps) for i in range(grid_t)
+    ]
+    assert timestamps == expected
+    assert timestamps != resampled
+
+
 def test_video_shorter_than_one_sampling_interval_is_rejected(processor):
     """A clip the sampler cannot pick a single frame from is a bad request."""
     with pytest.raises(ValueError, match="selected no frames"):
@@ -177,10 +390,12 @@ def test_mm_device_do_normalize():
 
     normalized_inputs = processor(prompt, mm_items=mm_items)
     normalized_values = normalized_inputs["mm_kwargs"].get_data()["pixel_values"]
+    assert isinstance(normalized_values, torch.Tensor)
 
     ctx.model_config.multimodal_config.mm_device_do_normalize = True
     raw_inputs = processor(prompt, mm_items=mm_items)
     raw_values = raw_inputs["mm_kwargs"].get_data()["pixel_values"]
+    assert isinstance(raw_values, torch.Tensor)
     assert raw_values.dtype == torch.uint8
 
     input_norm = build_mm_input_norm(ctx.model_config).to(device)
