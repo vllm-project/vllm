@@ -417,7 +417,7 @@ def test_rocm_aiter_shared_routed_router_without_shared_expert_gate(
     logits = (torch.randn((num_tokens, num_experts), device="cuda") * 3).to(dtype)
     # The last routed experts must stay selectable.
     last_experts = range(num_experts - num_shared, num_experts)
-    logits[0, -num_shared:] = 100.0
+    logits[0, -num_shared:] = 20.0
     hidden_states = torch.empty((num_tokens, 16), dtype=dtype, device="cuda")
     weights, ids = router.select_experts(hidden_states, logits)
 

@@ -103,12 +103,19 @@ class AiterSharedRoutedFusedMoERouter(BaseRouter):
             total_topk_weights = total_topk_weights[:M]
             total_topk_ids = total_topk_ids[:M]
 
-            # The kernel honors the row strides, so it fills the routed slots
-            # in place and leaves the pre-filled shared-expert slots untouched.
-            topk_func = dispatch_topk_softmax_func(use_rocm_aiter=True)
+            # Both kernels honor the row strides, so they fill the routed slots
+            # in place and leave the pre-filled shared-expert slots untouched.
+            topk_weights = total_topk_weights[:, :topk]
+            topk_ids = total_topk_ids[:, :topk]
+            topk_func = dispatch_topk_softmax_func(
+                use_rocm_aiter=True,
+                topk_weights=topk_weights,
+                topk_indices=topk_ids,
+                gating_output=router_logits,
+            )
             topk_func(
-                total_topk_weights[:, :topk],
-                total_topk_ids[:, :topk],
+                topk_weights,
+                topk_ids,
                 token_expert_indices,
                 router_logits,
                 self.renormalize,
