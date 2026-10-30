@@ -697,12 +697,17 @@ def _make_mla_hybrid_worker(
     return worker
 
 
-def _own_pairs(worker) -> tuple[list[int], list[int]]:
-    """The (regions, groups) a worker reads when paired with an identical peer."""
+def _own_region_pairs(worker) -> bw._RegionPairs:
+    """How a worker pairs its regions with an identical peer's."""
     metadata = msgspec.msgpack.decode(
         worker.xfer_handshake_metadata.agent_metadata_bytes, type=NixlAgentMetadata
     )
-    pairs = worker._pair_regions(metadata)
+    return worker._pair_regions(metadata)
+
+
+def _own_pairs(worker) -> tuple[list[int], list[int]]:
+    """The (regions, groups) a worker reads when paired with an identical peer."""
+    pairs = _own_region_pairs(worker)
     return pairs.local, pairs.group
 
 
@@ -1595,6 +1600,9 @@ def test_csa_linear_remote_ple_is_copied_whole():
     )
 
     worker = _make_csa_linear_ple_worker()
+    # Every region pairs, so the peer's SSM and PLE regions keep their indices.
+    pairs = _own_region_pairs(worker)
+    assert pairs.remote_regions == list(range(worker.num_regions))
     metadata = NixlAgentMetadata(
         engine_id="remote",
         agent_metadata=b"agent",
@@ -1619,6 +1627,7 @@ def test_csa_linear_remote_ple_is_copied_whole():
         metadata,
         tp_ratio=-2,
         transfer_info=SimpleNamespace(remote_physical_blocks_per_logical=1),
+        pairs=pairs,
     )
     assert descriptors.shape == (5, 5)
     # PLE run: 2 whole 256-byte pages at 0x10000, 0x10100.
@@ -1630,6 +1639,7 @@ def test_csa_linear_remote_ple_is_copied_whole():
             metadata,
             tp_ratio=-2,
             transfer_info=SimpleNamespace(remote_physical_blocks_per_logical=1),
+            pairs=pairs,
         )
 
 

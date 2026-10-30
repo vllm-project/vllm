@@ -149,7 +149,7 @@ class _RegionPairs:
     # Whether every paired layer is in the same cache group on both sides.
     groups_match: bool = True
     # Hybrid SSM models: the peer's regions holding SSM state, in the order its
-    # SSM descriptors are built, and its PLE region. None means the local ones.
+    # SSM descriptors are built, and its PLE region (set by _pair_ssm_regions).
     remote_ssm_regions: list[int] | None = None
     remote_ple_region: int | None = None
 
@@ -2112,12 +2112,12 @@ class NixlBaseConnectorWorker:
         nixl_agent_meta: NixlAgentMetadata,
         tp_ratio: int,
         transfer_info: EngineTransferInfo,
-        pairs: _RegionPairs | None = None,
+        pairs: _RegionPairs,
     ) -> np.ndarray:
         """Build remote desc regions (conv sub-projections + ssm) per layer.
         For hetero-TP, each D rank reads only its sub-projection slice from
-        the P rank. The remote SSM and PLE regions come from ``pairs``, or are
-        the local ones without it. Returns Nx5 uint64 strided descs."""
+        the P rank. The remote SSM and PLE regions come from ``pairs``.
+        Returns Nx5 uint64 strided descs."""
         assert nixl_agent_meta.kv_caches_base_addr, (
             "Remote KV cache base addresses must not be empty."
         )
@@ -2141,14 +2141,9 @@ class NixlBaseConnectorWorker:
         strided_descs: list[tuple[int, int, int, int, int]] = []
         # NOTE (ZhanqiuHu): use per-layer block_lens[i], not [0], in case
         # block lengths vary across layers (e.g. MLA).
-        region_indices: Sequence[int] = self._ssm_region_indices or range(
-            len(nixl_agent_meta.kv_caches_base_addr)
-        )
-        ple_region = self._ple_region_index
-        if pairs is not None and pairs.remote_ssm_regions is not None:
-            region_indices = pairs.remote_ssm_regions
-            ple_region = pairs.remote_ple_region
-        for i in region_indices:
+        assert pairs.remote_ssm_regions is not None, "SSM regions were not paired"
+        ple_region = pairs.remote_ple_region
+        for i in pairs.remote_ssm_regions:
             base_addr = nixl_agent_meta.kv_caches_base_addr[i]
             block_stride = (
                 nixl_agent_meta.block_strides[i] * remote_physical_per_logical
