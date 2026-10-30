@@ -22,6 +22,7 @@ from vllm.config.watermarking import (
 from vllm.v1.watermarking import (
     DualKeyGumbelWatermarkDetector,
     GumbelWatermarkDetector,
+    RedGreenWatermarkDetector,
     WatermarkDetection,
     WatermarkDetector,
     create_prf,
@@ -29,7 +30,7 @@ from vllm.v1.watermarking import (
 )
 from vllm.v1.worker.gpu.sample.watermark import repeated_context_mask
 
-GOLDEN_SCHEMA_VERSION = 3
+GOLDEN_SCHEMA_VERSION = 4
 
 # JSON floats round-trip exactly, but libm differs by an ULP across builds.
 GOLDEN_FLOAT_RTOL = 1e-9
@@ -43,6 +44,8 @@ ROUTING_BOUNDARY_MIN_DISTANCE = 1e-6
 WATERMARK_CONFIG_FIELDS = (
     "algorithm",
     "alpha",
+    "delta",
+    "gamma",
     "context_width",
     "deduplicate_contexts",
     "deduplicate_contexts_max_history",
@@ -99,6 +102,8 @@ class WatermarkingSchemeConfig:
     generation_deduplicate_contexts_max_history: int | None = 8192
     detection_deduplicate_contexts: bool = True
     p_value_threshold: float = 0.01
+    delta: float = 2.0
+    gamma: float = 0.25
 
 
 @dataclass(frozen=True)
@@ -165,9 +170,25 @@ def _create_dual_key_gumbel_detector(
     )
 
 
+def _create_red_green_detector(
+    key: int,
+    config: WatermarkingSchemeConfig,
+    prf: WatermarkPRFName,
+) -> WatermarkDetector:
+    return RedGreenWatermarkDetector(
+        key=key,
+        context_width=config.context_width,
+        p_value_threshold=config.p_value_threshold,
+        prf=prf,
+        deduplicate_contexts=config.detection_deduplicate_contexts,
+        gamma=config.gamma,
+    )
+
+
 DETECTOR_FACTORIES = {
     "gumbel": _create_gumbel_detector,
     "dual_key_gumbel": _create_dual_key_gumbel_detector,
+    "red_green": _create_red_green_detector,
 }
 
 
@@ -201,6 +222,8 @@ class WatermarkingCandidate:
                     self.scheme_config.detection_deduplicate_contexts
                 ),
                 "p_value_threshold": self.scheme_config.p_value_threshold,
+                "delta": self.scheme_config.delta,
+                "gamma": self.scheme_config.gamma,
             },
             "prf": self.prf,
             "prf_version": prf_version,
@@ -247,6 +270,7 @@ class WatermarkingCandidate:
                 "p_value_threshold": detector.p_value_threshold,
                 "deduplicate_contexts": detector.deduplicate_contexts,
                 "alpha": getattr(detector, "alpha", None),
+                "gamma": getattr(detector, "gamma", None),
                 "prf_key": str(detector.prf.key),
                 "key_b_prf_key": None if key_b_prf is None else str(key_b_prf.key),
             },
@@ -330,6 +354,8 @@ class WatermarkingCandidate:
             algorithm=self.scheme,
             key=self.key,
             alpha=self.scheme_config.generation_alpha,
+            delta=self.scheme_config.delta,
+            gamma=self.scheme_config.gamma,
             context_width=self.scheme_config.context_width,
             deduplicate_contexts=(self.scheme_config.generation_deduplicate_contexts),
             deduplicate_contexts_max_history=(
@@ -430,6 +456,8 @@ def _candidate(
     generation_deduplicate_contexts_max_history: int | None = 8192,
     detection_deduplicate_contexts: bool = True,
     p_value_threshold: float = 0.01,
+    delta: float = 2.0,
+    gamma: float = 0.25,
     fixture: DeterministicGenerationFixture = BALANCED_FIXTURE,
 ) -> WatermarkingCandidate:
     return WatermarkingCandidate(
@@ -447,6 +475,8 @@ def _candidate(
             ),
             detection_deduplicate_contexts=detection_deduplicate_contexts,
             p_value_threshold=p_value_threshold,
+            delta=delta,
+            gamma=gamma,
         ),
         prf=prf,
         key=key,
@@ -624,6 +654,23 @@ WATERMARKING_CANDIDATES = (
         prf="philox",
         generation_deduplicate_contexts="all",
         fixture=REPETITIVE_FIXTURE,
+    ),
+    _candidate("red-green-philox-key42-cw4", "red_green", 42, prf="philox"),
+    _candidate(
+        "red-green-philox-key42-cw4-wrong-key",
+        "red_green",
+        42,
+        prf="philox",
+        detection_key=43,
+    ),
+    _candidate(
+        "red-green-philox-key7-cw2-delta4-gamma0.5",
+        "red_green",
+        7,
+        prf="philox",
+        context_width=2,
+        delta=4.0,
+        gamma=0.5,
     ),
 )
 
