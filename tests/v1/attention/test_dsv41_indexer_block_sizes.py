@@ -11,17 +11,16 @@ Platform._preferred_block_size_for_backends for the full DSv4.1 backend set.
 from types import SimpleNamespace
 
 import pytest
-
+from vllm.models.deepseek_v41.compressor import CompressorBackend
+from vllm.models.deepseek_v41.nvidia.flashinfer_sparse import (
+    DeepseekSparseSWAFlashInferBackend,
+    DeepseekV4FlashInferMLASparseBackend,
+)
+from vllm.models.deepseek_v41.sparse_mla import DeepseekV4SparseMLABackend
 from vllm.platforms import current_platform
 from vllm.platforms.interface import Platform
 from vllm.v1.attention.backend import MultipleOf
 from vllm.v1.attention.backends.mla.indexer import DeepseekV41IndexerBackend
-from vllm.models.deepseek_v41.sparse_mla import DeepseekV4SparseMLABackend
-from vllm.models.deepseek_v41.nvidia.flashinfer_sparse import (
-    DeepseekV4FlashInferMLASparseBackend,
-    DeepseekSparseSWAFlashInferBackend,
-)
-from vllm.models.deepseek_v41.compressor import CompressorBackend
 
 # SM12x declarations changed by this PR: 64-token kernel blocks.
 UNIFORM = [64]
@@ -103,5 +102,9 @@ def test_non_sm12x_sparse_mla_base_declaration(monkeypatch, family, base_expecte
     )
     # Off SM12x the sparse_mla base keeps its Hopper/Blackwell split and the
     # FlashInfer sparse backend keeps 128 — the change is SM12x-only.
-    assert DeepseekV4SparseMLABackend.get_supported_kernel_block_sizes() == base_expected
-    assert DeepseekV4FlashInferMLASparseBackend.get_supported_kernel_block_sizes() == [128]
+    assert (
+        DeepseekV4SparseMLABackend.get_supported_kernel_block_sizes() == base_expected
+    )
+    assert DeepseekV4FlashInferMLASparseBackend.get_supported_kernel_block_sizes() == [
+        128
+    ]
