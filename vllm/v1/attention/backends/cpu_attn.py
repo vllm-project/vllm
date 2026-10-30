@@ -13,12 +13,12 @@ from vllm import _custom_ops as ops
 from vllm import envs
 from vllm.config import (
     VllmConfig,
+    get_current_vllm_config,
     get_layers_from_vllm_config,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import CpuArchEnum, current_platform
-from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
@@ -31,11 +31,15 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.utils import (
     get_num_attention_heads_from_layers,
 )
+from vllm.v1.attention.backends.zentorch_sdpa import (
+    should_use_zentorch_sdpa,
+    zentorch_sdpa_attn,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     CrossAttentionSpec,
-    EncoderOnlyAttentionSpec,
     KVCacheLayout,
+    is_quantized_kv_cache,
 )
 
 logger = init_logger(__name__)
@@ -57,8 +61,17 @@ class CPUAttentionBackend(AttentionBackend):
     ]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [MultipleOf(32)]
+
+    @classmethod
+    def supports_kv_cache_dtype(cls, kv_cache_dtype: "CacheDType | None") -> bool:
+        if kv_cache_dtype in (None, "auto", "bfloat16", "float16"):
+            return True
+        if kv_cache_dtype not in cls.supported_kv_cache_dtypes:
+            return False
+        # Mirrors the FP8 ISA requirement enforced in _get_attn_isa.
+        return torch.cpu._is_amx_tile_supported() or torch.cpu._is_avx512_supported()
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
@@ -99,10 +112,6 @@ class CPUAttentionBackend(AttentionBackend):
     @staticmethod
     def get_builder_cls() -> type["CPUAttentionMetadataBuilder"]:
         return CPUAttentionMetadataBuilder
-
-    @staticmethod
-    def use_cascade_attention(*args, **kwargs) -> bool:
-        return False
 
 
 @dataclass
@@ -161,8 +170,10 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
         )
         self._set_isa_to_layers(layer_names)
         self.is_cross_attention = isinstance(kv_cache_spec, CrossAttentionSpec)
-        self.is_encoder_only_attention = isinstance(
-            kv_cache_spec, EncoderOnlyAttentionSpec
+        attn_layers = get_layers_from_vllm_config(vllm_config, Attention, layer_names)
+        self.is_encoder_only_attention = any(
+            layer.attn_type == AttentionType.ENCODER_ONLY
+            for layer in attn_layers.values()
         )
 
     def _set_isa_to_layers(self, layer_names: list[str]) -> None:
@@ -216,7 +227,9 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
 
         causal = (
             False
-            if self.is_cross_attention or is_dynamic_casual
+            if self.is_cross_attention
+            or self.is_encoder_only_attention
+            or is_dynamic_casual
             else common_attn_metadata.causal
         )
 
@@ -334,6 +347,12 @@ class CPUAttentionBackendImpl(AttentionImpl):
                 "heads in the layer"
             )
 
+        vllm_config = get_current_vllm_config()
+        self.use_zentorch_sdpa = should_use_zentorch_sdpa(
+            attn_type,
+            vllm_config.model_config.dtype,
+        )
+
     def forward(
         self,
         layer: AttentionLayer,
@@ -383,6 +402,21 @@ class CPUAttentionBackendImpl(AttentionImpl):
             AttentionType.ENCODER,
         )
         if is_encoder_attention:
+            if self.use_zentorch_sdpa:
+                # Encoder attention never reads the KV cache back, so the
+                # zentorch path attends the packed QKV directly instead of
+                # staging it through the scratch encoder cache.
+                zentorch_sdpa_attn(
+                    query[:num_actual_tokens],
+                    key[:num_actual_tokens],
+                    value[:num_actual_tokens],
+                    output[:num_actual_tokens],
+                    attn_metadata,
+                    self.scale,
+                    self.sliding_window,
+                    self.alibi_slopes,
+                )
+                return output
             # For encoder attention,
             kv_cache = attn_metadata.encoder_cache
 
@@ -406,6 +440,15 @@ class CPUAttentionBackendImpl(AttentionImpl):
                 kv_cache_dtype=self.kv_cache_dtype,
             )
 
+        # The CPU kernel executes attention sinks natively in bf16. If the
+        # sinks tensor is anything other than bf16, cast it to fp32 so it is
+        # executed in full float precision (done lazily here, after weights
+        # are loaded, rather than at __init__ time).
+        if self.sinks is not None and self.sinks.dtype not in [
+            torch.bfloat16,
+            torch.float32,
+        ]:
+            self.sinks = self.sinks.to(torch.float32)
         ops.cpu_attention_with_kv_cache(
             query=query[:num_actual_tokens],
             key_cache=key_cache,

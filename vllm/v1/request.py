@@ -20,6 +20,7 @@ from vllm.v1.engine import (
     EngineCoreRequest,
     FinishReason,
 )
+from vllm.v1.kv_hints import KvHintsEnvelope
 from vllm.v1.metrics.stats import PrefillStats, RequestSpecDecodeMetrics
 from vllm.v1.structured_output.request import StructuredOutputRequest
 from vllm.v1.utils import ConstantList
@@ -78,6 +79,7 @@ class Request:
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
         abort_immediately: bool = False,
+        kv_hints: KvHintsEnvelope | None = None,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -193,6 +195,7 @@ class Request:
         # trace_headers
         self.trace_headers = trace_headers
         self.session_id = session_id
+        self.kv_hints = kv_hints
 
         # True if this request is scheduled as a non-final prefill chunk.
         self.is_prefill_chunk = False
@@ -226,7 +229,7 @@ class Request:
         self._block_hasher: Callable[[Request], list[BlockHash]] | None = block_hasher
         self.update_block_hashes()
 
-        self.skip_reading_prefix_cache = self.get_skip_reading_prefix_cache()
+        self.prefix_cache_hit_limit = self.get_prefix_cache_hit_limit()
 
         # Used for streaming
         self.resumable = resumable
@@ -260,6 +263,7 @@ class Request:
             block_hasher=block_hasher,
             resumable=request.resumable,
             session_id=request.session_id,
+            kv_hints=request.kv_hints,
             reasoning_ended=request.reasoning_ended,
             reasoning_parser_kwargs=request.reasoning_parser_kwargs,
             abort_immediately=request.abort_immediately,
@@ -307,18 +311,32 @@ class Request:
     def has_encoder_inputs(self) -> bool:
         return self.num_encoder_inputs > 0
 
-    def get_skip_reading_prefix_cache(self) -> bool:
-        if (
-            self.sampling_params is not None
-            and self.sampling_params.skip_reading_prefix_cache is not None
+    def get_max_cache_hit_length(self, bound: int | None = None) -> int:
+        """Longest prefix cache hit allowed, optionally tightened by bound."""
+        # The last token is always recomputed to produce logits.
+        limits = (self.num_tokens - 1, self.prefix_cache_hit_limit, bound)
+        return min(limit for limit in limits if limit is not None)
+
+    @property
+    def skip_reading_external_kv(self) -> bool:
+        # KV connector hits are not bounded by prefix_cache_hit_limit, so a
+        # bounded request reuses only the local prefix cache.
+        return self.prefix_cache_hit_limit is not None
+
+    def get_prefix_cache_hit_limit(self) -> int | None:
+        """Number of leading tokens that may be read from the prefix cache:
+        0 when the request skips cache reads, the first scored prompt row for
+        prompt scoring, or None when unbounded.
+        See docs/training/prompt_token_id_logprobs.md."""
+        params = self.sampling_params or self.pooling_params
+        if params is not None and params.skip_reading_prefix_cache:
+            return 0
+        sp = self.sampling_params
+        if sp is not None and (
+            sp.prompt_logprobs is not None or sp.prompt_logprob_token_ids is not None
         ):
-            return self.sampling_params.skip_reading_prefix_cache
-        elif (
-            self.pooling_params is not None
-            and self.pooling_params.skip_reading_prefix_cache is not None
-        ):
-            return self.pooling_params.skip_reading_prefix_cache
-        return False
+            return sp.prompt_logprob_start or 0
+        return None
 
     def is_finished(self) -> bool:
         return RequestStatus.is_finished(self.status)

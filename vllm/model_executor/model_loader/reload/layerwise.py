@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import inspect
 from collections.abc import Callable
+from contextlib import nullcontext
 from functools import wraps
 from weakref import WeakKeyDictionary, WeakSet
 
@@ -79,7 +80,9 @@ def record_metadata_for_reloading(model: torch.nn.Module):
 
 
 @torch.no_grad()
-def initialize_layerwise_reload(model: torch.nn.Module):
+def initialize_layerwise_reload(
+    model: torch.nn.Module, *, defer_processing: bool = False
+):
     """Set up layerwise weight loading with deferred processing.
 
     Must be called after `record_metadata_for_reloading`. This function:
@@ -92,6 +95,8 @@ def initialize_layerwise_reload(model: torch.nn.Module):
     2. Load all cached weights
     3. Run quantization processing if applicable
     4. Copy processed values back to original tensor storage
+
+    With defer_processing=True, only finalize_layerwise_reload triggers processing.
     """
     # disable torchao reloading to avoid infinite recursion
     model._original_do_torchao_reload = getattr(model, "_do_torchao_reload", False)
@@ -114,6 +119,7 @@ def initialize_layerwise_reload(model: torch.nn.Module):
 
         # Wrap weight loaders to buffer loading
         initialize_online_processing(layer)
+        info.defer_processing = defer_processing
 
 
 def initialize_online_processing(layer: torch.nn.Module):
@@ -193,7 +199,9 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
         )
 
         # Do not online process attention layers, must wait until finalize
-        if is_deferred_attention_layer(layer):
+        # Preserve placement remapping until checkpoint iteration finishes:
+        # expert reload wrappers must survive trailing redundant mappings.
+        if info.defer_processing or is_deferred_attention_layer(layer):
             return ret
 
         # Log warnings allocating excessive buffers on device
@@ -269,7 +277,7 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
         # if the created weight has extra padding elements which are not loaded
         # Having too many of these delayed layers can lead to excess memory usage
         # see Limitations(4)
-        elif info.load_numel > 0 and info.load_numel < info.load_numel_total:  # type: ignore[operator]
+        elif info.defer_processing or info.load_numel < info.load_numel_total:  # type: ignore[operator]
             logger.debug("%s: Delayed processing", layer.__class__.__name__)
             _layerwise_process(layer, info)
 
@@ -321,7 +329,21 @@ def _reload_attention_scales(layer: torch.nn.Module, info: LayerReloadingInfo) -
         _get_weight_loader(param)(*args.args, **args.kwargs)
 
     if quant_method is not None:
-        quant_method.process_weights_after_loading(layer)
+        from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
+        from vllm.model_executor.layers.quantization.online.moe_base import (
+            OnlineMoEMethodBase,
+        )
+        from vllm.model_executor.model_loader.utils import (
+            online_quantization_timing_context,
+        )
+
+        timing_context = (
+            online_quantization_timing_context(layer, quant_method)
+            if isinstance(quant_method, (OnlineLinearBase, OnlineMoEMethodBase))
+            else nullcontext()
+        )
+        with timing_context:
+            quant_method.process_weights_after_loading(layer)
 
     _copy_and_restore_kernel_tensors(layer, info)
 
@@ -356,7 +378,21 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
     # Process weights (quantization, repacking, etc.)
     quant_method = getattr(layer, "quant_method", None)
     if isinstance(quant_method, QuantizeMethodBase):
-        quant_method.process_weights_after_loading(layer)
+        from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
+        from vllm.model_executor.layers.quantization.online.moe_base import (
+            OnlineMoEMethodBase,
+        )
+        from vllm.model_executor.model_loader.utils import (
+            online_quantization_timing_context,
+        )
+
+        timing_context = (
+            online_quantization_timing_context(layer, quant_method)
+            if isinstance(quant_method, (OnlineLinearBase, OnlineMoEMethodBase))
+            else nullcontext()
+        )
+        with timing_context:
+            quant_method.process_weights_after_loading(layer)
         # Re-reconcile parameter TP state: process_weights_after_loading may
         # have re-created Parameters (stamped with the global rank), which would
         # otherwise break replicated (disable_tp) weights on a subsequent reload.

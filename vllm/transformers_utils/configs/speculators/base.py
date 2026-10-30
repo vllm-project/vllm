@@ -4,7 +4,7 @@ import os
 from dataclasses import fields
 from typing import Any
 
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.transformers_utils.configs.speculators.algos import (
     SUPPORTED_SPECULATORS_TYPES,
@@ -12,13 +12,13 @@ from vllm.transformers_utils.configs.speculators.algos import (
 from vllm.transformers_utils.utils import without_trust_remote_code
 
 
-class SpeculatorsConfig(PretrainedConfig):
+class SpeculatorsConfig(PreTrainedConfig):
     model_type = "speculators"
 
     def __init__(self, **kwargs):
         # super().__init__ performs some validation before setting all kwargs as
         # attributes, so we set them first to be safe
-        pre_trained_config_fields = {f.name for f in fields(PretrainedConfig)}
+        pre_trained_config_fields = {f.name for f in fields(PreTrainedConfig)}
         super_kwargs = dict()
         for key, value in kwargs.items():
             if key == "model_type":

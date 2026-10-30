@@ -21,6 +21,7 @@ from vllm.assets.video import VideoAsset
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.image import convert_image_mode
 from vllm.platforms import current_platform
+from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
@@ -29,7 +30,7 @@ class ModelRequestData(NamedTuple):
     prompts: list[str]
     stop_token_ids: list[int] | None = None
     lora_requests: list[LoRARequest] | None = None
-    sampling_params: list[SamplingParams] | None = None
+    sampling_params: SamplingParams | list[SamplingParams] | None = None
 
 
 # NOTE: The default `max_num_seqs` and `max_model_len` may result in OOM on
@@ -935,80 +936,6 @@ def run_kanana_v(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
-# Keye-VL
-def run_keye_vl(questions: list[str], modality: str) -> ModelRequestData:
-    model_name = "Kwai-Keye/Keye-VL-8B-Preview"
-
-    mm_limit = {"image": 1, "video": 1} if modality == "image+video" else {modality: 1}
-    engine_args = EngineArgs(
-        model=model_name,
-        max_model_len=8192,
-        trust_remote_code=True,
-        limit_mm_per_prompt=mm_limit,
-    )
-
-    image_placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
-    video_placeholder = "<|vision_start|><|video_pad|><|vision_end|>"
-
-    if modality == "image":
-        placeholder = image_placeholder
-    elif modality == "video":
-        placeholder = video_placeholder
-    elif modality == "image+video":
-        placeholder = image_placeholder + video_placeholder
-
-    prompts = [
-        (
-            f"<|im_start|>user\n{placeholder}"
-            f"{question}<|im_end|>\n"
-            "<|im_start|>assistant\n"
-        )
-        for question in questions
-    ]
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
-
-
-# Keye-VL-1.5
-def run_keye_vl1_5(questions: list[str], modality: str) -> ModelRequestData:
-    model_name = "Kwai-Keye/Keye-VL-1.5-8B"
-
-    mm_limit = {"image": 1, "video": 1} if modality == "image+video" else {modality: 1}
-    engine_args = EngineArgs(
-        model=model_name,
-        max_model_len=8192,
-        trust_remote_code=True,
-        limit_mm_per_prompt=mm_limit,
-    )
-
-    image_placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
-    video_placeholder = "<|vision_start|><|video_pad|><|vision_end|>"
-
-    if modality == "image":
-        placeholder = image_placeholder
-    elif modality == "video":
-        placeholder = video_placeholder
-    elif modality == "image+video":
-        placeholder = image_placeholder + video_placeholder
-
-    prompts = [
-        (
-            f"<|im_start|>user\n{placeholder}"
-            f"{question}<|im_end|>\n"
-            "<|im_start|>assistant\n"
-        )
-        for question in questions
-    ]
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
-
-
 # Kimi-VL
 def run_kimi_vl(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -1392,6 +1319,38 @@ def run_molmo2(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+def run_nemotron_parse_35(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    engine_args = EngineArgs(
+        model="nvidia/Nemotron-3.5-Parse",
+        dtype="bfloat16",
+        max_model_len=16384,
+        max_num_seqs=1,
+        limit_mm_per_prompt={"image": 1},
+        trust_remote_code=True,
+    )
+
+    # Direct LLM.generate needs one <pad> per image; the Parse processor expands
+    # it into image tokens. The chat renderer inserts it, so omit it from chat text.
+    prompt = (
+        "<pad></s><s><predict_bbox><predict_classes>"
+        "<output_markdown><predict_text_in_pic>"
+    )
+    sampling_params = SamplingParams(
+        temperature=0,
+        top_k=1,
+        repetition_penalty=1.1,
+        max_tokens=8744,
+        skip_special_tokens=False,
+    )
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=[prompt for _ in questions],
+        sampling_params=sampling_params,
+    )
+
+
 # Nemontron_VL
 def run_nemotron_vl(questions: list[str], modality: str) -> ModelRequestData:
     model_name = "nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1"
@@ -1493,6 +1452,36 @@ def run_openpangu_vl(questions: list[str], modality: str) -> ModelRequestData:
     return ModelRequestData(
         engine_args=engine_args,
         prompts=prompts,
+    )
+
+
+# OpenVLA
+def run_openvla(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    model_name = "openvla/openvla-7b"
+    chat_template = get_chat_template_fallback_path("openvla", model_name)
+    assert chat_template is not None
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    messages = [{"role": "user", "content": "pick up the red block"}]
+    prompt = tokenizer.apply_chat_template(
+        messages,
+        chat_template=chat_template.read_text(),
+        tokenize=False,
+    ).removeprefix(tokenizer.bos_token)
+    prompts = [prompt for _ in questions]
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=512,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+        sampling_params=SamplingParams(temperature=0.0, max_tokens=7),
     )
 
 
@@ -2203,8 +2192,6 @@ model_example_map = {
     "interns1_pro": run_interns1_pro,
     "internvl_chat": run_internvl,
     "kanana_v": run_kanana_v,
-    "keye_vl": run_keye_vl,
-    "keye_vl1_5": run_keye_vl1_5,
     "kimi_vl": run_kimi_vl,
     "kimi_k25": run_kimi_k25,
     "lightonocr": run_lightonocr,
@@ -2219,9 +2206,11 @@ model_example_map = {
     "mistral3": run_mistral3,
     "molmo": run_molmo,
     "molmo2": run_molmo2,
+    "nemotron_parse_35": run_nemotron_parse_35,
     "nemotron_vl": run_nemotron_vl,
     "NVLM_D": run_nvlm_d,
     "openpangu_vl": run_openpangu_vl,
+    "openvla": run_openvla,
     "ovis": run_ovis,
     "ovis2_5": run_ovis2_5,
     "paddleocr_vl": run_paddleocr_vl,
@@ -2252,6 +2241,7 @@ MODELS_NEED_VIDEO_METADATA = [
     "glm4_5v",
     "glm4_5v_fp8",
     "molmo2",
+    "qwen2_5_vl",
     "qwen3_vl",
     "qwen3_vl_moe",
     "qwen3_5",
@@ -2273,6 +2263,7 @@ MODELS_SUPPORT_VIT_CUDA_GRAPH = [
     "stepvl",
     "glm4_1v",
     "deepseek_ocr",
+    "deepseek_vl_v2",
     "ernie45_vl",
     "minicpmv2_5_vl",
     "minicpmv2_6_vl",

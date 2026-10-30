@@ -119,6 +119,8 @@ class BatchedMMTensors:
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("block_shape", [None, [128, 128]])
 @pytest.mark.parametrize("per_act_token_quant", [False, True])
+# Tuned configs can pick a BLOCK_SIZE_K wider than the quantization block.
+@pytest.mark.parametrize("fp8_block_k", [32, 256])
 def test_batched_mm(
     num_experts: int,
     max_tokens_per_expert: int,
@@ -127,6 +129,7 @@ def test_batched_mm(
     dtype: torch.dtype,
     block_shape: list[int] | None,
     per_act_token_quant: bool,
+    fp8_block_k: int,
 ):
     """Note: float8_e4m3fn is not supported on CUDA architecture < 89,
     and those tests will be skipped on unsupported hardware."""
@@ -148,6 +151,9 @@ def test_batched_mm(
 
     if per_act_token_quant and block_shape is not None:
         pytest.skip("Skip illegal quantization test.")
+
+    if fp8_block_k != 32 and not use_fp8_w8a8:
+        pytest.skip("BLOCK_SIZE_K is only varied for fp8.")
 
     if dtype.itemsize == 1:
         act_dtype = torch.bfloat16
@@ -214,7 +220,7 @@ def test_batched_mm(
         config={
             "BLOCK_SIZE_M": 16,
             "BLOCK_SIZE_N": 16,
-            "BLOCK_SIZE_K": 16 if dtype.itemsize > 1 else 32,
+            "BLOCK_SIZE_K": 16 if dtype.itemsize > 1 else fp8_block_k,
         },
         per_act_token_quant=per_act_token_quant,
         block_shape=block_shape,
@@ -246,6 +252,65 @@ def test_batched_mm(
 
     torch.testing.assert_close(ref_output, q_ref_output, atol=atol, rtol=rtol)
     torch.testing.assert_close(test_output, q_ref_output, atol=atol, rtol=rtol)
+
+
+@pytest.mark.parametrize("scale_shape", ["[E]", "[E,1,1]"])
+def test_batched_mm_per_tensor_weight_per_token_act(scale_shape: str):
+    """Per-tensor weight scales must broadcast along N when activations are
+    quantized per token, instead of indexing into other experts' scales."""
+    if torch.float8_e4m3fn not in DTYPES or (
+        current_platform.is_cuda_alike()
+        and not current_platform.has_device_capability(89)
+    ):
+        pytest.skip("float8_e4m3fn is not supported on this device")
+    set_random_seed(7)
+
+    E, M, K, N = 8, 64, 256, 256
+    num_expert_tokens = torch.randint(
+        1, M + 1, size=(E,), device=DEVICE, dtype=torch.int32
+    )
+    _, A_q, A_scale = make_quantized_test_activations(
+        E,
+        M,
+        K,
+        in_dtype=torch.bfloat16,
+        quant_dtype=torch.float8_e4m3fn,
+        per_act_token_quant=True,
+    )
+    (_, B_q, B_scale, _), _ = make_test_weights(
+        E, N // 2, K, in_dtype=torch.bfloat16, quant_dtype=torch.float8_e4m3fn
+    )
+    assert B_scale is not None and B_scale.numel() == E
+    B_scale = B_scale.view(-1) if scale_shape == "[E]" else B_scale.view(-1, 1, 1)
+
+    test_output = torch.zeros((E, M, N), dtype=torch.bfloat16, device=DEVICE)
+    invoke_moe_batched_triton_kernel(
+        A_q,
+        B_q,
+        test_output,
+        num_expert_tokens,
+        tl.bfloat16,
+        A_scale,
+        B_scale,
+        None,
+        True,
+        False,
+        False,
+        config={"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 16, "BLOCK_SIZE_K": 32},
+        per_act_token_quant=True,
+    )
+
+    ref_output = native_batched_masked_quant_matmul(
+        A_q,
+        B_q,
+        torch.zeros_like(test_output),
+        num_expert_tokens,
+        A_scale,
+        B_scale.view(-1, 1, 1),
+        None,
+        True,
+    )
+    torch.testing.assert_close(test_output, ref_output, atol=6e-2, rtol=6e-2)
 
 
 @pytest.mark.parametrize(("m", "n", "k"), MNK_FACTORS)
@@ -387,7 +452,7 @@ def _td_supported() -> bool:
     )
 
 
-def _run_td(A, B, num_expert_tokens, use_td: bool):
+def _run_td(A, B, num_expert_tokens, use_td: bool, swap: bool | None = None):
     out = torch.zeros(
         A.shape[0],
         A.shape[1],
@@ -399,6 +464,7 @@ def _run_td(A, B, num_expert_tokens, use_td: bool):
 
     from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
         batched_triton_kernel,
+        batched_triton_kernel_swapped,
     )
 
     if use_td:
@@ -411,8 +477,12 @@ def _run_td(A, B, num_expert_tokens, use_td: bool):
     K = A.shape[2]
     N = B.shape[1]
     BM = BN = BK = 64
-    grid = (E, triton.cdiv(max_tokens, BM) * triton.cdiv(N, BN))
-    batched_triton_kernel[grid](
+    if swap is None:
+        swap = current_platform.is_xpu()
+    num_tiles = triton.cdiv(max_tokens, BM) * triton.cdiv(N, BN)
+    grid = (num_tiles, E) if swap else (E, num_tiles)
+    kernel = batched_triton_kernel_swapped if swap else batched_triton_kernel
+    kernel[grid](
         A,
         B,
         out,
@@ -450,6 +520,54 @@ def _run_td(A, B, num_expert_tokens, use_td: bool):
         USE_TD=use_td,
     )
     return out
+
+
+@pytest.mark.parametrize("num_experts,max_tokens_per_expert,K,N", _TD_SHAPES)
+def test_batched_mm_swapped_grid(num_experts, max_tokens_per_expert, K, N):
+    """The swapped kernel maps every program's tile to the right expert, m and n."""
+    set_random_seed(42)
+    A = (
+        torch.randn(
+            num_experts, max_tokens_per_expert, K, device=DEVICE, dtype=torch.bfloat16
+        )
+        / 10
+    )
+    B = torch.randn(num_experts, N, K, device=DEVICE, dtype=torch.bfloat16)
+    num_expert_tokens = torch.randint(
+        low=0,
+        high=max_tokens_per_expert,
+        size=(num_experts,),
+        device=DEVICE,
+        dtype=torch.int32,
+    )
+
+    out = _run_td(A, B, num_expert_tokens, False, swap=True)
+    ref = native_batched_masked_quant_matmul(
+        A, B, torch.zeros_like(out), num_expert_tokens
+    )
+
+    torch.testing.assert_close(out, ref, atol=6e-2, rtol=6e-2)
+
+
+def test_swapped_kernel_matches_original_source():
+    """The two kernels must stay in sync apart from their program_id axes."""
+    import inspect
+
+    from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
+        batched_triton_kernel,
+        batched_triton_kernel_swapped,
+    )
+
+    def body(kernel):
+        return [
+            line
+            for line in inspect.getsource(kernel.fn).splitlines()
+            if not line.startswith("def ")
+            and "tl.program_id(" not in line
+            and not line.strip().startswith("# axis ")
+        ]
+
+    assert body(batched_triton_kernel_swapped) == body(batched_triton_kernel)
 
 
 @pytest.mark.parametrize("num_experts,max_tokens_per_expert,K,N", _TD_SHAPES)
@@ -682,3 +800,39 @@ def test_batched_triton_backend_mapping():
         == UnquantizedMoeBackend.BATCHED_TRITON
     )
     assert map_unquantized_backend("triton") == UnquantizedMoeBackend.TRITON
+
+
+def test_batched_resize_keeps_blockwise_quant_k_tile():
+    from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
+        resize_batched_config_tiles,
+    )
+    from vllm.model_executor.layers.fused_moe.fused_moe import get_default_config
+
+    block_shape = [128, 128]
+    cfg = get_default_config(512, 64, 1408, 2048, 6, "fp8_w8a8", block_shape)
+    # moe_mmk derives scale-group offsets from BLOCK_SIZE_K.
+    assert resize_batched_config_tiles(cfg, block_shape)["BLOCK_SIZE_K"] == 128
+
+
+def test_batched_config_override_is_not_resized():
+    """An override or tuned config reaches the batched kernel with its own tiles."""
+    from vllm.model_executor.layers.fused_moe import override_config
+    from vllm.model_executor.layers.fused_moe.fused_moe import (
+        has_configured_moe_config,
+        try_get_optimal_moe_config,
+    )
+
+    w1_shape, w2_shape = (64, 2816, 2048), (64, 2048, 1408)
+    tuned = {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 128,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 1,
+        "SPLIT_K": 1,
+        "num_warps": 4,
+        "num_stages": 3,
+    }
+    with override_config(tuned):
+        # BatchedTritonExperts.apply resizes tiles only when this is False.
+        assert has_configured_moe_config(w2_shape, None, 256)
+        assert try_get_optimal_moe_config(w1_shape, w2_shape, 6, None, 256) == tuned

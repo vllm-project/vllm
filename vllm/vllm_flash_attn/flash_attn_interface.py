@@ -214,6 +214,8 @@ def flash_attn_varlen_func(
     aux_tensors=None,
     aux_tensor_leading_dims=None,
     dynamic_causal: "torch.Tensor | None" = None,
+    gather_kv_indices=None,
+    gather_kv_valid_length=None,
 ):
     """dropout_p should be set to 0.0 during evaluation
     Supports multi-query and grouped-query attention (MQA/GQA) by passing in K, V with fewer heads
@@ -262,9 +264,10 @@ def flash_attn_varlen_func(
            testing only. The returned probabilities are not guaranteed to be correct
            (they might not have the right scaling).
         seqused_k: (batch_size,), dtype torch.int32. Actual number of key tokens per
-           sequence. Mutually exclusive with cu_seqlens_k, and required when
+           sequence. Mutually exclusive with cu_seqlens_k except on FA4, which reads
+           cu_seqlens_k as the KV offset and seqused_k as the length. Required when
            block_table is given.
-        q_v: optional value tensor fused with q. FA3 only.
+        q_v: optional value tensor fused with q. FA3 and FA4 only.
         block_table: (batch_size, max_blocks_per_seq), dtype torch.int32. Paged KV
            cache block table. Requires seqused_k.
         return_softmax_lse: bool. Whether to also return softmax_lse.
@@ -289,18 +292,21 @@ def flash_attn_varlen_func(
         aux_tensors: auxiliary tensors consumed by mask_mod. FA4 only.
         aux_tensor_leading_dims: leading dimensions of each entry in aux_tensors.
         dynamic_causal: optional per-sequence causal offsets. FA4 only.
+        gather_kv_indices: (total_q, k) int32 KV rows per query token, `-1` padded,
+            k a multiple of 128. Requires q_v, excludes block_table. FA4 only.
+        gather_kv_valid_length: (total_q,) int32, real entries per row. FA4 only.
 
     Return:
         out: (total, nheads, headdim).
-        softmax_lse [optional, if return_softmax_lse=True]: (nheads, total_q_seqlen). The
-            logsumexp of each row of the matrix QK^T * scaling (e.g., log of the softmax
-            normalization factor).
+        softmax_lse [optional, if return_softmax_lse=True]: (nheads, total_q_seqlen), or
+            (total_q, nheads) on FA4's q_v path. The logsumexp of each row of the matrix
+            QK^T * scaling (e.g., log of the softmax normalization factor).
 
     """
     assert cu_seqlens_k is not None or seqused_k is not None, (
         "cu_seqlens_k or seqused_k must be provided"
     )
-    assert cu_seqlens_k is None or seqused_k is None, (
+    assert fa_version == 4 or cu_seqlens_k is None or seqused_k is None, (
         "cu_seqlens_k and seqused_k cannot be provided at the same time"
     )
     assert block_table is None or seqused_k is not None, (
@@ -311,6 +317,9 @@ def flash_attn_varlen_func(
         f"Fused FP8 output (output_scale) is only supported by FA4, "
         f"got fa_version={fa_version}"
     )
+    assert fa_version == 4 or (
+        gather_kv_indices is None and gather_kv_valid_length is None
+    ), f"gather_kv_* is only supported by FA4, got fa_version={fa_version}"
 
     if softmax_scale is None:
         softmax_scale = q.shape[-1] ** (-0.5)
@@ -432,18 +441,39 @@ def flash_attn_varlen_func(
         if v.dtype not in (torch.float8_e4m3fn, torch.float8_e5m2):
             q_descale = k_descale = v_descale = None
 
+        # CuTe requires unit stride in the descales' head dimension.
+        # contiguous() can be a no-op for scalar.expand(1, 1), whose
+        # strides are (0, 0), so explicitly clone incompatible layouts.
+        q_descale, k_descale, v_descale = (
+            t.clone(memory_format=torch.contiguous_format)
+            if t is not None and t.ndim == 2 and t.stride(1) != 1
+            else t
+            for t in (q_descale, k_descale, v_descale)
+        )
+
         from vllm.vllm_flash_attn.cute.interface import _flash_attn_fwd
+
+        # SM90 FA4 fp8-KV path: fp8 e4m3 paged K/V dequantized and the K/V descale folded
+        # in-kernel; accepts bf16/fp16 Q and writes O in its native dtype (no Q cast, no
+        # output copy). Only the (batch, num_kv_heads) f32 K/V descales are forwarded.
+        fa4_fp8_kv_dequant = (
+            k.dtype == torch.float8_e4m3fn
+            and torch.cuda.get_device_capability()[0] == 9
+        )
 
         out, softmax_lse, _, _ = _flash_attn_fwd(
             q,
             k,
             v,
+            qv=q_v,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_k=cu_seqlens_k,
             seqused_k=seqused_k,
             max_seqlen_q=max_seqlen_q,
             max_seqlen_k=max_seqlen_k,
             page_table=block_table,
+            gather_kv_indices=gather_kv_indices,
+            gather_kv_valid_length=gather_kv_valid_length,
             softmax_scale=softmax_scale,
             causal=causal,
             dynamic_causal=dynamic_causal,
@@ -458,10 +488,11 @@ def flash_attn_varlen_func(
             block_sparse_tensors=block_sparse_tensors,
             aux_tensors=aux_tensors,
             aux_tensor_leading_dims=aux_tensor_leading_dims,
-            q_descale=q_descale,
+            q_descale=None if fa4_fp8_kv_dequant else q_descale,
             k_descale=k_descale,
             v_descale=v_descale,
             output_scale=output_scale,
+            fp8_kv_dequant=fa4_fp8_kv_dequant,
         )
     else:
         raise ValueError(f"Unsupported FA version: {fa_version}")

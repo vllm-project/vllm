@@ -25,6 +25,7 @@ from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.model_loader.utils import get_draft_load_config
 from vllm.model_executor.models import (
     supports_multimodal,
     supports_multimodal_embeddings,
@@ -35,8 +36,8 @@ from vllm.model_executor.models.laguna_dflash import DFlashLagunaForCausalLM
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 from vllm.model_executor.models.qwen3_eagle3 import Eagle3Qwen3ForCausalLM
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
+from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -102,9 +103,7 @@ class SpecDecodeBaseProposer:
         # shape (T, hc_mult * hidden_size). Expand the hidden_states buffer
         # so target_hidden_states fits; detect DeepseekV4 via draft hf_config.
         draft_hf_config = self.draft_model_config.hf_config
-        if hasattr(draft_hf_config, "compress_ratios") and hasattr(
-            draft_hf_config, "hc_mult"
-        ):
+        if get_compress_ratios(draft_hf_config) and hasattr(draft_hf_config, "hc_mult"):
             self.hidden_size = self.hidden_size * draft_hf_config.hc_mult
 
         # Unifying eagle, draft model, and parallel drafting support.
@@ -165,10 +164,7 @@ class SpecDecodeBaseProposer:
         self.max_positions = self.max_num_tokens
 
         # Multi-modal data support
-        self.mm_registry = MULTIMODAL_REGISTRY
-        self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
-            vllm_config.model_config
-        )
+        self.supports_mm_inputs = vllm_config.model_config.supports_multimodal_inputs
 
         self.draft_attn_groups: list[AttentionGroup] = []
         self.kv_cache_gid: int = -1
@@ -259,7 +255,7 @@ class SpecDecodeBaseProposer:
             with_numpy=True,
         )
         self._enable_probabilistic_draft_probs = (
-            self.speculative_config.rejection_sample_method == "standard"
+            self.speculative_config.rejection_sample_method in ("standard", "fly")
             and self.speculative_config.draft_sample_method == "probabilistic"
         )
         self._last_draft_probs: torch.Tensor | None = None
@@ -686,6 +682,7 @@ class SpecDecodeBaseProposer:
         # (i.e., not the first proposal).
         if self.num_speculative_tokens > 1 and num_rejected_tokens_gpu is not None:
             common_attn_metadata.seq_lens -= num_rejected_tokens_gpu
+        common_attn_metadata.invalidate_cached_layout()
 
         block_size = self.block_size
         assert block_size > 0, "block_size has not been initialized."
@@ -814,6 +811,8 @@ class SpecDecodeBaseProposer:
 
         if common_attn_metadata.seq_lens_cpu_upper_bound is not None:
             common_attn_metadata.seq_lens_cpu_upper_bound += 1
+        # seq_lens was advanced in place by the kernel above.
+        common_attn_metadata.invalidate_cached_layout()
 
         return positions
 
@@ -994,7 +993,7 @@ class SpecDecodeBaseProposer:
         per_group_attn_metadata: list[object] = []
         per_layer_attn_metadata: dict[str, object] = {}
         for attn_group in self.draft_attn_groups:
-            attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
+            attn_metadata = attn_group.build_metadata_for_drafting(
                 common_attn_metadata=common_attn_metadata, draft_index=draft_index
             )
             per_group_attn_metadata.append(attn_metadata)
@@ -1315,7 +1314,7 @@ class SpecDecodeBaseProposer:
             model = get_model(
                 vllm_config=draft_vllm_config,
                 model_config=self.speculative_config.draft_model_config,
-                load_config=self.speculative_config.draft_load_config,
+                load_config=get_draft_load_config(draft_vllm_config),
             )
         return model
 
@@ -1334,10 +1333,13 @@ class SpecDecodeBaseProposer:
             self.vllm_config,
             AttentionLayerBase,  # type: ignore[type-abstract]
         )
+        draft_attn_layer_names = set(all_attn_layers) - target_attn_layer_names
+        for name in draft_attn_layer_names:
+            all_attn_layers[name].is_draft_layer = True
         # Filter to only layers that have KV cache specs.
         self._draft_attn_layer_names = {
             name
-            for name in (set(all_attn_layers.keys()) - target_attn_layer_names)
+            for name in draft_attn_layer_names
             if all_attn_layers[name].get_kv_cache_spec(self.vllm_config) is not None
         }
 
@@ -1482,9 +1484,9 @@ class SpecDecodeBaseProposer:
                 # width check does not apply to them.
                 draft_embed = self.model.model.embed_tokens
                 # Guard with isinstance so non-Tensor weights (e.g. in tests)
-                # are not affected — mirrors the weight-equality check above.
+                # and drafts built without an embedding are not affected.
                 if isinstance(target_embed_tokens.weight, torch.Tensor) and isinstance(
-                    draft_embed.weight, torch.Tensor
+                    getattr(draft_embed, "weight", None), torch.Tensor
                 ):
                     target_dim = target_embed_tokens.weight.shape[-1]
                     draft_dim = draft_embed.weight.shape[-1]
@@ -1768,20 +1770,7 @@ class SpecDecodeBaseProposer:
                     attention_groups[backend_key].layer_names.append(layer_name)
 
         self.draft_attn_groups = list(attention_groups.values())
-        if kernel_block_sizes is not None and 0 <= self.kv_cache_gid < len(
-            kernel_block_sizes
-        ):
-            # Slot mappings are computed against the block table, which is
-            # stored at kernel-block granularity. Use the kernel block size
-            # rather than the KV cache manager's block size; the two differ
-            # when manager blocks are split for the attention kernel.
-            self.block_size = kernel_block_sizes[self.kv_cache_gid]
-        else:
-            self.block_size = (
-                self.draft_attn_groups[0]
-                .get_metadata_builder()
-                .kv_cache_spec.block_size
-            )
+        self.block_size = self.draft_attn_groups[0].kv_cache_spec.block_size
         logger.debug("Using block size %d for drafting layers", self.block_size)
 
     def _determine_batch_execution_and_padding(

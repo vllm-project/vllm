@@ -415,7 +415,7 @@ def _calculate_mtp_layers(vllm_config, model_config):
                 model_config.hf_config, "num_nextn_predict_layers", 0
             )
 
-        elif vllm_config.speculative_config.use_eagle():
+        elif vllm_config.speculative_config.uses_target_hidden_states:
             try:
                 draft_model_config = vllm_config.speculative_config.draft_model_config
                 num_mtp_layers = draft_model_config.get_num_layers(
@@ -606,6 +606,7 @@ class LMCacheConnectorV1Impl:
 
         self.async_loading = config.enable_async_loading
         self.layerwise_retrievers: list[Generator[torch.Tensor | None, None, None]] = []
+        self.layerwise_storers: list[Generator[Any, None, None]] = []
         self._stats_monitor = LMCStatsMonitor.GetOrCreate()
         if role == KVConnectorRole.SCHEDULER:
             # Create lookup client using factory
@@ -798,6 +799,7 @@ class LMCacheConnectorV1Impl:
         """
         self.current_layer = 0
         self.layerwise_retrievers = []
+        self.layerwise_storers = []
 
     @_lmcache_nvtx_annotate
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
