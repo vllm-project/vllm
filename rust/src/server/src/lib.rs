@@ -31,7 +31,7 @@ use axum::http::Request;
 pub use config::{
     AccessLogConfig, ApiServerOptions, Config, CoordinatorMode, CorsConfig,
     DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL, DEFAULT_REQUEST_BODY_LIMIT_BYTES,
-    HttpListenerMode, LoraModulePath, OutputLogging, TlsConfig,
+    HttpListenerMode, LoraModulePath, OutputLogConfig, OutputLogging, TlsConfig,
 };
 use hyper::body::Incoming;
 use hyper::server::conn::http1;

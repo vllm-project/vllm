@@ -108,13 +108,6 @@ pub(super) fn validate_request_compat(
             "return_prompt_text is not supported."
         );
     }
-    // TODO: return the per-choice `weight_versions` spans.
-    if request.return_weight_versions == Some(true) {
-        bail_invalid_request!(
-            param = "return_weight_versions",
-            "return_weight_versions is not supported."
-        );
-    }
     validate_generation_prompt_truncation(request.truncate_prompt_tokens, request.echo)?;
     reject_non_default(
         request.media_io_kwargs.as_ref(),
@@ -344,24 +337,6 @@ mod tests {
 
         let request = ChatCompletionRequest {
             return_prompt_text: Some(true),
-            ..base_request()
-        };
-        assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
-    }
-
-    #[test]
-    fn validate_request_compat_rejects_return_weight_versions() {
-        for return_weight_versions in [None, Some(false)] {
-            let request = ChatCompletionRequest {
-                return_weight_versions,
-                ..base_request()
-            };
-            validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
-                .expect("an unset or false return_weight_versions should be accepted");
-        }
-
-        let request = ChatCompletionRequest {
-            return_weight_versions: Some(true),
             ..base_request()
         };
         assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());

@@ -49,6 +49,8 @@ pub(super) struct ResponseOptions {
     /// The request's `return_tokens_as_token_ids`; `None` falls back to the
     /// server's `--return-tokens-as-token-ids`.
     pub return_tokens_as_token_ids: Option<bool>,
+    /// Whether to return the weight-version spans on each finished choice.
+    pub return_weight_versions: bool,
 }
 
 /// Validate and lower one OpenAI completions request into the internal
@@ -79,12 +81,7 @@ pub(super) fn prepare_completion_request(
 
     let logprobs = request.logprobs;
     let prompt_only = request.echo && request.max_tokens == Some(0);
-    let prompt_logprobs =
-        request.prompt_logprobs.or(if request.echo && (!request.stream || prompt_only) {
-            logprobs
-        } else {
-            None
-        });
+    let prompt_logprobs = request.prompt_logprobs.or(if request.echo { logprobs } else { None });
     let include_usage = (request.stream_options.as_ref())
         .and_then(|options| options.include_usage)
         .unwrap_or(false);
@@ -142,7 +139,7 @@ pub(super) fn prepare_completion_request(
             ignore_eos: request.ignore_eos,
             logit_bias: convert_logit_bias(request.logit_bias)?,
             allowed_token_ids: request.allowed_token_ids,
-            bad_words: None,
+            bad_words: request.bad_words,
             bad_words_token_ids: None,
             logprob_token_ids,
             structured_outputs,
@@ -187,6 +184,7 @@ pub(super) fn prepare_completion_request(
             include_prompt_logprobs,
             return_token_ids: request.return_token_ids.unwrap_or(false),
             return_tokens_as_token_ids: request.return_tokens_as_token_ids,
+            return_weight_versions: request.return_weight_versions.unwrap_or(false),
         },
         text_request,
     })
@@ -411,6 +409,7 @@ mod tests {
             "frequency_penalty": 0.2,
             "presence_penalty": 0.3,
             "repetition_penalty": 1.1,
+            "bad_words": ["hello"],
             "ignore_eos": true,
             "skip_special_tokens": false,
             "stream_interval": 4
@@ -446,6 +445,10 @@ mod tests {
         assert_eq!(
             prepared.text_request.sampling_params.repetition_penalty,
             Some(1.1)
+        );
+        assert_eq!(
+            prepared.text_request.sampling_params.bad_words,
+            Some(vec!["hello".to_string()])
         );
         assert!(prepared.text_request.sampling_params.ignore_eos);
         assert!(!prepared.text_request.decode_options.skip_special_tokens);
