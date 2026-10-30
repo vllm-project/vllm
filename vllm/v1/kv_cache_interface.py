@@ -10,7 +10,7 @@ from enum import Enum, IntEnum
 from fractions import Fraction
 from functools import cached_property
 from math import prod
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, NamedTuple, Self
 
 import torch
 
@@ -705,12 +705,6 @@ class KVCacheGroup:
         return self.manager_config.manager_cls
 
     @property
-    def block_table_key(self) -> tuple:
-        """Groups with equal keys allocate blocks identically and can be looked
-        up together."""
-        return self.manager_config, self.block_size, self.dcp_sharded
-
-    @property
     def prefix_cacheable(self) -> bool:
         return self.manager_cls.prefix_cacheable(self.manager_config)
 
@@ -754,6 +748,58 @@ class KVCacheGroup:
         return self.manager_cls.max_num_blocks_per_req(
             self.manager_config, self.block_size, self.dcp_sharded, vllm_config, max_len
         )
+
+    def block_table_width(self, vllm_config: VllmConfig, max_len: int) -> int:
+        """``max_num_blocks_per_req`` (which accounts for DCP sharding: attention
+        KV is sharded, recurrent state replicated) padded to the manager's
+        block-table token alignment."""
+        from vllm.v1.worker.block_table import get_block_table_width
+
+        return get_block_table_width(
+            self.max_num_blocks_per_req(vllm_config, max_len),
+            self.block_size,
+            token_alignment=self.block_table_token_alignment,
+        )
+
+
+class PrefixLookupGroup(NamedTuple):
+    """KV cache groups looked up jointly for cache hits: they share a manager
+    policy, block size and DCP sharding."""
+
+    manager_config: ManagerConfig
+    block_size: int
+    group_ids: list[int]
+    use_eagle: bool = False
+    """Whether the lookup takes the EAGLE last-block drop, which applies to
+    every member since they are looked up jointly. Set by the coordinator."""
+
+    @property
+    def manager_cls(self) -> type[SingleTypeKVCacheManager]:
+        return self.manager_config.manager_cls
+
+    @property
+    def is_full_attention(self) -> bool:
+        return self.manager_cls.is_full_attention
+
+
+def prefix_lookup_groups(
+    groups: Sequence[KVCacheGroup],
+) -> list[PrefixLookupGroup]:
+    """Partition the prefix-cacheable groups into joint cache-hit lookups."""
+    lookups: dict[tuple, PrefixLookupGroup] = {}
+    for i, g in enumerate(groups):
+        if not g.prefix_cacheable:
+            continue
+        # A lookup takes the EAGLE last-block drop if any member does, so only
+        # groups with equal layouts share one. TODO: drop with the EAGLE drop.
+        specs = set(g.kv_cache_specs.values())
+        layout = specs.pop() if len(specs) == 1 else tuple(g.kv_cache_specs)
+        key = (g.manager_config, g.block_size, g.dcp_sharded, layout)
+        lookup = lookups.setdefault(
+            key, PrefixLookupGroup(g.manager_config, g.block_size, [])
+        )
+        lookup.group_ids.append(i)
+    return list(lookups.values())
 
 
 @dataclass

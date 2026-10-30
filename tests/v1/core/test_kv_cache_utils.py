@@ -85,6 +85,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
     SparseCacheRole,
+    prefix_lookup_groups,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.metrics.stats import CachingMetrics, PrefixCacheStats
@@ -1847,6 +1848,27 @@ def test_group_sliding_window_reads_manager_config():
         }
     )
     assert swa_group.sliding_window == 128
+
+
+def test_prefix_lookup_groups_batch_only_equal_layouts():
+    # A lookup batch takes the EAGLE last-block drop if any member does, so
+    # only groups with equal layouts are batched; packed groups never are.
+    spec = new_kv_cache_spec()
+    wide = new_kv_cache_spec(num_kv_heads=4)
+    packed = {"x": full_layer(spec), "y": full_layer(wide)}
+    groups = [
+        new_kv_cache_group(["a"], spec),
+        new_kv_cache_group(["b"], spec),
+        new_kv_cache_group(["c"], wide),
+        KVCacheGroup.from_layers(packed),
+        KVCacheGroup.from_layers({f"{k}2": v for k, v in packed.items()}),
+    ]
+    assert [g.group_ids for g in prefix_lookup_groups(groups)] == [
+        [0, 1],
+        [2],
+        [3],
+        [4],
+    ]
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])

@@ -783,7 +783,7 @@ class TestSWABoundedReplayGrouping:
             scheduler_block_size=128,
         )
         (group,) = manager.coordinator.attention_groups
-        assert group.kv_cache_group_spec.manager_cls is FullAttentionManager
+        assert group.manager_cls is FullAttentionManager
 
         # Allocating and caching a request goes through every group's manager;
         # the 32-token SWA group must skip hashing rather than assert on the

@@ -291,7 +291,9 @@ def test_initialize_kv_cache_does_not_dcp_shard_mamba_block_table(
             raise _CapturedWidths
         return max_num_blocks
 
-    monkeypatch.setattr(model_runner_module, "get_block_table_width", capture_width)
+    monkeypatch.setattr(
+        "vllm.v1.worker.block_table.get_block_table_width", capture_width
+    )
 
     with pytest.raises(_CapturedWidths):
         GPUModelRunner.initialize_kv_cache(runner, kv_cache_config)

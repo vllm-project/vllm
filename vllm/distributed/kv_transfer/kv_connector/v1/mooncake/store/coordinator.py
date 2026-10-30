@@ -4,7 +4,7 @@
 
 from collections.abc import Sequence
 from dataclasses import replace
-from typing import TYPE_CHECKING, NamedTuple, cast
+from typing import TYPE_CHECKING, cast
 
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
@@ -18,28 +18,17 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     MambaManager,
-    SingleTypeKVCacheManager,
     SlidingWindowManager,
 )
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroup,
     ManagerConfig,
+    prefix_lookup_groups,
 )
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-
-
-class StoreSpecGroup(NamedTuple):
-    block_size: int
-    group_ids: list[int]
-    manager_config: ManagerConfig
-    use_eagle: bool
-
-    @property
-    def manager_cls(self) -> type[SingleTypeKVCacheManager]:
-        return self.manager_config.manager_cls
 
 
 class ExternalCachedBlockPool:
@@ -166,29 +155,15 @@ class MooncakeStoreCoordinator:
         return length // alignment * alignment
 
     def _verify_and_split_kv_cache_groups(self) -> None:
-        """Group compatible specs using their registered cache managers."""
-        attention_groups: list[StoreSpecGroup] = []
-        for i, g in enumerate(self.kv_cache_groups):
-            if not g.prefix_cacheable:
-                continue
-            for idx, group in enumerate(attention_groups):
-                if (
-                    self.kv_cache_groups[group.group_ids[0]].block_table_key
-                    == g.block_table_key
-                ):
-                    group.group_ids.append(i)
-                    if g.is_eagle_group and not group.use_eagle:
-                        attention_groups[idx] = group._replace(use_eagle=True)
-                    break
-            else:
-                attention_groups.append(
-                    StoreSpecGroup(
-                        g.block_size,
-                        [i],
-                        _coverage_config(g.manager_config),
-                        g.is_eagle_group,
-                    )
-                )
+        """Group the prefix-cacheable groups into joint cache-hit lookups."""
+        groups = self.kv_cache_groups
+        attention_groups = [
+            g._replace(
+                manager_config=_coverage_config(g.manager_config),
+                use_eagle=any(groups[i].is_eagle_group for i in g.group_ids),
+            )
+            for g in prefix_lookup_groups(groups)
+        ]
         # Full attention first (matches upstream convergence ordering).
         attention_groups.sort(key=lambda g: not g.manager_cls.is_full_attention)
         # Conservatively flag all groups when use_eagle is set but none is flagged.
@@ -366,7 +341,7 @@ class MooncakeStoreCoordinator:
             else self.lcm_block_size
         )
         if len(self.attention_groups) == 1:
-            block_size, group_ids, manager_config, group_eagle = self.attention_groups[
+            manager_config, block_size, group_ids, group_eagle = self.attention_groups[
                 0
             ]
             manager_cls = manager_config.manager_cls
@@ -400,7 +375,7 @@ class MooncakeStoreCoordinator:
         while True:
             curr_hit_length = hit_length
 
-            for idx, (block_size, group_ids, manager_config, group_eagle) in enumerate(
+            for idx, (manager_config, block_size, group_ids, group_eagle) in enumerate(
                 self.attention_groups
             ):
                 manager_cls = manager_config.manager_cls
