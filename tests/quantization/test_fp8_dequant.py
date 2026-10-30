@@ -500,3 +500,89 @@ def test_indexer_layerwise_reload_completes_while_loading(layout):
     assert get_layerwise_info(model.wk_weights_proj).load_numel_total is None
     finalize_layerwise_reload(model, _MODEL_CONFIG)
     torch.testing.assert_close(model.wk_weights_proj.weight, expected, rtol=0, atol=0)
+
+
+def _sharded_rdt_sync(model, ckpt: dict[str, torch.Tensor]) -> None:
+    """Bake a sharded RDT plan for ``ckpt``'s names, then replay it as the
+    engine does: materialize each planned layer, apply its fills, scatter the
+    recorded slices (no loader runs), post-process; finalize at the end."""
+    from vllm.distributed.weight_transfer.sharded_rdt_engine import (
+        ShardedRDTWeightTransferEngine,
+        ShardedRDTWeightTransferInitInfo,
+        _apply_fills,
+    )
+    from vllm.model_executor.model_loader.reload.layerwise import (
+        LAYERWISE_INFO,
+        _copy_and_restore_kernel_tensors,
+    )
+    from vllm.model_executor.model_loader.reload.meta import materialize_layer
+
+    engine = object.__new__(ShardedRDTWeightTransferEngine)
+    engine.model, engine.device = model, _DEVICE
+    engine._name_to_plan, engine._name_meta, engine._live_names = {}, {}, set()
+    names = list(ckpt)
+    engine._bake(
+        ShardedRDTWeightTransferInitInfo(
+            names=names,
+            dtype_names=[str(ckpt[n].dtype).removeprefix("torch.") for n in names],
+            shapes=[list(ckpt[n].shape) for n in names],
+        )
+    )
+    assert engine._live_names == set(names)  # every name baked: no plan failure
+    assert engine._live_names <= set(engine._name_to_plan)
+
+    initialize_layerwise_reload(model)
+    with torch.no_grad():
+        for plan in {id(p): p for p in engine._name_to_plan.values()}.values():
+            layer = plan[0].layer
+            info = LAYERWISE_INFO[layer]
+            materialize_layer(layer, info)
+            _apply_fills(layer, engine._layer_fills.get(layer, ()))
+            for sc in plan:
+                src_name, chain = sc.src
+                tensor = ckpt[src_name]
+                for op, args, kwargs in chain:
+                    tensor = getattr(tensor, op)(*args, **dict(kwargs))
+                param = getattr(layer, sc.param_name)
+                param.data.as_strided(sc.shape, sc.stride, sc.offset).copy_(tensor)
+            layer.quant_method.process_weights_after_loading(layer)
+            _copy_and_restore_kernel_tensors(layer, info)
+            info.reset()
+    finalize_layerwise_reload(model, _MODEL_CONFIG)
+
+
+def test_sharded_rdt_bf16_update():
+    """A BF16 trainer syncing into block-FP8-config layers bakes under sharded
+    RDT: the ones the BF16 rows load into their scale rows are recorded as
+    fills, so each layer is fully covered without fetching them."""
+    model = _cold_start(_checkpoint(30))
+    runtime = _expected(_checkpoint(31))
+    update = {
+        "qkv_a.0.weight": runtime["qkv_a"][: _OUT[0]].clone(),
+        "qkv_a.1.weight": runtime["qkv_a"][_OUT[0] :].clone(),
+        "o.-.weight": runtime["o"],
+    }
+    ptrs = {n: p.data_ptr() for n, p in model.named_parameters()}
+    _sharded_rdt_sync(model, update)
+    _assert_runtime(model, runtime)
+    assert {n: p.data_ptr() for n, p in model.named_parameters()} == ptrs
+    for layer in (model.qkv_a, model.o):  # the scale rows got the fill
+        assert torch.all(layer.weight_scale_inv == 1)
+
+
+def test_sharded_rdt_bf16_indexer_update():
+    model = _indexer_cold_start(_indexer_checkpoint(32)[0])
+    _, expected = _indexer_checkpoint(33)
+    update = {
+        "wk.weight": expected[:_WK].clone(),
+        "weights_proj.weight": expected[_WK:].clone(),
+    }
+    _sharded_rdt_sync(model, update)
+    torch.testing.assert_close(model.wk_weights_proj.weight, expected, rtol=0, atol=0)
+
+
+def test_sharded_rdt_refuses_fp8():
+    """FP8 rows would need the loader at replay: refused at bake."""
+    model = _cold_start(_checkpoint(34))
+    with pytest.raises(NotImplementedError, match="sharded RDT"):
+        _sharded_rdt_sync(model, {"o.-.weight": _checkpoint(35)["o.-.weight"]})

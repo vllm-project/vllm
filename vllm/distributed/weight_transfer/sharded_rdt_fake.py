@@ -66,6 +66,9 @@ class _Scatter:
     shape: tuple[int, ...]
     stride: tuple[int, ...]
     dtype: torch.dtype
+    # A constant the loader built (`constant_like`): the replay fills the
+    # region with it instead of fetching ``src``.
+    fill: float | None = None
 
 
 def _meta_copy_(dest: torch.Tensor, src: "FakeRDTTensor") -> torch.Tensor:
@@ -110,7 +113,8 @@ class BakeSink:
     copied_names: "set[str]" = field(default_factory=set)
 
     def accept_copy(self, dest: torch.Tensor, src: "FakeRDTTensor") -> torch.Tensor:
-        self.copied_names.add(src._name)
+        if src._fill is None:
+            self.copied_names.add(src._name)
         if self.current is not None:
             layer, param_name = self.current
             if dest.numel() != src.numel():
@@ -136,6 +140,7 @@ class BakeSink:
                     shape=tuple(dest.shape),
                     stride=tuple(dest.stride()),
                     dtype=src.dtype,
+                    fill=src._fill,
                 )
             )
         return _meta_copy_(dest, src)
@@ -158,6 +163,8 @@ class FakeRDTTensor(torch.Tensor):
     _ops: OpChain
     # Handles this fake's copy_. ``None`` only on bare construction.
     _sink: "BakeSink | None"
+    # Set on a constant (`constant_like`): nothing to fetch.
+    _fill: float | None
 
     @staticmethod
     def __new__(
@@ -168,6 +175,7 @@ class FakeRDTTensor(torch.Tensor):
         device: torch.device,
         ops: OpChain = (),
         sink: "BakeSink | None" = None,
+        fill: float | None = None,
     ) -> "FakeRDTTensor":
         t = torch.Tensor._make_wrapper_subclass(
             cls,
@@ -179,6 +187,7 @@ class FakeRDTTensor(torch.Tensor):
         t._name = name
         t._ops = tuple(ops)
         t._sink = sink
+        t._fill = fill
         return t
 
     def _key(self) -> FetchKey:
@@ -202,6 +211,7 @@ class FakeRDTTensor(torch.Tensor):
             device=self.device,
             ops=self._ops + new_ops,
             sink=self._sink,
+            fill=self._fill,
         )
 
     def _meta(self) -> torch.Tensor:
@@ -298,3 +308,23 @@ class FakeRDTTensor(torch.Tensor):
                     "the sharded RDT backend."
                 )
         return func(*args, **kwargs)
+
+
+def constant_like(
+    like: torch.Tensor, shape: tuple[int, ...], value: float, dtype: torch.dtype
+) -> torch.Tensor:
+    """``torch.full(shape, value)`` on ``like``'s device, for a loader that
+    writes a constant next to a checkpoint tensor (e.g. the scale of a BF16
+    weight). During a sharded RDT bake ``like`` is a fake, and so is the
+    constant: its copy_ records a fill that the replay applies, with nothing to
+    fetch."""
+    if isinstance(like, FakeRDTTensor):
+        return FakeRDTTensor(
+            name=f"<constant {value}>",
+            shape=torch.Size(shape),
+            dtype=dtype,
+            device=like.device,
+            sink=like._sink,
+            fill=value,
+        )
+    return torch.full(shape, value, dtype=dtype, device=like.device)

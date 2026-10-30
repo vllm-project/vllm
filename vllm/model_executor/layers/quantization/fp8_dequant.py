@@ -187,11 +187,17 @@ def _scale_groups(scale: torch.Tensor, rows: int, cols: int) -> torch.Tensor:
     """The checkpoint scale of a ``[rows, cols]`` FP8 weight, in any layout
     (per-tensor, per-channel, ``[n, k]`` blocks, MXFP8 E8M0), as one float32
     scale per row and ``_ANY_LAYOUT_BLOCK[1]`` columns."""
+    group = _ANY_LAYOUT_BLOCK[1]
+    if (
+        scale.dtype == torch.float32
+        and cols % group == 0
+        and tuple(scale.shape) == (rows, cols // group)
+    ):
+        return scale  # in this layout already (no ops: a sharded RDT bake)
     if scale.dtype in (torch.uint8, torch.float8_e8m0fnu):
         scale = scale.view(torch.float8_e8m0fnu)
     scale = scale.to(torch.float32)
     scale = scale.reshape(scale.shape[0] if scale.ndim else 1, -1)
-    group = _ANY_LAYOUT_BLOCK[1]
     block_n, block_k = rows // scale.shape[0], cols // scale.shape[1]
     if (
         block_n * scale.shape[0] != rows
@@ -242,12 +248,12 @@ def load_unneeded_scale(
     layer = param.layer_ref()
     assert layer is not None
     scale = layer.weight_scale_inv
-    if isinstance(scale, Fp8DequantScaleParameter):
-        shape: tuple[int, ...] = ()  # per tensor, expanded to its rows
-    else:
-        block_n, block_k = scale.weight_block_size
-        shape = (cdiv(tensor.shape[0], block_n), cdiv(tensor.shape[1], block_k))
-    ones = torch.ones(shape, dtype=torch.float32, device=tensor.device)
+    from vllm.distributed.weight_transfer.sharded_rdt_fake import constant_like
+
+    block_n, block_k = scale.weight_block_size
+    shape = (cdiv(tensor.shape[0], block_n), cdiv(tensor.shape[1], block_k))
+    # a sharded RDT bake records it as a fill
+    ones = constant_like(tensor, shape, 1.0, torch.float32)
     scale.weight_loader(scale, ones, *(() if shard_id is None else (shard_id,)))
     loaded.add(name.removesuffix("weight") + "weight_scale_inv")
 

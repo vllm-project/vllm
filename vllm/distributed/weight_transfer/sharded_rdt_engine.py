@@ -50,6 +50,7 @@ results behind the choices here.
 """
 
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from math import prod
 from typing import TYPE_CHECKING, Any, cast
@@ -336,6 +337,8 @@ class ShardedRDTWeightTransferEngine(
         # Names whose copy_ fired during the bake. Unbaked names not here never
         # move data (e.g. non-local EP experts), so receive_weights skips them.
         self._live_names: set[str] = set()
+        # Leaf module -> constants its loader wrote (filled on materialize).
+        self._layer_fills: dict[Any, list[_Scatter]] = {}
 
         # ---- Consumer-side pre-registered receive buffers ----------------------
         # One persistent 1-D buffer per dtype per ring slot, STORAGE-registered with
@@ -850,6 +853,7 @@ class ShardedRDTWeightTransferEngine(
 
         model = self.model
         recorder = BakeSink()
+        self._layer_fills = {}
 
         _t0 = time.perf_counter()
         with torch.device(self.device):
@@ -872,10 +876,16 @@ class ShardedRDTWeightTransferEngine(
                 copied = sum(prod(c.shape) for c in copies)
                 if copied < get_layer_size(module):
                     continue  # partial -> slow path
-                for c in copies:
+                # Constants the loader wrote fetch nothing: filled on
+                # materialize instead.
+                fetches = [c for c in copies if c.fill is None]
+                fills = [c for c in copies if c.fill is not None]
+                if fills:
+                    self._layer_fills[module] = fills
+                for c in fetches:
                     # Every name of the module shares ONE list, so identity
                     # dedups them back to one module at plan time.
-                    self._name_to_plan[c.src[0]] = copies
+                    self._name_to_plan[c.src[0]] = fetches
             self._restore_after_dry_run(model)
 
         # Names whose copy_ fired during the bake. Names not in here no-op for
@@ -1342,6 +1352,7 @@ class ShardedRDTWeightTransferEngine(
                             "update_weights)."
                         )
                     materialize_layer(layer, info)
+                    _apply_fills(layer, self._layer_fills.get(layer, ()))
                 for sc in chunk.scatters:
                     param = getattr(sc.layer, sc.param_name)
                     # Through .data, exactly like default_weight_loader: params
@@ -1455,11 +1466,19 @@ class ShardedRDTWeightTransferEngine(
         self._name_to_plan.clear()
         self._name_meta.clear()
         self._live_names.clear()
+        self._layer_fills = {}
         # Drop the cached plan (holds _Scatter refs to the baked layers).
         self._cached_plan = None
         # Release the receive buffers (their NIXL registration is pinned for the
         # process lifetime; freeing the tensors just drops our strong refs).
         self._dest_buffers = [{} for _ in range(self._ring_depth)]
+
+
+def _apply_fills(layer: Any, fills: "Iterable[_Scatter]") -> None:
+    """Write the constants a module's loader produced (see `constant_like`)."""
+    for sc in fills:
+        param = getattr(layer, sc.param_name)
+        param.data.as_strided(sc.shape, sc.stride, sc.offset).fill_(sc.fill)
 
 
 def _plan_digest(keys_per_chunk: list) -> str:
