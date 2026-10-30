@@ -3,6 +3,7 @@
 import torch
 
 from vllm.triton_utils import tl, triton
+from vllm.v1.worker.gpu.spec_decode.draft_logits import draft_logits_row
 
 # Smallest positive value produced by Triton's fp32 `tl.rand`. Used by the
 # retained Philox helper for rejection sampling.
@@ -68,6 +69,12 @@ def tl_rand32(seed, offset, includes_zero: tl.constexpr):
     if not includes_zero:
         u = tl.maximum(u, _TL_RAND_MIN)
     return u
+
+
+@triton.jit
+def spec_step_seed(seed, step):
+    """Mix a speculative step into the high bits of a request seed."""
+    return seed ^ (tl.cast(step, tl.int64) << 32)
 
 
 @triton.jit
@@ -222,6 +229,7 @@ def gumbel_block_argmax(
     logits_cache_col_ptr,
     logits_cache_source_ptr,
     logits_cache_source_stride,
+    logits_cache_row_mapping_ptr,
     vocab_size,
     IS_DRAFTING: tl.constexpr,
     APPLY_TEMPERATURE: tl.constexpr,
@@ -246,17 +254,20 @@ def gumbel_block_argmax(
             logits_cache_source_ptr + token_idx * logits_cache_source_stride + block,
             mask=mask,
         )
+        row = draft_logits_row(req_state_idx, logits_cache_row_mapping_ptr)
         tl.store(
             logits_cache_ptr
-            + req_state_idx * logits_cache_stride_0
+            + row * logits_cache_stride_0
             + col * logits_cache_stride_1
             + block,
             cached_logits,
-            mask=mask & is_valid_req,
+            mask=mask & (row >= 0),
         )
 
     seed = tl.load(seeds_ptr + req_state_idx, mask=is_valid_req, other=0)
     pos = tl.load(pos_ptr + token_idx)
+    if logits_cache_ptr is not None:
+        seed = spec_step_seed(seed, col)
     return gumbel_noised_argmax(
         logits,
         block,
@@ -283,6 +294,7 @@ def _gumbel_sample_kernel(
     logits_cache_col_ptr,
     logits_cache_source_ptr,
     logits_cache_source_stride,
+    logits_cache_row_mapping_ptr,
     logits_ptr,
     logits_stride,
     expanded_idx_mapping_ptr,
@@ -322,6 +334,7 @@ def _gumbel_sample_kernel(
         logits_cache_col_ptr,
         logits_cache_source_ptr,
         logits_cache_source_stride,
+        logits_cache_row_mapping_ptr,
         vocab_size,
         IS_DRAFTING=IS_DRAFTING,
         APPLY_TEMPERATURE=APPLY_TEMPERATURE,
@@ -345,6 +358,7 @@ def gumbel_sample(
     logits_cache_col: torch.Tensor | None = None,  # scalar or [num_tokens]
     use_fp64: bool = False,
     logits_cache_source: torch.Tensor | None = None,
+    logits_cache_row_mapping: torch.Tensor | None = None,  # [max_num_reqs]
 ) -> torch.Tensor:
     # Enforce contiguity on non-strided input tensors
     expanded_idx_mapping = expanded_idx_mapping.contiguous()
@@ -390,6 +404,7 @@ def gumbel_sample(
         logits_cache_col,
         logits_cache_source,
         logits_cache_source.stride(0) if logits_cache_source is not None else 0,
+        logits_cache_row_mapping,
         logits,
         logits.stride(0),
         expanded_idx_mapping,

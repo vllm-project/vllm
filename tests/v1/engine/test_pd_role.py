@@ -49,6 +49,7 @@ def test_pd_role_keeps_both_transfer_capabilities():
 def _pd_role_engine_core() -> EngineCoreProc:
     core = object.__new__(EngineCoreProc)
     core.batch_queue = None
+    core.reject_new_requests = False
     core.scheduler = create_scheduler(use_kv_connector=True)
     core.vllm_config = core.scheduler.vllm_config
     core._pd_role = "prefill"

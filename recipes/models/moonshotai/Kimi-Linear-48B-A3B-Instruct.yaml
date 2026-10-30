@@ -1,0 +1,146 @@
+meta:
+  title: "Kimi-Linear-48B-A3B-Instruct"
+  slug: "kimi-linear-48b-a3b-instruct"
+  provider: "Moonshot AI"
+  description: "Kimi-Linear is a 48B-parameter instruction-tuned MoE model (~3B activated) with a linear-attention variant supporting very long context (1M tokens)."
+  date_added: 2025-10-31
+  date_updated: 2026-04-17
+  tasks:
+    - text
+  performance_headline: "Linear-attention MoE with 1M-token context on a single node"
+  related_recipes: []
+  hardware:
+    h200: verified
+    mi300x: verified
+    mi325x: verified
+    mi355x: verified
+
+model:
+  model_id: "moonshotai/Kimi-Linear-48B-A3B-Instruct"
+  min_vllm_version: "0.11.2"
+  architecture: moe
+  parameter_count: "48B"
+  active_parameters: "3B"
+  context_length: 1048576
+  base_args:
+    - "--trust-remote-code"
+  base_env: {}
+
+dependencies:
+  - note: "Pin vllm==0.11.2 — 0.12.0 has a known Kimi-Linear regression"
+    command: "uv pip install vllm==0.11.2 --torch-backend auto"
+
+features: {}
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 115
+    description: "Full precision BF16 on 4 or 8 GPUs (single node)"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+  - multi_node_tp_pp
+  - multi_node_tep
+  - multi_node_dep
+
+hardware_overrides:
+  amd:
+    extra_args:
+      - "--no-enable-prefix-caching"
+    extra_env:
+      SAFETENSORS_FAST_GPU: "1"
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  Kimi-Linear is Moonshot AI's 48B-parameter instruction-tuned MoE model (`A3B` indicates
+  ~3B active parameters per token) featuring a linear-attention variant that enables very
+  long context windows (up to 1,048,576 tokens).
+
+  ## Prerequisites
+
+  - **Hardware**: 4 or 8 GPUs on a single node
+  - **vLLM**: `0.11.2` recommended. Avoid vLLM `0.12.0`, which has a known bug
+    `MLAModules.__init__() missing 1 required positional argument: 'indexer_rotary_emb'`
+    that affects Kimi-Linear.
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  # Install a stable version (avoid 0.12.0)
+  uv pip install vllm==0.11.2 --torch-backend auto
+  ```
+
+  ### AMD ROCm
+
+  The ROCm wheel requires Python 3.12, ROCm 7.0+, and glibc >= 2.35. Use the
+  ROCm Docker image when your host environment does not meet those requirements.
+
+  ```bash
+  uv venv --python 3.12
+  source .venv/bin/activate
+  uv pip install vllm==0.11.2 --extra-index-url https://wheels.vllm.ai/rocm/
+  ```
+
+  ## Running Kimi-Linear
+
+  The following snippets assume 4 or 8 GPUs on a single node.
+
+  ### 4-GPU Tensor Parallel
+
+  ```bash
+  vllm serve moonshotai/Kimi-Linear-48B-A3B-Instruct \
+    --port 8000 \
+    --tensor-parallel-size 4 \
+    --max-model-len 1048576 \
+    --trust-remote-code
+  ```
+
+  ### 8-GPU Tensor Parallel
+
+  ```bash
+  vllm serve moonshotai/Kimi-Linear-48B-A3B-Instruct \
+    --port 8000 \
+    --tensor-parallel-size 8 \
+    --max-model-len 1048576 \
+    --trust-remote-code
+  ```
+
+  ### ROCm on 8x MI300X / MI325X / MI355X
+
+  ```bash
+  export SAFETENSORS_FAST_GPU=1
+  vllm serve moonshotai/Kimi-Linear-48B-A3B-Instruct \
+    --tensor-parallel-size 8 \
+    --max-model-len auto \
+    --trust-remote-code
+  ```
+
+  If you see OOM, reduce `--max-model-len` (e.g. 65536) or increase
+  `--gpu-memory-utilization` (<= 0.95).
+
+  ## Client Usage
+
+  Once the server is up, test it with:
+
+  ```bash
+  curl http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{"model":"moonshotai/Kimi-Linear-48B-A3B-Instruct","messages":[{"role":"user","content":"Hello!"}]}'
+  ```
+
+  ## Troubleshooting
+
+  - **`MLAModules.__init__() missing 1 required positional argument: 'indexer_rotary_emb'`**:
+    Known bug in vLLM 0.12.0 affecting Kimi-Linear. Pin to `vllm==0.11.2` instead.
+  - **OOM**: Reduce `--max-model-len` or increase `--gpu-memory-utilization` up to 0.95.
+
+  ## References
+
+  - [Kimi-Linear-48B-A3B-Instruct on Hugging Face](https://huggingface.co/moonshotai/Kimi-Linear-48B-A3B-Instruct)

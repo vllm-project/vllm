@@ -14,8 +14,8 @@ from vllm.v1.attention.ops.dcp import (
 )
 
 requires_accelerator = pytest.mark.skipif(
-    not current_platform.is_cuda_alike(),
-    reason="needs a CUDA or ROCm device for the Triton pack kernel",
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="needs a CUDA, ROCm or XPU device for the Triton pack kernel",
 )
 
 
@@ -61,7 +61,7 @@ def test_fused_mask_matches_eager(
     dtype, world_size, h_per_rank, tokens_per_req, num_pad_rows, seq_lens_list
 ):
     torch.manual_seed(0)
-    device = "cuda"
+    device = current_platform.device_type
     head_dim = 512
     num_seqs = len(seq_lens_list)
     # tokens_per_req > 1 is the MTP / multi-token-verify shape.
@@ -109,7 +109,7 @@ def test_fused_mask_matches_eager_ragged(dtype, seed):
     same batch.
     """
     torch.manual_seed(seed)
-    device = "cuda"
+    device = current_platform.device_type
     world_size, h_per_rank, head_dim = 8, 2, 512
     num_seqs = 17
 
@@ -143,7 +143,7 @@ def test_fused_mask_matches_eager_ragged(dtype, seed):
 def test_mask_disabled_is_unmasked():
     """Passing no seq_lens/query_start_loc must leave the LSE untouched."""
     torch.manual_seed(0)
-    device = "cuda"
+    device = current_platform.device_type
     world_size, h_per_rank, head_dim = 8, 2, 512
     out = torch.randn(
         4, world_size * h_per_rank, head_dim, device=device, dtype=torch.bfloat16
