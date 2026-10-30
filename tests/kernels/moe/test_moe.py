@@ -109,6 +109,62 @@ def test_triton_moe_launcher_passes_scalar_scale_as_pointer(monkeypatch) -> None
     assert captured_scale.data_ptr() == a_scale.data_ptr()
 
 
+def test_triton_moe_applies_bias_and_router_weight_before_cast() -> None:
+    """The fp32 accumulator must get the bias, then the router weight, then one
+    cast to bf16. Integer inputs keep the GEMM and bias exact in fp32, so the
+    output must equal round((x + bias) * w) bit for bit."""
+    set_random_seed(0)
+    num_experts, top_k, m, n, k, block_m = 8, 2, 33, 128, 1024, 16
+    dtype = torch.bfloat16
+    a = torch.randint(-16, 17, (m * top_k, k), device=DEVICE_TYPE).to(dtype)
+    b = torch.randint(-16, 17, (num_experts, n, k), device=DEVICE_TYPE).to(dtype)
+    bias = torch.randint(-16, 17, (num_experts, n), device=DEVICE_TYPE).to(dtype)
+    topk_ids = torch.randint(
+        0, num_experts, (m, top_k), dtype=torch.int32, device=DEVICE_TYPE
+    )
+    topk_weights = torch.rand(m, top_k, dtype=torch.float32, device=DEVICE_TYPE)
+    sorted_token_ids, expert_ids, num_tokens_post_padded = (
+        fused_moe_module.moe_align_block_size(topk_ids, block_m, num_experts)
+    )
+    out = torch.zeros(m, top_k, n, dtype=dtype, device=DEVICE_TYPE)
+
+    # As in TritonExperts' second GEMM: A has one row per (token, expert) pair.
+    fused_moe_module.invoke_fused_moe_triton_kernel(
+        A=a,
+        B=b,
+        C=out,
+        A_scale=None,
+        B_scale=None,
+        topk_weights=topk_weights,
+        sorted_token_ids=sorted_token_ids,
+        expert_ids=expert_ids,
+        num_tokens_post_padded=num_tokens_post_padded,
+        mul_routed_weight=True,
+        top_k=1,
+        config={
+            "BLOCK_SIZE_M": block_m,
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 32,
+            "GROUP_SIZE_M": 1,
+        },
+        compute_type=tl.bfloat16,
+        use_fp8_w8a8=False,
+        use_int8_w8a8=False,
+        use_int8_w8a16=False,
+        use_int4_w4a16=False,
+        per_channel_quant=False,
+        B_bias=bias,
+    )
+
+    # Every value stays below 2**24, so the reference is exact in fp32.
+    ids = topk_ids.long()
+    x = torch.einsum(
+        "mjk,mjnk->mjn", a.view(m, top_k, k).double(), b[ids].double()
+    ).float()
+    expected = ((x + bias[ids].float()) * topk_weights[..., None]).to(dtype)
+    torch.testing.assert_close(out, expected, atol=0, rtol=0)
+
+
 def iterative_moe(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
