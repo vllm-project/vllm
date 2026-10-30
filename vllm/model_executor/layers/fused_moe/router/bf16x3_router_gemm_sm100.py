@@ -1021,6 +1021,65 @@ def _pick_config(M: int, K: int, N: int, num_sms: int) -> tuple[RouterGemmConfig
     return config, min(split_k, math_utils.cdiv(K, 64))
 
 
+@cache
+def _num_sms(device: torch.device) -> int:
+    return torch.cuda.get_device_properties(device).multi_processor_count
+
+
+_DECOMP_BLOCK = 4096
+
+
+@cache
+def _decomp_fast_launcher(device: torch.device):
+    """Relaunch handle for the decomp kernel that skips JITFunction.run's
+    per-call binding and specialization-key work (~10us -> ~3us eager CPU).
+    Only valid for the specialization it compiles with: numel divisible by
+    16 (and != 1) and 16B-aligned pointers; anything else takes the normal
+    launch path in _decompose_w. Returns None when launch hooks are active
+    (profilers), so the hooked path stays observable."""
+    from triton import knobs
+
+    enter_hook = knobs.runtime.launch_enter_hook
+    if enter_hook is not None and getattr(enter_hook, "calls", True):
+        # hooks active (profilers): keep the hooked launch path observable
+        return None
+    w = torch.empty(16, dtype=torch.float32, device=device)
+    w3 = torch.empty(3 * 16, dtype=torch.bfloat16, device=device)
+    kernel = _bf16x3_decomp_kernel.warmup(
+        w, w3, 16, BLOCK=_DECOMP_BLOCK, grid=(1,), launch_pdl=True
+    )
+    kernel._init_handles()
+    return kernel
+
+
+def _decompose_w(W: torch.Tensor) -> torch.Tensor:
+    N, K = W.shape
+    numel = N * K
+    w3 = W.new_empty(3, N, K, dtype=torch.bfloat16)
+    kernel = _decomp_fast_launcher(W.device)
+    if kernel is not None and numel % 16 == 0 and W.data_ptr() % 16 == 0:
+        stream = torch.cuda.current_stream(W.device).cuda_stream
+        kernel.run(
+            (numel + _DECOMP_BLOCK - 1) // _DECOMP_BLOCK,
+            1,
+            1,
+            stream,
+            kernel.function,
+            kernel.packed_metadata,
+            None,
+            None,
+            None,
+            W,
+            w3,
+            numel,
+        )
+        return w3
+    _bf16x3_decomp_kernel[lambda meta: (triton.cdiv(numel, meta["BLOCK"]),)](
+        W, w3, numel, launch_pdl=True
+    )
+    return w3
+
+
 def warmup_bf16x3_router_gemm(
     K: int,
     N: int,
@@ -1097,7 +1156,7 @@ def _bf16x3_router_gemm(X: torch.Tensor, W: torch.Tensor) -> torch.Tensor:
     N, _ = W.shape
     if M == 0:
         return X.new_empty((M, N), dtype=torch.float32)
-    num_sms = torch.cuda.get_device_properties(X.device).multi_processor_count
+    num_sms = _num_sms(X.device)
     config, split_k = _pick_config(M, K, N, num_sms)
 
     partials = X.new_empty(split_k, M, N, dtype=torch.float32)
@@ -1105,12 +1164,8 @@ def _bf16x3_router_gemm(X: torch.Tensor, W: torch.Tensor) -> torch.Tensor:
         if not W.is_contiguous():
             # the decomp kernel indexes W flat; the small-M kernel takes strides
             raise ValueError("BF16x3 router GEMM: large-M path needs a contiguous W")
-        w3 = W.new_empty(3, N, K, dtype=torch.bfloat16)
-        _bf16x3_decomp_kernel[lambda meta: (triton.cdiv(N * K, meta["BLOCK"]),)](
-            W, w3, N * K, launch_pdl=True
-        )
         Sm100BF16x3RouterGemmLargeM.compile(K, config.cta_group)(
-            X, w3, partials, split_k
+            X, _decompose_w(W), partials, split_k
         )
     else:
         Sm100BF16x3RouterGemmSmallM.compile(K, config.BM)(X, W, partials, split_k)
