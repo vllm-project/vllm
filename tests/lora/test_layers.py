@@ -1839,7 +1839,7 @@ def test_compressor_projection_applies_lora_with_fp32_output(
     default_vllm_config, dist_init, has_gate, aux_stream
 ):
     """Direct FP32-output GEMM must retain adapters for both compressed KV and gate."""
-    from vllm.models.deepseek_v4_1.attention import DeepseekV4Attention
+    from vllm.models.deepseek_v41.attention import DeepseekV4Attention
 
     torch.manual_seed(1)
     tokens, columns, outputs, rank = 17, 256, 128, 8
@@ -1888,10 +1888,22 @@ def test_compressor_projection_applies_lora_with_fp32_output(
             _fused_wqa_wkv_gemm=lambda values: values,
         )
         _, actual, _ = DeepseekV4Attention._run_parallel_input_projections(attention, x)
+        assert actual is not None
         assert actual.dtype == torch.float32
         torch.testing.assert_close(actual, expected, rtol=0.02, atol=0.02)
         inactive = torch.tensor([value == 0 for value in ids])
         torch.testing.assert_close(actual[inactive], baseline[inactive], rtol=0, atol=0)
+
+
+def test_dsv41_gemm_rs_is_not_set_up_with_lora(monkeypatch):
+    """The fused wo_b GEMM-RS reads the base weight and would drop adapters."""
+    from vllm.config import VllmConfig
+    from vllm.models.deepseek_v41.nvidia.model import maybe_init_gemm_rs
+
+    monkeypatch.setenv("VLLM_ENABLE_GEMM_RS", "1")
+    vllm_config = object.__new__(VllmConfig)
+    vllm_config.lora_config = LoRAConfig(max_lora_rank=8)
+    assert not maybe_init_gemm_rs(vllm_config, use_sequence_parallel=True)
 
 
 @torch.inference_mode()
