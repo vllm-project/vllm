@@ -23,6 +23,20 @@ def test_out_of_vocab_token(vllm_runner):
         runner.llm.generate({"prompt_token_ids": [999999]})
 
 
+def test_out_of_vocab_token_skip_tokenizer_init(vllm_runner):
+    # Without a tokenizer the model vocab size is the only bound; an
+    # out-of-range id must not reach the embedding lookup.
+    with (
+        vllm_runner(
+            "openai-community/gpt2",
+            enforce_eager=True,
+            skip_tokenizer_init=True,
+        ) as runner,
+        pytest.raises(VLLMValidationError, match="out of vocabulary"),
+    ):
+        runner.llm.generate({"prompt_token_ids": [999999]})
+
+
 def test_require_mm_embeds(vllm_runner):
     with (
         vllm_runner(

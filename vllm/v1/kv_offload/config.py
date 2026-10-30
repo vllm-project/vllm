@@ -16,6 +16,9 @@ class OffloadingGroupConfig:
     layer_names: tuple[str, ...]
     # Original KVCacheConfig group index.
     group_id: int
+    # Chunks of this group the tier keeps for one request, or None when
+    # attention reaches back without a bound (a full layer).
+    sliding_window_size_in_chunks: int | None = None
     # Packed block (byte offset, padded page bytes), in layer_names order.
     # Empty when the group is not certified for compact filesystem storage.
     packed_layout: tuple[tuple[int, int], ...] = ()
@@ -27,6 +30,8 @@ class OffloadingModelConfig:
     name: str
     # KV cache data type (e.g. "float16").
     dtype: str
+    # Longest request the engine accepts, in tokens. 0 when not known.
+    max_model_len: int = 0
 
 
 @dataclass(frozen=True)

@@ -2,7 +2,7 @@ group: Entrypoints
 depends_on: 
   - image-build
 steps:
-- label: ":nvidia: (H200) Initialized Snapshot E2E"
+- label: ":nvidia: (H200) [Nightly] Initialized Snapshot E2E"
   key: initialized-snapshot-e2e
   device: h200
   num_devices: 1
@@ -34,13 +34,16 @@ steps:
   - vllm/utils/flashinfer.py
   - tests/entrypoints/unit_tests
   - tests/entrypoints/launchers
+  - tests/entrypoints/common
   commands:
   - pytest -v -s entrypoints/unit_tests
   - pytest -v -s entrypoints/launchers
+  - pytest -v -s entrypoints/common
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Entrypoints Unit"
       dind: false
+      automatic_shard: true
       device: mi355_dpx
       timeout_in_minutes: 50
       depends_on:
@@ -51,6 +54,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (LLM)"
   device: h200_35gb
   key: entrypoints-integration-llm
+  automatic_shard: true
   timeout_in_minutes: 60
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -59,12 +63,18 @@ steps:
   - tests/entrypoints/llm
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py --ignore=entrypoints/llm/offline_mode
+  - >-
+    pytest -v -s
+    entrypoints/llm
+    --ignore=entrypoints/llm/test_generate.py
+    --ignore=entrypoints/llm/test_collective_rpc.py
+    --ignore=entrypoints/llm/offline_mode
   - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
   - pytest -v -s entrypoints/llm/offline_mode # Needs to avoid interference with other tests
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Entrypoints Integration (LLM)"
+      automatic_shard: true
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 90
@@ -84,12 +94,16 @@ steps:
   - tests/entrypoints/scale_out
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/serve --ignore=entrypoints/serve/dev/rpc --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  - >-
+    pytest -v -s
+    entrypoints/serve
+    --ignore=entrypoints/serve/dev/rpc
+    --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   - if [ "$$BUILDKITE_PARALLEL_JOB" = "1" ]; then PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc; fi
   - pytest -v -s entrypoints/scale_out --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   mirror:
     amd:
-      label: ":amd: (MI355 DPX) Entrypoints Integration (API Server) %N"
+      label: ":amd: (MI355 DPX) Entrypoints Integration (API Server) Shard %N"
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 65
@@ -107,8 +121,17 @@ steps:
   - tests/entrypoints/openai
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/correctness
+  - >-
+    pytest -v -s
+    entrypoints/openai/completion
+    --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
+  - >-
+    pytest -v -s
+    entrypoints/openai
+    --ignore=entrypoints/openai/completion
+    --ignore=entrypoints/openai/chat_completion
+    --ignore=entrypoints/openai/responses
+    --ignore=entrypoints/openai/correctness
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Entrypoints Integration (OpenAI API completion)"
@@ -121,6 +144,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (OpenAI API chat_completion)"
   device: h200_35gb
   key: entrypoints-integration-api-server-openai-chat_completion
+  automatic_shard: true
   timeout_in_minutes: 83
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -132,6 +156,7 @@ steps:
   - pytest -v -s entrypoints/openai/chat_completion
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) Entrypoints Integration (OpenAI API chat_completion)"
       dind: false
       device: mi355_dpx
@@ -142,6 +167,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (API Server Generate)"
   device: h200_35gb
   key: entrypoints-integration-api-server-generate
+  automatic_shard: true
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -160,6 +186,7 @@ steps:
   - pytest -v -s entrypoints/cohere
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) Entrypoints Integration (API Server Generate)"
       dind: false
       device: mi355_dpx
@@ -205,6 +232,7 @@ steps:
     amd:
       label: ":amd: (MI355 DPX) Entrypoints Integration (Speech to Text)"
       dind: false
+      automatic_shard: true
       device: mi355_dpx
       timeout_in_minutes: 60
       working_dir: "/vllm-workspace/tests"
@@ -214,6 +242,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (Multimodal)"
   device: h200_35gb
   key: entrypoints-integration-multimodal
+  automatic_shard: true
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -249,6 +278,7 @@ steps:
     amd:
       label: ":amd: (MI355 DPX) Entrypoints Integration (Pooling)"
       dind: false
+      automatic_shard: true
       device: mi355_dpx
       timeout_in_minutes: 65
       working_dir: "/vllm-workspace/tests"

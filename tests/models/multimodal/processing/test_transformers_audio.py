@@ -4,6 +4,9 @@ import numpy as np
 import pytest
 
 from vllm.config import ModelConfig
+from vllm.model_executor.models.transformers.multimodal import (
+    MultiModalProcessor as TransformersMultiModalProcessor,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 AUDIO_MODEL_SETTINGS = {
@@ -103,6 +106,7 @@ def test_audio_multimodal_processor(model_id):
 
     audio_items = result.get("mm_kwargs", {}).get("audio", [])
     assert len(audio_items) == 1, f"Expected 1 audio item, got {len(audio_items)}"
+    assert audio_items[0] is not None
     item_keys = list(audio_items[0].keys())
     has_features = "input_features" in item_keys or "input_values" in item_keys
     assert has_features, (
@@ -142,6 +146,7 @@ def test_audio_fields_not_claimed_by_image():
     model_id = "ibm-granite/granite-speech-3.3-2b"
     model_config = ModelConfig(model=model_id, model_impl="transformers")
     mm_processor = MULTIMODAL_REGISTRY.create_processor(model_config)
+    assert isinstance(mm_processor, TransformersMultiModalProcessor)
 
     audio_keys = ["input_features", "input_features_mask"]
     owned = mm_processor._partition_keys_by_modality(audio_keys, ["audio", "image"])
@@ -155,6 +160,7 @@ def test_unclaimed_fields_warn_rather_than_raise():
     model_id = "ibm-granite/granite-speech-3.3-2b"
     model_config = ModelConfig(model=model_id, model_impl="transformers")
     mm_processor = MULTIMODAL_REGISTRY.create_processor(model_config)
+    assert isinstance(mm_processor, TransformersMultiModalProcessor)
 
     owned = mm_processor._partition_keys_by_modality(
         ["input_features", "surprise_field"], ["audio", "image"]

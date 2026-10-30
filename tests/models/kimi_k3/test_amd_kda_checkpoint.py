@@ -53,6 +53,7 @@ BLOCK_SIZE = 64
 class _StubSpeculativeConfig:
     method = "dspark"
     parallel_drafting = False
+    enable_adaptive_verification = False
 
     def __init__(self, num_speculative_tokens: int) -> None:
         self.num_speculative_tokens = num_speculative_tokens
@@ -482,7 +483,7 @@ def _spec_for(monkeypatch, **attrs) -> MambaSpec:
     layer = KimiK3DeltaAttention.__new__(KimiK3DeltaAttention)
     for name, value in dict(
         use_prefill_checkpoint=True,
-        use_fused_chunk=True,
+        kda_prefill_backend="fused",
         num_spec=0,
         use_safe_gate=True,
     ).items():
@@ -506,7 +507,8 @@ def test_opt_in_publishes_chunk_walk_alignment(monkeypatch) -> None:
     "attr,value",
     [
         ("use_prefill_checkpoint", False),
-        ("use_fused_chunk", False),
+        ("kda_prefill_backend", "triton"),
+        ("kda_prefill_backend", "gluon"),
         ("use_safe_gate", False),
     ],
 )
