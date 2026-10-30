@@ -42,6 +42,7 @@ from vllm.platforms import current_platform
 from vllm.transformers_utils.config import set_default_rope_theta
 from vllm.transformers_utils.repo_utils import get_hf_file_bytes
 from vllm.v1.attention.backend import AttentionType
+from vllm.v1.worker.gpu.spec_decode.dflash.config import DFlashSpeculatorConfig
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     get_eagle3_aux_layers_from_config,
 )
@@ -861,6 +862,9 @@ class DFlashQwen3Model(nn.Module):
 
 
 class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
+    # The speculator this is a draft model of (see SpeculativeDraftModel).
+    speculator_config_class = DFlashSpeculatorConfig
+
     model_cls = DFlashQwen3Model
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

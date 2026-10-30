@@ -36,6 +36,7 @@ from vllm.model_executor.model_loader.mtp_validation import (
     is_mtp_completeness_check_enabled,
 )
 from vllm.platforms import current_platform
+from vllm.v1.worker.gpu.spec_decode.dspark.config import DSparkSpeculatorConfig
 
 from .qwen3_dflash import DFlashQwen3ForCausalLM, DFlashQwen3Model
 from .utils import (
@@ -234,6 +235,8 @@ class Qwen3DSparkModel(DFlashQwen3Model):
 
 
 class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
+    # The speculator this is a draft model of (see SpeculativeDraftModel).
+    speculator_config_class = DSparkSpeculatorConfig
     model_cls = Qwen3DSparkModel
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
@@ -279,6 +282,10 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
         # Draft-vocab logits without the d2t scatter: the speculator adds the
         # Markov bias in draft space, then remaps via map_draft_to_target.
         return self.logits_processor(self.lm_head, hidden_states)
+
+    def compute_draft_logits_local(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """This TP rank's vocab shard of compute_draft_logits, not gathered."""
+        return self.logits_processor(self.lm_head, hidden_states, skip_gather=True)
 
     def map_draft_to_target(self, draft_ids: torch.Tensor) -> torch.Tensor:
         # Map draft-vocab ids to target ids (identity for full-vocab drafts).
