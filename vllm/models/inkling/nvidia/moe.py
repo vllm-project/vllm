@@ -464,7 +464,7 @@ class InklingMoE(nn.Module):
         # stream itself (RS -> shard sconv -> AG); the runner must return the
         # per-rank partial sum instead of all-reducing.
         self.experts.moe_config.skip_final_all_reduce = True
-        for param in self.experts.routed_experts.parameters():
+        for param in self.experts.routed_experts.parameters(recurse=False):
             param.weight_loader = write_loader
 
         self._routed_sel: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
@@ -623,7 +623,7 @@ class InklingMoE(nn.Module):
             half = param.shape[1] // 2
             for gid, lid in slots.items():
                 slab = weight[gid].narrow(0, tp_rank * 2 * half, 2 * half)
-                param.weight_loader(param, slab, deinterleave_into(lid, 0, half))
+                param.weight_loader(param, slab, deinterleave_into(lid, half))
         else:
             # w2: shard the packed intermediate (last) dim.
             shard = param.shape[2]

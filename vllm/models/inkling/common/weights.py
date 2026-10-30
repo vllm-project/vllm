@@ -18,17 +18,44 @@ def write_loader(
     write(param, loaded_weight)
 
 
+def _fill(dst: torch.Tensor, value: float) -> None:
+    # copy_, not fill_: layerwise reload counts copied elements to know when a
+    # layer is complete
+    if dst.numel():
+        dst.copy_(torch.full_like(dst, value))
+
+
 def deinterleave_into(
-    slot: int, gate_start: int, up_start: int
+    slot: int, half: int, pad: float | None = None
 ) -> Callable[[torch.Tensor, torch.Tensor], None]:
-    """Write interleaved [g0, u0, g1, u1, ...] rows as [gate; up] into ``slot``."""
+    """Write interleaved [g0, u0, g1, u1, ...] rows as [gate; up] into ``slot``,
+    each half ``half`` rows long. Rows past the checkpoint's are padding: if
+    ``pad`` is given they are set to it, so a reload (which restores the layer
+    uninitialized) writes the whole slot as cold start's initialization did."""
 
     def write(param: torch.Tensor, slab: torch.Tensor) -> None:
         # one bounded H2D upload, de-interleaved on device
         slab = slab.to(param.device)
         rows = slab.shape[0] // 2
-        param.data[slot, gate_start : gate_start + rows].copy_(slab[0::2])
-        param.data[slot, up_start : up_start + rows].copy_(slab[1::2])
+        dst = param.data[slot]
+        for start, src in ((0, slab[0::2]), (half, slab[1::2])):
+            dst[start : start + rows].copy_(src)
+            if pad is not None:
+                _fill(dst[start + rows : start + half], pad)
+
+    return write
+
+
+def copy_padded(
+    slot: int, width: int, pad: float
+) -> Callable[[torch.Tensor, torch.Tensor], None]:
+    """Write into the first ``width`` columns of ``slot`` and set the padding
+    columns after them to ``pad``."""
+
+    def write(param: torch.Tensor, weight: torch.Tensor) -> None:
+        dst = param.data[slot]
+        dst[..., :width].copy_(weight)
+        _fill(dst[..., width:], pad)
 
     return write
 

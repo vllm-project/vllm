@@ -43,7 +43,12 @@ from vllm.triton_utils import tl, tldevice, triton
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import aux_stream
 
-from ..common.weights import copy_into_slots, deinterleave_into, write_loader
+from ..common.weights import (
+    copy_into_slots,
+    copy_padded,
+    deinterleave_into,
+    write_loader,
+)
 from ..configs import InklingModelConfig
 
 if TYPE_CHECKING:
@@ -483,7 +488,7 @@ class InklingMoE(nn.Module):
         # stream itself (RS -> shard sconv -> AG); the runner must return the
         # per-rank partial sum instead of all-reducing.
         self.experts.moe_config.skip_final_all_reduce = True
-        for param in self.experts.routed_experts.parameters():
+        for param in self.experts.routed_experts.parameters(recurse=False):
             param.weight_loader = write_loader
 
         self._routed_sel: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
@@ -624,6 +629,9 @@ class InklingMoE(nn.Module):
         lids = [slots[g] for g in gids]
         tp_rank = experts.moe_config.moe_parallel_config.tp_rank
         tp_size = experts.moe_config.moe_parallel_config.tp_size
+        # AITER pads the intermediate dim; the padding keeps the value the
+        # weights (zero) and scales (one) are created with
+        pad = 1.0 if key.endswith("_scale") else 0.0
 
         if key.endswith("_scale_2"):
             # Per-expert scalars, vectorized over the local experts. The
@@ -658,12 +666,12 @@ class InklingMoE(nn.Module):
                     tp_rank * 2 * logical_half,
                     2 * logical_half,
                 )
-                param.weight_loader(param, slab, deinterleave_into(lid, 0, dst_half))
+                param.weight_loader(param, slab, deinterleave_into(lid, dst_half, pad))
         else:
             # w2: shard the packed intermediate (last) dim. AITER rounds the
             # destination intermediate width to 256, so derive the logical TP
-            # slice from the checkpoint and leave the destination tail at its
-            # initialized padding value (zero for weights, one for scales).
+            # slice from the checkpoint and set the destination tail to the
+            # padding value.
             if weight.shape[2] % tp_size != 0:
                 raise ValueError(
                     f"cannot TP-shard {name} with shape {tuple(weight.shape)} "
@@ -679,7 +687,7 @@ class InklingMoE(nn.Module):
                 param.weight_loader(
                     param,
                     weight[gid].narrow(1, tp_rank * shard, shard),
-                    lambda p, w, lid=lid: p.data[lid, :, :shard].copy_(w),
+                    copy_padded(lid, shard, pad),
                 )
         return [f"experts.routed_experts.{key}"]
 
