@@ -356,18 +356,23 @@ class DFlashSpeculator(DraftModelSpeculator):
         )
         num_sample = num_reqs * self.num_speculative_steps
         sample_hidden_states = last_hidden_states[self.sample_indices[:num_sample]]
+        idx_mapping = self.sample_idx_mapping[:num_sample]
+        draft_step = self.sample_col[:num_sample]
+        # Draft models without get_top_tokens() never use local argmax reduction.
+        logits = self.compute_draft_logits(sample_hidden_states, 0)
         # sample_pos is the predicted token's position P. Sampling keys a draw
         # by the position before the sampled token, P-1.
-        draft_tokens = self.sample_draft(
-            sample_hidden_states,
+        draft_tokens = self.sample_draft_logits(
+            logits,
             self.sample_pos[:num_sample] - 1,
-            self.sample_idx_mapping[:num_sample],
+            idx_mapping,
             self.temperature,
             self.seeds,
-            self.sample_col[:num_sample],
+            draft_step,
             self.draft_logits,
             num_steps=self.num_speculative_steps,
         )
+        self._maybe_predict_acceptance(logits, idx_mapping, draft_step)
         self.draft_tokens[:num_reqs] = draft_tokens.view(
             num_reqs, self.num_speculative_steps
         )
@@ -432,7 +437,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         inside the FULL graph, so it must not sync with the host."""
 
     def supports_batch_sharded_draft_logits(self) -> bool:
-        # Every draft logits write goes through sample_draft.
+        # Every draft logits write goes through sample_draft_logits.
         return True
 
     @torch.inference_mode()

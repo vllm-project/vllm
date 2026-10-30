@@ -543,22 +543,19 @@ class DraftModelSpeculator(BaseSpeculator):
     ) -> torch.Tensor:
         return self.model.get_top_tokens(hidden_states)
 
-    def sample_draft(
+    def sample_draft_logits(
         self,
-        hidden_states: torch.Tensor,
+        logits: torch.Tensor,
         sample_src_positions: torch.Tensor,
         idx_mapping: torch.Tensor,
         temperature: torch.Tensor,
         seeds: torch.Tensor,
         draft_step: torch.Tensor,
         draft_logits: DraftLogitsCache | None,
-        spec_step_idx: int = 0,
         num_steps: int = 1,
     ) -> torch.Tensor:
-        if draft_logits is None and self.use_local_argmax_reduction:
-            return self.get_draft_top_tokens(hidden_states, spec_step_idx)
-
-        logits = self.compute_draft_logits(hidden_states, spec_step_idx)
+        """Sample draft tokens from `logits`, caching them in `draft_logits`
+        for probabilistic rejection sampling."""
         if draft_logits is not None and self.draft_watermarker is not None:
             sampled = self.draft_watermarker.sample(
                 logits,
@@ -589,13 +586,16 @@ class DraftModelSpeculator(BaseSpeculator):
             )
         else:
             sampled = greedy_argmax(logits)
-        self._maybe_predict_acceptance(logits, idx_mapping, draft_step)
         return sampled
 
     def _maybe_predict_acceptance(
-        self, logits: torch.Tensor, idx_mapping: torch.Tensor, draft_step: torch.Tensor
+        self,
+        logits: torch.Tensor | None,
+        idx_mapping: torch.Tensor,
+        draft_step: torch.Tensor,
     ) -> None:
-        if self.acceptance_estimator is not None:
+        # Local argmax reduction (logits None) is rejected with the estimator.
+        if self.acceptance_estimator is not None and logits is not None:
             self.acceptance_estimator.predict(
                 logits,
                 idx_mapping,

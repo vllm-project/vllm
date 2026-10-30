@@ -166,7 +166,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         self.on_multi_step_decode_end(self.max_num_reqs)
 
     def supports_batch_sharded_draft_logits(self) -> bool:
-        # Every draft logits write goes through sample_draft.
+        # Every draft logits write goes through sample_draft_logits.
         return True
 
     @torch.inference_mode()
@@ -494,15 +494,22 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             return
 
         sample_hidden_states = last_hidden_states[last_token_indices]
-        self.draft_tokens[:num_reqs, 0] = self.sample_draft(
-            sample_hidden_states,
-            sample_src_positions,
-            idx_mapping,
-            self.temperature,
-            self.seeds,
-            self.current_draft_step,
-            self.draft_logits,
-        )
+        logits = None
+        if self.draft_logits is None and self.use_local_argmax_reduction:
+            draft_tokens = self.get_draft_top_tokens(sample_hidden_states, 0)
+        else:
+            logits = self.compute_draft_logits(sample_hidden_states, 0)
+            draft_tokens = self.sample_draft_logits(
+                logits,
+                sample_src_positions,
+                idx_mapping,
+                self.temperature,
+                self.seeds,
+                self.current_draft_step,
+                self.draft_logits,
+            )
+        self.draft_tokens[:num_reqs, 0] = draft_tokens
+        self._maybe_predict_acceptance(logits, idx_mapping, self.current_draft_step)
         if last_hidden_states is hidden_states:
             self.hidden_states[:num_reqs] = sample_hidden_states
         else:
@@ -677,15 +684,21 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         # Sample the draft tokens.
         sample_hidden_states = last_hidden_states[:num_reqs]
         sample_src_positions = self.sample_src_positions[:num_reqs]
-        draft_tokens = self.sample_draft(
-            sample_hidden_states,
-            sample_src_positions,
-            idx_mapping,
-            self.temperature,
-            self.seeds,
-            self.current_draft_step,
-            self.draft_logits,
-        )
+        logits = None
+        if self.draft_logits is None and self.use_local_argmax_reduction:
+            draft_tokens = self.get_draft_top_tokens(sample_hidden_states, 0)
+        else:
+            logits = self.compute_draft_logits(sample_hidden_states, 0)
+            draft_tokens = self.sample_draft_logits(
+                logits,
+                sample_src_positions,
+                idx_mapping,
+                self.temperature,
+                self.seeds,
+                self.current_draft_step,
+                self.draft_logits,
+            )
+        self._maybe_predict_acceptance(logits, idx_mapping, self.current_draft_step)
 
         # Update the inputs for the next step.
         update_draft_inputs(

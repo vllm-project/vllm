@@ -137,7 +137,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         )
 
     def supports_batch_sharded_draft_logits(self) -> bool:
-        # Every draft logits write goes through sample_draft.
+        # Every draft logits write goes through sample_draft_logits.
         return True
 
     @torch.inference_mode()
@@ -444,16 +444,21 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
 
             # Sample draft tokens for the current step.
             sample_hidden_states = last_hidden_states[last_token_indices]
-            draft_tokens = self.sample_draft(
-                sample_hidden_states,
-                sample_src_positions,
-                idx_mapping,
-                self.temperature,
-                self.seeds,
-                self.current_draft_step,
-                self.draft_logits,
-                spec_step_idx=step,
-            )
+            logits = None
+            if self.draft_logits is None and self.use_local_argmax_reduction:
+                draft_tokens = self.get_draft_top_tokens(sample_hidden_states, step)
+            else:
+                logits = self.compute_draft_logits(sample_hidden_states, step)
+                draft_tokens = self.sample_draft_logits(
+                    logits,
+                    sample_src_positions,
+                    idx_mapping,
+                    self.temperature,
+                    self.seeds,
+                    self.current_draft_step,
+                    self.draft_logits,
+                )
+            self._maybe_predict_acceptance(logits, idx_mapping, self.current_draft_step)
 
             self.draft_tokens[:num_reqs, step] = draft_tokens
             if step < self.num_speculative_steps - 1:
