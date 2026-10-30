@@ -23,6 +23,7 @@ from vllm.entrypoints.generate.base.protocol import (
 )
 from vllm.logger import init_logger
 from vllm.parser.abstract_parser import Parser, StreamState
+from vllm.parser.engine.arg_rewrite import _ArgsRewriter, _StreamingArgs
 from vllm.parser.engine.events import EventType, SemanticEvent
 from vllm.parser.engine.parser_engine_config import (
     ArgValueExtender,
@@ -32,7 +33,7 @@ from vllm.parser.engine.parser_engine_config import (
 from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
 from vllm.renderers.chat_utils import get_tool_call_id_type, make_tool_call_id
 from vllm.tool_parsers.utils import (
-    coerce_to_schema_type,
+    canonical_schema_types,
     extract_types_from_schema,
     find_tool_name,
     find_tool_properties,
@@ -63,7 +64,9 @@ class ToolCallSlot:
         "_args_parts",
         "_args_joined",
         "name_sent",
+        "properties",
         "string_keys",
+        "arg_cache",
         "_streamed_parts",
         "_streamed_joined",
         "extend_open_value",
@@ -76,7 +79,9 @@ class ToolCallSlot:
         self._args_parts: list[str] = []
         self._args_joined: str | None = ""
         self.name_sent: bool = False
+        self.properties: dict | None = None
         self.string_keys: set[str] | None = None
+        self.arg_cache: _StreamingArgs | None = None
         self._streamed_parts: list[str] = []
         self._streamed_joined: str | None = ""
         self.extend_open_value: ArgValueExtender | None = None
@@ -293,133 +298,6 @@ class ParserEngine(Parser):
     # ── Schema-aware type correction ─────────────────────────────────
 
     @staticmethod
-    def _coerce_value(value: object, schema: dict) -> tuple[object, bool]:
-        """Coerce a single value according to its schema.
-
-        Returns ``(coerced_value, changed)``.
-        """
-        if isinstance(value, str):
-            types = extract_types_from_schema(schema)
-            coerced = coerce_to_schema_type(value, types)
-            if coerced is not value:
-                return coerced, True
-            return value, False
-
-        if isinstance(value, dict):
-            nested_props = schema.get("properties")
-            if isinstance(nested_props, dict):
-                _, changed = ParserEngine._coerce_dict(value, nested_props)
-                return value, changed
-            return value, False
-
-        if isinstance(value, list):
-            items_schema = schema.get("items")
-            if isinstance(items_schema, dict):
-                changed = False
-                for i, item in enumerate(value):
-                    coerced, item_changed = ParserEngine._coerce_value(
-                        item, items_schema
-                    )
-                    if item_changed:
-                        value[i] = coerced
-                        changed = True
-                return value, changed
-            return value, False
-
-        types = extract_types_from_schema(schema)
-        as_str = json.dumps(value, ensure_ascii=False)
-        coerced = coerce_to_schema_type(as_str, types)
-        if type(coerced) is not type(value) or coerced != value:
-            return coerced, True
-        return value, False
-
-    @staticmethod
-    def _coerce_dict(args: dict, properties: dict) -> tuple[dict, bool]:
-        """Coerce all values in *args* using *properties* schemas."""
-        changed = False
-        for key, value in args.items():
-            prop = properties.get(key)
-            if not isinstance(prop, dict):
-                continue
-            coerced, val_changed = ParserEngine._coerce_value(value, prop)
-            if val_changed:
-                args[key] = coerced
-                changed = True
-        return args, changed
-
-    @staticmethod
-    def _safe_arg_prefix(
-        json_str: str, string_keys: set[str] | None = None
-    ) -> tuple[str, bool]:
-        """Return the prefix of *json_str* up to the last top-level value.
-
-        Middle values (followed by a comma) are stable across streaming
-        ticks and included.  The trailing value is excluded for non-string
-        values because type coercion may change its serialised form between
-        ticks, which would violate the ``startswith(prev)`` prefix invariant.
-        String values for keys in ``string_keys`` are prefix-stable, so stream
-        their unterminated content instead of buffering long arguments until
-        the closing tag arrives.
-
-        Also returns whether the returned prefix stops inside that trailing
-        string, so streamed text may be appended to it.  This holds even when
-        *json_str* closes the string: converters serialise an open raw value
-        as a closed JSON string.
-        """
-        last_colon = -1
-        last_key: str | None = None
-        pending_key: str | None = None
-        in_string = False
-        escape = False
-        string_start = -1
-        depth = 0
-        for i, c in enumerate(json_str):
-            if escape:
-                escape = False
-                continue
-            if in_string:
-                if c == "\\":
-                    escape = True
-                elif c == '"':
-                    in_string = False
-                    if depth == 1 and string_start >= 0:
-                        pending_key = json_str[string_start + 1 : i]
-                continue
-            if c == '"':
-                in_string = True
-                string_start = i
-            elif c in ("{", "["):
-                depth += 1
-            elif c in ("}", "]"):
-                depth -= 1
-            elif c == ":" and depth == 1:
-                last_colon = i
-                last_key = pending_key
-                pending_key = None
-        if last_colon < 0:
-            return "", False
-        end = last_colon + 1
-        while end < len(json_str) and json_str[end] in (" ", "\t", "\n", "\r"):
-            end += 1
-        if end >= len(json_str) or json_str[end] != '"':
-            return json_str[:end], False
-        if string_keys is not None and last_key not in string_keys:
-            return json_str[:end], False
-
-        escape = False
-        for i in range(end + 1, len(json_str)):
-            c = json_str[i]
-            if escape:
-                escape = False
-                continue
-            if c == "\\":
-                escape = True
-                continue
-            if c == '"':
-                return json_str[:i], True
-        return json_str, True
-
-    @staticmethod
     def _streamable_string_keys(properties: dict) -> set[str] | None:
         """Return keys whose trailing string values can safely stream.
 
@@ -433,36 +311,19 @@ class ParserEngine(Parser):
 
         streamable: set[str] = set()
         for key, schema in properties.items():
-            if set(extract_types_from_schema(schema)) == {"string"}:
+            if canonical_schema_types(extract_types_from_schema(schema)) == {"string"}:
                 streamable.add(key)
         return streamable
 
     def _fix_arg_types(self, args_json: str, func_name: str) -> str:
-        """Correct parameter types using the tool schema.
+        """Correct argument values in place using the tool schema.
 
-        String values are coerced via :func:`coerce_to_schema_type`.
-        Nested objects and arrays are recursed into when the schema
-        defines ``properties`` or ``items``.  Without a schema, values
-        stay as strings.
+        See :class:`_ArgsRewriter`; non-finite literals are quoted even
+        without a schema.
         """
-        if not self._tools or not func_name:
-            return args_json
-        try:
-            args = json.loads(args_json)
-        except (json.JSONDecodeError, ValueError):
-            return args_json
-        if not isinstance(args, dict):
-            return args_json
-
-        properties = find_tool_properties(self._tools, func_name)
-        if not properties:
-            return args_json
-
-        _, changed = self._coerce_dict(args, properties)
-
-        if changed:
-            return json.dumps(args, ensure_ascii=False)
-        return args_json
+        return _ArgsRewriter(
+            args_json, find_tool_properties(self._tools, func_name), final=True
+        ).rewrite()
 
     def _is_valid_tool_name(self, name: str) -> bool:
         if not self.parser_engine_config.validate_tool_names:
@@ -961,6 +822,13 @@ class ParserEngine(Parser):
             )
             state.history_tool_call_cnt += 1
 
+    def _bind_tool(self, slot: ToolCallSlot, name: str) -> None:
+        slot.name = name
+        slot.name_sent = True
+        slot.properties = find_tool_properties(self._tools, name)
+        slot.string_keys = self._streamable_string_keys(slot.properties)
+        self._ensure_tool_id(slot, name)
+
     def _handle_tool_name(self, event: SemanticEvent) -> None:
         idx = event.tool_index
         self._tool_slots[idx].name += event.value
@@ -974,12 +842,7 @@ class ParserEngine(Parser):
         if name is None or not self._accept_tool_name(name):
             return
         slot = self._tool_slots[idx]
-        slot.name = name
-        slot.name_sent = True
-        slot.string_keys = self._streamable_string_keys(
-            find_tool_properties(self._tools, name)
-        )
-        self._ensure_tool_id(slot, name)
+        self._bind_tool(slot, name)
         deltas.append(
             DeltaToolCall(
                 index=idx,
@@ -1032,12 +895,7 @@ class ParserEngine(Parser):
         if not slot.name_sent:
             name = slot.name or self._try_extract_name(idx) or ""
             if self._accept_tool_name(name):
-                slot.name = name
-                slot.name_sent = True
-                slot.string_keys = self._streamable_string_keys(
-                    find_tool_properties(self._tools, name)
-                )
-                self._ensure_tool_id(slot, name)
+                self._bind_tool(slot, name)
                 deltas.append(
                     DeltaToolCall(
                         index=idx,
@@ -1109,6 +967,11 @@ class ParserEngine(Parser):
                 if not diff or not slot.open_value_streams:
                     return None
                 slot.append_streamed(diff)
+                # The extender emits directly to the client; advancing the
+                # cache with it lets the next converted delta resume after
+                # the sent text instead of rebuilding the whole document.
+                if slot.arg_cache is not None:
+                    slot.arg_cache.extend_streamed(diff)
                 return diff
             slot.extend_open_value = None
         elif structural is not None and structural.isdisjoint(raw_delta):
@@ -1123,23 +986,32 @@ class ParserEngine(Parser):
         if not current_json:
             return None
 
-        if slot.name:
-            current_json = self._fix_arg_types(current_json, slot.name)
+        cache = slot.arg_cache
+        result = cache.delta(current_json) if cache is not None else None
+        if result is None:
+            cache = _StreamingArgs(current_json, slot.properties, slot.string_keys)
+            safe_json, value_streams = cache.safe, cache.streams
+            prev = slot.streamed_json
+            if prev and not safe_json.startswith(prev):
+                slot.arg_cache = None
+                return None
+            slot.arg_cache = cache
+            if not safe_json:
+                return None
+            # A full pass supersedes the streamed text; replace it rather than
+            # appending, so a fallback every tick does not grow the part list.
+            slot.streamed_json = safe_json
+            delta = safe_json[len(prev) :]
+        else:
+            delta, value_streams = result
+            if delta:
+                slot.append_streamed(delta)
 
-        prev = slot.streamed_json
-        safe_json, value_streams = self._safe_arg_prefix(current_json, slot.string_keys)
-
-        if not safe_json:
-            return None
-        if prev and not safe_json.startswith(prev):
-            return None
-
-        slot.streamed_json = safe_json
         if self._arg_value_extender is not None:
             # Deltas that only extend the open value skip the conversion above.
             slot.extend_open_value = self._arg_value_extender(slot.args)
             slot.open_value_streams = value_streams
-        return safe_json[len(prev) :] or None
+        return delta or None
 
     def _flush_arg_converter(self, idx: int) -> str | None:
         converter = self._arg_converter
@@ -1162,6 +1034,7 @@ class ParserEngine(Parser):
                 return None
             diff = final_json[len(prev) :]
             slot.streamed_json = final_json
+            slot.arg_cache = None
             return diff
         return None
 

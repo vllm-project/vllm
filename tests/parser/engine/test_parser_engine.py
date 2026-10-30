@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 import pytest
 import regex as re
 
+import vllm.parser.engine.arg_rewrite as arg_rewrite
 from tests.parser.engine.conftest import make_mock_tokenizer
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
@@ -31,8 +32,17 @@ from vllm.parser.engine.adapters import (
     ParserEngineToolAdapter,
     make_adapters,
 )
+from vllm.parser.engine.arg_rewrite import (
+    _ArgsRewriter,
+    _document_has_non_finite_literal,
+    _StreamingArgs,
+    safe_arg_prefix,
+)
 from vllm.parser.engine.events import EventType, SemanticEvent
-from vllm.parser.engine.parser_engine import ParserEngine, ReasoningEnd
+from vllm.parser.engine.parser_engine import (
+    ParserEngine,
+    ReasoningEnd,
+)
 from vllm.parser.engine.parser_engine_config import (
     ParserEngineConfig,
     ParserState,
@@ -40,7 +50,12 @@ from vllm.parser.engine.parser_engine_config import (
 )
 from vllm.parser.glm47_moe import glm47_moe_config
 from vllm.parser.parser_manager import ParserManager
-from vllm.parser.qwen3 import Qwen3Parser
+from vllm.parser.qwen3 import Qwen3Parser, qwen3_config
+from vllm.tool_parsers.utils import (
+    MAX_NESTING_DEPTH,
+    coerce_typed_value,
+    find_tool_properties,
+)
 
 # ── Shared test configs ──────────────────────────────────────────────
 
@@ -690,6 +705,10 @@ def _make_tool(name: str, properties: dict) -> ChatCompletionToolsParam:
     )
 
 
+def _reject_json_constant(name: str):
+    raise ValueError(f"invalid JSON constant: {name}")
+
+
 class TestFixArgTypes:
     """Tests for ParserEngine._fix_arg_types()."""
 
@@ -836,6 +855,260 @@ class TestFixArgTypes:
         result = engine._fix_arg_types('{"vals": ["42", "3.14"]}', "f")
         parsed = json.loads(result)
         assert parsed["vals"] == [42, 3.14]
+
+    def test_untyped_param_string_value_unchanged(self):
+        """A schema without ``type`` extracts as string-only, so a string
+        argument passes through untouched.
+        """
+        tool = _make_tool("f", {"value": {"description": "Any JSON value."}})
+        engine = _make_engine(tools=[tool])
+        original = '{"value": "5"}'
+        assert engine._fix_arg_types(original, "f") == original
+
+    @pytest.mark.parametrize(
+        ("input_json", "expected"),
+        [
+            ('{"value": 5}', {"value": 5}),
+            ('{"value": true}', {"value": True}),
+            ('{"value": null}', {"value": None}),
+        ],
+        ids=["int", "bool", "null"],
+    )
+    def test_untyped_param_keeps_emitted_type(self, input_json, expected):
+        """A non-string argument for an untyped property keeps its emitted
+        type instead of being re-encoded as text and stringified.
+        """
+        tool = _make_tool("f", {"value": {"description": "Any JSON value."}})
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types(input_json, "f")
+        assert json.loads(result) == expected
+
+    def test_param_absent_from_schema_keeps_typed_value(self):
+        """Properties missing from the schema are not coerced at all, so
+        their emitted types survive — the contrast that shows the untyped
+        fallback, not JSON parsing, causes the type loss above.
+        """
+        tool = _make_tool("f", {"count": {"type": "integer"}})
+        engine = _make_engine(tools=[tool])
+        original = '{"count": 7, "extra": 5}'
+        assert engine._fix_arg_types(original, "f") == original
+
+    @pytest.mark.parametrize(
+        ("branch", "input_json"),
+        [
+            ({"type": "string"}, '{"value": 5}'),
+            ({"type": "string"}, '{"value": 5.0}'),
+            ({"type": "boolean"}, '{"value": 1}'),
+        ],
+        ids=["string_branch_int", "string_branch_float", "boolean_branch_int"],
+    )
+    def test_untyped_union_param_keeps_emitted_type(self, branch, input_json):
+        """An untyped branch of a union must not inject a sibling branch's
+        type that rewrites the model's typed value.
+
+        The branch must be one that actually coerces; a ``null`` branch
+        would leave the literal unchanged whether or not the untyped
+        admission is honored.
+        """
+        tool = _make_tool("f", {"value": {"anyOf": [branch, {}]}})
+        engine = _make_engine(tools=[tool])
+        assert engine._fix_arg_types(input_json, "f") == input_json
+
+    @pytest.mark.parametrize("numeric_type", ["integer", "number"])
+    def test_overflowing_number_literal_under_numeric_schema_stays_verbatim(
+        self, numeric_type
+    ):
+        """A numeric literal no declared type can represent is still valid
+        JSON; it must not be re-encoded as a quoted copy of itself, which
+        would turn a number field into a string.
+        """
+        tool = _make_tool("f", {"n": {"type": numeric_type}})
+        engine = _make_engine(tools=[tool])
+        assert engine._fix_arg_types('{"n": 1e999}', "f") == '{"n": 1e999}'
+
+    def test_invalid_escape_keeps_later_corrections(self):
+        """A closed string that is not valid JSON is copied verbatim; it must
+        not stop correction of the members after it.
+        """
+        tool = _make_tool(
+            "f",
+            {"count": {"type": "integer"}, "note": {"type": "string"}},
+        )
+        engine = _make_engine(tools=[tool])
+        args = '{"a": "\\x41", "count": "5", "note": NaN}'
+        expected = '{"a": "\\x41", "count": 5, "note": "NaN"}'
+        assert engine._fix_arg_types(args, "f") == expected
+
+    def test_untyped_union_param_keeps_emitted_string(self):
+        """A union admitting any value must not coerce a string argument to
+        a type named by a sibling branch.
+        """
+        tool = _make_tool("f", {"value": {"anyOf": [{"type": "null"}, {}]}})
+        engine = _make_engine(tools=[tool])
+        original = '{"value": "5"}'
+        assert engine._fix_arg_types(original, "f") == original
+
+    def test_ref_param_keeps_emitted_type(self):
+        """An unresolved ``$ref`` is unknown, not untyped, so the emitted
+        type is kept: an int under an int-enum reference is not stringified.
+        """
+        tool = _make_tool("f", {"level": {"$ref": "#/$defs/Level"}})
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types('{"level": 3}', "f")
+        assert json.loads(result) == {"level": 3}
+
+    def test_ref_union_param_keeps_emitted_string(self):
+        """A nullable ``$ref`` union declares only ``null``, so a quoted value
+        must not be ``json.loads``-unwrapped into a type no branch declares.
+        """
+        tool = _make_tool(
+            "f",
+            {"level": {"anyOf": [{"$ref": "#/$defs/Level"}, {"type": "null"}]}},
+        )
+        engine = _make_engine(tools=[tool])
+        original = '{"level": "42"}'
+        assert engine._fix_arg_types(original, "f") == original
+
+    def test_ref_with_type_sibling_keeps_declared_type(self):
+        """An explicit ``type`` sibling of a ``$ref`` applies (JSON Schema
+        2020-12), so the declared repair wins over the unknown-ref default.
+        """
+        tool = _make_tool("f", {"count": {"$ref": "#/$defs/Count", "type": "integer"}})
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types('{"count": 5}', "f")
+        assert json.loads(result) == {"count": 5}
+
+    def test_deep_nesting_passes_through_verbatim(self):
+        """Nesting deeper than the rewriter's depth cap passes through
+        verbatim instead of raising RecursionError.
+        """
+        tool = _make_tool("f", {"a": {"type": "array"}})
+        engine = _make_engine(tools=[tool])
+        args = '{"a": ' + "[" * 5000 + "]" * 5000 + "}"
+        assert engine._fix_arg_types(args, "f") == args
+
+    def test_deeply_nested_string_payload_does_not_recurse(self):
+        """A stringified payload nested past ``json.loads``' recursion limit
+        stays a string instead of crashing the request."""
+        tool = _make_tool("f", {"payload": {"type": "object"}})
+        engine = _make_engine(tools=[tool])
+        deep = "[" * 12000 + "]" * 12000
+        args = '{"payload": "' + deep + '"}'
+        assert engine._fix_arg_types(args, "f") == args
+
+    def test_deeply_nested_schema_does_not_recurse(self):
+        """A client-supplied schema nested past the cap must not raise."""
+        schema: dict = {"type": "integer"}
+        for _ in range(MAX_NESTING_DEPTH * 10):
+            schema = {"anyOf": [schema]}
+        tool = _make_tool("f", {"count": schema})
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types('{"count": 5}', "f")
+        assert json.loads(result) == {"count": 5}
+
+    @pytest.mark.parametrize(
+        "type_name",
+        ["str", "text", "varchar", "char", "STRING"],
+        ids=["str", "text", "varchar", "char", "uppercase"],
+    )
+    def test_aliased_string_type_reverts_int(self, type_name):
+        """Alias and non-canonical type names get the same string repair as
+        the canonical ``"string"``.
+        """
+        tool = _make_tool("f", {"zipcode": {"type": type_name}})
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types('{"zipcode": 12345}', "f")
+        assert json.loads(result) == {"zipcode": "12345"}
+
+    def test_const_string_param_reverts_int(self):
+        """``const`` pins the type the same way ``enum`` does."""
+        tool = _make_tool("f", {"zip": {"const": "5"}})
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types('{"zip": 5}', "f")
+        assert json.loads(result) == {"zip": "5"}
+
+    def test_const_integer_param_coerces_string(self):
+        """A numeric ``const`` must not turn an emitted string into text."""
+        tool = _make_tool("f", {"n": {"const": 5}})
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types('{"n": "5"}', "f")
+        assert json.loads(result) == {"n": 5}
+
+    def test_non_list_allof_does_not_crash(self):
+        """A malformed ``allOf`` must not raise out of argument parsing."""
+        tool = _make_tool("f", {"a": {"allOf": True}})
+        engine = _make_engine(tools=[tool])
+        assert engine._fix_arg_types('{"a": 5}', "f") == '{"a": 5}'
+
+    def test_untyped_param_nonfinite_float_becomes_string(self):
+        """Non-finite floats cannot be serialized as valid JSON, so they
+        keep the historical string form even for untyped properties.
+        """
+        tool = _make_tool("f", {"count": {"type": "integer"}, "x": {}})
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types('{"count": "5", "x": NaN}', "f")
+        parsed = json.loads(result, parse_constant=_reject_json_constant)
+        assert parsed == {"count": 5, "x": "NaN"}
+
+    def test_nonfinite_float_in_untyped_array_becomes_string(self):
+        """An array without ``items`` is not recursed into for coercion, but
+        its non-finite elements still cannot stay in valid JSON.
+        """
+        tool = _make_tool("f", {"count": {"type": "integer"}, "x": {"type": "array"}})
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types('{"count": "5", "x": [NaN, 1]}', "f")
+        parsed = json.loads(result, parse_constant=_reject_json_constant)
+        assert parsed == {"count": 5, "x": ["NaN", 1]}
+
+    def test_nonfinite_float_in_untyped_object_becomes_string(self):
+        tool = _make_tool("f", {"count": {"type": "integer"}, "x": {"type": "object"}})
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types('{"count": "5", "x": {"a": NaN}}', "f")
+        parsed = json.loads(result, parse_constant=_reject_json_constant)
+        assert parsed == {"count": 5, "x": {"a": "NaN"}}
+
+    def test_nonfinite_float_alone_forces_rewrite(self):
+        """Sanitizing a non-finite float is itself a change, even when no
+        value is coerced.
+        """
+        tool = _make_tool("f", {"x": {}})
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types('{"x": NaN}', "f")
+        parsed = json.loads(result, parse_constant=_reject_json_constant)
+        assert parsed == {"x": "NaN"}
+
+    def test_nonfinite_literal_detection_ignores_string_contents(self):
+        """Only a bare ``NaN``/``Infinity`` token needs the slow path; the
+        same text inside a string must not disable the no-schema fast path,
+        including a token surrounded by whitespace, which the token regex
+        alone cannot reject.
+        """
+        assert _document_has_non_finite_literal('{"x": NaN}')
+        assert _document_has_non_finite_literal('{"x": -Infinity}')
+        assert _document_has_non_finite_literal('{"x": [Infinity]}')
+        assert not _document_has_non_finite_literal('{"x": "banaNaNa"}')
+        assert not _document_has_non_finite_literal('{"x": "Infinity"}')
+        assert not _document_has_non_finite_literal('{"x": "NaNValue"}')
+        assert not _document_has_non_finite_literal('{"x": "temp -Infinity seen"}')
+        assert not _document_has_non_finite_literal('{"x": "say \\" -Infinity"}')
+
+    @pytest.mark.parametrize(
+        "tools,func_name",
+        [
+            ([_make_tool("f", {})], "f"),
+            ([_make_tool("known", {"x": {"type": "string"}})], "unknown"),
+            (None, "f"),
+        ],
+        ids=["no_properties", "unknown_function", "no_tools"],
+    )
+    def test_nonfinite_float_sanitized_without_schema(self, tools, func_name):
+        """Sanitization must not depend on a resolvable property schema, or
+        invalid JSON reaches the client.
+        """
+        engine = _make_engine(tools=tools)
+        result = engine._fix_arg_types('{"x": NaN}', func_name)
+        parsed = json.loads(result, parse_constant=_reject_json_constant)
+        assert parsed == {"x": "NaN"}
 
 
 # ── TestBuildExtractedResult ─────────────────────────────────────────
@@ -1520,28 +1793,14 @@ def _collect_arg_deltas(deltas: list) -> str:
     return "".join(parts)
 
 
+def _stream_tool_args(engine, name: str, chunks: list[str]) -> str:
+    """Stream a tool call and return the exact joined argument text."""
+    per_chunk, flush = _stream_arg_deltas(engine, name, chunks)
+    return "".join(per_chunk) + flush
+
+
 def _run_streaming_tool(engine, name: str, chunks: list[str]) -> dict:
-    deltas = []
-    deltas.append(
-        engine._events_to_delta(
-            [SemanticEvent(EventType.TOOL_CALL_START, tool_index=0)]
-        )
-    )
-    deltas.append(
-        engine._events_to_delta(
-            [SemanticEvent(EventType.TOOL_NAME, name, tool_index=0)]
-        )
-    )
-    for chunk in chunks:
-        deltas.append(
-            engine._events_to_delta(
-                [SemanticEvent(EventType.ARG_VALUE_CHUNK, chunk, tool_index=0)]
-            )
-        )
-    deltas.append(
-        engine._events_to_delta([SemanticEvent(EventType.TOOL_CALL_END, tool_index=0)])
-    )
-    return json.loads(_collect_arg_deltas(deltas))
+    return json.loads(_stream_tool_args(engine, name, chunks))
 
 
 class TestArgDeltaWithConverter:
@@ -1758,7 +2017,7 @@ class TestArgValueExtender:
 
 
 class TestSafeArgPrefix:
-    """Unit tests for ParserEngine._safe_arg_prefix."""
+    """Unit tests for safe_arg_prefix."""
 
     @pytest.mark.parametrize(
         "json_str, expected",
@@ -1780,7 +2039,26 @@ class TestSafeArgPrefix:
         ],
     )
     def test_safe_arg_prefix(self, json_str, expected):
-        assert ParserEngine._safe_arg_prefix(json_str)[0] == expected
+        assert safe_arg_prefix(json_str)[0] == expected
+
+    @pytest.mark.parametrize(
+        "json_str, open_string",
+        [
+            ('{"a": 1', False),
+            ('{"a": ', False),
+            ('{"a": "x', True),
+            ('{"a": "x"', False),
+            ('{"a": "x", "b', True),
+            ('{"o": {"a": "x', True),
+            ('{"a": ["x', True),
+            ('{"a": "x\\', True),
+            ('{"a": "x\\\\"', False),
+            ("", False),
+        ],
+    )
+    def test_open_string(self, json_str, open_string):
+        """The third value reports whether the text ends inside a string."""
+        assert safe_arg_prefix(json_str)[2] is open_string
 
 
 # ── Coercion instability regression tests ────────────────────────
@@ -1796,12 +2074,17 @@ def _growing_kv_converter(raw_args: str, partial: bool) -> str:
     return json.dumps(params, ensure_ascii=False)
 
 
+def _verbatim_converter(raw_args: str, partial: bool) -> str:
+    """Converter that returns the arguments text as-is, like Granite."""
+    return raw_args
+
+
 class TestCoercionInstabilityRegression:
     """Regression tests for _fix_arg_types coercion instability.
 
     These tests exercise scenarios where a trailing value's coercion
     status changes between ticks (e.g. "4" coerces to int but "4e"
-    does not).  Before the _safe_arg_prefix fix, these would violate
+    does not).  Before the safe_arg_prefix fix, these would violate
     the startswith prefix invariant and permanently drop deltas.
     """
 
@@ -1868,6 +2151,699 @@ class TestCoercionInstabilityRegression:
         assert parsed["val"] == "4e"
         assert isinstance(parsed["val"], str)
         assert parsed["extra"] == "ok"
+
+    def test_middle_value_corrected_before_streaming(self):
+        """A middle value in a still-open object is corrected before it
+        streams, so the final flush can still extend the prefix.
+
+        The converter output is not valid JSON until the object closes, so
+        the engine has to correct the complete leading members on their own;
+        otherwise ``"5"`` streams and is later replaced by ``5``.
+        """
+        tool = _make_tool(
+            "f",
+            {
+                "count": {"type": "integer"},
+                "flag": {"type": "boolean"},
+                "note": {"type": "string"},
+            },
+        )
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        parsed = _run_streaming_tool(
+            engine,
+            "f",
+            ['{"count": "5", ', '"flag": true, ', '"note": "x', '"}'],
+        )
+        assert parsed == {"count": 5, "flag": True, "note": "x"}
+        assert isinstance(parsed["count"], int)
+
+    def test_nonfinite_middle_value_sanitized_before_streaming(self):
+        """A non-finite float in a middle value must not be streamed raw.
+
+        While the object is open, ``NaN`` cannot be seen by a whole-object
+        parse; streaming it would leave the client with invalid JSON once
+        the value is sanitized to ``"NaN"`` at close.
+        """
+        tool = _make_tool(
+            "f",
+            {
+                "count": {"description": "Any JSON value."},
+                "note": {"type": "string"},
+            },
+        )
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        parsed = _run_streaming_tool(
+            engine,
+            "f",
+            ['{"count": NaN, ', '"note": "x', '"}'],
+        )
+        assert parsed == {"count": "NaN", "note": "x"}
+
+    @pytest.mark.parametrize("sep", [",", ",\n", ",\t", ", "])
+    def test_model_separator_formatting_survives_correction(self, sep):
+        """Correction must rewrite value tokens in place, not re-serialize.
+
+        ``json.dumps`` normalizes separators to ``, `` and ``: ``, which
+        cannot extend an already-streamed prefix in the model's own
+        formatting, silently truncating the streamed arguments.
+        """
+        tool = _make_tool(
+            "f",
+            {"count": {"type": "integer"}, "note": {"type": "string"}},
+        )
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        chunks = [f'{{"count": "5"{sep}', '"note": "x', '"}']
+        args = _stream_tool_args(engine, "f", chunks)
+        assert args == f'{{"count": 5{sep}"note": "x"}}'
+
+    def test_sanitization_without_coercion_keeps_prefix(self):
+        """A sanitized value alone must not re-serialize the object.
+
+        With nothing to coerce, the pre-fix code still ran ``json.dumps``,
+        whose ``", "`` separators broke the ``startswith(prev)`` check on
+        the compact prefix already streamed and truncated the call.
+        """
+        tool = _make_tool("f", {"a": {"type": "integer"}})
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        args = _stream_tool_args(engine, "f", ['{"a":1,"x":', "NaN}"])
+        assert args == '{"a":1,"x":"NaN"}'
+
+    def test_overflowing_number_literal_kept_verbatim(self):
+        """``1e999`` is valid JSON; it must not become the string
+        ``"Infinity"`` just because sanitization ran."""
+        tool = _make_tool("f", {"a": {"type": "integer"}})
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        args = _stream_tool_args(engine, "f", ['{"a": 1, "x": 1e999}'])
+        assert args == '{"a": 1, "x": 1e999}'
+        assert json.loads(args)["x"] == float("inf")
+
+    def test_exponent_literal_normalizes_under_integer(self):
+        """An integral exponent form under an integer schema becomes the
+        integer, matching the number-schema normalization."""
+        tool = _make_tool("f", {"n": {"type": "integer"}})
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        args = _stream_tool_args(engine, "f", ['{"n": 5e3}'])
+        assert args == '{"n": 5000}'
+
+    def test_integral_numeric_string_coerces_under_integer(self):
+        """A quoted integral number is repaired to the declared integer."""
+        tool = _make_tool("f", {"n": {"type": "integer"}})
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        args = _stream_tool_args(engine, "f", ['{"n": "4.0"}'])
+        assert args == '{"n": 4}'
+
+    def test_fractional_numeric_string_stays_text_under_integer(self):
+        """A fractional value has no exact integer form; keep the text."""
+        tool = _make_tool("f", {"n": {"type": "integer"}})
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        args = _stream_tool_args(engine, "f", ['{"n": "4.5"}'])
+        assert args == '{"n": "4.5"}'
+
+    def test_exponent_literal_normalizes_under_number(self):
+        """Under a number schema the integral exponent form normalizes to
+        an integer, as the parse-and-redump repair did."""
+        tool = _make_tool("f", {"n": {"type": "number"}})
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        args = _stream_tool_args(engine, "f", ['{"n": 5e3}'])
+        assert args == '{"n": 5000}'
+
+    def test_truncated_first_member_sanitized(self):
+        """A truncated call still has its complete tokens corrected: the
+        first member is never preceded by a comma, but its ``NaN`` literal
+        is complete once the arguments end."""
+        tool = _make_tool("f", {"note": {"type": "string"}})
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        args = _stream_tool_args(engine, "f", ['{"x": NaN'])
+        assert args == '{"x": "NaN"'
+
+    def test_aliased_string_type_streams_coerced_value(self):
+        """An aliased string type gets the same in-place repair while
+        streaming as the canonical spelling."""
+        tool = _make_tool("f", {"zip": {"type": "str"}})
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        args = _stream_tool_args(engine, "f", ['{"zip": 12345}'])
+        assert args == '{"zip": "12345"}'
+
+    def test_aliased_string_key_streams_incrementally(self):
+        """An aliased string property still holds a string, so its value may
+        stream before it closes."""
+        assert ParserEngine._streamable_string_keys({"zip": {"type": "str"}}) == {"zip"}
+
+    def test_deep_nesting_streams_verbatim(self):
+        """A model emitting nesting deeper than the rewriter's cap streams
+        verbatim instead of crashing the request with RecursionError."""
+        tool = _make_tool("f", {"a": {"type": "array"}})
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        deep = "[" * 1000 + "]" * 1000
+        args = _stream_tool_args(engine, "f", ['{"a": ' + deep + "}"])
+        assert args == '{"a": ' + deep + "}"
+
+
+def _stream_arg_deltas(engine, name: str, chunks: list[str]) -> tuple[list[str], str]:
+    """Stream a tool call; return per-chunk argument deltas and the flush."""
+    engine._events_to_delta([SemanticEvent(EventType.TOOL_CALL_START, tool_index=0)])
+    engine._events_to_delta([SemanticEvent(EventType.TOOL_NAME, name, tool_index=0)])
+    per_chunk = [
+        _collect_arg_deltas(
+            [
+                engine._events_to_delta(
+                    [SemanticEvent(EventType.ARG_VALUE_CHUNK, chunk, tool_index=0)]
+                )
+            ]
+        )
+        for chunk in chunks
+    ]
+    flush = _collect_arg_deltas(
+        [
+            engine._events_to_delta(
+                [SemanticEvent(EventType.TOOL_CALL_END, tool_index=0)]
+            )
+        ]
+    )
+    return per_chunk, flush
+
+
+@pytest.fixture
+def rewrite_counts(monkeypatch):
+    """Count `_ArgsRewriter` invocations and the characters they rewrite."""
+    counts = SimpleNamespace(calls=0, chars=0)
+
+    class CountingRewriter(_ArgsRewriter):
+        def rewrite(self):
+            counts.calls += 1
+            counts.chars += len(self._text)
+            return super().rewrite()
+
+    monkeypatch.setattr(arg_rewrite, "_ArgsRewriter", CountingRewriter)
+    return counts
+
+
+class TestIncrementalArgRewrite:
+    """The incremental rewrite must match a full pass tick for tick.
+
+    Deltas are the API-visible boundary, so resuming from the last final
+    member may not change when text becomes streamable.
+    """
+
+    @staticmethod
+    def _expected_deltas(tool, chunks: list[str], convert=None) -> list[str]:
+        properties = find_tool_properties([tool], "f")
+        string_keys = ParserEngine._streamable_string_keys(properties)
+        emitted = ""
+        deltas: list[str] = []
+        # The first chunk emits the tool name, so the first argument delta
+        # covers the first two chunks.
+        for i in range(2, len(chunks) + 1):
+            current = "".join(chunks[:i])
+            if convert is not None:
+                current = convert(current, True)
+            corrected = _ArgsRewriter(current, properties, final=False).rewrite()
+            safe = safe_arg_prefix(corrected, string_keys)[0]
+            deltas.append(safe[len(emitted) :])
+            emitted = safe
+        return deltas
+
+    @pytest.mark.parametrize(
+        "schema,chunks",
+        [
+            (
+                {"n": {"type": "string"}, "s": {"type": "string"}},
+                ['{"n": ', "5", ', "s": "he', "llo", '"}'],
+            ),
+            (
+                {"n": {"type": "integer"}, "b": {"type": "boolean"}},
+                ['{"n": "', "4", '2", "b": ', "1", "}"],
+            ),
+            (
+                {"s": {"type": "string"}, "t": {"type": "integer"}},
+                ['{"s": "abc', '"', ",", " ", '"t"', ": 1", "}"],
+            ),
+            (
+                {"items": {"type": "array"}},
+                ['{"items": [', '{"a": ', "1", "}, ", '{"b": 2}', "]}"],
+            ),
+            pytest.param(
+                {"body": {"anyOf": [{"type": "string"}, {"type": "null"}]}},
+                ['{"body": "', "he", "llo", '"', "}"],
+                id="withheld-anyof",
+            ),
+            pytest.param(
+                {"body": {"type": ["string", "null"]}},
+                ['{"body": "', "he", 'll"', "}"],
+                id="withheld-type-list",
+            ),
+            pytest.param(
+                {
+                    "obj": {
+                        "type": "object",
+                        "properties": {"body": {"type": "string"}},
+                    }
+                },
+                ['{"obj": {"body": "', "he", 'llo"', "}}"],
+                id="withheld-nested-object",
+            ),
+            pytest.param(
+                {"arr": {"type": "array", "items": {"type": "string"}}},
+                ['{"arr": ["', "he", 'llo"', "]}"],
+                id="withheld-nested-array",
+            ),
+        ],
+    )
+    def test_deltas_match_full_pass(self, schema, chunks):
+        tool = _make_tool("f", schema)
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        actual, flush = _stream_arg_deltas(engine, "f", chunks)
+        expected = self._expected_deltas(tool, chunks)
+        # Unfiltered: a tick where the full pass emits but the cache defers
+        # is a latency regression even if the joined text is unchanged.
+        assert actual[1:] == expected
+        assert "".join(actual) + flush == engine._fix_arg_types("".join(chunks), "f")
+
+    def test_long_string_deltas_match_full_pass(self):
+        """Split escapes in an open string must not change the delta stream."""
+        tool = _make_tool("f", {"body": {"type": "string"}})
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        body = 'ab\\"cd\\\\ef' * 60
+        chunks = ['{"body": "'] + [body[i : i + 5] for i in range(0, len(body), 5)]
+        chunks.append('"}')
+        actual, flush = _stream_arg_deltas(engine, "f", chunks)
+        expected = self._expected_deltas(tool, chunks)
+        assert actual[1:] == expected
+        assert "".join(actual) + flush == engine._fix_arg_types("".join(chunks), "f")
+
+    def test_transient_truncation_does_not_pin_resume_boundary(self, rewrite_counts):
+        """An unterminated trailing value is not a give-up.
+
+        Treating it as one pins the resume boundary at the first tick's tail,
+        so every later delta rescans the whole document.
+        """
+        fields = {f"f{i}": {"type": "string"} for i in range(80)}
+        doc = "{" + ", ".join(f'"f{i}": "v{i}"' for i in range(80)) + "}"
+        tool = _make_tool("f", fields)
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        chunks = [doc[i : i + 4] for i in range(0, len(doc), 4)]
+        assert _stream_tool_args(engine, "f", chunks) == doc
+        assert rewrite_counts.chars < 20 * len(doc), (
+            f"rewrote {rewrite_counts.chars} chars for {len(doc)}"
+        )
+
+    def test_malformed_key_keeps_streaming(self):
+        """A malformed member's non-string key must not stop a streamable
+        string from streaming.
+
+        A full scan attributes the colon to the previous value, so the open
+        string streams; resuming after the comma loses that and buffers it.
+        """
+        schema = {
+            "a": {"type": "integer"},
+            "val": {"type": "string"},
+            "x": {"type": "string"},
+        }
+        tool = _make_tool("f", schema)
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        doc = '{"a": 1, "val": "x", 2: "streaming a long string value"}'
+        chunks = [doc[i : i + 3] for i in range(0, len(doc), 3)]
+        actual, flush = _stream_arg_deltas(engine, "f", chunks)
+        assert actual[1:] == self._expected_deltas(tool, chunks)
+        assert "".join(actual) + flush == engine._fix_arg_types(doc, "f")
+
+    def test_split_quote_and_comma_stream_in_order(self):
+        """A closing quote and the following comma arriving in separate
+        deltas must not be appended blindly to an open string."""
+        tool = _make_tool("f", {"s": {"type": "string"}, "t": {"type": "integer"}})
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        chunks = ['{"s": "abc', '"', ",", ' "t": ', "1", "}"]
+        per_chunk, flush = _stream_arg_deltas(engine, "f", chunks)
+        assert "".join(per_chunk) == '{"s": "abc", "t": '
+        assert "".join(per_chunk) + flush == '{"s": "abc", "t": 1}'
+
+    @pytest.mark.parametrize(
+        "schema,prefix,suffix",
+        [
+            pytest.param(
+                {"body": {"type": "string"}}, '{"body": "', '"}', id="streamable"
+            ),
+            pytest.param(
+                {"body": {"anyOf": [{"type": "string"}, {"type": "null"}]}},
+                '{"body": "',
+                '"}',
+                id="withheld-anyof",
+            ),
+            pytest.param(
+                {"body": {"type": ["string", "null"]}},
+                '{"body": "',
+                '"}',
+                id="withheld-type-list",
+            ),
+            pytest.param(
+                {
+                    "obj": {
+                        "type": "object",
+                        "properties": {"body": {"type": "string"}},
+                    }
+                },
+                '{"obj": {"body": "',
+                '"}}',
+                id="withheld-nested-object",
+            ),
+            pytest.param(
+                {"arr": {"type": "array", "items": {"type": "string"}}},
+                '{"arr": ["',
+                '"]}',
+                id="withheld-nested-array",
+            ),
+        ],
+    )
+    def test_long_string_is_not_rewritten_per_delta(
+        self, rewrite_counts, schema, prefix, suffix
+    ):
+        """An open trailing string is only string content, so its deltas do
+        not re-rewrite the accumulated document, whether it streams or is
+        withheld by the safe prefix."""
+        tool = _make_tool("f", schema)
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        body = "x" * 4000
+        chunks = [prefix] + [body[i : i + 8] for i in range(0, len(body), 8)]
+        chunks.append(suffix)
+        args = _stream_tool_args(engine, "f", chunks)
+        assert args == prefix + body + suffix
+        assert rewrite_counts.calls < 10, (
+            f"rewrote {rewrite_counts.calls} times for {len(chunks)} deltas"
+        )
+
+    def test_long_string_naming_nonfinite_is_not_rewritten_per_delta(
+        self, rewrite_counts
+    ):
+        """A no-schema open string that names a non-finite literal is still
+        string content; the fragment check must not force a full pass."""
+        engine = _make_engine(_converter_config(_verbatim_converter))
+        body = "Infinity " * 500
+        chunks = ['{"body": "'] + [body[i : i + 8] for i in range(0, len(body), 8)]
+        chunks.append('"}')
+        args = _stream_tool_args(engine, "f", chunks)
+        assert args == '{"body": "' + body + '"}'
+        assert rewrite_counts.calls < 10, (
+            f"rewrote {rewrite_counts.calls} times for {len(chunks)} deltas"
+        )
+
+    def test_non_extending_text_falls_back_to_full_pass(self):
+        tool = _make_tool("f", {"a": {"type": "integer"}})
+        properties = find_tool_properties([tool], "f")
+        string_keys = ParserEngine._streamable_string_keys(properties)
+        cache = _StreamingArgs('{"a": 1}', properties, string_keys)
+        assert cache.delta('{"a": 2}') is None
+
+    def test_rewritten_emitted_tail_falls_back_to_full_pass(self):
+        """A change to text already emitted from the resume boundary is a
+        rewrite, not an append."""
+        tool = _make_tool("f", {"a": {"type": "integer"}, "b": {"type": "string"}})
+        properties = find_tool_properties([tool], "f")
+        string_keys = ParserEngine._streamable_string_keys(properties)
+        cache = _StreamingArgs('{"a": 1, "b": "x"}', properties, string_keys)
+        assert cache.delta('{"a": 1, "b": "y", "c": 2}') is None
+
+    def test_changed_unemitted_tail_resumes(self):
+        """A changed value that was never emitted leaves the emitted text
+        intact, so only the tail after the last finalized member is
+        rewritten."""
+        tool = _make_tool("f", {"a": {"type": "integer"}})
+        properties = find_tool_properties([tool], "f")
+        string_keys = ParserEngine._streamable_string_keys(properties)
+        cache = _StreamingArgs('{"a": 1, "b": "x"}', properties, string_keys)
+        assert cache.delta('{"a": 1, "b": "y", "c": 2}') == ('"y", "c": ', False)
+
+    def test_reserializing_converter_resumes(self):
+        """A converter that re-serializes its whole output every tick must
+        still resume from the last finalized member instead of full-passing."""
+        tool = _make_tool("f", {"a": {"type": "integer"}, "b": {"type": "string"}})
+        engine = _make_engine(_converter_config(_kv_converter), tools=[tool])
+        chunks = ["a=1", " b=he", "llo", " c=2"]
+        actual, flush = _stream_arg_deltas(engine, "f", chunks)
+
+        assert actual[1:] == self._expected_deltas(tool, chunks, _kv_converter)
+        assert "".join(actual) + flush == engine._fix_arg_types(
+            _kv_converter("".join(chunks), False), "f"
+        )
+
+    def test_extender_bytes_are_verified_against_the_converter(self):
+        """Text an extender streamed ahead of the converter must match the
+        converter's tail, or the cache falls back."""
+        tool = _make_tool("f", {"a": {"type": "integer"}, "b": {"type": "string"}})
+        properties = find_tool_properties([tool], "f")
+        string_keys = ParserEngine._streamable_string_keys(properties)
+        cache = _StreamingArgs('{"a": 1, "b": "x"}', properties, string_keys)
+        cache.extend_streamed("not-what-the-converter-emits")
+        assert cache.delta('{"a": 1, "b": "xyz"}') is None
+
+    def test_extender_bytes_verified_without_a_resume_boundary(self):
+        """A single-member call has no top-level comma to resume from, so
+        extender bytes must still be checked against the converter."""
+        tool = _make_tool("f", {"a": {"type": "string"}})
+        properties = find_tool_properties([tool], "f")
+        string_keys = ParserEngine._streamable_string_keys(properties)
+        cache = _StreamingArgs('{"a": "', properties, string_keys)
+        cache.extend_streamed("not-what-the-converter-emits")
+        assert cache.delta('{"a": "xyz"}') is None
+
+    def test_open_string_fast_path_survives_resume_advance(self, rewrite_counts):
+        """A delta that finalizes a member advances the resume boundary and
+        must leave the verbatim open-string fast path armed for the next
+        tick instead of forcing a tail rewrite."""
+        tool = _make_tool("f", {"a": {"type": "integer"}, "b": {"type": "string"}})
+        properties = find_tool_properties([tool], "f")
+        string_keys = ParserEngine._streamable_string_keys(properties)
+        cache = _StreamingArgs('{"a": 1', properties, string_keys)
+        assert cache.delta('{"a": 1, "b": "xx') == ('1, "b": "xx', True)
+        rewrites = rewrite_counts.calls
+        assert cache.delta('{"a": 1, "b": "xxx') == ("x", True)
+        assert rewrite_counts.calls == rewrites
+
+    def test_extender_ticks_reuse_the_cached_correction(self, monkeypatch):
+        """A value streamed by an argument extender must not discard the
+        incremental state; the next converted delta resumes after it."""
+        from tests.parser.engine.streaming_helpers import (
+            collect_tool_arguments,
+            simulate_tool_streaming,
+        )
+
+        constructions = 0
+        original = arg_rewrite._StreamingArgs.__init__
+
+        def counting(self, *args, **kwargs):
+            nonlocal constructions
+            constructions += 1
+            return original(self, *args, **kwargs)
+
+        monkeypatch.setattr(arg_rewrite._StreamingArgs, "__init__", counting)
+        fields = {f"f{i}": {"type": "string"} for i in range(40)}
+        tool = _make_tool("write", fields)
+        engine = _make_engine(qwen3_config(thinking=False), tools=[tool])
+        request = ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "test"}],
+            tools=[tool],
+            tool_choice="auto",
+            include_reasoning=True,
+        )
+        doc = (
+            "<tool_call>\n<function=write>\n"
+            + "".join(f"<parameter=f{i}>value{i}</parameter>\n" for i in range(40))
+            + "</function>\n</tool_call>"
+        )
+        chunks = [doc[i : i + 4] for i in range(0, len(doc), 4)]
+
+        results = simulate_tool_streaming(engine, request, chunks)
+        assert json.loads(collect_tool_arguments(results)) == {
+            f"f{i}": f"value{i}" for i in range(40)
+        }
+        assert constructions <= 5, f"{constructions} caches for {len(chunks)} ticks"
+
+    def test_rewrite_behind_identical_tail_falls_back_to_full_pass(self):
+        """The cached prefix is compared in full: an open-string converter
+        appends at the end, so a same-length rewrite far from the end leaves
+        the tail identical and its delta would be sliced from stale offsets."""
+        tool = _make_tool("f", {"a": {"type": "string"}, "b": {"type": "string"}})
+        properties = find_tool_properties([tool], "f")
+        string_keys = ParserEngine._streamable_string_keys(properties)
+        raw = '{"a": "1", "b": "' + "x" * 300
+        cache = _StreamingArgs(raw, properties, string_keys)
+        rewritten = '{"a": "2", "b": "' + "x" * 301
+        assert cache.delta(rewritten) is None
+
+    @pytest.mark.parametrize("size", [1, 2, 3, 5])
+    def test_non_delimited_nonfinite_literal_streams_as_final(self, size):
+        """A non-finite token followed by malformed text is quoted by the
+        final pass too, so streaming must not emit it bare: the streamed
+        prefix would stop being a prefix of the final arguments.
+        """
+        schema = {"s": {"type": "string"}, "n": {"type": "string"}}
+        tool = _make_tool("f", schema)
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        doc = '{"s": "hello", "n": -Infinity: "x"}'
+        chunks = [doc[i : i + size] for i in range(0, len(doc), size)]
+        actual, flush = _stream_arg_deltas(engine, "f", chunks)
+        assert actual[1:] == self._expected_deltas(tool, chunks)
+        assert "".join(actual) + flush == engine._fix_arg_types(doc, "f")
+
+    @pytest.mark.parametrize(
+        "schema, doc",
+        [
+            (
+                {f"f{i}": {"type": "string"} for i in range(80)},
+                "{" + " , ".join(f'"f{i}": "v{i}"' for i in range(80)) + "}",
+            ),
+            (
+                {
+                    "items": {"type": "array"},
+                    **{f"f{i}": {"type": "string"} for i in range(60)},
+                },
+                '{"items": [1 , 2] , '
+                + " , ".join(f'"f{i}": "v{i}"' for i in range(60))
+                + "}",
+            ),
+        ],
+        ids=["object", "array"],
+    )
+    def test_transient_whitespace_does_not_pin_resume_boundary(
+        self, rewrite_counts, schema, doc
+    ):
+        """Whitespace between a complete value and the next comma is a wait,
+        not a give-up: pinning the boundary there rescans the whole document
+        for every later delta.
+        """
+        tool = _make_tool("f", schema)
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        chunks = [doc[i : i + 4] for i in range(0, len(doc), 4)]
+        assert _stream_tool_args(engine, "f", chunks) == doc
+        assert rewrite_counts.chars < 20 * len(doc), (
+            f"rewrote {rewrite_counts.chars} chars for {len(doc)}"
+        )
+
+    def test_nonfinite_inside_string_does_not_parse_document(self, monkeypatch):
+        """Text naming a non-finite literal inside a string must keep the
+        no-schema identity fast path, not force a structural walk."""
+        calls = 0
+        original = _ArgsRewriter._object
+
+        def counting(self, *args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return original(self, *args, **kwargs)
+
+        monkeypatch.setattr(_ArgsRewriter, "_object", counting)
+        document = '{"msg": "temp -Infinity seen"}'
+        assert _ArgsRewriter(document, None, final=False).rewrite() == document
+        assert calls == 0
+
+
+class TestIncrementalArgRewriteAfterGiveUp:
+    """Text after a structural give-up is corrected verbatim.
+
+    Resuming the rewriter past the give-up re-parses that region, coerces
+    values the full pass left alone, and makes the streamed text stop being
+    a prefix of the final arguments.
+    """
+
+    @staticmethod
+    def _assert_stream_matches_final(doc, schema, size):
+        tool = _make_tool("f", schema)
+        chunks = [doc[i : i + size] for i in range(0, len(doc), size)]
+        engine = _make_engine(_converter_config(_verbatim_converter), tools=[tool])
+        actual, flush = _stream_arg_deltas(engine, "f", chunks)
+        assert actual[1:] == TestIncrementalArgRewrite._expected_deltas(tool, chunks)
+        assert "".join(actual) + flush == engine._fix_arg_types(doc, "f")
+
+    @pytest.mark.parametrize("size", [1, 3, 4])
+    def test_malformed_member_then_coercible(self, size):
+        self._assert_stream_matches_final(
+            '{"a": , "b": "5", "c": "z"}',
+            {
+                "a": {"type": "string"},
+                "b": {"type": "integer"},
+                "c": {"type": "string"},
+            },
+            size,
+        )
+
+    @pytest.mark.parametrize("size", [4, 8])
+    def test_pathological_nesting_then_coercible(self, size):
+        deep = "[" * 300 + "]" * 300
+        self._assert_stream_matches_final(
+            '{"a": ' + deep + ', "b": "5", "c": "z"}',
+            {
+                "a": {"type": "object"},
+                "b": {"type": "integer"},
+                "c": {"type": "string"},
+            },
+            size,
+        )
+
+    @pytest.mark.parametrize("size", [1, 3])
+    def test_no_schema_nonfinite_after_giveup(self, size):
+        """Without a schema only non-finite literals are rewritten, but the
+        identity fast path must not hide a give-up from the resume check."""
+        self._assert_stream_matches_final(
+            '{"n": NaN, "t": -Infin:ity, "x": 1e999, "t": NaN}',
+            {},
+            size,
+        )
+
+    @pytest.mark.parametrize("size", [1, 3, 4])
+    def test_text_after_closed_object_is_not_rewritten(self, size):
+        """Text past the closed top-level object is copied verbatim, so the
+        resume boundary must not move into it and coerce values the final
+        pass leaves alone.
+        """
+        self._assert_stream_matches_final(
+            '{"a": 1} {"c": "2", "e": "5", "z": 9}',
+            {
+                "a": {"type": "integer"},
+                "c": {"type": "string"},
+                "e": {"type": "integer"},
+                "z": {"type": "integer"},
+            },
+            size,
+        )
+
+
+_STREAMABLE_SCHEMA_SHAPES: list[dict] = [
+    {"type": "string"},
+    {"type": "str"},
+    {},
+    {"description": "Any JSON value."},
+    {"anyOf": [{"type": "string"}, {}]},
+    {"allOf": [{"type": "string"}]},
+    {"$ref": "#/$defs/Foo"},
+    {"type": "string", "enum": ["a", "b"]},
+    {"const": "fixed"},
+    {"type": ["string", "null"]},
+    {"anyOf": [{"type": "string"}, {"type": "integer"}]},
+    {"type": "integer"},
+]
+
+
+class TestStreamableStringKeyProperty:
+    """A key whose open string streams must never have that string rewritten.
+
+    ``_streamable_string_keys`` and the rewriter derive a property's type
+    through separate schema pipelines; streaming is prefix-safe only while
+    they agree.  This pins the agreement across schema shapes, so a change
+    that streams a key's string in one pipeline while coercing it in the
+    other fails here instead of silently truncating the call.
+    """
+
+    @pytest.mark.parametrize(
+        "schema", _STREAMABLE_SCHEMA_SHAPES, ids=lambda s: json.dumps(s)
+    )
+    @pytest.mark.parametrize(
+        "value", ["x", "", 'quote " and \\ backslash', "ünïcødé", "NaN"]
+    )
+    def test_streamable_key_string_never_rewritten(self, schema, value):
+        properties = {"k": schema}
+        text = json.dumps({"k": value})
+        if "k" in (ParserEngine._streamable_string_keys(properties) or set()):
+            assert coerce_typed_value(value, schema) == (value, False)
+            assert _ArgsRewriter(text, properties, final=True).rewrite() == text
 
 
 _DROP_VOCAB: dict[str, int] = {

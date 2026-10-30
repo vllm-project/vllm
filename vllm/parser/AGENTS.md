@@ -13,7 +13,8 @@ serving layer calls `parse` / `parse_delta` and `is_reasoning_end` on it.
   (`parser_engine_config.py`) is a set of terminals, transitions and content
   events; `parser_engine.py` and `streaming_parser_engine.py` drive it for the
   non-streaming and streaming paths; `token_id_scanner.py` pre-lexes
-  special-token ids and `incremental_lexer.py` lexes text; `adapters.py`
+  special-token ids and `incremental_lexer.py` lexes text; `arg_rewrite.py`
+  corrects and incrementally streams tool-call argument JSON; `adapters.py`
   exposes an engine through the legacy reasoning/tool parser interfaces.
 - `<model>.py` — one file per model family. Most subclass `ParserEngine`
   (`deepseek_v4.py`, `qwen3.py`, ...); a few are `DelegatingParser` wrappers

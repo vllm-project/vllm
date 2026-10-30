@@ -6,8 +6,9 @@ import json
 import keyword as _python_keyword
 import math
 import warnings
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from json import JSONDecodeError, JSONDecoder
 from typing import Any, TypeAlias
 
@@ -901,7 +902,7 @@ def escape_nested_quotes_in_strings(text: str) -> tuple[str, bool]:
         for close in (j for j in quotes if is_closer(j)):
             interior: list[str] = []
             for j in range(index + 1, close):
-                if text[j] == char and not _is_escaped(text, j):
+                if text[j] == char and not is_escaped(text, j):
                     interior.append("\\")
                 interior.append(text[j])
             candidate = "".join(
@@ -962,7 +963,7 @@ def contains_broken_string_literal(text: str) -> bool:
     return False
 
 
-def _is_escaped(text: str, index: int) -> bool:
+def is_escaped(text: str, index: int) -> bool:
     """Whether the character at ``index`` is backslash-escaped.
 
     A character is escaped iff it is preceded by an *odd* number of consecutive
@@ -1002,7 +1003,7 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
         # in a string argument (e.g. `cmd='grep -F "]"'`) corrupts the bracket
         # stack and the whole tool call is rejected as mismatched.
         if bracket_stack and bracket_stack[-1] in {"'", '"'}:
-            if char == bracket_stack[-1] and not _is_escaped(text, index):
+            if char == bracket_stack[-1] and not is_escaped(text, index):
                 bracket_stack.pop()
             continue
         if char in {"[", "(", "{"}:
@@ -1077,15 +1078,86 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
     return candidate, added_text
 
 
-def extract_types_from_schema(schema: Any) -> list[str]:
+# Shared bound for the recursive schema and document walks below.  Real
+# arguments and schemas nest a handful of levels deep; beyond this we stop
+# recursing rather than approach the interpreter's limit.
+MAX_NESTING_DEPTH = 200
+
+
+def schema_admits_any_value(schema: Any, *, _depth: int = 0) -> bool:
+    """Whether *schema* is explicitly untyped, i.e. admits any JSON value.
+
+    An empty dict or ``true`` schema is untyped, as is a union with an
+    untyped ``anyOf``/``oneOf`` branch.  Sibling keywords are conjunctive:
+    every present ``anyOf``/``oneOf`` must have an untyped branch, and
+    every ``allOf`` branch must be untyped.  ``type``/``enum``/``const``
+    narrow the schema, and an unresolved ``$ref`` is unknown rather than
+    untyped.  Nesting beyond :data:`MAX_NESTING_DEPTH` returns ``False``;
+    coercion callers then resolve no types and leave the value verbatim.
+    """
+    if schema is True:
+        return True
+    if not isinstance(schema, dict):
+        return False
+    if any(key in schema for key in ("type", "enum", "const", "$ref", "$dynamicRef")):
+        return False
+    if _depth >= MAX_NESTING_DEPTH:
+        return False
+
+    for choice_field in ("anyOf", "oneOf"):
+        choices = schema.get(choice_field)
+        if isinstance(choices, list) and not any(
+            schema_admits_any_value(choice, _depth=_depth + 1) for choice in choices
+        ):
+            return False
+
+    all_of = schema.get("allOf")
+    if not isinstance(all_of, list):
+        return True
+    return all(schema_admits_any_value(choice, _depth=_depth + 1) for choice in all_of)
+
+
+def _json_type_name(value: Any) -> str | None:
+    """JSON Schema type name of *value*, or ``None`` for a non-JSON type."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    return None
+
+
+def extract_types_from_schema(
+    schema: Any,
+    *,
+    fallback: list[str] | None = None,
+    _depth: int = 0,
+) -> list[str]:
     """Extract all possible type strings from a JSON Schema definition.
 
-    Handles ``type`` (string or list), ``enum`` value inference, and
-    recursive ``anyOf``/``oneOf``/``allOf``.  Returns ``["string"]``
-    when no type information can be determined.
+    Handles ``type`` (string or list), ``enum``/``const`` value inference,
+    and recursive ``anyOf``/``oneOf``/``allOf``.  Returns *fallback*
+    (default ``["string"]``) when the schema supplies no type information:
+    ``true``/``false``, absent or non-dict schemas, ``$ref``-only, and
+    over-deep (:data:`MAX_NESTING_DEPTH`) schemas.  Coercion callers pass
+    ``[]`` to leave such values verbatim.  Explicit ``type``/``enum``
+    siblings of a ``$ref`` still apply.
     """
-    if schema is None or not isinstance(schema, dict):
-        return ["string"]
+    if fallback is None:
+        fallback = ["string"]
+    if not isinstance(schema, dict):
+        return list(fallback)
+    if _depth >= MAX_NESTING_DEPTH:
+        return list(fallback)
 
     types: set[str] = set()
 
@@ -1098,29 +1170,40 @@ def extract_types_from_schema(schema: Any) -> list[str]:
                 if isinstance(t, str):
                     types.add(t)
 
-    if "enum" in schema and isinstance(schema["enum"], list) and schema["enum"]:
+    if "enum" in schema and isinstance(schema["enum"], list):
         for value in schema["enum"]:
-            if value is None:
-                types.add("null")
-            elif isinstance(value, bool):
-                types.add("boolean")
-            elif isinstance(value, int):
-                types.add("integer")
-            elif isinstance(value, float):
-                types.add("number")
-            elif isinstance(value, str):
-                types.add("string")
-            elif isinstance(value, list):
-                types.add("array")
-            elif isinstance(value, dict):
-                types.add("object")
+            type_name = _json_type_name(value)
+            if type_name is not None:
+                types.add(type_name)
+
+    if "const" in schema:
+        type_name = _json_type_name(schema["const"])
+        if type_name is not None:
+            types.add(type_name)
 
     for choice_field in ("anyOf", "oneOf", "allOf"):
         if choice_field in schema and isinstance(schema[choice_field], list):
             for choice in schema[choice_field]:
-                types.update(extract_types_from_schema(choice))
+                types.update(
+                    extract_types_from_schema(
+                        choice, fallback=fallback, _depth=_depth + 1
+                    )
+                )
 
-    return list(types) if types else ["string"]
+    if types:
+        return list(types)
+    return list(fallback)
+
+
+def schema_coercion_types(schema: Any) -> list[str]:
+    """Types *schema* justifies coercing a value to; ``[]`` for none.
+
+    An untyped schema (see :func:`schema_admits_any_value`) has no branch
+    that would justify a type change, so callers leave such values verbatim.
+    """
+    if not isinstance(schema, dict) or schema_admits_any_value(schema):
+        return []
+    return extract_types_from_schema(schema, fallback=[])
 
 
 _TYPE_ALIASES: dict[str, str] = {
@@ -1150,12 +1233,58 @@ _TYPE_ALIASES: dict[str, str] = {
 }
 
 
+def canonical_schema_types(types: Iterable[str]) -> set[str]:
+    """Normalize schema type strings to the JSON Schema names vLLM coerces to."""
+    return {_TYPE_ALIASES.get(t.strip().lower(), t.strip().lower()) for t in types}
+
+
+def is_undeclared_string(coerced: Any, types: Iterable[str]) -> bool:
+    """Whether *coerced* is a string that *types* does not declare."""
+    return isinstance(coerced, str) and "string" not in canonical_schema_types(types)
+
+
+def _exact_integer(value: str) -> int | None:
+    """The integer *value* spells exactly, or ``None``.
+
+    ``int()`` rejects float spellings (``"4.0"``, ``"1e3"``) even when they
+    denote an integer.  A float conversion cannot decide on its own:
+    ``"9007199254740993.0"`` rounds to ``2**53``, and a fractional text just
+    above ``2**52`` rounds to an integer, so an integral-looking float is
+    confirmed against the exact decimal value.  Float spellings of 19 or
+    more digits are rejected, so a short text such as ``"1e999999999"``
+    cannot expand into an enormous integer.
+    """
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        pass
+    try:
+        number = float(value)
+    except (ValueError, TypeError):
+        return None
+    if not math.isfinite(number) or not number.is_integer():
+        return None
+    if abs(number) < 2**52:
+        # Every integer below 2**52 is exactly representable.
+        return int(number)
+    try:
+        parsed = Decimal(value.strip())
+    except InvalidOperation:
+        return None
+    if parsed != parsed.to_integral_value() or parsed.adjusted() >= 19:
+        return None
+    return int(parsed)
+
+
 def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
     """Best-effort coercion of a raw string value to a JSON Schema type.
 
     Tries each type in priority order (null > integer > number > boolean >
     object > array > string) and returns the first successful coercion.
-    Falls back to the original string when no coercion succeeds.
+    Integral text in any numeric spelling (``"42"``, ``"4.0"``, ``"1e3"``)
+    satisfies ``integer``.  If none matches, returns the original string;
+    only when no requested type name is recognized is the value parsed as
+    JSON instead.
 
     Args:
         value: The raw string value from the model output.
@@ -1166,9 +1295,7 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
     if isinstance(schema_type, str):
         schema_type = [schema_type]
 
-    normalized_types = {
-        _TYPE_ALIASES.get(key, key) for t in schema_type for key in [t.strip().lower()]
-    }
+    normalized_types = canonical_schema_types(schema_type)
 
     # Priority: null > integer > number > boolean > object > array > string
     type_priority = [
@@ -1180,27 +1307,28 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
         "array",
         "string",
     ]
+    has_recognized_types = False
 
     for candidate_type in type_priority:
         if candidate_type not in normalized_types:
             continue
+        has_recognized_types = True
 
         if candidate_type == "null":
-            if value.lower() == "null":
+            if value.strip().lower() == "null":
                 return None
             continue
         if candidate_type == "string":
             return value
         if candidate_type == "integer":
-            try:
-                return int(value)
-            except (ValueError, TypeError):
-                continue
+            exact = _exact_integer(value)
+            if exact is not None:
+                return exact
+            continue
         if candidate_type == "number":
-            try:
-                return int(value)
-            except (ValueError, TypeError):
-                pass
+            exact = _exact_integer(value)
+            if exact is not None:
+                return exact
             try:
                 val = float(value)
             except (ValueError, TypeError):
@@ -1222,7 +1350,9 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
         if candidate_type in ("object", "array"):
             try:
                 parsed = json.loads(value)
-            except (json.JSONDecodeError, ValueError, TypeError):
+            except (json.JSONDecodeError, ValueError, TypeError, RecursionError):
+                # The depth bound does not cover stringified JSON; keep the
+                # string instead of failing the request.
                 continue
             if _is_json_finite(parsed):
                 return parsed
@@ -1230,9 +1360,14 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
             # serialized back to valid JSON; preserve the raw string.
             continue
 
+    if has_recognized_types:
+        # None of the declared types matched, so no JSON type the fallback
+        # could produce is one this schema asked for.
+        return value
+
     try:
         parsed = json.loads(value)
-    except (json.JSONDecodeError, ValueError):
+    except (json.JSONDecodeError, ValueError, RecursionError):
         return value
     # Reject non-finite results (e.g. json.loads("1e999") -> inf, or nested
     # inf/nan inside a parsed list/dict) which json.dumps would render as
@@ -1240,6 +1375,66 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
     if not _is_json_finite(parsed):
         return value
     return parsed
+
+
+def value_changed(before: Any, after: Any) -> bool:
+    """Whether *after* differs from *before* in JSON type or value."""
+    return type(after) is not type(before) or after != before
+
+
+def coerce_typed_value(
+    value: Any, schema: Any, *, types: list[str] | None = None
+) -> tuple[Any, bool]:
+    """Coerce an already-typed value according to its property *schema*.
+
+    Unlike :func:`coerce_to_schema_type`, *value* may be any JSON value;
+    non-string values are serialized before coercion. A value whose own type
+    no branch declares is left as emitted; a schema admitting any value (see
+    :func:`schema_admits_any_value`) declares no type at all. *types*
+    overrides the types derived from *schema*, for callers that cache them.
+    Returns ``(value, changed)``.
+    """
+    if types is None:
+        types = schema_coercion_types(schema)
+    if not types:
+        return value, False
+    raw_value = (
+        value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    )
+    coerced = coerce_to_schema_type(raw_value, types)
+    if (
+        not isinstance(value, str)
+        and is_undeclared_string(coerced, types)
+        and _json_type_name(value) not in canonical_schema_types(types)
+    ):
+        # The fallback serialized a type no branch declares; keep the value
+        # as emitted rather than stringifying it.
+        return value, False
+    return coerced, value_changed(value, coerced)
+
+
+def sanitize_non_finite(value: Any) -> Any:
+    """Replace non-finite floats with their string form, recursively.
+
+    ``json.dumps`` renders ``NaN``/``Infinity`` as invalid JSON, so values
+    headed for serialization are sanitized first. Containers are updated in
+    place. The walk is iterative: ``json.loads`` accepts model output nested
+    past the interpreter's recursion limit, so a recursive walk would raise
+    ``RecursionError`` on JSON that parsed fine.
+    """
+    if isinstance(value, float):
+        # Spell it the way json.dumps spells it ("NaN"/"Infinity").
+        return value if math.isfinite(value) else json.dumps(value)
+    stack: list[Any] = [value] if isinstance(value, (dict, list)) else []
+    while stack:
+        node = stack.pop()
+        items = node.items() if isinstance(node, dict) else enumerate(node)
+        for key, item in items:
+            if isinstance(item, (dict, list)):
+                stack.append(item)
+            elif isinstance(item, float) and not math.isfinite(item):
+                node[key] = json.dumps(item)
+    return value
 
 
 def compute_tool_delta(

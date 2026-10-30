@@ -7,8 +7,10 @@ import json
 import pytest
 
 from vllm.tool_parsers.utils import (
+    MAX_NESTING_DEPTH,
     UnexpectedAstError,
     coerce_to_schema_type,
+    coerce_typed_value,
     contains_broken_string_literal,
     escape_ctrl_chars_in_strings,
     escape_nested_quotes_in_strings,
@@ -19,6 +21,8 @@ from vllm.tool_parsers.utils import (
     normalize_leading_zero_ints,
     rename_reserved_kwargs,
     restore_reserved_kwarg_names,
+    sanitize_non_finite,
+    schema_admits_any_value,
 )
 
 
@@ -36,6 +40,10 @@ class TestCoerceToSchemaType:
         def test_null_case_insensitive(self):
             assert coerce_to_schema_type("NULL", "null") is None
             assert coerce_to_schema_type("Null", "null") is None
+
+        @pytest.mark.parametrize("value", [" null", "null ", " NULL "])
+        def test_null_with_surrounding_whitespace(self, value):
+            assert coerce_to_schema_type(value, "null") is None
 
         def test_none_string_never_converted(self):
             assert coerce_to_schema_type("none", "null") == "none"
@@ -81,6 +89,31 @@ class TestCoerceToSchemaType:
         def test_invalid_integer_fallback(self):
             assert coerce_to_schema_type("not_a_number", "integer") == "not_a_number"
 
+        def test_fractional_value_not_coerced(self):
+            # A float is not an integer; keep the emitted text.
+            assert coerce_to_schema_type("4.5", "integer") == "4.5"
+
+        def test_integral_float_text_coerces(self):
+            # JSON spells integral values as floats too; the value is an
+            # integer, so the emitted text becomes one.
+            result = coerce_to_schema_type("4.0", "integer")
+            assert result == 4
+            assert isinstance(result, int)
+
+        def test_integral_exponent_text_coerces(self):
+            assert coerce_to_schema_type("1e3", "integer") == 1000
+
+        def test_large_integral_float_text_is_exact(self):
+            # A float conversion would round this to 2**53; the exact
+            # decimal value must be preserved.
+            result = coerce_to_schema_type("9007199254740993.0", "integer")
+            assert result == 9007199254740993
+
+        def test_huge_exponent_text_not_expanded(self):
+            # A short exponent spelling must not expand into an enormous
+            # integer; keep the emitted text.
+            assert coerce_to_schema_type("1e999999999", "integer") == ("1e999999999")
+
         def test_uint32_alias(self):
             assert coerce_to_schema_type("5", "uint32") == 5
 
@@ -109,6 +142,12 @@ class TestCoerceToSchemaType:
             result = coerce_to_schema_type(str(value), schema_type)
             assert isinstance(result, int)
             assert json.loads(json.dumps(result)) == value
+
+        def test_large_integral_float_text_preserved(self):
+            # Same exactness rule as the integer branch: a float conversion
+            # would round this to 2**53.
+            result = coerce_to_schema_type("9007199254740993.0", "number")
+            assert result == 9007199254740993
 
         def test_invalid_number_fallback(self):
             assert coerce_to_schema_type("abc", "number") == "abc"
@@ -213,6 +252,12 @@ class TestCoerceToSchemaType:
         def test_list_alias(self):
             assert coerce_to_schema_type("[1]", "list") == [1]
 
+        def test_deeply_nested_json_does_not_recurse(self):
+            # The nesting bound covers the document, not stringified JSON.
+            deep = "[" * 12000 + "]" * 12000
+            assert coerce_to_schema_type(deep, "object") == deep
+            assert coerce_to_schema_type(deep, "array") == deep
+
     class TestMultiType:
         def test_null_takes_priority_over_string(self):
             assert coerce_to_schema_type("null", ["string", "null"]) is None
@@ -236,6 +281,172 @@ class TestCoerceToSchemaType:
 
         def test_unrecognized_type_falls_back_to_json(self):
             assert coerce_to_schema_type("42", "interval") == 42
+
+    class TestUndeclaredJSONType:
+        """The JSON fallback must not invent a type the caller did not declare.
+
+        Regression: under the OpenAPI nullable-ref pattern
+        ``anyOf: [{$ref: ...}, {"type": "null"}]`` the unresolved ``$ref``
+        contributes no type, so a quoted ``"42"`` was ``json.loads``-unwrapped
+        into the integer ``42`` that no branch declares.
+        """
+
+        @pytest.mark.parametrize("value", ["42", "true", "false", '{"a": 1}', "[1, 2]"])
+        def test_only_null_branch_keeps_string(self, value):
+            assert coerce_to_schema_type(value, ["null"]) == value
+
+
+class TestCoerceTypedValue:
+    def test_untyped_schema_keeps_emitted_type(self):
+        assert coerce_typed_value(5, {"description": "Any JSON value."}) == (5, False)
+        assert coerce_typed_value(True, {}) == (True, False)
+
+    def test_declared_type_coerces_string(self):
+        assert coerce_typed_value("5", {"type": "integer"}) == (5, True)
+
+    def test_matching_type_is_unchanged(self):
+        assert coerce_typed_value(5, {"type": "integer"}) == (5, False)
+        assert coerce_typed_value("5", {"type": "string"}) == ("5", False)
+
+    def test_untyped_union_branch_keeps_emitted_type(self):
+        schema = {"anyOf": [{"type": "null"}, {"description": "Any JSON value."}]}
+        assert coerce_typed_value(5, schema) == (5, False)
+
+    def test_untyped_union_branch_keeps_emitted_string(self):
+        # A string stays a string: the union admits any value, so a declared
+        # sibling branch such as ``null`` must not drive coercion.
+        schema = {"anyOf": [{"type": "null"}, {"description": "Any JSON value."}]}
+        assert coerce_typed_value("5", schema) == ("5", False)
+        assert coerce_typed_value("null", schema) == ("null", False)
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("42", ("42", False)),
+            ('{"a": 1}', ('{"a": 1}', False)),
+            ("null", (None, True)),
+            (5, (5, False)),
+            (True, (True, False)),
+            ({"a": 1}, ({"a": 1}, False)),
+        ],
+        ids=["string-int", "string-object", "string-null", "int", "bool", "object"],
+    )
+    def test_nullable_ref_union_keeps_emitted_value(self, value, expected):
+        # The unresolved ``$ref`` is unknown and the ``null`` branch names no
+        # type these values have, so they keep their own type.
+        schema = {"anyOf": [{"$ref": "#/$defs/Thing"}, {"type": "null"}]}
+        assert coerce_typed_value(value, schema) == expected
+
+    def test_untyped_boolean_branch_keeps_emitted_type(self):
+        # ``true`` is a boolean JSON Schema admitting any value.
+        schema = {"anyOf": [{"type": "null"}, True]}
+        assert coerce_typed_value(5, schema) == (5, False)
+        assert coerce_typed_value("5", schema) == ("5", False)
+
+    def test_declared_type_sibling_still_coerces(self):
+        # The declared ``type`` narrows the union, so the untyped branch
+        # does not disable coercion.
+        schema = {"type": "string", "anyOf": [{}]}
+        assert coerce_typed_value(5, schema) == ("5", True)
+
+    def test_typed_sibling_union_keyword_still_coerces(self):
+        # Only the ``anyOf`` branch is untyped; the sibling ``oneOf`` still
+        # constrains the type.
+        schema = {"anyOf": [{}], "oneOf": [{"type": "string"}]}
+        assert coerce_typed_value(5, schema) == ("5", True)
+
+    def test_non_dict_schema_is_unchanged(self):
+        assert coerce_typed_value(5, None) == (5, False)
+
+
+class TestSchemaAdmitsAnyValue:
+    def test_explicitly_untyped_schemas(self):
+        assert schema_admits_any_value({})
+        assert schema_admits_any_value({"description": "Any JSON value."})
+        assert schema_admits_any_value(True)
+
+    def test_typed_schemas_are_constrained(self):
+        assert not schema_admits_any_value({"type": "string"})
+        assert not schema_admits_any_value({"enum": [1, 2]})
+        assert not schema_admits_any_value({"const": "5"})
+        assert not schema_admits_any_value({"$ref": "#/$defs/X"})
+        assert not schema_admits_any_value(None)
+
+    def test_non_list_allof_is_ignored(self):
+        # Malformed keyword values must not crash argument parsing.
+        assert schema_admits_any_value({"allOf": True})
+        assert schema_admits_any_value({"allOf": 5})
+
+    def test_untyped_union_branch_admits_any(self):
+        assert schema_admits_any_value({"anyOf": [{"type": "null"}, {}]})
+        assert schema_admits_any_value({"oneOf": [{"type": "null"}, True]})
+
+    def test_sibling_union_keywords_are_conjunctive(self):
+        # ``anyOf`` and ``oneOf`` at the same level both have to hold, so an
+        # untyped ``anyOf`` must not override a typed ``oneOf``.
+        assert not schema_admits_any_value(
+            {"anyOf": [{}], "oneOf": [{"type": "string"}]}
+        )
+        assert schema_admits_any_value({"anyOf": [{}], "oneOf": [{}, True]})
+
+    def test_typed_union_is_constrained(self):
+        assert not schema_admits_any_value(
+            {"anyOf": [{"type": "null"}, {"type": "string"}]}
+        )
+
+    def test_allof_needs_every_branch_untyped(self):
+        assert schema_admits_any_value({"allOf": [{}, {"description": "x"}]})
+        assert not schema_admits_any_value({"allOf": [{"type": "integer"}, {}]})
+
+    def test_declared_type_sibling_narrows_union(self):
+        assert not schema_admits_any_value({"type": "string", "anyOf": [{}]})
+
+    def test_deeply_nested_schema_is_constrained(self):
+        # A client-supplied schema must not recurse to the interpreter limit.
+        schema: dict = {"type": "integer"}
+        for _ in range(MAX_NESTING_DEPTH * 10):
+            schema = {"anyOf": [schema]}
+        assert not schema_admits_any_value(schema)
+
+
+class TestSanitizeNonFinite:
+    def test_nonfinite_scalars_become_strings(self):
+        assert sanitize_non_finite(float("nan")) == "NaN"
+        assert sanitize_non_finite(float("inf")) == "Infinity"
+        assert sanitize_non_finite(float("-inf")) == "-Infinity"
+
+    def test_finite_values_are_unchanged(self):
+        assert sanitize_non_finite(1.5) == 1.5
+        assert sanitize_non_finite("text") == "text"
+
+    def test_nested_containers_are_sanitized_in_place(self):
+        value = {"x": [float("nan"), {"y": float("inf")}, 1]}
+        result = sanitize_non_finite(value)
+        assert result is value
+        assert result == {"x": ["NaN", {"y": "Infinity"}, 1]}
+
+    def test_clean_container_is_unchanged(self):
+        value = {"x": [1, {"y": 2.5}]}
+        assert sanitize_non_finite(value) is value
+        assert value == {"x": [1, {"y": 2.5}]}
+
+    def test_deep_nesting_does_not_recurse(self):
+        # json.loads accepts output nested past the interpreter's recursion
+        # limit, so sanitizing it must not raise RecursionError.
+        depth = 5000
+        root: list = []
+        node = root
+        for _ in range(depth):
+            child: list = []
+            node.append(child)
+            node = child
+        node.append(float("nan"))
+
+        assert sanitize_non_finite(root) is root
+        node = root
+        for _ in range(depth):
+            node = node[0]
+        assert node == ["NaN"]
 
 
 class TestExtractTypesFromSchema:
@@ -268,6 +479,22 @@ class TestExtractTypesFromSchema:
         result = set(extract_types_from_schema(schema))
         assert result == {"integer", "string", "null"}
 
+    @pytest.mark.parametrize(
+        ("const", "expected"),
+        [
+            ("5", "string"),
+            (5, "integer"),
+            (1.5, "number"),
+            (True, "boolean"),
+            (None, "null"),
+            ([1], "array"),
+            ({"a": 1}, "object"),
+        ],
+        ids=["string", "int", "float", "bool", "null", "array", "object"],
+    )
+    def test_const_infers_type(self, const, expected):
+        assert extract_types_from_schema({"const": const}, fallback=[]) == [expected]
+
     def test_enum_with_bool(self):
         schema = {"enum": [True, False]}
         assert extract_types_from_schema(schema) == ["boolean"]
@@ -287,6 +514,12 @@ class TestExtractTypesFromSchema:
     def test_non_dict_schema_defaults_to_string(self):
         assert extract_types_from_schema("string") == ["string"]
 
+    def test_none_schema_honors_fallback(self):
+        assert extract_types_from_schema(None, fallback=[]) == []
+
+    def test_non_dict_schema_honors_fallback(self):
+        assert extract_types_from_schema("string", fallback=[]) == []
+
     def test_empty_dict_defaults_to_string(self):
         assert extract_types_from_schema({}) == ["string"]
 
@@ -299,6 +532,78 @@ class TestExtractTypesFromSchema:
         }
         result = set(extract_types_from_schema(schema))
         assert result == {"integer", "null", "string"}
+
+    def test_untyped_schema_with_empty_fallback(self):
+        assert extract_types_from_schema({}, fallback=[]) == []
+
+    def test_untyped_union_branch_honors_fallback(self):
+        # The untyped branch must not inject the default string fallback
+        # into the union.
+        schema = {"anyOf": [{"type": "null"}, {"description": "any value"}]}
+        assert set(extract_types_from_schema(schema, fallback=[])) == {"null"}
+
+    def test_untyped_only_union_with_empty_fallback(self):
+        schema = {"anyOf": [{"description": "any value"}]}
+        assert extract_types_from_schema(schema, fallback=[]) == []
+
+    def test_untyped_allof_branch_keeps_declared_types(self):
+        # An untyped allOf branch constrains nothing; the intersection is
+        # still the declared type.
+        schema = {"allOf": [{"type": "integer"}, {}]}
+        assert extract_types_from_schema(schema, fallback=[]) == ["integer"]
+
+    def test_declared_type_sibling_suppresses_untyped_union(self):
+        # ``type`` applies alongside the union, so an untyped branch does
+        # not make the whole schema untyped.
+        schema = {"type": "string", "anyOf": [{}]}
+        assert extract_types_from_schema(schema, fallback=[]) == ["string"]
+
+    def test_ref_sibling_suppresses_untyped_union(self):
+        # A $ref constrains the value elsewhere, so the type is unknown.
+        schema = {"anyOf": [{}], "$ref": "#/$defs/X"}
+        assert extract_types_from_schema(schema, fallback=[]) == []
+
+    def test_true_boolean_schema_honors_fallback(self):
+        assert extract_types_from_schema(True, fallback=[]) == []
+        assert extract_types_from_schema(True) == ["string"]
+
+    def test_false_schema_honors_fallback(self):
+        # ``false`` admits no value, so it contributes no type to a union;
+        # the historical string default applies only when the caller wants one.
+        assert extract_types_from_schema(False) == ["string"]
+        assert extract_types_from_schema(False, fallback=[]) == []
+        schema = {"anyOf": [False, {"type": "integer"}]}
+        assert extract_types_from_schema(schema, fallback=[]) == ["integer"]
+
+    def test_deeply_nested_schema_honors_fallback(self):
+        schema: dict = {"type": "integer"}
+        for _ in range(MAX_NESTING_DEPTH * 10):
+            schema = {"allOf": [schema]}
+        assert extract_types_from_schema(schema, fallback=[]) == []
+        assert extract_types_from_schema(schema) == ["string"]
+
+    def test_ref_schema_honors_fallback(self):
+        # A $ref constrains the value elsewhere; without resolving it the
+        # type is unknown, so the caller's fallback decides how
+        # conservative to be.
+        schema = {"$ref": "#/$defs/Zip"}
+        assert extract_types_from_schema(schema, fallback=[]) == []
+        assert extract_types_from_schema(schema) == ["string"]
+
+    def test_ref_with_type_sibling(self):
+        # $ref siblings apply (JSON Schema 2020-12), so an explicit type
+        # wins over the unresolved-reference default.
+        schema = {"$ref": "#/$defs/Count", "type": "integer"}
+        assert extract_types_from_schema(schema) == ["integer"]
+        assert extract_types_from_schema(schema, fallback=[]) == ["integer"]
+
+    def test_ref_with_enum_sibling(self):
+        schema = {"$ref": "#/$defs/Size", "enum": [1, 2]}
+        assert extract_types_from_schema(schema) == ["integer"]
+
+    def test_untyped_union_with_default_fallback(self):
+        schema = {"anyOf": [{"type": "null"}, {"description": "any value"}]}
+        assert set(extract_types_from_schema(schema)) == {"null", "string"}
 
 
 def _value_of(expr: str):

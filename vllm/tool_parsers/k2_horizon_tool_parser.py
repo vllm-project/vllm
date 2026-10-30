@@ -25,11 +25,14 @@ from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 from vllm.tool_parsers.utils import (
+    canonical_schema_types,
     coerce_to_schema_type,
-    extract_types_from_schema,
+    coerce_typed_value,
     find_tool_name,
     find_tool_properties,
     partial_tag_overlap,
+    sanitize_non_finite,
+    schema_coercion_types,
 )
 
 logger = init_logger(__name__)
@@ -150,14 +153,8 @@ class K2HorizonToolParser(ToolParser):
 
     @staticmethod
     def _coerce_json_value(value: Any, schema: Any) -> Any:
-        if not isinstance(schema, dict):
-            return value
-        raw_value = (
-            value
-            if isinstance(value, str)
-            else json.dumps(value, ensure_ascii=False, allow_nan=False)
-        )
-        return coerce_to_schema_type(raw_value, extract_types_from_schema(schema))
+        coerced, _ = coerce_typed_value(sanitize_non_finite(value), schema)
+        return coerced
 
     @classmethod
     def _coerce_xml_value(
@@ -167,16 +164,23 @@ class K2HorizonToolParser(ToolParser):
         explicit_type: str | None,
     ) -> Any:
         explicit_base = cls._base_arg_type(explicit_type)
-        target_types = extract_types_from_schema(schema)
-        if isinstance(schema, dict):
-            if explicit_base in target_types and len(set(target_types)) > 1:
-                target_types = [explicit_base]
-        elif explicit_base == "any":
-            return value
-        elif explicit_base:
+        target_types = schema_coercion_types(schema)
+        if not target_types:
+            if explicit_base is None or explicit_base == "any":
+                return value
+            # An untyped schema carries no type information, so the
+            # model's explicit <arg_type> tag decides.
             target_types = [explicit_base]
+        elif explicit_base is not None and len(target_types) > 1:
+            narrowed = canonical_schema_types([explicit_base]).intersection(
+                canonical_schema_types(target_types)
+            )
+            if narrowed:
+                target_types = sorted(narrowed)
 
-        raw_value = value if "string" in target_types else value.strip()
+        raw_value = (
+            value if "string" in canonical_schema_types(target_types) else value.strip()
+        )
         return coerce_to_schema_type(raw_value, target_types)
 
     @staticmethod

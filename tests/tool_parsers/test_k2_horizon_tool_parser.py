@@ -50,6 +50,7 @@ def tokenizer():
 def _request(
     tool_format: str | None = None,
     tool_choice="auto",
+    tools=TOOLS,
 ) -> ChatCompletionRequest:
     chat_template_kwargs = (
         {"tool_call_format": tool_format} if tool_format is not None else None
@@ -57,10 +58,27 @@ def _request(
     return ChatCompletionRequest(
         model="k2-horizon",
         messages=[{"role": "user", "content": "test"}],
-        tools=TOOLS,
+        tools=tools,
         tool_choice=tool_choice,
         chat_template_kwargs=chat_template_kwargs,
     )
+
+
+def _lookup_tool(properties: dict, parameters: dict | None = None) -> list:
+    """A ``lookup`` tool with *properties* after the string ``query``."""
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}, **properties},
+                    **(parameters or {}),
+                },
+            },
+        }
+    ]
 
 
 def _group(*calls: str, prefix: str = "", suffix: str = "") -> str:
@@ -195,6 +213,174 @@ def test_number_schema_preserves_large_integer(tokenizer, tool_format, streaming
         result = parser.extract_tool_calls(output, request)
         assert result.tools_called
         assert json.loads(result.tool_calls[0].function.arguments) == {"limit": value}
+
+
+def test_json_untyped_param_keeps_emitted_type(tokenizer):
+    # A property without ``type`` permits any value, so the model's typed
+    # JSON value must not be stringified by schema coercion.
+    tools = _lookup_tool({"count": {"description": "Any JSON value."}})
+    request = _request("json", tools=tools)
+    parser = K2HorizonToolParser(tokenizer, tools)
+
+    result = parser.extract_tool_calls(
+        _group(_json_call("lookup", {"query": "x", "count": 5})), request
+    )
+
+    assert result.tools_called
+    assert json.loads(result.tool_calls[0].function.arguments) == {
+        "query": "x",
+        "count": 5,
+    }
+
+
+def test_xml_untyped_param_keeps_emitted_type(tokenizer):
+    # An untyped property carries no schema type, so the model's explicit
+    # ``<arg_type>`` tag must decide, as it does when the schema is missing.
+    tools = _lookup_tool({"limit": {"description": "Any JSON value."}})
+    request = _request("xml_typed", tools=tools)
+    parser = K2HorizonToolParser(tokenizer, tools)
+
+    result = parser.extract_tool_calls(
+        _group(_xml_call("lookup", [("query", "x"), ("limit", "5")], typed=True)),
+        request,
+    )
+
+    assert result.tools_called
+    assert json.loads(result.tool_calls[0].function.arguments) == {
+        "query": "x",
+        "limit": 5,
+    }
+
+
+def test_xml_ref_param_keeps_emitted_type(tokenizer):
+    # A property whose only constraint is an unresolved ``$ref`` resolves no
+    # type, so the model's explicit ``<arg_type>`` tag must decide, as it
+    # does for an untyped property.
+    tools = _lookup_tool(
+        {"limit": {"$ref": "#/$defs/Int"}}, {"$defs": {"Int": {"type": "integer"}}}
+    )
+    request = _request("xml_typed", tools=tools)
+    parser = K2HorizonToolParser(tokenizer, tools)
+
+    result = parser.extract_tool_calls(
+        _group(_xml_call("lookup", [("query", "x"), ("limit", "5")], typed=True)),
+        request,
+    )
+
+    assert result.tools_called
+    assert json.loads(result.tool_calls[0].function.arguments) == {
+        "query": "x",
+        "limit": 5,
+    }
+
+
+def test_xml_untyped_param_alias_type_keeps_whitespace(tokenizer):
+    # ``str`` aliases ``string``; the whitespace rule must canonicalise the
+    # explicit ``<arg_type>``, or an untyped property loses its spaces.
+    tools = _lookup_tool({"note": {"description": "Any JSON value."}})
+    request = _request("xml_typed", tools=tools)
+    parser = K2HorizonToolParser(tokenizer, tools)
+    call = (
+        "<ifm|tool_call>lookup"
+        "<ifm|arg_key>note</ifm|arg_key>"
+        "<ifm|arg_type>str</ifm|arg_type>"
+        "<ifm|arg_value>  hi  </ifm|arg_value>"
+        "</ifm|tool_call>"
+    )
+
+    result = parser.extract_tool_calls(_group(call), request)
+
+    assert result.tools_called
+    assert json.loads(result.tool_calls[0].function.arguments) == {"note": "  hi  "}
+
+
+def test_xml_union_param_alias_type_narrows_to_declared_type(tokenizer):
+    # ``str`` aliases ``string``; the ``<arg_type>`` tag must narrow a union
+    # schema so the declared type wins over value-based inference.
+    tools = _lookup_tool({"note": {"type": ["string", "integer"]}})
+    request = _request("xml_typed", tools=tools)
+    parser = K2HorizonToolParser(tokenizer, tools)
+    call = (
+        "<ifm|tool_call>lookup"
+        "<ifm|arg_key>note</ifm|arg_key>"
+        "<ifm|arg_type>str</ifm|arg_type>"
+        "<ifm|arg_value>5</ifm|arg_value>"
+        "</ifm|tool_call>"
+    )
+
+    result = parser.extract_tool_calls(_group(call), request)
+
+    assert result.tools_called
+    assert json.loads(result.tool_calls[0].function.arguments) == {"note": "5"}
+
+
+def test_json_untyped_param_keeps_containers_structured(tokenizer):
+    # Dict/list values for an untyped property stay structured JSON, not
+    # double-encoded JSON text a client would have to re-parse.
+    tools = _lookup_tool({"payload": {"description": "Any JSON value."}})
+    request = _request("json", tools=tools)
+    parser = K2HorizonToolParser(tokenizer, tools)
+
+    result = parser.extract_tool_calls(
+        _group(_json_call("lookup", {"query": "x", "payload": {"a": [1, 2]}})),
+        request,
+    )
+
+    assert result.tools_called
+    assert json.loads(result.tool_calls[0].function.arguments) == {
+        "query": "x",
+        "payload": {"a": [1, 2]},
+    }
+
+
+def test_json_untyped_nonfinite_param_keeps_calls(tokenizer):
+    # NaN has no valid JSON form. Stringify it rather than letting
+    # ``json.dumps(allow_nan=False)`` raise and drop the whole call group.
+    tools = _lookup_tool({"count": {"description": "Any JSON value."}})
+    request = _request("json", tools=tools)
+    parser = K2HorizonToolParser(tokenizer, tools)
+
+    result = parser.extract_tool_calls(
+        _group(
+            _json_call("lookup", {"query": "x", "count": float("nan")}),
+            _json_call("lookup", {"query": "y", "count": 5}),
+        ),
+        request,
+    )
+
+    assert result.tools_called
+    assert len(result.tool_calls) == 2
+    assert json.loads(result.tool_calls[0].function.arguments) == {
+        "query": "x",
+        "count": "NaN",
+    }
+    assert json.loads(result.tool_calls[1].function.arguments) == {
+        "query": "y",
+        "count": 5,
+    }
+
+
+def test_json_deeply_nested_param_keeps_calls(tokenizer):
+    # Nesting can exceed the interpreter's recursion limit while remaining
+    # valid JSON; sanitizing must not raise RecursionError and drop the group.
+    tools = _lookup_tool({"payload": {"description": "Any JSON value."}})
+    request = _request("json", tools=tools)
+    parser = K2HorizonToolParser(tokenizer, tools)
+
+    depth = 2000
+    nested: list = [float("nan")]
+    for _ in range(depth):
+        nested = [nested]
+    result = parser.extract_tool_calls(
+        _group(_json_call("lookup", {"query": "x", "payload": nested})),
+        request,
+    )
+
+    assert result.tools_called
+    payload = json.loads(result.tool_calls[0].function.arguments)["payload"]
+    for _ in range(depth):
+        payload = payload[0]
+    assert payload == ["NaN"]
 
 
 @pytest.mark.parametrize(
