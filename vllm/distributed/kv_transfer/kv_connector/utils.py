@@ -19,9 +19,16 @@ from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheConfig,
+    SlidingWindowSpec,
+    get_kv_cache_spec_sliding_window,
+    iter_layer_specs,
+)
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
@@ -43,6 +50,36 @@ def clip_ssm_state_blocks(blocks: list[int], num_spec_blocks: int) -> list[int]:
     if num_scratch := min(num_spec_blocks, len(blocks) - 1):
         blocks = blocks[:-num_scratch]
     return blocks[-1:]
+
+
+def get_sliding_window_blocks_per_group(kv_cache_config: KVCacheConfig) -> list[int]:
+    """Blocks a connector transfers per transfer group, 0 for non-window groups.
+
+    A sliding-window group (including a packed group whose layers share one
+    window) transfers its window plus the tokens retained below it, and one
+    more block for the window/block boundary overlap.
+
+    Args:
+        kv_cache_config: Config supplying the transfer groups.
+
+    Returns:
+        One block count per transfer group.
+
+    """
+    blocks_per_sw = []
+    for group in kv_cache_config.transfer_groups:
+        spec = group.kv_cache_spec
+        sliding_window = get_kv_cache_spec_sliding_window(spec)
+        if sliding_window is None:
+            blocks_per_sw.append(0)
+            continue
+        retained = max(
+            layer_spec.extra_retained_tokens
+            for layer_spec in iter_layer_specs(spec)
+            if isinstance(layer_spec, SlidingWindowSpec)
+        )
+        blocks_per_sw.append(cdiv(sliding_window + retained, spec.block_size) + 1)
+    return blocks_per_sw
 
 
 def get_kv_connector_cache_layout(vllm_config: VllmConfig | None = None):
