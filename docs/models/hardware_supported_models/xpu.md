@@ -82,8 +82,11 @@ failures are cached for subsequent decode calls.
 Fusion applies to eligible calls with **1–8 input token rows**, contiguous,
 64-byte-aligned FP16/BF16 activations, FP8-e4m3 routed/shared weights with FP32
 per-expert/per-tensor scales, matching expert dimensions and a supported routing
-configuration. Tensor parallelism uses one reduction for the combined routed
-and shared outputs. Larger token batches, other quantization formats and
+configuration. Both shared projections must use `XPUW8A16FP8LinearKernel`.
+Explicit `--linear-backend=xpu` selects W8A8 activation quantization and keeps
+these projections on the existing MoE path. Tensor parallelism uses one
+reduction for the combined routed and shared outputs. Larger token batches,
+other quantization formats and
 unsupported features such as LoRA, expert/sequence parallelism, DBO or EPLB use
 the existing MoE path. Dense models do not use this expert fusion.
 
