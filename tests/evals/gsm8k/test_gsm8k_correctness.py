@@ -87,6 +87,18 @@ def get_acceptance_length(server_url: str) -> float:
     return 1.0 + num_accepted / num_drafts
 
 
+def run_rpc_checks(remote_server: RemoteOpenAIServer, methods: list[str]) -> None:
+    """Each worker extension method must return a falsy value on every rank."""
+    for method in methods:
+        response = requests.post(
+            remote_server.url_for("collective_rpc"), json={"method": method}
+        )
+        response.raise_for_status()
+        results = response.json()["results"]
+        print(f"  {method}: {results}")
+        assert results and not any(results), f"{method} failed: {results}"
+
+
 def test_gsm8k_correctness(config_filename):
     """Test GSM8K correctness for a given model configuration."""
     eval_config = yaml.safe_load(config_filename.read_text(encoding="utf-8"))
@@ -179,14 +191,7 @@ def test_gsm8k_correctness(config_filename):
         print(f"Server started at: {server_url}")
 
         # Run before any traffic: EPLB may rearrange experts after a few steps.
-        for method in eval_config.get("startup_rpc_checks", []):
-            response = requests.post(
-                remote_server.url_for("collective_rpc"), json={"method": method}
-            )
-            response.raise_for_status()
-            results = response.json()["results"]
-            print(f"  {method}: {results}")
-            assert results and not any(results), f"{method} failed: {results}"
+        run_rpc_checks(remote_server, eval_config.get("startup_rpc_checks", []))
 
         results = run_gsm8k_eval(eval_config, server_url)
 
@@ -202,6 +207,9 @@ def test_gsm8k_correctness(config_filename):
         print(f"  Invalid rate: {results['invalid_rate']:.3f}")
         print(f"  Latency: {results['latency']:.1f}s")
         print(f"  QPS: {results['questions_per_second']:.1f}")
+
+        # Run after the traffic: e.g. that a kernel served the eval.
+        run_rpc_checks(remote_server, eval_config.get("final_rpc_checks", []))
 
         assert measured_metric >= expected_metric - tol, (
             f"GSM8K metric too low: {measured_metric:.4f} < "

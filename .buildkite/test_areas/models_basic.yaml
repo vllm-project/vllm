@@ -119,9 +119,8 @@ steps:
       - tests/models/test_deepseek_v4_dspark_rocm.py
       - tests/models/test_deepseek_v4_rocm_wo_a.py
       - tests/models/test_deepseek_v4_rocm_compressor_gemm_fusion.py
-      - tests/models/test_dsv41_mono_decode.py
+      - tests/models/minimax_m3/test_index_cache_overrides.py
       - tests/models/test_muse_spark_rocm_loading.py
-      - tests/models/test_dsv4_mono_decode.py
       - tests/models/test_deepseek_v4_vl_stream_weights.py
       - tests/models/hy_v4/test_triton_ihc.py
       - vllm/models/muse_spark/
@@ -142,32 +141,13 @@ steps:
         models/test_deepseek_v4_dspark_rocm.py
         models/test_deepseek_v4_rocm_wo_a.py
         models/test_deepseek_v4_rocm_compressor_gemm_fusion.py
-        models/test_dsv41_mono_decode.py
+        models/minimax_m3/test_index_cache_overrides.py
         models/test_muse_spark_rocm_loading.py
         models/test_deepseek_v4_vl_stream_weights.py
         models/test_muse_spark_logits_local.py
         models/test_muse_spark_rocm_shared_rope.py
       - VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'not distributed'
       - pytest -v -s models/hy_v4/test_triton_ihc.py
-      - pytest -v -s models/test_dsv4_mono_decode.py
-
-- label: ":amd: (MI355) MiniMax M3 MonoKernel"
-  key: minimax-m3-monokernel-mi355
-  dind: false
-  timeout_in_minutes: 45
-  device: mi355_4
-  num_devices: 4
-  working_dir: "/vllm-workspace/tests"
-  depends_on:
-  - image-build-amd
-  source_file_dependencies:
-  - vllm/models/minimax_m3/amd/
-  - tests/models/minimax_m3/amd_specialized_decode/
-  - tests/models/minimax_m3/test_index_cache_overrides.py
-  - vllm/model_executor/models/config.py
-  commands:
-  - pytest -v -s models/minimax_m3/amd_specialized_decode
-  - pytest -v -s models/minimax_m3/test_index_cache_overrides.py
 
 - label: ":nvidia: (B200) Inkling"
   key: inkling-unit-tests-b200
@@ -243,7 +223,7 @@ steps:
       # The ROCm KDA/AttnRes kernels are gated on gfx950, so this has to be MI355.
       # The kernels/ file the NVIDIA job adds is CUDA-only (it imports
       # cuda.bindings.driver), so it is deliberately left out here.
-      - pytest -v -s models/kimi_k3 --ignore=models/kimi_k3/test_prefix_cache.py
+      - pytest -v -s models/kimi_k3 --ignore=models/kimi_k3/amd_specialized_decode --ignore=models/kimi_k3/test_prefix_cache.py
 
 # Disabled until the KV connectors installation is locked.
 # - label: ":nvidia: (4xB200) [Nightly] Kimi K3 Prefix Cache"
@@ -436,85 +416,6 @@ steps:
       models/test_beam_numerics.py
       models/test_cohere2_moe_parallel_block.py
 
-- label: ':amd: (MI355) DeepSeek-V4.1 Mono Decode Numerics'
-  key: dsv41-mono-decode-numerics-amd
-  dind: false
-  device: mi355_4
-  num_devices: 4
-  timeout_in_minutes: 40
-  working_dir: /vllm-workspace/
-  depends_on:
-  - image-build-amd
-  source_file_dependencies:
-  - docker/Dockerfile.rocm_base
-  - vllm/models/deepseek_v41/amd/
-  - vllm/models/deepseek_v41/nvidia/model_state.py
-  - tests/models/test_dsv41_mono_numerics.py
-  - tests/models/test_dsv41_mono_layers.py
-  commands:
-  - pytest -v -s tests/models/test_dsv41_mono_numerics.py
-  - pytest -v -s tests/models/test_dsv41_mono_layers.py
-
-- label: ':amd: (MI355) DeepSeek-V4.1 Mono Decode Numerics TP8'
-  key: dsv41-mono-decode-numerics-tp8-amd
-  dind: false
-  device: mi355_8
-  num_devices: 8
-  timeout_in_minutes: 60
-  working_dir: /vllm-workspace/
-  depends_on:
-  - image-build-amd
-  source_file_dependencies:
-  - docker/Dockerfile.rocm_base
-  - vllm/models/deepseek_v41/amd/
-  - vllm/models/deepseek_v41/nvidia/model_state.py
-  - tests/models/test_dsv41_mono_numerics.py
-  - tests/models/test_dsv41_mono_layers.py
-  commands:
-  # only the TP8 cases; the 4-GPU step above runs TP2/TP4 (TP8 skips there)
-  - pytest -v -s "tests/models/test_dsv41_mono_numerics.py::test_mono_decode_layer_matches_vllm[8]"
-  - >-
-    pytest -v -s
-    "tests/models/test_dsv41_mono_layers.py::test_mono_decode_matches_the_model[8-8]"
-    "tests/models/test_dsv41_mono_layers.py::test_mono_decode_matches_the_model[8-28]"
-
-- label: ':amd: (MI355) DeepSeek-V4-Pro Mono Decode Numerics'
-  key: dsv4-mono-decode-numerics-amd
-  dind: false
-  device: mi355_8
-  num_devices: 8
-  timeout_in_minutes: 60
-  working_dir: /vllm-workspace/
-  depends_on:
-  - image-build-amd
-  source_file_dependencies:
-  - docker/Dockerfile.rocm_base
-  - vllm/models/deepseek_v4/amd/
-  - tests/models/test_dsv4_mono_numerics.py
-  - tests/models/test_dsv4_mono_layers.py
-  commands:
-  - pytest -v -s tests/models/test_dsv4_mono_numerics.py
-  - pytest -v -s tests/models/test_dsv4_mono_layers.py
-
-- label: ':amd: (MI300) DeepSeek-V4.1 gfx942 Mono Decode Layers'
-  key: dsv41-mono-decode-layers-gfx942-amd
-  dind: false
-  device: mi300_4
-  num_devices: 4
-  timeout_in_minutes: 40
-  working_dir: /vllm-workspace/
-  depends_on:
-  - image-build-amd
-  source_file_dependencies:
-  - docker/Dockerfile.rocm_base
-  - vllm/models/deepseek_v41/amd/
-  - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
-  - tests/models/test_dsv41_mono_numerics.py
-  - tests/models/test_dsv41_mono_layers.py
-  commands:
-  - pytest -v -s tests/models/test_dsv41_mono_numerics.py
-  - pytest -v -s tests/models/test_dsv41_mono_layers.py
-
 - label: ":nvidia: (4xB200) DeepSeek-V4.1 Specialized Decode"
   key: dsv41-nvidia-specialized-decode-4xb200
   # Nightly only: 4-GPU B200 pods wait hours behind smaller jobs on per-PR runs.
@@ -539,18 +440,3 @@ steps:
   - pytest -v -s models/deepseek_v41/nvidia/specialized_decode/test_kernels.py
   - pytest -v -s models/deepseek_v41/nvidia/specialized_decode/test_numerics.py
   - pytest -v -s models/deepseek_v41/nvidia/specialized_decode/test_layers.py
-
-- label: ':amd: (MI355) Kimi-K3 Specialized Decode'
-  key: kimi-k3-specialized-decode-amd
-  dind: false
-  device: mi355_8
-  num_devices: 8
-  timeout_in_minutes: 60
-  working_dir: /vllm-workspace/
-  depends_on:
-  - image-build-amd
-  source_file_dependencies:
-  - vllm/models/kimi_k3/amd/
-  - tests/models/kimi_k3/amd_specialized_decode/
-  commands:
-  - pytest -v -s tests/models/kimi_k3/amd_specialized_decode

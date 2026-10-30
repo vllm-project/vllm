@@ -25,8 +25,17 @@ import torch
 
 from vllm.platforms import current_platform
 
+
+def _on_gfx942() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx942
+
+    return on_gfx942()
+
+
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_rocm(), reason="the fused launch is for ROCm"
+    not _on_gfx942(), reason="the fused launch runs on gfx942 only"
 )
 
 VOCAB, RANK, N_SPEC, MAX_REQS = 129280, 256, 5, 4
