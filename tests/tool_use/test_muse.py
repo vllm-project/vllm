@@ -613,3 +613,53 @@ def test_string_parameter_schema_preserves_raw_text(value, request_kind, parser_
         name, arguments = _fn_of(calls[0])
         assert name == "echo"
         assert json.loads(arguments) == expected
+
+
+# --------------------------------------------------- reasoning token counting
+
+_SPECIALS = ["<|message|>", "<|start|>", "<|eom|>", "<|eot|>"]
+
+
+class _CharTokenizer:
+    """Char-level stub: specials are single ids, other chars are ``ord()``."""
+
+    def __init__(self):
+        self._id_of = {s: 200100 + i for i, s in enumerate(_SPECIALS)}
+        self._str_of = {v: k for k, v in self._id_of.items()}
+
+    def get_vocab(self) -> dict[str, int]:
+        return dict(self._id_of)
+
+    def encode(self, text: str) -> list[int]:
+        ids = []
+        i = 0
+        while i < len(text):
+            for s in _SPECIALS:
+                if text.startswith(s, i):
+                    ids.append(self._id_of[s])
+                    i += len(s)
+                    break
+            else:
+                ids.append(ord(text[i]))
+                i += 1
+        return ids
+
+    def decode(self, ids) -> str:
+        return "".join(self._str_of.get(t, chr(t)) for t in ids)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # Every reasoning block counts; commentary, tool and answer bodies don't.
+        (RAW_COMMENTARY_ANSWER + " to=self<|message|>more", len("Plan.more")),
+        (RAW_TOOLCALL, len("I should read the hostname file to answer.")),
+        ("<|message|>bare<|eom|><|start|>assistant to=user<|message|>x", 4),
+        # A body cut off by the token budget counts to the end.
+        (" to=self<|message|>cut off", len("cut off")),
+    ],
+)
+def test_count_reasoning_tokens(raw, expected):
+    tok = _CharTokenizer()
+    parser = MuseReasoningParser(tok)
+    assert parser.count_reasoning_tokens(tok.encode(raw)) == expected

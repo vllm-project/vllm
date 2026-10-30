@@ -693,7 +693,7 @@ def calculate_metrics(
             if is_good_req:
                 good_completed += 1
 
-    if completed == 0 and not any(output.cancelled for output in outputs):
+    if completed == 0 and any(not output.cancelled for output in outputs):
         warnings.warn(
             "All requests failed. This is likely due to a misconfiguration "
             "on the benchmark arguments.",
@@ -854,16 +854,29 @@ async def benchmark(
 ):
     if not 0 <= cancellation_rate <= 1:
         raise ValueError("--cancellation-rate must be between 0 and 1")
-    if not 0 < cancellation_delay < float("inf"):
+    if cancellation_rate and not 0 < cancellation_delay < float("inf"):
         raise ValueError("--cancellation-delay must be finite and greater than 0")
-    if cancellation_rate and endpoint_type not in ("vllm", "openai", "openai-chat"):
-        raise ValueError("Cancellation workloads require a completions or chat backend")
+    if cancellation_rate and endpoint_type not in (
+        "vllm",
+        "openai",
+        "openai-chat",
+        "openai-responses",
+    ):
+        raise ValueError(
+            "Cancellation workloads require a completions, chat or responses backend"
+        )
     # A separate RNG keeps dataset sampling and request arrivals unchanged.
     cancellation_indices = set(
         random.Random(cancellation_seed).sample(
             range(len(input_requests)), int(len(input_requests) * cancellation_rate)
         )
     )
+    if cancellation_rate and not cancellation_indices:
+        warnings.warn(
+            "No requests selected for cancellation. Increase --num-prompts "
+            "or --cancellation-rate.",
+            stacklevel=2,
+        )
     try:
         request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
     except KeyError:
@@ -1737,7 +1750,8 @@ def add_cli_args(parser: FlexibleArgumentParser):
         default=0.0,
         help="Fraction of benchmark requests selected for intentional cancellation "
         "(0 to 1, default disabled). Selects floor(num_prompts * rate) requests "
-        "using --seed, independently of request arrivals. Completions/chat only.",
+        "using --seed, independently of request arrivals. "
+        "Completions, chat and responses backends only.",
     )
     parser.add_argument(
         "--cancellation-delay",

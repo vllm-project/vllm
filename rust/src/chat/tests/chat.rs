@@ -30,6 +30,7 @@ use vllm_text::{
     DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs, DecodedTokenLogprob, Prompt,
     TextBackend,
 };
+use vllm_tokenizer::Tokenizer as _;
 use vllm_tokenizer::test_utils::TestTokenizer;
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
@@ -111,6 +112,12 @@ fn prompt_logprobs_for_hi() -> Logprobs {
 
 fn bytes_to_token_ids(bytes: &[u8]) -> Vec<u32> {
     bytes.iter().map(|byte| u32::from(*byte)).collect()
+}
+
+/// Encode `text` with the fake chat tokenizer, so markers spelled in full are
+/// their dedicated tokens, as the model emits them.
+fn token_ids(text: &str) -> Vec<u32> {
+    fake_chat_tokenizer().encode(text, false).unwrap()
 }
 
 fn bytes_with_special_stop_token(bytes: &[u8]) -> Vec<u32> {
@@ -826,24 +833,14 @@ async fn chat_stream_separates_reasoning_blocks_automatically() {
                     push,
                     RequestBatchOutputs {
                         outputs: vec![
-                            request_output(
-                                "chat-reasoning",
-                                bytes_to_token_ids(b"<think>"),
-                                None,
-                                None,
-                            ),
+                            request_output("chat-reasoning", token_ids("<think>"), None, None),
                             request_output(
                                 "chat-reasoning",
                                 bytes_to_token_ids(b"reason "),
                                 None,
                                 None,
                             ),
-                            request_output(
-                                "chat-reasoning",
-                                bytes_to_token_ids(b"more</think>"),
-                                None,
-                                None,
-                            ),
+                            request_output("chat-reasoning", token_ids("more</think>"), None, None),
                             request_output(
                                 "chat-reasoning",
                                 bytes_to_token_ids(b"answer"),
@@ -977,7 +974,7 @@ async fn chat_collectors_return_structured_message_and_visible_text() {
                     RequestBatchOutputs {
                         outputs: vec![request_output(
                             "chat-collect",
-                            bytes_to_token_ids(b"<think>inner</think>outer"),
+                            token_ids("<think>inner</think>outer"),
                             Some(EngineCoreFinishReason::Length),
                             None,
                         )],
@@ -1016,7 +1013,7 @@ async fn chat_collectors_return_structured_message_and_visible_text() {
     );
     assert_eq!(
         message.usage.output_token_count,
-        "<think>inner</think>outer".len()
+        token_ids("<think>inner</think>outer").len()
     );
     // 5 tokens for "inner"; markers are excluded.
     assert_eq!(message.usage.reasoning_tokens, 5);
@@ -1044,7 +1041,7 @@ async fn chat_explicitly_disables_reasoning_parser() {
                         outputs: vec![
                             request_output(
                                 "chat-reasoning-disabled",
-                                bytes_to_token_ids(b"<think>"),
+                                token_ids("<think>"),
                                 None,
                                 None,
                             ),
@@ -1056,7 +1053,7 @@ async fn chat_explicitly_disables_reasoning_parser() {
                             ),
                             request_output(
                                 "chat-reasoning-disabled",
-                                bytes_to_token_ids(b"more</think>"),
+                                token_ids("more</think>"),
                                 None,
                                 None,
                             ),
@@ -1124,7 +1121,7 @@ async fn chat_stream_parses_tool_calls_automatically() {
                         outputs: vec![
                             request_output(
                                 "chat-tool",
-                                bytes_to_token_ids(b"<think>Need tool.</think>"),
+                                token_ids("<think>Need tool.</think>"),
                                 None,
                                 None,
                             ),
@@ -1233,7 +1230,7 @@ async fn chat_collect_message_preserves_tool_call_arguments_in_final_only_mode()
                         outputs: vec![
                             request_output(
                                 "chat-final-only-tool",
-                                bytes_to_token_ids(b"<think>Need tool.</think>"),
+                                token_ids("<think>Need tool.</think>"),
                                 None,
                                 None,
                             ),

@@ -48,15 +48,17 @@ def _benchmark_kwargs():
 
 
 @pytest.mark.parametrize(
-    "rate, expected",
+    "rate, expected, delay",
     [
-        (0.0, []),
-        (0.5, [1, 3]),
-        (1.0, [0, 1, 2, 3]),
+        (0.0, [], 0),
+        (0.05, [], 0.02),
+        (0.5, [1, 3], 0.02),
+        (1.0, [0, 1, 2, 3], 0.02),
     ],
 )
+@pytest.mark.parametrize("backend", ["openai", "openai-responses"])
 def test_cancellation_starts_after_admission_and_leaves_warmups_alone(
-    monkeypatch, rate, expected
+    monkeypatch, rate, expected, delay, backend
 ):
     finished = []
     cancelled = []
@@ -79,13 +81,19 @@ def test_cancellation_starts_after_admission_and_leaves_warmups_alone(
             itl=[0.05],
         )
 
-    monkeypatch.setitem(serve.ASYNC_REQUEST_FUNCS, "openai", request)
+    monkeypatch.setitem(serve.ASYNC_REQUEST_FUNCS, backend, request)
     for name in ("fetch_spec_decode_metrics", "fetch_diffusion_metrics"):
         monkeypatch.setattr(serve, name, AsyncMock(return_value=None))
 
     kwargs = _benchmark_kwargs()
-    kwargs["cancellation_rate"] = rate
-    result = asyncio.run(serve.benchmark(**kwargs))
+    kwargs.update(
+        cancellation_rate=rate, cancellation_delay=delay, endpoint_type=backend
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        result = asyncio.run(serve.benchmark(**kwargs))
+    assert any(
+        "No requests selected for cancellation" in str(w.message) for w in caught
+    ) == (rate > 0 and not expected)
     assert cancelled == [str(i) for i in expected]
     # Readiness and warmup use prompt 0 and are never selected.
     assert finished == ["0", "0"] + [str(i) for i in range(4) if i not in expected]
@@ -116,6 +124,9 @@ def test_cancelled_requests_are_not_failures_or_completed_tokens():
         metrics, _ = serve.calculate_metrics([], outputs[1:2], 2, None, [50], {})
     assert metrics.cancelled == 1 and metrics.failed == metrics.completed == 0
     assert not any("All requests failed" in str(w.message) for w in caught)
+    with pytest.warns(UserWarning, match="All requests failed"):
+        metrics, _ = serve.calculate_metrics([], outputs[1:], 2, None, [50], {})
+    assert metrics.cancelled == metrics.failed == 1 and metrics.completed == 0
 
 
 @pytest.mark.parametrize(

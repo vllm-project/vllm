@@ -32,6 +32,7 @@ from vllm.benchmarks.lib.endpoint_request_func import (
     async_request_openai_audio,
     async_request_openai_chat_completions,
     async_request_openai_completions,
+    async_request_openai_responses,
     async_request_with_cancellation,
 )
 from vllm.benchmarks.serve import _get_server_metrics_results
@@ -107,9 +108,9 @@ def test_request_timeout_is_not_an_intentional_cancellation():
         )
 
 
-@pytest.mark.parametrize("chat", [False, True])
+@pytest.mark.parametrize("backend", ["openai", "openai-chat", "openai-responses"])
 @pytest.mark.parametrize("send_token", [False, True])
-def test_intentional_cancellation_closes_streaming_connection(chat, send_token):
+def test_intentional_cancellation_closes_streaming_connection(backend, send_token):
     """Both a silent prefill and an interrupted decode release the HTTP stream."""
     from aiohttp import web
 
@@ -121,7 +122,12 @@ def test_intentional_cancellation_closes_streaming_connection(chat, send_token):
             await response.prepare(request)
             try:
                 if send_token:
-                    await response.write(_token_chunk(0, chat=chat))
+                    chunk = (
+                        _sse({"type": "response.output_text.delta", "delta": "a"})
+                        if backend == "openai-responses"
+                        else _token_chunk(0, chat=backend == "openai-chat")
+                    )
+                    await response.write(chunk)
                 while True:
                     await asyncio.sleep(0.01)
                     await response.write(b": keepalive\n\n")
@@ -130,7 +136,14 @@ def test_intentional_cancellation_closes_streaming_connection(chat, send_token):
             return response
 
         app = web.Application()
-        suffix = "/v1/chat/completions" if chat else "/v1/completions"
+        request_func, suffix = {
+            "openai": (async_request_openai_completions, "/v1/completions"),
+            "openai-chat": (
+                async_request_openai_chat_completions,
+                "/v1/chat/completions",
+            ),
+            "openai-responses": (async_request_openai_responses, "/v1/responses"),
+        }[backend]
         app.router.add_post(suffix, stream)
         runner = web.AppRunner(app)
         await runner.setup()
@@ -141,13 +154,11 @@ def test_intentional_cancellation_closes_streaming_connection(chat, send_token):
         try:
             async with aiohttp.ClientSession() as session:
                 output = await async_request_with_cancellation(
-                    async_request_openai_chat_completions
-                    if chat
-                    else async_request_openai_completions,
+                    request_func,
                     _make_input(
                         f"http://127.0.0.1:{port}{suffix}",
                         3,
-                        "chat" if chat else "completions",
+                        backend,
                     ),
                     session,
                     0.1,

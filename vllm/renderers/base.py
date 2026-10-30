@@ -455,10 +455,10 @@ class BaseRenderer(ABC, Generic[_T]):
     ) -> None:
         """Raise VLLMValidationError if a token id is out of vocabulary.
 
-        Skipped when the tokenizer is not initialized.
+        Without a tokenizer, the model vocab size is the only bound.
         """
         tokenizer = self.tokenizer
-        if not token_ids or tokenizer is None:
+        if not token_ids:
             return
 
         max_input_id = max(token_ids)
@@ -474,7 +474,9 @@ class BaseRenderer(ABC, Generic[_T]):
 
         # Here we take the max of the two to determine if a token id is
         # truly out-of-vocabulary.
-        model_vocab_size = self.model_config.get_vocab_size()
+        max_token_id = self.model_config.get_vocab_size() - 1
+        if tokenizer is not None:
+            max_token_id = max(tokenizer.max_token_id, max_token_id)
         # A negative id is out of vocabulary just like an over-large one,
         # but is not caught by the upper-bound check below. Reject it here
         # so it is not used as an embedding index downstream.
@@ -482,7 +484,7 @@ class BaseRenderer(ABC, Generic[_T]):
             raise VLLMValidationError(
                 f"Token id {min_input_id} is out of vocabulary", parameter=parameter
             )
-        if max_input_id > max(tokenizer.max_token_id, model_vocab_size - 1):
+        if max_input_id > max_token_id:
             raise VLLMValidationError(
                 f"Token id {max_input_id} is out of vocabulary", parameter=parameter
             )
@@ -553,7 +555,9 @@ class BaseRenderer(ABC, Generic[_T]):
         prompts: Sequence[DictPrompt | bytes],
     ) -> list[DictPrompt]:
         if len(prompts) == 0:
-            raise ValueError("You must pass at least one prompt")
+            raise VLLMValidationError(
+                "You must pass at least one prompt", parameter="prompt"
+            )
 
         return [self.render_prompt(prompt) for prompt in prompts]
 
@@ -574,7 +578,9 @@ class BaseRenderer(ABC, Generic[_T]):
         prompts: Sequence[DictPrompt | bytes],
     ) -> list[DictPrompt]:
         if len(prompts) == 0:
-            raise ValueError("You must pass at least one prompt")
+            raise VLLMValidationError(
+                "You must pass at least one prompt", parameter="prompt"
+            )
 
         return await asyncio.gather(
             *(self._render_prompt_async(prompt) for prompt in prompts)
@@ -882,24 +888,27 @@ class BaseRenderer(ABC, Generic[_T]):
 
             if data_items is None:
                 if uuid_items is None:
-                    raise ValueError(
+                    raise VLLMValidationError(
                         f"multi_modal_data[{modality!r}] is empty but "
-                        f"multi_modal_uuids[{modality!r}] is missing."
+                        f"multi_modal_uuids[{modality!r}] is missing.",
+                        parameter="multi_modal_uuids",
                     )
 
             elif uuid_items is not None:
                 if len(data_items) != len(uuid_items):
-                    raise ValueError(
+                    raise VLLMValidationError(
                         f"If given, multi_modal_uuids[{modality!r}] must have "
                         f"same length as multi_modal_data[{modality!r}], but "
-                        f"got {len(uuid_items)} vs {len(data_items)}."
+                        f"got {len(uuid_items)} vs {len(data_items)}.",
+                        parameter="multi_modal_uuids",
                     )
 
                 for i, item in enumerate(data_items):
                     if item is None and uuid_items[i] is None:
-                        raise ValueError(
+                        raise VLLMValidationError(
                             f"multi_modal_data[{modality!r}][{i}] is empty but "
-                            f"multi_modal_uuids[{modality!r}][{i}] is missing."
+                            f"multi_modal_uuids[{modality!r}][{i}] is missing.",
+                            parameter="multi_modal_uuids",
                         )
 
     def _process_mm_uuids(
@@ -1013,8 +1022,9 @@ class BaseRenderer(ABC, Generic[_T]):
 
     def _process_embeds(self, prompt: EmbedsPrompt) -> EmbedsInput:
         if not self.model_config.enable_prompt_embeds:
-            raise ValueError(
-                "You must set `--enable-prompt-embeds` to input `prompt_embeds`."
+            raise VLLMValidationError(
+                "You must set `--enable-prompt-embeds` to input `prompt_embeds`.",
+                parameter="prompt_embeds",
             )
 
         prompt_embeds = prompt["prompt_embeds"]
@@ -1027,7 +1037,10 @@ class BaseRenderer(ABC, Generic[_T]):
             prompt_embeds = prompt_embeds.squeeze(dim=0)
 
         if prompt_embeds.ndim != 2:
-            raise ValueError("prompt_embeds must be of shape (seq_len, hidden_size).")
+            raise VLLMValidationError(
+                "prompt_embeds must be of shape (seq_len, hidden_size).",
+                parameter="prompt_embeds",
+            )
 
         # Tensors must be on CPU for serialization between processes
         # in the MsgpackEncoder. Casting to CPU here ensures that there is no

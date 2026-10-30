@@ -57,29 +57,39 @@ def test_mimo_does_not_inherit_aux_hidden_state_pp_support():
 
 
 class _PPAuxLayer(torch.nn.Module):
-    """Aliases and mutates residual in place like MiniMaxM3DecoderLayer."""
+    """Aliases and mutates residual in place like MiniMaxM3DecoderLayer.
 
-    ffn_all_reduce_deferred = False
+    With ``deferred``, the FFN output is this rank's half of a 2-way TP sum, and
+    the next input norm completes the all-reduce.
+    """
 
-    def __init__(self, index):
+    def __init__(self, index, deferred):
         super().__init__()
         self.index = index
+        self.ffn_all_reduce_deferred = deferred
+        self.fuse_input_allreduce = False
 
-    def forward(self, positions, hidden_states, residual):
-        total = hidden_states if residual is None else hidden_states + residual
-        residual = hidden_states if residual is None else residual
-        residual.copy_(total + self.index + 1)
-        return torch.full_like(hidden_states, 10 * (self.index + 1)), residual
+    def forward_input_norm(self, hidden_states, residual):
+        if residual is None:
+            return hidden_states, hidden_states
+        if self.fuse_input_allreduce:
+            hidden_states = hidden_states * 2
+        residual.add_(hidden_states)
+        return hidden_states, residual
+
+    def forward_after_input_norm(self, positions, hidden_states, residual):
+        residual.add_(self.index + 1)
+        output = torch.full_like(hidden_states, 10 * (self.index + 1))
+        return output / 2 if self.ffn_all_reduce_deferred else output, residual
 
 
 class _PPAuxNorm(torch.nn.Module):
-    """Clobbers its inputs so aux taps that alias them would fail."""
+    """Fused add + norm (identity scaling) that overwrites its inputs in place."""
 
     def forward(self, hidden_states, residual):
-        output = hidden_states + residual
-        hidden_states.fill_(-101)
-        residual.fill_(-103)
-        return output, residual
+        residual.add_(hidden_states)
+        hidden_states.copy_(residual)
+        return hidden_states, residual
 
 
 @pytest.fixture
@@ -91,6 +101,9 @@ def minimax_pp_stage(monkeypatch):
     monkeypatch.setattr(parallel_state, "get_pp_group", lambda: group)
     monkeypatch.setattr(parallel_state, "model_parallel_is_initialized", lambda: True)
     monkeypatch.setattr(
+        minimax_m3.MiniMaxM3Model, "_init_fused_moe_finalize", lambda *_: None
+    )
+    monkeypatch.setattr(
         minimax_m3,
         "VocabParallelEmbedding",
         lambda *args, **kwargs: torch.nn.Identity(),
@@ -98,10 +111,18 @@ def minimax_pp_stage(monkeypatch):
     monkeypatch.setattr(
         minimax_m3, "MiniMAXGemmaRMSNorm", lambda *args, **kwargs: _PPAuxNorm()
     )
+    deferred = [False]
     monkeypatch.setattr(
         minimax_m3,
         "MiniMaxM3DecoderLayer",
-        lambda **kwargs: _PPAuxLayer(int(kwargs["prefix"].rsplit(".", 1)[1])),
+        lambda **kwargs: _PPAuxLayer(
+            int(kwargs["prefix"].rsplit(".", 1)[1]), deferred[0]
+        ),
+    )
+    monkeypatch.setattr(
+        minimax_m3,
+        "fused_allreduce_gemma_rms_norm",
+        lambda hidden_states, residual, norm: norm(hidden_states * 2, residual),
     )
 
     def make_layers(num_layers, build, prefix):
@@ -117,8 +138,9 @@ def minimax_pp_stage(monkeypatch):
 
     monkeypatch.setattr(minimax_m3, "make_layers", make_layers)
 
-    def make_stage(start, end, taps, world_size=2):
+    def make_stage(start, end, taps, world_size=2, deferred_all_reduce=False):
         bounds[:] = [start, end]
+        deferred[0] = deferred_all_reduce
         group.world_size = world_size
         group.is_first_rank = start == 0
         group.is_last_rank = end == 6
@@ -130,6 +152,7 @@ def minimax_pp_stage(monkeypatch):
                 model_config=SimpleNamespace(hf_text_config=config),
                 quant_config=None,
                 speculative_config=None,
+                kernel_config=SimpleNamespace(moe_backend="auto"),
                 use_v2_model_runner=True,
             )
         )
@@ -203,4 +226,16 @@ def test_minimax_pp2_without_aux_keeps_hidden_and_residual_transport(minimax_pp_
         target.make_empty_intermediate_tensors(12, torch.bfloat16, "cpu").tensors
     ) == {"hidden_states", "residual"}
     output = last(None, None, sent)
+    torch.testing.assert_close(output, _pp_aux_state(_expected_aux_value(6)))
+
+
+@pytest.mark.parametrize("taps", [(0, 3, 6), (1, 2, 5)])
+def test_minimax_aux_taps_follow_deferred_tp_all_reduce(minimax_pp_stage, taps):
+    """Under TP each FFN output stays a partial sum until the next input norm or
+    the final norm all-reduces it, so aux taps must read the reduced stream."""
+    model, _ = minimax_pp_stage(0, 6, taps, world_size=1, deferred_all_reduce=True)
+    assert model.fuse_final_norm_allreduce
+    output, aux = model(None, None, None, _pp_aux_state(7))
+    for hidden, tap in zip(aux, taps, strict=True):
+        torch.testing.assert_close(hidden, _pp_aux_state(_expected_aux_value(tap)))
     torch.testing.assert_close(output, _pp_aux_state(_expected_aux_value(6)))
