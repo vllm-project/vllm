@@ -4686,3 +4686,61 @@ un `LlamaForCausalLM` dense, 52 couches, 8 KV heads, head_dim 128 ⇒ **106 496 
 de KV capacitaire, soit ~141-174 K tokens de KV GPU contre **831 723** aujourd'hui. Le banc ne
 mesure que la santé de la quantification, pas une adoption possible. Le user a de toute façon
 annoncé **Qwen 4 27B** comme remplaçant de cette lane (semaine du 02/11).
+
+
+## 30/10 12:1xZ — Reprise après le gel dur n°10 de l'hôte (~12 h 21 d'arrêt), isolation GPU-2 sous WSL2, correction du taux de hit
+
+### Panne : gel dur de l'hôte, pas du moteur
+
+| fait | valeur | source |
+|---|---|---|
+| dernier échantillon télémétrie vivant | **29/10 23:37:58Z** | `wedge_telemetry.jsonl` (epoch) |
+| dernière sonde watchdog OK | 23:37:14 | watchdog `--tail` |
+| état du moteur à la mort | **en charge** : running 5, gen 104 t/s, KV 70 %, prefill jusqu'à 18 409 t/s les minutes précédentes | télémétrie |
+| boot hôte | **30/10 11:58:49Z** (rallumé par le user) | `LastBootUpTime` |
+| moteur reparti seul | StartedAt 12:01:30Z, health 200 en 3 ms, RC=0, 3/3 Up, OOM 0 | `docker inspect` |
+| Kernel-Power 41 | `BugcheckCode=0`, aucun dump | journal System |
+| **WHEA Id 1, niveau Erreur** | BERT (notification BOOT `3D61A466…`), sévérité **fatale**, 3 sections Firmware Error Record GUID `8F87F311-C998-4D9E-A0C4-6065518C4F6D` (« SoC Firmware Error Record Type 2 », Intel CrashLog — **contenu non décodé**) | CPER parsé |
+| antécédent | **13/10 22:02:06Z WHEA Id 16 fatale, AER root port `0:1D.0`** (gel n°9) | journal System, trouvé par ai-01:claudish |
+| **derrière `PCI(1D00)`** | **GPU 2** (pci 72:00.0, slot chipset) + son audio HDMI ; GPU 0/1 = root ports CPU `0100`/`0101` | `DEVPKEY_Device_LocationPaths` |
+| hôte | i9-14900KF, microcode **0x12F**, BIOS ProArt Z790 3107 | registre / CIM |
+
+Le GPU 2 avait été mesuré à 45 MiB par la régie à 22:28Z et 22:31Z. La fenêtre de 23:20 à 23:50Z n'a jamais été confirmée. **Son état à 23:37Z n'est pas mesurable**, car la colonne GPU de la télémétrie est aveugle depuis le 03/07 (Q48, #273). C'est le premier coût concret de cet angle mort. **Aucune attribution** : le gel n°9 pointe le slot du GPU 2, le n°10 un CrashLog SoC non décodé. Le volet matériel est porté par Maintenance d'ai-01. Fiche : `project_host_hard_crash_pattern.md`.
+
+### `--gpus device=2` n'isole plus sous WSL2 (mesuré)
+
+Énumération par le driver (`cuInit` + `cuDeviceGetPCIBusId`), sans création de contexte, dans `vllm/vllm-openai:v0.32.0` :
+
+| variables | GPU vus | index CUDA 0 |
+|---|---|---|
+| `--gpus device=2` seul | **3** | **pci 01:00.0 = GPU 0 de PROD** |
+| + `CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=2` | 1 | pci 72:00.0 = GPU 2 |
+
+La contrainte n°2 de la régie est donc **nécessaire**. Mon soupçon de défaut sur le lanceur `serve_axteam.ps1` était faux. En revanche, le squelette réutilisable `qwen38_27b_gpu2/serve_qwen38.sh` n'avait pas ces variables : relancé aujourd'hui, il aurait chargé un modèle sur le GPU 0 de la prod. Il est corrigé, et la règle est ajoutée en tête des faits GPU-2 de `CLAUDE.md`. Le 12/09, le drapeau seul isolait (carte vide mesurée) ; la cause du changement n'est pas établie.
+
+### Correction : le « 91,7 → 73,9 % » du cycle 22:1xZ mélangeait deux formules
+
+À 22:1xZ, `prefix_cache_hits_total` (hits GPU) était **plat** sur 102 s. Le 73,9 % était le ratio des **tiers d'offload** (`external_*`), pas un hit GPU. La comparaison avec 91,7 % n'avait donc pas de sens.
+
+Mesure du 30/10 : `prefix_cache_queries_total` est **égal** à `prompt_tokens_total` (4 800 886). Les requêtes de cache sont donc comptées **en tokens**, pas en blocs de 16 comme écrit précédemment.
+
+Formules retenues désormais, toujours sur les compteurs cumulés depuis le boot :
+- **GPU** = `hits / queries` ;
+- **tier** = `external_hits / external_queries`, où `external_queries` est égal aux miss GPU ;
+- **combiné** = `(hits + external_hits) / queries`.
+
+| instant | GPU | tier (sur les miss GPU) | combiné | préemptions |
+|---|---|---|---|---|
+| 30/10 12:31:42Z (30 min après boot) | 81,5 % | 14,8 % | **84,3 %** | 0 |
+
+Le tier fs a survécu au reboot : 90 chunk-hits `1:TouchOnHitFsTier`, 2,73 Go relus. Le tier RAM, lui, est reparti vide.
+
+### Reste du cycle
+
+- Commit hôte **60,9 %** ; `/dev/shm` 51 %, 0 orphelin ; poids Swift 19G dans la VM, pas de montage fantôme ; `autoheal` présent mais le moteur porte `autoheal=False`.
+- G: OK ; nbaudit `ok:true`, vague 2 `Image/` armée.
+- 400 window+1 sur 14 h : **po-2027 (22:37Z)** et **po-2024 (23:09Z)** — po-2027 est nouveau ; #431 ne couvre toujours pas ces cas.
+- 401 : `1f7f6080cb65` (Hetzner, connu) ; aucune trace de `5cb29436afca` depuis (Q49 : processus probablement mort au reboot).
+- IP externes : rien de nouveau ; `37.187.180.135` passe en 200 avec la clé MEDIUM valide (empreinte `be312daf7c1c`).
+- #4438 (web1) : `api.medium` et `qdrant` répondent **200** à 12:27Z — leurs 502 de 00:33Z sont le gel. `api.mini` reste en 502 : son service est archivé depuis le 30/04, il n'a plus d'amont.
+- Nanbeige : la régie a servi une génération réelle sur le GPU 2 (22:25:50Z). La quantification est fonctionnelle, sa **qualité n'a pas été évaluée**. Je solde sur ce résultat, sans 4ᵉ fenêtre : le verdict d'adoption est déjà négatif pour raison d'architecture, Qwen 4 27B arrive, et un gel matériel est en cours d'instruction.
