@@ -202,12 +202,7 @@ class B12xPagedAttentionBackend(AttentionBackend):
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
-        # head_dim 64 is excluded: the b12x paged decode kernel only runs the
-        # 16-row query tile with a single 64-row KV tile, while its trait
-        # selection rejects an odd KV-tile count for head_dim 64. Every
-        # head_dim 64 model therefore fails at the first forward (CUDA graph
-        # capture) with "no valid NUM_MMA_KV typed shared-memory allocation
-        # fits the device". Reject it at backend selection instead.
+        # head_dim 64 is excluded until flashinfer-ai/flashinfer#6977 is fixed.
         return [128, 192, 256]
 
     @classmethod
