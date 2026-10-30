@@ -156,6 +156,21 @@ export MORI_GPU_ARCHS="gfx950"
 # path fails to come up.
 export MORI_ENABLE_HOST_PROXY="${MORI_ENABLE_HOST_PROXY:-1}"
 
+# NIXL UCX defaults: RC on ionic_0, GPU-direct RDMA.
+if [[ "${KV_CONNECTOR:-}" == Nixl* ]]; then
+    export UCX_TLS="${UCX_TLS:-rc_verbs,ud_verbs,tcp,self,rocm}"
+    export UCX_NET_DEVICES="${UCX_NET_DEVICES:-ionic_0:1,lo}"
+    export UCX_IB_GID_INDEX="${UCX_IB_GID_INDEX:-${_IB_GID_INDEX}}"
+    export UCX_UD_VERBS_ETH_DGID_CHECK="${UCX_UD_VERBS_ETH_DGID_CHECK:-n}"
+    export UCX_IB_GPU_DIRECT_RDMA="${UCX_IB_GPU_DIRECT_RDMA:-yes}"
+    export UCX_RMA_PPLN_ENABLE="${UCX_RMA_PPLN_ENABLE:-y}"
+    export UCX_PROTO_EMULATION_ENABLE="${UCX_PROTO_EMULATION_ENABLE:-n}"
+    export UCX_KEEPALIVE_INTERVAL="${UCX_KEEPALIVE_INTERVAL:-inf}"
+    export UCX_UD_VERBS_RX_QUEUE_LEN="${UCX_UD_VERBS_RX_QUEUE_LEN:-1024}"
+    export UCX_RCACHE_MAX_UNRELEASED="${UCX_RCACHE_MAX_UNRELEASED:-1024}"
+    export ACCURACY_NUM_CONCURRENT="${ACCURACY_NUM_CONCURRENT:-1}"
+fi
+
 # ----------------------------------------------------------------- benchmark
 export BENCHMARK_COMBINATIONS="${BENCHMARK_COMBINATIONS:-1024/128 2048/128}"
 export BENCHMARK_CON="${BENCHMARK_CON:-32 64}"
