@@ -624,17 +624,31 @@ def test_cpu_spec_create_worker_skips_mmap_for_empty_cache(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("replicated_layout", "rank", "device_index", "world_size", "expected_engine_id"),
+    (
+        "replicated_layout",
+        "rank",
+        "device_index",
+        "world_size",
+        "expected_engine_id",
+        "capacity_error",
+    ),
     [
-        (True, 1, 5, 4, "test-engine"),
-        (True, 0, 0, 4, "test-engine"),
-        (False, 1, 5, 4, "test-engine_1"),
-        (False, 0, 5, 4, "test-engine_0"),
-        (False, 3, 6, 4, "test-engine_3"),
+        (True, 1, 5, 4, "test-engine", False),
+        (True, 0, 0, 4, "test-engine", False),
+        (False, 1, 5, 4, "test-engine_1", False),
+        (False, 0, 5, 4, "test-engine_0", False),
+        (False, 3, 6, 4, "test-engine_3", False),
+        (False, 0, 5, 4, "test-engine_0", True),
     ],
 )
 def test_cpu_spec_create_worker_region_assignment(
-    monkeypatch, replicated_layout, rank, device_index, world_size, expected_engine_id
+    monkeypatch,
+    replicated_layout,
+    rank,
+    device_index,
+    world_size,
+    expected_engine_id,
+    capacity_error,
 ):
     import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
 
@@ -679,7 +693,14 @@ def test_cpu_spec_create_worker_region_assignment(
     else:
         assert capacity_check is not None
         region_bytes = spec.num_chunks * region_calls[0]["kv_bytes_per_chunk"]
-        capacity_check(region_bytes)
+        if capacity_error:
+            error = RuntimeError("Insufficient space in /dev/shm")
+            memory_check.side_effect = error
+            with pytest.raises(RuntimeError) as raised:
+                capacity_check(region_bytes)
+            assert raised.value is error
+        else:
+            capacity_check(region_bytes)
         memory_check.assert_called_once_with(
             region_bytes * world_size,
             allocation_name="CPU KV offload regions in /dev/shm",

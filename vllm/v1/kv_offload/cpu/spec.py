@@ -209,11 +209,13 @@ class CPUOffloadingSpec(OffloadingSpec):
             worker_index = self.config.parallel.rank
 
             def check_rank_regions_capacity(size: int) -> None:
-                check_shm_free_space(
-                    size * world_size,
-                    allocation_name="CPU KV offload regions in /dev/shm",
-                )
-                _all_workers_barrier()
+                try:
+                    check_shm_free_space(
+                        size * world_size,
+                        allocation_name="CPU KV offload regions in /dev/shm",
+                    )
+                finally:
+                    _all_workers_barrier()
 
             mmap_region = SharedOffloadRegion(
                 engine_id=engine_id,
