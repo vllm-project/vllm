@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import ctypes
 import os
 import threading
 from collections.abc import Iterator
@@ -1103,6 +1104,11 @@ class MoriEPv2All2AllManager(All2AllManagerBase):
         comm = Communicator.init(
             self.world_size, self.rank, values[0], per_rank_vmm=nbytes
         )
+        # cco probes fabric handles with hipMemCreate and, where they are
+        # unsupported, leaves hipErrorNotSupported as the HIP last error; the
+        # next torch call that checks it (an allocation) would raise it. MoRI
+        # clears it itself since ROCm/mori#761, which no release has yet.
+        ctypes.CDLL("libamdhip64.so").hipGetLastError()
         window = _MoriEPv2Window(comm, nbytes)
         self._windows.append(window)
         return window

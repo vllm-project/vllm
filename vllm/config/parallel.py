@@ -1239,6 +1239,7 @@ def resolve_mori_all2all(
     moe_backend: str,
     lsa_spans_hosts: bool = False,
     sdma_picks_epv1: bool = True,
+    validated_arch: bool = True,
 ) -> None:
     """Resolve whether the "mori" all2all backend runs MoRI EPv2 or EPv1.
 
@@ -1246,13 +1247,19 @@ def resolve_mori_all2all(
     is unsupported, an explicit true keeps EPv2 regardless, and false selects
     EPv1. `lsa_spans_hosts` says whether a CCO-LSA team can span hosts (e.g.
     gfx1250's UALink vPOD). `sdma_picks_epv1` says whether `MORI_ENABLE_SDMA=1`
-    selects EPv1; gfx1250 keeps EPv2 under SDMA.
+    selects EPv1; gfx1250 keeps EPv2 under SDMA. `validated_arch` says whether
+    EPv2 is validated on this GPU.
     """
     if parallel_config.all2all_backend != "mori":
         return
     if parallel_config.mori_ep_v2 is None:
         parallel_config.mori_ep_v2 = _resolve_mori_ep_v2(
-            parallel_config, model_config, moe_backend, lsa_spans_hosts, sdma_picks_epv1
+            parallel_config,
+            model_config,
+            moe_backend,
+            lsa_spans_hosts,
+            sdma_picks_epv1,
+            validated_arch,
         )
     logger.info_once("MoRI all2all: EP%s", "v2" if parallel_config.mori_ep_v2 else "v1")
 
@@ -1263,11 +1270,17 @@ def _resolve_mori_ep_v2(
     moe_backend: str,
     lsa_spans_hosts: bool,
     sdma_picks_epv1: bool,
+    validated_arch: bool,
 ) -> bool:
     if envs.VLLM_MORI_EP_V2 is False:
         return False
     reason = _mori_epv2_unsupported_reason(
-        parallel_config, model_config, moe_backend, lsa_spans_hosts, sdma_picks_epv1
+        parallel_config,
+        model_config,
+        moe_backend,
+        lsa_spans_hosts,
+        sdma_picks_epv1,
+        validated_arch,
     )
     if reason is None:
         return True
@@ -1308,7 +1321,15 @@ def _mori_epv2_unsupported_reason(
     moe_backend: str,
     lsa_spans_hosts: bool,
     sdma_picks_epv1: bool,
+    validated_arch: bool,
 ) -> str | None:
+    from vllm.utils.import_utils import mori_epv2_unavailable_reason
+
+    reason = mori_epv2_unavailable_reason()
+    if reason is not None:
+        return f"this MoRI ({reason}; upgrade MoRI)"
+    if not validated_arch:
+        return "this GPU (EPv2 is validated on gfx950 and gfx1250)"
     ep_size = (
         parallel_config.tensor_parallel_size
         * parallel_config.data_parallel_size
@@ -1325,4 +1346,22 @@ def _mori_epv2_unsupported_reason(
         return "moe_backend=aiter_mega_moe (MegaMoE runs on MoRI EPv1 shmem)"
     if model_config is not None and model_config.dtype != torch.bfloat16:
         return f"dtype={model_config.dtype} (EPv2 requires bfloat16)"
+    if model_config is not None and _quantizes_activations_per_tensor(model_config):
+        return "per-tensor FP8 activations (AITER cannot quantize them after dispatch)"
     return None
+
+
+def _quantizes_activations_per_tensor(model_config: "ModelConfig") -> bool:
+    # Under EPv2 AITER quantizes the received rows itself, which its per-tensor
+    # quant does not support. Other formats are caught at kernel set-up.
+    method = getattr(model_config, "quantization", None)
+    arch_config = getattr(model_config, "model_arch_config", None)
+    quant_cfg = getattr(arch_config, "quantization_config", None)
+    if not isinstance(quant_cfg, dict):
+        quant_cfg = {}
+    quant_cfg = quant_cfg.get("quantization", quant_cfg)
+    if method == "fp8":
+        return not quant_cfg.get("weight_block_size")
+    if method == "modelopt":
+        return quant_cfg.get("quant_algo") == "FP8"
+    return False

@@ -13,6 +13,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 import vllm.model_executor.layers.fused_moe.prepare_finalize.mori_epv2 as mori_epv2
+import vllm.utils.import_utils as import_utils
 from vllm.config.parallel import resolve_mori_all2all
 from vllm.model_executor.layers.fused_moe.prepare_finalize.mori_epv2 import (
     MoriEPv2PrepareAndFinalize,
@@ -160,6 +161,7 @@ def test_manager_requires_one_lsa_team(monkeypatch, world_size, lsa_size):
     monkeypatch.setattr(
         torch.distributed, "broadcast_object_list", lambda *a, **k: None
     )
+    monkeypatch.setattr(all2all.ctypes, "CDLL", lambda name: Mock())
     device_comm = Mock(lsa_size=lsa_size)
     calls = Mock()  # records the order of op.close and comm.destroy
     comm = calls.comm
@@ -211,6 +213,7 @@ def _unique_id_worker(rank, init_method):
         self.__dict__.update(rank=g.rank(), world_size=g.size(), cpu_group=g)
 
     All2AllManagerBase.__init__ = fake_init  # type: ignore[method-assign]
+    all2all.ctypes.CDLL = lambda name: Mock()  # type: ignore[misc]
     communicator = Mock()
     communicator.get_unique_id.return_value = f"uid-of-rank-{rank}"
     communicator.init.return_value.create_dev_comm.return_value = Mock(lsa_size=2)
@@ -251,22 +254,24 @@ def test_experts_write_into_combine_staging_only_when_it_fits():
 
 
 @pytest.mark.parametrize(
-    "in_dtype,quant_dtype,quantizes_itself,ok",
+    "in_dtype,quant_dtype,quantizes_itself,per_tensor,ok",
     [
-        (torch.bfloat16, None, False, True),
+        (torch.bfloat16, None, False, False, True),
         # e.g. AITER, which quantizes after the all2all.
-        (torch.bfloat16, torch.float8_e4m3fn, True, True),
+        (torch.bfloat16, torch.float8_e4m3fn, True, False, True),
+        # AITER cannot quantize the received rows per tensor.
+        (torch.bfloat16, torch.float8_e4m3fn, True, True, False),
         # e.g. FP8 Triton experts, which expect the dispatch to quantize.
-        (torch.bfloat16, torch.float8_e4m3fn, False, False),
-        (torch.float16, None, False, False),
+        (torch.bfloat16, torch.float8_e4m3fn, False, False, False),
+        (torch.float16, None, False, False, False),
     ],
 )
 def test_experts_it_cannot_feed_are_rejected(
-    in_dtype, quant_dtype, quantizes_itself, ok
+    in_dtype, quant_dtype, quantizes_itself, per_tensor, ok
 ):
     experts = SimpleNamespace(
         moe_config=SimpleNamespace(in_dtype=in_dtype),
-        quant_config=SimpleNamespace(quant_dtype=quant_dtype),
+        quant_config=SimpleNamespace(quant_dtype=quant_dtype, is_per_tensor=per_tensor),
         expects_unquantized_inputs=quantizes_itself,
     )
     prepare_finalize = _make_pf(FakeOp(16))
@@ -292,11 +297,16 @@ def _parallel_config(**overrides):
     return SimpleNamespace(**(fields | overrides))
 
 
-def _model_config(**overrides):
-    return SimpleNamespace(**({"dtype": torch.bfloat16} | overrides))
+def _model_config(quant_cfg=None, **overrides):
+    fields = {"dtype": torch.bfloat16, "quantization": None}
+    arch = SimpleNamespace(quantization_config=quant_cfg)
+    return SimpleNamespace(model_arch_config=arch, **(fields | overrides))
 
 
 _EXTERNAL_LB = {"data_parallel_size_local": 1, "data_parallel_external_lb": True}
+_FP8_BLOCK = {"quantization": "fp8", "quant_cfg": {"weight_block_size": [128, 128]}}
+_MODELOPT_FP8 = {"quantization": "modelopt", "quant_cfg": {"quant_algo": "FP8"}}
+_MODELOPT_NVFP4 = {"quantization": "modelopt", "quant_cfg": {"quant_algo": "NVFP4"}}
 
 
 @pytest.mark.parametrize(
@@ -325,6 +335,13 @@ _EXTERNAL_LB = {"data_parallel_size_local": 1, "data_parallel_external_lb": True
         ({"mori_ep_v2": True}, {"dtype": torch.float16}, "aiter", {}, True),
         # Other MoRI backends always run EPv1.
         ({"all2all_backend": "mori_high_throughput"}, {}, "aiter", {}, None),
+        ({"validated_arch": False}, {}, "aiter", {}, False),
+        ({"mori_reason": "too old"}, {}, "aiter", {}, False),
+        # Per-tensor FP8 activations; block FP8 and NVFP4 are fine.
+        ({}, {"quantization": "fp8"}, "aiter", {}, False),
+        ({}, _FP8_BLOCK, "aiter", {}, True),
+        ({}, _MODELOPT_FP8, "aiter", {}, False),
+        ({}, _MODELOPT_NVFP4, "aiter", {}, True),
     ],
 )
 def test_mori_picks_epv2_where_supported(
@@ -337,12 +354,39 @@ def test_mori_picks_epv2_where_supported(
     parallel = dict(parallel)
     lsa_spans_hosts = parallel.pop("lsa_spans_hosts", False)
     sdma_picks_epv1 = parallel.pop("sdma_picks_epv1", True)
+    validated_arch = parallel.pop("validated_arch", True)
+    mori_reason = parallel.pop("mori_reason", None)
+    monkeypatch.setattr(
+        import_utils, "mori_epv2_unavailable_reason", lambda: mori_reason
+    )
     parallel_config = _parallel_config(**parallel)
     model_config = _model_config(**model)
     resolve_mori_all2all(
-        parallel_config, model_config, moe_backend, lsa_spans_hosts, sdma_picks_epv1
+        parallel_config,
+        model_config,
+        moe_backend,
+        lsa_spans_hosts,
+        sdma_picks_epv1,
+        validated_arch,
     )
     assert parallel_config.mori_ep_v2 is ep_v2
+
+
+@pytest.mark.parametrize(
+    "modules,version,usable",
+    [
+        ({"mori", "mori.cco", "mori.ops.dispatch_combine_v2"}, "1.2.4", True),
+        ({"mori", "mori.cco", "mori.ops.dispatch_combine_v2"}, "1.2.5.dev3+g1", True),
+        ({"mori", "mori.cco", "mori.ops.dispatch_combine_v2"}, "1.2.3.post1", False),
+        ({"mori", "mori.cco", "mori.ops.dispatch_combine_v2"}, "unknown", False),
+        ({"mori"}, "1.2.4", False),
+        (set(), "1.2.4", False),
+    ],
+)
+def test_mori_epv2_needs_a_recent_mori(monkeypatch, modules, version, usable):
+    monkeypatch.setattr(import_utils, "_has_module", lambda name: name in modules)
+    monkeypatch.setitem(sys.modules, "mori", SimpleNamespace(__version__=version))
+    assert (import_utils.mori_epv2_unavailable_reason() is None) is usable
 
 
 @pytest.mark.parametrize(

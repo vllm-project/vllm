@@ -64,6 +64,14 @@ class MoriEPv2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 "VLLM_MORI_EP_V2=0 for MORI EPv1, which also requires AITER fused MoE."
             )
 
+        if quant_dtype is not None and fused_experts.quant_config.is_per_tensor:
+            raise ValueError(
+                "MORI EPv2 does not support per-tensor activation quantization: "
+                "the experts would quantize the received rows, which AITER's "
+                "per-tensor quant does not support. Set VLLM_MORI_EP_V2=0 to use "
+                "MORI EPv1, which quantizes before dispatch."
+            )
+
         # AITER computes only the first expert_num_tokens rows.
         self._experts_read_recv_rows_only = isinstance(fused_experts, AiterExperts)
 
