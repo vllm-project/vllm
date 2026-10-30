@@ -103,7 +103,9 @@ def test_pp_handler_broadcasts_through_pp_group(monkeypatch):
     monkeypatch.setattr(pp_utils, "get_pp_group", FakePPGroup)
     monkeypatch.setattr(pp_utils.torch.cuda, "current_stream", lambda device: None)
     monkeypatch.setattr(pp_utils.torch.cuda, "Stream", lambda device: None)
-    monkeypatch.setattr(pp_utils.torch.cuda, "stream", lambda s: contextlib.nullcontext())
+    monkeypatch.setattr(
+        pp_utils.torch.cuda, "stream", lambda s: contextlib.nullcontext()
+    )
     monkeypatch.setattr(torch.Tensor, "record_stream", lambda self, stream: None)
     handler = pp_utils.PPHandler(max_num_reqs=4, num_speculative_steps=0, device="cpu")
     handler.main_stream = handler.broadcast_stream = _NullStream()
@@ -114,13 +116,22 @@ def test_pp_handler_broadcasts_through_pp_group(monkeypatch):
         num_scheduled_tokens=np.array([1, 1]),
         max_seq_len_np=None,
         is_prefilling_np=np.array([False, False]),
+        num_draft_tokens=0,
     )
     sampled = torch.zeros(2, 1, dtype=torch.int64)
-    handler.broadcast(sampled, torch.ones(2, dtype=torch.int32),
-                      torch.zeros(2, dtype=torch.int32), batch)
+    handler.broadcast(
+        sampled,
+        torch.ones(2, dtype=torch.int32),
+        torch.zeros(2, dtype=torch.int32),
+        batch,
+    )
     assert calls == [((2, 1), 1, "sibling"), ((2, 2), 1, "sibling")]
 
 
 class _NullStream:
     def wait_stream(self, stream):
+        pass
+
+    def synchronize(self):
+        # PPHandler.broadcast() synchronizes the main stream on XPU.
         pass
