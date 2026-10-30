@@ -4,7 +4,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwapOption;
 use bytes::Bytes;
@@ -19,7 +18,7 @@ use zeromq::RouterSendHalf;
 use crate::client::state::{
     OutputReceiver, OutputSender, RequestRegistry, UtilityReceiver, UtilityRegistry,
 };
-use crate::client::stream::EngineCoreStreamOutput;
+use crate::client::stream::{EngineCoreStreamOutput, monotonic_timestamp_secs};
 use crate::client::{AbortCause, AbortRequest};
 use crate::error::{client_closed, dispatcher_closed, unexpected_dispatcher_output};
 use crate::metrics::{
@@ -200,11 +199,7 @@ impl ClientInner {
         &self,
         request_ids: impl IntoIterator<Item = &'a String>,
     ) -> Vec<String> {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs_f64())
-            .unwrap_or(0.0);
-        self.request_reg.lock().abort_many(request_ids, timestamp)
+        self.request_reg.lock().abort_many(request_ids, monotonic_timestamp_secs())
     }
 
     /// Apply one scheduler stats update for the given engine to the local
@@ -463,12 +458,10 @@ pub(crate) async fn run_output_dispatcher_loop(
                     let has_outputs = !batch.outputs.is_empty();
                     let mut iteration_tokens: u64 =
                         batch.outputs.iter().map(output_iteration_tokens).sum();
-                    let (engine_index, timestamp, weight_version) =
-                        (batch.engine_index, batch.timestamp, batch.weight_version);
                     let outputs = batch.outputs.into_iter().map(|output| EngineCoreStreamOutput {
-                        engine_index,
-                        timestamp,
-                        weight_version: weight_version.clone(),
+                        timestamp: batch.timestamp,
+                        weight_version: batch.weight_version.clone(),
+                        weight_versions: None,
                         output,
                     });
                     for output in inner.send_outputs(outputs) {

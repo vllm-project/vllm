@@ -357,13 +357,13 @@ impl RequestRegistry {
     ) -> Vec<String> {
         let mut aborted = Vec::new();
         for request_id in request_ids {
-            let Some((mut sender, engine_id)) = self.remove(request_id) else {
+            let Some((mut sender, _)) = self.remove(request_id) else {
                 continue;
             };
             let output = EngineCoreStreamOutput {
-                engine_index: engine_id.engine_index().unwrap_or(0),
                 timestamp,
                 weight_version: None,
+                weight_versions: None,
                 output: EngineCoreOutput {
                     request_id: request_id.clone(),
                     finish_reason: Some(EngineCoreFinishReason::Abort),
@@ -545,9 +545,9 @@ mod tests {
 
     fn stream_output(output: EngineCoreOutput) -> EngineCoreStreamOutput {
         EngineCoreStreamOutput {
-            engine_index: 0,
             timestamp: 0.0,
             weight_version: None,
+            weight_versions: None,
             output,
         }
     }

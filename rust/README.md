@@ -1,6 +1,6 @@
 # vllm-frontend-rs
 
-This is a Rust drop-in alternative frontend for vLLM. The current goal is to rebuild the northbound serving layer in Rust while still talking to the core Python vLLM engine process(es) via ZMQ over the existing engine boundary.
+This is a Rust drop-in alternative frontend for vLLM. It implements the northbound serving layer and connects to engine processes over ZMQ or token generation servers over HTTP.
 
 It should still be considered experimental, and is not feature-complete. We are working to add more functionality from the python front-end.
 
@@ -74,6 +74,44 @@ updates and `/update_weight_version` and `/weight_info` for version tracking.
 For trainer-side usage, see the [IPC](../examples/rl/rlhf_http_ipc.py) and
 [NCCL](../examples/rl/rlhf_http_nccl.py) examples. Configure the weight-transfer
 backend on the server and pause generation during updates, as shown there.
+
+### HTTP generation through a gateway
+
+```bash
+vllm-rs serve Qwen/Qwen3-0.6B \
+  --generation-url http://gateway:8080 \
+  --max-model-len 32768
+```
+
+HTTP mode starts no Python engine and opens no ZMQ connection. It sends token
+requests to `/inference/v1/generate`; rendering, detokenization, stop-string
+matching, reasoning and tool parsing stay in the Rust frontend. The model,
+revision and generation configuration must match the downstream deployment.
+`--max-model-len` must not exceed its effective context limit.
+
+Startup reads `/server_info?config_format=json`, `/version`, `/kv_event_sources`
+and `/health`. The downstream server must enable `VLLM_SERVER_DEV_MODE=1` for
+`/server_info` and enable token generation with `--tokens-only` or
+`--enable-scale-out`. Health is polled every five seconds. No new HTTP endpoints
+are required. Discovery currently supports one managed DP engine per backend;
+`/server_info` does not provide individual engine records for internal DP.
+
+Engine controls use the existing HTTP endpoints. Enable the corresponding
+features downstream for profiling, checkpoints and dynamic LoRA loading. A
+gateway must route discovery and control calls consistently with the target
+backend; these calls do not discover or broadcast to every replica in a pool.
+Configuration is cached at startup. HTTP collective-RPC results retain the
+HTTP API's JSON/string representation, which may differ from native results.
+
+Streaming responses must pass through the gateway without buffering, and client
+disconnects must cancel downstream requests. Upstream authentication and gateway
+routing configuration are external to this option.
+
+Generation supports text. Prompt and selective logprobs, bad-word constraints,
+multimodal tensors, KV hints, resumable inputs and routed-expert responses are not
+supported. Cached-token usage requires downstream
+`--enable-prompt-tokens-details`. Native engine statistics and per-request engine
+metrics are not reconstructed; requests are accounted for under the HTTP backend.
 
 ### External Engine
 

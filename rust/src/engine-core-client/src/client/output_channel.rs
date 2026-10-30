@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 //! Per-request output channel between the output dispatcher and
-//! [`EngineCoreOutputStream`](crate::EngineCoreOutputStream).
+//! [`EngineOutputStreamAdapter`](crate::EngineOutputStreamAdapter).
 //!
 //! With a stream interval above one, the sender holds back the outputs after
 //! the first one until they carry at least that many new tokens, then delivers
@@ -18,11 +18,14 @@
 //! values.
 
 use std::num::NonZeroU32;
+use std::sync::Arc;
 
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-use crate::client::stream::{EngineCoreStreamDelivery as Delivery, EngineCoreStreamOutput};
+use crate::client::stream::{
+    EngineCoreStreamDelivery as Delivery, EngineCoreStreamOutput, WeightVersionSpan,
+};
 use crate::error::{Error, Result};
 
 /// Create the output channel for one request.
@@ -34,6 +37,8 @@ pub(crate) fn output_channel(stream_interval: NonZeroU32) -> (OutputSender, Outp
         delivered_first: false,
         buffered: Vec::new(),
         buffered_tokens: 0,
+        weight_version_starts: Vec::new(),
+        num_output_tokens: 0,
     };
     (sender, rx)
 }
@@ -53,14 +58,34 @@ pub(crate) struct OutputSender {
     buffered: Vec<EngineCoreStreamOutput>,
     /// Number of new tokens in `buffered`.
     buffered_tokens: usize,
+    /// (weight version, first output-token index) for each span.
+    weight_version_starts: Vec<(Arc<str>, usize)>,
+    /// Number of output tokens sent so far.
+    num_output_tokens: usize,
 }
 
 impl OutputSender {
     /// Send one output, or hold it back until the held-back outputs reach the
     /// stream interval. The first output and the terminal output are always
     /// delivered immediately, the latter together with any held-back outputs.
-    pub fn send(&mut self, output: EngineCoreStreamOutput) {
+    /// The spans opened by each output's `weight_version` label are attached
+    /// to the terminal output.
+    pub fn send(&mut self, mut output: EngineCoreStreamOutput) {
+        let num_new_tokens = output.new_token_ids.len();
+        // Start a span when tokens arrive under a new label.
+        if num_new_tokens > 0
+            && let Some(version) = &output.weight_version
+            && self.weight_version_starts.last().is_none_or(|(last, _)| last != version)
+        {
+            self.weight_version_starts.push((version.clone(), self.num_output_tokens));
+        }
+        self.num_output_tokens += num_new_tokens;
+
         let finished = output.finished();
+        if finished {
+            output.weight_versions =
+                WeightVersionSpan::from_starts(&self.weight_version_starts, self.num_output_tokens);
+        }
         if self.buffered.is_empty()
             && (finished || !self.delivered_first || self.stream_interval == 1)
         {
@@ -128,9 +153,9 @@ mod tests {
 
     fn output(token_ids: &[u32]) -> EngineCoreStreamOutput {
         EngineCoreStreamOutput {
-            engine_index: 0,
             timestamp: 0.0,
             weight_version: None,
+            weight_versions: None,
             output: EngineCoreOutput {
                 request_id: "req".to_string(),
                 new_token_ids: token_ids.to_vec(),
@@ -142,6 +167,11 @@ mod tests {
     fn finished(token_ids: &[u32]) -> EngineCoreStreamOutput {
         let mut output = output(token_ids);
         output.output.finish_reason = Some(EngineCoreFinishReason::Length);
+        output
+    }
+
+    fn labelled(mut output: EngineCoreStreamOutput, version: &str) -> EngineCoreStreamOutput {
+        output.weight_version = Some(version.into());
         output
     }
 
@@ -318,5 +348,27 @@ mod tests {
         // One delivery for the first output, one for the held-back output,
         // then the error.
         assert_eq!(items, [Some(1), Some(1), None]);
+    }
+
+    #[test]
+    fn weight_version_spans_attach_to_the_terminal_output_only() {
+        let (mut sender, mut receiver) = channel(1);
+        sender.send(labelled(output(&[1, 2]), "v1"));
+        sender.send(labelled(output(&[3]), "v2"));
+        sender.send(labelled(finished(&[4]), "v2"));
+
+        let span = |version: &str, start, end| WeightVersionSpan {
+            version: version.into(),
+            start,
+            end,
+        };
+        let mut versions = Vec::new();
+        while let Ok(Ok(delivery)) = receiver.try_recv() {
+            versions.extend(delivery.into_iter().map(|output| output.weight_versions));
+        }
+        assert_eq!(
+            versions,
+            [None, None, Some(vec![span("v1", 0, 2), span("v2", 2, 4)])]
+        );
     }
 }

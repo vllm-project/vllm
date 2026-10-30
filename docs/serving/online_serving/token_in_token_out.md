@@ -18,6 +18,13 @@ curl -X POST http://localhost:8000/inference/v1/generate \
 
 A full client is in [examples/scale_out/token_generation_client.py](../../../examples/scale_out/token_generation_client.py).
 
+## Rust chat frontend through a gateway
+
+The Rust frontend can serve `/v1/chat/completions` while submitting prepared
+prompt tokens to this endpoint through a gateway. See
+[HTTP generation through a gateway](../../../rust/README.md#http-generation-through-a-gateway)
+for configuration, supported features, and deployment requirements.
+
 ## Request fields
 
 | Field | Notes |

@@ -22,6 +22,7 @@ use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, Tran
 use vllm_metrics::CustomHistogramBuckets;
 use vllm_text::backend::hf::{HfOverrides, ModelSource};
 
+use crate::engine_http_client;
 use crate::routes::openai::utils::types::ReasoningEffort;
 
 /// Default keep-alive idle timeout (seconds); also the head-read bound
@@ -258,12 +259,26 @@ impl FromStr for LoraModulePath {
     }
 }
 
+/// Generation backend selected before frontend startup.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum EngineBackend {
+    EngineCore(TransportMode),
+    HttpGenerate { url: String, max_model_len: u32 },
+}
+
+impl From<TransportMode> for EngineBackend {
+    fn from(value: TransportMode) -> Self {
+        Self::EngineCore(value)
+    }
+}
+
 /// Normalized runtime configuration for the minimal OpenAI-compatible server.
 #[derive(Educe, Clone, PartialEq, Eq, Serialize)]
 #[educe(Debug)]
 pub struct Config {
-    /// Frontend-to-engine transport setup.
-    pub transport_mode: TransportMode,
+    /// Generation backend the frontend submits requests to.
+    pub engine_backend: EngineBackend,
     /// Requested frontend-side coordinator behavior.
     pub coordinator_mode: CoordinatorMode,
     /// Backend model identifier used for engine-core loading.
@@ -403,16 +418,32 @@ impl Config {
                 max_logprobs
             );
         }
-        self.transport_mode.validate()?;
+        match &self.engine_backend {
+            EngineBackend::EngineCore(mode) => mode.validate()?,
+            EngineBackend::HttpGenerate { url, max_model_len } => {
+                engine_http_client::generate_url(url)?;
+                if *max_model_len == 0 {
+                    bail!("HTTP generation requires a positive --max-model-len");
+                }
+                if self.api_server_options.enable_per_request_metrics || self.manages_engine {
+                    bail!(
+                        "HTTP generation does not support per-request engine metrics or a managed engine"
+                    );
+                }
+            }
+        }
 
         Ok(())
     }
 
-    /// Return the number of engines implied by the configured transport mode.
+    /// Return the number of engines implied by the configured generation backend.
     pub fn engine_count(&self) -> usize {
-        match &self.transport_mode {
-            TransportMode::HandshakeOwner { engine_count, .. }
-            | TransportMode::Bootstrapped { engine_count, .. } => *engine_count,
+        match &self.engine_backend {
+            EngineBackend::EngineCore(
+                TransportMode::HandshakeOwner { engine_count, .. }
+                | TransportMode::Bootstrapped { engine_count, .. },
+            ) => *engine_count,
+            EngineBackend::HttpGenerate { .. } => 0,
         }
     }
 

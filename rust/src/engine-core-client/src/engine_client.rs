@@ -13,7 +13,7 @@ use crate::protocol::handshake::EngineCoreReadyResponse;
 use crate::protocol::lora::LoraRequest;
 use crate::protocol::request::EngineCoreRequest;
 use crate::protocol::utility::{CheckpointState, PauseMode, SleepLevel};
-use crate::{EngineCoreClient, EngineCoreOutputStream, EngineCoreStreamDelivery, Result};
+use crate::{EngineCoreClient, EngineCoreStreamDelivery, EngineOutputStreamAdapter, Result};
 
 /// Per-request engine output. Dropping a live stream must abort its request.
 /// Mark the stream terminated when delivering its terminal output, so dropping
@@ -28,7 +28,7 @@ pub trait EngineOutputStream:
     fn engine_index(&self) -> u32;
 }
 
-impl EngineOutputStream for EngineCoreOutputStream {
+impl EngineOutputStream for EngineOutputStreamAdapter {
     fn request_id(&self) -> &str {
         self.request_id()
     }

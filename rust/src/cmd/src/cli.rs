@@ -18,6 +18,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
+use anyhow::Context as _;
 use clap::{ArgAction, Args, Parser, Subcommand};
 use educe::Educe;
 use serde::de::DeserializeOwned;
@@ -36,8 +37,8 @@ use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_arg
 use vllm_server::{
     ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
     CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL,
-    DEFAULT_REQUEST_BODY_LIMIT_BYTES, HttpListenerMode, LoraModulePath, OutputLogging,
-    ParserSelection, ReasoningEffort, RenderConfig, RendererSelection,
+    DEFAULT_REQUEST_BODY_LIMIT_BYTES, EngineBackend, HttpListenerMode, LoraModulePath,
+    OutputLogging, ParserSelection, ReasoningEffort, RenderConfig, RendererSelection,
 };
 use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
 
@@ -729,14 +730,15 @@ impl SharedRuntimeArgs {
         } = self.model.file_sources();
 
         Config {
-            transport_mode: TransportMode::Bootstrapped {
+            engine_backend: TransportMode::Bootstrapped {
                 input_listener_fd,
                 output_listener_fd,
                 engine_start_index,
                 engine_count,
                 data_parallel_size,
                 ready_timeout,
-            },
+            }
+            .into(),
             coordinator_mode: match coordinator_address {
                 Some(address) => CoordinatorMode::External { address },
                 None => CoordinatorMode::None,
@@ -782,20 +784,14 @@ impl SharedRuntimeArgs {
         }
     }
 
-    /// Build the OpenAI-server config for the managed `serve` path that still
-    /// owns the startup handshake and binds its own HTTP listener.
-    fn into_managed_config(
+    /// Build the OpenAI-server config for `serve` with the selected generation backend.
+    fn into_serve_config(
         self,
         listener_mode: HttpListenerMode,
         grpc_listener_mode: Option<HttpListenerMode>,
-        handshake_address: String,
-        advertised_host: String,
-        engine_count: usize,
-        local_input_address: Option<String>,
-        local_output_address: Option<String>,
+        engine_backend: EngineBackend,
         manages_engine: bool,
     ) -> Config {
-        let ready_timeout = self.ready_timeout();
         let shutdown_timeout = self.shutdown_timeout();
         let keep_alive_timeout = self.keep_alive_timeout();
         let log_stats_interval = self.log_stats_interval();
@@ -811,14 +807,7 @@ impl SharedRuntimeArgs {
         } = self.model.file_sources();
 
         Config {
-            transport_mode: TransportMode::HandshakeOwner {
-                handshake_address,
-                advertised_host,
-                engine_count,
-                ready_timeout,
-                local_input_address,
-                local_output_address,
-            },
+            engine_backend,
             coordinator_mode: CoordinatorMode::MaybeInProc,
             model: model.id,
             revision: model.revision,
@@ -1066,6 +1055,11 @@ impl FrontendArgs {
 #[educe(Debug)]
 #[command(override_usage = "vllm-rs serve <MODEL> [OPTIONS] [-- <PYTHON_ARGS>...]")]
 pub struct ServeArgs {
+    /// Gateway base URL for HTTP token generation, without starting a local engine.
+    /// Requires --max-model-len to match the downstream deployment.
+    #[arg(long, conflicts_with = "headless", requires = "max_model_len")]
+    #[educe(Debug(ignore))]
+    pub generation_url: Option<String>,
     /// Only launch the managed Python headless engine and do not start the Rust
     /// frontend.
     #[arg(long)]
@@ -1105,6 +1099,33 @@ impl ServeArgs {
         // Prefer IPC sockets for local engine input/output.
         let (local_input_address, local_output_address) =
             self.managed_engine.frontend_local_only().then(frontend_ipc_addresses).unzip();
+        self.frontend_config(
+            TransportMode::HandshakeOwner {
+                handshake_address,
+                advertised_host: self.managed_engine.handshake_host.clone(),
+                engine_count: self.managed_engine.data_parallel_size,
+                ready_timeout: self.runtime.ready_timeout(),
+                local_input_address,
+                local_output_address,
+            }
+            .into(),
+            // `--data-parallel-size-local 0` runs the frontend without a local engine.
+            self.managed_engine.data_parallel_size_local != Some(0),
+        )
+    }
+
+    pub fn to_http_frontend_config(&self, url: String) -> anyhow::Result<Config> {
+        let max_model_len = self
+            .managed_engine
+            .max_model_len
+            .as_deref()
+            .context("--generation-url requires --max-model-len")?
+            .parse::<u32>()
+            .context("HTTP generation requires an explicit positive --max-model-len")?;
+        Ok(self.frontend_config(EngineBackend::HttpGenerate { url, max_model_len }, false))
+    }
+
+    fn frontend_config(&self, engine_backend: EngineBackend, manages_engine: bool) -> Config {
         let listener_mode = match &self.uds {
             Some(path) => HttpListenerMode::BindUnix { path: path.clone() },
             None => HttpListenerMode::BindTcp {
@@ -1123,16 +1144,11 @@ impl ServeArgs {
             port,
         });
 
-        self.runtime.clone().into_managed_config(
+        self.runtime.clone().into_serve_config(
             listener_mode,
             grpc_listener_mode,
-            handshake_address,
-            self.managed_engine.handshake_host.clone(),
-            self.managed_engine.data_parallel_size,
-            local_input_address,
-            local_output_address,
-            // `--data-parallel-size-local 0` runs the frontend without a local engine.
-            self.managed_engine.data_parallel_size_local != Some(0),
+            engine_backend,
+            manages_engine,
         )
     }
 

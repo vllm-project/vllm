@@ -14,8 +14,9 @@ pub mod test_utils;
 mod transport;
 
 pub use client::{
-    AbortCause, CoordinatorMode, EngineCoreClient, EngineCoreClientConfig, EngineCoreOutputStream,
-    EngineCoreStreamDelivery, EngineCoreStreamOutput, TransportMode,
+    AbortCause, CoordinatorMode, EngineCoreClient, EngineCoreClientConfig,
+    EngineCoreStreamDelivery, EngineCoreStreamOutput, EngineOutputStreamAdapter, TransportMode,
+    WeightVersionSpan, monotonic_timestamp_secs,
 };
 pub use engine_client::{EngineClient, EngineOutputStream};
 pub use error::{Error, Result};

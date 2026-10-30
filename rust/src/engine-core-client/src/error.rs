@@ -14,6 +14,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Public error type for the Rust engine-core client.
 #[derive(Debug, Error, Macro)]
 pub enum Error {
+    #[error("HTTP engine returned {status}: {message}")]
+    Http { status: u16, message: String },
     #[error("messagepack encode failed for {target_type}: {message}")]
     Encode {
         target_type: &'static str,

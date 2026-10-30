@@ -43,6 +43,7 @@ dirs = "6.0.0"
 easy-ext = "1.0.3"
 educe = "0.6.0"
 enum-as-inner = "0.7.0"
+eventsource-stream = "0.2.3"
 expect-test = "1.5.1"
 fastokens = { version = "0.3.5", default-features = false }
 futures = "0.3.31"

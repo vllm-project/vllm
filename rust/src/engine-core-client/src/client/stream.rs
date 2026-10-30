@@ -5,33 +5,71 @@ use std::ops::Deref;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Instant;
 
-use futures::stream::FusedStream;
+use futures::stream::{BoxStream, FusedStream};
 use futures::{Stream, StreamExt as _};
 use itertools::Either;
+use serde::{Deserialize, Serialize};
 use thiserror_ext::AsReport as _;
-use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
 
-use crate::client::AbortRequest;
-use crate::client::state::OutputReceiver;
 use crate::protocol::output::{EngineCoreFinishReason, EngineCoreOutput};
-use crate::{AbortCause, Error, Result};
+use crate::{Error, Result};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum State {
-    Running,
-    Finished,
-    ClosedWithError,
-    UnexpectedClose,
+/// Output tokens `[start, end)` were sampled by weights labelled `version`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WeightVersionSpan {
+    pub version: Arc<str>,
+    pub start: usize,
+    pub end: usize,
 }
 
-/// One request-scoped engine-core output plus the enclosing batch metadata.
+impl WeightVersionSpan {
+    /// Spans over the output so far; `[]` for no tokens, `None` if no label was reported.
+    pub(crate) fn from_starts(
+        starts: &[(Arc<str>, usize)],
+        num_output_tokens: usize,
+    ) -> Option<Vec<Self>> {
+        if starts.is_empty() && num_output_tokens > 0 {
+            return None;
+        }
+        let ends = starts.iter().skip(1).map(|(_, start)| *start).chain([num_output_tokens]);
+        Some(
+            starts
+                .iter()
+                .zip(ends)
+                .map(|((version, start), end)| Self {
+                    version: version.clone(),
+                    start: *start,
+                    end,
+                })
+                .collect(),
+        )
+    }
+}
+
+/// Seconds on a process-wide monotonic clock, for producers that stamp
+/// outputs as they receive them. Only differences between the outputs of one
+/// request are meaningful, matching the engine's own batch timestamps.
+pub fn monotonic_timestamp_secs() -> f64 {
+    static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    EPOCH.get_or_init(Instant::now).elapsed().as_secs_f64()
+}
+
+/// One request-scoped engine-core output, normalized across engine backends.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EngineCoreStreamOutput {
-    pub engine_index: u32,
+    /// The producing backend's monotonic timestamp; only differences
+    /// between the outputs of one request are meaningful.
     pub timestamp: f64,
+    /// Label of the weights that sampled this output, when the backend
+    /// reports one per engine batch. The engine-core output channel turns
+    /// these labels into `weight_versions` spans on the terminal output.
     pub weight_version: Option<Arc<str>>,
+    /// Weight-version spans over the whole output. Set only on the terminal
+    /// output; `None` when no version was reported for a non-empty output.
+    pub weight_versions: Option<Vec<WeightVersionSpan>>,
     pub output: EngineCoreOutput,
 }
 
@@ -105,33 +143,43 @@ impl IntoIterator for EngineCoreStreamDelivery {
     }
 }
 
-/// Stream of raw engine-core outputs for one request.
+/// Stream of raw engine-core outputs for one request, over any engine
+/// backend's raw delivery stream.
 ///
 /// The stream yields only [`EngineCoreStreamOutput`] values whose embedded
 /// output `request_id` matches the originating `add_request()` call. Normal
 /// request completion is expected to include a final output object whose
 /// `finish_reason` is non-`None`.
-pub struct EngineCoreOutputStream {
+///
+/// This adapter owns the [`EngineOutputStream`] contract shared by every
+/// backend: a terminal output or an error terminates the stream, an inner
+/// stream that ends first yields [`Error::RequestStreamClosed`], and dropping
+/// a live stream runs `abort_on_drop` (when given) before the inner stream
+/// itself is dropped.
+///
+/// [`EngineOutputStream`]: crate::EngineOutputStream
+pub struct EngineOutputStreamAdapter {
     request_id: String,
     engine_index: u32,
-    abort_tx: mpsc::UnboundedSender<AbortRequest>,
-    state: State,
-    rx: OutputReceiver,
+    /// Dropped as soon as the stream terminates, so the backend releases
+    /// the request's resources without waiting for this stream to drop.
+    /// `None` marks the terminated state.
+    inner: Option<BoxStream<'static, Result<EngineCoreStreamDelivery>>>,
+    abort_on_drop: Option<Box<dyn FnOnce() + Send>>,
 }
 
-impl EngineCoreOutputStream {
-    pub(crate) fn new(
+impl EngineOutputStreamAdapter {
+    pub fn new(
         request_id: String,
         engine_index: u32,
-        abort_tx: mpsc::UnboundedSender<AbortRequest>,
-        rx: OutputReceiver,
+        inner: impl Stream<Item = Result<EngineCoreStreamDelivery>> + Send + 'static,
+        abort_on_drop: Option<Box<dyn FnOnce() + Send>>,
     ) -> Self {
         Self {
             request_id,
             engine_index,
-            abort_tx,
-            state: State::Running,
-            rx,
+            inner: Some(Box::pin(inner)),
+            abort_on_drop,
         }
     }
 
@@ -157,18 +205,18 @@ impl EngineCoreOutputStream {
     }
 }
 
-impl Stream for EngineCoreOutputStream {
+impl Stream for EngineOutputStreamAdapter {
     type Item = Result<EngineCoreStreamDelivery>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if self.is_terminated() {
+        let Some(inner) = &mut self.inner else {
             return Poll::Ready(None);
-        }
+        };
 
-        match Pin::new(&mut self.rx).poll_recv(cx) {
+        match inner.as_mut().poll_next(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Some(item)) => {
-                match &item {
+                let terminated = match &item {
                     Ok(delivery) => {
                         // If the output indicates the request is finished, mark the stream as
                         // terminated with cleanly-finished state and expect no more outputs to
@@ -185,15 +233,18 @@ impl Stream for EngineCoreOutputStream {
                                 );
                             }
                             debug!(self.request_id, "request completed via final output");
-                            self.state = State::Finished;
                         }
+                        output.finished()
                     }
                     Err(error) => {
                         // If we get an error from the output stream, mark the stream as terminated
                         // with an error.
                         warn!(self.request_id, error = %error.as_report(), "request encountered an error");
-                        self.state = State::ClosedWithError;
+                        true
                     }
+                };
+                if terminated {
+                    self.inner = None;
                 }
                 Poll::Ready(Some(item))
             }
@@ -203,7 +254,7 @@ impl Stream for EngineCoreOutputStream {
                 // with an unexpected close state and send an error down the
                 // stream to notify the caller.
                 warn!(self.request_id, "request stream closed unexpectedly");
-                self.state = State::UnexpectedClose;
+                self.inner = None;
 
                 Poll::Ready(Some(Err(Error::RequestStreamClosed {
                     request_id: self.request_id.clone(),
@@ -213,13 +264,13 @@ impl Stream for EngineCoreOutputStream {
     }
 }
 
-impl FusedStream for EngineCoreOutputStream {
+impl FusedStream for EngineOutputStreamAdapter {
     fn is_terminated(&self) -> bool {
-        !matches!(self.state, State::Running)
+        self.inner.is_none()
     }
 }
 
-impl Drop for EngineCoreOutputStream {
+impl Drop for EngineOutputStreamAdapter {
     fn drop(&mut self) {
         if self.is_terminated() {
             // If it's terminated, it means that the request either finished cleanly, or
@@ -229,16 +280,103 @@ impl Drop for EngineCoreOutputStream {
             return;
         }
 
-        let abort_req = AbortRequest {
-            request_id: self.request_id.clone(),
-            cause: AbortCause::current(),
-        };
-
-        if self.abort_tx.send(abort_req).is_err() {
-            warn!(
-                request_id = self.request_id,
-                "auto-abort worker already shut down; skip auto-abort"
-            );
+        if let Some(abort_on_drop) = self.abort_on_drop.take() {
+            abort_on_drop();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use futures::StreamExt as _;
+
+    use super::*;
+    use crate::protocol::output::EngineCoreFinishReason;
+
+    /// Sets its flag when dropped, proving the inner stream was released.
+    struct DropFlag(Arc<AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn output(finish_reason: Option<EngineCoreFinishReason>) -> Result<EngineCoreStreamDelivery> {
+        Ok(EngineCoreStreamDelivery::One(EngineCoreStreamOutput {
+            timestamp: 0.0,
+            weight_version: None,
+            weight_versions: None,
+            output: EngineCoreOutput {
+                request_id: "req".to_string(),
+                finish_reason,
+                ..EngineCoreOutput::default()
+            },
+        }))
+    }
+
+    fn adapter(
+        items: Vec<Result<EngineCoreStreamDelivery>>,
+        inner_dropped: Arc<AtomicBool>,
+        aborted: Arc<AtomicBool>,
+    ) -> EngineOutputStreamAdapter {
+        let flag = DropFlag(inner_dropped);
+        let mut items = items.into_iter();
+        let inner = futures::stream::poll_fn(move |_| {
+            let _ = &flag;
+            Poll::Ready(items.next())
+        });
+        EngineOutputStreamAdapter::new(
+            "req".to_string(),
+            0,
+            inner,
+            Some(Box::new(move || aborted.store(true, Ordering::SeqCst))),
+        )
+    }
+
+    #[tokio::test]
+    async fn terminal_output_drops_inner_stream_without_aborting() {
+        let inner_dropped = Arc::new(AtomicBool::new(false));
+        let aborted = Arc::new(AtomicBool::new(false));
+        let mut stream = adapter(
+            vec![output(Some(EngineCoreFinishReason::Length))],
+            inner_dropped.clone(),
+            aborted.clone(),
+        );
+
+        assert!(stream.next().await.unwrap().is_ok());
+        // Termination releases the backend's stream immediately, before
+        // this stream itself is dropped.
+        assert!(inner_dropped.load(Ordering::SeqCst));
+        assert!(stream.next().await.is_none());
+        drop(stream);
+        assert!(!aborted.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn dropping_a_live_stream_runs_the_abort_hook() {
+        let inner_dropped = Arc::new(AtomicBool::new(false));
+        let aborted = Arc::new(AtomicBool::new(false));
+        let mut stream = adapter(vec![output(None)], inner_dropped, aborted.clone());
+
+        assert!(stream.next().await.unwrap().is_ok());
+        drop(stream);
+        assert!(aborted.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn inner_stream_ending_early_yields_request_stream_closed() {
+        let inner_dropped = Arc::new(AtomicBool::new(false));
+        let aborted = Arc::new(AtomicBool::new(false));
+        let mut stream = adapter(vec![], inner_dropped.clone(), aborted.clone());
+
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert!(matches!(error, Error::RequestStreamClosed { request_id } if request_id == "req"));
+        assert!(inner_dropped.load(Ordering::SeqCst));
+        assert!(stream.next().await.is_none());
+        drop(stream);
+        assert!(!aborted.load(Ordering::SeqCst));
     }
 }

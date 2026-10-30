@@ -12,7 +12,7 @@ use serde::Serialize;
 use serde_json::Value as JsonValue;
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::task::AbortOnDropHandle;
-use tracing::{debug, info, trace};
+use tracing::{debug, info, trace, warn};
 
 use crate::client::imp::{ClientInner, run_abort_loop, run_output_dispatcher_loop};
 use crate::coordinator::CoordinatorHandle;
@@ -31,7 +31,10 @@ mod output_channel;
 mod state;
 mod stream;
 
-pub use stream::{EngineCoreOutputStream, EngineCoreStreamDelivery, EngineCoreStreamOutput};
+pub use stream::{
+    EngineCoreStreamDelivery, EngineCoreStreamOutput, EngineOutputStreamAdapter, WeightVersionSpan,
+    monotonic_timestamp_secs,
+};
 
 /// How the frontend acquires its request/response transport with Python
 /// `EngineCoreProc`s.
@@ -625,7 +628,7 @@ impl EngineCoreClient {
     /// tokens, and the terminal output is delivered immediately together with
     /// any held-back outputs. The stream still yields every raw output in
     /// order; batching only reduces how often the consuming task is woken.
-    pub async fn call(&self, mut req: EngineCoreRequest) -> Result<EngineCoreOutputStream> {
+    pub async fn call(&self, mut req: EngineCoreRequest) -> Result<EngineOutputStreamAdapter> {
         req.client_index = self.config.client_index;
         req.validate()?;
         trace!(
@@ -642,7 +645,7 @@ impl EngineCoreClient {
         let stream_interval = (req.sampling_params.as_ref())
             .and_then(|params| params.stream_interval)
             .unwrap_or(NonZeroU32::MIN);
-        let (engine_id, rx) = self.inner.register_request(
+        let (engine_id, mut rx) = self.inner.register_request(
             request_id.clone(),
             lora_name,
             data_parallel_rank,
@@ -652,11 +655,24 @@ impl EngineCoreClient {
         // Construct the output stream first before actually sending the request to the engine.
         // This ensures that cancelling the future will properly clean up the request registration
         // via `Drop` of the stream.
-        let stream = EngineCoreOutputStream::new(
+        let abort_tx = self.abort_tx.clone();
+        let abort_request_id = request_id.clone();
+        let stream = EngineOutputStreamAdapter::new(
             request_id.clone(),
             engine_id.engine_index().unwrap_or(0),
-            self.abort_tx.clone(),
-            rx,
+            futures::stream::poll_fn(move |cx| rx.poll_recv(cx)),
+            Some(Box::new(move || {
+                let abort_req = AbortRequest {
+                    request_id: abort_request_id.clone(),
+                    cause: AbortCause::current(),
+                };
+                if abort_tx.send(abort_req).is_err() {
+                    warn!(
+                        request_id = abort_request_id,
+                        "auto-abort worker already shut down; skip auto-abort"
+                    );
+                }
+            })),
         );
 
         let result: Result<()> = async {

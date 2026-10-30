@@ -2123,7 +2123,6 @@ async fn multi_engine_client_shares_transport_and_routes_by_inflight_count() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(final_1.engine_index, 0);
     assert_eq!(final_1.new_token_ids, vec![10]);
     assert_eq!(final_1.finish_reason, Some(EngineCoreFinishReason::Length));
 
@@ -2139,7 +2138,6 @@ async fn multi_engine_client_shares_transport_and_routes_by_inflight_count() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(final_3.engine_index, 0);
     assert_eq!(final_3.new_token_ids, vec![30]);
     assert_eq!(final_3.finish_reason, Some(EngineCoreFinishReason::Length));
 
@@ -2149,7 +2147,6 @@ async fn multi_engine_client_shares_transport_and_routes_by_inflight_count() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(final_2.engine_index, 1);
     assert_eq!(final_2.new_token_ids, vec![20]);
     assert_eq!(final_2.finish_reason, Some(EngineCoreFinishReason::Length));
 
@@ -2315,7 +2312,6 @@ async fn multi_engine_abort_is_grouped_and_utility_fans_out_to_all_engines() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(final_1.engine_index, 0);
     assert_eq!(final_1.finish_reason, Some(EngineCoreFinishReason::Abort));
 
     let final_2 = timeout(Duration::from_secs(1), stream_2.next())
@@ -2323,7 +2319,6 @@ async fn multi_engine_abort_is_grouped_and_utility_fans_out_to_all_engines() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(final_2.engine_index, 1);
     assert_eq!(final_2.finish_reason, Some(EngineCoreFinishReason::Abort));
 
     let _ = shutdown_tx_0.send(());

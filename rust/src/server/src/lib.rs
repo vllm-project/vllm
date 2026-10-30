@@ -4,6 +4,7 @@
 //! Minimal OpenAI-compatible HTTP server above [`vllm_chat`].
 
 mod config;
+mod engine_http_client;
 mod error;
 mod grpc;
 mod listener;
@@ -29,8 +30,8 @@ use axum::body::Body;
 use axum::http::Request;
 pub use config::{
     ApiServerOptions, Config, CoordinatorMode, CorsConfig, DEFAULT_KEEP_ALIVE_TIMEOUT,
-    DEFAULT_LOG_STATS_INTERVAL, DEFAULT_REQUEST_BODY_LIMIT_BYTES, HttpListenerMode, LoraModulePath,
-    OutputLogging, TlsConfig,
+    DEFAULT_LOG_STATS_INTERVAL, DEFAULT_REQUEST_BODY_LIMIT_BYTES, EngineBackend, HttpListenerMode,
+    LoraModulePath, OutputLogging, TlsConfig,
 };
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
@@ -55,6 +56,7 @@ pub use vllm_metrics::CustomHistogramBuckets;
 use vllm_metrics::METRICS;
 use vllm_text::TextLlm;
 
+use crate::engine_http_client::EngineHTTPClient;
 use crate::listener::{Listener, MaybeTlsListener};
 use crate::routes::build_router;
 use crate::server_info::ServerInfoSnapshot;
@@ -98,7 +100,8 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
             hf_overrides: config.hf_overrides.clone(),
             generation_config: config.generation_config,
             renderer: config.renderer,
-            language_model_only: config.language_model_only,
+            language_model_only: config.language_model_only
+                || matches!(config.engine_backend, EngineBackend::HttpGenerate { .. }),
             chat_template: config.chat_template.clone(),
             trust_request_chat_template: config.trust_request_chat_template,
             chat_template_content_format: config.chat_template_content_format,
@@ -122,22 +125,36 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
         "resolved coordinator mode"
     );
 
-    let client = EngineCoreClient::connect(EngineCoreClientConfig {
-        transport_mode: config.transport_mode.clone(),
-        coordinator_mode,
-        model_name: metrics_model_name,
-        client_index: 0,
-        engine_stats_enabled: !config.disable_log_stats,
-    })
-    .await
-    .context("failed to connect to engine core")?;
-    let server_info = ServerInfoSnapshot::new(config, &client);
+    let (text, server_info) = match &config.engine_backend {
+        EngineBackend::HttpGenerate { url, max_model_len } => {
+            let backend =
+                EngineHTTPClient::connect(url, metrics_model_name, *max_model_len).await?;
+            let server_info = ServerInfoSnapshot::new(config, &backend);
+            let llm = Llm::new(backend)
+                .with_request_id_randomization(!config.disable_request_id_randomization)
+                .with_stream_interval(config.stream_interval);
+            (TextLlm::new(llm, text_backend), server_info)
+        }
+        EngineBackend::EngineCore(transport_mode) => {
+            let client = EngineCoreClient::connect(EngineCoreClientConfig {
+                transport_mode: transport_mode.clone(),
+                coordinator_mode,
+                model_name: metrics_model_name,
+                client_index: 0,
+                engine_stats_enabled: !config.disable_log_stats,
+            })
+            .await
+            .context("failed to connect to engine core")?;
 
-    let llm = Llm::new(client)
-        .with_log_stats(config.log_stats_interval.filter(|_| !config.disable_log_stats))
-        .with_request_id_randomization(!config.disable_request_id_randomization)
-        .with_stream_interval(config.stream_interval);
-    let text = TextLlm::new(llm, text_backend)
+            let server_info = ServerInfoSnapshot::new(config, &client);
+            let llm = Llm::new(client)
+                .with_log_stats(config.log_stats_interval.filter(|_| !config.disable_log_stats))
+                .with_request_id_randomization(!config.disable_request_id_randomization)
+                .with_stream_interval(config.stream_interval);
+            (TextLlm::new(llm, text_backend), server_info)
+        }
+    };
+    let text = text
         .with_max_logprobs(config.max_logprobs)
         .with_structured_outputs_backend(config.structured_outputs_backend);
 

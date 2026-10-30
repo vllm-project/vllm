@@ -31,6 +31,8 @@ pub enum ApiError {
     ServerError { message: String },
     /// The engine rejected the request with a retryable error.
     ServiceUnavailable { message: String },
+    /// The generation backend rejected the request or failed during submission.
+    Upstream { status: u16, message: String },
 }
 
 impl ApiError {
@@ -43,6 +45,9 @@ impl ApiError {
             Self::ServerError { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             Self::JsonParseError { .. } => StatusCode::BAD_REQUEST,
             Self::ServiceUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
+            Self::Upstream { status, .. } => {
+                StatusCode::from_u16(*status).unwrap_or(StatusCode::BAD_GATEWAY)
+            }
         }
     }
 
@@ -50,6 +55,17 @@ impl ApiError {
     /// error class as the Python frontend does, and `code` is the HTTP status.
     pub fn to_error_response(&self) -> ErrorResponse {
         let (error_type, message, param) = match self {
+            Self::Upstream { status, message } => {
+                if let Ok(response) = serde_json::from_str::<ErrorResponse>(message) {
+                    return response;
+                }
+                let error_type = match status {
+                    429 => "RateLimitError",
+                    400..=499 => "BadRequestError",
+                    _ => "InternalServerError",
+                };
+                (error_type, message.clone(), None)
+            }
             Self::InvalidRequest { message, param } => (
                 "BadRequestError",
                 message.clone(),
@@ -99,10 +115,19 @@ impl IntoResponse for ApiError {
 
 /// Classify a text-pipeline submit failure: request validation failures are
 /// the client's fault and map to HTTP 400, mirroring the Python frontend.
-/// Everything else stays an internal 500.
+/// Remote generation failures retain their upstream HTTP status.
 pub fn text_submit_error(context: &'static str, error: vllm_text::Error) -> ApiError {
     if error.is_request_validation_error() {
         return invalid_request!(param = error.param(), "{error}");
+    }
+    if let vllm_text::Error::Llm(vllm_llm::Error::EngineCoreClient(
+        vllm_engine_core_client::Error::Http { status, message },
+    )) = &error
+    {
+        return ApiError::Upstream {
+            status: *status,
+            message: message.clone(),
+        };
     }
     server_error!("{}: {}", context, error.to_report_string())
 }
@@ -110,6 +135,9 @@ pub fn text_submit_error(context: &'static str, error: vllm_text::Error) -> ApiE
 /// Like [`text_submit_error`], for the chat pipeline, which wraps the text
 /// errors.
 pub fn chat_submit_error(context: &'static str, error: vllm_chat::Error) -> ApiError {
+    if let vllm_chat::Error::Text(error) = error {
+        return text_submit_error(context, error);
+    }
     if error.is_request_validation_error() {
         return invalid_request!(param = error.param(), "{error}");
     }

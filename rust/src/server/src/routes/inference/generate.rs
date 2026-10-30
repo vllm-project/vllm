@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 mod convert;
-mod types;
+pub(crate) mod types;
 mod validate;
 
 use std::collections::HashMap;

@@ -52,14 +52,15 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let port = unique_local_port()?;
     let config = Config {
-        transport_mode: TransportMode::HandshakeOwner {
+        engine_backend: TransportMode::HandshakeOwner {
             handshake_address: args.handshake_address,
             advertised_host: args.host,
             engine_count: args.engine_count,
             ready_timeout: Duration::from_secs(args.ready_timeout_secs),
             local_input_address: None,
             local_output_address: None,
-        },
+        }
+        .into(),
         coordinator_mode: CoordinatorMode::MaybeInProc,
         model: args.model,
         revision: None,

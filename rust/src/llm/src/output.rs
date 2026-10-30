@@ -25,13 +25,7 @@ use crate::error::Result;
 use crate::inflight::RequestGuard;
 use crate::request_metrics::{RequestMetricsTracker, current_unix_timestamp_secs};
 
-/// Output tokens `[start, end)` were sampled by weights labelled `version`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct WeightVersionSpan {
-    pub version: Arc<str>,
-    pub start: usize,
-    pub end: usize,
-}
+pub use vllm_engine_core_client::WeightVersionSpan;
 
 /// Token usage metadata for one request.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -320,9 +314,6 @@ pub struct GenerateOutputStream {
     remote_prefill_cached_tokens: Option<usize>,
     raw_stream: Box<dyn EngineOutputStream>,
     request_metrics: RequestMetricsTracker,
-    /// (weight version, first output-token index) for each span.
-    weight_version_starts: Vec<(Arc<str>, usize)>,
-    num_output_tokens: usize,
     /// Routed-expert rows received so far, concatenated on the terminal output.
     routed_experts_chunks: Vec<WireNdArray>,
     /// Removes this request's external→internal tracking edge on drop. Held for
@@ -349,8 +340,6 @@ impl GenerateOutputStream {
             })),
             raw_stream,
             request_metrics,
-            weight_version_starts: Vec::new(),
-            num_output_tokens: 0,
             routed_experts_chunks: Vec::new(),
             _request_guard: request_guard,
         }
@@ -383,16 +372,8 @@ impl GenerateOutputStream {
     fn convert_output(&mut self, raw: EngineCoreStreamOutput) -> Result<GenerateOutput> {
         let received_at = current_unix_timestamp_secs();
         self.request_metrics.observe_output(raw.timestamp, received_at, &raw.output);
-        let num_new_tokens = raw.output.new_token_ids.len();
-        // Start a span when tokens arrive under a new label.
-        if num_new_tokens > 0
-            && let Some(version) = raw.weight_version
-            && self.weight_version_starts.last().is_none_or(|(last, _)| *last != version)
-        {
-            self.weight_version_starts.push((version, self.num_output_tokens));
-        }
-        self.num_output_tokens += num_new_tokens;
 
+        let weight_versions = raw.weight_versions;
         let raw = raw.output;
         if let Some(rows) = raw.routed_experts {
             self.routed_experts_chunks.push(*rows);
@@ -445,7 +426,7 @@ impl GenerateOutputStream {
             self.request_metrics.record_finished(received_at, finish_reason.clone());
         }
         let weight_versions = if finish_reason.is_some() {
-            self.weight_version_spans()
+            weight_versions
         } else {
             None
         };
@@ -500,26 +481,6 @@ impl GenerateOutputStream {
             shape,
             data,
         ))))
-    }
-
-    /// Spans over the output so far; `[]` for no tokens, `None` if no label was reported.
-    fn weight_version_spans(&self) -> Option<Vec<WeightVersionSpan>> {
-        let starts = &self.weight_version_starts;
-        if starts.is_empty() && self.num_output_tokens > 0 {
-            return None;
-        }
-        let ends = starts.iter().skip(1).map(|(_, start)| *start).chain([self.num_output_tokens]);
-        Some(
-            starts
-                .iter()
-                .zip(ends)
-                .map(|((version, start), end)| WeightVersionSpan {
-                    version: version.clone(),
-                    start: *start,
-                    end,
-                })
-                .collect(),
-        )
     }
 }
 

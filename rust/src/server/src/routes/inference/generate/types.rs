@@ -112,12 +112,15 @@ pub(super) struct GenerateResponseChoice {
 
 /// Mirrors the Python vLLM `GenerateResponseStreamChoice` class.
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize)]
-pub(super) struct GenerateResponseStreamChoice {
+#[serde_with::serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct GenerateResponseStreamChoice {
     pub index: u32,
     pub logprobs: Option<GenerateLogProbs>,
     pub finish_reason: Option<String>,
     pub stop_reason: Option<StopReason>,
+    #[serde(default)]
+    #[serde_as(deserialize_as = "serde_with::DefaultOnNull")]
     pub token_ids: Vec<u32>,
     /// Base64 `.npy` routed-expert rows `[num_tokens - 1, num_layers, top_k]`,
     /// set on the terminal response, as Python `numpy2base64` encodes them.
@@ -169,25 +172,26 @@ pub(super) struct PlaceholderRangeInfo {
 
 /// Mirrors the Python vLLM `GenerateLogProbs` class: output logprobs for one
 /// choice, carrying integer token ids rather than the OpenAI string token.
-#[derive(Debug, Clone, Serialize)]
-pub(super) struct GenerateLogProbs {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct GenerateLogProbs {
     pub content: Option<Vec<GenerateLogProbsContent>>,
 }
 
 /// Mirrors the Python vLLM `GenerateLogProbsContent` class: the sampled token
 /// at one position plus its top-k candidates, in the engine's order: the
 /// sampled token first, then the remaining candidates in rank order.
-#[derive(Debug, Clone, Serialize)]
-pub(super) struct GenerateLogProbsContent {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct GenerateLogProbsContent {
     pub token_id: u32,
     pub logprob: f32,
     pub rank: Option<u32>,
+    #[serde(default)]
     pub top_logprobs: Vec<GenerateLogProb>,
 }
 
 /// Mirrors the Python vLLM `GenerateLogProb` class: one candidate token.
-#[derive(Debug, Clone, Serialize)]
-pub(super) struct GenerateLogProb {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct GenerateLogProb {
     pub token_id: u32,
     pub logprob: f32,
     pub rank: Option<u32>,

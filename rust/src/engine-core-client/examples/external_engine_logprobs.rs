@@ -12,7 +12,8 @@ use vllm_engine_core_client::protocol::output::EngineCoreFinishReason;
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 use vllm_engine_core_client::{
-    EngineCoreClient, EngineCoreClientConfig, EngineCoreStreamOutput, TransportMode,
+    EngineCoreClient, EngineCoreClientConfig, EngineCoreStreamOutput, EngineOutputStreamAdapter,
+    TransportMode,
 };
 
 const BASE_PROMPT_TOKEN_IDS: &[u32] = &[20841, 448, 6896, 25, 23811];
@@ -87,7 +88,7 @@ fn build_request(
 }
 
 async fn wait_for_final_output(
-    stream: vllm_engine_core_client::EngineCoreOutputStream,
+    stream: EngineOutputStreamAdapter,
 ) -> Result<EngineCoreStreamOutput> {
     let mut stream = stream.into_outputs();
     while let Some(output) = stream.next().await {

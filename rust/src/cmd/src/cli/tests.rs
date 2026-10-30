@@ -8,12 +8,78 @@ use expect_test::expect;
 use vllm_engine_core_client::TransportMode;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_server::{
-    Config, GenerationConfigMode, HttpListenerMode, LoraModulePath, OutputLogging, ParserSelection,
-    ReasoningEffort, RendererSelection,
+    Config, EngineBackend, GenerationConfigMode, HttpListenerMode, LoraModulePath, OutputLogging,
+    ParserSelection, ReasoningEffort, RendererSelection,
 };
 use vllm_text::backend::hf::ModelSource;
 
 use super::{BenchCommand, Cli, Command, LogStatsInterval, SharedRuntimeArgs, parse_int_flag};
+
+#[test]
+fn http_generation_config_does_not_manage_an_engine() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "test-model",
+        "--generation-url",
+        "http://gateway:8080",
+        "--max-model-len",
+        "4096",
+    ])
+    .unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("serve args")
+    };
+    let config = args.to_http_frontend_config(args.generation_url.clone().unwrap()).unwrap();
+    config.validate().unwrap();
+    assert!(!config.manages_engine);
+    assert_eq!(config.engine_count(), 0);
+    assert!(config.effective_coordinator_mode(true).is_none());
+    assert!(matches!(
+        config.engine_backend,
+        EngineBackend::HttpGenerate {
+            max_model_len: 4096,
+            ..
+        }
+    ));
+    assert!(
+        Cli::try_parse_from([
+            "vllm-rs",
+            "serve",
+            "test-model",
+            "--generation-url",
+            "http://gateway:8080",
+        ])
+        .is_err()
+    );
+}
+
+#[test]
+fn http_generation_rejects_invalid_context_limits() {
+    for limit in ["0", "auto"] {
+        let cli = Cli::try_parse_from([
+            "vllm-rs",
+            "serve",
+            "test-model",
+            "--generation-url",
+            "http://gateway:8080",
+            "--max-model-len",
+            limit,
+        ])
+        .unwrap();
+        let Command::Serve(args) = cli.command else {
+            panic!("serve args")
+        };
+        let error = args
+            .to_http_frontend_config(args.generation_url.clone().unwrap())
+            .and_then(|config| config.validate())
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("--max-model-len"),
+            "{error:#}"
+        );
+    }
+}
 
 #[test]
 fn bench_serve_args_parse_without_managed_engine_repartition() {
@@ -1608,7 +1674,11 @@ fn frontend_args_json_applies_defaults() {
     assert_eq!(args.runtime.renderer, RendererSelection::Auto);
     assert_eq!(args.runtime.max_logprobs, None);
     assert_eq!(args.runtime.shutdown_timeout, 0);
-    assert_eq!(args.into_config().transport_mode.data_parallel_size(), 4);
+    let config = args.into_config();
+    let EngineBackend::EngineCore(transport) = config.engine_backend else {
+        panic!("expected engine core generation backend");
+    };
+    assert_eq!(transport.data_parallel_size(), 4);
 }
 
 #[test]
@@ -2553,14 +2623,14 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
     };
     let config = args.to_frontend_config("tcp://10.99.48.128:29550".to_string());
 
-    let TransportMode::HandshakeOwner {
+    let EngineBackend::EngineCore(TransportMode::HandshakeOwner {
         handshake_address,
         advertised_host,
         engine_count,
         ready_timeout,
         local_input_address,
         local_output_address,
-    } = &config.transport_mode
+    }) = &config.engine_backend
     else {
         panic!("expected handshake-owned transport");
     };
@@ -2582,18 +2652,20 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
 
     expect![[r#"
         Config {
-            transport_mode: HandshakeOwner {
-                handshake_address: "tcp://10.99.48.128:29550",
-                advertised_host: "10.99.48.128",
-                engine_count: 4,
-                ready_timeout: 600s,
-                local_input_address: Some(
-                    "<ipc input>",
-                ),
-                local_output_address: Some(
-                    "<ipc output>",
-                ),
-            },
+            engine_backend: EngineCore(
+                HandshakeOwner {
+                    handshake_address: "tcp://10.99.48.128:29550",
+                    advertised_host: "10.99.48.128",
+                    engine_count: 4,
+                    ready_timeout: 600s,
+                    local_input_address: Some(
+                        "<ipc input>",
+                    ),
+                    local_output_address: Some(
+                        "<ipc output>",
+                    ),
+                },
+            ),
             coordinator_mode: MaybeInProc,
             model: "Qwen/Qwen3-0.6B",
             revision: None,
@@ -2666,14 +2738,15 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
         }
     "#]]
     .assert_debug_eq(&Config {
-        transport_mode: TransportMode::HandshakeOwner {
+        engine_backend: TransportMode::HandshakeOwner {
             handshake_address: handshake_address.clone(),
             advertised_host: advertised_host.clone(),
             engine_count: *engine_count,
             ready_timeout: *ready_timeout,
             local_input_address: Some("<ipc input>".to_string()),
             local_output_address: Some("<ipc output>".to_string()),
-        },
+        }
+        .into(),
         ..config.clone()
     });
 }
@@ -2700,14 +2773,16 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
 
     expect![[r#"
         Config {
-            transport_mode: HandshakeOwner {
-                handshake_address: "tcp://10.99.48.128:29550",
-                advertised_host: "10.99.48.128",
-                engine_count: 4,
-                ready_timeout: 600s,
-                local_input_address: None,
-                local_output_address: None,
-            },
+            engine_backend: EngineCore(
+                HandshakeOwner {
+                    handshake_address: "tcp://10.99.48.128:29550",
+                    advertised_host: "10.99.48.128",
+                    engine_count: 4,
+                    ready_timeout: 600s,
+                    local_input_address: None,
+                    local_output_address: None,
+                },
+            ),
             coordinator_mode: MaybeInProc,
             model: "Qwen/Qwen3-0.6B",
             revision: None,
@@ -2901,14 +2976,16 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
 
     expect![[r#"
         Config {
-            transport_mode: Bootstrapped {
-                input_listener_fd: 999999,
-                output_listener_fd: 999998,
-                engine_start_index: 3,
-                engine_count: 1,
-                data_parallel_size: 4,
-                ready_timeout: 600s,
-            },
+            engine_backend: EngineCore(
+                Bootstrapped {
+                    input_listener_fd: 999999,
+                    output_listener_fd: 999998,
+                    engine_start_index: 3,
+                    engine_count: 1,
+                    data_parallel_size: 4,
+                    ready_timeout: 600s,
+                },
+            ),
             coordinator_mode: External {
                 address: "tcp://127.0.0.1:7000",
             },

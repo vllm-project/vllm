@@ -121,6 +121,10 @@ async fn async_main(cli: Cli) -> Result<()> {
             vllm_bench::run(bench_args).await
         }
         Command::Serve(args) => {
+            if let Some(url) = &args.generation_url {
+                let config = args.to_http_frontend_config(url.clone())?;
+                return vllm_server::serve(config, shutdown_signal()).await;
+            }
             let handshake_port = args.managed_engine.resolve_handshake_port()?;
 
             if args.managed_engine.data_parallel_size_local == Some(0) {
