@@ -806,6 +806,11 @@ class MuseSpark1xMoE(nn.Module):
             num_tokens, sp_active
         )
         buffer, padding = self.experts.input_buffer(num_tokens)
+        topk_ids = buffer.topk_idx
+        if use_trtllm:
+            # Reuse the storage for contiguous int32 IDs, without a dtype cast.
+            topk_ids = topk_ids.view(torch.int32).view(-1, topk_ids.shape[-1])
+        topk_ids = topk_ids[:num_tokens]
         norm = self.pre_expert_norm
         pooler = self.pooler
         assert norm is not None and pooler is not None
@@ -845,7 +850,7 @@ class MuseSpark1xMoE(nn.Module):
                 router_output_multiplier=router.router_output_multiplier,
                 router_score_normalization=router.router_score_normalization,
                 router_score_division_eps=router.router_score_division_eps,
-                topk_ids=buffer.topk_idx[:num_tokens],
+                topk_ids=topk_ids,
                 topk_weights=buffer.topk_weights[:num_tokens],
                 is_padding=padding,
             )
@@ -857,7 +862,7 @@ class MuseSpark1xMoE(nn.Module):
         )
         if use_trtllm:
             assert quantized_input is not None
-            return self.experts.forward_trtllm(quantized_input, buffer)
+            return self.experts.forward_trtllm(quantized_input, buffer, topk_ids)
         assert pooled is not None
         return self.experts.forward_prepared(pooled, buffer)
 

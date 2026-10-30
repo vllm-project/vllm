@@ -93,7 +93,10 @@ class MuseSparkHybridMoEExperts(MuseSparkMegaMoEExperts):
         )
 
     def forward_trtllm(
-        self, quantized_input: tuple[torch.Tensor, torch.Tensor], buffer
+        self,
+        quantized_input: tuple[torch.Tensor, torch.Tensor],
+        buffer,
+        topk_ids: torch.Tensor,
     ) -> torch.Tensor:
         import flashinfer
         from flashinfer.comm.mnnvl_cutedsl_moe_finalize import (
@@ -104,7 +107,7 @@ class MuseSparkHybridMoEExperts(MuseSparkMegaMoEExperts):
         num_tokens = packed.shape[0]
         raw = flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe(
             topk_ids=(
-                buffer.topk_idx[:num_tokens].to(torch.int32),
+                topk_ids,
                 buffer.topk_weights[:num_tokens],
             ),
             routing_bias=None,
