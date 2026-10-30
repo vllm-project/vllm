@@ -52,6 +52,21 @@ pub struct ChatDelta {
 #[derive(Deserialize)]
 pub struct ChunkUsage {
     pub completion_tokens: Option<u64>,
+    pub prompt_tokens: Option<u64>,
+}
+
+impl ChunkUsage {
+    /// Record the server-reported token counts on `output`. A zero
+    /// `prompt_tokens` keeps the client estimate: some OpenAI-compatible
+    /// servers send placeholder zeros in usage chunks.
+    pub fn apply(&self, output: &mut RequestFuncOutput) {
+        if let Some(ct) = self.completion_tokens {
+            output.output_tokens = ct as usize;
+        }
+        if let Some(pt) = self.prompt_tokens.filter(|&pt| pt > 0) {
+            output.prompt_len = pt as usize;
+        }
+    }
 }
 
 use crate::cli::BackendKind;
@@ -245,6 +260,21 @@ pub fn build_headers(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A placeholder zero `prompt_tokens` must not replace the client estimate.
+    #[test]
+    fn chunk_usage_ignores_zero_prompt_tokens() {
+        let mut output = RequestFuncOutput {
+            prompt_len: 100,
+            ..Default::default()
+        };
+        ChunkUsage {
+            completion_tokens: Some(3),
+            prompt_tokens: Some(0),
+        }
+        .apply(&mut output);
+        assert_eq!((output.prompt_len, output.output_tokens), (100, 3));
+    }
 
     #[test]
     fn test_update_server_metrics_converts_ms_to_seconds() {
