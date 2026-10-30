@@ -940,6 +940,8 @@ def test_prefix_cache_replays_the_swa_window(
     bounded-replay SWA spec makes a prefix hit recompute the window.
     This is the spec the attention layer actually publishes. Forcing
     the window back into the prefix cache, on CDNA4 or off it, fails here.
+    The replay_start clamp used by the gather kernels is covered by
+    test_builder_replay_start_bounds_prefill_window_and_gather.
     """
     from vllm.config import set_current_vllm_config
     from vllm.models.deepseek_v41 import attention as attn
@@ -954,7 +956,10 @@ def test_prefix_cache_replays_the_swa_window(
     monkeypatch.setattr(attn, "get_tensor_model_parallel_world_size", lambda: 1)
     monkeypatch.setattr(torch.cuda, "Event", lambda *a, **k: object())
     monkeypatch.setattr(current_platform, "is_rocm", lambda: is_rocm)
-    monkeypatch.setattr(attn, "get_cdna_version", lambda: cdna)
+    if is_rocm:
+        import vllm.platforms.rocm as rocm_platform
+
+        monkeypatch.setattr(rocm_platform, "get_cdna_version", lambda: cdna)
 
     window = 128
     vllm_config = create_vllm_config(
