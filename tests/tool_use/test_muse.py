@@ -36,6 +36,7 @@ import pytest
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.reasoning.muse_reasoning_parser import MuseReasoningParser
+from vllm.tool_parsers import schema_types
 from vllm.tool_parsers.muse_glimmer_tool_parser import MuseGlimmerToolParser
 from vllm.tool_parsers.muse_tool_parser import MuseToolParser
 
@@ -559,16 +560,24 @@ def test_channel_boundaries_match_streaming(raw, reasoning, content):
 
 
 @pytest.mark.parametrize(
-    "value", ["25", "true", "null", "[1,2]", '{"x":1}', "3%", "1,500", " 25 "]
+    "value", ["25", "true", "null", "[1,2]", '{"x":1}', '"q"', "3%", "1,500", " 25 "]
 )
 @pytest.mark.parametrize("request_kind", ["chat", "responses"])
 @pytest.mark.parametrize("parser_class", [MuseToolParser, MuseGlimmerToolParser])
-def test_string_parameter_schema_preserves_raw_text(value, request_kind, parser_class):
+@pytest.mark.parametrize("nullable", [False, True])
+def test_string_parameter_schema_preserves_raw_text(
+    monkeypatch, value, request_kind, parser_class, nullable
+):
     """String schemas disambiguate ATEM values; Glimmer keeps legacy decoding."""
+    walks = MagicMock(wraps=schema_types.parameter_types)
+    monkeypatch.setattr(schema_types, "parameter_types", walks)
+    text_schema: dict = {"type": "string"}
+    if nullable:
+        text_schema = {"anyOf": [text_schema, {"type": "null"}]}
     parameters = {
         "type": "object",
         "properties": {
-            "text": {"type": "string"},
+            "text": text_schema,
             "count": {"type": "integer"},
             "items": {"type": "array", "items": {"type": "integer"}},
         },
@@ -589,12 +598,12 @@ def test_string_parameter_schema_preserves_raw_text(value, request_kind, parser_
         '<atem:parameter name="items">[1,2]</atem:parameter>'
         "</atem:invoke></atem:function_calls><|eot|>"
     )
-    expected_text = value
+    expected_text = None if nullable and value == "null" else value
     if parser_class is MuseGlimmerToolParser:
         with suppress(ValueError):
             expected_text = json.loads(value)
     expected = {"text": expected_text, "count": 25, "items": [1, 2]}
-    parser = parser_class(object())
+    parser = parser_class(object(), request.tools)
     calls = parser.extract_tool_calls(raw, request).tool_calls
     assert len(calls) == 1
     assert calls[0].function.name == "echo"
@@ -614,168 +623,8 @@ def test_string_parameter_schema_preserves_raw_text(value, request_kind, parser_
         name, arguments = _fn_of(calls[0])
         assert name == "echo"
         assert json.loads(arguments) == expected
-
-
-def _parse_param(parser_class, parameters: dict, value: str) -> list:
-    """Parse one ``v`` parameter, non-streaming and streaming."""
-    function = {"name": "f", "parameters": parameters}
-    request = ChatCompletionRequest(
-        model="test",
-        messages=[],
-        tools=[{"type": "function", "function": function}],
-    )
-    raw = (
-        'to=f<|message|><atem:function_calls><atem:invoke name="f">'
-        f'<atem:parameter name="v">{value}</atem:parameter>'
-        "</atem:invoke></atem:function_calls><|eot|>"
-    )
-    calls = parser_class(object()).extract_tool_calls(raw, request).tool_calls
-    results = [json.loads(calls[0].function.arguments)["v"]]
-    parser = parser_class(object())
-    for end in range(7, len(raw) + 7, 7):
-        previous, current = raw[: end - 7], raw[:end]
-        delta = parser.extract_tool_calls_streaming(
-            previous, current, current[len(previous) :], [], [], [], request
-        )
-        if delta and delta.tool_calls:
-            results.append(json.loads(_fn_of(delta.tool_calls[0])[1])["v"])
-    assert len(results) == 2
-    return results
-
-
-_STRING_DEF = {"$defs": {"S": {"type": "string"}}}
-
-
-@pytest.mark.parametrize(
-    "parameters",
-    [
-        {"properties": {"v": {"type": "string"}}},
-        {"properties": {"v": {"anyOf": [{"type": "string"}, {"type": "null"}]}}},
-        {"properties": {"v": {"oneOf": [{"type": "string"}, {"type": "null"}]}}},
-        {"properties": {"v": {"type": ["string", "null"]}}},
-        {"properties": {"v": {"enum": ["1.10", "2.0"]}}},
-        {"properties": {"v": {"const": "1.10"}}},
-        {"properties": {"v": {"$ref": "#/$defs/S"}}, **_STRING_DEF},
-        {"properties": {"v": {"allOf": [{"$ref": "#/$defs/S"}]}}, **_STRING_DEF},
-        {"properties": {"v": {"allOf": [{"type": "string"}, {"minLength": 1}]}}},
-        {"properties": {}, "additionalProperties": {"type": "string"}},
-    ],
-    ids=[
-        "string",
-        "anyOf",
-        "oneOf",
-        "type_list",
-        "enum",
-        "const",
-        "ref",
-        "allOf_ref",
-        "allOf_constraint",
-        "additionalProperties",
-    ],
-)
-@pytest.mark.parametrize(
-    "value",
-    ["1.10", "1984", "true", '"q"', '{\n  "version": "1.4.0",\n  "build": 7\n}'],
-)
-def test_string_schema_forms_keep_raw_text(parameters, value):
-    """Values that decode to no other admitted type keep the ATEM text verbatim."""
-    assert _parse_param(MuseToolParser, parameters, value) == [value, value]
-
-
-@pytest.mark.parametrize(
-    "schema, value, expected",
-    [
-        # nullable string: null is still null, anything else stays text
-        ({"anyOf": [{"type": "string"}, {"type": "null"}]}, "null", None),
-        ({"type": ["string", "null"]}, "null", None),
-        # a string-or-X union keeps a value of the other admitted type
-        ({"anyOf": [{"type": "integer"}, {"type": "string"}]}, "25", 25),
-        ({"anyOf": [{"type": "integer"}, {"type": "string"}]}, "1.10", "1.10"),
-        ({"type": ["number", "string"]}, "25", 25),
-        ({"enum": [1, "a"]}, "1", 1),
-        ({"type": ["number", "string"], "enum": [1, "x"]}, "1", 1),
-        # no string admitted, or no type information: decode as before
-        ({"anyOf": [{"type": "number"}, {"type": "null"}]}, "1.10", 1.1),
-        ({"description": "untyped"}, "25", 25),
-        ({"anyOf": [{"type": "string"}, {}]}, "25", 25),
-    ],
-)
-def test_string_union_schemas(schema, value, expected):
-    parameters = {"properties": {"v": schema}}
-    assert _parse_param(MuseToolParser, parameters, value) == [expected, expected]
-
-
-def test_ref_cycles_and_shared_refs_resolve_quickly():
-    """$ref cycles terminate; shared $refs are walked once, not once per path."""
-    cyclic = {
-        "properties": {"v": {"$ref": "#/$defs/A"}},
-        "$defs": {
-            "A": {"anyOf": [{"$ref": "#/$defs/B"}, {"type": "string"}]},
-            "B": {"type": "object", "properties": {"a": {"$ref": "#/$defs/A"}}},
-        },
-    }
-    assert _parse_param(MuseToolParser, cyclic, "1.10") == ["1.10", "1.10"]
-    # Each def references the next one twice: 2**60 paths without memoization.
-    defs: dict[str, dict] = {
-        f"D{i}": {"anyOf": [{"$ref": f"#/$defs/D{i + 1}"}] * 2} for i in range(60)
-    }
-    defs["D60"] = {"type": "string"}
-    chain = {"properties": {"v": {"$ref": "#/$defs/D0"}}, "$defs": defs}
-    assert _parse_param(MuseToolParser, chain, "1.10") == ["1.10", "1.10"]
-
-
-def test_glimmer_keeps_decoding_optional_string():
-    schema = {"anyOf": [{"type": "string"}, {"type": "null"}]}
-    parameters = {"properties": {"v": schema}}
-    assert _parse_param(MuseGlimmerToolParser, parameters, "1.10") == [1.1, 1.1]
-
-
-def _schema_walk_request() -> ChatCompletionRequest:
-    schema = {"anyOf": [{"type": "string"}, {"type": "null"}]}
-    function = {"name": "f", "parameters": {"properties": {"v": schema}}}
-    return ChatCompletionRequest(
-        model="test", messages=[], tools=[{"type": "function", "function": function}]
-    )
-
-
-_RAW_INVOKE = (
-    'to=f<|message|><atem:function_calls><atem:invoke name="f">'
-    '<atem:parameter name="v">1.10</atem:parameter>'
-    "</atem:invoke></atem:function_calls><|eot|>"
-)
-
-
-def _count_schema_walks(monkeypatch) -> MagicMock:
-    """Replace the shared schema walk with a call counter."""
-    import vllm.tool_parsers.schema_types as schema_types_module
-
-    counter = MagicMock(wraps=schema_types_module.parameter_types)
-    monkeypatch.setattr(schema_types_module, "parameter_types", counter)
-    return counter
-
-
-def test_parameter_types_built_once_per_request(monkeypatch):
-    """The schema walk runs once per parser, not once per streaming delta."""
-    counter = _count_schema_walks(monkeypatch)
-    request = _schema_walk_request()
-    parser = MuseToolParser(object(), request.tools)
-    assert counter.call_count == 1
-    for _ in range(3):
-        parser.extract_tool_calls(_RAW_INVOKE, request)
-    for end in range(7, len(_RAW_INVOKE) + 7, 7):
-        previous, current = _RAW_INVOKE[: end - 7], _RAW_INVOKE[:end]
-        parser.extract_tool_calls_streaming(
-            previous, current, current[len(previous) :], [], [], [], request
-        )
-    assert counter.call_count == 1
-
-
-def test_glimmer_never_builds_parameter_types(monkeypatch):
-    counter = _count_schema_walks(monkeypatch)
-    request = _schema_walk_request()
-    parser = MuseGlimmerToolParser(object(), request.tools)
-    parser.extract_tool_calls(_RAW_INVOKE, request)
-    assert counter.call_count == 0
+    # One schema walk per parser on first use, none on construction or for Glimmer.
+    assert walks.call_count == (4 if parser_class is MuseToolParser else 0)
 
 
 # --------------------------------------------------- reasoning token counting

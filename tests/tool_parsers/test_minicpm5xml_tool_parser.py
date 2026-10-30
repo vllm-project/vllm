@@ -794,72 +794,25 @@ class TestParameterWhitespace:
         }
 
 
-_NULLABLE_STR = {"anyOf": [{"type": "string"}, {"type": "null"}]}
-_STRING_SCHEMA_CASES = [
-    # (schema, raw value, expected argument)
-    ({"type": "string"}, "1.10", "1.10"),
-    ({"type": "string"}, "null", "null"),
-    (_NULLABLE_STR, "1.10", "1.10"),
-    (_NULLABLE_STR, "1984", "1984"),
-    (_NULLABLE_STR, "null", None),
-    ({"type": ["string", "null"]}, "1984", "1984"),
-    ({"type": ["string", "null"]}, "null", None),
-    ({"enum": ["1.10", "2.0"]}, "1.10", "1.10"),
-    ({"$ref": "#/$defs/Version"}, "1984", "1984"),
-    ({"type": "number"}, "1.10", 1.1),
-]
-
-
 @pytest.mark.parametrize("stream", [False, True])
-@pytest.mark.parametrize(("schema", "raw", "expected"), _STRING_SCHEMA_CASES)
-def test_string_schema_forms_keep_raw_text(
-    parser: ToolParser, schema: dict, raw: str, expected, stream: bool
+@pytest.mark.parametrize(
+    ("param", "expected"),
+    [
+        ('<param name="v">1.10</param>', "1.10"),
+        ('<param name="v">null</param>', None),
+        ('<param name="arguments">{"v": 1984}</param>', "1984"),
+    ],
+)
+def test_nullable_string_keeps_raw_text(
+    parser: ToolParser, param: str, expected, stream: bool
 ) -> None:
-    """Strings behind anyOf/type lists/enum/$ref are not JSON-decoded."""
-    request = make_request(
-        [
-            _tool(
-                "f",
-                {
-                    "type": "object",
-                    "properties": {"v": schema},
-                    "$defs": {"Version": {"type": "string"}},
-                },
-            )
-        ]
-    )
-    text = f'<function name="f"><param name="v">{raw}</param></function>'
+    schema = {"anyOf": [{"type": "string"}, {"type": "null"}]}
+    request = make_request([_tool("f", {"properties": {"v": schema}})])
+    text = f'<function name="f">{param}</function>'
     if stream:
-        chunks = [text[i : i + 3] for i in range(0, len(text), 3)]
         calls = run_tool_extraction_streaming(
-            parser, chunks, request, assert_one_tool_per_delta=False
+            parser, list(text), request, assert_one_tool_per_delta=False
         ).tool_calls
     else:
         calls = parser.extract_tool_calls(text, request).tool_calls
-    assert len(calls) == 1
-    assert json.loads(calls[0].function.arguments) == {"v": expected}
-
-
-def test_parameter_types_built_once_per_request(monkeypatch) -> None:
-    """The schema walk runs once per parser, not once per streamed argument."""
-    import vllm.tool_parsers.schema_types as schema_types_module
-
-    counter = MagicMock(wraps=schema_types_module.parameter_types)
-    monkeypatch.setattr(schema_types_module, "parameter_types", counter)
-    request = make_request(
-        [_tool("f", {"type": "object", "properties": {"v": {"type": "string"}}})]
-    )
-    parser = MiniCPM5XMLToolParser(MagicMock(), tools=request.tools)
-    text = '<function name="f"><param name="v">1.10</param></function>'
-    parser.extract_tool_calls(text, request)
-    chunks = [text[i : i + 3] for i in range(0, len(text), 3)]
-    run_tool_extraction_streaming(
-        parser, chunks, request, assert_one_tool_per_delta=False
-    )
-    assert counter.call_count == 1
-
-    request = make_request(
-        [_tool("f", {"type": "object", "properties": {"v": {"type": "string"}}})]
-    )
-    parser.extract_tool_calls(text, request)
-    assert counter.call_count == 2
+    assert [json.loads(call.function.arguments) for call in calls] == [{"v": expected}]

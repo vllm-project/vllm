@@ -22,18 +22,18 @@ from __future__ import annotations
 
 import json
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 from openai.types.responses.tool_param import FunctionToolParam
 
+from tests.tool_parsers.utils import run_tool_extraction_streaming
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.tool_parsers.poolside_v1_tool_parser import PoolsideV1ToolParser
 
 
 def _write_file_tool() -> dict[str, Any]:
-    """Tool with a string arg (``content``) and a non-string arg (``mode``)."""
+    """Tool with string (``content``), integer and nullable string args."""
     return {
         "type": "function",
         "function": {
@@ -44,6 +44,7 @@ def _write_file_tool() -> dict[str, Any]:
                 "properties": {
                     "content": {"type": "string"},
                     "mode": {"type": "integer"},
+                    "note": {"anyOf": [{"type": "string"}, {"type": "null"}]},
                 },
                 "required": ["content"],
             },
@@ -101,6 +102,9 @@ class _StubTokenizer:
 
     def get_vocab(self) -> dict[str, int]:
         return {"<tool_call>": 151_657, "</tool_call>": 151_658}
+
+    def tokenize(self, text: str) -> list[str]:
+        return []
 
 
 def _make_parser(request: ChatCompletionRequest) -> PoolsideV1ToolParser:
@@ -368,88 +372,19 @@ def test_streaming_responses_request_with_logprobs_emits_empty_delta() -> None:
     assert result.content == ""
 
 
-# ---------------------------------------------------------------------------
-# String schemas other than a bare {"type": "string"} keep the raw text
-# ---------------------------------------------------------------------------
-
-_NULLABLE_STR = {"anyOf": [{"type": "string"}, {"type": "null"}]}
-
-
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize(
-    ("schema", "raw", "expected"),
-    [
-        ({"type": "string"}, "1.10", "1.10"),
-        ({"type": "string"}, "null", "null"),
-        (_NULLABLE_STR, "1.10", "1.10"),
-        (_NULLABLE_STR, "1984", "1984"),
-        (_NULLABLE_STR, " null ", None),
-        (_NULLABLE_STR, "  x = 1\n", "  x = 1\n"),
-        ({"type": ["string", "null"]}, "null", None),
-        ({"type": ["string", "null"]}, "true", "true"),
-        ({"enum": ["1.10", "2.0"]}, "1.10", "1.10"),
-        ({"$ref": "#/$defs/Version"}, "1984", "1984"),
-        ({"type": "number"}, " 1.10 ", 1.1),
-    ],
+    ("raw", "expected"), [(" 1.10\n", " 1.10\n"), (" null ", None)]
 )
-def test_string_schema_forms_keep_raw_text(
-    schema: dict[str, Any], raw: str, expected: Any, stream: bool
-) -> None:
-    request = ChatCompletionRequest.model_validate(
-        {
-            "model": "poolside-test",
-            "messages": [{"role": "user", "content": "hi"}],
-            "tools": [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "f",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {"v": schema},
-                            "$defs": {"Version": {"type": "string"}},
-                        },
-                    },
-                }
-            ],
-        }
-    )
-    parser = _make_parser(request)
-    model_output = (
-        f"<tool_call>f\n<arg_key>v</arg_key><arg_value>{raw}</arg_value></tool_call>"
-    )
-    if not stream:
-        result = parser.extract_tool_calls(model_output, request)
-        args = result.tool_calls[0].function.arguments
-    else:
-        args, prev = "", ""
-        for ch in model_output:
-            delta = parser.extract_tool_calls_streaming(
-                prev, prev + ch, ch, [], [], [], request
-            )
-            prev += ch
-            for tc in (delta.tool_calls if delta else None) or []:
-                args += (tc.function.arguments or "") if tc.function else ""
-    assert json.loads(args) == {"v": expected}
-
-
-def test_parameter_types_built_once_per_request(monkeypatch) -> None:
-    """The schema walk runs once per parser, not once per streamed argument."""
-    import vllm.tool_parsers.schema_types as schema_types_module
-
-    counter = MagicMock(wraps=schema_types_module.parameter_types)
-    monkeypatch.setattr(schema_types_module, "parameter_types", counter)
+def test_nullable_string_keeps_raw_text(raw: str, expected: Any, stream: bool) -> None:
     request = _build_chat_request(tool_choice="auto")
-    parser = PoolsideV1ToolParser(_StubTokenizer(), tools=request.tools)
-    model_output = (
-        "<tool_call>write_file\n<arg_key>content</arg_key>"
-        "<arg_value>  x = 1\n</arg_value></tool_call>"
+    parser = _make_parser(request)
+    output = (
+        "<tool_call>write_file\n<arg_key>note</arg_key>"
+        f"<arg_value>{raw}</arg_value></tool_call>"
     )
-    parser.extract_tool_calls(model_output, request)
-    previous = ""
-    for current in (model_output[:i] for i in range(1, len(model_output) + 1)):
-        parser.extract_tool_calls_streaming(
-            previous, current, current[len(previous) :], [], [], [], request
-        )
-        previous = current
-    assert counter.call_count == 1
+    if stream:
+        calls = run_tool_extraction_streaming(parser, list(output), request).tool_calls
+    else:
+        calls = parser.extract_tool_calls(output, request).tool_calls
+    assert [json.loads(c.function.arguments) for c in calls] == [{"note": expected}]

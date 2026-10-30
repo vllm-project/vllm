@@ -203,10 +203,7 @@ class MuseToolParser(ToolParser):
         tools: list[Tool] | None = None,
     ) -> None:
         super().__init__(tokenizer, tools)
-        # MuseGlimmer keeps legacy decoding, so it never walks its schemas.
-        self._parameter_types_cache = (
-            ParameterTypesCache(tools) if self._preserve_string_parameters else None
-        )
+        self._parameter_types_cache = ParameterTypesCache()
         # Streaming cursors. vLLM constructs one ToolParser per request, so
         # instance state is per-stream.
         self._streamed_content_len: int = 0
@@ -326,8 +323,8 @@ class MuseToolParser(ToolParser):
     def _parameter_types(
         self, request: ChatCompletionRequest | ResponsesRequest | None
     ) -> dict[str, ParameterTypes]:
-        if self._parameter_types_cache is None:
-            return {}
+        if not self._preserve_string_parameters:
+            return {}  # MuseGlimmer keeps legacy decoding, so it never walks.
         return self._parameter_types_cache.for_tools(getattr(request, "tools", None))
 
     @staticmethod
@@ -372,11 +369,11 @@ class MuseToolParser(ToolParser):
             if not name_m:
                 continue
             name = cls._normalize_name(name_m.group(1), registered)
-            parameters = (types or {}).get(name, ParameterTypes({}, None))
+            props, extra = (types or {}).get(name, ({}, None))
             args: dict = {}
             for pm in _PARAM_RE.finditer(invoke):
                 key, raw = pm.group("key"), pm.group("value")
-                args[key] = convert_value(raw, parameters.get(key), _decode_value)
+                args[key] = convert_value(raw, props.get(key, extra), _decode_value)
             tool_calls.append(
                 ToolCall(
                     function=FunctionCall(

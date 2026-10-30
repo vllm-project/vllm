@@ -92,7 +92,7 @@ class PoolsideV1ToolParser(ToolParser):
         self.tool_call_end_token_id = self.vocab.get(self.tool_call_end_token)
         self._buffer: str = ""
 
-        self._parameter_types_cache = ParameterTypesCache(tools)
+        self._parameter_types_cache = ParameterTypesCache()
 
         # Streaming state for incremental tool-call streaming
         self._in_tool_call: bool = False
@@ -134,13 +134,9 @@ class PoolsideV1ToolParser(ToolParser):
         self, tool_name: str, arg_name: str, tools: list[Tool] | None
     ) -> set[str] | None:
         """JSON types the argument's schema admits; ``None`` if unconstrained."""
-        if tools is None:
-            return None
-        tool_types = self._parameter_types_cache.for_tools(tools).get(tool_name)
-        if tool_types is None:
-            logger.debug("No tool named '%s'.", tool_name)
-            return None
-        return tool_types.get(arg_name)
+        tool_types = self._parameter_types_cache.for_tools(tools)
+        props, extra = tool_types.get(tool_name, ({}, None))
+        return props.get(arg_name, extra)
 
     @staticmethod
     def _tools_enabled(request: ChatCompletionRequest) -> bool:

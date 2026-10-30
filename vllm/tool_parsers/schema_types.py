@@ -7,7 +7,11 @@ the parameter's schema to decide whether to keep that text or decode it.
 """
 
 from collections.abc import Callable, Iterable
-from typing import Any, NamedTuple
+from typing import Any
+
+# Types admitted by each listed parameter of one tool, and by any other
+# parameter (additionalProperties). None means unconstrained.
+ParameterTypes = tuple[dict[str, set[str] | None], set[str] | None]
 
 
 def _json_type(value: Any) -> str:
@@ -27,37 +31,15 @@ def _json_type(value: Any) -> str:
     return "string"
 
 
-def _intersect(a: set[str], b: set[str]) -> set[str]:
-    """Intersect two type sets, treating ``integer`` as a subset of ``number``."""
-    both = a & b
-    if ("number" in a and "integer" in b) or ("integer" in a and "number" in b):
-        both.add("integer")
-    return both
-
-
-def _resolve_ref(root: dict, ref: str) -> Any:
-    """Resolve a local JSON pointer such as ``#/$defs/Name`` against *root*."""
-    if not ref.startswith("#/"):
-        return None
-    node: Any = root
-    for part in ref[2:].split("/"):
-        if not isinstance(node, dict):
-            return None
-        node = node.get(part.replace("~1", "/").replace("~0", "~"))
-    return node
-
-
 def _schema_types(
     schema: Any, root: dict, refs: dict[str, set[str] | None]
 ) -> set[str] | None:
     """JSON types a parameter schema admits, or ``None`` if it admits any.
 
-    Covers ``type`` (name or list), ``const``, ``enum``, local ``$ref``,
-    ``anyOf``/``oneOf`` (union) and ``allOf`` (intersection), so that e.g.
-    pydantic's ``Optional[str]`` (``anyOf: [string, null]``) counts as a string.
-    *refs* memoizes each ``$ref`` (a ref still being resolved counts as
-    unconstrained), keeping the walk linear in the schema size even when
-    ``$defs`` reference each other many times or cyclically.
+    Covers ``type``, ``const``, ``enum``, local ``$ref``, ``anyOf``/``oneOf``
+    (union) and ``allOf`` (intersection), so that e.g. pydantic's
+    ``Optional[str]`` counts as a string. *refs* memoizes each ``$ref``, which
+    keeps the walk linear and ends cycles.
     """
     if not isinstance(schema, dict):
         return None
@@ -74,74 +56,32 @@ def _schema_types(
     ref = schema.get("$ref")
     if isinstance(ref, str):
         if ref not in refs:
-            refs[ref] = None
-            refs[ref] = _schema_types(_resolve_ref(root, ref), root, refs)
+            refs[ref] = None  # a ref still being resolved is unconstrained
+            node = root if ref.startswith("#/") else None  # e.g. #/$defs/Name
+            for part in ref[2:].split("/"):
+                if isinstance(node, dict):
+                    node = node.get(part.replace("~1", "/").replace("~0", "~"))
+            refs[ref] = _schema_types(node, root, refs)
         constraints.append(refs[ref])
     for key in ("anyOf", "oneOf"):
-        if not isinstance(schema.get(key), list) or not schema[key]:
-            continue
-        union: set[str] = set()
-        for branch in schema[key]:
-            branch_types = _schema_types(branch, root, refs)
-            if branch_types is None:
-                break
-            union |= branch_types
-        else:
-            constraints.append(union)
+        if isinstance(schema.get(key), list) and schema[key]:
+            union: set[str] = set()
+            for branch in schema[key]:
+                if (types := _schema_types(branch, root, refs)) is None:
+                    break  # an unconstrained branch admits anything
+                union |= types
+            else:
+                constraints.append(union)
     if isinstance(schema.get("allOf"), list):
         constraints.extend(_schema_types(s, root, refs) for s in schema["allOf"])
-    allowed: set[str] | None = None
-    for c in constraints:
-        if c is not None:
-            allowed = c if allowed is None else _intersect(allowed, c)
-    return allowed
-
-
-def schema_types(schema: Any, root: dict | None = None) -> set[str] | None:
-    """JSON types the parameter schema admits, or ``None`` when it has none.
-
-    Unlike :func:`extract_types_from_schema`, "no type information" stays
-    distinct from the string type. *root* is the tool's ``parameters`` object,
-    against which local ``$ref`` pointers resolve.
-    """
-    if root is None:
-        root = schema if isinstance(schema, dict) else {}
-    return _schema_types(schema, root, {})
-
-
-class ParameterTypes(NamedTuple):
-    """JSON types admitted by each top-level parameter of one tool.
-
-    ``additional`` covers parameters not listed in ``properties``
-    (``additionalProperties``). ``None`` means unconstrained.
-    """
-
-    properties: dict[str, set[str] | None]
-    additional: set[str] | None
-
-    def get(self, key: str) -> set[str] | None:
-        return self.properties.get(key, self.additional)
-
-    @classmethod
-    def from_schema(cls, parameters: Any) -> "ParameterTypes":
-        if not isinstance(parameters, dict):
-            return cls({}, None)
-        properties = parameters.get("properties")
-        if not isinstance(properties, dict):
-            properties = {}
-        refs: dict[str, set[str] | None] = {}
-        return cls(
-            {k: _schema_types(s, parameters, refs) for k, s in properties.items()},
-            _schema_types(parameters.get("additionalProperties"), parameters, refs),
-        )
+    known = [  # an integer is also a number
+        t | {"integer"} if "number" in t else t for t in constraints if t is not None
+    ]
+    return set.intersection(*known) if known else None
 
 
 def parameter_types(tools: Iterable[Any] | None) -> dict[str, ParameterTypes]:
-    """Map tool name to its :class:`ParameterTypes`.
-
-    Accepts Chat Completions tools (nested ``function``) and flat Responses
-    function tools.
-    """
+    """Map tool name to :data:`ParameterTypes`, for Chat or flat Responses tools."""
     types: dict[str, ParameterTypes] = {}
     for tool in tools or []:
         function = getattr(tool, "function", None) or tool
@@ -150,41 +90,39 @@ def parameter_types(tools: Iterable[Any] | None) -> dict[str, ParameterTypes]:
         else:
             name = getattr(function, "name", None)
             parameters = getattr(function, "parameters", None)
-        if name and isinstance(parameters, dict):
-            types[name] = ParameterTypes.from_schema(parameters)
+        if not name or not isinstance(parameters, dict):
+            continue
+        properties = parameters.get("properties")
+        if not isinstance(properties, dict):
+            properties = {}
+        refs: dict[str, set[str] | None] = {}
+        types[name] = (
+            {k: _schema_types(s, parameters, refs) for k, s in properties.items()},
+            _schema_types(parameters.get("additionalProperties"), parameters, refs),
+        )
     return types
 
 
 class ParameterTypesCache:
-    """Parameter types for one tools list, rebuilt when its identity changes."""
+    """Parameter types of the last tools list seen, built on first use."""
 
-    def __init__(self, tools: Iterable[Any] | None = None) -> None:
-        self._tools = tools
-        self._types = parameter_types(tools)
+    _last: tuple[Any, dict[str, ParameterTypes]] = (None, {})
 
     def for_tools(self, tools: Iterable[Any] | None) -> dict[str, ParameterTypes]:
-        if tools is not self._tools:
-            self._tools = tools
-            self._types = parameter_types(tools)
-        return self._types
+        if tools is not self._last[0]:
+            self._last = tools, parameter_types(tools)
+        return self._last[1]
 
 
 def convert_value(
     raw: str, allowed: set[str] | None, decode: Callable[[str], Any]
 ) -> Any:
-    """Decode a parameter value, keeping the raw text where a string is meant.
-
-    When the schema admits a string, the raw text is kept unless it decodes to
-    another type the schema also admits (``null`` for ``Optional[str]``, ``3``
-    for ``anyOf: [integer, string]``).
-    Otherwise the result of *decode* is returned unchanged.
+    """Decode *raw*, but keep the text if the schema admits a string, unless it
+    decodes to another admitted type (``null`` for ``Optional[str]``).
     """
     if allowed == {"string"}:
         return raw
     decoded = decode(raw)
     if allowed is None or "string" not in allowed:
         return decoded
-    kind = _json_type(decoded)
-    if kind == "integer" and "number" in allowed:
-        kind = "number"
-    return decoded if kind != "string" and kind in allowed else raw
+    return decoded if _json_type(decoded) in allowed - {"string"} else raw

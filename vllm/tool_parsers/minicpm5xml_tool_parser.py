@@ -132,14 +132,13 @@ def _coerce_argument_value(
     value: Any,
     param_types: dict[str, ParameterTypes],
 ) -> Any:
-    tool_types = param_types.get(func_name)
-    allowed = tool_types.get(arg_key) if tool_types is not None else None
+    props, extra = param_types.get(func_name, ({}, None))
+    allowed = props.get(arg_key, extra)
     if isinstance(value, str):
         return convert_value(value, allowed, lambda v: _parse_arguments(v)[0])
     # Already decoded (wrapped arguments): serialize it where a string is meant.
-    return convert_value(
-        json.dumps(value, ensure_ascii=False), allowed, lambda _: value
-    )
+    text = json.dumps(value, ensure_ascii=False)
+    return convert_value(text, allowed, lambda _: value)
 
 
 def _add_argument(
@@ -265,11 +264,7 @@ def _normalize_alias_tool_call(
 
 def _build_tool_maps(
     tools: list[ChatCompletionToolsParam] | None,
-) -> tuple[
-    set[str],
-    dict[str, set[str]],
-    dict[str, set[str]],
-]:
+) -> tuple[set[str], dict[str, set[str]], dict[str, set[str]]]:
     name_to_allowed_props: dict[str, set[str]] = {}
     name_to_required: dict[str, set[str]] = {}
 
@@ -292,11 +287,7 @@ def _build_tool_maps(
             )
             name_to_required[name] = set()
 
-    return (
-        {tool.function.name for tool in tools or [] if tool.function.name},
-        name_to_allowed_props,
-        name_to_required,
-    )
+    return set(name_to_allowed_props), name_to_allowed_props, name_to_required
 
 
 def _parse_function_block(
@@ -458,7 +449,7 @@ class MiniCPM5XMLToolParser(ToolParser):
         self.tool_call_start_token = "<function"
         self.tool_call_end_token = "</function>"
         self._processed_len = 0
-        self._parameter_types_cache = ParameterTypesCache(tools)
+        self._parameter_types_cache = ParameterTypesCache()
 
     def _reset_stream_state(self) -> None:
         self._processed_len = 0
@@ -494,7 +485,6 @@ class MiniCPM5XMLToolParser(ToolParser):
         tool_names, name_to_allowed_props, name_to_required = _build_tool_maps(
             request.tools
         )
-        param_types = self._parameter_types_cache.for_tools(request.tools)
 
         tool_calls: list[ToolCall] = []
         normal_parts: list[str] = []
@@ -511,7 +501,7 @@ class MiniCPM5XMLToolParser(ToolParser):
                     tool_names,
                     name_to_allowed_props,
                     name_to_required,
-                    param_types,
+                    self._parameter_types_cache.for_tools(request.tools),
                 )
                 if parsed is not None:
                     tool_calls.append(
