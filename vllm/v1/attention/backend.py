@@ -72,6 +72,12 @@ class AttentionBackend(ABC):
     # Can forward() run with key/value omitted after a fused op wrote the cache?
     supports_kv_cache_update_bypass: bool = False
 
+    # Does the backend verify speculative trees: read
+    # CommonAttentionMetadata.tree_parents (recurrent layers) or tree_ancestors
+    # (attention) instead of assuming each row follows the one before it? A
+    # speculator whose plans branch needs it in every layer of the target.
+    supports_tree_verify: bool = False
+
     @staticmethod
     def get_supported_kernel_block_sizes(
         kv_cache_spec: "KVCacheSpec | None" = None,
@@ -478,6 +484,20 @@ class CommonAttentionMetadata:
     at the current decode run's last full-state write. write_pos counts from
     here, so a preemption-resumed request re-anchors past the prompt boundary."""
 
+    tree_parents: torch.Tensor | None = None
+    """(num_tokens,) int32 for a tree verify: each token's parent as a row
+    index within its request, -1 for the request's first row, every other
+    row's parent an earlier row (``i - 1`` in a chain). Only the rows of
+    speculative decodes are read. None means every request is a chain."""
+
+    tree_ancestors: torch.Tensor | None = None
+    """(num_tokens,) int64 alongside ``tree_parents``: bit ``j`` is set when row
+    ``j`` of the token's plan is the token's row or one of its ancestors, so a
+    plan row attends to the request's context and to the rows whose bits are
+    set. 0 for a token that is not a plan row (a prompt token in front of the
+    plan), which attends causally. Plan rows are the request's last ``count``
+    query tokens."""
+
     _num_computed_tokens_cache: torch.Tensor | None = None
     _token_to_req_indices_cache: torch.Tensor | None = None
 
@@ -561,6 +581,12 @@ class CommonAttentionMetadata:
             req_idx=maybe_slice_reqs(self.req_idx),
             rswa_prefix_lens=maybe_slice_reqs(self.rswa_prefix_lens),
             replayssm_decode_base_cpu=maybe_slice_reqs(self.replayssm_decode_base_cpu),
+            tree_parents=self.tree_parents[:num_actual_tokens]
+            if self.tree_parents is not None
+            else None,
+            tree_ancestors=self.tree_ancestors[:num_actual_tokens]
+            if self.tree_ancestors is not None
+            else None,
         )
 
 

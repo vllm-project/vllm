@@ -23,7 +23,7 @@ from collections.abc import Iterable
 from contextlib import AbstractContextManager, nullcontext
 from copy import deepcopy
 from dataclasses import replace
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 import numpy as np
 import torch
@@ -73,6 +73,9 @@ from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, async_tensor_h2d
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    CrossAttentionSpec,
+    EncoderOnlyAttentionSpec,
     KVCacheConfig,
     MambaSpec,
     SlidingWindowSpec,
@@ -163,19 +166,30 @@ from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
     maybe_create_adaptive_verification_manager,
     resolve_adaptive_cudagraph_mode,
 )
+from vllm.v1.worker.gpu.spec_decode.commit import (
+    ConvWindowAligner,
+    KvCompactor,
+    accept_result_of,
+    accepted_rows,
+    kv_cache_layout,
+)
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     set_eagle3_aux_hidden_state_layers,
 )
 from vllm.v1.worker.gpu.spec_decode.plan_kernels import (
+    PlanLayout,
     chain_parents,
+    chain_path,
 )
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     RejectionSampler,
     get_max_chunk_logits,
 )
 from vllm.v1.worker.gpu.spec_decode.round import (
+    AcceptResult,
     PlanBound,
     PlanInputs,
+    SpecResources,
     VerifyPlan,
 )
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
@@ -321,16 +335,41 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
 
         # The plan of a step that verifies drafts: today always a chain, with its
-        # counts and tokens in the runner's buffers.
+        # counts and tokens in the runner's buffers. Other plans are laid out by
+        # plan_layout, built on first use.
         self.chain_plan: VerifyPlan | None = None
+        # The accepted path of every chain round, path[r, j] == j.
+        self.chain_path: torch.Tensor | None = None
         if self.speculative_config is not None:
+            max_rows = self.num_speculative_steps + 1
             self.chain_plan = VerifyPlan(
-                parent=chain_parents(
-                    self.max_num_reqs, self.num_speculative_steps + 1, self.device
-                ),
+                parent=chain_parents(self.max_num_reqs, max_rows, self.device),
                 count=None,
                 is_chain=True,
             )
+            self.chain_path = chain_path(self.max_num_reqs, max_rows, self.device)
+        self.plan_layout: PlanLayout | None = None
+        # What speculation holds (rows, decode graphs, branching), declared by
+        # the speculator's config; the scheduler reads the same declaration.
+        self.spec_resources: SpecResources | None = None
+        self.max_branching = 1
+        if self.speculative_config is not None:
+            self.spec_resources = self.speculative_config.speculator_config.resources(
+                self.max_num_reqs
+            )
+            # Above 1 the speculator verifies trees: every verify batch (chains
+            # and capture batches too) is laid out, so the attention metadata
+            # always carries tree_parents / tree_ancestors and one graph serves
+            # every plan.
+            self.max_branching = self.spec_resources.max_branching
+        # The rows per request of a chain the runner lays out (max_branching > 1).
+        self.chain_count: torch.Tensor | None = None
+        if self.max_branching > 1:
+            self.chain_count = torch.ones(
+                self.max_num_reqs, dtype=torch.int32, device=self.device
+            )
+        self.kv_compactor: KvCompactor | None = None
+        self.conv_window_aligner: ConvWindowAligner | Literal[False] | None = None
 
         # Draft tokens propagation - for spec-dec + struct outputs.
         self.draft_tokens_handler = DraftTokensHandler(self.device)
@@ -714,14 +753,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             max_num_blocks_per_group.append(max_num_blocks)
 
-        target_attn_layer_names = None
-        if isinstance(self.speculator, DraftModelSpeculator):
-            # Adaptive verification validates target attention separately.
-            target_attn_layer_names = {
-                layer_name
-                for group in self.kv_cache_config.kv_cache_groups
-                for layer_name in group.layer_names
-            } - self.speculator.draft_attn_layer_names
         draft_attn_layer_names = None
         if isinstance(self.speculator, DraftModelSpeculator):
             draft_attn_layer_names = self.speculator.draft_attn_layer_names
@@ -737,6 +768,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.device,
                 draft_layer_names=draft_attn_layer_names,
             )
+        self._check_tree_backends()
+        target_attn_layer_names = None
+        if draft_attn_layer_names is not None:
+            # Backend initialization adds layers that share target KV.
+            target_attn_layer_names = {
+                layer_name
+                for group in self.kv_cache_config.kv_cache_groups
+                for layer_name in group.layer_names
+            } - draft_attn_layer_names
         additional_attn_cg_support = self.model_state.get_additional_cg_support()
         attn_cg_support = attn_cg_support.narrow(*additional_attn_cg_support)
         # The speculator clears the flag at load time when the checkpoint has
@@ -1413,23 +1453,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 idx_mapping = async_tensor_h2d(
                     idx_mapping_np, device=self.device, dtype=torch.int64
                 )
+                chain_only = self._chain_only(
+                    scheduler_output, idx_mapping_np, has_prefill
+                )
                 planned = self.speculator.plan(
                     PlanInputs(
                         req_ids=req_ids,
                         idx_mapping=idx_mapping,
                         idx_mapping_np=idx_mapping_np,
                         scheduled_rows=num_draft_tokens_np + 1,
-                        chain_only=True,
+                        chain_only=chain_only,
                     )
                 )
                 bound = PlanBound()
                 if planned is not None:
                     verify_plan, bound = planned
-                    if not verify_plan.is_chain:
-                        raise ValueError(
-                            "the speculator returned a plan that is not a chain, "
-                            "which needs SpecResources.max_branching > 1"
-                        )
+                    self._check_plan(verify_plan, num_reqs, chain_only)
                 if bound.rows is not None:
                     # Unverified drafts leave the batch; they count as rejected.
                     num_toks -= int(num_scheduled_tokens.sum())
@@ -1691,6 +1730,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self, input_batch: InputBatch
     ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
         if self.pcp_manager is not None:
+            if not _is_chain(input_batch.verify_plan):
+                raise NotImplementedError(
+                    "verify plans that are not chains do not support context "
+                    "parallelism yet"
+                )
             return self.pcp_manager.prepare_attn(input_batch)
 
         # Block tables: num_kv_cache_groups x [num_reqs_padded, max_num_blocks].
@@ -1707,7 +1751,137 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch.positions,
             num_tokens_padded=input_batch.num_tokens_after_padding,
         )
+        # After the slot mappings: every verify row keeps the chain slot of its row.
+        self.lay_out_verify_plan(input_batch)
         return block_tables, slot_mappings
+
+    def lay_out_verify_plan(self, input_batch: InputBatch) -> None:
+        """Lay out the batch's plan: move its rows' positions to
+        ``num_computed_tokens + depth``, write its candidate tokens and fill the
+        tree metadata the attention backends read.
+
+        A speculator that never branches verifies chains, which are laid out
+        already, so nothing runs for it. With ``max_branching > 1`` every batch is
+        laid out (a chain, or a batch without drafts, as the chain of its query
+        rows), so the tree metadata is current whenever a captured graph that
+        reads it replays: one graph serves every plan."""
+        if self.max_branching == 1:
+            return
+        assert self.plan_layout is not None and self.chain_plan is not None
+        plan = input_batch.verify_plan
+        num_reqs = input_batch.num_reqs
+        if plan is None or plan.count is None:
+            assert self.chain_count is not None
+            count = self.chain_count[:num_reqs]
+            torch.diff(input_batch.query_start_loc[: num_reqs + 1], out=count)
+            count.clamp_(1, self.num_speculative_steps + 1)
+            plan = self.chain_plan
+        else:
+            count = plan.count
+        self.plan_layout.apply(
+            plan,
+            count,
+            input_batch.query_start_loc,
+            input_batch.positions,
+            input_batch.input_ids,
+            num_reqs,
+            input_batch.num_tokens,
+            input_batch.num_tokens_after_padding,
+        )
+        num_tokens = input_batch.num_tokens_after_padding
+        input_batch.tree_parents = self.plan_layout.tree_parents[:num_tokens]
+        input_batch.tree_ancestors = self.plan_layout.tree_ancestors[:num_tokens]
+        input_batch.tree_pos_delta = self.plan_layout.pos_delta[:num_tokens]
+
+    def _init_tree_verify(self) -> None:
+        """Startup checks and buffers of a speculator whose plans branch."""
+        if self.max_branching == 1:
+            return
+        unsupported = {
+            "pipeline parallelism": self.use_pp,
+            "context parallelism": self.pcp_manager is not None or self.dcp_size > 1,
+            "batch-sharded sampling": self.batch_sharder is not None,
+            "micro-batching": self.parallel_config.use_ubatching,
+            "a model state without tree metadata": (
+                not type(self.model_state).supports_tree_verify
+            ),
+        }
+        for what, refused in unsupported.items():
+            if refused:
+                raise NotImplementedError(
+                    f"a speculator with max_branching > 1 does not support {what}"
+                )
+        self.plan_layout = PlanLayout(
+            self.max_num_reqs,
+            self.max_num_tokens,
+            self.num_speculative_steps + 1,
+            self.device,
+        )
+        self.input_buffers.tree_parents = self.plan_layout.tree_parents
+        self.input_buffers.tree_ancestors = self.plan_layout.tree_ancestors
+
+    def _check_tree_backends(self) -> None:
+        """Every target layer's attention backend must verify trees."""
+        if self.max_branching == 1:
+            return
+        draft = getattr(self.speculator, "draft_attn_layer_names", None) or set()
+        refused = sorted(
+            {
+                group.backend.get_name()
+                for groups in self.attn_groups
+                for group in groups
+                if not group.backend.supports_tree_verify
+                and not set(group.layer_names) <= draft
+            }
+        )
+        if refused:
+            raise ValueError(
+                f"the speculator verifies trees (max_branching="
+                f"{self.max_branching}), but attention backends {refused} do "
+                "not (AttentionBackend.supports_tree_verify)"
+            )
+
+    def _chain_only(
+        self,
+        scheduler_output: SchedulerOutput,
+        idx_mapping_np: np.ndarray,
+        has_prefill: bool,
+    ) -> bool:
+        """Whether this step can only verify chains: a prefill shares the batch
+        (a branching plan must be its request's whole query), structured output
+        (the grammar bitmask of row ``i`` assumes the rows before it as its
+        prefix), or logits processing that reads each row's prefix."""
+        if self.max_branching == 1:
+            return True
+        if has_prefill or scheduler_output.has_structured_output_requests:
+            return True
+        assert self.sampler is not None
+        return self.sampler.reads_row_prefix(idx_mapping_np)
+
+    def _check_plan(self, plan: VerifyPlan, num_reqs: int, chain_only: bool) -> None:
+        if plan.is_chain:
+            return
+        if chain_only:
+            raise ValueError(
+                "the speculator returned a plan that is not a chain for a batch "
+                "that can only verify chains (PlanInputs.chain_only)"
+            )
+        if plan.parent.shape[1] > self.num_speculative_steps + 1:
+            raise ValueError(
+                f"a plan has {plan.parent.shape[1]} rows per request; the "
+                f"scheduler reserves {self.num_speculative_steps + 1}"
+            )
+        if plan.parent.shape[0] < num_reqs:
+            raise ValueError("a plan must cover every request of the batch")
+
+    def restore_chain_positions(self, input_batch: InputBatch) -> None:
+        """Undo :meth:`lay_out_verify_plan` after the forward: the sampler, the
+        prompt logprobs and the drafter read chain positions (accept gets the
+        plan positions as ``VerifyOutput.positions``)."""
+        if self.plan_layout is not None:
+            self.plan_layout.restore_positions(
+                input_batch.positions, input_batch.num_tokens
+            )
 
     def prepare_dummy_attn(
         self, input_batch: InputBatch, valid_state_slots: bool = False
@@ -1818,6 +1992,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         query_start_loc: torch.Tensor | None = None,
         # Drafts received from the last PP rank (non-last ranks only).
         draft_tokens: torch.Tensor | None = None,
+        accepted_row: torch.Tensor | None = None,
     ) -> None:
         # Update the number of computed tokens.
         output_bin_counts = None
@@ -1839,9 +2014,106 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.req_states.draft_tokens,
         )
 
-        self.model_state.postprocess_state(
-            idx_mapping, num_sampled, self.req_states.num_computed_tokens.gpu
+        if accepted_row is None:
+            self.model_state.postprocess_state(
+                idx_mapping, num_sampled, self.req_states.num_computed_tokens.gpu
+            )
+        else:
+            self.model_state.postprocess_state(
+                idx_mapping,
+                num_sampled,
+                self.req_states.num_computed_tokens.gpu,
+                accepted_row=accepted_row,
+            )
+
+    def commit_round(
+        self, input_batch: InputBatch, result: AcceptResult | None
+    ) -> torch.Tensor | None:
+        """Commit the accepted path: move its KV to the chain slots, gather its
+        conv inputs into the window the next step reads, and return the verify
+        row each request's recurrent state resumes from. A chain's accepted rows
+        already sit where the next step reads them and its state rows follow from
+        ``num_sampled``, so a chain commits nothing here and returns None."""
+        plan = input_batch.verify_plan
+        if result is None or _is_chain(plan):
+            return None
+        assert plan is not None and plan.count is not None
+        if self.kv_compactor is None:
+            self.kv_compactor = self._build_kv_compactor()
+        self.kv_compactor.compact(
+            plan.count, input_batch.seq_lens, result, input_batch.num_reqs
         )
+        if self.conv_window_aligner is None:
+            self.conv_window_aligner = self._build_conv_window_aligner()
+        if self.conv_window_aligner is not False:
+            self.conv_window_aligner.align(result, input_batch.num_reqs)
+        return accepted_rows(result, input_batch.num_reqs)
+
+    def _build_conv_window_aligner(self) -> "ConvWindowAligner | Literal[False]":
+        """An aligner over the target's recurrent layers with a conv state, or
+        False for a model without any."""
+        from vllm.model_executor.layers.mamba.abstract import MambaBase
+        from vllm.model_executor.layers.mamba.mamba_utils import (
+            is_conv_state_dim_first,
+        )
+
+        forward_context = self.compilation_config.static_forward_context
+        specs = get_kv_cache_spec(self.vllm_config)
+        windows, tables, widths = [], [], set()
+        for gid, group in enumerate(self.kv_cache_config.kv_cache_groups):
+            for name in group.layer_names:
+                layer = forward_context.get(name)
+                if (
+                    not isinstance(layer, MambaBase)
+                    or not hasattr(layer, "conv1d")
+                    or getattr(specs.get(name), "is_draft", False)
+                ):
+                    continue
+                conv = layer.kv_cache[0]
+                windows.append(conv if is_conv_state_dim_first() else conv.mT)
+                tables.append(self.block_tables.input_block_tables[gid])
+                widths.add(layer.conv1d.weight.shape[-1])
+        if not windows:
+            return False
+        if len(widths) != 1:
+            raise NotImplementedError(
+                "verify plans that are not chains need one conv width per model"
+            )
+        return ConvWindowAligner(windows, tables, widths.pop(), self.device)
+
+    def _build_kv_compactor(self) -> KvCompactor:
+        """A compactor over the target's own attention KV caches: no draft layers,
+        no layers that read another layer's cache, no encoder or cross attention.
+
+        Block sizes come from the KV cache group, as the cache was allocated and
+        the block table is kept: a hybrid model's group blocks are larger than its
+        layers' own specs say (attention pages grow to the recurrent state's).
+        """
+        forward_context = self.compilation_config.static_forward_context
+        specs = get_kv_cache_spec(self.vllm_config)
+        caches, layouts, tables, table_block_sizes = [], [], [], []
+        for gid, group in enumerate(self.kv_cache_config.kv_cache_groups):
+            for name in group.layer_names:
+                spec = specs.get(name)
+                if (
+                    not isinstance(spec, AttentionSpec)
+                    or isinstance(spec, (EncoderOnlyAttentionSpec, CrossAttentionSpec))
+                    or spec.is_draft
+                ):
+                    continue
+                group_spec = group.kv_cache_spec
+                if isinstance(group_spec, UniformTypeKVCacheSpecs):
+                    group_spec = group_spec.kv_cache_specs[name]
+                block_size = group_spec.block_size
+                cache = forward_context[name].kv_cache
+                num_kernel_blocks = self.kv_cache_config.num_blocks * (
+                    block_size // self.kernel_block_sizes[gid]
+                )
+                caches.append(cache)
+                layouts.append(kv_cache_layout(cache, num_kernel_blocks))
+                tables.append(self.block_tables.input_block_tables[gid])
+                table_block_sizes.append(block_size)
+        return KvCompactor(caches, layouts, tables, table_block_sizes, self.device)
 
     def _merge_ec_connector_no_forward(
         self, scheduler_output: SchedulerOutput, output: ModelRunnerOutput
@@ -2192,6 +2464,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     model_output = self.model(**model_inputs)
 
         self.kv_connector.finish_forward()
+        self.restore_chain_positions(input_batch)
 
         if self.is_last_pp_rank:
             if self.use_aux_hidden_state_outputs:
@@ -2295,6 +2568,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         sampler_output, num_sampled, num_rejected = self.sample(
             hidden_states, input_batch, grammar_output
         )
+        # The accepted path: the speculator's accept chose it, or the chain
+        # sampler's arange (a view of a constant buffer).
+        accept_result = None
+        if input_batch.verify_plan is not None:
+            assert self.chain_path is not None
+            accept_result = accept_result_of(sampler_output, self.chain_path)
 
         if self.pp_handler is not None:
             # Broadcast to non-last PP ranks (handles spec decode multi-token).
@@ -2384,7 +2663,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_sampled,
             num_rejected,
             input_batch.query_start_loc,
+            accepted_row=self.commit_round(input_batch, accept_result),
         )
+        input_batch.accept_result = accept_result
 
         if self.speculator is not None:
             assert self.sampler is not None
@@ -2638,3 +2919,8 @@ def sort_batch_req_ids(
         num,
     )
     return sorted(num_tokens_per_req, key=key)
+
+
+def _is_chain(plan: VerifyPlan | None) -> bool:
+    """Whether a batch's plan keeps chain positions (no plan: no drafts)."""
+    return plan is None or plan.is_chain

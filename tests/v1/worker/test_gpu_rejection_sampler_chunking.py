@@ -41,6 +41,8 @@ def _make_input_batch(
             )
         ).to(device),
         seq_lens_cpu_upper_bound=torch.full((num_reqs,), 64, dtype=torch.int32),
+        verify_plan=None,
+        tree_pos_delta=None,
     )
 
 
@@ -110,7 +112,7 @@ def test_chunked_scores_match_full_batch(
     )
     logits = torch.arange(170, dtype=torch.float32, device=device).view(10, 17)
 
-    sampled, num_sampled, chunked_logprobs, sampling_mask_tensors = (
+    sampled, num_sampled, chunked_logprobs, sampling_mask_tensors, _ = (
         rejection_sampler._verify_in_chunks(
             logits,
             input_batch,
@@ -231,7 +233,7 @@ def test_replay_on_off_preserves_rejection_sampling_and_rng(monkeypatch):
     )
 
     rng_before = torch.get_device_module(device).get_rng_state()
-    off_sampled, off_counts, off_logprobs, off_masks = (
+    off_sampled, off_counts, off_logprobs, off_masks, _ = (
         rejection_sampler._verify_in_chunks(
             processed_logits,
             input_batch,
@@ -246,14 +248,16 @@ def test_replay_on_off_preserves_rejection_sampling_and_rng(monkeypatch):
     assert pack_calls == []
 
     sampler.return_sampling_mask = True
-    on_sampled, on_counts, on_logprobs, on_masks = rejection_sampler._verify_in_chunks(
-        processed_logits,
-        input_batch,
-        draft_logits,
-        draft_sampled,
-        pos,
-        max_chunk_logits=8,
-        max_num_logprobs=0,
+    on_sampled, on_counts, on_logprobs, on_masks, _ = (
+        rejection_sampler._verify_in_chunks(
+            processed_logits,
+            input_batch,
+            draft_logits,
+            draft_sampled,
+            pos,
+            max_chunk_logits=8,
+            max_num_logprobs=0,
+        )
     )
     rng_after_on = torch.get_device_module(device).get_rng_state()
 

@@ -21,6 +21,7 @@ from vllm.utils.import_utils import resolve_obj_by_qualname
 # vllm.config imports this module, so it imports vllm.config lazily.
 if TYPE_CHECKING:
     from vllm.config import ParallelConfig, SpeculativeConfig
+    from vllm.v1.worker.gpu.spec_decode.round import SpecResources
 
 _PKG = "vllm.v1.worker.gpu.spec_decode"
 
@@ -98,6 +99,8 @@ class SpeculatorConfig:
     def __init__(self, spec_config: "SpeculativeConfig"):
         # Read lazily, since the spec config may still be updated.
         self.spec_config = spec_config
+        # (max_num_seqs, dense batch size -> K) of a Dynamic SD schedule.
+        self._dynamic_sd_lookup: tuple[int, list[int]] | None = None
 
     @property
     @final
@@ -140,6 +143,48 @@ class SpeculatorConfig:
     def hash_factors(self) -> list[Any]:
         """Extra factors of `SpeculativeConfig.compute_hash`."""
         return []
+
+    # --- Resources (the speculative round contract, see spec_decode/round.py) ---
+
+    def resources(self, max_num_seqs: int) -> "SpecResources":
+        """What speculation holds, declared once at startup.
+
+        A pure function of the config: the scheduler and every worker compute it
+        on their own. The default is a chain of up to K drafts (``max_candidates``
+        K + 1) with a recurrent-state row per draft. Its decode graphs are the
+        uniform K + 1 shape, or one uniform shape per K of a Dynamic SD schedule,
+        plus the variable-length shape under adaptive verification.
+        """
+        from vllm.v1.worker.gpu.spec_decode.round import PlanShape, SpecResources
+
+        k = self.num_speculative_tokens
+        if self.spec_config.uses_dynamic_speculative_decoding():
+            counts = {n + 1 for n in self._dynamic_sd_schedule(max_num_seqs)[1:]}
+        else:
+            counts = {k + 1}
+        shapes = tuple(PlanShape(c) for c in sorted(counts))
+        if self.spec_config.enable_adaptive_verification:
+            # The target replays the variable-length graph; the drafter's own
+            # graphs keep the uniform shape.
+            shapes += (PlanShape(None),)
+        return SpecResources(max_candidates=k + 1, capture_shapes=shapes)
+
+    def _dynamic_sd_schedule(self, max_num_seqs: int) -> list[int]:
+        if (
+            self._dynamic_sd_lookup is None
+            or self._dynamic_sd_lookup[0] != max_num_seqs
+        ):
+            from vllm.v1.spec_decode.dynamic.utils import (
+                build_dynamic_sd_schedule_lookup,
+            )
+
+            lookup = build_dynamic_sd_schedule_lookup(
+                self.spec_config.num_speculative_tokens_per_batch_size,
+                vllm_max_batch_size=max_num_seqs,
+                vllm_num_speculative_tokens=self.num_speculative_tokens,
+            )
+            self._dynamic_sd_lookup = (max_num_seqs, lookup)
+        return self._dynamic_sd_lookup[1]
 
     def pcp_unsupported_reason(self, parallel_config: "ParallelConfig") -> str | None:
         """Why prefill context parallelism can't be used, or None."""
