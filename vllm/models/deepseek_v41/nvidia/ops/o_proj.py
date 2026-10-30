@@ -7,7 +7,6 @@ from collections.abc import Callable
 import torch
 from torch import nn
 
-from vllm.lora.layers.column_parallel_linear import ColumnParallelLinearWithLoRA
 from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
     FlashInferCutedslMxfp8LinearKernel,
 )
@@ -32,10 +31,9 @@ def _fused_wo_a_max_tokens(layer: nn.Module) -> int:
 
 def _can_fuse_wo_a(layer: nn.Module) -> bool:
     """Whether the attention layer matches the fused WO-A kernel's layout."""
-    # The fused kernel consumes ``wo_a.weight`` directly and has no adapter
-    # epilogue. Fall back to ``deep_gemm_fp8_o_proj`` so its grouped LoRA path
-    # can apply the per-group B slices.
-    if isinstance(layer.wo_a, ColumnParallelLinearWithLoRA):
+    # The fused kernel never materializes the BF16 input an adapter on wo_a
+    # needs, so such a layer takes ``deep_gemm_fp8_o_proj`` instead.
+    if getattr(layer.wo_a, "requires_unquantized_input", False):
         return False
     method = getattr(layer.wo_b, "scheme", layer.wo_b.quant_method)
     return (
