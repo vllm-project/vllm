@@ -112,11 +112,17 @@ It does not change `auto` or the existing `aiter`, `flydsl`, and
 `VLLM_ROCM_USE_AITER_MOE=1` and install an AITER build exposing
 `flydsl_a16w4_moe` from [AITER PR #6995](https://github.com/ROCm/aiter/pull/6995).
 Older AITER builds reject this explicit choice.
+The default ROCm image's AITER v0.1.26 does not provide this optional API.
+The dedicated gfx942 CI job uses AITER commit
+`f52deefccdb66c410b337a2947050b228a55e547` and FlyDSL 0.4.0 in an isolated
+environment, after checking the base image's dependency behavior.
 
 The supported configuration is BF16 input/output, native MXFP4 weights with
 E8M0 scales, SiLU with a positive model-provided clamp bound, and TP without
 expert parallelism. Bias, LoRA, expert load balancing, GPT-OSS SwiGLU, quantized
 activations and routing weights applied to the input are not supported.
+Both native MXFP4 and Quark MXFP4 checkpoints use the same weight conversion
+when they satisfy these requirements.
 The activation rounds GEMM1 results to BF16 before computing
 `silu(min(gate, limit)) * clamp(up, -limit, limit)`; it does not add an up-branch
 offset. BF16 atomic accumulation is not bitwise deterministic.

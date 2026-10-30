@@ -2032,19 +2032,52 @@ def test_aiter_mxfp4_w4a4_moe_pad_masks_only_padding(
 # -----------------------------------------------------------------------------
 
 
+@pytest.fixture
+def enable_aiter_flydsl_mxfp4(monkeypatch):
+    try:
+        with monkeypatch.context() as environment:
+            environment.setenv("VLLM_ROCM_USE_AITER", "1")
+            environment.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+            rocm_aiter_ops.refresh_env_variables()
+            yield
+    finally:
+        rocm_aiter_ops.refresh_env_variables()
+
+
+def _has_aiter_flydsl_mxfp4():
+    try:
+        from aiter.ops.flydsl.kernels import moe_2stage_a16wmix
+    except ImportError:
+        return False
+    return hasattr(moe_2stage_a16wmix, "flydsl_a16w4_moe")
+
+
+def _check_aiter_flydsl_quark_backend(model):
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterFlydslMxfp4Experts,
+    )
+    from vllm.model_executor.layers.quantization.quark.quark_moe import (
+        QuarkOCP_MX_MoEMethod,
+    )
+
+    experts = model.model.layers[0].mlp.experts.routed_experts
+    assert isinstance(experts.quant_method, QuarkOCP_MX_MoEMethod)
+    assert experts.quant_method.moe_kernel is not None
+    assert isinstance(
+        experts.quant_method.moe_kernel.fused_experts, AiterFlydslMxfp4Experts
+    )
+
+
 @pytest.mark.skipif(not ROCM_AVAILABLE, reason="ROCm-specific backend")
 @pytest.mark.parametrize("num_tokens", [0, 1, 8, 33])
 def test_aiter_flydsl_clamped_mxfp4_oracle_and_graph(
-    num_tokens, monkeypatch, workspace_init
+    num_tokens, enable_aiter_flydsl_mxfp4, workspace_init
 ):
     """The opt-in backend preserves clamped BF16 math through graph replay."""
     from vllm.platforms.rocm import on_gfx942
 
     if not on_gfx942():
         pytest.skip("The AITER FlyDSL MXFP4 backend is restricted to gfx942")
-    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
-    monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
-    from aiter import QuantType, dtypes, get_torch_quant
 
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
@@ -2075,6 +2108,13 @@ def test_aiter_flydsl_clamped_mxfp4_oracle_and_graph(
         swiglu_limit=10.0,
         intermediate_size_per_partition_unpadded=288,
     )
+    if not _has_aiter_flydsl_mxfp4():
+        with pytest.raises(ValueError, match="requires AITER PR #6995"):
+            select_deepseek_v4_mxfp4_moe_backend(config)
+        return
+
+    from aiter import QuantType, dtypes, get_torch_quant
+
     backend, expert_cls = select_deepseek_v4_mxfp4_moe_backend(config)
     assert backend == Mxfp4MoeBackend.AITER_FLYDSL_MXFP4_BF16
     assert expert_cls is AiterFlydslMxfp4Experts
@@ -2197,6 +2237,143 @@ def test_aiter_flydsl_clamped_mxfp4_oracle_and_graph(
         assert torch.isfinite(output).all()
         torch.testing.assert_close(
             output.float() / rms, expected / rms, rtol=0.03, atol=0.03
+        )
+
+
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="ROCm-specific backend")
+def test_aiter_flydsl_mxfp4_quark_loading(
+    tmp_path, vllm_runner, enable_aiter_flydsl_mxfp4
+):
+    """A real Quark checkpoint loads and generates through the selected expert."""
+    from vllm.platforms.rocm import on_gfx942
+
+    if not on_gfx942():
+        pytest.skip("The AITER FlyDSL MXFP4 backend is restricted to gfx942")
+    if not _has_aiter_flydsl_mxfp4():
+        from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+            select_deepseek_v4_mxfp4_moe_backend,
+        )
+
+        config = replace(
+            make_dummy_moe_config(hidden_dim=256, intermediate_size=384),
+            moe_backend="aiter_flydsl_mxfp4_bf16",
+            swiglu_limit=10.0,
+        )
+        with pytest.raises(ValueError, match="requires AITER PR #6995"):
+            select_deepseek_v4_mxfp4_moe_backend(config)
+        return
+
+    from aiter import QuantType, dtypes, get_torch_quant
+    from safetensors.torch import save_file
+    from transformers import ExaoneMoeConfig, ExaoneMoeForCausalLM
+
+    from vllm import SamplingParams
+
+    torch.manual_seed(103)
+    config = ExaoneMoeConfig(
+        architectures=["ExaoneMoeForCausalLM"],
+        vocab_size=128,
+        hidden_size=256,
+        intermediate_size=384,
+        moe_intermediate_size=384,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        num_experts=8,
+        num_experts_per_tok=6,
+        num_shared_experts=0,
+        first_k_dense_replace=0,
+        mlp_layer_types=["sparse"],
+        layer_types=["full_attention"],
+        max_position_embeddings=128,
+        swiglu_limits=[10.0],
+    )
+    state = ExaoneMoeForCausalLM(config).to(torch.bfloat16).state_dict()
+    quantize = get_torch_quant(QuantType.per_1x32)
+    for name in list(state):
+        if state[name].numel() == 0:
+            del state[name]
+            continue
+        if name.endswith(".gate.e_score_correction_bias"):
+            state[name.replace(".gate.e_score", ".e_score")] = state.pop(name)
+            continue
+        if ".mlp.experts." not in name:
+            continue
+        prefix, projection = name.rsplit(".", 1)
+        for expert_id, weight in enumerate(state.pop(name)):
+            projections = (
+                zip(("gate_proj", "up_proj"), weight.chunk(2, dim=0))
+                if projection == "gate_up_proj"
+                else (("down_proj", weight),)
+            )
+            for projection_name, expert_weight in projections:
+                packed, scale = quantize(expert_weight.cuda(), quant_dtype=dtypes.fp4x2)
+                key = f"{prefix}.{expert_id}.{projection_name}"
+                state[f"{key}.weight"] = packed.view(torch.uint8).cpu().contiguous()
+                state[f"{key}.weight_scale"] = (
+                    scale.view(torch.uint8).cpu().contiguous()
+                )
+    config.quantization_config = {
+        "quant_method": "quark",
+        "export": {"pack_method": "reorder", "kv_cache_group": []},
+        "global_quant_config": {
+            "weight": {
+                "dtype": "fp4",
+                "qscheme": "per_group",
+                "group_size": 32,
+                "scale_format": "e8m0",
+                "is_dynamic": False,
+            },
+            "input_tensors": None,
+        },
+        "layer_type_quant_config": {},
+        "layer_quant_config": {},
+        "exclude": [
+            name.removesuffix(".weight")
+            for name in state
+            if name.endswith(".weight") and ".mlp.experts." not in name
+        ],
+    }
+    config.save_pretrained(tmp_path)
+    save_file(state, str(tmp_path / "model.safetensors"))
+
+    results = []
+    for backend in ("triton_unfused", "aiter_flydsl_mxfp4_bf16"):
+        with vllm_runner(
+            str(tmp_path),
+            dtype="bfloat16",
+            skip_tokenizer_init=True,
+            enforce_eager=True,
+            max_model_len=64,
+            max_num_seqs=2,
+            max_num_batched_tokens=64,
+            gpu_memory_utilization=0.05,
+            kernel_config={"moe_backend": backend},
+            attention_config={"backend": "TRITON_ATTN"},
+        ) as runner:
+            if backend == "aiter_flydsl_mxfp4_bf16":
+                runner.apply_model(_check_aiter_flydsl_quark_backend)
+            results.append(
+                runner.llm.generate(
+                    [{"prompt_token_ids": [1, 11, 23, 37]}],
+                    SamplingParams(
+                        temperature=0,
+                        max_tokens=4,
+                        ignore_eos=True,
+                        detokenize=False,
+                        logprobs=5,
+                    ),
+                )[0].outputs[0]
+            )
+    reference, actual = results
+    assert len(reference.token_ids) == len(actual.token_ids) == 4
+    assert reference.token_ids == actual.token_ids
+    assert reference.logprobs is not None and actual.logprobs is not None
+    for token_id, expected, observed in zip(
+        reference.token_ids, reference.logprobs, actual.logprobs
+    ):
+        assert observed[token_id].logprob == pytest.approx(
+            expected[token_id].logprob, abs=0.03
         )
 
 
