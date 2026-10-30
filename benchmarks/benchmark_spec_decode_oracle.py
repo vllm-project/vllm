@@ -113,7 +113,7 @@ class OracleProposer:
             pass
 
     def _resync(self, gen: np.ndarray, ref: np.ndarray) -> int | None:
-        """Return the index in ``ref`` after the last match of ``gen[-m:]``."""
+        """Return the match end in ``ref`` nearest to the current output length."""
         m = self.m
         if len(gen) < m or len(ref) <= m:
             return None
@@ -125,7 +125,7 @@ class OracleProposer:
         idx = np.flatnonzero(hits)
         if idx.size == 0:
             return None
-        end = int(idx[-1]) + m
+        end = int(idx[np.argmin(np.abs(idx + m - len(gen)))]) + m
         return end if end < len(ref) else None
 
     def propose(

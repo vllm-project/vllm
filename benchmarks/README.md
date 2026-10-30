@@ -45,7 +45,7 @@ Each run writes throughput and raw vLLM speculative-decoding metrics to JSON. Se
 When reading the results:
 
 - **Match scheduling settings.** Use `--no-async-scheduling` on baseline and EAGLE3 runs to match the scheduling mode used by CPU-side `custom_class` and `ngram` drafters.
-- **Outputs may differ from the saved reference.** The oracle attempts to realign using the last 3 generated tokens; `--strict` disables realignment. With `--ref`, `outputs_identical_frac` measures complete token-sequence equality, not task accuracy. The benchmark does not identify the cause of mismatches.
+- **Outputs may differ from the saved reference.** The oracle attempts to realign with the last 3 generated tokens. If they occur more than once, it chooses the match whose end is closest to the current output length; ties favor the earlier match. This is a heuristic, and `--strict` disables it. With `--ref`, `outputs_identical_frac` measures complete token-sequence equality, not task accuracy. The benchmark does not identify the cause of mismatches.
 - **Oracle statistics are diagnostic snapshots.** They are cumulative, include warm-up, and are written every 100 calls, so final calls may be missing and short runs may have no snapshot. `ms_per_call` times the Python proposer body, not a complete decoding step.
 
 See the [Qwen3-8B / H100 experiment report](https://gist.github.com/jiangLLM/e95756b974f385846e4277b7ee68d6c8) for measured results, settings, prompts, and limitations.
