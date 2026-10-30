@@ -96,8 +96,10 @@ def _fp8_step_load(c, r_w, r_ws, k, rg, st, row_major=False):
     shuffle lays a row group out in 32-column blocks of 16 rows, a chunk two of
     them (lanes 0-31, 32-63); ``k`` % 64 = 32 (a last quarter step): the lanes
     of a block past the row read its last block. ``row_major`` (vLLM's dense
-    layout, k % 64 == 0): the same registers from a row-major [N, K] weight --
-    lane l row 16 rg + l % 16, K bytes 128 st + 16 (l // 16) .. and + 64."""
+    layout, k % 32 == 0): the same registers from a row-major [N, K] weight --
+    lane l row 16 rg + l % 16, K bytes 128 st + 16 (l // 16) .. and + 64; with
+    k % 64 == 32 (TP8's shared expert, K = 288) the last step's upper lanes are
+    clamped into the row, as in the shuffled layout."""
     lane = c["lane"]
     j = lane // 16
     kg = k // 32
@@ -105,9 +107,15 @@ def _fp8_step_load(c, r_w, r_ws, k, rg, st, row_major=False):
         assert row_major, "gfx942 reads the runner's row-major FP8 copies only"
         return _fp8_step_load_942(r_w, r_ws, k, rg, st, lane)
     if const_expr(row_major):
-        assert k % 64 == 0
+        assert k % 32 == 0
         row = rg * 16 + lane % 16
-        lo_at = row * (k // 4) + st * 32 + j * 4
+        if const_expr(k % 64 == 0):
+            lo_at = row * (k // 4) + st * 32 + j * 4
+        else:
+            # K % 64 == 32 (TP8's shared expert, K = 288): the last step's
+            # upper lanes clamped into the row (``_fp8_step_mfma`` zeroes
+            # them on both sides)
+            lo_at = row * (k // 4) + fx.min(st * 32 + j * 4, k // 4 - 4)
         hi_at = row * (k // 4) + fx.min(2 * st + 1, k // 64 - 1) * 16 + j * 4
         lo = fx.Vector(
             bo.buffer_load(r_w, lo_at, vec_width=4, dtype=T.i32, cache_modifier=CM_NT)

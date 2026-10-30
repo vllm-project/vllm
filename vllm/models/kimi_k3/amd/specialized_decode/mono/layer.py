@@ -80,6 +80,7 @@ from vllm.models.kimi_k3.amd.specialized_decode.mono.common.sync import (
 )
 from vllm.models.kimi_k3.amd.specialized_decode.mono.stages import gemv as gemv
 from vllm.models.kimi_k3.amd.specialized_decode.mono.stages import moe as k2b
+from vllm.v1.attention.ops.flydsl_kernels import _run_compiled
 
 O0, O1 = NA, BLOCKS  # o_proj CTAs: every CTA past AttnRes's
 O_N = O1 - O0  # 200
@@ -913,7 +914,8 @@ def k2_launch(
     if m1c_in is not None and m1c.wide_kv(m1c_in["kv"]):
         key = replace(key, m1c_wide=True)
     f = build(key)
-    f(
+    _run_compiled(
+        f,
         core.data_ptr(),
         *(m1b.host_args(key.m1b_ranks, **m1b_in) if m1b_in is not None else [0] * 16),
         *(m1c.host_args(**m1c_in) if m1c_in is not None else [0] * 6),
@@ -945,5 +947,5 @@ def k2_launch(
         health.data_ptr(),
         alarm,
         ptr(tl),
-        stream=torch.cuda.current_stream(),
+        torch.cuda.current_stream(),
     )
