@@ -356,6 +356,57 @@ def test_max_num_active_seqs_caps_admission():
     assert scheduler.max_num_running_reqs == 16
 
 
+@pytest.mark.parametrize("max_loads", [None, 2])
+def test_max_num_inflight_kv_loads(max_loads):
+    """Async KV loads past --max-num-inflight-kv-loads wait without blocks; a
+    finished load holds its blocks until its request runs, and the next load
+    starts then."""
+    BLOCK_SIZE = 16
+    scheduler = create_scheduler(
+        block_size=BLOCK_SIZE,
+        max_num_inflight_kv_loads=max_loads,
+        use_kv_connector=mock_kv(matched_tokens=BLOCK_SIZE * 4, is_async=True),
+    )
+    requests = create_requests(
+        num_requests=5, num_tokens=BLOCK_SIZE * 5, block_size=BLOCK_SIZE
+    )
+    for request in requests:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    loading = [r for r in requests if r.status == RequestStatus.WAITING_FOR_REMOTE_KVS]
+    if max_loads is None:
+        assert loading == requests
+        return
+    assert loading == requests[:max_loads]
+    assert scheduler.num_inflight_kv_loads() == max_loads
+    manager = scheduler.kv_cache_manager.coordinator.single_type_managers[0]
+    for request in requests[max_loads:]:
+        assert request.status == RequestStatus.WAITING
+        assert not manager.req_to_blocks.get(request.request_id)
+
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=[],
+            req_id_to_index={},
+            sampled_token_ids=[],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+            kv_connector_output=KVConnectorOutput(
+                finished_recving={requests[0].request_id}
+            ),
+        ),
+    )
+    assert scheduler.num_inflight_kv_loads() == max_loads
+    scheduler.schedule()
+    assert requests[0].status == RequestStatus.RUNNING
+    assert requests[2].status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert requests[3].status == RequestStatus.WAITING
+    assert scheduler.num_inflight_kv_loads() == max_loads
+
+
 def _bind_hisparse_connector(scheduler):
     connector = object.__new__(HiSparseConnector)
     connector.connector_scheduler = HiSparseConnectorScheduler(async_speculative=False)

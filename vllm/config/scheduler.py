@@ -76,6 +76,17 @@ class SchedulerConfig:
     be ``<= max_num_seqs``. ``None`` (default) keeps current behavior.
     """
 
+    max_num_inflight_kv_loads: int | None = Field(default=None, ge=1)
+    """Maximum number of requests holding KV cache blocks for an async KV
+    connector load (e.g. a NIXL pull) before they run: loads in progress, or
+    finished and waiting to be scheduled. A request past it waits without
+    allocating until one of them runs or ends.
+
+    Such requests do not count toward ``max_num_seqs``, so without a limit a
+    burst of slow loads can hold blocks that running requests need for their
+    next steps. ``None`` (default) keeps current behavior.
+    """
+
     long_prefill_token_threshold: int = Field(default=0, ge=0)
     """For chunked prefill, a request is considered long if the prompt is
     longer than this number of tokens. 0 disables the cap (default).
