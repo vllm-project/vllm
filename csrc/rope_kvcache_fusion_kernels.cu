@@ -8,187 +8,139 @@
 
 namespace vllm {
 
-// Functional Q-output variant for the model-visible manual fusion path.
-//
-// One thread block owns one token. Threads rotate Q into a contiguous output,
-// rotate K directly into the paged cache, and copy V into the cache. K is never
-// materialized outside the cache because ordinary non-DCP decoder attention
-// consumes it from there. Keeping all work for a decode token in one CTA avoids
-// the scheduling overhead of separate per-head tasks at small decode shapes.
-template <typename qk_t, bool IS_NEOX, bool VECTORIZE_VALUE>
+// Rotates the first rot_dim elements of each head from src into dst and copies
+// the rest unchanged. The arithmetic matches the unfused rotary kernel.
+template <typename T, bool IS_NEOX>
+__device__ __forceinline__ void rotate_heads(
+    const T* __restrict__ src, const int64_t src_stride_head,
+    T* __restrict__ dst, const int64_t dst_stride_head,
+    const T* __restrict__ cos_sin, const int num_heads, const int rot_dim,
+    const int head_size) {
+  const int embed_dim = rot_dim / 2;
+  for (int i = threadIdx.x; i < num_heads * embed_dim; i += blockDim.x) {
+    const int head = i / embed_dim;
+    const int pair = i % embed_dim;
+    const float cos_f = static_cast<float>(VLLM_LDG(cos_sin + pair));
+    const float sin_f =
+        static_cast<float>(VLLM_LDG(cos_sin + pair + embed_dim));
+    const int x_idx = IS_NEOX ? pair : 2 * pair;
+    const int y_idx = IS_NEOX ? embed_dim + pair : 2 * pair + 1;
+    const T* head_src = src + head * src_stride_head;
+    T* head_dst = dst + head * dst_stride_head;
+    const float x = static_cast<float>(head_src[x_idx]);
+    const float y = static_cast<float>(head_src[y_idx]);
+    head_dst[x_idx] = static_cast<T>(x * cos_f - y * sin_f);
+    head_dst[y_idx] = static_cast<T>(y * cos_f + x * sin_f);
+  }
+  const int pass_dim = head_size - rot_dim;
+  for (int i = threadIdx.x; i < num_heads * pass_dim; i += blockDim.x) {
+    const int head = i / pass_dim;
+    const int offset = rot_dim + i % pass_dim;
+    dst[head * dst_stride_head + offset] = src[head * src_stride_head + offset];
+  }
+}
+
+// One thread block per token: rotates Q into a contiguous query_out, rotates K
+// directly into the paged cache and copies V there. Tokens past the end of
+// slot_mapping, or with a negative slot, only produce Q.
+template <typename T, bool IS_NEOX, bool VECTORIZE_VALUE>
 __global__ void fused_rope_and_reshape_cache_flash_q_out_kernel(
-    const int64_t* __restrict__ positions,  // [num_padded_tokens]
-    const qk_t* __restrict__ query,         // [num_padded_tokens, num_q_heads,
-                                            // head_size]
-    const qk_t* __restrict__ key,           // [num_padded_tokens, num_kv_heads,
-                                            // head_size]
-    const qk_t* __restrict__ value,         // [num_padded_tokens, num_kv_heads,
-                                            // head_size]
-    qk_t* __restrict__ query_out,  // contiguous, same logical shape as query
-    const qk_t* __restrict__ cos_sin_cache,  // [max_position, rot_dim]
-    qk_t* __restrict__ key_cache,    // [num_blocks, block_size, num_kv_heads,
-                                     // head_size]
-    qk_t* __restrict__ value_cache,  // same logical shape
+    const int64_t* __restrict__ positions,  // [num_tokens]
+    const T* __restrict__ query,            // [num_tokens, num_q_heads, head]
+    const T* __restrict__ key,              // [num_tokens, num_kv_heads, head]
+    const T* __restrict__ value,            // [num_tokens, num_kv_heads, head]
+    T* __restrict__ query_out,              // contiguous, shaped like query
+    const T* __restrict__ cos_sin_cache,    // [max_position, rot_dim]
+    T* __restrict__ key_cache,  // [num_blocks, block_size, num_kv_heads, head]
+    T* __restrict__ value_cache,  // same logical shape as key_cache
     const int64_t* __restrict__ slot_mapping,  // [num_cache_tokens]
-    const int64_t num_rope_tokens, const int64_t num_cache_tokens,
-    const int rot_dim, const int64_t query_stride_token,
-    const int64_t query_stride_head, const int64_t key_stride_token,
-    const int64_t key_stride_head, const int64_t value_stride_token,
-    const int64_t value_stride_head, const int64_t cos_sin_stride_token,
-    const int64_t key_cache_stride_block, const int64_t key_cache_stride_token,
-    const int64_t key_cache_stride_head, const int64_t value_cache_stride_block,
+    const int64_t num_cache_tokens, const int rot_dim,
+    const int64_t query_stride_token, const int64_t query_stride_head,
+    const int64_t key_stride_token, const int64_t key_stride_head,
+    const int64_t value_stride_token, const int64_t value_stride_head,
+    const int64_t cos_sin_stride_token, const int64_t key_cache_stride_block,
+    const int64_t key_cache_stride_token, const int64_t key_cache_stride_head,
+    const int64_t value_cache_stride_block,
     const int64_t value_cache_stride_token,
     const int64_t value_cache_stride_head, const int num_q_heads,
     const int num_kv_heads, const int head_size, const int block_size) {
-  const int64_t token_idx = blockIdx.x;
-  if (token_idx >= num_rope_tokens) {
+  const int64_t token = blockIdx.x;
+  const T* cos_sin = cos_sin_cache + positions[token] * cos_sin_stride_token;
+  rotate_heads<T, IS_NEOX>(query + token * query_stride_token,
+                           query_stride_head,
+                           query_out + token * num_q_heads * head_size,
+                           head_size, cos_sin, num_q_heads, rot_dim, head_size);
+
+  if (token >= num_cache_tokens) {
     return;
   }
-  const int64_t pos = positions[token_idx];
-  const qk_t* cos_sin_ptr = cos_sin_cache + pos * cos_sin_stride_token;
-  const int embed_dim = rot_dim / 2;
-
-  const int nq = num_q_heads * embed_dim;
-  for (int i = threadIdx.x; i < nq; i += blockDim.x) {
-    const int head_idx = i / embed_dim;
-    const int pair_idx = i % embed_dim;
-    const float cos_f = static_cast<float>(VLLM_LDG(cos_sin_ptr + pair_idx));
-    const float sin_f =
-        static_cast<float>(VLLM_LDG(cos_sin_ptr + pair_idx + embed_dim));
-    const int idx_x = IS_NEOX ? pair_idx : pair_idx * 2;
-    const int idx_y = IS_NEOX ? embed_dim + pair_idx : pair_idx * 2 + 1;
-    const qk_t* q_src =
-        query + token_idx * query_stride_token + head_idx * query_stride_head;
-    qk_t* q_dst = query_out + (token_idx * num_q_heads + head_idx) * head_size;
-    const float x_f = static_cast<float>(q_src[idx_x]);
-    const float y_f = static_cast<float>(q_src[idx_y]);
-    q_dst[idx_x] = static_cast<qk_t>(x_f * cos_f - y_f * sin_f);
-    q_dst[idx_y] = static_cast<qk_t>(y_f * cos_f + x_f * sin_f);
-  }
-
-  const int q_pass_dim = head_size - rot_dim;
-  const int nq_pass = num_q_heads * q_pass_dim;
-  for (int i = threadIdx.x; i < nq_pass; i += blockDim.x) {
-    const int head_idx = i / q_pass_dim;
-    const int head_offset = rot_dim + i % q_pass_dim;
-    const qk_t* q_src =
-        query + token_idx * query_stride_token + head_idx * query_stride_head;
-    qk_t* q_dst = query_out + (token_idx * num_q_heads + head_idx) * head_size;
-    q_dst[head_offset] = q_src[head_offset];
-  }
-
-  bool write_cache = token_idx < num_cache_tokens;
-  int64_t block_idx = 0;
-  int64_t page_offset = 0;
-  if (write_cache) {
-    const int64_t slot_idx = slot_mapping[token_idx];
-    write_cache = slot_idx >= 0;
-    if (write_cache) {
-      block_idx = slot_idx / block_size;
-      page_offset = slot_idx % block_size;
-    }
-  }
-  if (!write_cache) {
+  const int64_t slot = slot_mapping[token];
+  if (slot < 0) {
     return;
   }
+  const int64_t block_idx = slot / block_size;
+  const int64_t page_offset = slot % block_size;
+  rotate_heads<T, IS_NEOX>(key + token * key_stride_token, key_stride_head,
+                           key_cache + block_idx * key_cache_stride_block +
+                               page_offset * key_cache_stride_token,
+                           key_cache_stride_head, cos_sin, num_kv_heads,
+                           rot_dim, head_size);
 
-  const int nk = num_kv_heads * embed_dim;
-  for (int i = threadIdx.x; i < nk; i += blockDim.x) {
-    const int head_idx = i / embed_dim;
-    const int pair_idx = i % embed_dim;
-    const float cos_f = static_cast<float>(VLLM_LDG(cos_sin_ptr + pair_idx));
-    const float sin_f =
-        static_cast<float>(VLLM_LDG(cos_sin_ptr + pair_idx + embed_dim));
-    const int idx_x = IS_NEOX ? pair_idx : pair_idx * 2;
-    const int idx_y = IS_NEOX ? embed_dim + pair_idx : pair_idx * 2 + 1;
-    const qk_t* k_src =
-        key + token_idx * key_stride_token + head_idx * key_stride_head;
-    qk_t* k_dst = key_cache + block_idx * key_cache_stride_block +
-                  page_offset * key_cache_stride_token +
-                  head_idx * key_cache_stride_head;
-    const float x_f = static_cast<float>(k_src[idx_x]);
-    const float y_f = static_cast<float>(k_src[idx_y]);
-    const qk_t x_out = static_cast<qk_t>(x_f * cos_f - y_f * sin_f);
-    const qk_t y_out = static_cast<qk_t>(y_f * cos_f + x_f * sin_f);
-    k_dst[idx_x] = x_out;
-    k_dst[idx_y] = y_out;
-  }
-  const int k_pass_dim = head_size - rot_dim;
-  const int nk_pass = num_kv_heads * k_pass_dim;
-  for (int i = threadIdx.x; i < nk_pass; i += blockDim.x) {
-    const int head_idx = i / k_pass_dim;
-    const int head_offset = rot_dim + i % k_pass_dim;
-    const qk_t* k_src =
-        key + token_idx * key_stride_token + head_idx * key_stride_head;
-    qk_t* k_dst = key_cache + block_idx * key_cache_stride_block +
-                  page_offset * key_cache_stride_token +
-                  head_idx * key_cache_stride_head;
-    k_dst[head_offset] = k_src[head_offset];
-  }
-
+  const T* v_src = value + token * value_stride_token;
+  T* v_dst = value_cache + block_idx * value_cache_stride_block +
+             page_offset * value_cache_stride_token;
   if constexpr (VECTORIZE_VALUE) {
-    const qk_t* v_src = value + token_idx * value_stride_token;
-    qk_t* v_dst = value_cache + block_idx * value_cache_stride_block +
-                  page_offset * value_cache_stride_token;
     constexpr int vec_size = 8;
-    using vec_t = vec_n_t<qk_t, vec_size>;
+    using vec_t = vec_n_t<T, vec_size>;
     if (head_size % vec_size == 0 && value_stride_head % vec_size == 0 &&
         value_cache_stride_head % vec_size == 0 &&
         reinterpret_cast<uintptr_t>(v_src) % alignof(vec_t) == 0 &&
         reinterpret_cast<uintptr_t>(v_dst) % alignof(vec_t) == 0) {
-      const int head_vectors = head_size / vec_size;
-      for (int i = threadIdx.x; i < num_kv_heads * head_vectors;
-           i += blockDim.x) {
-        const int head = i / head_vectors;
-        const int offset = i % head_vectors;
-        reinterpret_cast<vec_t*>(v_dst +
-                                 head * value_cache_stride_head)[offset] =
-            reinterpret_cast<const vec_t*>(v_src +
-                                           head * value_stride_head)[offset];
+      const int head_vecs = head_size / vec_size;
+      for (int i = threadIdx.x; i < num_kv_heads * head_vecs; i += blockDim.x) {
+        const int head = i / head_vecs;
+        reinterpret_cast<vec_t*>(
+            v_dst + head * value_cache_stride_head)[i % head_vecs] =
+            reinterpret_cast<const vec_t*>(
+                v_src + head * value_stride_head)[i % head_vecs];
       }
       return;
     }
   }
-
-  const int nv = num_kv_heads * head_size;
-  for (int i = threadIdx.x; i < nv; i += blockDim.x) {
-    const int head_idx = i / head_size;
-    const int head_offset = i % head_size;
-    const qk_t* v_src =
-        value + token_idx * value_stride_token + head_idx * value_stride_head;
-    qk_t* v_dst = value_cache + block_idx * value_cache_stride_block +
-                  page_offset * value_cache_stride_token +
-                  head_idx * value_cache_stride_head;
-    v_dst[head_offset] = v_src[head_offset];
+  for (int i = threadIdx.x; i < num_kv_heads * head_size; i += blockDim.x) {
+    const int head = i / head_size;
+    const int offset = i % head_size;
+    v_dst[head * value_cache_stride_head + offset] =
+        v_src[head * value_stride_head + offset];
   }
 }
 
 }  // namespace vllm
 
-#define CALL_FUSED_ROPE_AND_RESHAPE_CACHE_FLASH_Q_OUT(IS_NEOX,                \
-                                                      VECTORIZE_VALUE)        \
-  do {                                                                        \
-    VLLM_STABLE_DISPATCH_HALF_TYPES(                                          \
-        query.scalar_type(), "qk_scalar_type", [&] {                          \
-          using qk_t = scalar_t;                                              \
-          vllm::fused_rope_and_reshape_cache_flash_q_out_kernel<              \
-              qk_t, IS_NEOX, VECTORIZE_VALUE><<<grid, block, 0, stream>>>(    \
-              positions.const_data_ptr<int64_t>(),                            \
-              query.const_data_ptr<qk_t>(), key.const_data_ptr<qk_t>(),       \
-              value.const_data_ptr<qk_t>(),                                   \
-              query_out.mutable_data_ptr<qk_t>(),                             \
-              cos_sin_cache.const_data_ptr<qk_t>(),                           \
-              key_cache.mutable_data_ptr<qk_t>(),                             \
-              value_cache.mutable_data_ptr<qk_t>(),                           \
-              slot_mapping.const_data_ptr<int64_t>(), num_rope_tokens,        \
-              num_cache_tokens, rot_dim, query_stride_token,                  \
-              query_stride_head, key_stride_token, key_stride_head,           \
-              value_stride_token, value_stride_head, cos_sin_stride_token,    \
-              key_cache_stride_block, key_cache_stride_token,                 \
-              key_cache_stride_head, value_cache_stride_block,                \
-              value_cache_stride_token, value_cache_stride_head, num_q_heads, \
-              num_kv_heads, head_size, block_size);                           \
-        });                                                                   \
+#define CALL_FUSED_ROPE_AND_RESHAPE_CACHE_FLASH_Q_OUT(IS_NEOX,                 \
+                                                      VECTORIZE_VALUE)         \
+  do {                                                                         \
+    VLLM_STABLE_DISPATCH_HALF_TYPES(                                           \
+        query.scalar_type(), "qk_scalar_type", [&] {                           \
+          using qk_t = scalar_t;                                               \
+          vllm::fused_rope_and_reshape_cache_flash_q_out_kernel<               \
+              qk_t, IS_NEOX, VECTORIZE_VALUE><<<grid, block, 0, stream>>>(     \
+              positions.const_data_ptr<int64_t>(),                             \
+              query.const_data_ptr<qk_t>(), key.const_data_ptr<qk_t>(),        \
+              value.const_data_ptr<qk_t>(),                                    \
+              query_out.mutable_data_ptr<qk_t>(),                              \
+              cos_sin_cache.const_data_ptr<qk_t>(),                            \
+              key_cache.mutable_data_ptr<qk_t>(),                              \
+              value_cache.mutable_data_ptr<qk_t>(),                            \
+              slot_mapping.const_data_ptr<int64_t>(), num_cache_tokens,        \
+              rot_dim, query_stride_token, query_stride_head,                  \
+              key_stride_token, key_stride_head, value_stride_token,           \
+              value_stride_head, cos_sin_stride_token, key_cache_stride_block, \
+              key_cache_stride_token, key_cache_stride_head,                   \
+              value_cache_stride_block, value_cache_stride_token,              \
+              value_cache_stride_head, num_q_heads, num_kv_heads, head_size,   \
+              block_size);                                                     \
+        });                                                                    \
   } while (false)
 
 // Manual-fusion operator with caller-owned Q storage. Writes rotated Q to the
