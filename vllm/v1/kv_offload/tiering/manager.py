@@ -699,7 +699,7 @@ class TieringOffloadingManager(OffloadingManager):
             failed_keys = transfer_job.keys
 
         # Keys the promotion skipped because they were already in the
-        # primary were not fetched from the tier for this request; drop
+        # primary and were not fetched from the tier for this request; drop
         # their entries so they are reported as host hits.
         already_in_primary = set(transfer_job.requested_keys) - set(transfer_job.keys)
         _maybe_update_load_sources(set(failed_keys) | already_in_primary)
@@ -954,8 +954,7 @@ class TieringOffloadingManager(OffloadingManager):
             # silently.
             return None
         if primary_write_result is None:
-            # Primary tier is full; caller should treat the chunk as unavailable
-            # rather than retrying indefinitely.
+            # Primary tier is full
             self._metrics.on_promotion_allocation_failure()
             return None
 
@@ -1382,7 +1381,6 @@ class TieringOffloadingManager(OffloadingManager):
         # safe: _maybe_finalize_request() holds off while pending_cascade_keys is
         # non-empty, so nothing finalizes early and the list still drains.
         self._flush_pending_cascades()
-        self.primary_tier.on_schedule_end(context)
         for tier in self.secondary_tiers:
             tier.on_schedule_end(context)
 
@@ -1464,6 +1462,9 @@ class TieringOffloadingManager(OffloadingManager):
         for tier_idx, pending_by_ctx in self._pending_load_submissions.items():
             for entry in pending_by_ctx.values():
                 self._inflight_promotion_keys.difference_update(entry.keys)
+        assert not self._inflight_promotion_keys, (
+            "inflight promotion keys survived drain + pending-submission removal"
+        )
 
         # Deferred promotion submissions reserve primary slots that the
         # reset below invalidates; their submit_load() has not yet been
