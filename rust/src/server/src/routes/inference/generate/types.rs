@@ -132,6 +132,9 @@ pub(super) struct GenerateResponseStreamChoice {
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct GenerateStreamResponse {
     pub request_id: String,
+    /// Always `tokens`: the only supported level. Python serializes it on
+    /// every chunk.
+    pub output_mode: GenerateOutputMode,
     pub choices: Vec<GenerateResponseStreamChoice>,
     pub usage: Option<Usage>,
     pub prompt_token_ids: Option<Vec<u32>>,
@@ -143,6 +146,13 @@ pub(super) struct GenerateStreamResponse {
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct GenerateResponse {
     pub request_id: String,
+    pub model: String,
+    pub created: u64,
+    /// Always present, as in Python, which reports token counts and cached
+    /// prompt tokens here for disaggregated serving.
+    pub usage: Usage,
+    /// Always `tokens`: the only supported level.
+    pub output_mode: GenerateOutputMode,
     pub choices: Vec<GenerateResponseChoice>,
     pub prompt_logprobs: Option<Vec<Option<HashMap<u32, GenerateLogprob>>>>,
     /// Base64 `.npy` float32 array, as Python `numpy2base64` encodes it.
