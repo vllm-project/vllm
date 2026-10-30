@@ -370,7 +370,7 @@ def test_num_lookahead_tokens_per_method(
     object.__setattr__(
         speculative_config,
         "draft_model_config",
-        SimpleNamespace(hf_config=hf_config),
+        SimpleNamespace(hf_config=hf_config, architectures=[]),
     )
 
     config = _config_without_post_init(speculative_config)

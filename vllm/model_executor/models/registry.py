@@ -945,6 +945,10 @@ class _ModelInfo:
     supports_kv_cache_grouping: bool
     supported_video_pruning_methods: tuple[str, ...]
     supports_mm_device_do_normalize: bool
+    # Fully-qualified name of `SpeculativeDraftModel.speculator_config_class`.
+    speculator_config_class: str | None
+    # Whether a draft model may reuse the target's input embedding under PP.
+    may_use_target_embed: bool
 
     @staticmethod
     def from_model_cls(model: type[nn.Module]) -> "_ModelInfo":
@@ -983,6 +987,12 @@ class _ModelInfo:
             supports_mm_device_do_normalize=getattr(
                 model, "supports_mm_device_do_normalize", False
             ),
+            speculator_config_class=(
+                f"{config_cls.__module__}.{config_cls.__qualname__}"
+                if (config_cls := getattr(model, "speculator_config_class", None))
+                else None
+            ),
+            may_use_target_embed=hasattr(model, "has_own_embed_tokens"),
         )
 
 
