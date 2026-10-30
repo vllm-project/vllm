@@ -35,6 +35,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_tp_mapping impor
     MoRIIOWriteTPMapping,
     compute_write_tp_mapping,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio.stats import (
+    MoRIIOKVConnectorStats,
+)
 
 from .utils import make_moriio_writer
 
@@ -70,7 +73,9 @@ def _fake_worker(
     )
     wrapper._mark_transfer_terminal_locked = lambda transfer_id: None
     wrapper._is_transfer_terminal_locked = lambda transfer_id: False
-    worker = SimpleNamespace(moriio_wrapper=wrapper, tp_rank=tp_rank)
+    worker = SimpleNamespace(
+        moriio_wrapper=wrapper, tp_rank=tp_rank, xfer_stats=MoRIIOKVConnectorStats()
+    )
     if set_remote_dp_size_local is not None:
         worker.remote_dp_size_local = set_remote_dp_size_local
     return worker
@@ -295,7 +300,15 @@ def test_execute_write_task_writes_every_fanout_target():
     def _prepare_transfer_plan(
         task, request_info, remote_moriio_meta, remote_engine_id=None, target=None
     ):
-        return "plan"
+        return LayerTransferPlan(
+            request_id=task.request_id,
+            transfer_id=task.transfer_id,
+            layer_name=task.layer_name,
+            sess_idx=0,
+            transfer_local_offsets=[0, 64],
+            transfer_remote_offsets=[0, 64],
+            transfer_sizes=[64, 32],
+        )
 
     def _do_layer_write(plan, sessions):
         write_sessions.append(sessions)
@@ -320,6 +333,8 @@ def test_execute_write_task_writes_every_fanout_target():
         "status-remote-engine_dp0_tp2",
         "status-remote-engine_dp0_tp3",
     ]
+    assert (info.transfer_bytes, info.transfer_descs) == (192, 4)
+    assert info.transfer_start is not None
 
 
 def test_fanout_write_done_notifies_every_target_after_completion():
@@ -545,7 +560,10 @@ def test_deferred_write_timeout_fails_transfer_on_every_decode_rank():
     wrapper.send_notify = lambda tid, ip, port, message_type: sent.append(
         (ip, port, message_type)
     )
-    writer = make_moriio_writer(SimpleNamespace(moriio_wrapper=wrapper, tp_rank=0))
+    stats = MoRIIOKVConnectorStats()
+    writer = make_moriio_writer(
+        SimpleNamespace(moriio_wrapper=wrapper, tp_rank=0, xfer_stats=stats)
+    )
     task = _write_task(
         "tA",
         "10.0.0.1",
@@ -560,6 +578,8 @@ def test_deferred_write_timeout_fails_transfer_on_every_decode_rank():
 
     assert writer._deferred_tasks == []
     assert [ack.transfer_id for ack in wrapper.done_req_ids] == ["tA"]
+    assert stats.data["num_kv_expired_reqs"] == [1]
+    assert stats.data["num_failed_notifications"] == []
     # Global DP ranks 0-3, two per pod: the owning rank is unknown.
     assert sent == [
         (host, 20000 + get_port_offset(local_rank, 0), "write_failed")
@@ -581,7 +601,11 @@ def test_deferred_write_timeout_notifies_every_fanout_target():
     wrapper.send_notify = lambda tid, ip, port, message_type: sent.append(
         (ip, port, message_type)
     )
-    writer = make_moriio_writer(SimpleNamespace(moriio_wrapper=wrapper, tp_rank=0))
+    writer = make_moriio_writer(
+        SimpleNamespace(
+            moriio_wrapper=wrapper, tp_rank=0, xfer_stats=MoRIIOKVConnectorStats()
+        )
+    )
     task = _write_task(
         "tA",
         "10.0.0.1",
@@ -640,12 +664,14 @@ def test_write_failed_is_reported_as_failed_recving_on_owning_rank():
         transfer_id_to_request_id={"tA": "req-1"},
         _unmatched_write_failures=OrderedDict(),
         get_finished=lambda: (set(), set()),
+        xfer_stats=MoRIIOKVConnectorStats(),
     )
 
     results = MoRIIOConnectorWorker.get_transfer_results(worker)
 
     assert results.finished_recving == {"req-1"}
     assert results.failed_recving == {"req-1"}
+    assert worker.xfer_stats.data["num_failed_transfers"] == [1]
     assert wrapper.pop_finished_write_req_ids() == set()
     assert list(worker._unmatched_write_failures) == ["tOtherRank"]
 
