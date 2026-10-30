@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
 
 from pydantic import model_validator
-from typing_extensions import Self
 
 from vllm.config.utils import config, get_hash_factors, hash_factors
 
@@ -45,15 +44,17 @@ class EngramConfig:
     dp_shared_memory: bool | None = None
     """Share CPU-offloaded embedding weights between co-located
     DP replicas. Each node stores one copy of every TP shard, reducing host
-    memory without per-step Engram DP collectives. Requires sufficient
-    /dev/shm capacity and a shared IPC namespace. Defaults to enabled whenever
-    the other settings allow it, falling back to per-replica tables when DP
-    replicas are not co-located on one node or /dev/shm cannot hold them."""
+    memory without per-step Engram DP collectives. Uses host-NUMA cuMem shared
+    by FABRIC handle where supported, else /dev/shm (which then needs capacity
+    and a shared IPC namespace). Defaults to enabled whenever the other settings
+    allow it, falling back to per-replica tables when DP replicas are not
+    co-located on one node or the host cannot hold them."""
 
     use_thp: bool = False
     """Back private CPU-offloaded tables with transparent huge pages (best
     effort, falls back to ordinary pinned pages). Prefaulting the tables at
-    startup takes longer. Requires cpu_offload without dp_shared_memory."""
+    startup takes longer. Requires cpu_offload without dp_shared_memory.
+    Always on for private tables on ROCm."""
 
     @model_validator(mode="after")
     def _validate_shared_memory(self) -> Self:

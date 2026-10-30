@@ -136,7 +136,7 @@ def apply_grammar_bitmask(
         if req_id in struct_out_req_ids:
             struct_out_req_batch_indices[req_id] = logit_index
 
-    out_indices = []
+    out_indices: list[int] = []
 
     # Reorder the bitmask to match the order of the requests in the batch.
     sorted_bitmask_tensor = torch.full(
@@ -146,15 +146,18 @@ def apply_grammar_bitmask(
         pin_memory=PIN_MEMORY,
     )
     sorted_bitmask = sorted_bitmask_tensor.numpy()
+    mask_stride = grammar_bitmask.shape[0] // len(
+        grammar_output.structured_output_request_ids
+    )
     cumulative_index = 0
     for req_id in grammar_output.structured_output_request_ids:
-        num_spec_tokens = len(spec_tokens.get(req_id, ()))
+        num_rows = 1 + len(spec_tokens.get(req_id, ()))
         if (logit_idx := struct_out_req_batch_indices.get(req_id)) is not None:
-            for i in range(1 + num_spec_tokens):
-                bitmask_index = logit_idx + i
-                sorted_bitmask[bitmask_index] = grammar_bitmask[cumulative_index + i]
-                out_indices.append(bitmask_index)
-        cumulative_index += 1 + num_spec_tokens
+            sorted_bitmask[logit_idx : logit_idx + num_rows] = grammar_bitmask[
+                cumulative_index : cumulative_index + num_rows
+            ]
+            out_indices.extend(range(logit_idx, logit_idx + num_rows))
+        cumulative_index += mask_stride
 
     # Copy async to device.
     grammar_bitmask = sorted_bitmask_tensor.to(logits.device, non_blocking=True)

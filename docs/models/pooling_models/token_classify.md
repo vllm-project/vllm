@@ -43,7 +43,7 @@ The BAAI/bge-m3 model leverages token classification for sparse retrieval. For m
 
 | Architecture | Models | Example HF Models | [LoRA](../../features/lora.md) | [PP](../../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----------------- | --------------------------- | --------------------------------------- |
-| `BertForTokenClassification` | bert-based | `boltuix/NeuroBERT-NER` (see note), etc. | | |
+| `BertForTokenClassification` | bert-based | `boltuix/NeuroBERT-NER` (see note), etc. | ✅︎ | |
 | `ModernBertForTokenClassification` | ModernBERT-based | `disham993/electrical-ner-ModernBERT-base` | | |
 | `OpenAIPrivacyFilterForTokenClassification` | gpt-oss-based encoder | `openai/privacy-filter` | | |
 | `Qwen3ForTokenClassification`<sup>C</sup> | Qwen3-based | `bd2lcco/Qwen3-0.6B-finetuned` | | |
@@ -64,11 +64,7 @@ If your model is not in the above list, we will try to automatically convert the
 
 | Architecture                                  | Models              | Inputs            | Example HF Models                          | [LoRA](../../features/lora.md) | [PP](../../serving/parallelism_scaling.md) |
 | --------------------------------------------- | ------------------- | ----------------- | ------------------------------------------ | ------------------------------ | ------------------------------------------ |
-| `Qwen3ASRForcedAlignerForTokenClassification` | Qwen3-ForcedAligner | T + A<sup>+</sup> | `Qwen/Qwen3-ForcedAligner-0.6B` (see note) |                                | ✅︎                                         |
-
-!!! note
-    Forced alignment usage requires `--hf-overrides '{"architectures": ["Qwen3ASRForcedAlignerForTokenClassification"]}'`.
-    Please refer to [examples/pooling/token_classify/forced_alignment_offline.py](../../../examples/pooling/token_classify/forced_alignment_offline.py).
+| `Qwen3ASRForcedAlignerForTokenClassification` | Qwen3-ForcedAligner | T + A<sup>+</sup> | `Qwen/Qwen3-ForcedAligner-0.6B`            |                                | ✅︎                                         |
 
 ### Reward Models
 

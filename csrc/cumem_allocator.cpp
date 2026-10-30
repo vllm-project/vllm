@@ -203,38 +203,29 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
   }
 #endif
 
-  CUmemAccessDesc accessDesc = {};
-  accessDesc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-  accessDesc.location.id = device;
-  accessDesc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
-
-  CUDA_CHECK(cuMemSetAccess(d_mem, size, &accessDesc, 1));
-  if (error_code != 0) {
-    return;
-  }
-
-#ifdef USE_ROCM
-  // ROCm-only: zero the freshly (re)mapped region.
-  //
-  // On some amdgpu driver versions the physical VRAM backing a buffer is not
-  // scrubbed on release, so the pages handed back here (e.g. on wake_up after a
-  // sleep that discarded a tag) can still contain stale data from a previously
-  // freed allocation -- possibly from another process. Callers of the device
-  // allocator expect newly mapped memory to be well defined; in particular
-  // hybrid Mamba / gated-delta-net (GDN) models keep a persisted conv/recurrent
-  // state cache, and a new sequence that reads an unzeroed slot will propagate
-  // garbage/NaN, collapsing generation to token id 0 (decoded as "!").
-  //
-  // This is scoped to the ROCm path on purpose: the CUDA path is unchanged.
-  // Use CUDA_CHECK so a failure sets the global error_code; the Python caller
-  // (python_create_and_map) only inspects error_code, so returning without
-  // setting it would make a failed memset look successful and still hand back
-  // unzeroed memory.
-  CUDA_CHECK((CUresult)hipMemset(reinterpret_cast<void*>(d_mem), 0, size));
-  if (error_code != 0) {
-    return;
-  }
+#if defined(USE_ROCM) && HIP_VERSION >= 70200000
+  // Also map for the host, as PyTorch does for its expandable segments: on
+  // ROCm >= 7.2, Tensor.item() on a large-BAR device dereferences VRAM
+  // directly from the host, which segfaults on a device-only mapping.
+  constexpr int num_desc = 2;
+#else
+  constexpr int num_desc = 1;
 #endif
+  CUmemAccessDesc accessDesc[num_desc] = {};
+  accessDesc[0].location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+  accessDesc[0].location.id = device;
+  accessDesc[0].flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+#if defined(USE_ROCM) && HIP_VERSION >= 70200000
+  accessDesc[1].location.type = hipMemLocationTypeHost;
+  accessDesc[1].location.id = 0;  // ignored
+  accessDesc[1].flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+#endif
+
+  CUDA_CHECK(cuMemSetAccess(d_mem, size, accessDesc, num_desc));
+  if (error_code != 0) {
+    return;
+  }
+
   // std::cout << "create_and_map: device=" << device << ", size=" << size << ",
   // d_mem=" << d_mem << ", p_memHandle=" << p_memHandle << std::endl;
 }

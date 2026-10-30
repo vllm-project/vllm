@@ -1,0 +1,94 @@
+meta:
+  title: "K2-Horizon-32B"
+  slug: "k2-horizon-32b"
+  provider: "IFM"
+  description: "Dense long-context model for reasoning research and high-capacity serving"
+  date_added: 2026-08-31
+  date_updated: 2026-09-02
+  tasks: [text]
+  performance_headline: "34.78B stored parameters including embeddings, with native vLLM execution and up to 512K context"
+  related_recipes: ["IFM/K2-Horizon-7B", "IFM/K2-Horizon-MoVA-36B-A4B"]
+  hardware:
+    h200: verified
+model:
+  model_id: "IFM/K2-Horizon-32B"
+  architecture: dense
+  parameter_count: "34.78B"
+  active_parameters: "34.78B"
+  context_length: 524288
+  base_args: ["--trust-remote-code", "--chat-template-content-format", "string", "--dtype", "bfloat16"]
+  base_env: {}
+features:
+  reasoning:
+    description: "Extract K2-Horizon reasoning into message.reasoning"
+    args: ["--reasoning-parser", "k2_horizon"]
+  tool_calling:
+    description: "Enable automatic tool choice with the K2-Horizon parser"
+    args: ["--enable-auto-tool-choice", "--tool-call-parser", "k2_horizon"]
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 84
+    description: "BF16 serving runtime with native vLLM execution"
+compatible_strategies: [single_node_tp, multi_node_tp, multi_node_tp_pp]
+hardware_overrides: {}
+strategy_overrides:
+  single_node_tp:
+    tp: 2
+guide: |
+  ## Overview
+
+  K2-Horizon-32B is a large dense model in the IFM K2-Horizon family,
+  with 34.78B stored parameters including embeddings and support for up to
+  524,288 tokens of context.
+
+  K2-Horizon is an open-weight IFM model family built for transparent
+  foundation-model research, staged checkpoint analysis, and practical
+  deployment. The series spans compact dense models for local experimentation,
+  dense mid-size and large models such as K2-Horizon-32B for high-quality
+  research workloads, and mixture-of-expert (MoE) models for higher-capacity
+  serving.
+
+  ## Launch Commands
+
+  ```bash
+  vllm serve IFM/K2-Horizon-32B \
+    --tensor-parallel-size 2 \
+    --trust-remote-code \
+    --chat-template-content-format string \
+    --dtype bfloat16 \
+    --reasoning-parser k2_horizon \
+    --enable-auto-tool-choice \
+    --tool-call-parser k2_horizon
+  ```
+
+  ## Client usage
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(
+      api_key="EMPTY", base_url="http://localhost:8000/v1", timeout=3600
+  )
+
+  resp = client.chat.completions.create(
+      model="IFM/K2-Horizon-32B",
+      messages=[{"role": "user", "content": "Give me three primes above 100."}],
+      temperature=1.0, top_p=0.95, max_tokens=2048,
+  )
+  print(resp.choices[0].message.content)
+  ```
+
+  ### Thinking modes
+
+  The model supports selectable thinking through `chat_template_kwargs`, per
+  request or server-wide via `--default-chat-template-kwargs`:
+
+  - `{"reasoning_effort": "high"}` — full thinking (default).
+  - `{"reasoning_effort": "medium"}` — faster thinking.
+  - `{"reasoning_effort": "low"}` — fastest thinking.
+
+  ## References
+
+  - [IFM/K2-Horizon-32B on Hugging Face](https://huggingface.co/IFM/K2-Horizon-32B)
+  - [K2 Horizon Collection](https://huggingface.co/collections/IFM/k2-horizon)

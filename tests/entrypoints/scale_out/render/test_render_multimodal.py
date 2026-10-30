@@ -105,6 +105,36 @@ async def test_chat_completion_render_with_base64_image_url(
 
 
 @pytest.mark.asyncio
+async def test_chat_completion_render_rejects_local_file_when_disabled(
+    vision_client,
+):
+    """A file URL without `--allowed-local-media-path` is a client error."""
+    response = await vision_client.post(
+        "/v1/chat/completions/render",
+        json={
+            "model": VISION_MODEL_NAME,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "file:///tmp/disallowed.png"},
+                        },
+                        {"type": "text", "text": "What's in this image?"},
+                    ],
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["type"] == "BadRequestError"
+    assert "--allowed-local-media-path" in error["message"]
+
+
+@pytest.mark.asyncio
 async def test_tokenize_matches_render_for_multimodal_input(
     vision_client,
     local_asset_server,
