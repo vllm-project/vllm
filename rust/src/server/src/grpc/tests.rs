@@ -481,6 +481,10 @@ async fn start_grpc_test_server(
     let (health_reporter, health_service) = health_reporter();
     health_reporter.set_serving::<InferenceServer<InferenceServiceImpl>>().await;
     health_reporter.set_serving::<ControlServer<ControlServiceImpl>>().await;
+    let services = vec![
+        <InferenceServer<InferenceServiceImpl> as tonic::server::NamedService>::NAME,
+        <ControlServer<ControlServiceImpl> as tonic::server::NamedService>::NAME,
+    ];
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind grpc listener");
     let addr = listener.local_addr().expect("local addr");
@@ -493,7 +497,7 @@ async fn start_grpc_test_server(
             .add_service(inference_service)
             .serve_with_incoming_shutdown(incoming, shutdown.clone().cancelled_owned());
         let health_monitor =
-            super::monitor_health(health_reporter, engine_health, shutdown.clone());
+            super::monitor_health(health_reporter, services, engine_health, shutdown.clone());
         let server = async move {
             let result = server.await;
             shutdown.cancel();

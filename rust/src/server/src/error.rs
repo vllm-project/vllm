@@ -98,11 +98,17 @@ impl IntoResponse for ApiError {
 }
 
 /// Classify a text-pipeline submit failure: request validation failures are
-/// the client's fault and map to HTTP 400, mirroring the Python frontend.
-/// Everything else stays an internal 500.
+/// the client's fault and map to HTTP 400, mirroring the Python frontend. A
+/// request that cannot be taken now maps to 503. Everything else stays an
+/// internal 500.
 pub fn text_submit_error(context: &'static str, error: vllm_text::Error) -> ApiError {
     if error.is_request_validation_error() {
         return invalid_request!(param = error.param(), "{error}");
+    }
+    if error.is_unavailable() {
+        return ApiError::ServiceUnavailable {
+            message: error.to_report_string(),
+        };
     }
     server_error!("{}: {}", context, error.to_report_string())
 }
@@ -112,6 +118,11 @@ pub fn text_submit_error(context: &'static str, error: vllm_text::Error) -> ApiE
 pub fn chat_submit_error(context: &'static str, error: vllm_chat::Error) -> ApiError {
     if error.is_request_validation_error() {
         return invalid_request!(param = error.param(), "{error}");
+    }
+    if error.is_unavailable() {
+        return ApiError::ServiceUnavailable {
+            message: error.to_report_string(),
+        };
     }
     server_error!("{}: {}", context, error.to_report_string())
 }

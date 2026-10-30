@@ -194,12 +194,17 @@ impl TextLlm {
     /// Create a new text-generation facade from an [`Llm`], such as a
     /// [`vllm_llm::EngineCoreLlm`], plus a text backend.
     pub fn new(llm: impl Llm, backend: DynTextBackend) -> Self {
+        Self::from_boxed(Box::new(llm), backend)
+    }
+
+    /// Create a new text-generation facade from an already boxed [`Llm`].
+    pub fn from_boxed(llm: Box<dyn Llm>, backend: DynTextBackend) -> Self {
         // The engine-reported value reflects the post-profiling, auto-fitted
         // KV cache limit used at runtime.
         let max_model_len = llm.info().max_model_len;
 
         Self {
-            llm: Box::new(llm),
+            llm,
             processor: TextRequestProcessor::new(backend, max_model_len),
         }
     }
