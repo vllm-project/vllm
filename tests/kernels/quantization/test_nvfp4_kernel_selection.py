@@ -30,3 +30,10 @@ def test_w4a16_kernel_does_not_precede_w4a4_kernels(w4a4_kernel):
         f"{w4a4_kernel.__name__} must be preferred over "
         f"{FlashInferCuteDslNvFp4W4A16LinearKernel.__name__}"
     )
+
+
+def test_b12x_precedes_flashinfer_cutlass_on_sm12x():
+    candidates = _POSSIBLE_NVFP4_KERNELS[PlatformEnum.CUDA]
+    assert candidates.index(FlashInferB12xNvFp4LinearKernel) < candidates.index(
+        FlashInferCutlassNvFp4LinearKernel
+    )
