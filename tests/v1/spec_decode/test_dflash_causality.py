@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Config-only DFlash behavior.
+"""DFlash model and config behavior.
 
 ``dflash_has_any_non_causal`` decides pre-build whether the draft needs a
 non-causal-capable backend, so its branch table (explicit override, SWA-derived
@@ -10,12 +10,16 @@ per-layer causality, and the no-``layer_types`` fallback) is worth pinning.
 from types import SimpleNamespace
 
 import pytest
+import torch
+import torch.nn as nn
 
 from vllm.model_executor.models.qwen3_dflash import (
     _dflash_layer_causal,
+    _DFlashAttention,
     _get_dflash_fc_input_size,
     dflash_has_any_non_causal,
 )
+from vllm.v1.attention.backend import AttentionType, MultipleOf
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     get_eagle3_aux_layers_from_config,
 )
@@ -125,3 +129,71 @@ def test_eagle_aux_layers_preserves_legacy_layer_ids(config_name):
     assert get_eagle3_aux_layers_from_config(vllm_config.speculative_config) == tuple(
         layer_ids
     )
+
+
+class _MultipleOf16Backend:
+    @classmethod
+    def get_name(cls):
+        return cls.__name__
+
+    @classmethod
+    def get_supported_kernel_block_sizes(cls, kv_cache_spec=None):
+        return [MultipleOf(16)]
+
+
+class _FixedBlockBackend(_MultipleOf16Backend):
+    @classmethod
+    def get_supported_kernel_block_sizes(cls, kv_cache_spec=None):
+        return [16, 32, 64]
+
+
+class _LargeBlockBackend(_MultipleOf16Backend):
+    @classmethod
+    def get_supported_kernel_block_sizes(cls, kv_cache_spec=None):
+        return [256]
+
+
+def _make_attention(backend):
+    attention = _DFlashAttention.__new__(_DFlashAttention)
+    nn.Module.__init__(attention)
+    attention.attn_type = AttentionType.DECODER
+    attention.sliding_window = None
+    attention.kv_cache_dtype = "auto"
+    attention.kv_cache_torch_dtype = torch.bfloat16
+    attention.num_kv_heads = 8
+    attention.head_size = 128
+    attention.head_size_v = 128
+    attention.attn_backend = backend
+    attention.layer_name = "draft"
+    return attention
+
+
+def _make_vllm_config(use_mla: bool):
+    # Ling 3.0 Flash at TP=4: 512-token MLA/KDA target page of 512 * 1152 bytes.
+    return SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=512, mamba_page_size_padded=512 * 1152),
+        model_config=SimpleNamespace(use_mla=use_mla),
+    )
+
+
+@pytest.mark.parametrize(
+    ("backend", "use_mla", "expected_block_size"),
+    [
+        (_MultipleOf16Backend, True, 128),
+        (_FixedBlockBackend, True, 64),
+        (_MultipleOf16Backend, False, 512),
+    ],
+)
+def test_dflash_kv_block_fits_hybrid_mla_target_page(
+    backend, use_mla: bool, expected_block_size: int
+):
+    spec = _make_attention(backend).get_kv_cache_spec(_make_vllm_config(use_mla))
+
+    assert spec.block_size == expected_block_size
+
+
+def test_dflash_kv_block_rejects_backend_without_fitting_block():
+    attention = _make_attention(_LargeBlockBackend)
+
+    with pytest.raises(NotImplementedError, match="no kernel block size"):
+        attention.get_kv_cache_spec(_make_vllm_config(use_mla=True))
