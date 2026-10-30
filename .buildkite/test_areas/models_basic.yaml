@@ -229,7 +229,6 @@ steps:
       kernels/attention/test_kimi_k3_mla_fused_epilogue.py
   mirror:
     amd:
-      automatic_shard: true
       label: ":amd: (MI355) Kimi K3"
       dind: false
       device: mi355_1
