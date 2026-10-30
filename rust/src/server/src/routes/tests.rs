@@ -3396,6 +3396,7 @@ async fn non_stream_chat_returns_json_response() {
     let response_object = json.as_object().expect("response object");
     let choice = json["choices"][0].as_object().expect("choice object");
     let message = choice["message"].as_object().expect("message object");
+    let usage = json["usage"].as_object().expect("usage object");
     for (object, key) in [
         (response_object, "service_tier"),
         (response_object, "system_fingerprint"),
@@ -3412,6 +3413,8 @@ async fn non_stream_chat_returns_json_response() {
         (message, "audio"),
         (message, "function_call"),
         (message, "reasoning"),
+        // No reasoning parser is configured, so reasoning tokens are unknown.
+        (usage, "completion_tokens_details"),
     ] {
         assert!(
             object.contains_key(key) && object[key].is_null(),
@@ -3420,6 +3423,61 @@ async fn non_stream_chat_returns_json_response() {
     }
     // ...except `tool_calls`, which Python pops from the payload when empty.
     assert!(!message.contains_key("tool_calls"), "{json}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_return_prompt_text_reports_the_rendered_prompt() {
+    for stream in [false, true] {
+        let (mut app, engine_task) = test_app_with_backend_and_engine_request_check(
+            Arc::new(FakeChatBackend::new()),
+            |_| {},
+        )
+        .await;
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "stream": stream,
+                            "messages": [{"role": "user", "content": "hello"}],
+                            "return_prompt_text": true,
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        engine_task.await.expect("mock engine task");
+
+        let prompt_texts = if stream {
+            let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+            sse_json_payloads(&text)
+                .into_iter()
+                .map(|chunk| chunk.get("prompt_text").cloned())
+                .collect::<Vec<_>>()
+        } else {
+            let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+            vec![json.get("prompt_text").cloned()]
+        };
+        // Streaming sends it on the first chunk only.
+        let (first, rest) = prompt_texts.split_first().expect("response");
+        assert_eq!(
+            first,
+            &Some(json!("user: hello\nassistant:")),
+            "stream={stream}"
+        );
+        assert!(
+            rest.iter().all(Option::is_none),
+            "stream={stream}: {prompt_texts:?}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3731,6 +3789,7 @@ async fn non_stream_chat_image_url_reaches_engine_mm_features() {
                     json!({
                         "model": "Qwen/Qwen1.5-0.5B-Chat",
                         "stream": false,
+                        "return_prompt_text": true,
                         "messages": [{
                             "role": "user",
                             "content": [
@@ -3758,6 +3817,11 @@ async fn non_stream_chat_image_url_reaches_engine_mm_features() {
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
 
     assert_eq!(json["object"], "chat.completion");
+    // The rendered prompt, before the image placeholder is expanded.
+    assert_eq!(
+        json["prompt_text"],
+        json!("user: describe <|image_pad|>\nassistant:")
+    );
     assert_eq!(json["choices"][0]["message"]["content"], "hi");
 }
 
@@ -5064,6 +5128,7 @@ async fn non_stream_completions_return_json_response() {
     // non-streaming responses.
     let response_object = json.as_object().expect("response object");
     let choice = json["choices"][0].as_object().expect("choice object");
+    let usage = json["usage"].as_object().expect("usage object");
     for (object, key) in [
         (response_object, "service_tier"),
         (response_object, "system_fingerprint"),
@@ -5075,6 +5140,8 @@ async fn non_stream_completions_return_json_response() {
         (choice, "prompt_token_ids"),
         (choice, "routed_experts"),
         (choice, "weight_versions"),
+        // Completions never count reasoning tokens.
+        (usage, "completion_tokens_details"),
     ] {
         assert!(
             object.contains_key(key) && object[key].is_null(),
@@ -7041,6 +7108,11 @@ async fn include_reasoning_false_suppresses_reasoning_in_non_stream_chat() {
     // responses.
     assert!(
         json["choices"][0]["message"]["reasoning"].is_null(),
+        "{text}"
+    ); // The auto-selected reasoning parser still counts the hidden reasoning.
+    assert_eq!(
+        json["usage"]["completion_tokens_details"],
+        json!({"reasoning_tokens": 5}),
         "{text}"
     );
 }
