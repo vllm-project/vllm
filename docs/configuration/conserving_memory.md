@@ -75,6 +75,25 @@ from vllm import LLM
 llm = LLM(model="meta-llama/Llama-3.1-8B-Instruct", enforce_eager=True)
 ```
 
+## Sparse indexer decode logits
+
+On SM100, dense MXFP4 indexer decode with `auto`, `cooperative`, or `persistent`
+top-k can process query rows in chunks. Each row still scores its complete valid
+history. `VLLM_SPARSE_INDEXER_MAX_DECODE_LOGITS_MB` sets the BF16 logits payload
+budget per chunk in MiB (default `2048`); `0` disables decode chunking.
+
+The row limit is derived from the layer's compressed logits width, so layers with
+different compression ratios can use different row counts under the same budget.
+Batches that fit are not split. Padding, candidate-selection scratch, and other
+model allocations are additional; this setting is not a total CUDA graph memory
+limit. DCP, PCP, and candidate-only sparse logits retain their existing paths.
+
+Set the budget before starting the engine. Increasing it, for example to `4096`,
+can reduce repeated scheduling and kernel launches at the cost of more temporary
+memory. Decreasing it saves memory but can increase decode latency. With FULL
+CUDA graphs, all chunks are captured together and execute in one replay; eager
+and piecewise execution can also pay per-chunk CPU dispatch overhead.
+
 ## Adjust cache size
 
 If you run out of CPU RAM, try the following options:
