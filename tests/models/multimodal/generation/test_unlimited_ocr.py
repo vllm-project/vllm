@@ -159,6 +159,19 @@ def test_unlimited_ocr2_batched_pages(
         )[0].outputs[0]
         assert constrained.token_ids == [100] * 4
 
+        eos_id = runner.llm.get_tokenizer().eos_token_id
+        eos_only = runner.llm.generate(
+            requests[:1],
+            SamplingParams(
+                temperature=0,
+                max_tokens=4,
+                allowed_token_ids=[eos_id],
+                extra_args={"eos_token_id": eos_id},
+            ),
+        )[0].outputs[0]
+        assert eos_only.token_ids == [eos_id]
+        assert eos_only.finish_reason == "stop"
+
         # Reuse scheduler storage for a new request with a different first page.
         requests[0]["multi_modal_data"] = {"image": pages[1:]}
         result = runner.llm.generate(requests[:1], sampling)[0].outputs[0].text

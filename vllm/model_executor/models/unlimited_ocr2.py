@@ -77,7 +77,10 @@ class PageCountGuard:
             )
             _force_token(logits, force)
         elif self.marker_cum < self.expected_pages:
-            logits[self.eos_token_id] = -float("inf")
+            finite = torch.isfinite(logits)
+            finite[self.eos_token_id] = False
+            if finite.any():
+                logits[self.eos_token_id] = -float("inf")
 
 
 @triton.jit
@@ -159,11 +162,27 @@ def _page_count_guard_kernel(
                 (logit_pos < VOCAB_SIZE) & (logit_pos != force),
             )
     elif markers < expected:
-        tl.store(
-            Logits + row * LOGIT_STRIDE + eos * LOGIT_COL_STRIDE,
-            -float("inf"),
-            (eos >= 0) & (eos < VOCAB_SIZE),
-        )
+        if tl.load(Logits + row * LOGIT_STRIDE + eos * LOGIT_COL_STRIDE) == -float(
+            "inf"
+        ):
+            return
+        has_other = tl.full((), False, tl.int1)
+        start = 0
+        while (start < VOCAB_SIZE) & ~has_other:
+            pos = start + offsets
+            value = tl.load(
+                Logits + row * LOGIT_STRIDE + pos * LOGIT_COL_STRIDE,
+                (pos < VOCAB_SIZE) & (pos != eos),
+                other=-float("inf"),
+            )
+            finite = (value > -float("inf")) & (value < float("inf"))
+            has_other = tl.sum(finite.to(tl.int32), 0) > 0
+            start += BLOCK
+        if has_other:
+            tl.store(
+                Logits + row * LOGIT_STRIDE + eos * LOGIT_COL_STRIDE,
+                -float("inf"),
+            )
 
 
 class PageCountGuardLogitsProcessor(LogitsProcessor):
@@ -184,7 +203,8 @@ class PageCountGuardLogitsProcessor(LogitsProcessor):
       through.
 
     Forced transitions yield to existing token masks from other sampling
-    constraints when their target token is unavailable.
+    constraints when their target token is unavailable. EOS is retained if
+    suppressing it would leave no finite logits.
 
     Register it via the CLI::
 

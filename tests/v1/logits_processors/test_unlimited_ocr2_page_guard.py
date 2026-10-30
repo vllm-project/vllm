@@ -383,3 +383,33 @@ def test_masked_forced_token_preserves_other_sampling_constraints(output, forced
     actual = original.unsqueeze(0).cuda()
     v2.apply(actual, _make_v2_ctx(1, [len(prompt) + len(output)]))
     assert torch.equal(actual[0].cpu(), original)
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=_requires_cuda)])
+@pytest.mark.parametrize("other_token", [None, 100, VOCAB_SIZE - 1])
+def test_eos_mask_preserves_last_available_token(device, other_token):
+    """Incomplete pages must not turn a valid sampling mask into all -inf."""
+    prompt = [PAGE_ID, 100]
+    logits = _logits().fill_(-float("inf"))
+    logits[EOS_ID] = 0.75
+    if other_token is not None:
+        logits[other_token] = 0.25
+    expected = logits.clone()
+    if other_token is not None:
+        expected[EOS_ID] = -float("inf")
+
+    if device == "cpu":
+        guard = PageCountGuard(PAGE_ID, EOS_ID)
+        guard.seed_expected_pages(prompt)
+        guard.step([], logits)
+        actual = logits
+    else:
+        processor = _make_v2_guard()
+        assert processor.add_request(0, SamplingParams())
+        _commit(processor, prompt, [])
+        processor.apply_staged_writes()
+        actual = processor.apply(
+            logits.unsqueeze(0).cuda(), _make_v2_ctx(1, [len(prompt)])
+        )[0].cpu()
+    assert torch.equal(actual, expected)
+    assert actual.argmax().item() == (EOS_ID if other_token is None else other_token)
