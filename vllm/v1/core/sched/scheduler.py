@@ -2325,10 +2325,16 @@ class Scheduler(SchedulerInterface):
             if scheduled_spec_token_ids and (
                 generated_token_ids or self.num_sampled_tokens_per_step == 0
             ):
-                num_draft_tokens = len(scheduled_spec_token_ids)
+                if num_drafted_tokens_per_req is not None:
+                    assert num_verified_tokens_per_req is not None
+                    num_draft_tokens = num_drafted_tokens_per_req[req_index]
+                    num_verified = num_verified_tokens_per_req[req_index]
+                else:
+                    # The (out-of-tree) model runner does not report the counts.
+                    num_draft_tokens = num_verified = len(scheduled_spec_token_ids)
                 num_sampled = self.num_sampled_tokens_per_step
                 num_accepted = max(len(generated_token_ids) - num_sampled, 0)
-                num_rejected = num_draft_tokens - num_accepted
+                num_rejected = len(scheduled_spec_token_ids) - num_accepted
                 # Rejections roll back num_computed_tokens (and, under async
                 # scheduling, num_output_placeholders, which covers the spec
                 # tokens). A stale rejection count predates the preemption
@@ -2339,20 +2345,15 @@ class Scheduler(SchedulerInterface):
                     if request.num_output_placeholders > 0:
                         request.num_output_placeholders -= num_rejected
 
-                num_drafted = num_verified = num_draft_tokens
-                if num_drafted_tokens_per_req is not None:
-                    assert num_verified_tokens_per_req is not None
-                    num_drafted = num_drafted_tokens_per_req[req_index]
-                    num_verified = num_verified_tokens_per_req[req_index]
                 spec_decoding_stats = self.make_spec_decoding_stats(
                     spec_decoding_stats,
-                    num_draft_tokens=num_drafted,
+                    num_draft_tokens=num_draft_tokens,
                     num_accepted_tokens=num_accepted,
                     num_verified_tokens=num_verified,
                 )
                 if request.spec_decode_metrics is not None:
                     request.spec_decode_metrics.observe(
-                        num_draft_tokens=num_drafted,
+                        num_draft_tokens=num_draft_tokens,
                         num_accepted=num_accepted,
                         detailed=self.spec_decode_metrics_level == "detailed",
                         num_verified_tokens=num_verified,
