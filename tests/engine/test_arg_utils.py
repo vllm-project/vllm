@@ -53,6 +53,26 @@ def test_optional_type():
     assert optional_type_func("42") == 42
 
 
+@pytest.mark.parametrize("min_batch", [1, 8, 32, 0])
+def test_pp_min_decode_batch_size_cli(min_batch):
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(
+        [
+            "--model",
+            "facebook/opt-125m",
+            "--pp-min-decode-batch-size",
+            str(min_batch),
+        ]
+    )
+    engine_args = EngineArgs.from_cli_args(args)
+    if min_batch == 0:
+        with pytest.raises(ValueError, match="pp_min_decode_batch_size"):
+            engine_args.create_engine_config()
+    else:
+        config = engine_args.create_engine_config()
+        assert config.scheduler_config.pp_min_decode_batch_size == min_batch
+
+
 def test_watermark_config_cli():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     args = parser.parse_args(

@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from unittest.mock import patch
+
 import torch
 
 import vllm.envs as envs
@@ -61,6 +63,7 @@ def create_scheduler(
     model: str = "facebook/opt-125m",
     max_num_seqs: int = 16,
     max_num_active_seqs: int | None = None,
+    pp_min_decode_batch_size: int = 8,
     max_num_batched_tokens: int = 8192,
     enable_chunked_prefill: bool = True,
     enable_prefix_caching: bool = False,
@@ -131,6 +134,7 @@ def create_scheduler(
     scheduler_config = SchedulerConfig(
         max_num_seqs=max_num_seqs,
         max_num_active_seqs=max_num_active_seqs,
+        pp_min_decode_batch_size=pp_min_decode_batch_size,
         max_num_batched_tokens=max_num_batched_tokens,
         max_model_len=max_model_len,
         long_prefill_token_threshold=long_prefill_token_threshold,
@@ -241,16 +245,16 @@ def create_scheduler(
     register_all_kvcache_specs(vllm_config)
     if scheduler_cls is None:
         scheduler_cls = AsyncScheduler if async_scheduling else Scheduler
-    scheduler = scheduler_cls(
-        vllm_config=vllm_config,
-        kv_cache_config=kv_cache_config,
-        block_size=block_size,
-        log_stats=True,
-        structured_output_manager=StructuredOutputManager(vllm_config),
-    )
     if use_v2_model_runner is None:
         use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER is not False
-    scheduler.use_v2_model_runner = use_v2_model_runner
+    with patch.object(envs, "VLLM_USE_V2_MODEL_RUNNER", use_v2_model_runner):
+        scheduler = scheduler_cls(
+            vllm_config=vllm_config,
+            kv_cache_config=kv_cache_config,
+            block_size=block_size,
+            log_stats=True,
+            structured_output_manager=StructuredOutputManager(vllm_config),
+        )
     return scheduler
 
 

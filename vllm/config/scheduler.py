@@ -76,6 +76,16 @@ class SchedulerConfig:
     be ``<= max_num_seqs``. ``None`` (default) keeps current behavior.
     """
 
+    pp_min_decode_batch_size: int = Field(default=8, ge=1)
+    """Minimum target decode batch size for Model Runner V2 PP balancing.
+
+    The per-step target is the running decode count divided by PP size,
+    rounded up, with this floor. It never exceeds the active request limit
+    divided by PP size, rounded up. This avoids excessively small batches
+    at low load; it does not delay execution to fill a batch. Set to 1 for
+    unrestricted balancing, or to max_num_seqs for a fixed target.
+    """
+
     long_prefill_token_threshold: int = Field(default=0, ge=0)
     """For chunked prefill, a request is considered long if the prompt is
     longer than this number of tokens. 0 disables the cap (default).

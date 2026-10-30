@@ -22,11 +22,17 @@ from ..utils import (
     "ATTN_BACKEND",
     [None] if current_platform.is_rocm() else ["FLASH_ATTN"],
 )
+@pytest.mark.parametrize(
+    ("pp_min_decode_batch_size", "cudagraph_mode"),
+    [(8, None), (1, "FULL_DECODE_ONLY")],
+)
 @create_new_process_for_each_test()
 def test_pp_cudagraph(
     PP_SIZE: int,
     MODEL_NAME: str,
     ATTN_BACKEND: str | None,
+    pp_min_decode_batch_size: int,
+    cudagraph_mode: str | None,
 ):
     if current_platform.is_rocm():
         # ROCm CI can hand this test a device that is still lazily
@@ -43,11 +49,20 @@ def test_pp_cudagraph(
         str(PP_SIZE),
         "--distributed-executor-backend",
         "mp",
+        "--max-num-seqs",
+        "32",
+        "--pp-min-decode-batch-size",
+        str(pp_min_decode_batch_size),
     ]
+    if cudagraph_mode is not None:
+        cudagraph_args.extend(
+            ["--compilation-config", f'{{"cudagraph_mode": "{cudagraph_mode}"}}']
+        )
     # On ROCm, defer to the platform attention selector instead of forcing a backend.
     if ATTN_BACKEND is not None:
         cudagraph_args.append(f"--attention-backend={ATTN_BACKEND}")
 
     eager_args = cudagraph_args + ["--enforce-eager"]
 
-    compare_two_settings(MODEL_NAME, eager_args, cudagraph_args)
+    env = {"VLLM_USE_V2_MODEL_RUNNER": "1"}
+    compare_two_settings(MODEL_NAME, eager_args, cudagraph_args, env, env)

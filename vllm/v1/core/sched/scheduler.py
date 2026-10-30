@@ -129,6 +129,7 @@ class Scheduler(SchedulerInterface):
 
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
+        self.pp_microbatch_enabled = vllm_config.pp_microbatch_enabled
         self.max_num_scheduled_decodes = vllm_config.max_num_scheduled_decodes
         # Admission into RUNNING. Separate from max_num_running_reqs, which
         # is the model-runner slot count.
@@ -697,6 +698,15 @@ class Scheduler(SchedulerInterface):
             num_new_tokens -= self.num_prefill_lookahead - remaining
         return max(num_new_tokens, 0)
 
+    def _is_established_decode(self, request: Request) -> bool:
+        # Replaying previously generated tokens after preemption is prefill work.
+        return (
+            not request.is_prefill_chunk
+            and request.num_computed_tokens >= request.num_prompt_tokens
+            and request.num_tokens - request.num_computed_tokens
+            <= self.num_sampled_tokens_per_step
+        )
+
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
@@ -719,6 +729,18 @@ class Scheduler(SchedulerInterface):
         # Balance established decodes without limiting prefill admission or
         # chunks that finish a prompt in this step.
         max_num_scheduled_decodes = self.max_num_scheduled_decodes
+        if self.pp_microbatch_enabled:
+            num_running_decodes = sum(
+                self._is_established_decode(r) for r in self.running
+            )
+            pp_size = self.parallel_config.pipeline_parallel_size
+            max_num_scheduled_decodes = min(
+                max_num_scheduled_decodes,
+                max(
+                    self.scheduler_config.pp_min_decode_batch_size,
+                    (num_running_decodes + pp_size - 1) // pp_size,
+                ),
+            )
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
@@ -825,6 +847,13 @@ class Scheduler(SchedulerInterface):
                 req_index += 1
                 continue
 
+            is_decode = self.pp_microbatch_enabled and self._is_established_decode(
+                request
+            )
+            if is_decode and len(scheduled_decode_req_ids) >= max_num_scheduled_decodes:
+                req_index += 1
+                continue
+
             if defer_prefills and request.is_prefill_chunk:
                 # DP prefill balancing: defer this in-progress prefill chunk to a
                 # cadence-aligned step; decodes still run to fill this step.
@@ -911,11 +940,6 @@ class Scheduler(SchedulerInterface):
                 # NOTE(woosuk): Here, by doing `continue` instead of `break`,
                 # we do not strictly follow the FCFS scheduling policy and
                 # allow the lower-priority requests to be scheduled.
-                req_index += 1
-                continue
-
-            is_decode = request.num_computed_tokens >= request.num_prompt_tokens
-            if is_decode and len(scheduled_decode_req_ids) >= max_num_scheduled_decodes:
                 req_index += 1
                 continue
 
@@ -1411,17 +1435,6 @@ class Scheduler(SchedulerInterface):
                         skip_request(request_queue)
                         continue
 
-                is_decode = (
-                    not load_kv_async
-                    and num_computed_tokens >= request.num_prompt_tokens
-                )
-                if (
-                    is_decode
-                    and len(scheduled_decode_req_ids) >= max_num_scheduled_decodes
-                ):
-                    skip_request(request_queue)
-                    continue
-
                 # During async KV load, no forward pass is run yet.
                 # Allocate speculative lookahead slots later to avoid
                 # mismatching local and remote block counts.
@@ -1592,8 +1605,6 @@ class Scheduler(SchedulerInterface):
                     request_id
                 )
                 num_scheduled_tokens[request_id] = num_new_tokens
-                if is_decode:
-                    scheduled_decode_req_ids.add(request_id)
                 token_budget -= num_new_tokens
                 input_budget -= num_new_tokens + draft_slots
                 request.status = RequestStatus.RUNNING

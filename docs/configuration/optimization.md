@@ -123,6 +123,22 @@ llm = LLM(
 )
 ```
 
+#### Decode Batch Balancing
+
+Model Runner V2 balances established decode requests across PP steps, without
+limiting prefill or first/resumed request admission. The per-step decode target is
+the running decode count divided by `pipeline_parallel_size`, rounded up. It is
+bounded above by `ceil(max_num_active_seqs / pipeline_parallel_size)` (using
+`max_num_seqs` when `max_num_active_seqs` is unset).
+
+`--pp-min-decode-batch-size` sets a lower bound on this target (default: `8`,
+minimum: `1`); the upper bound still takes precedence. It does not wait for a
+batch to fill. Smaller values distribute low-load decodes over more PP steps,
+but can reduce throughput when small batches underutilize the device. Set it to
+`1` for unrestricted balancing or to `max_num_seqs` for a fixed target. Tune this
+setting with representative workloads. MRV1, PP size 1, and XPU deployments with
+`VLLM_XPU_PP_MICROBATCH=0` retain their existing scheduling behavior.
+
 ### Expert Parallelism (EP)
 
 Expert parallelism is a specialized form of parallelism for Mixture of Experts (MoE) models, where different expert networks are distributed across GPUs.

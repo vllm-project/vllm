@@ -545,6 +545,7 @@ def _mock_config_for_cudagraph_sizes(
     pipeline_parallel_size: int = 1,
     async_scheduling: bool = True,
     use_v2_model_runner: bool = True,
+    max_num_active_seqs: int | None = None,
 ) -> MagicMock:
     """Mock VllmConfig wired up enough to run `_set_cudagraph_sizes`.
 
@@ -559,11 +560,13 @@ def _mock_config_for_cudagraph_sizes(
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=max_num_batched_tokens,
         async_scheduling=async_scheduling,
+        max_num_active_seqs=max_num_active_seqs,
     )
     config.parallel_config = ParallelConfig(
         pipeline_parallel_size=pipeline_parallel_size
     )
     config.use_v2_model_runner = use_v2_model_runner
+    config.pp_microbatch_enabled = VllmConfig.pp_microbatch_enabled.fget(config)
     config.max_num_scheduled_decodes = VllmConfig.max_num_scheduled_decodes.fget(config)
     config.model_config = MagicMock()
     config.model_config.enforce_eager = False
@@ -603,7 +606,7 @@ def _mock_config_for_cudagraph_sizes(
         (4, True, False, 64),
     ],
 )
-def test_pp_decode_limit_matches_default_graph_range(
+def test_pp_decode_limit_preserves_prompt_finishing_graph_range(
     mode, pp_size, async_scheduling, use_v2, decode_limit
 ):
     config = _mock_config_for_cudagraph_sizes(
@@ -617,15 +620,15 @@ def test_pp_decode_limit_matches_default_graph_range(
     )
     assert config.max_num_scheduled_decodes == decode_limit
     VllmConfig._set_cudagraph_sizes(config)
-    expected = 2 * decode_limit * 4 if mode == CUDAGraphMode.FULL_DECODE_ONLY else 512
-    assert config.compilation_config.max_cudagraph_capture_size == expected
+    assert config.compilation_config.max_cudagraph_capture_size == 512
+    assert 64 * 4 in config.compilation_config.cudagraph_capture_sizes
     assert config.scheduler_config.max_num_seqs == 64
 
 
 @pytest.mark.parametrize(
-    ("max_num_seqs", "pp_size", "num_spec"), [(65, 3, 8), (5, 8, 0)]
+    ("max_num_seqs", "pp_size", "num_spec"), [(65, 3, 3), (5, 8, 0)]
 )
-def test_pp_decode_capture_covers_rounded_request_limit(
+def test_pp_decode_capture_covers_full_request_capacity(
     max_num_seqs, pp_size, num_spec
 ):
     config = _mock_config_for_cudagraph_sizes(
@@ -639,7 +642,7 @@ def test_pp_decode_capture_covers_rounded_request_limit(
     )
     VllmConfig._set_cudagraph_sizes(config)
     assert (
-        cdiv(max_num_seqs, pp_size) * (num_spec + 1)
+        max_num_seqs * (num_spec + 1)
         in config.compilation_config.cudagraph_capture_sizes
     )
 
@@ -663,9 +666,8 @@ def test_pp_decode_capture_respects_xpu_opt_out(
     )
     VllmConfig._set_cudagraph_sizes(config)
     assert config.max_num_scheduled_decodes == (16 if microbatch else 64)
-    assert config.compilation_config.max_cudagraph_capture_size == (
-        128 if microbatch else 512
-    )
+    assert config.pp_microbatch_enabled == microbatch
+    assert config.compilation_config.max_cudagraph_capture_size == 512
 
 
 @pytest.mark.parametrize(
@@ -709,8 +711,23 @@ def test_pp_decode_capture_preserves_dynamic_widths():
     VllmConfig._set_cudagraph_sizes(config)
     sizes = config.compilation_config.cudagraph_capture_sizes
     assert 16 * 9 in sizes
-    assert 33 * 3 in sizes
-    assert 66 * 3 not in sizes
+    assert 66 * 3 in sizes
+
+
+def test_pp_active_limit_does_not_shrink_graph_capacity():
+    config = _mock_config_for_cudagraph_sizes(
+        max_num_seqs=64,
+        max_num_active_seqs=16,
+        num_speculative_tokens=3,
+        max_num_batched_tokens=8192,
+        compilation_config=CompilationConfig(
+            cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY
+        ),
+        pipeline_parallel_size=4,
+    )
+    assert config.max_num_scheduled_decodes == 4
+    VllmConfig._set_cudagraph_sizes(config)
+    assert 64 * 4 in config.compilation_config.cudagraph_capture_sizes
 
 
 @pytest.mark.parametrize("max_num_seqs", [100, 101])

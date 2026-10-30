@@ -47,12 +47,12 @@ def test_pp_balances_decodes_without_limiting_prefill(
         max_num_seqs=max_num_seqs,
         num_speculative_tokens=num_spec_tokens,
         speculative_method="ngram_gpu" if num_spec_tokens else None,
+        pipeline_parallel_size=pp_size,
     )
-    # Exercise PP scheduling on CPU without distributed/model validation.
-    scheduler.use_pp = True
-    if async_scheduling:
-        scheduler.decode_stagger = pp_size
-    scheduler.max_num_scheduled_decodes = (max_num_seqs + pp_size - 1) // pp_size
+    assert scheduler.use_pp
+    assert (
+        scheduler.max_num_scheduled_decodes == (max_num_seqs + pp_size - 1) // pp_size
+    )
     requests = create_requests(num_requests=max_num_seqs)
     for request in requests:
         scheduler.add_request(request)
@@ -99,10 +99,8 @@ def test_pp_decode_limit_does_not_block_prefill_chunks(prefill_tokens):
         use_v2_model_runner=True,
         max_num_seqs=4,
         long_prefill_token_threshold=2,
+        pipeline_parallel_size=2,
     )
-    scheduler.use_pp = True
-    scheduler.decode_stagger = 2
-    scheduler.max_num_scheduled_decodes = 2
     for request in create_requests(num_requests=3, num_tokens=2):
         scheduler.add_request(request)
     prefill = scheduler.schedule()
@@ -122,15 +120,13 @@ def test_pp_decode_limit_does_not_block_prefill_chunks(prefill_tokens):
     assert chunked.is_prefill_chunk == (prefill_tokens == 8)
 
 
-def test_pp_decode_limit_skips_waiting_decodes_but_admits_prefill():
+def test_pp_decode_limit_does_not_defer_waiting_admission():
     scheduler = create_scheduler(
         async_scheduling=True,
         use_v2_model_runner=True,
         max_num_seqs=6,
+        pipeline_parallel_size=2,
     )
-    scheduler.use_pp = True
-    scheduler.decode_stagger = 2
-    scheduler.max_num_scheduled_decodes = 3
     (running,) = create_requests(num_requests=1, req_ids=["running"])
     scheduler.add_request(running)
     output = scheduler.schedule()
@@ -149,10 +145,10 @@ def test_pp_decode_limit_skips_waiting_decodes_but_admits_prefill():
         "running": 1,
         "0": 1,
         "1": 1,
+        "2": 1,
         "prefill": prefill.num_prompt_tokens,
     }
-    assert waiting[-1].status == RequestStatus.WAITING
-    assert scheduler.schedule().num_scheduled_tokens == {waiting[-1].request_id: 1}
+    assert all(request.status == RequestStatus.RUNNING for request in waiting)
 
 
 def test_pp_priority_preemption_releases_decode_slot(monkeypatch):
@@ -162,10 +158,8 @@ def test_pp_priority_preemption_releases_decode_slot(monkeypatch):
         max_num_seqs=3,
         long_prefill_token_threshold=2,
         scheduling_policy="priority",
+        pipeline_parallel_size=3,
     )
-    scheduler.use_pp = True
-    scheduler.decode_stagger = 3
-    scheduler.max_num_scheduled_decodes = 1
     low, high = create_requests(num_requests=2, num_tokens=2)
     (prefill,) = create_requests(num_requests=1, num_tokens=6, req_ids=["prefill"])
     for request in [low, prefill, high]:
@@ -197,25 +191,129 @@ def test_pp_priority_preemption_releases_decode_slot(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("async_scheduling", "use_v2", "pp_size", "decode_stagger"),
-    [(False, False, 2, 2), (True, False, 2, 2), (True, True, 1, 1), (True, True, 2, 1)],
+    ("async_scheduling", "use_v2", "pp_size", "xpu_opt_out"),
+    [
+        (False, False, 2, False),
+        (True, False, 2, False),
+        (True, True, 1, False),
+        (True, True, 2, True),
+    ],
 )
 def test_pp_decode_limit_leaves_other_scheduling_modes_unchanged(
-    async_scheduling, use_v2, pp_size, decode_stagger
+    monkeypatch, async_scheduling, use_v2, pp_size, xpu_opt_out
 ):
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: xpu_opt_out)
+    monkeypatch.setenv("VLLM_XPU_PP_MICROBATCH", "0" if xpu_opt_out else "1")
     scheduler = create_scheduler(
         async_scheduling=async_scheduling,
         use_v2_model_runner=use_v2,
         max_num_seqs=4,
+        pipeline_parallel_size=pp_size,
     )
-    scheduler.use_pp = pp_size > 1
+    assert scheduler.max_num_scheduled_decodes == 4
     if async_scheduling:
-        scheduler.decode_stagger = decode_stagger
+        assert scheduler.decode_stagger == 1
     for request in create_requests(num_requests=4):
         scheduler.add_request(request)
     prefill = scheduler.schedule()
     scheduler.update_from_output(prefill, _make_model_runner_output(prefill))
     assert len(scheduler.schedule().num_scheduled_tokens) == 4
+
+
+@pytest.mark.parametrize(
+    ("running", "max_seqs", "max_active", "min_batch", "expected"),
+    [
+        (60, 256, None, 8, 15),
+        (8, 16, None, 8, 4),
+        (8, 256, None, 1, 2),
+        (60, 256, 64, 64, 16),
+    ],
+)
+def test_pp_dynamic_decode_target_respects_floor_and_active_limit(
+    running, max_seqs, max_active, min_batch, expected
+):
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        use_v2_model_runner=True,
+        max_num_seqs=max_seqs,
+        max_num_active_seqs=max_active,
+        pipeline_parallel_size=4,
+        pp_min_decode_batch_size=min_batch,
+    )
+    assert scheduler.decode_stagger == 4
+    assert scheduler.max_num_scheduled_decodes == ((max_active or max_seqs) + 3) // 4
+    for request in create_requests(num_requests=running):
+        scheduler.add_request(request)
+    prefill = scheduler.schedule()
+    assert len(prefill.num_scheduled_tokens) == running
+    scheduler.update_from_output(prefill, _make_model_runner_output(prefill))
+    for _ in range(3):
+        assert not scheduler.schedule().num_scheduled_tokens
+    scheduled_ids = set()
+    for _ in range(4):
+        output = scheduler.schedule()
+        batch_ids = set(output.num_scheduled_tokens)
+        assert len(batch_ids) == min(expected, running - len(scheduled_ids))
+        assert batch_ids.isdisjoint(scheduled_ids)
+        scheduled_ids.update(batch_ids)
+    assert len(scheduled_ids) == running
+
+
+def test_pp_decode_cap_does_not_limit_output_recomputation():
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        use_v2_model_runner=True,
+        pipeline_parallel_size=2,
+        max_num_seqs=4,
+        long_prefill_token_threshold=2,
+    )
+    requests = create_requests(num_requests=3, num_tokens=2)
+    for request in requests:
+        scheduler.add_request(request)
+    prefill = scheduler.schedule()
+    scheduler.update_from_output(prefill, _make_model_runner_output(prefill))
+    scheduler.schedule()
+    replay = requests[-1]
+    replay.append_output_token_ids([2, 3, 4, 5, 6])
+    # Simulate a resumed request replaying output beyond the prompt boundary.
+    replay.num_computed_tokens = replay.num_prompt_tokens
+    replay.num_output_placeholders = 0
+    replay.is_prefill_chunk = True
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"0": 1, "1": 1, "2": 2}
+
+
+def test_pp_full_decode_quota_preserves_priority_admission(monkeypatch):
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        use_v2_model_runner=True,
+        pipeline_parallel_size=2,
+        max_num_seqs=4,
+        scheduling_policy="priority",
+        enable_prefix_caching=True,
+    )
+    for request in create_requests(num_requests=2, num_tokens=16):
+        request.priority = 10
+        scheduler.add_request(request)
+    prefill = scheduler.schedule()
+    scheduler.update_from_output(prefill, _make_model_runner_output(prefill))
+    scheduler.schedule()
+    (resumed,) = create_requests(num_requests=1, num_tokens=16, req_ids=["resumed"])
+    resumed.append_output_token_ids([1, 2, 3])
+    resumed.status = RequestStatus.PREEMPTED
+    resumed.priority = -1
+    scheduler.add_request(resumed)
+    lookup = Mock(wraps=scheduler.kv_cache_manager.get_computed_blocks)
+    monkeypatch.setattr(scheduler.kv_cache_manager, "get_computed_blocks", lookup)
+    output = scheduler.schedule()
+    assert set(output.num_scheduled_tokens) == {"0", "1", "resumed"}
+    assert output.num_scheduled_tokens["resumed"] == 3
+    assert resumed.status == RequestStatus.RUNNING
+    lookup.assert_called_once_with(resumed, None)
+    scheduler.schedule()
+    lookup.assert_called_once_with(resumed, None)
 
 
 @pytest.mark.parametrize("max_tokens", [1, 2, 3, 5])
