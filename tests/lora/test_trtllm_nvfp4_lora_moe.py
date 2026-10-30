@@ -14,6 +14,8 @@ from vllm.model_executor.layers.fused_moe.experts.trtllm_lora_moe import (
 )
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     NvFp4MoeBackend,
+    _requested_kernel_cls,
+    backend_to_kernel_cls,
     convert_to_nvfp4_moe_kernel_format,
     make_nvfp4_moe_quant_config,
     select_nvfp4_moe_backend,
@@ -232,7 +234,21 @@ def test_lora_experts_are_opt_in_for_per_token_activations():
     assert select("flashinfer_trtllm", False, per_token)[1] is not lora_cls
     assert select("flashinfer_trtllm", True, per_token) == (trtllm, lora_cls)
     assert select("auto", True, per_token)[0] != trtllm
-    with pytest.raises(ValueError, match="quantization scheme"):
+    with pytest.raises(ValueError, match="does not support"):
         select("flashinfer_trtllm", True, kNvfp4Dynamic)
-    with pytest.raises(ValueError, match="routing method"):
+    with pytest.raises(ValueError, match="does not support"):
         select("flashinfer_trtllm", True, per_token, RoutingMethodType.Llama4)
+
+
+def test_requested_kernel_cls_puts_lora_experts_first():
+    config = make_dummy_moe_config(num_experts=E, hidden_dim=K, intermediate_size=N)
+    trtllm = NvFp4MoeBackend.FLASHINFER_TRTLLM
+    cutlass = NvFp4MoeBackend.FLASHINFER_CUTLASS
+    assert _requested_kernel_cls(trtllm, config) == backend_to_kernel_cls(trtllm)
+
+    config.is_lora_enabled = True
+    assert _requested_kernel_cls(trtllm, config) == [
+        TrtLlmNvFp4LoRAExperts,
+        *backend_to_kernel_cls(trtllm),
+    ]
+    assert _requested_kernel_cls(cutlass, config) == backend_to_kernel_cls(cutlass)
