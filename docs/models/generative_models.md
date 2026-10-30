@@ -64,6 +64,7 @@ A code example can be found here: [examples/basic/offline_inference/basic.py](..
 ### `LLM.beam_search`
 
 The [beam_search][vllm.LLM.beam_search] method implements [beam search](https://huggingface.co/docs/transformers/en/generation_strategies#beam-search) on top of [generate][vllm.LLM.generate].
+Each prompt's search stops when it reaches `max_tokens` generated tokens or the model's context length limit (prompt plus generated tokens). Reaching the context limit returns the completed beams without stopping other prompts in the batch.
 For example, to search using 5 beams and output at most 50 tokens:
 
 ```python

@@ -50,6 +50,45 @@ MM_BEAM_WIDTHS = [2]
 MODELS = ["TinyLlama/TinyLlama-1.1B-Chat-v1.0"]
 
 
+@pytest.mark.parametrize("model", MODELS)
+def test_beam_search_stops_at_context_limit_per_prompt(vllm_runner, model: str) -> None:
+    """Finish full-context beams while other prompts continue generating."""
+    max_model_len = 128
+    max_tokens = 8
+    with vllm_runner(
+        model,
+        max_model_len=max_model_len,
+        **(dict(enforce_eager=True) | EXTRA_ENGINE_KWARGS),
+    ) as vllm_model:
+        llm = vllm_model.llm
+        token_ids = llm.get_tokenizer().encode("Hello world. " * max_model_len)
+        prompt_lengths = [max_model_len - 1, max_model_len - 4, 16]
+        prompts = [
+            {"prompt_token_ids": token_ids[:length]} for length in prompt_lengths
+        ]
+        params = BeamSearchParams(beam_width=2, max_tokens=max_tokens, ignore_eos=True)
+
+        outputs = llm.beam_search(prompts, params)
+        assert len(outputs) == len(prompts)
+        for prompt, output in zip(prompts, outputs):
+            prompt_ids = prompt["prompt_token_ids"]
+            expected_tokens = min(max_tokens, max_model_len - len(prompt_ids))
+            assert len(output.sequences) == params.beam_width
+            for beam in output.sequences:
+                assert beam.tokens[: len(prompt_ids)] == prompt_ids
+                generated_ids = beam.tokens[len(prompt_ids) :]
+                assert len(generated_ids) == expected_tokens
+                assert len(beam.logprobs) == expected_tokens
+                if len(prompt_ids) + expected_tokens == max_model_len:
+                    assert beam.finish_reason == "length"
+                assert beam.cum_logprob == pytest.approx(
+                    sum(
+                        logprobs[token_id].logprob
+                        for token_id, logprobs in zip(generated_ids, beam.logprobs)
+                    )
+                )
+
+
 @pytest.mark.parametrize(("abort_after", "prompt_token"), [(0, 1), (1, 1), (0, 0)])
 @pytest.mark.parametrize("terminal_logprobs", [None, [], [{11: Logprob(-0.1)}]])
 def test_beam_search_abort_returns_partial_outputs_and_continues_other_prompts(
@@ -99,6 +138,7 @@ def test_beam_search_abort_returns_partial_outputs_and_continues_other_prompts(
 
     llm = LLM.__new__(LLM)
     llm.llm_engine = Mock()
+    llm.model_config = Mock(max_model_len=16)
     llm.llm_engine.input_processor.generation_config_fields = {}
     tokenizer = SimpleNamespace(
         eos_token_id=0,
