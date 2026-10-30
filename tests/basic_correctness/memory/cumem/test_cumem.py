@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import ctypes
 import gc
 
 import pytest
@@ -70,6 +71,49 @@ def test_python_error():
         # when the allocator is woken up, it should raise an error
         # because we don't have enough memory
         allocator.wake_up()
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="Uses the CUDA allocator ABI"
+)
+@create_new_process_for_each_test("fork")
+def test_free_with_unaligned_size():
+    """my_free must unmap and release with the size my_malloc rounded up to,
+    not with the size PyTorch asked for. The driver rejects an unaligned size,
+    which leaks the physical handle and the address range."""
+    allocator = get_mem_allocator_instance()
+    # Entering the pool once registers the Python callbacks with the
+    # extension; my_malloc and my_free refuse to run without them.
+    with allocator.use_memory_pool():
+        torch.empty(1, device=DEVICE_TYPE)
+    device = torch.accelerator.current_device_index()
+    native = ctypes.CDLL(cumem.lib_name)
+    native.my_malloc.argtypes = [ctypes.c_ssize_t, ctypes.c_int, ctypes.c_void_p]
+    native.my_malloc.restype = ctypes.c_void_p
+    native.my_free.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_ssize_t,
+        ctypes.c_int,
+        ctypes.c_void_p,
+    ]
+    native.my_free.restype = None
+    driver_error = ctypes.c_int.in_dll(native, "error_code")
+
+    # One byte is smaller than any allocation granularity, so my_malloc has
+    # to round it up and the two sizes differ.
+    size = 1
+    ptr = native.my_malloc(size, device, None)
+    assert ptr is not None
+    assert allocator.pointer_to_data[ptr].handle[1] > size
+
+    native.my_free(ptr, size, device, None)
+    assert ptr not in allocator.pointer_to_data
+    assert driver_error.value == 0, "driver rejected the unmap or address free"
+
+    # The allocator must still work afterwards.
+    with allocator.use_memory_pool():
+        tensor = torch.ones(1024, dtype=torch.uint8, device=DEVICE_TYPE)
+    assert torch.all(tensor == 1)
 
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
