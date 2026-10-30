@@ -26,7 +26,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.request import Request
 
 if TYPE_CHECKING:
-    from vllm.v1.worker.cpu.no_triton_model_runner import NoTritonCPUModelRunner
+    from vllm.v1.worker.cpu.standalone_model_runner import StandaloneCPUModelRunner
 
 
 def _reserved_block_count(
@@ -53,7 +53,7 @@ def _reserved_block_count(
 
 
 def _warmup_block_counter(
-    model_runner: "NoTritonCPUModelRunner",
+    model_runner: "StandaloneCPUModelRunner",
 ) -> Callable[[int, KVCacheSpec], int]:
     num_lookahead_tokens = model_runner.vllm_config.num_lookahead_tokens
     max_model_len = model_runner.max_model_len
@@ -73,7 +73,7 @@ def _warmup_block_counter(
 
 @torch.inference_mode()
 def warmup_kernels(
-    model_runner: "NoTritonCPUModelRunner",
+    model_runner: "StandaloneCPUModelRunner",
     worker_execute_model: Callable[[SchedulerOutput], Any],
     worker_sample_tokens: Callable[[GrammarOutput | None], Any],
 ) -> None:

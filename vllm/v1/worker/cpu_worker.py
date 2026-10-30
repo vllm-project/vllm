@@ -159,11 +159,11 @@ class CPUWorker(Worker):
                     self.vllm_config, self.device
                 )
             else:
-                from vllm.v1.worker.cpu.no_triton_model_runner import (
-                    NoTritonCPUModelRunner as NoTritonCPUModelRunnerV2,
+                from vllm.v1.worker.cpu.standalone_model_runner import (
+                    StandaloneCPUModelRunner,
                 )
 
-                self.model_runner = NoTritonCPUModelRunnerV2(  # type: ignore
+                self.model_runner = StandaloneCPUModelRunner(  # type: ignore
                     self.vllm_config, self.device
                 )
         else:

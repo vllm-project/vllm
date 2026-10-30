@@ -772,7 +772,9 @@ class VllmConfig:
                 current_platform.is_cpu()
                 and current_platform.get_cpu_architecture() != CpuArchEnum.X86
             ):
-                unsupported.extend(self._get_cpu_no_triton_v2_unsupported_features())
+                unsupported.extend(
+                    self._get_standalone_cpu_model_runner_unsupported_features()
+                )
                 if not unsupported:
                     return True
             else:
@@ -3115,8 +3117,8 @@ class VllmConfig:
 
         return unsupported
 
-    def _get_cpu_no_triton_v2_unsupported_features(self) -> list[str]:
-        """Collect V2 features not supported by CPU without Triton."""
+    def _get_standalone_cpu_model_runner_unsupported_features(self) -> list[str]:
+        """Collect features not supported by the standalone CPU model runner."""
         unsupported: list[str] = []
 
         if self.speculative_config is not None:
@@ -3419,7 +3421,7 @@ class VllmConfig:
             and current_platform.is_cpu()
             and current_platform.get_cpu_architecture() != CpuArchEnum.X86
         ):
-            unsupported = self._get_cpu_no_triton_v2_unsupported_features()
+            unsupported = self._get_standalone_cpu_model_runner_unsupported_features()
             if unsupported:
                 raise ValueError(
                     "CPU Model Runner V2 without Triton does not yet support: "

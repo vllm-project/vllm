@@ -112,7 +112,14 @@ def sort_batch_req_ids(
     return sorted(num_tokens_per_req, key=key)
 
 
-class NoTritonCPUModelRunner(LoRAModelRunnerMixin):
+class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
+    """Standalone MRV2 implementation for CPUs without mature Triton support.
+
+    It follows the GPU MRV2 architecture with a smaller feature set. Batch
+    preparation, request bookkeeping, KV-cache metadata, and sampling use C++
+    and PyTorch operations instead of Triton.
+    """
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config

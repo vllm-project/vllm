@@ -426,8 +426,8 @@ void apply_logit_bias_cpu(
 void init_cpu_memory_env(std::vector<int64_t> node_ids);
 
 namespace cpu_utils {
-// Kernels used only by no-Triton CPU MRV2.
-#ifdef VLLM_CPU_NO_TRITON_MRV2
+// Kernels used only by standalone CPU MRV2.
+#ifdef VLLM_STANDALONE_CPU_MRV2
 void gather_block_table_cpu(const torch::Tensor& block_table,
                             torch::Tensor& output,
                             const torch::Tensor& idx_mapping,
@@ -1067,7 +1067,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   ops.def("init_cpu_memory_env(SymInt[] node_ids) -> ()", &init_cpu_memory_env);
 
-#ifdef VLLM_CPU_NO_TRITON_MRV2
+#ifdef VLLM_STANDALONE_CPU_MRV2
   ops.def(
       "gather_block_table_cpu(Tensor block_table, Tensor(a1!) output, "
       "Tensor idx_mapping, Tensor num_blocks, SymInt num_reqs_padded) -> ()",

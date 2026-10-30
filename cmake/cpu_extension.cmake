@@ -695,7 +695,7 @@ else()
         USE_SABI 3
         WITH_SOABI
     )
-    target_compile_definitions(_C PRIVATE VLLM_CPU_NO_TRITON_MRV2)
+    target_compile_definitions(_C PRIVATE VLLM_STANDALONE_CPU_MRV2)
     if (VLLM_OPENBLAS_LIB)
         target_compile_definitions(_C PRIVATE VLLM_HAS_OPENBLAS)
     endif()
