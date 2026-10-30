@@ -23,6 +23,7 @@ from vllm.v1.worker.gpu.sample.batch_shard import (
     BatchSharder,
     _shard_grammar_output,
 )
+from vllm.v1.worker.gpu.spec_decode import draft_logits as draft_logits_module
 
 DEVICE = current_platform.device_type
 
@@ -43,13 +44,10 @@ def _make_batch(
     num_reqs: int,
     max_num_reqs: int,
     max_spec: int,
-    slot_pool: np.ndarray | None = None,
 ) -> InputBatch:
     """Consistent batch with random unique request slots, 1 + k_i logits
     rows per request at the tail of each query segment."""
-    if slot_pool is None:
-        slot_pool = np.arange(max_num_reqs)
-    slots = rng.choice(slot_pool, size=num_reqs, replace=False)
+    slots = rng.choice(max_num_reqs, size=num_reqs, replace=False)
     slots = slots.astype(np.int32)
     k = rng.integers(0, max_spec + 1, size=num_reqs)
     num_logits_per_req = (1 + k).astype(np.int32)
@@ -116,8 +114,21 @@ def _shard_all_ranks(
     max_num_reqs: int,
     tp_size: int,
     adaptive_verification_enabled: bool = False,
+    owners_np: np.ndarray | None = None,
 ):
-    """Simulate every TP rank by faking get_tp_group() per BatchSharder."""
+    """Simulate every TP rank by faking get_tp_group() per BatchSharder.
+
+    ``owners_np`` is a sharded DraftLogitsCache owner table indexed by request
+    slot. Without it, requests are owned by batch position.
+    """
+    draft_logits = None
+    if owners_np is not None:
+        owners_np = owners_np.astype(np.int32)
+        owners = torch.from_numpy(owners_np).to(DEVICE)
+        # BatchSharder reads only the owner table of a sharded cache.
+        draft_logits = SimpleNamespace(
+            owners_of=lambda idx_mapping_np: (owners_np[idx_mapping_np], owners)
+        )
     results = []
     for rank in range(tp_size):
         fake_group = SimpleNamespace(rank_in_group=rank, world_size=tp_size)
@@ -127,6 +138,7 @@ def _shard_all_ranks(
                 max_num_logits_per_req=8,
                 device=torch.device(DEVICE),
                 adaptive_verification_enabled=adaptive_verification_enabled,
+                draft_logits=draft_logits,
             )
         local_batch, sorted_logits_indices, _, metadata = sharder.shard_sampler_inputs(
             batch, None
@@ -215,7 +227,7 @@ def test_local_batch_partition(tp_size: int, seed: int):
     for rank, (local, _, metadata) in enumerate(results):
         owned = _owned_batch_indices(local)
         assert local.num_reqs == len(owned) == metadata.num_local_reqs
-        assert (batch.idx_mapping_np[owned] % tp_size == rank).all()
+        assert (owned % tp_size == rank).all()
         # Stable sort: batch order is preserved within an owner.
         assert (np.diff(owned) > 0).all()
         all_owned.extend(owned.tolist())
@@ -398,15 +410,10 @@ def test_gather_src_indices_round_trip(tp_size: int):
     batch order, including when some rank owns zero requests."""
     rng = np.random.default_rng(3)
     max_num_reqs = 40
-    all_slots = np.arange(max_num_reqs)
-    batch = _make_batch(
-        rng,
-        num_reqs=17,
-        max_num_reqs=max_num_reqs,
-        max_spec=2,
-        slot_pool=all_slots[all_slots % tp_size != 0],  # rank 0 owns nothing
-    )
-    results = _shard_all_ranks(batch, max_num_reqs, tp_size)
+    batch = _make_batch(rng, num_reqs=17, max_num_reqs=max_num_reqs, max_spec=2)
+    # An owner table under which rank 0 owns nothing.
+    owners_np = 1 + np.arange(max_num_reqs) % (tp_size - 1)
+    results = _shard_all_ranks(batch, max_num_reqs, tp_size, owners_np=owners_np)
     metadata0 = results[0][2]
     assert metadata0.num_local_reqs == 0
 
@@ -670,3 +677,148 @@ def test_finish_requests_frees_slots_in_sorted_order():
     GPUModelRunner.finish_requests(fake_runner, scheduler_output)
     assert removed == sorted(removed)
     assert set(removed) == {"req-a", "req-b", "req-c", "req-d", "req-e"}
+
+
+def _make_sharded_draft_logits(tp_size: int, max_num_reqs: int) -> list:
+    """One sharded DraftLogitsCache per simulated TP rank."""
+    caches = []
+    for rank in range(tp_size):
+        fake_group = SimpleNamespace(rank_in_group=rank, world_size=tp_size)
+        with mock.patch.object(
+            draft_logits_module, "get_tp_group", return_value=fake_group
+        ):
+            caches.append(
+                draft_logits_module.DraftLogitsCache(
+                    max_num_reqs,
+                    1,
+                    1,
+                    dtype=torch.float32,
+                    fill=0.0,
+                    device=torch.device(DEVICE),
+                    sharded=True,
+                )
+            )
+    return caches
+
+
+def _draft_batch(slots: list[int], num_logits_per_req: int) -> SimpleNamespace:
+    """The fields of an InputBatch that DraftLogitsCache reads."""
+    slots_np = np.array(slots, dtype=np.int32)
+    return SimpleNamespace(
+        idx_mapping=torch.from_numpy(slots_np).to(DEVICE),
+        idx_mapping_np=slots_np,
+        expanded_idx_mapping=torch.from_numpy(
+            np.repeat(slots_np, num_logits_per_req)
+        ).to(DEVICE),
+        expanded_local_pos=torch.arange(num_logits_per_req, device=DEVICE).repeat(
+            len(slots)
+        ),
+    )
+
+
+@requires_gpu
+@pytest.mark.parametrize("tp_size", [2, 4])
+def test_sharded_draft_logits_balance_and_stale_rows(tp_size: int):
+    """Owners follow batch position, every rank caches at most
+    cdiv(num_reqs, tp_size) requests, and a request skipped while another
+    request took its row has stale drafts."""
+    max_num_reqs = 64
+    num_logits_per_req = 3
+    owners = _make_sharded_draft_logits(tp_size, max_num_reqs)
+    # Skewed slots: under slot % tp_size, rank 0 would own every request.
+    step0 = [s * tp_size for s in range(2 * tp_size)]
+    batch0 = _draft_batch(step0, num_logits_per_req)
+    for o in owners:
+        o.assign(batch0.idx_mapping, batch0.idx_mapping_np)
+
+    for rank, o in enumerate(owners):
+        assert o.shard_mapping_np[step0].tolist() == [
+            i % tp_size for i in range(len(step0))
+        ]
+        rows = _np(o.row_mapping)[step0]
+        owned = [i for i in range(len(step0)) if i % tp_size == rank]
+        assert rows[owned].tolist() == [i // tp_size for i in owned]
+        assert (np.delete(rows, owned) == -1).all()
+        assert _np(o.inverse_row_mapping)[: len(owned)].tolist() == [
+            step0[i] for i in owned
+        ]
+
+    # Every drafted request verifies against its own row.
+    for rank, o in enumerate(owners):
+        owned = [s for s in step0 if o.shard_mapping_np[s] == rank]
+        stale = _np(o.stale_drafts(_draft_batch(owned, num_logits_per_req)))
+        assert not stale.any()
+
+    # Step 1 skips the request at position 1 and puts a new request there.
+    skipped, new = step0[1], 63
+    step1 = [step0[0], new] + step0[2:]
+    batch1 = _draft_batch(step1, num_logits_per_req)
+    for o in owners:
+        o.assign(batch1.idx_mapping, batch1.idx_mapping_np)
+
+    # The skipped request keeps its owner, whose row now holds `new`.
+    owner_of_skipped = 1 % tp_size
+    o = owners[owner_of_skipped]
+    assert o.shard_mapping_np[skipped] == owner_of_skipped
+    stale = _np(o.stale_drafts(_draft_batch([skipped, new], num_logits_per_req)))
+    stale = stale.reshape(2, num_logits_per_req)
+    # Only draft rows (local position > 0) of the skipped request are stale.
+    assert stale[0].tolist() == [False] + [True] * (num_logits_per_req - 1)
+    assert not stale[1].any()
+
+
+@pytest.mark.parametrize("pcp_size", [1, 2])
+def test_draft_logits_stay_replicated_under_pcp(pcp_size: int):
+    """PCPManager.sync_drafts indexes the draft logits cache by request state,
+    so PCP keeps the cache replicated even under batch-sharded sampling."""
+    from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+
+    speculator = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp_size)
+        ),
+        max_num_reqs=8,
+        num_speculative_steps=2,
+        vocab_size=4,
+        device=torch.device("cpu"),
+        draft_watermarker=None,
+        draft_logits_spec=lambda _: (torch.float32, 0.0),
+        supports_batch_sharded_draft_logits=lambda: True,
+    )
+    fake_group = SimpleNamespace(rank_in_group=0, world_size=2)
+    with (
+        mock.patch(
+            "vllm.v1.worker.gpu.spec_decode.speculator.batch_sharded_sampling_enabled",
+            return_value=True,
+        ),
+        mock.patch.object(draft_logits_module, "get_tp_group", return_value=fake_group),
+    ):
+        DraftModelSpeculator._init_draft_logits(speculator, target_model=None)
+
+    draft_logits = speculator.draft_logits
+    assert (draft_logits.row_mapping is not None) == (pcp_size == 1)
+    assert draft_logits.values.shape[0] == (4 if pcp_size == 1 else 8)
+
+
+def test_owners_of_reads_owner_table_or_batch_position():
+    """A sharded cache owns each request at the rank its owner table records;
+    a replicated cache leaves requests round-robin over batch positions."""
+    fake_group = SimpleNamespace(rank_in_group=1, world_size=4)
+    idx_mapping_np = np.array([6, 1, 3, 4, 0], dtype=np.int32)
+    with mock.patch.object(
+        draft_logits_module, "get_tp_group", return_value=fake_group
+    ):
+        sharded, replicated = (
+            draft_logits_module.DraftLogitsCache(
+                8, 1, 1, dtype=torch.float32, fill=0.0, device="cpu", sharded=sharded
+            )
+            for sharded in (True, False)
+        )
+        sharded_owners_np, sharded_owners = sharded.owners_of(idx_mapping_np)
+        replicated_owners_np, replicated_owners = replicated.owners_of(idx_mapping_np)
+
+    # Before any assign(), a sharded cache owns each request by its slot.
+    assert sharded_owners_np.tolist() == (idx_mapping_np % 4).tolist()
+    assert sharded_owners is sharded.shard_mapping
+    assert replicated_owners_np.tolist() == [0, 1, 2, 3, 0]
+    assert replicated_owners is None

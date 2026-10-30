@@ -13,9 +13,22 @@ from typing import Any
 import pytest
 import torch
 import torch.nn as nn
-from transformers import AutoConfig, AutoModel, PreTrainedConfig
+from safetensors.torch import load_file, save_file
+from transformers import (
+    AutoConfig,
+    AutoModel,
+    AutoModelForCausalLM,
+    PreTrainedConfig,
+)
 
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import (
+    ModelConfig,
+    ParallelConfig,
+    SpeculativeConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
+from vllm.model_executor import model_loader
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.transformers.base import Base
 from vllm.model_executor.models.transformers.fusers import AttentionFuser
@@ -144,6 +157,26 @@ def test_hybrid_attention(vllm_runner: type[VllmRunner]) -> None:
         prompts,
         model="hmellor/tiny-random-Gemma2ForCausalLM",
         kwargs_ref=kwargs_ref,
+        kwargs_test=kwargs_test,
+    )
+
+
+def test_whole_graph_compile(
+    vllm_runner: type[VllmRunner], example_prompts: list[str]
+) -> None:
+    """Compiling attention and the KV-cache op into one Inductor graph must
+    match eager, so vllm:: ops have to receive eager strides."""
+    kwargs_ref = {"model_impl": "transformers", "max_model_len": 2048}
+    kwargs_test = {
+        **kwargs_ref,
+        "compilation_config": {"mode": 2, "backend": "inductor"},
+    }
+    check_implementation(
+        vllm_runner,
+        vllm_runner,
+        example_prompts,
+        model="Qwen/Qwen3-0.6B",
+        kwargs_ref={**kwargs_ref, "enforce_eager": True},
         kwargs_test=kwargs_test,
     )
 
@@ -694,8 +727,11 @@ def test_attention_layer_index_is_the_modules_own():
     attentions = [
         model.get_submodule(f"layers.{i}.self_attn.{j}") for i in (0, 1) for j in (0, 1)
     ]
-    fusers = [AttentionFuser.match(None, attn) for attn in attentions]
-    assert all(fuser is not None for fuser in fusers)
+    fusers: list[AttentionFuser] = []
+    for attn in attentions:
+        fuser = AttentionFuser.match(None, attn)
+        assert fuser is not None
+        fusers.append(fuser)
     assert [f.layer_index(a) for f, a in zip(fusers, attentions)] == [0, 1, 2, 3]
 
     # Not dispatching to vLLM yet, as a vision tower never would be. The vLLM
@@ -705,17 +741,13 @@ def test_attention_layer_index_is_the_modules_own():
     assert all(f.validate(a, None) for f, a in zip(fusers, attentions))
 
 
-def test_attention_dispatch_is_required(monkeypatch: pytest.MonkeyPatch):
+def test_attention_dispatch_is_required():
     """Models selected by the permissive registry fail clearly without dispatch."""
-    monkeypatch.setattr(
-        "vllm.model_executor.models.transformers.base.get_pp_indices",
-        lambda *_: (0, 1),
-    )
     model = SimpleNamespace(
         text_config=SimpleNamespace(num_hidden_layers=1),
-        pp_group=SimpleNamespace(rank_in_group=0, world_size=1),
         attention_fusers={},
         _get_attn_cls=lambda: None,
+        _pp_indices=lambda: (0, 1),
     )
 
     with pytest.raises(
@@ -784,3 +816,99 @@ def test_get_mrope_input_positions_omits_unsupported_grid_kwargs():
 
     assert positions.shape == (4, 3)
     assert delta == 0
+
+
+# The smallest sizes the fused MoE kernels accept
+MTP_HIDDEN_SIZE = 128
+MTP_MOE_KWARGS = dict(
+    vocab_size=128,
+    hidden_size=MTP_HIDDEN_SIZE,
+    intermediate_size=256,
+    moe_intermediate_size=128,
+    n_routed_experts=4,
+    num_experts_per_tok=2,
+)
+# Real layer counts, since the MTP weight patterns hard-code them
+MTP_MODELS = {
+    "glm4_moe": dict(
+        num_hidden_layers=46, num_attention_heads=2, num_key_value_heads=1, head_dim=64
+    ),
+    "deepseek_v3": dict(
+        num_hidden_layers=61,
+        num_attention_heads=16,
+        q_lora_rank=64,
+        kv_lora_rank=512,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        v_head_dim=128,
+        first_k_dense_replace=1,
+        n_group=1,
+        topk_group=1,
+    ),
+}
+
+
+@pytest.mark.parametrize("model_type", MTP_MODELS)
+def test_mtp_draft_loads_mtp_weights(model_type, tmp_path, tp_init, monkeypatch):
+    """An MTP draft for a model following the Transformers MTP standard loads each
+    MTP layer appended to the target's checkpoint into `MtpModel`'s layout."""
+    kwargs = MTP_MODELS[model_type] | MTP_MOE_KWARGS
+    num_hidden_layers = kwargs.pop("num_hidden_layers")
+    num_mtp_layers = 2
+    hidden_size = MTP_HIDDEN_SIZE
+    config = AutoConfig.for_model(
+        model_type, num_hidden_layers=num_hidden_layers + num_mtp_layers, **kwargs
+    )
+    model_cls = AutoModelForCausalLM._model_mapping[type(config)]
+    config.architectures = [model_cls.__name__]
+    # These have one MTP layer, so register the second like Step-3.7 registers its own
+    monkeypatch.setattr(
+        model_cls,
+        "_keys_to_ignore_on_load_unexpected",
+        [rf"model\.layers\.{num_hidden_layers + 1}.*"]
+        + model_cls._keys_to_ignore_on_load_unexpected,
+    )
+    # Save the MTP layers as the last decoder layers, then add their MTP modules
+    model_cls(config).save_pretrained(tmp_path)
+    weights = load_file(tmp_path / "model.safetensors")
+    for i in range(num_hidden_layers, num_hidden_layers + num_mtp_layers):
+        for name, shape in {
+            "enorm.weight": (hidden_size,),
+            "hnorm.weight": (hidden_size,),
+            "eh_proj.weight": (hidden_size, 2 * hidden_size),
+            "shared_head.norm.weight": (hidden_size,),
+        }.items():
+            weights[f"model.layers.{i}.{name}"] = torch.randn(shape)
+    save_file(weights, tmp_path / "model.safetensors", metadata={"format": "pt"})
+    config.num_hidden_layers = num_hidden_layers
+    config.num_nextn_predict_layers = num_mtp_layers
+    config.save_pretrained(tmp_path)
+
+    target = ModelConfig(str(tmp_path), model_impl="transformers", dtype="bfloat16")
+    speculative_config = SpeculativeConfig(
+        method="mtp",
+        num_speculative_tokens=num_mtp_layers,
+        target_model_config=target,
+        target_parallel_config=ParallelConfig(),
+    )
+    draft = speculative_config.draft_model_config
+    assert draft.architecture == "TransformersMoEForMTP"
+    vllm_config = VllmConfig(model_config=target, speculative_config=speculative_config)
+    with set_current_vllm_config(vllm_config):
+        model = model_loader.get_model(vllm_config=vllm_config, model_config=draft)
+
+    assert len(model.model.layers) == num_mtp_layers
+    for k, layer in enumerate(model.model.layers):
+        mtp = f"model.layers.{num_hidden_layers + k}"
+        for ckpt_name, param_name in {
+            "enorm.weight": "enorm.weight",
+            "hnorm.weight": "hnorm.weight",
+            "eh_proj.weight": "eh_proj.weight",
+            "shared_head.norm.weight": "post_norm.weight",
+            "input_layernorm.weight": "mtp_block.input_layernorm.weight",
+            "self_attn.o_proj.weight": "mtp_block.self_attn.o_proj.weight",
+        }.items():
+            torch.testing.assert_close(
+                layer.get_parameter(param_name).cpu(),
+                weights[f"{mtp}.{ckpt_name}"].to(torch.bfloat16),
+            )
