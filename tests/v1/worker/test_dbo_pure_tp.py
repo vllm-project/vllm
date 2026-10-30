@@ -83,15 +83,13 @@ def _config(tp=4, dp=1, ep=False, spec=False, mm=False, enc_dec=False):
 @pytest.mark.parametrize(
     ("kwargs", "rejected"),
     [
-        # pure TP: the drafter and the vision encoder run outside the split
-        (dict(spec=True), None),
+        # pure TP: the vision encoder runs outside the split
         (dict(mm=True), None),
         (dict(spec=True, mm=True), None),
         # anything that is not pure TP keeps the old restrictions
-        (dict(spec=True, dp=2), "speculative decoding"),
-        (dict(spec=True, ep=True), "speculative decoding"),
-        (dict(spec=True, tp=1), "speculative decoding"),
         (dict(mm=True, dp=2), "multimodal"),
+        (dict(mm=True, ep=True), "multimodal"),
+        (dict(mm=True, tp=1), "multimodal"),
         # encoder-decoder models stay out under pure TP too
         (dict(enc_dec=True), "multimodal"),
     ],

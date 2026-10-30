@@ -48,7 +48,7 @@ With `--tensor-parallel-size N` (N > 1) and neither data nor expert parallelism,
 * Each rank decides alone whether to split a step; there is no DP coordination.
 * A split step runs without CUDA graphs. Set `--dbo-decode-token-threshold` above the largest decode batch so that decode steps keep their graphs, and raise `--dbo-prefill-token-threshold` (e.g. to 8192) so that only long prefills split.
 * `fused_allreduce_gemma_rms_norm` skips its FlashInfer and AITER fused kernels under DBO, so that every all-reduce is a microbatch hand-off.
-* Speculative decoding and multimodal models are allowed in this mode.
+* Multimodal models are allowed in this mode: the vision encoder runs outside the split.
 
 EX: `VLLM_USE_V2_MODEL_RUNNER=1 vllm serve Qwen/Qwen3-30B-A3B --tensor-parallel-size 4 --enable-dbo --dbo-prefill-token-threshold 8192 --dbo-decode-token-threshold 32768`
 
