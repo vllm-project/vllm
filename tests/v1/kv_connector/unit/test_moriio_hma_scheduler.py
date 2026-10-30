@@ -374,6 +374,11 @@ def test_scheduler_accepts_dspark_with_wrapped_full_attention(
         dcp_world_size=dcp_size,
     )
     imported_tokens = manager.block_size
+    assert scheduler._attn_block_size == manager.block_size
+    request = _make_read_request([[10, 11], [90]], 2 * manager.block_size + 1)
+    assert scheduler._select_read_attention(
+        request, manager.block_size, [100, 101, 102], [10, 11]
+    ) == ([101], [11])
     target_tokens = 1 + vllm_config.num_speculative_tokens
     manager.allocate_new_blocks(
         "decode",
@@ -739,12 +744,18 @@ def _make_read_scheduler():
         _reqs_need_send={},
         _req_kv_params={},
         _max_decode_tail_blocks=1,
+        _attn_block_size=128,
     )
 
 
-def _make_read_request(remote_block_ids):
+def _make_read_request(remote_block_ids, num_prompt_tokens=None):
     return SimpleNamespace(
         request_id="req",
+        num_prompt_tokens=(
+            len(remote_block_ids[0]) * 128 + 1
+            if num_prompt_tokens is None
+            else num_prompt_tokens
+        ),
         kv_transfer_params={
             "do_remote_prefill": True,
             "transfer_id": "tx",
@@ -798,17 +809,48 @@ def test_update_state_drops_decode_recompute_tail_block(
     assert output.new_block_ids_to_zero == [100, 101, 102]
 
 
-def test_update_state_pairs_shorter_local_blocks_with_remote_suffix():
+@pytest.mark.parametrize("local,remote", [([100], [10, 11]), ([100, 101], [10])])
+def test_update_state_rejects_incomplete_attention_tables(local, remote):
+    # Admission supplies complete tables, not an unhashed receive suffix.
     sched = _make_read_scheduler()
-    request = _make_read_request([[10, 11, 12], [92]])
-    blocks = _FakeBlocks(
-        all_groups=([102], [202]),
+    request = _make_read_request([remote, [92]], num_prompt_tokens=257)
+    with pytest.raises(moriio_common.MoRIIOError, match="do not cover"):
+        sched.update_state_after_alloc(
+            request, _FakeBlocks((local, [202])), num_external_tokens=128
+        )
+
+
+@pytest.mark.parametrize("local_tokens", [0, 64, 128, 192, 256])
+def test_update_state_selects_missing_attention_pages(local_tokens):
+    sched = _make_read_scheduler()
+    request = _make_read_request([[10, 11], [90]], num_prompt_tokens=257)
+    blocks = _FakeBlocks(([100, 101, 102], [200]))
+    external, asynchronous = sched.get_num_new_matched_tokens(request, local_tokens)
+    assert (external, asynchronous) == (256 - local_tokens, False)
+    sched.update_state_after_alloc(request, blocks, external)
+    output = SchedulerOutput.make_empty()
+    output.new_block_ids_to_zero = [100, 101, 102, 999]
+    meta = sched.build_connector_meta(output).reqs_to_recv["req"]
+    expected = [100, 101][local_tokens // 128 :]
+    assert meta.local_block_ids == [expected, [200]]
+    if external:
+        assert meta.remote_block_ids == [[10, 11][local_tokens // 128 :], [90]]
+    assert output.new_block_ids_to_zero == [
+        block for block in [100, 101, 102, 999] if block not in expected
+    ]
+
+
+@pytest.mark.parametrize("external", [128, 256])
+def test_update_state_uses_final_external_token_count(external):
+    sched = _make_read_scheduler()
+    request = _make_read_request([[10, 11], [90]], num_prompt_tokens=257)
+    assert sched.get_num_new_matched_tokens(request, 128) == (128, False)
+    sched.update_state_after_alloc(
+        request, _FakeBlocks(([100, 101, 102], [200])), external
     )
-
-    sched.update_state_after_alloc(request, blocks, num_external_tokens=64)
-
-    assert sched._reqs_need_recv["req"][1] == [[102], [202]]
-    assert sched._req_kv_params["req"]["remote_block_ids"] == [[12], [92]]
+    assert sched._reqs_need_recv["req"][1][0] == (
+        [101] if external == 128 else [100, 101]
+    )
 
 
 def test_update_state_pairs_trimmed_mamba_state_with_remote_state():
@@ -1197,11 +1239,10 @@ def test_read_rematch_after_alloc_keeps_queued_transfer():
     """Clearing the flag blocks another external hit, not the queued READ."""
     sched = _make_read_scheduler()
     request = _make_read_request([[10, 11], [91]])
-    request.num_prompt_tokens = 32
-    assert sched.get_num_new_matched_tokens(request, 0) == (31, False)
+    assert sched.get_num_new_matched_tokens(request, 0) == (256, False)
 
     sched.update_state_after_alloc(
-        request, _FakeBlocks(all_groups=([100, 101], [200])), num_external_tokens=31
+        request, _FakeBlocks(all_groups=([100, 101], [200])), num_external_tokens=256
     )
 
     assert sched._reqs_need_recv["req"][1] == [[100, 101], [200]]
