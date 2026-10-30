@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Schedule EPLB expert migrations into conflict-free batches."""
+"""Schedule EPLB expert migrations with bounded per-rank concurrency."""
 
 from dataclasses import dataclass
 
@@ -21,15 +21,17 @@ def schedule_migration_batches(
     num_local_experts: int,
     old_indices: np.ndarray,
     new_indices: np.ndarray,
+    max_peers_per_batch: int = 1,
 ) -> list[list[MigrationFlow]]:
-    """Schedule expert migrations without per-rank communication contention.
+    """Schedule expert migrations with bounded per-rank concurrency.
 
     Experts assigned to the same source and destination ranks form one flow.
-    Each flow is placed in the first batch that does not already use either
-    endpoint, so a rank communicates with at most one peer in each batch while
-    independent rank pairs can transfer concurrently.
+    Each flow is placed in the first batch with capacity at both endpoints.
+    Send and receive flows both count toward each rank's limit.
     """
     assert old_indices.shape == new_indices.shape
+    if max_peers_per_batch < 1:
+        raise ValueError("max_peers_per_batch must be positive")
     recv_ranks_by_expert: dict[int, list[int]] = {}
     old_experts_by_rank: list[set[int]] = []
     old_by_rank = old_indices.reshape(-1, num_local_experts)
@@ -83,22 +85,25 @@ def schedule_migration_batches(
     # constraints, so coalesce them before grouping. The loop below is a
     # deterministic first-fit edge coloring of the rank communication graph.
     batches: list[list[MigrationFlow]] = []
-    endpoints_used: list[int] = []
+    peer_counts: list[list[int]] = []
+    num_ranks = old_indices.size // num_local_experts
     for (src_rank, dst_rank), expert_ids in expert_ids_by_pair.items():
         flow = MigrationFlow(src_rank, dst_rank, tuple(expert_ids))
 
-        # Direction is irrelevant for NIC contention. This endpoint mask keeps
-        # each rank connected to at most one peer in a batch. The conservative
-        # limit leaves bandwidth headroom for inference during async migration.
-        endpoints = (1 << src_rank) | (1 << dst_rank)
-        for batch_idx, (batch, used) in enumerate(zip(batches, endpoints_used)):
-            if not endpoints & used:
+        for batch, counts in zip(batches, peer_counts):
+            if (
+                counts[src_rank] < max_peers_per_batch
+                and counts[dst_rank] < max_peers_per_batch
+            ):
                 batch.append(flow)
-                endpoints_used[batch_idx] |= endpoints
+                counts[src_rank] += 1
+                counts[dst_rank] += 1
                 break
         else:
             batches.append([flow])
-            endpoints_used.append(endpoints)
+            counts = [0] * num_ranks
+            counts[src_rank] = counts[dst_rank] = 1
+            peer_counts.append(counts)
 
     return batches
 
@@ -107,6 +112,7 @@ def schedule_migration_batches_for_layers(
     num_local_experts: int,
     old_indices: np.ndarray,
     new_indices: np.ndarray,
+    max_peers_per_batch: int = 1,
 ) -> list[list[list[MigrationFlow]]]:
     """Precompute the independent migration schedule for every MoE layer.
 
@@ -117,7 +123,9 @@ def schedule_migration_batches_for_layers(
     assert old_indices.shape == new_indices.shape
     assert old_indices.ndim == 2
     return [
-        schedule_migration_batches(num_local_experts, old_layer, new_layer)
+        schedule_migration_batches(
+            num_local_experts, old_layer, new_layer, max_peers_per_batch
+        )
         for old_layer, new_layer in zip(old_indices, new_indices)
     ]
 
