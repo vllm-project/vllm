@@ -175,7 +175,15 @@ def test_flashinfer_trtllm_sparse_mla_decode_without_rope(dtype, mode, monkeypat
             backend, "prepare_sparse_mla_safe_lengths", unexpected_helper
         )
 
-    out, lse = impl._run_mqa_kernel(query.squeeze(1), kv_cache, indices, counts)
+    out, lse = impl._forward_mqa_kernel(
+        query.squeeze(1),
+        kv_cache,
+        indices,
+        counts,
+        layer=None,
+        block_size=block_size,
+        is_decode=True,
+    )
     reference = trtllm_batch_decode_with_kv_cache_mla(
         query=query,
         kv_cache=kv_cache.unsqueeze(1),

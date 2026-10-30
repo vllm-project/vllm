@@ -99,6 +99,15 @@ vllm serve openai/gpt-oss-20b --quantization-config.moe.activation mxfp8
 
 Combine with `--moe-backend` to pin a specific kernel family.
 
+For MXFP4 linear layers on RDNA3/RDNA3.5 (gfx11), `int8_per_group_32` selects
+the W4A8 int8-dot GEMV for decode (batches of up to 8 tokens); larger batches
+run weight-only. On W4A4 checkpoints this replaces the MXFP4 activation
+quantization:
+
+```bash
+vllm serve <mxfp4-model> --quantization-config.linear.activation int8_per_group_32
+```
+
 ### Re-quantizing layers to a different precision
 
 An online target can re-quantize a checkpoint-quantized (prequantized) layer at load time.
@@ -111,7 +120,10 @@ Currently supported combinations are:
 
 | Checkpoint layer | Online target | Requirements |
 | ---------------- | ------------- | ------------ |
-| Serialized ModelOpt MXFP8 linear | any | Target-specific hardware requirements |
+| Serialized ModelOpt MXFP8 linear | any online linear method | Target-specific hardware requirements |
+| Serialized compressed-tensors NVFP4 MoE | any online MoE method | Target-specific hardware requirements |
+| Serialized ModelOpt NVFP4 MoE | any online MoE method | Target-specific hardware requirements |
+| Serialized Quark NVFP4 MoE | any online MoE method | Target-specific hardware requirements |
 
 For example, serialized ModelOpt MXFP8 linears can be converted to
 per-channel-weight/per-token-activation FP8 at load time:
@@ -122,10 +134,18 @@ vllm serve MiniMaxAI/MiniMax-M3-MXFP8 \
   --quantization-config.linear fp8_per_channel
 ```
 
+Similarly, for example, NVFP4 MoE checkpoints can be re-quantized to any online MoE method,
+for example compressed-tensors NVFP4 experts to online MXFP4:
+
+```bash
+vllm serve RedHatAI/Qwen3-30B-A3B-NVFP4 \
+  --quantization-config '{"targets":{"*mlp.experts*":"mxfp4"}}'
+```
+
 !!! info
 
-    This is only available for linear layers at the moment.
-    
+    Re-quantization is available for both linear and MoE layers.
+
     Checkpoint-exclusion policy is not enforced by online quantization/re-quantization. Only exclusion through `--quantization-config.targets`/`--quantization-config.ignore` is enforced. 
 
 ### Online quantization on unquantized layers from partially-quantized checkpoints

@@ -1,0 +1,170 @@
+meta:
+  title: "GLM-ASR-Nano-2512"
+  slug: "glm-asr-nano-2512"
+  provider: "GLM (Z-AI)"
+  description: "Open-source speech recognition model (~2B) with strong dialect support (Cantonese and others) and robust low-volume speech transcription"
+  date_added: 2026-01-26
+  date_updated: 2026-04-17
+  tasks:
+    - multimodal
+  performance_headline: "Outperforms Whisper V3 on multiple benchmarks at compact 1.5B active / 2B total size"
+  related_recipes: []
+
+model:
+  model_id: "zai-org/GLM-ASR-Nano-2512"
+  min_vllm_version: "0.14.1"
+  architecture: dense
+  parameter_count: "2.3B"
+  active_parameters: "1.5B"
+  context_length: 8192
+  base_args: []
+  base_env: {}
+
+dependencies:
+  - note: "Audio extras required for ASR (requires vllm>=0.14.1)"
+    command: 'uv pip install -U "vllm[audio]" --torch-backend auto'
+  - note: "Install transformers from source for GLM-ASR tokenizer support"
+    command: "uv pip install git+https://github.com/huggingface/transformers.git"
+
+features: {}
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 11
+    description: "Full precision BF16 — single-GPU deployment"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+kv_offload_support:
+  offloading_cpu: verified
+  offloading_fs: verified
+
+hardware_overrides: {}
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  GLM-ASR-Nano-2512 is an open-source automatic speech recognition model with 1.5B
+  active parameters (2B total). It outperforms OpenAI Whisper V3 on multiple benchmarks
+  while remaining compact enough for single-GPU deployment.
+
+  ### Key Capabilities
+
+  - **Dialect support:** Beyond standard Mandarin and English, strong on Cantonese
+    (粤语) and other Chinese dialects.
+  - **Low-volume speech:** Specifically trained for "whisper/quiet speech" scenarios.
+  - **SOTA accuracy:** Lowest average error rate (4.10) among comparable open-source
+    models, strong on Wenet Meeting, Aishell-1, and similar Chinese benchmarks.
+
+  ## Prerequisites
+
+  - **vLLM version:** >= 0.14.1 (with `[audio]` extras)
+  - **Transformers:** install from source for latest
+
+  ### Install Dependencies
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install git+https://github.com/huggingface/transformers.git
+  uv pip install -U "vllm[audio]" --torch-backend auto
+  ```
+
+  ## Launching the Server
+
+  ```bash
+  vllm serve zai-org/GLM-ASR-Nano-2512
+  ```
+
+  ## Client Usage
+
+  ### OpenAI SDK (Audio URL)
+
+  ```python
+  import base64
+  import httpx
+  from openai import OpenAI
+
+  client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+
+  audio_url = "https://github.com/zai-org/GLM-ASR/raw/main/examples/example_en.wav"
+  audio_data = base64.b64encode(httpx.get(audio_url).content).decode("utf-8")
+
+  response = client.chat.completions.create(
+      model="zai-org/GLM-ASR-Nano-2512",
+      messages=[{
+          "role": "user",
+          "content": [{
+              "type": "input_audio",
+              "input_audio": {"data": audio_data, "format": "wav"}
+          }]
+      }],
+      max_tokens=500,
+  )
+  print(response.choices[0].message.content)
+  ```
+
+  ### Transcribe Endpoint
+
+  ```python
+  import httpx
+  from openai import OpenAI
+
+  client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+
+  audio_file = httpx.get("https://github.com/zai-org/GLM-ASR/raw/main/examples/example_en.wav").content
+
+  response = client.audio.transcriptions.create(
+      model="zai-org/GLM-ASR-Nano-2512",
+      file=("audio.wav", audio_file),
+  )
+  print(response.text)
+  ```
+
+  ### cURL (Transcribe)
+
+  ```bash
+  curl http://localhost:8000/v1/audio/transcriptions \
+    -H "Authorization: Bearer EMPTY" \
+    -F "model=zai-org/GLM-ASR-Nano-2512" \
+    -F "file=@your_audio.wav"
+  ```
+
+  ### Local Audio File (chat API)
+
+  ```python
+  import base64
+  from openai import OpenAI
+
+  client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+
+  with open("your_audio.mp3", "rb") as f:
+      audio_data = base64.b64encode(f.read()).decode("utf-8")
+
+  response = client.chat.completions.create(
+      model="zai-org/GLM-ASR-Nano-2512",
+      messages=[{
+          "role": "user",
+          "content": [{"type": "input_audio", "input_audio": {"data": audio_data, "format": "mp3"}}]
+      }],
+      max_tokens=500,
+  )
+  print(response.choices[0].message.content)
+  ```
+
+  ## Troubleshooting
+
+  - **Transformers version:** Requires `transformers >= 5.0.0` for best compatibility.
+  - **Audio formats:** Supports wav, mp3, flac, and other common formats.
+
+  ## References
+
+  - [Model card](https://huggingface.co/zai-org/GLM-ASR-Nano-2512)
+  - [GitHub repo](https://github.com/zai-org/GLM-ASR)
