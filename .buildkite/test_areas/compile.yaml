@@ -185,6 +185,7 @@ steps:
 
 - label: ":nvidia: (B200) [Nightly] Fusion E2E Config Sweep"
   key: fusion-e2e-config-sweep-b200
+  automatic_shard: false  # fails on main: enrollment waits until it passes
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"
   device: b200-k8s

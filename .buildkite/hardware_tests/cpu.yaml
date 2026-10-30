@@ -3,6 +3,7 @@ depends_on: []
 steps:
 - label: CPU-Kernel Tests Shard %N
   key: cpu-kernel-tests
+  automatic_shard: false  # CPU step: held out until its owners agree; main has no test timings for it
   depends_on: []
   device: intel_cpu
   no_plugin: true
@@ -68,6 +69,7 @@ steps:
 # which unit tests cannot reach.
 - label: CPU-Spec Decode Tests
   key: cpu-spec-decode-tests
+  automatic_shard: false  # CPU step: held out until its owners agree; main has no test timings for it
   depends_on: []
   soft_fail: true
   device: intel_cpu
@@ -126,6 +128,7 @@ steps:
 
 - label: CPU-Language Generation and Pooling Model Tests Shard %N
   key: cpu-language-generation-and-pooling-model-tests
+  automatic_shard: false  # CPU step: held out until its owners agree; main has no test timings for it
   depends_on: []
   device: intel_cpu
   no_plugin: true
@@ -147,6 +150,7 @@ steps:
 
 - label: CPU-Quantization Model Tests
   key: cpu-quantization-model-tests
+  automatic_shard: false  # CPU step: held out until its owners agree; main has no test timings for it
   depends_on: []
   device: intel_cpu
   no_plugin: true
@@ -169,6 +173,7 @@ steps:
       
 - label: CPU-Distributed Tests (PP+TP)
   key: cpu-distributed-tests-pp-tp
+  automatic_shard: false  # CPU step: held out until its owners agree; main has no test timings for it
   depends_on: []
   device: intel_cpu
   no_plugin: true
@@ -189,6 +194,7 @@ steps:
 
 - label: CPU-Distributed Tests (DP+TP)
   key: cpu-distributed-tests-dp-tp
+  automatic_shard: false  # CPU step: held out until its owners agree; main has no test timings for it
   depends_on: []
   device: intel_cpu
   no_plugin: true
@@ -200,6 +206,7 @@ steps:
 
 - label: CPU-Multi-Modal Model Tests %N
   key: cpu-multi-modal-model-tests-n
+  automatic_shard: false  # CPU step: held out until its owners agree; main has no test timings for it
   depends_on: []
   device: intel_cpu
   no_plugin: true
@@ -219,6 +226,7 @@ steps:
 
 - label: CPU-Qwen2.5-VL Multimodal Tests
   key: cpu-qwen2-5-vl-multimodal-tests
+  automatic_shard: false  # CPU step: held out until its owners agree; main has no test timings for it
   depends_on: []
   device: intel_cpu
   no_plugin: true
@@ -233,6 +241,7 @@ steps:
 
 - label: "Arm CPU Test Shard %N"
   key: arm-cpu-test
+  automatic_shard: false  # CPU step: held out until its owners agree; main has no test timings for it
   depends_on:
   - cpu-arm64-image-build
   soft_fail: false

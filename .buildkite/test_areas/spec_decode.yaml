@@ -610,6 +610,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 35GB) [Nightly] Spec Decode AL MTP + Other Acceptance"
   key: spec-decode-mtp-other-acceptance-nightly
+  automatic_shard: false  # keeps its fixed split until its own enrollment PR merges
   timeout_in_minutes: 35
   device: h200_35gb
   optional: true

@@ -510,6 +510,7 @@ steps:
 
 - label: ":nvidia: (L4) Quantization Kernels Shard %N"
   key: kernels-quantization-test
+  automatic_shard: false  # keeps its fixed split until an automatic plan meets the shard target
   device: l4
   num_devices: 1
   timeout_in_minutes: 30
@@ -1192,6 +1193,7 @@ steps:
 
 - label: ":amd: (MI300) DeepSeek-V4.1 gfx942 Mono Decode Kernels"
   key: dsv41-mono-decode-gfx942-amd
+  automatic_shard: false  # fails on main: enrollment waits until it passes
   dind: false
   device: mi300_1
   num_devices: 1
