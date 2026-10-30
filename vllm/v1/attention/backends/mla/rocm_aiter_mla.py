@@ -486,13 +486,40 @@ def _aiter_mla_small_head_mode() -> str:
     return mode
 
 
+def _adaptive_dcp_verify_unsupported_reason(vllm_config: VllmConfig) -> str | None:
+    parallel_config = vllm_config.parallel_config
+    dcp_world_size = parallel_config.decode_context_parallel_size
+    if dcp_world_size == 1:
+        return None
+    cp_interleave = parallel_config.cp_kv_cache_interleave_size
+    if cp_interleave != 1:
+        return (
+            "adaptive verification with decode context parallelism requires "
+            f"cp_kv_cache_interleave_size 1, got {cp_interleave}"
+        )
+    asm_selected = (
+        _asm_dcp_verify_configured(dcp_world_size, cp_interleave, True)
+        and max_decode_query_len(vllm_config) >= _MIN_CPRR_QLEN
+    )
+    if not (
+        asm_selected
+        or _segmented_dcp_verify_supported(dcp_world_size, cp_interleave)
+        or _triton_dcp_verify_supported(dcp_world_size, cp_interleave)
+    ):
+        return (
+            "adaptive verification with decode context parallelism needs the "
+            "round-robin asm decode, segmented MLA or the gfx942 Triton verify"
+        )
+    return None
+
+
 def _adaptive_varlen_verify_enabled(vllm_config: VllmConfig) -> bool:
     speculative_config = vllm_config.speculative_config
     return (
         speculative_config is not None
         and bool(getattr(speculative_config, "enable_adaptive_verification", False))
-        and vllm_config.parallel_config.decode_context_parallel_size == 1
         and max_decode_query_len(vllm_config) > 1
+        and _adaptive_dcp_verify_unsupported_reason(vllm_config) is None
     )
 
 
@@ -587,6 +614,20 @@ class AiterMLABackend(MLACommonBackend):
             and kv_cache_dtype in (None, "auto", "float16")
         ):
             invalid_reasons.append("non-causal fp16 MLA decode not supported")
+        if use_adaptive_verification and use_dcp:
+            from vllm.config import get_current_vllm_config_or_none
+
+            vllm_config = get_current_vllm_config_or_none()
+            reason = (
+                _adaptive_dcp_verify_unsupported_reason(vllm_config)
+                if vllm_config is not None
+                else None
+            )
+            if reason is not None:
+                raise ValueError(
+                    f"{reason}. Disable enable_adaptive_verification in the "
+                    "speculative config or set decode_context_parallel_size=1."
+                )
         return invalid_reasons
 
     @staticmethod
@@ -764,6 +805,10 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
 
         return uniform_qo_len
 
+    @property
+    def _varlen_right_align(self) -> bool:
+        return self.dcp_world_size > 1
+
     @classmethod
     def get_varlen_cudagraph_max_query_len(
         cls: type["AiterMLAMetadataBuilder"],
@@ -922,7 +967,9 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         max_num_pages = max_num_reqs * max_num_pages_per_req
         speculative_config = vllm_config.speculative_config
-        if _adaptive_varlen_verify_enabled(vllm_config):
+        if _adaptive_varlen_verify_enabled(vllm_config) and not (
+            self._varlen_right_align
+        ):
             assert speculative_config is not None
             max_num_pages += max_num_reqs * (
                 speculative_config.num_speculative_tokens or 0
@@ -1041,12 +1088,11 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # The assembly prefill requires FP8 KV, bf16 output, and 16-aligned
         # heads. It writes bf16 through a raw output pointer, so fp16 must use
         # the standard prefill path. Head counts that are not a multiple of 16
-        # are replicate-padded up to one in _mla_fp8_prefill_attn, so the gate
-        # is the same head-count predicate the decode path uses.
+        # are replicate-padded up to one in _mla_fp8_prefill_attn.
         self._fp8_prefill_enabled = _fp8_mla_prefill_supported() and (
             kv_cache_dtype_str == "fp8"
             and vllm_config.model_config.dtype == torch.bfloat16
-            and AiterMLAHelper.is_valid_num_heads(self.num_heads)
+            and AiterMLAHelper.is_valid_fp8_prefill_num_heads(self.num_heads)
         )
         if self._fp8_prefill_enabled:
             max_prefill_qlen = min(
@@ -1565,8 +1611,10 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 )
 
         varlen_q_rows = varlen_o_rows = None
-        if varlen_decode:
+        varlen_left_align = varlen_decode and not self._varlen_right_align
+        if varlen_left_align:
             seq_lens_for_kernel = seq_lens_device + (max_qo_len - qo_lens_device)
+        if varlen_decode:
             varlen_q_rows, varlen_o_rows = self._fill_varlen_rows(
                 query_start_loc_device, qo_lens_device, num_reqs
             )
@@ -1631,7 +1679,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             # device synchronisation. Programs whose chunk lies past
             # num_tokens mask out entirely.
             max_tokens_per_req = block_table_tensor.shape[1] * self.kernel_block_size
-            if varlen_decode:
+            if varlen_left_align:
                 max_tokens_per_req += max_qo_len - 1
             num_chunks = max(1, cdiv(max_tokens_per_req, 1024))
             _expand_page_indices_kernel[(num_reqs, num_chunks)](
@@ -1643,7 +1691,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 seq_lens_device,
                 KERNEL_BLOCK_SIZE=self.kernel_block_size,
                 BLOCK_SIZE=1024,
-                CLAMP_TAIL=varlen_decode,
+                CLAMP_TAIL=varlen_left_align,
             )
             paged_kv_indices = self.paged_kv_indices
 
@@ -1887,7 +1935,9 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         row_pos = self._varlen_row_pos[:num_rows]
         row_qlen = qo_lens_device.to(torch.int64).index_select(0, row_req)
         row_start = query_start_loc_device.to(torch.int64).index_select(0, row_req)
-        is_real = row_pos < row_qlen
+        if self._varlen_right_align:
+            row_pos = row_pos - (width - row_qlen)
+        is_real = (row_pos >= 0) & (row_pos < row_qlen)
         packed_row = row_start + row_pos
         q_rows = self._varlen_q_rows[:num_rows]
         q_rows.copy_(torch.where(is_real, packed_row, 0))
@@ -2093,6 +2143,19 @@ class AiterMLAHelper:
                 or num_heads % AiterMLAHelper._AITER_MIN_MLA_HEADS == 0
             )
         )
+
+    @staticmethod
+    def is_valid_fp8_prefill_num_heads(num_heads: int) -> bool:
+        """Whether the FP8 PS asm prefill should run at ``num_heads`` per rank.
+
+        Rejects counts that padding to the kernel width would at least double
+        (1-8 heads). At 8 heads (Kimi-K2.x at TP8) the doubled kernel plus its
+        reduce is slower than bf16 flash attention, so those counts keep the
+        bf16 prefill.
+        """
+        return AiterMLAHelper.is_valid_num_heads(
+            num_heads
+        ) and 2 * num_heads > AiterMLAHelper.get_fp8_prefill_num_heads(num_heads)
 
     @staticmethod
     def has_fp8_non_causal_qlen2_kernel(num_heads: int) -> bool:
@@ -2349,7 +2412,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
         self._fp8_prefill_enabled = _fp8_mla_prefill_supported() and (
             is_quantized_kv_cache(kv_cache_dtype)
-            and AiterMLAHelper.is_valid_num_heads(self.num_heads)
+            and AiterMLAHelper.is_valid_fp8_prefill_num_heads(self.num_heads)
         )
         self._fused_prefill_qkv = False
         if self._fp8_prefill_enabled:
@@ -2982,8 +3045,11 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             num_tokens = q.shape[0]
             q = q.index_select(0, q_rows)
         o, lse = self._forward_mqa(q, kv_c_and_k_pe_cache, attn_metadata, layer)
-        assert lse is None
-        return o.index_select(0, decode.varlen_o_rows[:num_tokens]), None
+        o_rows = decode.varlen_o_rows[:num_tokens]
+        assert lse is None or self.dcp_world_size > 1
+        if lse is not None:
+            lse = lse.index_select(0, o_rows)
+        return o.index_select(0, o_rows), lse
 
     def _forward_mqa(
         self,
