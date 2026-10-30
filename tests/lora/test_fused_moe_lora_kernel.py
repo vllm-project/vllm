@@ -1038,7 +1038,6 @@ def _record_fast_paths(monkeypatch):
         monkeypatch.setattr(fused_moe_lora_op, name, wrapper)
 
     record("_run_fused_moe_lora_one_shot")
-    record("_run_fused_moe_lora_small_batch")
     return calls
 
 
