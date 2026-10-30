@@ -45,11 +45,10 @@ VideoInput: TypeAlias = (
     list[Image.Image] | list[np.ndarray] | list[tuple[np.ndarray, dict[str, Any]]]
 )
 AudioInput = list[tuple[np.ndarray, int]]
+ResizedData: TypeAlias = Image.Image | np.ndarray | list[Image.Image]
 
 
-def _resize_data(
-    _data: Image.Image | np.ndarray, size_factor: float
-) -> Image.Image | np.ndarray:
+def _resize_data(_data: ResizedData, size_factor: float) -> ResizedData:
     assert size_factor <= 1, "Size factor must be less than 1"
     # Image input
     if isinstance(_data, Image.Image):
@@ -75,7 +74,7 @@ def _resize_data(
 
 def resize_mm_data(
     data: ImageInput | VideoInput | AudioInput, size_factors: tuple[float, ...]
-) -> ImageInput | VideoInput | AudioInput:
+) -> list[ResizedData]:
     size_factors = size_factors[: len(data)]
     if is_list_of(data, (Image.Image, np.ndarray, list)):
         return [_resize_data(d, s) for d, s in zip(data, size_factors)]

@@ -6,6 +6,7 @@ import torch
 from PIL import Image
 
 from vllm.config import ModelConfig
+from vllm.model_executor.models.unlimited_ocr import UnlimitedOCRProcessingInfo
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.processing.context import TimingContext
@@ -24,6 +25,7 @@ def test_profiling_tokens_cover_all_crop_grids():
         model_config_kwargs={"max_model_len": 8192},
     )
     mm_processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    assert isinstance(mm_processor.info, UnlimitedOCRProcessingInfo)
     hf_processor = mm_processor.info.get_hf_processor()
     dummy_inputs = mm_processor.get_dummy_mm_inputs({"image": 1})
     budget = dummy_inputs["mm_placeholders"]["image"][0].get_num_embeds()
@@ -48,6 +50,7 @@ def test_image_cache_identity_across_image_counts(use_uuid: bool, use_embeds: bo
     )
     processor = MULTIMODAL_REGISTRY.create_processor(config)
     tokenizer = processor.info.get_tokenizer()
+    images: list[torch.Tensor] | list[Image.Image]
     if use_embeds:
         images = [torch.ones(8, config.get_hidden_size())] * 3
     else:

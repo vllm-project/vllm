@@ -177,10 +177,12 @@ def test_mm_device_do_normalize():
 
     normalized_inputs = processor(prompt, mm_items=mm_items)
     normalized_values = normalized_inputs["mm_kwargs"].get_data()["pixel_values"]
+    assert isinstance(normalized_values, torch.Tensor)
 
     ctx.model_config.multimodal_config.mm_device_do_normalize = True
     raw_inputs = processor(prompt, mm_items=mm_items)
     raw_values = raw_inputs["mm_kwargs"].get_data()["pixel_values"]
+    assert isinstance(raw_values, torch.Tensor)
     assert raw_values.dtype == torch.uint8
 
     input_norm = build_mm_input_norm(ctx.model_config).to(device)

@@ -58,10 +58,9 @@ def test_window_attention_applies_sinks(vision_attn_env, num_kv_heads):
     attn.sinks.data.normal_()
 
     total = sum(SEQ_LENS)
-    opts = dict(device="cuda", dtype=torch.bfloat16)
-    q = torch.randn(total, NUM_HEADS, HEAD_DIM, **opts)
-    k = torch.randn(total, num_kv_heads, HEAD_DIM, **opts)
-    v = torch.randn(total, num_kv_heads, HEAD_DIM, **opts)
+    q = torch.randn(total, NUM_HEADS, HEAD_DIM, device="cuda", dtype=torch.bfloat16)
+    k = torch.randn(total, num_kv_heads, HEAD_DIM, device="cuda", dtype=torch.bfloat16)
+    v = torch.randn(total, num_kv_heads, HEAD_DIM, device="cuda", dtype=torch.bfloat16)
     cu_seqlens = torch.tensor(
         [0, *torch.tensor(SEQ_LENS).cumsum(0).tolist()],
         device="cuda",

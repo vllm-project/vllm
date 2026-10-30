@@ -58,7 +58,7 @@ from transformers import BatchFeature
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
-from vllm.inputs import MultiModalDataDict, PromptType, TokensPrompt
+from vllm.inputs import MultiModalDataDict, TokensPrompt
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import MultiModalDataItems, MultiModalDataParser
@@ -441,7 +441,7 @@ class MingV3ASRForConditionalGeneration(
         )
 
     @classmethod
-    def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
+    def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> TokensPrompt:
         if stt_params.task_type != "transcribe" or stt_params.to_language is not None:
             raise ValueError("Ming V3 ASR does not support translation")
         language = cls.validate_language(stt_params.language)
