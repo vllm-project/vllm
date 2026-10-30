@@ -220,6 +220,7 @@ def _latency_test(llm: LLM, subscriber: MockSubscriber | None):
 
 def _accuracy_test(llm: LLM, subscriber: MockSubscriber | None):
     sampling_params = SamplingParams(max_tokens=1)
+    assert llm.llm_engine.vllm_config.kv_transfer_config is not None
     extra_config = (
         llm.llm_engine.vllm_config.kv_transfer_config.kv_connector_extra_config
     )
@@ -326,6 +327,7 @@ def test_cpu_offloading(
 
 def _sliding_window_partial_chunk_test(llm: LLM) -> None:
     vllm_config = llm.llm_engine.vllm_config
+    assert vllm_config.kv_transfer_config is not None
     extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
     assert extra_config["store_threshold"] == 2
     blocks_per_chunk = extra_config["blocks_per_chunk"]

@@ -246,6 +246,7 @@ def test_scheduler_emits_only_objects_stored_by_every_worker():
             )
         )
 
+        assert isinstance(metadata, UMBPConnectorMetadata)
         scheduler.update_connector_output(
             SimpleNamespace(
                 kv_connector_worker_meta=UMBPConnectorWorkerMetadata(

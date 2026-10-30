@@ -604,7 +604,7 @@ def test_sync_partial_tail_load_targets_hashed_blocks():
     scheduler.config = scheduler.config._replace(sync_load_budget_bytes=1 << 40)
     request = _make_partial_tail_request(scheduler)
     req_status = scheduler._req_status["req"]
-    scheduler.manager.lookup.return_value = LookupResult.HIT
+    _as_mock(scheduler.manager.lookup).return_value = LookupResult.HIT
 
     assert scheduler.get_num_new_matched_tokens(request, 0) == (28, False)
     assert "req" in scheduler._current_batch_sync_loads
@@ -640,7 +640,7 @@ def test_sync_load_budget_is_shared_per_step():
     scheduler.config = scheduler.config._replace(sync_load_budget_bytes=hit_bytes)
     first = _make_partial_tail_request(scheduler, request_id="a")
     second = _make_partial_tail_request(scheduler, request_id="b")
-    scheduler.manager.lookup.return_value = LookupResult.HIT
+    _as_mock(scheduler.manager.lookup).return_value = LookupResult.HIT
 
     assert scheduler.get_num_new_matched_tokens(first, 0) == (28, False)
     assert scheduler.get_num_new_matched_tokens(second, 0) == (28, True)
@@ -719,13 +719,13 @@ def test_sparse_group_miss_registers_shared_prefix_junction():
     request = _make_partial_tail_request(scheduler)
     request.shared_prefix_boundary = 0
     stored: set[OffloadKey] = set()
-    scheduler.manager.lookup.side_effect = _hybrid_lookup(stored)
+    _as_mock(scheduler.manager.lookup).side_effect = _hybrid_lookup(stored)
 
     assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
     assert request.shared_prefix_boundary == 16
 
     # The recompute's Mamba state at the junction is handed off and stored.
-    scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
+    _as_mock(scheduler.manager.prepare_store).side_effect = lambda keys, req_context: (
         generate_store_output(keys)
     )
     jobs = scheduler._build_aligned_boundary_store_jobs({"req": [(1, 77, 16)]})
@@ -742,7 +742,7 @@ def test_shared_prefix_junction_is_not_lowered():
     request = _make_partial_tail_request(scheduler)
     # e.g. a longer junction from the local prefix cache
     request.shared_prefix_boundary = 24
-    scheduler.manager.lookup.side_effect = _hybrid_lookup(set())
+    _as_mock(scheduler.manager.lookup).side_effect = _hybrid_lookup(set())
 
     assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
     assert request.shared_prefix_boundary == 24
@@ -752,7 +752,7 @@ def test_no_shared_prefix_junction_when_sparse_group_hits():
     scheduler = _make_sparse_retention_scheduler()
     request = _make_partial_tail_request(scheduler)
     request.shared_prefix_boundary = 0
-    scheduler.manager.lookup.return_value = LookupResult.HIT
+    _as_mock(scheduler.manager.lookup).return_value = LookupResult.HIT
 
     tokens, _ = scheduler.get_num_new_matched_tokens(request, 0)
     assert tokens == 28
@@ -1136,10 +1136,12 @@ def test_partial_lookup_requires_every_cache_group():
 
 def _key_tokens(scheduler: OffloadingConnectorScheduler, keys) -> dict[int, int]:
     req_context = scheduler._req_status["req"].req_context
-    return {
-        get_offload_group_idx(key): req_context.get_offload_key_position(key)
-        for key in keys
-    }
+    positions = {}
+    for key in keys:
+        position = req_context.get_offload_key_position(key)
+        assert position is not None
+        positions[get_offload_group_idx(key)] = position
+    return positions
 
 
 @pytest.mark.parametrize(
@@ -1171,7 +1173,7 @@ def test_eagle_partial_tail_store_keys_attention_at_proof():
     req_status.loaded_from_offload = True
     req_status.group_states[0].block_ids[:] = [11, 12]
     req_status.group_states[1].block_ids[:] = [0, 21]
-    scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
+    _as_mock(scheduler.manager.prepare_store).side_effect = lambda keys, req_context: (
         generate_store_output(keys)
     )
 
@@ -1186,7 +1188,7 @@ def test_eagle_partial_tail_store_keys_attention_at_proof():
     jobs = scheduler._build_partial_tail_store_jobs(output)
 
     [job_id] = jobs
-    offered_keys = scheduler.manager.prepare_store.call_args.args[0]
+    offered_keys = _as_mock(scheduler.manager.prepare_store).call_args.args[0]
     assert _key_tokens(scheduler, offered_keys) == {0: 28, 1: 24}
     assert [get_offload_block_hash(key) for key in offered_keys] == [b"h6", b"h5"]
     src_spec = jobs[job_id].src_spec
@@ -1233,7 +1235,7 @@ def test_eagle_partial_tail_store_needs_proof_in_prompt(
     req_status.loaded_from_offload = True
     req_status.group_states[0].block_ids[:] = [11, 12]
     req_status.group_states[1].block_ids[:] = [0, 21]
-    scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
+    _as_mock(scheduler.manager.prepare_store).side_effect = lambda keys, req_context: (
         generate_store_output(keys)
     )
 
@@ -1247,7 +1249,7 @@ def test_eagle_partial_tail_store_needs_proof_in_prompt(
     )
 
     assert bool(scheduler._build_partial_tail_store_jobs(output)) == stored
-    assert scheduler.manager.prepare_store.called == stored
+    assert _as_mock(scheduler.manager.prepare_store).called == stored
 
 
 @pytest.mark.parametrize("missing", [None, b"h6", b"h3"])
@@ -1272,7 +1274,7 @@ def test_eagle_partial_lookup_loads_attention_proof(missing):
             ready = block_hash != missing
         return LookupResult.HIT if ready else LookupResult.MISS
 
-    scheduler.manager.lookup.side_effect = lookup
+    _as_mock(scheduler.manager.lookup).side_effect = lookup
     if missing is not None:
         assert scheduler._lookup(req_status) == 0
         assert req_status.partial_tail_boundary is None
@@ -1336,7 +1338,7 @@ def test_eagle_partial_lookup_probes_popped_chunk_once(
         )
         return LookupResult.HIT if ready else LookupResult.MISS
 
-    scheduler.manager.lookup.side_effect = lookup
+    _as_mock(scheduler.manager.lookup).side_effect = lookup
     assert scheduler._lookup(req_status) == expected_hit
     assert lookups == expected_lookups
 
@@ -1366,7 +1368,7 @@ def test_eagle_partial_lookup_after_recurrent_group_tightens_hit():
         ready = group_idx == 0 or block_hash in (b"h3", b"h8")
         return LookupResult.HIT if ready else LookupResult.MISS
 
-    scheduler.manager.lookup.side_effect = lookup
+    _as_mock(scheduler.manager.lookup).side_effect = lookup
     assert scheduler._lookup(req_status) == 36
     assert req_status.partial_tail_boundary == 36
     assert lookups.count("0h7") == 1
@@ -1404,10 +1406,10 @@ def test_eagle_partial_tail_round_trip_serves_mamba_checkpoint(cow_on_proof_step
     """
     scheduler = _make_partial_tail_scheduler(eagle=True)
     stored: set = set()
-    scheduler.manager.lookup.side_effect = lambda key, req_context: (
+    _as_mock(scheduler.manager.lookup).side_effect = lambda key, req_context: (
         LookupResult.HIT if key in stored else LookupResult.MISS
     )
-    scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
+    _as_mock(scheduler.manager.prepare_store).side_effect = lambda keys, req_context: (
         generate_store_output(keys)
     )
 
@@ -1422,6 +1424,7 @@ def test_eagle_partial_tail_round_trip_serves_mamba_checkpoint(cow_on_proof_step
                 boundary_state_offloads=handoffs,
             )
         meta = scheduler.build_connector_meta(output)
+        assert isinstance(meta, OffloadingConnectorMetadata)
         for job_id in meta.store_jobs:
             stored.update(scheduler._jobs[job_id].keys)
         scheduler.update_connector_output(
@@ -1483,13 +1486,13 @@ def test_eagle_partial_tail_store_needs_offload_load(host_hit):
     tokens from the offload tier, the same hand-off stores the tail.
     """
     scheduler = _make_partial_tail_scheduler(eagle=True)
-    scheduler.manager.lookup.side_effect = lambda key, req_context: (
+    _as_mock(scheduler.manager.lookup).side_effect = lambda key, req_context: (
         LookupResult.HIT
         if host_hit
         and (get_offload_group_idx(key) == 0 or get_offload_block_hash(key) == b"h5")
         else LookupResult.MISS
     )
-    scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
+    _as_mock(scheduler.manager.prepare_store).side_effect = lambda keys, req_context: (
         generate_store_output(keys)
     )
     request = _make_partial_tail_request(scheduler)
@@ -1523,7 +1526,7 @@ def test_eagle_partial_tail_store_needs_offload_load(host_hit):
     )
 
     assert bool(scheduler._build_partial_tail_store_jobs(output)) == host_hit
-    assert scheduler.manager.prepare_store.called == host_hit
+    assert _as_mock(scheduler.manager.prepare_store).called == host_hit
 
 
 def _make_tiering_engine_scheduler(secondary_tiers: list[dict[str, Any]]):
@@ -1824,12 +1827,12 @@ def test_finish_mid_prefill_stores_only_computed_blocks(
     runner.scheduler.finish_requests(req_id, finish_status)
     metadata = runner.scheduler.schedule().kv_connector_metadata
     assert isinstance(metadata, OffloadingConnectorMetadata)
-    stored_blocks = sorted(
-        int(block_id)
-        for job in metadata.store_jobs.values()
-        if job.req_id == req_id
-        for block_id in job.src_spec.block_ids
-    )
+    stored_blocks: list[int] = []
+    for job in metadata.store_jobs.values():
+        if job.req_id == req_id:
+            assert isinstance(job.src_spec, GPULoadStoreSpec)
+            stored_blocks.extend(int(block_id) for block_id in job.src_spec.block_ids)
+    stored_blocks.sort()
     assert not stored_blocks, (
         f"{finish_status.name}: stored {len(stored_blocks)} blocks {stored_blocks} "
         f"but only {6 // block_size} full block(s) were computed "
