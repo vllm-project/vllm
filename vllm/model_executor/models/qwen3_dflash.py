@@ -835,8 +835,7 @@ class DFlashQwen3Model(nn.Module):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # Absent on models built without __init__ (tests).
-        proj = getattr(self, "_context_kv_proj", None)
+        proj = self._context_kv_proj
         if proj is not None:
             weights = self._tee_context_kv(weights)
         loader = AutoWeightsLoader(self)
