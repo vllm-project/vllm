@@ -139,6 +139,31 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
+# `schtasks /create` leaves WINDOWS' LAPTOP DEFAULTS in place, and on this host they
+# disarmed the guard twice over in a single night (measured 2026-10-30):
+#
+#   - DisallowStartIfOnBatteries / StopIfGoingOnBatteries default to True. The machine
+#     went on battery at ~04:37Z and every 5-minute tick was silently REFUSED
+#     (LastTaskResult=0x800710E0, "the operator or administrator refused the request")
+#     while Get-ScheduledTask kept reporting Ready.
+#   - ExecutionTimeLimit defaults to PT72H. When the host fell into swap famine (0.4 GB
+#     free), one pass hung on a subprocess and held the task in State=Running; with
+#     MultipleInstances=IgnoreNew every later tick was then refused too. Nothing kills
+#     a 72 h limit, so the guard stayed dead for as long as the pass hung.
+#
+# Both are silent: the task says Ready either way. Bound them explicitly.
+$task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+if ($task) {
+    $task.Settings.DisallowStartIfOnBatteries = $false
+    $task.Settings.StopIfGoingOnBatteries     = $false
+    $task.Settings.ExecutionTimeLimit         = 'PT10M'
+    Set-ScheduledTask -TaskName $TaskName -Settings $task.Settings | Out-Null
+    Write-Output "  settings             : batteries allowed, ExecutionTimeLimit=PT10M"
+} else {
+    Write-Output "  settings             : TASK NOT FOUND - cannot apply settings"
+    exit 1
+}
+
 Write-Output ""
 Write-Output "=== Verification ==="
 # Get-ScheduledTask rather than parsing 'schtasks /query /fo LIST': that output is
@@ -155,6 +180,9 @@ Write-Output "  state                : $($t.State)"
 Write-Output "  action               : $($t.Actions[0].Execute) $($t.Actions[0].Arguments)"
 Write-Output "  principal            : $($t.Principal.UserId) | LogonType=$($t.Principal.LogonType) | RunLevel=$($t.Principal.RunLevel)"
 Write-Output "  next run             : $($info.NextRunTime)"
+$st = (Get-ScheduledTask -TaskName $TaskName).Settings
+Write-Output "  batteries            : DisallowStart=$($st.DisallowStartIfOnBatteries) StopOnBatteries=$($st.StopIfGoingOnBatteries) (both must be False)"
+Write-Output "  exec time limit      : $($st.ExecutionTimeLimit) (must be bounded, never PT72H)"
 
 Write-Output ""
 Write-Output "DONE - task '$TaskName' registered (user-level, /IT, no elevation)."
