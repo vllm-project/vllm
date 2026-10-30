@@ -5297,6 +5297,9 @@ class GPUModelRunner(
                 logprobs_tensors = LogprobsTensors.empty_cpu(
                     num_prompt_tokens - 1, num_prompt_logprobs + 1
                 )
+                # Seed the selected-token column with a sentinel that is never a
+                # real gathered id so unwritten rows are detectable (#61490).
+                logprobs_tensors.logprob_token_ids[:, 0].fill_(-1)
                 request.in_progress_prompt_logprobs_cpu = logprobs_tensors
 
             # Determine number of logits to retrieve.
@@ -5313,6 +5316,21 @@ class GPUModelRunner(
                 # This is the last chunk of prompt tokens to return.
                 num_logits = num_remaining_tokens
                 completed_prefill_reqs.append(req_id)
+                # Diagnostic: report any prompt row that was never written so a
+                # clean run can prove coverage without relying on a decode
+                # failure (#61490). A row still holding the -1 sentinel was
+                # skipped, e.g. by a prefix-cache hit the redo failed to ignore.
+                unwritten = (logprobs_tensors.logprob_token_ids[:, 0] == -1).nonzero()
+                if unwritten.numel():
+                    positions = unwritten.flatten().tolist()
+                    logger.warning(
+                        "Request %s: %d prompt-logprobs row(s) never written "
+                        "(first uncovered positions %s). These rows cannot be "
+                        "valid; the prefill did not recompute the whole prompt.",
+                        req_id,
+                        len(positions),
+                        positions[:8],
+                    )
                 prompt_logprobs_dict[req_id] = logprobs_tensors
 
             if num_logits <= 0:

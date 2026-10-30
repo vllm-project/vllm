@@ -167,8 +167,16 @@ class Request:
         # (reset_prefix_cache).
         self.drop_stale_output = False
         # A dropped stale output carried this request's completed prompt
-        # logprobs; the resumed prefill must recompute them (#61490).
+        # logprobs; the resumed prefill must recompute the whole prompt (#61490).
+        # This stays set until the prompt logprobs are produced, so it survives
+        # repeated preemptions of the redo (the fresh CPU logprobs tensor has one
+        # row per prompt position and only rows the prefill covers get written;
+        # a retained prefix hit would leave the hit rows uninitialized).
         self.prompt_logprobs_dropped = False
+        # The one-shot redo directive has been sent to the runner (V1 only);
+        # decoupled from prompt_logprobs_dropped so the recompute forcing can
+        # persist while the directive is sent once.
+        self.redo_prompt_logprobs_sent = False
 
         # Tokens of steps whose output is not yet processed (async scheduling
         # and PP run ahead of the GPU); `num_computed_tokens` counts them

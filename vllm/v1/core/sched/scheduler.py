@@ -1231,7 +1231,10 @@ class Scheduler(SchedulerInterface):
                     # the whole prompt: its fresh CPU logprobs tensor has one
                     # row per prompt position, and only rows this prefill
                     # covers get written. A retained prefix hit would leave the
-                    # hit rows uninitialized (#61490).
+                    # hit rows uninitialized (#61490). The marker stays set
+                    # until the prompt logprobs are produced, so a redo that is
+                    # itself preempted before producing them still recomputes
+                    # in full on its next resume.
                     if request.prompt_logprobs_dropped and num_computed_tokens > 0:
                         new_computed_blocks = (
                             self.kv_cache_manager.empty_kv_cache_blocks
@@ -1547,6 +1550,7 @@ class Scheduler(SchedulerInterface):
                     # A fresh schedule re-registers prompt logprobs on the
                     # runner's new-request path; drop any stale redo marker.
                     request.prompt_logprobs_dropped = False
+                    request.redo_prompt_logprobs_sent = False
                     scheduled_new_reqs.append(request)
                 elif request.status == RequestStatus.PREEMPTED:
                     scheduled_resumed_reqs.append(request)
@@ -1936,9 +1940,11 @@ class Scheduler(SchedulerInterface):
         for idx, req in enumerate(itertools.chain(running_reqs, resumed_reqs)):
             req_id = req.request_id
             req_ids.append(req_id)
-            if req.prompt_logprobs_dropped:
+            if req.prompt_logprobs_dropped and not req.redo_prompt_logprobs_sent:
+                # Send the one-shot redo directive; keep prompt_logprobs_dropped
+                # set so the recompute forcing survives later preemptions.
                 redo_prompt_logprobs_req_ids.add(req_id)
-                req.prompt_logprobs_dropped = False
+                req.redo_prompt_logprobs_sent = True
             # NOTE: In PP+async scheduling, we consume token ids via a direct GPU
             # broadcast path (`input_batch.prev_sampled_token_ids`), so we can
             # omit this payload.
@@ -2511,6 +2517,11 @@ class Scheduler(SchedulerInterface):
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
             prompt_token_id_logprobs = prompt_token_id_logprobs_dict.get(req_id)
+            if prompt_logprobs_tensors is not None:
+                # The prompt logprobs are produced; the redo is complete and the
+                # request no longer needs to recompute its whole prompt.
+                request.prompt_logprobs_dropped = False
+                request.redo_prompt_logprobs_sent = False
             if should_emit_output:
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(

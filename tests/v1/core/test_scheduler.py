@@ -2384,12 +2384,14 @@ def test_reset_prefix_cache_redoes_dropped_prompt_logprobs():
     )
     assert request.prompt_logprobs_dropped
 
-    # The resumed schedule carries the redo directive exactly once.
+    # The resumed schedule carries the redo directive exactly once; the
+    # recompute marker itself stays set until the prompt logprobs are produced.
     out = scheduler.schedule()
     cached = out.scheduled_cached_reqs
     assert request.request_id in cached.resumed_req_ids
     assert request.request_id in cached.redo_prompt_logprobs_req_ids
-    assert not request.prompt_logprobs_dropped
+    assert request.redo_prompt_logprobs_sent
+    assert request.prompt_logprobs_dropped
     cached = scheduler.schedule().scheduled_cached_reqs
     assert request.request_id not in cached.redo_prompt_logprobs_req_ids
 
@@ -2465,6 +2467,67 @@ def test_stale_output_without_prompt_logprobs_sets_no_redo_flag():
 
     cached = scheduler.schedule().scheduled_cached_reqs
     assert request.request_id not in cached.redo_prompt_logprobs_req_ids
+
+
+def test_redo_recompute_survives_a_second_preemption():
+    """A redo prefill can itself be preempted before it produces the prompt
+    logprobs. The dropped in-flight output then carries no completed prompt
+    logprobs, so the redo marker is not re-armed from the drop. The request
+    must still recompute its whole prompt on the next resume: the fresh CPU
+    logprobs tensor has one row per prompt position, and a retained prefix hit
+    would leave the hit rows unwritten (#61490)."""
+    scheduler = create_scheduler(
+        enable_prefix_caching=True, async_scheduling=True, use_v2_model_runner=False
+    )
+    request = create_requests(num_requests=1, num_tokens=48, prompt_logprobs=5)[0]
+    scheduler.add_request(request)
+
+    # First prefill is in flight when the reset lands; its output carries the
+    # completed prompt logprobs and is dropped, arming the redo marker.
+    scheduler_output = scheduler.schedule()
+    scheduler.reset_prefix_cache(reset_running_requests=True)
+    scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[]],
+            logprobs=None,
+            prompt_logprobs_dict={request.request_id: Mock()},
+            pooler_output=[],
+        ),
+    )
+    assert request.prompt_logprobs_dropped
+
+    # The resumed redo prefill is scheduled. It is then preempted again before
+    # it can produce any prompt logprobs.
+    redo_output = scheduler.schedule()
+    scheduler.reset_prefix_cache(reset_running_requests=True)
+    scheduler.update_from_output(
+        redo_output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[]],
+            logprobs=None,
+            prompt_logprobs_dict={},  # mid-recompute: nothing produced yet
+            pooler_output=[],
+        ),
+    )
+
+    # On the next resume the prompt-logprobs rows are still unwritten, so the
+    # scheduler must ignore any prefix hit and schedule the whole prompt.
+    hit_tokens = 16
+    real_hit = scheduler._get_local_prefix_cache_hit
+
+    def patched_hit(req, max_cache_hit_length=None):
+        blocks, _num, boundary, diverged = real_hit(req, max_cache_hit_length)
+        return blocks, hit_tokens, boundary, diverged
+
+    with patch.object(scheduler, "_get_local_prefix_cache_hit", patched_hit):
+        out = scheduler.schedule()
+
+    assert out.num_scheduled_tokens[request.request_id] == request.num_tokens
 
 
 def test_redo_marker_cleared_on_v2_resume():
