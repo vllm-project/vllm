@@ -7,6 +7,11 @@ test here pins each microbatch's sliced inputs to known layouts. The rest covers
 the decision to microbatch and the threaded execution of the microbatches.
 """
 
+import faulthandler
+import linecache
+import multiprocessing
+import os
+import signal
 import threading
 from dataclasses import replace
 from types import SimpleNamespace
@@ -48,7 +53,10 @@ from vllm.v1.worker.gpu.ubatch_utils import (
     slice_model_inputs,
 )
 from vllm.v1.worker.ubatching import (
+    _CURRENT_CONTEXTS,
+    _THREAD_ID_TO_CONTEXT,
     dbo_current_ubatch_id,
+    dbo_enabled,
     dbo_register_recv_hook,
     dbo_yield,
 )
@@ -596,34 +604,35 @@ def test_merge_keeps_aux_hidden_states_per_layer():
         torch.testing.assert_close(merged, expected)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
-@pytest.mark.parametrize("failed_ubatch", [0, 1])
-def test_ubatch_runner_names_the_microbatch_that_failed(failed_ubatch):
-    """A failing microbatch surfaces as a named error, not a downstream KeyError.
+def _assert_ubatch_cleanup():
+    assert not dbo_enabled()
+    assert all(context is None for context in _CURRENT_CONTEXTS)
 
-    The first recorded failure is reported, not microbatch 0's later error from
-    registering a recv hook on the exited microbatch 1. A microbatch that fails
-    *while its sibling is parked at a yield* hangs the step instead -- the
-    shared handoff protocol in `ubatching.py` has no way to unwind a parked
-    microbatch, and the V1 runner has the same gap. Fixing that means changing
-    `ubatching.py`, which is out of scope for the V2 runner.
-    """
+
+def _run_failing_ubatch(connection, failed_ubatch, yield_before_failure, fail_in_hook):
+    faulthandler.register(signal.SIGUSR1, all_threads=True)
     vllm_config = _make_dbo_config()
     device = torch.device("cuda:0")
     runner = _make_execution_runner(vllm_config)
-    failed_threads: list[threading.Thread] = []
 
     class _FailingModel(torch.nn.Module):
         def forward(self, input_ids, positions, **kwargs):
-            if dbo_current_ubatch_id() == failed_ubatch:
-                failed_threads.append(threading.current_thread())
-                raise ValueError("boom")
-            if failed_ubatch == 0:
+            if fail_in_hook:
+                if dbo_current_ubatch_id() != failed_ubatch:
+
+                    def fail():
+                        raise ValueError("boom")
+
+                    dbo_register_recv_hook(fail)
+                dbo_yield()
                 return input_ids.float().unsqueeze(-1)
+            if yield_before_failure:
+                dbo_yield()
+            if dbo_current_ubatch_id() == failed_ubatch:
+                raise ValueError("boom")
             dbo_yield()
-            failed_threads[0].join(timeout=5.0)
-            assert not failed_threads[0].is_alive()
-            dbo_register_recv_hook(lambda: None)
+            dbo_yield()
+            return input_ids.float().unsqueeze(-1)
 
     model_inputs = _make_model_inputs(8, device)
     ubatch_state = _make_ubatch_state(
@@ -634,24 +643,221 @@ def test_ubatch_runner_names_the_microbatch_that_failed(failed_ubatch):
         ],
     )
 
-    result: dict[str, BaseException] = {}
+    finish = runner.begin_capturable_run(_FailingModel(), model_inputs, ubatch_state)
+    connection.send("ready")
+    with pytest.raises(RuntimeError, match=f"Microbatch {failed_ubatch}") as error:
+        finish()
+    assert isinstance(error.value.__cause__, ValueError)
+    assert str(error.value.__cause__) == "boom"
+    _assert_ubatch_cleanup()
 
-    def _call():
+    trace: list[tuple[str, int]] = []
+    output = runner.run(_YieldingModel(trace), model_inputs, ubatch_state)
+    expected = model_inputs["input_ids"].float().unsqueeze(-1) * 3
+    assert torch.equal(output, expected)
+    assert trace == [("enter", 0), ("enter", 1), ("exit", 0), ("exit", 1)]
+    _assert_ubatch_cleanup()
+    connection.send("recovered")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
+@pytest.mark.parametrize("failed_ubatch", [0, 1])
+@pytest.mark.parametrize(
+    ("yield_before_failure", "fail_in_hook"),
+    [(False, False), (True, False), (False, True)],
+)
+def test_ubatch_runner_names_the_microbatch_that_failed(
+    failed_ubatch, yield_before_failure, fail_in_hook
+):
+    """Unwind parked siblings, preserve the original failure, and allow reuse."""
+    _run_ubatch_subprocess(
+        _run_failing_ubatch, failed_ubatch, yield_before_failure, fail_in_hook
+    )
+
+
+def _run_ubatch_subprocess(target, *args):
+    ctx = multiprocessing.get_context("spawn")
+    receiver, sender = ctx.Pipe(duplex=False)
+    process = ctx.Process(
+        target=target,
+        args=(sender, *args),
+    )
+    process.start()
+    sender.close()
+    try:
+        assert receiver.poll(60), "microbatch test initialization timed out"
+        assert receiver.recv() == "ready"
+        if not receiver.poll(10):
+            os.kill(process.pid, signal.SIGUSR1)
+            process.join(timeout=1)
+            pytest.fail("UBatchRunner.finish hung after a microbatch failed")
+        assert receiver.recv() == "recovered"
+        process.join(timeout=5)
+        assert process.exitcode == 0
+    finally:
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=5)
+        receiver.close()
+
+
+def _run_ubatch_entry_failures(connection, failed_ubatch):
+    faulthandler.register(signal.SIGUSR1, all_threads=True)
+    config = _make_dbo_config()
+    runner = _make_execution_runner(config)
+    inputs = _make_model_inputs(8, torch.device("cuda:0"))
+    state = _make_ubatch_state(
+        config,
+        [
+            UBatchSlice(slice(0, 2), slice(0, 4)),
+            UBatchSlice(slice(2, 4), slice(4, 8)),
+        ],
+    )
+    torch.accelerator.synchronize()
+    connection.send("ready")
+    entry_points = {
+        "before_registration": "_THREAD_ID_TO_CONTEXT[threading.get_ident()] = self.id",
+        "registered": "_CURRENT_CONTEXTS[self.id] = self",
+        "barrier": "self.ready_barrier.wait()",
+        "stream": "self.update_stream(self.compute_stream)",
+        "worker": "torch.accelerator.set_device_index(",
+    }
+
+    def run_stage(stage):
+        faults: list[tuple[bool, bool]] = []
+
+        def trace(frame, event, arg):
+            function = frame.f_code.co_name
+            if function not in ("__enter__", "run_ubatch"):
+                return None
+            if not frame.f_code.co_filename.endswith(
+                (
+                    "/worker/ubatching.py",
+                    "/worker/gpu/ubatch_utils.py",
+                )
+            ):
+                return None
+            if function == "__enter__":
+                context = frame.f_locals["self"]
+            else:
+                context = frame.f_locals["ubatch_context"]
+            if event == "line" and not faults:
+                line = linecache.getline(
+                    frame.f_code.co_filename, frame.f_lineno
+                ).strip()
+                in_target = (function != "__enter__") == (stage == "worker")
+                if (
+                    in_target
+                    and context.id == failed_ubatch
+                    and line.startswith(entry_points[stage])
+                ):
+                    faults.append(
+                        (
+                            threading.get_ident() in _THREAD_ID_TO_CONTEXT,
+                            _CURRENT_CONTEXTS[context.id] is context,
+                        )
+                    )
+                    raise ValueError("entry failure")
+            return trace
+
+        class Model(torch.nn.Module):
+            def forward(self, input_ids, positions, **kwargs):
+                dbo_yield()
+                return input_ids.float().unsqueeze(-1)
+
+        threading.settrace(trace)
         try:
-            runner.run(_FailingModel(), model_inputs, ubatch_state)
-        except BaseException as e:  # noqa: BLE001
-            result["error"] = e
+            with pytest.raises(
+                RuntimeError, match=f"Microbatch {failed_ubatch}"
+            ) as error:
+                runner.run(Model(), inputs, state)
+        finally:
+            threading.settrace(None)
+        assert isinstance(error.value.__cause__, ValueError)
+        assert str(error.value.__cause__) == "entry failure"
+        expected = {
+            "before_registration": (False, False),
+            "registered": (True, False),
+            "barrier": (True, True),
+            "stream": (True, True),
+            "worker": (False, False),
+        }
+        assert faults == [expected[stage]]
+        _assert_ubatch_cleanup()
+        output = runner.run(_YieldingModel([]), inputs, state)
+        assert torch.equal(output, inputs["input_ids"].float().unsqueeze(-1) * 3)
+        _assert_ubatch_cleanup()
 
-    # Run behind a watchdog: `UBatchRunner.run` joins without a timeout, so a
-    # regression here would wedge the suite rather than fail it.
-    caller = threading.Thread(target=_call, daemon=True)
-    caller.start()
-    caller.join(timeout=60.0)
-    assert not caller.is_alive(), "UBatchRunner.run hung on a failing microbatch"
+    for stage in entry_points:
+        run_stage(stage)
+    connection.send("recovered")
 
-    assert isinstance(result["error"], RuntimeError)
-    assert f"Microbatch {failed_ubatch}" in str(result["error"])
-    assert isinstance(result["error"].__cause__, ValueError)
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
+@pytest.mark.parametrize("failed_ubatch", [0, 1])
+def test_ubatch_runner_unwinds_partial_entry(failed_ubatch):
+    """Release startup waiters and unregister partially entered contexts."""
+    _run_ubatch_subprocess(_run_ubatch_entry_failures, failed_ubatch)
+
+
+def _run_ubatch_concurrent_cleanup(connection, failed_ubatch):
+    faulthandler.register(signal.SIGUSR1, all_threads=True)
+    config = _make_dbo_config()
+    runner = _make_execution_runner(config)
+    inputs = _make_model_inputs(8, torch.device("cuda:0"))
+    state = _make_ubatch_state(
+        config,
+        [
+            UBatchSlice(slice(0, 2), slice(0, 4)),
+            UBatchSlice(slice(2, 4), slice(4, 8)),
+        ],
+    )
+    torch.accelerator.synchronize()
+    connection.send("ready")
+    workers = {}
+    hook_failures = []
+    both_hooks = threading.Barrier(2)
+
+    class Model(torch.nn.Module):
+        def forward(self, input_ids, positions, **kwargs):
+            i = dbo_current_ubatch_id()
+            workers[i] = threading.current_thread()
+            peer = 1 - i
+
+            def fail_hook():
+                both_hooks.wait(timeout=5)
+                if peer == failed_ubatch:
+                    # Let the sibling record its cleanup error before the
+                    # original worker reaches its outer exception handler.
+                    workers[1 - failed_ubatch].join(timeout=5)
+                    assert not workers[1 - failed_ubatch].is_alive()
+                hook_failures.append(peer)
+                raise KeyError(f"secondary hook {peer}")
+
+            dbo_register_recv_hook(fail_hook)
+            dbo_yield()
+            if i == failed_ubatch:
+                raise ValueError("original failure")
+            dbo_yield()
+            return input_ids.float().unsqueeze(-1)
+
+    with pytest.raises(RuntimeError, match=f"Microbatch {failed_ubatch}") as error:
+        runner.run(Model(), inputs, state)
+    assert isinstance(error.value.__cause__, ValueError)
+    assert str(error.value.__cause__) == "original failure"
+    assert hook_failures == [1 - failed_ubatch, failed_ubatch]
+    _assert_ubatch_cleanup()
+    output = runner.run(_YieldingModel([]), inputs, state)
+    assert torch.equal(output, inputs["input_ids"].float().unsqueeze(-1) * 3)
+    _assert_ubatch_cleanup()
+    connection.send("recovered")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
+@pytest.mark.parametrize("failed_ubatch", [0, 1])
+def test_ubatch_runner_preserves_failure_during_concurrent_cleanup(failed_ubatch):
+    """Keep the forward failure when the sibling records a cleanup error first."""
+    _run_ubatch_subprocess(_run_ubatch_concurrent_cleanup, failed_ubatch)
 
 
 # DCP x DBO: each microbatch recomputes DCP-local seq_lens from its own

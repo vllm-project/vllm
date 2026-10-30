@@ -4,7 +4,7 @@
 
 import threading
 from collections.abc import Callable
-from contextlib import ExitStack
+from contextlib import ExitStack, suppress
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -470,7 +470,6 @@ class UBatchRunner:
         )
 
         outputs: dict[int, Any] = {}
-        errors: dict[int, BaseException] = {}
         dtype = self.vllm_config.model_config.dtype
 
         @torch.inference_mode()
@@ -492,14 +491,7 @@ class UBatchRunner:
                 with ubatch_context:
                     outputs[ubatch_context.id] = model(**inputs)
             except BaseException as e:  # noqa: BLE001
-                # Recorded so the join below can report which microbatch broke.
-                # Note the siblings are not told to unwind: microbatches hand
-                # control to each other, so one that dies mid-forward leaves
-                # the others parked on a handoff that never comes and the step
-                # hangs. The V1 runner behaves the same way; fixing it means
-                # changing the shared handoff protocol in ubatching.py, which
-                # is deliberately out of scope here.
-                errors[ubatch_context.id] = e
+                ubatch_context.abort_state.abort(ubatch_context.id, e)
 
         # Threads own the forward context; keep it cleared and SMs reserved
         # until finish joins them.
@@ -520,7 +512,9 @@ class UBatchRunner:
             thread.start()
 
         # Park all threads before the caller starts capture.
-        self.ready_barrier.wait()
+        # finish joins workers and reports any startup failure.
+        with suppress(threading.BrokenBarrierError):
+            self.ready_barrier.wait()
 
         def finish() -> Any:
             try:
@@ -531,11 +525,12 @@ class UBatchRunner:
                 self._pending_finish = None
                 stack.close()
 
-            if errors:
-                failed = next(iter(errors))
+            failure = ubatch_contexts[0].abort_state.failure
+            if failure is not None:
+                failed, error = failure
                 raise RuntimeError(
                     f"Microbatch {failed} of {self.num_ubatches} failed"
-                ) from errors[failed]
+                ) from error
             return merge_ubatch_outputs([outputs[i] for i in range(self.num_ubatches)])
 
         self._pending_finish = finish
