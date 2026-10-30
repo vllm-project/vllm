@@ -32,12 +32,17 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_worker import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
     NixlPushConnectorWorker,
 )
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheLayout,
     KVCacheTensor,
+    MambaSpec,
     MLAAttentionSpec,
+    SlidingWindowSpec,
+    SparseCacheRole,
     create_kv_cache_views,
 )
 
@@ -1907,3 +1912,379 @@ def test_shared_base_regions_with_distinct_block_lens_stay_separate():
     np.testing.assert_array_equal(
         descs[:, 0], [base[0], base[0] + 256, base[0], base[0] + 256]
     )
+
+
+# Real model KV layouts, end to end on CPU: vLLM's planner and allocator build
+# P's and D's caches, D reads one request from P, and the recorded descriptors
+# are run as memory copies so every byte can be checked. Each case is the
+# first layers of a model with that model's per-layer KV specs. Hybrid block
+# sizes are the ones vLLM aligns to on CPU, where the attention page must hold
+# the Mamba state.
+_BF16 = torch.bfloat16
+
+
+def _attn(heads, head, head_v=None, window=None):
+    def make(block_size, _mamba_page):
+        kwargs = dict(
+            block_size=block_size,
+            num_kv_heads=heads,
+            head_size=head,
+            head_size_v=head_v or head,
+            dtype=_BF16,
+        )
+        if window is not None:
+            return SlidingWindowSpec(sliding_window=window, **kwargs)
+        return FullAttentionSpec(**kwargs)
+
+    return make
+
+
+def _mla(head=576, dtype=_BF16, **kwargs):
+    def make(block_size, _mamba_page):
+        return MLAAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=head,
+            dtype=dtype,
+            **kwargs,
+        )
+
+    return make
+
+
+def _mamba(shapes, mamba_type):
+    def make(block_size, mamba_page):
+        return MambaSpec(
+            block_size=block_size,
+            shapes=shapes,
+            dtypes=(_BF16, torch.float32),
+            page_size_padded=mamba_page,
+            mamba_type=mamba_type,
+        )
+
+    return make
+
+
+def _layers(n, make):
+    return [entry for i in range(n) for entry in make(i)]
+
+
+_GDN = MambaAttentionBackendEnum.GDN_ATTN
+# (block size, [(layer name, spec factory)]) per model.
+_REAL_MODELS = {
+    # GLM-4.5-Air and MiniMax-M2 have the same attention shape.
+    "Qwen3-8B": (
+        128,
+        _layers(4, lambda i: [(f"model.layers.{i}.self_attn.attn", _attn(8, 128))]),
+    ),
+    "gpt-oss-20b": (
+        128,
+        _layers(
+            4,
+            lambda i: [
+                (
+                    f"model.layers.{i}.attn.attn",
+                    _attn(8, 64, window=None if i % 2 else 128),
+                )
+            ],
+        ),
+    ),
+    "gemma-3-1b": (
+        128,
+        _layers(
+            12,
+            lambda i: [
+                (
+                    f"model.layers.{i}.self_attn.attn",
+                    _attn(1, 256, window=None if i % 6 == 5 else 512),
+                )
+            ],
+        ),
+    ),
+    "MiMo-V2-Flash": (
+        128,
+        _layers(
+            12,
+            lambda i: [
+                (
+                    f"model.layers.{i}.self_attn.attn",
+                    _attn(4, 192, 128)
+                    if i in (0, 5, 11)
+                    else _attn(8, 192, 128, window=128),
+                )
+            ],
+        ),
+    ),
+    # Kimi-K2 has the same MLA cache.
+    "DeepSeek-V3": (
+        128,
+        _layers(4, lambda i: [(f"model.layers.{i}.self_attn.attn", _mla())]),
+    ),
+    "DeepSeek-V3.2": (
+        64,
+        _layers(
+            4,
+            lambda i: [
+                (
+                    f"model.layers.{i}.self_attn.attn",
+                    _mla(is_index_group_leader=True),
+                ),
+                (
+                    f"model.layers.{i}.self_attn.indexer.k_cache",
+                    _mla(132, torch.uint8, cache_role=SparseCacheRole.INDEXER),
+                ),
+            ],
+        ),
+    ),
+    "Qwen3-Next-80B-A3B": (
+        1152,
+        _layers(
+            8,
+            lambda i: [
+                (f"model.layers.{i}.self_attn.attn", _attn(2, 256))
+                if i % 4 == 3
+                else (
+                    f"model.layers.{i}.linear_attn",
+                    _mamba(((8192, 3), (32, 128, 128)), _GDN),
+                )
+            ],
+        ),
+    ),
+    "NVIDIA-Nemotron-Nano-9B-v2": (
+        1408,
+        _layers(
+            22,
+            lambda i: (
+                [
+                    (
+                        f"model.layers.{i}.mixer",
+                        _mamba(
+                            ((12288, 3), (128, 80, 128)),
+                            MambaAttentionBackendEnum.MAMBA2,
+                        ),
+                    )
+                ]
+                if i in (0, 2, 4, 6, 7, 9, 11, 13, 16, 18, 20)
+                else [(f"model.layers.{i}.mixer.attn", _attn(8, 128))]
+                if i in (14, 21)
+                else []
+            ),
+        ),
+    ),
+    # KDA at 1-based layers 1-3, 5-7; MLA at 4 and 8. A 1920-token MLA page
+    # (64-token kernel blocks) is the first to hold the 2,170,880 B KDA state.
+    "Kimi-Linear-48B-A3B": (
+        1920,
+        _layers(
+            8,
+            lambda i: [
+                (f"model.layers.{i}.self_attn.attn", _mla())
+                if i % 4 == 3
+                else (
+                    f"model.layers.{i}.self_attn",
+                    _mamba(((12288, 3), (32, 128, 128)), _GDN),
+                )
+            ],
+        ),
+    ),
+}
+_LAYOUT_PREFERENCE = ["LBNHC", "LBHNC", "BLNHC", "BLHNC", "BHLNC", "LHBNC"]
+
+
+def _real_model_side(model, layout):
+    """Plan and allocate one side's KV caches the way the engine does, with
+    just enough blocks for one request of one or two blocks per group."""
+    from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
+    from vllm.v1.core.kv_cache_planning import (
+        get_global_kv_cache_groups,
+        get_kv_cache_configs,
+    )
+    from vllm.v1.worker.utils import allocate_kv_cache
+
+    block_size, layers = _REAL_MODELS[model]
+    vllm_config = create_vllm_config(
+        block_size=block_size, max_model_len=block_size, kv_role="kv_both"
+    )
+    vllm_config.model_config.max_model_len = block_size
+    vllm_config.cache_config.enable_prefix_caching = False
+    vllm_config.cache_config.kv_cache_layout = layout
+    vllm_config.kv_transfer_config.kv_buffer_device = "cuda"
+    # A Mamba page is padded to the attention page, which holds it.
+    specs = {name: make(block_size, None) for name, make in layers}
+    mamba_page = max(
+        (
+            spec.page_size_bytes
+            for spec in specs.values()
+            if not isinstance(spec, MambaSpec)
+        ),
+        default=None,
+    )
+    specs = {name: make(block_size, mamba_page) for name, make in layers}
+    resolved = resolve_kv_cache_layout(
+        vllm_config, [_LAYOUT_PREFERENCE], specs.values()
+    )
+    groups = get_global_kv_cache_groups(vllm_config, [specs])
+    vllm_config.cache_config.num_gpu_blocks_override = 2 + sum(
+        _blocks_per_request(g.kv_cache_spec) for g in groups
+    )
+    kv_cache_config = get_kv_cache_configs(vllm_config, [specs], [1 << 40], groups)[0]
+    kv_cache_config.kv_cache_layout = vllm_config.cache_config.kv_cache_layout
+    caches = allocate_kv_cache(
+        kv_cache_config,
+        torch.device("cpu"),
+        resolved,
+        [g.kv_cache_spec.block_size for g in kv_cache_config.kv_cache_groups],
+    )
+    return vllm_config, kv_cache_config, caches
+
+
+def _blocks_per_request(spec):
+    return 1 if isinstance(spec, MambaSpec) else 2
+
+
+def _real_model_worker(engine_id, vllm_config, kv_cache_config, caches):
+    from vllm.config import set_current_vllm_config
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+
+    use_mla = any(
+        isinstance(g.kv_cache_spec, MLAAttentionSpec)
+        for g in kv_cache_config.kv_cache_groups
+    )
+    fake_backend = MagicMock()
+    fake_backend.get_name.return_value = "FLASHMLA" if use_mla else "FLASH_ATTN"
+    fake_backend.full_cls_name.return_value = "fake.backend"
+    fake_platform = MagicMock()
+    fake_platform.device_type = "cuda"
+    fake_platform.get_nixl_memory_type.return_value = "VRAM"
+    with (
+        patch.object(bw, "NixlWrapper", _RecordingNixl),
+        patch.object(bw, "get_tensor_model_parallel_rank", return_value=0),
+        patch.object(bw, "get_tensor_model_parallel_world_size", return_value=1),
+        patch.object(bw, "get_current_attn_backends", return_value=[fake_backend]),
+        patch.object(bw, "select_common_block_size", lambda size, *_: size),
+        patch.object(bw, "current_platform", fake_platform),
+        patch(
+            "vllm.model_executor.layers.mamba.mamba_utils.get_conv_state_layout",
+            return_value="DS",
+        ),
+        set_current_vllm_config(vllm_config),
+    ):
+        worker = NixlConnectorWorker(vllm_config, engine_id, kv_cache_config)
+        worker.use_mla = use_mla
+        worker.register_kv_caches(caches)
+    return worker
+
+
+def _cache_pages(cache, block):
+    """A layer's page(s) for one block: one tensor, or one per Mamba state."""
+    return (
+        [c[block] for c in cache]
+        if isinstance(cache, (list, tuple))
+        else [cache[block]]
+    )
+
+
+def _tag(page, *key):
+    gen = torch.Generator().manual_seed(hash(key) & 0x7FFFFFFF)
+    return torch.randint(1, 120, page.shape, generator=gen).to(page.dtype)
+
+
+def _run_recorded_copies(nixl):
+    """Run every recorded READ as memcpy: remote desc bytes -> local desc."""
+    import ctypes
+
+    for op, local_handle, local_ids, remote_handle, remote_ids in nixl.xfers:
+        assert op == "READ" and len(local_ids) == len(remote_ids)
+        for local_id, remote_id in zip(local_ids, remote_ids):
+            dst, dst_len, _ = (int(x) for x in nixl.dlists[local_handle][local_id])
+            src, src_len, _ = (int(x) for x in nixl.dlists[remote_handle][remote_id])
+            assert dst_len == src_len
+            ctypes.memmove(dst, src, dst_len)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "model,p_layout,d_layout",
+    [(model, None, None) for model in _REAL_MODELS]
+    + [
+        ("DeepSeek-V3", "BLNHC", "BLNHC"),
+        ("DeepSeek-V3", "BLNHC", "LBNHC"),
+        ("Qwen3-Next-80B-A3B", "BLHNC", "BLHNC"),
+        ("NVIDIA-Nemotron-Nano-9B-v2", "BLHNC", "BLHNC"),
+        ("Kimi-Linear-48B-A3B", "BLNHC", "BLNHC"),
+    ],
+)
+def test_real_model_layout_pull_copies_every_page(model, p_layout, d_layout):
+    """D pulls one request from P with each model's real KV plan: every page
+    of every layer arrives at D's block for the same layer and request
+    position, and nothing else in D's caches changes."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        NixlConnectorMetadata,
+    )
+
+    p_config, p_kv_config, p_caches = _real_model_side(model, p_layout)
+    d_config, d_kv_config, d_caches = _real_model_side(model, d_layout)
+    p = _real_model_worker("P", p_config, p_kv_config, p_caches)
+    d = _real_model_worker("D", d_config, d_kv_config, d_caches)
+
+    # Block ids run up from 1 on P and down from the last block on D.
+    groups = d_kv_config.transfer_groups
+    p_ids: list[list[int]] = []
+    d_ids: list[list[int]] = []
+    for g in groups:
+        n = _blocks_per_request(g.kv_cache_spec)
+        p_ids.append([1 + sum(map(len, p_ids)) + k for k in range(n)])
+        d_ids.append(
+            [d_kv_config.num_blocks - 1 - sum(map(len, d_ids)) - k for k in range(n)]
+        )
+    for g, ids in zip(groups, p_ids):
+        for layer in g.layer_names:
+            for pos, block in enumerate(ids):
+                for part, page in enumerate(_cache_pages(p_caches[layer], block)):
+                    page.copy_(_tag(page, layer, pos, part))
+
+    meta = msgspec.msgpack.Decoder(NixlAgentMetadata).decode(
+        p.xfer_handshake_metadata.agent_metadata_bytes
+    )
+    _register_remote_agents(d, meta, 1)
+    metadata = NixlConnectorMetadata()
+    metadata.add_new_req_to_recv(
+        request_id="req",
+        local_block_ids=tuple(d_ids),
+        kv_transfer_params={
+            "remote_block_ids": p_ids,
+            "remote_engine_id": "P",
+            "remote_request_id": "prefill-req",
+            "remote_host": "remote-host",
+            "remote_port": 1234,
+            "tp_size": 1,
+        },
+    )
+    req = metadata.reqs_to_recv["req"]
+    req.local_physical_block_ids = d._logical_to_kernel_block_ids(
+        req.local_block_ids, d._physical_blocks_per_logical_kv_block
+    )
+    d._recving_metadata["req"] = req
+    d._read_blocks_for_req("req", req)
+    assert d.nixl_wrapper.xfers
+    _run_recorded_copies(d.nixl_wrapper)
+
+    wrong = []
+    for g, ids in zip(groups, d_ids):
+        for layer in g.layer_names:
+            for pos, block in enumerate(ids):
+                for part, page in enumerate(_cache_pages(d_caches[layer], block)):
+                    if not torch.equal(page, _tag(page, layer, pos, part)):
+                        wrong.append(f"{layer}[{pos}].{part}")
+                    page.zero_()
+    assert not wrong, wrong[:8]
+    storages = {
+        t.untyped_storage().data_ptr(): t
+        for cache in d_caches.values()
+        for t in (cache if isinstance(cache, (list, tuple)) else [cache])
+    }
+    for t in storages.values():
+        raw = torch.empty(0, dtype=torch.uint8).set_(t.untyped_storage())
+        assert not raw.any(), "D bytes outside the request's pages changed"
