@@ -130,7 +130,9 @@ profile. Disabled compression uses the native Mooncake path and needs no
 compression dependencies.
 
 The current implementation supports dense BF16 FullAttention KV caches, including
-FullAttention regions of hybrid models. Other regions use raw transfer.
+FullAttention regions of hybrid models. Other regions use raw transfer,
+including SWA layers sharing a group with FullAttention when the hybrid KV
+cache manager is disabled.
 Compressed P/D requires identical TP and PP sizes and a common logical
 block size across FullAttention groups. `kv_both`, MLA, and FP16/FP8
 compressed KV are unsupported and fail explicitly. No adaptive selection or

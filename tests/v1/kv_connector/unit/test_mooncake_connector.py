@@ -4,6 +4,7 @@
 import asyncio
 import contextlib
 import errno
+import os
 import queue
 import socket
 import threading
@@ -21,6 +22,7 @@ import zmq.asyncio
 from tests.v1.attention.utils import dense_kv_cache_views
 from vllm import envs
 from vllm.config import KVTransferConfig, set_current_vllm_config
+from vllm.distributed.kv_transfer import kv_transfer_state
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import (
     mooncake_connector,
     mooncake_utils,
@@ -55,12 +57,17 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import
     MooncakeBootstrapServer,
     RegisterWorkerPayload,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.session_ipc import (
+    OpenProducerJob,
+)
+from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheLayout,
     MLAAttentionSpec,
+    SlidingWindowSpec,
 )
 from vllm.v1.request import RequestStatus
 
@@ -1210,6 +1217,137 @@ def patch_worker_dependencies():
             "mock_async_client": mock_async_client,
             "mock_http_client": mock_http_client_instance,
         }
+
+
+def test_public_shutdown_stops_worker_threads(monkeypatch):
+    config = _make_worker_vllm_config("kv_consumer")
+    with set_current_vllm_config(config), patch_worker_dependencies():
+        connector = MooncakeConnector(
+            config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
+        )
+        worker = connector.connector_worker
+        assert worker is not None
+        thread = worker._mooncake_receiver_t
+        assert thread.is_alive()
+        monkeypatch.setattr(kv_transfer_state, "_KV_CONNECTOR_AGENT", connector)
+        try:
+            kv_transfer_state.ensure_kv_transfer_shutdown()
+            kv_transfer_state.ensure_kv_transfer_shutdown()
+            assert not thread.is_alive()
+            assert not kv_transfer_state.has_kv_transfer_group()
+        finally:
+            worker.shutdown()
+
+
+@pytest.mark.parametrize("compressed_layer", [0, 1, 2])
+def test_compression_transfers_swa_layers_in_unified_group(
+    monkeypatch, compressed_layer
+):
+    if os.environ.get("VLLM_TEST_REQUIRE_MOONCAKE_COMPRESSION") != "1":
+        pytest.importorskip("kvserve_v1.compression.runtime")
+    backend = mooncake_connector.load_backend()
+    extra = {
+        "compression": {
+            "enable-compression-pipeline": True,
+            "pipeline": ["codec"],
+            "split_type": "layer",
+            "logical_blocks_per_chunk": 2,
+        }
+    }
+    config = _make_worker_vllm_config("kv_producer", extra)
+    config.scheduler_config.disable_hybrid_kv_cache_manager = True
+    geometry = dict(
+        block_size=config.cache_config.block_size,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+    )
+    names = [f"model.layers.{i}.self_attn" for i in range(3)]
+    specs = {
+        name: FullAttentionSpec(**geometry)
+        if i == compressed_layer
+        else SlidingWindowSpec(**geometry, sliding_window=32)
+        for i, name in enumerate(names)
+    }
+    groups = get_kv_cache_groups(config, dict(specs))
+    assert len(groups) == 1
+    cache_config = KVCacheConfig(
+        num_blocks=4, kv_cache_tensors=[], kv_cache_groups=groups
+    )
+    spec = groups[0].kv_cache_spec
+    source = torch.empty(4 * 3 * spec.page_size_bytes, dtype=torch.uint8, device="cuda")
+    target = torch.zeros_like(source)
+    local = dense_kv_cache_views(source, spec, 4, 3, KVCacheLayout.LBHNC)
+    remote = dense_kv_cache_views(target, spec, 4, 3, KVCacheLayout.LBHNC)
+    for i, cache in enumerate(local):
+        cache.fill_(i + 1)
+
+    def transfer(peer, srcs, dsts, lengths):
+        for src, dst, length in zip(srcs, dsts, lengths):
+            start, end = src - source.data_ptr(), dst - target.data_ptr()
+            target[end : end + length].copy_(source[start : start + length])
+        return 0
+
+    monkeypatch.setattr(
+        FakeMooncakeWrapper, "batch_transfer_sync_write", staticmethod(transfer)
+    )
+    plan = backend.build_memory_plan(
+        backend.CompressionConfig.from_extra_config(extra),
+        {
+            names[compressed_layer]: backend.CacheSpec(
+                layer_index=compressed_layer, **geometry
+            )
+        },
+        num_layers=3,
+        device=torch.device("cuda"),
+    )
+    with set_current_vllm_config(config), patch_worker_dependencies():
+        connector = MooncakeConnector(config, KVConnectorRole.WORKER, cache_config)
+        worker = connector.connector_worker
+        assert worker is not None
+        try:
+            worker.compression = backend.CompressionRuntime(
+                plan=plan,
+                kv_cache_layout="LBHNC",
+                blocks_per_logical=1,
+                device=torch.device("cuda"),
+            )
+            connector.register_kv_caches(dict(zip(names, local)))
+            metadata = MooncakeXferMetadata(
+                remote_hostname="consumer",
+                remote_port=12345,
+                remote_tp_size=1,
+                remote_tp_rank=0,
+                req_blocks={"d": ("xfer", [[0, 1]])},
+                kv_caches_base_addr=[
+                    target.data_ptr() + p - source.data_ptr()
+                    for p in worker.kv_caches_base_addr
+                ],
+                block_lens=worker.block_len_per_layer,
+                kv_block_lens=worker.kv_block_len_per_layer,
+                registered_layer_names=worker.registered_layer_names,
+                registered_layer_indices=worker.registered_layer_indices,
+                registered_group_indices=worker.registered_group_indices,
+                registered_row_offsets=worker.region_row_offsets,
+            )
+            worker._session_job_open_producer(
+                OpenProducerJob(
+                    job_id=1,
+                    transfer_id="xfer",
+                    d_req_id="d",
+                    nonce="n",
+                    metadata=metadata,
+                    local_block_ids=[[1, 2]],
+                    num_tokens=2 * spec.block_size,
+                )
+            )
+            for i in range(3):
+                if i == compressed_layer:
+                    assert torch.count_nonzero(remote[i]) == 0
+                else:
+                    assert torch.equal(remote[i][:2], local[i][1:3])
+        finally:
+            worker.shutdown()
 
 
 def _region(

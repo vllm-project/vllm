@@ -13,6 +13,7 @@ from collections.abc import Collection
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import IntEnum
+from itertools import groupby
 from typing import TYPE_CHECKING, Any, Final, cast
 
 import msgspec
@@ -1071,6 +1072,10 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> None:
         assert self.connector_worker is not None
         self.connector_worker.initialize_worker_memory(memory_plan)
+
+    def shutdown(self):
+        if self.connector_worker is not None:
+            self.connector_worker.shutdown()
 
 
 class MooncakeConnectorScheduler:
@@ -3025,7 +3030,7 @@ class MooncakeConnectorWorker:
     def _prepare_transfer_regions(
         self, meta: MooncakeXferMetadata
     ) -> tuple[list[TransferRegion], list[TransferRegion], str | None]:
-        """Align and coalesce once per peer layout.
+        """Align and coalesce raw-transfer regions once per peer layout.
 
         ``send_kv_to_decode`` runs on every scheduler batch. The registered
         layout does not change until the next ``register_kv_caches``.
@@ -3126,23 +3131,45 @@ class MooncakeConnectorWorker:
         # Replicated KV keeps that offset at 0. MLA is replicated in practice;
         # gating on use_mla alone would promote and then fail the length check
         # for a non-replicated MLA rank with tp_ratio != 1.
+        compression = getattr(self, "compression", None)
+        compressed_layers = set()
+        if compression is not None and compression.config.pipeline:
+            compressed_layers = {
+                part.layer_name for part in compression.layout.layer_parts
+            }
+            fa_groups = compression.fa_group_indices
+            for region in local_regions:
+                groups = set(region.shared_group_ids or (region.group_index,))
+                if groups & fa_groups and not groups <= fa_groups:
+                    return finish(
+                        [],
+                        [],
+                        "Compressed KV and raw state must have separate "
+                        "transfer regions.",
+                    )
         tp_ratio = _get_tp_ratio(self.tp_size, meta.remote_tp_size)
-        if tp_ratio == 1 or self._producer_cache_is_replicated():
-            covered_both_sides = len(local_regions) == len(pre_align_local) and len(
-                remote_regions
-            ) == len(pre_align_remote)
-            n_aligned = len(local_regions)
-            local_regions, remote_regions = _coalesce_contiguous_transfer_regions(
-                local_regions,
-                remote_regions,
-                promote_full_row=covered_both_sides,
-            )
-            logger.info(
-                "Mooncake packed coalesce: %s aligned regions -> %s transfer regions.",
-                n_aligned,
-                len(local_regions),
-            )
-        prepared = (local_regions, remote_regions, None)
+        covered_both_sides = len(local_regions) == len(pre_align_local) and len(
+            remote_regions
+        ) == len(pre_align_remote)
+        raw_local: list[TransferRegion] = []
+        raw_remote: list[TransferRegion] = []
+        # Compressed layers are barriers: raw spans must not cover their bytes.
+        for compressed, pairs in groupby(
+            zip(local_regions, remote_regions),
+            key=lambda pair: pair[0].layer_name in compressed_layers,
+        ):
+            if compressed:
+                continue
+            local_run, remote_run = map(list, zip(*pairs))
+            if tp_ratio == 1 or self._producer_cache_is_replicated():
+                local_run, remote_run = _coalesce_contiguous_transfer_regions(
+                    local_run,
+                    remote_run,
+                    promote_full_row=covered_both_sides and not compressed_layers,
+                )
+            raw_local.extend(local_run)
+            raw_remote.extend(remote_run)
+        prepared = (raw_local, raw_remote, None)
         self._prepared_transfer_regions[cache_key] = prepared
         self._remember_peer_layout(meta, prepared)
         return prepared
@@ -3724,21 +3751,6 @@ class MooncakeConnectorWorker:
         )
         if align_err is not None:
             raise ValueError(align_err)
-        fa_groups = self.compression.fa_group_indices
-        if not raw:
-            for region in local_regions:
-                groups = set(region.shared_group_ids or (region.group_index,))
-                if groups & fa_groups and not groups <= fa_groups:
-                    raise ValueError(
-                        "Compressed KV and raw state must have separate "
-                        "transfer regions."
-                    )
-        raw_pairs = [
-            (local, remote)
-            for local, remote in zip(local_regions, remote_regions)
-            if raw
-            or not set(local.shared_group_ids or (local.group_index,)) <= fa_groups
-        ]
         (
             src_ptrs,
             dst_ptrs,
@@ -3748,11 +3760,11 @@ class MooncakeConnectorWorker:
         ) = self._build_transfer_params_sync(
             [(job.d_req_id, send_meta)],
             metadata,
-            [pair[0] for pair in raw_pairs],
-            [pair[1] for pair in raw_pairs],
+            local_regions,
+            remote_regions,
         )
         if err_reqs:
-            raise RuntimeError(err_msg or "Raw GDN transfer planning failed.")
+            raise RuntimeError(err_msg or "Raw KV transfer planning failed.")
         if src_ptrs:
             remote_session = f"{metadata.remote_hostname}:{metadata.remote_port}"
             result = self._send_blocks(remote_session, src_ptrs, dst_ptrs, lengths)
