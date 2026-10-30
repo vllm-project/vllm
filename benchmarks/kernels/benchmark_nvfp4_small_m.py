@@ -168,9 +168,10 @@ def bench_us(fn, warmup: int, iters: int, shuffles: int) -> list[float]:
         for _ in range(warmup):
             fn()
         torch.accelerator.synchronize()
-        samples.append(
-            statistics.median(bench_gpu_time_with_cupti(fn, repeat_iters=iters)) * 1e3
-        )
+        # Weights are already rotated past L2. The default write-based L2 flush
+        # leaves dirty lines whose write-back slows the next kernels by 2-10 us.
+        times = bench_gpu_time_with_cupti(fn, repeat_iters=iters, cold_l2_cache=False)
+        samples.append(statistics.median(times) * 1e3)
     return samples
 
 
