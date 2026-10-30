@@ -1165,6 +1165,8 @@ steps:
   - csrc/
   - tests/kernels/core
   - tests/kernels/test_top_k_per_row.py
+  - vllm/model_executor/layers/indexer_topk.py
+  - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
   - tests/kernels/test_concat_mla_q.py
   - tests/kernels/test_rocm_fp32_router_gemm.py
   - vllm/model_executor/layers/fused_moe/router/gate_linear.py
@@ -2202,10 +2204,17 @@ steps:
   - >-
     pytest -v -s
     v1/attention
+    --ignore=v1/attention/test_gdn_aiter_flydsl.py
+    --ignore=v1/attention/test_mla_backends.py
     --ignore=v1/attention/test_sparse_mla_backends.py
     --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
-  - VLLM_ROCM_USE_AITER=1 pytest -v -s v1/attention/test_sparse_mla_backends.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - >-
+    VLLM_ROCM_USE_AITER=1 pytest -v -s
+    v1/attention/test_gdn_aiter_flydsl.py
+    v1/attention/test_mla_backends.py
+    v1/attention/test_sparse_mla_backends.py
+    --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":amd: (MI300) Metrics, Tracing" # TBD
   timeout_in_minutes: 30
@@ -2525,10 +2534,12 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/basic_correctness/
+  - tests/model_executor/test_sleep_mode_tensor_ownership.py
   optional: true
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s basic_correctness/memory/cumem
+  - pytest -v -s model_executor/test_sleep_mode_tensor_ownership.py
 
 - label: ":amd: (MI300) Basic Correctness Sleep Mode" # TBD
   timeout_in_minutes: 60
@@ -3128,8 +3139,7 @@ steps:
     VLLM_ROCM_USE_AITER_CUSTOM_AR=1
     pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py
     -k 'test_tp2_ar_rms_fp8_fusions and inductor_partition and
-    not +quant_fp8 and not +rms_norm and DeepSeek-Coder and
-    ROCM_AITER_MLA'
+    not +quant_fp8 and DeepSeek-Coder and ROCM_AITER_MLA'
 
 - label: ":amd: (MI355) DSv4-Flash Disaggregated DP EP" # TBD
   timeout_in_minutes: 85
@@ -4447,11 +4457,13 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/model_executor/layers/minimax_rms_norm/
+  - vllm/model_executor/layers/fused_allreduce_gemma_rms_norm.py
   - vllm/distributed/
   - vllm/_aiter_ops.py
   - vllm/envs.py
   - vllm/platforms/rocm.py
   - tests/kernels/core/test_minimax_reduce_rms.py
+  - tests/kernels/core/test_fused_allreduce_gemma_rms_norm.py
   - tests/utils.py
   - csrc/minimax_reduce_rms_kernel.cu
   - csrc/minimax_reduce_rms_kernel.h
@@ -4460,7 +4472,7 @@ steps:
   - vllm/model_executor/layers/mamba/linear/minimax_linear_attn.py
   optional: true
   commands:
-  - pytest -v -s kernels/core/test_minimax_reduce_rms.py
+  - pytest -v -s kernels/core/test_minimax_reduce_rms.py kernels/core/test_fused_allreduce_gemma_rms_norm.py
 
 - label: ":amd: (MI355 DPX) Kernels" # TBD
   timeout_in_minutes: 25
@@ -4526,9 +4538,18 @@ steps:
   - csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
   - vllm/models/deepseek_v4/common/ops/
   - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
+  - csrc/topk.cu
+  - csrc/persistent_topk.cuh
+  - csrc/sampled_topk.cuh
+  - csrc/topk_histogram_4096.cuh
+  - csrc/topk_histogram_4096_overflow.cuh
+  - vllm/model_executor/layers/indexer_topk.py
+  - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
+  - tests/kernels/test_top_k_per_row.py
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
+  - pytest -v -s kernels/test_top_k_per_row.py -k "persistent or sparse_indexer"
 
 - label: ":amd: (MI355 DPX) Attention Kernels Shard %N" # TBD
   timeout_in_minutes: 90
@@ -4839,6 +4860,7 @@ steps:
   - tests/models/test_vision.py
   - tests/models/test_deepseek_v4_vl_rocm.py
   - tests/models/test_deepseek_v4_vl_stream_weights.py
+  - tests/models/test_utils.py
   commands:
   - >-
     pytest -v -s
@@ -4847,6 +4869,7 @@ steps:
     models/test_registry.py
     models/test_deepseek_v4_vl_rocm.py
     models/test_deepseek_v4_vl_stream_weights.py
+    models/test_utils.py::test_merge_multimodal_embeddings_no_sync
   - VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'not distributed'
   - pytest -v -s models/test_vision.py::test_simple_mrope_vision_model_spatial_merge
 
@@ -4869,6 +4892,7 @@ steps:
     models/qwen4_exp/test_qsa_prepare_amd.py
   # PLE and QSA import conflicting HC registrations in a shared process.
   - pytest -v -s models/qwen4_exp/test_ple.py
+  - pytest -v -s models/qwen4_exp/test_qsa_reference.py
 
 - label: ":amd: (MI355 DPX) GLM5Next"
   timeout_in_minutes: 35
@@ -4918,6 +4942,7 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s models/inkling/rocm
+  - pytest -v -s models/inkling/test_mm_towers.py models/inkling/test_moe_weight_layout.py models/inkling/test_qkvr_prep.py
 
 #-----------------------------------------------------  mi355 · models / language  -----------------------------------------------------#
 
@@ -5157,6 +5182,10 @@ steps:
     --ignore models/multimodal/processing
   - pytest -v -s models/multimodal/generation/test_vit_cudagraph.py -m core_model
   - pytest models/multimodal/generation/test_memory_leak.py -m core_model
+  - >-
+    pytest -v -s
+    models/multimodal/processing/test_mistral3.py::test_pixtral_patch_embed_preserves_image_order_and_strides
+    models/multimodal/test_mimo_v2_omni.py
   - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model
 
 - label: ":amd: (MI355 DPX) Multimodal Models (PPL)"
@@ -5821,11 +5850,13 @@ steps:
   - >-
     pytest -v -s
     v1/attention
+    --ignore=v1/attention/test_gdn_aiter_flydsl.py
     --ignore=v1/attention/test_mla_backends.py
     --ignore=v1/attention/test_sparse_mla_backends.py
     --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   - >-
     VLLM_ROCM_USE_AITER=1 pytest -v -s
+    v1/attention/test_gdn_aiter_flydsl.py
     v1/attention/test_mla_backends.py
     v1/attention/test_sparse_mla_backends.py
     --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT

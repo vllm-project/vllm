@@ -73,8 +73,8 @@ template <uint32_t TopK, uint32_t BlockSize, uint32_t VecSize = 1,
           uint32_t StartRound = 0, uint32_t FinalCandidateCapacity = 0>
 __device__ void exact_topk_rescan(const float* __restrict__ scores,
                                   int32_t* __restrict__ output, uint32_t length,
-                                  void* _smem, uint32_t initial_prefix = 0,
-                                  uint32_t initial_remaining = TopK) {
+                                  void* _smem, uint32_t initial_prefix,
+                                  uint32_t initial_remaining) {
   static_assert(VecSize == 1 || VecSize == 2 || VecSize == 4);
   using Radix = ExactRadixTraits;
   constexpr uint32_t kHistogramBins = Radix::kBins;
@@ -171,7 +171,7 @@ __device__ void exact_topk_rescan(const float* __restrict__ scores,
     const uint32_t warp_total = smem->warp_sum[lane];
     uint32_t count_above =
         warp_reduce_sum_full(lane > warp ? warp_total : 0) +
-        __shfl_sync(0xFFFFFFFFu, warp_inclusive, kWarpSize - 1) -
+        TOPK_SHFL_SYNC(0xFFFFFFFFu, warp_inclusive, kWarpSize - 1) -
         warp_inclusive;
 #pragma unroll
     for (int i = static_cast<int>(kBinsPerThread) - 1; i >= 0; --i) {
@@ -244,7 +244,8 @@ template <uint32_t TopK, uint32_t BlockSize, uint32_t VecSize>
 __device__ __noinline__ void exact_topk_rescan_cold(
     const float* __restrict__ scores, int32_t* __restrict__ output,
     uint32_t length, void* smem) {
-  exact_topk_rescan<TopK, BlockSize, VecSize>(scores, output, length, smem);
+  exact_topk_rescan<TopK, BlockSize, VecSize>(scores, output, length, smem, 0,
+                                              TopK);
 }
 
 struct CoarseRefineRange {
@@ -290,7 +291,7 @@ __device__ __forceinline__ uint32_t warp_reduce_min_full(uint32_t v) {
 #else
   #pragma unroll
   for (uint32_t mask = kWarpSize >> 1; mask > 0; mask >>= 1) {
-    v = min(v, __shfl_xor_sync(0xFFFFFFFFu, v, mask));
+    v = min(v, TOPK_SHFL_XOR_SYNC(0xFFFFFFFFu, v, mask));
   }
   return v;
 #endif
@@ -302,7 +303,7 @@ __device__ __forceinline__ uint32_t warp_reduce_max_full(uint32_t v) {
 #else
   #pragma unroll
   for (uint32_t mask = kWarpSize >> 1; mask > 0; mask >>= 1) {
-    v = max(v, __shfl_xor_sync(0xFFFFFFFFu, v, mask));
+    v = max(v, TOPK_SHFL_XOR_SYNC(0xFFFFFFFFu, v, mask));
   }
   return v;
 #endif

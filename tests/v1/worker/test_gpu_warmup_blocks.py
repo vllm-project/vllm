@@ -38,7 +38,8 @@ NUM_SPEC_STEPS = 3
 
 # `warmup_kernels` ends on `torch.accelerator.synchronize()`.
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="warmup synchronizes on the accelerator"
+    not current_platform.is_cuda_alike(),
+    reason="warmup synchronizes on the accelerator",
 )
 
 

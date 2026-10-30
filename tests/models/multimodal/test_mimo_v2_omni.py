@@ -40,7 +40,9 @@ def _reference(q, k, v, cu_seqlens, sinks, scale):
     return out
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="requires flash-attn")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires CUDA or ROCm"
+)
 @pytest.mark.parametrize("num_kv_heads", [NUM_HEADS, NUM_HEADS // 2])
 def test_window_attention_applies_sinks(vision_attn_env, num_kv_heads):
     from vllm.model_executor.models.mimo_v2_omni import MiMoVisionAttention

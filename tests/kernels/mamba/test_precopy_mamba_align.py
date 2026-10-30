@@ -43,7 +43,7 @@ try:
     import pytest
 
     _cuda_required = pytest.mark.skipif(
-        not current_platform.is_cuda(),
+        not current_platform.is_cuda_alike(),
         reason="precopy_mamba_align_fused_kernel needs CUDA/Triton",
     )
     _parametrize = pytest.mark.parametrize

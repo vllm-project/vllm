@@ -9,8 +9,8 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.block_table import BlockTables
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="requires CUDA",
+    not current_platform.is_cuda_alike(),
+    reason="requires CUDA or ROCm",
 )
 
 

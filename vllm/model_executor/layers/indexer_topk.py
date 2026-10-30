@@ -183,8 +183,8 @@ class SparseIndexerTopk(torch.nn.Module):
         if self._backend == "cooperative":
             failures = self._cooperative_constraints(logits, topk_tokens, num_rows)
         elif self._backend == "persistent":
-            if not self._is_cuda:
-                failures.append("requires a CUDA platform")
+            if not (self._is_cuda or self._is_rocm):
+                failures.append("requires a CUDA or ROCm platform")
             if topk_tokens not in (512, 1024, 2048):
                 failures.append(
                     f"topk_tokens must be in (512, 1024, 2048), got {topk_tokens}"
@@ -278,8 +278,7 @@ class SparseIndexerTopk(torch.nn.Module):
     @staticmethod
     def _row_ends(seq_lens: torch.Tensor, next_n: int, num_rows: int) -> torch.Tensor:
         """Per-row exclusive end offsets (int32, (num_rows,)) for top-k
-        kernels that take ragged lengths (DeepSelect, FlashInfer, torch
-        reference).
+        kernels that take ragged lengths.
 
         seq_lens is (B, next_n) per-row effective lens for native spec decode
         and (B, 1) otherwise, in which case per-row lens are derived the same
@@ -321,7 +320,7 @@ class SparseIndexerTopk(torch.nn.Module):
             )
             torch.ops._C.cooperative_topk(
                 logits,
-                seq_lens,
+                self._row_ends(seq_lens, next_n, logits.shape[0]),
                 topk_indices,
                 topk_workspace,
                 topk_tokens,
@@ -338,7 +337,7 @@ class SparseIndexerTopk(torch.nn.Module):
             # long-row kernels on short-context batches.
             torch.ops._C.persistent_topk(
                 logits,
-                seq_lens,
+                self._row_ends(seq_lens, next_n, logits.shape[0]),
                 topk_indices,
                 topk_workspace,
                 topk_tokens,

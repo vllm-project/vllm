@@ -20,9 +20,14 @@ namespace vllm::sampled_topk {
 namespace hist4096 = topk_histogram_4096;
 
 constexpr int kThreads = 1024;
-// Conservative crossover bounds from the B300 batch/length sweep.
+// Conservative crossover bounds from the B300 batch/length sweep. On gfx950
+// sampling wins for every row too long for the 32K register path.
 template <int K>
+#ifdef USE_ROCM
+constexpr int kMinSampledLength = 32769;
+#else
 constexpr int kMinSampledLength = K == 512 ? 98304 : 65536;
+#endif
 // Target half the buffer to leave room for sampling error.
 constexpr int kSample = 4096;
 constexpr int kCapacity = 8192;
@@ -109,12 +114,12 @@ __device__ uint32_t threshold(Storage& s, const float* row, int count,
 }
 
 __device__ __forceinline__ int reserve(bool hit, int* counter) {
-  const uint32_t mask = __ballot_sync(0xffffffffu, hit);
+  const uint32_t mask = TOPK_BALLOT_SYNC(0xffffffffu, hit);
   if (mask == 0) return 0;
   const int lane = threadIdx.x & 31;
   int base = 0;
   if (lane == 0) base = atomicAdd(counter, __popc(mask));
-  base = __shfl_sync(0xffffffffu, base, 0);
+  base = TOPK_SHFL_SYNC(0xffffffffu, base, 0);
   return base + __popc(mask & ((1u << lane) - 1));
 }
 
@@ -171,22 +176,37 @@ __global__ void __launch_bounds__(kThreads)
     }
     return;
   }
-  if (tid == 0) s.remaining = max(1, (kCapacity / 2) * kSample / length);
+  const int sample_rank = max(1, (kCapacity / 2) * kSample / length);
+  if (tid == 0) s.remaining = sample_rank;
   for (int i = tid; i < 2048; i += kThreads) s.histogram[i] = 0;
   __syncthreads();
   // Sample contiguous warps spread across the row to keep loads coalesced.
   for (int i = tid; i < kSample; i += kThreads) {
     const int index = (i / 32) * (length / (kSample / 32)) + i % 32;
-    atomicAdd(&s.histogram[coarse(hist4096::convert_to_uint32_v2(row[index]))],
-              1);
+    const uint32_t key = hist4096::convert_to_uint32_v2(row[index]);
+#ifdef USE_ROCM
+    s.candidates[i].y = key;
+#endif
+    atomicAdd(&s.histogram[coarse(key)], 1);
   }
   __syncthreads();
   select_bin<2048>(s);
   const uint16_t half_key = s.bin << 5;
   const uint16_t half_bits =
       (half_key & 0x8000u) ? (half_key ^ 0x8000u) : ~half_key;
-  const uint32_t cutoff =
+  uint32_t cutoff =
       hist4096::convert_to_uint32_v2(__half2float(__ushort_as_half(half_bits)));
+#ifdef USE_ROCM
+  // In a clustered row most of the sample shares the cutoff's coarse bin, so
+  // the survivors would overflow the buffer and force the full-row fallback.
+  // Cut at the exact sampled rank instead.
+  const int admitted = sample_rank - s.remaining + s.histogram[s.bin];
+  __syncthreads();
+  if (static_cast<int64_t>(admitted) * length >
+      static_cast<int64_t>(kCapacity) * kSample) {
+    cutoff = threshold<true>(s, row, kSample, sample_rank);
+  }
+#endif
   if (tid == 0) s.count = 0;
   __syncthreads();
   constexpr int kItems = 16;
@@ -223,13 +243,13 @@ __global__ void __launch_bounds__(kThreads)
     int inclusive = hits;
 #pragma unroll
     for (int delta = 1; delta < 32; delta *= 2) {
-      const int previous = __shfl_up_sync(0xffffffffu, inclusive, delta);
+      const int previous = TOPK_SHFL_UP_SYNC(0xffffffffu, inclusive, delta);
       if (lane >= delta) inclusive += previous;
     }
-    const int total = __shfl_sync(0xffffffffu, inclusive, 31);
+    const int total = TOPK_SHFL_SYNC(0xffffffffu, inclusive, 31);
     int warp_base = 0;
     if (lane == 31 && total != 0) warp_base = atomicAdd(&s.count, total);
-    warp_base = __shfl_sync(0xffffffffu, warp_base, 31);
+    warp_base = TOPK_SHFL_SYNC(0xffffffffu, warp_base, 31);
     int offset = warp_base + inclusive - hits;
 #pragma unroll
     for (int j = 0; j < kItems; ++j) {

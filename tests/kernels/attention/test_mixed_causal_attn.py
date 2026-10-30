@@ -115,9 +115,6 @@ def test_triton_mixed_causal(
     dtype: torch.dtype,
     block_size: int,
 ):
-    if not current_platform.is_cuda():
-        pytest.skip("Triton attention requires CUDA")
-
     from vllm.v1.attention.ops.triton_unified_attention import unified_attention
 
     set_random_seed(42)

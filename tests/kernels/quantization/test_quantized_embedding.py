@@ -34,8 +34,8 @@ def _dequant_gather_torch(
 
 
 @pytest.mark.skipif(
-    not (current_platform.is_cuda() or current_platform.is_xpu()),
-    reason="Triton dequant kernel requires CUDA or XPU",
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="Triton dequant kernel requires CUDA, ROCm or XPU",
 )
 @pytest.mark.parametrize("num_bits", [2, 4, 8])
 @pytest.mark.parametrize("group_size", [0, 256])  # 0 -> channel

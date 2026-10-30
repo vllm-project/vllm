@@ -19,7 +19,9 @@ def test_compile():
 
 @pytest.mark.forked
 @pytest.mark.core_model
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Skip if not CUDA or ROCm"
+)
 @pytest.mark.parametrize(
     ("model", "tokenizer", "config_format", "tokenizer_mode", "model_arch"),
     [
@@ -77,7 +79,7 @@ def test_pixtral_compilation(
             max_model_len=4096,
             limit_mm_per_prompt={"image": 1},
             gpu_memory_utilization=0.8,
-            attention_backend="FLASH_ATTN",
+            attention_backend=None if current_platform.is_rocm() else "FLASH_ATTN",
             compilation_config={
                 "mode": CompilationMode.VLLM_COMPILE,
                 "compile_mm_encoder": compile_mm_encoder,
@@ -90,7 +92,9 @@ def test_pixtral_compilation(
 
 # forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
 @pytest.mark.forked
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Skip if not CUDA or ROCm"
+)
 def test_qwen2_5_vl_compilation(vllm_runner, monkeypatch):
     """Test that Qwen2.5-VL vision submodules are compiled.
 
@@ -124,7 +128,9 @@ def test_qwen2_5_vl_compilation(vllm_runner, monkeypatch):
 
 # forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
 @pytest.mark.forked
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Skip if not CUDA or ROCm"
+)
 def test_qwen2_5_vl_no_vit_compilation(vllm_runner, monkeypatch):
     """Test that Qwen2.5-VL vision submodules are not compiled when the
     config is passed off
