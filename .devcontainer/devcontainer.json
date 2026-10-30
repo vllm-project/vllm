@@ -1,0 +1,17 @@
+{
+  "name": "vLLM",
+  "image": "mcr.microsoft.com/devcontainers/python:1-3.12-bookworm",
+  "features": {
+    "ghcr.io/devcontainers-extra/features/uv:1.0.2": {},
+    "ghcr.io/devcontainers/features/rust:1.6.0": {},
+    "ghcr.io/devcontainers/features/github-cli:1.1.3": {}
+  },
+  "remoteUser": "vscode",
+  "mounts": [
+    "source=vllm-devcontainer-cache,target=/home/vscode/.cache,type=volume"
+  ],
+  "containerEnv": {
+    "UV_LINK_MODE": "copy"
+  },
+  "postCreateCommand": "uv pip install --system -r requirements/lint.txt && VLLM_USE_PRECOMPILED=1 uv pip install --system -e . --torch-backend=auto && pre-commit install"
+}

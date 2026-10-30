@@ -37,6 +37,24 @@ Then, configure your Python virtual environment.
 
 --8<-- "docs/getting_started/installation/python_env_setup.inc.md"
 
+!!! tip "Dev container"
+    [![Open in Dev Containers](https://img.shields.io/static/v1?label=Dev%20Containers&message=Open&color=blue&logo=visualstudiocode)](https://vscode.dev/redirect?url=vscode://ms-vscode-remote.remote-containers/cloneInVolume?url=https://github.com/vllm-project/vllm)
+    [![Dev container build](https://github.com/vllm-project/vllm/actions/workflows/devcontainer.yml/badge.svg?branch=main)](https://github.com/vllm-project/vllm/actions/workflows/devcontainer.yml)
+
+    A CPU-only VS Code dev container is available for editing and linting without a GPU.
+    Open the Command Palette and run **Dev Containers: Reopen in Container**. The badge
+    above clones `vllm-project/vllm` into a container volume; to work on a fork, clone
+    it locally and use **Reopen in Container** instead.
+
+    On first creation it installs `uv`, creates a uv-managed Python 3.12 venv at `.venv`
+    inside a Docker volume (separate from any host `.venv`), and installs
+    `requirements/lint.txt`. On every start it also runs `pre-commit install`.
+
+    **Limitations:** no GPU support; not for CUDA/C++ builds or GPU tests; Pylance will
+    report unresolved imports for packages not installed in the container (e.g. `torch`).
+    If you also commit from the host, run `pre-commit install` again on the host after
+    using the container — the container rewrites `.git/hooks` with container-internal paths.
+
 If you are only developing vLLM's Python code, install vLLM using:
 
 ```bash

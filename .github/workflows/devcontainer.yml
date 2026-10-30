@@ -1,0 +1,39 @@
+name: Dev container
+
+on:
+  pull_request:
+    paths:
+      - ".devcontainer/**"
+      - "requirements/lint.txt"
+      - ".github/workflows/devcontainer.yml"
+  push:
+    branches: [main]
+    paths:
+      - ".devcontainer/**"
+      - "requirements/lint.txt"
+      - ".github/workflows/devcontainer.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: devcontainers/ci@513af61f4de4f75d37e4438f184ba4358f0fc1ca # v0.3.1900000450
+        with:
+          push: never
+          runCmd: |
+            set -euo pipefail
+            uv --version
+            python --version | grep -F "Python 3.12"
+            python -c "import vllm"
+            pre-commit --version
+            test -f .git/hooks/pre-commit

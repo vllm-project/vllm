@@ -1,0 +1,25 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "enabledManagers": ["devcontainer"],
+  "dependencyDashboard": true,
+  "labels": ["dependencies"],
+  "schedule": ["before 6am on monday"],
+  "packageRules": [
+    {
+      "matchManagers": ["devcontainer"],
+      "matchDepTypes": ["image"],
+      "matchPackageNames": ["mcr.microsoft.com/devcontainers/python"],
+      "groupName": "devcontainer base image"
+    },
+    {
+      "matchManagers": ["devcontainer"],
+      "matchDepTypes": ["feature"],
+      "matchPackageNames": [
+        "ghcr.io/devcontainers-extra/features/uv",
+        "ghcr.io/devcontainers/features/rust",
+        "ghcr.io/devcontainers/features/github-cli"
+      ],
+      "groupName": "devcontainer features"
+    }
+  ]
+}
