@@ -14,6 +14,7 @@ def _fused_gdn_gated_rms_norm_kernel(
     z_ptr,
     w_ptr,
     out_ptr,
+    scale_ptr,
     stride_x_tok,
     stride_z_tok,
     stride_out_tok,
@@ -24,6 +25,7 @@ def _fused_gdn_gated_rms_norm_kernel(
     ROWS_PER_BLOCK: tl.constexpr,
     NORM_BEFORE_GATE: tl.constexpr,
     ACTIVATION: tl.constexpr,
+    QUANT_FP8: tl.constexpr,
 ):
     """FLA-equivalent per-head gated RMS norm with token-strided z."""
     row_start = tl.program_id(0) * ROWS_PER_BLOCK
@@ -62,6 +64,11 @@ def _fused_gdn_gated_rms_norm_kernel(
             y *= tl.sigmoid(z)
 
     out_ptrs = out_ptr + rows[:, None] * stride_out_tok + head * N + cols[None, :]
+    if QUANT_FP8:
+        # Static FP8 from the bf16-rounded output, like scaled_fp8_quant.
+        y = y.to(x_ptr.dtype.element_ty).to(tl.float32)
+        y = y * tl.math.div_rn(1.0, tl.load(scale_ptr))
+        y = tl.clamp(y, -448.0, 448.0)
     tl.store(out_ptrs, y.to(out_ptr.dtype.element_ty), mask=mask)
 
 
@@ -75,6 +82,7 @@ def fused_gdn_gated_rms_norm(
     head_v_dim: int,
     norm_before_gate: bool,
     activation: str,
+    scale: torch.Tensor | None = None,
 ) -> None:
     """Gated RMS norm ``out = rms_norm(x) * act(z)`` for Qwen3.5 GDN.
 
@@ -91,12 +99,17 @@ def fused_gdn_gated_rms_norm(
         norm_before_gate: if True, out = norm(x) * act(z), else
             out = norm(x * act(z)).
         activation: "swish"/"silu" or "sigmoid".
+        scale: optional static per-tensor FP8 scale; when given, out is
+            float8_e4m3fn and must not alias x.
 
     """
     assert x.shape == z.shape == out.shape and x.dim() == 2
     assert x.stride(-1) == 1 and z.stride(-1) == 1 and out.stride(-1) == 1
     assert weight.shape == (head_v_dim,) and weight.stride(0) == 1
     assert x.shape[1] == num_v_heads * head_v_dim
+    quant_fp8 = scale is not None
+    if scale is not None:
+        assert out.dtype == torch.float8_e4m3fn and scale.numel() == 1
 
     num_tokens = x.shape[0]
     if num_tokens == 0:
@@ -109,6 +122,7 @@ def fused_gdn_gated_rms_norm(
         z,
         weight,
         out,
+        scale if quant_fp8 else weight,
         x.stride(0),
         z.stride(0),
         out.stride(0),
@@ -119,5 +133,6 @@ def fused_gdn_gated_rms_norm(
         ROWS_PER_BLOCK=rows_per_block,
         NORM_BEFORE_GATE=norm_before_gate,
         ACTIVATION=activation,
+        QUANT_FP8=quant_fp8,
         num_warps=min(max(block_n // 256, 1), 8),
     )
