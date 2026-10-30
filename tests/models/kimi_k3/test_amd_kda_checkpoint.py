@@ -53,6 +53,7 @@ BLOCK_SIZE = 64
 class _StubSpeculativeConfig:
     method = "dspark"
     parallel_drafting = False
+    enable_adaptive_verification = False
 
     def __init__(self, num_speculative_tokens: int) -> None:
         self.num_speculative_tokens = num_speculative_tokens
