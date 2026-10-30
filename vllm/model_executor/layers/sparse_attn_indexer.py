@@ -516,22 +516,27 @@ def sparse_attn_indexer(
                 cfg.scheduler_config.max_num_batched_tokens,
             ) * (1 + cfg.num_speculative_tokens)
 
-        # Dummy allocation for the peak logits memory during inference: the
-        # prefill chunks' budget, or the decode logits, which eager and
-        # piecewise steps allocate outside the CUDA graph pools. DeepGEMM emits
-        # them in BF16 on SM100 and FP32 elsewhere, each row holding whole KV
-        # splits at a 1024-byte stride; the FP32 copy keeps that stride.
+        # Dummy allocation for the peak logits memory during inference: a
+        # prefill chunk's, or the decode logits, which eager and piecewise
+        # steps allocate outside the CUDA graph pools. DeepGEMM emits them in
+        # BF16 on SM100 and FP32 elsewhere, each row holding whole KV splits at
+        # a 1024-byte stride; the FP32 copy keeps that stride. Prefill always
+        # reads the FP32 copy, and the chunk splitter caps it at the budget.
         if current_platform.is_device_capability_family(100):
             logits_dtype, split_kv = torch.bfloat16, 384
         else:
             logits_dtype, split_kv = torch.float32, 256
         row_align = math.lcm(split_kv, 1024 // logits_dtype.itemsize)
-        elem_bytes = logits_dtype.itemsize
-        if logits_dtype != torch.float32 and fp32_decode_logits:
-            elem_bytes += torch.float32.itemsize
+        copy_bytes = 0 if logits_dtype == torch.float32 else torch.float32.itemsize
+        decode_copy_bytes = copy_bytes if fp32_decode_logits else 0
+        prefill_budget = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
         max_logits_bytes = max(
-            envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024,
-            max_decode_tokens * round_up(max_model_len, row_align) * elem_bytes,
+            prefill_budget
+            // torch.float32.itemsize
+            * (logits_dtype.itemsize + copy_bytes),
+            max_decode_tokens
+            * round_up(max_model_len, row_align)
+            * (logits_dtype.itemsize + decode_copy_bytes),
         )
         _ = torch.empty(
             max_logits_bytes, dtype=torch.uint8, device=hidden_states.device
@@ -638,13 +643,18 @@ def sparse_attn_indexer(
         prefill_metadata = attn_metadata_narrowed.prefill
         assert prefill_metadata is not None
 
-        # Get the full shared workspace buffers once (will allocate on first use).
+        # Get the shared workspace buffers once, sized for this batch's largest
+        # chunk rather than the profiled bound (total_seq_lens), so the scratch
+        # stays at the workspace head and leaves retained tail spans intact.
         # Layout switches between FP8 (head_dim bytes + 4-byte fp32 scale) and
         # MXFP4 (head_dim/2 bytes packed + head_dim/MXFP4_BLOCK_SIZE ue8m0
         # scales) based on use_fp4_cache.
         workspace_manager = current_workspace_manager()
         values_spec, scales_spec = _gather_workspace_shapes(
-            total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
+            max(c.max_local_total_seq_lens for c in prefill_metadata.chunks),
+            head_dim,
+            fp8_dtype,
+            use_fp4_cache,
         )
         # PCP + DCP needs two more pairs: the rank-major all-gather destination
         # and the de-interleaved result.
@@ -830,6 +840,8 @@ def sparse_attn_indexer(
                     cp_kv_cache_interleave_size,
                     row_starts=row_starts,
                 )
+            # Free this chunk's logits before the next chunk allocates its own.
+            del logits
 
         if row_shard is not None:
             # Rows are already fully ranked, so this is a layout gather.
