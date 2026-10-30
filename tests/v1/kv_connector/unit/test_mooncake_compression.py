@@ -22,6 +22,7 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
     "extra",
     [
         {},
+        {"kv_lease_duration": 30},
         {"compression": None},
         {"compression": {"enable-compression-pipeline": False, "unknown": 1}},
     ],

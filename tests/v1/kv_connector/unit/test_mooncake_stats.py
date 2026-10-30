@@ -3,6 +3,7 @@
 
 import queue
 import threading
+from collections import OrderedDict
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -277,6 +278,8 @@ def test_expired_request_bumps_counter():
     import asyncio
 
     worker = _bare_worker()
+    worker._kv_lease_duration = None
+    worker._expired_transfer_ids = OrderedDict()
     worker.reqs_need_send = {
         "tid1": SendBlockMeta(
             p_req_id="req1",

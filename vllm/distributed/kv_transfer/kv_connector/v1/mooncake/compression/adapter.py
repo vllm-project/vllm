@@ -38,6 +38,10 @@ def get_compression_config(extra: dict[str, Any]) -> Any:
         "enable-compression-pipeline", False
     ):
         return None
+    if extra.get("kv_lease_duration") is not None:
+        raise ValueError(
+            "Mooncake compression does not support kv_lease_duration; leave it unset."
+        )
     return load_backend().CompressionConfig.from_extra_config(extra)
 
 
