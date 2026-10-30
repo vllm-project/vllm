@@ -23,10 +23,11 @@ vLLM provides multiple communication backends for EP. Use `--all2all-backend` to
 
 | Backend | Use Case | Features | Best For |
 | ------- | -------- | -------- | -------- |
-| `allgather_reducescatter` | Default backend | Standard all2all using allgather/reducescatter primitives | General purpose, works with any EP+DP configuration |
+| `auto` | Default | Picks `flashinfer_nvlink_one_sided` for EP with DP ≥ 8 on GB200/GB300 or DP = 8 on a single HGX B200 node, `allgather_reducescatter` otherwise | Most deployments |
+| `allgather_reducescatter` | General purpose | Standard all2all using allgather/reducescatter primitives | Works with any EP+DP configuration |
 | `deepep_high_throughput` | Multi-node prefill | Grouped GEMM with continuous layout, optimized for prefill | Prefill-dominated workloads, high-throughput scenarios |
 | `deepep_low_latency` | Multi-node decode | CUDA graph support, masked layout, optimized for decode | Decode-dominated workloads, low-latency scenarios |
-| `flashinfer_nvlink_one_sided` | MNNVL systems | FlashInfer's one-sided A2A strategy for multi-node NVLink | High-throughput workloads |
+| `flashinfer_nvlink_one_sided` | MNNVL systems, single-node NVSwitch | FlashInfer's one-sided A2A strategy over NVLink | High-throughput workloads |
 | `passthrough` | Any | Internal, not accepted on the CLI: bound automatically for MoE backends that dispatch and combine themselves, so no all-to-all runs in the framework | `--moe-backend flashinfer_moe_ep_*` (FlashInfer MoE-EP megakernels) |
 | `flashinfer_nvlink_two_sided` | MNNVL systems | FlashInfer's two-sided A2A strategy for multi-node NVLink | Systems with NVLink across nodes |
 

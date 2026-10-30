@@ -76,8 +76,25 @@ def _is_gb200_or_gb300() -> bool:
         return False
 
 
+@cache
+def _is_hgx_b200() -> bool:
+    """Whether this is an x86 HGX B200; HGX B300 is 10.3, not 10.0."""
+    if not current_platform.is_cuda():
+        return False
+    if current_platform.get_cpu_architecture() != CpuArchEnum.X86:
+        return False
+    try:
+        return current_platform.is_device_capability(100)
+    except Exception:
+        return False
+
+
 def _resolve_all2all_backend(
-    requested: All2AllBackend, enable_expert_parallel: bool, data_parallel_size: int
+    requested: All2AllBackend,
+    enable_expert_parallel: bool,
+    data_parallel_size: int,
+    data_parallel_size_local: int,
+    distributed_executor_backend: str | type[Executor] | None,
 ) -> All2AllBackend:
     """Pick the all2all backend, resolving "auto" against the deployment.
 
@@ -85,6 +102,8 @@ def _resolve_all2all_backend(
         requested: The configured backend, or "auto" to choose one here.
         enable_expert_parallel: Whether expert parallelism is on.
         data_parallel_size: Number of data-parallel ranks.
+        data_parallel_size_local: Number of data-parallel ranks on this host.
+        distributed_executor_backend: The configured executor backend.
 
     Returns:
         A concrete backend; never "auto".
@@ -99,8 +118,15 @@ def _resolve_all2all_backend(
         return "allgather_reducescatter"
 
     if requested == "auto":
-        if not (
-            enable_expert_parallel and _is_gb200_or_gb300() and data_parallel_size >= 8
+        if not enable_expert_parallel or not (
+            (data_parallel_size >= 8 and _is_gb200_or_gb300())
+            # HGX B200 has no NVLink between hosts, so the EP group must be
+            # one host's 8 GPUs. An external launcher places ranks itself.
+            or (
+                data_parallel_size == data_parallel_size_local == 8
+                and distributed_executor_backend != "external_launcher"
+                and _is_hgx_b200()
+            )
         ):
             return "allgather_reducescatter"
         requested = "flashinfer_nvlink_one_sided"
@@ -288,9 +314,9 @@ class ParallelConfig:
     all2all_backend: All2AllBackend = "auto"
     """All2All backend for MoE expert parallel communication. Available options:
 
-    - "auto": "flashinfer_nvlink_one_sided" on GB200/GB300 running expert
-      parallelism with at least 8 data-parallel ranks, "allgather_reducescatter"
-      otherwise
+    - "auto": "flashinfer_nvlink_one_sided" for expert parallelism with at
+      least 8 data-parallel ranks on GB200/GB300, or with exactly 8 on a single
+      HGX B200 node; "allgather_reducescatter" otherwise
 
     - "allgather_reducescatter": All2all based on allgather and reducescatter
     - "deepep_high_throughput": Use deepep high-throughput kernels
@@ -630,6 +656,8 @@ class ParallelConfig:
             self.all2all_backend,
             enable_expert_parallel=self.enable_expert_parallel,
             data_parallel_size=self.data_parallel_size,
+            data_parallel_size_local=self.data_parallel_size_local,
+            distributed_executor_backend=self.distributed_executor_backend,
         )
 
         if self.data_parallel_size_local > self.data_parallel_size:

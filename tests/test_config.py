@@ -1729,6 +1729,13 @@ def _pretend_cuda_host(monkeypatch, cpu_arch, capability) -> None:
     )
 
 
+def _clear_platform_probes() -> None:
+    from vllm.config.parallel import _is_gb200_or_gb300, _is_hgx_b200
+
+    _is_gb200_or_gb300.cache_clear()
+    _is_hgx_b200.cache_clear()
+
+
 def _parallel_config(**kwargs) -> ParallelConfig:
     """ParallelConfig with the executor pinned, so that multi-rank configs do
     not reach the platform probe that picks one for us."""
@@ -1739,15 +1746,25 @@ def _parallel_config(**kwargs) -> ParallelConfig:
 @pytest.fixture
 def one_sided_capable_host(monkeypatch):
     """A GB200 host with FlashInfer present, i.e. everything but the EP group."""
-    from vllm.config.parallel import _is_gb200_or_gb300
-
     _pretend_cuda_host(monkeypatch, CpuArchEnum.ARM, (10, 0))
     monkeypatch.setattr(
         "vllm.utils.flashinfer.has_flashinfer_nvlink_one_sided", lambda: True
     )
-    _is_gb200_or_gb300.cache_clear()
+    _clear_platform_probes()
     yield
-    _is_gb200_or_gb300.cache_clear()
+    _clear_platform_probes()
+
+
+@pytest.fixture
+def hgx_b200_host(monkeypatch):
+    """An x86 HGX B200 host with FlashInfer present."""
+    _pretend_cuda_host(monkeypatch, CpuArchEnum.X86, (10, 0))
+    monkeypatch.setattr(
+        "vllm.utils.flashinfer.has_flashinfer_nvlink_one_sided", lambda: True
+    )
+    _clear_platform_probes()
+    yield
+    _clear_platform_probes()
 
 
 @pytest.mark.parametrize(
@@ -1756,8 +1773,9 @@ def one_sided_capable_host(monkeypatch):
         # GB200 and GB300: datacenter Blackwell on a Grace host.
         (CpuArchEnum.ARM, (10, 0), "flashinfer_nvlink_one_sided"),
         (CpuArchEnum.ARM, (10, 3), "flashinfer_nvlink_one_sided"),
-        # HGX B200/B300 share the compute capability but not the Grace host.
-        (CpuArchEnum.X86, (10, 0), "allgather_reducescatter"),
+        # HGX B200 has GB200's compute capability on an x86 host.
+        (CpuArchEnum.X86, (10, 0), "flashinfer_nvlink_one_sided"),
+        # HGX B300 has GB300's, but one-sided was not measured there.
         (CpuArchEnum.X86, (10, 3), "allgather_reducescatter"),
         # GB10 is a Grace-Blackwell superchip too, but not a 10.x part.
         (CpuArchEnum.ARM, (12, 1), "allgather_reducescatter"),
@@ -1766,23 +1784,69 @@ def one_sided_capable_host(monkeypatch):
         (CpuArchEnum.X86, (9, 0), "allgather_reducescatter"),
     ],
 )
-def test_all2all_backend_defaults_to_one_sided_only_on_gb200_gb300(
+def test_all2all_backend_defaults_to_one_sided_only_on_measured_platforms(
     monkeypatch, cpu_arch, capability, expected
 ):
-    """x86 HGX B200/B300 report the same compute capability as GB200/GB300, so
-    the default needs the Grace host to stay off unbenchmarked parts."""
-    from vllm.config.parallel import _is_gb200_or_gb300
-
+    """One-sided becomes the default only where it was measured to win: GB200,
+    GB300 and HGX B200. Telling HGX B200 from HGX B300 takes the minor
+    version, and telling either from GB200/GB300 takes the host CPU."""
     _pretend_cuda_host(monkeypatch, cpu_arch, capability)
     monkeypatch.setattr(
         "vllm.utils.flashinfer.has_flashinfer_nvlink_one_sided", lambda: True
     )
-    _is_gb200_or_gb300.cache_clear()
+    _clear_platform_probes()
     try:
-        config = _parallel_config(enable_expert_parallel=True, data_parallel_size=8)
+        config = _parallel_config(
+            enable_expert_parallel=True,
+            data_parallel_size=8,
+            data_parallel_size_local=8,
+        )
         assert config.all2all_backend == expected
     finally:
-        _is_gb200_or_gb300.cache_clear()
+        _clear_platform_probes()
+
+
+@pytest.mark.parametrize(
+    ("data_parallel_size", "data_parallel_size_local", "expected"),
+    [
+        # One full node: the configuration measured on HGX B200.
+        (8, 8, "flashinfer_nvlink_one_sided"),
+        # The EP group spans hosts, which HGX does not connect over NVLink.
+        (8, 4, "allgather_reducescatter"),
+        (8, 1, "allgather_reducescatter"),
+        (16, 8, "allgather_reducescatter"),
+        # Fewer ranks than were measured.
+        (4, 4, "allgather_reducescatter"),
+    ],
+)
+def test_one_sided_all2all_default_on_hgx_b200_needs_one_full_node(
+    hgx_b200_host, data_parallel_size, data_parallel_size_local, expected
+):
+    """One-sided maps peer memory over NVLink, which on HGX B200 ends at the
+    node, so the default may only pick it when all 8 EP ranks share one."""
+    config = _parallel_config(
+        enable_expert_parallel=True,
+        data_parallel_size=data_parallel_size,
+        data_parallel_size_local=data_parallel_size_local,
+    )
+    assert config.all2all_backend == expected
+
+
+def test_one_sided_all2all_default_on_hgx_b200_skips_external_launchers(
+    hgx_b200_host, monkeypatch
+):
+    """An external launcher such as torchrun places the ranks itself, so
+    data_parallel_size_local does not vouch that they share a host."""
+    monkeypatch.setenv("RANK", "0")
+    # __post_init__ overwrites this for external launchers; restore it after.
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
+    config = _parallel_config(
+        enable_expert_parallel=True,
+        data_parallel_size=8,
+        data_parallel_size_local=8,
+        distributed_executor_backend="external_launcher",
+    )
+    assert config.all2all_backend == "allgather_reducescatter"
 
 
 @pytest.mark.parametrize(
@@ -1831,18 +1895,16 @@ def test_one_sided_all2all_default_requires_expert_parallel(one_sided_capable_ho
 def test_one_sided_all2all_default_falls_back_without_flashinfer(monkeypatch):
     """FlashInferNVLinkOneSidedManager asserts on the missing module, so an
     image without it must degrade instead of failing startup."""
-    from vllm.config.parallel import _is_gb200_or_gb300
-
     _pretend_cuda_host(monkeypatch, CpuArchEnum.ARM, (10, 0))
     monkeypatch.setattr(
         "vllm.utils.flashinfer.has_flashinfer_nvlink_one_sided", lambda: False
     )
-    _is_gb200_or_gb300.cache_clear()
+    _clear_platform_probes()
     try:
         config = _parallel_config(enable_expert_parallel=True, data_parallel_size=8)
         assert config.all2all_backend == "allgather_reducescatter"
     finally:
-        _is_gb200_or_gb300.cache_clear()
+        _clear_platform_probes()
 
 
 def test_dp_group_uses_configured_timeout_without_current_config(monkeypatch):

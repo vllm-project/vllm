@@ -49,9 +49,13 @@ DEVICE = current_platform.device_type
 
 @pytest.fixture
 def cuda_host(monkeypatch):
-    """Resolve the all2all default as it would on a datacenter Blackwell host,
-    where only a Grace CPU distinguishes GB200/GB300 from x86 HGX B200/B300."""
-    from vllm.config.parallel import _is_gb200_or_gb300
+    """Resolve the all2all default as it would on a 10.0 datacenter Blackwell
+    host: GB200 on a Grace CPU, HGX B200 on x86."""
+    from vllm.config.parallel import _is_gb200_or_gb300, _is_hgx_b200
+
+    def clear_platform_probes() -> None:
+        _is_gb200_or_gb300.cache_clear()
+        _is_hgx_b200.cache_clear()
 
     def apply(cpu_arch: CpuArchEnum) -> None:
         monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
@@ -63,28 +67,34 @@ def cuda_host(monkeypatch):
             "get_device_capability",
             staticmethod(lambda device_id=0: DeviceCapability(major=10, minor=0)),
         )
-        _is_gb200_or_gb300.cache_clear()
+        clear_platform_probes()
 
     yield apply
-    _is_gb200_or_gb300.cache_clear()
+    clear_platform_probes()
+
+
+_needs_one_sided = pytest.mark.skipif(
+    not has_flashinfer_nvlink_one_sided(),
+    reason="FlashInfer NVLink one-sided not available",
+)
 
 
 @pytest.mark.parametrize(
-    ("cpu_arch", "expected_backend"),
+    ("cpu_arch", "data_parallel_size_local", "expected_backend"),
     [
+        # GB200: NVLink spans hosts, so rank placement does not matter.
         pytest.param(
-            CpuArchEnum.ARM,
-            "flashinfer_nvlink_one_sided",
-            marks=pytest.mark.skipif(
-                not has_flashinfer_nvlink_one_sided(),
-                reason="FlashInfer NVLink one-sided not available",
-            ),
+            CpuArchEnum.ARM, 1, "flashinfer_nvlink_one_sided", marks=_needs_one_sided
         ),
-        (CpuArchEnum.X86, "allgather_reducescatter"),
+        # HGX B200: only when the EP group is one node.
+        pytest.param(
+            CpuArchEnum.X86, 8, "flashinfer_nvlink_one_sided", marks=_needs_one_sided
+        ),
+        (CpuArchEnum.X86, 1, "allgather_reducescatter"),
     ],
 )
 def test_default_ep_communicator_uses_platform_all2all_backend(
-    monkeypatch, cuda_host, cpu_arch, expected_backend
+    monkeypatch, cuda_host, cpu_arch, data_parallel_size_local, expected_backend
 ):
     def init_device_communicator(
         self,
@@ -121,6 +131,7 @@ def test_default_ep_communicator_uses_platform_all2all_backend(
         parallel_config=ParallelConfig(
             enable_expert_parallel=True,
             data_parallel_size=8,
+            data_parallel_size_local=data_parallel_size_local,
             distributed_executor_backend="mp",
         )
     )
