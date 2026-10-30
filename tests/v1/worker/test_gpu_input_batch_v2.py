@@ -162,3 +162,60 @@ def test_prepare_dcp_local_seq_lens_matches_reference(
         )
         assert batch.dcp_local_seq_lens is not None
         assert torch.equal(batch.dcp_local_seq_lens.cpu(), expected.to(torch.int32))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="triton kernel needs CUDA")
+@pytest.mark.parametrize("write_padding", [False, True])
+@pytest.mark.parametrize(
+    "query_lens,gap,tail", [([3, 1, 2], 0, 5), ([3, 1, 2], 3, 5), ([1025], 7, 1030)]
+)
+def test_prepare_positions_preserves_padding_after_compaction(
+    write_padding: bool, query_lens: list[int], gap: int, tail: int
+):
+    """Dropped real rows stay unpadded; only the graph tail is padding."""
+    from vllm.v1.worker.gpu.input_batch import prepare_pos_seq_lens
+
+    device = "cuda"
+    num_reqs = len(query_lens)
+    mapping = torch.arange(num_reqs - 1, -1, -1, dtype=torch.int32, device=device)
+    computed = torch.arange(num_reqs, dtype=torch.int32, device=device) * 10
+    starts = np.concatenate(([0], np.cumsum(query_lens)))
+    query_start_loc = torch.tensor(starts, dtype=torch.int32, device=device)
+    num_tokens = int(starts[-1])
+    pad_start = num_tokens + gap
+    padded_tokens = pad_start + tail
+    positions = torch.full((padded_tokens + 1,), -1, dtype=torch.int64, device=device)
+    seq_lens = torch.full((num_reqs + 2,), -1, dtype=torch.int32, device=device)
+    padding = torch.ones(padded_tokens + 1, dtype=torch.bool, device=device)
+    padding[-1] = False
+    if write_padding:
+        padding[pad_start:padded_tokens] = False
+
+    prepare_pos_seq_lens(
+        mapping,
+        query_start_loc,
+        computed,
+        positions,
+        seq_lens,
+        is_padding=padding if write_padding else None,
+        num_tokens_padded=padded_tokens,
+        pad_start=pad_start,
+    )
+
+    expected_positions = torch.cat(
+        [
+            torch.arange(query_len, device=device) + (num_reqs - 1 - i) * 10
+            for i, query_len in enumerate(query_lens)
+        ]
+    )
+    assert torch.equal(positions[:num_tokens], expected_positions)
+    assert (positions[num_tokens:] == -1).all()
+    expected_lens = computed.flip(0) + torch.tensor(query_lens, device=device)
+    assert torch.equal(seq_lens[:num_reqs], expected_lens)
+    assert not seq_lens[num_reqs:].any()
+    if write_padding:
+        assert not padding[:pad_start].any()
+        assert padding[pad_start:padded_tokens].all()
+    else:
+        assert padding[:padded_tokens].all()
+    assert not padding[-1]

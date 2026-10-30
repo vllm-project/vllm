@@ -855,6 +855,21 @@ def _topk_topp_kernel(
         if not (final_pivot < max_logit):
             final_pivot = -float("inf")
         elif final_pivot != -float("inf"):
+            # A top-p below the fp32 resolution of the kept mass (e.g. 1e-9) can
+            # drop every duplicate; if nothing else survives, keep the max token(s).
+            if num_keep == 0 and num_duplicate_logit > 0:
+                num_survivors = tl.zeros((), dtype=tl.uint32)
+                for i in range(0, NUM_TILES):
+                    offs_s = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+                    mask_s = offs_s < VOCAB_SIZE
+                    logits_s = tl.load(
+                        LOGITS_ROW + offs_s, mask=mask_s, other=-float("inf")
+                    )
+                    survive = (logits_s > final_pivot) & mask_s
+                    survive = survive & (tl.abs(logits_s - duplicate_logit) >= 1e-9)
+                    num_survivors += tl.sum(survive)
+                if num_survivors == 0:
+                    num_keep = num_duplicate_logit
             for i in range(0, NUM_TILES):
                 offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
                 mask_n = offs_n < VOCAB_SIZE
@@ -884,11 +899,13 @@ def _max_sampler_batch_size(vllm_config: Any) -> int:
     )
 
 
-def _topk_topp_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
+def _topk_topp_warmup_inputs(
+    vllm_config: Any, logits_strides: tuple[int, ...] = (16, 2)
+) -> dict[str, Any]:
     vocab_size = vllm_config.model_config.get_vocab_size()
     split_enabled = current_platform.is_cuda_alike()
     mode: Any = WarmupChoices((True, False), (True, True), (False, True))
-    logits_stride: Any = WarmupChoices(16, 2)
+    logits_stride: Any = WarmupChoices(*logits_strides)
     batch_size: Any = WarmupIntRange(1, _max_sampler_batch_size(vllm_config) + 1)
     topk_enabled = mode[0]
     topp_enabled = mode[1]
@@ -1051,10 +1068,12 @@ def _topp_sb_stats_kernel(
     tl.store(STATS + base + 3, cnt)
 
 
-def _topp_split_stats_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
+def _topp_split_stats_warmup_inputs(
+    vllm_config: Any, logits_strides: tuple[int, ...] = (16, 2)
+) -> dict[str, Any]:
     vocab_size = vllm_config.model_config.get_vocab_size()
     num_sm = num_compute_units()
-    logits_stride: Any = WarmupChoices(16, 2)
+    logits_stride: Any = WarmupChoices(*logits_strides)
     batch_size: Any = WarmupIntRange(
         1, min(_max_sampler_batch_size(vllm_config), _SPLIT_MAX_BATCH) + 1
     )
@@ -1340,10 +1359,12 @@ def _topp_sb_step_kernel(
     tl.store(pbase + fidx * 3 + 2, nmin)
 
 
-def _topp_split_step_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
+def _topp_split_step_warmup_inputs(
+    vllm_config: Any, logits_strides: tuple[int, ...] = (16, 2)
+) -> dict[str, Any]:
     vocab_size = vllm_config.model_config.get_vocab_size()
     num_sm = num_compute_units()
-    logits_stride: Any = WarmupChoices(16, 2)
+    logits_stride: Any = WarmupChoices(*logits_strides)
     batch_size: Any = WarmupIntRange(
         1, min(_max_sampler_batch_size(vllm_config), _SPLIT_MAX_BATCH) + 1
     )
@@ -1518,10 +1539,12 @@ def _topp_sb_mask_kernel(
         tl.store(ROW + i + offs, tl.where(keep, x, MASK_VALUE), mask=mask_n)
 
 
-def _topp_split_mask_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
+def _topp_split_mask_warmup_inputs(
+    vllm_config: Any, logits_strides: tuple[int, ...] = (16, 2)
+) -> dict[str, Any]:
     vocab_size = vllm_config.model_config.get_vocab_size()
     num_sm = num_compute_units()
-    logits_stride: Any = WarmupChoices(16, 2)
+    logits_stride: Any = WarmupChoices(*logits_strides)
     batch_size: Any = WarmupIntRange(
         1, min(_max_sampler_batch_size(vllm_config), _SPLIT_MAX_BATCH) + 1
     )

@@ -166,6 +166,46 @@ class DSparkSpeculator(DFlashSpeculator):
             logits_cache_row_mapping=self.draft_logits.row_mapping,
         )
 
+    def _sample_markov_step(
+        self,
+        step: int,
+        logits: torch.Tensor,
+        bias: torch.Tensor,
+        idx_map: torch.Tensor,
+        draw_pos: torch.Tensor,
+    ) -> torch.Tensor:
+        """Draft ids of step `step`, sampled from `logits + bias`."""
+        # Greedy drafting, a reduced draft vocab, watermarking, the acceptance
+        # estimator and an output logit transform need the biased logits;
+        # otherwise the Gumbel kernel adds the bias itself.
+        transform = getattr(self.model, "apply_output_logit_transform", None)
+        if (
+            self.draft_logits is None
+            or self._d2t_scatter_index is not None
+            or self.draft_watermarker is not None
+            or self.acceptance_estimator is not None
+            or transform is not None
+        ):
+            logits = logits + bias
+            if transform is not None:
+                logits = transform(logits)
+            # _sample_logits takes the predicted position P.
+            return self._sample_logits(logits, idx_map, draw_pos + 1, step)
+        return gumbel_sample(
+            logits,
+            idx_map,
+            self.temperature,
+            self.seeds,
+            draw_pos,
+            apply_temperature=True,
+            is_drafting=True,
+            logits_cache=self.draft_logits.values,
+            logits_cache_col=self._step_cols[step],
+            use_fp64=self.use_fp64_gumbel,
+            logits_cache_row_mapping=self.draft_logits.row_mapping,
+            bias=bias,
+        )
+
     def _sample_sequential(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
         if self._draft_topk is not None:
             self._sample_sequential_topk(num_reqs, head_hidden)
@@ -191,7 +231,12 @@ class DSparkSpeculator(DFlashSpeculator):
 
         idx_map = self.sample_idx_mapping[:num_sample].view(num_reqs, n_spec)
         sample_pos = self.sample_pos[:num_sample].view(num_reqs, n_spec)
+        # Step-major, so every step reads contiguous rows. Draws are keyed by
+        # the position before the sampled token, P-1.
+        idx_map_steps = idx_map.t().contiguous()
+        draw_pos_steps = (sample_pos.t() - 1).contiguous()
         confidence_markov_embeds = []
+        draft_ids = []
 
         # Anchor (bonus) token per request = the input id at query offset 0,
         # read via the precomputed persistent index (fixed buffer for capture).
@@ -203,14 +248,15 @@ class DSparkSpeculator(DFlashSpeculator):
             if self.use_confidence_head:
                 confidence_markov_embeds.append(markov_embed)
             bias = self.model.markov_bias(markov_embed)
-            logits_i = base_logits[:, i] + bias
-            if hasattr(self.model, "apply_output_logit_transform"):
-                logits_i = self.model.apply_output_logit_transform(logits_i)
-            draft_sampled_i = self._sample_logits(
-                logits_i, idx_map[:, i], sample_pos[:, i], i
+            prev = self._sample_markov_step(
+                i,
+                base_logits[:, i],
+                bias,
+                idx_map_steps[i],
+                draw_pos_steps[i],
             )
-            self.draft_tokens[:num_reqs, i] = draft_sampled_i
-            prev = draft_sampled_i
+            draft_ids.append(prev)
+        torch.stack(draft_ids, dim=1, out=self.draft_tokens[:num_reqs])
 
         if self.use_confidence_head:
             confidence = self.model.compute_confidence(
