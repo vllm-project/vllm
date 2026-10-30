@@ -28,6 +28,7 @@ vllm-metrics.workspace = true
 vllm-tokenizer.workspace = true
 
 [dev-dependencies]
+axum.workspace = true
 expect-test.workspace = true
 futures.workspace = true
 serial_test.workspace = true
