@@ -86,8 +86,24 @@ MXFP8_DATA_WORDS = MXFP8_DATA_BYTES // 4
 MXFP8_SCALE_BYTES = HEAD_DIM // 32
 MXFP8_BYTES_PER_TOKEN = MXFP8_DATA_BYTES + MXFP8_SCALE_BYTES
 
-BLOCK_SIZE = 256
+BLOCK_SIZE = 128
 WARPS_PER_BLOCK = BLOCK_SIZE // 32
+# Full-cache CTA size, chosen per store dtype and launch size. Kernel-only
+# microseconds on H200 (16 q heads, CUDA-graph replay):
+#
+#   T     bf16/128  bf16/256  fp8/128  fp8/256  .cu bf16  .cu fp8
+#   128      2.32      2.45     2.54     2.40     2.87     2.73
+#   512      5.53      5.64     5.03     4.50     5.70     5.05
+#   1024     8.61      8.58     7.67     6.74     9.03      -
+#   2048    15.11     15.33    15.76    16.99    17.20      -
+#   4096    37.22     37.87    29.69    31.27    47.26    39.88
+#
+# bf16 rows prefer 128-thread CTAs at every size. fp8 rows, half the bytes,
+# prefer 256-thread CTAs while the working set still fits in L2 (latency
+# bound) and 128-thread CTAs once the launch spills to DRAM.
+FULL_CACHE_BLOCK_SIZE = 128
+FULL_CACHE_FP8_L2_BLOCK_SIZE = 256
+FULL_CACHE_FP8_L2_TOKENS = 2048
 
 _DUMMY_TENSORS: dict[tuple[Any, ...], torch.Tensor] = {}
 
@@ -1015,6 +1031,7 @@ class FullCacheCompileKey:
     store_q_fp8: bool
     store_kv_fp8: bool
     eps: float
+    block_size: int = FULL_CACHE_BLOCK_SIZE
 
 
 class _FullCacheInsertKernel(VllmCuTeDSLJitKernel[FullCacheCompileKey]):
@@ -1029,6 +1046,8 @@ class _FullCacheInsertKernel(VllmCuTeDSLJitKernel[FullCacheCompileKey]):
         HAS_KV_NORM = compile_key.has_kv_norm
         STORE_Q_FP8 = compile_key.store_q_fp8
         STORE_KV_FP8 = compile_key.store_kv_fp8
+        FC_BLOCK = compile_key.block_size
+        FC_WARPS = FC_BLOCK // 32
         EPS = Float32(compile_key.eps)
         USE_PDL = current_platform.is_arch_support_pdl()
 
@@ -1055,7 +1074,7 @@ class _FullCacheInsertKernel(VllmCuTeDSLJitKernel[FullCacheCompileKey]):
             bidx, _, _ = cute.arch.block_idx()
             warp = cute.arch.warp_idx()
             lane = cute.arch.lane_idx()
-            gw = bidx * WARPS_PER_BLOCK + warp
+            gw = bidx * FC_WARPS + warp
             token = gw // Int32(HQ + 1)
             slot = gw % Int32(HQ + 1)
             dim_base = lane * ELEMS_PER_LANE
@@ -1190,11 +1209,11 @@ class _FullCacheInsertKernel(VllmCuTeDSLJitKernel[FullCacheCompileKey]):
                 bs,
             ).launch(
                 grid=(
-                    (n * (HQ + 1) + WARPS_PER_BLOCK - 1) // WARPS_PER_BLOCK,
+                    (n * (HQ + 1) + FC_WARPS - 1) // FC_WARPS,
                     1,
                     1,
                 ),
-                block=(BLOCK_SIZE, 1, 1),
+                block=(FC_BLOCK, 1, 1),
                 stream=stream,
                 use_pdl=USE_PDL,
             )
@@ -1314,6 +1333,7 @@ class _FullCacheInsertKernel(VllmCuTeDSLJitKernel[FullCacheCompileKey]):
         store_q_fp8: bool,
         store_kv_fp8: bool,
         eps: float,
+        block_size: int = FULL_CACHE_BLOCK_SIZE,
     ) -> CuTeDSLLaunchSpec[FullCacheCompileKey]:
         compile_key = self.dispatch(
             num_heads_q=num_heads_q,
@@ -1322,6 +1342,7 @@ class _FullCacheInsertKernel(VllmCuTeDSLJitKernel[FullCacheCompileKey]):
             store_q_fp8=store_q_fp8,
             store_kv_fp8=store_kv_fp8,
             eps=eps,
+            block_size=block_size,
         )
         return compile_key, (
             q,
@@ -1729,4 +1750,9 @@ def fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
         store_q_fp8=True,
         store_kv_fp8=True,
         eps=eps if apply_q_norm else 0.0,
+        block_size=(
+            FULL_CACHE_FP8_L2_BLOCK_SIZE
+            if q.shape[0] < FULL_CACHE_FP8_L2_TOKENS
+            else FULL_CACHE_BLOCK_SIZE
+        ),
     )
