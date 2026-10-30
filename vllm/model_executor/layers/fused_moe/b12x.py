@@ -19,6 +19,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 )
 from vllm.model_executor.layers.quantization.utils.csf_scales import (
     encode_csf_scales,
+    encode_mxfp4_csf_scales,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -211,7 +212,7 @@ _CSF_SCALE_SCRATCH: dict[tuple[Any, ...], tuple[torch.Tensor, torch.Tensor]] = {
 def _csf_scale_scratch(
     w1_scale: torch.Tensor, w2_scale: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    key = (w1_scale.device, w1_scale.shape, w2_scale.shape)
+    key = (w1_scale.device, w1_scale.dtype, w1_scale.shape, w2_scale.shape)
     if key not in _CSF_SCALE_SCRATCH:
         _CSF_SCALE_SCRATCH[key] = (
             torch.zeros_like(w1_scale),
@@ -269,10 +270,9 @@ class B12xExperts(mk.FusedMoEExpertsModular):
             raise ValueError(
                 f"unsupported b12x MoE quantization scheme {scheme}"
             ) from exc
-        # Keep NVFP4 block scales CSF-compressed; b12x expands them per call
-        # and needs the FC1 halves in up/gate order.
         self._csf_scales = csf_scales
-        if csf_scales:
+        # NVFP4 CSF needs up/gate order; MXFP4 keeps gate/up order.
+        if csf_scales and self._source_format == "modelopt_nvfp4":
             self._w13_layout = "w13"
         self._prepared_experts: Any | None = None
         self._source_parameters_released = False
@@ -398,12 +398,13 @@ class B12xExperts(mk.FusedMoEExpertsModular):
             a2_gscale = unit_scale
 
         if self._csf_scales:
+            is_mxfp4 = self._source_format == "fp4_e8m0_k32"
             csf_plan = fused_moe.plan_weights(
                 source=fused_moe.PackedSource(
                     format=self._source_format, w13_layout=self._w13_layout
                 ),
                 activation=fused_moe.ActivationSpec(
-                    mode="a4",
+                    mode="a8" if is_mxfp4 else "a4",
                     nonlinearity=_b12x_activation_name(activation),
                     io_dtype=params_dtype,
                 ),
@@ -414,6 +415,22 @@ class B12xExperts(mk.FusedMoEExpertsModular):
                 ),
             )
             w1_scratch, w2_scratch = _csf_scale_scratch(self.w1_scale, self.w2_scale)
+            if is_mxfp4:
+                mxfp4_weights = fused_moe.Mxfp4CsfWeights(
+                    w13=w1,
+                    w2=w2,
+                    w13_scales=fused_moe.CsfScalePlanes(
+                        *encode_mxfp4_csf_scales(self.w1_scale)
+                    ),
+                    w2_scales=fused_moe.CsfScalePlanes(
+                        *encode_mxfp4_csf_scales(self.w2_scale)
+                    ),
+                    w13_scale_scratch=w1_scratch,
+                    w2_scale_scratch=w2_scratch,
+                )
+                return fused_moe.prepare_weights(
+                    plan=csf_plan, weights=mxfp4_weights
+                )._impl
             weights = fused_moe.Nvfp4CsfWeights(
                 packed=fused_moe.PackedWeights(
                     w13=w1,
@@ -600,6 +617,21 @@ class B12xExperts(mk.FusedMoEExpertsModular):
             hasattr(fused_moe, "Nvfp4CsfWeights")
             and moe_config.is_act_and_mul
             and moe_config.hidden_dim % 128 == 0
+        )
+
+    @staticmethod
+    def supports_mxfp4_csf_scales(moe_config: mk.FusedMoEConfig) -> bool:
+        """Whether MXFP4 W4A8 can use CSF without padded scale storage."""
+        fused_moe = get_b12x_fused_moe()
+        hidden = moe_config.hidden_dim
+        intermediate = moe_config.intermediate_size_per_partition
+        return (
+            hasattr(fused_moe, "Mxfp4CsfWeights")
+            and moe_config.is_act_and_mul
+            and hidden % 256 == 0
+            and intermediate % 128 == 0
+            and 1 <= hidden // 32 <= 255
+            and 1 <= intermediate // 32 <= 255
         )
 
     @staticmethod
