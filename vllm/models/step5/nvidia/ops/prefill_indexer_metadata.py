@@ -27,7 +27,16 @@ class PrefillIndexerMetadata(NamedTuple):
 
 # Row, page and region counts follow the prompt; keep them runtime values so
 # each new prompt length does not recompile.
-@triton.jit(do_not_specialize=["ROWS", "PAGES", "REGIONS"])
+@triton.jit(
+    do_not_specialize=[
+        "ROWS",
+        "PAGES",
+        "REGIONS",
+        "OUTPUT_ROW",
+        "OUTPUT_HEAD",
+        "OUTPUT_WIDTH",
+    ]
+)
 def _prepare_prefill_indexer(
     Owners,
     Positions,
@@ -59,6 +68,11 @@ def _prepare_prefill_indexer(
     PAGE_INDPTR_STRIDE: tl.constexpr = 1,
     BLOCK_SIZE: tl.constexpr = 8,
     PAGE_STRIDE: tl.constexpr = 1,
+    HISTORY_ONLY: tl.constexpr = False,
+    OUTPUT_ROW=0,
+    OUTPUT_HEAD=0,
+    OUTPUT_GROUPS: tl.constexpr = 1,
+    OUTPUT_WIDTH=0,
 ):
     page_tile = tl.program_id(0)
     row = tl.program_id(1)
@@ -69,12 +83,16 @@ def _prepare_prefill_indexer(
         tl.store(Lengths + row, current + 1)
         tl.store(TopKLengths + row, current)
         if not NEED_SCORES:
-            _emit_all_regions(
-                current,
-                Selected + row.to(tl.int64) * (REGIONS + 1),
-                REGIONS,
-                BLOCK_REGIONS,
-            )
+            # All-history selections are identical across output KV heads.
+            for group in tl.static_range(OUTPUT_GROUPS):
+                _emit_all_regions(
+                    current,
+                    Selected + row.to(tl.int64) * OUTPUT_ROW + group * OUTPUT_HEAD,
+                    REGIONS,
+                    BLOCK_REGIONS,
+                    HISTORY_ONLY,
+                    OUTPUT_WIDTH,
+                )
         if PREPARE_PAGES:
             col = tl.arange(0, BLOCK_REGIONS)
             region = col - (REGIONS - current)
@@ -139,11 +157,15 @@ def prepare_prefill_indexer(
     num_sms: int,
     *,
     paged_prefill: PagedPrefillMetadata | None = None,
+    out: torch.Tensor | None = None,
+    history_only: bool = False,
 ) -> list[PrefillIndexerMetadata]:
     """Prepare bounded FI query chunks once; reuse them for every DSA layer."""
     rows = positions.numel()
     chunk_size = prefill_indexer_chunk_size(regions)
     need_scores = regions > topk
+    if out is not None and out.shape[0] != rows:
+        raise ValueError("prefill selection output must match the number of rows")
     paged_kwargs = {}
     if paged_prefill is not None:
         if need_scores or paged_prefill.block_size not in (16, 32, 64, 128):
@@ -176,7 +198,15 @@ def prepare_prefill_indexer(
         else None
     )
     selected = (
-        torch.empty((rows, regions + 1), device=positions.device, dtype=torch.int64)
+        (
+            out
+            if out is not None
+            else torch.empty(
+                (rows, regions + int(not history_only)),
+                device=positions.device,
+                dtype=torch.int64,
+            )
+        )
         if not need_scores
         else None
     )
@@ -204,6 +234,15 @@ def prepare_prefill_indexer(
             chunk_size.bit_length(),
             num_warps=4,
             **paged_kwargs,
+            HISTORY_ONLY=history_only,
+            OUTPUT_ROW=selected.stride(0) if selected is not None else 0,
+            OUTPUT_HEAD=selected.stride(1)
+            if selected is not None and selected.ndim == 3
+            else 0,
+            OUTPUT_GROUPS=selected.shape[1]
+            if selected is not None and selected.ndim == 3
+            else 1,
+            OUTPUT_WIDTH=selected.shape[-1] if selected is not None else 0,
         )
     return [
         PrefillIndexerMetadata(
