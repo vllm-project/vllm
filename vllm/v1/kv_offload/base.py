@@ -90,6 +90,11 @@ TierFilter.ALL = TierFilter(matchers=(TierMatcher(),))
 
 @dataclass
 class ReqContext:
+    """Per-request offloading state with optional token counts.
+
+    Counts are live until the scheduler finishes the request, then frozen.
+    """
+
     req_id: str
     kv_transfer_params: dict[str, Any] | None = None
     kv_hints: KvHintsEnvelope | None = None
@@ -104,6 +109,26 @@ class ReqContext:
     _offload_key_positions: dict[OffloadKey, int] = field(
         default_factory=dict, repr=False, init=False
     )
+
+    @property
+    def num_computed_tokens(self) -> int | None:
+        """Scheduler's computed token count, including in-flight work."""
+        return None
+
+    @property
+    def num_in_flight_tokens(self) -> int | None:
+        """Scheduled tokens whose output has not yet been processed."""
+        return None
+
+    @property
+    def num_prompt_tokens(self) -> int | None:
+        """Number of prompt tokens."""
+        return None
+
+    @property
+    def num_tokens(self) -> int | None:
+        """Number of prompt and output tokens, excluding speculative tokens."""
+        return None
 
     def set_state(self, val: Any) -> None:
         self._state[type(val)] = val
@@ -484,6 +509,11 @@ class OffloadingManager(ABC):
         """Evict all tracked blocks and reset internal state."""
         return
 
+    def on_reset_flushed(self) -> None:
+        """Called once workers have reported every job in flight at the last
+        reset_cache(); blocks it freed are no longer written by them."""
+        return
+
     def get_stats(self) -> "OffloadingConnectorStats | None":
         """Return collected metrics since last call, or None if disabled."""
         return None
@@ -662,9 +692,17 @@ class OffloadingWorker(ABC):
 
     @abstractmethod
     def submit_load(
-        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: GPULoadStoreSpec
+        self,
+        job_id: int,
+        src_spec: LoadStoreSpec,
+        dst_spec: GPULoadStoreSpec,
+        expedited: bool = False,
     ) -> bool:
-        """Async offloaded medium -> GPU."""
+        """Async offloaded medium -> GPU.
+
+        An expedited load is waited on within the step, so it should not queue
+        behind regular loads. Submission itself must still not block.
+        """
 
     @abstractmethod
     def get_finished(self) -> list[TransferResult]: ...

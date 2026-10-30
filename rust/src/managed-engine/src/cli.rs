@@ -93,6 +93,7 @@ impl ManagedEngineArgs {
         handshake_port: u16,
         limit_mm_per_prompt: Option<String>,
         hf_overrides: Option<String>,
+        structured_outputs_config: Option<String>,
     ) -> ManagedEngineConfig {
         let mut python_args = self.python_args;
         // Manually forward some args to the Python engine.
@@ -135,6 +136,10 @@ impl ManagedEngineArgs {
         if let Some(hf_overrides) = hf_overrides {
             python_args.push("--hf-overrides".to_string());
             python_args.push(hf_overrides);
+        }
+        if let Some(structured_outputs_config) = structured_outputs_config {
+            python_args.push("--structured-outputs-config".to_string());
+            python_args.push(structured_outputs_config);
         }
 
         ManagedEngineConfig {

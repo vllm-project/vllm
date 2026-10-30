@@ -217,6 +217,17 @@ kNvfp4DynamicToken = QuantKey(
     FP4_DTYPE, scale=kNvfp4DynamicGroupScale, scale2=kDynamicTokenScale
 )
 
+
+def is_dynamic_per_token_outer_scale(key: QuantKey | None) -> bool:
+    """Whether ``key``'s second-level scale is computed per token at runtime."""
+    return (
+        key is not None
+        and key.scale2 is not None
+        and not key.scale2.static
+        and key.scale2.group_shape == GroupShape.PER_TOKEN
+    )
+
+
 kNvfp4StaticGroupScale = ScaleDesc(FP8_DTYPE, True, GroupShape(1, 16))
 kNvfp4Static = QuantKey(
     FP4_DTYPE, scale=kNvfp4StaticGroupScale, scale2=kStaticTensorScale
