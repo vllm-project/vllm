@@ -1247,15 +1247,13 @@ class MiniMaxM3DecoderLayer(nn.Module):
         # The input norm can write qkv_proj's MXFP8 input directly (TP1: no
         # all-reduce to fuse; the normed BF16 activation has no other reader).
         self.input_norm_mxfp8 = (
-            envs.VLLM_M3_NORM_MXFP8
-            and get_tensor_model_parallel_world_size() == 1
+            get_tensor_model_parallel_world_size() == 1
             and _consumes_mxfp8_128x4(self.self_attn.qkv_proj)
         )
-        if envs.VLLM_M3_NORM_MXFP8:
-            logger.info_once(
-                "MiniMax M3 input norm emits MXFP8 for qkv_proj: %s",
-                self.input_norm_mxfp8,
-            )
+        logger.info_once(
+            "MiniMax M3 input norm emits MXFP8 for qkv_proj: %s",
+            self.input_norm_mxfp8,
+        )
 
     def forward(
         self,

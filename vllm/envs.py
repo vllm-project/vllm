@@ -229,7 +229,6 @@ if TYPE_CHECKING:
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
     VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE: bool = False
-    VLLM_M3_NORM_MXFP8: bool = True
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_REGEX_COMPILATION_TIMEOUT_S: int = 5
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
@@ -1879,9 +1878,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE": lambda: bool(
         int(os.getenv("VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE", "0"))
     ),
-    # MiniMax-M3 (NVIDIA, TP1): the input (fused add) RMSNorm writes MXFP8 for
-    # qkv_proj instead of BF16 + a quantize kernel.
-    "VLLM_M3_NORM_MXFP8": lambda: bool(int(os.getenv("VLLM_M3_NORM_MXFP8", "1"))),
     # Control the maximum number of tokens per expert supported by the
     # NVFP4 MoE CUTLASS Kernel. This value is used to create a buffer for
     # the blockscale tensor of activations NVFP4 Quantization.
