@@ -1800,7 +1800,7 @@ async fn render_glm_tools_for_none_follow_server_exclusion_setting() {
     for exclude in [false, true] {
         let mut app = build_render_router(Arc::new(RenderState {
             model: "glm-test".into(),
-            served_model_names: vec!["glm-test".into()],
+            served_model_names: ServedModelNames::new(vec!["glm-test".into()]),
             max_model_len: Some(4096),
             text: TextRequestProcessor::new(Arc::new(FakeChatBackend::new()), 4096),
             chat: ChatRequestProcessor::render_only(backend.clone())
