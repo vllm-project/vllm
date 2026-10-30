@@ -18,10 +18,10 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
 from vllm.platforms import current_platform
 
-from ..common.qsa_cache import (
+from ..common.qsa_indexer import (
     QSACompressedKeyCache,
-    QSAForwardMetadata,
-    QSAKeyStateCache,
+    QSAIndexerMetadata,
+    QSARawKeyCache,
     canonical_qsa_rope_positions,
 )
 from .ops.qsa_prepare import qsa_prepare, supports_fused_pre_indexer
@@ -111,7 +111,7 @@ class QSAIndexer(nn.Module):
         )
         self.prefix = prefix
         # MTP step 0 selects the target-aligned rows; later steps reuse them
-        # while continuing to update the QSA side cache.
+        # while continuing to update the QSA indexer cache.
         self.skip_topk = False
 
         self.index_qk_proj = ReplicatedLinear(
@@ -145,7 +145,7 @@ class QSAIndexer(nn.Module):
                 "by the Qwen4Exp QSA indexer (only 'bf16' or 'fp8')."
             )
         self.indexer_dtype = indexer_dtype
-        self.raw_key_cache = QSAKeyStateCache(
+        self.raw_key_cache = QSARawKeyCache(
             head_size=self.index_head_dim,
             dtype=torch.bfloat16,
             cache_rope_positions=vllm_config.model_config.uses_mrope,
@@ -215,30 +215,24 @@ class QSAIndexer(nn.Module):
 
     def _metadata(
         self,
-    ) -> tuple[QSAForwardMetadata, QSAForwardMetadata] | None:
+    ) -> tuple[QSAIndexerMetadata, QSAIndexerMetadata] | None:
         metadata = get_forward_context().attn_metadata
         if isinstance(metadata, list):
             metadata = metadata[0]
         if not isinstance(metadata, dict):
             return None
-        raw = cast(QSAForwardMetadata, metadata[self.raw_key_cache.prefix])
+        raw = cast(QSAIndexerMetadata, metadata[self.raw_key_cache.prefix])
         compressed = cast(
-            QSAForwardMetadata, metadata[self.compressed_key_cache.prefix]
+            QSAIndexerMetadata, metadata[self.compressed_key_cache.prefix]
         )
-        if raw.num_actual_tokens != compressed.num_actual_tokens:
-            raise RuntimeError("QSA side-cache metadata token counts disagree")
-        if not raw.logical_positions.is_cuda and (
-            not torch.equal(raw.logical_positions, compressed.logical_positions)
-        ):
-            raise RuntimeError("QSA side-cache metadata positions disagree")
         return raw, compressed
 
     def _update_and_compress(
         self,
         token_k: torch.Tensor,
         positions: torch.Tensor,
-        raw_metadata: QSAForwardMetadata,
-        compressed_metadata: QSAForwardMetadata,
+        raw_metadata: QSAIndexerMetadata,
+        compressed_metadata: QSAIndexerMetadata,
     ) -> None:
         num_tokens = raw_metadata.num_actual_tokens
         raw_key_cache = self.raw_key_cache.key_cache
@@ -288,8 +282,8 @@ class QSAIndexer(nn.Module):
         projected_q: torch.Tensor,
         raw_keys: torch.Tensor,
         positions: torch.Tensor,
-        raw_metadata: QSAForwardMetadata,
-        compressed_metadata: QSAForwardMetadata,
+        raw_metadata: QSAIndexerMetadata,
+        compressed_metadata: QSAIndexerMetadata,
         attn: Qwen4ExpQSAAttention,
         qkv: torch.Tensor,
         slot_mapping: torch.Tensor,
@@ -358,7 +352,7 @@ class QSAIndexer(nn.Module):
     def _select(
         self,
         q: torch.Tensor,
-        metadata: QSAForwardMetadata,
+        metadata: QSAIndexerMetadata,
         out: torch.Tensor | None,
     ) -> torch.Tensor:
         from .ops.qsa import qsa_select_paged_tokens
