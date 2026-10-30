@@ -16,7 +16,7 @@ via Gemma4MultimodalEmbedder.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from types import SimpleNamespace
 from typing import Any
 
@@ -909,6 +909,13 @@ class DiffusionGemmaModelState(ModelState):
     def get_supported_generation_tasks(self):
         return ("generate",)
 
+    def compute_sample_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return hidden_states
+
+    def dummy_sampler_run(self, sampler: Any, hidden_states: torch.Tensor) -> bool:
+        sampler.profile_run(hidden_states)
+        return True
+
     def custom_sampler(self, sampler: Any) -> tuple[Any, Any] | None:
         diffusion_config = self.vllm_config.diffusion_config
         gen = self.gen_config
@@ -931,6 +938,7 @@ class DiffusionGemmaModelState(ModelState):
             diffusion_config=diffusion_config,
             vocab_size=self.model_config.get_vocab_size(),
             diffusion_states=self.diffusion_states,
+            compute_logits=self.model.compute_logits,
             t_min=gen["t_min"],
             t_max=gen["t_max"],
             entropy_bound=entropy_bound,
@@ -1143,6 +1151,7 @@ class DiffusionSampler:
         vocab_size: int,
         diffusion_states: DiffusionGemmaRequestStates,
         *,
+        compute_logits: Callable[[torch.Tensor], torch.Tensor],
         confidence_threshold: float,
         t_min: float,
         t_max: float,
@@ -1154,6 +1163,7 @@ class DiffusionSampler:
         tp_size: int = 1,
         tp_group_name: str = "",
     ):
+        self.compute_logits = compute_logits
         self.sampling_states = sampler.sampling_states
         self.logprob_token_ids_state = sampler.logprob_token_ids_state
         self.req_states = sampler.req_states
@@ -1262,6 +1272,24 @@ class DiffusionSampler:
         # post_update treats None bin counts as "no penalty bookkeeping".
         return _NO_PENALTIES_STATE
 
+    @torch.inference_mode()
+    def profile_run(self, hidden_states: torch.Tensor) -> None:
+        CL = self.canvas_length
+        device = hidden_states.device
+        bounds = np.array([0, CL], dtype=np.int32)
+        dummy_batch = SimpleNamespace(
+            num_reqs=1,
+            num_draft_tokens=CL,
+            idx_mapping_np=np.zeros(1, dtype=np.int32),
+            idx_mapping=torch.zeros(1, dtype=torch.int64, device=device),
+            cu_num_logits_np=bounds,
+            query_start_loc_np=bounds,
+            query_start_loc=torch.tensor(bounds, device=device),
+        )
+        self.diffusion_states.add_request(0)
+        self(hidden_states.new_zeros((CL, hidden_states.shape[-1])), dummy_batch)
+        self.diffusion_states.add_request(0)
+
     # ------------------------------------------------------------------
     # Prefill
     # ------------------------------------------------------------------
@@ -1359,12 +1387,12 @@ class DiffusionSampler:
 
     def __call__(
         self,
-        logits: torch.Tensor,
+        hidden_states: torch.Tensor,
         input_batch: Any,
         draft_logits: torch.Tensor | None = None,
     ) -> SamplerOutput:
         num_reqs = input_batch.num_reqs
-        device = logits.device
+        device = hidden_states.device
 
         if input_batch.num_draft_tokens == 0:
             return self._handle_prefill(input_batch, device)
@@ -1398,26 +1426,7 @@ class DiffusionSampler:
             valid_canvas_len_np.astype(np.int64), device=device
         )
 
-        # Per-request top_k/top_p, mirroring the AR sampler. Masked tokens
-        # become -inf and survive the temperature scaling in the compiled
-        # step, so Gumbel sampling, probs, and entropy all see the filtered
-        # distribution. The committed argmax (always the top-1 token) is
-        # unaffected; only the canvas exploration is constrained. Applied
-        # before canvas padding so phantom positions stay uniform.
-        if num_decode > 0:
-            top_k, top_p, has_topp_only_rows = self.sampling_states.get_top_k_top_p(
-                decode_slots.repeat_interleave(
-                    valid_canvas_len, output_size=int(valid_canvas_len_np.sum())
-                ),
-                decode_slots_np,
-                logits.shape[-1],
-            )
-            if top_k is not None or top_p is not None:
-                logits = apply_top_k_top_p(
-                    logits.float(), top_k, top_p, has_topp_only_rows=has_topp_only_rows
-                )
-
-        # Where each decode request's rows start in the flat logits. Tiles
+        # Where each decode request's rows start in the flat hidden states. Tiles
         # below gather and pad a request to the tile's width.
         row_starts_np = np.concatenate(
             ([0], np.cumsum(valid_canvas_len_np)[:-1])
@@ -1443,23 +1452,18 @@ class DiffusionSampler:
         embed_weight = self.embed_weight
         vocab_size = self.vocab_size
         sc_vocab_start, sc_vocab_end = self.sc_vocab_start, self.sc_vocab_end
+        per_row = None
         if allowed is not None:
-            assert logits.shape[-1] == allowed.numel()
             embed_weight = self.embed_weight[allowed]
             sc_vocab_start, sc_vocab_end = 0, allowed.numel()
         elif states.constrained and num_decode > 0:
             # The decode slots do not share one set, so this step runs over
             # the full vocabulary. Mask each constrained request's rows to
-            # its own set so it reads the same as on the shared path. The
-            # helper masks a copy, since the runner owns `logits`: one
-            # full-vocab copy per step, as for top_k/top_p above.
+            # its own set so it reads the same as on the shared path.
             per_row = [
                 None if ids is None else states.allowed_tensor(ids)
                 for ids in (states.constrained.get(s) for s in decode_slots_np.tolist())
             ]
-            logits = _mask_rows_to_allowed(
-                logits, row_starts_np, valid_canvas_len_np, per_row
-            )
 
         slots_np = input_batch.idx_mapping_np[:num_reqs]
         max_num_logprobs = self.sampling_states.max_num_logprobs(slots_np)
@@ -1473,8 +1477,9 @@ class DiffusionSampler:
         # tile runs the compiled step at that width over [:, :W] views of the
         # state, so a narrow read pays for its own rows rather than the served
         # canvas. Widths ascend, so the last tile's canvas-to-draft copy (over
-        # all slots) is the widest. The fp32 pipeline keeps several live
-        # [tile * W, vocab] copies, so a tile is also bounded by free memory.
+        # all slots) is the widest. Each tile projects its own logits, and the
+        # fp32 pipeline keeps several live [tile * W, vocab] copies, so a tile
+        # is also bounded by free memory.
         widths_np = states.canvas_width_np[decode_slots_np]
         order = np.argsort(widths_np, kind="stable")
         free = torch.accelerator.get_memory_info()[0] if num_decode > 0 else 0
@@ -1484,10 +1489,11 @@ class DiffusionSampler:
             run_end = run_start
             while run_end < num_decode and widths_np[order[run_end]] == W:
                 run_end += 1
-            # Transient [tile * W, vocab] tensors: the softmax in the embedding
-            # dtype for self-conditioning, plus the fp32 scaled logits when
-            # logprobs are wanted (pad for allocator overhead).
-            budget = max(1, int(free * 0.5) // max(W * self.vocab_size * 4 * 3, 1))
+            # Transient [tile * W, vocab] tensors: the projected fp32 logits and
+            # their top_k/top_p or allowed-set copy, the softmax in the
+            # embedding dtype for self-conditioning, plus the fp32 scaled
+            # logits when logprobs are wanted (pad for allocator overhead).
+            budget = max(1, int(free * 0.5) // max(W * self.vocab_size * 4 * 5, 1))
             for t0 in range(run_start, run_end, budget):
                 sel_np = order[t0 : min(t0 + budget, run_end)]
                 n = len(sel_np)
@@ -1496,21 +1502,54 @@ class DiffusionSampler:
                 tile_valid = valid_canvas_len[sel]
                 tile_valid_np = valid_canvas_len_np[sel_np]
                 contiguous = bool((sel_np == np.arange(sel_np[0], sel_np[0] + n)).all())
+                phantom = None
                 if contiguous and tile_valid_np.min() == W:
                     r0 = int(row_starts_np[sel_np[0]])
-                    tile_logits = logits[r0 : r0 + n * W]
+                    tile_hidden = hidden_states[r0 : r0 + n * W]
                 else:
                     # Pad each request to W. Phantom positions are zeroed:
                     # uniform logits, high entropy, argmax 0, never committed.
                     # masked_fill, not multiply, so -inf from top_k/top_p
-                    # filtering above cannot turn a phantom row into NaN.
+                    # filtering below cannot turn a phantom row into NaN.
                     ar = torch.arange(W, device=device)
                     src = (row_starts[sel].unsqueeze(1) + ar.unsqueeze(0)).clamp_max(
-                        logits.shape[0] - 1
+                        hidden_states.shape[0] - 1
                     )
-                    valid = ar.unsqueeze(0) < tile_valid.unsqueeze(1)
-                    tile_logits = logits[src.reshape(-1)].masked_fill_(
-                        ~valid.reshape(-1, 1), 0
+                    phantom = (ar.unsqueeze(0) >= tile_valid.unsqueeze(1)).reshape(
+                        -1, 1
+                    )
+                    tile_hidden = hidden_states[src.reshape(-1)].masked_fill_(
+                        phantom, 0
+                    )
+                tile_logits = self.compute_logits(tile_hidden)
+                if allowed is not None:
+                    assert tile_logits.shape[-1] == allowed.numel()
+
+                # Per-request top_k/top_p, mirroring the AR sampler. Masked
+                # tokens become -inf and survive the temperature scaling, so
+                # Gumbel sampling, probs, and entropy all see the filtered
+                # distribution. The committed argmax (always the top-1 token)
+                # is unaffected; only the canvas exploration is constrained.
+                top_k, top_p, has_topp_only_rows = self.sampling_states.get_top_k_top_p(
+                    tile_slots.repeat_interleave(W, output_size=n * W),
+                    decode_slots_np[sel_np],
+                    tile_logits.shape[-1],
+                )
+                if top_k is not None or top_p is not None:
+                    tile_logits = apply_top_k_top_p(
+                        tile_logits.float(),
+                        top_k,
+                        top_p,
+                        has_topp_only_rows=has_topp_only_rows,
+                    )
+                    if phantom is not None:
+                        tile_logits.masked_fill_(phantom, 0)
+                if per_row is not None:
+                    tile_logits = _mask_rows_to_allowed(
+                        tile_logits,
+                        np.arange(n) * W,
+                        tile_valid_np,
+                        [per_row[i] for i in sel_np],
                     )
                 compute_sc = (
                     not states.single_step_slots
