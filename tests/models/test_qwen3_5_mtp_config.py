@@ -130,18 +130,25 @@ def test_mtp_override_downloads_real_hf_hub_configs(
 
 @pytest.mark.parametrize("multimodal", [False, True], ids=["text", "multimodal"])
 @pytest.mark.parametrize(
-    ("mtp_layers", "num_spec_tokens", "multi_module"),
-    [(1, 2, False), (2, 1, False), (2, 2, True)],
+    ("mtp_layers", "num_spec_tokens", "index_share", "multi_module"),
+    [
+        (1, 2, None, False),
+        (2, 1, None, False),
+        (2, 2, None, True),
+        (2, 2, True, False),
+    ],
 )
 def test_mtp_num_hidden_layers_selects_multi_module_mtp(
     tmp_path: Path,
     multimodal: bool,
     mtp_layers: int,
     num_spec_tokens: int,
+    index_share: bool | None,
     multi_module: bool,
 ) -> None:
     """Qwen3.5 declares its MTP modules as `mtp_num_hidden_layers` (nested in
-    `text_config` when multimodal), not `num_nextn_predict_layers`."""
+    `text_config` when multimodal), not `num_nextn_predict_layers`. MTP index
+    sharing is only supported by the single-module speculator."""
     text_config = Qwen3_5TextConfig(
         hidden_size=64,
         intermediate_size=128,
@@ -166,6 +173,7 @@ def test_mtp_num_hidden_layers_selects_multi_module_mtp(
     speculative_config = SpeculativeConfig(
         method="mtp",
         num_speculative_tokens=num_spec_tokens,
+        index_share_for_mtp_iteration=index_share,
         target_model_config=ModelConfig(
             model=str(tmp_path), tokenizer_mode="skip", max_model_len=2048
         ),

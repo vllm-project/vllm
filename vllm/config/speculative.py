@@ -1844,28 +1844,23 @@ class SpeculativeConfig:
     def num_mtp_modules(self) -> int:
         """Number of MTP modules the drafter selects among by draft step."""
         assert self.draft_model_config is not None
-        hf_config = self.draft_model_config.hf_config
-        if hf_config.model_type == "qwen3_5_mtp":
-            # Qwen3.5 declares `mtp_num_hidden_layers` instead of
-            # `num_nextn_predict_layers`; hf_config_override normalizes it.
-            return getattr(hf_config, "n_predict", None) or 1
-        return getattr(hf_config, "num_nextn_predict_layers", 1)
+        return getattr(self.draft_model_config.hf_config, "n_predict", None) or 1
 
     def use_multi_module_mtp(self) -> bool:
         if self.method != "mtp" or self.draft_model_config is None:
             return False
-        k = self.num_speculative_tokens
-        num_modules = self.num_mtp_modules()
-        declared = getattr(self.draft_model_config.hf_config, "n_predict", None) or 1
-        if min(declared, k) > min(num_modules, k):
-            logger.warning_once(
-                "The MTP draft model declares %d modules but speculative "
-                "decoding will use %d, so later draft steps reuse earlier "
-                "modules. This lowers draft acceptance, not output quality.",
-                declared,
-                num_modules,
-            )
-        return min(num_modules, k) > 1
+        hf_config = self.draft_model_config.hf_config
+        if min(self.num_mtp_modules(), self.num_speculative_tokens) <= 1:
+            return False
+        index_share = self.index_share_for_mtp_iteration
+        if index_share is None:
+            index_share = getattr(hf_config, "index_share_for_mtp_iteration", False)
+        if index_share:
+            # TODO: Support index_share_for_mtp_iteration in
+            # MultiModuleMTPSpeculator.
+            return False
+        # TODO: Verify MiniMax-M3 with MultiModuleMTPSpeculator.
+        return hf_config.model_type != "minimax_m3_mtp"
 
     def __repr__(self) -> str:
         method = self.custom_method or self.method
