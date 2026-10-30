@@ -13,6 +13,7 @@ import torch
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.mrope import MRoPEPositionState
 
 if TYPE_CHECKING:
     from vllm.distributed.aux_output_connector.connector import AuxRequestOutput
@@ -231,6 +232,7 @@ class KVConnectorOutput:
     # It captures a static setup info and should almost always remain constant
     # for a given connector after discovery. Default value entails no change.
     expected_finished_count: int = 0
+    mrope_position_states: dict[str, MRoPEPositionState] | None = None
 
     def is_empty(self):
         return (
@@ -241,6 +243,7 @@ class KVConnectorOutput:
             and not self.invalid_block_ids
             and not self.failed_recving
             and not self.kv_connector_worker_meta
+            and not self.mrope_position_states
         )
 
 

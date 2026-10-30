@@ -18,6 +18,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector import (
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.connector import (
     MooncakeStoreKVEvents,
 )
+from vllm.v1.mrope import MRoPEPositionState
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 pytestmark = pytest.mark.cpu_test
@@ -194,6 +195,25 @@ def test_aggregate_workers_output_with_expected_finished_count():
     # NOTE: This is to showcase dynamic update. Workers are responsible for
     # ensuring "req1" termination in this case
     assert aggregator._send_remaining_count["req1"] == 2
+
+
+@pytest.mark.parametrize("replay", [False, True])
+def test_aggregate_mrope_position_state_from_first_pipeline_stage(replay):
+    state = MRoPEPositionState(positions=[[0, 1], [0, 2], [0, 3]], delta=-7)
+    first_stage = DummyModelRunnerOutput()
+    first_stage.kv_connector_output.mrope_position_states = {"req": state}
+    last_stage = DummyModelRunnerOutput()
+    aggregator = KVOutputAggregator(expected_finished_count=2)
+    if replay:
+        aggregator.ft_defer_kv_connector_outputs(
+            [first_stage.kv_connector_output, None]
+        )
+        first_stage = DummyModelRunnerOutput()
+
+    output = aggregator.aggregate([first_stage, last_stage], output_rank=1)
+
+    assert output is last_stage
+    assert output.kv_connector_output.mrope_position_states == {"req": state}
 
 
 def test_replay_preserves_get_and_clear_fields():

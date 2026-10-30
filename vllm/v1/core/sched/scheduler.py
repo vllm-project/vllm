@@ -72,6 +72,7 @@ from vllm.v1.metrics.stats import (
     RequestSpecDecodeMetrics,
     SchedulerStats,
 )
+from vllm.v1.mrope import MROPE_POSITION_STATE_KEY
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
@@ -1908,6 +1909,7 @@ class Scheduler(SchedulerInterface):
         # Update block hashes for the new tokens.
         session.update_block_hashes()
         session.num_prompt_tokens = len(session.prompt_token_ids)
+        session.mrope_position_state = None
         session.arrival_time = update.arrival_time
         session.sampling_params = update.sampling_params
         session.prefix_cache_hit_limit = session.get_prefix_cache_hit_limit()
@@ -2264,6 +2266,12 @@ class Scheduler(SchedulerInterface):
         pooler_outputs = model_runner_output.pooler_output
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
+        mrope_position_states = (
+            kv_connector_output.mrope_position_states
+            if kv_connector_output is not None
+            and kv_connector_output.mrope_position_states is not None
+            else {}
+        )
         ec_connector_output = model_runner_output.ec_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
 
@@ -2309,6 +2317,8 @@ class Scheduler(SchedulerInterface):
             output_is_stale = False
             if request is not None:
                 request.num_in_flight_tokens -= num_tokens_scheduled
+                if position_state := mrope_position_states.get(req_id):
+                    request.mrope_position_state = position_state
                 # Drain any stale share (see _preempt_request) in lockstep.
                 if request.num_stale_output_tokens > 0:
                     output_is_stale = True
@@ -3028,6 +3038,14 @@ class Scheduler(SchedulerInterface):
         self._inflight_prefills.discard(request)
         self._set_kv_fetch_stage(request, None)
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
+        if (
+            kv_xfer_params is not None
+            and kv_xfer_params.get("do_remote_prefill")
+            and request.mrope_position_state is not None
+        ):
+            kv_xfer_params[MROPE_POSITION_STATE_KEY] = (
+                request.mrope_position_state.to_payload()
+            )
 
         # EC Connector: mirror the KV hook. The contract requires firing
         # before the encoder cache is freed so the connector can inspect

@@ -155,6 +155,7 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+from vllm.v1.mrope import MRoPEPositionState
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
     AsyncModelRunnerOutput,
@@ -516,6 +517,11 @@ class GPUModelRunner(
         # These will be overridden in load_model()
         self.is_multimodal_pruning_enabled = False
         self.requires_sequential_video_encoding = False
+        kv_transfer_config = vllm_config.kv_transfer_config
+        self._export_mrope_position_state = bool(
+            kv_transfer_config and kv_transfer_config.is_kv_producer
+        )
+        self._pending_mrope_position_states: dict[str, tuple[torch.Tensor, int]] = {}
         self.max_model_len = model_config.max_model_len
 
         # Always set to false after the first forward pass
@@ -1302,7 +1308,7 @@ class GPUModelRunner(
 
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             if self.uses_mrope:
-                self._init_mrope_positions(req_state)
+                self._init_mrope_positions(req_state, new_req_data.mrope_position_state)
 
             reqs_to_add.append(req_state)
             # Track new requests for ngram_gpu full tensor copy
@@ -1623,11 +1629,27 @@ class GPUModelRunner(
         req_state.output_token_ids.clear()
 
         if self.uses_mrope:
-            self._init_mrope_positions(req_state)
+            self._init_mrope_positions(req_state, new_req_data.mrope_position_state)
 
         return req_state
 
-    def _init_mrope_positions(self, req_state: CachedRequestState):
+    def _init_mrope_positions(
+        self,
+        req_state: CachedRequestState,
+        position_state: MRoPEPositionState | None = None,
+    ):
+        if position_state is not None:
+            if len(position_state.positions) != self.mrope_num_dims:
+                raise ValueError(
+                    f"Expected {self.mrope_num_dims} M-RoPE position rows, "
+                    f"but received {len(position_state.positions)}"
+                )
+            req_state.mrope_positions = torch.tensor(
+                position_state.positions, dtype=torch.int64
+            )
+            req_state.mrope_position_delta = position_state.delta
+            return
+
         model = self.get_model()
         assert supports_mrope(model), "M-RoPE support is not implemented."
         mrope_model = cast(SupportsMRoPE, model)
@@ -3065,6 +3087,11 @@ class GPUModelRunner(
                 ]
                 req_state.mrope_positions.copy_(new_mrope_positions)
                 req_state.mrope_position_delta = new_delta
+                if self._export_mrope_position_state:
+                    self._pending_mrope_position_states[req_id] = (
+                        new_mrope_positions,
+                        new_delta,
+                    )
 
             mm_embeds.extend(mm_embeds_req)
             req_start_idx += num_scheduled_tokens
@@ -3074,6 +3101,28 @@ class GPUModelRunner(
             self.mrope_positions.copy_to_gpu(total_num_scheduled_tokens)
 
         return mm_embeds, is_mm_embed
+
+    def _attach_mrope_position_states(
+        self, kv_connector_output: KVConnectorOutput | None
+    ) -> None:
+        if not self._pending_mrope_position_states:
+            return
+        if kv_connector_output is None:
+            raise RuntimeError(
+                "M-RoPE position state was produced without a KV connector output"
+            )
+        with gpu_sync_allowed():
+            kv_connector_output.mrope_position_states = {
+                req_id: MRoPEPositionState(
+                    positions=positions.to(dtype=torch.int32, device="cpu").tolist(),
+                    delta=int(delta),
+                )
+                for req_id, (
+                    positions,
+                    delta,
+                ) in self._pending_mrope_position_states.items()
+            }
+        self._pending_mrope_position_states.clear()
 
     def get_model(self) -> nn.Module:
         if not hasattr(self, "model"):
@@ -4192,11 +4241,13 @@ class GPUModelRunner(
                 if not get_pp_group().is_last_rank:
                     # Return the intermediate tensors.
                     assert isinstance(hidden_states, IntermediateTensors)
+                    self._attach_mrope_position_states(kv_connector_output)
                     self.kv_connector_output = kv_connector_output
                     return hidden_states
 
                 if self.is_pooling_model:
                     # Return the pooling output.
+                    self._attach_mrope_position_states(kv_connector_output)
                     return self._pool(
                         hidden_states,
                         num_scheduled_tokens,
@@ -4242,6 +4293,7 @@ class GPUModelRunner(
             cudagraph_stats,
             slot_mappings,
         )
+        self._attach_mrope_position_states(kv_connector_output)
         self.kv_connector_output = kv_connector_output
 
         # Now the batch has been launched we can wait for corrections from the

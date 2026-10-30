@@ -77,6 +77,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     compute_layer_kv_cache_shape_bytes,
 )
+from vllm.v1.mrope import MROPE_POSITION_STATE_KEY, MRoPEPositionState
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import RequestStatus
 
@@ -413,6 +414,30 @@ def test_prefill_exports_cached_tokens_in_kv_transfer_params():
         output.kv_transfer_params["remote_prefill_cached_tokens"]
         == NUM_TOKENS - BLOCK_SIZE
     )
+
+
+def test_prefill_exports_pruning_adjusted_mrope_state():
+    vllm_config = create_vllm_config()
+    scheduler = create_scheduler(vllm_config)
+    request = create_request(request_id=3, num_tokens=4, do_remote_decode=True)
+    scheduler.add_request(request)
+    scheduler_output = scheduler.schedule()
+
+    state = MRoPEPositionState(
+        positions=[[0, 1, 5, 6], [0, 2, 5, 6], [0, 3, 5, 6]], delta=-9
+    )
+    model_runner_output = create_model_runner_output([request])
+    model_runner_output.kv_connector_output = KVConnectorOutput(
+        mrope_position_states={request.request_id: state}
+    )
+
+    engine_core_outputs = scheduler.update_from_output(
+        scheduler_output, model_runner_output
+    )
+
+    output = engine_core_outputs[0].outputs[0]
+    assert output.kv_transfer_params is not None
+    assert output.kv_transfer_params[MROPE_POSITION_STATE_KEY] == state.to_payload()
 
 
 @patch(
