@@ -1716,7 +1716,8 @@ class KVCacheConfig:
         """Whether device attention caches use more than one precision."""
         kv_cache_precisions: set[tuple[torch.dtype, KVQuantMode]] = set()
         for group in self.kv_cache_groups:
-            if group.host_resident:
+            # A private pool's blocks are never reused by another group.
+            if group.host_resident or group.pool_id:
                 continue
             kv_cache_precisions.update(
                 (spec.dtype, spec.kv_quant_mode)

@@ -856,9 +856,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""
+        kv_cache_groups = self.kv_cache_config.kv_cache_groups
         self.kv_block_zeroer = KVBlockZeroer(
             self.device,
-            attn_groups_iter=(g for groups in self.attn_groups for g in groups),
+            # Private pools hold one precision and no Mamba state.
+            attn_groups_iter=(
+                g
+                for groups in self.attn_groups
+                for g in groups
+                if not kv_cache_groups[g.kv_cache_group_id].pool_id
+            ),
             kernel_block_sizes=self.kernel_block_sizes,
             static_forward_context=self.compilation_config.static_forward_context,
             num_blocks=self.kv_cache_config.num_blocks,
