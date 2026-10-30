@@ -89,26 +89,33 @@ def _is_hgx_b200() -> bool:
         return False
 
 
-def _resolve_all2all_backend(
-    requested: All2AllBackend,
-    enable_expert_parallel: bool,
-    data_parallel_size: int,
-    data_parallel_size_local: int,
-    distributed_executor_backend: str | type[Executor] | None,
-) -> All2AllBackend:
-    """Pick the all2all backend, resolving "auto" against the deployment.
+def _prefers_one_sided_all2all(config: "ParallelConfig") -> bool:
+    """Whether "auto" picks flashinfer_nvlink_one_sided: only where it was
+    measured to beat allgather_reducescatter."""
+    # The one-sided manager is not wired for elastic EP's stateless groups.
+    if not config.enable_expert_parallel or config.enable_elastic_ep:
+        return False
+    if config.data_parallel_size >= 8 and _is_gb200_or_gb300():
+        return True
+    # HGX B200 has no NVLink between hosts, so the EP group must be one host's
+    # 8 GPUs, placed by vLLM's own launcher. An API-server-only process has no
+    # local ranks and must agree with engines that do.
+    return (
+        config.data_parallel_size == 8
+        and config.data_parallel_size_local in (0, 8)
+        and config.distributed_executor_backend in ("mp", "uni")
+        and _is_hgx_b200()
+    )
 
-    Args:
-        requested: The configured backend, or "auto" to choose one here.
-        enable_expert_parallel: Whether expert parallelism is on.
-        data_parallel_size: Number of data-parallel ranks.
-        data_parallel_size_local: Number of data-parallel ranks on this host.
-        distributed_executor_backend: The configured executor backend.
+
+def _resolve_all2all_backend(config: "ParallelConfig") -> All2AllBackend:
+    """Pick the all2all backend, resolving "auto" against the deployment.
 
     Returns:
         A concrete backend; never "auto".
 
     """
+    requested = config.all2all_backend
     if requested in ("pplx", "naive"):
         logger.warning(
             "The '%s' all2all backend has been removed. "
@@ -118,21 +125,12 @@ def _resolve_all2all_backend(
         return "allgather_reducescatter"
 
     if requested == "auto":
-        if not enable_expert_parallel or not (
-            (data_parallel_size >= 8 and _is_gb200_or_gb300())
-            # HGX B200 has no NVLink between hosts, so the EP group must be
-            # one host's 8 GPUs. An external launcher places ranks itself.
-            or (
-                data_parallel_size == data_parallel_size_local == 8
-                and distributed_executor_backend != "external_launcher"
-                and _is_hgx_b200()
-            )
-        ):
+        if not _prefers_one_sided_all2all(config):
             return "allgather_reducescatter"
         requested = "flashinfer_nvlink_one_sided"
 
     if requested == "flashinfer_nvlink_one_sided":
-        if not enable_expert_parallel:
+        if not config.enable_expert_parallel:
             logger.debug(
                 "Expert parallel is disabled; using the "
                 "'allgather_reducescatter' all2all backend instead of "
@@ -314,9 +312,10 @@ class ParallelConfig:
     all2all_backend: All2AllBackend = "auto"
     """All2All backend for MoE expert parallel communication. Available options:
 
-    - "auto": "flashinfer_nvlink_one_sided" for expert parallelism with at
-      least 8 data-parallel ranks on GB200/GB300, or with exactly 8 on a single
-      HGX B200 node; "allgather_reducescatter" otherwise
+    - "auto": "flashinfer_nvlink_one_sided" for expert parallelism without
+      elastic EP, with at least 8 data-parallel ranks on GB200/GB300 or exactly
+      8 on a single HGX B200 node launched by vLLM; "allgather_reducescatter"
+      otherwise
 
     - "allgather_reducescatter": All2all based on allgather and reducescatter
     - "deepep_high_throughput": Use deepep high-throughput kernels
@@ -652,13 +651,7 @@ class ParallelConfig:
                 "The FT system assumes one AsyncMPClient manages all engines."
             )
 
-        self.all2all_backend = _resolve_all2all_backend(
-            self.all2all_backend,
-            enable_expert_parallel=self.enable_expert_parallel,
-            data_parallel_size=self.data_parallel_size,
-            data_parallel_size_local=self.data_parallel_size_local,
-            distributed_executor_backend=self.distributed_executor_backend,
-        )
+        self.all2all_backend = _resolve_all2all_backend(self)
 
         if self.data_parallel_size_local > self.data_parallel_size:
             raise ValueError(

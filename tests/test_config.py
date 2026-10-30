@@ -1715,6 +1715,7 @@ def test_all2all_backend_has_portable_default():
 
 def _pretend_cuda_host(monkeypatch, cpu_arch, capability) -> None:
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: True)
     monkeypatch.setattr(current_platform, "get_cpu_architecture", lambda: cpu_arch)
     # `is_device_capability_family` is a classmethod, so it reads the capability
     # off the class rather than the instance patched above.
@@ -1811,6 +1812,8 @@ def test_all2all_backend_defaults_to_one_sided_only_on_measured_platforms(
     [
         # One full node: the configuration measured on HGX B200.
         (8, 8, "flashinfer_nvlink_one_sided"),
+        # An API-server-only process must agree with engines on one full node.
+        (8, 0, "flashinfer_nvlink_one_sided"),
         # The EP group spans hosts, which HGX does not connect over NVLink.
         (8, 4, "allgather_reducescatter"),
         (8, 1, "allgather_reducescatter"),
@@ -1832,7 +1835,7 @@ def test_one_sided_all2all_default_on_hgx_b200_needs_one_full_node(
     assert config.all2all_backend == expected
 
 
-def test_one_sided_all2all_default_on_hgx_b200_skips_external_launchers(
+def test_one_sided_all2all_default_on_hgx_b200_needs_ranks_placed_by_vllm(
     hgx_b200_host, monkeypatch
 ):
     """An external launcher such as torchrun places the ranks itself, so
@@ -1845,6 +1848,22 @@ def test_one_sided_all2all_default_on_hgx_b200_skips_external_launchers(
         data_parallel_size=8,
         data_parallel_size_local=8,
         distributed_executor_backend="external_launcher",
+    )
+    assert config.all2all_backend == "allgather_reducescatter"
+
+
+@pytest.mark.parametrize("host", ["one_sided_capable_host", "hgx_b200_host"])
+def test_one_sided_all2all_default_skips_elastic_ep(request, host):
+    """The one-sided manager is not wired for elastic EP's stateless groups,
+    and on HGX B200 a growing EP group would leave the node."""
+    request.getfixturevalue(host)
+    config = _parallel_config(
+        enable_expert_parallel=True,
+        enable_eplb=True,
+        eplb_config={"use_async": False},
+        enable_elastic_ep=True,
+        data_parallel_size=8,
+        data_parallel_size_local=8,
     )
     assert config.all2all_backend == "allgather_reducescatter"
 
