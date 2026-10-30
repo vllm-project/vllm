@@ -341,8 +341,6 @@ class MiniMaxM3CuteDSLExperts(FlashInferCuteDSLExperts):
 
 class MiniMaxM3CuteDSLMethod(CompressedTensorsW4A4Nvfp4MoEMethod):
     def __init__(self, moe: FusedMoEConfig, layer_name: str) -> None:
-        import vllm.envs as envs
-
         # Checked here, before weight loading, rather than when the experts are
         # built in process_weights_after_loading.
         if moe.moe_parallel_config.use_ep or moe.dp_size > 1:
@@ -367,7 +365,7 @@ class MiniMaxM3CuteDSLMethod(CompressedTensorsW4A4Nvfp4MoEMethod):
         self.experts_cls = MiniMaxM3CuteDSLExperts
         # Defer the top-k reduce into the next layer's input norm on TP1 (no
         # TP all-reduce of the MoE output).
-        self.defer_finalize = moe.tp_size == 1 and envs.VLLM_M3_MOE_TAIL_FUSED
+        self.defer_finalize = moe.tp_size == 1
         logger.info_once(
             "MiniMax-M3 CuTeDSL NVFP4 MoE engaged (deferred finalize fused "
             "into the next input norm: %s)",
