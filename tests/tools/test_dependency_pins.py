@@ -1,12 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import hashlib
+import io
 import json
+import shlex
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
 
 import pytest
+import regex as re
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -93,3 +98,59 @@ def test_action_pin_check_accepts_immutable_and_local_actions(tmp_path):
         ],
         check=True,
     )
+
+
+@pytest.mark.parametrize(
+    "dockerfile", ["Dockerfile.rocm", "Dockerfile.rocm_72", "Dockerfile.rocm_gfx1250"]
+)
+@pytest.mark.parametrize("hash_mode", ["valid", "invalid"])
+def test_rocm_source_rebuild_verifies_requirement_hashes(
+    tmp_path, dockerfile, hash_mode
+):
+    """Run the Docker extraction/install command against a local source archive."""
+    archive = tmp_path / "fastsafetensors-0.0.0.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        for name, content in {
+            "setup.py": (
+                "from setuptools import setup\n"
+                "setup(name='fastsafetensors', version='0.0.0', "
+                "py_modules=['fastsafetensors'])\n"
+            ),
+            "fastsafetensors.py": "SOURCE_REBUILT = True\n",
+        }.items():
+            data = content.encode()
+            info = tarfile.TarInfo(f"fastsafetensors-0.0.0/{name}")
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    if hash_mode == "invalid":
+        digest = "0" * 64
+    requirement = "fastsafetensors==0.0.0"
+    requirement += " \\\n    --hash=sha256:" + "a" * 64
+    requirement += " \\\n    --hash=sha256:" + digest
+    requirements = tmp_path / "rocm-test-reqs.txt"
+    requirements.write_text(f"other==1.0\n{requirement}\n# via test\nafter==2.0\n")
+    target = tmp_path / "installed"
+    docker = (ROOT / "docker" / dockerfile).read_text()
+    match = re.search(
+        r"RUN --mount=type=cache,target=/root/\.cache/pip \\\n(.*?)(?:\n\n|$)",
+        docker.split("# Rebuild fastsafetensors from source", 1)[1],
+        re.DOTALL,
+    )
+    assert match is not None
+    command = match.group(1).replace("/tmp/", str(tmp_path) + "/")
+    command = command.replace(
+        "python3 -m pip install",
+        f"{shlex.quote(sys.executable)} -m pip --isolated install "
+        "--no-index --no-build-isolation "
+        f"--find-links {shlex.quote(str(tmp_path))} "
+        f"--target {shlex.quote(str(target))}",
+    )
+    result = subprocess.run(["sh", "-c", command], capture_output=True, text=True)
+    if hash_mode == "invalid":
+        assert result.returncode != 0
+        assert "DO NOT MATCH THE HASHES" in result.stderr
+        assert not (target / "fastsafetensors.py").exists()
+    else:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (target / "fastsafetensors.py").read_text() == "SOURCE_REBUILT = True\n"

@@ -809,6 +809,9 @@ steps:
   - tools/pre_commit/check_github_actions_pins.py
   - tools/use_existing_torch.py
   - tests/tools/test_dependency_pins.py
+  - docker/Dockerfile.rocm
+  - docker/Dockerfile.rocm_72
+  - docker/Dockerfile.rocm_gfx1250
   - tests/tool_parsers
   - tests/tokenizers_
   - tests/parser
