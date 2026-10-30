@@ -401,6 +401,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         spec_sequence_masks = m.spec_sequence_masks
         spec_token_indx = m.spec_token_indx
         non_spec_token_indx = m.non_spec_token_indx
+        num_spec_tokens = m.num_spec_tokens
         spec_state_indices_tensor = m.spec_state_indices_tensor
         spec_query_start_loc = m.spec_query_start_loc
         num_accepted_tokens = m.num_accepted_tokens
@@ -521,6 +522,12 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 mixed_qkv_spec = mixed_qkv
                 g1_spec, beta_spec = g1, beta
                 mixed_qkv_ns = g1_ns = beta_ns = None
+            elif num_spec_tokens is not None:
+                # Spec tokens lead the batch: split with views, no gathers
+                s = num_spec_tokens
+                mixed_qkv_spec, mixed_qkv_ns = mixed_qkv[:s], mixed_qkv[s:]
+                g1_spec, g1_ns = g1[:, :s], g1[:, s:]
+                beta_spec, beta_ns = beta[:, :s], beta[:, s:]
             else:
                 mixed_qkv_spec = mixed_qkv.index_select(0, spec_token_indx)
                 g1_spec = g1.index_select(1, spec_token_indx)
@@ -573,10 +580,12 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 and q_spec.shape[1] != m.num_spec_decodes * uniform_sequence_length
             ):
                 uniform_sequence_length = None
-            # Spec-only batches write directly into core_attn_out.
+            # Spec-only batches and batches with leading spec tokens write
+            # directly into core_attn_out.
             spec_out = (
                 core_attn_out[:, : q_spec.shape[1]]
-                if m.num_prefills == 0 and m.num_decodes == 0
+                if (m.num_prefills == 0 and m.num_decodes == 0)
+                or num_spec_tokens is not None
                 else None
             )
             core_attn_out_spec, _ = fused_recurrent_kda(
@@ -656,11 +665,13 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 # peel cannot apply and the chunk kernel takes them.
                 core_attn_out_decode = None
                 split_non_spec = spec_sequence_masks is None and m.num_decodes > 0
-                # Without a spec split the non-spec tokens are exactly
-                # core_attn_out[:, :num_actual_tokens] in order, so both kernels
-                # can write their slice straight into it. With one, the tokens
+                # The non-spec tokens are core_attn_out[:, ns0:num_actual_tokens]
+                # in order when there is no spec split (ns0 = 0) or the spec
+                # tokens lead the batch (ns0 = num_spec_tokens), so both kernels
+                # can write their slice straight into it. Otherwise the tokens
                 # are interleaved and have to be scattered by index afterwards.
-                direct = spec_sequence_masks is None
+                direct = spec_sequence_masks is None or num_spec_tokens is not None
+                ns0 = num_spec_tokens or 0
                 if split_non_spec:
                     assert non_spec_query_start_loc is not None
                     nd_tok = m.num_decode_tokens
@@ -733,7 +744,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     chunk_indices=m.chunk_indices,
                     chunk_offsets=m.chunk_offsets,
                     backend=self.kda_prefill_backend,
-                    out=core_attn_out[:, nd_tok:num_actual_tokens] if direct else None,
+                    out=(
+                        core_attn_out[:, ns0 + nd_tok : num_actual_tokens]
+                        if direct
+                        else None
+                    ),
                     checkpoint_state=checkpoint_state,
                     checkpoint_offsets=checkpoint_offsets,
                     checkpoint_state_indices=checkpoint_state_indices,
@@ -743,7 +758,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
 
                 if direct:
                     # Both slices already landed in core_attn_out.
-                    core_attn_out_non_spec = core_attn_out[:, :num_actual_tokens]
+                    core_attn_out_non_spec = core_attn_out[:, ns0:num_actual_tokens]
                 elif split_non_spec:
                     # Restore decode-first token order for the merge below.
                     core_attn_out_non_spec = torch.cat(
@@ -786,9 +801,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
 
         # ---------- merge spec and non-spec outputs ----------
         if core_attn_out_spec is not None and core_attn_out_non_spec is not None:
-            merged = core_attn_out[:, :num_actual_tokens]
-            merged.index_copy_(1, spec_token_indx, core_attn_out_spec)
-            merged.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
+            # With leading spec tokens both paths already wrote core_attn_out
+            if num_spec_tokens is None:
+                merged = core_attn_out[:, :num_actual_tokens]
+                merged.index_copy_(1, spec_token_indx, core_attn_out_spec)
+                merged.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
         elif core_attn_out_non_spec is not None:
             if core_attn_out_non_spec.data_ptr() != core_attn_out.data_ptr():
                 core_attn_out[0, :num_actual_tokens] = core_attn_out_non_spec[

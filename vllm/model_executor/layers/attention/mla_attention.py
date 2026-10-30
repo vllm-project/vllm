@@ -711,6 +711,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 padded_num_heads=self.q_pad_num_heads,
                 is_lse_base_on_e=self.impl.lse_base_on_e,
                 use_pcp=self.use_pcp,
+                query_storage_heads=getattr(self.impl, "dcp_query_storage_heads", None),
             )
 
         # TODO(ROCm): both BMM kernels re-quantize kv_b_proj online, ignoring

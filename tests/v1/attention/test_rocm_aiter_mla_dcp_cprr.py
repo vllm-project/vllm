@@ -274,5 +274,53 @@ def test_causal_multi_token_batch_without_a_valid_route_fails():
         )
 
 
+# --------------------------------------------------------------------------
+# DCP query gather into the cprr head storage
+# --------------------------------------------------------------------------
+
+
+def _gather_into_storage(local_queries, storage_heads):
+    """Run MLADCPManager._gather_query_into_storage with a fake DCP group
+    whose all-gather concatenates the per-rank queries."""
+    from vllm.v1.attention.ops.dcp import MLADCPManager
+
+    manager = MLADCPManager.__new__(MLADCPManager)
+    manager.query_storage_heads = storage_heads
+    manager.group = SimpleNamespace(
+        world_size=len(local_queries),
+        all_gather=lambda query, dim: torch.cat(local_queries, dim=dim),
+    )
+    return manager._gather_query_into_storage(local_queries[0])
+
+
+@pytest.mark.parametrize("num_tokens", [1, 10, 37])
+def test_gather_into_storage_matches_head_gather(num_tokens):
+    """The gather returns the same [B, W * H, D] query as a dim-1 all-gather,
+    in [B, storage_heads, D] storage."""
+    world_size, heads_per_rank, head_dim, storage_heads = 8, 12, 576, 128
+    local_queries = [
+        torch.randn(num_tokens, heads_per_rank, head_dim) for _ in range(world_size)
+    ]
+
+    gathered = _gather_into_storage(local_queries, storage_heads)
+
+    assert torch.equal(gathered, torch.cat(local_queries, dim=1))
+    assert gathered.stride() == (storage_heads * head_dim, head_dim, 1)
+
+
+def test_gathered_query_pads_to_cprr_heads_as_a_view():
+    """The cprr padding (96 -> 128 heads) reads the gather storage in place."""
+    local_queries = [torch.randn(10, 12, 576) for _ in range(8)]
+    gathered = _gather_into_storage(local_queries, 128)
+
+    padded = rocm_aiter_mla.AiterMLAHelper.get_mla_padded_q(
+        96, gathered, target_heads=128
+    )
+
+    assert padded.shape == (10, 128, 576)
+    assert padded.data_ptr() == gathered.data_ptr()
+    assert torch.equal(padded[:, :96], gathered)
+
+
 # Kernel numerics live in test_rocm_aiter_mla_dcp_cprr_numerics.py, which runs
 # the real builder and the real asm kernel on a gfx950 GPU.

@@ -280,6 +280,54 @@ def test_has_initial_state_after_reclassification():
     assert meta.has_initial_state[0].item() is True
 
 
+@pytest.mark.parametrize(
+    "seq_lens, query_lens, draft_tokens, expected",
+    [
+        # Spec decodes lead the batch: their tokens are rows [0, 6)
+        ([20, 30, 100], [3, 3, 50], [2, 2, -1], 6),
+        # Zero-draft decodes count as spec rows
+        ([20, 30, 100], [3, 1, 50], [2, 0, -1], 4),
+        # A prefill leads the batch: no prefix
+        ([100, 20], [50, 3], [-1, 2], None),
+        # A non-spec decode sits between the spec decodes: no prefix
+        ([20, 65, 30, 100], [3, 1, 3, 50], [2, -1, 2, -1], None),
+    ],
+)
+def test_num_spec_tokens_marks_leading_spec_rows(
+    seq_lens, query_lens, draft_tokens, expected
+):
+    """num_spec_tokens is set only when the spec tokens are a prefix, and the
+    token indices it replaces are unchanged."""
+    builder = _create_gdn_builder(num_speculative_tokens=2)
+    batch = BatchSpec(seq_lens=seq_lens, query_lens=query_lens)
+    meta = _build(builder, batch, num_decode_draft_tokens=draft_tokens)
+
+    assert meta.num_spec_tokens == expected
+    assert meta.spec_token_indx is not None
+    assert meta.non_spec_token_indx is not None
+    if expected is not None:
+        num_tokens = sum(query_lens)
+        torch.testing.assert_close(
+            meta.spec_token_indx.cpu(),
+            torch.arange(expected, dtype=meta.spec_token_indx.dtype),
+        )
+        torch.testing.assert_close(
+            meta.non_spec_token_indx.cpu(),
+            torch.arange(expected, num_tokens, dtype=meta.non_spec_token_indx.dtype),
+        )
+
+
+def test_num_spec_tokens_unset_without_mixed_spec_batch():
+    """Spec-only and non-spec batches keep num_spec_tokens unset."""
+    builder = _create_gdn_builder(num_speculative_tokens=2)
+    spec_only = _build(builder, BatchSpec(seq_lens=[50, 30], query_lens=[3, 3]), [2, 2])
+    assert spec_only.num_spec_tokens is None
+    no_spec = _build(
+        _create_gdn_builder(), BatchSpec(seq_lens=[40, 100], query_lens=[1, 50])
+    )
+    assert no_spec.num_spec_tokens is None
+
+
 def test_full_cudagraph_spec_metadata_uses_request_count():
     """FULL cudagraph token padding must not pad request-indexed metadata."""
     num_speculative_tokens = 3

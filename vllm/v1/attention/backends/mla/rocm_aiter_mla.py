@@ -12,7 +12,7 @@ import torch
 
 from vllm import envs
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.distributed import get_dcp_group
 from vllm.logger import init_logger
@@ -2356,6 +2356,9 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
     # base-2 segment statistics with LOGE2. Stated rather than inherited because
     # the DCP combine silently corrupts the softmax denominator if it disagrees.
     lse_base_on_e: bool = True
+    # Head count of the storage the cprr asm decode reads the DCP-gathered
+    # query from (e.g. 96 -> 128); None keeps the default DCP gather
+    dcp_query_storage_heads: int | None = None
 
     @property
     def _decode_num_heads(self) -> int:
@@ -2393,6 +2396,19 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         AiterMLAHelper.check_num_heads_validity(num_heads)
         AiterMLAHelper.check_num_heads_validity(self._decode_num_heads)
         self._sm_count = current_platform.num_compute_units()
+
+        # The DCP gather writes straight into the cprr head storage, so the
+        # padding is a view
+        vllm_config = get_current_vllm_config()
+        parallel_config = vllm_config.parallel_config
+        if _asm_dcp_verify_configured(
+            parallel_config.decode_context_parallel_size,
+            parallel_config.cp_kv_cache_interleave_size,
+            multi_token_decode=vllm_config.speculative_config is not None,
+        ):
+            asm_heads = _asm_dcp_verify_heads(self._decode_num_heads)
+            if asm_heads > self._decode_num_heads:
+                self.dcp_query_storage_heads = asm_heads
 
         unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
         if any(unsupported_features):
@@ -3034,6 +3050,13 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         layer: AttentionLayer,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         decode = attn_metadata.decode
+        if (
+            self.dcp_query_storage_heads is not None
+            and isinstance(q, torch.Tensor)
+            and (decode is None or decode.dcp_route is not _DCPDecodeRoute.CPRR)
+        ):
+            # Only the cprr asm decode reads the padded query storage in place
+            q = q.contiguous()
         if decode is None or decode.varlen_q_rows is None:
             return self._forward_mqa(q, kv_c_and_k_pe_cache, attn_metadata, layer)
         assert decode.varlen_o_rows is not None
