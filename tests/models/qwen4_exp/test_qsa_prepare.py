@@ -5,17 +5,17 @@
 import pytest
 import torch
 
-from vllm.models.qwen4_exp.common.qsa_cache import (
+from vllm.models.qwen4_exp.common.qsa_indexer import (
     canonical_qsa_rope_positions,
     circular_qsa_slot_mapping,
     compressed_qsa_slot_mapping,
 )
-from vllm.models.qwen4_exp.nvidia.indexer_qsa import apply_qsa_rope
 from vllm.models.qwen4_exp.nvidia.ops.qsa import (
     qsa_compress_groups_with_ratio,
     qsa_store_cache_rows,
 )
 from vllm.models.qwen4_exp.nvidia.ops.qsa_prepare import qsa_prepare
+from vllm.models.qwen4_exp.nvidia.qsa_indexer import apply_qsa_rope
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 

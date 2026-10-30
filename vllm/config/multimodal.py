@@ -212,31 +212,31 @@ def _merge_mm_processor_kwargs(
 class BaseDummyOptions:
     """Base options for generating dummy data during profiling."""
 
-    count: int = Field(999, ge=0)
+    count: int = Field(default=999, ge=0)
 
 
 @dataclass(config=ConfigDict(extra="forbid"))
 class VideoDummyOptions(BaseDummyOptions):
     """Options for generating dummy video data during profiling."""
 
-    num_frames: int | None = Field(None, gt=0)
-    width: int | None = Field(None, gt=0)
-    height: int | None = Field(None, gt=0)
+    num_frames: int | None = Field(default=None, gt=0)
+    width: int | None = Field(default=None, gt=0)
+    height: int | None = Field(default=None, gt=0)
 
 
 @dataclass(config=ConfigDict(extra="forbid"))
 class ImageDummyOptions(BaseDummyOptions):
     """Options for generating dummy image data during profiling."""
 
-    width: int | None = Field(None, gt=0)
-    height: int | None = Field(None, gt=0)
+    width: int | None = Field(default=None, gt=0)
+    height: int | None = Field(default=None, gt=0)
 
 
 @dataclass(config=ConfigDict(extra="forbid"))
 class AudioDummyOptions(BaseDummyOptions):
     """Options for generating dummy audio data during profiling."""
 
-    length: int | None = Field(None, gt=0)
+    length: int | None = Field(default=None, gt=0)
 
 
 @final
