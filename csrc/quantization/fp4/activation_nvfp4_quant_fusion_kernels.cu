@@ -49,6 +49,11 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
   static_assert(sizeof(PackedVec) == sizeof(Type) * CVT_FP4_ELTS_PER_THREAD,
                 "Vec size is not matched.");
 
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+  cudaGridDependencySynchronize();
+  cudaTriggerProgrammaticLaunchCompletion();
+#endif
+
   // Precompute SF layout parameter (constant for entire kernel).
   int32_t const numKTiles = (numCols + 63) / 64;
 
@@ -170,13 +175,29 @@ void silu_and_mul_nvfp4_quant_sm1xxa(
                std::max(1, (multiProcessorCount * numBlocksPerSM) / grid_y));
   dim3 grid(grid_x, grid_y);
 
+  // PDL launch pays off at small M; at large M the early-launched blocks
+  // slow the chain down, so keep the serialized launch there.
+  bool const use_pdl =
+      int64_t(m) * num_packed_cols <= int64_t(multiProcessorCount) * 4096;
+
   VLLM_STABLE_DISPATCH_HALF_TYPES(
       input.scalar_type(), "silu_and_mul_nvfp4_quant_kernel", [&] {
         using cuda_type = vllm::CUDATypeConverter<scalar_t>::Type;
         auto input_ptr = static_cast<cuda_type const*>(input.data_ptr());
-        vllm::silu_mul_cvt_fp16_to_fp4<cuda_type><<<grid, block, 0, stream>>>(
-            m, n, num_packed_cols, num_padded_cols, input_ptr, input_sf_ptr,
-            reinterpret_cast<uint32_t*>(output_ptr),
-            reinterpret_cast<uint32_t*>(sf_out));
+        cudaLaunchConfig_t config = {};
+        config.gridDim = grid;
+        config.blockDim = block;
+        config.dynamicSmemBytes = 0;
+        config.stream = stream;
+        cudaLaunchAttribute attrs[1];
+        attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+        attrs[0].val.programmaticStreamSerializationAllowed = 1;
+        config.numAttrs = use_pdl ? 1 : 0;
+        config.attrs = attrs;
+        cudaLaunchKernelEx(&config, vllm::silu_mul_cvt_fp16_to_fp4<cuda_type>,
+                           m, n, num_packed_cols, num_padded_cols, input_ptr,
+                           input_sf_ptr,
+                           reinterpret_cast<uint32_t*>(output_ptr),
+                           reinterpret_cast<uint32_t*>(sf_out));
       });
 }

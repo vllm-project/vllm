@@ -18,6 +18,7 @@ from tests.parser.engine.conftest import make_mock_tokenizer
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
+from vllm.parser import glm47_moe
 from vllm.parser.glm47_moe import (
     THINK_END,
     THINK_START,
@@ -140,6 +141,15 @@ CALL_HEAD = (
 CALL_TAIL = f"</arg_value>\n{TOOL_CALL_END}"
 # Escapes, non-ASCII, and tag-like text that must stay inside the value.
 CONTENT_LINE = 'if a < b > c: print("x\\y")  # </div> </arg_ <arg_key>\t\u00e9\n'
+# A model stuck in a loop repeats closed argument pairs inside one call.
+LOOP_HEAD = (
+    f"{THINK_END}{TOOL_CALL_START}Write\n"
+    "<arg_key>file_path</arg_key><arg_value>/repo/app.py</arg_value>\n"
+)
+LOOP_PAIRS = (
+    "<arg_key>content</arg_key><arg_value>a > b</arg_value>\n"
+    "<arg_key>line_count</arg_key><arg_value>1</arg_value>\n"
+)
 
 
 def _pieces(text: str, size: int) -> list[str]:
@@ -209,6 +219,57 @@ class TestStreamedToolArguments:
             return calls
 
         assert streaming_conversions(lines=40) == streaming_conversions(lines=400)
+
+    @pytest.mark.parametrize("size", [1, 7])
+    def test_repeated_closed_args_stream_non_streaming_arguments(
+        self, mock_request, size
+    ):
+        """Covers a duplicate open key and a second call sharing the first pair."""
+        mock_request.tools = [WRITE_TOOL]
+        text = (
+            LOOP_HEAD
+            + LOOP_PAIRS * 20
+            + "<arg_key>content</arg_key><arg_value>a > b"
+            + CALL_TAIL
+            + LOOP_HEAD.removeprefix(THINK_END)
+            + TOOL_CALL_END
+        )
+
+        streamed = _stream_arguments(
+            Glm47MoeParser(make_mock_tokenizer(VOCAB)),
+            mock_request,
+            _pieces(text, size),
+        )
+        result = Glm47MoeParser(make_mock_tokenizer(VOCAB)).extract_tool_calls(
+            text, mock_request
+        )
+
+        assert len(result.tool_calls) == 2
+        assert streamed == "".join(c.function.arguments for c in result.tool_calls)
+
+    def test_closed_pairs_are_parsed_once(self, mock_request, monkeypatch):
+        """Streaming cost must not grow with the closed pairs already seen."""
+        mock_request.tools = [WRITE_TOOL]
+        arg_re = glm47_moe._ARG_RE
+        matches = 0
+
+        class CountingPattern:
+            def __getattr__(self, name):
+                return getattr(arg_re, name)
+
+            def finditer(self, *args):
+                nonlocal matches
+                for match in arg_re.finditer(*args):
+                    matches += 1
+                    yield match
+
+        monkeypatch.setattr(glm47_moe, "_ARG_RE", CountingPattern())
+        text = LOOP_HEAD + LOOP_PAIRS * 200 + TOOL_CALL_END
+        _stream_arguments(
+            Glm47MoeParser(make_mock_tokenizer(VOCAB)), mock_request, _pieces(text, 4)
+        )
+
+        assert matches == len(arg_re.findall(text))
 
     def test_value_extender_stops_at_split_value_end(self):
         extend = _glm47_arg_value_extender("<arg_key>k</arg_key><arg_value>x")

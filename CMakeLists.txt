@@ -1373,6 +1373,19 @@ set_gencode_flags_for_srcs(
   CUDA_ARCHS "${CUDA_ARCHS}")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
+  set(MUSE_SPARK_ROUTING_ARCHS "${CUDA_ARCHS}")
+  if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 13.0)
+    # Native FP32 warp-max reduction requires the Blackwell family target.
+    list(TRANSFORM MUSE_SPARK_ROUTING_ARCHS
+      REPLACE "^10[.]0([+]PTX)?$" "10.0f")
+  endif()
+  set_gencode_flags_for_srcs(
+    SRCS "csrc/moe/muse_spark_routing.cu"
+    CUDA_ARCHS "${MUSE_SPARK_ROUTING_ARCHS}")
+  list(APPEND VLLM_MOE_EXT_SRC "csrc/moe/muse_spark_routing.cu")
+endif()
+
+if(VLLM_GPU_LANG STREQUAL "CUDA")
   set(VLLM_MOE_WNA16_SRC
     "csrc/moe/moe_wna16.cu")
 

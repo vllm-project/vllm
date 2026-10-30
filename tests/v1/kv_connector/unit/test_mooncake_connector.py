@@ -27,9 +27,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import (
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
     _SHARED_REGION_GROUP_ID,
     KVConnectorRole,
+    LeaseHeartbeat,
     MooncakeConnector,
     MooncakeConnectorMetadata,
     MooncakeConnectorWorker,
+    MooncakeLeaseHeartbeat,
     MooncakeXferMetadata,
     MooncakeXferResponse,
     MooncakeXferResponseStatus,
@@ -62,6 +64,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.request import RequestStatus
 
 from .utils import (
+    create_model_runner_output,
     create_request,
     create_scheduler,
     create_vllm_config,
@@ -180,11 +183,14 @@ def _make_test_kv_cache_config() -> KVCacheConfig:
     )
 
 
-def _make_worker_vllm_config(kv_role: str):
+def _make_worker_vllm_config(
+    kv_role: str, kv_connector_extra_config: dict | None = None
+):
     return create_vllm_config(
         kv_connector="MooncakeConnector",
         kv_role=kv_role,
         block_size=maybe_update_block_size(16),
+        kv_connector_extra_config=kv_connector_extra_config,
     )
 
 
@@ -1853,6 +1859,320 @@ async def test_worker_get_finished_timeout(monkeypatch):
         assert "p-req-active" not in finished_reqs
         assert "tx-expired" not in prefill_worker.reqs_need_send
         assert "tx-active" in prefill_worker.reqs_need_send
+
+
+class _BootstrapClientStub:
+    """httpx.AsyncClient stand-in for the prefill bootstrap server."""
+
+    def __init__(self, workers: dict | None = None, **kwargs):
+        self.workers = workers or {}
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+    async def post(self, url, json=None):
+        return MagicMock()
+
+    async def get(self, url):
+        response = MagicMock()
+        response.json.return_value = self.workers
+        return response
+
+
+def _lease_decode_scheduler(kv_lease_duration: float | None):
+    extra_config = (
+        {} if kv_lease_duration is None else {"kv_lease_duration": kv_lease_duration}
+    )
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector",
+        kv_role="kv_consumer",
+        kv_connector_extra_config=extra_config,
+    )
+    return create_scheduler(vllm_config), vllm_config.cache_config.block_size
+
+
+def _remote_prefill_request(request_id: int, block_size: int):
+    request = create_request(
+        request_id=request_id,
+        block_size=block_size,
+        num_tokens=block_size * 2,
+        do_remote_prefill=True,
+    )
+    request.kv_transfer_params.update(
+        {
+            "transfer_id": f"xfer-{request_id}",
+            "remote_bootstrap_addr": "http://prefill:8998",
+        }
+    )
+    return request
+
+
+@pytest.mark.parametrize("kv_lease_duration", [None, 30])
+def test_decode_lease_renewal_is_opt_in_and_throttled(kv_lease_duration):
+    scheduler, block_size = _lease_decode_scheduler(kv_lease_duration)
+    scheduler.add_request(_remote_prefill_request(1, block_size))
+
+    output = scheduler.schedule()
+    if kv_lease_duration is None:
+        assert not output.kv_connector_metadata.lease_heartbeats
+    else:
+        assert output.kv_connector_metadata.lease_heartbeats == {
+            "my-engine-id": LeaseHeartbeat(
+                remote_bootstrap_addr="http://prefill:8998", transfer_ids=["xfer-1"]
+            )
+        }
+    scheduler.update_from_output(output, create_model_runner_output(reqs=[]))
+    # At most one renewal per kv_lease_duration / 6 seconds.
+    assert not scheduler.schedule().kv_connector_metadata.lease_heartbeats
+
+
+def _next_lease_heartbeats(scheduler, scheduler_output, timeout: float = 5.0):
+    connector = scheduler.get_kv_connector()
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        meta = connector.build_connector_meta(scheduler_output)
+        if meta.lease_heartbeats:
+            return meta.lease_heartbeats
+        time.sleep(0.005)
+    return {}
+
+
+@pytest.mark.parametrize("settled_by", ["finished_recving", "abort"])
+def test_decode_renews_lease_until_pull_settles(settled_by):
+    # Renew every 10 ms so the test can wait for the next renewal.
+    scheduler, block_size = _lease_decode_scheduler(0.06)
+    settled = _remote_prefill_request(1, block_size)
+    kept = _remote_prefill_request(2, block_size)
+    scheduler.add_request(settled)
+    scheduler.add_request(kept)
+
+    output = scheduler.schedule()
+    meta = output.kv_connector_metadata
+    assert len(meta.reqs_to_recv["my-engine-id"]) == 2
+    assert sorted(meta.lease_heartbeats["my-engine-id"].transfer_ids) == [
+        "xfer-1",
+        "xfer-2",
+    ]
+    if settled_by == "finished_recving":
+        scheduler.update_from_output(
+            output,
+            create_model_runner_output(reqs=[], finished_recving={settled.request_id}),
+        )
+    else:
+        scheduler.update_from_output(output, create_model_runner_output(reqs=[]))
+        scheduler.finish_requests(settled.request_id, RequestStatus.FINISHED_ABORTED)
+
+    # The pull of `kept` has been issued but not settled, so it is still renewed.
+    assert _next_lease_heartbeats(scheduler, output) == {
+        "my-engine-id": LeaseHeartbeat(
+            remote_bootstrap_addr="http://prefill:8998", transfer_ids=["xfer-2"]
+        )
+    }
+
+
+@pytest.mark.asyncio
+async def test_decode_heartbeat_reaches_every_paired_prefill_worker():
+    """A renewal for a request still queued on D queries P's bootstrap first."""
+    vllm_config = _make_worker_vllm_config(
+        "kv_consumer", kv_connector_extra_config={"kv_lease_duration": 30}
+    )
+    # P TP=2 serves this D TP=1 worker from both of its ranks.
+    workers = {
+        "0": {
+            "engine_id": "p-engine",
+            "worker_addr": {
+                "0": {"0": "tcp://prefill-tp0:1234"},
+                "1": {"0": "tcp://prefill-tp1:1234"},
+            },
+        }
+    }
+    with (
+        set_current_vllm_config(vllm_config),
+        patch_worker_dependencies() as mocks,
+        patch.object(
+            mooncake_connector.httpx,
+            "AsyncClient",
+            lambda **kwargs: _BootstrapClientStub(workers),
+        ),
+    ):
+        worker = MooncakeConnector(
+            vllm_config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
+        ).connector_worker
+        sock = mocks["mock_socket_object"]
+        sock.recv.return_value = msgspec.msgpack.encode(
+            MooncakeXferResponse(status=MooncakeXferResponseStatus.FINISH)
+        )
+        metadata = MooncakeConnectorMetadata()
+        metadata.lease_heartbeats = {
+            "p-engine": LeaseHeartbeat(
+                remote_bootstrap_addr="http://prefill:8998",
+                transfer_ids=["xfer-1", "xfer-2"],
+            )
+        }
+        worker.start_load_kv(metadata)
+
+        deadline = time.monotonic() + 10
+        while sock.send.await_count < 2 and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        addrs = sorted(c.args[1] for c in mocks["mock_make_zmq"].call_args_list)
+        assert addrs == ["tcp://prefill-tp0:1234", "tcp://prefill-tp1:1234"]
+        for call in sock.send.await_args_list:
+            heartbeat = msgspec.msgpack.decode(
+                call.args[0], type=MooncakeLeaseHeartbeat
+            )
+            assert heartbeat.lease_transfer_ids == ["xfer-1", "xfer-2"]
+        worker.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kv_lease_duration", [30, None])
+async def test_prefill_side_channel_renews_leases(kv_lease_duration):
+    extra_config = (
+        {} if kv_lease_duration is None else {"kv_lease_duration": kv_lease_duration}
+    )
+    vllm_config = _make_worker_vllm_config(
+        "kv_producer", kv_connector_extra_config=extra_config
+    )
+    with (
+        set_current_vllm_config(vllm_config),
+        patch_worker_dependencies(),
+        patch.object(mooncake_connector.httpx, "AsyncClient", _BootstrapClientStub),
+    ):
+        producer = MooncakeConnector(
+            vllm_config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
+        ).connector_worker
+
+        # Allocation, then prefill end, as the scheduler reports them.
+        for block_ids in ([], [[1]]):
+            meta = MooncakeConnectorMetadata()
+            meta.reqs_to_send = {f"p-req-{i}": (f"xfer-{i}", block_ids) for i in (1, 2)}
+            before = time.perf_counter()
+            await producer.record_send_reqs(meta)
+        initial = kv_lease_duration or envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
+        for send_meta in producer.reqs_need_send.values():
+            assert before + initial <= send_meta.expire_time
+            assert send_meta.expire_time <= time.perf_counter() + initial
+            # Both deadlines pass.
+            send_meta.expire_time = before - 1
+
+        listener = asyncio.create_task(
+            producer._mooncake_sender_listener(threading.Event())
+        )
+        ctx = zmq.asyncio.Context()
+        dealer = ctx.socket(zmq.DEALER)
+        try:
+            while not producer.side_channel_port:
+                await asyncio.sleep(0.01)
+            dealer.connect(f"tcp://127.0.0.1:{producer.side_channel_port}")
+
+            async def request(message) -> MooncakeXferResponse:
+                await dealer.send(msgspec.msgpack.encode(message))
+                reply = await asyncio.wait_for(dealer.recv(), timeout=10)
+                return msgspec.msgpack.decode(reply, type=MooncakeXferResponse)
+
+            renewal = MooncakeLeaseHeartbeat(lease_transfer_ids=["xfer-1", "xfer-9"])
+            response = await request(renewal)
+            if kv_lease_duration is None:
+                assert response.status == MooncakeXferResponseStatus.ERROR
+                expired = {"p-req-1", "p-req-2"}
+            else:
+                assert response.status == MooncakeXferResponseStatus.FINISH
+                renewed = producer.reqs_need_send["xfer-1"].expire_time
+                assert renewed >= before + kv_lease_duration * 2 / 3
+                # A renewal never recreates a transfer P does not hold, and
+                # never shortens a deadline.
+                assert "xfer-9" not in producer.reqs_need_send
+                producer.reqs_need_send["xfer-1"].expire_time = renewed + 100
+                await request(renewal)
+                assert producer.reqs_need_send["xfer-1"].expire_time == renewed + 100
+                expired = {"p-req-2"}
+
+            # Pulls on the same channel still reach the sender workers.
+            pull = _xfer_meta(
+                [_region(0x2000)], {"d-req-1": ("xfer-1", [[1]])}, remote_tp_rank=1
+            )
+            response = await request(pull)
+            assert response.status == MooncakeXferResponseStatus.ERROR
+            assert "not paired" in response.err_msg
+
+            assert await producer.fetch_finished_sending_reqs() == expired
+        finally:
+            listener.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await listener
+            dealer.close(linger=0)
+            ctx.term()
+            producer.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_live_req", [False, True])
+async def test_pull_after_expiry_fails_without_waiting(with_live_req):
+    """A pull for KV that P already freed must not wait for a prefill."""
+    vllm_config = _make_worker_vllm_config("kv_producer")
+    with set_current_vllm_config(vllm_config), patch_worker_dependencies():
+        producer = MooncakeConnector(
+            vllm_config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
+        ).connector_worker
+        producer.kv_caches_base_addr = [0x1000]
+        producer.block_len_per_layer = [256]
+        producer.kv_block_len_per_layer = [256]
+        producer.registered_layer_names = ["model.layers.0.self_attn"]
+        producer.registered_layer_indices = [0]
+        sender_loop = producer.sender_loop
+        producer.sender_loop = asyncio.get_running_loop()
+
+        producer.reqs_need_send["xfer-expired"] = SendBlockMeta(
+            p_req_id="p-req-expired",
+            transfer_id="xfer-expired",
+            local_block_ids=[[1]],
+            ready=asyncio.Event(),
+            expire_time=time.perf_counter() - 1,
+        )
+        assert await producer.fetch_finished_sending_reqs() == {"p-req-expired"}
+
+        req_blocks = {"d-req-expired": ("xfer-expired", [[100]])}
+        if with_live_req:
+            live = SendBlockMeta(
+                p_req_id="p-req-live",
+                transfer_id="xfer-live",
+                local_block_ids=[[2]],
+                ready=asyncio.Event(),
+                expire_time=time.perf_counter() + 100,
+            )
+            live.ready.set()
+            producer.reqs_need_send["xfer-live"] = live
+            req_blocks["d-req-live"] = ("xfer-live", [[200]])
+        metadata = _xfer_meta(
+            [_region(0x2000, row_offset=-1, layer_name="model.layers.0.self_attn")],
+            req_blocks,
+        )
+        sock = AsyncMock(spec=zmq.asyncio.Socket, send_multipart=AsyncMock())
+        with patch.object(producer, "_send_blocks", return_value=0):
+            await producer.send_kv_to_decode(b"consumer", sock, metadata)
+
+        # No placeholder that would wait for a prefill that already ran.
+        assert "xfer-expired" not in producer.reqs_need_send
+        responses = [
+            producer._xfer_resp_decoder.decode(c.args[0][1])
+            for c in sock.send_multipart.call_args_list
+        ]
+        assert responses[0].err_reqs == ["d-req-expired"]
+        if with_live_req:
+            assert responses[0].status == MooncakeXferResponseStatus.CONTINUE
+            assert len(responses) == 2
+            assert responses[1].status == MooncakeXferResponseStatus.FINISH
+            assert responses[1].ok_reqs == ["d-req-live"]
+            assert producer.finished_sending_reqs == {"p-req-live"}
+        else:
+            assert responses[0].status == MooncakeXferResponseStatus.FINISH
+            assert len(responses) == 1
+
+        producer.sender_loop = sender_loop
+        producer.shutdown()
 
 
 @pytest.mark.parametrize(

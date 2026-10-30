@@ -406,6 +406,8 @@ class Fp8LinearMethod(LinearMethodBase):
 
             # Update layer with new values.
             replace_parameter(layer, "weight", weight.data)
+            # The helper returns (K, N); the param keeps its checkpoint dims.
+            layer.processed_weight_dims = (0, 1)
             replace_parameter(layer, "weight_scale", weight_scale.data)
 
         if input_scale is not None:

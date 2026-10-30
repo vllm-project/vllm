@@ -121,6 +121,7 @@ if TYPE_CHECKING:
     VLLM_USE_BYTECODE_HOOK: bool = True
     VLLM_FORCE_AOT_LOAD: bool = False
     VLLM_USE_MEGA_AOT_ARTIFACT: bool = False
+    VLLM_COMPILE_ON_ONE_RANK: bool = False
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_FASTSAFETENSORS_QUEUE_SIZE: int = 0
     VLLM_TRITON_FORCE_FIRST_CONFIG: bool = False
@@ -240,6 +241,7 @@ if TYPE_CHECKING:
     VLLM_P2P_MAX_PEERS: int = 128
     VLLM_P2P_HANDSHAKE_TIMEOUT_S: int = 30
     VLLM_P2P_IDLE_TIMEOUT_S: int = 300
+    VLLM_P2P_TRANSFER_STALL_TIMEOUT_S: float = 20.0
     VLLM_EC_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_EC_SIDE_CHANNEL_PORT: int = 5601
     VLLM_MOONCAKE_BOOTSTRAP_PORT: int = 8998
@@ -401,6 +403,18 @@ def use_mega_aot_artifact():
     )
 
     return os.environ.get("VLLM_USE_MEGA_AOT_ARTIFACT", default_value) == "1"
+
+
+def compile_on_one_rank() -> bool:
+    from vllm.platforms import current_platform
+    from vllm.utils.torch_utils import is_torch_equal_or_newer
+
+    if not is_torch_equal_or_newer("2.14.0.dev"):
+        return False
+    # Inductor implements the mode for CUDA/ROCm and XPU only.
+    if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
+        return False
+    return os.environ.get("VLLM_COMPILE_ON_ONE_RANK", "0") == "1"
 
 
 def env_with_choices(
@@ -808,6 +822,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # without re-splitting graph modules. This reduces overhead during model
     # loading by using reconstruct_serializable_fn_from_mega_artifact.
     "VLLM_USE_MEGA_AOT_ARTIFACT": use_mega_aot_artifact,
+    # Compile with torch's compile-on-one-rank mode, which resolves the device
+    # at run time instead of baking the compile-time index into the cached
+    # code, so a compile cache can be reused on any device index (e.g. across
+    # --device-ids). Off by default. Requires torch >= 2.14 on CUDA/ROCm or
+    # XPU; not yet compatible with use_inductor_graph_partition or
+    # debug_dump_path.
+    "VLLM_COMPILE_ON_ONE_RANK": compile_on_one_rank,
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
     "LOCAL_RANK": lambda: int(os.environ.get("LOCAL_RANK", "0")),
@@ -1776,6 +1797,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # only when remaining peer slots are within 8 of VLLM_P2P_MAX_PEERS.
     # Default: 300. Set to 0 to disable.
     "VLLM_P2P_IDLE_TIMEOUT_S": lambda: int(os.getenv("VLLM_P2P_IDLE_TIMEOUT_S", "300")),
+    # Seconds a P2P WRITE may stay in progress before the source treats its
+    # peer as faulted: no new WRITEs to it, and the session is torn down.
+    # The stalled transfer and its pins are held until it stops. Default:
+    # 20. Set to 0 to disable.
+    "VLLM_P2P_TRANSFER_STALL_TIMEOUT_S": lambda: float(
+        os.getenv("VLLM_P2P_TRANSFER_STALL_TIMEOUT_S", "20")
+    ),
     # IP address used for the EC connector's ZMQ side channel
     # (producer ROUTER bind, consumer DEALER dial).
     "VLLM_EC_SIDE_CHANNEL_HOST": lambda: os.getenv(

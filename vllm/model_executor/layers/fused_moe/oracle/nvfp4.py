@@ -207,6 +207,18 @@ def select_nvfp4_moe_backend(
     """Select the primary NvFP4 MoE backend
     Note: Shape-specific fallbacks may still occur at runtime.
     """
+    from vllm.model_executor.layers.quantization.online.requantization import (
+        is_requantization_source,
+    )
+
+    # TODO: remove and let the oracles have an option to skip init.
+    if is_requantization_source():
+        from vllm.model_executor.layers.fused_moe.experts.nvfp4_emulation_moe import (
+            Nvfp4QuantizationEmulationTritonExperts,
+        )
+
+        return NvFp4MoeBackend.EMULATION, Nvfp4QuantizationEmulationTritonExperts
+
     # NOTE: the kernels are selected in the following order.
     # FLASHINFER_B12X is intentionally excluded from auto-selection until
     # the upstream CUTLASS SM121 MMA op guard is resolved; use

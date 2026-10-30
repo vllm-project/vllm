@@ -22,7 +22,10 @@ use zeromq::util::PeerIdentity;
 use zeromq::{DealerSocket, PushSocket, SocketOptions, SubSocket, XPubSocket, ZmqMessage};
 
 use crate::metrics::SchedulerStatsRecorder;
-use crate::protocol::handshake::{EngineCoreReadyResponse, HandshakeInitMessage, ReadyMessage};
+use crate::mock_engine::MockEngineConfig;
+use crate::protocol::handshake::{
+    EngineCoreReadyResponse, HandshakeInitMessage, HandshakeParallelConfig, ReadyMessage,
+};
 use crate::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
 use crate::protocol::logprobs::MaybeWireLogprobs;
 use crate::protocol::lora::LoraRequest;
@@ -36,12 +39,12 @@ use crate::protocol::output::{
 };
 use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::sampling::EngineCoreSamplingParams;
-use crate::protocol::stats::{KvConnectorStats, MooncakeOperation, SchedulerStats};
+use crate::protocol::stats::{KvConnectorStats, MooncakeOperation, SchedulerStats, UmbpOperation};
 use crate::protocol::tensor::{WireArrayData, WireTensor};
 use crate::protocol::utility::{PauseMode, SleepLevel, UtilityOutput, UtilityResultEnvelope};
 use crate::test_utils::{
-    IpcNamespace, setup_bootstrapped_mock_engine, setup_mock_engine_sockets,
-    setup_mock_engine_with_init, spawn_mock_engine_task,
+    IpcNamespace, setup_bootstrapped_mock_engine, setup_hybrid_mock_engine_sockets,
+    setup_mock_engine_sockets, setup_mock_engine_with_init, spawn_mock_engine_task,
 };
 use crate::transport::ConnectedEngine;
 use crate::{
@@ -270,6 +273,17 @@ async fn recv_start_dp_wave(sub: &mut SubSocket) -> (u32, Option<u32>) {
     rmp_serde::from_slice(&frames[1]).expect("decode START_DP_WAVE payload")
 }
 
+/// Receive one coordinator state publish and return its msgpack bytes as hex.
+async fn recv_coordinator_publish(sub: &mut SubSocket) -> String {
+    let frames = timeout(Duration::from_secs(2), sub.recv())
+        .await
+        .expect("coordinator state publish should arrive")
+        .unwrap()
+        .into_vec();
+    assert_eq!(frames.len(), 1);
+    hex::encode(&frames[0])
+}
+
 async fn send_start_wave(push: &mut PushSocket, engine_index: u32, wave: u32) {
     send_outputs(
         push,
@@ -309,7 +323,9 @@ fn handshake_test_config(
         transport_mode: TransportMode::HandshakeOwner {
             handshake_address,
             advertised_host: "127.0.0.1".to_string(),
+            engine_start_index: 0,
             engine_count,
+            data_parallel_size: engine_count,
             ready_timeout,
             local_input_address: None,
             local_output_address: None,
@@ -572,21 +588,23 @@ where
 async fn coordinator_handshake_includes_engine_control_addresses() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
-    let handshake_address = ipc.handshake_endpoint();
-    let engine_id = [0x00, 0x00];
-
-    let (init_tx, init_rx) = oneshot::channel();
-    let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let engine_task = tokio::spawn(async move {
-        let sockets = setup_mock_engine_sockets(handshake_address, &engine_id).await;
-        let _ = init_tx.send(sockets.init.clone());
-        let _ = shutdown_rx.await;
-    });
+    let mut engines = Vec::new();
+    for engine_id in [[0x00, 0x00], [0x01, 0x00]] {
+        let handshake_address = ipc.handshake_endpoint();
+        let (init_tx, init_rx) = oneshot::channel();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let engine_task = tokio::spawn(async move {
+            let sockets = setup_mock_engine_sockets(handshake_address, &engine_id).await;
+            let _ = init_tx.send(sockets.init.clone());
+            let _ = shutdown_rx.await;
+        });
+        engines.push((init_rx, shutdown_tx, engine_task));
+    }
 
     let client = connect_client_with_ipc(
         handshake_test_config(
             ipc.handshake_endpoint(),
-            1,
+            2,
             "test-model",
             Duration::from_secs(2),
             0,
@@ -596,13 +614,35 @@ async fn coordinator_handshake_includes_engine_control_addresses() {
     )
     .await;
 
-    let init = init_rx.await.unwrap();
+    let mut inits = Vec::new();
+    for (init_rx, shutdown_tx, engine_task) in engines {
+        inits.push(init_rx.await.unwrap());
+        let _ = shutdown_tx.send(());
+        engine_task.await.unwrap();
+    }
+    let init = &inits[0];
+    assert_eq!(init.parallel_config, inits[1].parallel_config);
     assert!(init.addresses.coordinator_input.is_some());
     assert!(init.addresses.coordinator_output.is_some());
-    assert!(init.addresses.frontend_stats_publish_address.is_none());
+    assert!(init.addresses.frontend_stats_publish_address.is_some());
 
-    let _ = shutdown_tx.send(());
-    engine_task.await.unwrap();
+    // Coordinated DP sends one DP rendezvous to every engine: the handshake
+    // host plus five distinct ports.
+    let rendezvous = init
+        .parallel_config
+        .data_parallel_rendezvous
+        .as_ref()
+        .expect("coordinated DP sends the DP rendezvous");
+    assert_eq!(rendezvous.data_parallel_master_ip, "127.0.0.1");
+    assert_eq!(rendezvous.data_parallel_size, 2);
+    let mut ports = rendezvous.data_parallel_master_port_list.clone();
+    assert_eq!(ports.len(), 4);
+    ports.push(rendezvous.data_parallel_master_port);
+    ports.sort_unstable();
+    ports.dedup();
+    assert_eq!(ports.len(), 5);
+    assert!(!ports.contains(&0));
+
     client.shutdown().await.unwrap();
 }
 
@@ -894,6 +934,395 @@ async fn coordinator_rebroadcasts_engine_start_wave_control() {
     engine0_task.await.unwrap();
     engine1_task.await.unwrap();
     client.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn coordinator_publishes_wave_state_to_frontend_subscribers() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+
+    let (init_tx, init_rx) = oneshot::channel();
+    let (subscribed_tx, subscribed_rx) = oneshot::channel();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let engine_task = tokio::spawn(async move {
+        let mut engine = setup_mock_engine_sockets(handshake_address, &[0x00, 0x00]).await;
+        let mut coordinator =
+            engine.coordinator.take().expect("coordinator sockets should be present");
+
+        // Finish wave 0 and start wave 1 before any frontend subscribes. The
+        // `START_DP_WAVE` broadcast shows the coordinator processed both.
+        send_start_wave(&mut coordinator.output_push, 0, 0).await;
+        assert_eq!(
+            recv_start_dp_wave(&mut coordinator.input_sub).await,
+            (0, Some(0))
+        );
+        send_outputs(
+            &mut coordinator.output_push,
+            DpControlOutput {
+                engine_index: 0,
+                timestamp: 0.0,
+                control: DpControlMessage::WaveComplete(0),
+            }
+            .into(),
+        )
+        .await;
+        send_start_wave(&mut coordinator.output_push, 0, 1).await;
+        assert_eq!(
+            recv_start_dp_wave(&mut coordinator.input_sub).await,
+            (1, Some(0))
+        );
+        let _ = init_tx.send(engine.init.clone());
+
+        subscribed_rx.await.unwrap();
+        send_outputs(
+            &mut coordinator.output_push,
+            DpControlOutput {
+                engine_index: 0,
+                timestamp: 0.0,
+                control: DpControlMessage::WaveComplete(1),
+            }
+            .into(),
+        )
+        .await;
+
+        let _ = shutdown_rx.await;
+    });
+
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            ipc.handshake_endpoint(),
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            Some(CoordinatorMode::InProc),
+        ),
+        &ipc,
+    )
+    .await;
+
+    let init = init_rx.await.unwrap();
+    let publish_address = init
+        .addresses
+        .frontend_stats_publish_address
+        .expect("frontend publish address should be present");
+    let mut frontend = SubSocket::new();
+    frontend.connect(&publish_address).await.unwrap();
+    frontend.subscribe("").await.unwrap();
+
+    // The wave-only publish `(None, wave, engines_running)` as a msgpack
+    // array. A frontend subscribing mid-wave first receives the current state.
+    assert_eq!(recv_coordinator_publish(&mut frontend).await, "93c001c3");
+
+    // A wave transition still pending when the frontend subscribed may publish
+    // the same state again; the next distinct state is the one that follows.
+    subscribed_tx.send(()).unwrap();
+    let next_state = loop {
+        let state = recv_coordinator_publish(&mut frontend).await;
+        if state != "93c001c3" {
+            break state;
+        }
+    };
+    assert_eq!(next_state, "93c002c2");
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    client.shutdown().await.unwrap();
+}
+
+/// Override the DP ranks a handshake-owned test config connects to.
+fn with_engine_range(
+    mut config: EngineCoreClientConfig,
+    start_index: u32,
+    dp_size: usize,
+) -> EngineCoreClientConfig {
+    let TransportMode::HandshakeOwner {
+        engine_start_index,
+        data_parallel_size,
+        ..
+    } = &mut config.transport_mode
+    else {
+        unreachable!("expected handshake-owned transport")
+    };
+    *engine_start_index = start_index;
+    *data_parallel_size = dp_size;
+    config
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hybrid_lb_frontends_split_ranks_and_follow_rank_zero_coordinator() {
+    init_tracing();
+    let head_ipc = IpcNamespace::new().unwrap();
+    let node_ipc = IpcNamespace::new().unwrap();
+
+    // Engine 0 runs on the rank-0 node and joins only that node's frontend.
+    let (wave_done_tx, wave_done_rx) = oneshot::channel();
+    let (head_shutdown_tx, head_shutdown_rx) = oneshot::channel();
+    let engine0_task = tokio::spawn({
+        let head_handshake = head_ipc.handshake_endpoint();
+        async move {
+            let mut engine = setup_mock_engine_sockets(head_handshake, &[0x00, 0x00]).await;
+            let mut coordinator =
+                engine.coordinator.take().expect("coordinator sockets should be present");
+
+            // Woken by the wave that engine 1 starts, engine 0 later ends it.
+            assert_eq!(
+                recv_start_dp_wave(&mut coordinator.input_sub).await,
+                (0, Some(1))
+            );
+            send_outputs(
+                &mut coordinator.output_push,
+                DpControlOutput {
+                    engine_index: 0,
+                    timestamp: 0.0,
+                    control: DpControlMessage::WaveComplete(0),
+                }
+                .into(),
+            )
+            .await;
+            let _ = wave_done_tx.send(());
+            let _ = head_shutdown_rx.await;
+        }
+    });
+
+    // Engine 1 runs on the other node and joins both frontends.
+    let (init1_tx, init1_rx) = oneshot::channel();
+    let (wave_tx, mut wave_rx) = mpsc::unbounded_channel();
+    let (node_shutdown_tx, mut node_shutdown_rx) = oneshot::channel();
+    let engine1_task = tokio::spawn({
+        let head_handshake = head_ipc.handshake_endpoint();
+        let node_handshake = node_ipc.handshake_endpoint();
+        async move {
+            let mut engine =
+                setup_hybrid_mock_engine_sockets(head_handshake, node_handshake, &[0x01, 0x00])
+                    .await;
+            let _ = init1_tx.send(engine.init.clone());
+            let mut coordinator =
+                engine.coordinator.take().expect("coordinator sockets should be present");
+            send_start_wave(&mut coordinator.output_push, 1, 0).await;
+            assert_eq!(
+                recv_start_dp_wave(&mut coordinator.input_sub).await,
+                (0, Some(1))
+            );
+
+            // Report the wave stamped on every request until shutdown.
+            let data_socket = engine.data_sockets.first_mut().expect("data socket");
+            loop {
+                tokio::select! {
+                    message = recv_engine_message(&mut data_socket.dealer) => {
+                        if message[0].as_ref() == [0x00] {
+                            let request: EngineCoreRequest =
+                                rmp_serde::from_slice(&message[1]).unwrap();
+                            let _ = wave_tx.send(request.current_wave);
+                        }
+                    }
+                    _ = &mut node_shutdown_rx => break,
+                }
+            }
+        }
+    });
+
+    let head_config = with_engine_range(
+        handshake_test_config(
+            head_ipc.handshake_endpoint(),
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            Some(CoordinatorMode::InProc),
+        ),
+        0,
+        2,
+    );
+    let node_config = with_engine_range(
+        handshake_test_config(
+            node_ipc.handshake_endpoint(),
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            None,
+        ),
+        1,
+        2,
+    );
+    let (head, node) = tokio::join!(
+        connect_client_with_ipc(head_config, &head_ipc),
+        connect_client_with_ipc(node_config, &node_ipc),
+    );
+
+    // Rank 0 handshakes with both engines but connects only to its own.
+    assert_eq!(head.engine_identities(), vec![[0x00, 0x00].as_slice()]);
+    assert_eq!(node.engine_identities(), vec![[0x01, 0x00].as_slice()]);
+    assert_eq!(
+        (head.data_parallel_size(), node.data_parallel_size()),
+        (2, 2)
+    );
+
+    // Engine 1 takes its I/O from its own frontend and the DP rendezvous from
+    // rank 0.
+    let init1 = init1_rx.await.unwrap();
+    assert_eq!(init1.addresses.inputs, vec![node_ipc.input_endpoint()]);
+    assert_eq!(
+        init1
+            .parallel_config
+            .data_parallel_rendezvous
+            .map(|rendezvous| rendezvous.data_parallel_size),
+        Some(2)
+    );
+
+    // The rank-1 frontend comes to stamp its requests with the wave that rank
+    // 0's coordinator advanced to.
+    wave_done_rx.await.unwrap();
+    let mut streams = Vec::new();
+    timeout(Duration::from_secs(2), async {
+        for i in 0.. {
+            streams.push(node.call(sample_request_with_id(&format!("req-{i}"))).await.unwrap());
+            if wave_rx.recv().await.unwrap() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the rank-1 frontend should follow the rank-0 wave");
+    drop(streams);
+
+    let _ = head_shutdown_tx.send(());
+    let _ = node_shutdown_tx.send(());
+    engine0_task.await.unwrap();
+    engine1_task.await.unwrap();
+    head.shutdown().await.unwrap();
+    node.shutdown().await.unwrap();
+}
+
+/// Connect a rank-0 frontend serving DP ranks [0, 1) of 2 while the given
+/// engines join it, and return the startup error.
+async fn rank_zero_startup_error(engines: Vec<([u8; 2], MockEngineConfig)>) -> String {
+    let ipc = IpcNamespace::new().unwrap();
+    let engine_tasks = engines
+        .into_iter()
+        .map(|(engine_id, config)| {
+            tokio::spawn(crate::mock_engine::connect_to_frontend(
+                ipc.handshake_endpoint(),
+                EngineId::from(&engine_id),
+                config,
+            ))
+        })
+        .collect::<Vec<_>>();
+    let config = with_engine_range(
+        handshake_test_config(
+            ipc.handshake_endpoint(),
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            None,
+        ),
+        0,
+        2,
+    );
+    let Err(error) = EngineCoreClient::connect(config.with_local_input_output_addresses(
+        Some(ipc.input_endpoint()),
+        Some(ipc.output_endpoint()),
+    ))
+    .await
+    else {
+        panic!("rank-0 startup should fail");
+    };
+    for task in engine_tasks {
+        task.abort();
+    }
+    error.to_report_string()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn partitioned_handshake_rejects_unexpected_ranks_and_headless_remote_engines() {
+    init_tracing();
+    let headless = MockEngineConfig::default();
+    let hybrid = MockEngineConfig {
+        headless: false,
+        ..MockEngineConfig::default()
+    };
+
+    expect_test::expect!["unexpected startup handshake message: engine EngineId(0500) is not one of the expected DP ranks 0..2"].assert_eq(
+        &rank_zero_startup_error(vec![
+            ([0x00, 0x00], headless.clone()),
+            ([0x05, 0x00], hybrid),
+        ])
+        .await,
+    );
+    expect_test::expect!["unexpected startup handshake message: the engine of DP rank 1 joined headless; in hybrid or external DP LB every node runs its own frontend"].assert_eq(
+        &rank_zero_startup_error(vec![
+            ([0x00, 0x00], headless.clone()),
+            ([0x01, 0x00], headless),
+        ])
+        .await,
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn handshake_checks_parallel_config_hashes_only_for_coordinated_dp() {
+    init_tracing();
+
+    async fn connect_engines_with_different_hashes(
+        ipc: &IpcNamespace,
+        coordinator_mode: Option<CoordinatorMode>,
+    ) -> crate::Result<EngineCoreClient> {
+        let engine_tasks = ["a", "b"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, hash)| {
+                tokio::spawn(crate::mock_engine::connect_to_frontend(
+                    ipc.handshake_endpoint(),
+                    EngineId::from(&[index as u8, 0x00]),
+                    MockEngineConfig {
+                        parallel_config_hash: Some(hash.to_string()),
+                        ..MockEngineConfig::default()
+                    },
+                ))
+            })
+            .collect::<Vec<_>>();
+        let result = EngineCoreClient::connect(
+            handshake_test_config(
+                ipc.handshake_endpoint(),
+                2,
+                "test-model",
+                Duration::from_secs(2),
+                0,
+                coordinator_mode,
+            )
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
+        )
+        .await;
+        for task in engine_tasks {
+            task.abort();
+        }
+        result
+    }
+
+    // Dense DP ranks share no collectives, so their configs may differ.
+    let ipc = IpcNamespace::new().unwrap();
+    let client = connect_engines_with_different_hashes(&ipc, None).await.unwrap();
+    client.shutdown().await.unwrap();
+
+    let ipc = IpcNamespace::new().unwrap();
+    let Err(error) =
+        connect_engines_with_different_hashes(&ipc, Some(CoordinatorMode::InProc)).await
+    else {
+        panic!("coordinated DP startup should fail");
+    };
+    assert!(
+        error
+            .to_report_string()
+            .contains("launch every DP rank with the same parallel config"),
+        "{}",
+        error.to_report_string()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2095,6 +2524,9 @@ async fn multi_engine_client_shares_transport_and_routes_by_inflight_count() {
     assert_eq!(init_1.addresses.inputs, vec![ipc.input_endpoint()]);
     assert_eq!(init_0.addresses.outputs, vec![ipc.output_endpoint()]);
     assert_eq!(init_1.addresses.outputs, vec![ipc.output_endpoint()]);
+    // Without coordinated DP, engines keep their own rendezvous config.
+    assert_eq!(init_0.parallel_config, HandshakeParallelConfig::default());
+    assert_eq!(init_1.parallel_config, HandshakeParallelConfig::default());
 
     assert_eq!(client.input_address(), ipc.input_endpoint());
     assert_eq!(client.output_address(), ipc.output_endpoint());
@@ -2922,6 +3354,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     let mooncake_stats_hex = lines.next().expect("missing Mooncake stats fixture line");
     let mooncake_transfer_stats_hex =
         lines.next().expect("missing Mooncake transfer stats fixture line");
+    let umbp_stats_hex = lines.next().expect("missing UMBP stats fixture line");
     let multi_connector_stats_hex =
         lines.next().expect("missing MultiConnector stats fixture line");
     let ready_response_hex = lines.next().expect("missing ready response fixture line");
@@ -3149,6 +3582,13 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
         KvConnectorStats::MooncakeTransfer(stats) if stats.num_failed_transfers == [1]
     ));
 
+    let umbp_stats: KvConnectorStats =
+        rmp_serde::from_slice(&hex::decode(umbp_stats_hex).unwrap()).unwrap();
+    assert!(matches!(
+        umbp_stats,
+        KvConnectorStats::Umbp(stats) if stats.0[&UmbpOperation::Store].num_bytes == 4096
+    ));
+
     let multi_connector_stats: KvConnectorStats =
         rmp_serde::from_slice(&hex::decode(multi_connector_stats_hex).unwrap()).unwrap();
     let KvConnectorStats::Multi(multi_connector_stats) = multi_connector_stats else {
@@ -3157,6 +3597,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     assert!(multi_connector_stats.nixl.is_some());
     assert!(multi_connector_stats.mooncake_transfer.is_some());
     assert!(multi_connector_stats.mooncake.is_some());
+    assert!(multi_connector_stats.umbp.is_some());
     assert!(multi_connector_stats.other.contains_key("UnsupportedConnector"));
     let nixl_stats = multi_connector_stats.nixl.as_ref().expect("NIXL stats decode");
     assert_eq!(nixl_stats.num_failed_handshakes, [1]);
@@ -3202,6 +3643,10 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     ));
     assert!(rendered_metrics.contains(
         "vllm:nixl_num_notifications_after_expiry_total{model_name=\"test-model\",engine=\"0\"} 2"
+    ));
+    assert!(rendered_metrics.contains(
+        "vllm:umbp_transfer_bytes_total{model_name=\"test-model\",engine=\"0\",\
+         operation=\"load\"} 8192"
     ));
 
     let map_keys = |bytes: &[u8]| -> BTreeSet<String> {

@@ -145,6 +145,7 @@ def _mxfp8_quant_triton_kernel():
 
 
 _MXFP8_QUANT_KERNEL = None
+_MXFP8_M1_BLOCK_M = {2048: 4, 3072: 4, 6144: 2}
 
 
 def _mxfp8_e4m3_quantize_triton(
@@ -163,7 +164,7 @@ def _mxfp8_e4m3_quantize_triton(
     scales = torch.empty(
         (M, K // MXFP8_BLOCK_SIZE), dtype=MXFP8_SCALE_DTYPE, device=x.device
     )
-    BLOCK_M = 64
+    BLOCK_M = _MXFP8_M1_BLOCK_M.get(K, 64) if M == 1 else 64
     grid = (triton.cdiv(M, BLOCK_M), K // MXFP8_BLOCK_SIZE)
     _MXFP8_QUANT_KERNEL[grid](
         x,
@@ -180,6 +181,7 @@ def _mxfp8_e4m3_quantize_triton(
         BLOCK_M=BLOCK_M,
         FP8_MAX=float(torch.finfo(MXFP8_VALUE_DTYPE).max),
         TINY=float(torch.finfo(torch.float32).tiny),
+        num_warps=4,
     )
     return xq, scales
 

@@ -282,10 +282,8 @@ def get_type_hints(type_hint: TypeHint) -> set[TypeHint]:
     return type_hints
 
 
-NEEDS_HELP = (
-    any("--help" in arg for arg in sys.argv)  # vllm SUBCOMMAND --help
-    or "mkdocs" in sys.modules  # mkdocs SUBCOMMAND
-)
+IS_ARGPARSE = any("--help" in arg for arg in sys.argv)  # vllm SUBCOMMAND --help
+NEEDS_HELP = IS_ARGPARSE or "mkdocs" in sys.modules  # mkdocs SUBCOMMAND
 
 
 def _maybe_add_docs_url(cls: Any) -> str:
@@ -354,8 +352,9 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
         # Get the help text for the field
         name = field.name
         help = cls_docs.get(name, "").strip()
-        # Escape % for argparse
-        help = help.replace("%", "%%")
+        # Escape % for argparse's %-formatting in _expand_help
+        if IS_ARGPARSE:
+            help = help.replace("%", "%%")
 
         # Initialise the kwargs dictionary for the field
         kwargs[name] = {"default": default, "help": help}

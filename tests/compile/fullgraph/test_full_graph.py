@@ -59,7 +59,7 @@ def models_list(*, all: bool = True, keywords: list[str] | None = None):
     [CompilationMode.DYNAMO_TRACE_ONCE, CompilationMode.VLLM_COMPILE],
 )
 @pytest.mark.parametrize("model, model_kwargs", models_list(all=True))
-@create_new_process_for_each_test()
+@create_new_process_for_each_test("spawn")
 def test_full_graph(
     monkeypatch: pytest.MonkeyPatch,
     model: str,
@@ -140,7 +140,7 @@ def test_full_graph(
     ],
 )
 # only test some of the models
-@create_new_process_for_each_test()
+@create_new_process_for_each_test("spawn")
 def test_custom_compile_config(
     compilation_config: CompilationConfig,
     model: str,
