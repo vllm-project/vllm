@@ -205,8 +205,10 @@ impl std::fmt::Display for RequiredFile {
 
 /// Model files of one source, read from disk or downloaded from the Hub on demand.
 enum SourceFiles {
-    /// A local model directory or a cached Hub snapshot.
+    /// A local model directory given by path.
     Dir(PathBuf),
+    /// A cached Hub snapshot of `model_id`.
+    Snapshot { dir: PathBuf, model_id: String },
     /// A Hub repo with its listed files.
     Remote {
         model_id: String,
@@ -232,10 +234,11 @@ impl SourceFiles {
         let cache = std::env::var_os("HF_HUB_CACHE")
             .map(|path| Cache::new(path.into()))
             .unwrap_or_else(Cache::from_env);
-        if let Some(snapshot) = cached_snapshot_dir(&cache, &repo).map(Self::Dir)
-            && snapshot.contains(required).await?
-        {
-            return Ok(snapshot);
+        if let Some(dir) = cached_snapshot_dir(&cache, &repo) {
+            let snapshot = Self::snapshot(model_id, dir);
+            if snapshot.contains(required).await? {
+                return Ok(snapshot);
+            }
         }
         if is_hf_hub_offline() {
             return Err(Error::Tokenizer(format!(
@@ -264,8 +267,15 @@ impl SourceFiles {
 
     /// Return the path of `filename`, downloading it if the source lists it.
     async fn get(&self, filename: &str) -> Result<Option<PathBuf>> {
+        self.probe(filename).await
+    }
+
+    /// Look for `filename` without treating its absence as a cache miss: a
+    /// tokenizer format the model may not use, or a file that decides whether
+    /// a cached snapshot is usable.
+    async fn probe(&self, filename: &str) -> Result<Option<PathBuf>> {
         match self {
-            Self::Dir(dir) => Ok(local_file_if_exists(dir, filename)),
+            Self::Dir(dir) | Self::Snapshot { dir, .. } => Ok(local_file_if_exists(dir, filename)),
             Self::Remote {
                 model_id,
                 repo,
@@ -281,7 +291,7 @@ impl SourceFiles {
     async fn contains(&self, required: RequiredFile) -> Result<bool> {
         Ok(match required {
             RequiredFile::Tokenizer => self.tokenizer_file().await?.is_some(),
-            RequiredFile::Config => self.get("config.json").await?.is_some(),
+            RequiredFile::Config => self.probe("config.json").await?.is_some(),
             RequiredFile::Nothing => true,
         })
     }
@@ -289,12 +299,12 @@ impl SourceFiles {
     /// Find the tokenizer file: `tekken.json`, `tokenizer.json`, or a tiktoken file.
     async fn tokenizer_file(&self) -> Result<Option<PathBuf>> {
         for filename in ["tekken.json", "tokenizer.json"] {
-            if let Some(path) = self.get(filename).await? {
+            if let Some(path) = self.probe(filename).await? {
                 return Ok(Some(path));
             }
         }
         match self {
-            Self::Dir(dir) => Ok(discover_tiktoken_in_dir(dir)),
+            Self::Dir(dir) | Self::Snapshot { dir, .. } => Ok(discover_tiktoken_in_dir(dir)),
             Self::Remote {
                 model_id,
                 repo,
@@ -319,6 +329,10 @@ impl SourceFiles {
                     "model '{model_id}' does not expose a supported tokenizer file \
                      (tokenizer.json, tiktoken.model, or *.tiktoken) on Hugging Face"
                 ),
+                Self::Snapshot { dir, model_id, .. } => format!(
+                    "cached snapshot '{}' of model '{model_id}' does not contain a supported tokenizer file (tokenizer.json, tiktoken.model, or *.tiktoken)",
+                    dir.display()
+                ),
             }));
         };
         if tokenizer_path.ends_with("tekken.json") {
@@ -335,7 +349,7 @@ impl SourceFiles {
     /// Find the dedicated chat template file, if any.
     async fn chat_template(&self) -> Result<Option<PathBuf>> {
         match self {
-            Self::Dir(dir) => Ok(discover_chat_template_in_dir(dir)),
+            Self::Dir(dir) | Self::Snapshot { dir, .. } => Ok(discover_chat_template_in_dir(dir)),
             Self::Remote {
                 model_id,
                 repo,
@@ -344,6 +358,14 @@ impl SourceFiles {
                 Some(filename) => download_known_file(repo, model_id, filename).await.map(Some),
                 None => Ok(None),
             },
+        }
+    }
+
+    /// A cached snapshot of `model_id`.
+    fn snapshot(model_id: &str, dir: PathBuf) -> Self {
+        Self::Snapshot {
+            dir,
+            model_id: model_id.to_string(),
         }
     }
 }
