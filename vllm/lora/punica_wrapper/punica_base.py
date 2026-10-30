@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from vllm.utils.torch_utils import async_tensor_h2d
+
 from .utils import compute_meta, convert_mapping
 
 if TYPE_CHECKING:
@@ -133,6 +135,10 @@ class PunicaWrapperBase(PunicaWrapperABC):
         self._token_lora_indices = torch.empty(
             max_num_batched_tokens, dtype=torch.long, device=device
         )
+        self.token_lora_ids = torch.zeros(
+            max_num_batched_tokens, dtype=torch.int64, device=device
+        )
+        self.slot_lora_ids: torch.Tensor | None = None
         self._sampler_indices = torch.empty(
             max_num_batched_tokens, dtype=torch.long, device=device
         )
@@ -167,6 +173,19 @@ class PunicaWrapperBase(PunicaWrapperABC):
         max_loras: int,
         vocab_size: int,
     ):
+        self.token_lora_ids.zero_()
+        async_tensor_h2d(
+            list(mapping.index_mapping),
+            out=self.token_lora_ids[: len(mapping.index_mapping)],
+        )
+        if self.slot_lora_ids is None:
+            self.slot_lora_ids = torch.empty(
+                len(lora_index_to_id), dtype=torch.int64, device=self.device
+            )
+        async_tensor_h2d(
+            [adapter_id or 0 for adapter_id in lora_index_to_id],
+            out=self.slot_lora_ids,
+        )
         (
             base_indices,
             sampler_indices,
