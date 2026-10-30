@@ -39,6 +39,7 @@ steps:
         'bash .buildkite/scripts/hardware_ci/run-intel-ci-test.sh example'
   - label: ":intel: (BMG) V1 test"
     key: xpu-v1-test
+    automatic_shard: false  # runs through its own hardware runner, with no test timings on main
     depends_on:
       - image-build-xpu
     timeout_in_minutes: 70

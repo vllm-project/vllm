@@ -6,7 +6,6 @@ steps:
 # - label: ":nvidia: (H200 MIG 35GB) Model Executor"
 #   device: h200_35gb
 #   key: model-executor
-#   automatic_shard: true
 #   timeout_in_minutes: 60
 #   source_file_dependencies:
 #   - vllm/engine/arg_utils.py
@@ -60,7 +59,6 @@ steps:
 - label: ':amd: (MI300) Model Executor'
   device: mi300_1
   key: amd-model-executor
-  automatic_shard: true
   timeout_in_minutes: 75
   source_file_dependencies:
   - vllm/engine/arg_utils.py
