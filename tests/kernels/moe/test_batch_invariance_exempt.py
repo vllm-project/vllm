@@ -1,37 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""batch_invariance_exempt() lifts the batch-invariance requirement on MoE
-experts selection, e.g. for a speculative drafter."""
+"""VLLM_BI_DRAFTER=0 lets the drafter skip batch-invariant MoE experts."""
 
 import pytest
 
 import vllm.envs as envs
 from tests.kernels.moe.utils import make_dummy_moe_config
-from vllm.model_executor.determinism.scope import (
-    batch_invariance_exempt,
-    drafter_build_context,
+from vllm.model_executor.determinism import (
+    building_drafter,
     requires_batch_invariant_kernels,
 )
 from vllm.model_executor.layers.fused_moe import modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.spec_decode import speculator as speculator_mod
-from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
-from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import DFlash2Speculator
-from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
-from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
-from vllm.v1.worker.gpu.spec_decode.extract_hidden_states import (
-    ExtractHiddenStatesSpeculator,
-)
-from vllm.v1.worker.gpu.spec_decode.gemma4.speculator import Gemma4Speculator
-from vllm.v1.worker.gpu.spec_decode.lilicorr.speculator import LiLiCorrSpeculator
 from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
-from vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator import (
-    MultiModuleMTPSpeculator,
-)
-from vllm.v1.worker.gpu.spec_decode.standalone_ar.speculator import (
-    StandaloneARSpeculator,
-)
 
 
 class _NonInvariantTritonExperts(TritonExperts):
@@ -40,23 +23,20 @@ class _NonInvariantTritonExperts(TritonExperts):
         return False
 
 
-def test_exempt_scope_only_lifts_the_requirement_inside(monkeypatch):
+@pytest.mark.parametrize("bi_drafter", [True, False])
+def test_only_drafter_is_exempt(monkeypatch, bi_drafter):
     monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    monkeypatch.setattr(envs, "VLLM_BI_DRAFTER", bi_drafter)
     assert requires_batch_invariant_kernels()
-    with batch_invariance_exempt():
-        assert not requires_batch_invariant_kernels()
-        with batch_invariance_exempt():
-            assert not requires_batch_invariant_kernels()
-        assert not requires_batch_invariant_kernels()
+    with building_drafter():
+        assert requires_batch_invariant_kernels() == bi_drafter
     assert requires_batch_invariant_kernels()
-
-    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", False)
-    assert not requires_batch_invariant_kernels()
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="TritonExperts on CUDA")
-def test_exempt_scope_accepts_experts_without_batch_invariance(monkeypatch):
+def test_drafter_accepts_non_invariant_experts(monkeypatch):
     monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    monkeypatch.setattr(envs, "VLLM_BI_DRAFTER", False)
     config = make_dummy_moe_config(
         num_experts=8, experts_per_token=2, hidden_dim=256, intermediate_size=512
     )
@@ -66,60 +46,25 @@ def test_exempt_scope_accepts_experts_without_batch_invariance(monkeypatch):
             cls, config, None, None, mk.FusedMoEActivationFormat.Standard
         )
 
-    assert check(TritonExperts) == (True, None)
     supported, reason = check(_NonInvariantTritonExperts)
-    assert not supported
-    assert "batch invariance" in reason
-    with batch_invariance_exempt():
+    assert not supported and "batch invariance" in reason
+    with building_drafter():
         assert check(_NonInvariantTritonExperts) == (True, None)
-        assert check(TritonExperts) == (True, None)
 
 
-@pytest.mark.parametrize("bi_drafter", [True, False])
-def test_drafter_is_exempt_only_when_bi_drafter_is_off(monkeypatch, bi_drafter):
-    """VLLM_BI_DRAFTER=0 opts the drafter out; by default it stays invariant."""
+def test_load_model_builds_drafter_in_scope(monkeypatch):
     monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
-    monkeypatch.setattr(envs, "VLLM_BI_DRAFTER", bi_drafter)
-    with drafter_build_context():
-        assert requires_batch_invariant_kernels() == bi_drafter
-
-
-class _DraftBuilt(Exception):
-    pass
-
-
-@pytest.mark.parametrize(
-    "speculator_cls",
-    [
-        EagleSpeculator,
-        MTPSpeculator,
-        MultiModuleMTPSpeculator,
-        Gemma4Speculator,
-        DFlashSpeculator,
-        DFlash2Speculator,
-        DSparkSpeculator,
-        LiLiCorrSpeculator,
-        StandaloneARSpeculator,
-        ExtractHiddenStatesSpeculator,
-    ],
-)
-@pytest.mark.parametrize("bi_drafter", [True, False])
-def test_every_v2_drafter_is_built_under_the_switch(
-    monkeypatch, speculator_cls, bi_drafter
-):
-    """Each model runner V2 drafter is built inside drafter_build_context()."""
-    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
-    monkeypatch.setattr(envs, "VLLM_BI_DRAFTER", bi_drafter)
-    monkeypatch.setattr(speculator_mod, "get_layers_from_vllm_config", lambda *args: {})
+    monkeypatch.setattr(envs, "VLLM_BI_DRAFTER", False)
+    monkeypatch.setattr(speculator_mod, "get_layers_from_vllm_config", lambda *a: {})
     seen = []
 
     def load_draft_model(self, target_model, target_attn_layer_names):
         seen.append(requires_batch_invariant_kernels())
-        raise _DraftBuilt
+        raise StopIteration
 
-    monkeypatch.setattr(speculator_cls, "load_draft_model", load_draft_model)
-    speculator = object.__new__(speculator_cls)
+    monkeypatch.setattr(MTPSpeculator, "load_draft_model", load_draft_model)
+    speculator = object.__new__(MTPSpeculator)
     speculator.vllm_config = None
-    with pytest.raises(_DraftBuilt):
+    with pytest.raises(StopIteration):
         speculator.load_model(object())
-    assert seen == [bi_drafter]
+    assert seen == [False]

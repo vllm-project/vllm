@@ -10,7 +10,7 @@ from typing import Any, final
 import torch
 
 from vllm.logger import init_logger
-from vllm.model_executor.determinism.scope import requires_batch_invariant_kernels
+from vllm.model_executor.determinism import requires_batch_invariant_kernels
 from vllm.model_executor.layers.fused_moe.activation import (
     ApplyMoEActivationConfig,
     MoEActivation,
