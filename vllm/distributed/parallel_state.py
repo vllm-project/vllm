@@ -2214,6 +2214,8 @@ def initialize_model_parallel(
         and config.model_config is not None
         and config.model_config.architecture == "DeepseekV41ForCausalLM"
         and not enable_elastic_ep
+        # The replacement modes keep per-rank GPU tables and exchange no ids.
+        and engram_config.mode == "ngram"
     ):
         if (
             not engram_config.cpu_offload

@@ -377,6 +377,7 @@ steps:
   source_file_dependencies:
   - vllm/models/qwen4_exp/
   - vllm/config/compilation.py
+  - vllm/model_executor/models/config.py
   - vllm/v1/attention/backends/short_conv_attn.py
   - tests/models/qwen4_exp/
   commands:
@@ -384,6 +385,7 @@ steps:
       pytest -v -s
       models/qwen4_exp/test_config.py
       models/qwen4_exp/test_ple.py
+      models/qwen4_exp/test_ple_embedding_mode.py
 
 - label: ":computer: (CPU) Basic Models Other"
   key: basic-models-test-other-cpu
@@ -412,6 +414,7 @@ steps:
   - tests/models/test_dspark_mla.py
   - tests/models/transformers/test_layer_registry.py
   - tests/models/test_cohere2_moe_parallel_block.py
+  - tests/models/deepseek_v41/test_engram_replacement.py
   device: cpu-small
   commands:
     - >-
@@ -435,6 +438,7 @@ steps:
       models/test_beam_weight_mapping.py
       models/test_beam_numerics.py
       models/test_cohere2_moe_parallel_block.py
+      models/deepseek_v41/test_engram_replacement.py
 
 - label: ':amd: (MI355) DeepSeek-V4.1 Mono Decode Numerics'
   key: dsv41-mono-decode-numerics-amd

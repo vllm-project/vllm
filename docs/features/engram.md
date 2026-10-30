@@ -115,7 +115,8 @@ vllm serve deepseek-ai/DeepSeek-V4.1-Flash \
 ```
 
 `embedding_across_dp` is not supported with elastic expert parallelism yet.
-Qwen4Exp PLE tables are ETP-sharded instead and honor `cpu_offload` only.
+Qwen4Exp PLE tables are ETP-sharded instead and honor `cpu_offload` only (in
+`ngram` mode; see [PLE embedding mode](#ple-embedding-mode-qwen4exp-rocm)).
 
 ## Sharing host tables across DP replicas
 
@@ -136,9 +137,71 @@ and falls back to per-replica (or DP-sharded) tables with a warning when:
 Requirements: `cpu_offload` enabled, `--data-parallel-size > 1`, and a shared
 IPC namespace across the co-located replicas.
 
+## Lookup modes (DeepSeek V4.1, ROCm)
+
+On ROCm, `DeepseekV41ForCausalLM` accepts a `mode` in `--engram-config`. The
+non-default modes replace only the table lookup; the Engram projection, gate
+and residual add run unchanged.
+
+| Mode | Behaviour |
+| --- | --- |
+| `ngram` (default) | Hashed n-gram lookup, as described above. |
+| `per_token` | Reads one row per token from a per-token table, indexed by the compressed id of the current token. Requires `replacement_tables`. |
+| `zero` | The lookup returns zeros. |
+
+```bash
+# per-token table, one file per Engram layer
+vllm serve <model> --engram-config \
+  '{"mode": "per_token", "replacement_tables": "<model>/per_token_table"}'
+
+# zero lookup
+vllm serve <model> --engram-config '{"mode": "zero"}'
+```
+
+`replacement_tables` is a directory holding `U_L<layer>_bf16.npy` for every
+Engram layer id of the model: bf16 bits stored as `uint16`, shape
+`[engram_compressed_vocab_size, n_hash_cols, head_dim]` (for example
+`[99092, 24, 256]`). The table is user-supplied: any array of that dtype and
+shape works. Missing files and mismatched dtype or shape fail at startup with
+the file name in the error. Tables are read once at startup; weight reload and
+sleep level 2 do not restore them.
+
+These modes do not read the n-gram tables of the checkpoint, so a checkpoint
+without them can be served; if they are present they are skipped. The
+per-token tables live on each rank's GPU, sharded over the hash columns by
+tensor parallelism, so `cpu_offload` has no effect and `embedding_across_dp`,
+`dp_shared_memory` and `use_thp` must stay off, and no Engram data-parallel
+group is formed. The modes are experimental and not supported on other
+platforms. The ROCm DeepSeek V4.1 model does not use sequence parallelism, so
+the modes are not combined with it.
+
+## PLE embedding mode (Qwen4Exp, ROCm)
+
+On ROCm, `Qwen4ExpForCausalLM` selects the same kind of lookup with a
+`ple_embedding_mode` field in the text config, not with `--engram-config`. It
+can be set through `--hf-overrides`, nested under `text_config` (a top-level
+override is ignored and silently leaves the default `ngram`):
+
+```bash
+vllm serve <model> --hf-overrides '{"text_config": {"ple_embedding_mode": "zero"}}'
+```
+
+| Mode | Behaviour |
+| --- | --- |
+| `ngram` (default) | Hashed n-gram lookup, as described above. |
+| `per_token` | Reads one row of a `[vocab_size, ple_embed_dim]` table (`per_token_table.weight`) indexed by the current token id. Loading fails if the table is missing from the checkpoint. |
+| `zero` | The lookup returns zeros. |
+
+`per_token` supports a single PLE layer and needs `ple_embed_dim` divisible by
+the number of n-gram heads. Its table is replicated on every rank's GPU, so
+`cpu_offload` has no effect. Token ids outside the table are clamped to the
+first or last row instead of failing. The selected mode and table size are
+logged once per PLE layer. Non-`ngram` modes are experimental and not supported
+on other platforms or with sequence parallelism.
+
 ## Limitations
 
-- CUDA-alike platforms only.
+- CUDA-alike platforms only; the non-`ngram` lookup modes are ROCm only.
 - DeepSeek V4.1 Engram does not support DBO or microbatching; disable
   `--enable-dbo` and set `--ubatch-size 0`.
 - `dp_shared_memory` requires `cpu_offload`, `data_parallel_size > 1`, and is

@@ -1100,6 +1100,15 @@ class Qwen4ExpForConditionalGenerationConfig(Qwen3_5ForConditionalGenerationConf
         text_config = vllm_config.model_config.hf_text_config
         if text_config.hc_count <= 1:
             raise ValueError("Qwen4Exp requires hc_count > 1")
+        from vllm.models.qwen4_exp.common.ple_mode import (
+            validate_ple_embedding_config,
+        )
+
+        ple_mode = validate_ple_embedding_config(text_config)
+        if ple_mode != "ngram" and not current_platform.is_rocm():
+            raise NotImplementedError(
+                f"ple_embedding_mode={ple_mode!r} is only implemented for ROCm"
+            )
         parallel_config = vllm_config.parallel_config
         # MoE SP also enables HC SP without the explicit HC flag.
         if (
