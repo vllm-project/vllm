@@ -64,9 +64,23 @@ def _target_feeds_hc_residual(vllm_config: VllmConfig) -> bool:
 
 
 class BaseSpeculator(ABC):
+    """Base class for V2 model runner speculators.
+
+    This is also the interface for custom speculators, named by the
+    `speculator_class` of their registered `SpeculatorConfig` (see
+    `register_speculative_method`). Speculators that run a draft model
+    should subclass `DraftModelSpeculator` (or `TargetDependentARSpeculator` if
+    drafting consumes target model state), which the model runner loads and
+    allocates draft KV cache for.
+    """
+
     num_query_per_req: int = 1
     # Extra query slots reserved per request outside the regular queries.
     num_extra_query_per_req: int = 0
+    supports_mm_inputs: bool = False
+    # Draft logits for probabilistic rejection sampling, or None for
+    # greedy-draft verification and for speculators without a draft model.
+    draft_logits: DraftLogitsCache | None = None
 
     @abstractmethod
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
@@ -106,6 +120,12 @@ class BaseSpeculator(ABC):
         num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
         pass
+
+    def prepare_watermarking(
+        self, sampler: "GPUWatermarkSampler", idx_mapping: torch.Tensor
+    ) -> None:
+        """Prepare draft-side watermarking before `propose`. No-op by default."""
+        return
 
 
 class DraftModelSpeculator(BaseSpeculator):
