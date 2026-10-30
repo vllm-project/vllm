@@ -26,6 +26,8 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
     SlidingWindowSpec,
+    get_kv_cache_spec_sliding_window,
+    iter_layer_specs,
 )
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
@@ -53,8 +55,9 @@ def clip_ssm_state_blocks(blocks: list[int], num_spec_blocks: int) -> list[int]:
 def get_sliding_window_blocks_per_group(kv_cache_config: KVCacheConfig) -> list[int]:
     """Blocks a connector transfers per transfer group, 0 for non-window groups.
 
-    A sliding-window group transfers its window plus the tokens retained below
-    it, and one more block for the window/block boundary overlap.
+    A sliding-window group (including a packed group whose layers share one
+    window) transfers its window plus the tokens retained below it, and one
+    more block for the window/block boundary overlap.
 
     Args:
         kv_cache_config: Config supplying the transfer groups.
@@ -66,11 +69,16 @@ def get_sliding_window_blocks_per_group(kv_cache_config: KVCacheConfig) -> list[
     blocks_per_sw = []
     for group in kv_cache_config.transfer_groups:
         spec = group.kv_cache_spec
-        if isinstance(spec, SlidingWindowSpec):
-            n_tokens = spec.sliding_window + spec.extra_retained_tokens
-            blocks_per_sw.append(cdiv(n_tokens, spec.block_size) + 1)
-        else:
+        sliding_window = get_kv_cache_spec_sliding_window(spec)
+        if sliding_window is None:
             blocks_per_sw.append(0)
+            continue
+        retained = max(
+            layer_spec.extra_retained_tokens
+            for layer_spec in iter_layer_specs(spec)
+            if isinstance(layer_spec, SlidingWindowSpec)
+        )
+        blocks_per_sw.append(cdiv(sliding_window + retained, spec.block_size) + 1)
     return blocks_per_sw
 
 
