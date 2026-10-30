@@ -3,6 +3,7 @@
 """Pydantic models for Anthropic API protocol."""
 
 import time
+from http import HTTPStatus
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -26,6 +27,30 @@ class AnthropicErrorResponse(BaseModel):
 
     type: Literal["error"] = "error"
     error: AnthropicError
+
+
+# Anthropic SDKs dispatch on ``error.type``, which must use Anthropic's own
+# vocabulary rather than vLLM's internal/Python error class names.
+_ANTHROPIC_ERROR_TYPE_BY_STATUS: dict[int, str] = {
+    HTTPStatus.BAD_REQUEST.value: "invalid_request_error",
+    HTTPStatus.UNAUTHORIZED.value: "authentication_error",
+    HTTPStatus.FORBIDDEN.value: "permission_error",
+    HTTPStatus.NOT_FOUND.value: "not_found_error",
+    HTTPStatus.REQUEST_ENTITY_TOO_LARGE.value: "request_too_large",
+    HTTPStatus.TOO_MANY_REQUESTS.value: "rate_limit_error",
+    # vLLM reports overload (e.g. QueueOverflowError) as HTTP 503.
+    HTTPStatus.SERVICE_UNAVAILABLE.value: "overloaded_error",
+}
+
+
+def translate_error_type(status_code: int) -> str:
+    """Translate an HTTP status code to Anthropic's ``error.type`` vocabulary."""
+    error_type = _ANTHROPIC_ERROR_TYPE_BY_STATUS.get(status_code)
+    if error_type is not None:
+        return error_type
+    if status_code >= HTTPStatus.INTERNAL_SERVER_ERROR.value:
+        return "api_error"
+    return "invalid_request_error"
 
 
 class AnthropicUsage(BaseModel):

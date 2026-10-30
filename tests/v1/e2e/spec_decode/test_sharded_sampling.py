@@ -61,7 +61,7 @@ def test_mtp_sharded_sampling_equivalence(monkeypatch: pytest.MonkeyPatch):
                 max_num_seqs=len(test_prompts),
                 # Timing-based kernel selection is the dominant source of
                 # cross-boot numeric noise; disable for a tight comparison.
-                kernel_config={"enable_flashinfer_autotune": False},
+                enable_flashinfer_autotune=False,
             )
             try:
                 # Guard against a vacuous comparison: verify every worker is

@@ -18,7 +18,11 @@ pub enum TruncationSide {
 /// Maximum number of prompt tokens to retain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PromptTruncationLimit {
-    /// Use the input budget remaining after reserving output tokens.
+    /// Retain `max_model_len - 1` tokens, holding one token of context back
+    /// so generation always has room for at least one output token.
+    ///
+    /// Python's `TokenizeParams.max_truncation_tokens`; `max_tokens` is an
+    /// upper bound that is clamped after tokenization, not a reservation.
     InputBudget,
     /// Retain at most the given number of prompt tokens.
     Fixed(u64),
@@ -44,14 +48,14 @@ impl PromptTruncation {
         Ok(Self { limit, side })
     }
 
-    pub(crate) fn apply(self, prompt_token_ids: &mut Vec<u32>, input_budget: u32) -> Result<()> {
+    pub(crate) fn apply(self, prompt_token_ids: &mut Vec<u32>, max_model_len: u32) -> Result<()> {
         let max_input_tokens = match self.limit {
-            PromptTruncationLimit::InputBudget => input_budget,
+            PromptTruncationLimit::InputBudget => max_model_len.saturating_sub(1),
             PromptTruncationLimit::Fixed(limit) => {
-                if limit > u64::from(input_budget) {
-                    return Err(Error::TruncatePromptTokensExceedsBudget {
+                if limit > u64::from(max_model_len) {
+                    return Err(Error::TruncatePromptTokensExceedsMaxModelLen {
                         value: limit,
-                        budget: input_budget,
+                        max_model_len,
                     });
                 }
                 limit as u32
@@ -121,7 +125,7 @@ mod tests {
     }
 
     #[test]
-    fn input_budget_reserves_output_tokens() {
+    fn input_budget_holds_back_one_token_for_output() {
         let mut prompt = vec![0; 100];
         PromptTruncation {
             limit: PromptTruncationLimit::InputBudget,
@@ -129,11 +133,11 @@ mod tests {
         }
         .apply(&mut prompt, 70)
         .unwrap();
-        assert_eq!(prompt.len(), 70);
+        assert_eq!(prompt.len(), 69);
     }
 
     #[test]
-    fn fixed_limit_cannot_exceed_input_budget() {
+    fn fixed_limit_cannot_exceed_max_model_len() {
         let mut prompt = vec![1, 2, 3];
         let error = PromptTruncation {
             limit: PromptTruncationLimit::Fixed(80),
@@ -143,11 +147,20 @@ mod tests {
         .unwrap_err();
         assert!(matches!(
             error,
-            Error::TruncatePromptTokensExceedsBudget {
+            Error::TruncatePromptTokensExceedsMaxModelLen {
                 value: 80,
-                budget: 70
+                max_model_len: 70
             }
         ));
+
+        let mut prompt = vec![1, 2, 3];
+        PromptTruncation {
+            limit: PromptTruncationLimit::Fixed(70),
+            side: TruncationSide::Left,
+        }
+        .apply(&mut prompt, 70)
+        .unwrap();
+        assert_eq!(prompt, vec![1, 2, 3]);
     }
 
     #[test]

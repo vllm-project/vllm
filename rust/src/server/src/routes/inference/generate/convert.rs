@@ -131,7 +131,8 @@ mod tests {
                 "max_tokens": 7,
                 "logprobs": 2,
                 "prompt_logprobs": 1,
-                "ignore_eos": true
+                "ignore_eos": true,
+                "routed_experts_prompt_start": 2
             },
             "kv_transfer_params": {
                 "connector": "x"
@@ -158,6 +159,10 @@ mod tests {
             Some(1)
         );
         assert!(prepared.text_request.sampling_params.ignore_eos);
+        assert_eq!(
+            prepared.text_request.sampling_params.routed_experts_prompt_start,
+            Some(2)
+        );
         assert_eq!(prepared.text_request.priority, -3);
         assert_eq!(prepared.text_request.cache_salt.as_deref(), Some("salt"));
         assert_eq!(
@@ -171,25 +176,57 @@ mod tests {
     }
 
     #[test]
+    fn prepare_generate_request_accepts_python_extra_args() {
+        let request: GenerateRequest = serde_json::from_value(json!({
+            "token_ids": [11, 22],
+            "sampling_params": {"extra_args": {"custom": 1}},
+            "kv_transfer_params": {"connector": "x"}
+        }))
+        .expect("parse request");
+
+        let prepared = prepare_generate_request(
+            request,
+            &served(&["test-model"]),
+            ResolvedRequestContext::default(),
+            None,
+        )
+        .expect("prepare request");
+
+        let xargs = prepared.text_request.sampling_params.vllm_xargs.expect("xargs");
+        assert_eq!(xargs.get("custom"), Some(&json!(1)));
+        assert_eq!(
+            xargs.get("kv_transfer_params"),
+            Some(&json!({"connector": "x"}))
+        );
+    }
+
+    #[test]
     fn prepare_generate_request_preserves_watermarking_defaults_and_opt_out() {
-        for watermarking in [None, Some(true), Some(false)] {
+        // Python's `SamplingParams` declares `watermarking: bool | None`, so an
+        // explicit `null` means the same as omitting it.
+        for (watermarking, expected) in [
+            (None, None),
+            (Some(json!(null)), None),
+            (Some(json!(true)), Some(true)),
+            (Some(json!(false)), Some(false)),
+        ] {
             let mut body = json!({
                 "token_ids": [11, 22],
                 "sampling_params": {}
             });
             if let Some(watermarking) = watermarking {
-                body["sampling_params"]["watermarking"] = json!(watermarking);
+                body["sampling_params"]["watermarking"] = watermarking;
             }
             let prepared = prepare_generate_request(
-                serde_json::from_value(body).expect("parse request"),
+                serde_json::from_value(body.clone()).expect("parse request"),
                 &served(&["test-model"]),
                 ResolvedRequestContext::default(),
                 None,
             )
             .expect("prepare request");
             assert_eq!(
-                prepared.text_request.sampling_params.watermarking,
-                watermarking.unwrap_or(true)
+                prepared.text_request.sampling_params.watermarking, expected,
+                "{body}"
             );
         }
     }

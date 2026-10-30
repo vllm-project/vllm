@@ -15,7 +15,7 @@ jobs:
     steps:
       - name: Label issues based on keywords
         id: label-step
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             // Configuration: Add new labels and keywords here
@@ -196,6 +196,14 @@ jobs:
               // models, hardware and libraries.
               deepseek: {
                 keywords: [{ term: "DeepSeek", searchIn: "title" }],
+              },
+              beam: {
+                // Bare "beam" also describes beam search; require a model identifier.
+                regexPatterns: [{
+                  pattern: "(?:\\bbeam[- ]\\d|\\breflection(?:\\s+ai)?[ /-]+beam\\b|\\bBeamForCausalLM\\b|\\bBeamConfig\\b|\\[beam\\])",
+                  flags: "gi",
+                  searchIn: "title",
+                }],
               },
               // DSv4 and DSv4.1 are distinct architectures; these keep them exclusive.
               DSv4: {
@@ -625,7 +633,7 @@ jobs:
 
       - name: CC users for labeled issues
         if: steps.label-step.outputs.labels_added != '[]'
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             // Configuration: Map labels to GitHub users to CC
@@ -706,7 +714,7 @@ jobs:
 
       - name: Request missing ROCm info from issue author
         if: contains(steps.label-step.outputs.labels_added, 'rocm') && contains(toJSON(github.event.issue.labels.*.name), 'bug')
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             const body = (context.payload.issue.body || '').toLowerCase();

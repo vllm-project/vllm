@@ -21,6 +21,7 @@ from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
     AiterFp8BlockExperts,
     AiterFp8ChannelExperts,
     AiterFp8TensorExperts,
+    AiterMxfp4Experts,
     AiterUnquantizedExperts,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -231,6 +232,9 @@ def rank_worker(
             # bias-free SwiGLU-OAI (~55% sign agreement, ~5x-small magnitude
             # on hardware), instead of raising. Only smoke-test until the
             # fix in https://github.com/vllm-project/vllm/pull/59766 lands.
+            # SWIGLUOAI_UNINTERLEAVE isn't exempted here: its kernel math is
+            # identical to SWIGLUOAI's on this path (see reference_moe_impl),
+            # and it passes the full numerical check below.
             if config.is_w4a16_mxfp4 and config.activation == MoEActivation.SWIGLUOAI:
                 assert mk_out.shape == ref_out.shape, (
                     f"AiterMxfp4Experts output shape {mk_out.shape} != "
@@ -293,32 +297,56 @@ MK_ACTIVATIONS = [
     MoEActivation.SILU,
     MoEActivation.GELU,
     MoEActivation.SWIGLUOAI,
+    MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+    # SITU currently generates zero test cases: is_nyi_config() below gates
+    # it off entirely because the installed AITER build's kernel codegen
+    # doesn't support it yet. Kept here so coverage turns on automatically
+    # (no test-harness changes needed) once AITER catches up.
+    MoEActivation.SITU,
 ]
 
 
 def is_nyi_config(config: Config) -> bool:
     # We know these configs to be legitimate. but still fail.
     info = expert_info(config.fused_experts_type)
-    if info.needs_matching_quant:
-        # The triton kernels expect both per-act-token-quant and
-        # per-out-ch-quant or neither.
-        unsupported_quant_config = (
-            config.is_per_act_token_quant + config.is_per_out_ch_quant
-        ) == 1
-        if unsupported_quant_config:
-            return True
+    # The triton kernels expect per-out-ch-quant weights to be paired with
+    # per-act-token-quant activations.
+    if (
+        info.needs_matching_quant
+        and config.is_per_out_ch_quant
+        and not config.is_per_act_token_quant
+    ):
+        return True
+
+    is_aiter = issubclass(config.fused_experts_type, AiterExperts)
 
     # AITER's W4A16 MXFP4 (mxfp4 weight, unquantized activation) scheme only
-    # has a heuristic-dispatch kernel specialization for SWIGLUOAI (matching
-    # gpt-oss' own usage); SILU/GELU hit "Unsupported kernel config for moe
-    # heuristic dispatch" at runtime despite being declared supported by
-    # AiterExperts._supports_activation(). https://github.com/ROCm/aiter/issues/2419
-    is_w4a16_mxfp4 = (
-        issubclass(config.fused_experts_type, AiterExperts) and config.is_w4a16_mxfp4
+    # has a heuristic-dispatch kernel specialization for the SWIGLUOAI family
+    # (matching gpt-oss' own usage); SWIGLUOAI_UNINTERLEAVE hits the same
+    # kernel as SWIGLUOAI here since rocm_aiter_fused_experts() forces
+    # gate_mode=INTERLEAVE for any W4A16 mxfp4 call regardless of activation,
+    # overriding the uninterleaved hint. SILU/GELU/SITU hit "Unsupported
+    # kernel config for moe heuristic dispatch" at runtime despite being
+    # declared supported by AiterExperts._supports_activation().
+    # https://github.com/ROCm/aiter/issues/2419
+    is_w4a16_mxfp4 = is_aiter and config.is_w4a16_mxfp4
+    is_swigluoai_family = config.activation in (
+        MoEActivation.SWIGLUOAI,
+        MoEActivation.SWIGLUOAI_UNINTERLEAVE,
     )
-    if config.activation == MoEActivation.SWIGLUOAI:
+    if is_swigluoai_family:
         return not is_w4a16_mxfp4
     if is_w4a16_mxfp4:
+        return True
+
+    # AITER's W4A4 MXFP4 (mxfp4 weight, mxfp4 activation) path is the only
+    # candidate kernel specialization for SITU (Kimi-K3 convention), but the
+    # installed AITER build's heuristic dispatch routes this shape through a
+    # ck2stages kernel whose JIT codegen (gen_instances.py) doesn't accept
+    # the "situv2" activation (only silu/gelu/swiglu/gelutanh are valid
+    # choices), so the kernel build itself fails before any numerics can be
+    # compared. Mark NYI until AITER's dispatch/codegen supports it.
+    if config.activation == MoEActivation.SITU:
         return True
 
     if config.activation != MoEActivation.SILU:
@@ -491,8 +519,8 @@ def test_modular_kernel_combinations_singlegpu(
 # read once at import time, so each combo needs a fresh child process (see
 # parallel_launch_with_config) rather than in-process monkeypatching.
 #
-# AITER_MOE_SORT_BACKEND is not covered: it only matters when output_aux=True,
-# which vLLM only sets on the MXFP4 path -- not yet wired into AiterExperts.
+# AITER_MOE_SORT_BACKEND is covered separately below (3b): it only matters
+# when output_aux=True, which vLLM only sets on the MXFP4 DSV4 path.
 
 
 def _aiter_sort_backend_hooks_available() -> bool:
@@ -747,6 +775,178 @@ def test_aiter_moe_dispatch_policy_forwarded_through_apply(dispatch_policy: int)
     )
 
 
+# --- 3b: AITER_MOE_SORT_BACKEND (MXFP4 adaptive-vs-Opus aux sort) ------------
+#
+# Only matters when aiter's internal `output_aux` flag is set. aiter sets it
+# unconditionally for a handful of MXFP4 a4w4 kernel families it ships,
+# including DSV4 and Kimi-K3's SiTU path (the latter is in fact the shape
+# aiter's own adaptive/Opus crossover heuristic is tuned against -- see
+# `_aux_uses_opus()`'s docstring in the installed aiter). DSV4 is just the
+# only one of these this test file can currently drive end-to-end: it's
+# wired to a vLLM flag (VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4=1,
+# FusedMoEConfig.__post_init__) and the modular-kernel harness already
+# converts weights for it. Kimi-K3's SiTU activation is real and
+# default-enabled in production (VLLM_ROCM_USE_AITER_MOE_SITUV2="auto") but
+# is blanket-marked NYI by `is_nyi_config()` below pending harness support
+# for its weight-shuffle conversion -- a separate, tracked follow-up, not
+# this PR's scope. Despite the "a4w4" name, DSV4 runs through vLLM's W4A16
+# quant pair: activations aren't pre-quantized here, AITER quantizes them to
+# 4-bit internally.
+#
+# Shape (E=384, K=5120, N=640, topk=6, M=16) is DeepSeek-V4.1-tuned
+# (dsv41_fp4_tuned_fmoe.csv) and selects block_m=16 -- the only block_m
+# where aiter's _aux_uses_opus() crossover ever prefers adaptive over Opus.
+
+MXFP4_SORT_BACKEND_ENV_CASES = ["opus", "ck", "adaptive", "auto"]
+
+
+def _aiter_mxfp4_sort_backend_worker(
+    pgi: ProcessGroupInfo,
+    vllm_config: VllmConfig,
+    cpu_group,
+    config: Config,
+    weights: WeightTensors,
+    verbose: bool,
+    backend: str,
+):
+    import aiter.fused_moe as aiter_fused_moe
+
+    # Captured before patching: a patched attribute's signature would be the
+    # mock's (*args, **kwargs), not the real one.
+    original_moe_sorting_impl = aiter_fused_moe._moe_sorting_impl
+    original_adaptive_sort = aiter_fused_moe._adaptive_moe_sort
+
+    with (
+        mock.patch.object(
+            aiter_fused_moe,
+            "_moe_sorting_impl",
+            wraps=original_moe_sorting_impl,
+        ) as sorting_impl_mock,
+        mock.patch.object(
+            aiter_fused_moe,
+            "_adaptive_moe_sort",
+            wraps=original_adaptive_sort,
+        ) as adaptive_mock,
+    ):
+        # Reuses the real correctness/accuracy checking rank_worker already
+        # does for every other AiterExperts combo, instead of duplicating it.
+        rank_worker(pgi, vllm_config, cpu_group, config, weights, verbose)
+
+    assert sorting_impl_mock.call_count > 0, (
+        "Expected AiterMxfp4Experts.apply() to reach aiter's _moe_sorting_impl."
+    )
+    call = sorting_impl_mock.call_args_list[0]
+    bound = inspect.signature(original_moe_sorting_impl).bind(*call.args, **call.kwargs)
+    bound.apply_defaults()
+    output_aux = bound.arguments["output_aux"]
+    assert output_aux, (
+        "Expected this MXFP4 DSV4 shape to set aiter's internal output_aux "
+        "flag (set automatically by aiter's _make_mxfp4_metadata for the "
+        "DSV4 kernel config) -- without it, AITER_MOE_SORT_BACKEND has no "
+        "effect, and this test can no longer exercise its target branch."
+    )
+
+    backend_forces_opus = backend in ("opus", "ck")
+    block_size = bound.arguments["block_size"]
+    num_experts = bound.arguments["num_experts"]
+    routed_rows = bound.arguments["topk_ids"].numel()
+    aux_uses_opus = aiter_fused_moe._aux_uses_opus(
+        output_aux, block_size, routed_rows, num_experts
+    )
+    # Assert (don't derive expect_adaptive from) this predicate: otherwise a
+    # tuning change that flips it would silently relax the assertion below
+    # instead of failing it.
+    assert not aux_uses_opus, (
+        f"block_size={block_size} was chosen as adaptive-eligible, but the "
+        "installed aiter build's crossover now prefers Opus for it -- pick "
+        "a new adaptive-eligible shape."
+    )
+
+    if backend_forces_opus:
+        assert adaptive_mock.call_count == 0, (
+            f"AITER_MOE_SORT_BACKEND={backend!r} unconditionally disables "
+            "the adaptive sort, but the adaptive sort fired anyway."
+        )
+    else:
+        assert adaptive_mock.call_count > 0, (
+            f"AITER_MOE_SORT_BACKEND={backend!r} was requested for this "
+            "adaptive-eligible shape, but the adaptive sort never fired "
+            "-- a silent fallback to Opus."
+        )
+
+
+@require_aiter_moe
+@pytest.mark.parametrize("backend", MXFP4_SORT_BACKEND_ENV_CASES)
+def test_aiter_moe_sort_backend_dispatch_env_matrix_mxfp4(backend: str):
+    """3b follow-up to test_aiter_moe_sorting_backend_dispatch_env_matrix: covers
+    AITER_MOE_SORT_BACKEND (#54966), left uncovered by #58393. DSV4 is the only
+    aiter output_aux path this harness can currently drive end-to-end (see the
+    module comment above for the other known path, Kimi-K3 SiTU, and why it's
+    out of scope here)."""
+    if not _aiter_sort_backend_hooks_available():
+        pytest.skip(
+            "Installed aiter build predates the sort-backend hooks "
+            "(_moe_sorting_impl, _flydsl_moe_sorting, _USE_CK_MOE_SORTING, "
+            "_USE_FLYDSL_MOE_SORTING)."
+        )
+    import aiter.fused_moe as aiter_fused_moe
+
+    if not hasattr(aiter_fused_moe, "_adaptive_moe_sort") or not hasattr(
+        aiter_fused_moe, "_aux_uses_opus"
+    ):
+        pytest.skip(
+            "Installed aiter build lacks the MXFP4 adaptive-sort hooks "
+            "(_adaptive_moe_sort, _aux_uses_opus)."
+        )
+
+    from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+        MoEPrepareAndFinalizeNoDPEPModular,
+    )
+
+    # W4A16: weights are mxfp4, activations are unquantized -- the DSV4 gate
+    # in rocm_aiter_fused_experts() only fires for this quant scheme.
+    quant_config = TestMoEQuantConfig(
+        quant_dtype=None,
+        weight_dtype="mxfp4",
+        per_out_ch_quant=False,
+        per_act_token_quant=False,
+        block_shape=None,
+    )
+    config = Config(
+        Ms=[16],
+        K=5120,
+        N=640,
+        E=384,
+        topks=[6],
+        dtype=torch.bfloat16,
+        quant_config=quant_config,
+        prepare_finalize_type=MoEPrepareAndFinalizeNoDPEPModular,
+        fused_experts_type=AiterMxfp4Experts,
+        world_size=1,
+        use_mxfp4_w4a4_dsv4=True,
+    )
+    valid, reason = config.is_valid()
+    if not valid:
+        # is_valid() also covers AiterMxfp4Experts's gfx950-only check; skip
+        # (not fail) since e.g. the MI300 CI lane running this file isn't gfx950.
+        pytest.skip(reason)
+
+    weights = WeightTensors.make(config)
+    vllm_config, env_dict = config.make_env_data()
+    env_dict = {**env_dict, "AITER_MOE_SORT_BACKEND": backend}
+
+    parallel_launch_with_config(
+        config.world_size,
+        _aiter_mxfp4_sort_backend_worker,
+        vllm_config,
+        env_dict,
+        config,
+        weights,
+        False,
+        backend,
+    )
+
+
 # --- 4b: hidden_dim_unpadded/intermediate_size_per_partition_unpadded matrix -
 
 # K/N intentionally unaligned to AITER's 64/128 granularity (unlike the
@@ -764,6 +964,26 @@ _PADDING_HIDDEN_PAD_EXPECTED = 128
 #   // 64 * 64 * (2 if tp_size == 1 else 1) (rocm_aiter_moe.py); tp_size==1 here.
 _PADDING_INTERMEDIATE_PAD_EXPECTED = 256
 
+# AITER's W4A16 stage2 kernel raises NotImplementedError below a 256-wide
+# physical intermediate (128 isn't enough), so MXFP4 needs its own N pair.
+_PADDING_N_UNPADDED_MXFP4 = 512  # 2 * 256
+_PADDING_N_PADDED_MXFP4 = 768  # +256
+_PADDING_INTERMEDIATE_PAD_EXPECTED_MXFP4_W4A16 = 512
+
+# Both MXFP4 schemes also need a 256-wide physical hidden dim: W4A4's stage1
+# GEMM silently produces NaN/Inf below it (confirmed: K=896/1152 -> NaN,
+# K=768/1024 -> finite); W4A16 silently produces wrong output instead (K=896
+# fails the cos_sim check below). Production enforces the same 256 floor via
+# mxfp4_round_up_hidden_size_and_intermediate_size() before building weights,
+# so this isn't just a test-only requirement.
+_PADDING_K_UNPADDED_MXFP4 = 1024  # 4 * 256
+_PADDING_K_PADDED_MXFP4 = 1280  # +256
+# hidden_pad = (K_padded_mxfp4 - hidden_dim_unpadded) // 128 * 128.
+_PADDING_HIDDEN_PAD_EXPECTED_MXFP4 = 256
+# W4A4's SiLU path doubles intermediate_pad inside AITER, so this constant
+# (undoubled) differs from the W4A16 one above despite the same N pair.
+_PADDING_INTERMEDIATE_PAD_EXPECTED_MXFP4_W4A4 = 256
+
 # {no padding, hidden-only, intermediate-only, both} -> (pad_hidden, pad_intermediate)
 _PADDING_MODES: dict[str, tuple[bool, bool]] = {
     "none": (False, False),
@@ -773,7 +993,8 @@ _PADDING_MODES: dict[str, tuple[bool, bool]] = {
 }
 
 # unquantized + the 4 fp8 configs AiterExperts supports (excludes MXFP4,
-# stubbed below pending MI350/gfx950, and MK_QUANT_CONFIGS[1], unsupported).
+# covered separately by _PADDING_MXFP4_QUANT_CONFIGS below, and
+# MK_QUANT_CONFIGS[1], unsupported).
 _PADDING_QUANT_CONFIGS = [
     MK_QUANT_CONFIGS[0],  # unquantized
     MK_QUANT_CONFIGS[2],  # fp8 channel weights / per-token activations
@@ -793,10 +1014,13 @@ _PADDING_QUANT_IDS = [
 def _padding_matrix_fe_cls(
     quant_config: TestMoEQuantConfig | None,
 ) -> type[AiterExperts]:
-    """Map a _PADDING_QUANT_CONFIGS entry to the AiterExperts leaf class that
-    supports it (mirrors Config.fp8_quant_key_pair's scheme derivation)."""
+    """Map a _PADDING_QUANT_CONFIGS/_PADDING_MXFP4_QUANT_CONFIGS entry to the
+    AiterExperts leaf class that supports it (mirrors
+    Config.fp8_quant_key_pair/mxfp4_quant_key_pair's scheme derivation)."""
     if quant_config is None:
         return AiterUnquantizedExperts
+    if quant_config.weight_dtype == "mxfp4" or quant_config.quant_dtype == "mxfp4":
+        return AiterMxfp4Experts
     if quant_config.block_shape is not None:
         return AiterFp8BlockExperts
     if quant_config.per_out_ch_quant:
@@ -867,7 +1091,9 @@ def _make_padding_matrix_weights(config: Config) -> WeightTensors:
         n=config.N,
         k=config.K,
         in_dtype=config.dtype,
-        quant_dtype=config.quant_dtype,
+        # weight_dtype, not quant_dtype: quant_dtype is None for MXFP4 W4A16
+        # (unquantized activation) even though the weight itself is mxfp4.
+        quant_dtype=config.weight_dtype,
         block_shape=config.quant_block_shape,
         per_out_ch_quant=config.is_per_out_ch_quant,
     )
@@ -886,6 +1112,36 @@ def _slice_unpadded_rank_tensors(
         topk_ids=rank_tensors.topk_ids,
         expert_map=rank_tensors.expert_map,
     )
+
+
+def _check_mxfp4_accuracy(
+    ref_out: torch.Tensor, mk_out: torch.Tensor, fe_name: str
+) -> None:
+    """Shared mxfp4 accuracy check for _aiter_padding_matrix_worker and
+    _aiter_token_padding_worker (callers pre-slice to the real region).
+
+    Cosine similarity catches a sign-flipped mk_out that the magnitude
+    guard can't (gfx950: 0.79-0.99 correct vs. <=0.01 corrupted); being
+    scale-invariant, it in turn misses a uniform-scale error like
+    rank_worker's ~5x-small AITER_MXFP4_BF16 bug, which the magnitude
+    guard catches instead.
+    """
+    cos_sim = torch.nn.functional.cosine_similarity(
+        mk_out.flatten().float(), ref_out.flatten().float(), dim=0
+    )
+    assert cos_sim > 0.5, (
+        f"{fe_name} output (cos_sim={cos_sim:.4f} vs. reference) looks "
+        "degenerate/decorrelated, not just numerically imprecise."
+    )
+    ref_scale = ref_out.abs().mean()
+    mk_scale = mk_out.abs().mean()
+    assert mk_scale > 0.5 * ref_scale, (
+        f"{fe_name} output magnitude (mean |mk_out|={mk_scale:.6f}) looks "
+        f"degenerate/zeroed vs. reference (mean |ref_out|={ref_scale:.6f})."
+    )
+    # Looser tolerance than the fp8/unquantized case: matches rank_worker's
+    # main mxfp4 sweep's atol/rtol.
+    check_accuracy(ref_out, mk_out, atol=1e-1, rtol=1e-1, percent=0.9)
 
 
 def _aiter_padding_matrix_worker(
@@ -914,54 +1170,77 @@ def _aiter_padding_matrix_worker(
             pgi, vllm_config, padded_config, weights, rank_tensors
         )
 
+    fe_name = padded_config.fused_experts_type.__name__
     assert fused_moe_mock.call_count > 0, (
-        "Expected AiterExperts.apply() to call rocm_aiter_ops.fused_moe."
+        f"Expected {fe_name}.apply() to call rocm_aiter_ops.fused_moe."
     )
     for call in fused_moe_mock.call_args_list:
         assert call.kwargs["hidden_pad"] == hidden_pad_expected, (
-            f"AiterExperts.apply() forwarded hidden_pad="
+            f"{fe_name}.apply() forwarded hidden_pad="
             f"{call.kwargs['hidden_pad']}, expected {hidden_pad_expected}."
         )
         assert call.kwargs["intermediate_pad"] == intermediate_pad_expected, (
-            f"AiterExperts.apply() forwarded intermediate_pad="
+            f"{fe_name}.apply() forwarded intermediate_pad="
             f"{call.kwargs['intermediate_pad']}, expected "
             f"{intermediate_pad_expected}."
         )
 
+    k_unpadded = padded_config.hidden_dim_unpadded or padded_config.K
+    n_unpadded = (
+        padded_config.intermediate_size_per_partition_unpadded or padded_config.N
+    )
+
     # AiterExperts.apply() never slices its own output -- the buffer stays
     # raw (padded) width; only the caller-sliced unpadded prefix is checked.
     assert mk_out.shape[-1] == padded_config.K, (
-        f"AiterExperts output width {mk_out.shape[-1]} != raw hidden_dim "
+        f"{fe_name} output width {mk_out.shape[-1]} != raw hidden_dim "
         f"{padded_config.K}."
     )
-    mk_out = mk_out[..., :_PADDING_K_UNPADDED]
+    mk_out = mk_out[..., :k_unpadded]
     # Only the real slice is checked: beyond it is unspecified/reused memory.
     assert torch.isfinite(mk_out).all(), (
-        "AiterExperts output must not contain NaN/Inf in the real "
+        f"{fe_name} output must not contain NaN/Inf in the real "
         "hidden_dim_unpadded-wide output slice."
     )
 
-    unpadded_weights = _slice_unpadded_weights(
-        weights,
-        padded_config.quant_config,
-        _PADDING_K_UNPADDED,
-        _PADDING_N_UNPADDED,
-    )
-    unpadded_rank_tensors = _slice_unpadded_rank_tensors(
-        rank_tensors, _PADDING_K_UNPADDED
-    )
+    is_mxfp4 = padded_config.weight_dtype == "mxfp4"
+    if is_mxfp4:
+        unpadded_weights = _slice_unpadded_mxfp4_weights(
+            weights, k_unpadded, n_unpadded
+        )
+    else:
+        unpadded_weights = _slice_unpadded_weights(
+            weights, padded_config.quant_config, k_unpadded, n_unpadded
+        )
+    unpadded_rank_tensors = _slice_unpadded_rank_tensors(rank_tensors, k_unpadded)
 
     with set_current_vllm_config(vllm_config):
         ref_out = reference_moe_impl(
             padded_config, unpadded_weights, unpadded_rank_tensors
         )
 
+    if (
+        padded_config.is_w4a16_mxfp4
+        and padded_config.activation == MoEActivation.SWIGLUOAI
+    ):
+        # AITER_MXFP4_BF16 silently miscomputes SWIGLUOAI; smoke test only
+        # until #59766 (see rank_worker). SWIGLUOAI_UNINTERLEAVE isn't
+        # exempted -- same kernel path, gets the full check below instead.
+        assert mk_out.shape == ref_out.shape, (
+            f"{fe_name} output shape {mk_out.shape} != reference shape {ref_out.shape}."
+        )
+        return
+
+    if is_mxfp4:
+        _check_mxfp4_accuracy(ref_out, mk_out, fe_name)
+        return
+
     # ref_out's magnitude here (~1e-3-1e-2) is below atol=3e-2, so a zeroed-out
     # mk_out would still pass check_accuracy below -- guard against that.
     ref_scale = ref_out.abs().mean()
     mk_scale = mk_out.abs().mean()
     assert mk_scale > 0.5 * ref_scale, (
-        f"AiterExperts output magnitude (mean |mk_out|={mk_scale:.6f}) looks "
+        f"{fe_name} output magnitude (mean |mk_out|={mk_scale:.6f}) looks "
         f"degenerate/zeroed vs. reference (mean |ref_out|={ref_scale:.6f})."
     )
 
@@ -1002,6 +1281,22 @@ def test_aiter_moe_padding_matrix(mode: str, quant_config: TestMoEQuantConfig | 
             "GEMM problem'. Only hidden_pad-forcing modes (raw "
             f"hidden_dim={_PADDING_K_PADDED}) are exercised for this quant "
             "scheme."
+        )
+
+    if (
+        quant_config is not None
+        and quant_config.block_shape is None
+        and not pad_intermediate
+    ):
+        pytest.skip(
+            "AITER v0.1.26's ck_moe_stage2 kernel doesn't support the raw "
+            f"(unpadded) intermediate_size={_PADDING_N_UNPADDED} for fp8 "
+            "per-channel/per-tensor schemes -- 'wrong! device_gemm ... "
+            "does not support this GEMM problem'. Regressed vs v0.1.25 "
+            "(https://github.com/vllm-project/vllm/pull/62486); unrelated "
+            "to this test file. Only intermediate_pad-forcing modes "
+            f"(intermediate_size={_PADDING_N_PADDED}) are exercised here "
+            "until AITER fixes it upstream."
         )
 
     k = _PADDING_K_PADDED if pad_hidden else _PADDING_K_UNPADDED
@@ -1049,13 +1344,121 @@ def test_aiter_moe_padding_matrix(mode: str, quant_config: TestMoEQuantConfig | 
     )
 
 
-@pytest.mark.skip(
-    reason="MXFP4 AiterExperts padding requires MI350/gfx950 hardware. "
-    'See https://github.com/vllm-project/vllm/issues/54966 ("Test padding").'
+# mxfp4 weight_dtype/quant_dtype entries conditionally appended to
+# MK_QUANT_CONFIGS when has_aiter() (see mk_objects.py): W4A16 (mxfp4 weight,
+# unquantized activation) and W4A4 (both mxfp4).
+_PADDING_MXFP4_QUANT_CONFIGS = [
+    c
+    for c in MK_QUANT_CONFIGS
+    if c is not None and (c.weight_dtype == "mxfp4" or c.quant_dtype == "mxfp4")
+]
+_PADDING_MXFP4_QUANT_IDS = [
+    "mxfp4_w4a4" if c.quant_dtype == "mxfp4" else "mxfp4_w4a16"
+    for c in _PADDING_MXFP4_QUANT_CONFIGS
+]
+
+
+def _slice_unpadded_mxfp4_weights(
+    weights: WeightTensors, k_unpadded: int, n_unpadded: int
+) -> WeightTensors:
+    """MXFP4 counterpart to _slice_unpadded_weights: slices the packed
+    uint8/block-scale tensors directly so the result can feed
+    reference_moe_impl like the fp8 path does.
+
+    downcast_to_mxfp() packs 2 elements/byte along the quantized axis with
+    32-wide scale blocks (MXFP_BLOCK_SIZE); this file's MXFP4 padding
+    constants are multiples of both (lcm=64), so every slice lands on a
+    byte/scale-block boundary. Gate/up interleave is left to
+    reference_moe_impl, which expects pre-interleave row order.
+    """
+    assert weights.w1_scale is not None and weights.w2_scale is not None, (
+        "mxfp4 weights must carry block scales"
+    )
+    assert k_unpadded % 64 == 0 and n_unpadded % 64 == 0
+
+    w1 = _slice_gate_up_rows(weights.w1[:, :, : k_unpadded // 2], n_unpadded)
+    w1_scale = _slice_gate_up_rows(
+        weights.w1_scale[:, :, : k_unpadded // 32], n_unpadded
+    )
+    w2 = weights.w2[:, :k_unpadded, : n_unpadded // 2]
+    w2_scale = weights.w2_scale[:, :k_unpadded, : n_unpadded // 32]
+
+    return WeightTensors(w1=w1, w2=w2, w1_scale=w1_scale, w2_scale=w2_scale)
+
+
+@require_aiter_moe
+@pytest.mark.parametrize(
+    "quant_config", _PADDING_MXFP4_QUANT_CONFIGS, ids=_PADDING_MXFP4_QUANT_IDS
 )
-def test_aiter_moe_padding_matrix_mxfp4():
-    """Stub for the {no padding, hidden-only, intermediate-only, both} MXFP4
-    padding matrix once MI350/gfx950 hardware is available in CI."""
+@pytest.mark.parametrize("mode", list(_PADDING_MODES))
+def test_aiter_moe_padding_matrix_mxfp4(mode: str, quant_config: TestMoEQuantConfig):
+    """See https://github.com/vllm-project/vllm/issues/54966 ("Test padding").
+
+    MXFP4 counterpart to test_aiter_moe_padding_matrix: W4A16 (mxfp4 weight,
+    unquantized activation) and W4A4 (both mxfp4). W4A16 uses
+    SWIGLUOAI_UNINTERLEAVE to dodge the AITER_MXFP4_BF16 SWIGLUOAI bug
+    (#59766, see rank_worker) and get the full reference comparison like
+    W4A4 (SILU) -- only possible since #62907 taught the shared
+    reference/NYI infra to treat SWIGLUOAI_UNINTERLEAVE this way.
+    """
+    from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+        MoEPrepareAndFinalizeNoDPEPModular,
+    )
+
+    pad_hidden, pad_intermediate = _PADDING_MODES[mode]
+    is_w4a16 = quant_config.quant_dtype is None
+
+    k = _PADDING_K_PADDED_MXFP4 if pad_hidden else _PADDING_K_UNPADDED_MXFP4
+    n = _PADDING_N_PADDED_MXFP4 if pad_intermediate else _PADDING_N_UNPADDED_MXFP4
+
+    config = Config(
+        Ms=_PADDING_M,
+        K=k,
+        N=n,
+        E=_PADDING_E,
+        topks=_PADDING_TOPK,
+        dtype=torch.bfloat16,
+        quant_config=quant_config,
+        activation=(
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE if is_w4a16 else MoEActivation.SILU
+        ),
+        prepare_finalize_type=MoEPrepareAndFinalizeNoDPEPModular,
+        fused_experts_type=_padding_matrix_fe_cls(quant_config),
+        world_size=1,
+        hidden_dim_unpadded=_PADDING_K_UNPADDED_MXFP4 if pad_hidden else None,
+        intermediate_size_per_partition_unpadded=(
+            _PADDING_N_UNPADDED_MXFP4 if pad_intermediate else None
+        ),
+    )
+    assert config.is_valid()[0]
+    if not config.fe_supports_quant_scheme():
+        pytest.skip(
+            f"AiterMxfp4Experts does not support quant scheme {quant_config} "
+            "on this GPU (gfx950-only, not gfx1250)."
+        )
+
+    weights = _make_padding_matrix_weights(config)
+    vllm_config, env_dict = config.make_env_data()
+
+    hidden_pad_expected = _PADDING_HIDDEN_PAD_EXPECTED_MXFP4 if pad_hidden else 0
+    if not pad_intermediate:
+        intermediate_pad_expected = 0
+    elif is_w4a16:
+        intermediate_pad_expected = _PADDING_INTERMEDIATE_PAD_EXPECTED_MXFP4_W4A16
+    else:
+        intermediate_pad_expected = _PADDING_INTERMEDIATE_PAD_EXPECTED_MXFP4_W4A4
+
+    parallel_launch_with_config(
+        config.world_size,
+        _aiter_padding_matrix_worker,
+        vllm_config,
+        env_dict,
+        config,
+        weights,
+        False,
+        hidden_pad_expected,
+        intermediate_pad_expected,
+    )
 
 
 # --- 4c: HIP-graph token padding -- inf/nan garbage rows (topk_ids=-1) ------
@@ -1118,18 +1521,30 @@ def _aiter_token_padding_worker(
         ref_out = reference_moe_impl(config, weights, rank_tensors)
 
     real_rows = [i for i in range(config.Ms) if i not in garbage_rows]
+    fe_name = config.fused_experts_type.__name__
 
     assert torch.isfinite(mk_out[real_rows]).all(), (
-        "Garbage (padding) token rows leaked NaN/Inf into real rows' output "
-        "through AiterExperts."
+        f"Garbage (padding) token rows leaked NaN/Inf into real rows' output "
+        f"through {fe_name}."
     )
+
+    if config.is_w4a16_mxfp4 and config.activation == MoEActivation.SWIGLUOAI:
+        # AITER_MXFP4_BF16 silently miscomputes SWIGLUOAI; smoke test only
+        # (finite real rows, already checked) until #59766 (see rank_worker).
+        # SWIGLUOAI_UNINTERLEAVE isn't exempted -- same kernel path, gets
+        # the full check below instead.
+        return
+
+    if config.weight_dtype == "mxfp4":
+        _check_mxfp4_accuracy(ref_out[real_rows], mk_out[real_rows], fe_name)
+        return
 
     # ref_out's magnitude here (~1e-3-1e-2) is below atol=3e-2, so a zeroed-out
     # mk_out would still pass the checks below -- guard against that.
     ref_scale = ref_out[real_rows].abs().mean()
     mk_scale = mk_out[real_rows].abs().mean()
     assert mk_scale > 0.5 * ref_scale, (
-        f"AiterExperts output magnitude (mean |mk_out|={mk_scale:.6f}) looks "
+        f"{fe_name} output magnitude (mean |mk_out|={mk_scale:.6f}) looks "
         f"degenerate/zeroed vs. reference (mean |ref_out|={ref_scale:.6f})."
     )
 
@@ -1202,6 +1617,17 @@ def test_aiter_moe_token_padding_garbage_rows(
             "https://github.com/ROCm/aiter/issues/6275."
         )
 
+    if (
+        quant_config is not None
+        and config.fp8_quant_key_pair()[0] == kFp8StaticTensorSym
+    ):
+        pytest.skip(
+            "AITER fused_moe_2stages allocates a2 with torch.empty and stage1 "
+            "never writes the topk_ids=-1 slots, so the dynamic per-tensor a2 "
+            "quant scale is taken over stale memory and can zero every real "
+            "row. Remove once AITER_BRANCH includes https://github.com/ROCm/aiter/pull/6568."
+        )
+
     weights = WeightTensors.make(config)
     vllm_config, env_dict = config.make_env_data()
 
@@ -1217,12 +1643,65 @@ def test_aiter_moe_token_padding_garbage_rows(
     )
 
 
-@pytest.mark.skip(
-    reason="MXFP4 AiterExperts token padding requires MI350/gfx950 hardware. "
-    'See https://github.com/vllm-project/vllm/issues/54966 ("Test padding").'
+@require_aiter_moe
+@pytest.mark.parametrize(
+    "quant_config", _PADDING_MXFP4_QUANT_CONFIGS, ids=_PADDING_MXFP4_QUANT_IDS
 )
-def test_aiter_moe_token_padding_garbage_rows_mxfp4():
-    pass
+@pytest.mark.parametrize("garbage_mode", list(_TOKEN_PADDING_GARBAGE_MODES))
+def test_aiter_moe_token_padding_garbage_rows_mxfp4(
+    garbage_mode: str, quant_config: TestMoEQuantConfig
+):
+    """See https://github.com/vllm-project/vllm/issues/54966 ("Test padding").
+
+    MXFP4 counterpart to test_aiter_moe_token_padding_garbage_rows. Uses
+    SWIGLUOAI_UNINTERLEAVE for W4A16 for the same reason as
+    test_aiter_moe_padding_matrix_mxfp4.
+    """
+    from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+        MoEPrepareAndFinalizeNoDPEPModular,
+    )
+
+    garbage_rows = _TOKEN_PADDING_GARBAGE_MODES[garbage_mode]
+    is_w4a16 = quant_config.quant_dtype is None
+
+    # Reuses test_aiter_moe_padding_matrix_mxfp4's 256-aligned K/N (required
+    # by AITER's MXFP4 kernels). Token-padding safety doesn't depend on
+    # hidden_pad/intermediate_pad, so no separate shape is needed here.
+    config = Config(
+        Ms=_PADDING_M,
+        K=_PADDING_K_PADDED_MXFP4,
+        N=_PADDING_N_PADDED_MXFP4,
+        E=_PADDING_E,
+        topks=_PADDING_TOPK,
+        dtype=torch.bfloat16,
+        quant_config=quant_config,
+        activation=(
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE if is_w4a16 else MoEActivation.SILU
+        ),
+        prepare_finalize_type=MoEPrepareAndFinalizeNoDPEPModular,
+        fused_experts_type=_padding_matrix_fe_cls(quant_config),
+        world_size=1,
+    )
+    assert config.is_valid()[0]
+    if not config.fe_supports_quant_scheme():
+        pytest.skip(
+            f"AiterMxfp4Experts does not support quant scheme {quant_config} "
+            "on this GPU (gfx950-only, not gfx1250)."
+        )
+
+    weights = WeightTensors.make(config)
+    vllm_config, env_dict = config.make_env_data()
+
+    parallel_launch_with_config(
+        config.world_size,
+        _aiter_token_padding_worker,
+        vllm_config,
+        env_dict,
+        config,
+        weights,
+        False,
+        garbage_rows,
+    )
 
 
 if __name__ == "__main__":
