@@ -2225,6 +2225,90 @@ def rocm_mxfp8_wo_a_bmm_mxfp8(
     )
 
 
+def _rocm_mxfp8_o_proj_impl(
+    a: torch.Tensor,
+    a_scale: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    n_groups: int,
+    o_lora_rank: int,
+    wo_b_weight: torch.Tensor,
+    wo_b_weight_scale: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    from vllm.model_executor.kernels.linear.mxfp8.rocm_block32_gemm import (
+        rocm_mxfp8_block32_gemm,
+        rocm_mxfp8_block32_gemm_quant,
+    )
+
+    tile, _ = _mxfp8_wo_a_bmm_config(a.shape[0], n_groups, o_lora_rank)
+    if tile[1] % 32:
+        # A tile narrower than one MX block cannot quantize in its epilogue, so
+        # wo_b quantizes the bf16 wo_a output as its own linear does, inside
+        # the GEMM at tiny M.
+        out = _rocm_mxfp8_wo_a_bmm_impl(
+            a, a_scale, weight, weight_scale, n_groups, o_lora_rank
+        )
+        return rocm_mxfp8_block32_gemm_quant(
+            out, wo_b_weight, wo_b_weight_scale, out_dtype
+        )
+    q, q_scale = _rocm_mxfp8_wo_a_bmm_mxfp8_impl(
+        a, a_scale, weight, weight_scale, n_groups, o_lora_rank
+    )
+    return rocm_mxfp8_block32_gemm(
+        q, q_scale, wo_b_weight, wo_b_weight_scale, out_dtype
+    )
+
+
+def _rocm_mxfp8_o_proj_fake(
+    a: torch.Tensor,
+    a_scale: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    n_groups: int,
+    o_lora_rank: int,
+    wo_b_weight: torch.Tensor,
+    wo_b_weight_scale: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    return a.new_empty((a.shape[0], wo_b_weight.shape[0]), dtype=out_dtype)
+
+
+# An opaque op: whether the wo_a tile can hand wo_b an MXFP8 input depends on
+# the token count, which the compiled o_proj must not freeze.
+direct_register_custom_op(
+    op_name="rocm_dsv41_mxfp8_o_proj",
+    op_func=_rocm_mxfp8_o_proj_impl,
+    fake_impl=_rocm_mxfp8_o_proj_fake,
+)
+
+
+def rocm_mxfp8_o_proj(
+    a: torch.Tensor,
+    a_scale: torch.Tensor,
+    wo_a: torch.nn.Module,
+    n_groups: int,
+    o_lora_rank: int,
+    wo_b: torch.nn.Module,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    """wo_b(wo_a(a)) when wo_b's linear is the block32 MXFP8 GEMM. Where the
+    wo_a tile is at least one MX block wide, its epilogue hands wo_b the MXFP8
+    input (rocm_mxfp8_wo_a_bmm_mxfp8); below that, wo_b quantizes the bf16
+    wo_a output itself, as its linear would."""
+    return torch.ops.vllm.rocm_dsv41_mxfp8_o_proj(
+        a,
+        a_scale,
+        wo_a.weight,
+        wo_a.weight_scale,
+        n_groups,
+        o_lora_rank,
+        wo_b.weight,
+        wo_b.weight_scale,
+        out_dtype,
+    )
+
+
 _DSV4_SPARSE_NOPE_DIM = 448
 _DSV4_SPARSE_ROPE_DIM = 64
 

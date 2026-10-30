@@ -14,9 +14,6 @@ from vllm.distributed import (
 )
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.kernels.linear.mxfp8.rocm_block32_gemm import (
-    rocm_mxfp8_block32_gemm,
-)
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
 from vllm.model_executor.layers.rocm_paged_mxfp4_indexer import (
@@ -59,8 +56,8 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_inv_rope_einsum,
     rocm_inverse_rope_mxfp8_rows,
     rocm_inverse_rope_rows_,
+    rocm_mxfp8_o_proj,
     rocm_mxfp8_wo_a_bmm,
-    rocm_mxfp8_wo_a_bmm_mxfp8,
     rocm_sparse_attn_decode,
     rocm_sparse_attn_prefill,
 )
@@ -936,18 +933,13 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
     ) -> torch.Tensor:
         if isinstance(attn_out, QuantizedActivation):
             if self._wo_b_takes_wo_a_mxfp8():
-                q, q_scale = rocm_mxfp8_wo_a_bmm_mxfp8(
+                return rocm_mxfp8_o_proj(
                     attn_out.data,
                     attn_out.scale,
                     self.wo_a,
                     self.n_local_groups,
                     self.o_lora_rank,
-                )
-                return rocm_mxfp8_block32_gemm(
-                    q,
-                    q_scale,
-                    self.wo_b.weight,
-                    self.wo_b.weight_scale,
+                    self.wo_b,
                     attn_out.orig_dtype,
                 )
             z = rocm_mxfp8_wo_a_bmm(
