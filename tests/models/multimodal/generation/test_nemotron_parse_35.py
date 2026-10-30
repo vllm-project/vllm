@@ -51,7 +51,9 @@ def generate_hf_logprobs_from_logits(
                 }
             )
         token_ids = generated.sequences[0, -len(logprobs) :].tolist()
-        outputs.append((token_ids, hf_model.tokenizer.decode(token_ids), logprobs))
+        decoded = hf_model.tokenizer.decode(token_ids)
+        assert isinstance(decoded, str)
+        outputs.append((token_ids, decoded, logprobs))
     return outputs
 
 

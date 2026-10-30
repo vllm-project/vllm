@@ -178,16 +178,6 @@ pub struct TopLevelUnsupportedArgs {
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Eq, Default, Args, Serialize, Deserialize)]
 pub struct EngineUnsupportedArgs {
-    /// Name or path of the Hugging Face tokenizer to use. If unspecified, model
-    /// name or path will be used.
-    #[arg(long)]
-    pub tokenizer: Option<Unsupported>,
-
-    /// Name or path of the Hugging Face config to use. If unspecified, model
-    /// name or path will be used.
-    #[arg(long)]
-    pub hf_config_path: Option<Unsupported>,
-
     /// Allowing API requests to read local images or videos from directories
     /// specified by the server file system. This is a security risk. Should
     /// only be enabled in trusted environments.
@@ -198,12 +188,6 @@ pub struct EngineUnsupportedArgs {
     /// multi-modal inputs.
     #[arg(long)]
     pub allowed_media_domains: Option<Unsupported>,
-
-    /// The specific revision to use for the tokenizer on the Hugging Face Hub.
-    /// It can be a branch name, a tag name, or a commit id. If unspecified,
-    /// will use the default version.
-    #[arg(long)]
-    pub tokenizer_revision: Option<Unsupported>,
 
     /// Skip initialization of tokenizer and detokenizer. Expects valid
     /// `prompt_token_ids` and `None` for prompt from the input. The generated
@@ -379,14 +363,6 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub collect_detailed_traces: Option<Unsupported>,
 
-    /// Custom Prometheus histogram bucket boundaries, as a JSON mapping from
-    /// bucket-family key to a list of strictly increasing, positive, finite
-    /// upper bounds. When a family key is present, its list replaces the
-    /// default buckets for every histogram in that family; families not listed
-    /// keep their defaults.
-    #[arg(long)]
-    pub custom_histogram_buckets: Option<Unsupported>,
-
     /// Maximum number of requests that can be in-flight (waiting or running)
     /// at the same time. When the limit is reached, new requests are rejected
     /// with HTTP 503 so the client can retry on another instance.
@@ -397,10 +373,6 @@ pub struct EngineUnsupportedArgs {
     /// When the limit is reached, new requests are rejected with HTTP 503.
     #[arg(long)]
     pub max_num_queued_tokens: Option<Unsupported>,
-
-    /// Structured outputs configuration.
-    #[arg(long)]
-    pub structured_outputs_config: Option<Noop>,
 
     /// Log aggregate rather than per-engine statistics when using data
     /// parallelism.
@@ -437,17 +409,6 @@ pub struct ServerUnsupportedArgs {
     #[arg(long)]
     pub response_role: Option<Unsupported>,
 
-    /// When `--max-logprobs` is specified, represents single tokens as
-    /// strings of the form 'token_id:{token_id}' so that tokens that are not
-    /// JSON-encodable can be identified.
-    #[arg(
-        long,
-        visible_alias = "no-return-tokens-as-token-ids",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub return_tokens_as_token_ids: Option<Unsupported>,
-
     /// Enable auto tool choice for supported models. Use `--tool-call-parser`
     /// to specify which parser to use.
     #[arg(
@@ -458,16 +419,6 @@ pub struct ServerUnsupportedArgs {
         hide = true
     )]
     pub enable_auto_tool_choice: Option<Noop>,
-
-    /// If specified, exclude tool definitions in prompts when
-    /// tool_choice='none'.
-    #[arg(
-        long,
-        visible_alias = "no-exclude-tools-when-tool-choice-none",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub exclude_tools_when_tool_choice_none: Option<Unsupported>,
 
     /// Special the tool parser plugin write to parse the model-generated tool
     /// into OpenAI API format, the name register in this plugin can be used in
@@ -510,27 +461,6 @@ pub struct ServerUnsupportedArgs {
         num_args = 0..=1
     )]
     pub enable_force_include_usage: Option<Unsupported>,
-
-    /// If set to True, log model outputs (generations).
-    /// Requires `--enable-log-requests`. As with `--enable-log-requests`,
-    /// information is only logged at INFO level at maximum.
-    #[arg(
-        long,
-        visible_alias = "no-enable-log-outputs",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub enable_log_outputs: Option<Unsupported>,
-
-    /// If set to False, output deltas will not be logged. Relevant only if
-    /// --enable-log-outputs is set.
-    #[arg(
-        long,
-        visible_alias = "no-enable-log-deltas",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub enable_log_deltas: Option<Unsupported>,
 
     /// If set to True, log the stack trace of error responses
     #[arg(

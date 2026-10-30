@@ -198,7 +198,12 @@ The response adds a `joint` object, `null` when each question was read on its ow
 | `chat_template_kwargs` | passed to the chat template, for example `{"enable_thinking": false}` |
 | `cache_salt` | optional [prefix-cache salt](../usage/security.md#cache-salting) applied to every question |
 | `joint` | optional boolean, default `false`; see [Joint reads](#joint-reads). DiffusionGemma only, other models return 400 |
-| `images`, `audio`, `videos` | optional media URLs or data URLs, for models that take them ([Clef-Flash](#clef-flash), images/video; [Clef-Omni](#clef-omni); [Decision 3.0](#decision-30), images/video; DiffusionGemma, images only, with or without `joint`; [Liquid d1](#liquid-d1), images only) |
+| `images`, `audio`, `videos` | optional media URLs or data URLs, for models that take them ([Clef-Flash](#clef-flash), images/video; [Clef-Omni](#clef-omni); [Decision 3.0](#decision-30), images/video; DiffusionGemma, images only, with or without `joint`; [Liquid d1](#liquid-d1), images only; multimodal `NextTokenStrategy` models such as Qwen3.5, images only) |
+
+By default, `/v1/systemone` rejects `chat_template_kwargs.chat_template` with
+HTTP 400. Start the server with `--trust-request-chat-template` to allow
+request-provided chat templates. Other template kwargs, such as
+`enable_thinking`, do not require this flag.
 
 Unknown top-level fields, and question fields other than `type`,
 `instructions` and `criteria`, are rejected with a 400.

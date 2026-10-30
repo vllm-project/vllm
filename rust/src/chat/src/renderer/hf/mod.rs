@@ -9,13 +9,13 @@ use thiserror_ext::AsReport as _;
 use tracing::{info, trace, warn};
 use vllm_text::Prompt;
 use vllm_text::backend::hf::{
-    HfSpecialTokens, HfTokenizerConfig, ResolvedModelFiles, load_tokenizer_config,
+    HfChatTemplate, HfSpecialTokens, HfTokenizerConfig, ResolvedModelFiles, load_tokenizer_config,
 };
 
 use self::format::{
     ChatTemplateContentFormat, ChatTemplateContentFormatOption as ContentFormatOption,
 };
-use self::template::{CompiledChatTemplate, TemplateContext};
+use self::template::{CompiledChatTemplate, TemplateContext, request_template_fuel};
 use super::{ChatRenderer, RenderedPrompt};
 use crate::error::Result;
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest};
@@ -73,12 +73,17 @@ pub struct MultimodalRenderInfo {
 /// state.
 pub struct HfChatRenderer {
     default_template: Option<CompiledChatTemplate>,
+    /// The model's template for requests with tools, from a list-form
+    /// `chat_template` entry named `tool_use`; falls back to the default.
+    tool_use_template: Option<CompiledChatTemplate>,
     default_template_kwargs: HashMap<String, JsonValue>,
     content_format: ContentFormatOption,
     special_tokens: Option<HfSpecialTokens>,
     multimodal: Option<MultimodalRenderInfo>,
     /// Whether a request may override the chat template.
     trust_request_chat_template: bool,
+    /// Fuel budget for request-supplied templates; `None` disables it.
+    request_template_fuel: Option<u64>,
 }
 
 impl HfChatRenderer {
@@ -95,12 +100,29 @@ impl HfChatRenderer {
                         .map_err(|error| Error::ChatTemplate(error.to_report_string()))
                 })
                 .transpose()?,
+            tool_use_template: None,
             default_template_kwargs,
             content_format,
             special_tokens: None,
             multimodal: None,
             trust_request_chat_template: false,
+            request_template_fuel: request_template_fuel(
+                std::env::var_os("VLLM_CHAT_TEMPLATE_FUEL").as_deref(),
+            )
+            .map_err(|error| Error::ChatTemplate(error.to_report_string()))?,
         })
+    }
+
+    /// Use a separate model template for requests with tools, as Transformers
+    /// selects a `tool_use` template when tools are passed.
+    pub fn with_tool_use_template(mut self, template: Option<String>) -> Result<Self> {
+        self.tool_use_template = template
+            .map(|template| {
+                CompiledChatTemplate::new(template, self.content_format)
+                    .map_err(|error| Error::ChatTemplate(error.to_report_string()))
+            })
+            .transpose()?;
+        Ok(self)
     }
 
     pub fn with_special_tokens(mut self, special_tokens: Option<HfSpecialTokens>) -> Self {
@@ -131,7 +153,16 @@ impl HfChatRenderer {
             chat_template,
             ..
         } = load_tokenizer_config(files.tokenizer_config_path.as_deref())?;
-        let mut template = chat_template;
+        let mut template = chat_template
+            .as_ref()
+            .and_then(HfChatTemplate::default_template)
+            .map(str::to_owned);
+        // A configured template or a dedicated template file replaces every
+        // tokenizer_config template, `tool_use` included.
+        let mut tool_use_template = chat_template
+            .as_ref()
+            .and_then(HfChatTemplate::tool_use_template)
+            .map(str::to_owned);
         let special_tokens = (!special_tokens.is_empty()).then_some(special_tokens);
 
         if let Some(configured_template) = options.chat_template.as_deref() {
@@ -139,6 +170,7 @@ impl HfChatRenderer {
                 resolve_chat_template(configured_template)
                     .map_err(|error| Error::ChatTemplate(error.to_report_string()))?,
             );
+            tool_use_template = None;
             info!("using configured chat template override");
         } else if let Some(chat_template_path) = files.chat_template_path.as_deref() {
             // If independent chat template file(s) exist and contain non-empty content,
@@ -152,6 +184,7 @@ impl HfChatRenderer {
                     "loaded dedicated chat template file, overriding tokenizer_config chat_template"
                 );
                 template = file_template;
+                tool_use_template = None;
             } else {
                 warn!(
                     path = %chat_template_path.display(),
@@ -165,6 +198,7 @@ impl HfChatRenderer {
             options.default_chat_template_kwargs,
             options.chat_template_content_format,
         )?
+        .with_tool_use_template(tool_use_template)?
         .with_special_tokens(special_tokens)
         .with_multimodal(multimodal)
         .with_trust_request_chat_template(options.trust_request_chat_template))
@@ -176,7 +210,10 @@ impl HfChatRenderer {
     /// If the request carries a per-request `chat_template` override, a
     /// temporary template is compiled from that string and used instead of
     /// the model's default. Overrides are refused unless request templates
-    /// are trusted.
+    /// are trusted, and render under a fuel budget; the model's default
+    /// template has none, as in the Python frontend. Without an override, a
+    /// request with tools uses the model's `tool_use` template if it has one,
+    /// as Transformers' `get_chat_template` does.
     fn apply_chat_template(&self, request: &ChatRequest) -> Result<RenderedPrompt> {
         if request.chat_options.chat_template.is_some() && !self.trust_request_chat_template {
             return Err(Error::UntrustedRequestChatTemplate);
@@ -187,12 +224,19 @@ impl HfChatRenderer {
             .as_ref()
             .map(|template| {
                 CompiledChatTemplate::new(template.clone(), self.content_format)
+                    .map(|template| template.with_fuel(self.request_template_fuel))
                     .map_err(|error| Error::ChatTemplate(error.to_report_string()))
             })
             .transpose()?;
+        let model_template = if request.tools().is_empty() {
+            None
+        } else {
+            self.tool_use_template.as_ref()
+        }
+        .or(self.default_template.as_ref());
         let template = override_template
             .as_ref()
-            .or(self.default_template.as_ref())
+            .or(model_template)
             .ok_or(Error::MissingChatTemplate)?;
 
         self.apply_chat_template_inner(template, request)
@@ -220,7 +264,7 @@ impl HfChatRenderer {
             None
         };
 
-        let tools = request.tool_parsing_enabled().then(|| to_template_tools(request.tools()));
+        let tools = (!request.tools().is_empty()).then(|| to_template_tools(request.tools()));
         trace!(
             message_count = messages.len(),
             content_format = ?effective_template.content_format(),
@@ -1143,6 +1187,21 @@ mod tests {
     }
 
     #[test]
+    fn only_request_templates_have_a_fuel_budget() {
+        // Each message costs a fixed number of instructions, like a chat template's message loop.
+        let template = "{% for m in messages %}{% for _ in range(10) %}{{ m.content }}{% endfor %}{% endfor %}";
+        let mut request =
+            sample_request((0..20_000).map(|_| ChatMessage::text(ChatRole::User, "x")).collect());
+        assert!(render(Some(template), &request).is_ok());
+
+        request.chat_options.chat_template = Some(template.to_string());
+        let Err(Error::ChatTemplate(message)) = render(None, &request) else {
+            panic!("expected the request template to run out of fuel");
+        };
+        expect!["chat template exceeded its fuel budget; adjust VLLM_CHAT_TEMPLATE_FUEL to override: engine ran out of fuel (in chat:1)"].assert_eq(&message);
+    }
+
+    #[test]
     fn chat_template_per_request_override_without_default_template() {
         let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
         request.chat_options.chat_template = Some("override:{{ messages[0].content }}".to_string());
@@ -1250,12 +1309,21 @@ mod tests {
             .chat_options
             .template_kwargs
             .insert("enable_thinking".to_string(), Value::Bool(true));
+        request.chat_options.template_kwargs.extend([
+            ("reasoning_effort".to_string(), Value::Null),
+            ("mode".to_string(), Value::String("auto".to_string())),
+        ]);
 
         let renderer = HfChatRenderer::new(
-            Some("{{ enable_thinking }}|{{ default_only }}".to_string()),
+            Some(
+                "{{ enable_thinking }}|{{ default_only }}|{{ reasoning_effort is none }}|{{ mode }}"
+                    .to_string(),
+            ),
             HashMap::from([
                 ("enable_thinking".to_string(), Value::Bool(false)),
                 ("default_only".to_string(), Value::String("x".to_string())),
+                ("reasoning_effort".to_string(), Value::String("medium".to_string())),
+                ("mode".to_string(), Value::String("strict".to_string())),
             ]),
             ChatTemplateContentFormatOption::Auto,
         )
@@ -1263,7 +1331,7 @@ mod tests {
 
         let rendered = renderer.render(&request).unwrap().prompt;
 
-        assert_eq!(rendered, Prompt::Text("True|x".to_string()));
+        assert_eq!(rendered, Prompt::Text("True|x|True|auto".to_string()));
     }
 
     #[test]
@@ -1454,7 +1522,7 @@ mod tests {
     }
 
     #[test]
-    fn chat_template_exposes_tools_to_templates_when_auto_enabled() {
+    fn chat_template_exposes_tools_to_templates_for_any_tool_choice() {
         let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
         let tools = vec![ChatTool {
             name: "get_weather".to_string(),
@@ -1467,21 +1535,25 @@ mod tests {
             strict: None,
             defer_loading: None,
         }];
-        request.tool_context = crate::request::ResolvedToolContext::new(
-            &request.messages,
-            tools,
-            Some(ChatToolChoice::Auto),
-            true,
-        )
-        .expect("tool context should resolve");
+        // Matches Python: `tool_choice=none` still renders tools unless the
+        // server drops them via `--exclude-tools-when-tool-choice-none`.
+        for tool_choice in [ChatToolChoice::Auto, ChatToolChoice::None] {
+            request.tool_context = crate::request::ResolvedToolContext::new(
+                &request.messages,
+                tools.clone(),
+                Some(tool_choice),
+                true,
+            )
+            .expect("tool context should resolve");
 
-        let rendered = render(
-            Some("{{ tools[0].function.name }}|{{ tools[0].function.parameters.required[0] }}"),
-            &request,
-        )
-        .unwrap();
+            let rendered = render(
+                Some("{{ tools[0].function.name }}|{{ tools[0].function.parameters.required[0] }}"),
+                &request,
+            )
+            .unwrap();
 
-        assert_eq!(rendered, "get_weather|city");
+            assert_eq!(rendered, "get_weather|city");
+        }
     }
 
     #[test]
