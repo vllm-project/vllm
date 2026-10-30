@@ -597,4 +597,13 @@ class Gemma4MTP(nn.Module):
                 dtype=torch.long,
                 device=next(self.parameters()).device,
             )
+        # In Gemma4 MTP, attention layers share KV cache with the target model.
+        # When the target model or cache config specifies quantized/calibrated KV
+        # scales, Attention modules instantiate scale parameters (e.g., k_scale,
+        # v_scale, q_scale, prob_scale) that are not present in unquantized
+        # assistant checkpoints and are populated dynamically via KV sharing.
+        for param_name, _ in self.named_parameters():
+            if "self_attn.attn." in param_name and param_name.endswith("_scale"):
+                loaded.add(param_name)
         return loaded
+
