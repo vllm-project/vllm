@@ -21,6 +21,7 @@ use thiserror_ext::AsReport as _;
 use tracing::{debug, error, info, trace};
 use tracing_futures::Instrument as _;
 use vllm_engine_core_client::protocol::output::StopReason;
+use vllm_llm::WeightVersionSpan;
 use vllm_text::tokenizer::Tokenizer;
 use vllm_text::{
     DecodedPromptLogprobs, DecodedTextEvent, FinishReason, SampledDelta, TextOutputStream,
@@ -166,6 +167,7 @@ async fn collect_completion(
         include_prompt_logprobs,
         return_token_ids,
         return_tokens_as_token_ids,
+        return_weight_versions,
     }: ResponseOptions,
 ) -> Result<CompletionResponse, ApiError> {
     let return_tokens_as_token_ids =
@@ -260,7 +262,7 @@ async fn collect_completion(
             token_ids: return_token_ids.then(|| collected.token_ids.clone()),
             prompt_token_ids: return_token_ids.then(|| collected.prompt_token_ids.to_vec()),
             routed_experts: None,
-            weight_versions: None,
+            weight_versions: collected.weight_versions.filter(|_| return_weight_versions),
         }],
         service_tier: None,
         usage: Some(usage),
@@ -296,6 +298,7 @@ async fn completion_chunk_stream(
         include_prompt_logprobs: _,
         return_token_ids,
         return_tokens_as_token_ids,
+        return_weight_versions,
     }: ResponseOptions,
     mut y: TryYielder<CompletionSseChunk, ApiError>,
 ) -> Result<(), ApiError> {
@@ -407,6 +410,7 @@ async fn completion_chunk_stream(
                             &envelope,
                             finished.finish_reason,
                             finished.kv_transfer_params.map(|value| *value),
+                            finished.weight_versions.filter(|_| return_weight_versions),
                         )?;
                         if let Some(output_log) = output_log.take() {
                             log_output(
@@ -496,6 +500,7 @@ async fn completion_chunk_stream(
                         &envelope,
                         finished.finish_reason,
                         finished.kv_transfer_params.map(|value| *value),
+                        finished.weight_versions.filter(|_| return_weight_versions),
                     )?;
                     if let Some(output_log) = output_log.take() {
                         log_output(
@@ -555,6 +560,7 @@ fn final_chunk(
     envelope: &Arc<StreamResponseEnvelope>,
     finish_reason: FinishReason,
     kv_transfer_params: Option<Value>,
+    weight_versions: Option<Vec<WeightVersionSpan>>,
 ) -> Result<CompletionStreamResponse, ApiError> {
     let stop_reason = finish_reason.as_stop_reason().map(stop_reason_to_json);
     let finish_reason = completion_finish_reason_to_openai(&finish_reason)?;
@@ -563,6 +569,7 @@ fn final_chunk(
     chunk.choices.push(CompletionStreamChoice {
         finish_reason: Some(finish_reason.to_string()),
         stop_reason,
+        weight_versions,
         ..Default::default()
     });
     chunk.kv_transfer_params = kv_transfer_params;
@@ -725,7 +732,7 @@ mod tests {
 
     #[test]
     fn final_chunk_maps_stop_finish_reason() {
-        let chunk = final_chunk(&stream_envelope(), FinishReason::stop_eos(), None)
+        let chunk = final_chunk(&stream_envelope(), FinishReason::stop_eos(), None, None)
             .expect("finish reason valid");
         assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("stop"));
         assert_eq!(chunk.choices[0].text, "");
@@ -733,21 +740,21 @@ mod tests {
 
     #[test]
     fn final_chunk_maps_length_finish_reason() {
-        let chunk = final_chunk(&stream_envelope(), FinishReason::Length, None)
+        let chunk = final_chunk(&stream_envelope(), FinishReason::Length, None, None)
             .expect("finish reason valid");
         assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("length"));
     }
 
     #[test]
     fn final_chunk_maps_abort_finish_reason() {
-        let chunk = final_chunk(&stream_envelope(), FinishReason::Abort, None)
+        let chunk = final_chunk(&stream_envelope(), FinishReason::Abort, None, None)
             .expect("finish reason valid");
         assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("abort"));
     }
 
     #[test]
     fn final_chunk_rejects_error_finish_reason() {
-        assert!(final_chunk(&stream_envelope(), FinishReason::Error(None), None).is_err());
+        assert!(final_chunk(&stream_envelope(), FinishReason::Error(None), None, None).is_err());
     }
 
     #[tokio::test]
@@ -779,6 +786,7 @@ mod tests {
                             first_token_ts: 10.5,
                             last_token_ts: 10.5,
                         },
+                        weight_versions: None,
                     }),
                 )),
             ])
@@ -914,6 +922,7 @@ mod tests {
                         first_token_ts: 10.5,
                         last_token_ts: 11.0,
                     },
+                    weight_versions: None,
                 }),
             )),
         ]);
@@ -1068,6 +1077,7 @@ mod tests {
                         ec_transfer_params: None,
                         sampling_mask: None,
                         spec_decode_metrics: None,
+                        weight_versions: None,
                         timestamps: vllm_llm::RequestTimestamps::default(),
                     }),
                 ))
@@ -1123,6 +1133,7 @@ mod tests {
                     ec_transfer_params: None,
                     sampling_mask: None,
                     spec_decode_metrics: None,
+                    weight_versions: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1185,6 +1196,7 @@ mod tests {
                     ec_transfer_params: None,
                     sampling_mask: None,
                     spec_decode_metrics: None,
+                    weight_versions: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1251,6 +1263,7 @@ mod tests {
                     ec_transfer_params: None,
                     sampling_mask: None,
                     spec_decode_metrics: None,
+                    weight_versions: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1306,6 +1319,7 @@ mod tests {
                     ec_transfer_params: None,
                     sampling_mask: None,
                     spec_decode_metrics: None,
+                    weight_versions: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1366,6 +1380,7 @@ mod tests {
                     ec_transfer_params: None,
                     sampling_mask: None,
                     spec_decode_metrics: None,
+                    weight_versions: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1445,6 +1460,7 @@ mod tests {
                     ec_transfer_params: None,
                     sampling_mask: None,
                     spec_decode_metrics: None,
+                    weight_versions: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1522,6 +1538,7 @@ mod tests {
                     ec_transfer_params: None,
                     sampling_mask: None,
                     spec_decode_metrics: None,
+                    weight_versions: None,
                     timestamps: Default::default(),
                 }),
             )),

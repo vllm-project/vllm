@@ -232,6 +232,8 @@ async fn generate_chunk_stream(
 
                 let stop_reason =
                     finish_reason.as_ref().and_then(|reason| reason.as_stop_reason().cloned());
+                // Like Python, the spans cover the whole output on the final chunk only.
+                let weight_versions = output.weight_versions.filter(|_| finish_reason.is_some());
                 let prompt_token_ids = prompt_token_ids.take();
                 y.yield_ok(GenerateStreamResponse {
                     request_id: request_id.clone(),
@@ -247,7 +249,7 @@ async fn generate_chunk_stream(
                             .map(npy_base64)
                             .transpose()?,
                         sampling_mask: output.sampling_mask.map(|mask| mask.rows),
-                        weight_versions: output.weight_versions,
+                        weight_versions,
                     }],
                     usage: include_continuous_usage
                         .then(|| Usage::from_token_usage(usage, enable_prompt_tokens_details)),
@@ -585,7 +587,7 @@ mod tests {
     use vllm_engine_core_client::protocol::multimodal::{MmModality, PlaceholderRange};
     use vllm_engine_core_client::protocol::output::{RequestSpecDecodeMetrics, StopReason};
     use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
-    use vllm_llm::{GeneratePromptInfo, PromptCacheUsage};
+    use vllm_llm::{GeneratePromptInfo, PromptCacheUsage, WeightVersionSpan};
 
     use super::*;
 
@@ -831,6 +833,25 @@ mod tests {
         let chunks = collect_chunks(vec![output], false, None).await;
 
         assert_eq!(chunks[0].choices[0].sampling_mask, Some(vec![vec![33, 44]]));
+    }
+
+    #[tokio::test]
+    async fn generate_chunk_stream_returns_weight_versions_on_final_chunk_only() {
+        let span = |end| WeightVersionSpan {
+            version: "v1".into(),
+            start: 0,
+            end,
+        };
+        let mut first = stream_output(Some(&[11]), vec![33], None);
+        first.weight_versions = Some(vec![span(1)]);
+        let mut last = stream_output(None, vec![44], Some(FinishReason::Length));
+        last.weight_versions = Some(vec![span(2)]);
+
+        let chunks = collect_chunks(vec![first, last], false, None).await;
+
+        let weight_versions: Vec<_> =
+            chunks.iter().map(|chunk| chunk.choices[0].weight_versions.clone()).collect();
+        assert_eq!(weight_versions, [None, Some(vec![span(2)])]);
     }
 
     #[tokio::test]
