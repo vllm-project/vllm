@@ -66,7 +66,7 @@ class _Scatter:
     shape: tuple[int, ...]
     stride: tuple[int, ...]
     dtype: torch.dtype
-    # A constant the loader built (`constant_like`): the replay fills the
+    # A constant the loader built (`new_ones` etc. on a fake): the replay fills the
     # region with it instead of fetching ``src``.
     fill: float | None = None
 
@@ -175,7 +175,7 @@ class FakeRDTTensor(torch.Tensor):
     _ops: OpChain
     # Handles this fake's copy_. ``None`` only on bare construction.
     _sink: "BakeSink | None"
-    # Set on a constant (`constant_like`): nothing to fetch.
+    # Set on a constant (`new_ones` etc.): nothing to fetch.
     _fill: float | None
 
     @staticmethod
