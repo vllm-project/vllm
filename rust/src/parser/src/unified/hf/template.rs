@@ -191,6 +191,31 @@ impl ResponseTemplate {
         })
     }
 
+    /// The pattern of the lookahead that ends the `xml-inline` tag pattern of
+    /// tool-call arguments, such as for the opener of the next argument.
+    pub fn argument_lookahead(&self) -> Option<&str> {
+        self.regions.iter().find_map(|region| match &region.kind {
+            RegionKind::ToolCalls(calls) => calls.content.lookahead(),
+            _ => None,
+        })
+    }
+
+    /// The literal closers of the reasoning field, longest first, or none if it
+    /// has no literal close.
+    pub fn reasoning_closers(&self) -> &[String] {
+        self.regions
+            .iter()
+            .find_map(|region| match (&region.kind, &region.close) {
+                (RegionKind::Text(text), Some(Boundary::Literals(closers)))
+                    if text.role == TextRole::Reasoning =>
+                {
+                    Some(closers.as_slice())
+                }
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
     /// Return the start and end offsets of the last start-anchor match in
     /// `prompt`.
     pub(super) fn last_start_anchor(&self, prompt: &str) -> Option<(usize, usize)> {
