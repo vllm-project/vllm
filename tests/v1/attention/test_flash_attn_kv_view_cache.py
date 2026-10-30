@@ -120,6 +120,30 @@ class TestFlashAttentionKVViewCache:
         k_ref, _ = _reference_views(second)
         assert torch.equal(k_second, k_ref)
 
+    def test_clear_layer_kv_caches_drops_view_cache(self):
+        """Runner teardown must drop the cached views, or the detached
+        kv_cache tensor stays alive through them.
+
+        Both runners release layer KV caches on profiling teardown and
+        shutdown: Model Runner V2 (and the cudagraph utils) via
+        clear_layer_kv_caches, V1 via the same pattern inlined in
+        _cleanup_profiling_kv_cache.
+        """
+        from types import SimpleNamespace
+
+        from vllm.v1.worker.utils import clear_layer_kv_caches
+
+        impl = _make_impl(num_kv_heads=4)
+        kv_cache = _make_kv_cache(num_kv_heads=4)
+        impl._get_kv_views(kv_cache, canonicalize=True)
+        assert impl._kv_view_cache is not None
+
+        layer = SimpleNamespace(kv_cache=kv_cache, impl=impl)
+        clear_layer_kv_caches([layer])
+
+        assert impl._kv_view_cache is None
+        assert layer.kv_cache.numel() == 0
+
     def test_single_kv_head_raw_and_canonicalized_variants(self):
         """With one KV head the two variants share storage and values; the
         canonicalized view carries canonical size-1 strides.
