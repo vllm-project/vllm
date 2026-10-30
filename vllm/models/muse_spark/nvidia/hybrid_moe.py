@@ -74,8 +74,11 @@ class MuseSparkHybridMoEExperts(MuseSparkMegaMoEExperts):
             and 0 < num_tokens <= self.trtllm_token_threshold
         )
 
-    def prepare_decode_inputs(self, pooled, norm, buffer):
-        num_tokens = pooled.shape[0]
+    @property
+    def nvfp4_input_global_scale(self) -> torch.Tensor:
+        return self._input_global_scale
+
+    def prepare_decode_inputs(self, pooled, norm, buffer, num_tokens: int):
         return norm_quant_trtllm_nvfp4(
             pooled,
             num_tokens,
@@ -89,21 +92,27 @@ class MuseSparkHybridMoEExperts(MuseSparkMegaMoEExperts):
             ),
         )
 
-    def forward_trtllm(self, hidden_states: torch.Tensor, buffer) -> torch.Tensor:
+    def forward_trtllm(
+        self,
+        quantized_input: tuple[torch.Tensor, torch.Tensor],
+        buffer,
+        topk_ids: torch.Tensor,
+    ) -> torch.Tensor:
         import flashinfer
         from flashinfer.comm.mnnvl_cutedsl_moe_finalize import (
             moe_finalize_rmsnorm_allreduce,
         )
 
-        num_tokens = hidden_states.shape[0]
+        packed, scales = quantized_input
+        num_tokens = packed.shape[0]
         raw = flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe(
             topk_ids=(
-                buffer.topk_idx[:num_tokens].to(torch.int32),
+                topk_ids,
                 buffer.topk_weights[:num_tokens],
             ),
             routing_bias=None,
-            hidden_states=buffer.x[:num_tokens].view(torch.uint8),
-            hidden_states_scale=buffer.x_sf[:num_tokens].view(torch.float8_e4m3fn),
+            hidden_states=packed,
+            hidden_states_scale=scales.view(torch.float8_e4m3fn),
             gemm1_weights=self.w13_weight,
             gemm1_weights_scale=self.w13_weight_scale,
             gemm1_bias=None,
@@ -133,7 +142,9 @@ class MuseSparkHybridMoEExperts(MuseSparkMegaMoEExperts):
         )
         assert isinstance(result, UnfinalizedMoEOutput)
         norm = self.post_expert_norm
-        y = torch.empty_like(hidden_states, dtype=torch.bfloat16)
+        y = torch.empty(
+            (num_tokens, self.hidden_size), device=packed.device, dtype=torch.bfloat16
+        )
         moe_finalize_rmsnorm_allreduce(
             result.gemm2_permuted,
             result.expert_weights,

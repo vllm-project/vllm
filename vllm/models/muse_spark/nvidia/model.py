@@ -521,8 +521,10 @@ class MuseSpark1xMoE(nn.Module):
         # loaded, so larger batches keep the replicated projections.
         replicated_tokens = (
             self.tp_size > 1
-            and not self.use_mega_moe
-            and not self.is_sequence_parallel
+            and (
+                (self.use_hybrid_moe and self.is_nvfp4_mega_moe)
+                or (not self.use_mega_moe and not self.is_sequence_parallel)
+            )
             and not self.use_sequence_parallel_moe
             and parallel_config.data_parallel_size == 1
             and not envs.VLLM_BATCH_INVARIANT
@@ -672,15 +674,20 @@ class MuseSpark1xMoE(nn.Module):
         self.router_output_multiplier = None
         self.moe_router.router_output_multiplier = None
 
-    def shards_pooler(self, num_tokens: int) -> bool:
-        return self.shard_pooler and num_tokens <= _SHARDED_PROJECTION_MAX_TOKENS
+    def _can_shard_projection(self, num_tokens: int, sp_active: bool) -> bool:
+        return num_tokens <= _SHARDED_PROJECTION_MAX_TOKENS and (
+            not self.use_mega_moe
+            or (self.use_hybrid_moe and self.experts.use_trtllm(num_tokens, sp_active))
+        )
 
-    def shards_unpooler(self, num_tokens: int) -> bool:
+    def shards_pooler(self, num_tokens: int, sp_active: bool = True) -> bool:
+        return self.shard_pooler and self._can_shard_projection(num_tokens, sp_active)
+
+    def shards_unpooler(self, num_tokens: int, sp_active: bool = True) -> bool:
         return (
             self.shard_unpooler
-            and self.min_sharded_unpooler_tokens
-            <= num_tokens
-            <= _SHARDED_PROJECTION_MAX_TOKENS
+            and self.min_sharded_unpooler_tokens <= num_tokens
+            and self._can_shard_projection(num_tokens, sp_active)
         )
 
     def _project_local_columns(
@@ -799,24 +806,38 @@ class MuseSpark1xMoE(nn.Module):
             num_tokens, sp_active
         )
         buffer, padding = self.experts.input_buffer(num_tokens)
+        topk_ids = buffer.topk_idx
+        if use_trtllm:
+            # Reuse the storage for contiguous int32 IDs, without a dtype cast.
+            topk_ids = topk_ids.view(torch.int32).view(-1, topk_ids.shape[-1])
+        topk_ids = topk_ids[:num_tokens]
         norm = self.pre_expert_norm
         pooler = self.pooler
         assert norm is not None and pooler is not None
 
         def pool_and_quantize():
-            pooled, _ = pooler(hidden_states)
-            if use_trtllm:
-                self.experts.prepare_decode_inputs(pooled, norm, buffer)
+            if use_trtllm and self.shards_pooler(num_tokens, sp_active):
+                pooled = self._project_local_columns(pooler, hidden_states)
+                if fused := self._all_gather_norm_quant(
+                    pooled, norm, self.experts.nvfp4_input_global_scale
+                ):
+                    return None, fused
+                pooled = sp_all_gather(pooled)
             else:
-                prepare_megamoe_nvfp4_with_norm(
-                    pooled,
-                    norm.weight,
-                    norm.variance_epsilon,
-                    norm.fused_gain_center,
-                    buffer.x[:num_tokens],
-                    buffer.x_sf[:num_tokens].view(torch.uint8),
+                pooled, _ = pooler(hidden_states)
+            if use_trtllm:
+                return None, self.experts.prepare_decode_inputs(
+                    pooled, norm, buffer, num_tokens
                 )
-            return pooled
+            prepare_megamoe_nvfp4_with_norm(
+                pooled,
+                norm.weight,
+                norm.variance_epsilon,
+                norm.fused_gain_center,
+                buffer.x[:num_tokens],
+                buffer.x_sf[:num_tokens].view(torch.uint8),
+            )
+            return pooled, None
 
         def route():
             logits, _ = self.router(router_input)
@@ -829,18 +850,20 @@ class MuseSpark1xMoE(nn.Module):
                 router_output_multiplier=router.router_output_multiplier,
                 router_score_normalization=router.router_score_normalization,
                 router_score_division_eps=router.router_score_division_eps,
-                topk_ids=buffer.topk_idx[:num_tokens],
+                topk_ids=topk_ids,
                 topk_weights=buffer.topk_weights[:num_tokens],
                 is_padding=padding,
             )
 
         # The fork event also orders both writers after the previous layer's
         # MegaMoE, which may have consumed this same symmetric buffer.
-        pooled, _ = maybe_execute_in_parallel(
+        (pooled, quantized_input), _ = maybe_execute_in_parallel(
             pool_and_quantize, route, *self._router_events, self._router_aux_stream
         )
         if use_trtllm:
-            return self.experts.forward_trtllm(pooled, buffer)
+            assert quantized_input is not None
+            return self.experts.forward_trtllm(quantized_input, buffer, topk_ids)
+        assert pooled is not None
         return self.experts.forward_prepared(pooled, buffer)
 
     def _prepares_nvfp4_inputs(self, num_tokens: int) -> bool:
@@ -986,7 +1009,7 @@ class MuseSpark1xMoE(nn.Module):
             return self._project_local_columns(self.unpooler, experts_out)
         if self.unpooler is not None:
             experts_out = self._project(
-                self.unpooler, experts_out, self.shards_unpooler(num_tokens)
+                self.unpooler, experts_out, self.shards_unpooler(num_tokens, sp_active)
             )
 
         if self.use_sequence_parallel_moe:
@@ -1524,7 +1547,7 @@ class MuseSpark1xDecoderLayer(nn.Module):
         if sp_active and not self.feed_forward.use_mega_moe:
             # Non-megakernel experts need every token.
             branch = sp_shard(self.feed_forward(sp_all_gather(ffn_in)))
-        elif self._defers_column_gather(ffn_in.shape[0]):
+        elif self._defers_column_gather(ffn_in.shape[0], sp_active):
             return MuseSpark1xColumnShardedStream(
                 stream=stream,
                 branch=self.feed_forward(
@@ -1552,11 +1575,11 @@ class MuseSpark1xDecoderLayer(nn.Module):
             connection=self.add_ffn,
         )
 
-    def _defers_column_gather(self, num_tokens: int) -> bool:
+    def _defers_column_gather(self, num_tokens: int, sp_active: bool) -> bool:
         # Only sharded MoE layers get a workspace (see _configure_column_gather).
         return self.all_gather_dual_norm is not None and cast(
             MuseSpark1xMoE, self.feed_forward
-        ).shards_unpooler(num_tokens)
+        ).shards_unpooler(num_tokens, sp_active)
 
 
 # Runs uncompiled under breakable cudagraphs; drop LlamaModel's torch.compile.
@@ -1680,7 +1703,10 @@ class MuseSpark1xModel(LlamaModel):
             for layer in islice(self.layers, self.start_layer, self.end_layer)
             if isinstance(layer.feed_forward, MuseSpark1xMoE)
             and layer.feed_forward.shard_pooler
-            and layer.feed_forward.fused_input_quant
+            and (
+                layer.feed_forward.fused_input_quant
+                or layer.feed_forward.use_hybrid_moe
+            )
             and layer.feed_forward.norm_fuses_into_nvfp4_quant
         ]
         if not moes:
