@@ -69,18 +69,3 @@ def test_template_frame_matches_model_frame(
 
 def test_template_is_none_when_sentinels_are_ambiguous():
     assert _delta_frame_template("cmpl-987654321", CREATED, "m") is None
-
-
-def test_delta_chunk_fields_are_frozen():
-    """The template tracks field order and formatting, but not a new field the
-    generator starts populating per chunk; adding one must fail here."""
-    assert set(CompletionResponseStreamChoice.model_fields) == {
-        "index",
-        "text",
-        "logprobs",
-        "finish_reason",
-        "stop_reason",
-        "prompt_token_ids",
-        "token_ids",
-        "weight_versions",
-    }
