@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Paged side-cache ownership and metadata for Qwen4Exp QSA.
+"""Paged indexer cache ownership and metadata for Qwen4Exp QSA.
 
 Each QSA layer keeps a fixed circular buffer of raw index keys (the
 compressor state) and one compressed key. MRoPE models pack exact three-axis
@@ -399,7 +399,7 @@ def build_qsa_metadata_triton(
     k_work_metadata_buffer: torch.Tensor | None = None,
     request_capacity: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Build QSA side-cache and optional pre-indexer work metadata."""
+    """Build QSA indexer cache and optional pre-indexer work metadata."""
     num_tokens = common_attn_metadata.num_actual_tokens
     num_mapped_tokens = int(common_attn_metadata.query_start_loc_cpu[-1])
     token_to_req = token_to_req_buffer[:num_tokens]
@@ -573,17 +573,22 @@ build_qsa_metadata = (
 
 
 @dataclass
-class QSAForwardMetadata(AttentionMetadata):
-    """Common per-forward metadata for one QSA side cache."""
+class QSAIndexerMetadata(AttentionMetadata):
+    """Per-forward metadata for one raw or compressed QSA indexer cache."""
 
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
     seq_lens: torch.Tensor
     query_start_loc: torch.Tensor
     token_to_req: torch.Tensor
-    logical_positions: torch.Tensor
-    visible_blocks: torch.Tensor
-    k_work_metadata: torch.Tensor
+    # Positions in the original uncompressed sequence, padded with -1.
+    logical_positions: torch.Tensor  # [num_tokens]
+    # Complete compression groups visible to each query.
+    visible_blocks: torch.Tensor  # [num_tokens]
+    # K compression work items: (request index, local task index), -1 for padding.
+    # Task 0 per request also saves the raw-K suffix, even without a complete group.
+    # Empty for raw or uncompressed caches.
+    k_work_metadata: torch.Tensor  # [num_k_work, 2]
     num_actual_tokens: int
     num_decodes: int
     num_decode_tokens: int
@@ -592,11 +597,12 @@ class QSAForwardMetadata(AttentionMetadata):
     max_query_len: int
     decode_query_len: int
     max_seq_len: int
+    # Key rows per physical cache block.
     storage_block_size: int
     compress_ratio: int
 
 
-class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
+class QSAIndexerMetadataBuilder(AttentionMetadataBuilder[QSAIndexerMetadata]):
     """Build QSA metadata from vLLM's cache-group-specific common metadata."""
 
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
@@ -653,7 +659,7 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
-    ) -> QSAForwardMetadata:
+    ) -> QSAIndexerMetadata:
         del common_prefix_len, fast_build
         num_tokens = common_attn_metadata.num_actual_tokens
         decode_threshold = self.reorder_batch_threshold
@@ -702,7 +708,7 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
                 request_capacity=request_capacity,
             )
         )
-        return QSAForwardMetadata(
+        return QSAIndexerMetadata(
             block_table=common_attn_metadata.block_table_tensor,
             slot_mapping=slot_mapping,
             seq_lens=common_attn_metadata.seq_lens,
@@ -724,8 +730,8 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
         )
 
 
-class QSAStateBackend(AttentionBackend):
-    """Key-only dummy backend for out-of-band QSA side-cache operations."""
+class QSAIndexerBackend(AttentionBackend):
+    """Key-only dummy backend for out-of-band QSA indexer cache operations."""
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
     # fp8 entries allow the optional e4m3 compressed indexer cache.
@@ -738,17 +744,17 @@ class QSAStateBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "QWEN4_EXP_EXP_QSA_STATE"
+        return "QWEN4_EXP_QSA_INDEXER"
 
     @staticmethod
     def get_impl_cls():
         raise NotImplementedError(
-            "QSA state caches run out-of-band and have no attention impl"
+            "QSA indexer caches run out-of-band and have no attention impl"
         )
 
     @staticmethod
-    def get_builder_cls() -> type[QSAMetadataBuilder]:
-        return QSAMetadataBuilder
+    def get_builder_cls() -> type[QSAIndexerMetadataBuilder]:
+        return QSAIndexerMetadataBuilder
 
     @classmethod
     def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
@@ -756,7 +762,7 @@ class QSAStateBackend(AttentionBackend):
         return (KVCacheLayout.BLNHC, KVCacheLayout.BLHNC)
 
 
-class _QSAStateCache(nn.Module, AttentionLayerBase):
+class _QSAIndexerCache(nn.Module, AttentionLayerBase):
     supports_dcp = False
 
     def __init__(
@@ -795,20 +801,20 @@ class _QSAStateCache(nn.Module, AttentionLayerBase):
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
         """Adapt the unified [B, H, N, C] view to QSA's [B, N, H, C]."""
         if kv_cache.ndim != 4 or kv_cache.shape[1] != 1:
-            raise ValueError("QSA state cache must be [blocks, 1, states, width]")
+            raise ValueError("QSA indexer cache must be [blocks, 1, states, width]")
         if kv_cache.dtype != self.dtype or kv_cache.shape[3] != self.head_size:
             raise ValueError(
-                f"QSA state cache does not match its spec "
+                f"QSA indexer cache does not match its spec "
                 f"(dtype {kv_cache.dtype} != {self.dtype} or width "
                 f"{kv_cache.shape[3]} != {self.head_size})"
             )
         super().bind_kv_cache(kv_cache.transpose(1, 2))
 
     def get_attn_backend(self) -> type[AttentionBackend]:
-        return QSAStateBackend
+        return QSAIndexerBackend
 
 
-class QSAKeyStateCache(_QSAStateCache):
+class QSARawKeyCache(_QSAIndexerCache):
     """Raw BF16 key, optionally followed by exact int64 MRoPE positions."""
 
     _BF16_PER_INT64 = 4
@@ -860,7 +866,7 @@ class QSAKeyStateCache(_QSAStateCache):
         )
 
 
-class QSACompressedKeyCache(_QSAStateCache):
+class QSACompressedKeyCache(_QSAIndexerCache):
     """Normed, group-first-RoPE key at one row per complete group."""
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
@@ -876,10 +882,10 @@ class QSACompressedKeyCache(_QSAStateCache):
 
 __all__ = [
     "QSACompressedKeyCache",
-    "QSAForwardMetadata",
-    "QSAKeyStateCache",
-    "QSAMetadataBuilder",
-    "QSAStateBackend",
+    "QSAIndexerMetadata",
+    "QSARawKeyCache",
+    "QSAIndexerMetadataBuilder",
+    "QSAIndexerBackend",
     "canonical_qsa_rope_positions",
     "circular_qsa_slot_mapping",
     "compressed_qsa_slot_mapping",
