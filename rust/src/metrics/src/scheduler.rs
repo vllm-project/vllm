@@ -125,6 +125,19 @@ pub type MooncakeOperationHistogramFamily =
     Family<MooncakeOperationLabels, Histogram, fn() -> Histogram>;
 pub type MooncakeOperationCounterFamily = Family<MooncakeOperationLabels, U64Counter>;
 
+/// Labels for per-operation UMBP store connector telemetry.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct UmbpOperationLabels {
+    pub model_name: String,
+    pub engine: u32,
+    pub operation: &'static str,
+}
+
+/// Family type alias for the UMBP connector telemetry, exposed so
+/// `engine-core-client` can hold onto the `Family` directly, since an
+/// operation's series appears once the connector first reports it.
+pub type UmbpOperationCounterFamily = Family<UmbpOperationLabels, U64Counter>;
+
 /// Adapter names encoded as a deterministic comma-joined Prometheus label value.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct LoraAdapterNames(pub BTreeSet<String>);
@@ -290,6 +303,12 @@ pub struct SchedulerMetrics {
     pub nixl_num_failed_notifications: Family<EngineLabels, U64Counter>,
     pub nixl_num_kv_expired_reqs: Family<EngineLabels, U64Counter>,
     pub nixl_num_notifications_after_expiry: Family<EngineLabels, U64Counter>,
+
+    // UMBP store connector telemetry. Mirrors `UMBPStorePromMetrics`.
+    pub umbp_transfer_submitted_total: UmbpOperationCounterFamily,
+    pub umbp_transfer_completed_total: UmbpOperationCounterFamily,
+    pub umbp_transfer_failed_total: UmbpOperationCounterFamily,
+    pub umbp_transfer_bytes_total: UmbpOperationCounterFamily,
 
     /// Non-Prometheus interval accumulators for periodic text-log helpers.
     pub log_stats: Family<EngineLabels, SchedulerLogStatsAccumulator>,
@@ -632,6 +651,35 @@ impl SchedulerMetrics {
             nixl_num_notifications_after_expiry.clone(),
         );
 
+        // UMBP store connector telemetry.
+        let umbp_transfer_submitted_total = Family::default();
+        registry.register(
+            "vllm:umbp_transfer_submitted",
+            "Number of UMBP objects submitted",
+            umbp_transfer_submitted_total.clone(),
+        );
+
+        let umbp_transfer_completed_total = Family::default();
+        registry.register(
+            "vllm:umbp_transfer_completed",
+            "Number of UMBP objects completed",
+            umbp_transfer_completed_total.clone(),
+        );
+
+        let umbp_transfer_failed_total = Family::default();
+        registry.register(
+            "vllm:umbp_transfer_failed",
+            "Number of UMBP objects failed",
+            umbp_transfer_failed_total.clone(),
+        );
+
+        let umbp_transfer_bytes_total = Family::default();
+        registry.register(
+            "vllm:umbp_transfer_bytes",
+            "Bytes in successfully completed UMBP transfer ranges",
+            umbp_transfer_bytes_total.clone(),
+        );
+
         Self {
             scheduler_running,
             scheduler_waiting,
@@ -674,6 +722,10 @@ impl SchedulerMetrics {
             nixl_num_failed_notifications,
             nixl_num_kv_expired_reqs,
             nixl_num_notifications_after_expiry,
+            umbp_transfer_submitted_total,
+            umbp_transfer_completed_total,
+            umbp_transfer_failed_total,
+            umbp_transfer_bytes_total,
             log_stats: Family::default(),
         }
     }
