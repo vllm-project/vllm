@@ -330,6 +330,7 @@ steps:
 
 - label: ":nvidia: (B200) [Nightly] LM Eval Spec Decode"
   key: lm-eval-spec-decode-4xb200
+  automatic_shard: false  # its command's PYTHONPATH= would hide the sharding plugin, until the plugin moves to site-packages
   timeout_in_minutes: 120
   device: b200-k8s
   num_devices: 4
@@ -867,6 +868,7 @@ steps:
 
 - label: ":nvidia: (A100) [Nightly] LM Eval Humming Default TEMPORARY Shard %N"
   key: lm-eval-humming-a100-default
+  automatic_shard: false  # retired hardware: its removal PR is open
   optional: true
   timeout_in_minutes: 75
   device: a100
@@ -883,6 +885,7 @@ steps:
 
 - label: ":nvidia: (A100) [Nightly] LM Eval Humming Activation INT8 TEMPORARY Shard %N"
   key: lm-eval-humming-a100-act
+  automatic_shard: false  # retired hardware: its removal PR is open
   optional: true
   timeout_in_minutes: 45
   device: a100
@@ -969,6 +972,7 @@ steps:
 
 - label: ":nvidia: (B200) [Nightly] LM Eval Humming Activation FP8/INT8 TEMPORARY"
   key: lm-eval-humming-b200-act
+  automatic_shard: false  # fails on main: enrollment waits until it passes
   optional: true
   timeout_in_minutes: 50
   device: b200-k8s
@@ -1407,6 +1411,7 @@ steps:
 
 - label: ":nvidia: (H100) [Nightly] LM Eval KV-Offload Large"
   key: kv-offload-large
+  automatic_shard: false  # two tests: splitting them costs more setup than it saves
   automatic_shard: true
   # Nightly only: 4-GPU H100 pods wait behind smaller jobs on per-PR runs.
   optional: true

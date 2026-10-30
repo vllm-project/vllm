@@ -370,6 +370,7 @@ steps:
 
 - label: ":computer: (CPU) Qwen4 Exp"
   key: qwen4-exp-unit-tests-cpu
+  automatic_shard: false  # CPU step: held out until its owners agree; main has no test timings for it
   depends_on:
   - image-build-cpu
   timeout_in_minutes: 20
@@ -387,6 +388,7 @@ steps:
 
 - label: ":computer: (CPU) Basic Models Other"
   key: basic-models-test-other-cpu
+  automatic_shard: false  # CPU step: held out until its owners agree; main has no test timings for it
   depends_on:
   - image-build-cpu
   timeout_in_minutes: 30
@@ -517,6 +519,7 @@ steps:
 
 - label: ":nvidia: (4xB200) DeepSeek-V4.1 Specialized Decode"
   key: dsv41-nvidia-specialized-decode-4xb200
+  automatic_shard: false  # fails on main: enrollment waits until it passes
   # Nightly only: 4-GPU B200 pods wait hours behind smaller jobs on per-PR runs.
   optional: true
   timeout_in_minutes: 40

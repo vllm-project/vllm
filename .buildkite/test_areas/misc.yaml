@@ -134,6 +134,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) V1 KV Offload"
   device: h200_35gb
   key: v1-kv-offload
+  automatic_shard: false  # fails on main: enrollment waits until it passes
   timeout_in_minutes: 45
   source_file_dependencies: *v1-core-kv-metrics-deps
   commands:
@@ -329,6 +330,7 @@ steps:
 
 - label: ":computer: (CPU) V1 Others"
   key: v1-others-cpu
+  automatic_shard: false  # CPU step: held out until its owners agree; main has no test timings for it
   depends_on:
     - image-build-cpu
   source_file_dependencies:
@@ -767,6 +769,7 @@ steps:
 
 - label: ":computer: (CPU) Multimodal + Config"
   key: cpu-multimodal-config
+  automatic_shard: false  # CPU step: held out until its owners agree; main has no test timings for it
   depends_on:
   - image-build-cpu
   timeout_in_minutes: 35
@@ -862,6 +865,7 @@ steps:
 
 - label: ":computer: (CPU) Reasoning + Renderers"
   key: cpu-reasoning-renderers
+  automatic_shard: false  # CPU step: held out until its owners agree; main has no test timings for it
   depends_on:
   - image-build-cpu
   timeout_in_minutes: 35
@@ -873,6 +877,7 @@ steps:
 
 - label: ":computer: (CPU) Tool Parsers"
   key: cpu-tool-parsers
+  automatic_shard: false  # CPU step: held out until its owners agree; main has no test timings for it
   depends_on:
   - image-build-cpu
   timeout_in_minutes: 35

@@ -83,6 +83,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (API Server) %N"
   key: entrypoints-integration-api-server
+  automatic_shard: false  # its command's PYTHONPATH= would hide the sharding plugin, until the plugin moves to site-packages
   device: h200_35gb
   timeout_in_minutes: 75
   parallelism: 4

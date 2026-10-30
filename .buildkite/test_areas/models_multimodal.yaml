@@ -103,6 +103,7 @@ steps:
 
 - label: ":computer: (CPU) Multimodal Processor Shard %N"
   key: multi-modal-processor-cpu
+  automatic_shard: false  # CPU step: held out until its owners agree; main has no test timings for it
   depends_on:
   - image-build-cpu
   timeout_in_minutes: 125
@@ -171,6 +172,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) [Nightly] Multimodal Models (Extended Generation 1)"
   device: h200_35gb
   key: multi-modal-models-extended-generation-1
+  automatic_shard: false  # fails on main: enrollment waits until it passes
   optional: true
   source_file_dependencies:
   - vllm/
@@ -196,6 +198,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) [Nightly] Multimodal Models (PPL)"
   device: h200_35gb
   key: multi-modal-models-extended-ppl
+  automatic_shard: false  # fails on main: enrollment waits until it passes
   optional: true
   source_file_dependencies:
   - vllm/
