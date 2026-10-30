@@ -801,6 +801,15 @@ class Gemma4ModelArchConfigConvertor(ModelArchConfigConvertorBase):
         )
 
 
+class AprielVoiceModelArchConfigConvertor(Gemma4ModelArchConfigConvertor):
+    """Use Gemma4 image attention only when the wrapper has a vision tower."""
+
+    def is_mm_prefix_lm(self, supports_multimodal: bool = True) -> bool:
+        if getattr(self.hf_config, "vision_config", None) is not None:
+            return super().is_mm_prefix_lm(supports_multimodal)
+        return ModelArchConfigConvertorBase.is_mm_prefix_lm(self, supports_multimodal)
+
+
 class MossAudioModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def _language_config(self) -> PreTrainedConfig:
         return self.hf_config.language_config
@@ -847,6 +856,7 @@ class MossAudioModelArchConfigConvertor(ModelArchConfigConvertorBase):
 
 # hf_config.model_type -> convertor class
 MODEL_ARCH_CONFIG_CONVERTORS = {
+    "aprielvoice": AprielVoiceModelArchConfigConvertor,
     "bailing_hybrid_mtp": BailingHybridMTPModelArchConfigConvertor,
     "cohere_asr": CohereAsrModelArchConfigConvertor,
     "dbrx": DbrxModelArchConfigConvertor,

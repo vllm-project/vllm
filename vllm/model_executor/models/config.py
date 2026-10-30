@@ -1284,6 +1284,7 @@ class LongcatFlashNgramForCausalLMConfig(VerifyAndUpdateConfig):
 
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "AliceAIForCausalLM": AliceAIForCausalLMConfig,
+    "AprielVoiceModel": Gemma4Config,
     "ColBERTJinaRobertaModel": JinaRobertaModelConfig,
     "ColQwen3_5": ColQwen3_5Config,
     "D3ForSequenceClassification": D3ForSequenceClassificationConfig,
