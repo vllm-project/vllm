@@ -9,8 +9,46 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.config import get_current_vllm_config
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.v1.worker.workspace import current_workspace_manager
+
+
+@triton.jit
+def _upcast_logits_kernel(src_ptr, dst_ptr, row_ends_ptr, stride, BLOCK: tl.constexpr):
+    row = tl.program_id(0)
+    end = tl.load(row_ends_ptr + row)
+    src_ptr += row.to(tl.int64) * stride
+    dst_ptr += row.to(tl.int64) * stride
+    for start in range(tl.program_id(1) * BLOCK, end, tl.num_programs(1) * BLOCK):
+        offs = start + tl.arange(0, BLOCK)
+        mask = offs < end
+        vals = tl.load(src_ptr + offs, mask=mask)
+        tl.store(dst_ptr + offs, vals.to(tl.float32), mask=mask)
+
+
+def as_fp32_logits(logits: torch.Tensor, row_ends: torch.Tensor) -> torch.Tensor:
+    """Upcast SM100's BF16 MQA logits for the FP32 top-k kernels.
+
+    Only columns below ``row_ends`` (int32, one per row) are converted, the
+    span the consumers read; DeepGEMM's aligned row stride is kept.
+    """
+    if logits.dtype == torch.float32:
+        return logits
+    out = torch.empty_strided(
+        logits.shape, logits.stride(), dtype=torch.float32, device=logits.device
+    )
+    num_rows, width = logits.shape
+    if num_rows == 0 or width == 0:
+        return out
+    assert row_ends.numel() == num_rows and row_ends.dtype == torch.int32
+    block = 1024
+    splits = min(triton.cdiv(width, block), max(1, 1024 // num_rows))
+    _upcast_logits_kernel[(num_rows, splits)](
+        logits, out, row_ends.contiguous(), logits.stride(0), BLOCK=block
+    )
+    return out
+
 
 RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
 

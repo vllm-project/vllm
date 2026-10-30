@@ -110,6 +110,7 @@ def test_model_rpc_uses_execute_model_timeout(monkeypatch, method, result, stall
         (None, 1, False, False, False),  # nothing to overlap
         (None, 8, True, False, False),  # CPU backend sets OpenMP envs per worker
         (None, 8, False, True, False),  # NUMA wrapper patches the executable
+        (None, 8, False, None, False),  # auto-detection may enable that wrapper
     ],
 )
 def test_can_start_workers_concurrently(

@@ -163,7 +163,10 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
             # The MoE output is left un-reduced; fuse its all-reduce into the
             # final norm, as the main model does at layer boundaries.
             hidden_states, _ = fused_allreduce_rms_norm(
-                hidden_states, residual, self.shared_head.norm
+                hidden_states,
+                residual,
+                self.shared_head.norm,
+                max_size_bytes=self.mtp_block.fi_allreduce_max_bytes,
             )
         return hidden_states, hidden_states
 
