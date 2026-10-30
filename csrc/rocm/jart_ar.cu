@@ -957,6 +957,50 @@ __global__ void ping(Ptrs P, int rank) {
   if (threadIdx.x == 0) ep[blockIdx.x] = epoch + 1;
 }
 
+// All-gather LL de palabras de 16 bits opacas: cada rank manda su trozo a los 3 pares
+// y coloca las 4 partes en out[fila][src][interior] (gather sobre cualquier dim).
+__device__ __forceinline__ void store3_g(uint16_t* out, int i, int numel, int inner, int src,
+                                         uint64_t b) {
+#pragma unroll
+  for (int e = 0; e < 3; ++e) {
+    const int idx = 3 * i + e;
+    if (idx < numel) {
+      const int row = idx / inner;
+      out[(row * kWorld + src) * inner + idx - row * inner] =
+          static_cast<uint16_t>(b >> (16 * e));
+    }
+  }
+}
+
+__global__ void __launch_bounds__(kThreads, 1)
+    gather(Ptrs P, const uint16_t* __restrict__ in, uint16_t* __restrict__ out, int rank,
+           int numel, int inner) {
+  uint32_t* ep = P.ep;
+  const uint32_t epoch = ep[blockIdx.x];
+  const uint32_t tag = epoch % 65535u + 1;
+  const uint64_t tg = uint64_t(tag) << 48;
+  const int par = epoch & 1;
+  const int pk = (numel + 2) / 3;
+  const int first = blockIdx.x * blockDim.x + threadIdx.x;
+  const int stride = gridDim.x * blockDim.x;
+  for (int i = first; i < pk; i += stride) {
+    const uint64_t v = load3(in, i, numel);
+#pragma unroll
+    for (int d = 1; d < kWorld; ++d) put(slot(P.p[(rank + d) & 3], par, 0, rank) + i, tg | v);
+    store3_g(out, i, numel, inner, rank, v);
+  }
+  for (int i = first; i < pk; i += stride) {
+    uint64_t o[3];
+    get_otros(slot(P.p[rank], par, 0, (rank + 1) & 3) + i,
+              slot(P.p[rank], par, 0, (rank + 2) & 3) + i,
+              slot(P.p[rank], par, 0, (rank + 3) & 3) + i, tag, o);
+#pragma unroll
+    for (int k = 0; k < 3; ++k) store3_g(out, i, numel, inner, (rank + 1 + k) & 3, o[k]);
+  }
+  __syncthreads();
+  if (threadIdx.x == 0) ep[blockIdx.x] = epoch + 1;
+}
+
 std::tuple<fptr_t, at::Tensor> alloc_shared() {
   void* buf = nullptr;
   HIP_CHECK(hipExtMallocWithFlags(&buf, kBytes, hipDeviceMallocUncached));
@@ -1046,6 +1090,23 @@ void all_reduce(fptr_t ctx, at::Tensor& inp, at::Tensor& out, int64_t algo) {
   HIP_CHECK(hipGetLastError());
 }
 
+// inner = elementos contiguos por trozo de rank dentro de cada fila de la salida.
+void all_gather(fptr_t ctx, at::Tensor& inp, at::Tensor& out, int64_t inner) {
+  auto* c = reinterpret_cast<Ctx*>(ctx);
+  const int64_t es = inp.element_size();
+  TORCH_CHECK(inp.is_contiguous() && out.is_contiguous() && es % 2 == 0);
+  TORCH_CHECK(out.scalar_type() == inp.scalar_type() && out.numel() == kWorld * inp.numel());
+  TORCH_CHECK(inner > 0 && inp.numel() % inner == 0);
+  const int64_t words = inp.numel() * es / 2;
+  TORCH_CHECK(words <= kMaxNumel, "jart_ar all_gather: ", words, " words > ", kMaxNumel);
+  const c10::DeviceGuard g(inp.device());
+  auto stream = c10::hip::getCurrentHIPStreamMasqueradingAsCUDA().stream();
+  gather<<<blocks_env(), kThreads, 0, stream>>>(
+      c->ptrs, (const uint16_t*)inp.data_ptr(), (uint16_t*)out.data_ptr(), c->rank,
+      static_cast<int>(words), static_cast<int>(inner * es / 2));
+  HIP_CHECK(hipGetLastError());
+}
+
 }  // namespace jart_ar
 
 TORCH_LIBRARY(_jart_ar, m) {
@@ -1054,6 +1115,8 @@ TORCH_LIBRARY(_jart_ar, m) {
   m.def("init(int[] ptrs, int rank) -> int", &jart_ar::init);
   m.def("all_reduce(int ctx, Tensor inp, Tensor(a!) out, int algo) -> ()",
         &jart_ar::all_reduce);
+  m.def("all_gather(int ctx, Tensor inp, Tensor(a!) out, int inner) -> ()",
+        &jart_ar::all_gather);
   m.def("add_rms_solo(Tensor ar, Tensor res, Tensor w, float eps, Tensor(a!) out, "
         "Tensor(b!) res_out) -> ()", &jart_ar::add_rms_solo);
   m.def("ar_add_rms(int ctx, Tensor inp, Tensor res, Tensor w, float eps, Tensor(a!) out, "

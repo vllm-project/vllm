@@ -476,6 +476,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
         # gather-before-GEMM uses dim=0 with tp-aligned (uniform) shards.
         if dim < 0:
             dim += input_.dim()
+        jart_ar_comm = getattr(self, "jart_ar_comm", None)
+        if jart_ar_comm is not None and jart_ar_comm.should_gather(input_):
+            return jart_ar_comm.all_gather(input_, dim)
         if dim == 0 and should_nccl_symm_mem_ag_rs():
             return self._all_gather_symm_mem(input_.contiguous())
 

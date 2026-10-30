@@ -1643,6 +1643,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return 0
         return self.sampler.top_k_logits_width(input_batch.idx_mapping_np, max_k)
 
+    def _set_top_k_candidate_ids(self, ids: torch.Tensor | None) -> None:
+        for sampler in (self.sampler, getattr(self.rejection_sampler, "sampler", None)):
+            if sampler is not None:
+                sampler.top_k_candidate_ids = ids
+
     def sample(
         self,
         hidden_states: torch.Tensor,
@@ -1651,6 +1656,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     ) -> tuple[SamplerOutput, torch.Tensor, torch.Tensor]:
         shard_metadata = None
         global_input_batch = input_batch
+        candidate_ids = None
         if self.batch_sharder is not None:
             # Shard the inputs along the batch dimension to sample in parallel
             # across TP ranks.
@@ -1683,6 +1689,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     (values.shape[0], self.vocab_size),
                     torch.finfo(torch.float16).min,
                 ).scatter_(1, ids, values)
+                candidate_ids = ids
             else:
                 logits = self.model.compute_logits(sample_hidden_states)
 
@@ -1704,6 +1711,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 grammar_output.num_acceptable_drafts,
             )
 
+        # The fill of the gathered rows keeps zero probability up to this
+        # temperature.
+        if candidate_ids is not None and self.sampler is not None:
+            temperature = self.sampler.sampling_states.temperature.np
+            if np.max(temperature[input_batch.idx_mapping_np]) > 100.0:
+                candidate_ids = None
+        self._set_top_k_candidate_ids(candidate_ids)
+
         sampler_output: SamplerOutput | None
         if input_batch.num_reqs == 0:
             # This rank owns no requests this step. It contributes an
@@ -1723,6 +1738,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.speculator.draft_logits,
                 invalid_drafts,
             )
+        self._set_top_k_candidate_ids(None)
 
         if shard_metadata is not None:
             # Gather the sharded sampler outputs from the TP ranks into a single

@@ -503,13 +503,29 @@ def apply_top_k_top_p(
     k: torch.Tensor | None,
     p: torch.Tensor | None,
     has_topp_only_rows: bool = True,
+    candidate_ids: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Apply top-k and/or top-p masking to logits.
 
     has_topp_only_rows must be True if any row has p < 1 and
     k >= logits.shape[-1] (no active top-k).
+
+    candidate_ids, when given, holds per row the only entries that can survive
+    top-k; the rest of the row must hold a fill below every candidate with zero
+    probability. Only the candidates are then masked.
     """
     if p is None and k is None:
+        return logits
+
+    if (
+        candidate_ids is not None
+        and k is not None
+        and candidate_ids.shape[0] == logits.shape[0]
+        and logits.dtype == torch.float32
+        and current_platform.is_rocm()
+        and hasattr(torch.ops._rocm_C, "topk_topp_candidates")
+    ):
+        torch.ops._rocm_C.topk_topp_candidates(logits, candidate_ids, k, p)
         return logits
 
     if HAS_TRITON:
