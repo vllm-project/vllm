@@ -28,15 +28,15 @@ import gc
 import logging
 import threading
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Hashable
 from typing import Any, ClassVar, TypeVar
 
 import torch
 
 import vllm.envs as envs
+from vllm.compilation.cudagraph_pool import capture_pool
 from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
 from vllm.forward_context import (
     BatchDescriptor,
     get_forward_context,
@@ -95,8 +95,6 @@ def eager_break_during_capture(fn: F) -> F:
         def unified_attention_with_output(...):
             ...
     """
-    if not is_breakable_cudagraph_enabled():
-        return fn
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -277,6 +275,7 @@ class BreakableCUDAGraphWrapper:
         runnable: Callable[..., Any],
         vllm_config: VllmConfig,
         runtime_mode: CUDAGraphMode | None = None,
+        key_fn: Callable[..., Hashable] | None = None,
     ) -> None:
         # runtime_mode=None matches any non-NONE dispatch mode; entries
         # are keyed by BatchDescriptor, which already encodes batch
@@ -284,11 +283,12 @@ class BreakableCUDAGraphWrapper:
         self.runnable = runnable
         self.vllm_config = vllm_config
         self.runtime_mode = runtime_mode
+        self.key_fn = key_fn
         self.compilation_config = vllm_config.compilation_config
         self.graph_pool = current_platform.get_global_graph_pool()
         self.is_debugging_mode = logger.isEnabledFor(logging.DEBUG)
 
-        self.entries: dict[BatchDescriptor, _BreakableEntry] = {}
+        self.entries: dict[Hashable, _BreakableEntry] = {}
         BreakableCUDAGraphWrapper._all_instances.add(self)
 
         logger.info_once("Breakable CUDA graph enabled")
@@ -333,10 +333,14 @@ class BreakableCUDAGraphWrapper:
             return self.runnable(*args, **kwargs)
 
         assert batch_descriptor is not None
-        entry = self.entries.get(batch_descriptor)
+        # Python control flow (e.g. MTP module selection) must not share graphs.
+        key: Hashable = batch_descriptor
+        if self.key_fn is not None:
+            key = (batch_descriptor, self.key_fn(*args, **kwargs))
+        entry = self.entries.get(key)
         if entry is None:
             entry = _BreakableEntry(batch_descriptor=batch_descriptor)
-            self.entries[batch_descriptor] = entry
+            self.entries[key] = entry
 
         if entry.capture is None:
             return self._capture(entry, args, kwargs)
@@ -370,11 +374,6 @@ class BreakableCUDAGraphWrapper:
 
         entry.input_addresses = self._collect_tensor_addresses(args, kwargs)
 
-        if self.graph_pool is not None:
-            set_graph_pool_id(self.graph_pool)
-        else:
-            set_graph_pool_id(current_platform.graph_pool_handle())
-
         # Match torch.cuda.graph()'s pre-capture cleanup, which we bypass.
         # Skip it when gc is disabled: bulk capture runs under
         # freeze_gc_for_cudagraph_capture, which already did this cleanup,
@@ -386,8 +385,10 @@ class BreakableCUDAGraphWrapper:
         # pre-capture prefetches are complete and don't leak into the graph.
         get_offloader().sync_prev_onload()
 
-        capture = BreakableCUDAGraphCapture(pool=self.graph_pool)
-        with capture:
+        with (
+            capture_pool(self.graph_pool, self.vllm_config) as pool,
+            BreakableCUDAGraphCapture(pool=pool) as capture,
+        ):
             output = self.runnable(*args, **kwargs)
             # Join the offloader's copy stream while we still hold the last
             # segment open, so the join is captured into the graph (otherwise

@@ -25,6 +25,11 @@ INT4_DTYPE = scalar_types.uint4b8
 INT8_DTYPE = scalar_types.uint8b128
 
 
+def require_finite_positive_scales(name: str, value: torch.Tensor) -> None:
+    if not torch.isfinite(value).all() or not (value > 0).all():
+        raise ValueError(f"{name} must contain finite positive scales")
+
+
 def _dtype_abbr(dtype: torch.dtype | ScalarType) -> str:
     """Return a stable short name for torch and ScalarType dtypes."""
     if isinstance(dtype, ScalarType):
@@ -212,6 +217,17 @@ kNvfp4DynamicToken = QuantKey(
     FP4_DTYPE, scale=kNvfp4DynamicGroupScale, scale2=kDynamicTokenScale
 )
 
+
+def is_dynamic_per_token_outer_scale(key: QuantKey | None) -> bool:
+    """Whether ``key``'s second-level scale is computed per token at runtime."""
+    return (
+        key is not None
+        and key.scale2 is not None
+        and not key.scale2.static
+        and key.scale2.group_shape == GroupShape.PER_TOKEN
+    )
+
+
 kNvfp4StaticGroupScale = ScaleDesc(FP8_DTYPE, True, GroupShape(1, 16))
 kNvfp4Static = QuantKey(
     FP4_DTYPE, scale=kNvfp4StaticGroupScale, scale2=kStaticTensorScale
@@ -292,6 +308,8 @@ kInt8DynamicTensorSym = QuantKey(torch.int8, kDynamicTensorScale, symmetric=True
 kInt8DynamicTokenAsym = QuantKey(torch.int8, kDynamicTokenScale, symmetric=False)
 kInt8StaticTensorAsym = QuantKey(torch.int8, kStaticTensorScale, symmetric=False)
 kInt8DynamicTensorAsym = QuantKey(torch.int8, kDynamicTensorScale, symmetric=False)
+kDynamic32Scale = ScaleDesc(torch.float32, False, GroupShape(1, 32))
+kInt8Dynamic32Sym = QuantKey(torch.int8, kDynamic32Scale, symmetric=True)
 
 # INT4 W4A8 quantization keys
 

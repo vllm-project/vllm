@@ -39,7 +39,7 @@ Encoder engines should be launched with the following flags:
 
 - `--enforce-eager` **(required)** – The current EPD implementation is only compatible with encoder instances running in this mode.
 
-- `--no-enable-prefix-caching` **(required)** – Encoder instances do not consume KV cache; prefix caching is disabled to avoid conflicts with other features.
+- `--disable-prefix-caching` **(required)** – Encoder instances do not consume KV cache; prefix caching is disabled to avoid conflicts with other features.
 
 - `--max-num-batched-tokens=<large value>` **(default: 2048)** – This flag controls the token scheduling budget per decoding step and is irrelevant to encoder-only instances. **Set it to a very high value (effectively unlimited) to bypass scheduler limitations.** The actual token budget is managed by the encoder cache manager.
 
@@ -57,7 +57,12 @@ The vllm instances and `disagg_encoder_proxy` supports local URIs with ```{"url"
 
 ## EC connector and KV transfer
 
-The `ECExampleonnector` is used to store the encoder cache on local disk and facilitate transfer. To enable the encoder disaggregation feature, add the following configuration:
+`ECExampleConnector` stores encoder cache on local disk. For RDMA/TCP transfer
+without a shared filesystem, use `ECMooncakeConnector` (1E + 1PD only through
+this proxy). See
+[ECMooncakeConnector Usage Guide](../../../docs/features/mooncake_ec_connector_usage.md).
+
+To enable filesystem encoder disaggregation, add:
 
 ```bash
 # Add to encoder instance: 
@@ -104,6 +109,8 @@ If you enable prefill instance (`--prefill-servers-urls` not disabled), you will
 | `--encode-servers-urls` | Comma-separated list of encoder endpoints. Every multimodal item extracted from the request is fanned out to one of these URLs in a round-robin fashion. |
 | `--prefill-servers-urls` | Comma-separated list of prefill endpoints. Set to `disable`, `none`, or `""` to skip the dedicated prefill phase and run E+PD (encoder + combined prefill/decode). |
 | `--decode-servers-urls` | Comma-separated list of decode endpoints. Non-stream and stream paths both round-robin over this list. |
+| `--ec-consumer-zmq-addrs` | Mooncake EC consumer control addresses, aligned with `--decode-servers-urls`. Required for `ECMooncakeConnector`. Supported only in E+PD mode (`--prefill-servers-urls disable`). |
+| `--ec-consumer-dp-size` | Data-parallel replicas per EC consumer (default 1). |
 | `--host`, `--port` | Bind address for the proxy itself (defaults: `0.0.0.0:8000`). |
 
 ### Dynamic registration

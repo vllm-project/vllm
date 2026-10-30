@@ -62,7 +62,9 @@ async fn main() -> Result<()> {
         transport_mode: TransportMode::HandshakeOwner {
             handshake_address: args.handshake_address.clone(),
             advertised_host: args.host.clone(),
+            engine_start_index: 0,
             engine_count: args.engine_count,
+            data_parallel_size: args.engine_count,
             ready_timeout,
             local_input_address: None,
             local_output_address: None,
@@ -70,6 +72,7 @@ async fn main() -> Result<()> {
         coordinator_mode: None,
         model_name: args.model.clone(),
         client_index: CLIENT_INDEX,
+        engine_stats_enabled: true,
     })
     .await
     .context("failed to connect to external vLLM engine")?;

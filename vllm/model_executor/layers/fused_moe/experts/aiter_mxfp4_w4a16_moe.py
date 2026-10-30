@@ -16,6 +16,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kMxfp4Static,
 )
+from vllm.triton_utils import triton
 
 __all__ = [
     "AiterW4A16ExpertsMonolithic",
@@ -52,10 +53,10 @@ def _aiter_w4a16_silu_via_a8w4(
         from aiter.ops.triton.moe_op_gemm_a8w4 import moe_gemm_a8w4
 
     from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
-        should_use_cdna4_mx_scale_swizzle,
+        get_aiter_mx_scale_swizzle,
     )
 
-    swz = "CDNA4_SCALE" if should_use_cdna4_mx_scale_swizzle() else None
+    swz = get_aiter_mx_scale_swizzle()
     quant_dtype = torch.float8_e4m3fn
 
     g1_gammas = gammas if apply_router_weight_on_input else None
@@ -134,6 +135,8 @@ def aiter_triton_kernel_w4a16_moe_forward(
     e_score_correction_bias: torch.Tensor | None = None,
     routed_scaling_factor: float | None = None,
     score_mode: str | None = None,
+    input_ids: torch.Tensor | None = None,
+    hash_indices_table: torch.Tensor | None = None,
 ):
     assert quant_config is not None and rocm_aiter_ops.is_enabled()
     from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
@@ -154,17 +157,37 @@ def aiter_triton_kernel_w4a16_moe_forward(
         _routing_mod.is_tdm_avail = lambda: False
     aiter_routing = _routing_mod.routing
 
-    if score_mode is not None:
+    scale = routed_scaling_factor if routed_scaling_factor is not None else 1.0
+    if hash_indices_table is not None:
+        assert score_mode == "sqrtsoftplus" and input_ids is not None
+        # Same block_m heuristic as aiter's routing().
+        n_tokens, n_experts = gating_output.shape
+        block_m = max(
+            16, min(triton.next_power_of_2(max(1, n_tokens * topk // n_experts)), 128)
+        )
+        routing_data, gather_idx, scatter_idx = _routing_mod.routing_from_hash(
+            gating_output,
+            hash_indices_table,
+            input_ids,
+            topk,
+            block_m,
+            score_mode=score_mode,
+            renorm=renormalize,
+            routed_scaling_factor=scale,
+        )
+    elif score_mode is not None:
         use_grouped_topk = num_expert_group is not None and num_expert_group > 1
         routing_data, gather_idx, scatter_idx = aiter_routing(
             gating_output,
             topk,
             score_mode=score_mode,
-            bias=e_score_correction_bias,
-            renorm=renormalize,
-            routed_scaling_factor=(
-                routed_scaling_factor if routed_scaling_factor is not None else 1.0
+            bias=(
+                e_score_correction_bias.float()
+                if e_score_correction_bias is not None
+                else None
             ),
+            renorm=renormalize,
+            routed_scaling_factor=scale,
             use_grouped_topk=use_grouped_topk,
             num_expert_group=num_expert_group,
             topk_group=topk_group,
@@ -178,6 +201,17 @@ def aiter_triton_kernel_w4a16_moe_forward(
         gather_src = gather_idx.to(torch.long) // topk
         hidden_states = hidden_states[gather_src]
         gather_idx = None
+
+    # Expert parallelism: mark gates whose expert is not on this rank so the
+    # scatter combine skips them, instead of zero-filling the skipped experts'
+    # output rows.
+    gate_valid = None
+    if expert_map is not None:
+        topk_ids = routing_data.topk_ids
+        assert topk_ids is not None, (
+            "expert-parallel W4A16 requires aiter routing to expose topk_ids"
+        )
+        gate_valid = (expert_map[topk_ids.long()] >= 0).to(torch.int32).contiguous()
 
     assert quant_config.w1_precision is not None
     assert quant_config.w2_precision is not None
@@ -207,6 +241,11 @@ def aiter_triton_kernel_w4a16_moe_forward(
 
     # SILU on gfx1250: use the verified a8w4 kernel (dynamic MXFP8); a16w4 faults.
     if activation == MoEActivation.SILU and on_gfx1250():
+        if expert_map is not None:
+            raise NotImplementedError(
+                "Expert parallelism is not supported for SILU on gfx1250 "
+                "(the a8w4 fallback kernel has no expert_map support)."
+            )
         return _aiter_w4a16_silu_via_a8w4(
             hidden_states,
             w1_data,
@@ -261,6 +300,8 @@ def aiter_triton_kernel_w4a16_moe_forward(
         unpadded_N=unpadded_N_w1,
         unpadded_K=unpadded_K_w1,
         backend=a16w4_backend,
+        expert_map=expert_map,
+        gate_valid=gate_valid,
     )
 
     out = moe_gemm_a16w4(
@@ -278,6 +319,8 @@ def aiter_triton_kernel_w4a16_moe_forward(
         unpadded_N=unpadded_N_w2,
         unpadded_K=unpadded_K_w2,
         backend=a16w4_backend,
+        expert_map=expert_map,
+        gate_valid=gate_valid,
     )
 
     return out
@@ -295,6 +338,7 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             RoutingMethodType.Renormalize,
             RoutingMethodType.RenormalizeNaive,
             RoutingMethodType.DeepseekV4,
+            RoutingMethodType.DeepSeekV3,
         )
 
     @staticmethod
@@ -329,7 +373,7 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         moe_parallel_config: FusedMoEParallelConfig,
     ) -> bool:
         return (
-            not moe_parallel_config.use_ep
+            not moe_parallel_config.use_all2all_kernels
             and not moe_parallel_config.enable_eplb
             and moe_parallel_config.dp_size <= 1
         )
@@ -344,7 +388,12 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             RoutingMethodType.Renormalize,
             RoutingMethodType.RenormalizeNaive,
             RoutingMethodType.DeepseekV4,
+            RoutingMethodType.DeepSeekV3,
         ]
+
+    @staticmethod
+    def _supports_hash_routing() -> bool:
+        return True
 
     @staticmethod
     def _supports_router_logits_dtype(
@@ -372,12 +421,24 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
+        routing_replay_out: torch.Tensor | None = None,
+        input_ids: torch.Tensor | None = None,
+        hash_indices_table: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        score_mode = (
-            "sqrtsoftplus"
-            if self.moe_config.routing_method == RoutingMethodType.DeepseekV4
-            else None
-        )
+        routing_method = self.moe_config.routing_method
+        if routing_method == RoutingMethodType.DeepseekV4:
+            score_mode = "sqrtsoftplus"
+        elif routing_method == RoutingMethodType.DeepSeekV3:
+            # MiMo-V2.6: an ungrouped sigmoid router with a per-expert
+            # correction bias. aiter's flat top-k implements this natively
+            # (select on sigmoid(logits) + bias, return the unbiased sigmoid
+            # scores).
+            assert e_score_correction_bias is not None, (
+                "DeepSeekV3 routing requires e_score_correction_bias"
+            )
+            score_mode = "sigmoid"
+        else:
+            score_mode = None
         return aiter_triton_kernel_w4a16_moe_forward(
             hidden_states=hidden_states,
             w1=w1,
@@ -399,4 +460,6 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             e_score_correction_bias=e_score_correction_bias,
             routed_scaling_factor=routed_scaling_factor,
             score_mode=score_mode,
+            input_ids=input_ids,
+            hash_indices_table=hash_indices_table,
         )

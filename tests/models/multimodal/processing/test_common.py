@@ -23,13 +23,13 @@ from vllm.distributed.ec_transfer.ec_connector.utils import (
     PlaceholderMetadataResolver,
     collect_ec_item_metadata,
 )
-from vllm.entrypoints.chat_utils import _get_embeds_data
 from vllm.inputs import MultiModalDataDict, MultiModalInput
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.inputs import MultiModalFeatureSpec, batched_tensors_equal
 from vllm.multimodal.processing import BaseMultiModalProcessor, InputProcessingContext
 from vllm.platforms import current_platform
+from vllm.renderers.chat_utils.item_tracker import _get_embeds_data
 from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
 from vllm.utils.mistral import is_mistral_tokenizer
 
@@ -43,6 +43,7 @@ from ...registry import (
 
 def add_video_metadata(mm_data: MultiModalDataDict) -> MultiModalDataDict:
     """Add metadata to video mm_data."""
+    assert isinstance(mm_data, dict)
 
     def create_metadata(frames: np.ndarray):
         num_frames = len(frames)
@@ -71,6 +72,7 @@ def glmasr_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
     """Patch the multimodal data for GLM-ASR model.
     GLM-ASR requires text and audio to match 1:1, so we limit audio to 1.
     """
+    assert isinstance(mm_data, dict)
     if "audio" in mm_data:
         audio = mm_data["audio"]
         if isinstance(audio, list) and len(audio) > 1:
@@ -218,7 +220,7 @@ def test_audio_metadata_only_roundtrip(model_id, durations, monkeypatch):
     mm_config.enable_mm_embeds = True
     mm_config.allow_missing_mm_embeddings = True
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
-    sample_rate = processor.info.get_feature_extractor().sampling_rate
+    sample_rate = getattr(processor.info, "get_feature_extractor")().sampling_rate  # noqa: B009
     audios = [
         np.zeros(int(duration * sample_rate), dtype=np.float32)
         for duration in durations
@@ -333,6 +335,7 @@ def _test_processing_correctness(
     )
     # Ensure that the cache can fit all of the data
     # (set after because ModelConfig would set it to 0 for encoder-decoder models)
+    assert model_config.multimodal_config is not None
     model_config.multimodal_config.mm_processor_cache_gb = 2048
 
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)

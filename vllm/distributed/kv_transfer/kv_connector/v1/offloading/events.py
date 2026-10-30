@@ -31,6 +31,7 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     maybe_convert_block_hash,
     resolve_block_hashes,
+    to_event_extra_keys,
 )
 from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
@@ -58,6 +59,9 @@ _MEDIUM_TO_EVENT_STR: dict[Medium, str] = {
     Medium.CPU: MEDIUM_CPU,
     Medium.STORAGE: MEDIUM_STORAGE,
 }
+
+# The tracker is CPU-primary by construction: the primary tier's residency key.
+_PRIMARY_RESIDENCY: tuple[Medium, str | None] = (Medium.CPU, None)
 
 
 class OffloadingEventGroupSpec(NamedTuple):
@@ -99,14 +103,19 @@ class OffloadingEventsTracker:
     """Tracks offloaded chunks' KV event payloads from store to eviction.
 
     The scheduler calls :meth:`record_store` from ``_build_store_jobs`` and
-    :meth:`record_lookup` for ready primary-tier hits while the ``Request`` is
-    available. Deferred and missing lookups add no state. Under the connector's
-    supported success-only transfer model, entries remain until the final
-    observed residency removal or :meth:`reset`.
+    :meth:`record_lookup` for allocated primary-tier hits while the ``Request`` is
+    available. Unallocated and missing lookups add no state. Entries remain until
+    the final observed residency removal or :meth:`reset`.
     """
 
-    def __init__(self, config: OffloadingKVEventsConfig):
+    def __init__(
+        self,
+        config: OffloadingKVEventsConfig,
+        group_specs: dict[int, OffloadingEventGroupSpec] | None = None,
+    ):
         self.config = config
+        # Static classification survives resets and never asserts prefix residency.
+        self._group_specs = group_specs or {}
         self.self_describing_enabled = (
             config.enable_kv_cache_events and config.self_describing_kv_events
         )
@@ -142,7 +151,7 @@ class OffloadingEventsTracker:
         chunk_idx: int,
         offload_key: OffloadKey,
     ) -> None:
-        """Snapshot metadata for a ready primary-tier lookup hit."""
+        """Snapshot metadata for a ready or write-pending primary-tier hit."""
         if not self.self_describing_enabled:
             return
         if group_config.sliding_window_size_in_chunks is not None:
@@ -151,6 +160,13 @@ class OffloadingEventsTracker:
             self._pending_event_metadata[offload_key] = self._build_event_metadata(
                 req, group_config, chunk_idx
             )
+        # Primary residency is registered here rather than by the manager's
+        # prepare_write(): the payload needs the Request, which only the
+        # scheduler holds at lookup time, and the manager reaches this tracker
+        # only through OffloadingEvents.
+        self._pending_event_metadata[offload_key].active_residencies.add(
+            _PRIMARY_RESIDENCY
+        )
 
     def record_partial_store(
         self,
@@ -229,7 +245,7 @@ class OffloadingEventsTracker:
             extra_keys=None,
             group_idx=group_config.group_idx,
             kv_cache_spec=group_config.kv_event_group_spec,
-            active_residencies={(Medium.CPU, None)},
+            active_residencies={_PRIMARY_RESIDENCY},
         )
         if existing := self._pending_event_metadata.get(offload_key):
             meta.active_residencies.update(existing.active_residencies)
@@ -330,7 +346,7 @@ class OffloadingEventsTracker:
             extra_keys=None,
             group_idx=group_config.group_idx,
             kv_cache_spec=group_config.kv_event_group_spec,
-            active_residencies={(Medium.CPU, None)},
+            active_residencies={_PRIMARY_RESIDENCY},
         )
 
     def _placeholder_stored(
@@ -340,6 +356,14 @@ class OffloadingEventsTracker:
         locality: str | None,
         ownership: str | None,
     ) -> BlockStored:
+        group_idx = get_offload_group_idx(key)
+        # Static classification is part of the self-describing contract only;
+        # legacy placeholders keep carrying just group_idx and the hash.
+        spec = (
+            self._group_specs.get(group_idx, OffloadingEventGroupSpec(None, None))
+            if self.self_describing_enabled
+            else OffloadingEventGroupSpec(None, None)
+        )
         return BlockStored(
             block_hashes=[
                 maybe_convert_block_hash(BlockHash(get_offload_block_hash(key)))
@@ -350,7 +374,9 @@ class OffloadingEventsTracker:
             block_size=0,
             medium=_MEDIUM_TO_EVENT_STR[medium],
             lora_name=None,
-            group_idx=get_offload_group_idx(key),
+            group_idx=group_idx,
+            kv_cache_spec_kind=spec.kv_cache_spec_kind,
+            kv_cache_spec_sliding_window=spec.kv_cache_spec_sliding_window,
             locality=locality,
             ownership=ownership,
         )
@@ -393,9 +419,7 @@ class OffloadingEventsTracker:
                 lora_id=meta.lora_id,
                 medium=_MEDIUM_TO_EVENT_STR[event.medium],
                 lora_name=meta.lora_name,
-                extra_keys=(
-                    list(meta.extra_keys) if meta.extra_keys is not None else None
-                ),
+                extra_keys=to_event_extra_keys(meta.extra_keys),
                 group_idx=meta.group_idx,
                 kv_cache_spec_kind=meta.kv_cache_spec.kv_cache_spec_kind,
                 kv_cache_spec_sliding_window=(
@@ -411,6 +435,10 @@ class OffloadingEventsTracker:
         by_group: dict[int, list] = {}
         for key in event.keys:
             meta = self._pending_event_metadata.get(key)
+            if event.metadata_only:
+                if meta is not None:
+                    meta.active_residencies.discard((event.medium, event.ownership))
+                continue
             if meta is not None:
                 group_idx = meta.group_idx
                 by_group.setdefault(group_idx, []).extend(

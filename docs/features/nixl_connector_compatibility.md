@@ -52,7 +52,7 @@ th:not(:first-child) {
 | Dense Transformers | ✅ | ✅<sup>1</sup> | ✅ | ✅<sup>2</sup> | ✅ | ✅ | 🟠<sup>3</sup> |
 | MLA (e.g. DeepSeek-V2/V3) | ✅ | ✅<sup>1</sup> | 🟠<sup>4</sup> | ✅<sup>2</sup> | ✅ | ✅ | 🟠<sup>3</sup> |
 | Sparse MLA (e.g. DeepSeek-V3.2) | ✅ | ✅<sup>1</sup> | 🟠<sup>4</sup> | ✅<sup>2</sup> | ✅ | ✅ | 🟠<sup>3</sup> |
-| Hybrid SSM / Mamba | ✅ | ❔ | 🚧<sup>5</sup> | ❌ | ✅ | ✅ | ❌<sup>6</sup> |
+| Hybrid SSM / Mamba | ✅ | ❔ | 🟠<sup>5</sup> | ❌ | ✅ | ✅ | ❌<sup>6</sup> |
 | MoE | ✅ | ✅<sup>1</sup> | ✅ | ✅<sup>2</sup> | ✅ | ✅ | 🟠<sup>3</sup> |
 | Multimodal | ❔ | ❔ | ❔ | ❔ | ❔ | ❔ | ❔ |
 | Encoder-Decoder | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
@@ -67,7 +67,7 @@ what may differ.
 
 <sup>4</sup> MLA KV cache is replicated across TP workers, so heterogeneous TP works but there is no head-splitting. When P TP > D TP, only a single read is executed (redundant ranks are skipped). D TP > P TP also works.
 
-<sup>5</sup> Hybrid SSM (Mamba) models require **homogeneous TP** (`P TP == D TP`). Heterogeneous TP is not yet supported for Mamba layers.
+<sup>5</sup> Hybrid SSM/Mamba models (including GDN) support heterogeneous TP in both directions, provided one TP size is an integer multiple of the other.
 
 <sup>6</sup> HMA (required by hybrid models) does not support different remote block sizes.
 
@@ -120,7 +120,8 @@ Current push PP + HMA limitations:
 - Only the prefiller (producer) may be PP-sharded; decode-side PP is not supported.
 - Hybrid SSM/Mamba layouts are not supported under PP.
 - HMA requires the same block size on P and D.
-- Attention-HMA member routing requires decode TP to be no greater than prefill TP.
+- Non-MLA attention-HMA layer routing requires decode TP to be no greater than prefill TP.
+- Packed layouts under PP require MLA caches. Local and remote packed block strides may differ; layer pages must have equal sizes. MLA supports decode TP greater than prefill TP because its KV is replicated.
 
 ### Quantized KV cache
 
