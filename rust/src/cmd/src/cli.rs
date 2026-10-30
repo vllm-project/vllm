@@ -33,11 +33,12 @@ use vllm_engine_core_client::TransportMode;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
+use vllm_managed_engine::data_parallel::{DataParallelLbArgs, DataParallelTopology};
 use vllm_server::{
     ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
     CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL,
-    DEFAULT_REQUEST_BODY_LIMIT_BYTES, HttpListenerMode, LoraModulePath, ParserSelection,
-    RenderConfig, RendererSelection,
+    DEFAULT_REQUEST_BODY_LIMIT_BYTES, HttpListenerMode, LoraModulePath, OutputLogging,
+    ParserSelection, ReasoningEffort, RenderConfig, RendererSelection,
 };
 use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
 
@@ -148,11 +149,20 @@ pub struct RenderArgs {
     #[arg(long = "tokenizer-mode", default_value_t)]
     renderer: RendererSelection,
     /// Override the model chat template with a file path or inline template.
+    /// Only the `hf` renderer supports it.
     #[arg(long)]
     chat_template: Option<String>,
     /// Default JSON keyword arguments merged into every chat-template render.
     #[arg(long, value_parser = parse_json::<HashMap<String, Value>>, value_name = "JSON")]
     default_chat_template_kwargs: Option<HashMap<String, Value>>,
+    /// JSON mapping that rewrites a request's reasoning effort to a value the
+    /// chat template supports. Efforts not listed pass through unchanged, and
+    /// `reasoning_effort` in `chat_template_kwargs` is not rewritten.
+    ///
+    /// Example: `{"medium": "low", "xhigh": "max"}` for a template that only
+    /// knows low, high and max.
+    #[arg(long, value_parser = parse_json::<ReasoningEffortMap>, value_name = "JSON")]
+    reasoning_effort_map: Option<ReasoningEffortMap>,
     /// Whether to trust the chat template provided in the request. Only the HF
     /// chat-template renderer honors request templates; native renderers ignore
     /// them.
@@ -200,6 +210,7 @@ impl RenderArgs {
             renderer: self.renderer,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs.unwrap_or_default(),
+            reasoning_effort_map: self.reasoning_effort_map.unwrap_or_default(),
             trust_request_chat_template: self.trust_request_chat_template,
             exclude_tools_when_tool_choice_none: self.exclude_tools_when_tool_choice_none,
             chat_template_content_format: self.chat_template_content_format,
@@ -310,7 +321,7 @@ pub struct SharedRuntimeArgs {
     pub http_timeout_keep_alive: Option<u64>,
 
     /// The file path to the chat template, or the template in single-line form
-    /// for the specified model.
+    /// for the specified model. Only the `hf` renderer supports it.
     #[arg(long)]
     #[serde(default)]
     pub chat_template: Option<String>,
@@ -327,6 +338,15 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub default_chat_template_kwargs: Option<HashMap<String, Value>>,
 
+    /// JSON mapping that rewrites a request's reasoning effort to a value the
+    /// chat template supports. Efforts not listed pass through unchanged, and
+    /// `reasoning_effort` in `chat_template_kwargs` is not rewritten.
+    ///
+    /// Example: `{"medium": "low", "xhigh": "max"}` for a template that only
+    /// knows low, high and max.
+    #[arg(long, value_parser = parse_json::<ReasoningEffortMap>, value_name = "JSON")]
+    #[serde(default)]
+    pub reasoning_effort_map: Option<ReasoningEffortMap>,
     /// Whether to trust the chat template provided in the request. If False,
     /// the server will always use the chat template specified by
     /// `--chat-template` or the ones from tokenizer. Only the HF chat-template
@@ -388,8 +408,27 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub enable_log_requests: bool,
 
-    /// Include prompt_tokens_details in usage when cached prompt tokens are
-    /// present.
+    /// If set to True, log model outputs (generations). Output text and
+    /// finish reasons are logged at INFO, while output token IDs are logged at
+    /// DEBUG. Requires `--enable-log-requests`.
+    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
+    #[serde(default)]
+    pub enable_log_outputs: bool,
+
+    /// If set to False, output deltas will not be logged. Relevant only if
+    /// `--enable-log-outputs` is set.
+    #[arg(
+        long,
+        action = ArgAction::Set,
+        default_value_t = true,
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    #[serde(default = "default_enable_log_deltas")]
+    pub enable_log_deltas: bool,
+
+    /// Include prompt_tokens_details in usage, including cached and newly
+    /// cached prompt tokens.
     #[arg(
         long,
         default_missing_value = "true",
@@ -721,6 +760,7 @@ impl SharedRuntimeArgs {
             language_model_only: self.language_model_only,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
+            reasoning_effort_map: self.reasoning_effort_map.unwrap_or_default(),
             trust_request_chat_template: self.trust_request_chat_template,
             exclude_tools_when_tool_choice_none: self.exclude_tools_when_tool_choice_none,
             limit_mm_per_prompt: self.limit_mm_per_prompt,
@@ -752,7 +792,7 @@ impl SharedRuntimeArgs {
         grpc_listener_mode: Option<HttpListenerMode>,
         handshake_address: String,
         advertised_host: String,
-        engine_count: usize,
+        topology: &DataParallelTopology,
         local_input_address: Option<String>,
         local_output_address: Option<String>,
         manages_engine: bool,
@@ -776,7 +816,9 @@ impl SharedRuntimeArgs {
             transport_mode: TransportMode::HandshakeOwner {
                 handshake_address,
                 advertised_host,
-                engine_count,
+                engine_start_index: topology.frontend_engine_start_index(),
+                engine_count: topology.frontend_engine_count(),
+                data_parallel_size: topology.data_parallel_size,
                 ready_timeout,
                 local_input_address,
                 local_output_address,
@@ -799,6 +841,7 @@ impl SharedRuntimeArgs {
             language_model_only: self.language_model_only,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
+            reasoning_effort_map: self.reasoning_effort_map.unwrap_or_default(),
             trust_request_chat_template: self.trust_request_chat_template,
             exclude_tools_when_tool_choice_none: self.exclude_tools_when_tool_choice_none,
             limit_mm_per_prompt: self.limit_mm_per_prompt,
@@ -824,6 +867,11 @@ impl SharedRuntimeArgs {
     fn api_server_options(&self) -> ApiServerOptions {
         ApiServerOptions {
             enable_log_requests: self.enable_log_requests,
+            log_outputs: match (self.enable_log_outputs, self.enable_log_deltas) {
+                (false, _) => OutputLogging::Disabled,
+                (true, false) => OutputLogging::Complete,
+                (true, true) => OutputLogging::CompleteAndDeltas,
+            },
             enable_prompt_tokens_details: self.enable_prompt_tokens_details,
             default_return_tokens_as_token_ids: self.return_tokens_as_token_ids,
             enable_per_request_metrics: self.enable_per_request_metrics,
@@ -852,6 +900,10 @@ impl SharedRuntimeArgs {
 
 fn default_engine_ready_timeout_secs() -> u64 {
     600
+}
+
+fn default_enable_log_deltas() -> bool {
+    true
 }
 
 fn default_stream_interval() -> NonZeroU32 {
@@ -901,6 +953,9 @@ pub struct StructuredOutputsConfig {
     #[serde(flatten)]
     pub extra: serde_json::Map<String, Value>,
 }
+
+/// Keys are API effort names, so unknown efforts fail at startup.
+type ReasoningEffortMap = HashMap<ReasoningEffort, String>;
 
 /// Parsed `VLLM_LOG_STATS_INTERVAL`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1045,15 +1100,23 @@ pub struct ServeArgs {
     /// Managed Python headless-engine arguments.
     #[command(flatten)]
     pub managed_engine: ManagedEngineArgs,
+
+    /// Data parallel load-balancing arguments.
+    #[command(flatten)]
+    pub data_parallel_lb: DataParallelLbArgs,
 }
 
 impl ServeArgs {
     /// Build the OpenAI-server runtime config used after the managed Python
     /// engine starts.
-    pub fn to_frontend_config(&self, handshake_address: String) -> Config {
+    pub fn to_frontend_config(
+        &self,
+        handshake_address: String,
+        topology: &DataParallelTopology,
+    ) -> Config {
         // Prefer IPC sockets for local engine input/output.
         let (local_input_address, local_output_address) =
-            self.managed_engine.frontend_local_only().then(frontend_ipc_addresses).unzip();
+            topology.frontend_local_only().then(frontend_ipc_addresses).unzip();
         let listener_mode = match &self.uds {
             Some(path) => HttpListenerMode::BindUnix { path: path.clone() },
             None => HttpListenerMode::BindTcp {
@@ -1077,7 +1140,7 @@ impl ServeArgs {
             grpc_listener_mode,
             handshake_address,
             self.managed_engine.handshake_host.clone(),
-            self.managed_engine.data_parallel_size,
+            topology,
             local_input_address,
             local_output_address,
             // `--data-parallel-size-local 0` runs the frontend without a local engine.
@@ -1087,7 +1150,12 @@ impl ServeArgs {
 
     /// Build the managed Python-engine spawn configuration with the given
     /// handshake port.
-    pub fn to_managed_engine_config(&self, handshake_port: u16) -> ManagedEngineConfig {
+    pub fn to_managed_engine_config(
+        &self,
+        handshake_port: u16,
+        topology: &DataParallelTopology,
+        client_handshake_address: Option<String>,
+    ) -> ManagedEngineConfig {
         let reasoning_parser = effective_engine_reasoning_parser(
             &self.runtime.reasoning_parser,
             &self.runtime.model.id,
@@ -1111,12 +1179,24 @@ impl ServeArgs {
             self.runtime.limit_mm_per_prompt_json(),
             hf_overrides,
             self.runtime.structured_outputs_config_json(),
+            topology,
+            client_handshake_address,
         )
     }
 }
 
 fn effective_engine_reasoning_parser(selection: &ParserSelection, model: &str) -> Option<String> {
     selection.resolve_reasoning_name(model).map(str::to_owned)
+}
+
+/// Allocate a fresh IPC handshake endpoint for a frontend that serves only its
+/// node's engines (hybrid or external DP LB).
+pub fn frontend_ipc_handshake_address() -> String {
+    let preferred_base_path = std::env::var_os("VLLM_RPC_BASE_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let handshake = preferred_base_path.join(format!("vllm-rs-h-{}", Uuid::new_v4().simple()));
+    format!("ipc://{}", handshake.to_string_lossy())
 }
 
 /// Allocate fresh IPC endpoints for one managed frontend instance.

@@ -446,6 +446,8 @@ pub(super) struct ChatCompletionStreamResponse {
     /// Set only on the first chunk.
     #[serde(flatten)]
     pub prompt: Option<ChatCompletionStreamPrompt>,
+    /// Set only on the chunk carrying the finish reason.
+    pub kv_transfer_params: Option<Value>,
 }
 
 impl ChatCompletionStreamResponse {
@@ -457,6 +459,7 @@ impl ChatCompletionStreamResponse {
             usage: None,
             metrics: None,
             prompt: None,
+            kv_transfer_params: None,
         }
     }
 }
