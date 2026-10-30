@@ -4745,7 +4745,7 @@ Le tier fs a survécu au reboot : 90 chunk-hits `1:TouchOnHitFsTier`, 2,73 Go re
 - #4438 (web1) : `api.medium` et `qdrant` répondent **200** à 12:27Z — leurs 502 de 00:33Z sont le gel. `api.mini` reste en 502 : son service est archivé depuis le 30/04, il n'a plus d'amont.
 - Nanbeige : la régie a servi une génération réelle sur le GPU 2 (22:25:50Z). La quantification est fonctionnelle, sa **qualité n'a pas été évaluée**. Je solde sur ce résultat, sans 4ᵉ fenêtre : le verdict d'adoption est déjà négatif pour raison d'architecture, Qwen 4 27B arrive, et un gel matériel est en cours d'instruction.
 
-## 30/10 13:4xZ — Deux corrections : le 400 window+1 ne coûte pas de préremplissage ; le timeout de condensation de 90 s est structurel
+## 30/10 12:4xZ — Deux corrections : le 400 window+1 ne coûte pas de préremplissage ; le timeout de condensation de 90 s est structurel
 
 ### 1. Le 400 « maximum context length » est levé par le frontal, pas par le moteur
 
