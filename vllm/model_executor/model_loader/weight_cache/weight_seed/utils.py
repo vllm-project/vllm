@@ -228,15 +228,11 @@ def mirror_device_indices(seed_value: str, num_local: int) -> list[int]:
     sockets, so the operator does not place the mirror by hand, and an
     arbitrary source placement (not just a leading block) works.
     """
-    paths = []
-    for address in split_addresses(seed_value):
-        path = parse_seed_address(address)
-        if not isinstance(path, str):
-            raise ValueError("A same-host mirror seeds from Unix socket paths")
-        if path not in paths:
-            paths.append(path)
     source_uuids = set()
-    for path in paths:
+    for address in split_addresses(seed_value):
+        # The launcher only calls this for the all-Unix-socket form.
+        path = parse_seed_address(address)
+        assert isinstance(path, str)
         verify_socket_owner(path, strict_perms=False)
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
             sock.settimeout(_CONNECT_TIMEOUT_S)

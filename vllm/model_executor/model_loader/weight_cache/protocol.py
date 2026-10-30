@@ -23,7 +23,6 @@ import time
 from dataclasses import asdict, dataclass, fields
 from typing import Any, Literal, NamedTuple, TypeVar, get_origin
 
-import regex as re
 import torch
 from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
@@ -40,6 +39,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.hashing import safe_hash
+from vllm.utils.network_utils import split_host_port
 
 SOCKET_NAME_TEMPLATE = "vllm_weight_cache_{gpu_uuid}{role}.sock"
 SOCKET_DIR_TEMPLATE = "vllm_weight_cache_{uid}"
@@ -477,32 +477,16 @@ class WeightCacheState(NamedTuple):
     """Python-side flags set by load_weights, e.g. EAGLE ownership flags."""
 
 
-_HOST_PORT = re.compile(
-    r"\[(?P<v6>[^\]]+)\]:(?P<v6port>\d+)|(?P<host>[^:\[\]]+):(?P<port>\d+)"
-)
-
-
 def parse_seed_address(address: str) -> str | tuple[str, int]:
     """Split a seed address into a Unix socket path or a ``(host, port)``.
 
     Anything containing a slash, or no colon, is a socket path, so relative
     paths such as ``run/sock0`` stay local. Otherwise it must be
     ``host:port``, with an IPv6 host in brackets.
-
-    Raises:
-        ValueError: If a colon form is not ``host:port``.
-
     """
     if "/" in address or ":" not in address:
         return os.path.expanduser(address)
-    match = _HOST_PORT.fullmatch(address)
-    if match is None:
-        raise ValueError(
-            f"Seed address must be a Unix socket path or host:port, got {address!r}"
-        )
-    if match["v6"] is not None:
-        return match["v6"], int(match["v6port"])
-    return match["host"], int(match["port"])
+    return split_host_port(address)
 
 
 def json_to_dataclass(cls: type[_DataclassT], payload: Any) -> _DataclassT:

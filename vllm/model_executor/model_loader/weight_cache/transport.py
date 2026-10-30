@@ -154,10 +154,7 @@ class SeedTransport:
                 f"Source daemon refused the {seedable.kind} seed request "
                 f"(status {status}): {response.get('message', response)}"
             )
-        try:
-            return seedable.validate_payload(response.get("payload"))
-        except Exception as e:
-            raise RuntimeError(f"Rejected the remote {seedable.kind} seed: {e}") from e
+        return seedable.validate_payload(response.get("payload"))
 
     @property
     def source(self) -> str | tuple[str, int] | None:
@@ -168,7 +165,7 @@ class SeedTransport:
         """Best-effort: fetch and install, or fall back to the local path."""
         try:
             payload = self.fetch(seedable, ctx)
-        except RuntimeError as e:
+        except Exception as e:
             logger.warning(
                 "No remote %s seed adopted; using the local path: %s",
                 seedable.kind,

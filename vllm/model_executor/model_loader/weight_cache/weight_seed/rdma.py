@@ -15,7 +15,15 @@ from vllm.model_executor.model_loader.weight_cache.weight_seed.core import (
     RDMA_BACKEND,
     WeightMover,
 )
+from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.network_utils import get_ip
+
+try:
+    from mooncake.engine import TransferEngine
+except ImportError:
+    TransferEngine = PlaceholderModule("mooncake.engine").placeholder_attr(
+        "TransferEngine"
+    )
 
 logger = init_logger(__name__)
 
@@ -35,8 +43,6 @@ class RdmaMover(WeightMover):
         self._registered: dict[int, int] = {}
 
     def _initialize_engine(self):
-        from mooncake.engine import TransferEngine
-
         engine = TransferEngine()
         if engine.initialize(get_ip(), "P2PHANDSHAKE", self.protocol, "") != 0:
             raise RuntimeError("Mooncake TransferEngine initialization failed")

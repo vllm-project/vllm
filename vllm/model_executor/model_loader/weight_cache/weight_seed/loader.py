@@ -163,7 +163,7 @@ class PeerModelLoader(BaseModelLoader):
             # client built from the extra config.
             payload = self._fetch_standalone(expected_key, model_config.model)
         manifest = payload["manifest"]
-        mover = get_mover(parse_seed_backend(payload["seed"]["backend"]))
+        mover = get_mover(payload["seed"]["backend"])
         device = torch.device(
             current_platform.device_type, torch.accelerator.current_device_index()
         )
@@ -221,9 +221,4 @@ class PeerModelLoader(BaseModelLoader):
                 f"Source daemon refused the weights seed request: "
                 f"{response.get('message', response)}"
             )
-        try:
-            return validate_weights_payload(
-                response.get("payload"), expected_key, model
-            )
-        except (TypeError, ValueError) as e:
-            raise RuntimeError(f"Rejected the weights seed payload: {e}") from e
+        return validate_weights_payload(response.get("payload"), expected_key, model)
