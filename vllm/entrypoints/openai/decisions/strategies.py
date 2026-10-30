@@ -18,6 +18,7 @@ from functools import cached_property, partial
 from typing import Any, ClassVar, TypeVar
 
 import numpy as np
+import torch
 from PIL import Image
 
 import vllm.envs as envs
@@ -45,7 +46,9 @@ from vllm.sampling_params import MAX_LOGPROB_TOKEN_IDS, SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.math_utils import round_up
+from vllm.v1.core.sched.prefix_lm_scheduler import PREFIX_LM_LEN, prefix_lm_salt
 
+from . import slot_prompt
 from .question_types import (
     LABELS,
     QUESTION_TYPES,
@@ -377,6 +380,7 @@ class NextTokenStrategy(ReadStrategy):
         priority: int,
         cache_salt: str | None,
         trace_headers: Mapping[str, str] | None,
+        extra_args: dict[str, Any] | None = None,
     ) -> None:
         """Prefill the tokens every question starts with, before the reads.
 
@@ -397,7 +401,7 @@ class NextTokenStrategy(ReadStrategy):
             return
         generator = engine_client.generate(
             tokens_input(list(prompts[0][:shared]), cache_salt=cache_salt),
-            SamplingParams(max_tokens=1, temperature=0.0),
+            SamplingParams(max_tokens=1, temperature=0.0, extra_args=extra_args),
             f"{request_id}-prefix",
             lora_request=lora_request,
             trace_headers=trace_headers,
@@ -1444,6 +1448,181 @@ class D3Strategy(ReadStrategy):
         return reads
 
 
+class SlotLMStrategy(NextTokenStrategy):
+    """Slot-readout models: one PrefixLM request per question on ``slot_prompt``."""
+
+    MAX_SCORE_LEVELS = 10
+    #: The most options the checkpoint was trained to read in one question.
+    MAX_OPTIONS = 255
+
+    def __init__(self, context: ReadContext):
+        model_config = context.engine_client.model_config
+        if model_config.head_dtype != torch.float32:
+            raise ValueError(
+                "slot reads need the fp32 LM head the checkpoint was trained "
+                f"with, but head_dtype is {model_config.head_dtype}"
+            )
+        super().__init__(context)
+        # read() renders no media, though the base model takes images.
+        self.modalities = frozenset()
+        self.max_model_len = model_config.max_model_len
+        n_slots = model_config.hf_config.modeling_overrides.get(
+            "n_slots", len(slot_prompt.SLOT_LABELS)
+        )
+        # Each slot label's own token must also be the reply's first token.
+        labels = slot_prompt.SLOT_LABELS[:n_slots]
+        _, self.slot_ids = reply_label_ids(
+            self._tokenizer(), self._generation_prompt(), labels
+        )
+        if any(self._tokens(label) != [i] for label, i in zip(labels, self.slot_ids)):
+            raise ValueError("the slot labels' tokens differ at the start of the reply")
+        # read() tokenizes the state once and each suffix on its own, which
+        # needs the suffix to start a pre-token after the prefix.
+        prefix = self._prefix_text("x")
+        for type_name in ("choice", "score"):
+            suffix = slot_prompt.render_suffix(type_name, None, {"x": None})
+            tail = self._prompt("x", suffix)[len(prefix) :]
+            if self._tokens(prefix) + self._tokens(tail) != self._tokens(prefix + tail):
+                raise ValueError("the slot prompt's suffix merges with its prefix")
+
+    def limits(self) -> DecisionLimits:
+        return DecisionLimits(
+            max_questions=64,
+            max_options=min(
+                len(self.slot_ids), self.MAX_OPTIONS, MAX_LOGPROB_TOKEN_IDS
+            ),
+            labeled=False,
+        )
+
+    def render_state(self, state: Any) -> str:
+        return slot_prompt.render_state(state)
+
+    def _generation_prompt(self) -> list[int]:
+        return self._tokens(self._prompt("x", "y"))
+
+    def _prompt(self, state: str, suffix: str) -> str:
+        prompt = self._tokenizer().apply_chat_template(
+            [
+                {"role": "system", "content": slot_prompt.SYSTEM_PROMPT},
+                {"role": "user", "content": f"<state>\n{state}\n</state>\n\n{suffix}"},
+            ],
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
+        assert isinstance(prompt, str)
+        return prompt
+
+    def _tokens(self, text: str) -> list[int]:
+        return self._tokenizer().encode(text, add_special_tokens=False)
+
+    def _prefix_text(self, state: str) -> str:
+        """The prompt up to where the suffix starts."""
+        marked = self._prompt(state, slot_prompt.PREFIX_MARK)
+        # The last mark is the suffix's: the state may contain the mark too.
+        return marked[: marked.rindex(slot_prompt.PREFIX_MARK)]
+
+    def _suffix(self, q: Question) -> str:
+        if q.type.name not in slot_prompt.DEFAULT_INSTRUCTIONS:
+            raise StructuredDecisionError(
+                f"question {q.id!r}: this model does not answer "
+                f"{q.type.name!r} questions"
+            )
+        if q.type.name == "score" and len(q.options) > self.MAX_SCORE_LEVELS:
+            raise StructuredDecisionError(
+                f"question {q.id!r}: a score has at most "
+                f"{self.MAX_SCORE_LEVELS} levels for this model"
+            )
+        if q.raw is not None:
+            instructions, criteria = q.raw
+        else:
+            # Decisions API questions have no raw criteria; options key them
+            # by name.
+            names = [o.name for o in q.options]
+            if len(set(names)) != len(names):
+                raise StructuredDecisionError(
+                    f"question {q.id!r}: option labels must be distinct for this model"
+                )
+            instructions = q.instructions
+            criteria = {o.name: o.description for o in q.options}
+        return slot_prompt.render_suffix(q.type.name, instructions, criteria)
+
+    async def read(
+        self,
+        questions: list[Question],
+        instructions: str | None,
+        state: str,
+        *,
+        request_id: str,
+        chat_template_kwargs: dict[str, Any] | None,
+        lora_request: LoRARequest | None,
+        priority: int,
+        cache_salt: str | None = None,
+        trace_headers: Mapping[str, str] | None = None,
+        media: Mapping[str, Sequence[str]] | None = None,
+    ) -> list[QuestionRead]:
+        fixed = chat_template_kwargs in (None, {}, {"enable_thinking": False})
+        if instructions or not fixed:
+            raise StructuredDecisionError(
+                "this model reads a fixed prompt, so it takes no instructions "
+                "or chat_template_kwargs"
+            )
+        suffixes = [self._suffix(q) for q in questions]
+        # The state is most of every prompt, so it is tokenized once.
+        prefix_text = self._prefix_text(state)
+        prefix = self._tokens(prefix_text)
+        prefix_len = len(prefix)
+        prompts = []
+        for suffix in suffixes:
+            prompt = self._prompt(state, suffix)
+            assert prompt.startswith(prefix_text)
+            prompts.append(prefix + self._tokens(prompt[len(prefix_text) :]))
+        for q, ids in zip(questions, prompts):
+            # The read samples one token, so the prompt must leave room for it.
+            if len(ids) >= self.max_model_len:
+                raise StructuredDecisionError(
+                    f"question {q.id!r}: the prompt has {len(ids)} tokens, which "
+                    f"with the answer token exceeds max_model_len="
+                    f"{self.max_model_len}; nothing is truncated"
+                )
+        cache_salt = prefix_lm_salt(prefix, cache_salt)
+
+        await self._warm_shared_prefix(
+            [ids[:prefix_len] for ids in prompts],
+            request_id,
+            lora_request=lora_request,
+            priority=priority,
+            cache_salt=cache_salt,
+            trace_headers=trace_headers,
+            extra_args={PREFIX_LM_LEN: prefix_len},
+        )
+        slots = [[[i] for i in self.slot_ids[: len(q.options)]] for q in questions]
+        label_reads = await next_token_label_reads(
+            self.context.engine_client,
+            [tokens_input(ids, cache_salt=cache_salt) for ids in prompts],
+            [
+                SamplingParams(
+                    max_tokens=1,
+                    temperature=0.0,
+                    logprob_token_ids=self.slot_ids[: len(groups)],
+                    extra_args={PREFIX_LM_LEN: prefix_len},
+                    # The read needs ids only: up to 255 label tokens per read
+                    # would each be detokenized otherwise.
+                    detokenize=False,
+                )
+                for groups in slots
+            ],
+            request_id,
+            lora_request=lora_request,
+            trace_headers=trace_headers,
+            priority=priority,
+        )
+        return [
+            self._question_read(r.result, groups, r.logprobs)
+            for groups, r in zip(slots, label_reads)
+        ]
+
+
 READ_STRATEGIES: dict[str, type[ReadStrategy]] = {
     "ClefFlashForJointSchema": ClefFlashStrategy,
     "ClefOmniForJointSchema": JointSchemaStrategy,
@@ -1454,6 +1633,7 @@ READ_STRATEGIES: dict[str, type[ReadStrategy]] = {
     "Lfm2VlForConditionalGeneration": LiquidStrategy,
     "Qwen3ForCausalLM": NextTokenStrategy,
     "Qwen3_5ForConditionalGeneration": NextTokenStrategy,
+    "Qwen3_5ForSlotDecision": SlotLMStrategy,
     "Qwen3_5MoeForConditionalGeneration": NextTokenStrategy,
     "DiffusionGemmaForBlockDiffusion": DiffusionGemmaCanvasStrategy,
 }
