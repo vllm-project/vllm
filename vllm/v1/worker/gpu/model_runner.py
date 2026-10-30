@@ -590,16 +590,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     "A custom rejection sampler cannot read batch-sharded draft logits"
                 )
                 self.vllm_config._check_supports_watermarking(custom_sampler=True)
+                if "accept" in self.speculator_hooks:
+                    raise ValueError(
+                        "a model state's custom rejection sampler cannot run the "
+                        "speculator's accept"
+                    )
                 self.sampler, self.rejection_sampler = custom
             elif self.speculative_config is not None:
-                self.rejection_sampler = RejectionSampler(
-                    self.sampler,
-                    self.speculative_config,
-                    self.device,
-                    watermark_key=speculative_target_watermark_key(
-                        self.vllm_config.watermark_config
-                    ),
-                )
+                self.rejection_sampler = self._build_rejection_sampler()
+            self._init_tree_verify()
             self.prompt_logprobs_worker = PromptLogprobsWorker(
                 self.max_num_reqs,
                 self.device,
@@ -644,6 +643,25 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def dp_rank(self) -> int:
         # Not cached: elastic EP rewrites parallel_config in place on reconfigure.
         return self.parallel_config.data_parallel_rank
+
+    def _build_rejection_sampler(self) -> RejectionSampler:
+        """The chain rejection sampler, verifying through the speculator's
+        ``accept`` when it overrides it."""
+        assert self.sampler is not None
+        assert self.speculative_config is not None
+        accept = None
+        if "accept" in self.speculator_hooks:
+            assert self.speculator is not None
+            accept = self.speculator.accept
+        return RejectionSampler(
+            self.sampler,
+            self.speculative_config,
+            self.device,
+            watermark_key=speculative_target_watermark_key(
+                self.vllm_config.watermark_config
+            ),
+            accept=accept,
+        )
 
     def get_model(self) -> nn.Module:
         return self.model

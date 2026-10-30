@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
 import numpy as np
@@ -26,6 +26,7 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     rejection_sample,
 )
 from vllm.v1.worker.gpu.spec_decode.round import (
+    AcceptResult,
     VerifyOutput,
     VerifyPlan,
 )
@@ -38,6 +39,9 @@ from vllm.v1.worker.gpu.spec_decode.tree_accept import accept_greedy_tree
 # its traffic entirely.
 MAX_CHUNK_BYTES = 2**30  # 1GB
 _FP32_BYTES = 4
+
+
+AcceptFn = Callable[[VerifyPlan, VerifyOutput, Sampler], "AcceptResult | None"]
 
 
 def slice_plan(plan: VerifyPlan, start: int, end: int) -> VerifyPlan:
@@ -191,8 +195,11 @@ class RejectionSampler:
         device: torch.device,
         *,
         watermark_key: int | None = None,
+        accept: AcceptFn | None = None,
     ):
         self.sampler = sampler
+        # The speculator's accept, when it overrides the chain verification.
+        self.accept = accept
         self.watermark_key = watermark_key
         if watermark_key is not None:
             assert isinstance(sampler, GPUWatermarkSampler)
@@ -392,7 +399,7 @@ class RejectionSampler:
             chunk_cu_num_logits = input_batch.cu_num_logits[start : end + 1] - lo
             result = None
             plan = input_batch.verify_plan
-            if plan is not None and not plan.is_chain:
+            if plan is not None and (self.accept is not None or not plan.is_chain):
                 plan = slice_plan(plan, start, end)
                 output = VerifyOutput(
                     logits=logits[lo:hi],
@@ -409,8 +416,11 @@ class RejectionSampler:
                     ),
                 )
                 width = self.num_speculative_steps + 1
-                result = accept_greedy_tree(plan, output, self.sampler, width)
-                if result.sampled.shape[1] < width:
+                if self.accept is not None:
+                    result = self.accept(plan, output, self.sampler)
+                if result is None and not plan.is_chain:
+                    result = accept_greedy_tree(plan, output, self.sampler, width)
+                if result is not None and result.sampled.shape[1] < width:
                     # Committed tokens are read at the chain's width.
                     result.sampled = torch.nn.functional.pad(
                         result.sampled, (0, width - result.sampled.shape[1])

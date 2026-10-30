@@ -52,6 +52,7 @@ def _make_rejection_sampler(
     """RejectionSampler for standard, fixed-boundary, unwatermarked verification."""
     rejection_sampler = object.__new__(RejectionSampler)
     rejection_sampler.sampler = sampler
+    rejection_sampler.accept = None
     rejection_sampler.num_speculative_steps = num_speculative_steps
     rejection_sampler.enable_adaptive_verification = False
     rejection_sampler.synthetic_conditional_rates = None

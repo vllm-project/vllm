@@ -43,8 +43,10 @@ from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
 )
 from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 from vllm.v1.worker.gpu.spec_decode.round import (
+    AcceptResult,
     PlanBound,
     PlanInputs,
+    VerifyOutput,
     VerifyPlan,
 )
 from vllm.v1.worker.utils import AttentionGroup
@@ -150,12 +152,33 @@ class BaseSpeculator(ABC):
         """
         return None
 
+    def accept(
+        self, plan: VerifyPlan, output: VerifyOutput, sampler: "Sampler"
+    ) -> AcceptResult | None:
+        """Which rows of each request the target confirmed.
+
+        Called on the sampler's stream for every verified batch, once per
+        request range when a large batch is verified in pieces; ``plan`` and
+        ``output`` cover that range. ``sampler`` applies the sampling parameters
+        (``apply_sampling_params``) and holds the sampling states; it is an
+        internal interface and may change. Return None (the default) to let vLLM
+        verify: a chain through its rejection sampler (path ``arange``), a plan
+        that is not a chain by walking the tree on each row's argmax, which only
+        greedy requests accept. The runner commits the KV and the recurrent state
+        along the returned path and takes each committed token's logprobs from
+        its path row.
+        """
+        return None
+
     def overridden_hooks(self) -> frozenset[str]:
         """The optional per-step hooks this speculator overrides. The model
         runner reads them once and skips the no-op defaults on every step."""
         return frozenset(
             name
-            for name in ("plan",)
+            for name in (
+                "plan",
+                "accept",
+            )
             if getattr(type(self), name) is not getattr(BaseSpeculator, name)
         )
 
