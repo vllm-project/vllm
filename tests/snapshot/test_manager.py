@@ -167,7 +167,22 @@ def test_prepare_capture_keeps_ready_state_when_root_is_dead(tmp_path, monkeypat
     assert manager.snapshot_status()["operation_started_at"] is None
 
 
-def test_fail_capture_from_draining_resumes_source(tmp_path, sleeping_child):
+def _write_detach_marker(ticket: dict[str, Any]) -> None:
+    marker = {
+        "pid": ticket["root_pid"],
+        "nonce": ticket["nonce"],
+        "generation": ticket["generation"],
+        "snapshot_id": ticket["snapshot_id"],
+        "config_hash": ticket["config_hash"],
+        "state": "detached",
+    }
+    with open(ticket["marker_path"], "w") as marker_file:
+        json.dump(marker, marker_file)
+
+
+def test_fail_capture_from_draining_without_detach_keeps_ready(
+    tmp_path, sleeping_child
+):
     manager = EngineSnapshotManager(
         str(tmp_path / "control.sock"),
         str(tmp_path / "snapshots"),
@@ -177,6 +192,29 @@ def test_fail_capture_from_draining_resumes_source(tmp_path, sleeping_child):
     client = SnapshotControlClient(str(tmp_path / "control.sock"))
     try:
         client.request("prepare_capture")
+
+        failed = client.request("fail_capture", {"error": "rollback failed"})
+
+        assert failed["state"] == SnapshotState.READY
+        assert failed["root_pid"] == sleeping_child
+        assert manager._pid_alive(sleeping_child)
+    finally:
+        manager.close()
+
+
+def test_fail_capture_from_draining_after_detach_resumes_source(
+    tmp_path, sleeping_child
+):
+    manager = EngineSnapshotManager(
+        str(tmp_path / "control.sock"),
+        str(tmp_path / "snapshots"),
+        sleeping_child,
+    )
+    manager.start()
+    client = SnapshotControlClient(str(tmp_path / "control.sock"))
+    try:
+        ticket = client.request("prepare_capture")["ticket"]
+        _write_detach_marker(ticket)
 
         failed = client.request("fail_capture", {"error": "rollback failed"})
 

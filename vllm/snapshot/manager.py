@@ -605,6 +605,8 @@ class EngineSnapshotManager:
                     code="invalid_state",
                 )
             root_pid = self.status.root_pid
+            ticket = self._ticket
+            detach_state = self._detach_marker_state(ticket)
             self.status.state = SnapshotState.FAILED
             self.status.last_error = error
             self.status.operation_finished_at = time.time()
@@ -616,11 +618,27 @@ class EngineSnapshotManager:
             if self.process_manager is not None:
                 self.process_manager.cancel_snapshot()
             with self._state_lock:
-                if root_pid is not None and self._signal_snapshot_resume(root_pid):
-                    self.status.root_pid = root_pid
-                    self.status.state = SnapshotState.ATTACHING
+                if detach_state == "detached":
+                    if root_pid is not None and self._signal_snapshot_resume(root_pid):
+                        self.status.root_pid = root_pid
+                        self.status.state = SnapshotState.ATTACHING
+                    else:
+                        self.status.root_pid = None
+                elif detach_state == "detach_failed":
+                    self.status.root_pid = (
+                        root_pid
+                        if root_pid is not None and self._pid_alive(root_pid)
+                        else None
+                    )
                 else:
-                    self.status.root_pid = None
+                    # I/O is still attached; keep the healthy engine and let
+                    # the caller retry the capture.
+                    self.status.state = SnapshotState.READY
+                    self.status.root_pid = (
+                        root_pid
+                        if root_pid is not None and self._pid_alive(root_pid)
+                        else None
+                    )
             return self._status_dict()
 
         cleanup_error = None
@@ -979,6 +997,22 @@ class EngineSnapshotManager:
         if self._ticket is None:
             raise RuntimeError("snapshot ticket is missing")
         return self._ticket
+
+    @staticmethod
+    def _detach_marker_state(ticket: SnapshotTicket | None) -> str | None:
+        if ticket is None:
+            return None
+        try:
+            marker = json.loads(Path(ticket.marker_path).read_text())
+        except (OSError, json.JSONDecodeError):
+            return None
+        if (
+            marker.get("snapshot_id") != ticket.snapshot_id
+            or marker.get("nonce") != ticket.nonce
+        ):
+            return None
+        state = marker.get("state")
+        return state if isinstance(state, str) else None
 
     def _validate_detach_marker(self, ticket: SnapshotTicket) -> None:
         deadline = time.monotonic() + 30
