@@ -984,11 +984,7 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         return False
 
     def fused_rope_kvcache_q_out_supported(self) -> bool:
-        """Whether a separate fused RoPE/cache update can precede attention.
-
-        A supporting backend's forward must consume cached K/V when its key
-        and value arguments are None, without updating the cache again.
-        """
+        """Whether `do_rope_and_kv_cache_update_q_out` supports this layer."""
         return False
 
     def do_qk_norm_rope_kvcache_update(
@@ -1064,13 +1060,11 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
     ) -> None:
-        """Write rotated Q and update K/V cache without mutating inputs.
+        """Write rotated `query` to `query_out`, and rotated `key` plus `value`
+        directly to the KV cache, without modifying the inputs.
 
-        Implementations must write rotated K directly to cache; materializing
-        K would defeat this interface's ownership boundary. ``query_out`` is a
-        fresh contiguous buffer with the same shape as query, owned by the
-        compiled model graph. Inputs have shape [tokens, heads, head_size];
-        reshaping stays in the graph, outside the opaque update operation.
+        Inputs are [num_tokens, num_heads, head_size]; `query_out` is a
+        contiguous buffer of the same shape.
         """
         raise NotImplementedError
 

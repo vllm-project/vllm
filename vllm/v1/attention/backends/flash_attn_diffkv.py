@@ -79,10 +79,6 @@ class FlashAttentionDiffKVBackend(FlashAttentionBackend):
 class FlashAttentionDiffKVImpl(FlashAttentionImpl):
     vllm_flash_attn_version: int | None
 
-    def fused_rope_kvcache_q_out_supported(self) -> bool:
-        # DiffKV uses a distinct cache writer for unequal K/V head dimensions.
-        return False
-
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         # Re-derive the FA version with diff-kv context so that

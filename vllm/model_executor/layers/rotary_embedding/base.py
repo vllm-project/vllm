@@ -13,11 +13,9 @@ from .common import ApplyRotaryEmb
 
 
 class RopeRotation(NamedTuple):
-    """Per-head prefix rotation with a 2D ``[cos | sin]`` table.
-
-    Token ``i`` uses row ``positions[i]``. The table width is the rotary
-    dimension; the remainder of each head is unchanged.
-    """
+    """RoPE as data for fused kernels: token `i` rotates the first
+    `cos_sin.shape[-1]` dims of each head by row `positions[i]` of `cos_sin`,
+    laid out `[cos | sin]`."""
 
     positions: torch.Tensor
     cos_sin: torch.Tensor
@@ -145,10 +143,9 @@ class RotaryEmbeddingBase(CustomOp):
     def get_rotation(
         self, positions: torch.Tensor, dtype: torch.dtype
     ) -> RopeRotation | None:
-        """Describe the rotation on the positions' device, or opt out with None.
-
-        Subclasses changing the rotation semantics must override this method.
-        """
+        """Describe this layer's rotation for `positions`, or return None if it
+        is not a plain per-token cos/sin rotation. Subclasses that change the
+        rotation must override this."""
         return None
 
     def get_cos_sin(self, seqlen: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -181,12 +178,8 @@ class RotaryEmbedding(RotaryEmbeddingBase):
     def get_rotation(
         self, positions: torch.Tensor, dtype: torch.dtype
     ) -> RopeRotation | None:
-        if (
-            positions.dim() != 1
-            or self.use_flashinfer
-            or not 0 < self.rotary_dim <= self.head_size
-            or self.rotary_dim % 2 != 0
-        ):
+        # FlashInfer RoPE keeps a float32 cache that the fused path would cast.
+        if positions.dim() != 1 or self.use_flashinfer:
             return None
         cos_sin = self._cos_sin_cache_as(dtype, positions.device)
         return RopeRotation(positions, cos_sin, self.is_neox_style)

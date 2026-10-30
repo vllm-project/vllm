@@ -146,7 +146,7 @@ class PassConfig:
     fuse_mla_dual_rms_norm: bool = None  # type: ignore[assignment]
     """Fuse paired q/kv RMS norms in MLA attention."""
     fuse_rope_kvcache: bool = None  # type: ignore[assignment]
-    """Fuse the Q/K RoPE and KV-cache update ops."""
+    """Fuse the QK rope + KV cache ops."""
     fuse_qk_norm_rope_kvcache: bool = Field(default=None)  # type: ignore[assignment]
     """Fuse QK RMSNorm + RoPE/MRoPE + KV cache update into an AITER HIP
     kernel. Supersedes both enable_qk_norm_rope_fusion and fuse_rope_kvcache
@@ -154,9 +154,9 @@ class PassConfig:
     with QK-norm (e.g. Qwen3-MoE and Qwen3-VL-class architectures)."""
 
     rope_kvcache_fusion_max_token_num: int = 256
-    """Maximum token count for RoPE+KV-cache fusion, targeting small decode
-    batches. Larger batches use the unfused kernels. Also applies to the fused
-    QK-Norm+RoPE/MRoPE+KV-cache pass.
+    """The threshold for RoPE+KVCache fusion e.g. for small batch decode.
+    Larger batch sizes e.g. during prefill will use the unfused kernels.
+    Also applies to the fused QK-Norm+RoPE/MRoPE+KVCache pass.
     """
 
     fi_allreduce_fusion_max_size_mb: float | None = None
@@ -1190,9 +1190,8 @@ class CompilationConfig:
                 # that doesn't seem to affect performance.
                 # https://github.com/vllm-project/vllm/issues/33267
                 if not self.use_inductor_graph_partition:
-                    # CUDA uses a manual model call site and does not need the
-                    # legacy graph pass to see RoPE and the cache update in the
-                    # same Inductor graph. ROCm still relies on that pass.
+                    # Only the ROCm graph pass needs RoPE and the KV cache
+                    # update in the same graph; CUDA fuses at the call site.
                     if (
                         self.pass_config.fuse_rope_kvcache
                         and current_platform.is_rocm()

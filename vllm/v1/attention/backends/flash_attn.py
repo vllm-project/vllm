@@ -1184,8 +1184,8 @@ class FlashAttentionImpl(AttentionImpl):
         self,
         layer: torch.nn.Module,
         query: torch.Tensor,
-        key: torch.Tensor | None,
-        value: torch.Tensor | None,
+        key: torch.Tensor,
+        value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: FlashAttentionMetadata,
         output: torch.Tensor,
@@ -1197,10 +1197,8 @@ class FlashAttentionImpl(AttentionImpl):
         Args:
             layer: The attention layer, providing the q/k/v quantization scales.
             query: shape = [num_tokens, num_heads, head_size]
-            key: shape = [num_tokens, num_kv_heads, head_size], or None when a
-                fused decoder update has already populated the KV cache
-            value: shape = [num_tokens, num_kv_heads, head_size], or None when
-                a fused decoder update has already populated the KV cache
+            key: shape = [num_tokens, num_kv_heads, head_size]
+            value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape =
                 [num_blocks, num_kv_heads, block_size, 2 * head_size]
             attn_metadata: Metadata for attention.
@@ -1247,7 +1245,6 @@ class FlashAttentionImpl(AttentionImpl):
         if attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             # For encoder attention,
             # we use direct Q, K, V tensors without caching
-            assert key is not None and value is not None
             return self._forward_encoder_attention(
                 query[:num_actual_tokens],
                 key[:num_actual_tokens],
@@ -1300,7 +1297,6 @@ class FlashAttentionImpl(AttentionImpl):
         v_descale = layer._v_scale.expand(descale_shape)
 
         if self.dcp_world_size > 1:
-            assert key is not None and value is not None
             self._forward_with_dcp(
                 query[:num_actual_tokens],
                 key[:num_actual_tokens],
@@ -1491,12 +1487,11 @@ class FlashAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
     ) -> None:
-        from vllm import _custom_ops
+        from vllm import _custom_ops as ops
 
-        # (B, H, N, 2*D) -> ((B, N, H, D), (B, N, H, D)).
+        # (B, H, N, 2*D) -> ((B, N, H, D), (B, N, H, D))
         key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
-
-        _custom_ops.fused_rope_and_reshape_cache_flash_q_out(
+        ops.fused_rope_and_reshape_cache_flash_q_out(
             query,
             key,
             value,

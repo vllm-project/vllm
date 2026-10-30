@@ -443,16 +443,18 @@ class Attention(nn.Module, AttentionLayerBase):
 
         compilation_config = vllm_config.compilation_config
         pass_config = compilation_config.pass_config
-        supports_rope_kvcache = self.impl.fused_rope_kvcache_q_out_supported()
+        supports_rope_kvcache = (
+            self.attn_backend.supports_kv_cache_update_bypass
+            and self.impl.fused_rope_kvcache_q_out_supported()
+        )
         if (
             pass_config.fuse_rope_kvcache
             and current_platform.is_cuda()
             and not supports_rope_kvcache
         ):
             logger.warning_once(
-                "fuse_rope_kvcache=True has no effect for the selected %s "
-                "attention backend in this configuration. These layers will "
-                "use unfused RoPE and KV-cache updates.",
+                "fuse_rope_kvcache=True has no effect for the %s attention "
+                "backend in this configuration.",
                 self.attn_backend.get_name(),
             )
         self._fuse_rope_kvcache = bool(
@@ -565,8 +567,7 @@ class Attention(nn.Module, AttentionLayerBase):
                     else torch.ops.vllm.fused_rope_and_unified_kv_cache_update_q_out
                 )
                 op(query, key, value, query_out, *rotation, encoded)
-                query = query_out
-                key = value = None
+                query, key, value = query_out, None, None
 
         if output_dtype is None:
             output_dtype = query.dtype
@@ -651,10 +652,10 @@ class Attention(nn.Module, AttentionLayerBase):
         rotary_emb: nn.Module,
     ) -> "RopeRotation | None":
         # vLLM drops Dynamo shape guards, so compiled graphs always take the
-        # fused op and it applies the token threshold at runtime.
-        if not self._fuse_rope_kvcache or not (
-            torch.compiler.is_compiling()
-            or query.shape[0] <= self.rope_kvcache_fusion_max_token_num
+        # fused op, which applies the token threshold at runtime.
+        if not self._fuse_rope_kvcache or (
+            not torch.compiler.is_compiling()
+            and query.shape[0] > self.rope_kvcache_fusion_max_token_num
         ):
             return None
         get_rotation = getattr(rotary_emb, "get_rotation", None)
@@ -665,62 +666,6 @@ class Attention(nn.Module, AttentionLayerBase):
         ):
             return None
         return get_rotation(positions, query.dtype)
-
-    def _rope_and_kv_cache_update_q_out(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        query_out: torch.Tensor,
-        positions: torch.Tensor,
-        cos_sin_cache: torch.Tensor,
-        is_neox: bool,
-        kv_cache: torch.Tensor,
-        layer_slot_mapping: torch.Tensor | None,
-    ) -> None:
-        impl = self.impl
-        if (
-            layer_slot_mapping is not None
-            and query.shape[0] <= self.rope_kvcache_fusion_max_token_num
-        ):
-            impl.do_rope_and_kv_cache_update_q_out(
-                self,
-                query,
-                key,
-                value,
-                query_out,
-                positions,
-                cos_sin_cache,
-                is_neox,
-                kv_cache,
-                layer_slot_mapping,
-            )
-            return
-
-        from vllm import _custom_ops
-
-        query_out.copy_(query)
-        key_out = key.clone() if layer_slot_mapping is not None else None
-        _custom_ops.rotary_embedding(
-            positions,
-            query_out,
-            key_out,
-            self.head_size,
-            cos_sin_cache,
-            is_neox,
-        )
-        if key_out is not None:
-            assert layer_slot_mapping is not None
-            assert hasattr(impl, "do_kv_cache_update"), (
-                f"{impl.__class__.__name__} does not support kv cache update"
-            )
-            impl.do_kv_cache_update(  # type: ignore[attr-defined]
-                self,
-                key_out,
-                value,
-                kv_cache,
-                layer_slot_mapping,
-            )
 
     def extra_repr(self) -> str:
         s = f"head_size={self.impl.head_size}"  # type: ignore
@@ -823,7 +768,7 @@ class Attention(nn.Module, AttentionLayerBase):
 
 def get_attention_context(
     layer_name: str,
-) -> tuple[Any, "Attention | MLAAttention", torch.Tensor, torch.Tensor | None]:
+) -> tuple[Any, "Attention | MLAAttention", torch.Tensor, torch.Tensor]:
     """Extract attention context for a given layer.
 
     This helper function extracts the attention metadata, attention layer
@@ -838,11 +783,10 @@ def get_attention_context(
             no metadata available
         - attn_layer: The attention layer instance (Attention or MLAAttention)
         - kv_cache: The KV cache tensor for current forward pass
-        - slot_mapping: The slot mapping for this specific layer, or None when
-            the current forward does not update its cache
+        - slot_mapping: The slot mapping for this specific layer
 
-        Note: attn_metadata and slot_mapping may be None, but attn_layer and
-        kv_cache are always extracted from the forward context.
+        Note: attn_metadata may be None, but attn_layer and kv_cache are always
+        extracted from the forward context.
 
     """
     forward_context: ForwardContext = get_forward_context()
@@ -876,27 +820,48 @@ def fused_rope_and_unified_kv_cache_update_q_out(
     is_neox: bool,
     layer_name: LayerNameType,
 ) -> None:
-    """Write rotated Q and update the layer's hidden K/V cache."""
+    """Write rotated Q to `query_out` and rotated K plus V to the KV cache.
+
+    Above the token threshold, this runs the unfused RoPE and cache update
+    instead. `query` and `key` are never modified.
+    """
     layer_name = _resolve_layer_name(layer_name)
-    attn_metadata, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(
-        layer_name
+    attn_metadata, layer, kv_cache, slot_mapping = get_attention_context(layer_name)
+    assert isinstance(layer, Attention)
+    if (
+        slot_mapping is not None
+        and query.shape[0] <= layer.rope_kvcache_fusion_max_token_num
+    ):
+        layer.impl.do_rope_and_kv_cache_update_q_out(
+            layer,
+            query,
+            key,
+            value,
+            query_out,
+            positions,
+            cos_sin_cache,
+            is_neox,
+            kv_cache,
+            slot_mapping,
+        )
+        return
+
+    from vllm import _custom_ops as ops
+
+    query_out.copy_(query)
+    if slot_mapping is None:
+        # Profiling runs have no cache to update.
+        assert attn_metadata is None
+        ops.rotary_embedding(
+            positions, query_out, None, layer.head_size, cos_sin_cache, is_neox
+        )
+        return
+    key = key.clone()
+    ops.rotary_embedding(
+        positions, query_out, key, layer.head_size, cos_sin_cache, is_neox
     )
-    assert layer_slot_mapping is not None or attn_metadata is None, (
-        "Decoder attention metadata requires a per-layer slot mapping."
-    )
-    assert isinstance(attn_layer, Attention), (
-        "Manual RoPE/cache fusion requires a standard Attention layer."
-    )
-    attn_layer._rope_and_kv_cache_update_q_out(
-        query,
-        key,
-        value,
-        query_out,
-        positions,
-        cos_sin_cache,
-        is_neox,
-        kv_cache,
-        layer_slot_mapping,
+    layer.impl.do_kv_cache_update(  # type: ignore[attr-defined]
+        layer, key, value, kv_cache, slot_mapping
     )
 
 
