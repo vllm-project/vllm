@@ -694,13 +694,11 @@ void topkGatingKernelLauncher(
     const bool* is_padding) {
     static constexpr int WARPS_PER_TB = 4;
     static constexpr int BYTES_PER_LDG_POWER_OF_2 = 16;
-#ifndef USE_ROCM
-    // Non-power-of-two fast paths below are CUDA-only: ROCm uses 64-lane warps.
+    // Non-power-of-two fast paths are CUDA-only unless noted: most need
+    // 32-lane rows, while CDNA uses 64-lane warps.
     // for bfloat16 dtype, we need 4 bytes loading to make sure num_experts
     // elements can be loaded by a warp
-    static constexpr int BYTES_PER_LDG_MULTIPLE_64 =
-    (std::is_same_v<InputType, __nv_bfloat16> || std::is_same_v<InputType, __half>) ? 4 : 8;
-#endif
+    static constexpr int BYTES_PER_LDG_MULTIPLE_64 = sizeof(InputType) == 2 ? 4 : 8;
     switch (num_experts) {
         case 1:
             LAUNCH_TOPK(1, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2);
@@ -745,9 +743,12 @@ void topkGatingKernelLauncher(
                 return;
             }
             break;
+#endif
         case 384:
+            // Two elements per load leave a power-of-two row of 32 or 64 lanes.
             LAUNCH_TOPK(384, WARPS_PER_TB, BYTES_PER_LDG_MULTIPLE_64);
             return;
+#ifndef USE_ROCM
         case 448:
             LAUNCH_TOPK(448, WARPS_PER_TB, BYTES_PER_LDG_MULTIPLE_64);
             return;
