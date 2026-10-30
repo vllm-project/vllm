@@ -2262,7 +2262,6 @@ class MoRIIOConnectorWorker:
                     writes_into_peer=self.is_producer and self.mode == MoRIIOMode.WRITE,
                     block_size=self.block_size,
                     is_mla=self.use_mla,
-                    has_mamba=self._has_mamba,
                     whole_block_layer=self._whole_block_dcp_layer(
                         metadata.cp_kv_cache_interleave_size
                     ),

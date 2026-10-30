@@ -164,7 +164,7 @@ The number of KV heads must be a multiple or a divisor of each TP size. Blocks a
 
 ### Decode context parallelism
 
-In WRITE mode a prefill instance without DCP can feed a decode instance with `--decode-context-parallel-size` (DCP) greater than 1, for MLA models without recurrent state. The decode instance deals the tokens of a request to the ranks of a DCP group in groups of `--cp-kv-cache-interleave-size` tokens, and each prefill rank writes a decode rank only the tokens that rank holds, so every token is written once per DCP group instead of once per decode rank.
+In WRITE mode a prefill instance without DCP can feed a decode instance with `--decode-context-parallel-size` (DCP) greater than 1, for MLA models, including hybrid models whose other layers keep a recurrent state. The decode instance deals the tokens of a request to the ranks of a DCP group in groups of `--cp-kv-cache-interleave-size` tokens, and each prefill rank writes a decode rank only the tokens that rank holds, so every token is written once per DCP group instead of once per decode rank. A recurrent state is not split by token: each decode rank receives the state of its TP heads, as without DCP.
 
 - `--cp-kv-cache-interleave-size` is optional on the decode instance and must divide the KV cache block size. Each group of interleaved tokens is one copy, so the block size gives the fewest copies. Speculative decoding with DCP on ROCm's MLA attention backend (`ROCM_AITER_MLA`) needs interleave 1.
 - Instances with the same DCP size in WRITE or READ modes work as before with any interleave that is the same on both prefill and decode. Instances whose DCP sizes or interleaves differ in any other way refuse each other at the handshake.

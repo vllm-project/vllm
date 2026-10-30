@@ -94,7 +94,7 @@ def _validate(local_dcp, local_interleave, peer_dcp, peer_interleave, **kwargs):
         peer_dcp,
         peer_interleave,
         block_size=BLOCK_SIZE,
-        **{"writes_into_peer": True, "is_mla": True, "has_mamba": False, **kwargs},
+        **{"writes_into_peer": True, "is_mla": True, **kwargs},
     )
 
 
@@ -104,14 +104,14 @@ def _validate(local_dcp, local_interleave, peer_dcp, peer_interleave, **kwargs):
         ((1, 1, 4, 64), {}),
         ((1, 1, 4, 1), {}),
         ((1, 1, 1, 64), {}),
-        ((8, 1, 8, 1), {"has_mamba": True}),
+        ((8, 1, 8, 1), {"is_mla": False}),
         ((8, 1, None, None), {"writes_into_peer": False}),
     ],
     ids=[
         "write-into-dcp",
         "write-into-dcp-unit-interleave",
         "no-dcp",
-        "same-dcp-hybrid",
+        "same-dcp-gqa",
         "older-peer",
     ],
 )
@@ -128,8 +128,7 @@ def test_peer_dcp_layout_accepted(layout, kwargs):
             {"whole_block_layer": "layer0"},
             "layer layer0 in whole blocks only.*needs --cp-kv-cache-interleave-size 64",
         ),
-        ((1, 1, 4, 64), {"is_mla": False}, "MLA models without recurrent state"),
-        ((1, 1, 4, 1), {"has_mamba": True}, "MLA models without recurrent state"),
+        ((1, 1, 4, 64), {"is_mla": False}, "supports MLA models only"),
         ((2, 1, 4, 1), {}, "between decode_context_parallel_size=2 here and 4"),
         ((1, 1, 4, 64), {"writes_into_peer": False}, "=1 here and 4 on the peer"),
         ((8, 64, 8, 1), {"writes_into_peer": False}, "64 here, 1 on the peer"),
@@ -138,7 +137,6 @@ def test_peer_dcp_layout_accepted(layout, kwargs):
         "write-into-dcp-interleave-not-dividing-block",
         "write-into-dcp-whole-block-layer",
         "write-into-dcp-gqa",
-        "write-into-dcp-hybrid",
         "dcp2-into-dcp4",
         "read-no-dcp-from-dcp",
         "same-dcp-interleave",

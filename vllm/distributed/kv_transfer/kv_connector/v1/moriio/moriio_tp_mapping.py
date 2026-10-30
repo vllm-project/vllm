@@ -239,7 +239,6 @@ def validate_peer_dcp_layout(
     writes_into_peer: bool,
     block_size: int,
     is_mla: bool,
-    has_mamba: bool,
     whole_block_layer: str | None = None,
 ) -> None:
     """Refuse a peer whose DCP layout this worker cannot transfer KV with.
@@ -272,12 +271,11 @@ def validate_peer_dcp_layout(
             "size on both instances, or a prefill instance without decode "
             "context parallelism in WRITE mode"
         )
-    if not is_mla or has_mamba:
+    if not is_mla:
         raise ValueError(
             "MoRIIO WRITE from a prefill instance without decode context "
             "parallelism into a decode instance with "
-            f"decode_context_parallel_size={peer_dcp_size} supports MLA models "
-            "without recurrent state only"
+            f"decode_context_parallel_size={peer_dcp_size} supports MLA models only"
         )
     if peer_interleave_size is None or block_size % peer_interleave_size:
         raise ValueError(
