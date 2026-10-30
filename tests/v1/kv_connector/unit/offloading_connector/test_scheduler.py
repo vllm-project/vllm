@@ -4860,6 +4860,7 @@ class TestEagle:
         )
         spec.draft_model_config = config.model_config
         config.speculative_config = spec
+        config.num_hash_lookahead_tokens = config._resolve_num_hash_lookahead_tokens()
         caches = KVCacheConfig(
             num_blocks=100,
             kv_cache_tensors=[],
@@ -6547,6 +6548,7 @@ def _make_lookahead_hybrid_engine(lookahead=1, eagle=True):
         group.kv_cache_spec, num_speculative_blocks=1, num_prefill_checkpoint_blocks=1
     )
     config.model_config.hf_config.num_nextn_predict_layers = lookahead
+    config.num_hash_lookahead_tokens = config._resolve_num_hash_lookahead_tokens()
     init_none_hash(sha256)
     return create_scheduler(config, kv_cache_config=caches, hash_block_size=4)
 

@@ -1051,12 +1051,9 @@ class MooncakeConnectorScheduler:
             _, hash_block_size = resolve_kv_cache_block_sizes(
                 self.kv_cache_config, self.vllm_config
             )
-            num_valid_hashes = (
-                max(0, request.num_tokens - self.vllm_config.num_hash_lookahead_tokens)
-                // hash_block_size
+            request.truncate_block_hashes(
+                hash_block_size, self.vllm_config.num_hash_lookahead_tokens
             )
-            del request.block_hashes[num_valid_hashes:]
-            request._prompt_embeds_per_block_hashes.clear()
             params["_p_side_truncated"] = True
 
     def on_new_request(self, request: "Request") -> None:

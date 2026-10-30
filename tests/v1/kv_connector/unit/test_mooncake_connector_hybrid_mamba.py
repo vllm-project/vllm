@@ -184,6 +184,7 @@ def test_lookahead_hashes_follow_truncated_prefill(
         spec.method = "mtp"
         spec.draft_model_config = config.model_config
         config.speculative_config = spec
+        config.num_hash_lookahead_tokens = config._resolve_num_hash_lookahead_tokens()
     config.cache_config.prefix_match_unit = hash_block_size
     kv_config = make_hybrid_gdn_kv_cache_config(block_size)
     group = kv_config.kv_cache_groups[1]

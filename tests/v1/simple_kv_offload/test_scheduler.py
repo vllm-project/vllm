@@ -235,6 +235,7 @@ def _make_lookahead_config(num_lookahead: int) -> VllmConfig:
     config.model_config.hf_config.num_nextn_predict_layers = max(1, num_lookahead)
     spec.disable_lookahead_block_hashes = num_lookahead == 0
     config.speculative_config = spec
+    config.num_hash_lookahead_tokens = config._resolve_num_hash_lookahead_tokens()
     return config
 
 

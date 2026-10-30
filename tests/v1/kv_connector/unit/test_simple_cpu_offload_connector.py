@@ -117,6 +117,7 @@ def test_multi_cpu_coordinator_uses_parent_hash_protocol(
         kv_connector_extra_config={"connectors": children},
     )
     config.scheduler_config.disable_hybrid_kv_cache_manager = True
+    config.num_hash_lookahead_tokens = config._resolve_num_hash_lookahead_tokens()
     connector = KVConnectorFactory.create_connector(
         config, KVConnectorRole.SCHEDULER, _make_kv_cache_config()
     )

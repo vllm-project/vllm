@@ -1204,6 +1204,7 @@ def test_finish_during_prefill_saves_only_completed_kv(
     spec = SpeculativeConfig(model="ngram", num_speculative_tokens=1)
     spec.method = "mtp"
     config.speculative_config = spec
+    config.num_hash_lookahead_tokens = config._resolve_num_hash_lookahead_tokens()
     with patch.object(scheduler, "LookupKeyClient"):
         connector = mooncake_store_connector.MooncakeStoreConnector(
             config, KVConnectorRole.SCHEDULER, _make_kv_cache_config()
@@ -1283,6 +1284,7 @@ def test_finish_preserves_both_store_jobs_and_releases_their_own_blocks(
     spec = SpeculativeConfig(model="ngram", num_speculative_tokens=1)
     spec.method = "mtp"
     config.speculative_config = spec
+    config.num_hash_lookahead_tokens = config._resolve_num_hash_lookahead_tokens()
     kv_config = KVCacheConfig(
         num_blocks=32,
         kv_cache_tensors=[],
@@ -1430,6 +1432,7 @@ def test_store_uses_multi_connectors_final_hash_protocol(all_supported):
     spec.method = "mtp"
     spec.draft_model_config = config.model_config
     config.speculative_config = spec
+    config.num_hash_lookahead_tokens = config._resolve_num_hash_lookahead_tokens()
     kv_config = _make_kv_cache_config()
     with patch.object(scheduler, "LookupKeyClient"):
         connector = KVConnectorFactory.create_connector(
@@ -1461,6 +1464,7 @@ def test_lookahead_hashed_prefix_is_retried_without_new_blocks():
     spec.method = "mtp"
     spec.draft_model_config = config.model_config
     config.speculative_config = spec
+    config.num_hash_lookahead_tokens = config._resolve_num_hash_lookahead_tokens()
     with patch.object(scheduler, "LookupKeyClient") as lookup:
         lookup.return_value.lookup.return_value = MooncakeLookupResult(0)
         engine_scheduler = create_scheduler(config, num_blocks=16)

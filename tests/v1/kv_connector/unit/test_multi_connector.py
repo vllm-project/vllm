@@ -1126,6 +1126,9 @@ def test_multi_connector_children_use_configured_lookahead_hashes(
     spec.disable_lookahead_block_hashes = disabled
     vllm_config.speculative_config = spec
     vllm_config.cache_config.enable_prefix_caching = prefix_caching
+    vllm_config.num_hash_lookahead_tokens = (
+        vllm_config._resolve_num_hash_lookahead_tokens()
+    )
 
     assert vllm_config.num_hash_lookahead_tokens == (num_lookahead if expected else 0)
 

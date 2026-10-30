@@ -238,6 +238,9 @@ class RequestRunner:
             kv_role="kv_both",
             kv_connector_extra_config=extra_config,
         )
+        vllm_config.num_hash_lookahead_tokens = (
+            vllm_config._resolve_num_hash_lookahead_tokens()
+        )
         vllm_config.kv_events_config = KVEventsConfig(
             # Enable so the offloading events tracker is active, but use the
             # null publisher: these tests drain take_events directly and a
