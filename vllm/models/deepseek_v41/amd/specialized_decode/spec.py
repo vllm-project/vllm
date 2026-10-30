@@ -107,8 +107,8 @@ def _gpu_arch() -> str:
 def _refuse_config(vllm_config) -> list[str]:
     """Every reason this config cannot run the kernels, before load."""
     reasons = []
-    if vllm_config.parallel_config.tensor_parallel_size not in (2, 4):
-        reasons.append("needs tensor parallel size 2 or 4")
+    if vllm_config.parallel_config.tensor_parallel_size not in (2, 4, 8):
+        reasons.append("needs tensor parallel size 2, 4 or 8")
     if envs.VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4:
         reasons.append(
             "needs AITER's A8W4 MoE (VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4 unset)"

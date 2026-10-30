@@ -36,8 +36,8 @@ from vllm.models.common.specialized_decode.spec import DecodeSpec, Feature
 
 def _refuse_config(vllm_config) -> list[str]:
     reasons = []
-    if vllm_config.parallel_config.tensor_parallel_size not in (2, 4):
-        reasons.append("needs tensor parallel size 2 or 4")
+    if vllm_config.parallel_config.tensor_parallel_size not in (2, 4, 8):
+        reasons.append("needs tensor parallel size 2, 4 or 8")
     return reasons
 
 

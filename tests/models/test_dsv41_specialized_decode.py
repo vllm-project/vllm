@@ -4,6 +4,7 @@
 
 import importlib
 import sys
+from collections import defaultdict
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
@@ -246,6 +247,12 @@ def make_config(**overrides) -> Any:
     for key, value in overrides.items():
         setattr(config, key, value)
     return config
+
+
+def _kernel_config(specialized_decode: str | None) -> Any:
+    return make_config(
+        kernel_config=SimpleNamespace(specialized_decode=specialized_decode)
+    )
 
 
 def _swa(**overrides) -> Any:
@@ -822,3 +829,62 @@ def test_launch_declines_a_layout_it_cannot_read(monkeypatch):
             None,
         )
     assert out is None
+
+
+@pytest.mark.parametrize("specialized_decode", ["monokernel", None])
+@pytest.mark.parametrize("cdna", [3, 4])
+def test_swa_decode_meta_runs_on_cdna3_and_cdna4_with_the_flag(
+    monkeypatch, cdna, specialized_decode
+):
+    """swa_decode_meta's kernel is plain Triton, so with --monokernel a decode
+    batch gets its SWA metadata from the one launch on CDNA4 (gfx950) as on
+    CDNA3 (gfx942). Without the flag, the builder keeps vLLM's build."""
+    import vllm.platforms.rocm as rocm_platform
+    from vllm.models.deepseek_v41.amd import ops, rocm
+    from vllm.models.deepseek_v41.amd.ops import swa_decode_meta
+
+    rows = 6
+    monkeypatch.setattr(ops, "current_platform", SimpleNamespace(is_rocm=lambda: True))
+    monkeypatch.setattr(rocm_platform, "get_cdna_version", lambda: cdna)
+    monkeypatch.setattr(ops, "_specialized_decode", ops._specialized_decode)
+    ops.record_specialized_decode(_kernel_config(specialized_decode))
+    launches = []
+    monkeypatch.setattr(
+        swa_decode_meta, "launch", lambda *args, noncausal: launches.append(noncausal)
+    )
+    ints = lambda *shape: torch.zeros(shape, dtype=torch.int32)  # noqa: E731
+    builder = SimpleNamespace(
+        decode_threshold=rows,
+        window_size=sd.SWA_WIDTH,
+        block_size=128,
+        decode_swa_indices=ints(64, 1, sd.SWA_WIDTH),
+        decode_swa_lens=ints(64),
+        is_valid_token=torch.zeros(64, dtype=torch.bool),
+        token_to_req_indices=ints(64),
+        no_replay_start=ints(2),
+        decode_swa_ragged_indices_buffer=ints(64 * sd.SWA_WIDTH),
+        decode_swa_ragged_indptr_buffer=ints(65),
+        build_tile_scheduler=lambda rows: defaultdict(lambda: None),
+        _build_deepseek_v4_metadata=lambda *args: {},
+    )
+    query_start_loc = torch.tensor([0, rows], dtype=torch.int32)
+    cam = SimpleNamespace(
+        causal=True,
+        max_query_len=rows,
+        num_reqs=1,
+        num_actual_tokens=rows,
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc,
+        seq_lens=torch.tensor([1000], dtype=torch.int32),
+        seq_lens_cpu_upper_bound=torch.tensor([1000], dtype=torch.int32),
+        slot_mapping=torch.arange(rows),
+        block_table_tensor=ints(1, 8),
+        token_to_req_indices=lambda buffer: buffer[:rows],
+    )
+    out = swa_decode_meta.build(
+        builder, 0, cam, False, None, rocm.DeepseekV41ROCMAiterSparseSWAMetadata
+    )
+    # No later test may see this test's cached gate.
+    ops.record_specialized_decode(_kernel_config(None))
+    assert launches == ([False] if specialized_decode else [])
+    assert (out is not None) is bool(specialized_decode)
