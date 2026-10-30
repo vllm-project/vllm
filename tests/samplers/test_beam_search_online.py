@@ -212,6 +212,63 @@ async def test_beam_search_respects_generation_config_eos(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("offline", [False, True])
+async def test_beam_search_score_ignores_prompt_length(
+    monkeypatch, offline: bool
+) -> None:
+    """Beams are ranked by generated length only, as in Transformers."""
+    # Long enough that counting the prompt would let the EOS beam win.
+    prompt_len = 50
+    prompt: TokensInput = {"type": "token", "prompt_token_ids": [1] * prompt_len}
+    params = BeamSearchParams(
+        beam_width=1, max_tokens=2, length_penalty=1.0, watermarking=False
+    )
+    eos = _Tokenizer.eos_token_id
+    # Mean logprobs: [eos] -1.0, [11, eos] -0.85, [11, 11] -0.8.
+    results = []
+    for logprobs in (
+        {eos: Logprob(-1.0), 11: Logprob(-1.5)},
+        {11: Logprob(-0.1), eos: Logprob(-0.2)},
+    ):
+        result = await anext(
+            _EngineClient().generate(prompt, SamplingParams(watermarking=False))
+        )
+        result.outputs[0].logprobs = [logprobs]
+        results.append(result)
+
+    def step_result(engine_prompt) -> RequestOutput:
+        return results[len(engine_prompt["prompt_token_ids"]) - prompt_len]
+
+    if offline:
+        offline_serving = _OfflineServing()
+        monkeypatch.setattr(
+            _OfflineServing,
+            "_beam_search_step",
+            BeamSearchOfflineMixin._beam_search_step,
+        )
+
+        def render_and_run_requests(*, prompts, **kwargs):
+            return [step_result(p) for p in prompts]
+
+        monkeypatch.setattr(
+            offline_serving, "_render_and_run_requests", render_and_run_requests
+        )
+        beam = offline_serving.beam_search(cast(list, [prompt]), params)[0].sequences[0]
+        assert beam.tokens[prompt_len:] == [11, 11]
+    else:
+
+        async def generate(engine_prompt, *args, **kwargs):
+            yield step_result(engine_prompt)
+
+        online_serving = _AsyncServing()
+        monkeypatch.setattr(online_serving.engine_client, "generate", generate)
+        output = (
+            await anext(online_serving.beam_search(prompt, "request", params))
+        ).outputs[0]
+        assert output.token_ids == [11, 11]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("priority", [None, -9, 12])
 async def test_beam_search_preserves_priority_for_every_step(monkeypatch, priority):
     """All beam expansion requests retain the caller's scheduling priority."""

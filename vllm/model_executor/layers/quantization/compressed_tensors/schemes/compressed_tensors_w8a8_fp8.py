@@ -5,7 +5,6 @@ from collections.abc import Callable
 
 import torch
 from compressed_tensors.quantization import QuantizationArgs, QuantizationStrategy
-from torch.nn import Parameter
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config
@@ -38,6 +37,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
 )
+from vllm.model_executor.utils import replace_parameter
 
 __all__ = ["CompressedTensorsW8A8Fp8"]
 
@@ -174,17 +174,16 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             )
 
         # required by torch.compile to be torch.nn.Parameter
-        layer.weight = Parameter(weight.data, requires_grad=False)
-        # The helpers return (K, N); retag so layout-aware kernels see it.
-        layer.weight.input_dim = 0
-        layer.weight.output_dim = 1
-        layer.weight_scale = Parameter(weight_scale.data, requires_grad=False)
+        replace_parameter(layer, "weight", weight.data)
+        # The helpers return (K, N); the param keeps its checkpoint dims.
+        layer.processed_weight_dims = (0, 1)
+        replace_parameter(layer, "weight_scale", weight_scale.data)
         if input_scale is not None:
-            layer.input_scale = Parameter(input_scale.data, requires_grad=False)
+            replace_parameter(layer, "input_scale", input_scale.data)
 
         # INPUT SCALE
         if self.is_static_input_scheme and hasattr(layer, "input_scale"):
-            layer.input_scale = Parameter(layer.input_scale.max(), requires_grad=False)
+            replace_parameter(layer, "input_scale", layer.input_scale.max())
         else:
             layer.input_scale = None
 
