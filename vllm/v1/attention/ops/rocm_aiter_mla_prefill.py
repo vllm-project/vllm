@@ -9,6 +9,7 @@ import torch
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.attention.mla_attention import MLACommonPrefillMetadata
+from vllm.utils.torch_utils import async_tensor_h2d
 
 
 def context_row_indices(
@@ -33,7 +34,7 @@ def context_row_indices(
         offset += padded
     rows = torch.cat(segments) if segments else torch.empty(0, dtype=torch.int32)
     assert rows.numel() == chunk.num_context_tokens
-    return rows.to(device=device, non_blocking=True)
+    return async_tensor_h2d(rows, device=device)
 
 
 def gather_compressed_context(
