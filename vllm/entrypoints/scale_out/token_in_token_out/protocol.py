@@ -684,10 +684,8 @@ class DerenderChatRequest(BaseModel):
     """
 
     prompt_tokens: int | None = None
-    """Prompt token count for usage; defaults to 0 if omitted.
-
-    GenerateResponse carries only output tokens; the caller already has
-    len(GenerateRequest.token_ids) from the render step.
+    """Prompt token count for usage. If omitted, falls back to
+    `generate_response.usage.prompt_tokens`, then to 0.
     """
 
     prompt_token_ids: list[NonNegativeInt] | None = None
@@ -728,7 +726,8 @@ class DerenderCompletionRequest(BaseModel):
     list[GenerateRequest] returned by /v1/completions/render."""
 
     prompt_tokens: list[int] | None = None
-    """One prompt token count per response; each defaults to 0 if omitted.
+    """One prompt token count per response. If omitted, each falls back to
+    that response's `usage.prompt_tokens`, then to 0.
 
     If provided, len(prompt_tokens) must equal len(generate_responses).
     """
