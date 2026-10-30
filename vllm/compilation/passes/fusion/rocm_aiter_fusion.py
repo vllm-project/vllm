@@ -859,7 +859,7 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
                     )
                 )
 
-        # RDNA4 uses native quant ops and supports only Triton replacements.
+        # RDNA uses native quant ops and supports only Triton replacements.
         match_aiter_quant_op = not rocm_aiter_ops.is_rdna_aiter_enabled()
 
         # Make sure fused add patterns are before simple rms norm,
@@ -930,7 +930,7 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
             # an aiter version that includes the GDN triton kernel renames.
             if gated_norm_shapes and (
                 rocm_aiter_ops.are_gdn_triton_kernels_available()
-                or rocm_aiter_ops.is_rdna_gdn_triton_kernels_available()
+                or rocm_aiter_ops.are_rdna_gdn_triton_kernels_available()
             ):
                 for num_heads, head_dim in gated_norm_shapes:
                     if head_dim != 128:
