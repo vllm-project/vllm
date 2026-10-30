@@ -41,7 +41,7 @@ def _fused_mm_input_norm_kernel(
     C: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    # 1D grid over the flattened (N, C, L) tensor. Each program processes
+    # 1D grid over the flattened (P, C, L) tensor. Each program processes
     # BLOCK contiguous elements; the channel index is recovered from the
     # flat offset via `(offs // L) % C`. int32 offsets: int64 division is
     # ~2x slower here (measured on GB200); the wrapper asserts
@@ -76,9 +76,9 @@ def fused_mm_input_norm_triton(
     """Fused per-channel affine transform for normalisation.
 
     Args:
-        inputs: Input tensor, shape ``(N, C, L)``. A contiguous copy is
+        inputs: Input tensor, shape ``(P, C, L)``. A contiguous copy is
             materialized internally if needed.
-        outputs: Output tensor, contiguous and shaped exactly ``(N, C, L)``.
+        outputs: Output tensor, contiguous and shaped exactly ``(P, C, L)``.
         weight: Per-channel scale, shape ``(C,)``.
         bias: Per-channel shift, shape ``(C,)``.
 
@@ -86,9 +86,9 @@ def fused_mm_input_norm_triton(
         ``outputs``, for chaining.
 
     """
-    N, C, L = inputs.shape
-    assert outputs.shape == (N, C, L), (
-        f"outputs shape {tuple(outputs.shape)} != inputs shape {(N, C, L)}"
+    P, C, L = inputs.shape
+    assert outputs.shape == (P, C, L), (
+        f"outputs shape {tuple(outputs.shape)} != inputs shape {(P, C, L)}"
     )
     assert weight.numel() == C and bias.numel() == C, (
         f"weight/bias must have {C} elements, got {weight.numel()} / {bias.numel()}"
@@ -103,7 +103,7 @@ def fused_mm_input_norm_triton(
     # sizes; larger tiles starve the SMs on small inputs.
     BLOCK_SIZE = 1024
 
-    numel = N * C * L
+    numel = P * C * L
     # The kernel indexes with int32 offsets (int64 division costs ~2x
     # throughput); guard the flat index range here.
     assert numel < 2**31, f"numel={numel} exceeds the int32 index range"
@@ -181,13 +181,14 @@ def _load_norm_params(model_config: ModelConfig) -> NormParams:
 
 
 class InputLayout(str, Enum):
-    """Layout of the tensors a.k.a. pixel_values passed to ``FusedMMInputNorm``.
+    """Layout of the tensors (a.k.a. ``pixel_values``) passed to
+    ``FusedMMInputNorm``.
 
-    * ``BCL``  — ``(patches, C * L)``: flattened per-patch pixels.
+    * ``PCL``  — ``(patches, C * L)``: flattened per-patch pixels。
     * ``BCHW`` — ``(B, C, H, W)``: NCHW image tensors.
     """
 
-    BCL = "bcl"
+    PCL = "pcl"
     BCHW = "bchw"
 
 
@@ -226,7 +227,7 @@ class FusedMMInputNorm(CustomOp):
 
     Input Layout semantics:
 
-    * ``layout="bcl"``  (default) — ``pixel_values`` is ``(patches, C*L)``,
+    * ``layout="pcl"``  (default) — ``pixel_values`` is ``(patches, C*L)``,
       output has the same shape.
     * ``layout="bchw"`` — ``pixel_values`` is ``(B, C, H, W)``, output has
       the same shape.
@@ -247,7 +248,7 @@ class FusedMMInputNorm(CustomOp):
         image_std: list[float],
         rescale_factor: float,
         channel: int = 3,
-        layout: InputLayout | str = InputLayout.BCL,
+        layout: InputLayout | str = InputLayout.PCL,
     ):
         super().__init__()
 
@@ -301,10 +302,10 @@ class FusedMMInputNorm(CustomOp):
     def _unpack(
         self, pixel_values: torch.Tensor
     ) -> tuple[torch.Tensor, tuple[int, ...]]:
-        """Normalise either layout to ``(B, C, L)`` plus the output shape.
+        """Normalise either layout to ``(P, C, L)`` plus the output shape.
 
         Returns a ``(x3, out_shape)`` pair where ``x3`` is a
-        ``(B, C, L)`` view of the input and ``out_shape`` is the shape
+        ``(P, C, L)`` view of the input and ``out_shape`` is the shape
         the final output must have. The ``reshape`` below is a pure view
         as long as the caller's tensor is contiguous; the platform
         forward_* methods call ``.contiguous()`` inside
@@ -385,7 +386,7 @@ class FusedMMInputNorm(CustomOp):
 
 def build_mm_input_norm(
     model_config: ModelConfig,
-    layout: InputLayout | str = InputLayout.BCL,
+    layout: InputLayout | str = InputLayout.PCL,
 ) -> nn.Module:
     """Build the input normalisation module for a model.
 

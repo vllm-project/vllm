@@ -8,9 +8,7 @@ from tests.models.utils import GenerateModelInfo
 from .ppl_utils import vqa_ppl_test
 
 MODELS = [
-    GenerateModelInfo("zai-org/GLM-OCR",
-                      hf_ppl=13.885052680969238,
-                      pixel_factor=28),
+    GenerateModelInfo("zai-org/GLM-OCR", hf_ppl=13.885052680969238, pixel_factor=28),
 ]
 
 

@@ -8,13 +8,21 @@ from tests.models.utils import GenerateModelInfo
 from .ppl_utils import vqa_ppl_test
 
 MODELS = [
-    GenerateModelInfo("Qwen/Qwen2-VL-2B-Instruct",
-                      hf_ppl=9.810060501098633,
-                      pixel_factor=28),
-    GenerateModelInfo("Qwen/Qwen2.5-VL-3B-Instruct", hf_ppl=22.17719078063965, pixel_factor=28),
-    GenerateModelInfo("Qwen/Qwen3-VL-4B-Instruct", hf_ppl=11.916606903076172,
-                      pixel_factor=32),
-    GenerateModelInfo("Qwen/Qwen3.5-4B", hf_ppl=6.478141784667969, pixel_factor=32, extra_kwargs={"enable_prefix_caching": False}),
+    GenerateModelInfo(
+        "Qwen/Qwen2-VL-2B-Instruct", hf_ppl=9.810060501098633, pixel_factor=28
+    ),
+    GenerateModelInfo(
+        "Qwen/Qwen2.5-VL-3B-Instruct", hf_ppl=22.17719078063965, pixel_factor=28
+    ),
+    GenerateModelInfo(
+        "Qwen/Qwen3-VL-4B-Instruct", hf_ppl=11.916606903076172, pixel_factor=32
+    ),
+    GenerateModelInfo(
+        "Qwen/Qwen3.5-4B",
+        hf_ppl=6.478141784667969,
+        pixel_factor=32,
+        extra_kwargs={"enable_prefix_caching": False},
+    ),
 ]
 
 

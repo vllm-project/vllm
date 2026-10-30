@@ -99,7 +99,7 @@ def _check_against_reference(
     image_mean: list[float] | None = None,
     image_std: list[float] | None = None,
     rescale_factor: float = _RGB_RESCALE,
-    layout: InputLayout | str = InputLayout.BCL,
+    layout: InputLayout | str = InputLayout.PCL,
     **close_kwargs,
 ):
     """Run ``FusedMMInputNorm`` on ``pixel_values`` and compare against the
@@ -239,7 +239,7 @@ class TestFusedMMInputNormShapes:
         )
         _check_against_reference(pixel_values, torch.float32)
 
-    def test_rejects_indivisible_bcl_size(self):
+    def test_rejects_indivisible_pcl_size(self):
         """Size % channel != 0 must fail loudly, not silently truncate."""
         norm = FusedMMInputNorm(_RGB_MEAN, _RGB_STD, _RGB_RESCALE).to(_DEVICE)
         with pytest.raises(AssertionError):
@@ -329,28 +329,28 @@ class TestFusedMMInputNormBCHWLayout:
         )
         _check_against_reference(pixel_values, torch.float32, layout="bchw")
 
-    def test_bchw_matches_bcl_equivalent(self):
-        """The same bytes viewed as (B, C, H*W) and (B, C, H, W) must
+    def test_bchw_matches_pcl_equivalent(self):
+        """The same bytes viewed as (P, C, H*W) and (B, C, H, W) must
         produce numerically identical outputs."""
         set_random_seed(0)
         B, C, H, W = 4, 3, 16, 32
         x_bchw = torch.randint(
             0, 256, (B, C, H, W), dtype=torch.float32, device=_DEVICE
         )
-        x_bcl = x_bchw.reshape(B, C * H * W)
+        x_pcl = x_bchw.reshape(B, C * H * W)
 
         norm_bchw = FusedMMInputNorm(
             _RGB_MEAN, _RGB_STD, _RGB_RESCALE, layout="bchw"
         ).to(_DEVICE)
-        norm_bcl = FusedMMInputNorm(_RGB_MEAN, _RGB_STD, _RGB_RESCALE, layout="bcl").to(
+        norm_pcl = FusedMMInputNorm(_RGB_MEAN, _RGB_STD, _RGB_RESCALE, layout="pcl").to(
             _DEVICE
         )
 
         y_bchw = norm_bchw(x_bchw, torch.float32)
-        y_bcl = norm_bcl(x_bcl, torch.float32)
+        y_pcl = norm_pcl(x_pcl, torch.float32)
 
         assert y_bchw.shape == (B, C, H, W)
-        torch.testing.assert_close(y_bchw.reshape(B, C * H * W), y_bcl)
+        torch.testing.assert_close(y_bchw.reshape(B, C * H * W), y_pcl)
 
     def test_large_batch_bchw(self):
         """Regression guard for the cuDNN grid-limit size, now in BCHW."""
@@ -405,9 +405,9 @@ class TestFusedMMInputNormBCHWValidation:
 # ===========================================================================
 @requires_vllm_config
 class TestFusedMMInputInputLayoutConfig:
-    def test_default_is_bcl(self):
+    def test_default_is_pcl(self):
         norm = FusedMMInputNorm(_RGB_MEAN, _RGB_STD, _RGB_RESCALE)
-        assert norm.layout is InputLayout.BCL
+        assert norm.layout is InputLayout.PCL
 
     @pytest.mark.parametrize("layout", ["bchw", InputLayout.BCHW])
     def test_accepts_string_and_enum(self, layout):
@@ -422,7 +422,7 @@ class TestFusedMMInputInputLayoutConfig:
         # InputLayout(str, Enum) must compare equal to its string form so
         # callers can keep layout="bchw" in configs.
         assert InputLayout.BCHW == "bchw"
-        assert InputLayout.BCL == "bcl"
+        assert InputLayout.PCL == "pcl"
 
     def test_input_dtype_and_enabled(self):
         # Sanity check for the CustomOp contract used by the processor.
@@ -436,7 +436,7 @@ class TestFusedMMInputInputLayoutConfig:
 # ===========================================================================
 @requires_vllm_config
 class TestFusedMMInputNormOOTAndIdentity:
-    @pytest.mark.parametrize("layout", ["bcl", "bchw"])
+    @pytest.mark.parametrize("layout", ["pcl", "bchw"])
     def test_forward_oot_matches_native(self, layout):
         set_random_seed(0)
         shape = (4, 3, 8, 8) if layout == "bchw" else (4, 3 * 64)
@@ -465,7 +465,7 @@ class TestFusedMMInputNormOOTAndIdentity:
 @requires_triton
 class TestFusedMMInputNormKernel:
     @pytest.mark.parametrize(
-        "N, C, L",
+        "P, C, L",
         [
             (1, 1, 1),
             (1, 3, 1),
@@ -474,12 +474,12 @@ class TestFusedMMInputNormKernel:
             (4, 3, 1000),
         ],
     )
-    def test_channel_boundary_crossing(self, N: int, C: int, L: int):
+    def test_channel_boundary_crossing(self, P: int, C: int, L: int):
         """The 1D kernel recovers ``c = (offs // L) % C`` per lane, so a tile
         can straddle a channel boundary and gather weight/bias per lane.
         These shapes force that path by keeping ``L`` well below the block."""
         set_random_seed(0)
-        x = torch.randn(N, C, L, dtype=torch.float32, device=_DEVICE)
+        x = torch.randn(P, C, L, dtype=torch.float32, device=_DEVICE)
         w = torch.randn(C, dtype=torch.float32, device=_DEVICE)
         b = torch.randn(C, dtype=torch.float32, device=_DEVICE)
 
@@ -491,15 +491,15 @@ class TestFusedMMInputNormKernel:
 
     def test_non_contiguous_inputs_materialized(self):
         """Read-only tensors are made contiguous internally."""
-        N, C, L = 3, 3, 100
+        P, C, L = 3, 3, 100
         set_random_seed(0)
-        base = torch.randn(N, C, L, 2, dtype=torch.float32, device=_DEVICE)
+        base = torch.randn(P, C, L, 2, dtype=torch.float32, device=_DEVICE)
         x = base[..., 0]
         assert not x.is_contiguous()
         w = torch.randn(C, dtype=torch.float32, device=_DEVICE)
         b = torch.randn(C, dtype=torch.float32, device=_DEVICE)
 
-        out = torch.empty(N, C, L, dtype=torch.float32, device=_DEVICE)
+        out = torch.empty(P, C, L, dtype=torch.float32, device=_DEVICE)
         fused_mm_input_norm_triton(x, out, w, b)
 
         expected = x * w.view(1, C, 1) + b.view(1, C, 1)
@@ -507,12 +507,12 @@ class TestFusedMMInputNormKernel:
 
     def test_rejects_mismatched_output_shape(self):
         """``outputs`` must be shaped exactly like ``inputs``."""
-        N, C, L = 3, 3, 100
-        x = torch.randn(N, C, L, dtype=torch.float32, device=_DEVICE)
+        P, C, L = 3, 3, 100
+        x = torch.randn(P, C, L, dtype=torch.float32, device=_DEVICE)
         w = torch.randn(C, dtype=torch.float32, device=_DEVICE)
         b = torch.randn(C, dtype=torch.float32, device=_DEVICE)
 
-        for out_shape in ((N, C + 1, L), (N, C, L + 1), (N + 2, C, L)):
+        for out_shape in ((P, C + 1, L), (P, C, L + 1), (P + 2, C, L)):
             with pytest.raises(AssertionError):
                 fused_mm_input_norm_triton(
                     x,
@@ -642,18 +642,18 @@ class TestBuildMMInputNorm:
         "rescale_factor": 1.0,
     }
 
-    @pytest.mark.parametrize("layout", ["bcl", "bchw"])
+    @pytest.mark.parametrize("layout", ["pcl", "bchw"])
     def test_layout_passthrough(self, monkeypatch, layout):
         mod = self._patch_processor(monkeypatch, self._NON_IDENTITY_CFG)
         norm = mod.build_mm_input_norm(self._model_config(), layout=layout)
         assert isinstance(norm, FusedMMInputNorm)
         assert norm.layout is InputLayout(layout)
 
-    def test_default_layout_is_bcl(self, monkeypatch):
+    def test_default_layout_is_pcl(self, monkeypatch):
         mod = self._patch_processor(monkeypatch, self._NON_IDENTITY_CFG)
         norm = mod.build_mm_input_norm(self._model_config())
         assert isinstance(norm, FusedMMInputNorm)
-        assert norm.layout is InputLayout.BCL
+        assert norm.layout is InputLayout.PCL
 
     def test_identity_params_return_identity_norm(self, monkeypatch):
         mod = self._patch_processor(monkeypatch, self._IDENTITY_CFG)

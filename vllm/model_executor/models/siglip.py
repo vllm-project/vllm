@@ -59,6 +59,7 @@ from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import async_tensor_h2d
 
+from ..layers.fusion.mm_input_norm import IdentityInputNorm
 from .clip import dual_encoder_has_text_tokens, merge_dual_encoder_text_and_vision
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsQuant
 from .interfaces_base import default_pooling_type
@@ -71,7 +72,6 @@ from .vision import (
     is_vit_use_data_parallel,
     resolve_visual_encoder_outputs,
 )
-from ..layers.fusion.mm_input_norm import IdentityInputNorm
 
 
 class SiglipImagePixelInputs(TensorSchema):

@@ -39,6 +39,7 @@ from vllm.multimodal.processing.processor import (
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
+from ..layers.fusion.mm_input_norm import build_mm_input_norm
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsEncoderCudaGraph,
@@ -53,7 +54,6 @@ from .utils import (
     init_vllm_registered_model,
     maybe_prefix,
 )
-from ..layers.fusion.mm_input_norm import build_mm_input_norm
 
 logger = init_logger(__name__)
 
