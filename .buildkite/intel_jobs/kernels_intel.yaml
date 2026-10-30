@@ -26,29 +26,6 @@ steps:
       pytest -v -s ir &&
       pytest -v -s kernels/ir'
 
-- label: ":intel: (BMG) UVA Kernel Tests"
-  key: uva-kernel-tests
-  timeout_in_minutes: 20
-  device: intel_gpu
-  agent_tags:
-    label: production
-    gpu: 1+
-    mem: 16+
-  no_plugin: true
-  working_dir: "."
-  env:
-    REGISTRY: "public.ecr.aws/q9t5s3a7"
-    REPO: "vllm-ci-test-repo"
-    VLLM_TEST_DEVICE: "xpu"
-  source_file_dependencies:
-    - tests/kernels/core/test_uva.py
-    - vllm/utils/torch_utils.py
-  commands:
-    - >-
-      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'cd tests &&
-      pytest -v -s kernels/core/test_uva.py'
-
 - label: ":intel: Qwen3.5 Native Shared Expert Decode / TP2 Reload"
   key: qwen35-shared-expert-decode
   timeout_in_minutes: 120
@@ -124,3 +101,26 @@ steps:
       'cd tests &&
       pytest -v -s kernels/moe/test_moe.py
       -k xpu_qwen3_5_missing_provider or xpu_qwen3_5_provider_import_failure_cached'
+
+- label: ":intel: (BMG) UVA Kernel Tests"
+  key: uva-kernel-tests
+  timeout_in_minutes: 20
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - tests/kernels/core/test_uva.py
+    - vllm/utils/torch_utils.py
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests &&
+      pytest -v -s kernels/core/test_uva.py'
