@@ -45,7 +45,7 @@ def gfx942_decode(monkeypatch):
     the recorded flag itself."""
     from vllm.models.deepseek_v41.amd import ops
 
-    monkeypatch.setattr(ops, "_monokernel", True)
+    monkeypatch.setattr(ops, "_specialized_decode", True)
     ops.enabled.cache_clear()
     yield
     ops.enabled.cache_clear()

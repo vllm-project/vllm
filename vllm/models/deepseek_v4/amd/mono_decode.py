@@ -212,7 +212,7 @@ class MonoDecodeLayer:
     def create(
         cls, layer: "DeepseekV4DecoderLayer", vllm_config
     ) -> "MonoDecodeLayer | None":
-        if not vllm_config.kernel_config.monokernel:
+        if not vllm_config.kernel_config.specialized_decode:
             return None
         why = _deployment_error(layer, vllm_config)
         if why is not None:

@@ -76,6 +76,7 @@ steps:
   - tests/models/test_deepseek_v41_pipeline.py
   - tests/models/transformers/test_layer_registry_e2e.py
   - tests/models/test_deepseek_v41_replay_start.py
+  - tests/models/common/specialized_decode/
   - tests/models/test_deepseek_v4_vl_stream_weights.py
   - tests/models/test_muse_spark_rocm_loading.py
   - tests/models/test_muse_spark_logits_local.py
@@ -97,6 +98,7 @@ steps:
       models/test_muse_spark_rocm_loading.py
       models/test_muse_spark_logits_local.py
       models/test_muse_spark_rocm_shared_rope.py
+      models/common/specialized_decode
   mirror:
     amd:
       label: ":amd: (MI355) Basic Models (Other)"
@@ -119,7 +121,7 @@ steps:
       - tests/models/test_deepseek_v4_dspark_rocm.py
       - tests/models/test_deepseek_v4_rocm_wo_a.py
       - tests/models/test_deepseek_v4_rocm_compressor_gemm_fusion.py
-      - tests/models/test_dsv41_mono_decode.py
+      - tests/models/test_dsv41_specialized_decode.py
       - tests/models/test_muse_spark_rocm_loading.py
       - tests/models/test_dsv4_mono_decode.py
       - tests/models/test_deepseek_v4_vl_stream_weights.py
@@ -127,6 +129,8 @@ steps:
       - vllm/models/muse_spark/
       - tests/models/test_muse_spark_logits_local.py
       - tests/models/test_muse_spark_rocm_shared_rope.py
+      - vllm/models/common/specialized_decode/
+      - tests/models/common/specialized_decode/
       commands:
       - >-
         pytest -v -s
@@ -142,17 +146,18 @@ steps:
         models/test_deepseek_v4_dspark_rocm.py
         models/test_deepseek_v4_rocm_wo_a.py
         models/test_deepseek_v4_rocm_compressor_gemm_fusion.py
-        models/test_dsv41_mono_decode.py
+        models/test_dsv41_specialized_decode.py
         models/test_muse_spark_rocm_loading.py
         models/test_deepseek_v4_vl_stream_weights.py
         models/test_muse_spark_logits_local.py
         models/test_muse_spark_rocm_shared_rope.py
+        models/common/specialized_decode
       - VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'not distributed'
       - pytest -v -s models/hy_v4/test_triton_ihc.py
       - pytest -v -s models/test_dsv4_mono_decode.py
 
-- label: ":amd: (MI355) MiniMax M3 MonoKernel"
-  key: minimax-m3-monokernel-mi355
+- label: ":amd: (MI355) MiniMax M3 Specialized Decode"
+  key: minimax-m3-specialized-decode-mi355
   dind: false
   timeout_in_minutes: 45
   device: mi355_4

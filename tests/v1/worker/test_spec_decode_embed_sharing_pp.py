@@ -162,7 +162,7 @@ def m3_config():
         parallel_config=ParallelConfig(),
         quant_config=None,
         cache_config=None,
-        kernel_config=SimpleNamespace(monokernel=False, moe_backend="auto"),
+        kernel_config=SimpleNamespace(specialized_decode=None, moe_backend="auto"),
     )
 
 

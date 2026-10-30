@@ -334,7 +334,7 @@ def _engine(vllm_runner, model_dir, mono, graphs=False, **extra):
         kernel_config={
             "enable_jit_warmup": False,
             "moe_backend": "aiter",
-            "monokernel": mono,
+            "specialized_decode": "monokernel" if mono else None,
         },
         enforce_eager=not graphs,
         compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY" if graphs else "NONE"},
