@@ -531,8 +531,12 @@ class DefaultModelLoader(BaseModelLoader):
     ) -> None:
         weights_to_load = {name for name, _ in model.named_parameters()}
         if loaded_weights is not None:
-            # ignore online quantization scales
             for name, module in model.named_modules():
+                if isinstance(module, StackedColumnParallelLinear):
+                    weights_to_load.update(
+                        f"{name}.{shard_id}" for shard_id in module.pop_missing_shards()
+                    )
+                # ignore online quantization scales
                 quant_method = getattr(module, "quant_method", None)
                 has_online_quant = getattr(quant_method, "uses_meta_device", False)
                 has_postprocess_quant = getattr(
@@ -571,21 +575,3 @@ class DefaultModelLoader(BaseModelLoader):
                     "Following weights were not initialized from "
                     f"checkpoint: {weights_not_loaded}"
                 )
-        self._check_stacked_weights_complete(model)
-
-    @staticmethod
-    def _check_stacked_weights_complete(model: nn.Module) -> None:
-        """Reject a stacked parameter, e.g. `qkv_proj`, that received only
-        some of its shards; the name-level check cannot see that."""
-        missing_shards: dict[str, list[str | int]] = {}
-        for module_name, module in model.named_modules():
-            if not isinstance(module, StackedColumnParallelLinear):
-                continue
-            for param_name, shards in module.pop_missing_shards().items():
-                full_name = f"{module_name}.{param_name}" if module_name else param_name
-                missing_shards[full_name] = shards
-        if missing_shards:
-            raise ValueError(
-                "Following weights were only partially initialized from "
-                f"checkpoint, missing shards: {missing_shards}"
-            )
