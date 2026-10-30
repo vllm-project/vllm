@@ -5,7 +5,7 @@ from collections import Counter
 from collections.abc import Iterable, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
-from itertools import chain, islice
+from itertools import chain
 from typing import Any, NamedTuple
 
 from vllm.config import VllmConfig
@@ -66,6 +66,9 @@ from vllm.v1.request import Request, RequestStatus
 
 logger = init_logger(__name__)
 
+# A cache reset fence held this long is reported once.
+_RESET_FENCE_WARN_S = 60
+
 KV_LOAD_TIERS_KEY = "kv_load_tiers"
 MATCHER_MEDIUM_KEY = "medium"
 MATCHER_LOCALITY_KEY = "locality"
@@ -79,11 +82,13 @@ class TransferJobStatus:
     # Number of workers still pending. Starts at num_workers,
     # decremented as each worker reports completion. Job is done at 0.
     pending_count: int
-    # Offload keys this job covers; passed to manager.complete_*().
-    keys: set[OffloadKey]
+    # Offload keys this job covers, in prefix order; passed to
+    # manager.complete_*().
+    keys: tuple[OffloadKey, ...]
     is_store: bool
     # Unlike an async load, store jobs may be created next to it.
     is_sync_load: bool = False
+    failed: bool = False
     # Store source blocks fenced after the request finishes.
     deferred_fence_block_ids: list[int] | None = None
     # Store source blocks fenced when the transfer is created.
@@ -371,6 +376,9 @@ class RequestOffloadState:
     load_key_ranges: list[tuple[int, int, OffloadKey]] = field(default_factory=list)
     # True once on_request_finished has been signaled to the manager.
     finished_signaled: bool = False
+    # A load for this request failed; all its later lookups, including after
+    # preemption, skip the offloaded cache so a faulting load is not retried.
+    load_failed: bool = False
 
     def __post_init__(self) -> None:
         self.group_states = tuple(
@@ -410,14 +418,9 @@ class RequestOffloadState:
         for group_config, group_state in zip(
             self.config.kv_group_configs, self.group_states
         ):
-            for req_block_hash in islice(
-                self.req.block_hashes,
-                group_config.hashes_per_chunk * len(group_state.offload_keys)
-                + group_config.hashes_per_chunk
-                - 1,
-                None,
-                group_config.hashes_per_chunk,
-            ):
+            stride = group_config.hashes_per_chunk
+            start = stride * (len(group_state.offload_keys) + 1) - 1
+            for req_block_hash in self.req.block_hashes[start::stride]:
                 key = make_offload_key(req_block_hash, group_config.group_idx)
                 group_state.offload_keys.append(key)
                 self.req_context.set_offload_key_position(
@@ -534,18 +537,58 @@ def _parse_tier_filter(raw: Any) -> TierFilter:
     return TierFilter(matchers=tuple(matchers))
 
 
-def _create_req_context(req: Request) -> ReqContext:
+class _RequestTokens(NamedTuple):
+    num_computed_tokens: int
+    num_in_flight_tokens: int
+    num_prompt_tokens: int
+    num_tokens: int
+
+
+@dataclass
+class _VllmReqContext(ReqContext):
+    _scheduler: "OffloadingConnectorScheduler" = field(
+        kw_only=True, repr=False, compare=False
+    )
+
+    @property
+    def _request_tokens(self) -> Request | _RequestTokens:
+        tokens = self.get_state(_RequestTokens)
+        if tokens is not None:
+            return tokens
+        return self._scheduler._req_status[self.req_id].req
+
+    @property
+    def num_computed_tokens(self) -> int:
+        return self._request_tokens.num_computed_tokens
+
+    @property
+    def num_in_flight_tokens(self) -> int:
+        return self._request_tokens.num_in_flight_tokens
+
+    @property
+    def num_prompt_tokens(self) -> int:
+        return self._request_tokens.num_prompt_tokens
+
+    @property
+    def num_tokens(self) -> int:
+        return self._request_tokens.num_tokens
+
+
+def _create_req_context(
+    req: Request, scheduler: "OffloadingConnectorScheduler"
+) -> ReqContext:
     params = req.kv_transfer_params
     load_filter = TierFilter.ALL
     if params:
         raw = params.get(KV_LOAD_TIERS_KEY)
         if raw is not None:
             load_filter = _parse_tier_filter(raw)
-    return ReqContext(
+    return _VllmReqContext(
         req_id=req.request_id,
         kv_transfer_params=params,
         kv_hints=req.kv_hints,
         load_tier_filter=load_filter,
+        _scheduler=scheduler,
     )
 
 
@@ -644,6 +687,12 @@ class OffloadingConnectorScheduler:
         # Threshold value for stale jobs. All job ids >= _stale_job_threshold are
         # active jobs.
         self._stale_job_threshold: int = 0
+        # Jobs flushed by a cache reset -> worker reports still due. Their
+        # chunks are released at once, but a worker may still write them (a
+        # late DMA) until it reports; the manager learns through
+        # on_reset_flushed() once every one has.
+        self._reset_fence: dict[int, int] = {}
+        self._reset_fence_since = 0.0
         self._jobs: dict[int, TransferJobStatus] = {}
 
         # block_id -> pending store job_ids. Used to track jobs that needs
@@ -841,13 +890,17 @@ class OffloadingConnectorScheduler:
         self,
         req_status: RequestOffloadState,
         max_num_new_tokens: int | None = None,
-    ) -> int | None:
+    ) -> tuple[int | None, int | None]:
         """Find how many tokens beyond num_locally_computed_tokens can be loaded.
 
         Iterates full-attention groups first (prefix lookup), then sliding-window
         groups (suffix lookup). Each group may tighten max_hit_size_tokens, which
         can invalidate an earlier group's result, so the loop re-runs when that
         happens until num_hit_tokens converges.
+
+        Returns the number of hit tokens (None to defer) and the hit boundary
+        the full-attention groups proved before any sliding-window/Mamba group
+        narrowed it (None if not reached).
         """
         num_computed_tokens = req_status.num_locally_computed_tokens
         max_hit_size_tokens: int = req_status.req.num_tokens
@@ -881,6 +934,7 @@ class OffloadingConnectorScheduler:
         # in the current convergence iteration. Reset when a non-eagle group
         # tightens the hit boundary, requiring a fresh pop.
         eagle_verified: set[int] = set()
+        full_attention_hit_boundary: int | None = None
         while lookup_groups:
             looked_up_sliding_window: bool = False
             groups_iter = iter(lookup_groups)
@@ -911,11 +965,21 @@ class OffloadingConnectorScheduler:
                     )
                 if max_hit_size_tokens - num_computed_tokens < tokens_per_chunk:
                     # We can only load less than a chunk, so skip.
-                    return 0
+                    return 0, full_attention_hit_boundary
 
                 sliding_window_size_in_chunks = (
                     group_config.sliding_window_size_in_chunks
                 )
+                if (
+                    sliding_window_size_in_chunks is not None
+                    and full_attention_hit_boundary is None
+                ):
+                    # Groups before the first sparse group are full attention.
+                    full_attention_hit_boundary = (
+                        max_hit_size_tokens
+                        if self._full_attention_groups and not defer_lookup
+                        else 0
+                    )
 
                 # For eagle groups, query one extra chunk that will be popped.
                 # Widening applies to every group type: without it, the pop
@@ -967,7 +1031,7 @@ class OffloadingConnectorScheduler:
                         initial_window + int(is_eagle_unverified),
                     )
                 if num_hit_chunks == 0:
-                    return 0
+                    return 0, full_attention_hit_boundary
 
                 if num_hit_chunks is None:
                     defer_lookup = True
@@ -984,7 +1048,7 @@ class OffloadingConnectorScheduler:
                 new_num_hit_tokens = max_hit_size_tokens - num_computed_tokens
                 if new_num_hit_tokens < tokens_per_chunk:
                     # We can only load less than a chunk, so skip.
-                    return 0
+                    return 0, full_attention_hit_boundary
 
                 if new_num_hit_tokens < num_hit_tokens:
                     if not group_config.is_eagle_group:
@@ -1007,7 +1071,7 @@ class OffloadingConnectorScheduler:
                 "Offloading manager delayed request %s as backend requested",
                 req_status.req.request_id,
             )
-            return None
+            return None, full_attention_hit_boundary
 
         # Possibly delay the request if any hit chunk is already being loaded.
         if self._chunks_being_loaded:
@@ -1033,7 +1097,7 @@ class OffloadingConnectorScheduler:
                         " chunks are already being loaded",
                         req_status.req.request_id,
                     )
-                    return None
+                    return None, full_attention_hit_boundary
 
         logger.debug(
             "Request %s hit %s offloaded tokens after %s GPU hit tokens",
@@ -1042,7 +1106,7 @@ class OffloadingConnectorScheduler:
             num_computed_tokens,
         )
 
-        return num_hit_tokens
+        return num_hit_tokens, full_attention_hit_boundary
 
     def _make_boundary_key(
         self,
@@ -1061,7 +1125,25 @@ class OffloadingConnectorScheduler:
         req_status: RequestOffloadState,
         max_num_new_tokens: int | None = None,
     ) -> int | None:
-        complete_hit = self._lookup_complete_chunks(req_status, max_num_new_tokens)
+        complete_hit, full_attention_hit_boundary = self._lookup_complete_chunks(
+            req_status, max_num_new_tokens
+        )
+        num_hit_tokens = self._lookup_partial_tail_hit(
+            req_status, complete_hit, max_num_new_tokens
+        )
+        if num_hit_tokens is not None and full_attention_hit_boundary is not None:
+            self._maybe_register_shared_prefix_junction(
+                req_status, full_attention_hit_boundary, num_hit_tokens
+            )
+        return num_hit_tokens
+
+    def _lookup_partial_tail_hit(
+        self,
+        req_status: RequestOffloadState,
+        complete_hit: int | None,
+        max_num_new_tokens: int | None,
+    ) -> int | None:
+        """Extend a complete-chunk hit with a partial tail, if supported."""
         req_status.partial_tail_boundary = None
         if complete_hit is None or not self.config.supports_partial_tail:
             return complete_hit
@@ -1171,6 +1253,10 @@ class OffloadingConnectorScheduler:
             key = self._make_boundary_key(
                 req, group_config.group_idx, key_tokens, req_context
             )
+            # The offload manager can report HIT as soon as the source chunk
+            # is ready, while its earlier GPU load is still in flight.  Do
+            # not schedule the same partial-tail transfer twice.
+            pending |= key in (self._chunks_being_loaded or ())
             result = self.manager.lookup(key, req_context)
             if result is LookupResult.MISS:
                 return False, pending
@@ -1185,18 +1271,37 @@ class OffloadingConnectorScheduler:
             )
         return True, False
 
+    def _maybe_register_shared_prefix_junction(
+        self, req_status: RequestOffloadState, boundary: int, num_hit_tokens: int
+    ) -> None:
+        """Pin a shared-prefix junction where a sparse group cut the hit, as
+        ``get_computed_blocks`` does for a local hit, so the recompute retains
+        the sliding-window/Mamba state at the full-attention hit boundary."""
+        if self.config.retention_interval is None:
+            return
+        if boundary <= req_status.num_locally_computed_tokens + num_hit_tokens:
+            return
+        request = req_status.req
+        # Never lower a junction the local prefix cache already set.
+        if boundary > request.shared_prefix_boundary:
+            request.shared_prefix_boundary = boundary
+
     def on_new_request(self, request: Request) -> None:
         """Called when a new request is added to the scheduler."""
-        req_context = _create_req_context(request)
-        with self._manager_locked():
-            offloading_context = self.manager.on_new_request(req_context)
+        req_context = _create_req_context(request, self)
         req_status = RequestOffloadState(
             config=self.config,
             req=request,
             req_context=req_context,
-            offloading_context=offloading_context,
+            offloading_context=RequestOffloadingContext(),
         )
         self._req_status[request.request_id] = req_status
+        try:
+            with self._manager_locked():
+                req_status.offloading_context = self.manager.on_new_request(req_context)
+        except Exception:
+            del self._req_status[request.request_id]
+            raise
 
     def get_num_new_matched_tokens(
         self,
@@ -1246,7 +1351,7 @@ class OffloadingConnectorScheduler:
         req_status.num_locally_computed_tokens = num_computed_tokens
 
         num_hit_tokens: int | None
-        if request.skip_reading_prefix_cache:
+        if request.skip_reading_external_kv or req_status.load_failed:
             num_hit_tokens = 0
         else:
             lookup_start = time.monotonic()
@@ -1480,7 +1585,7 @@ class OffloadingConnectorScheduler:
         self._jobs[load_job_id] = TransferJobStatus(
             req_id=request.request_id,
             pending_count=self.config.num_workers,
-            keys=set(keys_to_load),
+            keys=tuple(dict.fromkeys(keys_to_load)),
             is_store=False,
             is_sync_load=sync_load,
         )
@@ -1587,7 +1692,7 @@ class OffloadingConnectorScheduler:
                 self._jobs[job_id] = TransferJobStatus(
                     req_id=req_id,
                     pending_count=self.config.num_workers,
-                    keys={key},
+                    keys=(key,),
                     is_store=True,
                     fenced_block_ids=[block_id],
                 )
@@ -1734,7 +1839,7 @@ class OffloadingConnectorScheduler:
             self._jobs[job_id] = TransferJobStatus(
                 req_id=req_id,
                 pending_count=self.config.num_workers,
-                keys=set(store_output.keys_to_store),
+                keys=tuple(dict.fromkeys(store_output.keys_to_store)),
                 is_store=True,
                 fenced_block_ids=source_blocks,
             )
@@ -1824,7 +1929,12 @@ class OffloadingConnectorScheduler:
                 # Clamp to the GPU prefix cache's commit point. The final sampled
                 # token's slot is never committed (under spec decode it holds a
                 # rejected draft's KV), so a block ending there must not be stored.
-                num_tokens_after_batch = max(req.num_prompt_tokens, req.num_tokens - 1)
+                # A request that finished before its prefill completed (e.g. an
+                # error) has computed only num_computed_tokens of its prompt.
+                num_tokens_after_batch = min(
+                    req.num_computed_tokens,
+                    max(req.num_prompt_tokens, req.num_tokens - 1),
+                )
             else:
                 num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
                 num_tokens_after_batch = req.num_computed_tokens + num_scheduled_tokens
@@ -1990,7 +2100,8 @@ class OffloadingConnectorScheduler:
                 req_status.advance_stored_idx(num_offloadable_tokens)
                 continue
 
-            keys_to_store = set(store_output.keys_to_store)
+            ordered_keys_to_store = tuple(dict.fromkeys(store_output.keys_to_store))
+            keys_to_store = set(ordered_keys_to_store)
 
             group_sizes: list[int] = []
             block_indices: list[int] = []
@@ -2064,7 +2175,7 @@ class OffloadingConnectorScheduler:
             self._jobs[job_id] = TransferJobStatus(
                 req_id=req_id,
                 pending_count=self.config.num_workers,
-                keys=set(keys_to_store),
+                keys=ordered_keys_to_store,
                 is_store=True,
                 deferred_fence_block_ids=deferred_fence_block_ids,
                 fenced_block_ids=fenced_block_ids or None,
@@ -2106,6 +2217,18 @@ class OffloadingConnectorScheduler:
     def _build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
+        # Every step reaches here, including the empty steps a held fence
+        # keeps the engine taking when no request is left.
+        if (
+            self._reset_fence
+            and time.monotonic() - self._reset_fence_since > _RESET_FENCE_WARN_S
+        ):
+            logger.warning_once(
+                "KV offloading: workers have not reported %d jobs a cache "
+                "reset flushed for over %d s",
+                len(self._reset_fence),
+                _RESET_FENCE_WARN_S,
+            )
         self._update_req_states(scheduler_output)
         schedule_end_context = ScheduleEndContext(
             new_req_ids=[req.req_id for req in scheduler_output.scheduled_new_reqs],
@@ -2185,8 +2308,11 @@ class OffloadingConnectorScheduler:
         step-scoped acquire here would never reach build_connector_meta's
         release and would hold the manager for good -- which is precisely the
         state an idle engine settles into.
+
+        A cache reset fence also keeps it stepping: the flush must reach the
+        workers and their reports come back before on_reset_flushed().
         """
-        if self._jobs:
+        if self._jobs or self._reset_fence:
             return True
         with self._manager_locked():
             return self.manager.has_pending_work()
@@ -2240,6 +2366,16 @@ class OffloadingConnectorScheduler:
         for job_id, count in meta.completed_jobs.items():
             assert count > 0
             if job_id < self._stale_job_threshold:
+                if job_id in self._reset_fence:
+                    self._reset_fence[job_id] -= count
+                    if self._reset_fence[job_id] <= 0:
+                        del self._reset_fence[job_id]
+                        if not self._reset_fence:
+                            self.manager.on_reset_flushed()
+                            logger.info(
+                                "KV offloading: workers reported every job "
+                                "the cache reset flushed"
+                            )
                 logger.debug(
                     "Skipping stale completed job %d (pre-reset counter: %d)",
                     job_id,
@@ -2247,6 +2383,8 @@ class OffloadingConnectorScheduler:
                 )
                 continue
             job_status = self._jobs[job_id]
+            if job_id in meta.failed_jobs:
+                job_status.failed = True
             job_status.pending_count -= count
             if job_status.pending_count > 0:
                 continue
@@ -2254,8 +2392,27 @@ class OffloadingConnectorScheduler:
 
             req_status = self._req_status[job_status.req_id]
             if job_status.is_store:
-                self.manager.complete_store(job_status.keys, req_status.req_context)
+                if job_status.failed:
+                    logger.warning(
+                        "KV offload store job %d failed; dropping %d chunk(s) "
+                        "from the CPU cache rather than publishing them.",
+                        job_id,
+                        len(job_status.keys),
+                    )
+                self.manager.complete_store(
+                    job_status.keys,
+                    req_status.req_context,
+                    success=not job_status.failed,
+                )
             else:
+                if job_status.failed:
+                    logger.warning(
+                        "KV offload load job %d failed; request %s will not "
+                        "load from the offloaded cache again.",
+                        job_id,
+                        job_status.req_id,
+                    )
+                    req_status.load_failed = True
                 self.manager.complete_load(job_status.keys, req_status.req_context)
                 if self._chunks_being_loaded:
                     self._chunks_being_loaded.difference_update(job_status.keys)
@@ -2314,11 +2471,24 @@ class OffloadingConnectorScheduler:
 
         """
         req_status = self._req_status.get(request.request_id)
+        req_context = (
+            req_status.req_context
+            if req_status is not None
+            else _create_req_context(request, self)
+        )
+        # Freeze at logical completion, independent of deferred tier callbacks.
+        req_context.set_state(
+            _RequestTokens(
+                request.num_computed_tokens,
+                request.num_in_flight_tokens,
+                request.num_prompt_tokens,
+                request.num_tokens,
+            )
+        )
 
         if req_status is None:
             # Untracked request (offloading never started): no in-flight jobs,
             # nothing was deferred, so finalize immediately.
-            req_context = _create_req_context(request)
             with self._manager_locked():
                 self.manager.on_new_request(req_context)
                 self.manager.on_request_finished(req_context)
@@ -2366,10 +2536,11 @@ class OffloadingConnectorScheduler:
 
     def reset_cache(self) -> None:
         """Reset the offloading manager cache, evicting all stored chunks."""
-        # reset_cache cannot be called in the middle of a schedule step
+        # reset_cache cannot be called in the middle of a schedule step.
+        # _current_batch_jobs_to_flush may still hold a previous reset's flush
+        # set if no step ran since; the new ids are merged into it.
         assert not self._current_batch_load_jobs
         assert not self._current_batch_sync_loads
-        assert not self._current_batch_jobs_to_flush
         assert not self._current_batch_allocated_block_ids
 
         # Held for the whole reset. manager.reset_cache() drains tiers by
@@ -2400,6 +2571,18 @@ class OffloadingConnectorScheduler:
 
         # Discard jobs and save job_counter to be able to discard worker responses
         self._stale_job_threshold = self._job_counter
+        if self._jobs:
+            self._reset_fence.update(
+                (job_id, job.pending_count) for job_id, job in self._jobs.items()
+            )
+            self._reset_fence_since = time.monotonic()
+            logger.info(
+                "KV offloading: waiting for workers to report %d jobs "
+                "flushed by the cache reset",
+                len(self._reset_fence),
+            )
+        elif not self._reset_fence:
+            self.manager.on_reset_flushed()
         self._jobs.clear()
         self._block_id_to_pending_jobs.clear()
 

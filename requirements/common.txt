@@ -8,7 +8,7 @@ certifi >= 2026.10.19
 tqdm
 blake3
 py-cpuinfo
-transformers >= 5.16.1, < 5.21.0
+transformers >= 5.16.1, < 5.23.0
 huggingface_hub >= 1.31.0  # Required for the `huggingface_hub.utils.httpx` re-export
 tokenizers >= 0.23.2  # Required for fast incremental detokenization.
 safetensors >= 0.6.2  # MXFP4/MXFP6 dtype support (F8_E8M0, F4) added in 0.6.0: https://github.com/huggingface/safetensors/pull/611
@@ -36,7 +36,7 @@ partial-json-parser # used for parsing partial JSON outputs
 jsonschema >= 4.23.0 # required for MiniMax M3 tool schema validation
 pyzmq >= 25.0.0
 msgspec
-mistral_common[image] >= 1.11.6
+mistral_common[image] >= 1.13.0
 opencv-python-headless >= 4.13.0    # required for video IO
 pyyaml
 six>=1.16.0; python_version > '3.11' # transitive dependency of pandas that needs to be the latest version for python 3.12

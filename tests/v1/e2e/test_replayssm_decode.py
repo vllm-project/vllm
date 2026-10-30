@@ -55,7 +55,14 @@ if os.environ.get("VLLM_TEST_REQUIRE_REPLAYSSM") == "1":
 # Mamba2 (Nemotron-3) hybrid.
 MAMBA2_MODEL = "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16"
 MAMBA2_MTP_MODEL = "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4"
-FLASHINFER_MODELS = [pytest.param(MAMBA2_MTP_MODEL, marks=large_gpu_mark(min_gb=40))]
+requires_flashinfer = pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="FlashInfer Mamba SSU is CUDA-only"
+)
+FLASHINFER_MODELS = [
+    pytest.param(
+        MAMBA2_MTP_MODEL, marks=[large_gpu_mark(min_gb=40), requires_flashinfer]
+    )
+]
 MODELS = [
     pytest.param(MAMBA2_MODEL, marks=large_gpu_mark(min_gb=40)),
 ]
@@ -426,6 +433,7 @@ def test_triton_replayssm_align_prefix_cache_matches_baseline_v1(
     )
 
 
+@requires_flashinfer
 @requires_flashinfer_replayssm_materialization
 @large_gpu_mark(min_gb=40)
 @pytest.mark.parametrize(
@@ -540,6 +548,7 @@ def _generate_with_preemption(llm, block_size: int):
     return history
 
 
+@requires_flashinfer
 @requires_flashinfer_replayssm_materialization
 @large_gpu_mark(min_gb=40)
 @pytest.mark.parametrize(
