@@ -1225,6 +1225,7 @@ class EngineCoreProc(EngineCore):
     ):
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
         self.output_queue = queue.Queue[tuple[int, EngineCoreOutputs] | bytes]()
+
         executor_fail_callback = lambda: self.input_queue.put_nowait(
             (EngineCoreRequestType.EXECUTOR_FAILED, b"")
         )
@@ -2508,7 +2509,11 @@ class DPEngineCoreProc(EngineCoreProc):
             self.dp_group, self.scheduler.has_unfinished_requests()
         )
 
-        if has_global_unfinished:
+        # Once a scale_down has disabled the DP coordinator, resume into
+        # always-running — no coordinator wake-up is available.
+        if has_global_unfinished or (
+            self.enable_fault_tolerance and self.ft_sentinel.coordinator_disabled
+        ):
             self.engines_running = True
 
     def barrier(self):
@@ -2670,6 +2675,9 @@ class DPEngineCoreProc(EngineCoreProc):
             self.ignore_start_dp_wave = True
             self.pending_pause = False
             logger.debug("DP pause consensus reached, ignoring START_DP_WAVE.")
+        elif self.enable_fault_tolerance and self.ft_sentinel.coordinator_disabled:
+            # Coordinator disabled: never idle-pause; engines keep stepping.
+            return True
 
         return has_unfinished
 

@@ -49,6 +49,23 @@ from vllm.platforms import current_platform
 from vllm.transformers_utils.repo_utils import hf_api
 
 
+def test_preserve_placement_remapping_until_checkpoint_iteration_finishes():
+    """Deferred reload keeps loaders installed through trailing checkpoint entries."""
+    layer = torch.nn.Linear(2, 2, bias=False)
+    record_metadata_for_reloading(layer)
+    initialize_layerwise_reload(layer, defer_processing=True)
+    checkpoint = torch.arange(4, dtype=torch.float32).reshape(2, 2)
+    loader = layer.weight.weight_loader
+    loader(layer.weight, checkpoint)
+    assert layer.weight.is_meta
+    assert layer.weight.weight_loader is loader
+    loader(layer.weight, checkpoint + 1)
+    assert layer.weight.is_meta
+    finalize_layerwise_reload(layer, model_config=None)
+    assert torch.equal(layer.weight, checkpoint + 1)
+    assert not reload_layerwise.get_layerwise_info(layer).defer_processing
+
+
 @pytest.mark.parametrize("tp_rank", [0, 1])
 @pytest.mark.parametrize(
     "module_name,class_name,sink_name",
