@@ -971,7 +971,9 @@ def test_builtin_configs_keep_todays_resources_and_budget(qualname):
     )
     assert config.pads_new_decode_rows
     for num_reqs in (1, 7, 16):
-        assert config.candidate_budget(BudgetView(num_reqs, num_reqs, 0, 0, 16)) == 4
+        assert (
+            config.candidate_budget(BudgetView(num_reqs, num_reqs, 0, 0, 16, 16)) == 4
+        )
 
 
 def test_speculator_config_with_its_budget_state_pickles():

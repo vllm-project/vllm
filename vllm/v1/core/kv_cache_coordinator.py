@@ -364,30 +364,6 @@ class KVCacheCoordinator(ABC):
             for manager in self.single_type_managers
         )
 
-    @property
-    def num_spec_blocks_held(self) -> int:
-        """Speculative state blocks held by running requests, over all groups."""
-        return sum(
-            manager.num_spec_blocks_held
-            for manager in self.single_type_managers
-            if isinstance(manager, MambaManager)
-        )
-
-    def take_spec_state_block_counts(self) -> dict[str, dict[int, int]]:
-        """Requests whose speculative state tail shrank since the last call:
-        request id -> {group id: its new block count}."""
-        counts: dict[str, dict[int, int]] = {}
-        for manager in self.single_type_managers:
-            if isinstance(manager, MambaManager):
-                for (
-                    req_id,
-                    num_blocks,
-                ) in manager.take_spec_state_block_counts().items():
-                    counts.setdefault(req_id, {})[manager.kv_cache_group_id] = (
-                        num_blocks
-                    )
-        return counts
-
     def get_num_cacheable_tokens(
         self, num_computed_tokens: int, kv_cache_group_id: int
     ) -> int:

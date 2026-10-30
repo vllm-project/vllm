@@ -95,23 +95,20 @@ class SpecResources:
 
 @dataclass(frozen=True)
 class BudgetView:
-    """What the scheduler knows when it asks for the step's candidate budget
-    (:meth:`SpeculatorConfig.candidate_budget`). Host integers, read after this
-    step's requests are scheduled and their blocks allocated."""
+    """What the scheduler knows when it asks for the step's admission limit
+    (:meth:`SpeculatorConfig.admit_limit`) and candidate budget
+    (:meth:`SpeculatorConfig.candidate_budget`). Host integers. For the limit
+    they are read once the running requests are scheduled, before any waiting
+    one is admitted; for the budget, once all of this step's requests are
+    scheduled and their blocks allocated."""
 
     num_scheduled_reqs: int
     num_running: int
     num_waiting: int
     num_free_blocks: int
     max_num_seqs: int
-    block_size: int = 0
+    block_size: int
     """Tokens per block of the unified pool (the scheduler's block size)."""
-    num_spec_blocks_held: int = 0
-    """Recurrent-state blocks running requests hold for draft rows now, summed
-    over the recurrent-state groups: one per draft each verifies, per group
-    (``K * G`` per request at budget ``K + 1`` with ``G`` groups), kept one
-    step longer after the drafts drop, as the next step reads the state they
-    committed."""
 
 
 @dataclass

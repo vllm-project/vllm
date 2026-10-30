@@ -187,6 +187,25 @@ class SpeculatorConfig:
             return k + 1
         return self._dynamic_sd_schedule(view.max_num_seqs)[view.num_scheduled_reqs] + 1
 
+    def admit_limit(self, view: "BudgetView") -> int:
+        """The most requests that may be running once this step admits
+        waiting ones, at least 1.
+
+        The scheduler takes the smaller of it and ``max_num_active_seqs``, so
+        it lowers admission and never raises it. It calls it once per
+        `schedule()` that has waiting requests to admit, after the running
+        requests are scheduled (``view.num_scheduled_reqs`` counts them) and
+        before any waiting request is. Requests already running are never
+        preempted for it, and waiting ones (preempted ones included) are
+        admitted in queue order. Under async scheduling ``view.num_running``
+        includes the requests of the step still executing.
+
+        The default means no limit: the scheduler never calls it. An override
+        that wants no limit should not return the default's value, since
+        ``max_num_active_seqs`` can exceed ``max_num_seqs``.
+        """
+        return view.max_num_seqs
+
     @property
     def pads_new_decode_rows(self) -> bool:
         """Whether the scheduler pads a request that starts decoding to the

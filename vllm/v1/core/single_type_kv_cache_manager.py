@@ -443,6 +443,11 @@ class SingleTypeKVCacheManager(ABC):
         self._pending_boundary_state_offloads = []
         return pending
 
+    def take_spec_state_block_counts(self) -> dict[str, int]:
+        """Drain request id -> block count of the rows whose speculative state
+        tail was dropped. Only mamba with dynamic spec blocks populates this."""
+        return {}
+
     def finalize_partial_tail_offload(
         self,
         request_id: str,
@@ -1452,9 +1457,6 @@ class MambaManager(SingleTypeKVCacheManager):
         self._spec_state_idx: dict[str, int] = {}
         self._spec_span_end: dict[str, int] = {}
         self._num_dropped_blocks: dict[str, int] = {}
-        # Blocks past each request's state block, and their sum over requests.
-        self._num_spec_held: dict[str, int] = {}
-        self.num_spec_blocks_held = 0
         self.has_prefill_checkpoint_blocks = (
             self.mamba_cache_mode == "align"
             and kv_cache_spec.num_prefill_checkpoint_blocks > 0
@@ -1672,7 +1674,9 @@ class MambaManager(SingleTypeKVCacheManager):
         """Spec blocks the request holds after its state block."""
         if request_id not in self._spec_span_end:
             return self.num_speculative_blocks
-        return self._num_spec_held[request_id]
+        return (
+            len(self.req_to_blocks[request_id]) - 1 - self._spec_state_idx[request_id]
+        )
 
     def _num_spec_blocks_needed(
         self, request_id: str, state_idx: int, num_draft_tokens: int | None
@@ -1732,9 +1736,6 @@ class MambaManager(SingleTypeKVCacheManager):
             )
         state_idx = max(state_idx, self._spec_state_idx.get(request_id, -1))
         self._spec_state_idx[request_id] = state_idx
-        held = len(self.req_to_blocks[request_id]) - 1 - state_idx
-        self.num_spec_blocks_held += held - self._num_spec_held.get(request_id, 0)
-        self._num_spec_held[request_id] = held
 
     def take_spec_state_block_counts(self) -> dict[str, int]:
         """Block counts of the rows whose tail was dropped since the last call."""
@@ -2084,7 +2085,6 @@ class MambaManager(SingleTypeKVCacheManager):
         return self.kv_cache_group_id, source_block, boundary_tokens
 
     def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
-        self.num_spec_blocks_held -= self._num_spec_held.pop(request_id, 0)
         self._spec_state_idx.pop(request_id, None)
         self._spec_span_end.pop(request_id, None)
         # A request freed in the step that shrank it leaves the worker anyway.

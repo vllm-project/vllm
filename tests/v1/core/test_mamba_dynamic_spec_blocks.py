@@ -166,14 +166,23 @@ class _Request:
         self.span_end = 0
 
 
+def _held(*managers) -> int:
+    """Spec blocks the requests hold past their state block, over the managers."""
+    return sum(
+        len(manager.req_to_blocks[req_id]) - 1 - state_idx
+        for manager in managers
+        if isinstance(manager, MambaManager)
+        for req_id, state_idx in manager._spec_state_idx.items()
+    )
+
+
 def _check_invariants(manager: MambaManager, pool: BlockPool, requests, free0):
     held = {
         r.req_id: len(r.blocks) - 1 - manager._spec_state_idx[r.req_id]
         for r in requests
         if r.started
     }
-    assert manager._num_spec_held == held
-    assert manager.num_spec_blocks_held == sum(held.values())
+    assert {r: manager._num_spec_blocks(r) for r in held} == held
     num_owned = sum(sum(not b.is_null for b in r.blocks) for r in requests if r.started)
     assert pool.get_num_free_blocks() == free0 - num_owned
 
@@ -208,7 +217,7 @@ def test_spec_blocks_follow_random_drafts(seed: int, mode: str):
     for request in requests:
         if request.started:
             request.free()
-    assert manager.num_spec_blocks_held == 0
+    assert _held(manager) == 0
     assert pool.get_num_free_blocks() == free0
 
 
@@ -282,7 +291,7 @@ def test_spec_blocks_with_a_step_in_flight(seed: int, mode: str):
     for request in requests:
         if request.started:
             request.free()
-    assert manager.num_spec_blocks_held == 0
+    assert _held(manager) == 0
     assert pool.get_num_free_blocks() == free0
 
 
@@ -308,9 +317,8 @@ def test_no_spec_blocks_without_speculation(mode: str):
     request = _Request(manager, "r", 2)
     for num_drafts in (0, 2, 0):
         request.step(num_drafts, 1)
-        assert manager.num_spec_blocks_held == 0
         assert manager.take_spec_state_block_counts() == {}
-    assert manager._num_spec_held == {}
+    assert manager._spec_state_idx == {}
     request.free()
     assert pool.get_num_free_blocks() == free0
 
@@ -324,15 +332,15 @@ def test_shrink_keeps_the_previous_span_one_step():
     assert len(request.blocks) == 1
     request.step(3, 4)
     assert len(request.blocks) == 4
-    assert manager.num_spec_blocks_held == 3
+    assert _held(manager) == 3
     request.step(1, 2)
     assert len(request.blocks) == 4
     request.step(0, 1)
     assert len(request.blocks) == 2
-    assert manager.num_spec_blocks_held == 1
+    assert _held(manager) == 1
     request.step(0, 1)
     assert len(request.blocks) == 1
-    assert manager.num_spec_blocks_held == 0
+    assert _held(manager) == 0
 
 
 def test_boundary_crossing_while_shrinking():
@@ -355,7 +363,7 @@ def test_boundary_crossing_while_shrinking():
     assert manager.last_state_block_idx["r"] == 1
     assert request.blocks[1].block_id == state_block
     assert manager._spec_state_idx["r"] == 2
-    assert manager.num_spec_blocks_held == 0
+    assert _held(manager) == 0
 
 
 @pytest.mark.parametrize("mode", ["none", "align"])
@@ -373,12 +381,12 @@ def test_preempt_mid_shrink(mode: str):
     assert len(manager.req_to_blocks["r"]) < len(request.row)  # shrank
     manager.free("r")
     assert manager.take_spec_state_block_counts() == {}
-    assert manager.num_spec_blocks_held == 0
+    assert _held(manager) == 0
     assert pool.get_num_free_blocks() == free0
     # Resumed, it starts over from its prefill layout.
     resumed = _Request(manager, "r", num_tokens)
     resumed.step(0)
-    assert manager.num_spec_blocks_held == 0
+    assert _held(manager) == 0
 
 
 def test_kv_cache_manager_threads_draft_counts():
@@ -413,20 +421,20 @@ def test_kv_cache_manager_threads_draft_counts():
     request.num_computed_tokens = 5
     manager.allocate_slots(request, 3, num_draft_tokens=2)
     assert len(manager.get_block_ids("r")[0]) == 3
-    assert manager.num_spec_blocks_held == 2
+    assert _held(*manager.coordinator.single_type_managers) == 2
     request.num_computed_tokens = 6
     manager.allocate_slots(request, 1, num_draft_tokens=0)
     request.num_computed_tokens = 7
     manager.allocate_slots(request, 1, num_draft_tokens=0)
     assert manager.take_spec_state_block_counts() == {"r": {0: 1}}
-    assert manager.num_spec_blocks_held == 0
+    assert _held(*manager.coordinator.single_type_managers) == 0
     # Without a draft count the request takes the static tail back.
     request.num_computed_tokens = 8
     manager.allocate_slots(request, 1)
     assert len(manager.get_block_ids("r")[0]) == 3
     manager.free(request)
     assert manager.block_pool.get_num_free_blocks() == free0
-    assert manager.num_spec_blocks_held == 0
+    assert _held(*manager.coordinator.single_type_managers) == 0
 
 
 def _run_hybrid_with_prefix_caching(seed: int, dynamic: bool) -> tuple[int, int]:
@@ -497,7 +505,7 @@ def _run_hybrid_with_prefix_caching(seed: int, dynamic: bool) -> tuple[int, int]
     sibling = make_request("b", list(request.all_token_ids), attn_block_size, sha256)
     _, num_hit, _ = manager.get_computed_blocks(sibling)
     manager.free(request)
-    assert manager.num_spec_blocks_held == 0
+    assert _held(*manager.coordinator.single_type_managers) == 0
     return num_hit, max_blocks
 
 
@@ -560,7 +568,7 @@ def _scheduler_steps(
             (
                 drafts,
                 {req_id: len(manager.get_block_ids(req_id)[0]) for req_id in req_ids},
-                manager.num_spec_blocks_held,
+                _held(*manager.coordinator.single_type_managers),
                 output.spec_state_block_counts,
             )
         )
@@ -590,8 +598,6 @@ def test_scheduler_spec_blocks_follow_the_budget():
         {"0": {0: 1}, "1": {0: 1}},
         None,
     ]
-    # Each budget sees what the step's allocation left held.
-    assert [v.num_spec_blocks_held for v in views] == held
     assert all(v.block_size == 256 for v in views)
 
 
@@ -703,7 +709,7 @@ def test_scheduler_honors_every_budget(
             num_checked += 1
             num_drafting += drafts > 0
     assert num_checked > 40 and num_drafting > 10
-    assert manager.num_spec_blocks_held == 0
+    assert _held(manager) == 0
 
 
 def test_scheduler_reserves_draft_lookahead_after_budget_one(monkeypatch):

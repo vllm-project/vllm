@@ -323,6 +323,7 @@ class Scheduler(SchedulerInterface):
         # per-step candidate budget here; see SpeculatorConfig.candidate_budget.
         self.speculator_config: SpeculatorConfig | None = None
         self.pads_new_decode_rows = False
+        self.admits_by_policy = False
         if speculative_config is not None:
             self.speculator_config = speculative_config.speculator_config
             resources = self.speculator_config.resources(
@@ -337,6 +338,10 @@ class Scheduler(SchedulerInterface):
                 )
             self.max_candidates = resources.max_candidates
             self.pads_new_decode_rows = self.speculator_config.pads_new_decode_rows
+            # The default admit_limit sets no limit: call only an override.
+            # Looked up on the class, where a mock config has none.
+            override = getattr(type(self.speculator_config), "admit_limit", None)
+            self.admits_by_policy = override not in (None, SpeculatorConfig.admit_limit)
             self.use_eagle = speculative_config.uses_target_hidden_states
             self.use_eagle_block_drop = speculative_config.use_eagle_block_drop()
             if (
@@ -527,19 +532,21 @@ class Scheduler(SchedulerInterface):
         V2 runner shortens its block table rows."""
         return self._dynamic_spec_blocks_supported and self.use_v2_model_runner
 
+    def _budget_view(self, num_scheduled_reqs: int) -> BudgetView:
+        return BudgetView(
+            num_scheduled_reqs=num_scheduled_reqs,
+            num_running=len(self.running),
+            num_waiting=len(self.waiting),
+            num_free_blocks=self.kv_cache_manager.block_pool.get_num_free_blocks(),
+            max_num_seqs=self.scheduler_config.max_num_seqs,
+            block_size=self.block_size,
+        )
+
     def _candidate_budget(self, num_scheduled_reqs: int) -> int:
         """Ask the speculator's config for this step's candidate budget."""
         assert self.speculator_config is not None
         budget = self.speculator_config.candidate_budget(
-            BudgetView(
-                num_scheduled_reqs=num_scheduled_reqs,
-                num_running=len(self.running),
-                num_waiting=len(self.waiting),
-                num_free_blocks=self.kv_cache_manager.block_pool.get_num_free_blocks(),
-                max_num_seqs=self.scheduler_config.max_num_seqs,
-                block_size=self.block_size,
-                num_spec_blocks_held=self.kv_cache_manager.num_spec_blocks_held,
-            )
+            self._budget_view(num_scheduled_reqs)
         )
         if not 1 <= budget <= self.max_candidates:
             raise ValueError(
@@ -547,6 +554,16 @@ class Scheduler(SchedulerInterface):
                 f"[1, max_candidates={self.max_candidates}]."
             )
         return budget
+
+    def _admit_limit(self, num_scheduled_reqs: int) -> int:
+        """Ask the speculator's config for this step's admission limit."""
+        assert self.speculator_config is not None
+        limit = self.speculator_config.admit_limit(
+            self._budget_view(num_scheduled_reqs)
+        )
+        if limit < 1:
+            raise ValueError(f"admit_limit returned {limit}, below 1.")
+        return limit
 
     def _drafts_unused(
         self, request: Request, num_computed_tokens: int, num_new_tokens: int
@@ -957,17 +974,16 @@ class Scheduler(SchedulerInterface):
                 req_index += 1
                 continue
 
+            num_scheduled_spec_tokens = (
+                num_new_tokens
+                + request.num_computed_tokens
+                - request.num_tokens
+                - request.num_output_placeholders
+            )
             num_draft_tokens = None
             if self.dynamic_spec_blocks:
                 num_draft_tokens = min(
-                    len(request.spec_token_ids),
-                    max(
-                        num_new_tokens
-                        + request.num_computed_tokens
-                        - request.num_tokens
-                        - request.num_output_placeholders,
-                        0,
-                    ),
+                    len(request.spec_token_ids), max(num_scheduled_spec_tokens, 0)
                 )
 
             # Schedule newly needed KV blocks for the request.
@@ -1071,12 +1087,6 @@ class Scheduler(SchedulerInterface):
 
             # Speculative decode related.
             if request.spec_token_ids:
-                num_scheduled_spec_tokens = (
-                    num_new_tokens
-                    + request.num_computed_tokens
-                    - request.num_tokens
-                    - request.num_output_placeholders
-                )
                 if num_scheduled_spec_tokens > 0:
                     spec_token_ids = request.spec_token_ids
                     if len(spec_token_ids) > num_scheduled_spec_tokens:
@@ -1111,6 +1121,10 @@ class Scheduler(SchedulerInterface):
 
         # Next, schedule the WAITING requests.
         if not preempted_reqs and self._pause_state != PauseState.PAUSED_ALL:
+            max_num_active_reqs = self.max_num_active_reqs
+            if self.admits_by_policy and (self.kv_holding_waiting or self.waiting):
+                limit = self._admit_limit(len(scheduled_running_reqs))
+                max_num_active_reqs = min(max_num_active_reqs, limit)
             step_skipped_waiting: deque[Request] = deque()
             step_skipped_kv_holding: deque[Request] = deque()
 
@@ -1133,7 +1147,7 @@ class Scheduler(SchedulerInterface):
                 # Paused streaming sessions (WAITING_FOR_STREAMING_REQ) are not
                 # in `running` but still hold a model-runner request slot.
                 num_running = len(self.running) + self.num_waiting_for_streaming_input
-                if num_running >= self.max_num_active_reqs:
+                if num_running >= max_num_active_reqs:
                     break
 
                 request = request_queue.peek_request()

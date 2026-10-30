@@ -634,16 +634,15 @@ class KVCacheManager:
 
         return self.create_kv_cache_blocks(new_blocks)
 
-    @property
-    def num_spec_blocks_held(self) -> int:
-        """Speculative state blocks running requests hold now (Mamba groups)."""
-        return self.coordinator.num_spec_blocks_held
-
     def take_spec_state_block_counts(self) -> dict[str, dict[int, int]]:
         """Requests whose speculative state tail `allocate_slots` shortened
         since the last call: request id -> {group id: new block count}. The
         worker shortens those block table rows before appending new blocks."""
-        return self.coordinator.take_spec_state_block_counts()
+        counts: dict[str, dict[int, int]] = {}
+        for mgr in self.coordinator.single_type_managers:
+            for req_id, num_blocks in mgr.take_spec_state_block_counts().items():
+                counts.setdefault(req_id, {})[mgr.kv_cache_group_id] = num_blocks
+        return counts
 
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.
