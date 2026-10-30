@@ -53,6 +53,7 @@ from vllm.distributed.parallel_state import (
     get_pcp_group,
     get_pp_group,
     get_tp_group,
+    in_the_same_node_as,
     resume_device_comms,
     suspend_device_comms,
 )
@@ -157,6 +158,7 @@ def maybe_rocm_profiling_fallback(profile_result: MemoryProfilingResult) -> int 
 
 if TYPE_CHECKING:
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
+    from vllm.distributed.pp_cuda_ce import PPCudaCeReceiver, PPCudaCeSender
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner as GPUModelRunnerV2
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
@@ -245,6 +247,11 @@ class Worker(WorkerBase):
 
         # Device handles of the previous step's PP intermediate-tensor send.
         self._pp_send_work: list[Handle] = []
+
+        # PP hand-off on CUDA copy engines, set up at startup, see
+        # _use_pp_cuda_ce; otherwise the NCCL path.
+        self._pp_cuda_ce_tx: PPCudaCeSender | None = None
+        self._pp_cuda_ce_rx: PPCudaCeReceiver | None = None
 
         # Resolved lazily on first sleep/wake; persists worker-process state.
         self._sleep_mode_backend: SleepModeBackend | None = None
@@ -667,6 +674,7 @@ class Worker(WorkerBase):
                 self.model_runner.profile_run(
                     randomize_inputs=self.randomize_dummy_inputs
                 )
+                self._setup_pp_cuda_ce()
 
             msg = (
                 f"Initial free memory {format_gib(self.init_snapshot.free_memory)} "
@@ -705,6 +713,7 @@ class Worker(WorkerBase):
             set_current_vllm_config(self.vllm_config),
         ):
             self.model_runner.profile_run(randomize_inputs=self.randomize_dummy_inputs)
+            self._setup_pp_cuda_ce()
 
         # Profile CUDA graph memory if graphs will be captured. The V2 runner
         # decides itself, since encoder graphs don't depend on cudagraph_mode.
@@ -1332,6 +1341,36 @@ class Worker(WorkerBase):
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
         return self.model_runner.sample_tokens(grammar_output)
 
+    def _use_pp_cuda_ce(self) -> bool:
+        """CUDA, V2 runner, PP x TP1, all stages on one node: the hand-off goes
+        on CUDA copy engines (VLLM_CUDA_PP_CE=0 forces NCCL). Collective over
+        the PP group."""
+        parallel_config = self.vllm_config.parallel_config
+        if not (
+            envs.VLLM_CUDA_PP_CE
+            and current_platform.is_cuda()
+            and self.use_v2_model_runner
+            and parallel_config.pipeline_parallel_size > 1
+            and parallel_config.tensor_parallel_size == 1
+        ):
+            return False
+        return all(in_the_same_node_as(get_pp_group().cpu_group, source_rank=0))
+
+    def _setup_pp_cuda_ce(self) -> None:
+        """Collective over the PP group; on failure every rank keeps NCCL."""
+        if not self._use_pp_cuda_ce():
+            return
+        from vllm.distributed.pp_cuda_ce import setup_pp_cuda_ce
+
+        persistent = getattr(self.model_runner, "intermediate_tensors", None)
+        sides = setup_pp_cuda_ce(
+            get_pp_group(),
+            None if persistent is None else persistent.tensors,
+            None,
+        )
+        if sides is not None:
+            self._pp_cuda_ce_tx, self._pp_cuda_ce_rx = sides
+
     @torch.inference_mode()
     @with_gpu_sync_check
     def execute_model(
@@ -1346,7 +1385,11 @@ class Worker(WorkerBase):
 
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
-        if forward_pass and not get_pp_group().is_first_rank:
+        if forward_pass and self._pp_cuda_ce_rx is not None:
+            intermediate_tensors = AsyncIntermediateTensors(
+                self._pp_cuda_ce_rx.recv(get_pp_group())
+            )
+        elif forward_pass and not get_pp_group().is_first_rank:
             tensor_dict, comm_handles, comm_postprocess = (
                 get_pp_group().irecv_tensor_dict(
                     all_gather_group=get_tp_group(),
@@ -1384,11 +1427,15 @@ class Worker(WorkerBase):
         # Non-blocking send of the intermediate tensors. The metadata handle
         # is reaped lazily by the GroupCoordinator; the device handles are
         # waited at the top of the next step.
-        handles = get_pp_group().isend_tensor_dict(
-            output.tensors,
-            all_gather_group=get_tp_group(),
-        )
-        self._pp_send_work = handles[1:]
+        if self._pp_cuda_ce_tx is not None:
+            self._pp_cuda_ce_tx.send(output.tensors, get_pp_group())
+            self._pp_send_work = []
+        else:
+            handles = get_pp_group().isend_tensor_dict(
+                output.tensors,
+                all_gather_group=get_tp_group(),
+            )
+            self._pp_send_work = handles[1:]
 
         if self.use_v2_model_runner and self.model_runner.is_pooling_model:
             return self.model_runner.pool()  # type: ignore

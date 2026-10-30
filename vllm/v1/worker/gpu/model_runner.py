@@ -2054,6 +2054,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             new_tensors = {
                 k: v[:n]
                 if dummy_run
+                or intermediate_tensors.tensors[k].data_ptr() == v.data_ptr()
                 else v[:n].copy_(intermediate_tensors.tensors[k][:n])
                 for k, v in self.intermediate_tensors.tensors.items()
             }

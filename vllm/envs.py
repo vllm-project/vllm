@@ -327,6 +327,7 @@ if TYPE_CHECKING:
     VLLM_LORA_DISABLE_PDL: bool = False
     VLLM_ENABLE_CUDA_COMPATIBILITY: bool = False
     VLLM_CUDA_COMPATIBILITY_PATH: str | None = None
+    VLLM_CUDA_PP_CE: bool = True
     VLLM_SKIP_MODEL_NAME_VALIDATION: bool = False
     """If set, vLLM will skip model name validation in API requests.
     This allows any model name to be accepted in the 'model' field of requests,
@@ -2265,6 +2266,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Path to the CUDA compatibility libraries when CUDA compatibility is enabled.
     "VLLM_CUDA_COMPATIBILITY_PATH": lambda: os.environ.get(
         "VLLM_CUDA_COMPATIBILITY_PATH", None
+    ),
+    # PP stage hand-off on CUDA copy engines (one node, TP1, V2 runner).
+    # Set to 0 to use the NCCL send/recv path.
+    "VLLM_CUDA_PP_CE": lambda: (
+        os.getenv("VLLM_CUDA_PP_CE", "1").lower() in ("true", "1")
     ),
     # Skip model name validation in OpenAI API requests.
     # When set to 1, any model name will be accepted in the 'model' field

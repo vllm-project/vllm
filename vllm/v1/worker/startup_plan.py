@@ -69,6 +69,9 @@ def compute_plan_fingerprint(
         "cuda": torch.version.cuda or "",
         "rank": rank,
         "world_size": world_size,
+        # The PP transport changes how much memory is reserved beside the KV
+        # cache (copy-engine send and receive buffers vs the NCCL send path).
+        "pp_cuda_ce": envs.VLLM_CUDA_PP_CE,
     }
     digest = hashlib.sha256(json.dumps(factors, sort_keys=True).encode()).hexdigest()
     return digest[:16]
