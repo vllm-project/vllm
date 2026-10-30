@@ -19,6 +19,7 @@ serde_with.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 thiserror-ext.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 trait-set.workspace = true
 vllm-engine-core-client.workspace = true
