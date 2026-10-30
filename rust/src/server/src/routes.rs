@@ -3,6 +3,7 @@
 
 mod abort_requests;
 mod cache;
+mod checkpoint;
 mod collective_rpc;
 mod health;
 mod inference;
@@ -11,6 +12,7 @@ mod load;
 mod lora;
 mod metrics;
 pub(crate) mod openai;
+mod output_log;
 mod pause;
 mod profile;
 pub(super) mod render;
@@ -33,7 +35,6 @@ use axum::{Json, Router};
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 
-use crate::DEFAULT_REQUEST_BODY_LIMIT_BYTES;
 use crate::middleware;
 use crate::routes::openai::utils::types::{ErrorDetail, ErrorResponse};
 use crate::state::AppState;
@@ -185,6 +186,19 @@ fn build_router_with_options(
         router = router.route("/tokenizer_info", get(not_supported));
     }
 
+    // Process checkpoint lifecycle, which requires sleep mode.
+    if state
+        .engine_core_client()
+        .ready_responses()
+        .iter()
+        .all(|ready| ready.enable_sleep_mode)
+    {
+        router = router
+            .route("/checkpoint/prepare", post(checkpoint::prepare))
+            .route("/checkpoint/restore", post(checkpoint::restore))
+            .route("/checkpoint/status", get(checkpoint::status));
+    }
+
     if runtime_lora_updating_enabled {
         router = router
             .route("/v1/load_lora_adapter", post(lora::load_lora_adapter))
@@ -255,7 +269,10 @@ fn build_router_with_options(
     let enable_api_key_auth = state.has_api_keys();
     let mut router = router
         .with_state(state.clone())
-        .layer(DefaultBodyLimit::max(DEFAULT_REQUEST_BODY_LIMIT_BYTES))
+        .layer(match state.api_server_options.request_body_limit_bytes {
+            Some(limit) => DefaultBodyLimit::max(limit),
+            None => DefaultBodyLimit::disable(),
+        })
         .layer(middleware::request_runtime_layer(state.clone()))
         .layer(from_fn_with_state(
             state.clone(),
