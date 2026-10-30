@@ -198,7 +198,6 @@ def test_measured_sizing_caps_torch_memory(monkeypatch):
     accelerator = extensible_kv_cache.torch.accelerator
     monkeypatch.setattr(accelerator, "synchronize", lambda *args: None)
     monkeypatch.setattr(accelerator, "empty_cache", lambda: None)
-    monkeypatch.setattr(accelerator, "memory_stats", lambda *args: {})
     monkeypatch.setattr(accelerator, "get_memory_info", lambda *args: (6 * gib, 0))
     monkeypatch.setattr(accelerator, "memory_reserved", lambda *args: 2 * gib)
     monkeypatch.setattr(
