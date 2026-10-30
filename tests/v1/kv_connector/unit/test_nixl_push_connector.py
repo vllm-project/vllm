@@ -38,7 +38,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
-    _RegionPairs,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     PUSH_REG_NOTIF_PREFIX,
@@ -61,7 +60,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.outputs import KVConnectorOutput
 
-from .utils import create_request, expand_strided_descs, make_nixl_push_scheduler
+from .utils import (
+    create_request,
+    expand_strided_descs,
+    make_nixl_push_scheduler,
+    region_pairs_by_index,
+)
 
 # ----------------------------------------------------------------- #
 #  Helpers / fakes                                                   #
@@ -1059,7 +1063,7 @@ class TestPushWriterNotifs:
         w.dst_num_blocks = {w.engine_id: 8}
         w.dst_region_num_blocks[w.engine_id] = [8]
         w.dst_region_group_ids[w.engine_id] = [0]
-        w._dst_pairs[w.engine_id] = _RegionPairs.by_index(1)
+        w._dst_pairs[w.engine_id] = region_pairs_by_index(1)
         w.nixl_wrapper.make_prepped_xfer.return_value = 101
         w.nixl_wrapper.transfer.side_effect = RuntimeError("submit")
         if release_fails:
@@ -1533,7 +1537,7 @@ class TestPushWriterMlaReplication:
         }
         w._logical_to_kernel_block_ids = lambda block_ids, ratio: block_ids
         w.dst_region_group_ids[engine_id] = [0]
-        w._dst_pairs[engine_id] = _RegionPairs.by_index(1)
+        w._dst_pairs[engine_id] = region_pairs_by_index(1)
         w.dst_xfer_side_handles = {engine_id: {r: 1000 + r for r in d_ranks}}
         w.src_xfer_handles_by_block_size = {16: 2000}
         w._remote_agents = {engine_id: {(0, r): f"agent-{r}" for r in d_ranks}}
@@ -1616,7 +1620,7 @@ class TestPushWriterMlaReplication:
         w._logical_to_kernel_block_ids = lambda block_ids, ratio: block_ids
         w.region_group_ids = [0, 1, 2, 3]
         w.dst_region_group_ids[engine_id] = [0, 1, 2, 3]
-        w._dst_pairs[engine_id] = _RegionPairs.by_index(4, groups=[0, 1, 2, 3])
+        w._dst_pairs[engine_id] = region_pairs_by_index(4, groups=[0, 1, 2, 3])
         w.dst_xfer_side_handles = {engine_id: {0: 1000, 1: 1001}}
         w.src_xfer_handles_by_tp_ratio = {(-2, 16): [2000, 2001]}
 
@@ -1702,7 +1706,7 @@ class TestPushPrefixCaching:
             w.engine_id: [10_000],
         }
         w.dst_region_group_ids = {engine_id: [0], w.engine_id: [0]}
-        w._dst_pairs = {engine_id: _RegionPairs.by_index(1)}
+        w._dst_pairs = {engine_id: region_pairs_by_index(1)}
         w.dst_xfer_side_handles = {engine_id: {0: 5000}}
         w.src_xfer_handles_by_block_size = {16: 2000}
 

@@ -153,24 +153,6 @@ class _RegionPairs:
     remote_ssm_regions: list[int] | None = None
     remote_ple_region: int | None = None
 
-    @classmethod
-    def by_index(
-        cls,
-        num_regions: int,
-        groups: Sequence[int] | None = None,
-        groups_match: bool = True,
-    ) -> "_RegionPairs":
-        """Region ``i`` of the peer pairs with local region ``i``."""
-        regions = list(range(num_regions))
-        return cls(
-            remote=regions,
-            local=regions,
-            group=list(groups) if groups is not None else [0] * num_regions,
-            remote_regions=regions,
-            partner=regions,
-            groups_match=groups_match,
-        )
-
 
 class NixlBaseConnectorWorker:
     """Base implementation of Worker side methods shared by pull and push."""
@@ -189,17 +171,15 @@ class NixlBaseConnectorWorker:
         dst_num_blocks: int,
         block_size_ratio: float | None,
         physical_blocks_per_logical: int,
+        pairs: tuple[Sequence[int], Sequence[int]],
         region_num_blocks: list[int] | None = None,
-        pairs: tuple[Sequence[int], Sequence[int]] | None = None,
         ssm_regions: Sequence[int] | None = None,
     ) -> np.ndarray:
         """Compute NIXL descriptor IDs for given block IDs.
 
         ``pairs`` is ``(regions, keys)``: region ``regions[k]`` is read at
         ``block_ids[keys[k]]``, a cache group's blocks (a region's, for
-        region-mapped transfers). Without it, every region is read at the one
-        cache group's blocks, or, for hybrid SSM models, at the blocks of each
-        group holding a layer in it.
+        region-mapped transfers).
 
         ``ssm_regions`` lists this side's SSM regions in the order its SSM
         descriptors are built; it defaults to the local ones.
@@ -233,12 +213,7 @@ class NixlBaseConnectorWorker:
 
         # All-attention fast path.
         if num_ssm_regions == 0:
-            if pairs is None:
-                assert len(block_ids) == 1, "Reads of several cache groups need pairs"
-                regions: Sequence[int] = range(len(region_num_blocks))
-                keys: Sequence[int] = [0] * len(region_num_blocks)
-            else:
-                regions, keys = pairs
+            regions, keys = pairs
             offsets = region_offsets[np.asarray(regions, dtype=np.int64)]
             keys_array = np.asarray(keys, dtype=np.int64)
             desc_ids = []
@@ -268,32 +243,6 @@ class NixlBaseConnectorWorker:
         # num_fa_descs offset must be computed per-engine since P and D can
         # have different num_blocks (and thus different FA desc counts).
         num_ssm_descs = len(ssm_regions) * ssm_regions_per_layer
-        if pairs is None:
-            # Read every local region at the blocks of each group holding a
-            # layer in it. Hybrid regions are keyed by base address, so some
-            # hold only another group's layers (e.g. KDA-only or scratch-only
-            # tensors); reading them for this group would re-read aliased bytes.
-            default_regions: list[int] = []
-            default_groups: list[int] = []
-            for i in range(len(block_ids)):
-                group_regions = (
-                    self._group_region_indices[i]
-                    if self._group_region_indices
-                    else None
-                )
-                if i == self._ple_group_index:
-                    group_regions = [-1]
-                elif _is_ssm_spec(self._group_spec_types[i]):
-                    group_regions = [
-                        r
-                        for r in ssm_regions
-                        if group_regions is None or r in group_regions
-                    ]
-                elif group_regions is None:
-                    group_regions = list(range(self.num_regions))
-                default_regions.extend(group_regions)
-                default_groups.extend([i] * len(group_regions))
-            pairs = (default_regions, default_groups)
         pair_regions = np.asarray(pairs[0], dtype=np.int64)
         pair_keys = np.asarray(pairs[1], dtype=np.int64)
         sub_descs = np.arange(ssm_regions_per_layer, dtype=np.int64)

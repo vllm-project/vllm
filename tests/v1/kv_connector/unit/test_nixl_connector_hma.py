@@ -43,6 +43,7 @@ from .utils import (
     make_kv_cache_config,
     make_nixl_scheduler,
     maybe_update_block_size,
+    region_pairs_by_index,
 )
 
 
@@ -85,7 +86,7 @@ def region_pull_worker():
     worker.region_group_ids = [0, 1]
     worker.dst_region_group_ids = {"P": [0, 0]}
     worker._dst_pairs = {
-        "P": bw._RegionPairs.by_index(2, groups=[0, 1], groups_match=False)
+        "P": region_pairs_by_index(2, groups=[0, 1], groups_match=False)
     }
     worker.num_regions = 2
     worker.block_len_per_layer = [1024, 1024]
@@ -195,7 +196,7 @@ def test_dcp_region_pull(region_pull_worker, num_pages, region_groups):
     worker.num_regions = len(region_groups)
     worker.dst_region_group_ids = {"P": [0] * worker.num_regions}
     worker._dst_pairs = {
-        "P": bw._RegionPairs.by_index(
+        "P": region_pairs_by_index(
             worker.num_regions, groups=region_groups, groups_match=False
         )
     }
@@ -725,7 +726,7 @@ def test_read_blocks_for_req_expands_remote_ids(
     worker.region_group_ids = list(range(len(resolved_types)))
     worker.dst_region_group_ids = {remote_engine_id: list(worker.region_group_ids)}
     worker._dst_pairs = {
-        remote_engine_id: bw._RegionPairs.by_index(
+        remote_engine_id: region_pairs_by_index(
             len(resolved_types), groups=worker.region_group_ids
         )
     }
@@ -1257,6 +1258,8 @@ def test_get_block_descs_ids_hybrid_ssm():
         dst_num_blocks=100,
         block_size_ratio=None,
         physical_blocks_per_logical=1,
+        # FA group in both regions, SSM group in SSM region 0.
+        pairs=([0, 1, 0], [0, 0, 1]),
     )
 
     expected = [3, 5, 103, 105, 201, 202, 301, 302, 401, 402, 501, 502]
@@ -1341,6 +1344,8 @@ def test_get_block_descs_ids_kernel_block_mismatch():
         dst_num_blocks=num_blocks,
         block_size_ratio=None,
         physical_blocks_per_logical=ratio,
+        # FA group in both regions, SSM group in SSM region 0.
+        pairs=([0, 1, 0], [0, 0, 1]),
     )
 
     expected = [3, 7, 403, 407, 801, 802, 901, 902, 1001, 1002, 1101, 1102]
@@ -1370,6 +1375,8 @@ def test_get_block_descs_ids_hetero_block_size_hybrid():
         dst_num_blocks=100,
         block_size_ratio=ratio,
         physical_blocks_per_logical=1,
+        # FA group in both regions, SSM group in SSM region 0.
+        pairs=([0, 1, 0], [0, 0, 1]),
     )
 
     # FA regions have 100*4 entries each; SSM regions (4 per layer) start at
@@ -2375,7 +2382,7 @@ def test_push_write_hybrid_mla_replicates_attention():
     worker.src_xfer_handles_by_block_size = {4: 300}
     worker.region_group_ids = [0, 1]
     worker.dst_region_group_ids = {engine_id: [0, 1]}
-    worker._dst_pairs = {engine_id: bw._RegionPairs.by_index(2, groups=[0, 1])}
+    worker._dst_pairs = {engine_id: region_pairs_by_index(2, groups=[0, 1])}
     worker._sending_transfers = defaultdict(list)
     worker._sending_transfers_lock = threading.Lock()
     worker.kv_cache_config = _make_hybrid_mla_kv_cache_config()

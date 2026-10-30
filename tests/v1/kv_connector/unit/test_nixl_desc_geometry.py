@@ -697,6 +697,15 @@ def _make_mla_hybrid_worker(
     return worker
 
 
+def _own_pairs(worker) -> tuple[list[int], list[int]]:
+    """The (regions, groups) a worker reads when paired with an identical peer."""
+    metadata = msgspec.msgpack.decode(
+        worker.xfer_handshake_metadata.agent_metadata_bytes, type=NixlAgentMetadata
+    )
+    pairs = worker._pair_regions(metadata)
+    return pairs.local, pairs.group
+
+
 @pytest.mark.cpu_test
 @pytest.mark.parametrize("kda_only_tensor", [False, True])
 def test_mla_hybrid_groups_read_only_their_own_regions(kda_only_tensor):
@@ -717,6 +726,7 @@ def test_mla_hybrid_groups_read_only_their_own_regions(kda_only_tensor):
         dst_num_blocks=4,
         block_size_ratio=None,
         physical_blocks_per_logical=1,
+        pairs=_own_pairs(worker),
     )
 
     # 4 blocks per region; each SSM layer has 3 conv + 1 temporal regions.
@@ -1497,6 +1507,7 @@ def test_csa_linear_scratch_descs_follow_the_pages_they_overlay():
         dst_num_blocks=2,
         block_size_ratio=None,
         physical_blocks_per_logical=1,
+        pairs=_own_pairs(worker),
     )
     # Scratch group (block 0) now maps to regions 0 and 1 -> descs 0 and 2,
     # where the compressed-page placement gave 4 and 6.
@@ -1512,6 +1523,7 @@ def test_csa_linear_selects_compressed_sparse_compressor_state_and_mamba_regions
         dst_num_blocks=2,
         block_size_ratio=None,
         physical_blocks_per_logical=1,
+        pairs=_own_pairs(worker),
     )
     assert desc_ids.tolist() == [
         1,
@@ -1532,6 +1544,7 @@ def test_csa_linear_selects_compressed_sparse_compressor_state_and_mamba_regions
         dst_num_blocks=2,
         block_size_ratio=None,
         physical_blocks_per_logical=1,
+        pairs=_own_pairs(worker),
     )
     assert mamba_only.tolist() == [9, 11, 13, 15, 17]
 
