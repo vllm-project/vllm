@@ -18,10 +18,14 @@ def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     from vllm.model_executor.models.qwen3_dflash import (
         dflash_has_any_non_causal,
     )
+    from vllm.model_executor.models.utils import get_draft_quant_config
 
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
     draft_model_config = speculative_config.draft_model_config
+    # The drafter is quantized independently of the target, so resolve its own
+    # quantization config instead of inheriting the target's.
+    draft_quant_config = get_draft_quant_config(vllm_config)
     # Select an attention backend that supports the drafter's attention: mixing
     # a non-causal layer onto a causal-only backend would fail.
     draft_vllm_config = replace(
@@ -41,6 +45,10 @@ def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
         ),
         load_config=get_pp_safe_draft_load_config(get_draft_load_config(vllm_config)),
     )
+    # The copy above retains the target's quant_config, and VllmConfig
+    # post-init re-resolves it from the retained target model_config when it is
+    # None, so the drafter's own config has to be attached after construction.
+    draft_vllm_config.quant_config = draft_quant_config
     with set_model_tag("dflash_head"):
         dflash_model = get_model(
             vllm_config=draft_vllm_config, model_config=draft_model_config

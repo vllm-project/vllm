@@ -13,6 +13,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
     kMxfp8Static,
 )
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -130,7 +131,13 @@ def select_mxfp8_moe_backend(
         return backend, _select_kernel_cls(backend, config)
 
     # Auto-select: pick the first supported backend.
+    # Humming outranks Marlin on SM90. On XPU, the native backend stays first.
     backends = prioritize_humming(list(_SUPPORTED_BACKENDS))
+    if current_platform.is_xpu():
+        backends = [Fp8MoeBackend.XPU] + [
+            b for b in backends if b != Fp8MoeBackend.XPU
+        ]
+
     for backend in backends:
         try:
             experts_cls = _select_kernel_cls(backend, config)

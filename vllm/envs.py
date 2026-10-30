@@ -336,6 +336,9 @@ if TYPE_CHECKING:
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = True
     VLLM_XPU_FORCE_N_CONTIG_WEIGHT: bool = False
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
+    # Opt into slow PyTorch attention when an XPU FA2 shape is missing.
+    # Default (unset/0) is fail-closed in vllm-xpu-kernels.
+    VLLM_XPU_ATTN_ALLOW_FALLBACK: bool = False
     VLLM_XPU_INC_WNA16_BACKEND: Literal["auto", "ark", "w4a16", "w4a8"] = "auto"
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
     VLLM_GPU_NIC_PCIE_MAPPING: str = ""
@@ -2297,6 +2300,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # whether use xpu specific sample kernel
     "VLLM_XPU_USE_SAMPLER_KERNEL": lambda: bool(
         int(os.getenv("VLLM_XPU_USE_SAMPLER_KERNEL", "1"))
+    ),
+    # Opt into PyTorch reference attention when an XPU FA2 AOT shape is
+    # missing. Default is fail-closed (raise). Eager debug only; ignored
+    # under XPUGraph capture. Read by vllm-xpu-kernels at runtime.
+    "VLLM_XPU_ATTN_ALLOW_FALLBACK": lambda: bool(
+        int(os.getenv("VLLM_XPU_ATTN_ALLOW_FALLBACK", "0"))
     ),
     # Kernel backend for INC weight-only intN (WNA16) linear layers on XPU.
     # "auto" keeps the default preference order (ARK when importable, else the
