@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Qwen4Exp decode GEMM selection on Hopper and Blackwell.
+"""Qwen4Exp decode GEMM selection on Ampere, Hopper and Blackwell.
 
 Dispatch follows Kimi-K3 and uses the local ``(N, K)`` shape and token count.
 Plans contain measured CUDA graph capture sizes; other token counts use the
@@ -353,6 +353,81 @@ QWEN4_EXP_SM121_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] =
 }
 
 
+# A100 (SM80) plans for TP=8, selected by CUDA graph replay over M={1, 2, 4, 8, 16}.
+# Only points at least 3% faster than the standard linear implementation in both
+# hot-cache and L2-flush measurements are retained.
+QWEN4_EXP_SM80_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] = {
+    # GDN fused QKVZ projection, TP=8.
+    (2048, 2560): {
+        1: SkinnyGemmConfig(1, 160, 2, k_unroll=2, vector_width=4, static_k=2560),
+        2: SkinnyGemmConfig(2, 256, 4, vector_width=2),
+        4: SkinnyGemmConfig(4, 128, 4, k_unroll=4, vector_width=2),
+    },
+    # GDN and QSA output projections, TP=8.
+    (2560, 768): {
+        1: SkinnyGemmConfig(1, 64, 4, k_unroll=2, vector_width=4, static_k=768),
+        2: SkinnyGemmConfig(2, 64, 2, k_unroll=2, vector_width=4, static_k=768),
+        4: SkinnyGemmConfig(4, 32, 2, k_unroll=2, static_k=768),
+        8: SkinnyGemmConfig(8, 32, 2, k_unroll=2, static_k=768),
+        16: SkinnyGemmConfig(16, 32, 2, k_unroll=4, vector_width=2),
+    },
+    # GDN fused B/A projection, TP=8.
+    (12, 2560): {
+        1: SkinnyGemmConfig(1, 160, 1, k_unroll=2, static_k=2560),
+        2: SkinnyGemmConfig(2, 160, 1, k_unroll=2, static_k=2560),
+        4: SkinnyGemmConfig(4, 160, 1, static_k=2560),
+        8: SkinnyGemmConfig(8, 160, 1, k_unroll=4),
+        16: SkinnyGemmConfig(16, 160, 1, k_unroll=4, static_k=2560),
+    },
+    # QSA fused QKV/gate + replicated indexer Q/K, TP=8.
+    (2688, 2560): {
+        1: SkinnyGemmConfig(1, 160, 4, k_unroll=2, vector_width=4, static_k=2560),
+        2: SkinnyGemmConfig(2, 160, 4, k_unroll=2, vector_width=4, static_k=2560),
+        4: SkinnyGemmConfig(4, 128, 4, vector_width=4, static_k=2560),
+        8: SkinnyGemmConfig(8, 32, 4, k_unroll=2),
+    },
+    # Shared-expert fused gate/up projection, TP=8.
+    (160, 2560): {
+        1: SkinnyGemmConfig(1, 128, 2, k_unroll=4, vector_width=4, static_k=2560),
+        2: SkinnyGemmConfig(2, 160, 2, k_unroll=4, static_k=2560),
+        4: SkinnyGemmConfig(4, 160, 2, k_unroll=2, static_k=2560),
+        8: SkinnyGemmConfig(8, 128, 2, k_unroll=2, vector_width=4, static_k=2560),
+    },
+    # Router, replicated.
+    (512, 2560): {
+        1: SkinnyGemmConfig(1, 160, 2, k_unroll=2, static_k=2560),
+        2: SkinnyGemmConfig(2, 160, 1, static_k=2560),
+        4: SkinnyGemmConfig(4, 160, 2, k_unroll=4, static_k=2560),
+        8: SkinnyGemmConfig(8, 64, 1, k_unroll=4, static_k=2560),
+    },
+    # Shared-expert gate, replicated.
+    (1, 2560): {
+        1: SkinnyGemmConfig(1, 160, 1, k_unroll=2, static_k=2560),
+        2: SkinnyGemmConfig(2, 160, 1, k_unroll=2, static_k=2560),
+        4: SkinnyGemmConfig(4, 160, 1, k_unroll=4, vector_width=4, static_k=2560),
+        8: SkinnyGemmConfig(8, 128, 1, k_unroll=4, vector_width=4, static_k=2560),
+        16: SkinnyGemmConfig(16, 128, 1, k_unroll=4, vector_width=4, static_k=2560),
+    },
+    # LM head, TP=8.
+    (31040, 2560): {
+        1: SkinnyGemmConfig(1, 160, 2, k_unroll=2),
+        2: SkinnyGemmConfig(2, 160, 4, k_unroll=2),
+        4: SkinnyGemmConfig(4, 32, 2, static_k=2560),
+    },
+    # Final HC down projection, replicated.
+    (320, 10240): {
+        1: SkinnyGemmConfig(1, 256, 1, k_unroll=4, static_k=10240),
+        2: SkinnyGemmConfig(2, 160, 4, k_unroll=4),
+    },
+    # HC up projection, replicated.
+    (10240, 320): {
+        1: SkinnyGemmConfig(1, 32, 4, k_unroll=4, vector_width=2, static_k=320),
+        2: SkinnyGemmConfig(2, 32, 4, k_unroll=4, vector_width=2, static_k=320),
+        4: SkinnyGemmConfig(4, 32, 4, k_unroll=4, vector_width=2, static_k=320),
+    },
+}
+
+
 QWEN4_EXP_GEMM_PLANS_BY_CAPABILITY: dict[
     tuple[int, int] | None, dict[tuple[int, int], dict[int, SkinnyGemmConfig]]
 ] = {
@@ -360,6 +435,7 @@ QWEN4_EXP_GEMM_PLANS_BY_CAPABILITY: dict[
     (10, 0): QWEN4_EXP_SM100_GEMM_PLANS,
     (9, 0): QWEN4_EXP_SM90_GEMM_PLANS,
     (12, 1): QWEN4_EXP_SM121_GEMM_PLANS,
+    (8, 0): QWEN4_EXP_SM80_GEMM_PLANS,
 }
 
 
