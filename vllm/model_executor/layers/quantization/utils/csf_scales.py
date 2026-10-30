@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Decoders and the `csf` encoder for CSF-compressed NVFP4 block scales.
+"""CSF scale codecs for NVFP4 checkpoints and resident NVFP4/MXFP4 experts.
 
 ModelOpt checkpoints declare ``weight_scale_encoding`` per layer and store each
 E4M3 block-scale matrix as several ``<name>.weight_scale.<stream>`` tensors.
@@ -183,3 +183,101 @@ def encode_csf_scales(
         words = torch.from_numpy(words.cpu().numpy().astype(np.uint32))
         exceptions.extend(words.split(outliers.sum(1).tolist()))
     return tuple(fixed), tuple(exceptions)
+
+
+# MXFP4 (E8M0) scales: b12x consumes canonical planes per expert. Each 16-row
+# slab holds one base byte per row, then every row's one-bit selectors
+# (``ceil(cols / 8)`` bytes per row, low bit first); a set bit selects
+# ``base + 1`` over ``base``. Exceptions are sorted uint32 words: low 24 bits a
+# flat ``row * cols + col`` position, high 8 bits the exact scale byte.
+MXFP4_CSF_ROWS = 16
+
+
+def encode_mxfp4_csf_scales(
+    scales: torch.Tensor,
+) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]:
+    """Encode ``[experts, rows, cols]`` E8M0 block scales as b12x MXFP4 planes.
+
+    A row's base is the lowest byte whose two-value window ``{base, base + 1}``
+    holds the most of the row's bytes, which minimizes exceptions. Returns each
+    expert's fixed plane (uint8) and exception words (uint32) on the CPU.
+    """
+    if scales.dim() != 3 or scales.element_size() != 1:
+        raise ValueError(
+            f"Expected [experts, rows, cols] byte scales, got {scales.shape}"
+        )
+    experts, rows, cols = scales.shape
+    if (
+        experts == 0
+        or rows == 0
+        or rows % MXFP4_CSF_ROWS
+        or not 1 <= cols <= 255
+        or rows * cols > 1 << 24
+    ):
+        raise ValueError(
+            "MXFP4 CSF needs nonempty experts, positive rows divisible by 16, "
+            "1..255 columns and at most "
+            f"2**24 scales per matrix, got {rows}x{cols}"
+        )
+    raw = scales.contiguous().view(torch.uint8).cpu().numpy()
+    row_bytes = -(-cols // 8)
+    fixed: list[torch.Tensor] = []
+    exceptions: list[torch.Tensor] = []
+    for expert in range(experts):
+        values = raw[expert]
+        keys = (np.arange(rows, dtype=np.int64)[:, None] << 8) | values
+        counts = np.bincount(keys.reshape(-1), minlength=rows << 8).reshape(rows, 256)
+        bases = (counts[:, :255] + counts[:, 1:]).argmax(1).astype(np.uint8)
+        offsets = values.astype(np.int16) - bases[:, None]
+        selected = offsets == 1
+        outliers = (offsets != 0) & ~selected
+        bits = np.packbits(selected, axis=1, bitorder="little")
+        assert bits.shape[1] == row_bytes
+        slabs = np.concatenate(
+            (
+                bases.reshape(-1, MXFP4_CSF_ROWS),
+                bits.reshape(-1, MXFP4_CSF_ROWS * row_bytes),
+            ),
+            axis=1,
+        )
+        fixed.append(torch.from_numpy(np.ascontiguousarray(slabs)))
+        positions = np.flatnonzero(outliers.reshape(-1)).astype(np.uint32)
+        words = (values.reshape(-1)[positions].astype(np.uint32) << 24) | positions
+        exceptions.append(torch.from_numpy(words.astype(np.uint32)))
+    return tuple(fixed), tuple(exceptions)
+
+
+def decode_mxfp4_csf_scales(
+    fixed: torch.Tensor, exceptions: torch.Tensor, cols: int
+) -> torch.Tensor:
+    """Rebuild one CPU ``[rows, cols]`` E8M0 matrix from its b12x planes."""
+    if (
+        fixed.dtype != torch.uint8
+        or fixed.dim() != 2
+        or fixed.shape[0] == 0
+        or exceptions.dtype != torch.uint32
+        or not 1 <= cols <= 255
+        or fixed.shape[0] * MXFP4_CSF_ROWS * cols > 1 << 24
+    ):
+        raise ValueError("Invalid MXFP4 CSF planes")
+    row_bytes = -(-cols // 8)
+    if fixed.shape[1] != MXFP4_CSF_ROWS * (1 + row_bytes):
+        raise ValueError("MXFP4 CSF fixed plane does not match the column count")
+    rows = fixed.shape[0] * MXFP4_CSF_ROWS
+    planes = fixed.numpy()
+    bases = planes[:, :MXFP4_CSF_ROWS].reshape(rows, 1).astype(np.int16)
+    bits = np.unpackbits(
+        planes[:, MXFP4_CSF_ROWS:].reshape(rows, row_bytes), axis=1, bitorder="little"
+    )[:, :cols]
+    out = (bases + bits).reshape(-1)
+    if (out > 255).any():
+        raise ValueError("MXFP4 CSF selector exceeds the byte range")
+    out = out.astype(np.uint8)
+    words = exceptions.reshape(-1).numpy()
+    positions = words & 0xFFFFFF
+    if positions.size and (
+        positions[-1] >= rows * cols or (positions[1:] <= positions[:-1]).any()
+    ):
+        raise ValueError("CSF exception positions must be increasing and in range")
+    out[positions] = (words >> 24).astype(np.uint8)
+    return torch.from_numpy(out.reshape(rows, cols))

@@ -16,7 +16,9 @@ from vllm.model_executor.layers.quantization.modelopt import (
 )
 from vllm.model_executor.layers.quantization.utils.csf_scales import (
     decode_csf_scale,
+    decode_mxfp4_csf_scales,
     encode_csf_scales,
+    encode_mxfp4_csf_scales,
 )
 from vllm.model_executor.model_loader.reload.layerwise import (
     record_metadata_for_reloading,
@@ -265,3 +267,83 @@ def test_stream_params_load_decoded_scale_once_streams_arrive(monkeypatch):
     del layer, method
     gc.collect()
     assert layer_ref() is None
+
+
+def _mxfp4_scales(experts: int, rows: int, cols: int, seed: int = 0) -> np.ndarray:
+    """E8M0 bytes clustered on two neighbours, as in real checkpoints, plus outliers."""
+    rng = np.random.default_rng(seed)
+    shape = (experts, rows, cols)
+    raw = 118 + rng.binomial(1, 0.4, shape)
+    outliers = rng.random(shape) < 0.02
+    raw[outliers] += rng.integers(-5, 6, int(outliers.sum()))
+    return raw.astype(np.uint8)
+
+
+@pytest.mark.parametrize("rows, cols", [(16, 1), (32, 7), (64, 90), (16, 255)])
+def test_mxfp4_csf_round_trips(rows, cols):
+    raw = _mxfp4_scales(3, rows, cols)
+    fixed, exceptions = encode_mxfp4_csf_scales(torch.from_numpy(raw))
+
+    row_bytes = -(-cols // 8)
+    for expert in range(3):
+        assert fixed[expert].dtype == torch.uint8
+        assert fixed[expert].shape == (rows // 16, 16 * (1 + row_bytes))
+        assert exceptions[expert].dtype == torch.uint32
+        decoded = decode_mxfp4_csf_scales(fixed[expert], exceptions[expert], cols)
+        assert np.array_equal(decoded.numpy(), raw[expert])
+
+
+def test_mxfp4_csf_picks_the_window_with_fewest_exceptions():
+    # Every row holds only two neighbouring bytes, so no exceptions are needed,
+    # including at the top of the byte range.
+    raw = np.empty((1, 32, 10), dtype=np.uint8)
+    raw[0, :16] = [120, 121] * 5
+    raw[0, 16:] = [254, 255] * 5
+    fixed, exceptions = encode_mxfp4_csf_scales(torch.from_numpy(raw))
+    assert exceptions[0].numel() == 0
+    assert list(fixed[0][0, :16]) == [120] * 16
+    assert list(fixed[0][1, :16]) == [254] * 16
+    assert torch.equal(
+        fixed[0][0, 16:].reshape(16, 2),
+        torch.tensor([[0xAA, 0x02]], dtype=torch.uint8).expand(16, 2),
+    )
+    decoded = decode_mxfp4_csf_scales(fixed[0], exceptions[0], 10)
+    assert np.array_equal(decoded.numpy(), raw[0])
+
+
+def test_mxfp4_csf_keeps_arbitrary_bytes_exact():
+    raw = np.random.default_rng(1).integers(0, 256, (2, 32, 33), dtype=np.uint8)
+    fixed, exceptions = encode_mxfp4_csf_scales(torch.from_numpy(raw))
+    for expert in range(2):
+        words = exceptions[expert].numpy()
+        assert (np.diff(words & 0xFFFFFF) > 0).all()
+        decoded = decode_mxfp4_csf_scales(fixed[expert], exceptions[expert], 33)
+        assert np.array_equal(decoded.numpy(), raw[expert])
+
+
+@pytest.mark.parametrize(
+    "shape", [(1, 15, 4), (1, 16, 256), (16, 4), (0, 16, 4), (1, 0, 4)]
+)
+def test_mxfp4_csf_rejects_unsupported_shapes(shape):
+    with pytest.raises(ValueError):
+        encode_mxfp4_csf_scales(torch.zeros(shape, dtype=torch.uint8))
+
+
+@pytest.mark.parametrize("cols", [0, 256])
+def test_mxfp4_csf_decoder_rejects_unsupported_columns(cols):
+    with pytest.raises(ValueError, match="MXFP4 CSF"):
+        decode_mxfp4_csf_scales(
+            torch.zeros((1, 32), dtype=torch.uint8),
+            torch.empty(0, dtype=torch.uint32),
+            cols,
+        )
+
+
+@pytest.mark.parametrize("positions", [[16], [1, 0], [1, 1]])
+def test_mxfp4_csf_decoder_rejects_invalid_exception_positions(positions):
+    with pytest.raises(ValueError, match="positions"):
+        decode_mxfp4_csf_scales(
+            torch.zeros((1, 32), dtype=torch.uint8),
+            torch.tensor(positions, dtype=torch.uint32),
+            1,
+        )
