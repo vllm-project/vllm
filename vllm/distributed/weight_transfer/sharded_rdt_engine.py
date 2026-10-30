@@ -1446,7 +1446,7 @@ def begin_replayed_layer(layer: torch.nn.Module, fills: "Iterable[_Scatter]") ->
     """Materialize a planned layer for this sync's replay and write the
     constants its loader produced. The replay writes ``param.data`` without the
     parameters' loaders: parameters that track what their loaders wrote
-    (``reset_load_state``) drop state left by an earlier, aborted load."""
+    (``reset_replay_load_state``) drop state left by an earlier, aborted load."""
     from vllm.model_executor.model_loader.reload.layerwise import LAYERWISE_INFO
     from vllm.model_executor.model_loader.reload.meta import materialize_layer
 
@@ -1458,7 +1458,7 @@ def begin_replayed_layer(layer: torch.nn.Module, fills: "Iterable[_Scatter]") ->
         )
     materialize_layer(layer, info)
     for param in layer.parameters(recurse=False):
-        reset = getattr(param, "reset_load_state", None)
+        reset = getattr(param, "reset_replay_load_state", None)
         if reset is not None:
             reset()
     for sc in fills:

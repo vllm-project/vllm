@@ -121,7 +121,7 @@ class Fp8DequantWeightParameter(ModelWeightParameter):
             load(loaded_weight, **kwargs)
         self.fp8_rows[rows] = fp8
 
-    def reset_load_state(self) -> None:
+    def reset_replay_load_state(self) -> None:
         """For a load that writes ``data`` without this parameter's loaders
         (sharded RDT replay, BF16 only): no row holds FP8 bytes."""
         self.fp8_rows.zero_()

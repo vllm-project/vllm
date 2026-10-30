@@ -319,8 +319,10 @@ steps:
     - tests/v1
     - tests/watermarking
     - examples/disaggregated/mooncake_connector/mooncake_connector_proxy.py
+    - vllm/model_executor/layers/linear.py
     - vllm/model_executor/layers/quantization/fp8_dequant.py
     - vllm/model_executor/model_loader/reload/
+    - vllm/model_executor/parameter.py
     - tests/quantization/test_fp8_dequant.py
   device: cpu-small
   commands:
