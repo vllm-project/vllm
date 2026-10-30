@@ -5284,6 +5284,7 @@ def test_ucx_backend_params(dist_init, extra_config, agent_backends, created_bac
         connector = NixlConnector(
             vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
         )
+    assert connector.connector_worker is not None
     wrapper = connector.connector_worker.nixl_wrapper
     assert wrapper.config.backends == agent_backends
     assert wrapper.created_backends == created_backends

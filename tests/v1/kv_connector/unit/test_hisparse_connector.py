@@ -193,7 +193,7 @@ def test_full_graph_step_prepares_host_mirror_outside_model(
     worker._draft_layers = ()
     worker.is_host_writer = True
     monkeypatch.setattr(worker, "_enqueue_row_dma", MagicMock())
-    monkeypatch.setattr(worker, "_invalidate_written_slots", MagicMock())
+    monkeypatch.setattr(worker, "_invalidate_written_slots", MagicMock(), raising=False)
     monkeypatch.setattr(
         worker,
         "start_step",
@@ -229,6 +229,7 @@ def test_full_graph_step_prepares_host_mirror_outside_model(
 
     assert isinstance(worker._enqueue_row_dma, MagicMock)
     worker._enqueue_row_dma.assert_called_once_with((0,), ready_event=None)
+    assert isinstance(worker._invalidate_written_slots, MagicMock)
     worker._invalidate_written_slots.assert_called_once()
     assert worker._invalidate_written_slots.call_args.args[0] == [runtime]
 

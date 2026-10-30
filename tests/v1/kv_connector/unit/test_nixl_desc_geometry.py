@@ -726,12 +726,13 @@ def test_mla_hybrid_groups_read_only_their_own_regions(kda_only_tensor):
     """A KDA-only tensor is a region without MLA pages: MLA reads of it would
     only re-read bytes aliased by other groups (e.g. GLM-5.3-Flash). Likewise a
     KDA group skips SSM regions holding none of its layers."""
-    worker = _make_mla_hybrid_worker(
+    fixture = _make_mla_hybrid_worker(
         local_block_size=16,
         kernel_block_size=16,
         num_logical_blocks=4,
         kda_only_tensor=kda_only_tensor,
     )
+    worker = fixture.worker
     num_regions = 3 if kda_only_tensor else 2
     assert worker.num_regions == num_regions
 
@@ -1812,6 +1813,7 @@ def _make_shared_base_ring_worker():
 
     vllm_config = create_vllm_config(block_size=4)
     vllm_config.cache_config.enable_prefix_caching = False
+    assert vllm_config.kv_transfer_config is not None
     vllm_config.kv_transfer_config.kv_buffer_device = "cuda"
     fake_backend = MagicMock()
     fake_backend.get_supported_kernel_block_sizes.return_value = [4]
@@ -2060,6 +2062,7 @@ def _real_model_side(model, layout):
     vllm_config.model_config.max_model_len = block_size
     vllm_config.cache_config.enable_prefix_caching = False
     vllm_config.cache_config.kv_cache_layout = layout
+    assert vllm_config.kv_transfer_config is not None
     vllm_config.kv_transfer_config.kv_buffer_device = "cuda"
     # A Mamba page is padded to the attention page, which holds it.
     specs = {name: make(block_size, None) for name, make in layers}
