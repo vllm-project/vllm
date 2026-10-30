@@ -6,6 +6,7 @@ import copy
 import hashlib
 import math
 import os
+from array import array
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from typing import (
@@ -15,6 +16,7 @@ from typing import (
     NewType,
     TypeAlias,
     TypeVar,
+    cast,
     overload,
 )
 
@@ -222,6 +224,53 @@ class KVCacheBlock:
             f"prev_free_block={prev_block_id}, "
             f"next_free_block={next_block_id})"
         )
+
+
+class KVCacheBlockList(array):
+    """A request's blocks in one pool as int32 block ids: reads like a list of
+    the pool's blocks, but the cyclic GC never traverses one object per block."""
+
+    __slots__ = ("_blocks",)
+    _blocks: list[KVCacheBlock]
+
+    def __new__(cls, pool_blocks: list[KVCacheBlock]) -> "KVCacheBlockList":
+        self = cast("KVCacheBlockList", super().__new__(cls, "i"))
+        self._blocks = pool_blocks
+        return self
+
+    @overload  # type: ignore[override]
+    def __getitem__(self, idx: int) -> KVCacheBlock: ...
+
+    @overload
+    def __getitem__(self, idx: slice) -> list[KVCacheBlock]: ...
+
+    def __getitem__(self, idx):
+        if isinstance(idx, slice):
+            return list(map(self._blocks.__getitem__, array.__getitem__(self, idx)))
+        return self._blocks[array.__getitem__(self, idx)]
+
+    def __setitem__(self, idx: int, block: KVCacheBlock) -> None:  # type: ignore[override]
+        array.__setitem__(self, idx, block.block_id)
+
+    def __iter__(self) -> Iterator[KVCacheBlock]:  # type: ignore[override]
+        return map(self._blocks.__getitem__, array.__iter__(self))
+
+    def __reversed__(self) -> Iterator[KVCacheBlock]:
+        return map(
+            self._blocks.__getitem__, array.__getitem__(self, slice(None, None, -1))
+        )
+
+    def __contains__(self, block: object) -> bool:
+        return any(b is block for b in self)
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Sequence) and list(self) == list(other)
+
+    def append(self, block: KVCacheBlock) -> None:  # type: ignore[override]
+        array.append(self, block.block_id)
+
+    def extend(self, blocks: Iterable[KVCacheBlock]) -> None:  # type: ignore[override]
+        array.extend(self, [block.block_id for block in blocks])
 
 
 def null_head_len(blocks: Sequence[KVCacheBlock]) -> int:
@@ -1190,7 +1239,7 @@ class BlockHashListWithBlockSize:
 
     def __init__(
         self,
-        block_hashes: list[BlockHash],
+        block_hashes: Sequence[BlockHash],
         hash_block_size: int,
         target_block_size: int,
     ):
@@ -1227,7 +1276,7 @@ class BlockHashListWithBlockSize:
         return self.block_hashes[(idx + 1) * self.scale_factor - 1]
 
 
-BlockHashList = list[BlockHash] | BlockHashListWithBlockSize
+BlockHashList = Sequence[BlockHash] | BlockHashListWithBlockSize
 
 
 def resolve_block_hashes(

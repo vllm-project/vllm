@@ -3,6 +3,7 @@
 """Compare the with and without prefix caching."""
 
 import copy
+import gc
 from collections.abc import Callable
 from dataclasses import replace
 from math import lcm
@@ -3646,33 +3647,27 @@ def test_maybe_evict_cached_block():
         pool.cached_block_hash_to_block.insert(block_hash, block)
 
     block0, block1, block2, block3 = pool.blocks
-    assert pool.cached_block_hash_to_block._cache == {
-        block_hash0: {
-            block0.block_id: block0,
-            block3.block_id: block3,
-        },
-        block_hash1: block1,
-        block_hash2: block2,
-    }
+    cache = pool.cached_block_hash_to_block
+    # Only bytes and block ids, so the cyclic GC never traverses the cache.
+    assert not gc.is_tracked(cache._cache)
+    assert cache._cache == {block_hash0: 0, block_hash1: 1, block_hash2: 2}
+    assert cache._dup_ids == {block_hash0: {0: None, 3: None}}
     # Evict block1
     pool._maybe_evict_cached_block(block1)
-    assert pool.cached_block_hash_to_block._cache == {
-        block_hash0: {block0.block_id: block0, block3.block_id: block3},
-        block_hash2: block2,
-    }
+    assert cache._cache == {block_hash0: 0, block_hash2: 2}
+    assert cache._dup_ids == {block_hash0: {0: None, 3: None}}
     # Evict block0: block_hash0 entry should NOT be removed, as block3
     # also use the same hash
     pool._maybe_evict_cached_block(block0)
-    assert pool.cached_block_hash_to_block._cache == {
-        block_hash0: {block3.block_id: block3},
-        block_hash2: block2,
-    }
+    assert cache._cache == {block_hash0: 3, block_hash2: 2}
+    assert cache.get_one_block(block_hash0) is block3
+    assert cache._dup_ids == {}
     # Evict block2
     pool._maybe_evict_cached_block(block2)
-    assert pool.cached_block_hash_to_block._cache == {block_hash0: {3: block3}}
+    assert cache._cache == {block_hash0: 3}
     # Evict block3
     pool._maybe_evict_cached_block(block3)
-    assert pool.cached_block_hash_to_block._cache == {}
+    assert cache._cache == {}
 
 
 @pytest.mark.parametrize("blocks_to_cache", [2, 3, 10])
@@ -5511,12 +5506,11 @@ def test_hybrid_mamba_retention_lookahead_keeps_last_prompt_boundary():
 
 
 def test_block_lookup_cache_single_block_per_key():
-    cache = BlockHashToBlockMap()
+    block0, block1 = blocks = [KVCacheBlock(0), KVCacheBlock(1)]
+    cache = BlockHashToBlockMap(blocks)
     key0 = BlockHashWithGroupId(b"hash0")
     key1 = BlockHashWithGroupId(b"hash1")
     key2 = BlockHashWithGroupId(b"hash2")
-    block0 = KVCacheBlock(0)
-    block1 = KVCacheBlock(1)
 
     assert cache.get_one_block(key0) is None
     assert cache.get_one_block(key1) is None
@@ -5554,13 +5548,11 @@ def test_block_lookup_cache_single_block_per_key():
 
 
 def test_block_lookup_cache_multi_blocks_per_key():
-    cache = BlockHashToBlockMap()
+    blocks = [KVCacheBlock(i) for i in range(12)]
+    cache = BlockHashToBlockMap(blocks)
     key0 = BlockHashWithGroupId(b"hash0")
     key1 = BlockHashWithGroupId(b"hash1")
-    block00 = KVCacheBlock(0)
-    block01 = KVCacheBlock(1)
-    block10 = KVCacheBlock(10)
-    block11 = KVCacheBlock(11)
+    block00, block01, block10, block11 = blocks[0], blocks[1], blocks[10], blocks[11]
 
     assert cache.get_one_block(key0) is None
     assert cache.get_one_block(key1) is None

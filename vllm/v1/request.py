@@ -4,9 +4,9 @@
 import enum
 import time
 from collections import deque
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast, overload
 
 import torch
 
@@ -28,6 +28,63 @@ from vllm.v1.utils import ConstantList
 if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
     from vllm.v1.core.kv_cache_utils import BlockHash
+
+
+class BlockHashBuffer(Sequence["BlockHash"]):
+    """A request's equal-width block hashes packed in one bytearray: reads like
+    ``list[BlockHash]``, but the cyclic GC never traverses one object per hash."""
+
+    __slots__ = ("_buf", "_width")
+
+    def __init__(self) -> None:
+        self._buf = bytearray()
+        self._width = 1
+
+    def __len__(self) -> int:
+        return len(self._buf) // self._width
+
+    @overload
+    def __getitem__(self, idx: int) -> "BlockHash": ...
+
+    @overload
+    def __getitem__(self, idx: slice) -> list["BlockHash"]: ...
+
+    def __getitem__(self, idx):
+        if isinstance(idx, slice):
+            return [self[i] for i in range(*idx.indices(len(self)))]
+        num_hashes = len(self)
+        if idx < 0:
+            idx += num_hashes
+        if not 0 <= idx < num_hashes:
+            raise IndexError("block hash index out of range")
+        start = idx * self._width
+        return bytes(self._buf[start : start + self._width])
+
+    def __iter__(self) -> Iterator["BlockHash"]:
+        buf, width = self._buf, self._width
+        hashes = (bytes(buf[i : i + width]) for i in range(0, len(buf), width))
+        return cast("Iterator[BlockHash]", hashes)
+
+    def __delitem__(self, idx: slice) -> None:
+        start, stop, step = idx.indices(len(self))
+        assert step == 1, "block hashes chain, so only a contiguous run can go"
+        del self._buf[start * self._width : stop * self._width]
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Sequence) and list(self) == list(other)
+
+    def append(self, block_hash: "BlockHash") -> None:
+        if not self._buf:
+            self._width = len(block_hash)
+        assert len(block_hash) == self._width, "block hashes differ in width"
+        self._buf += block_hash
+
+    def extend(self, block_hashes: Iterable["BlockHash"]) -> None:
+        for block_hash in block_hashes:
+            self.append(block_hash)
+
+    def clear(self) -> None:
+        self._buf.clear()
 
 
 @dataclass
@@ -222,7 +279,7 @@ class Request:
         # add_request, then observed each verify step); stays None otherwise.
         self.spec_decode_metrics: RequestSpecDecodeMetrics | None = None
 
-        self.block_hashes: list[BlockHash] = []
+        self.block_hashes = BlockHashBuffer()
         # Store the block hasher without binding self to avoid creating a
         # reference cycle (Request -> partial -> Request) that prevents
         # immediate garbage collection via reference counting.

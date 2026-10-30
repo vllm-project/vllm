@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
+import gc
 import hashlib
 import importlib
 from collections.abc import Callable
@@ -45,6 +46,7 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     FreeKVCacheBlockQueue,
     KVCacheBlock,
+    KVCacheBlockList,
     generate_block_hash_extra_keys,
     generate_scheduler_kv_cache_config,
     get_kv_cache_capacity,
@@ -256,7 +258,7 @@ def make_request(
     request_id: str,
     prompt_token_ids: list[int] | None,
     block_size: int = 3,
-    hash_fn: Callable = hash,
+    hash_fn: Callable = sha256,
     mm_positions: list[PlaceholderRange] | None = None,
     mm_hashes: list[str] | None = None,
     cache_salt: str | None = None,
@@ -1041,6 +1043,32 @@ def test_request_block_hasher(hash_fn):
     assert block_hashes[1] == hash_fn(
         (block_hashes[0], (3, 4, 5), (("mm", "hash2", 0),))
     )
+
+
+def test_per_block_request_state_is_invisible_to_gc():
+    """Block tables and block hashes keep no Python object per block, so long
+    contexts add nothing to each cyclic-GC pass, yet they read like lists."""
+    pool = [KVCacheBlock(i) for i in range(4)]
+    blocks = KVCacheBlockList(pool)
+    blocks.extend(pool[1:3])
+    blocks.append(pool[3])
+    blocks[0] = pool[0]
+    assert blocks == [pool[0], pool[2], pool[3]]
+    assert blocks[1:] == [pool[2], pool[3]] and blocks[-1] is pool[3]
+    assert list(reversed(blocks)) == [pool[3], pool[2], pool[0]]
+    assert pool[2] in blocks and pool[1] not in blocks
+    assert not any(isinstance(o, KVCacheBlock) for o in gc.get_referents(blocks))
+
+    request = make_request("0", list(range(8)), block_size=4, hash_fn=sha256)
+    hashes = request.block_hashes
+    assert (
+        len(hashes) == 2 and hashes[1:] == [hashes[-1]] and list(hashes)[0] == hashes[0]
+    )
+    assert not any(isinstance(o, bytes) for o in gc.get_referents(hashes))
+    # KV connector metadata reaches the workers pickled (same reduce protocol).
+    assert copy.deepcopy(hashes) == hashes
+    request.append_output_token_ids([8, 9, 10, 11])
+    assert len(hashes) == 3
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
