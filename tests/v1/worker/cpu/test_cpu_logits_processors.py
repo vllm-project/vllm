@@ -105,7 +105,10 @@ def test_cpu_penalties_match_reference() -> None:
     torch.testing.assert_close(actual, expected)
 
 
-def test_cpu_penalties_keep_request_rows_independent() -> None:
+@pytest.mark.parametrize("placeholder_request", ["first", "second"])
+def test_cpu_penalties_keep_request_rows_independent(
+    placeholder_request: str,
+) -> None:
     req_states = CPURequestState(
         max_num_reqs=4,
         max_model_len=64,
@@ -118,6 +121,8 @@ def test_cpu_penalties_keep_request_rows_independent() -> None:
         "second": ([4], [5]),
     }
     for req_id, (prompt, output) in requests.items():
+        if req_id == placeholder_request:
+            prompt = prompt + [VOCAB_SIZE]
         tokens = prompt + output
         req_states.add_request(
             req_id=req_id,

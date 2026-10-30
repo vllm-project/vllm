@@ -287,9 +287,9 @@ class CPUPenalties(_CPULogitsProcessor):
             req_idx = req_indices_list[row]
             offset = row * vocab_size
             prompt_len = int(self.req_states.prompt_len_np[req_idx])
-            prompt_ids.append(
-                self.req_states.all_token_ids[req_idx, :prompt_len] + offset
-            )
+            prompt = self.req_states.all_token_ids[req_idx, :prompt_len]
+            prompt = prompt[(prompt >= 0) & (prompt < vocab_size)]
+            prompt_ids.append(prompt + offset)
             output_ids.append(self._output_tokens(req_idx, row, ctx) + offset)
 
         flat_logits = logits.view(-1)
