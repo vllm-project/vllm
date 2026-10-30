@@ -1011,8 +1011,14 @@ class MessageQueue:
 
     def _recv_interruptible(self, socket: zmq.Socket, timeout: float | None) -> Any:
         read_timeout = self.ReadTimeoutWithWarnings(timeout, should_warn=False)
+        first_poll = True
         while not self.shutting_down:
-            poll_timeout = read_timeout.timeout_ms() / 1000
+            poll_timeout = (
+                min(timeout, SHM_READER_RECHECK_INTERVAL_MS / 1000)
+                if first_poll and timeout is not None
+                else read_timeout.timeout_ms() / 1000
+            )
+            first_poll = False
             try:
                 obj = MessageQueue.recv(socket, poll_timeout)
             except TimeoutError:

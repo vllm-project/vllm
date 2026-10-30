@@ -591,7 +591,10 @@ def test_reader_timeout_caps_indefinite_waits(should_warn):
 
 
 @pytest.mark.parametrize("reader_kind", ["remote", "local_overflow"])
-def test_shutdown_wins_over_late_payload(reader_kind):
+@pytest.mark.parametrize(
+    "deliver_payload", [True, False], ids=["late_payload", "no_payload"]
+)
+def test_shutdown_cancels_payload_wait(reader_kind, deliver_payload):
     is_local = reader_kind == "local_overflow"
     writer = MessageQueue(
         n_reader=1,
@@ -651,30 +654,33 @@ def test_shutdown_wins_over_late_payload(reader_kind):
         writer.wait_until_ready()
         reader.wait_until_ready()
 
-        if is_local:
-            write_thread.start()
-            assert send_pending.wait(timeout=5)
-        else:
-            with pytest.raises(TimeoutError):
-                reader.dequeue(timeout=0.01)
+        with mock.patch.object(shm_broadcast, "SHM_READER_RECHECK_INTERVAL_MS", new=10):
+            if is_local:
+                write_thread.start()
+                assert send_pending.wait(timeout=5)
 
-        read_thread.start()
-        assert recv_started.wait(timeout=5)
-        reader.shutdown()
+            read_thread.start()
+            assert recv_started.wait(timeout=5)
+            reader.shutdown()
+
+            if deliver_payload:
+                if is_local:
+                    allow_send.set()
+                    write_thread.join(timeout=5)
+                else:
+                    writer.enqueue(payload)
+            read_thread.join(timeout=5)
+
+        assert not read_thread.is_alive()
+        assert isinstance(result.get("exc"), RuntimeError)
+        assert str(result["exc"]) == "cancelled"
+        assert "value" not in result
 
         if is_local:
             allow_send.set()
             write_thread.join(timeout=5)
-        else:
-            writer.enqueue(payload)
-        read_thread.join(timeout=5)
-
-        assert not read_thread.is_alive()
-        assert not write_thread.is_alive()
-        assert "exc" not in writer_result
-        assert isinstance(result.get("exc"), RuntimeError)
-        assert str(result["exc"]) == "cancelled"
-        assert "value" not in result
+            assert not write_thread.is_alive()
+            assert "exc" not in writer_result
     finally:
         allow_send.set()
         if is_local:
@@ -682,6 +688,37 @@ def test_shutdown_wins_over_late_payload(reader_kind):
         if read_thread.is_alive():
             writer.enqueue("cleanup")
             read_thread.join(timeout=5)
+        reader.shutdown()
+        writer.shutdown()
+        reader_socket = reader.local_socket if is_local else reader.remote_socket
+        writer_socket = writer.local_socket if is_local else writer.remote_socket
+        reader_socket.close(linger=0)
+        writer_socket.close(linger=0)
+
+
+@pytest.mark.parametrize("reader_kind", ["remote", "local_overflow"])
+@pytest.mark.parametrize("timeout", [0, -1, 0.0001])
+def test_short_timeout_receives_ready_payload(reader_kind, timeout):
+    is_local = reader_kind == "local_overflow"
+    writer = MessageQueue(
+        n_reader=1,
+        n_local_reader=int(is_local),
+        max_chunk_bytes=1024,
+        max_chunks=1,
+        connect_ip="127.0.0.1",
+    )
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    payload = "x" * 2048
+
+    try:
+        writer.wait_until_ready()
+        reader.wait_until_ready()
+        writer.enqueue(payload)
+        reader_socket = reader.local_socket if is_local else reader.remote_socket
+        assert reader_socket.poll(timeout=5000)
+
+        assert reader.dequeue(timeout=timeout) == payload
+    finally:
         reader.shutdown()
         writer.shutdown()
         reader_socket = reader.local_socket if is_local else reader.remote_socket
