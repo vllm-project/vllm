@@ -37,11 +37,14 @@ _MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS: set[str] = {
     "internlm2",
     "step3_vl",
     "step3p7",
+    "step5",
+    "step5_vl",
     "unlimited-ocr",
     "unlimited_ocr",
 }
 
 _VLLM_TOKENIZERS = {
+    "alpamayo2_super": ("alpamayo2_super", "Alpamayo2SuperTokenizer"),
     # ``cohere`` mode uses the standard cached HF tokenizer; only the
     # renderer (template stage) is replaced with a melody-based one.
     "cohere": ("hf", "CachedHfTokenizer"),
@@ -49,6 +52,7 @@ _VLLM_TOKENIZERS = {
     "deepseek_v4": ("deepseek_v4", "DeepseekV4Tokenizer"),
     "deepseek_v41": ("deepseek_v41", "DeepseekV41Tokenizer"),
     "hf": ("hf", "CachedHfTokenizer"),
+    "glm5_next": ("hf", "CachedHfTokenizer"),
     "kimi_audio": ("kimi_audio", "KimiAudioTokenizer"),
     "kimi_k3": ("hf", "CachedHfTokenizer"),
     "mistral": ("mistral", "MistralTokenizer"),
