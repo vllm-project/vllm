@@ -29,6 +29,7 @@ import json
 from contextlib import suppress
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -727,6 +728,54 @@ def test_glimmer_keeps_decoding_optional_string():
     schema = {"anyOf": [{"type": "string"}, {"type": "null"}]}
     parameters = {"properties": {"v": schema}}
     assert _parse_param(MuseGlimmerToolParser, parameters, "1.10") == [1.1, 1.1]
+
+
+def _schema_walk_request() -> ChatCompletionRequest:
+    schema = {"anyOf": [{"type": "string"}, {"type": "null"}]}
+    function = {"name": "f", "parameters": {"properties": {"v": schema}}}
+    return ChatCompletionRequest(
+        model="test", messages=[], tools=[{"type": "function", "function": function}]
+    )
+
+
+_RAW_INVOKE = (
+    'to=f<|message|><atem:function_calls><atem:invoke name="f">'
+    '<atem:parameter name="v">1.10</atem:parameter>'
+    "</atem:invoke></atem:function_calls><|eot|>"
+)
+
+
+def _count_schema_walks(monkeypatch) -> MagicMock:
+    """Replace the shared schema walk with a call counter."""
+    import vllm.tool_parsers.schema_types as schema_types_module
+
+    counter = MagicMock(wraps=schema_types_module.parameter_types)
+    monkeypatch.setattr(schema_types_module, "parameter_types", counter)
+    return counter
+
+
+def test_parameter_types_built_once_per_request(monkeypatch):
+    """The schema walk runs once per parser, not once per streaming delta."""
+    counter = _count_schema_walks(monkeypatch)
+    request = _schema_walk_request()
+    parser = MuseToolParser(object(), request.tools)
+    assert counter.call_count == 1
+    for _ in range(3):
+        parser.extract_tool_calls(_RAW_INVOKE, request)
+    for end in range(7, len(_RAW_INVOKE) + 7, 7):
+        previous, current = _RAW_INVOKE[: end - 7], _RAW_INVOKE[:end]
+        parser.extract_tool_calls_streaming(
+            previous, current, current[len(previous) :], [], [], [], request
+        )
+    assert counter.call_count == 1
+
+
+def test_glimmer_never_builds_parameter_types(monkeypatch):
+    counter = _count_schema_walks(monkeypatch)
+    request = _schema_walk_request()
+    parser = MuseGlimmerToolParser(object(), request.tools)
+    parser.extract_tool_calls(_RAW_INVOKE, request)
+    assert counter.call_count == 0
 
 
 # --------------------------------------------------- reasoning token counting

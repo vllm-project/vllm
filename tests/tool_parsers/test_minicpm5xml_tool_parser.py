@@ -838,3 +838,28 @@ def test_string_schema_forms_keep_raw_text(
         calls = parser.extract_tool_calls(text, request).tool_calls
     assert len(calls) == 1
     assert json.loads(calls[0].function.arguments) == {"v": expected}
+
+
+def test_parameter_types_built_once_per_request(monkeypatch) -> None:
+    """The schema walk runs once per parser, not once per streamed argument."""
+    import vllm.tool_parsers.schema_types as schema_types_module
+
+    counter = MagicMock(wraps=schema_types_module.parameter_types)
+    monkeypatch.setattr(schema_types_module, "parameter_types", counter)
+    request = make_request(
+        [_tool("f", {"type": "object", "properties": {"v": {"type": "string"}}})]
+    )
+    parser = MiniCPM5XMLToolParser(MagicMock(), tools=request.tools)
+    text = '<function name="f"><param name="v">1.10</param></function>'
+    parser.extract_tool_calls(text, request)
+    chunks = [text[i : i + 3] for i in range(0, len(text), 3)]
+    run_tool_extraction_streaming(
+        parser, chunks, request, assert_one_tool_per_delta=False
+    )
+    assert counter.call_count == 1
+
+    request = make_request(
+        [_tool("f", {"type": "object", "properties": {"v": {"type": "string"}}})]
+    )
+    parser.extract_tool_calls(text, request)
+    assert counter.call_count == 2

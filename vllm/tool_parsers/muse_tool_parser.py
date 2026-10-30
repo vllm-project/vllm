@@ -64,8 +64,8 @@ from vllm.tool_parsers.abstract_tool_parser import (
 )
 from vllm.tool_parsers.schema_types import (
     ParameterTypes,
+    ParameterTypesCache,
     convert_value,
-    parameter_types,
 )
 
 logger = init_logger(__name__)
@@ -203,6 +203,10 @@ class MuseToolParser(ToolParser):
         tools: list[Tool] | None = None,
     ) -> None:
         super().__init__(tokenizer, tools)
+        # MuseGlimmer keeps legacy decoding, so it never walks its schemas.
+        self._parameter_types_cache = (
+            ParameterTypesCache(tools) if self._preserve_string_parameters else None
+        )
         # Streaming cursors. vLLM constructs one ToolParser per request, so
         # instance state is per-stream.
         self._streamed_content_len: int = 0
@@ -319,13 +323,12 @@ class MuseToolParser(ToolParser):
                 names.add(name)
         return names
 
-    @classmethod
     def _parameter_types(
-        cls, request: ChatCompletionRequest | ResponsesRequest | None
+        self, request: ChatCompletionRequest | ResponsesRequest | None
     ) -> dict[str, ParameterTypes]:
-        if not cls._preserve_string_parameters:
+        if self._parameter_types_cache is None:
             return {}
-        return parameter_types(getattr(request, "tools", None))
+        return self._parameter_types_cache.for_tools(getattr(request, "tools", None))
 
     @staticmethod
     def _normalize_name(emitted: str, registered: set[str]) -> str:

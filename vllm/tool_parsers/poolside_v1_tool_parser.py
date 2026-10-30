@@ -41,7 +41,7 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
-from vllm.tool_parsers.schema_types import ParameterTypes, convert_value
+from vllm.tool_parsers.schema_types import ParameterTypesCache, convert_value
 from vllm.tool_parsers.utils import safe_literal_eval
 
 logger = init_logger(__name__)
@@ -92,6 +92,8 @@ class PoolsideV1ToolParser(ToolParser):
         self.tool_call_end_token_id = self.vocab.get(self.tool_call_end_token)
         self._buffer: str = ""
 
+        self._parameter_types_cache = ParameterTypesCache(tools)
+
         # Streaming state for incremental tool-call streaming
         self._in_tool_call: bool = False
         self._current_tool_name: str | None = None
@@ -128,25 +130,17 @@ class PoolsideV1ToolParser(ToolParser):
             return ""
         return json.dumps(s, ensure_ascii=False)[1:-1]
 
-    @staticmethod
     def _allowed_types(
-        tool_name: str,
-        arg_name: str,
-        tools: list[Tool] | None,
+        self, tool_name: str, arg_name: str, tools: list[Tool] | None
     ) -> set[str] | None:
         """JSON types the argument's schema admits; ``None`` if unconstrained."""
         if tools is None:
             return None
-        for tool in tools:
-            # ChatCompletion tools nest under .function; Responses
-            # FunctionTool is flat (.name/.parameters at the top level).
-            fn = getattr(tool, "function", tool)
-            if getattr(fn, "name", None) != tool_name:
-                continue
-            params = getattr(fn, "parameters", None)
-            return ParameterTypes.from_schema(params).get(arg_name)
-        logger.debug("No tool named '%s'.", tool_name)
-        return None
+        tool_types = self._parameter_types_cache.for_tools(tools).get(tool_name)
+        if tool_types is None:
+            logger.debug("No tool named '%s'.", tool_name)
+            return None
+        return tool_types.get(arg_name)
 
     @staticmethod
     def _tools_enabled(request: ChatCompletionRequest) -> bool:

@@ -43,6 +43,8 @@ use winnow::prelude::*;
 use winnow::stream::Partial;
 use winnow::token::{literal, rest, take_till, take_until, take_while};
 
+use crate::schema::{JsonType, SchemaTypes};
+
 use super::{Result, UnifiedParser, UnifiedParserOutput, token_id};
 use crate::tool::{Tool, ToolCallDelta};
 use crate::unified::parsing_failed;
@@ -493,17 +495,15 @@ impl ParameterTypes {
     /// Resolve the types admitted by each parameter of a tool's `parameters`
     /// schema, sharing one `$ref` cache across the whole tool.
     fn new(parameters: &Value) -> Self {
-        let mut refs = HashMap::new();
+        let mut types = SchemaTypes::new(parameters);
         let properties = parameters
             .get("properties")
             .and_then(Value::as_object)
             .into_iter()
             .flatten()
-            .map(|(name, schema)| (name.clone(), schema_types(schema, parameters, &mut refs)))
+            .map(|(name, schema)| (name.clone(), types.of(schema)))
             .collect();
-        let additional = parameters
-            .get("additionalProperties")
-            .and_then(|schema| schema_types(schema, parameters, &mut refs));
+        let additional = parameters.get("additionalProperties").and_then(|schema| types.of(schema));
         Self {
             properties,
             additional,
@@ -516,97 +516,6 @@ impl ParameterTypes {
     }
 }
 
-/// JSON Schema type name of a decoded JSON value.
-fn json_type(value: &Value) -> &'static str {
-    match value {
-        Value::Null => "null",
-        Value::Bool(_) => "boolean",
-        Value::Number(number) if number.is_f64() => "number",
-        Value::Number(_) => "integer",
-        Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(_) => "object",
-    }
-}
-
-/// Resolve a local JSON pointer such as `#/$defs/Name` against `root`.
-fn resolve_ref<'a>(root: &'a Value, reference: &str) -> Option<&'a Value> {
-    reference.strip_prefix("#/")?.split('/').try_fold(root, |node, part| {
-        node.as_object()?.get(&part.replace("~1", "/").replace("~0", "~"))
-    })
-}
-
-/// JSON types a parameter schema admits, or `None` if it admits any.
-///
-/// Covers `type` (name or list), `const`, `enum`, local `$ref`,
-/// `anyOf`/`oneOf` (union) and `allOf` (intersection), so that e.g.
-/// pydantic's `Optional[str]` (`anyOf: [string, null]`) counts as a string.
-/// `refs` memoizes each `$ref` (a ref still being resolved counts as
-/// unconstrained), keeping the walk linear in the schema size even when
-/// `$defs` reference each other many times or cyclically.
-fn schema_types(
-    schema: &Value,
-    root: &Value,
-    refs: &mut HashMap<String, AllowedTypes>,
-) -> AllowedTypes {
-    let schema = schema.as_object()?;
-    let mut constraints = Vec::new();
-    match schema.get("type") {
-        Some(Value::String(declared)) => constraints.push(Some(HashSet::from([declared.clone()]))),
-        Some(Value::Array(declared)) => constraints.push(Some(
-            declared.iter().filter_map(Value::as_str).map(str::to_owned).collect(),
-        )),
-        _ => {}
-    }
-    if let Some(value) = schema.get("const") {
-        constraints.push(Some(HashSet::from([json_type(value).to_owned()])));
-    }
-    if let Some(Value::Array(values)) = schema.get("enum") {
-        constraints.push(Some(
-            values.iter().map(|value| json_type(value).to_owned()).collect(),
-        ));
-    }
-    if let Some(Value::String(reference)) = schema.get("$ref") {
-        if !refs.contains_key(reference) {
-            refs.insert(reference.clone(), None);
-            let types =
-                resolve_ref(root, reference).and_then(|target| schema_types(target, root, refs));
-            refs.insert(reference.clone(), types);
-        }
-        constraints.push(refs[reference].clone());
-    }
-    for key in ["anyOf", "oneOf"] {
-        let Some(Value::Array(branches)) = schema.get(key) else {
-            continue;
-        };
-        if branches.is_empty() {
-            continue;
-        }
-        // A branch without type information makes the whole union
-        // unconstrained; the remaining branches are not walked.
-        let union = branches.iter().try_fold(HashSet::new(), |mut union, branch| {
-            union.extend(schema_types(branch, root, refs)?);
-            Some(union)
-        });
-        if union.is_some() {
-            constraints.push(union);
-        }
-    }
-    if let Some(Value::Array(subschemas)) = schema.get("allOf") {
-        constraints.extend(subschemas.iter().map(|subschema| schema_types(subschema, root, refs)));
-    }
-    // Intersect, treating "integer" as a subset of "number".
-    constraints.into_iter().flatten().reduce(|allowed, types| {
-        let mut both = &allowed & &types;
-        if (allowed.contains("number") && types.contains("integer"))
-            || (allowed.contains("integer") && types.contains("number"))
-        {
-            both.insert("integer".to_string());
-        }
-        both
-    })
-}
-
 /// Decode a parameter value, keeping the raw text where a string is meant.
 ///
 /// When the schema admits a string, the raw text is kept unless it decodes to
@@ -617,7 +526,7 @@ fn convert_parameter_value(raw: String, allowed: Option<&HashSet<String>>) -> Va
     let Some(allowed) = allowed.filter(|allowed| allowed.contains("string")) else {
         return decoded;
     };
-    let kind = match json_type(&decoded) {
+    let kind = match JsonType::of_value(&decoded).name() {
         "integer" if allowed.contains("number") => "number",
         kind => kind,
     };

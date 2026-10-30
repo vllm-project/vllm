@@ -97,6 +97,18 @@ def _schema_types(
     return allowed
 
 
+def schema_types(schema: Any, root: dict | None = None) -> set[str] | None:
+    """JSON types the parameter schema admits, or ``None`` when it has none.
+
+    Unlike :func:`extract_types_from_schema`, "no type information" stays
+    distinct from the string type. *root* is the tool's ``parameters`` object,
+    against which local ``$ref`` pointers resolve.
+    """
+    if root is None:
+        root = schema if isinstance(schema, dict) else {}
+    return _schema_types(schema, root, {})
+
+
 class ParameterTypes(NamedTuple):
     """JSON types admitted by each top-level parameter of one tool.
 
@@ -141,6 +153,20 @@ def parameter_types(tools: Iterable[Any] | None) -> dict[str, ParameterTypes]:
         if name and isinstance(parameters, dict):
             types[name] = ParameterTypes.from_schema(parameters)
     return types
+
+
+class ParameterTypesCache:
+    """Parameter types for one tools list, rebuilt when its identity changes."""
+
+    def __init__(self, tools: Iterable[Any] | None = None) -> None:
+        self._tools = tools
+        self._types = parameter_types(tools)
+
+    def for_tools(self, tools: Iterable[Any] | None) -> dict[str, ParameterTypes]:
+        if tools is not self._tools:
+            self._tools = tools
+            self._types = parameter_types(tools)
+        return self._types
 
 
 def convert_value(

@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+from vllm.tool_parsers.schema_types import schema_types
 from vllm.tool_parsers.utils import (
     UnexpectedAstError,
     coerce_to_schema_type,
@@ -299,6 +300,46 @@ class TestExtractTypesFromSchema:
         }
         result = set(extract_types_from_schema(schema))
         assert result == {"integer", "null", "string"}
+
+
+def test_extract_types_from_schema_delegates_to_walker():
+    """The wrapper keeps its list contract and historical fallback."""
+    assert extract_types_from_schema({}) == ["string"]
+    assert extract_types_from_schema({"const": 5}) == ["integer"]
+    assert extract_types_from_schema({"type": "string", "enum": [1, "a"]}) == ["string"]
+    # allOf intersects; an untyped union branch leaves the schema unconstrained.
+    assert extract_types_from_schema({"allOf": [{"type": "object"}]}) == ["object"]
+    assert (
+        extract_types_from_schema({"allOf": [{"type": "object"}, {"type": "null"}]})
+        == []
+    )
+    assert extract_types_from_schema({"anyOf": [{"type": "integer"}, {}]}) == ["string"]
+    # A $ref without a tool root is unconstrained, so the fallback applies.
+    assert extract_types_from_schema({"$ref": "#/$defs/S"}) == ["string"]
+
+
+def test_schema_types_entry_point():
+    """The walker keeps "any type" (``None``) distinct from "string"."""
+    assert schema_types({"type": "string"}) == {"string"}
+    assert schema_types({"enum": [1, "a", None]}) == {"integer", "string", "null"}
+    assert schema_types({"anyOf": [{"type": "integer"}, {"type": "string"}]}) == {
+        "integer",
+        "string",
+    }
+    assert schema_types({}) is None
+    assert schema_types({"anyOf": [{"type": "integer"}, {}]}) is None
+    root = {
+        "$defs": {
+            "S": {"type": "string"},
+            "A": {"anyOf": [{"$ref": "#/$defs/B"}, {"type": "string"}]},
+            "B": {"type": "object"},
+        },
+    }
+    # A local $ref resolves against the tool root; without one it is unconstrained.
+    assert schema_types({"$ref": "#/$defs/S"}, root) == {"string"}
+    assert schema_types({"$ref": "#/$defs/S"}) is None
+    # A $ref cycle terminates as unconstrained.
+    assert schema_types({"$ref": "#/$defs/A"}, root) == {"object", "string"}
 
 
 def _value_of(expr: str):

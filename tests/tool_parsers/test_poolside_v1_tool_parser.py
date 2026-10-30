@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 from openai.types.responses.tool_param import FunctionToolParam
@@ -430,3 +431,25 @@ def test_string_schema_forms_keep_raw_text(
             for tc in (delta.tool_calls if delta else None) or []:
                 args += (tc.function.arguments or "") if tc.function else ""
     assert json.loads(args) == {"v": expected}
+
+
+def test_parameter_types_built_once_per_request(monkeypatch) -> None:
+    """The schema walk runs once per parser, not once per streamed argument."""
+    import vllm.tool_parsers.schema_types as schema_types_module
+
+    counter = MagicMock(wraps=schema_types_module.parameter_types)
+    monkeypatch.setattr(schema_types_module, "parameter_types", counter)
+    request = _build_chat_request(tool_choice="auto")
+    parser = PoolsideV1ToolParser(_StubTokenizer(), tools=request.tools)
+    model_output = (
+        "<tool_call>write_file\n<arg_key>content</arg_key>"
+        "<arg_value>  x = 1\n</arg_value></tool_call>"
+    )
+    parser.extract_tool_calls(model_output, request)
+    previous = ""
+    for current in (model_output[:i] for i in range(1, len(model_output) + 1)):
+        parser.extract_tool_calls_streaming(
+            previous, current, current[len(previous) :], [], [], [], request
+        )
+        previous = current
+    assert counter.call_count == 1
