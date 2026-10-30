@@ -56,6 +56,7 @@ For converter usage and interactive model/hardware discovery, see the
 | Qwen/Qwen3-14B-AWQ | Qwen3ForCausalLM | ✅ | [Xeon 6](https://recipes.vllm.ai/Qwen/Qwen3-14B?hardware=xeon6&variant=awq) |
 | Qwen/Qwen3-30B-A3B | Qwen3MoeForCausalLM | ✅ | [Xeon 6](https://recipes.vllm.ai/Qwen/Qwen3-30B-A3B?hardware=xeon6) |
 | Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 | Qwen3MoeForCausalLM | ✅ | — |
+| Qwen/Qwen3.8-Flash-Next-FP8 | Qwen4ExpForConditionalGeneration | ✅ (text only; see [CPU requirements](#qwen38-flash-next)) | — |
 | Qwen/QwQ-32B | Qwen2ForCausalLM | ✅ | [Xeon 6](https://recipes.vllm.ai/Qwen/QwQ-32B?hardware=xeon6) |
 | Qwen/QwQ-32B-AWQ | Qwen2ForCausalLM | ✅ | [Xeon 6](https://recipes.vllm.ai/Qwen/QwQ-32B?hardware=xeon6&variant=awq) |
 | Qwen/Qwen1.5-0.5B-Chat-GPTQ-Int4 | Qwen2ForCausalLM | ✅ | — |
@@ -65,6 +66,13 @@ For converter usage and interactive model/hardware discovery, see the
 | microsoft/Phi-4-reasoning | Phi3ForCausalLM | ✅ | [Xeon 6](https://recipes.vllm.ai/microsoft/Phi-4-reasoning?hardware=xeon6) |
 | mistralai/Mistral-7B-Instruct-v0.2 | MistralForCausalLM | ✅ | — |
 | TheBloke/Mistral-7B-Instruct-v0.2-AWQ | MistralForCausalLM | ✅ | — |
+
+### Qwen3.8-Flash-Next
+
+Requires x86-64, an active Triton-CPU backend, Model Runner V2, BF16
+activations, and BF16 QSA KV cache. Serve with `--language-model-only`.
+TP1 and TP2 support compiled execution and `--enforce-eager`; PLE requires
+pipeline parallel size 1 on CPU.
 
 ### Multimodal Language Models
 

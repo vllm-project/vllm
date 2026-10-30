@@ -1118,6 +1118,10 @@ class Qwen4ExpForConditionalGenerationConfig(Qwen3_5ForConditionalGenerationConf
             raise NotImplementedError(
                 "Qwen4Exp PLE/QSA does not support dual-batch overlap or microbatching"
             )
+        if current_platform.is_cpu():
+            from vllm.models.qwen4_exp.cpu.runtime import verify_cpu_config
+
+            verify_cpu_config(vllm_config)
         multimodal_config = vllm_config.model_config.multimodal_config
         if multimodal_config is not None and multimodal_config.language_model_only:
             _strip_qwen4_exp_mrope(vllm_config.model_config)
