@@ -170,6 +170,16 @@ P99 ITL (ms):                            8.39
     comparing results, use the measurement points and formulas rather than the
     metric names alone. This section explains how we refer to them in vLLM.
 
+For the `openai`, `vllm`, and `openai-chat` backends, a successful streaming
+request must produce output and end with the `[DONE]` sentinel, without an
+in-stream error. HTTP 200 alone does not establish success: a stream that
+closes after partial output, even after a finish reason or usage chunk, is
+reported as failed when `[DONE]` is missing. Such requests are excluded from
+successful-request latency and throughput statistics. Reaching the requested
+output limit (`finish_reason: "length"`) with `[DONE]` remains a successful
+request; this does not establish that the generated answer is complete or
+correct.
+
 - **Time to first token (TTFT)** is the time from sending a request to receiving
   its first streamed output.
 - **Inter-token latency (ITL)** records the time between consecutive streamed
