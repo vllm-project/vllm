@@ -1014,9 +1014,13 @@ class MessageQueue:
         while not self.shutting_down:
             poll_timeout = read_timeout.timeout_ms() / 1000
             try:
-                return MessageQueue.recv(socket, poll_timeout)
+                obj = MessageQueue.recv(socket, poll_timeout)
             except TimeoutError:
                 pass
+            else:
+                if self.shutting_down:
+                    raise RuntimeError("cancelled")
+                return obj
         raise RuntimeError("cancelled")
 
     @staticmethod
