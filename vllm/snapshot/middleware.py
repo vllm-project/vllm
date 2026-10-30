@@ -72,8 +72,8 @@ class EngineSnapshotMiddleware:
         "/health",
         "/is_sleeping",
         "/metrics",
-        "/ready",
         "/sleep",
+        "/snapshot/ready",
         "/snapshot/status",
         "/wake_up",
     }

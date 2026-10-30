@@ -432,8 +432,8 @@ async def snapshot_status(raw_request: Request) -> JSONResponse:
     )
 
 
-@router.get("/ready")
-async def ready(raw_request: Request) -> Response:
+@router.get("/snapshot/ready")
+async def snapshot_ready(raw_request: Request) -> Response:
     client = snapshot_client(raw_request)
     if client is not None:
         try:

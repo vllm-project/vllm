@@ -264,6 +264,7 @@ development endpoints on a production network.
 - `POST /sleep?level=3&mode=wait` — Capture an EngineCore snapshot (experimental).
 - `POST /wake_up` — Wake up the model. Supports optional `tags` query parameters for partial wake-up (e.g., `?tags=weights`).
 - `GET /snapshot/status` — Report the EngineCore snapshot state.
+- `GET /snapshot/ready` — Readiness for the snapshot path: 200 only when the snapshot state is `READY` and the engine is healthy, 503 otherwise.
 - `POST /collective_rpc` — Perform a collective remote procedure call (RPC).
 - `GET /is_sleeping` — Check if the model is sleeping.
 

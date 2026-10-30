@@ -15,7 +15,7 @@ from vllm.entrypoints.serve.dev.sleep.api_router import (
     _sleep_level3,
     _wake_level3,
     is_sleeping,
-    ready,
+    snapshot_ready,
 )
 from vllm.snapshot.middleware import EngineSnapshotGate
 from vllm.snapshot.protocol import SnapshotControlError
@@ -79,7 +79,7 @@ def test_snapshot_operations_reject_concurrent_sleep_or_wake():
     asyncio.run(run())
 
 
-def test_ready_is_healthy_for_render_only_server():
+def test_snapshot_ready_is_healthy_for_render_only_server():
     async def run():
         request = cast(
             Request,
@@ -87,7 +87,7 @@ def test_ready_is_healthy_for_render_only_server():
                 app=SimpleNamespace(state=SimpleNamespace(engine_client=None))
             ),
         )
-        response = await ready(request)
+        response = await snapshot_ready(request)
         assert response.status_code == 200
 
     asyncio.run(run())
