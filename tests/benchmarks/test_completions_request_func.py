@@ -77,13 +77,35 @@ def test_eof_without_done_is_not_a_success(backend: str, finish_reason: str | No
 
 @pytest.mark.parametrize("backend", ["openai", "openai-chat"])
 @pytest.mark.parametrize("nested", [False, True])
-def test_error_after_output_is_not_a_success(backend: str, nested: bool):
+@pytest.mark.parametrize(
+    "has_output", [False, True], ids=["before-output", "after-output"]
+)
+def test_stream_error_is_not_a_success(backend: str, nested: bool, has_output: bool):
     error = {"object": "error", "message": "generation failed", "type": "server_error"}
-    stream = _choice(backend) + _sse({"error": error} if nested else error) + DONE
+    stream = (
+        (_choice(backend) if has_output else b"")
+        + _sse({"error": error} if nested else error)
+        + DONE
+    )
     output = asyncio.run(_request(backend, stream))
     assert not output.success
     assert "generation failed" in output.error
-    assert output.generated_text == "Hello 世界"
+    assert output.generated_text == ("Hello 世界" if has_output else "")
+
+
+@pytest.mark.parametrize("backend", ["openai", "openai-chat"])
+def test_complete_empty_rendered_token_is_a_success(backend: str):
+    choice = {"text": ""} if backend == "openai" else {"delta": {"content": ""}}
+    stream = (
+        _sse({"choices": [{"index": 0, **choice, "finish_reason": "stop"}]})
+        + _sse({"choices": [], "usage": {"prompt_tokens": 7, "completion_tokens": 1}})
+        + DONE
+    )
+    output = asyncio.run(_request(backend, stream))
+    assert output.success, output.error
+    assert output.generated_text == ""
+    assert output.output_tokens == 1
+    assert output.ttft > 0
 
 
 @pytest.mark.parametrize("backend", ["openai", "openai-chat"])
