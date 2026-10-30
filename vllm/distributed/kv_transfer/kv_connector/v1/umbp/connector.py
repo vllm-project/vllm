@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_events import KVCacheEvent, KVConnectorKVEvents
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -36,6 +36,7 @@ from .data import (
     UMBPConnectorWorkerMetadata,
     UMBPHandshakeMetadata,
     UMBPNamespace,
+    tp_replicated_group_ids,
 )
 from .runtime import UMBPRuntimeConfig, UMBPRuntimeFactory
 from .scheduler import UMBPStoreConnectorScheduler
@@ -99,6 +100,12 @@ class UMBPStoreKVEvents(KVConnectorKVEvents):
 class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
     """vLLM connector lifecycle shared by every UMBP runtime mode."""
 
+    @classmethod
+    def only_restores_canonical_kv(cls, kv_transfer_config: KVTransferConfig) -> bool:
+        # Objects are whole blocks this cache layout stored; the namespace
+        # fingerprints every per-layer spec, so foreign bytes cannot match.
+        return True
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -130,6 +137,12 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
         runtime = UMBPRuntimeFactory.build(runtime_config)
         self._runtime = runtime
         self._topology = topology
+        # MLA latents (e.g. DeepSeek-V4 on ROCm) are identical on every TP
+        # rank; a node-shared pool keeps one copy instead of tp_size copies.
+        self._dedup_tp_replicated = getattr(
+            runtime, "shares_pool_across_ranks", False
+        ) and bool(runtime_config.options.get("dedup_tp_replicated_kv", True))
+        self._replicated_groups: frozenset[int] = frozenset()
         self._store_submitted = False
         self._kv_cache_events: UMBPStoreKVEvents | None = None
         self._namespace: UMBPNamespace | None = None
@@ -147,6 +160,10 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
                 vllm_config, kv_cache_config
             )
             layout = KVLayoutPlanner.from_kv_cache_config(kv_cache_config)
+            if self._dedup_tp_replicated:
+                self._replicated_groups = tp_replicated_group_ids(
+                    kv_cache_config, topology
+                )
             self.connector_worker = UMBPStoreConnectorWorker(
                 runtime.create_worker_handle(
                     self._namespace.value, topology, layout.describe(topology)
@@ -168,6 +185,7 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
             pp_rank=topology.pp_rank,
             pcp_rank=topology.pcp_rank,
             dcp_rank=topology.dcp_rank,
+            replicated_groups=self._replicated_groups,
         )
 
     def _bind_scheduler_namespace(self, namespace: UMBPNamespace) -> None:
@@ -185,20 +203,36 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def get_handshake_metadata(self) -> UMBPHandshakeMetadata | None:
         if self.connector_worker is None or self._namespace is None:
             return None
-        return UMBPHandshakeMetadata(self._namespace.value)
+        return UMBPHandshakeMetadata(
+            self._namespace.value, tuple(sorted(self._replicated_groups))
+        )
 
     def set_xfer_handshake_metadata(
         self, metadata: dict[int, KVConnectorHandshakeMetadata]
     ) -> None:
-        if self.connector_scheduler is None or self._namespace is not None:
+        if self.connector_scheduler is None:
+            return
+        reports = [
+            report
+            for report in metadata.values()
+            if isinstance(report, UMBPHandshakeMetadata)
+        ]
+        # Only workers see per-layer specs, so the scheduler adopts their
+        # replicated groups even when the namespace is configured.
+        replicated = {report.replicated_groups for report in reports}
+        if len(replicated) > 1:
+            raise ValueError(
+                "UMBP workers must report the same replicated groups, got "
+                f"{sorted(replicated)}"
+            )
+        self._replicated_groups = frozenset(replicated.pop() if replicated else ())
+        if self._namespace is not None:
+            if self.connector_scheduler.codec is not None:
+                self.connector_scheduler.codec = self._codec(self._namespace)
             return
         # Reports are keyed by worker rank, but ranks may share a key (PCP
         # without DCP), so require agreement rather than one per rank.
-        namespaces = {
-            report.namespace
-            for report in metadata.values()
-            if isinstance(report, UMBPHandshakeMetadata)
-        }
+        namespaces = {report.namespace for report in reports}
         if len(namespaces) != 1:
             raise ValueError(
                 "UMBP workers must report exactly one namespace, got "
