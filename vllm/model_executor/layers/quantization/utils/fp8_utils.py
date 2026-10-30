@@ -964,7 +964,13 @@ def get_w8a8_per_token_fp8_config(
     # Partial decode tuning must not override unmeasured prefill sizes.
     if not configs or not min(configs) <= M <= max(configs):
         return None
-    config = configs[min(configs, key=lambda m: abs(m - M))]
+    config = configs.get(M)
+    if config is None:
+        config = configs[min(configs, key=lambda m: abs(m - M))]
+    if config.get("USE_HEURISTIC", False) or (
+        M not in configs and config.get("EXACT_M", False)
+    ):
+        return None
     if M not in configs:
         # Scheduling choices were measured only at their exact M, unlike tiles.
         config = {

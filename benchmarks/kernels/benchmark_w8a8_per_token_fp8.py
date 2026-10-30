@@ -7,7 +7,7 @@ Example: .venv/bin/python benchmarks/kernels/benchmark_w8a8_per_token_fp8.py
 
 Use --out-dtype float16 to tune FP16 output, --m to select batch sizes,
 --resume to continue an interrupted sweep, or --validate-only to compare
-installed configs against the default heuristic through the runtime custom op.
+installed configs against the production heuristic through the runtime custom op.
 Use --group-m and --n-stripe to search scheduling choices, and
 --unmasked-loads to request complete aligned operand loads.
 
@@ -15,6 +15,8 @@ Configs are written to output-dir/configs. Copy them to
 vllm/model_executor/layers/quantization/utils/configs after validation.
 Tuning and independent finalist measurements use GPU graphs and hot operands;
 quantization, attention, and tensor-parallel communication are excluded.
+New exports apply measured configurations only at exact M; other token counts
+and cases without a measured improvement retain the production heuristic.
 """
 
 import argparse
@@ -65,7 +67,42 @@ def candidates(group_m, n_stripe, unmasked_loads):
     ]
 
 
-def call(a, b, sa, sb, config=None, out_dtype=torch.bfloat16):
+def call(
+    a,
+    b,
+    sa,
+    sb,
+    config=None,
+    out_dtype=torch.bfloat16,
+    use_rdna_heuristic=False,
+    num_processors=0,
+    cache_size_bytes=0,
+):
+    if config is not None and config.get("USE_HEURISTIC", False):
+        config = None
+    if use_rdna_heuristic:
+        from vllm.model_executor.layers.quantization.utils import (
+            fp8_per_token_heuristic as heuristic,
+        )
+
+        if heuristic.can_use_fp8_per_token_heuristic(a, b, sa, sb, out_dtype, None):
+            if config is None:
+                choice = heuristic.get_heuristic_config(
+                    a.size(0), b.size(1), a.size(1), num_processors, cache_size_bytes
+                )
+            else:
+                choice = {
+                    "engine": "shared",
+                    "block_size_m": config["BLOCK_SIZE_M"],
+                    "block_size_n": config["BLOCK_SIZE_N"],
+                    "block_size_k": config["BLOCK_SIZE_K"],
+                    "num_warps": config["num_warps"],
+                    "num_stages": config["num_stages"],
+                    "group_m": config.get("GROUP_M", 1),
+                    "n_stripe": config.get("N_STRIPE", 0),
+                    "unmasked_loads": bool(config.get("UNMASKED_LOADS", False)),
+                }
+            return heuristic.launch_fp8_per_token(a, b, sa, sb, out_dtype, None, choice)
     kwargs = {}
     if config is not None:
         kwargs = {
@@ -127,6 +164,7 @@ def main():
     parser.add_argument("--rep-ms", type=int, default=10)
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--finalists", type=int, default=8)
+    parser.add_argument("--min-speedup", type=float, default=1.02)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
         "--validate-only",
@@ -138,10 +176,32 @@ def main():
         parser.error("Requires a CUDA, ROCm, or XPU device")
     if any(m <= 0 for m in args.m):
         parser.error("Batch sizes must be positive")
+    if args.min_speedup < 1:
+        parser.error("Minimum speedup must be at least one")
     out_dtype = getattr(torch, args.out_dtype)
-    run_mm = partial(call, out_dtype=out_dtype)
     device = current_platform.device_type
     torch.accelerator.set_device_index(args.device)
+    use_rdna_heuristic = False
+    num_processors, cache_size_bytes = 0, 0
+    if current_platform.is_rocm() and current_platform.supports_fp8():
+        from vllm.platforms.rocm import on_rdna
+
+        use_rdna_heuristic = on_rdna()
+    if use_rdna_heuristic:
+        from vllm.model_executor.layers.quantization.utils.fp8_per_token_heuristic import (  # noqa: E501
+            get_device_cache_size,
+        )
+        from vllm.utils.platform_utils import num_compute_units
+
+        num_processors = num_compute_units(args.device)
+        cache_size_bytes = get_device_cache_size(args.device)
+    run_mm = partial(
+        call,
+        out_dtype=out_dtype,
+        use_rdna_heuristic=use_rdna_heuristic,
+        num_processors=num_processors,
+        cache_size_bytes=cache_size_bytes,
+    )
     torch.set_num_threads(4)
     shapes = sorted({tuple(map(int, s.split(","))) for s in args.shapes})
     if any(len(shape) != 2 or min(shape) <= 0 for shape in shapes):
@@ -174,6 +234,9 @@ def main():
         + ", hot operands, median of randomized rounds",
         "bias": False,
         "quantization_included": False,
+        "production_rdna_heuristic": use_rdna_heuristic,
+        "num_processors": num_processors,
+        "cache_size_bytes": cache_size_bytes,
         "correctness": "all elements finite; <=64 rows x128 columns vs FP32",
         "cases": cases,
         "search_space": search,
@@ -182,11 +245,16 @@ def main():
         },
         "sources": {},
     }
-    for source in (
+    source_files = [
         Path(__file__),
         Path(triton_scaled_mm.__code__.co_filename),
         Path(get_w8a8_per_token_fp8_config.__code__.co_filename),
-    ):
+    ]
+    if use_rdna_heuristic:
+        source_files.append(
+            Path(get_device_cache_size.__wrapped__.__code__.co_filename)
+        )
+    for source in source_files:
         metadata["sources"][str(source)] = hashlib.sha256(
             source.read_bytes()
         ).hexdigest()
@@ -262,8 +330,6 @@ def main():
         rows, cols, ref = reference(a, w, sa, sb)
         if args.validate_only:
             config = get_w8a8_per_token_fp8_config(m, n, k, dtype, out_dtype)
-            if config is None:
-                raise ValueError(f"No installed tuned config for {case}")
             methods = {
                 "heuristic": partial(run_mm, a, b, sa, sb),
                 "tuned": partial(
@@ -275,6 +341,9 @@ def main():
                     out_dtype,
                     None,
                     True,
+                    use_rdna_heuristic,
+                    num_processors,
+                    cache_size_bytes,
                 ),
             }
             errors = {
@@ -292,6 +361,7 @@ def main():
                 "N": n,
                 "K": k,
                 "config": config,
+                "uses_tuned_config": config is not None,
                 "relative_rms": errors,
                 "samples_us": timings,
                 "median_us": {
@@ -350,24 +420,11 @@ def main():
         # Keep the heuristic if the independent finalist measurements do not win.
         baseline_us = statistics.median(timings["heuristic"])
         tuned_us = statistics.median(timings[winner])
-        if tuned_us >= baseline_us:
-            tile = (
-                (64, 64 if n < 8192 else 128, 256)
-                if m <= 32
-                else (64, 64, 256)
-                if m <= 64
-                else (64, 128, 128)
-                if m <= 128
-                else (128, 128, 128)
-            )
-            config = {
-                "BLOCK_SIZE_M": tile[0],
-                "BLOCK_SIZE_N": tile[1],
-                "BLOCK_SIZE_K": tile[2],
-                "num_warps": 4,
-                "num_stages": 2 if current_platform.is_rocm() else 3,
-            }
+        if baseline_us / tuned_us < args.min_speedup or baseline_us - tuned_us < 0.15:
+            config = {"USE_HEURISTIC": True}
             tuned_us = baseline_us
+        else:
+            config = dict(config, EXACT_M=True)
         record = {
             "M": m,
             "N": n,

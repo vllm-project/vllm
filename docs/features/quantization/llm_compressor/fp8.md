@@ -34,6 +34,27 @@ The FP8 types typically supported in hardware have two distinct representations,
     [`KernelConfig`](../../../cli/serve.md#kernelconfig) in the CLI
     reference and shown by `vllm serve --help=KernelConfig`.
 
+## Native Triton per-token FP8 on ROCm
+
+On ROCm GPUs with native FP8 support, `--linear-backend triton` selects the
+native Triton backend for dynamic per-token activation scales and per-channel
+weight scales. It supports BF16 and FP16 output. With the default
+`--linear-backend auto`, this backend is considered after higher-priority
+compatible ROCm backends and before Torch RowWise.
+
+```bash
+vllm serve RedHatAI/gemma-4-12B-it-FP8-Dynamic \
+  --language-model-only --max-model-len 32768 \
+  --max-num-batched-tokens 8192 --linear-backend triton
+```
+
+Tuning files are optional. FP8-capable RDNA GPUs use a hardware-aware launch
+heuristic when no tuned configuration applies. The Radeon AI PRO R9700 BF16
+tuning tables apply measured configurations only at their exact token counts;
+intermediate counts and entries without a reliable measured gain retain the
+heuristic. Here, token count means the rows processed by the current linear
+operation, including any graph padding, rather than the full context length.
+
 ## Installation
 
 To produce performant FP8 quantized models with vLLM, you'll need to install the [llm-compressor](https://github.com/vllm-project/llm-compressor/) library:

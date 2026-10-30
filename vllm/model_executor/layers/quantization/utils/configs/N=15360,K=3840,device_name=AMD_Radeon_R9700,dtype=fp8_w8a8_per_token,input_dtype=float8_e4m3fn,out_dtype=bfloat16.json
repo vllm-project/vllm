@@ -1,114 +1,89 @@
 {
-  "1": {
-    "BLOCK_SIZE_M": 16,
-    "BLOCK_SIZE_N": 64,
-    "BLOCK_SIZE_K": 128,
-    "num_warps": 4,
-    "num_stages": 1
-  },
-  "2": {
-    "BLOCK_SIZE_M": 16,
-    "BLOCK_SIZE_N": 64,
-    "BLOCK_SIZE_K": 64,
-    "num_warps": 4,
-    "num_stages": 2
-  },
-  "4": {
-    "BLOCK_SIZE_M": 16,
-    "BLOCK_SIZE_N": 128,
-    "BLOCK_SIZE_K": 256,
-    "num_warps": 4,
-    "num_stages": 1
-  },
-  "8": {
-    "BLOCK_SIZE_M": 16,
-    "BLOCK_SIZE_N": 64,
-    "BLOCK_SIZE_K": 64,
-    "num_warps": 4,
-    "num_stages": 2
-  },
-  "16": {
-    "BLOCK_SIZE_M": 16,
-    "BLOCK_SIZE_N": 64,
-    "BLOCK_SIZE_K": 128,
-    "num_warps": 4,
-    "num_stages": 1
-  },
-  "32": {
-    "BLOCK_SIZE_M": 32,
-    "BLOCK_SIZE_N": 128,
-    "BLOCK_SIZE_K": 128,
-    "num_warps": 4,
-    "num_stages": 2
-  },
-  "64": {
-    "BLOCK_SIZE_M": 64,
-    "BLOCK_SIZE_N": 128,
-    "BLOCK_SIZE_K": 128,
-    "num_warps": 4,
-    "num_stages": 2
-  },
-  "128": {
-    "BLOCK_SIZE_M": 128,
-    "BLOCK_SIZE_N": 128,
-    "BLOCK_SIZE_K": 128,
-    "num_warps": 8,
-    "num_stages": 1
-  },
-  "256": {
-    "BLOCK_SIZE_M": 128,
-    "BLOCK_SIZE_N": 128,
-    "BLOCK_SIZE_K": 128,
-    "num_warps": 8,
-    "num_stages": 1
-  },
-  "512": {
-    "BLOCK_SIZE_M": 128,
-    "BLOCK_SIZE_N": 128,
-    "BLOCK_SIZE_K": 128,
-    "num_warps": 4,
-    "num_stages": 2
-  },
-  "1024": {
-    "BLOCK_SIZE_M": 128,
-    "BLOCK_SIZE_N": 128,
-    "BLOCK_SIZE_K": 128,
-    "num_warps": 4,
-    "num_stages": 2
-  },
-  "2048": {
-    "BLOCK_SIZE_M": 128,
-    "BLOCK_SIZE_N": 128,
-    "BLOCK_SIZE_K": 128,
-    "num_warps": 4,
-    "num_stages": 2
-  },
-  "4096": {
-    "BLOCK_SIZE_M": 128,
-    "BLOCK_SIZE_N": 128,
-    "BLOCK_SIZE_K": 128,
-    "num_warps": 4,
-    "num_stages": 2
-  },
-  "8192": {
-    "BLOCK_SIZE_M": 128,
-    "BLOCK_SIZE_N": 128,
-    "BLOCK_SIZE_K": 128,
-    "num_warps": 4,
-    "num_stages": 2
-  },
-  "16384": {
-    "BLOCK_SIZE_M": 128,
-    "BLOCK_SIZE_N": 128,
-    "BLOCK_SIZE_K": 128,
-    "num_warps": 4,
-    "num_stages": 2
-  },
-  "32768": {
-    "BLOCK_SIZE_M": 128,
-    "BLOCK_SIZE_N": 128,
-    "BLOCK_SIZE_K": 128,
-    "num_warps": 4,
-    "num_stages": 2
-  }
+    "1": {
+        "USE_HEURISTIC": true
+    },
+    "2": {
+        "USE_HEURISTIC": true
+    },
+    "4": {
+        "USE_HEURISTIC": true
+    },
+    "8": {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 64,
+        "num_warps": 4,
+        "num_stages": 2,
+        "EXACT_M": true
+    },
+    "16": {
+        "USE_HEURISTIC": true
+    },
+    "32": {
+        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 128,
+        "num_warps": 4,
+        "num_stages": 1,
+        "EXACT_M": true
+    },
+    "64": {
+        "BLOCK_SIZE_M": 64,
+        "BLOCK_SIZE_N": 128,
+        "BLOCK_SIZE_K": 128,
+        "num_warps": 4,
+        "num_stages": 1,
+        "EXACT_M": true,
+        "UNMASKED_LOADS": true
+    },
+    "128": {
+        "BLOCK_SIZE_M": 128,
+        "BLOCK_SIZE_N": 256,
+        "BLOCK_SIZE_K": 128,
+        "num_warps": 8,
+        "num_stages": 2,
+        "EXACT_M": true,
+        "UNMASKED_LOADS": true
+    },
+    "256": {
+        "BLOCK_SIZE_M": 128,
+        "BLOCK_SIZE_N": 128,
+        "BLOCK_SIZE_K": 128,
+        "num_warps": 8,
+        "num_stages": 1,
+        "EXACT_M": true
+    },
+    "512": {
+        "BLOCK_SIZE_M": 128,
+        "BLOCK_SIZE_N": 128,
+        "BLOCK_SIZE_K": 128,
+        "num_warps": 8,
+        "num_stages": 1,
+        "EXACT_M": true,
+        "N_STRIPE": 4
+    },
+    "1024": {
+        "USE_HEURISTIC": true
+    },
+    "2048": {
+        "USE_HEURISTIC": true
+    },
+    "4096": {
+        "USE_HEURISTIC": true
+    },
+    "8192": {
+        "USE_HEURISTIC": true
+    },
+    "16384": {
+        "BLOCK_SIZE_M": 128,
+        "BLOCK_SIZE_N": 256,
+        "BLOCK_SIZE_K": 64,
+        "num_warps": 8,
+        "num_stages": 1,
+        "EXACT_M": true,
+        "UNMASKED_LOADS": true
+    },
+    "32768": {
+        "USE_HEURISTIC": true
+    }
 }
