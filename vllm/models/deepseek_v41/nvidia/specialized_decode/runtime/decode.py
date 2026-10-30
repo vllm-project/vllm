@@ -24,6 +24,9 @@ The steps issue TP collectives, so every decision reads host state that all TP
 ranks share: the step's rows and the attention metadata's host fields. Side
 streams the steps fork are joined before ``run`` returns, so a capture ends
 joined.
+
+``DraftDecode`` (``draft``) runs the DSpark draft model's layers through the
+same steps, on this executor's fused kernel and streams.
 """
 
 from typing import TYPE_CHECKING, NamedTuple, TypeAlias, cast
@@ -58,7 +61,9 @@ from ..moe.step import MoEStep
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
 
+    from ...dspark import DSparkDeepseekV4Model
     from ...model import DeepseekV4DecoderLayer, DeepseekV4Model
+    from .draft import DraftDecode
 
 DecodeOutput: TypeAlias = torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]
 
@@ -77,15 +82,15 @@ class DecodeStep(NamedTuple):
     low_batch: bool
     # The attention side projections run on aux streams.
     overlap_inputs: bool
-    executor: "SpecializedDecode"
+    executor: "SpecializedDecode | DraftDecode"
 
     def run(
         self,
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
         input_ids: torch.Tensor | None,
-        engram_hashes: torch.Tensor | None,
-        engram_mask: torch.Tensor | None,
+        engram_hashes: torch.Tensor | None = None,
+        engram_mask: torch.Tensor | None = None,
         streams: torch.Tensor | None = None,
     ) -> DecodeOutput:
         """The backbone's output after its embedding (and, from the
@@ -101,7 +106,7 @@ class DecodeStep(NamedTuple):
         )
 
 
-def step_gates(rows: int, executor: "SpecializedDecode") -> DecodeStep:
+def step_gates(rows: int, executor: "SpecializedDecode | DraftDecode") -> DecodeStep:
     """The step of ``rows`` rows (0 < rows <= ``FUSED_MHC_MAX_ROWS``)."""
     return DecodeStep(
         rows=rows,
@@ -130,6 +135,21 @@ def captures_pure_decode(swa_prefixes: list[str]) -> bool:
     return True
 
 
+def flashinfer_attentions(
+    layers: "list[DeepseekV4DecoderLayer]",
+) -> list[DeepseekV4FlashInferMLAAttention]:
+    """The layers' attention modules, which must be FlashInfer sparse MLA."""
+    attns: list[DeepseekV4FlashInferMLAAttention] = []
+    for layer in layers:
+        if not isinstance(layer.attn, DeepseekV4FlashInferMLAAttention):
+            raise ValueError(
+                "decode_backend=latency_specialized needs the FlashInfer "
+                f"sparse MLA attention, not {type(layer.attn).__name__}"
+            )
+        attns.append(layer.attn)
+    return attns
+
+
 class LayerPlan(NamedTuple):
     layer_id: int
     layer: "DeepseekV4DecoderLayer"
@@ -151,19 +171,13 @@ class SpecializedDecode:
             cast("DeepseekV4DecoderLayer", backbone.layers[index])
             for index in range(backbone.start_layer, backbone.end_layer)
         ]
-        attns: list[DeepseekV4FlashInferMLAAttention] = []
-        for layer in layers:
-            if not isinstance(layer.attn, DeepseekV4FlashInferMLAAttention):
-                raise ValueError(
-                    "decode_backend=latency_specialized needs the FlashInfer "
-                    f"sparse MLA attention, not {type(layer.attn).__name__}"
-                )
-            attns.append(layer.attn)
-        self.mhc_stream = layers[0].mhc_stream
-        if self.mhc_stream is None or not backbone.fuse_mhc_all_reduce:
+        attns = flashinfer_attentions(layers)
+        mhc_stream = layers[0].mhc_stream
+        if mhc_stream is None or not backbone.fuse_mhc_all_reduce:
             raise ValueError(
                 "decode_backend=latency_specialized needs the fused all-reduce + mHC"
             )
+        self.mhc_stream = mhc_stream
 
         # The CuTe DSL kernels, imported only when the executor is built.
         from ...ops.cute_dsl import LamportAllGather
@@ -182,7 +196,7 @@ class SpecializedDecode:
             rank_capacity_bytes=ALL_GATHER_RANK_BYTES,
             device=torch.device("cuda", torch.accelerator.current_device_index()),
         )
-        self.boundaries = Boundaries(self.all_reduce)
+        self.boundaries = Boundaries(self.all_reduce, mhc_stream)
         self.publisher = (
             PublishingMxfp8Linear(self.all_reduce)
             if uses_checked_flashinfer("the publishing wo_b GEMM")
@@ -260,6 +274,15 @@ class SpecializedDecode:
         """The executor of the target model's backbone."""
         return cls(backbone, config, lm_head)
 
+    def for_draft(self, backbone: "DSparkDeepseekV4Model") -> "DraftDecode":
+        """The executor of the DSpark draft model's backbone, on this
+        executor's fused all-reduce + mHC kernel, mailbox, publishing ``wo_b``
+        GEMM and mHC side stream. Its steps issue collectives, so every TP
+        rank builds it, as the target's."""
+        from .draft import DraftDecode
+
+        return DraftDecode(self, backbone)
+
     def plan(
         self,
         positions: torch.Tensor,
@@ -334,10 +357,10 @@ class SpecializedDecode:
                     if layer_aux is not None:
                         aux[plan.layer_id] = layer_aux
                 state.pending = plan.attention.run(layer_input, quant, positions, step)
-                bound.join(layer)
+                bound.join()
                 state, ffn_input, _, _ = bound.sublayer(layer, True, state)
                 state.pending = plan.moe.run(ffn_input, input_ids, step)
-                bound.join(layer)
+                bound.join()
             assert state is not None
             streams = bound.post_only(state)
             if backbone.end_layer in aux_layers:
@@ -356,7 +379,6 @@ class SpecializedDecode:
             self.candidates.join()
         self.engram.join()
         if error:
-            assert self.mhc_stream is not None
             torch.cuda.current_stream().wait_stream(self.mhc_stream)
 
     def _head(

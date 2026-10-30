@@ -72,10 +72,17 @@ def empty_quantized_layer_input(
 
 
 class Boundaries:
-    """The boundaries of one decode step's layer loop, on one fused kernel."""
+    """The boundaries of one decode step's layer loop, on one fused kernel.
 
-    def __init__(self, all_reduce: "BoundaryAllReduce") -> None:
+    The next sublayer's mHC coefficients run on ``mhc_stream``; the target's
+    layers share the stream with the DSpark draft's.
+    """
+
+    def __init__(
+        self, all_reduce: "BoundaryAllReduce", mhc_stream: torch.cuda.Stream
+    ) -> None:
         self.all_reduce = all_reduce
+        self.mhc_stream = mhc_stream
 
     def first(
         self,
@@ -83,9 +90,13 @@ class Boundaries:
         x: torch.Tensor,
         streams: torch.Tensor | None = None,
     ) -> tuple[BoundaryState, torch.Tensor]:
-        """The first layer's attention entry: the embedding broadcast to the
-        hc streams (or written with them, ``streams``), whose identity pre-mix
-        selects stream zero."""
+        """The first layer's attention entry. A ``[n, H]`` embedding is
+        broadcast to the hc streams (or written with them, ``streams``), whose
+        identity pre-mix selects stream zero; ``[n, hc, H]`` streams (the DSpark
+        draft's embedding, expanded) take the layer's own pre-mix, with none
+        carried in."""
+        if x.dim() == 3:
+            return self._pre(layer, x, layer.hc_attn_fn, None, None)
         assert layer.hc_attn_fn_broadcast is not None
         residual = (
             x.unsqueeze(1).expand(-1, layer.hc_mult, -1).contiguous()
@@ -140,8 +151,7 @@ class Boundaries:
             None if quant is None else (quant.data, quant.scale),
         )
         assert layer_input is not None
-        stream = layer.mhc_stream
-        assert stream is not None
+        stream = self.mhc_stream
         aux = None
         if capture_aux:
             streams_ready = torch.cuda.Event()
@@ -172,20 +182,24 @@ class Boundaries:
             aux.record_stream(stream)
         return BoundaryState(residual, post, comb, next_pre), layer_input, quant, aux
 
-    def post_only(self, state: BoundaryState) -> torch.Tensor:
+    def post_only(
+        self, state: BoundaryState, fuse_partial: bool = False
+    ) -> torch.Tensor:
         """Reduce ``state.pending`` into the streams and return them, for an
-        Engram injection or the final collapse."""
-        if isinstance(state.pending, MoEOutput):
+        Engram injection or the final collapse. A deferred MoE output, and with
+        ``fuse_partial`` a plain partial too, takes the fused kernel's
+        residual-only variant; a plain partial otherwise takes a separate
+        all-reduce and mHC post."""
+        if fuse_partial or isinstance(state.pending, MoEOutput):
             residual, _ = self._reduce(state, None, None, None)
             return residual
         assert isinstance(state.pending, torch.Tensor)
         x = tensor_model_parallel_all_reduce(state.pending)
         return mhc_post_tilelang(x, state.residual, state.post, state.comb)
 
-    def join(self, layer: "DeepseekV4DecoderLayer") -> None:
+    def join(self) -> None:
         """Make the current stream wait for the side-stream coefficients."""
-        assert layer.mhc_stream is not None
-        torch.cuda.current_stream().wait_stream(layer.mhc_stream)
+        torch.cuda.current_stream().wait_stream(self.mhc_stream)
 
     def _pre(
         self,
@@ -211,7 +225,7 @@ class Boundaries:
             x=x,
             norm_weight=layer.attn_norm.weight,
             norm_eps=layer.attn_norm.variance_epsilon,
-            stream=layer.mhc_stream,
+            stream=self.mhc_stream,
         )
         return BoundaryState(residual, post, comb, next_pre), layer_input
 

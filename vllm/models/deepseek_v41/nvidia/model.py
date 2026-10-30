@@ -987,9 +987,10 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         decode_step: "DecodeStep | None" = None,
     ) -> torch.Tensor | IntermediateTensors:
         # A specialized decode step embeds from the executor's copy of the
-        # table, which writes the first layer's hc streams too.
+        # table, which writes the first layer's hc streams too. The target's
+        # steps come from its own executor, not the DSpark draft's.
         embedding = (
-            decode_step.executor.embedding
+            typing.cast("SpecializedDecode", decode_step.executor).embedding
             if decode_step is not None and not self.use_sequence_parallel
             else None
         )
