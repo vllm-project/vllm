@@ -63,7 +63,6 @@ from .inputs import (
     TokPrompt,
 )
 from .inputs.preprocess import extract_target_prompt
-from .inputs.tokenize import get_detokenization_tokens
 from .params import ChatParams, TokenizeParams
 
 if TYPE_CHECKING:
@@ -684,13 +683,13 @@ class BaseRenderer(ABC, Generic[_T]):
 
     def _detokenize_prompt(self, prompt: TokensPrompt) -> TokensPrompt:
         tokenizer = self.get_tokenizer()
-        prompt["prompt"] = tokenizer.decode(get_detokenization_tokens(prompt))
+        prompt["prompt"] = tokenizer.decode(prompt["prompt_token_ids"])
 
         return prompt
 
     async def _detokenize_prompt_async(self, prompt: TokensPrompt) -> TokensPrompt:
         prompt["prompt"] = await self._async_tokenizer_decode(
-            get_detokenization_tokens(prompt)
+            prompt["prompt_token_ids"]
         )
 
         return prompt

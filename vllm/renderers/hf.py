@@ -23,7 +23,7 @@ from typing_extensions import override
 
 from vllm import envs
 from vllm.exceptions import ChatTemplateResolutionError, VLLMValidationError
-from vllm.inputs import EmbedsPrompt
+from vllm.inputs import EmbedsPrompt, TokensPrompt
 from vllm.inputs.engine import MultiModalInput
 from vllm.logger import init_logger
 from vllm.multimodal.hasher import MultiModalHasher
@@ -58,14 +58,13 @@ from .base import BaseRenderer
 from .inputs.preprocess import parse_dec_only_prompt
 
 if TYPE_CHECKING:
-    from collections.abc import Set
+    from collections.abc import Awaitable, Callable, Set
 
     from vllm.config import ModelConfig, VllmConfig
     from vllm.inputs import (
         MultiModalDataDict,
         MultiModalUUIDDict,
         TextPrompt,
-        TokensPrompt,
     )
     from vllm.inputs.engine import TokensInput
     from vllm.multimodal.processing.processor import (
@@ -1036,13 +1035,20 @@ def replace_vision_chunk_video_placeholder(
     return prompt_raw
 
 
+class HfTokensPrompt(TokensPrompt, total=False):
+    """Tokenized HF prompt with metadata for rebuilding echoed text."""
+
+    prompt_special_tokens_mask: list[int]
+    """Mask for tokens retained by truncation, before any padding."""
+
+
 def tokenize_prompt(
     tokenizer: TokenizerLike,
     prompt: TextPrompt,
     params: TokenizeParams,
     *,
     want_offsets: bool = False,
-) -> TokensPrompt:
+) -> HfTokensPrompt:
     """Tokenize text, preserving an optional mask for truncated echoes."""
     want_special_tokens_mask = (
         params.needs_detokenization
@@ -1064,20 +1070,54 @@ def tokenize_prompt(
         kwargs.pop("return_special_tokens_mask")
         encoding = tokenizer(prompt["prompt"], **kwargs)
 
-    tokenized = BaseRenderer._build_tokens_prompt(
-        encoding["input_ids"],
-        prompt,
-        offset_mapping=encoding["offset_mapping"] if want_offsets else None,
+    tokenized = cast(
+        HfTokensPrompt,
+        BaseRenderer._build_tokens_prompt(
+            encoding["input_ids"],
+            prompt,
+            offset_mapping=encoding["offset_mapping"] if want_offsets else None,
+        ),
     )
     token_ids = tokenized["prompt_token_ids"]
     if (
         want_special_tokens_mask
         and (mask := encoding.get("special_tokens_mask")) is not None
         and len(mask) == len(token_ids)
-        and params._truncation_slice(tokenizer, len(token_ids)) is not None
+        and (truncation := params._truncation_slice(tokenizer, len(token_ids)))
+        is not None
     ):
-        tokenized["prompt_special_tokens_mask"] = mask
+        tokenized["prompt_special_tokens_mask"] = mask[truncation]
     return tokenized
+
+
+def _get_detokenization_tokens(prompt: TokensPrompt) -> list[int]:
+    token_ids = prompt["prompt_token_ids"]
+    special_tokens_mask = cast(HfTokensPrompt, prompt).pop(
+        "prompt_special_tokens_mask", None
+    )
+    if special_tokens_mask is None:
+        return token_ids
+    # The mask already follows truncation; TokenizeParams pads only token_ids.
+    # IDs beyond the mask are therefore padding tokens.
+    return [
+        token_id
+        for index, token_id in enumerate(token_ids)
+        if index >= len(special_tokens_mask) or not special_tokens_mask[index]
+    ]
+
+
+def detokenize_prompt(tokenizer: TokenizerLike, prompt: TokensPrompt) -> TokensPrompt:
+    """Rebuild prompt text without tokenizer-added special tokens."""
+    prompt["prompt"] = tokenizer.decode(_get_detokenization_tokens(prompt))
+    return prompt
+
+
+async def detokenize_prompt_async(
+    decode: Callable[[list[int]], Awaitable[str]], prompt: TokensPrompt
+) -> TokensPrompt:
+    """Rebuild prompt text using the renderer's asynchronous decoder."""
+    prompt["prompt"] = await decode(_get_detokenization_tokens(prompt))
+    return prompt
 
 
 class HfRenderer(BaseRenderer[HfTokenizer]):
@@ -1153,13 +1193,19 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
 
     def _tokenize_prompt(
         self, prompt: TextPrompt, params: TokenizeParams
-    ) -> TokensPrompt:
+    ) -> HfTokensPrompt:
         return tokenize_prompt(
             self.get_tokenizer(),
             prompt,
             params,
             want_offsets=self._wants_offsets(prompt, params),
         )
+
+    def _detokenize_prompt(self, prompt: TokensPrompt) -> TokensPrompt:
+        return detokenize_prompt(self.get_tokenizer(), prompt)
+
+    async def _detokenize_prompt_async(self, prompt: TokensPrompt) -> TokensPrompt:
+        return await detokenize_prompt_async(self._async_tokenizer_decode, prompt)
 
     def render_messages(
         self,

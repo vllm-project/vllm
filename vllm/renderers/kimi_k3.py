@@ -16,7 +16,12 @@ from vllm.tokenizers.hf import HfTokenizer
 from vllm.utils.async_utils import make_async
 
 from .base import BaseRenderer
-from .hf import tokenize_prompt
+from .hf import (
+    HfTokensPrompt,
+    detokenize_prompt,
+    detokenize_prompt_async,
+    tokenize_prompt,
+)
 from .inputs import DictPrompt
 from .inputs.preprocess import parse_dec_only_prompt
 from .params import ChatParams, TokenizeParams
@@ -159,13 +164,19 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
 
     def _tokenize_prompt(
         self, prompt: TextPrompt, params: TokenizeParams
-    ) -> TokensPrompt:
+    ) -> HfTokensPrompt:
         return tokenize_prompt(
             self.get_tokenizer(),
             prompt,
             params,
             want_offsets=self._wants_offsets(prompt, params),
         )
+
+    def _detokenize_prompt(self, prompt: TokensPrompt) -> TokensPrompt:
+        return detokenize_prompt(self.get_tokenizer(), prompt)
+
+    async def _detokenize_prompt_async(self, prompt: TokensPrompt) -> TokensPrompt:
+        return await detokenize_prompt_async(self._async_tokenizer_decode, prompt)
 
     def _apply_chat_template(
         self,

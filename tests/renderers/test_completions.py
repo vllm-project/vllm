@@ -138,7 +138,13 @@ def _preprocess_prompt(
     "renderer_mode",
     ["deepseek_v32", "deepseek_v4", "deepseek_v41", "kimi_k3", "inkling"],
 )
-async def test_native_hf_renderer_truncated_echo(tmp_path, renderer_mode):
+@pytest.mark.parametrize(
+    ("truncation_side", "expected"),
+    [("left", "<bos> Hello world"), ("right", "<bos> Hello")],
+)
+async def test_native_hf_renderer_truncated_echo(
+    tmp_path, renderer_mode, truncation_side, expected
+):
     from tokenizers import Tokenizer, models, pre_tokenizers
     from transformers import OPTConfig, TokenizersBackend
 
@@ -167,15 +173,16 @@ async def test_native_hf_renderer_truncated_echo(tmp_path, renderer_mode):
     params = TokenizeParams(
         max_total_tokens=32,
         truncate_prompt_tokens=3,
-        truncation_side="right",
+        truncation_side=truncation_side,
         needs_detokenization=True,
     )
     try:
         (sync,) = renderer.render_cmpl([{"prompt": prompt}], params)
         (asynchronous,) = await renderer.render_cmpl_async([{"prompt": prompt}], params)
+        section = slice(-3, None) if truncation_side == "left" else slice(0, 3)
         for result in (sync, asynchronous):
-            assert result["prompt"] == "<bos> Hello"
-            assert result["prompt_token_ids"] == tokenizer.encode(prompt)[:3]
+            assert result["prompt"] == expected
+            assert result["prompt_token_ids"] == tokenizer.encode(prompt)[section]
     finally:
         renderer.shutdown()
 
