@@ -663,3 +663,92 @@ def test_flashinfer_plan_cache_is_bounded_without_invalidating_graphs():
     assert _flashinfer_plan.cache_info().currsize <= 8
     graph.replay()
     torch.testing.assert_close(captured, captured_expected, atol=0.00390625, rtol=0.01)
+
+
+def test_dash_mixed_forward_does_not_read_cuda_metadata(dist_init):
+    """A decode sharing a prefill batch must keep metadata on the host."""
+    from tests.v1.attention.utils import (
+        BatchSpec,
+        create_common_attn_metadata,
+        create_standard_kv_cache_spec,
+        create_vllm_config,
+    )
+    from vllm.config import set_current_vllm_config
+    from vllm.forward_context import get_forward_context, set_forward_context
+    from vllm.model_executor.layers.dash_attention import (
+        PAGE_POSITIONS_KEY,
+        TOKEN_ROLES_KEY,
+        DASHAttention,
+        prompt_page_positions,
+    )
+
+    config = create_vllm_config(model_name="baidu/Unlimited-OCR-2", max_num_seqs=3)
+    text = config.model_config.hf_text_config
+    device = torch.device("cuda")
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[3, 5, 0], query_lens=[1, 5, 0]),
+        16,
+        device,
+        arange_block_indices=True,
+    )
+    slots = torch.tensor([2, 16, 17, 18, 19, 20], device=device)
+    common = common.replace(slot_mapping=slots)
+    with set_current_vllm_config(config):
+        with torch.device(device):
+            layer = DASHAttention(
+                config,
+                text,
+                text.hidden_size,
+                text.num_attention_heads,
+                prefix="model.layers.0.self_attn",
+            ).to(torch.bfloat16)
+            for parameter in layer.parameters():
+                torch.nn.init.normal_(parameter, std=0.01)
+            layer.attn.kv_cache = torch.zeros(
+                2,
+                16,
+                layer.num_kv_heads + 1,
+                2 * layer.head_dim,
+                dtype=torch.bfloat16,
+            ).permute(0, 2, 1, 3)
+        builder = layer.attn.get_attn_backend().get_builder_cls()(
+            create_standard_kv_cache_spec(config),
+            [layer.attn.layer_name],
+            config,
+            device,
+        )
+        metadata = builder.build(0, common)
+        sp = text.sparse_attention_config
+        positions = torch.cat(
+            [
+                prompt_page_positions(
+                    [sp["page_token_id"], sp["image_token_id"], 0], sp
+                )[:, -1:],
+                prompt_page_positions(
+                    [sp["page_token_id"]] + [sp["image_token_id"]] * 3 + [0], sp
+                ),
+            ],
+            dim=1,
+        ).to(device)
+        hidden = torch.randn(6, text.hidden_size, dtype=torch.bfloat16, device=device)
+        with (
+            set_forward_context(
+                {layer.attn.layer_name: metadata},
+                config,
+                slot_mapping={layer.attn.layer_name: slots},
+            ),
+            torch.inference_mode(),
+        ):
+            kwargs = get_forward_context().additional_kwargs
+            kwargs[TOKEN_ROLES_KEY] = torch.tensor([0, 2, 1, 1, 1, 0], device=device)
+            kwargs[PAGE_POSITIONS_KEY] = positions
+            expected = layer(positions, hidden)
+            previous = torch.cuda.get_sync_debug_mode()
+            try:
+                torch.cuda.set_sync_debug_mode("error")
+                actual = layer(positions, hidden)
+            finally:
+                torch.cuda.set_sync_debug_mode(previous)
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+        assert metadata.requests == ((0, 0, 1, 3), (1, 1, 6, 5))
+        assert builder.build_for_cudagraph_capture(common).requests == ()

@@ -7,6 +7,7 @@ generated tokens are visible only in the local output window.
 """
 
 import math
+from dataclasses import dataclass, replace
 
 import torch
 import torch.nn.functional as F
@@ -17,9 +18,11 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.rswa_attention import RSWAAttention
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
+from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.triton_attn import (
     TritonAttentionBackend,
     TritonAttentionMetadata,
+    TritonAttentionMetadataBuilder,
 )
 
 
@@ -303,6 +306,47 @@ TOKEN_ROLES_KEY = "unlimited_ocr2_token_roles"
 PAGE_POSITIONS_KEY = "unlimited_ocr2_page_positions"
 
 
+@dataclass
+class DASHAttentionMetadata(TritonAttentionMetadata):
+    requests: tuple[tuple[int, int, int, int], ...] = ()
+
+
+class DASHAttentionMetadataBuilder(TritonAttentionMetadataBuilder):
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> DASHAttentionMetadata:
+        metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
+        requests: tuple[tuple[int, int, int, int], ...] = ()
+        if metadata.max_query_len > 1:
+            starts = common_attn_metadata.query_start_loc_cpu.tolist()
+            lengths_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
+            assert lengths_cpu is not None
+            # OCR2 rejects speculative decoding, so these CPU lengths are exact.
+            lengths = lengths_cpu.tolist()
+            requests = tuple(
+                (request, starts[request], starts[request + 1], length)
+                for request, length in enumerate(lengths)
+                if length > 0 and starts[request + 1] > starts[request]
+            )
+        return DASHAttentionMetadata(**vars(metadata), requests=requests)
+
+    def build_for_cudagraph_capture(
+        self, common_attn_metadata: CommonAttentionMetadata
+    ) -> DASHAttentionMetadata:
+        metadata = super().build_for_cudagraph_capture(common_attn_metadata)
+        assert isinstance(metadata, DASHAttentionMetadata)
+        return replace(metadata, requests=())
+
+
+class DASHAttentionBackend(TritonAttentionBackend):
+    @staticmethod
+    def get_builder_cls() -> type[DASHAttentionMetadataBuilder]:
+        return DASHAttentionMetadataBuilder
+
+
 class DASHAttention(nn.Module):
     def __init__(
         self,
@@ -357,7 +401,7 @@ class DASHAttention(nn.Module):
             num_kv_heads=self.num_kv_heads + 1,
             cache_config=cache_config,
             prefix=f"{prefix}.attn",
-            attn_backend=TritonAttentionBackend,
+            attn_backend=DASHAttentionBackend,
             **attention_kwargs,
         )
 
@@ -389,7 +433,7 @@ class DASHAttention(nn.Module):
             return
         assert isinstance(all_metadata, dict)
         metadata = all_metadata[self.attn.layer_name]
-        assert isinstance(metadata, TritonAttentionMetadata)
+        assert isinstance(metadata, DASHAttentionMetadata)
         assert roles is not None
         assert isinstance(context.slot_mapping, dict)
         slots = context.slot_mapping[self.attn.layer_name]
@@ -418,19 +462,8 @@ class DASHAttention(nn.Module):
                 )
             )
         else:
-            starts = metadata.query_start_loc.tolist()
-            first_slots = slots[
-                metadata.query_start_loc[:-1].clamp_max(slots.shape[0] - 1)
-            ]
-            lengths, first_slots_cpu = torch.stack(
-                (metadata.seq_lens, first_slots)
-            ).tolist()
             result.zero_()
-            for request, length in enumerate(lengths):
-                start, end = starts[request : request + 2]
-                # Padding and capture rows have no assigned KV slots.
-                if start == end or first_slots_cpu[request] < 0:
-                    continue
+            for request, start, end, length in metadata.requests:
                 if end - start == 1:
                     result[start:end] = paged_dash_decode(
                         q[start:end],
