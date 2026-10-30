@@ -7,7 +7,6 @@ import torch
 
 import vllm.lora.ops.torch_ops as torch_ops
 import vllm.lora.ops.triton_ops as triton_ops
-from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.lora.ops.triton_ops import LoRAKernelMeta
 from vllm.lora.ops.triton_ops.utils import _LORA_A_PTR_DICT, _LORA_B_PTR_DICT
 from vllm.platforms import current_platform
@@ -35,13 +34,6 @@ def reset_device(reset_default_device):
 def cleanup_fixture():
     """Override conftest's cleanup_fixture— not needed for punica tests."""
     yield
-
-
-@pytest.fixture(autouse=True, scope="module")
-def cleanup_after_module():
-    """Release this module's cached GPU memory before later engine tests."""
-    yield
-    cleanup_dist_env_and_memory()
 
 
 @pytest.fixture(autouse=True)
