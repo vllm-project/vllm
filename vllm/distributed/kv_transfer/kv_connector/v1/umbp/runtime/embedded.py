@@ -763,6 +763,11 @@ def _configure_dram(client_config: Any, options: dict[str, Any]) -> None:
     for option, field in option_fields.items():
         if option in options:
             setattr(dram, field, options[option])
+    if not dram.low_watermark < dram.high_watermark:
+        raise ValueError(
+            f"dram_low_watermark ({dram.low_watermark}) must be below "
+            f"dram_high_watermark ({dram.high_watermark}), or MORI never evicts"
+        )
 
 
 def _resolve_embedded_options(config: UMBPRuntimeConfig) -> dict[str, Any]:
@@ -783,8 +788,8 @@ def _resolve_embedded_options(config: UMBPRuntimeConfig) -> dict[str, Any]:
         ):
             raise ValueError(f"{name} must be in (0, 1]")
     low, high = options.get("dram_low_watermark"), options.get("dram_high_watermark")
-    if low is not None and high is not None and low > high:
-        raise ValueError("dram_low_watermark must not exceed dram_high_watermark")
+    if low is not None and high is not None and low >= high:
+        raise ValueError("dram_low_watermark must be below dram_high_watermark")
     if "dram_numa_node" in options and (
         type(options["dram_numa_node"]) is not int or options["dram_numa_node"] < -1
     ):
