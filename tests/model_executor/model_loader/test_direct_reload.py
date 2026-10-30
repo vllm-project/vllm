@@ -353,6 +353,21 @@ class TestRefusals:
         with pytest.raises(RuntimeError, match="online quantization"):
             _cold_start(_checkpoint())
 
+    def test_humming_moe_refused(self, monkeypatch):
+        # its post-load processing runs only once per quant method
+        from vllm.model_executor.layers.quantization.humming import HummingMoEMethod
+
+        humming = object.__new__(HummingMoEMethod)
+        init = _ToyModel.__init__
+
+        def with_humming_layer(self):
+            init(self)
+            self.proj.quant_method = humming
+
+        monkeypatch.setattr(_ToyModel, "__init__", with_humming_layer)
+        with pytest.raises(RuntimeError, match="humming MoE"):
+            _cold_start(_checkpoint())
+
     def test_replaced_param_refused(self):
         # a new Parameter under a checkpoint name has no checkpoint layout:
         # the loader would write checkpoint bytes into its runtime layout
