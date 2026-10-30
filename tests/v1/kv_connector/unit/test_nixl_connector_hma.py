@@ -84,6 +84,7 @@ def region_pull_worker():
     worker._group_spec_types = (MLAAttentionSpec, MLAAttentionSpec)
     worker.region_group_ids = [0, 1]
     worker.dst_region_group_ids = {"P": [0, 0]}
+    worker._remote_pp_stages = {}
     worker._dst_pairs = {
         "P": bw._RegionPairs.by_index(2, groups=[0, 1], groups_match=False)
     }
@@ -194,6 +195,7 @@ def test_dcp_region_pull(region_pull_worker, num_pages, region_groups):
     worker.region_group_ids = list(region_groups)
     worker.num_regions = len(region_groups)
     worker.dst_region_group_ids = {"P": [0] * worker.num_regions}
+    worker._remote_pp_stages = {}
     worker._dst_pairs = {
         "P": bw._RegionPairs.by_index(
             worker.num_regions, groups=region_groups, groups_match=False
@@ -724,6 +726,7 @@ def test_read_blocks_for_req_expands_remote_ids(
     remote_engine_id = "remote-engine"
     worker.region_group_ids = list(range(len(resolved_types)))
     worker.dst_region_group_ids = {remote_engine_id: list(worker.region_group_ids)}
+    worker._remote_pp_stages = {}
     worker._dst_pairs = {
         remote_engine_id: bw._RegionPairs.by_index(
             len(resolved_types), groups=worker.region_group_ids
@@ -2375,6 +2378,7 @@ def test_push_write_hybrid_mla_replicates_attention():
     worker.src_xfer_handles_by_block_size = {4: 300}
     worker.region_group_ids = [0, 1]
     worker.dst_region_group_ids = {engine_id: [0, 1]}
+    worker._remote_pp_stages = {}
     worker._dst_pairs = {engine_id: bw._RegionPairs.by_index(2, groups=[0, 1])}
     worker._sending_transfers = defaultdict(list)
     worker._sending_transfers_lock = threading.Lock()
