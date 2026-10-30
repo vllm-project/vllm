@@ -288,27 +288,49 @@ impl ChatRequestProcessor {
     /// for lowering.
     pub async fn prepare(
         &self,
-        mut request: ChatRequest,
+        request: ChatRequest,
         text_processor: &TextRequestProcessor,
     ) -> Result<PreparedChatRequest> {
+        let (text_request, mut output_processors, prompt_text) =
+            self.prepare_for_outputs(request, text_processor, 1).await?;
+        Ok(PreparedChatRequest {
+            text_request,
+            output_processor: output_processors.pop().expect("one output processor requested"),
+            prompt_text,
+        })
+    }
+
+    /// Like [`Self::prepare`], with one output processor per output sequence.
+    async fn prepare_for_outputs(
+        &self,
+        mut request: ChatRequest,
+        text_processor: &TextRequestProcessor,
+        num_outputs: usize,
+    ) -> Result<(TextRequest, Vec<DynChatOutputProcessor>, Option<String>)> {
         request.validate()?;
         self.map_reasoning_effort(&mut request);
 
-        let mut output_processor = self.backend.new_chat_output_processor(
-            &mut request,
-            NewChatOutputProcessorOptions {
-                tool_call_parser: &self.tool_call_parser,
-                reasoning_parser: &self.reasoning_parser,
-                tool_strict_level: self.tool_strict_level,
-            },
-        )?;
+        let mut output_processors = (0..num_outputs)
+            .map(|_| {
+                self.backend.new_chat_output_processor(
+                    &mut request,
+                    NewChatOutputProcessorOptions {
+                        tool_call_parser: &self.tool_call_parser,
+                        reasoning_parser: &self.reasoning_parser,
+                        tool_strict_level: self.tool_strict_level,
+                    },
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
         let (mut text_request, prompt_text) = self.prepare_text_request(request).await?;
 
-        // Initialize the output processor from the final prompt token IDs and apply
-        // the output grammar to the request, if any.
+        // Initialize the output processors from the final prompt token IDs and
+        // apply the output grammar to the request, if any.
         let prompt_token_ids = text_processor.tokenize_in_place(&mut text_request)?;
-        output_processor.initialize(prompt_token_ids)?;
-        let grammar = output_processor.build_output_grammar()?;
+        for output_processor in &mut output_processors {
+            output_processor.initialize(prompt_token_ids)?;
+        }
+        let grammar = output_processors[0].build_output_grammar()?;
         // Output grammars are xgrammar structural tags. With another backend the
         // request keeps its own constraint and parsing runs unconstrained.
         match text_processor.structured_outputs_backend() {
@@ -326,11 +348,7 @@ impl ChatRequestProcessor {
             }
         }
 
-        Ok(PreparedChatRequest {
-            text_request,
-            output_processor,
-            prompt_text,
-        })
+        Ok((text_request, output_processors, prompt_text))
     }
 }
 
