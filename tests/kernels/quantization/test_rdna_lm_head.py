@@ -16,7 +16,10 @@ import pytest
 import torch
 
 from vllm.config import KernelConfig, VllmConfig, set_current_vllm_config
-from vllm.model_executor.kernels.linear.mixed_precision import rdna_hybrid_w4a16
+from vllm.model_executor.kernels.linear.mixed_precision import (
+    rdna_hybrid_w4a16,
+    rdna_w8a16,
+)
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.online import rdna_lm_head
 from vllm.model_executor.layers.quantization.online.int4_lm_head import (
@@ -25,6 +28,11 @@ from vllm.model_executor.layers.quantization.online.int4_lm_head import (
     pack_zero_points,
     quantize_int4_rows,
     quantize_lm_head_int4,
+)
+from vllm.model_executor.layers.quantization.online.int8_lm_head import (
+    Int8LMHeadMethod,
+    Int8PerGroup32LMHeadMethod,
+    quantize_lm_head_int8,
 )
 from vllm.model_executor.layers.quantization.online.rdna_lm_head import (
     RdnaLMHeadMethod,
@@ -59,6 +67,13 @@ def _dequantize_int4(codes, scales, zero_points, group_size=GROUP_SIZE):
     return (codes.float() - zero_point) * scale
 
 
+def _dequantize_int8(codes, scales):
+    """Per-channel scales are [N], per-group ones [N, K // group_size]."""
+    scales = scales.float().view(codes.shape[0], -1)
+    groups = codes.float().unflatten(-1, (scales.shape[1], -1))
+    return (groups * scales[..., None]).flatten(-2)
+
+
 @dataclass(frozen=True)
 class Scheme:
     method: type[RdnaLMHeadMethod]
@@ -85,6 +100,28 @@ SCHEMES = [
             full_precision_tol=0.12,
         ),
         id="int4_per_group_32",
+    ),
+    pytest.param(
+        Scheme(
+            method=Int8LMHeadMethod,
+            reference=lambda w: _dequantize_int8(*quantize_lm_head_int8(w)),
+            weight_dtype=torch.int8,
+            weight_cols=lambda k: k,
+            # Measured 8.4e-3, against 8.2e-2 for int4_per_group_32.
+            full_precision_tol=0.015,
+        ),
+        id="int8_per_channel",
+    ),
+    pytest.param(
+        Scheme(
+            method=Int8PerGroup32LMHeadMethod,
+            reference=lambda w: _dequantize_int8(*quantize_lm_head_int8(w, 32)),
+            weight_dtype=torch.int8,
+            weight_cols=lambda k: k,
+            # Measured 5.5e-3; per-channel scales (8.4e-3) would fail it.
+            full_precision_tol=0.0075,
+        ),
+        id="int8_per_group_32",
     ),
 ]
 
@@ -209,7 +246,8 @@ def test_quantized_head_does_not_reuse_loaded_weight(scheme, tie, monkeypatch):
     monkeypatch.setattr(rdna_lm_head, "_on_gfx1x", lambda: True)
     # Without the gfx1151 row padding the quantized weight is contiguous, the
     # case where reusing the loaded storage would overwrite it.
-    monkeypatch.setattr(rdna_hybrid_w4a16, "_on_gfx1151", lambda: False)
+    for module in (rdna_hybrid_w4a16, rdna_w8a16):
+        monkeypatch.setattr(module, "_on_gfx1151", lambda: False)
     head, embed = _loaded_head(scheme, torch.bfloat16, tie=tie, device="cpu")
     loaded = head.weight
     embed_weight = embed.weight.detach().clone()
@@ -275,3 +313,43 @@ def test_quantize_lm_head_int4_layout():
     assert torch.equal(_unshuffle(w_q), codes)
     assert torch.equal(w_s, scales)
     assert torch.equal(w_zp, pack_zero_points(zero_points))
+
+
+# int8 quantizer (per channel and per group)
+
+INT8_GROUP_SIZES = pytest.mark.parametrize(
+    "group_size", [None, 32], ids=["per_channel", "g32"]
+)
+
+
+@INT8_GROUP_SIZES
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_quantize_lm_head_int8_error_bound(dtype, group_size):
+    torch.manual_seed(0)
+    weight = (torch.randn(64, 256) * 0.02).to(dtype)
+    weight[-8:] = 0  # vocab padding rows
+    codes, scales = quantize_lm_head_int8(weight, group_size)
+
+    assert codes.shape == (64, 256) and codes.dtype == torch.int8
+    expected = (64,) if group_size is None else (64, 256 // group_size)
+    assert scales.shape == expected and scales.dtype == dtype
+    assert int(codes.min()) >= -127 and int(codes.max()) <= 127
+
+    dequant = _dequantize_int8(codes, scales)
+    error = (dequant - weight.float()).abs()
+    # Rounding the scale to the model dtype can push a group's amax just past
+    # 127 steps, but by less than half a step, so the clamp stays within it.
+    step = _dequantize_int8(torch.ones_like(codes), scales)
+    assert (error <= step / 2).all()
+    assert torch.equal(dequant[-8:], torch.zeros(8, 256))
+
+
+@INT8_GROUP_SIZES
+def test_quantize_lm_head_int8_chunks_match(group_size):
+    torch.manual_seed(0)
+    weight = (torch.randn(96, 128) * 0.02).to(torch.bfloat16)
+    codes, scales = quantize_lm_head_int8(weight, group_size, chunk_rows=40)
+    ref_codes, ref_scales = quantize_lm_head_int8(weight, group_size, chunk_rows=96)
+
+    assert torch.equal(codes, ref_codes)
+    assert torch.equal(scales, ref_scales)

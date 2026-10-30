@@ -98,13 +98,23 @@ def _maybe_quantize_lm_head(
 ) -> QuantizeMethodBase:
     """Swap in the method selected by ``KernelConfig.lm_head_quantization``."""
     vllm_config = get_current_vllm_config_or_none()
-    if vllm_config is None or vllm_config.kernel_config.lm_head_quantization is None:
+    if vllm_config is None:
         return quant_method
+    quantization = vllm_config.kernel_config.lm_head_quantization
+    if quantization is None:
+        return quant_method
+    # Imported lazily so startup does not load the ROCm-only kernels.
     from vllm.model_executor.layers.quantization.online.int4_lm_head import (
         Int4LMHeadMethod,
     )
+    from vllm.model_executor.layers.quantization.online.int8_lm_head import (
+        Int8LMHeadMethod,
+        Int8PerGroup32LMHeadMethod,
+    )
 
-    return Int4LMHeadMethod.from_config(quant_method, vllm_config, prefix)
+    methods = (Int4LMHeadMethod, Int8LMHeadMethod, Int8PerGroup32LMHeadMethod)
+    method = {m.scheme: m for m in methods}[quantization]
+    return method.from_config(quant_method, vllm_config, prefix)
 
 
 def pad_vocab_size(vocab_size: int, pad_to: int = DEFAULT_VOCAB_PADDING_SIZE) -> int:
