@@ -25,14 +25,14 @@ _VLLM_RENDERERS = {
     "deepseek_v32": ("deepseek_v32", "DeepseekV32Renderer"),
     "deepseek_v4": ("deepseek_v4", "DeepseekV4Renderer"),
     "deepseek_v41": ("deepseek_v4", "DeepseekV41Renderer"),
-    "hf": ("hf", "HfRenderer"),
     "glm5_next": ("hf", "HfRenderer"),
-    "unlimited_ocr2": ("unlimited_ocr2", "UnlimitedOCR2Renderer"),
+    "hf": ("hf", "HfRenderer"),
+    "inkling": ("inkling", "InklingRenderer"),
     "kimi_audio": ("hf", "HfRenderer"),
     "kimi_k3": ("kimi_k3", "KimiK3Renderer"),
     "mistral": ("mistral", "MistralRenderer"),
     "terratorch": ("terratorch", "TerratorchRenderer"),
-    "inkling": ("inkling", "InklingRenderer"),
+    "unlimited_ocr2": ("unlimited_ocr2", "UnlimitedOCR2Renderer"),
 }
 
 
