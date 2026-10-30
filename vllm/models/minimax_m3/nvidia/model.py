@@ -249,6 +249,15 @@ def _use_sequence_parallel(vllm_config: VllmConfig) -> bool:
 def _maybe_init_gemm_rs(vllm_config: VllmConfig, use_sequence_parallel: bool) -> bool:
     if not (use_sequence_parallel and envs.VLLM_ENABLE_GEMM_RS):
         return False
+    max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+    if max_num_batched_tokens < _GEMM_RS_MIN_TOKENS:
+        logger.info_once(
+            "MiniMax-M3 GEMM-RS is disabled because max_num_batched_tokens=%d is "
+            "below its %d-token dispatch threshold.",
+            max_num_batched_tokens,
+            _GEMM_RS_MIN_TOKENS,
+        )
+        return False
 
     from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import (
         maybe_init_gemm_rs_ar,
