@@ -48,7 +48,11 @@ from vllm.renderers.chat_utils import (
 from vllm.renderers.chat_utils.content_parser import (
     PROMPT_EMBEDS_PLACEHOLDER_ID_PREFIX,
 )
-from vllm.tokenizers.hf import HfTokenizer, maybe_make_thread_pool
+from vllm.tokenizers.hf import (
+    HfTokenizer,
+    encode_with_special_tokens_mask,
+    maybe_make_thread_pool,
+)
 from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils.async_utils import make_async
@@ -1060,14 +1064,10 @@ def tokenize_prompt(
     if want_offsets:
         kwargs["return_offsets_mapping"] = True
     if want_special_tokens_mask:
-        kwargs["return_special_tokens_mask"] = True
-    try:
-        encoding = tokenizer(prompt["prompt"], **kwargs)
-    except (TypeError, NotImplementedError):
-        if not want_special_tokens_mask:
-            raise
-        want_special_tokens_mask = False
-        kwargs.pop("return_special_tokens_mask")
+        encoding = encode_with_special_tokens_mask(
+            tokenizer, prompt["prompt"], **kwargs
+        )
+    else:
         encoding = tokenizer(prompt["prompt"], **kwargs)
 
     tokenized = cast(
