@@ -193,6 +193,7 @@ from vllm.v1.worker.gpu.spec_decode.round import (
     VerifyPlan,
 )
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+from vllm.v1.worker.gpu.spec_decode.step_observation import StepObservation
 from vllm.v1.worker.gpu.spec_decode.utils import (
     DraftTokensHandler,
     get_drafter_hidden_states,
@@ -220,6 +221,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     # The optional per-step hooks the speculator overrides (see
     # BaseSpeculator.overridden_hooks); none without a speculator.
     speculator_hooks: frozenset[str] = frozenset()
+    # Steps passed to BaseSpeculator.observe_step so far.
+    _num_observed_steps: int = 0
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
@@ -2176,6 +2179,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         valid_dummy_state_slots: bool = False,
         randomize_inputs: bool = False,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
+        start_ns = (
+            time.perf_counter_ns() if "observe_step" in self.speculator_hooks else 0
+        )
         if not dummy_run:
             self.draft_tokens_handler.begin_step(scheduler_output)
             # Update the request states.
@@ -2541,6 +2547,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_spec_tokens_to_schedule=(
                 0 if skip_drafts else scheduler_output.num_spec_tokens_to_schedule
             ),
+            batch_desc=batch_desc,
+            start_ns=start_ns,
         )
 
         if not self.is_last_pp_rank:
@@ -2571,6 +2579,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ec_connector_output = self.execute_model_state.ec_connector_output
         cudagraph_stats = self.execute_model_state.cudagraph_stats
         num_spec_tokens = self.execute_model_state.num_spec_tokens_to_schedule
+        batch_desc = self.execute_model_state.batch_desc
+        start_ns = self.execute_model_state.start_ns
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
@@ -2706,6 +2716,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             accepted_row=self.commit_round(input_batch, accept_result),
         )
         input_batch.accept_result = accept_result
+        # After the commit along the path, before propose: the speculator sees
+        # the step it is about to draft from.
+        if "observe_step" in self.speculator_hooks:
+            self._observe_step(
+                input_batch,
+                batch_desc,
+                start_ns,
+                num_spec_tokens,
+                num_sampled,
+                num_rejected,
+            )
 
         if self.speculator is not None:
             assert self.sampler is not None
@@ -2761,6 +2782,47 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         model_runner_output.ec_connector_output = ec_connector_output
 
         return async_output
+
+    def _observe_step(
+        self,
+        input_batch: InputBatch,
+        batch_desc: BatchExecutionDescriptor | None,
+        start_ns: int,
+        num_spec_tokens: int,
+        num_sampled: torch.Tensor,
+        num_rejected: torch.Tensor,
+    ) -> None:
+        assert self.speculator is not None and batch_desc is not None
+        num_reqs = input_batch.num_reqs
+        num_prefill_tokens = 0
+        if input_batch.has_prefill:
+            prefilling = input_batch.is_prefilling_np[:num_reqs]
+            scheduled = input_batch.num_scheduled_tokens[:num_reqs]
+            num_prefill_tokens = int(scheduled[prefilling].sum())
+        step = self._num_observed_steps
+        self._num_observed_steps = step + 1
+        self.speculator.observe_step(
+            StepObservation(
+                step=step,
+                start_ns=start_ns,
+                req_ids=input_batch.req_ids,
+                num_reqs=num_reqs,
+                num_reqs_padded=input_batch.num_reqs_after_padding,
+                num_tokens=input_batch.num_tokens,
+                num_tokens_padded=input_batch.num_tokens_after_padding,
+                cudagraph_mode=batch_desc.cg_mode,
+                uniform_token_count=batch_desc.uniform_token_count,
+                num_ubatches=batch_desc.num_ubatches,
+                num_prefill_tokens=num_prefill_tokens,
+                num_spec_tokens=num_spec_tokens,
+                num_scheduled_tokens=input_batch.num_scheduled_tokens,
+                num_computed_tokens=input_batch.num_computed_tokens_np,
+                is_prefilling=input_batch.is_prefilling_np,
+                num_draft_tokens=input_batch.num_draft_tokens_per_req,
+                num_sampled=num_sampled,
+                num_rejected=num_rejected,
+            )
+        )
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.draft_tokens_handler.get_draft_tokens()
@@ -2899,6 +2961,10 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: ECConnectorOutput | None
     cudagraph_stats: CUDAGraphStat | None
     num_spec_tokens_to_schedule: int
+    batch_desc: BatchExecutionDescriptor | None = None
+    # time.perf_counter_ns() at execute_model entry, taken only for
+    # BaseSpeculator.observe_step (else 0).
+    start_ns: int = 0
 
 
 class BatchReqState(NamedTuple):

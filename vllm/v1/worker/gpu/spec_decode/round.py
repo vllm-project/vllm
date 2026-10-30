@@ -5,7 +5,8 @@
 A speculative step is a round: the speculator plans the rows the target verifies
 (:class:`VerifyPlan`), the target runs them, the speculator accepts a path through them
 (:class:`AcceptResult`) and the runner commits the KV and the recurrent state along that
-path. :class:`SpecResources` is what speculation holds, declared once at startup.
+path. :class:`SpecResources` is what speculation holds, declared once at startup, and
+:class:`StepObservation` is the read-only record of each step.
 
 Everything a speculator hands the runner is either a frozen dataclass of host integers
 or a device tensor in a buffer the speculator owns and keeps alive for the step. The
@@ -20,6 +21,10 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
+
+from vllm.v1.worker.gpu.spec_decode.step_observation import (
+    StepObservation as _StepObservation,
+)
 
 
 @dataclass(frozen=True)
@@ -215,3 +220,8 @@ class AcceptResult:
     """``[num_rows, vocab]`` the logits after the sampling parameters, in row order,
     when ``accept`` computed them: the runner takes processed logprobs and the
     sampling mask of each committed token from its path row. None: the raw logits."""
+
+
+# Defined with observe_step (step_observation.py); re-exported as part of the
+# round's vocabulary.
+StepObservation = _StepObservation

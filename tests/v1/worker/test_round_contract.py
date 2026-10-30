@@ -50,7 +50,7 @@ requires_kernels = pytest.mark.skipif(
 )
 
 
-def test_round_types_are_versioned_and_plans_state_their_shape():
+def test_plans_state_their_shape():
     resources = SpecResources(
         max_candidates=4, capture_shapes=(PlanShape(4), PlanShape(None))
     )

@@ -54,6 +54,7 @@ from vllm.v1.worker.utils import AttentionGroup
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.pcp_manager import PCPManager
     from vllm.v1.worker.gpu.sample.sampler import Sampler
+    from vllm.v1.worker.gpu.spec_decode.step_observation import StepObservation
 
 logger = init_logger(__name__)
 
@@ -170,6 +171,21 @@ class BaseSpeculator(ABC):
         """
         return None
 
+    def observe_step(self, step: "StepObservation") -> None:  # noqa: B027
+        """Receive the runner's record of a step once it has sampled.
+
+        Called once per step that ran the target forward and sampled, after
+        the runner committed the accepted path (``input_batch.accept_result``
+        is set) and before ``propose``, including steps without drafts
+        (candidate budget 1) and prefill steps. Capture and profiling runs are
+        not observed. With
+        pipeline parallelism only the last rank calls it. Runs on the host;
+        the record holds no copies and the runner does not sync for it, so
+        reading ``step.num_sampled`` on the host would add a sync. The default
+        does nothing, and the runner builds no record for a speculator that
+        does not override it.
+        """
+
     def overridden_hooks(self) -> frozenset[str]:
         """The optional per-step hooks this speculator overrides. The model
         runner reads them once and skips the no-op defaults on every step."""
@@ -178,6 +194,7 @@ class BaseSpeculator(ABC):
             for name in (
                 "plan",
                 "accept",
+                "observe_step",
             )
             if getattr(type(self), name) is not getattr(BaseSpeculator, name)
         )
