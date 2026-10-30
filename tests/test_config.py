@@ -22,6 +22,7 @@ from pydantic import ValidationError
 
 import vllm.config.vllm as vllm_config_module
 import vllm.envs as envs
+from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm.compilation.backends import VllmBackend
 from vllm.config import (
     AttentionConfig,
@@ -58,6 +59,8 @@ from vllm.transformers_utils.config import (
     try_get_dense_modules,
 )
 from vllm.v1.attention.backend import AttentionCGSupport
+from vllm.v1.worker.gpu.spec_decode.dflash2.config import DFlash2SpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.lilicorr.config import LiLiCorrSpeculatorConfig
 
 DEVICE_TYPE = current_platform.device_type
 
@@ -354,6 +357,27 @@ def test_mismatched_float_kv_cache_is_rejected(cache_dtype, model_dtype, should_
         config._reject_mismatched_float_kv_cache()
 
 
+@pytest.mark.parametrize("dcp_size", [1, 2])
+def test_nvfp4_ds_mla_rejects_decode_context_parallelism(dcp_size):
+    # The nvfp4_ds_mla chunked-context gather is not validated under DCP, so
+    # the combination fails at startup instead of on the first request that
+    # carries cached context.
+    kwargs = dict(
+        cache_config=CacheConfig(cache_dtype="nvfp4_ds_mla"),
+        device_config=DeviceConfig(device="cpu"),
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=2,
+            decode_context_parallel_size=dcp_size,
+            distributed_executor_backend="mp",
+        ),
+    )
+    if dcp_size > 1:
+        with pytest.raises(ValueError, match="decode context parallelism"):
+            VllmConfig(**kwargs)
+    else:
+        VllmConfig(**kwargs)
+
+
 def test_per_request_spec_decode_metrics_requires_spec_decode():
     # The flag only makes sense with speculative decoding configured; enabling
     # it without --speculative-config should fail fast rather than silently
@@ -601,7 +625,11 @@ def test_hisparse_requires_v2_model_runner():
 
 
 def test_hisparse_rejects_decode_context_parallelism(monkeypatch):
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        current_platform,
+        "get_hisparse_backend_cls",
+        lambda: "vllm.v1.hisparse.backend.CUDAHiSparseBackend",
+    )
     monkeypatch.setattr(current_platform, "device_count", lambda: 2)
     with pytest.raises(ValueError, match="decode context parallelism"):
         VllmConfig(
@@ -614,7 +642,11 @@ def test_hisparse_rejects_decode_context_parallelism(monkeypatch):
 
 
 def test_hisparse_rejects_pipeline_parallelism(monkeypatch):
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        current_platform,
+        "get_hisparse_backend_cls",
+        lambda: "vllm.v1.hisparse.backend.CUDAHiSparseBackend",
+    )
     monkeypatch.setattr(current_platform, "device_count", lambda: 2)
     with pytest.raises(ValueError, match="pipeline parallelism"):
         VllmConfig(
@@ -624,7 +656,11 @@ def test_hisparse_rejects_pipeline_parallelism(monkeypatch):
 
 
 def test_hisparse_rejects_full_cudagraph_mode(monkeypatch):
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        current_platform,
+        "get_hisparse_backend_cls",
+        lambda: "vllm.v1.hisparse.backend.CUDAHiSparseBackend",
+    )
     monkeypatch.setattr(current_platform, "support_static_graph_mode", lambda: True)
     monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
     with pytest.raises(ValueError, match="does not support cudagraph_mode=FULL"):
@@ -635,7 +671,11 @@ def test_hisparse_rejects_full_cudagraph_mode(monkeypatch):
 
 
 def test_hisparse_rejects_disabled_hybrid_kv_cache_manager(monkeypatch):
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        current_platform,
+        "get_hisparse_backend_cls",
+        lambda: "vllm.v1.hisparse.backend.CUDAHiSparseBackend",
+    )
     monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
     with pytest.raises(ValueError, match="requires the hybrid KV cache manager"):
         VllmConfig(
@@ -649,7 +689,11 @@ def test_hisparse_rejects_disabled_hybrid_kv_cache_manager(monkeypatch):
 
 
 def test_hisparse_rejects_disabled_full_isl_reservation(monkeypatch):
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        current_platform,
+        "get_hisparse_backend_cls",
+        lambda: "vllm.v1.hisparse.backend.CUDAHiSparseBackend",
+    )
     with pytest.raises(ValueError, match="requires --scheduler-reserve-full-isl"):
         VllmConfig(
             attention_config=AttentionConfig(hisparse_config=HiSparseConfig()),
@@ -661,9 +705,9 @@ def test_hisparse_rejects_disabled_full_isl_reservation(monkeypatch):
         )
 
 
-def test_hisparse_rejects_non_cuda(monkeypatch):
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: False)
-    with pytest.raises(ValueError, match="requires NVIDIA CUDA"):
+def test_hisparse_rejects_unsupported_platform(monkeypatch):
+    monkeypatch.setattr(current_platform, "get_hisparse_backend_cls", lambda: None)
+    with pytest.raises(ValueError, match="platform does not support HiSparse"):
         VllmConfig(attention_config=AttentionConfig(hisparse_config=HiSparseConfig()))
 
 
@@ -711,7 +755,11 @@ def test_hisparse_rejects_non_cuda(monkeypatch):
     ids=["standalone", "multi-connector", "pd-decode"],
 )
 def test_hisparse_connector_implies_attention_config(monkeypatch, kv_transfer_config):
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        current_platform,
+        "get_hisparse_backend_cls",
+        lambda: "vllm.v1.hisparse.backend.CUDAHiSparseBackend",
+    )
     monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
     config = VllmConfig(
         kv_transfer_config=kv_transfer_config,
@@ -727,7 +775,11 @@ def test_hisparse_connector_implies_attention_config(monkeypatch, kv_transfer_co
 
 
 def test_hisparse_connector_preserves_explicit_attention_config(monkeypatch):
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        current_platform,
+        "get_hisparse_backend_cls",
+        lambda: "vllm.v1.hisparse.backend.CUDAHiSparseBackend",
+    )
     monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
     config = VllmConfig(
         attention_config=AttentionConfig(
@@ -747,9 +799,9 @@ def test_hisparse_connector_preserves_explicit_attention_config(monkeypatch):
     assert config.attention_config.hisparse_config.device_buffer_size == 512
 
 
-def test_hisparse_connector_without_cuda_still_rejected(monkeypatch):
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: False)
-    with pytest.raises(ValueError, match="requires NVIDIA CUDA"):
+def test_hisparse_connector_with_unsupported_platform_rejected(monkeypatch):
+    monkeypatch.setattr(current_platform, "get_hisparse_backend_cls", lambda: None)
+    with pytest.raises(ValueError, match="platform does not support HiSparse"):
         VllmConfig(
             kv_transfer_config=KVTransferConfig(
                 kv_connector="HiSparseConnector",
@@ -827,7 +879,7 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
     config = SimpleNamespace(
         model_config=model_config,
         attention_config=AttentionConfig(),
-        speculative_config=SimpleNamespace(method="mtp") if with_mtp else None,
+        speculative_config=fake_speculative_config(method="mtp") if with_mtp else None,
         parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
         compilation_config=CompilationConfig(
             cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
@@ -979,7 +1031,7 @@ def test_v2_model_runner_supports_speculative_method(method):
     config = VllmConfig()
     config.speculative_config = cast(
         SpeculativeConfig,
-        SimpleNamespace(
+        fake_speculative_config(
             method=method,
             parallel_drafting=False,
             enable_adaptive_verification=False,
@@ -999,7 +1051,7 @@ def test_v2_model_runner_heterogeneous_vocab_draft_falls_back_to_v1(
     config = VllmConfig()
     config.speculative_config = cast(
         SpeculativeConfig,
-        SimpleNamespace(
+        fake_speculative_config(
             method="draft_model",
             parallel_drafting=False,
             enable_adaptive_verification=False,
@@ -1691,7 +1743,9 @@ def test_engram_tensor_parallel_size(dp_size: int, across_dp: bool, expected: in
     assert config.get_parallel_size(parallel) == expected
 
 
-@pytest.mark.parametrize("option", ["embedding_across_dp", "dp_shared_memory"])
+@pytest.mark.parametrize(
+    "option", ["embedding_across_dp", "dp_shared_memory", "disk_offload"]
+)
 def test_engram_rejects_elastic_cross_dp(option):
     parallel = ParallelConfig(
         tensor_parallel_size=4,
@@ -1877,6 +1931,23 @@ def test_deepseek_engram_rejects_microbatching(explicit, enable_dbo, ubatch_size
         VllmConfig._resolve_and_verify_engram_config(config)
 
 
+@pytest.mark.parametrize("threshold,expected", [(7, 8), (8, 8), (16, 16)])
+def test_dbo_thresholds_cover_a_request_per_microbatch(threshold, expected):
+    # Verifying 3 drafts: 4 tokens per request, so 2 microbatches need 8.
+    parallel_config = ParallelConfig(
+        enable_dbo=True,
+        dbo_decode_token_threshold=threshold,
+        dbo_prefill_token_threshold=threshold,
+    )
+    config = cast(
+        VllmConfig,
+        SimpleNamespace(uniform_decode_query_len=4, parallel_config=parallel_config),
+    )
+    VllmConfig._raise_dbo_thresholds_for_spec_decode(config)
+    assert parallel_config.dbo_decode_token_threshold == expected
+    assert parallel_config.dbo_prefill_token_threshold == expected
+
+
 def test_engram_explicit_config_requires_supported_model():
     """Explicit all-false settings still opt into model validation."""
     with pytest.raises(ValueError, match="requires a model with supported Engram"):
@@ -1915,12 +1986,46 @@ def test_engram_draft_config_validates_target(monkeypatch, target_has_ple, expli
             assert config.engram_config.cpu_offload is True
 
 
+@pytest.mark.parametrize(
+    ("architecture", "layer_field", "rocm", "expect_error"),
+    [
+        pytest.param(
+            "DeepseekV41ForCausalLM", "engram_layer_ids", False, True, id="deepseek"
+        ),
+        pytest.param(
+            "Qwen4ExpForCausalLM", "ple_layer_ids", True, True, id="qwen4exp_rocm"
+        ),
+        pytest.param(
+            "Qwen4ExpForCausalLM", "ple_layer_ids", False, False, id="qwen4exp_cuda"
+        ),
+    ],
+)
+def test_engram_disk_offload_requires_cuda_qwen4exp(
+    monkeypatch, architecture, layer_field, rocm, expect_error
+):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: not rocm)
+    model = cast(
+        ModelConfig,
+        SimpleNamespace(
+            architecture=architecture,
+            hf_text_config=SimpleNamespace(**{layer_field: [1]}),
+        ),
+    )
+    config = EngramConfig(disk_offload=True)
+    if expect_error:
+        with pytest.raises(ValueError, match="disk_offload"):
+            config.verify_model_config(model)
+    else:
+        config.verify_model_config(model)
+
+
 def test_engram_hash_tracks_execution_options():
     configs = [
         EngramConfig(cpu_offload=True),
         EngramConfig(cpu_offload=False),
         EngramConfig(cpu_offload=True, embedding_across_dp=True),
         EngramConfig(cpu_offload=True, dp_shared_memory=True),
+        EngramConfig(disk_offload=True),
     ]
     assert len({config.compute_hash() for config in configs}) == len(configs)
 
@@ -3710,7 +3815,7 @@ def test_target_only_gumbel_allows_speculative_decoding(caplog_vllm, disable_log
     config.watermark_config = WatermarkConfig(
         key=42, allow_target_only_watermarking=True
     )
-    config.speculative_config = SimpleNamespace(
+    config.speculative_config = fake_speculative_config(
         method="mtp",
         draft_sample_method="probabilistic",
         rejection_sample_method="standard",
@@ -3730,7 +3835,7 @@ def test_speculative_watermarking_without_context_dedup_does_not_warn(
     config.watermark_config = WatermarkConfig(
         algorithm="dual_key_gumbel", key=42, deduplicate_contexts="none"
     )
-    config.speculative_config = SimpleNamespace(
+    config.speculative_config = fake_speculative_config(
         method="mtp",
         draft_sample_method="probabilistic",
         rejection_sample_method="standard",
@@ -3751,7 +3856,7 @@ def test_speculative_context_dedup_logs_no_unsupported_warning(
     config.watermark_config = WatermarkConfig(
         algorithm="dual_key_gumbel", key=42, deduplicate_contexts="single_turn"
     )
-    config.speculative_config = SimpleNamespace(
+    config.speculative_config = fake_speculative_config(
         method="mtp",
         draft_sample_method="probabilistic",
         rejection_sample_method="standard",
@@ -3770,7 +3875,7 @@ def test_gumbel_rejects_speculative_decoding_without_target_only():
     config.watermark_config = WatermarkConfig(
         algorithm="gumbel", key=42, allow_target_only_watermarking=False
     )
-    config.speculative_config = SimpleNamespace(
+    config.speculative_config = fake_speculative_config(
         method="mtp",
         draft_sample_method="probabilistic",
         rejection_sample_method="standard",
@@ -3788,7 +3893,7 @@ def test_dual_key_gumbel_warns_that_configured_alpha_is_unused(
     config.watermark_config = WatermarkConfig(
         algorithm="dual_key_gumbel", key=42, alpha=0.25
     )
-    config.speculative_config = SimpleNamespace(
+    config.speculative_config = fake_speculative_config(
         method="mtp",
         draft_sample_method="probabilistic",
         rejection_sample_method="standard",
@@ -3814,7 +3919,7 @@ def test_dual_key_gumbel_alpha_warning_is_not_emitted(
         algorithm="dual_key_gumbel", key=42, alpha=alpha
     )
     if speculative:
-        config.speculative_config = SimpleNamespace(
+        config.speculative_config = fake_speculative_config(
             method="mtp",
             draft_sample_method="probabilistic",
             rejection_sample_method="standard",
@@ -3830,7 +3935,7 @@ def test_dual_key_gumbel_alpha_warning_is_not_emitted(
 def test_dual_key_gumbel_requires_probabilistic_drafting():
     config = _watermarked_vllm_config()
     config.watermark_config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
-    config.speculative_config = SimpleNamespace(
+    config.speculative_config = fake_speculative_config(
         method="mtp",
         draft_sample_method="greedy",
         rejection_sample_method="standard",
@@ -3856,7 +3961,7 @@ def test_dual_key_gumbel_supports_probabilistic_speculative_decoding(
 ):
     config = _watermarked_vllm_config()
     config.watermark_config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
-    config.speculative_config = SimpleNamespace(
+    config.speculative_config = fake_speculative_config(
         method=method,
         draft_sample_method="probabilistic",
         rejection_sample_method="standard",
@@ -3866,11 +3971,18 @@ def test_dual_key_gumbel_supports_probabilistic_speculative_decoding(
     config._check_supports_watermarking()
 
 
+_DFLASH_CANDIDATE_SPECULATOR_CONFIGS = {
+    "DFlash2DraftModel": DFlash2SpeculatorConfig,
+    "LiLiCorrDraftModel": LiLiCorrSpeculatorConfig,
+}
+
+
 @pytest.mark.parametrize("architecture", ["DFlash2DraftModel", "LiLiCorrDraftModel"])
 def test_dual_key_gumbel_rejects_dflash_candidate_drafts(architecture):
     config = _watermarked_vllm_config()
     config.watermark_config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
-    config.speculative_config = SimpleNamespace(
+    config.speculative_config = fake_speculative_config(
+        _DFLASH_CANDIDATE_SPECULATOR_CONFIGS[architecture],
         method="dflash",
         draft_sample_method="probabilistic",
         rejection_sample_method="standard",
@@ -3885,7 +3997,7 @@ def test_dual_key_gumbel_rejects_dflash_candidate_drafts(architecture):
 def test_dual_key_gumbel_rejects_unsupported_speculative_method():
     config = _watermarked_vllm_config()
     config.watermark_config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
-    config.speculative_config = SimpleNamespace(
+    config.speculative_config = fake_speculative_config(
         method="ngram",
         draft_sample_method="probabilistic",
         rejection_sample_method="standard",
@@ -3914,7 +4026,7 @@ def test_dual_key_gumbel_rejects_incompatible_speculative_modes(overrides, match
         "parallel_drafting": False,
         **overrides,
     }
-    config.speculative_config = SimpleNamespace(**values)
+    config.speculative_config = fake_speculative_config(**values)
 
     with pytest.raises(ValueError, match=match):
         config._check_supports_watermarking()
@@ -3991,7 +4103,7 @@ def test_watermarking_forces_model_runner_v2(monkeypatch):
     )
 
 
-@patch("vllm.config.speculative.ModelConfig")
+@patch("vllm.config.ModelConfig")
 def test_mtp_draft_uses_model_weights_not_local_cache(mock_model_config_cls):
     """Regression test: MTP + runai_streamer should use model_weights (original
     S3 URL) for the draft model, not model (local cache dir set by
@@ -4005,7 +4117,9 @@ def test_mtp_draft_uses_model_weights_not_local_cache(mock_model_config_cls):
     mock_draft.model = local_cache
     mock_draft.hf_config.model_type = "deepseek_mtp"
     mock_draft.hf_config.n_predict = None
+    mock_draft.hf_config.num_nextn_predict_layers = 1
     mock_draft.hf_config.max_position_embeddings = 4096
+    mock_draft.speculator_config_class = None
     mock_draft.max_model_len = 4096
     mock_model_config_cls.return_value = mock_draft
 
@@ -4015,6 +4129,7 @@ def test_mtp_draft_uses_model_weights_not_local_cache(mock_model_config_cls):
     target_config.hf_text_config.model_type = "deepseek_v3"
     target_config.quantization = None
     target_config.max_model_len = 4096
+    target_config.using_transformers_backend.return_value = False
 
     SpeculativeConfig(
         method="mtp",
