@@ -51,6 +51,7 @@ async fn list_models(State(state): State<Arc<RenderState>>) -> Json<ListModelsRe
         object: "list".to_string(),
         data: state
             .served_model_names
+            .names()
             .iter()
             .map(|model| ModelObject {
                 id: model.clone(),
@@ -75,8 +76,7 @@ fn model_resolution(state: &RenderState) -> LoraModelResolution {
 fn response_model(state: &RenderState, requested_model: Option<&str>) -> String {
     requested_model
         .filter(|model| !model.is_empty())
-        .or_else(|| state.served_model_names.first().map(String::as_str))
-        .unwrap_or_default()
+        .unwrap_or(state.served_model_names.primary())
         .to_string()
 }
 
