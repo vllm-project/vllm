@@ -6605,3 +6605,20 @@ def test_aborted_request_keeps_hbm_until_native_get_returns(monkeypatch):
     )
     assert all(block.ref_cnt == 0 for block in blocks)
     assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() == free_before
+
+
+@pytest.mark.parametrize(
+    ("rank", "stage_rank", "expected"),
+    [
+        (0, None, 0),
+        (3, None, 1),  # [PP, TP] layout, TP=2
+        # One stage per instance: worker ranks are stage-local.
+        (0, 2, 2),
+        (1, 1, 1),
+    ],
+)
+def test_resolve_store_pp_rank(rank, stage_rank, expected):
+    parallel_config = SimpleNamespace(
+        rank=rank, pipeline_parallel_size=3, pipeline_stage_rank=stage_rank
+    )
+    assert worker.resolve_store_pp_rank(parallel_config, ranks_per_stage=2) == expected

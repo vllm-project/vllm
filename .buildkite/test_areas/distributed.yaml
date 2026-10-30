@@ -15,6 +15,8 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/distributed
   - vllm/config/parallel.py
+  - vllm/config/model.py
+  - vllm/engine/arg_utils.py
   - vllm/v1/worker/gpu/pp_utils.py
   commands:
   - pytest -v -s distributed/test_localization.py
@@ -27,6 +29,7 @@ steps:
   - pytest -v -s distributed/test_shm_storage.py
   - pytest -v -s distributed/test_pipeline_partition.py
   - pytest -v -s distributed/test_pp_group_cls.py
+  - pytest -v -s distributed/test_pipeline_stage_rank.py
   mirror:
     amd:
       automatic_shard: true

@@ -19,6 +19,7 @@ from vllm.distributed.parallel_state import (
     init_distributed_environment,
 )
 from vllm.engine.arg_utils import EngineArgs
+from vllm.v1.executor import Executor
 
 
 class StagePPGroup(GroupCoordinator):
@@ -34,6 +35,7 @@ class StagePPGroup(GroupCoordinator):
 
 
 def _parallel_config(**kwargs) -> ParallelConfig:
+    kwargs.setdefault("distributed_executor_backend", f"{__name__}.PPExecutor")
     return ParallelConfig(
         pipeline_parallel_size=4,
         pp_group_cls=f"{__name__}.StagePPGroup",
@@ -52,6 +54,18 @@ def test_pipeline_stage_rank_validation():
         _parallel_config(pipeline_stage_rank=4)
     with pytest.raises(ValueError, match="requires pp_group_cls"):
         ParallelConfig(pipeline_parallel_size=2, pipeline_stage_rank=1)
+
+
+@pytest.mark.parametrize("backend", [None, "mp", "ray", "uni", "external_launcher"])
+def test_pipeline_stage_rank_rejects_builtin_executors(backend):
+    # The built-in executors expect all pipeline stages in this instance
+    # (e.g. MultiprocExecutor asserts world_size == TP * PP * PCP).
+    with pytest.raises(ValueError, match="requires a custom executor"):
+        _parallel_config(
+            pipeline_stage_rank=1,
+            tensor_parallel_size=1,
+            distributed_executor_backend=backend,
+        )
 
 
 def test_layer_range_follows_stage_rank():
@@ -113,5 +127,7 @@ def test_executor_qualname_declares_pp_support():
     engine_args._check_feature_supported()
 
 
-class PPExecutor:
+class PPExecutor(Executor):
+    """Stands in for a plugin executor that drives the other stages."""
+
     supports_pp = True
