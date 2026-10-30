@@ -434,10 +434,11 @@ class AttentionGroup:
         page_step = page_size // page_stride
         pages_per_block = kv_cache.shape[-2] // kernel_rows
         self.kernel_block_stride = kv_cache.stride(0) // page_stride
-        assert self.kernel_block_offsets is not None
-        self.kernel_block_offsets.copy_(
-            torch.arange(pages_per_block, dtype=torch.int32) * page_step
-        )
+        if page_step != 1:
+            assert self.kernel_block_offsets is not None
+            self.kernel_block_offsets.copy_(
+                torch.arange(pages_per_block, dtype=torch.int32) * page_step
+            )
         num_pages = (kv_cache.shape[0] - 1) * self.kernel_block_stride + (
             (pages_per_block - 1) * page_step + 1
         )
