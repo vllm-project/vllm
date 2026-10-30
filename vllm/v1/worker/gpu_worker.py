@@ -548,8 +548,8 @@ class Worker(WorkerBase):
 
             # take current memory snapshot after external weights are ready
             self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)
-            # What this process already holds, where the platform counts it.
-            # The free memory above excludes it; the KV budget counts it.
+            # Already held by this process (counted in the KV budget, not in
+            # the free memory above).
             self.init_process_memory = current_platform.get_process_device_memory_bytes(
                 self.device
             )
@@ -744,10 +744,9 @@ class Worker(WorkerBase):
 
         init_free_memory = self.init_snapshot.free_memory
         free_gpu_memory = profile_result.after_profile.free_memory
-        # Where the platform counts this process's memory (ROCm), size the KV
-        # cache from it instead of the free-memory delta, which starts after the
-        # startup snapshot (missing what the process held before it) and counts
-        # other processes' changes. It includes what graph setup retained.
+        # Where counted (ROCm), size from this process's memory: unlike the
+        # free-memory delta it includes what was held before the startup
+        # snapshot and ignores other processes. It covers graph setup too.
         process_memory = current_platform.get_process_device_memory_bytes(self.device)
         self.kv_budget_from_process_memory = process_memory is not None
         if process_memory is not None:
@@ -1059,8 +1058,7 @@ class Worker(WorkerBase):
                 + self.peak_activation_memory
                 + cuda_graph_memory_bytes
             )
-            # total_consumed then includes what the process held at the startup
-            # snapshot, which the snapshot's free memory excludes.
+            # total_consumed then includes memory held at the snapshot.
             held_at_snapshot = (
                 (self.init_process_memory or 0)
                 if getattr(self, "kv_budget_from_process_memory", False)

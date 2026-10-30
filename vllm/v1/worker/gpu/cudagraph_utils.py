@@ -1065,13 +1065,10 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
 
 @dataclass(frozen=True)
 class DeviceMemoryInUse:
-    """One reading of device memory in use. Subtract two readings for the
-    memory used in between; both sides then come from the same counter."""
+    """Device memory in use; subtracting two readings uses one counter."""
 
-    # This process's device memory, where the platform counts it (ROCm).
-    process: int | None
-    # Device-wide total minus free memory.
-    device: int
+    process: int | None  # this process's memory, where counted (ROCm)
+    device: int  # device total minus free memory
 
     def __sub__(self, earlier: "DeviceMemoryInUse") -> int:
         if self.process is not None and earlier.process is not None:
@@ -1080,19 +1077,11 @@ class DeviceMemoryInUse:
 
 
 def device_memory_in_use(device: torch.device) -> DeviceMemoryInUse:
-    """Device memory in use, for the difference between two readings.
-
-    Where the platform counts this process's device memory (ROCm), differences
-    use that count: it is exact and per process, and it includes memory the
-    GPU runtime allocates for graphs outside torch. ROCm's free memory rounds
-    every allocation up to 2 MB, which inflates graph estimates several times
-    over, since each captured graph makes small runtime allocations. Otherwise
-    differences use the device-wide total minus free memory, so they equal the
-    free-memory deltas used before.
-    """
+    """Device memory in use. On ROCm, differences use the per-process count:
+    free memory there rounds each allocation up to 2 MB, which inflates graph
+    estimates several times over. Elsewhere they equal free-memory deltas."""
     process = current_platform.get_process_device_memory_bytes(device)
-    # Torch's reserved memory is part of this process's memory; a lower
-    # reading means the counter is not what we expect, so it is not used.
+    # A count below torch's own reservation can't be this process's; ignore it.
     if process is not None and process < torch.accelerator.memory_reserved(device):
         process = None
     free, total = torch.accelerator.get_memory_info()

@@ -653,27 +653,20 @@ def _get_invalid_reasons(
     return invalid_reasons
 
 
-# Per-process VRAM for get_process_device_memory_bytes(), from DRM fdinfo.
-# HIP opens the GPU's render node /dev/dri/renderD<minor> (DRM major 226).
-# /proc/self/fdinfo/<fd> of that file reports the VRAM of this process's GPU
-# address space, HIP's own allocations included. /proc/self works in any
-# container, unlike KFD's per-process files, which are keyed by host PID.
-# The KFD topology is read only to map a torch device to its render node.
+# Per-process VRAM from DRM fdinfo of the GPU's render node (DRM major 226):
+# exact, includes HIP's allocations, and readable in any container via
+# /proc/self (KFD's per-process files are keyed by host PID).
 _KFD_TOPOLOGY_NODES = "/sys/class/kfd/kfd/topology/nodes"
 _DRM_MAJOR = 226
-# Buffers that prefer VRAM, evicted ones included since they return when used
-# (drm-usage-stats.rst): the DRM key (Linux 6.13+), then amdgpu's key on older
-# kernels. Not drm-resident-vram, which leaves evicted buffers out. Without a
-# key, the caller falls back.
+# VRAM including evicted buffers (drm-usage-stats.rst): the DRM key (Linux
+# 6.13+), else amdgpu's. Not drm-resident-vram, which leaves evicted ones out.
 _FDINFO_VRAM_KEYS = ("drm-total-vram", "amd-requested-vram")
 _FDINFO_UNITS = {"": 1, "KiB": 1 << 10, "MiB": 1 << 20, "GiB": 1 << 30}
 
 
 def _queue_save_area_bytes(props: dict[str, str]) -> int:
-    """Bytes KFD allocates per hardware queue for its context save area, from
-    the GPU's topology properties: ``cwsr_size`` for each XCC, page aligned.
-    KFD also adds a small debugger area per queue (tens of KB) that the
-    topology does not export."""
+    """KFD's context save area per hardware queue: ``cwsr_size`` per XCC, page
+    aligned (KFD's small per-queue debugger area is not exported)."""
     total = int(props["cwsr_size"]) * max(int(props.get("num_xcc", 1)), 1)
     return round_up(total, mmap.PAGESIZE)
 
@@ -681,7 +674,7 @@ def _queue_save_area_bytes(props: dict[str, str]) -> int:
 @cache
 def _kfd_gpu_node_props(uuid: str, pci: tuple[int, int, int]) -> dict[str, str] | None:
     """KFD topology properties of the GPU with this torch UUID / PCI address,
-    including its render-node minor. ``None`` if no single GPU node matches."""
+    or ``None`` if no single GPU node matches."""
     try:
         # torch's ROCm UUID is the KFD unique_id written as ASCII hex digits.
         unique_id = int(bytes.fromhex(uuid.replace("-", "")).decode(), 16)
@@ -714,9 +707,8 @@ def _kfd_gpu_node_props(uuid: str, pci: tuple[int, int, int]) -> dict[str, str] 
 
 
 def _sum_fdinfo_vram(fdinfos: list[str]) -> int | None:
-    """Total VRAM in the given fdinfo texts. Files that share a drm-client-id
-    are one open file reached through duplicated fds, so they count once.
-    ``None`` if no text has a VRAM key."""
+    """Total VRAM in the fdinfo texts, counting each drm-client-id once
+    (duplicated fds), or ``None`` if no text has a VRAM key."""
     total, seen, found = 0, set(), False
     for text in fdinfos:
         pairs = (line.split(":", 1) for line in text.splitlines() if ":" in line)
@@ -1330,15 +1322,11 @@ class RocmPlatform(Platform):
 
     @classmethod
     def get_process_device_memory_bytes(cls, device: torch.device) -> int | None:
-        # DRM fdinfo, not hipMemGetInfo (torch's free memory on ROCm), which
-        # counts every allocation as at least 2 MB. fdinfo is exact but can't
-        # see the context save area KFD allocates for each hardware queue, so
-        # that is added for the queues this process can create. HIP creates
-        # them on demand, so they are counted at its default-priority limit,
-        # GPU_MAX_HW_QUEUES, plus two runtime-internal queues (six in total,
-        # as measured on an R9700). A constant, so differences are exact.
-        # ``None`` (caller falls back) when the GPU's KFD node, its save area
-        # size or an fdinfo VRAM key is missing.
+        # fdinfo VRAM, not hipMemGetInfo (which rounds each allocation up to
+        # 2 MB), plus the KFD queue save areas fdinfo can't see. HIP creates
+        # queues on demand, so its default-priority limit is charged:
+        # GPU_MAX_HW_QUEUES + 2 runtime queues. A constant, so differences
+        # stay exact. ``None`` (caller falls back) if any reading is missing.
         try:
             props = torch.cuda.get_device_properties(device)
             node = _kfd_gpu_node_props(
