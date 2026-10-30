@@ -29,7 +29,7 @@ use vllm_chat::{
 use vllm_engine_core_client::mock_engine::DEFAULT_MOCK_MAX_MODEL_LEN;
 use vllm_engine_core_client::mock_engine::default_ready_response;
 use vllm_engine_core_client::protocol::decode_value;
-use vllm_engine_core_client::protocol::dtype::TensorDtype;
+use vllm_engine_core_client::protocol::dtype::{ModelDtype, TensorDtype};
 use vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse;
 use vllm_engine_core_client::protocol::logprobs::{
     Logprobs, MaybeWireLogprobs, PositionLogprobs, TokenLogprob,
@@ -3560,6 +3560,125 @@ async fn non_stream_chat_image_url_reaches_engine_mm_features() {
 
     assert_eq!(json["object"], "chat.completion");
     assert_eq!(json["choices"][0]["message"]["content"], "hi");
+}
+
+const TINY_PNG_DATA_URI: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
+fn multimodal_render_app() -> axum::Router {
+    let backend = Arc::new(FakeChatBackend::with_multimodal_model_info(
+        qwen_multimodal_model_info(),
+    ));
+    build_render_router(Arc::new(RenderState {
+        text: TextRequestProcessor::new(backend.clone(), u32::MAX),
+        chat: ChatRequestProcessor::render_only(backend).with_model_dtype(ModelDtype::BFloat16),
+        ..test_render_state(None, ParserSelection::Auto, ParserSelection::Auto)
+    }))
+}
+
+async fn render_image_chat(mm_payload: Option<&str>) -> axum::body::Bytes {
+    let mut body = json!({
+        "model": "render-model",
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "describe "},
+                {"type": "image_url", "image_url": {"url": TINY_PNG_DATA_URI}, "uuid": "image-1"}
+            ]
+        }],
+        "max_completion_tokens": 8
+    });
+    if let Some(mm_payload) = mm_payload {
+        body["mm_payload"] = json!(mm_payload);
+    }
+    let response = multimodal_render_app()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions/render")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("build render request"),
+        )
+        .await
+        .expect("call render app");
+    assert_eq!(response.status(), StatusCode::OK);
+    to_bytes(response.into_body(), usize::MAX).await.expect("read render response")
+}
+
+/// Render preprocesses images into Python-style `features`, which generate
+/// turns back into the same engine features.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn render_chat_multimodal_features_can_be_submitted_to_generate_unchanged() {
+    let render_body = render_image_chat(None).await;
+    let render_json: serde_json::Value =
+        serde_json::from_slice(&render_body).expect("decode render response");
+    let features = &render_json["features"];
+    assert_eq!(features["mm_hashes"], json!({"image": ["image-1"]}));
+    assert!(
+        features["kwargs_data"]["image"][0].is_string(),
+        "{features}"
+    );
+    let placeholder = &features["mm_placeholders"]["image"][0];
+    let token_ids: Vec<u32> =
+        serde_json::from_value(render_json["token_ids"].clone()).expect("decode token IDs");
+    let offset = placeholder["offset"].as_u64().unwrap() as usize;
+    let length = placeholder["length"].as_u64().unwrap() as usize;
+    assert!(length > 1, "placeholder is expanded");
+    assert!(token_ids[offset..offset + length].iter().all(|&id| id == 151655));
+
+    let (chat, engine_task) = test_models_with_engine_outputs_and_backend_inner(
+        b"engine-render-generate-multimodal",
+        |request_id| engine_outputs_for_request(request_id, default_stream_output_specs()),
+        move |request| {
+            assert_eq!(
+                request.prompt_token_ids.as_deref(),
+                Some(token_ids.as_slice())
+            );
+            let features = request.mm_features.as_ref().expect("multimodal features");
+            assert_eq!(features.len(), 1);
+            assert_eq!(features[0].identifier, "image-1");
+            assert_eq!(features[0].mm_position.offset, offset);
+            assert_eq!(features[0].mm_position.length, length);
+            assert!(features[0].mm_position.is_embed.is_some());
+            let data = features[0].data.as_ref().expect("feature data");
+            assert!(data.contains_key("pixel_values"));
+            assert!(data.contains_key("image_grid_thw"));
+        },
+        Arc::new(FakeChatBackend::with_multimodal_model_info(
+            qwen_multimodal_model_info(),
+        )),
+    )
+    .await;
+    let mut generate_app = build_router_with_scale_out_endpoints(
+        Arc::new(AppState::new(vec!["render-model".to_string()], chat)),
+        true,
+    );
+    let generate_response = generate_app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/inference/v1/generate")
+                .header("content-type", "application/json")
+                .body(Body::from(render_body))
+                .expect("build generate request"),
+        )
+        .await
+        .expect("call generate app");
+
+    assert_eq!(generate_response.status(), StatusCode::OK);
+    engine_task.finish().await;
+}
+
+#[tokio::test]
+async fn render_chat_mm_payload_none_returns_layout_only() {
+    let render_json: serde_json::Value =
+        serde_json::from_slice(&render_image_chat(Some("none")).await).expect("decode json");
+
+    let features = &render_json["features"];
+    assert_eq!(features["mm_hashes"], json!({"image": ["image-1"]}));
+    assert!(features["mm_placeholders"]["image"][0]["length"].as_u64().unwrap() > 1);
+    assert!(features.get("kwargs_data").is_none(), "{features}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

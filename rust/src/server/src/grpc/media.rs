@@ -3,25 +3,17 @@
 
 //! Protobuf media adaptation into the shared multimodal preparation boundary.
 
-use std::io::Cursor;
-
-use serde::Deserialize as _;
-use thiserror_ext::AsReport as _;
 use tonic::Status;
 use url::Url;
 use vllm_chat::MediaContentPart;
 use vllm_chat::multimodal::MultimodalInput;
-use vllm_engine_core_client::protocol::encode_msgpack;
-use vllm_engine_core_client::protocol::multimodal::{
-    MmFeatureSpec, MmKwargsItem, MmModality, PlaceholderRange,
-};
-use vllm_engine_core_client::protocol::tensor::{WireArrayData, WireTensor};
+use vllm_engine_core_client::protocol::multimodal::{MmFeatureSpec, MmModality, PlaceholderRange};
+use vllm_engine_core_client::protocol::tensor::WireTensor;
 
 use super::pb;
 
 /// Maximum total serialized kwargs size accepted in one gRPC request.
 const MAX_INLINE_MM_BYTES: usize = 16 * 1024 * 1024;
-const MAX_MSGPACK_DEPTH: usize = 32;
 
 /// Adapt a request containing either raw media or preprocessed features.
 ///
@@ -85,7 +77,7 @@ fn feature_from_proto(item: pb::MediaItem) -> Result<MmFeatureSpec, Status> {
     };
     Ok(MmFeatureSpec {
         modality,
-        data: Some(decode_inline_mm_kwargs(&bytes)?),
+        data: Some(crate::mm_wire::decode_kwargs(&bytes).map_err(Status::invalid_argument)?),
         identifier: feature.identifier,
         mm_hash: feature.mm_hash,
         mm_position: PlaceholderRange {
@@ -96,24 +88,6 @@ fn feature_from_proto(item: pb::MediaItem) -> Result<MmFeatureSpec, Status> {
     })
 }
 
-/// Decode one inline item using the engine protocol's typed serde schema.
-fn decode_inline_mm_kwargs(bytes: &[u8]) -> Result<MmKwargsItem, Status> {
-    let mut decoder = rmp_serde::Deserializer::new(Cursor::new(bytes));
-    decoder.set_max_depth(MAX_MSGPACK_DEPTH);
-    let kwargs = MmKwargsItem::deserialize(&mut decoder).map_err(|error| {
-        Status::invalid_argument(format!(
-            "invalid multimodal kwargs MessagePack: {}",
-            error.as_report()
-        ))
-    })?;
-    if decoder.position() != bytes.len() as u64 {
-        return Err(Status::invalid_argument(
-            "kwargs contains trailing MessagePack data",
-        ));
-    }
-    Ok(kwargs)
-}
-
 /// Convert one prepared feature into the preprocessed-media form accepted by
 /// [`from_proto`]. Without `include_kwargs`, the processed tensors are left
 /// out and only the hash and placeholder range remain.
@@ -122,17 +96,11 @@ pub(super) fn feature_to_proto(
     include_kwargs: bool,
 ) -> Result<pb::MediaItem, Status> {
     let kwargs = match feature.data.filter(|_| include_kwargs) {
-        Some(data) => Some(
-            encode_msgpack(&data).map_err(|error| Status::internal(error.to_report_string()))?,
-        ),
+        Some(data) => Some(crate::mm_wire::encode_kwargs(&data).map_err(Status::internal)?),
         None => None,
     };
-    let is_embed = match feature.mm_position.is_embed {
-        Some(WireTensor {
-            data: WireArrayData::RawView(mask),
-            ..
-        }) => mask.iter().map(|&byte| byte != 0).collect(),
-        Some(_) => return Err(Status::internal("is_embed mask must be stored inline")),
+    let is_embed = match &feature.mm_position.is_embed {
+        Some(mask) => crate::mm_wire::mask_to_bools(mask).map_err(Status::internal)?,
         None => Vec::new(),
     };
     Ok(pb::MediaItem {
@@ -342,7 +310,7 @@ mod tests {
             },
         )]);
         let valid = rmp_serde::to_vec_named(&kwargs).unwrap();
-        assert_eq!(decode_inline_mm_kwargs(&valid).unwrap(), kwargs);
+        assert_eq!(crate::mm_wire::decode_kwargs(&valid).unwrap(), kwargs);
         let mut trailing = valid.clone();
         trailing.push(0);
         let mut nested_kwargs = kwargs.clone();
@@ -357,7 +325,7 @@ mod tests {
             0x81, 0xa1, b'x', 0x81, 0xa4, b'd', b'a', b't', b'a', 0xdd, 0xff, 0xff, 0xff, 0xff,
         ];
         for bytes in [&valid[..valid.len() - 1], &trailing, &nested, &huge_array] {
-            assert!(decode_inline_mm_kwargs(bytes).is_err());
+            assert!(crate::mm_wire::decode_kwargs(bytes).is_err());
         }
     }
 
@@ -369,7 +337,7 @@ mod tests {
             \x00\x00\x80\x3f\x00\x00\x00\x40\
             \xa5field\x92\xa4flat\x83\xabkeep_on_cpu\xc2\
             \xa6slices\x91\x93\x00\x02\xc0\xa3dim\x00";
-        let kwargs = decode_inline_mm_kwargs(bytes).unwrap();
+        let kwargs = crate::mm_wire::decode_kwargs(bytes).unwrap();
         let expected = MmFieldElem {
             data: Some(MmKwargValue::Tensor(
                 WireTensor::from_f32(vec![2], vec![1., 2.]).unwrap(),

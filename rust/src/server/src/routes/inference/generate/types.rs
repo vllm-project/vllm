@@ -13,6 +13,7 @@ use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_llm::WeightVersionSpan;
 use vllm_text::SamplingParams;
 
+use super::features::MultiModalFeatures;
 use crate::routes::openai::utils::metrics::{
     SpeculativeDecodingMetrics, StreamingSpeculativeDecodingMetrics,
 };
@@ -67,6 +68,9 @@ pub struct GenerateRequest {
     pub ec_transfer_params: Option<HashMap<String, Value>>,
     /// Raw multimodal input; server resolves media. Mutually exclusive with `features`.
     pub content_parts: Option<Vec<MediaContentPart>>,
+    /// Multimodal items already preprocessed by render, aligned with the
+    /// expanded placeholders in `token_ids`.
+    pub features: Option<MultiModalFeatures>,
     pub return_token_ids: Option<bool>,
     pub output_mode: Option<GenerateOutputMode>,
     /// Whether reasoning has ended before the first generated token, as
@@ -161,10 +165,17 @@ pub(super) struct PerRequestMetrics<T> {
 
 pub(super) type MultiModalPlaceholders = HashMap<String, Vec<PlaceholderRangeInfo>>;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(super) struct PlaceholderRangeInfo {
+/// Mirrors the Python vLLM `PlaceholderRangeInfo` class.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaceholderRangeInfo {
     pub offset: usize,
     pub length: usize,
+    /// Which placeholder positions receive embeddings, for models with sparse
+    /// masks such as Qwen-VL; omitted means all. A Rust frontend addition that
+    /// Python's generate ignores.
+    #[serde(default)]
+    pub is_embed: Option<Vec<bool>>,
 }
 
 /// Mirrors the Python vLLM `GenerateLogProbs` class: output logprobs for one

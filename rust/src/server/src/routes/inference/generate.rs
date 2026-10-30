@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 mod convert;
+mod features;
 mod types;
 mod validate;
 
@@ -30,6 +31,7 @@ use vllm_llm::{
 };
 
 use self::convert::{ResponseOptions, prepare_generate_request};
+pub(crate) use self::features::{MmPayload, MultiModalFeatures};
 use self::types::{
     GenerateLogProb, GenerateLogProbs, GenerateLogProbsContent, GenerateLogprob, GenerateResponse,
     GenerateResponseChoice, GenerateResponseStreamChoice, GenerateStreamResponse,
@@ -71,6 +73,28 @@ pub async fn generate(
                 return ApiError::invalid_request(
                     format!("failed to resolve content_parts: {}", e.as_report()),
                     Some("content_parts"),
+                )
+                .into_response();
+            }
+        }
+    } else if let Some(features) = body.features.take() {
+        let features = match features.into_prepared() {
+            Ok(features) => features,
+            Err(error) => return error.into_response(),
+        };
+        match state
+            .chat
+            .prepare_media(
+                vllm_chat::multimodal::MultimodalInput::Preprocessed(features),
+                &mut body.token_ids,
+            )
+            .await
+        {
+            Ok(features) => features,
+            Err(e) => {
+                return ApiError::invalid_request(
+                    format!("invalid features: {}", e.as_report()),
+                    Some("features"),
                 )
                 .into_response();
             }
@@ -400,6 +424,7 @@ fn extract_mm_placeholders(features: Option<&[MmFeatureSpec]>) -> Option<MultiMo
             PlaceholderRangeInfo {
                 offset: feature.mm_position.offset,
                 length: feature.mm_position.length,
+                is_embed: None,
             },
         );
     }
@@ -717,6 +742,7 @@ mod tests {
             vec![PlaceholderRangeInfo {
                 offset: 1,
                 length: 4,
+                is_embed: None,
             }],
         )]);
         let chunks: Vec<_> = generate_chunk_stream(
@@ -846,6 +872,7 @@ mod tests {
                 vec![PlaceholderRangeInfo {
                     offset: 1,
                     length: 4,
+                    is_embed: None,
                 }],
             )])),
         )
@@ -986,6 +1013,7 @@ mod tests {
                 vec![PlaceholderRangeInfo {
                     offset: 0,
                     length: 1,
+                    is_embed: None,
                 }],
             )])),
         )
@@ -1137,10 +1165,12 @@ mod tests {
                 PlaceholderRangeInfo {
                     offset: 1,
                     length: 5,
+                    is_embed: None,
                 },
                 PlaceholderRangeInfo {
                     offset: 8,
                     length: 2,
+                    is_embed: None,
                 },
             ]
         );
@@ -1149,6 +1179,7 @@ mod tests {
             vec![PlaceholderRangeInfo {
                 offset: 4,
                 length: 3,
+                is_embed: None,
             }]
         );
     }

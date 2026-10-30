@@ -36,16 +36,27 @@ The Rust frontend also serves a `vllm.Render` gRPC service, defined in
 
 - `Render.Tokenize` renders a chat request into prompt token IDs, plus the
   settings that rendering decides: the tool-call grammar (`structural_tag`),
-  `skip_special_tokens`, and the engine reasoning gate. Copy them into your own
+  `skip_special_tokens`, the engine reasoning gate, and the preprocessed media
+  of image, video and audio parts. Copy them into your own
   `vllm.GenerateRequest` with your sampling parameters, and set
   `response.output_token_ids = true` and `response.output_text = false` so
-  `Inference.Generate` returns only token IDs.
+  `Inference.Generate` returns only token IDs. Set `omit_media_kwargs` to get
+  only media hashes and placeholder ranges, like `"mm_payload": "none"`.
 - `Render.Detokenize` takes the same chat request, the prompt token IDs, and the
-  output token IDs and finish info from `Inference.Generate`. It returns the
-  answer text, reasoning, and parsed tool calls.
+  `SequenceOutput` from `Inference.Generate`. It returns the answer text,
+  reasoning, parsed tool calls, and, when the output carries them, decoded
+  logprobs.
 
-Both RPCs are unary and accept text content only. Like `/inference/v1/generate`,
-this flow does not support stop strings.
+Both RPCs are unary. LoRA adapter names are accepted as the chat request's
+`model`. Like `/inference/v1/generate`, this flow does not support stop strings.
+
+The Rust `vllm-rs render` server serves the HTTP render endpoints as well. For
+multimodal models it returns the `features` object described in
+[Multimodal Render Features](#multimodal-render-features), except
+`mm_metadata`, and adds an `is_embed` mask to placeholder ranges of models with
+sparse placeholders, such as Qwen-VL. The Rust `/inference/v1/generate` accepts
+`features` with `kwargs_data` for every item, and ignores `mm_metadata`. Set the
+render server's `--dtype` to the engine's dtype.
 
 ## Get Responses prompt token IDs
 

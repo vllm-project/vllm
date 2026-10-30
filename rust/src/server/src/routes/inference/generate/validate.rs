@@ -16,6 +16,13 @@ pub(crate) fn validate_request_compat(
         return Err(ApiError::model_not_found(model.clone()));
     }
 
+    if request.content_parts.is_some() && request.features.is_some() {
+        bail_invalid_request!(
+            param = "features",
+            "content_parts and features are mutually exclusive."
+        );
+    }
+
     if request.sampling_params.n.unwrap_or(1) != 1 {
         bail_invalid_request!(param = "n", "Only n=1 is supported.");
     }
