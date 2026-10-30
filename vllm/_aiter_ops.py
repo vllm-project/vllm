@@ -2756,6 +2756,24 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
+    def is_fused_gdn_in_proj_dual_splitk_available(cls) -> bool:
+        """Dual split-K GEMM for the fused GDN in_proj, with a fused GDN decode
+        kernel that sums its split-K ba partials."""
+        if not cls.is_fused_gdn_decode_enabled():
+            return False
+        try:
+            from aiter.ops.triton.gated_delta_net.fused_gdn_decode_qkvz import (
+                SUPPORTS_BA_SPLITK_PARTIALS,
+            )
+            from aiter.ops.triton.gemm.fused.fused_gemm_a16w16_dual_splitk import (  # noqa: F401
+                fused_gemm_a16w16_dual_splitk,
+            )
+        except ImportError:
+            return False
+        return SUPPORTS_BA_SPLITK_PARTIALS
+
+    @classmethod
+    @if_aiter_supported
     def are_gdn_triton_kernels_available(cls) -> bool:
         """Check if AITER Triton kernels for GDN attention are importable.
 
