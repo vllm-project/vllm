@@ -1890,14 +1890,6 @@ def test_pairing_expands_packed_rows_alongside_nonpacked_regions():
     assert metadata.block_strides == [256, 128]
 
 
-def test_pairing_fails_loud_when_remote_omits_layers():
-    # Pairing regions by index here would silently transfer stale KV, so a
-    # peer that does not advertise its layers must fail the handshake instead.
-    worker = _layer_routing_worker([["a"]], {"a": 0})
-    with pytest.raises(RuntimeError, match="did not advertise the layers"):
-        worker._pair_regions(_agent_metadata([], [0xA000], [128]))
-
-
 def test_pairing_keeps_pooled_regions_once():
     worker = _layer_routing_worker(
         [["a", "a.swa"], ["b"]], {"a": 0, "a.swa": 1, "b": 0}
@@ -2042,27 +2034,30 @@ def test_layer_descriptors_pair_layers_across_asymmetric_pp_split(
     ]
 
 
-def test_pairing_rejects_a_peer_missing_local_layers():
-    worker = _layer_routing_worker([["l0"], ["l1"]], {"l0": 0, "l1": 1})
-    metadata = _agent_metadata([["l0"]], [0xA000], [128])
+@pytest.mark.parametrize(
+    ("local_layers", "pp_size", "remote_layers", "error", "match"),
+    [
+        # Pairing by index would silently transfer stale KV, so a peer that
+        # does not advertise its layers must fail the handshake instead.
+        ([["a"]], 2, [], RuntimeError, "did not advertise the layers"),
+        ([["a"], ["b"]], 2, [["a"]], RuntimeError, "does not hold the KV layers"),
+        # Only a PP stage may hold a slice of the peer's layers.
+        ([["a"]], 1, [["a"], ["b"]], RuntimeError, "has no counterpart here"),
+        ([["a"]], 2, [["a"], ["a"]], NotImplementedError, "spans 2 NIXL regions"),
+    ],
+)
+def test_pairing_rejects_unpairable_peers(
+    local_layers, pp_size, remote_layers, error, match
+):
+    worker = _layer_routing_worker(local_layers, {"a": 0, "b": 0}, pp_size=pp_size)
+    num_regions = max(len(remote_layers), 1)
+    metadata = _agent_metadata(
+        remote_layers,
+        [0xA000 + 0x1000 * i for i in range(num_regions)],
+        [128] * num_regions,
+    )
 
-    with pytest.raises(RuntimeError, match="does not hold the KV layers"):
-        worker._pair_regions(metadata)
-
-
-def test_pairing_rejects_extra_peer_layers_without_pp():
-    worker = _layer_routing_worker([["l0"]], {"l0": 0}, pp_size=1)
-    metadata = _agent_metadata([["l0"], ["l1"]], [0xA000, 0xB000], [128, 128])
-
-    with pytest.raises(RuntimeError, match="has no counterpart here"):
-        worker._pair_regions(metadata)
-
-
-def test_pairing_rejects_a_layer_split_differently():
-    worker = _layer_routing_worker([["a"]], {"a": 0})
-    metadata = _agent_metadata([["a"], ["a"]], [0xA000, 0xB000], [128, 128])
-
-    with pytest.raises(NotImplementedError, match="spans 2 NIXL regions"):
+    with pytest.raises(error, match=match):
         worker._pair_regions(metadata)
 
 
