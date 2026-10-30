@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterator
-from contextlib import contextmanager
-
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -16,11 +13,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import nvfp4_block_scale_interleave
-from vllm.v1.worker.ubatching import (
-    dbo_enabled,
-    dbo_switch_to_compute_sync,
-    dbo_yield_and_switch_from_compute_to_comm,
-)
+from vllm.v1.worker.ubatching import dbo_comm_region
 
 
 def _quantize_and_setup_dispatch(
@@ -144,31 +137,10 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
 
     def supports_dbo(self) -> bool:
         # prepare()/finalize() hand the collective to the comm stream
-        # themselves (see _comm_region), so the synchronous path is DBO-safe.
+        # themselves (see dbo_comm_region), so the synchronous path is DBO-safe.
         # supports_async() stays False: it also selects MK-internal
         # shared-expert overlap. Only validated on ROCm so far.
         return current_platform.is_rocm()
-
-    @contextmanager
-    def _comm_region(self) -> Iterator[None]:
-        """Scope the dispatch/combine collective runs in.
-
-        Without DBO the collective runs on the calling stream. Under DBO it
-        runs on the comm stream so the peer ubatch can compute while it is in
-        flight, using the same compute/comm handoff as DeepEP-HT. Graph
-        capture keeps every collective on the capture stream, so overlap is
-        limited to eager steps (prefill).
-        """
-        if not dbo_enabled() or torch.cuda.is_current_stream_capturing():
-            yield
-            return
-        # Release the CPU to the peer ubatch so it can enqueue compute while
-        # this ubatch's collective runs; the compute stream waits on exit.
-        dbo_yield_and_switch_from_compute_to_comm()
-        try:
-            yield
-        finally:
-            dbo_switch_to_compute_sync()
 
     def prepare(
         self,
@@ -215,7 +187,7 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
                 extra_tensors = []
             extra_tensors.append(local_token_lora_mapping)
 
-        with self._comm_region():
+        with dbo_comm_region():
             res = get_ep_group().dispatch(
                 a1q,
                 topk_weights,
@@ -276,7 +248,7 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
 
-        with self._comm_region():
+        with dbo_comm_region():
             get_ep_group().combine_into_output(
                 out,
                 output,
