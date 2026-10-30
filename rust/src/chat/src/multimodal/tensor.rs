@@ -209,8 +209,10 @@ pub(super) fn flat_range_for_index(
 fn tensor_as_usize_vec(tensor: &KwargValue) -> Result<Vec<usize>> {
     match tensor {
         KwargValue::Tensor { wire } if wire.dtype == TensorDtype::I64 => raw_tensor_bytes(wire)?
-            .chunks_exact(size_of::<i64>())
-            .map(|bytes| i64::from_ne_bytes(bytes.try_into().expect("exact int64 chunk")))
+            .as_chunks::<{ size_of::<i64>() }>()
+            .0
+            .iter()
+            .map(|bytes| i64::from_ne_bytes(*bytes))
             .map(|value| {
                 usize::try_from(value)
                     .map_err(|_| multimodal!("negative flat tensor size `{value}`"))
@@ -218,10 +220,10 @@ fn tensor_as_usize_vec(tensor: &KwargValue) -> Result<Vec<usize>> {
             .collect(),
         KwargValue::Tensor { wire } if wire.dtype == TensorDtype::U32 => {
             Ok(raw_tensor_bytes(wire)?
-                .chunks_exact(size_of::<u32>())
-                .map(|bytes| {
-                    u32::from_ne_bytes(bytes.try_into().expect("exact uint32 chunk")) as usize
-                })
+                .as_chunks::<{ size_of::<u32>() }>()
+                .0
+                .iter()
+                .map(|bytes| u32::from_ne_bytes(*bytes) as usize)
                 .collect())
         }
         _ => Err(multimodal!("flat tensor sizes must be int64 or uint32")),

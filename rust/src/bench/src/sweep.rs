@@ -420,7 +420,7 @@ const SS_OUTPUT_THROUGHPUT_KEY: &str = "__ss_output_throughput";
 fn ss_f64(result: &serde_json::Value, key: &str) -> Option<f64> {
     result
         .get("steady_state")
-        .and_then(|ss| if ss.is_null() { None } else { Some(ss) })
+        .filter(|&ss| !ss.is_null())
         .and_then(|ss| ss.get(key))
         .and_then(|v| v.as_f64())
 }
