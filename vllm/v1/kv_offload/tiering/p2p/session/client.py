@@ -306,6 +306,17 @@ class ClientRole:
         load.pending_fetch = None
         return True
 
+    def can_send_terminal_fetch(self, kv_request_id: str) -> bool:
+        """A terminal fetch must not close a newer live round on the peer."""
+        st = self._requests.get(kv_request_id)
+        if st is None:
+            return True
+        now = time.monotonic()
+        return not (st.probes or st.unsent) and not any(
+            load.aborted_at is None and now - load.submitted_at < load.timeout_s
+            for load in st.loads.values()
+        )
+
     def finish(self, kv_request_id: str) -> None:
         """Finish a request: abort in-flight loads and release lookup state.
 
@@ -332,6 +343,8 @@ class ClientRole:
                 load.aborted_at = time.monotonic()
             else:
                 self._abort_load(kv_request_id, round_seq, load)
+        st.probes.clear()
+        st.unsent.clear()
         if st.peer_lookup_open:
             st.peer_lookup_open = False
             self._send(
@@ -343,8 +356,6 @@ class ClientRole:
                     FetchMsg.ROUND_SEQ: st.round_seq,
                 }
             )
-        st.probes.clear()
-        st.unsent.clear()
         self._lookup_deadlines.pop(kv_request_id, None)
         self._flush_pending.discard(kv_request_id)
         self._maybe_prune(kv_request_id)
@@ -546,6 +557,14 @@ class ClientRole:
                     load.aborted_at is not None
                     or now - load.submitted_at >= load.timeout_s
                 ):
+                    if load.aborted_at is None:
+                        logger.warning(
+                            "P2PSession %s: queued fetch %s round=%s timed out "
+                            "before transport handoff",
+                            self._peer_id,
+                            req_id,
+                            round_seq,
+                        )
                     self._completed_loads.append(
                         LoadResult(load.job_id, req_id, success=False)
                     )
@@ -575,6 +594,16 @@ class ClientRole:
                         round_seq,
                     )
 
+        for req_id in {req_id for req_id, _ in to_remove}:
+            self._send(
+                {
+                    TYPE_KEY: FetchMsg.TYPE,
+                    FetchMsg.KV_REQUEST_ID: req_id,
+                    FetchMsg.KEYS: [],
+                    FetchMsg.BLOCK_INDEXES: [],
+                    FetchMsg.ROUND_SEQ: self._requests[req_id].round_seq,
+                }
+            )
         for req_id, round_seq in to_remove:
             st = self._requests[req_id]
             del st.loads[round_seq]

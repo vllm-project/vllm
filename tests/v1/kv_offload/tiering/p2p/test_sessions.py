@@ -3018,6 +3018,25 @@ class TestPendingSession:
 
 class TestDisconnect:
     @pytest.mark.parametrize("finished", [False, True])
+    def test_retired_fetch_queues_producer_release(
+        self, lookup_clock, finished, caplog
+    ):
+        session, conn, _ = _make_session()
+        session.request_blocks(7, "retired", [OffloadKey(b"key")], [0])
+        if finished:
+            session.finish_request("retired")
+        else:
+            lookup_clock.now = _PD_LOAD_TIMEOUT_S
+        assert session.poll().loads == [LoadResult(7, "retired", success=False)]
+        _activate(session, conn)
+        fetches = [m for m in conn._sent if m[TYPE_KEY] == FetchMsg.TYPE]
+        assert len(fetches) == 1
+        assert fetches[0][FetchMsg.BLOCK_INDEXES] == []
+        assert fetches[0][FetchMsg.KV_REQUEST_ID] == "retired"
+        if not finished:
+            assert "queued fetch retired" in caplog.text
+
+    @pytest.mark.parametrize("finished", [False, True])
     @pytest.mark.parametrize("ack_before_poll", [False, True])
     def test_unsent_fetch_retires_without_abort(
         self, lookup_clock, finished, ack_before_poll
@@ -3042,7 +3061,7 @@ class TestDisconnect:
             msg[FetchMsg.BLOCK_INDEXES]
             for msg in conn._sent
             if msg[TYPE_KEY] == FetchMsg.TYPE
-        ] == [[1]]
+        ] == ([[], [1]] if ack_before_poll else [[1]])
         assert not any(msg[TYPE_KEY] == AbortFetchMsg.TYPE for msg in conn._sent)
         assert session.close().failed_jobs == [8]
 
