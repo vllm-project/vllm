@@ -98,10 +98,6 @@ class NixlBaseConnectorScheduler:
             self.use_host_buffer = (
                 vllm_config.kv_transfer_config.kv_buffer_device == "cpu"
             )
-        transfer_specs = tuple(
-            next(iter(iter_layer_specs(group.kv_cache_spec)))
-            for group in kv_cache_config.transfer_groups
-        )
         self._is_hma_required = (
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
             # Also handle unlikely SW-only model case instead of checking num_groups>1.
@@ -167,7 +163,7 @@ class NixlBaseConnectorScheduler:
             (p.sliding_window, g.block_size)
             if isinstance(p := g.manager_config.params, SlidingWindowManager.Params)
             else (0, self.block_size)
-            for spec in transfer_specs
+            for g in kv_cache_config.transfer_groups
         ]
         # cdiv(n_tokens, block_size) gives blocks/window; add 1 to conservatively
         # account for boundary overlap eg window isn't fully aligned with blocks.
@@ -326,7 +322,35 @@ class NixlBaseConnectorScheduler:
 
     @property
     def supports_load_range(self) -> bool:
-        return True
+        parallel = self.vllm_config.parallel_config
+        return (
+            parallel.decode_context_parallel_size == 1
+            and parallel.prefill_context_parallel_size == 1
+            and parallel.pipeline_parallel_size == 1
+            and all(
+                type(g.kv_cache_spec) in (FullAttentionSpec, SlidingWindowSpec)
+                for g in self.kv_cache_config.kv_cache_groups
+            )
+        )
+
+    def get_loadable_window_group_ids(
+        self, request: "Request", end_token: int
+    ) -> tuple[int, ...]:
+        if not self.supports_load_range or end_token != (
+            self._get_remote_prefill_token_count(request.num_prompt_tokens)
+        ):
+            return ()
+        matched, _ = self.get_num_new_matched_tokens(request, 0)
+        if matched != end_token:
+            return ()
+        return tuple(
+            i
+            for i in self.kv_cache_config.transfer_group_ids
+            if isinstance(
+                self.kv_cache_config.kv_cache_groups[i].kv_cache_spec,
+                SlidingWindowSpec,
+            )
+        )
 
     @property
     def load_range_alignment(self) -> int:
@@ -338,24 +362,32 @@ class NixlBaseConnectorScheduler:
         load_range: KVLoadRange,
     ) -> BlockIds:
         """Return destination blocks owned by a piecewise load range."""
-        assert load_range.start_token % self._scheduler_block_size == 0
+        assert not load_range.num_tokens or (
+            load_range.start_token % self._scheduler_block_size == 0
+        )
         block_ids = blocks.get_block_ids()
         selected: list[list[int]] = []
-        for group, cache_group, block_size in zip(
-            block_ids,
-            self.kv_cache_config.kv_cache_groups,
-            self._range_group_block_sizes,
-            strict=True,
+        for group_id, (group, cache_group, block_size) in enumerate(
+            zip(
+                block_ids,
+                self.kv_cache_config.kv_cache_groups,
+                self._range_group_block_sizes,
+                strict=True,
+            )
         ):
-            if any(
-                isinstance(spec, MambaSpec)
-                for spec in iter_layer_specs(cache_group.kv_cache_spec)
-            ):
-                selected.append(list(group) if load_range.is_terminal else [])
+            if not is_full_attention_spec(cache_group.kv_cache_spec):
+                if group_id in load_range.window_group_ids:
+                    assert load_range.window_end_token is not None
+                    end_block = cdiv(load_range.window_end_token, block_size)
+                    selected.append(list(group[:end_block]))
+                else:
+                    selected.append([])
                 continue
             start_block = load_range.start_token // block_size
             end_block = cdiv(load_range.end_token, block_size)
-            selected.append(list(group[start_block:end_block]))
+            selected.append(
+                list(group[start_block:end_block]) if load_range.num_tokens else []
+            )
         return self.get_exchange_clipped_blocks(tuple(selected))
 
     def get_range_start_blocks(self, load_range: KVLoadRange) -> tuple[int, ...]:
