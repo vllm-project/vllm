@@ -4744,3 +4744,33 @@ Le tier fs a survécu au reboot : 90 chunk-hits `1:TouchOnHitFsTier`, 2,73 Go re
 - IP externes : rien de nouveau ; `37.187.180.135` passe en 200 avec la clé MEDIUM valide (empreinte `be312daf7c1c`).
 - #4438 (web1) : `api.medium` et `qdrant` répondent **200** à 12:27Z — leurs 502 de 00:33Z sont le gel. `api.mini` reste en 502 : son service est archivé depuis le 30/04, il n'a plus d'amont.
 - Nanbeige : la régie a servi une génération réelle sur le GPU 2 (22:25:50Z). La quantification est fonctionnelle, sa **qualité n'a pas été évaluée**. Je solde sur ce résultat, sans 4ᵉ fenêtre : le verdict d'adoption est déjà négatif pour raison d'architecture, Qwen 4 27B arrive, et un gel matériel est en cours d'instruction.
+
+## 30/10 13:4xZ — Deux corrections : le 400 window+1 ne coûte pas de préremplissage ; le timeout de condensation de 90 s est structurel
+
+### 1. Le 400 « maximum context length » est levé par le frontal, pas par le moteur
+
+Les cycles du 29/10 (18:1xZ, 22:1xZ) disaient que ces refus « coûtent un prefill condamné par requête ». **C'est faux.** Dans le code servi (`vllm/renderers/params.py:515-535`, image v0.32.0), `_token_len_check` lève l'erreur dans le **frontal API**. Il le fait juste après une tokenisation tronquée à `max_input_tokens + 1` : c'est l'origine du « at least 262145 » du message. La requête n'atteint jamais l'ordonnanceur. Il n'y a ni préremplissage, ni KV, ni préemption, seulement un coût CPU de tokenisation côté frontal (non mesuré). Le rapprochement fait le 29/10 avec « KV 91 %, 11 préemptions » est donc retiré.
+
+Comptage sur `error_sources.jsonl` :
+
+| période | total | po-2024 | po-2023 | po-2027 |
+|---|---:|---:|---:|---:|
+| 29/10, 00:55Z → 23:09Z | **159** | 117 | 29 | 13 |
+| depuis le reboot (30/10 11:58Z) | 0 | – | – | – |
+
+Les corps font de 0,88 à 1,06 Mo. Ils reviennent à secondes quasi fixes, toutes les ~30 min par machine. Hypothèse : des sessions cronées dont le contexte dépasse en permanence la fenêtre. La liste avec les epochs a été transmise à claudish, qui les appariera aux `SKIP reason=context` du hub.
+
+### 2. Condensation : la jambe statut ne peut pas aboutir en 90 s sur le moteur local
+
+Le 30/10 vers 12:34Z, la jambe statut d'une condensation de `workspace-vllm` a fini en `TIMEOUT after 90s` sur :5002. Le moteur n'était **pas saturé** : KV 24-38 %, file 0-1.
+
+**D'où viennent les 90 s.** Côté RSM :
+- la passe de condensation dure 165 s (`dashboard.ts:5605`) ;
+- `computePrimaryAttemptTimeoutMs` (`:280-288`) en retire la réserve cloud ;
+- le `.env` RSM d'ai-01 fixe `CONDENSE_CLOUD_RESERVE_MS=75000`.
+
+Il reste donc **90 s fixes** au primaire, quelle que soit la taille du statut.
+
+**Ce qu'un statut complet demande.** Mesure directe à 12:38Z, en non-streaming avec `max_tokens 7200` : **1 500 tokens en 64,3 s, soit 23,3 tok/s par flux** (préremplissage inclus), à 3,91 caractères/token. Un statut proche du plafond (15 360 o) fait ~3 800 tokens, soit **~165 s**. En 90 s, le primaire ne peut produire que ~7-8 Ko. Le résumé, plus court, passe ; le statut tombe au repli.
+
+La réponse faite à hermes (« famille file d'attente ») est corrigée. La mesure est versée à roo-extensions#4434 (c.6523091171). **Aucun changement moteur** : le levier est dans l'outil (budget proportionnel, streaming, statut plus court), instruit aux volets 4-5 de #4434.
