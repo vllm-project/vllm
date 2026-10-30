@@ -1896,9 +1896,7 @@ def test_store_sending_thread_delta_saves_only_new_masked_chunks(chunk_size):
             req_id="req-a",
             token_len_chunk=64,
             block_ids=([0, 1, 2, 3], [0, 1, 2, 3]),
-            block_hashes=[
-                BlockHash(f"a{i}".encode()) for i in range(64 // chunk_size)
-            ],
+            block_hashes=[BlockHash(f"a{i}".encode()) for i in range(64 // chunk_size)],
             can_save=True,
             num_prompt_tokens=33,
             prefill_end_tokens=64,
@@ -1932,7 +1930,12 @@ def test_decode_save_marks_completed_interval_as_replay_boundary():
             req_id="req-a",
             token_len_chunk=64,
             block_ids=([0, 1, 2, 3],),
-            block_hashes=[b"a0", b"a1", b"a2", b"a3"],
+            block_hashes=[
+                BlockHash(b"a0"),
+                BlockHash(b"a1"),
+                BlockHash(b"a2"),
+                BlockHash(b"a3"),
+            ],
             can_save=True,
             num_prompt_tokens=48,
             prefill_end_tokens=48,
@@ -2139,10 +2142,10 @@ def test_store_recving_thread_reports_all_attempted_blocks_on_exception():
     assert thread.get_and_clear_block_ids_with_load_errors() == {0, 1, 2}
 
 
-def test_store_recving_thread_finishes_when_group_masks_select_no_keys():
+def test_store_recving_thread_finishes_when_group_masks_select_no_keys(monkeypatch):
     store = MagicMock()
     thread = _make_store_recving_thread(store)
-    thread.coord.load_mask = MagicMock(return_value=[[False]])
+    monkeypatch.setattr(thread.coord, "load_mask", MagicMock(return_value=[[False]]))
 
     thread._handle_request(
         _make_load_req(
@@ -3815,7 +3818,9 @@ def test_store_sending_thread_clamps_token_len_to_lcm():
 
 
 @pytest.mark.parametrize("failure", ["partial", "exception"])
-def test_store_sending_thread_waits_for_hybrid_checkpoint_and_retries(failure):
+def test_store_sending_thread_waits_for_hybrid_checkpoint_and_retries(
+    failure, monkeypatch
+):
     from vllm.v1.kv_cache_interface import MambaSpec
 
     store = MagicMock()
@@ -3874,7 +3879,8 @@ def test_store_sending_thread_waits_for_hybrid_checkpoint_and_retries(failure):
         block_size=8,
         enable_kv_event=True,
     )
-    thread.update_kv_event = MagicMock()
+    monkeypatch.setattr(thread, "update_kv_event", MagicMock())
+    assert isinstance(thread.update_kv_event, MagicMock)
     thread._saved_offset["r0"] = 8
     stored_keys: set[str] = set()
     fail_put = True
@@ -3898,7 +3904,7 @@ def test_store_sending_thread_waits_for_hybrid_checkpoint_and_retries(failure):
             req_id="r0",
             token_len_chunk=12,
             block_ids=([1, 2, 3], [4, 5, 6]),
-            block_hashes=[b"a0", b"a1", b"a2"],
+            block_hashes=[BlockHash(b"a0"), BlockHash(b"a1"), BlockHash(b"a2")],
             can_save=True,
             token_ids=[8, 9, 10, 11],
             token_ids_start=8,
@@ -3915,11 +3921,16 @@ def test_store_sending_thread_waits_for_hybrid_checkpoint_and_retries(failure):
             req_id="r0",
             token_len_chunk=16,
             block_ids=([1, 2, 3], [4, 5, 6]),
-            block_hashes=[b"a0", b"a1", b"a2", b"a3"],
+            block_hashes=[
+                BlockHash(b"a0"),
+                BlockHash(b"a1"),
+                BlockHash(b"a2"),
+                BlockHash(b"a3"),
+            ],
             can_save=True,
             token_ids=list(range(8, 16)),
             token_ids_start=8,
-            boundary_puts=[(1, 5, 16)],
+            boundary_puts=[BoundaryPut(1, 5, 16)],
         ),
     )
 
@@ -3944,11 +3955,18 @@ def test_store_sending_thread_waits_for_hybrid_checkpoint_and_retries(failure):
             req_id="r0",
             token_len_chunk=24,
             block_ids=([1, 2, 3], [4, 5, 6]),
-            block_hashes=[b"a0", b"a1", b"a2", b"a3", b"a4", b"a5"],
+            block_hashes=[
+                BlockHash(b"a0"),
+                BlockHash(b"a1"),
+                BlockHash(b"a2"),
+                BlockHash(b"a3"),
+                BlockHash(b"a4"),
+                BlockHash(b"a5"),
+            ],
             can_save=True,
             token_ids=list(range(16, 24)),
             token_ids_start=16,
-            boundary_puts=[(1, 6, 24)],
+            boundary_puts=[BoundaryPut(1, 6, 24)],
         ),
     )
     keys = store.batch_put_from_multi_buffers.call_args.args[0]
@@ -5578,6 +5596,7 @@ def test_register_kv_caches_shared_storage(layout: KVCacheLayout):
     )
 
     db = worker.token_dbs[0]
+    assert isinstance(db.store_layout, RankLocalStoreLayout)
     if not layout.is_block_compact:
         # Each head group is its own region, so a block spans L*H regions.
         head_cache = caches[0][:, 0]
@@ -5661,6 +5680,7 @@ def test_register_kv_caches_uses_transfer_group_memory_domain(extra_config):
     worker._kv_cache_config = config
     worker._kv_cache_groups = list(config.transfer_groups)
     worker.cache_config.prefix_match_unit = None
+    assert isinstance(worker.cache_config.get_resolved_kv_cache_layout, MagicMock)
     worker.cache_config.get_resolved_kv_cache_layout.return_value = KVCacheLayout.LBHNC
     worker._group_tp_replication_factors = (
         worker._compute_group_tp_replication_factors()
@@ -5682,6 +5702,7 @@ def test_register_kv_caches_uses_transfer_group_memory_domain(extra_config):
     )
 
     db = worker.token_dbs[0]
+    assert isinstance(db.store_layout, RankLocalStoreLayout)
     assert db.store_layout.kv_caches_base_addr == [source.data_ptr()]
     assert db.store_layout.block_stride == [page_size]
     worker.store.register_buffer.assert_called_once_with(
@@ -5767,6 +5788,7 @@ def test_register_kv_caches_separate_head_groups():
         for head_idx in range(cache.shape[1])
     ]
     db = worker.token_dbs[0]
+    assert isinstance(db.store_layout, RankLocalStoreLayout)
     assert db.store_layout.kv_caches_base_addr == expected_addrs
     assert db.store_layout.block_stride == [head_block_bytes] * len(expected_addrs)
     worker.store.register_buffer.assert_called_once_with(raw.data_ptr(), raw.nbytes)
