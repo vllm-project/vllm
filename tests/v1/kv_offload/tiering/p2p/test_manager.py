@@ -694,7 +694,6 @@ def test_timed_out_load_holds_chunks_until_abort_ack(monkeypatch):
     chunk_ids = prepared.store_spec.chunk_ids
 
     def alloc_fn(keys, _ctx):
-        # The real alloc path (_promotion_allocation) records the allocation.
         tiering._metrics.on_promotion_allocated(0, len(chunk_ids))
         return (list(keys), chunk_ids)
 
@@ -3061,8 +3060,6 @@ class TestIdleWhileServingPeers:
                 assert tiering.has_pending_work() is False
 
             def alloc_fn(keys, _ctx):
-                # The real alloc path (_promotion_allocation) records the
-                # allocation.
                 tiering._metrics.on_promotion_allocated(0, 1)
                 return (list(keys), np.array([0], dtype=np.int32))
 

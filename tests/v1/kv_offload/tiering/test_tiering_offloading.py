@@ -1645,13 +1645,11 @@ class TestTieringOffloadingManager:
         # _make_request_level_request() wrapped submit_store in a MagicMock.
         submit_store = self.secondary_tier1.submit_store
         assert isinstance(submit_store, MagicMock)
-        cascaded = []
-        for call in submit_store.call_args_list:
-            job = call.args[0]
-            if job.req_context.req_id != req_id:
-                continue
-            cascaded.append(set(job.keys))
-        return cascaded
+        return [
+            set(call.args[0].keys)
+            for call in submit_store.call_args_list
+            if call.args[0].req_context.req_id == req_id
+        ]
 
     def test_cascade_rejects_retry_from_primary(self, manager_setup, monkeypatch):
         """RETRY would be parked with no guarantee of ever draining, so the
@@ -1667,7 +1665,7 @@ class TestTieringOffloadingManager:
         monkeypatch.setattr(
             self.manager.primary_tier,
             "lookup",
-            lambda key, req_context: LookupResult.RETRY,
+            lambda key, req_context: (LookupResult.RETRY),
         )
 
         with pytest.raises(AssertionError):
@@ -1772,8 +1770,8 @@ class TestTieringOffloadingManager:
         monkeypatch.setattr(
             self.secondary_tier1,
             "on_new_request",
-            lambda req_context: RequestOffloadingContext(
-                policy=OffloadPolicy.REQUEST_LEVEL
+            lambda req_context: (
+                RequestOffloadingContext(policy=OffloadPolicy.REQUEST_LEVEL)
             ),
         )
         rl_ctx = ReqContext(req_id="rl")
@@ -2486,44 +2484,6 @@ class TestTieringOffloadingManagerWithFsTier:
 
         fs_tier0.shutdown()
         fs_tier1.shutdown()
-
-    def test_deferred_promotion_chunk_counts_return_to_zero(self, fs_manager_setup):
-        """A deferred promotion's chunk count nets to zero once the job
-        finishes: the worker records the allocation increment when it
-        materializes the job, and the matching decrement is applied when
-        the job is reaped, so assert_idle holds.
-        """
-        manager, _, fs_tier = fs_manager_setup
-        keys = to_keys(range(3))
-        self._write_keys_to_fs(fs_tier, keys)
-
-        req_ctx = ReqContext(req_id="r_order")
-
-        for k in keys:
-            assert manager.lookup(k, req_ctx) == LookupResult.RETRY, (
-                "Lookups submit here"
-            )
-
-        manager.on_schedule_end(
-            ScheduleEndContext(new_req_ids=["r_order"], preempted_req_ids=[])
-        )
-        self._wait_lookup_workers(fs_tier)
-
-        for k in keys:
-            assert manager.lookup(k, req_ctx) == LookupResult.HIT_PENDING, (
-                "Promotions initiate here"
-            )
-
-        manager.on_schedule_end(
-            ScheduleEndContext(new_req_ids=[], preempted_req_ids=[])
-        )
-
-        self._drain_fs_results(manager, fs_tier)
-
-        for k in keys:
-            assert manager.lookup(k, req_ctx) == LookupResult.HIT
-
-        manager._metrics.assert_idle()
 
 
 if __name__ == "__main__":

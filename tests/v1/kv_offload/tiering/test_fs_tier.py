@@ -1085,9 +1085,6 @@ class TestFSPromotion:
         job.materialize()  # Simulates allocation on the scheduler thread
         tier.submit_load(job)
 
-        # load_task's materialize() call is a double call; the worker stashes
-        # the RuntimeError and the pool fails the job, then get_finished_jobs()
-        # re-raises it instead of reporting a silently failed promotion.
         with pytest.raises(AssertionError, match="materialized more than once"):
             drain(tier)
 
