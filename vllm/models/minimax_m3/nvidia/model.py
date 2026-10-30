@@ -237,10 +237,11 @@ def _use_sequence_parallel(vllm_config: VllmConfig) -> bool:
     between layers: attention all-gathers its input and reduce-scatters its
     output, replacing the two all-reduces per layer.
     """
+    if vllm_config.kernel_config.moe_backend != "deep_gemm_mega_moe":
+        return False
     parallel_config = vllm_config.parallel_config
     return (
-        vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
-        and parallel_config.pipeline_parallel_size == 1
+        parallel_config.pipeline_parallel_size == 1
         and parallel_config.enable_expert_parallel
         and parallel_config.tensor_parallel_size > 1
     )
@@ -1540,7 +1541,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        num_tokens = positions.shape[0]
+        num_tokens = hidden_states.shape[0]
         forward_context = None
         if self.use_sequence_parallel:
             # MegaMoE reads the padding mask from the forward context; give it
