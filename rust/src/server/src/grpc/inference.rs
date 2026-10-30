@@ -260,6 +260,7 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
             ec_transfer_params: collected.ec_transfer_params.map(Box::new),
             sampling_mask: collected.sampling_mask,
             spec_decode_metrics: collected.spec_decode_metrics,
+            weight_versions: collected.weight_versions,
             timestamps: collected.timestamps,
         };
 

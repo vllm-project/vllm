@@ -939,6 +939,7 @@ mod tests {
             ec_transfer_params: None,
             sampling_mask: None,
             spec_decode_metrics: None,
+            weight_versions: None,
             timestamps: Default::default(),
         }
     }
