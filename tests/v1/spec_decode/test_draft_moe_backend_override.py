@@ -14,8 +14,12 @@ from unittest.mock import patch
 
 import pytest
 
+import vllm.envs as envs
 from vllm.config import LoadConfig, SpeculativeConfig
+from vllm.model_executor.determinism import requires_batch_invariant_kernels
+from vllm.v1.worker.gpu.spec_decode import speculator as speculator_mod
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
+from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 
 
 @dataclass
@@ -95,3 +99,26 @@ def test_override_does_not_mutate_the_target_config():
     cfg = _config("flashinfer_b12x", "flashinfer_cutlass")
     _capture_draft_config(cfg)
     assert cfg.kernel_config.moe_backend == "flashinfer_b12x"
+
+
+@pytest.mark.parametrize("bi_drafter", [True, False])
+def test_draft_skips_batch_invariant_kernels_only_with_bi_drafter_off(
+    monkeypatch, bi_drafter
+):
+    """Under BI, only VLLM_BI_DRAFTER=0 lets the drafter pick non-BI kernels."""
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    monkeypatch.setattr(envs, "VLLM_BI_DRAFTER", bi_drafter)
+    monkeypatch.setattr(speculator_mod, "get_layers_from_vllm_config", lambda *a: {})
+    seen = []
+
+    def load_draft_model(self, target_model, target_attn_layer_names):
+        seen.append(requires_batch_invariant_kernels())
+        raise _Captured(None)
+
+    monkeypatch.setattr(MTPSpeculator, "load_draft_model", load_draft_model)
+    speculator = object.__new__(MTPSpeculator)
+    speculator.vllm_config = None
+    with pytest.raises(_Captured):
+        speculator.load_model(object())
+    assert seen == [bi_drafter]
+    assert requires_batch_invariant_kernels()
