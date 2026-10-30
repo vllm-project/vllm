@@ -15,7 +15,6 @@ from vllm import envs
 from vllm.config import CompilationMode, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
-from vllm.triton_utils import HAS_TRITON
 from vllm.utils.cpu_resource_utils import (
     get_allowed_cpu_list,
     get_memory_node_info,
@@ -150,20 +149,20 @@ class CPUWorker(Worker):
 
         # Construct the model runner
         if self.use_v2_model_runner:
-            if HAS_TRITON:
-                from vllm.v1.worker.cpu.model_runner import (
-                    CPUModelRunner as CPUModelRunnerV2,
-                )
-
-                self.model_runner: CPUModelRunner = CPUModelRunnerV2(  # type: ignore
-                    self.vllm_config, self.device
-                )
-            else:
+            if current_platform.uses_standalone_cpu_model_runner():
                 from vllm.v1.worker.cpu.standalone_model_runner import (
                     StandaloneCPUModelRunner,
                 )
 
-                self.model_runner = StandaloneCPUModelRunner(  # type: ignore
+                self.model_runner: CPUModelRunner = StandaloneCPUModelRunner(  # type: ignore
+                    self.vllm_config, self.device
+                )
+            else:
+                from vllm.v1.worker.cpu.model_runner import (
+                    CPUModelRunner as CPUModelRunnerV2,
+                )
+
+                self.model_runner = CPUModelRunnerV2(  # type: ignore
                     self.vllm_config, self.device
                 )
         else:
@@ -277,10 +276,10 @@ class CPUWorker(Worker):
         # their Triton JIT lands in the first request's TTFT.
         kernel_config = self.vllm_config.kernel_config
         if self.use_v2_model_runner and kernel_config.enable_jit_warmup:
-            if HAS_TRITON:
-                from vllm.v1.worker.gpu.warmup import warmup_kernels
-            else:
+            if current_platform.uses_standalone_cpu_model_runner():
                 from vllm.v1.worker.cpu.warmup import warmup_kernels
+            else:
+                from vllm.v1.worker.gpu.warmup import warmup_kernels
 
             warmup_kernels(
                 self.model_runner,

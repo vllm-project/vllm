@@ -73,7 +73,7 @@ from vllm.model_executor.model_loader.weight_checksum import (
 )
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
-from vllm.platforms import CpuArchEnum, current_platform
+from vllm.platforms import current_platform
 from vllm.profiler.wrapper import (
     create_graph_capture_profiler,
     create_worker_profiler,
@@ -206,15 +206,10 @@ class Worker(WorkerBase):
         is_driver_worker: bool = False,
     ):
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
-        # Only non-x86 CPUs have a standalone no-Triton MRV2 runner.
-        supports_v2_without_triton = (
-            current_platform.is_cpu()
-            and current_platform.get_cpu_architecture() != CpuArchEnum.X86
-        )
         if (
             self.use_v2_model_runner
             and not HAS_TRITON
-            and not supports_v2_without_triton
+            and not current_platform.uses_standalone_cpu_model_runner()
         ):
             raise ValueError("Model Runner V2 requires Triton.")
 
