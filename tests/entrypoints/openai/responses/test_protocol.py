@@ -14,6 +14,37 @@ from vllm.entrypoints.openai.responses.protocol import (
 from vllm.exceptions import VLLMValidationError
 
 
+@pytest.mark.parametrize("audio_format", ["mp3", "wav"])
+def test_input_audio_in_message_content(audio_format: str) -> None:
+    # Regression test for #47659: input_audio content parts inside a user
+    # message must be accepted on /v1/responses just as they are on
+    # /v1/chat/completions.
+    req = ResponsesRequest.model_validate(
+        {
+            "model": "test",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_audio",
+                            "input_audio": {
+                                "data": "AAAA",
+                                "format": audio_format,
+                            },
+                        },
+                        {"type": "input_text", "text": "what did I say?"},
+                    ],
+                }
+            ],
+        }
+    )
+    audio_part = req.input[0]["content"][0]
+    assert audio_part["type"] == "input_audio"
+    assert audio_part["input_audio"]["data"] == "AAAA"
+    assert audio_part["input_audio"]["format"] == audio_format
+
+
 def test_serialize_message() -> None:
     dict_value = {"a": 1, "b": "2"}
     assert serialize_message(dict_value) == dict_value
