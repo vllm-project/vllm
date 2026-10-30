@@ -1116,6 +1116,16 @@ class Worker(WorkerBase):
                 run_kv_cache_sizing_warmup(
                     self._v2_model_runner(), self.execute_model, self.sample_tokens
                 )
+                # Measure before capture, whose persistent allocations would
+                # hide part of the peak from a later peak - current.
+                kv_cache = self._v2_model_runner().extensible_kv_cache
+                assert kv_cache is not None
+                stats = torch.accelerator.memory_stats(self.device)
+                kv_cache.reserved_headroom_bytes = max(
+                    kv_cache.reserved_headroom_bytes,
+                    stats.get("allocated_bytes.all.peak", 0)
+                    - stats.get("allocated_bytes.all.current", 0),
+                )
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:

@@ -487,21 +487,18 @@ def measure_kv_cache_blocks(
 ) -> int:
     """Size an extensible KV cache from the memory free after warmup.
 
-    Keeps free the larger of the profiled peak and warmup's allocated (not
-    reserved) transient peak. Torch's cache is emptied first: its blocks may
-    not fit the large workspaces the first real steps allocate. Then caps torch's
-    caching allocator to leave KV_CACHE_NON_TORCH_MARGIN_FRACTION of the margin
-    free for allocations outside it.
+    Keeps free reserved_headroom_bytes, the larger of the profiled peak and
+    warmup's allocated (not reserved) transient peak. Torch's cache is emptied
+    first: its blocks may not fit the large workspaces the first real steps
+    allocate. Then caps torch's caching allocator to leave
+    KV_CACHE_NON_TORCH_MARGIN_FRACTION of the margin free for allocations
+    outside it.
     """
     torch.accelerator.synchronize()
     gc.collect()
-    stats = torch.accelerator.memory_stats(device)
-    warmup_peak = stats.get("allocated_bytes.all.peak", 0) - stats.get(
-        "allocated_bytes.all.current", 0
-    )
     torch.accelerator.empty_cache()
     free_memory, _ = torch.accelerator.get_memory_info(device)
-    transient_peak = max(kv_cache.reserved_headroom_bytes, warmup_peak)
+    transient_peak = kv_cache.reserved_headroom_bytes
     available = measure_kv_cache_bytes(
         init_free_memory=init_free_memory,
         free_memory=free_memory,
