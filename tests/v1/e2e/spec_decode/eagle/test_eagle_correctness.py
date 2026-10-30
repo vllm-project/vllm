@@ -10,6 +10,7 @@ from tests.utils import (
 from vllm import SamplingParams
 from vllm.platforms import current_platform
 
+from ..utils import get_spec_decode_metric_value, get_test_prompts
 from .utils import _run_eagle_correctness
 
 
@@ -170,3 +171,45 @@ def test_eagle_correctness_medium(
         attn_backend,
         vllm_runner,
     )
+
+
+@single_gpu_only
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or current_platform.is_device_capability_family(100),
+    reason="FLASHINFER splits 128-token blocks into kernel pages only below SM100",
+)
+def test_qwen3_eagle3_split_kernel_pages_keep_draft_acceptance(
+    monkeypatch: pytest.MonkeyPatch, vllm_runner
+):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    prompts = get_test_prompts(mm_enabled=False)
+    sampling_params = SamplingParams(temperature=0, max_tokens=128)
+    acceptance_per_pos = {}
+    for block_size in (64, 128):
+        with vllm_runner(
+            "Qwen/Qwen3-8B",
+            block_size=block_size,
+            max_model_len=2048,
+            attention_config={"backend": "FLASHINFER"},
+            speculative_config={
+                "method": "eagle3",
+                "model": "AngelSlim/Qwen3-8B_eagle3",
+                "num_speculative_tokens": 3,
+                "attention_backend": "TRITON_ATTN",
+            },
+            disable_log_stats=False,
+        ) as runner:
+            runner.llm.chat(prompts, sampling_params)
+            metrics = runner.llm.get_metrics()
+        num_drafts = get_spec_decode_metric_value(
+            metrics, "vllm:spec_decode_num_drafts"
+        )
+        accepted_per_pos = next(
+            m
+            for m in metrics
+            if m.name == "vllm:spec_decode_num_accepted_tokens_per_pos"
+        )
+        acceptance_per_pos[block_size] = [
+            n / num_drafts for n in accepted_per_pos.values
+        ]
+    assert acceptance_per_pos[128] == pytest.approx(acceptance_per_pos[64], abs=0.05)

@@ -250,6 +250,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         block_tables: BlockTables,
         target_input_buffers: InputBuffers,
         target_attn_groups: list[list[AttentionGroup]],
+        kernel_block_sizes: list[int],
     ) -> None:
         super().set_attn(
             model_state,
@@ -257,6 +258,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             block_tables,
             target_input_buffers,
             target_attn_groups,
+            kernel_block_sizes,
         )
 
         # FlashAttention's AOT split schedule is wrong for a windowed drafter,
