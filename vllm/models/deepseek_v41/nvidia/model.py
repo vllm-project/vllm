@@ -304,6 +304,12 @@ def maybe_init_gemm_rs(vllm_config: VllmConfig, use_sequence_parallel: bool) -> 
     """
     if not (use_sequence_parallel and envs.VLLM_ENABLE_GEMM_RS):
         return False
+    if vllm_config.lora_config is not None:
+        # The fused kernel reads wo_b's base weight and has no LoRA epilogue.
+        logger.warning_once(
+            "DeepSeek-V4.1 GEMM-RS is disabled because LoRA is enabled."
+        )
+        return False
 
     # The kernel module pulls in cute_dsl, so import it only once opted in.
     from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import (

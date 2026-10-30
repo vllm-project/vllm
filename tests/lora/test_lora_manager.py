@@ -1342,9 +1342,9 @@ def test_image_mapping_restores_batch_after_failure(monkeypatch):
 
 @pytest.mark.parametrize("grid, expected", [([3, 3], (9, 1)), ([4, 7], (28, 6))])
 def test_image_lora_counts_exclude_span_delimiters(grid, expected):
-    from vllm.models.deepseek_v4_1.nvidia.vl_model import DeepseekV41ForCausalLM
+    from vllm.models.deepseek_v41.nvidia.vl_model import DeepseekV41ForCausalLM
 
-    model = object.__new__(DeepseekV41ForCausalLM)
+    model = object.__new__(DeepseekV41ForCausalLM)  # type: ignore[type-abstract]
     model.config = SimpleNamespace(vision_downsample_ratio=3)
     counts = model.get_mm_lora_token_counts(
         modality="image",
@@ -1355,13 +1355,23 @@ def test_image_lora_counts_exclude_span_delimiters(grid, expected):
 
 
 def test_image_lora_initialization_accepts_encoder_budget_without_grid():
-    from vllm.models.deepseek_v4_1.nvidia.vl_model import DeepseekV41ForCausalLM
+    from vllm.models.deepseek_v41.nvidia.vl_model import DeepseekV41ForCausalLM
 
-    model = object.__new__(DeepseekV41ForCausalLM)
+    model = object.__new__(DeepseekV41ForCausalLM)  # type: ignore[type-abstract]
     model.config = SimpleNamespace(vision_downsample_ratio=3)
     assert model.get_mm_lora_token_counts(
         modality="image", mm_kwargs=None, num_mm_embeds=4096
     ) == (36864, 4096)
+
+
+def test_tower_lora_rejects_packed_encoder_cudagraph():
+    """The packed encoder graph cannot scope adapter mappings to each image."""
+    from vllm.models.deepseek_v41.nvidia.vl_model import DeepseekV41ForCausalLM
+
+    model = object.__new__(DeepseekV41ForCausalLM)  # type: ignore[type-abstract]
+    model.lora_config = LoRAConfig(max_lora_rank=8, enable_tower_connector_lora=True)
+    with pytest.raises(ValueError, match="enable_tower_connector_lora"):
+        model.get_encoder_cudagraph_config()
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA vision LoRA")
@@ -1369,19 +1379,18 @@ def test_image_batch_matches_individual_adapters(
     default_vllm_config, dist_init, monkeypatch
 ):
     """Mixed adapters and base images keep their identity when TP reorders images."""
-    from vllm.models.deepseek_v4_1.common.mm_preprocess import (
+    from vllm.lora.layers import LoRAMappingType
+    from vllm.models.deepseek_v4.common.vision import DeepseekV4Aligner, DeepseekV4ViT
+    from vllm.models.deepseek_v41.common.mm_preprocess import (
         IMAGE,
         IMAGE_END,
         IMAGE_NEW_LINE,
         IMAGE_START,
     )
-    from vllm.models.deepseek_v4_1.nvidia.vl_model import (
+    from vllm.models.deepseek_v41.nvidia.vl_model import (
         DeepseekV4VLImagePixelInputs,
         DeepseekV41ForCausalLM,
     )
-
-    from vllm.lora.layers import LoRAMappingType
-    from vllm.models.deepseek_v4.common.vision import DeepseekV4Aligner, DeepseekV4ViT
 
     def init_small_wrappers(manager, max_tokens, vllm_config):
         # Keep the real manager/wrappers; only bypass full-checkpoint token budgeting.
@@ -1413,7 +1422,7 @@ def test_image_batch_matches_individual_adapters(
         enable_tower_connector_lora=True,
     )
     with torch.device("cuda"), torch.inference_mode():
-        model = object.__new__(DeepseekV41ForCausalLM)
+        model = object.__new__(DeepseekV41ForCausalLM)  # type: ignore[type-abstract]
         torch.nn.Module.__init__(model)
         model.config = config
         model.use_data_parallel = True
@@ -1487,7 +1496,7 @@ def test_image_batch_matches_individual_adapters(
                     )
                 )
 
-        individual = []
+        individual: list[torch.Tensor] = []
         for i in range(4):
             set_batch([i])
             individual.extend(model._process_image_input(image_input([i])))

@@ -48,6 +48,7 @@ from vllm.models.deepseek_v4.common.vision import (
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphConfig
 
 from ..common.mm_preprocess import (
     IMAGE_PLACEHOLDER,
@@ -169,6 +170,7 @@ class DeepseekV41ForCausalLM(
         self.config = config
         self.multimodal_config = model_config.multimodal_config
         assert self.multimodal_config is not None
+        self.lora_config = vllm_config.lora_config
 
         # The tower is always built; _mark_tower_model stubs it out
         # (StageMissingLayer, weights skipped) when the image limit is 0.
@@ -276,6 +278,20 @@ class DeepseekV41ForCausalLM(
         if image_input is None:
             return []
         return self._process_image_input(image_input)
+
+    def get_encoder_cudagraph_config(self) -> EncoderCudaGraphConfig:
+        # The packed graph encodes every image at once, so it cannot scope
+        # the tower/connector adapter mapping to each image.
+        if (
+            self.lora_config is not None
+            and self.lora_config.enable_tower_connector_lora
+        ):
+            raise ValueError(
+                "cudagraph_mm_encoder is incompatible with "
+                "enable_tower_connector_lora for DeepSeek-V4.1. Disable one "
+                "of them."
+            )
+        return super().get_encoder_cudagraph_config()
 
     def embed_input_ids(
         self,
