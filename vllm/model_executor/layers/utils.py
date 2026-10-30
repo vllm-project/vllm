@@ -519,7 +519,10 @@ def rocm_unquantized_gemm_impl(
         out = ops.LLMM1(weight, x_view, 4)
         return out.reshape(*x.shape[:-1], weight.shape[0])
 
-    if rocm_aiter_ops.is_tgemm_enabled():
+    # AITER's gfx950 FlyDSL A16W16 kernel addresses C with int32 offsets and
+    # reads A/B through 4 GiB buffer descriptors (ROCm/aiter#6853).
+    aiter_hgemm_unsafe = n * m >= 1 << 31 or max(n, m) * k * x.element_size() >= 1 << 32
+    if rocm_aiter_ops.is_tgemm_enabled() and not aiter_hgemm_unsafe:
         from aiter.tuned_gemm import tgemm
 
         return tgemm.mm(x, weight, bias)
