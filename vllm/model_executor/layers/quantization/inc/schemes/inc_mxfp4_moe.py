@@ -4,6 +4,7 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.config.kernel import FLASHINFER_MOE_EP_BACKENDS
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoeWeightScaleSupported,
@@ -34,7 +35,11 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_moe_fp4_layer_for_marlin,
 )
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import (
+    move_parameter,
+    replace_parameter,
+    set_weight_attrs,
+)
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -53,6 +58,11 @@ class INCMxfp4MoEMethod(FusedMoEMethodBase):
 
     def __init__(self, moe) -> None:
         super().__init__(moe)
+        if moe.moe_backend in FLASHINFER_MOE_EP_BACKENDS:
+            raise ValueError(
+                f"moe_backend={moe.moe_backend!r} is not supported for AutoRound "
+                "(INC) MXFP4 MoE checkpoints"
+            )
         self.group_size = 32
         # Backend selection must stay consistent with the weight preparation in
         # process_weights_after_loading / get_fused_moe_quant_config, which use
@@ -159,14 +169,8 @@ class INCMxfp4MoEMethod(FusedMoEMethodBase):
         )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
-        layer.w13_weight = torch.nn.Parameter(
-            layer.w13_weight_packed.data, requires_grad=False
-        )
-        delattr(layer, "w13_weight_packed")
-        layer.w2_weight = torch.nn.Parameter(
-            layer.w2_weight_packed.data, requires_grad=False
-        )
-        delattr(layer, "w2_weight_packed")
+        move_parameter(layer, "w13_weight_packed", "w13_weight")
+        move_parameter(layer, "w2_weight_packed", "w2_weight")
 
         if self.use_cutlass_mxfp4:
             # Swizzle weight scales from flat checkpoint layout [E, N, K//32]
@@ -193,12 +197,8 @@ class INCMxfp4MoEMethod(FusedMoEMethodBase):
                 s2 = layer.w2_weight_scale[e_idx]
                 sw2 = swizzle_mxfp4_scales(s2, w2_M, w2_N)
                 swizzled_w2.append(sw2.reshape(w2_M, w2_scale_N))
-            layer.w13_weight_scale = torch.nn.Parameter(
-                torch.stack(swizzled_w13), requires_grad=False
-            )
-            layer.w2_weight_scale = torch.nn.Parameter(
-                torch.stack(swizzled_w2), requires_grad=False
-            )
+            replace_parameter(layer, "w13_weight_scale", torch.stack(swizzled_w13))
+            replace_parameter(layer, "w2_weight_scale", torch.stack(swizzled_w2))
         elif self.mxfp4_backend in B12X_BACKENDS or current_platform.is_xpu():
             pass
         else:

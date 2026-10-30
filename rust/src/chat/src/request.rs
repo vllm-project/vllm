@@ -394,7 +394,9 @@ pub struct ChatOptions {
     pub generation_prompt_mode: GenerationPromptMode,
 
     /// Per-request Jinja chat template override. When set, this template is
-    /// used instead of the model's default chat template.
+    /// used instead of the model's default chat template. Only the HF renderer
+    /// honors it, and only with `--trust-request-chat-template`; native
+    /// renderers ignore it.
     pub chat_template: Option<String>,
 
     /// Model-specific reasoning effort, typically `none`, `minimal`, `low`,
@@ -540,6 +542,17 @@ impl ResolvedToolContext {
     pub fn parsing_enabled(&self) -> bool {
         !matches!(self.tool_choice, ChatToolChoice::None) && !self.effective_tools.is_empty()
     }
+
+    /// Drop request-level tools when `tool_choice` is `none`, so they are not
+    /// rendered into the prompt. Message-scoped tools stay, as they are part of
+    /// the chat history.
+    pub(crate) fn exclude_initial_tools_if_none(&mut self) {
+        if matches!(self.tool_choice, ChatToolChoice::None) {
+            // `new` places request-level tools first in `effective_tools`.
+            self.effective_tools.drain(..self.initial_tools.len());
+            self.initial_tools.clear();
+        }
+    }
 }
 
 impl Default for ResolvedToolContext {
@@ -679,6 +692,22 @@ impl ChatRequest {
         self.tool_context.parsing_enabled()
     }
 
+    /// Return how many parsed tool calls may be surfaced, or `None` for no
+    /// limit.
+    ///
+    /// With tool parsing off (e.g. `tool_choice=none`), calls a parser still
+    /// recognizes are dropped rather than surfaced, matching Python's parser
+    /// engine.
+    pub(crate) fn max_tool_calls(&self) -> Option<usize> {
+        if !self.tool_parsing_enabled() {
+            Some(0)
+        } else if !self.parallel_tool_calls() {
+            Some(1)
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn parse_template_bool(&self, key: &str) -> Result<Option<bool>> {
         match self.chat_options.template_kwargs.get(key) {
             None => Ok(None),
@@ -801,6 +830,7 @@ mod tests {
                     "properties": {"city": {"type": "string"}},
                 }),
                 strict: Some(true),
+                defer_loading: None,
             }]),
         );
 
@@ -815,6 +845,7 @@ mod tests {
             description: None,
             parameters: json!({"type": "object"}),
             strict: None,
+            defer_loading: None,
         }
     }
 

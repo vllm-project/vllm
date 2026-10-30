@@ -362,6 +362,99 @@ def test_fused_moe_lora_kernel(
     torch.testing.assert_close(output, output2, atol=1e-2, rtol=1e-2)
 
 
+@pytest.mark.parametrize("max_lora_rank", [128, 256])
+@pytest.mark.parametrize("add_inputs", [True, False])
+@pytest.mark.parametrize("num_slices", [1, 2])
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("device", DEVICES)
+def test_fused_moe_lora_kernel_large_rank_fallback(
+    max_lora_rank,
+    add_inputs,
+    num_slices,
+    dtype,
+    device,
+):
+    """Ranks above the one-shot limit fall back to shrink/expand kernels."""
+    torch.set_default_device(device)
+    set_random_seed(42)
+
+    num_tokens = 8
+    num_sequences = 4
+    top_k_num = 2
+    num_experts = 4
+    max_loras = 2
+    N = 256
+    K = 256
+    block_size = 16
+    topk_ids, topk_weights, token_lora_mapping, lora_ids = sample_data(
+        num_tokens, num_sequences, max_loras, num_experts, top_k_num
+    )
+    lora_a_stacked = [
+        torch.rand(
+            (max_loras, num_experts, max_lora_rank, K),
+            dtype=dtype,
+        )
+        for _ in range(num_slices)
+    ]
+    lora_b_stacked = [
+        torch.rand(
+            (max_loras, num_experts, N // num_slices, max_lora_rank),
+            dtype=dtype,
+        )
+        for _ in range(num_slices)
+    ]
+    hidden_states = torch.rand((num_tokens, K), dtype=dtype)
+
+    residual = torch.randn((num_tokens, top_k_num, N), dtype=dtype)
+    output = residual.clone()
+    use_fused_moe_lora_kernel(
+        topk_ids,
+        topk_weights,
+        token_lora_mapping,
+        max_lora_rank,
+        top_k_num,
+        lora_ids,
+        lora_a_stacked,
+        lora_b_stacked,
+        hidden_states,
+        output,
+        max_loras,
+        num_experts,
+        block_size,
+        add_inputs=add_inputs,
+    )
+
+    strict_fp16 = dtype == torch.float16 and max_lora_rank == 256
+    if strict_fp16:
+        # An fp32 oracle is needed to catch an unintended fp16 -> bf16 cast.
+        reference_hidden_states = hidden_states.float()
+        reference_lora_a = [lora_a.float() for lora_a in lora_a_stacked]
+        reference_lora_b = [lora_b.float() for lora_b in lora_b_stacked]
+    else:
+        reference_hidden_states = hidden_states
+        reference_lora_a = lora_a_stacked
+        reference_lora_b = lora_b_stacked
+
+    expected = use_torch(
+        reference_hidden_states,
+        token_lora_mapping,
+        topk_ids,
+        reference_lora_a,
+        reference_lora_b,
+        top_k_num,
+        num_slices,
+    )
+    if add_inputs:
+        expected += residual.to(expected.dtype)
+
+    if strict_fp16:
+        # This separates the fp16 dot path from the old bf16-cast path while
+        # allowing normal fp16 accumulation and output-rounding error.
+        torch.testing.assert_close(output.float(), expected, atol=1e-2, rtol=8e-4)
+    else:
+        torch.testing.assert_close(output, expected, atol=2e-2, rtol=2e-2)
+
+
 def use_fused_moe_lora_kernel_naive(
     topk_ids,
     topk_weights,

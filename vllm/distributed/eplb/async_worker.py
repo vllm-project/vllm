@@ -3,6 +3,7 @@
 """The async worker that transfers experts in the background."""
 
 import threading
+import time
 from typing import TYPE_CHECKING
 
 import torch
@@ -11,6 +12,7 @@ from vllm.distributed.parallel_state import get_eplb_group
 from vllm.logger import init_logger
 
 from .eplb_utils import CpuGpuEvent, device_stream
+from .migration_scheduler import schedule_migration_batches_for_layers
 from .rebalance_execute import AsyncEplbLayerResult, transfer_layer
 
 if TYPE_CHECKING:
@@ -37,7 +39,8 @@ def start_async_worker(
                 stream=stream,
                 is_profile=is_profile,
             )
-        except Exception as exc:  # pragma: no cover - diagnostic path
+        except Exception as exc:
+            state.async_worker_error = exc
             logger.exception("async loop error (Rank %d): %s", rank, str(exc))
 
     thread = threading.Thread(target=thread_target, daemon=True)
@@ -95,9 +98,25 @@ def transfer_run_periodically(
             with device_stream(stream):
                 physical_to_logical_map_cpu = model_state.physical_to_logical_map.cpu()
 
+            t_start = time.perf_counter()
             new_physical_to_logical_map = run_rebalance_experts(
                 model_state, state, physical_to_logical_map_cpu, stream
             )
+
+            migration_batches_by_layer = None
+            if state.parallel_config.eplb_config.migration_batching_enabled:
+                profile_name = "eplb: schedule migration batches"
+                num_local_experts = model_state.model.expert_weights[0][0].shape[0]
+                # The placement snapshots stay fixed for this rebalance cycle.
+                # Precompute all layer schedules once, but execute transfers one
+                # layer at a time below to preserve the migration lifecycle. This
+                # profiling range therefore covers scheduling for every MoE layer.
+                with torch.profiler.record_function(profile_name):
+                    migration_batches_by_layer = schedule_migration_batches_for_layers(
+                        num_local_experts,
+                        physical_to_logical_map_cpu.numpy(),
+                        new_physical_to_logical_map.numpy(),
+                    )
 
             # Execute one EPLB layer transfer per model forward pass. Each iteration
             # of this loop will copy the new set of expert weights into
@@ -134,6 +153,16 @@ def transfer_run_periodically(
                     is_profile=is_profile,
                     stream=stream,
                     layer_idx=layer_idx,
+                    enable_migration_batching=(
+                        state.parallel_config.eplb_config.migration_batching_enabled
+                    ),
+                    migration_batches=(
+                        # This is only the current layer's schedule; it does not
+                        # combine transfers from different layers.
+                        migration_batches_by_layer[layer_idx]
+                        if migration_batches_by_layer is not None
+                        else None
+                    ),
                 )
 
                 # Wait until all writes to expert_buffer have finished before making the
@@ -156,5 +185,16 @@ def transfer_run_periodically(
                 # finish copying model_state.expert_buffer into
                 # model_state.model.expert_weights[layer_idx]
                 consumed_event.wait(stream=stream)
+                # Host-issued writes into expert_buffer (e.g. NIXL RDMA reads) are not
+                # stream-ordered, so wait until move_from_buffer has run on the GPU.
+                stream.synchronize()
                 assert model_state.pending_result is None
                 layer_idx += 1
+            if ep_rank == 0:
+                logger.info(
+                    "Async EPLB rearranged %d/%d layers of %s in %.2f s.",
+                    layer_idx,
+                    num_layers,
+                    model_state.model_name,
+                    time.perf_counter() - t_start,
+                )

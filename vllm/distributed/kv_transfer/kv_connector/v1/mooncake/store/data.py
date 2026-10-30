@@ -7,7 +7,7 @@
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from typing import cast
+from typing import NamedTuple, cast
 
 import numpy as np
 import torch
@@ -234,6 +234,10 @@ class RankLocalStoreLayout(StoreLayout):
         super().__init__(metadata, block_size, hash_block_size)
         self._key_prefix = PoolKey.build_prefix(metadata)
         self.kv_caches_base_addr: list[int] = []
+        self.block_stride: list[int] = []
+        # Bytes at the start of each block that are stored: up to the last
+        # byte of the group's data, skipping e.g. the padding of a Mamba state
+        # up to the attention page size.
         self.block_len: list[int] = []
 
     @property
@@ -263,44 +267,68 @@ class RankLocalStoreLayout(StoreLayout):
         self.kv_caches_base_addr = base_addrs
 
     def set_block_len(self, block_lens: list[int]) -> None:
-        self.block_len = block_lens
+        self.block_stride = block_lens
+        self.block_len = list(block_lens)
 
     def register_kv_caches(
         self,
         kv_caches: Sequence[torch.Tensor],
         num_blocks: int,
     ) -> None:
-        seen_region_ptrs: set[int] = set()
+        # Map each region's base address to its entry in the parallel lists.
+        region_index: dict[int, int] = {}
         base_addrs: list[int] = []
+        block_strides: list[int] = []
         block_lens: list[int] = []
+
+        def add_region(addr: int, block_stride: int, block_len: int) -> None:
+            assert 0 < block_len <= block_stride
+            index = region_index.get(addr)
+            if index is None:
+                region_index[addr] = len(base_addrs)
+                base_addrs.append(addr)
+                block_strides.append(block_stride)
+                block_lens.append(block_len)
+            else:
+                # Several views can share a region (e.g. the layers of a
+                # block-outermost buffer); keep the bytes up to the last one.
+                block_lens[index] = max(block_lens[index], block_len)
+
         for cache in kv_caches:
             storage = cache.untyped_storage()
             storage_addr = storage.data_ptr()
             storage_len = storage.nbytes()
+            block_bytes = cache[0].numel() * cache.element_size()
             if not is_non_overlapping_and_dense(cache[0]):
+                # One region per head, copying only that head's block (in a
+                # block-outermost buffer the block stride spans every head).
                 for head_idx in range(cache.shape[1]):
                     head_cache = cache[:, head_idx]
                     assert is_non_overlapping_and_dense(head_cache[0])
-                    region_addr = head_cache.data_ptr()
-                    if region_addr in seen_region_ptrs:
-                        continue
-                    seen_region_ptrs.add(region_addr)
-                    base_addrs.append(region_addr)
-                    block_lens.append(head_cache.stride(0) * head_cache.element_size())
+                    add_region(
+                        head_cache.data_ptr(),
+                        head_cache.stride(0) * head_cache.element_size(),
+                        head_cache[0].numel() * head_cache.element_size(),
+                    )
             elif cache.stride(0) * cache.element_size() * num_blocks == storage_len:
-                if storage_addr in seen_region_ptrs:
-                    continue
-                seen_region_ptrs.add(storage_addr)
-                base_addrs.append(storage_addr)
-                block_lens.append(storage_len // num_blocks)
+                # Block-outermost buffer: each block holds every layer, so the
+                # whole storage is one region. In block 0 this layer's data
+                # starts at cache.data_ptr() - storage_addr and spans
+                # block_bytes, so the block is used up to that end; the
+                # region keeps the end of its last layer.
+                add_region(
+                    storage_addr,
+                    storage_len // num_blocks,
+                    cache.data_ptr() - storage_addr + block_bytes,
+                )
             else:
-                region_addr = cache.data_ptr()
-                if region_addr in seen_region_ptrs:
-                    continue
-                seen_region_ptrs.add(region_addr)
-                base_addrs.append(region_addr)
-                block_lens.append(cache.stride(0) * cache.element_size())
+                add_region(
+                    cache.data_ptr(),
+                    cache.stride(0) * cache.element_size(),
+                    block_bytes,
+                )
         self.kv_caches_base_addr = base_addrs
+        self.block_stride = block_strides
         self.block_len = block_lens
 
     def prepare_values(
@@ -315,7 +343,11 @@ class RankLocalStoreLayout(StoreLayout):
             shard_id == 0 for shard_id in shard_ids
         )
         base = np.asarray(self.kv_caches_base_addr, dtype=np.int64)
-        length = len(self.block_len)
+        length = len(self.block_stride)
+        stride = np.asarray(
+            [self.block_stride[i % length] for i in range(base.shape[0])],
+            dtype=np.int64,
+        )
         blen = np.asarray(
             [self.block_len[i % length] for i in range(base.shape[0])],
             dtype=np.int64,
@@ -329,16 +361,18 @@ class RankLocalStoreLayout(StoreLayout):
             dtype=np.int64,
             count=n,
         )
-        addrs = base[None, :] + bids[:, None] * blen[None, :]
+        addrs = base[None, :] + bids[:, None] * stride[None, :]
         block_counts = (spans + self.block_size - 1) // self.block_size
-        sizes = blen[None, :] * block_counts[:, None]
+        # A chunk spanning several consecutive blocks also copies the
+        # padding between them.
+        sizes = stride[None, :] * (block_counts[:, None] - 1) + blen[None, :]
         return addrs.tolist(), sizes.tolist(), bids.tolist()
 
     def prepare_value_for_block(self, block_id: int) -> tuple[list[int], list[int]]:
-        length = len(self.block_len)
+        length = len(self.block_stride)
         return (
             [
-                base_addr + block_id * self.block_len[index % length]
+                base_addr + block_id * self.block_stride[index % length]
                 for index, base_addr in enumerate(self.kv_caches_base_addr)
             ],
             [
@@ -581,8 +615,8 @@ class ChunkedTokenDatabase:
         return self._rank_local_layout().kv_caches_base_addr
 
     @property
-    def block_len(self) -> list[int]:
-        return self._rank_local_layout().block_len
+    def block_stride(self) -> list[int]:
+        return self._rank_local_layout().block_stride
 
     def _rank_local_layout(self) -> RankLocalStoreLayout:
         if not isinstance(self.store_layout, RankLocalStoreLayout):
@@ -712,6 +746,7 @@ class RequestTracker:
     # For a fresh request this is len(prompt). For a resumed-from-preemption
     # request it includes previously-generated tokens, which are re-prefilled.
     prefill_end_tokens: int = 0
+    partial_tail_sent: bool = False
 
     def reset(self) -> None:
         self.token_len = 0
@@ -720,6 +755,7 @@ class RequestTracker:
         self.token_ids = None
         self.has_pending_offload = False
         self.prefill_end_tokens = 0
+        self.partial_tail_sent = False
 
     def update(
         self,
@@ -739,6 +775,14 @@ class RequestTracker:
                 existing.extend(new)
 
 
+class BoundaryPut(NamedTuple):
+    """A block stored under the hash of the prefix ending at ``num_tokens``."""
+
+    group_id: int
+    block_id: int
+    num_tokens: int
+
+
 @dataclass
 class ReqMeta:
     """Per-request metadata for store put/get operations."""
@@ -756,15 +800,24 @@ class ReqMeta:
     # Absolute request offset represented by token_ids[0].
     token_ids_start: int = 0
     num_prompt_tokens: int | None = None
+    # Total prefill tokens, including generated tokens replayed after preemption.
+    prefill_end_tokens: int | None = None
     # Identifies this store job for the engine's lifetime. A request id cannot
     # serve that purpose: it is reused once a preempted request resumes, so it
     # would release the wrong job's blocks.
     store_job_id: int | None = None
-    # Core-provided (group_id, block_id, boundary_tokens) mamba "align"
-    # boundary states. A block-aligned entry is a committed boundary snapshot;
-    # a non-aligned entry is the sub-block CoW tail. The store-job reference
-    # keeps each exact block alive until every worker rank finishes the job.
-    boundary_state_offloads: list[tuple[int, int, int]] | None = None
+    # Blocks stored under an explicit prefix hash rather than by position:
+    # core-provided mamba "align" states (a block-aligned entry is a committed
+    # snapshot, a non-aligned one the sub-block CoW prompt tail) and the
+    # scheduler-resolved non-Mamba blocks of the prompt's partial tail. The
+    # store-job reference keeps each block alive until every worker rank
+    # finishes the job.
+    boundary_puts: list[BoundaryPut] | None = None
+    # Total computed prefix length at the end of this step.
+    completed_token_len: int | None = None
+    # Set on the save that first covers the whole prompt, so the scheduler
+    # publishes the prompt's partial tail once rather than on every save.
+    publish_partial_tail: bool = False
 
     @staticmethod
     def from_request_tracker(
@@ -773,8 +826,12 @@ class ReqMeta:
         load_spec: LoadSpec | None = None,
         skip_save: bool | None = False,
         block_hashes: list[BlockHash] | None = None,
+        save_partial_tail: bool = False,
+        num_prompt_tokens: int | None = None,
     ) -> "ReqMeta | None":
         """Create ReqMeta from a RequestTracker."""
+        if save_partial_tail:
+            assert num_prompt_tokens is not None
         if block_hashes is None:
             block_hashes = []
         input_token_len = tracker.token_len
@@ -783,7 +840,15 @@ class ReqMeta:
         chunk_boundary = cdiv(token_ids_start + 1, block_size) * block_size
         num_tokens_to_save = input_token_len // block_size * block_size
 
-        skip_save = skip_save or num_tokens_to_save < chunk_boundary
+        publish_tail = (
+            save_partial_tail
+            and not tracker.partial_tail_sent
+            and num_prompt_tokens is not None
+            and 0 < num_prompt_tokens <= input_token_len
+        )
+        skip_save = skip_save or (
+            num_tokens_to_save < chunk_boundary and not publish_tail
+        )
         # A ReqMeta must never carry both a save AND a load.
         # The save would also be wasted work — the bytes are being looked up
         # in the store right now. Later cached_reqs steps save new tokens
@@ -795,6 +860,7 @@ class ReqMeta:
 
         if not skip_save:
             tracker.num_saved_tokens = num_tokens_to_save
+            tracker.partial_tail_sent |= publish_tail
 
         token_ids = None
         if tracker.token_ids and not skip_save:
@@ -826,7 +892,10 @@ class ReqMeta:
             block_hashes=block_hashes,
             token_ids=token_ids,
             token_ids_start=token_ids_start,
-            num_prompt_tokens=tracker.prefill_end_tokens,
+            num_prompt_tokens=num_prompt_tokens,
+            prefill_end_tokens=tracker.prefill_end_tokens,
+            completed_token_len=input_token_len,
+            publish_partial_tail=publish_tail and not skip_save,
         )
 
 

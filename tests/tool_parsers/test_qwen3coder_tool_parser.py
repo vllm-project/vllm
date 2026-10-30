@@ -9,6 +9,7 @@ import pytest
 from openai.types.responses.function_tool import FunctionTool
 from xgrammar import StructuralTag
 
+from tests.tool_parsers.utils import ToolState, ToolStateWithHeader
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     FunctionCall,
@@ -225,7 +226,7 @@ def test_extract_tool_calls_no_tools(qwen3_tool_parser):
     model_output = "This is a test response without any tool calls"
     extracted_tool_calls = qwen3_tool_parser.extract_tool_calls(
         model_output, request=None
-    )  # type: ignore[arg-type]
+    )
     assert not extracted_tool_calls.tools_called
     assert extracted_tool_calls.tool_calls == []
     assert extracted_tool_calls.content == model_output
@@ -653,7 +654,7 @@ true
     parser = Qwen3EngineToolParser(qwen3_tokenizer, tools=tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
 
-    tool_states = {}
+    tool_states: dict[int, ToolState] = {}
     for delta_message in stream_delta_message_generator(
         parser, qwen3_tokenizer, model_output, request
     ):
@@ -866,7 +867,7 @@ def test_extract_tool_calls_streaming(
     request = ChatCompletionRequest(model=MODEL, messages=[])
 
     other_content = ""
-    tool_states = {}  # Track state per tool index
+    tool_states: dict[int, ToolStateWithHeader] = {}  # Track state per tool index
 
     for delta_message in stream_delta_message_generator(
         qwen3_tool_parser, qwen3_tokenizer, model_output, request
@@ -993,7 +994,7 @@ fahrenheit
     request = ChatCompletionRequest(model=MODEL, messages=[])
 
     other_content = ""
-    tool_states = {}
+    tool_states: dict[int, ToolStateWithHeader] = {}
 
     for delta_message in stream_delta_message_generator(
         qwen3_tool_parser, qwen3_tokenizer, model_output, request
@@ -1078,6 +1079,7 @@ TX
     for chunk in chunks:
         if chunk.tool_calls and chunk.tool_calls[0].id:
             header_found = True
+            assert chunk.tool_calls[0].function is not None
             assert chunk.tool_calls[0].function.name == "get_current_weather"
             assert chunk.tool_calls[0].type == "function"
             break
@@ -1129,7 +1131,7 @@ fahrenheit
     request = ChatCompletionRequest(model=MODEL, messages=[])
 
     other_content = ""
-    tool_states = {}
+    tool_states: dict[int, ToolStateWithHeader] = {}
 
     for delta_message in stream_delta_message_generator(
         qwen3_tool_parser, qwen3_tokenizer, model_output, request

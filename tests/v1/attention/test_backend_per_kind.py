@@ -72,19 +72,20 @@ def test_get_attn_spec_kind_attn_type(attn_type, expected):
 
 
 def test_backend_per_kind_parses_strings():
-    cfg = AttentionConfig(
-        backend_per_kind={
-            "mla_attention": "FLASHINFER_MLA",
-            "sliding_window_mla": "triton_mla",  # case-insensitive
-        }
-    )
+    # The field's before-validator parses backend names from strings.
+    backend_per_kind: dict[str, str] = {
+        "mla_attention": "FLASHINFER_MLA",
+        "sliding_window_mla": "triton_mla",  # case-insensitive
+    }
+    cfg = AttentionConfig(backend_per_kind=backend_per_kind)
     assert cfg.backend_per_kind["mla_attention"] is AttentionBackendEnum.FLASHINFER_MLA
     assert cfg.backend_per_kind["sliding_window_mla"] is AttentionBackendEnum.TRITON_MLA
 
 
 def test_backend_per_kind_rejects_unknown_kind():
+    backend_per_kind: dict[str, str] = {"not_a_kind": "TRITON_MLA"}
     with pytest.raises(ValueError, match="Unknown KV cache group kind"):
-        AttentionConfig(backend_per_kind={"not_a_kind": "TRITON_MLA"})
+        AttentionConfig(backend_per_kind=backend_per_kind)
 
 
 def test_backend_per_kind_defaults_empty():

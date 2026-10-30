@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
+from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds, EngineId
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
 )
@@ -43,6 +43,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(vllm_config, engine_id, kv_cache_config)
+        # Registration generation of each remote engine's loaded agent.
+        self._remote_registration_generations: dict[EngineId, int] = {}
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):
         """Start loading by triggering non-blocking nixl_xfer.
@@ -72,14 +74,6 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             # Aborted cleanup requests have already been removed from the scheduler.
             if meta.awaiting_kvs or any(meta.local_block_ids):
                 self._recving_metadata[req_id] = meta
-            if remote_engine_id not in self._remote_agents:
-                # Initiate handshake with remote engine to exchange metadata.
-                with self._handshake_lock:
-                    if remote_engine_id not in self._remote_agents:
-                        self._background_nixl_handshake(req_id, remote_engine_id, meta)
-                        continue
-
-            # Handshake already completed, start async read xfer.
             self._read_blocks_for_req(req_id, meta)
 
         # Start transfers for requests whose handshakes have now finished.
@@ -144,6 +138,21 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         assert meta.remote is not None and self.transfer_topo is not None
         engine_id = meta.remote.engine_id
+        if engine_id in self._invalid_remote_engines:
+            self._handle_failed_transfer(
+                req_id, None, self._recv_failures, record_failed_transfer=False
+            )
+            return
+        generation = meta.remote.registration_generation
+        if self._remote_registration_generations.get(engine_id, 0) < generation:
+            # The remote registered its KV cache again, eg after a sleep.
+            if engine_id in self._remote_agents:
+                self._cleanup_remote_engine(engine_id, log_eviction=False)
+            self._remote_registration_generations[engine_id] = generation
+        if engine_id not in self._remote_agents:
+            # Also re-handshakes queued requests that outlived invalid-peer cleanup.
+            self._background_nixl_handshake(req_id, engine_id, meta)
+            return
         # Update last activity from this remote. Mind that cleanup is done on main
         # thread (this one), so we don't race on this structure.
         self._engine_last_active[engine_id] = time.perf_counter()
@@ -592,7 +601,16 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         remote_ids = np.asarray(remote_block_descs_ids)
         is_dram = desc_is_dram[local_ids]
 
-        assert local_dram_handle is not None
+        if self._skip_dram_xfer:
+            # TP rank 0 reads the DRAM (shared host pool) part for every
+            # local rank; keep only the device part. Register the request
+            # even if nothing is left, so it still completes and notifies.
+            keep = ~is_dram
+            local_ids = local_ids[keep]
+            remote_ids = remote_ids[keep]
+            is_dram = is_dram[keep]
+            self._recving_transfers.setdefault(request_id, [])
+        assert local_dram_handle is not None or not is_dram.any()
         reads = (
             (is_dram, local_dram_handle),
             (~is_dram, local_device_handle),
@@ -653,6 +671,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     req_id not in self._reqs_to_send
                     and req_id not in self._reqs_to_process
                 ):
+                    self.xfer_stats.record_notification_after_expiry()
                     logger.error(
                         "Potentially invalid KV blocks for "
                         "unrecognized request %s were retrieved by "

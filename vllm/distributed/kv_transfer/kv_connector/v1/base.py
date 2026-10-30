@@ -42,6 +42,7 @@ The class provides the following primitives:
 import enum
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -50,10 +51,12 @@ import torch
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.config.kv_transfer import KVTransferConfig
     from vllm.distributed.kv_events import KVCacheEvent, KVConnectorKVEvents
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
         KVConnectorPromMetrics,
@@ -178,6 +181,10 @@ class KVConnectorWorkerMetadata(ABC):
 class KVConnectorBase_V1(ABC):
     """Base class for KV connectors."""
 
+    # Source label for this connector's external hits. Subclasses must set
+    # HOST/DISK/P2P or override get_external_cache_hit_sources().
+    _cache_hit_source = CacheHitSource.EXTERNAL_UNSPECIFIED
+
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
         """Whether external hits can complete divergent local hybrid hits.
@@ -198,6 +205,11 @@ class KVConnectorBase_V1(ABC):
         return False, as a dropped save is just a future cache miss.
         """
         return self._kv_transfer_config.is_kv_producer
+
+    @classmethod
+    def supports_sleep_mode(cls, kv_transfer_config: "KVTransferConfig") -> bool:
+        """Whether the connector can follow the KV cache remap of sleep mode."""
+        return True
 
     def __init__(
         self,
@@ -226,6 +238,13 @@ class KVConnectorBase_V1(ABC):
     # ==============================
     # Worker-side methods
     # ==============================
+
+    def get_mem_pool_context(self) -> AbstractContextManager | None:
+        """Return a custom KV cache allocation context, if configured.
+
+        Returning None uses the engine's default memory pool.
+        """
+        return None
 
     def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
         """Set the connector metadata from the scheduler.
@@ -278,6 +297,15 @@ class KVConnectorBase_V1(ABC):
             kv_caches: dictionary of layer names, kv cache
 
         """
+        return
+
+    def unregister_kv_caches(self) -> None:
+        """Drop KV cache registrations before sleep. Transfers are already
+        drained. Idempotent."""
+        return
+
+    def restore_kv_caches(self) -> None:
+        """Redo `unregister_kv_caches` after wake-up. Idempotent."""
         return
 
     def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
@@ -474,6 +502,16 @@ class KVConnectorBase_V1(ABC):
         """
         return
 
+    def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
+        """KV cache groups restored by this connector's load for ``request``.
+
+        Called after ``get_num_new_matched_tokens`` returned a positive count.
+        Defaults to the prefix-cacheable groups, all a hash-addressed store
+        holds; a connector transferring the request's own blocks restores
+        every transfer group.
+        """
+        return self._kv_cache_config.prefix_cacheable_group_ids
+
     @abstractmethod
     def get_num_new_matched_tokens(
         self,
@@ -509,6 +547,24 @@ class KVConnectorBase_V1(ABC):
         """
         pass
 
+    def get_external_cache_hit_sources(
+        self,
+        request: "Request",
+        num_external_tokens: int,
+    ) -> dict[CacheHitSource, int]:
+        """Split ``num_external_tokens`` by the cache tier that supplied them.
+
+        Called after :meth:`update_state_after_alloc`, so the load plan is
+        known. Counts must sum to ``num_external_tokens``; a mismatch is
+        reported as ``external_unspecified``. Only non-zero counts are
+        included.
+
+        Default: all tokens under ``_cache_hit_source``.
+        """
+        if num_external_tokens == 0:
+            return {}
+        return {self._cache_hit_source: num_external_tokens}
+
     @abstractmethod
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
@@ -542,7 +598,11 @@ class KVConnectorBase_V1(ABC):
         """Build the connector metadata for this step.
 
         This function should NOT modify fields in the scheduler_output.
-        Also, calling this function will reset the state of the connector.
+        FIXME: one exception:
+        synchronous READ connectors may remove attention blocks they fully
+        overwrite this step from new_block_ids_to_zero. They must complete
+        those loads before the blocks are used and fail the step if a load fails.
+        Calling this function will reset the state of the connector.
 
         Args:
             scheduler_output (SchedulerOutput): the scheduler output object.

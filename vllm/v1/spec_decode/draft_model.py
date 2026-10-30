@@ -9,6 +9,7 @@ from vllm.config import VllmConfig
 from vllm.config.utils import replace
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.model_loader.utils import get_draft_load_config
 from vllm.tokenizers.registry import get_tokenizer
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 from vllm.v1.spec_decode.vocab_mapping import VocabMapping
@@ -81,13 +82,20 @@ class DraftModelProposer(SpecDecodeBaseProposer):
     def _create_draft_vllm_config(self) -> VllmConfig:
         base = super()._create_draft_vllm_config()
         spec = self.speculative_config
+        target_parallel = base.parallel_config
 
         return replace(
             base,
             quant_config=None,
             parallel_config=replace(
                 spec.draft_parallel_config,
-                rank=self.vllm_config.parallel_config.rank,
+                rank=target_parallel.rank,
+                decode_context_parallel_size=(
+                    target_parallel.decode_context_parallel_size
+                ),
+                cp_kv_cache_interleave_size=target_parallel.cp_kv_cache_interleave_size,
+                dcp_comm_backend=target_parallel.dcp_comm_backend,
+                dcp_q_replicate=target_parallel.dcp_q_replicate,
             ),
             model_config=spec.draft_model_config,
         )
@@ -101,6 +109,7 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             model = get_model(
                 vllm_config=draft_vllm_config,
                 prefix="draft_model",
+                load_config=get_draft_load_config(draft_vllm_config),
             )
         return model
 

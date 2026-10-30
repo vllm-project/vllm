@@ -33,6 +33,7 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
+    HiSparseHotSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVQuantMode,
@@ -404,6 +405,61 @@ def test_decode_bench_connector_selects_external_blocks_per_group():
     assert num_tokens == num_external_tokens
 
 
+def test_decode_bench_connector_skips_non_transfer_groups():
+    """Groups with enable_kv_transfer=False get no blocks to fill.
+
+    Regression test: HiSparse hot groups opt out of external KV transfer
+    and have a bounded per-request allocation that does not scale with
+    sequence length; the connector applied token-paged block-range math to
+    them and asserted once the sequence outgrew the allocation.
+    """
+    vllm_config = create_vllm_config(
+        block_size=16,
+        max_num_batched_tokens=1000,
+        kv_connector="DecodeBenchConnector",
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["attention"],
+                FullAttentionSpec(
+                    block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["hot"],
+                HiSparseHotSpec(block_size=16, page_size=1024, blocks_per_request=2),
+                enable_kv_transfer=False,
+            ),
+        ],
+    )
+    scheduler_connector = DecodeBenchConnector(
+        vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
+    )
+    num_external_tokens = 48
+    request = create_request(
+        request_id=1, num_tokens=num_external_tokens + 1, block_size=16
+    )
+    blocks = KVCacheBlocks(
+        (
+            [
+                KVCacheBlock(block_id=1),
+                KVCacheBlock(block_id=2),
+                KVCacheBlock(block_id=3),
+            ],
+            [KVCacheBlock(block_id=4), KVCacheBlock(block_id=5)],
+        )
+    )
+    scheduler_connector.update_state_after_alloc(request, blocks, num_external_tokens)
+    metadata = scheduler_connector.build_connector_meta(SchedulerOutput.make_empty())
+    assert isinstance(metadata, DecodeBenchConnectorMetadata)
+    assert metadata.reqs_to_fill == {
+        request.request_id: (([1, 2, 3], []), num_external_tokens)
+    }
+
+
 def test_decode_bench_connector_selects_unaligned_external_block():
     """An external interval includes the block containing its first token."""
     block_size = 32
@@ -500,7 +556,7 @@ def test_decode_bench_connector_skips_null_padding():
 
 
 def test_decode_bench_connector_uses_per_group_dcp_block_sizes():
-    """DCP scales full-attention blocks but not sliding-window blocks."""
+    """DCP scales target blocks but not the replicated draft's window."""
     block_size = 16
     dcp_world_size = 2
     vllm_config = create_vllm_config(
@@ -515,6 +571,7 @@ def test_decode_bench_connector_uses_per_group_dcp_block_sizes():
         dtype=torch.float32,
     )
     sliding_window = SlidingWindowSpec(
+        dcp_sharded=False,
         block_size=block_size,
         num_kv_heads=1,
         head_size=1,
