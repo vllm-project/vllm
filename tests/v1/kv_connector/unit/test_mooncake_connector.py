@@ -2155,7 +2155,7 @@ async def test_pull_after_expiry_fails_without_waiting(with_live_req):
             req_blocks,
         )
         sock = AsyncMock(spec=zmq.asyncio.Socket, send_multipart=AsyncMock())
-        with patch.object(producer, "_send_blocks", return_value=0):
+        with patch.object(producer, "_send_blocks", return_value=None):
             await producer.send_kv_to_decode(b"consumer", sock, metadata)
 
         # No placeholder that would wait for a prefill that already ran.

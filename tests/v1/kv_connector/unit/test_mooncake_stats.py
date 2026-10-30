@@ -22,6 +22,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.stats import (
     MooncakePromMetrics,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.engine import (
+    MemoryRegion,
+    RangeRequest,
+    TransferBackend,
     TransferEvent,
     TransferOp,
     TransferState,
@@ -213,6 +216,33 @@ def test_build_kv_connector_stats_with_data_round_trips():
     assert rebuilt.reduce()["Num failed transfers"] == 1
 
 
+class _RecordingBackend(TransferBackend):
+    """Backend that answers with the events a test queued and records calls."""
+
+    def __init__(self) -> None:
+        self.events: list[TransferEvent] = []
+        self.calls: list[tuple[str, TransferOp, list[RangeRequest]]] = []
+
+    @property
+    def rpc_port(self) -> int:
+        return 12345
+
+    def register_regions(self, regions: list[MemoryRegion]) -> None:
+        return None
+
+    def unregister_regions(self, regions: list[MemoryRegion]) -> None:
+        return None
+
+    def transfer(
+        self, peer: str, op: TransferOp, ranges: list[RangeRequest]
+    ) -> list[TransferEvent]:
+        self.calls.append((peer, op, list(ranges)))
+        return list(self.events)
+
+    def shutdown(self) -> None:
+        return None
+
+
 def _bare_worker() -> MooncakeConnectorWorker:
     """Construct a MooncakeConnectorWorker skipping __init__ (full init requires
     a live TransferEngine). Only the attributes touched by the methods under
@@ -220,16 +250,18 @@ def _bare_worker() -> MooncakeConnectorWorker:
     path a no-op."""
     worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
     worker.xfer_stats = MooncakeKVConnectorStats()
-    worker.transfer = MagicMock()
+    worker.transfer = _RecordingBackend()
     worker.async_zmq_ctx = MagicMock()
     worker.is_kv_consumer = True
     worker.is_kv_producer = True
+    worker._kv_lease_duration = None
+    worker._expired_transfer_ids = {}
     return worker
 
 
 def test_send_blocks_records_success():
     worker = _bare_worker()
-    worker.transfer.transfer.return_value = [
+    worker.transfer.events = [
         TransferEvent(state=TransferState.COMPLETED),
         TransferEvent(state=TransferState.COMPLETED),
     ]
@@ -251,7 +283,7 @@ def test_send_blocks_records_success():
 
 def test_send_blocks_records_failure():
     worker = _bare_worker()
-    worker.transfer.transfer.return_value = [
+    worker.transfer.events = [
         TransferEvent(
             state=TransferState.FAILED,
             error="Mooncake transfer engine returned 1",
@@ -267,14 +299,14 @@ def test_send_blocks_records_failure():
 
 def test_send_blocks_submits_one_range_per_descriptor():
     worker = _bare_worker()
-    worker.transfer.transfer.return_value = [
+    worker.transfer.events = [
         TransferEvent(state=TransferState.COMPLETED),
         TransferEvent(state=TransferState.COMPLETED),
     ]
 
     worker._send_blocks("host:1234", [0x1000, 0x2000], [0x3000, 0x4000], [8, 16])
 
-    _, op, ranges = worker.transfer.transfer.call_args.args
+    _, op, ranges = worker.transfer.calls[0]
     assert op is TransferOp.WRITE
     assert [
         (request.local_addr, request.remote_addr, request.length) for request in ranges
@@ -292,9 +324,7 @@ def test_get_kv_connector_stats_returns_none_when_empty():
 
 def test_get_kv_connector_stats_returns_and_resets():
     worker = _bare_worker()
-    worker.transfer.transfer.return_value = [
-        TransferEvent(state=TransferState.COMPLETED)
-    ]
+    worker.transfer.events = [TransferEvent(state=TransferState.COMPLETED)]
     worker._send_blocks("host:1234", [0x1000], [0x2000], [4096])
 
     snapshot = worker.get_kv_connector_stats()
