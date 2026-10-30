@@ -27,7 +27,6 @@ from vllm.model_executor.models.interfaces import (
 from vllm.model_executor.models.kimi_k25 import KimiK25MediaPixelInputs
 from vllm.model_executor.models.kimi_k25_vit import (
     KimiK25MultiModalProjector,
-    KimiVisionPatchMergerProjector,
     MoonViT3dPretrainedModel,
     vision_tower_forward,
 )
@@ -134,7 +133,6 @@ class KimiK3ForConditionalGeneration(
             self.mm_projector = self.mm_projector.to(
                 device=self.device, dtype=model_config.dtype
             )
-            self.merger_projector = KimiVisionPatchMergerProjector(self.mm_projector)
 
         self.quant_config = quant_config
         with self._mark_language_model(vllm_config):
@@ -332,7 +330,7 @@ class KimiK3ForConditionalGeneration(
         hidden_states = self.vision_tower(
             values["pixel_values"], None, encoder_metadata=metadata
         )
-        output = self.merger_projector(hidden_states, values["merge_gather_idx"])
+        output = self.mm_projector(hidden_states[values["merge_gather_idx"]])
         return output.reshape(-1, output.shape[-1])
 
     def encoder_eager_forward(
