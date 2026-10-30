@@ -1677,6 +1677,12 @@ class Worker(WorkerBase):
         if model_runner := getattr(self, "model_runner", None):
             model_runner.shutdown()
 
+        engram_config = self.vllm_config.engram_config
+        if engram_config is not None and engram_config.rdma_provider:
+            import importlib
+
+            importlib.import_module(engram_config.rdma_provider).close_reader()
+
         # Release kept-alive cumem pools while the pluggable allocator wrappers
         # and callbacks are still alive, so MemPool teardown is not deferred to
         # interpreter finalization (pytorch/pytorch#145168).

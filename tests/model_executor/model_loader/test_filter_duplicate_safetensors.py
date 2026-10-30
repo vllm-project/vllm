@@ -11,11 +11,57 @@ import torch
 from safetensors.torch import save_file
 
 from vllm.config.load import LoadConfig
+from vllm.config.model import ModelConfig
 from vllm.model_executor.model_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.weight_utils import (
     filter_duplicate_safetensors_files,
     filter_safetensors_files_by_weight_name,
 )
+
+
+@pytest.mark.parametrize("remote", [False, True])
+def test_mixed_shard_filter_is_opt_in(tmp_path, remote):
+    """The default path loads both tensors; remote mode excludes only its table."""
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "llama",
+                "architectures": ["LlamaForCausalLM"],
+                "hidden_size": 8,
+                "intermediate_size": 16,
+                "num_hidden_layers": 1,
+                "num_attention_heads": 1,
+                "num_key_value_heads": 1,
+                "vocab_size": 32,
+                "max_position_embeddings": 64,
+            }
+        )
+    )
+    save_file(
+        {"table": torch.ones(8), "projection": torch.zeros(4)},
+        str(tmp_path / "model.safetensors"),
+    )
+
+    class TinyModel(torch.nn.Module):
+        @property
+        def filter_unused_checkpoint_weights(self):
+            return remote
+
+        def is_unused_checkpoint_weight(self, name):
+            return name == "table"
+
+    model_config = ModelConfig(
+        model=str(tmp_path), skip_tokenizer_init=True, max_model_len=32, dtype="float32"
+    )
+    loader = DefaultModelLoader(
+        LoadConfig(
+            load_format="safetensors",
+            safetensors_load_strategy="lazy",
+            use_tqdm_on_load=False,
+        )
+    )
+    names = {name for name, _ in loader.get_all_weights(model_config, TinyModel())}
+    assert names == ({"projection"} if remote else {"table", "projection"})
 
 
 def test_filter_duplicate_safetensors_files_missing_weight():

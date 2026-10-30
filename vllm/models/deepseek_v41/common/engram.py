@@ -47,8 +47,12 @@ import numpy as np
 import torch
 from torch import nn
 
-from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.compilation.breakable_cudagraph import (
+    eager_break_during_capture,
+    is_breakable_cudagraph_enabled,
+)
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import (
     get_dp_group,
     get_engram_dp_group,
@@ -81,6 +85,16 @@ from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
 logger = init_logger(__name__)
+
+
+def _validate_remote_graph_mode(
+    enforce_eager: bool, mode: CUDAGraphMode, breakable: bool
+) -> None:
+    if not enforce_eager and (mode != CUDAGraphMode.PIECEWISE or not breakable):
+        raise ValueError(
+            "rdma_provider requires enforce_eager or breakable PIECEWISE CUDA graphs"
+        )
+
 
 # Per-rank token slot from which the Engram DP exchange switches from peer
 # reads to all-to-all.
@@ -1038,6 +1052,8 @@ class ParallelEngramEmbedding(nn.Module):
         cpu_offload: bool = False,
         dp_shared_memory: bool = False,
         use_thp: bool = False,
+        rdma_provider: str | None = None,
+        rdma_layer_id: int | None = None,
     ) -> None:
         super().__init__()
         assert head_sizes and all(size > 0 for size in head_sizes)
@@ -1045,6 +1061,9 @@ class ParallelEngramEmbedding(nn.Module):
         self.cpu_offload = cpu_offload
         self.dp_shared_memory = dp_shared_memory
         self.use_thp = use_thp
+        self.rdma_provider = rdma_provider
+        self.rdma_layer_id = rdma_layer_id
+        self._rdma_reader = None
         self.dp_size = get_engram_dp_size()
         if dp_shared_memory:
             if not cpu_offload:
@@ -1126,6 +1145,8 @@ class ParallelEngramEmbedding(nn.Module):
                     "engram_vocab_start": row_start,
                 },
             )
+            if rdma_provider:
+                set_weight_attrs(param, {"engram_external": True})
         if cpu_offload and not self.weight.is_meta:
             # Constant dummy values avoid randomizing huge CPU lookup tables.
             set_weight_attrs(self.weight, {"dummy_weight_value": 1.0})
@@ -1150,6 +1171,21 @@ class ParallelEngramEmbedding(nn.Module):
 
     def _allocate_weights(self) -> tuple[torch.Tensor, torch.Tensor]:
         scale_dim = self.dim // self.block_size
+        if self.rdma_provider:
+            return (
+                torch.empty(
+                    self.part_num_embeddings,
+                    self.dim,
+                    dtype=torch.float8_e4m3fn,
+                    device="meta",
+                ),
+                torch.empty(
+                    self.part_num_embeddings,
+                    scale_dim,
+                    dtype=torch.uint8,
+                    device="meta",
+                ),
+            )
         if torch.get_default_device().type == "meta" or not (
             self.cpu_offload or self.peer_rows
         ):
@@ -1264,6 +1300,14 @@ class ParallelEngramEmbedding(nn.Module):
         """
         rows = indices.shape[0] * self.part_n_hash_cols
         if not rows:
+            return
+        if self.rdma_provider:
+            if self._rdma_reader is None:
+                import importlib
+
+                provider = importlib.import_module(self.rdma_provider)
+                self._rdma_reader = provider.get_reader()
+            self._rdma_reader.lookup(self, indices, out, background)
             return
         weight, scales = self._storage()
         ids_stride_t, ids_stride_h = indices.stride()
@@ -1674,6 +1718,7 @@ class Engram(nn.Module):
     _prefetch_stream: torch.cuda.Stream | None = None
     _prefetch_done: torch.cuda.Event | None = None
     _batch: EngramBatch | None = None
+    _rdma_prefetch: bool = True
 
     def __init__(
         self,
@@ -1689,6 +1734,8 @@ class Engram(nn.Module):
         # Layers sharing one stream serialize their offloaded lookups, so they
         # take turns instead of jointly starving decoder compute of SMs.
         self._prefetch_stream = prefetch_stream
+        engram_config = get_current_vllm_config().engram_config
+        self._rdma_prefetch = engram_config is None or engram_config.rdma_prefetch
         self.layer_hash_index = layer_hash_index
         self.dim = config.hidden_size
         self.hc_mult = config.hc_mult
@@ -1728,8 +1775,24 @@ class Engram(nn.Module):
     def _create_embedding(
         self, layout: EngramLayout, layer_hash_index: int
     ) -> ParallelEngramEmbedding:
-        engram_config = get_current_vllm_config().engram_config
+        vllm_config = get_current_vllm_config()
+        engram_config = vllm_config.engram_config
         assert engram_config is not None
+        if engram_config.rdma_provider:
+            load_config = vllm_config.load_config
+            _validate_remote_graph_mode(
+                vllm_config.model_config.enforce_eager,
+                vllm_config.compilation_config.cudagraph_mode,
+                is_breakable_cudagraph_enabled(),
+            )
+            if (
+                load_config.safetensors_load_strategy != "lazy"
+                or load_config.load_format != "safetensors"
+                or load_config.model_loader_extra_config.get("enable_multithread_load")
+            ):
+                raise ValueError(
+                    "rdma_provider requires single-threaded lazy safetensors loading"
+                )
         return ParallelEngramEmbedding(
             layout.num_embeddings[layer_hash_index],
             layout.head_dim,
@@ -1737,6 +1800,12 @@ class Engram(nn.Module):
             cpu_offload=engram_config.cpu_offload,
             dp_shared_memory=bool(engram_config.dp_shared_memory),
             use_thp=engram_config.use_thp,
+            rdma_provider=engram_config.rdma_provider,
+            rdma_layer_id=(
+                layout.layer_ids[layer_hash_index]
+                if engram_config.rdma_provider
+                else None
+            ),
         )
 
     def _init_staging(self, max_tokens: int, head_dim: int) -> None:
@@ -1775,7 +1844,9 @@ class Engram(nn.Module):
         current = stream = torch.cuda.current_stream()
         # Big lookups stall persistent main-stream kernels anyway: run them inline.
         _, inline_min_tokens = _engram_lookup_thresholds(hash_ids.device)
-        if inline_min_tokens is not None and num_tokens >= inline_min_tokens:
+        if (self.embed_tokens.rdma_provider and not self._rdma_prefetch) or (
+            inline_min_tokens is not None and num_tokens >= inline_min_tokens
+        ):
             self.embed_tokens.lookup(hash_ids, rows)
         else:
             stream = self._prefetch_stream

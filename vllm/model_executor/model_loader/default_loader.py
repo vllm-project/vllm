@@ -84,6 +84,9 @@ class DefaultModelLoader(BaseModelLoader):
         """If defined, safetensors shards holding only weights whose checkpoint
         name (before *prefix*) it accepts are not read."""
 
+        filter_unused_per_tensor: bool = False
+        """Also skip unused tensors within mixed safetensors shards."""
+
     counter_before_loading_weights: float = 0.0
     counter_after_loading_weights: float = 0.0
 
@@ -340,6 +343,11 @@ class DefaultModelLoader(BaseModelLoader):
                         self.load_config.use_tqdm_on_load,
                         self.load_config.safetensors_load_strategy,
                         local_expert_ids=self.local_expert_ids,
+                        is_unused_weight=(
+                            source.is_unused_weight
+                            if source.filter_unused_per_tensor
+                            else None
+                        ),
                         safetensors_prefetch_num_threads=(
                             self.load_config.safetensors_prefetch_num_threads
                         ),
@@ -374,13 +382,18 @@ class DefaultModelLoader(BaseModelLoader):
         model_config: ModelConfig,
         model: nn.Module,
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
+        filter_per_tensor = getattr(model, "filter_unused_checkpoint_weights", False)
+        unused_weight = getattr(model, "is_unused_checkpoint_weight", None)
+        if hasattr(model, "filter_unused_checkpoint_weights") and not filter_per_tensor:
+            unused_weight = None
         primary_weights = DefaultModelLoader.Source(
             model_config.model,
             model_config.revision,
             prefix="",
             fall_back_to_pt=getattr(model, "fall_back_to_pt_during_load", True),
             allow_patterns_overrides=getattr(model, "allow_patterns_overrides", None),
-            is_unused_weight=getattr(model, "is_unused_checkpoint_weight", None),
+            is_unused_weight=unused_weight,
+            filter_unused_per_tensor=filter_per_tensor,
         )
         yield from self._get_weights_iterator(primary_weights)
 
