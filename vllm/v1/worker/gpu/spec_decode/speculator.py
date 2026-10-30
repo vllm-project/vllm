@@ -42,6 +42,11 @@ from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
     OnlineAcceptanceEstimator,
 )
 from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
+from vllm.v1.worker.gpu.spec_decode.round import (
+    PlanBound,
+    PlanInputs,
+    VerifyPlan,
+)
 from vllm.v1.worker.utils import AttentionGroup
 
 if TYPE_CHECKING:
@@ -127,6 +132,32 @@ class BaseSpeculator(ABC):
     ) -> None:
         """Prepare draft-side watermarking before `propose`. No-op by default."""
         return
+
+    def plan(self, inputs: PlanInputs) -> tuple[VerifyPlan, PlanBound] | None:
+        """The rows the target verifies this step.
+
+        Called once per scheduled batch that carries drafts, before its inputs
+        are built, unless adaptive verification (which sets its own budget) is
+        enabled. Return None (the default) to verify every scheduled draft as a
+        chain. Otherwise return a plan whose tensors cover ``inputs``' batch rows
+        and stay valid until the step commits, and its host bound: request ``r``
+        verifies ``bound.rows[r]`` rows (at most ``inputs.scheduled_rows[r]``);
+        the drafts past it leave the batch and count as rejected. A plan that is
+        not a chain needs ``SpecResources.max_branching > 1`` (declared by the
+        speculator's config) and a batch that is not
+        ``inputs.chain_only``. The plan's device ``count`` may stop short of its
+        bound: the rows past it are never accepted.
+        """
+        return None
+
+    def overridden_hooks(self) -> frozenset[str]:
+        """The optional per-step hooks this speculator overrides. The model
+        runner reads them once and skips the no-op defaults on every step."""
+        return frozenset(
+            name
+            for name in ("plan",)
+            if getattr(type(self), name) is not getattr(BaseSpeculator, name)
+        )
 
 
 class DraftModelSpeculator(BaseSpeculator):

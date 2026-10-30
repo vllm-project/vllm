@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
         AdmittedDraftCounts,
     )
+    from vllm.v1.worker.gpu.spec_decode.round import VerifyPlan
 
 
 class InputBuffers:
@@ -130,6 +131,10 @@ class InputBatch:
     # [num_reqs] admitted draft counts in flight to the host. Set only under
     # adaptive verification with batch-sharded sampling, when the budget binds.
     num_admitted_draft_tokens: "AdmittedDraftCounts | None" = None
+
+    # The rows each request verifies, when the batch carries drafts. Positions and
+    # slot mappings are computed from it (see spec_decode/plan_kernels.py).
+    verify_plan: "VerifyPlan | None" = None
 
     @classmethod
     def make_dummy(

@@ -166,9 +166,17 @@ from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     set_eagle3_aux_hidden_state_layers,
 )
+from vllm.v1.worker.gpu.spec_decode.plan_kernels import (
+    chain_parents,
+)
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     RejectionSampler,
     get_max_chunk_logits,
+)
+from vllm.v1.worker.gpu.spec_decode.round import (
+    PlanBound,
+    PlanInputs,
+    VerifyPlan,
 )
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.utils import (
@@ -195,6 +203,10 @@ logger = init_logger(__name__)
 
 
 class GPUModelRunner(LoRAModelRunnerMixin):
+    # The optional per-step hooks the speculator overrides (see
+    # BaseSpeculator.overridden_hooks); none without a speculator.
+    speculator_hooks: frozenset[str] = frozenset()
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -302,9 +314,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.speculator = init_speculator(
                     self.vllm_config, self.device, self.req_states
                 )
+                self.speculator_hooks = self.speculator.overridden_hooks()
 
             self.use_aux_hidden_state_outputs = (
                 self.speculative_config.uses_aux_hidden_states
+            )
+
+        # The plan of a step that verifies drafts: today always a chain, with its
+        # counts and tokens in the runner's buffers.
+        self.chain_plan: VerifyPlan | None = None
+        if self.speculative_config is not None:
+            self.chain_plan = VerifyPlan(
+                parent=chain_parents(
+                    self.max_num_reqs, self.num_speculative_steps + 1, self.device
+                ),
+                count=None,
+                is_chain=True,
             )
 
         # Draft tokens propagation - for spec-dec + struct outputs.
@@ -1372,6 +1397,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_seq_len_np = self.req_states.max_seq_len[idx_mapping_np]
 
         num_draft_tokens_np = None
+        idx_mapping = None
+        verify_plan = None
         if draft_tokens:
             num_drafts_iter = (len(draft_tokens.get(req_id, ())) for req_id in req_ids)
             num_draft_tokens_np = np.fromiter(
@@ -1381,6 +1408,36 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_toks = self.adaptive_verification.get_num_tokens(
                     num_tokens_per_req, draft_tokens
                 )
+            elif "plan" in self.speculator_hooks:
+                assert self.speculator is not None
+                idx_mapping = async_tensor_h2d(
+                    idx_mapping_np, device=self.device, dtype=torch.int64
+                )
+                planned = self.speculator.plan(
+                    PlanInputs(
+                        req_ids=req_ids,
+                        idx_mapping=idx_mapping,
+                        idx_mapping_np=idx_mapping_np,
+                        scheduled_rows=num_draft_tokens_np + 1,
+                        chain_only=True,
+                    )
+                )
+                bound = PlanBound()
+                if planned is not None:
+                    verify_plan, bound = planned
+                    if not verify_plan.is_chain:
+                        raise ValueError(
+                            "the speculator returned a plan that is not a chain, "
+                            "which needs SpecResources.max_branching > 1"
+                        )
+                if bound.rows is not None:
+                    # Unverified drafts leave the batch; they count as rejected.
+                    num_toks -= int(num_scheduled_tokens.sum())
+                    num_scheduled_tokens, num_draft_tokens_np = trim_draft_tokens(
+                        num_scheduled_tokens, num_draft_tokens_np, bound.rows - 1
+                    )
+                    num_toks += int(num_scheduled_tokens.sum())
+                    max_query_len = int(num_scheduled_tokens.max())
 
         prefill_runs_as_decode_np = None
         decode_graph_eligible = not has_prefill
@@ -1409,6 +1466,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             prefill_runs_as_decode_np=prefill_runs_as_decode_np,
             decode_graph_eligible=decode_graph_eligible,
             max_seq_len_np=max_seq_len_np,
+            idx_mapping=idx_mapping,
+            verify_plan=verify_plan,
         )
         return batch_state, get_uniform_decode_token_count(
             num_reqs, num_toks, max_query_len, decode_graph_eligible
@@ -1432,9 +1491,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         req_ids = batch_req_state.req_ids
         num_scheduled_tokens_np = batch_req_state.num_scheduled_tokens
         idx_mapping_np = batch_req_state.idx_mapping_np
-        idx_mapping = async_tensor_h2d(
-            idx_mapping_np, device=self.device, dtype=torch.int64
-        )
+        idx_mapping = batch_req_state.idx_mapping
+        if idx_mapping is None:
+            idx_mapping = async_tensor_h2d(
+                idx_mapping_np, device=self.device, dtype=torch.int64
+            )
         num_reqs = len(req_ids)
 
         # Get the number of draft tokens for each request.
@@ -1614,6 +1675,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_query_len=(
                 int(num_scheduled_tokens_upper_bound.max())
                 if adaptive_verification is not None
+                else None
+            ),
+            verify_plan=(
+                (batch_req_state.verify_plan or self.chain_plan)
+                if num_draft_tokens_per_req is not None
                 else None
             ),
         )
@@ -2531,6 +2597,32 @@ class BatchReqState(NamedTuple):
     has_prefill: bool
     prefill_runs_as_decode_np: np.ndarray | None  # [num_reqs]
     decode_graph_eligible: bool
+    # [num_reqs] device copy of idx_mapping_np when the speculator planned.
+    idx_mapping: torch.Tensor | None = None
+    # The speculator's plan; None verifies the scheduled drafts as a chain.
+    verify_plan: "VerifyPlan | None" = None
+
+
+def trim_draft_tokens(
+    num_scheduled_tokens: np.ndarray,
+    num_draft_tokens: np.ndarray,
+    num_verified_drafts: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Keep each request's first ``num_verified_drafts`` scheduled drafts.
+
+    Returns the per-request token and draft counts of the trimmed batch.
+    """
+    num_verified_drafts = np.asarray(num_verified_drafts, dtype=num_draft_tokens.dtype)
+    in_range = num_verified_drafts.shape == num_draft_tokens.shape and bool(
+        ((num_verified_drafts >= 0) & (num_verified_drafts <= num_draft_tokens)).all()
+    )
+    if not in_range:
+        raise ValueError(
+            "a plan must verify, for each request, between 1 and its scheduled "
+            f"rows; got {num_verified_drafts + 1} for {num_draft_tokens + 1}."
+        )
+    num_trimmed = num_draft_tokens - num_verified_drafts
+    return num_scheduled_tokens - num_trimmed, num_verified_drafts
 
 
 def sort_batch_req_ids(
