@@ -37,9 +37,11 @@ _NUMACTL_CPUSET_PATTERN = re.compile(r"^\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*$")
 ExpertPlacementStrategy = Literal["linear", "round_robin"]
 DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
-EPLBPolicyOption = str
+EPLBPolicyOption = Literal["default"]
 DCPCommBackend = Literal["ag_rs", "a2a"]
-EPLBCommunicatorBackend = str
+EPLBCommunicatorBackend = Literal[
+    "torch_nccl", "torch_gloo", "torch_xccl", "nixl", "pynccl"
+]
 All2AllBackend = Literal[
     "naive",
     "pplx",
@@ -89,10 +91,10 @@ class EPLBConfig:
     Whether to use non-blocking EPLB.
     """
 
-    policy: EPLBPolicyOption = "default"
+    policy: EPLBPolicyOption | str = "default"
     """Built-in or platform-defined policy name, validated by the platform."""
 
-    communicator: EPLBCommunicatorBackend | None = None
+    communicator: EPLBCommunicatorBackend | str | None = None
     """
     Backend for EPLB expert weight communication:
     - "torch_nccl": Use torch.distributed on the device process group
@@ -114,19 +116,6 @@ class EPLBConfig:
     def migration_batching_enabled(self) -> bool:
         """Whether contention-aware batching is active for this configuration."""
         return self.use_async and self.enable_migration_batching
-
-    @model_validator(mode="after")
-    def _validate_eplb_config(self) -> Self:
-        if self.use_async and self.communicator in ("torch_nccl", "pynccl"):
-            raise ValueError(
-                f"{self.communicator} communicator is incompatible with "
-                "async EPLB due to NCCL multi-stream conflicts. Use "
-                "'torch_gloo' or 'nixl' instead, or leave communicator "
-                "unset for automatic selection."
-            )
-        if self.log_balancedness and self.log_balancedness_interval <= 0:
-            raise ValueError("log_balancedness_interval must be greater than 0.")
-        return self
 
 
 @config

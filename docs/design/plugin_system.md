@@ -106,7 +106,7 @@ Every plugin has three parts:
     - `get_attn_backend_cls`: This function should return the attention backend class's fully qualified name.
     - `get_device_communicator_cls`: This function should return the device communicator class's fully qualified name.
 
-    For out-of-tree EPLB, implement `supports_eplb()` and `check_and_update_eplb_config(parallel_config)` to select and validate policy and communicator names. Built-in names retain their existing defaults and async communicator restrictions; a platform override owns validation of its custom names.
+    For out-of-tree EPLB, implement `supports_eplb()` and `check_and_update_eplb_config(parallel_config)` to select and validate policy and communicator names. When EPLB is enabled, this hook selects the default communicator and validates names and configuration combinations; `EPLBConfig` enforces field types and numeric bounds. Built-in names retain their existing defaults and async communicator restrictions; a platform override owns validation of its custom names and combinations.
 
     An `EplbState` subclass can implement `create_policy()`, `create_model_communicator()`, and `create_layer_state()`. The layer state may provide `map_and_record` for device-specific expert mapping and load recording. Policies receive a CPU `EplbRebalanceContext` containing one aggregate load bin, and return an `EplbPlan`. Per-model `EplbPolicyState` advances only through `on_layer_committed()`, after weights and maps are installed and before an async buffer is acknowledged.
 

@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 
 import pytest
 import torch
+from transformers import LlamaConfig
 
 import vllm.config.parallel as parallel_config_module
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
@@ -115,17 +116,69 @@ def test_xpu_preserves_eplb_and_xccl_auto_selection():
     assert config.eplb_config.communicator == "torch_xccl"
 
 
-@pytest.mark.parametrize("communicator", ["torch_gloo", "torch_xccl", "nixl"])
-def test_explicit_builtin_communicator_is_preserved(communicator):
-    config = ParallelConfig(eplb_config=EPLBConfig(communicator=communicator))
+@pytest.mark.parametrize(
+    "communicator, use_async",
+    [
+        ("torch_gloo", True),
+        ("torch_xccl", True),
+        ("nixl", True),
+        ("torch_nccl", False),
+        ("pynccl", False),
+    ],
+)
+def test_explicit_builtin_communicator_is_preserved(communicator, use_async):
+    config = ParallelConfig(
+        eplb_config=EPLBConfig(communicator=communicator, use_async=use_async)
+    )
     Platform.check_and_update_eplb_config(config)
     assert config.eplb_config.communicator == communicator
 
 
 @pytest.mark.parametrize("communicator", ["torch_nccl", "pynccl"])
 def test_async_nccl_restrictions_remain(communicator):
+    config = ParallelConfig(eplb_config=EPLBConfig(communicator=communicator))
     with pytest.raises(ValueError, match="incompatible with async EPLB"):
-        EPLBConfig(communicator=communicator)
+        Platform.check_and_update_eplb_config(config)
+
+
+def test_llm_rejects_async_nccl_communicator(vllm_runner, monkeypatch, tmp_path):
+    """Reject an invalid async communicator before loading model weights."""
+
+    class BuiltinPlatform(Platform):
+        _enum = PlatformEnum.CUDA
+
+    monkeypatch.setattr(parallel_config_module, "current_platform", BuiltinPlatform())
+    LlamaConfig(
+        architectures=["LlamaForCausalLM"],
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        max_position_embeddings=32,
+    ).save_pretrained(tmp_path)
+    eplb_config = EPLBConfig(communicator="torch_nccl")
+    with pytest.raises(ValueError, match="incompatible with async EPLB"):
+        vllm_runner(
+            str(tmp_path),
+            max_model_len=32,
+            skip_tokenizer_init=True,
+            tensor_parallel_size=2,
+            enable_expert_parallel=True,
+            enable_eplb=True,
+            distributed_executor_backend="uni",
+            eplb_config=eplb_config,
+        )
+
+
+@pytest.mark.parametrize("log_balancedness", [False, True])
+@pytest.mark.parametrize("interval", [0, -1])
+def test_balancedness_interval_must_be_positive(log_balancedness, interval):
+    with pytest.raises(ValueError, match="log_balancedness_interval"):
+        EPLBConfig(
+            log_balancedness=log_balancedness,
+            log_balancedness_interval=interval,
+        )
 
 
 @pytest.fixture

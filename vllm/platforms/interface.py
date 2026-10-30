@@ -1235,7 +1235,7 @@ class Platform:
 
     @classmethod
     def check_and_update_eplb_config(cls, parallel_config: "ParallelConfig") -> None:
-        """Choose and validate the platform's EPLB communicator.
+        """Choose and validate the platform's EPLB policy and communicator.
 
         Out-of-tree overrides validate their own policy and communicator names.
         """
@@ -1272,7 +1272,9 @@ class Platform:
         ):
             raise ValueError(
                 f"{eplb_config.communicator} communicator is incompatible with "
-                "async EPLB."
+                "async EPLB due to NCCL multi-stream conflicts. Use "
+                "'torch_gloo' or 'nixl' instead, or leave communicator "
+                "unset for automatic selection."
             )
 
     @classmethod
