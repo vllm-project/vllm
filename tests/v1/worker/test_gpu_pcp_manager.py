@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import replace
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -18,6 +19,12 @@ from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers, set_dummy_context
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
+from vllm.v1.worker.gpu.ubatch_utils import (
+    _slice_input_batch,
+    create_ubatch_slices,
+    merge_ubatch_outputs,
+    slice_slot_mappings,
+)
 
 
 def _copy_to_cpu(value, device=None, dtype=None, out=None):
@@ -25,6 +32,125 @@ def _copy_to_cpu(value, device=None, dtype=None, out=None):
     if out is not None:
         return out.copy_(tensor)
     return tensor
+
+
+@pytest.mark.parametrize(
+    ("query_lens", "expected"),
+    [([7], True), ([9], True), ([8, 8], True), ([7, 20], False)],
+)
+def test_pcp_dbo_requires_causal_prefix_on_every_coordinate(query_lens, expected):
+    """An early query cannot read a KV row published by the later microbatch."""
+    counts = np.array(query_lens, dtype=np.int32)
+    prefilling = np.ones(len(query_lens), dtype=np.bool_)
+    managers = [PCPManager(2, rank, torch.device("cpu"), True) for rank in range(2)]
+    num_tokens = managers[0].get_num_tokens_for_dispatch(counts, prefilling)
+    votes = [m.can_ubatch(counts, prefilling, num_tokens) for m in managers]
+    assert votes == [expected, expected]
+
+
+@pytest.mark.parametrize("query_lens", [[7], [9], [8, 8], [7, 7], [1, 1, 4]])
+@pytest.mark.parametrize("computed", [0, 11])
+def test_pcp_dbo_partition_slice_merge_restores_rows(query_lens, computed):
+    """Uneven/chunked prefills retain causal extents, unique slots and row order."""
+    device = torch.device("cpu")
+    counts = np.array(query_lens, dtype=np.int32)
+    num_tokens = int(counts.sum())
+    buffers = InputBuffers(8, 128, device)
+    batch = InputBatch.make_dummy(len(counts), num_tokens, buffers, is_padding=False)
+    query_start = np.concatenate(([0], np.cumsum(counts))).astype(np.int32)
+    batch.query_start_loc.copy_(torch.from_numpy(query_start))
+    batch.seq_lens.copy_(torch.from_numpy(counts + computed))
+    batch.input_ids.copy_(torch.arange(num_tokens))
+    batch.positions.copy_(
+        torch.cat([torch.arange(computed, computed + q) for q in query_lens])
+    )
+    batch = replace(
+        batch,
+        num_scheduled_tokens=counts,
+        query_start_loc_np=query_start,
+        seq_lens_cpu_upper_bound=torch.from_numpy(counts + computed),
+        num_computed_tokens_np=np.full(len(counts), computed, dtype=np.int32),
+        prefill_len_np=np.where(counts > 1, counts + computed, 0),
+        num_computed_prefill_tokens_np=np.where(counts > 1, computed, 0),
+        is_prefilling_np=counts > 1,
+        has_prefill=True,
+        decode_graph_eligible=False,
+    )
+    managers = [
+        PCPManager(2, rank, device, True, max_num_reqs=8, max_num_tokens=128)
+        for rank in range(2)
+    ]
+    padded = managers[0].get_num_tokens_for_dispatch(counts, batch.is_prefilling_np)
+    desc = BatchExecutionDescriptor(
+        CUDAGraphMode.NONE, padded, num_reqs=len(counts), num_ubatches=2
+    )
+    merged = []
+    published_slots: list[list[torch.Tensor]] = [[], []]
+    first_inputs = []
+    for manager in managers:
+        assert manager.can_ubatch(counts, batch.is_prefilling_np, padded)
+        local = manager.partition_batch(batch, desc)
+        assert manager.global_batch is batch
+        assert local.input_ids.data_ptr() == manager.input_buffers.input_ids.data_ptr()
+        slots = manager._convert_to_gathered_slot_mappings(
+            torch.arange(num_tokens).reshape(1, -1)
+        )
+        outputs = []
+        for lane, ubatch_slice in enumerate(create_ubatch_slices(local, 2)):
+            ubatch = _slice_input_batch(
+                local,
+                ubatch_slice,
+                torch.zeros(17, dtype=torch.int32),
+                torch.zeros(16, dtype=torch.int32),
+            )
+            # Sampling descriptors still belong to the untouched global batch.
+            assert ubatch.logits_indices is local.logits_indices
+            assert ubatch.cu_num_logits is local.cu_num_logits
+            assert ubatch.pcp is not None
+            assert len(ubatch.pcp.global_query_lens_np) == ubatch.num_reqs
+            nonempty = ubatch.query_start_loc[1:] > ubatch.query_start_loc[:-1]
+            assert torch.equal(
+                ubatch.seq_lens[nonempty],
+                ubatch.positions[ubatch.query_start_loc[1:][nonempty] - 1] + 1,
+            )
+            assert int(ubatch.seq_lens_cpu_upper_bound.max()) == int(
+                ubatch.seq_lens.max()
+            )
+            assert int((~ubatch.is_padding).sum()) == ubatch.num_tokens
+            lane_slots = slice_slot_mappings(slots, ubatch_slice.token_slice, 2)
+            published_slots[lane].append(lane_slots[lane_slots != PAD_SLOT_ID])
+            if lane == 0:
+                first_inputs.append(ubatch.input_ids[~ubatch.is_padding])
+            outputs.append(ubatch.input_ids[:, None].clone())
+        merged.append(merge_ubatch_outputs(outputs))
+    # All ranks see the same rank-major cache-update slots for each lane.
+    for rank_slots in published_slots:
+        assert torch.equal(rank_slots[0], rank_slots[1])
+    all_slots = torch.cat([rank_slots[0] for rank_slots in published_slots])
+    assert torch.equal(all_slots.sort().values, torch.arange(num_tokens))
+    first_ids = torch.cat(first_inputs)
+    for start, stop in zip(query_start[:-1], query_start[1:]):
+        request_ids = first_ids[(first_ids >= start) & (first_ids < stop)].sort().values
+        assert torch.equal(request_ids, torch.arange(start, start + len(request_ids)))
+    # Exercise the real restore/sampling boundary with only the transport replaced.
+    gathered = torch.cat(merged)
+    for rank, manager in enumerate(managers):
+        with patch.object(pcp_manager_module, "get_pcp_group") as transport:
+            transport.return_value.all_gather.return_value = gathered
+            restored, aux, sampling_batch = manager.restore_for_sampling(
+                merged[rank], None
+            )
+        assert torch.equal(restored[:, 0], batch.input_ids)
+        assert aux is None
+        assert sampling_batch is batch
+        assert sampling_batch.logits_indices is batch.logits_indices
+
+
+def test_pcp_dbo_decode_only_keeps_unsplit_path():
+    manager = PCPManager(2, 0, torch.device("cpu"), True)
+    assert not manager.can_ubatch(
+        np.ones(8, dtype=np.int32), np.zeros(8, dtype=bool), num_tokens_for_dispatch=4
+    )
 
 
 def _make_config(cudagraph_mode: CUDAGraphMode):

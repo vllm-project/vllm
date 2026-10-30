@@ -41,6 +41,33 @@ EX: `vllm serve deepseek-ai/DeepSeek-V2-Lite --trust-remote-code --data-parallel
 
 Note that there must be at least two GPUs visible in `CUDA_VISIBLE_DEVICES`
 
+### Experimental eager PCP + DBO in Model Runner V2
+
+!!! warning "Draft implementation"
+    This has static review and component tests only. Multi-GPU model outputs
+    and performance have not been qualified.
+
+MRV2 supports DBO with prefill context parallelism for NIXL EP, DP+EP, TP=1,
+DCP=1, no speculative decoding, synchronous scheduling and eager execution.
+Set `VLLM_USE_V2_MODEL_RUNNER=1` and pass `--enforce-eager` and
+`--no-async-scheduling`. The attention backend must support PCP.
+
+PCP partitions the scheduled batch first; DBO then splits each rank's local
+rows at the existing midpoint. A step is split only when:
+
+- It contains a prefill, meets the DBO thresholds and every DP rank votes to
+  split.
+- Across all PCP ranks, the first microbatch holds a causal prefix of every
+  request, so no early query needs KV from the second microbatch.
+- Every DP rank has the same PCP-local token count, since DP padding would
+  move the checked midpoint.
+
+Other steps, including decode-only batches and dummy runs, use the ordinary
+PCP forward. Each PCP rank derives its count and vote from the same scheduler
+layout, so the existing DP handshake agrees across the whole DP x PCP expert
+group. The DBO merge restores the local row order before the PCP restore and a
+single sampling pass over the original batch.
+
 ## DBO Components
 
 * GPUModelRunner

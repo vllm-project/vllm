@@ -4406,3 +4406,57 @@ def test_hybrid_layer_counts_sparse_attention_as_attention(
             )
             == len(layer_types) - expected_attention
         )
+
+
+def _make_pcp_dbo_config(*, enforce_eager=True, async_scheduling=False, **parallel):
+    return VllmConfig(
+        model_config=ModelConfig(
+            model="Qwen/Qwen3-30B-A3B",
+            max_model_len=512,
+            enforce_eager=enforce_eager,
+        ),
+        scheduler_config=SchedulerConfig(
+            max_model_len=512,
+            is_encoder_decoder=False,
+            async_scheduling=async_scheduling,
+        ),
+        parallel_config=ParallelConfig(
+            **(
+                {
+                    "prefill_context_parallel_size": 2,
+                    "data_parallel_size": 2,
+                    "enable_dbo": True,
+                    "all2all_backend": "nixl_ep",
+                    "distributed_executor_backend": "mp",
+                    "nnodes": 2,
+                    "enable_expert_parallel": True,
+                }
+                | parallel
+            )
+        ),
+    )
+
+
+def test_pcp_dbo_supports_eager_synchronous_dp_ep(monkeypatch):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    config = _make_pcp_dbo_config()
+    assert config.use_v2_model_runner
+    assert config.parallel_config.num_ubatches == 2
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"enforce_eager": False},
+        {"async_scheduling": True},
+        {"enable_expert_parallel": False},
+        {"tensor_parallel_size": 2},
+        {"all2all_backend": "deepep_low_latency"},
+        {"data_parallel_size": 1},
+        {"enable_dbo": False, "ubatch_size": 2},
+    ],
+)
+def test_pcp_dbo_rejects_unsupported_modes(monkeypatch, settings):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    with pytest.raises(ValueError, match="prefill context parallelism outside"):
+        _make_pcp_dbo_config(**settings)

@@ -121,6 +121,11 @@ def sync_cudagraph_and_dp_padding(
             # rank to them holds every rank to them.
             int(num_tokens_across_dp.min()),
             uniform_decode=uniform_decode_across_dp,
+        ) and (
+            # PCP checked the midpoint of its own rank-local rows; DP padding
+            # would move it.
+            parallel_config.prefill_context_parallel_size == 1
+            or bool(torch.all(num_tokens_across_dp == num_tokens_across_dp[0]))
         ):
             # Expert all-to-all requires every rank to split and pad equally.
             # Empty microbatches run as dummy batches.

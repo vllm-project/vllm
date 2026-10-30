@@ -3264,8 +3264,8 @@ class VllmConfig:
 
         The V2 runner microbatches a decoder forward pass (drafting runs whole,
         after it). Anything else that slices or replays the batch differently
-        (adapters, pipeline stages, prefill context parallelism, encoders) is
-        not handled yet.
+        (adapters, pipeline stages, encoders) is not handled yet. Prefill context
+        parallelism has a restricted eager path.
         """
         # TODO: DBO with model runner V2 is under development.
         # It should be enabled with explicit VLLM_USE_V2_MODEL_RUNNER environ.
@@ -3281,8 +3281,24 @@ class VllmConfig:
             unsupported.append("dual batch overlap with LoRA")
         if parallel_config.pipeline_parallel_size > 1:
             unsupported.append("dual batch overlap with pipeline parallelism")
-        if parallel_config.prefill_context_parallel_size > 1:
-            unsupported.append("dual batch overlap with prefill context parallelism")
+        # PCP microbatches its rank-local rows; only eager, synchronous NIXL EP
+        # with DP>1, TP=1 and no DCP or drafting is covered.
+        if parallel_config.prefill_context_parallel_size > 1 and not (
+            parallel_config.enable_dbo
+            and parallel_config.all2all_backend == "nixl_ep"
+            and parallel_config.use_batched_dp_moe
+            and parallel_config.tensor_parallel_size == 1
+            and parallel_config.decode_context_parallel_size == 1
+            and self.speculative_config is None
+            and not self.scheduler_config.async_scheduling
+            and self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+        ):
+            unsupported.append(
+                "dual batch overlap with prefill context parallelism outside "
+                "--enable-dbo, --all2all-backend=nixl_ep, DP>1, TP=1, DCP=1, "
+                "expert parallelism, no speculative decoding, "
+                "--no-async-scheduling and --enforce-eager"
+            )
         if model_config is not None and (
             model_config.is_multimodal_model or model_config.is_encoder_decoder
         ):
