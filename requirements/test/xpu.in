@@ -46,7 +46,7 @@ num2words
 pqdm
 
 # --- Vision & Multimodal ---
-timm>=1.0.17 # required for internvl and gemma3n-mm test
+timm>=1.0.30 # required for internvl and gemma3n-mm test
 albumentations
 ftfy
 matplotlib
