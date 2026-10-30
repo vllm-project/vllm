@@ -556,7 +556,7 @@ class Gemma3ForConditionalGeneration(
                 config.vision_config,
                 quant_config,
                 prefix=maybe_prefix(prefix, "vision_tower"),
-                input_norm=build_mm_input_norm(self.model_config),
+                input_norm=build_mm_input_norm(self.model_config, layout="bchw"),
             )
             self.multi_modal_projector = Gemma3MultiModalProjector(config)
 
