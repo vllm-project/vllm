@@ -184,7 +184,8 @@ class _XpuMoESharedFusion:
             shared.down_proj,
             block.shared_expert_gate,
         )
-        s13, s2 = experts.w1_scale, experts.w2_scale
+        s13 = runner.routed_experts.w13_weight_scale
+        s2 = runner.routed_experts.w2_weight_scale
         shared_s13 = getattr(gu, "weight_scale", None)
         shared_s2 = getattr(down, "weight_scale", None)
         if s13 is None or s2 is None or shared_s13 is None or shared_s2 is None:
