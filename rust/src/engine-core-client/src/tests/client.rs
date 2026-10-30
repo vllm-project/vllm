@@ -22,7 +22,9 @@ use zeromq::util::PeerIdentity;
 use zeromq::{DealerSocket, PushSocket, SocketOptions, SubSocket, XPubSocket, ZmqMessage};
 
 use crate::metrics::SchedulerStatsRecorder;
-use crate::protocol::handshake::{EngineCoreReadyResponse, HandshakeInitMessage, ReadyMessage};
+use crate::protocol::handshake::{
+    EngineCoreReadyResponse, HandshakeInitMessage, HandshakeParallelConfig, ReadyMessage,
+};
 use crate::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
 use crate::protocol::logprobs::MaybeWireLogprobs;
 use crate::protocol::lora::LoraRequest;
@@ -572,21 +574,23 @@ where
 async fn coordinator_handshake_includes_engine_control_addresses() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
-    let handshake_address = ipc.handshake_endpoint();
-    let engine_id = [0x00, 0x00];
-
-    let (init_tx, init_rx) = oneshot::channel();
-    let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let engine_task = tokio::spawn(async move {
-        let sockets = setup_mock_engine_sockets(handshake_address, &engine_id).await;
-        let _ = init_tx.send(sockets.init.clone());
-        let _ = shutdown_rx.await;
-    });
+    let mut engines = Vec::new();
+    for engine_id in [[0x00, 0x00], [0x01, 0x00]] {
+        let handshake_address = ipc.handshake_endpoint();
+        let (init_tx, init_rx) = oneshot::channel();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let engine_task = tokio::spawn(async move {
+            let sockets = setup_mock_engine_sockets(handshake_address, &engine_id).await;
+            let _ = init_tx.send(sockets.init.clone());
+            let _ = shutdown_rx.await;
+        });
+        engines.push((init_rx, shutdown_tx, engine_task));
+    }
 
     let client = connect_client_with_ipc(
         handshake_test_config(
             ipc.handshake_endpoint(),
-            1,
+            2,
             "test-model",
             Duration::from_secs(2),
             0,
@@ -596,13 +600,35 @@ async fn coordinator_handshake_includes_engine_control_addresses() {
     )
     .await;
 
-    let init = init_rx.await.unwrap();
+    let mut inits = Vec::new();
+    for (init_rx, shutdown_tx, engine_task) in engines {
+        inits.push(init_rx.await.unwrap());
+        let _ = shutdown_tx.send(());
+        engine_task.await.unwrap();
+    }
+    let init = &inits[0];
+    assert_eq!(init.parallel_config, inits[1].parallel_config);
     assert!(init.addresses.coordinator_input.is_some());
     assert!(init.addresses.coordinator_output.is_some());
     assert!(init.addresses.frontend_stats_publish_address.is_none());
 
-    let _ = shutdown_tx.send(());
-    engine_task.await.unwrap();
+    // Coordinated DP sends one DP rendezvous to every engine: the handshake
+    // host plus five distinct ports.
+    let rendezvous = init
+        .parallel_config
+        .data_parallel_rendezvous
+        .as_ref()
+        .expect("coordinated DP sends the DP rendezvous");
+    assert_eq!(rendezvous.data_parallel_master_ip, "127.0.0.1");
+    assert_eq!(rendezvous.data_parallel_size, 2);
+    let mut ports = rendezvous.data_parallel_master_port_list.clone();
+    assert_eq!(ports.len(), 4);
+    ports.push(rendezvous.data_parallel_master_port);
+    ports.sort_unstable();
+    ports.dedup();
+    assert_eq!(ports.len(), 5);
+    assert!(!ports.contains(&0));
+
     client.shutdown().await.unwrap();
 }
 
@@ -2095,6 +2121,9 @@ async fn multi_engine_client_shares_transport_and_routes_by_inflight_count() {
     assert_eq!(init_1.addresses.inputs, vec![ipc.input_endpoint()]);
     assert_eq!(init_0.addresses.outputs, vec![ipc.output_endpoint()]);
     assert_eq!(init_1.addresses.outputs, vec![ipc.output_endpoint()]);
+    // Without coordinated DP, engines keep their own rendezvous config.
+    assert_eq!(init_0.parallel_config, HandshakeParallelConfig::default());
+    assert_eq!(init_1.parallel_config, HandshakeParallelConfig::default());
 
     assert_eq!(client.input_address(), ipc.input_endpoint());
     assert_eq!(client.output_address(), ipc.output_endpoint());
