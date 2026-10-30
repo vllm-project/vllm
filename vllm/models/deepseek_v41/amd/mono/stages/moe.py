@@ -2027,7 +2027,6 @@ def moe_context(s, rs, lds, mb, bases, layout, scratch, args, rank, sym):
         # x (``ffn_normed``) before this launch: plain loads, no readiness wait
         "x_cm": 0,
         "x_ready": False,
-        # TP4 K2: the push's peer bases, loaded late; also batches the X8 copies
         "push_bases": None,
     }
     for name, off in stage_lds(s, rs)["offsets"].items():

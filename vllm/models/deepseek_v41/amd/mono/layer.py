@@ -631,7 +631,7 @@ def run_ffn(
         s, rs, lds.moe.peek(), amb, bases, mlayout, scratch, margs, rank, own
     )
     cb["x_cm"], cb["x_ready"] = CM_DEV, True
-    cb["push_bases"] = a.get("push_bases") if tp == 4 else None
+    cb["push_bases"] = a.get("push_bases") if tp in (4, 8) else None
     cb["tag"] = ep & 255
     for i, region in enumerate(COUNTERS):
         cb[region] = sreg(a["epoch"], 4 * (EPOCH_COUNTERS + i * moe.TAGS), region)

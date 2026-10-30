@@ -575,15 +575,15 @@ def test_mono_decode_layer_matches_vllm(monkeypatch: pytest.MonkeyPatch, tp: int
 
 @pytest.mark.skipif(not _on_cdna4(), reason="the mono kernels target CDNA4")
 @pytest.mark.skipif(not shutil.which("llvm-objdump"), reason="needs llvm-objdump")
-def test_mono_decode_k2_tp4_no_scratch(monkeypatch: pytest.MonkeyPatch):
-    """TP4 K2 at 14 rows, where the MoE push's peer bases spilled: no scratch."""
+@pytest.mark.parametrize("tp", [4, 8])
+def test_mono_decode_k2_no_scratch(monkeypatch: pytest.MonkeyPatch, tp: int):
     flyc = pytest.importorskip("flydsl.compiler")
     from vllm.models.deepseek_v41.amd.mono.layer import MonoBuild, build_mono_k2
     from vllm.models.minimax_m3.amd.specialized_decode.mono.residency import code_object
 
     monkeypatch.setenv("COMPILE_ONLY", "1")
     monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
-    k2 = build_mono_k2(MonoBuild(14, 4, 2))
+    k2 = build_mono_k2(MonoBuild(14, tp, 2))
     flyc.compile(k2, *[0] * (k2.func.__code__.co_argcount - 1))
     elf = code_object(k2._last_compiled[1]._ir_text)
     isa = subprocess.check_output(["llvm-objdump", "-d", "-"], input=elf)
