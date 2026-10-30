@@ -5,7 +5,6 @@
 # Adapted from https://github.com/state-spaces/mamba/blob/v2.2.4/mamba_ssm/ops/triton/selective_state_update.py
 
 import functools
-import json
 import os
 from contextlib import contextmanager
 from typing import Any
@@ -20,6 +19,7 @@ from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
 from vllm.model_executor.warmup.triton_autotune import (
     atomic_write_json,
     get_autotune_cache_dir,
+    read_config_json,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, tl, triton
@@ -99,18 +99,16 @@ def get_ssm_configs(
     config_file_paths.append(os.path.join(_CONFIGS_DIR, json_file_name))
 
     for path in config_file_paths:
-        if os.path.exists(path):
-            with open(path) as f:
-                logger.info_once(
-                    "Using SSM config from %s for selective_state_update.",
-                    path,
-                    scope="global",
-                )
-                raw = json.load(f)
-                if isinstance(raw, dict):
-                    # triton_version included in the config file only for reference
-                    raw.pop("triton_version", None)
-                    return {int(k): v for k, v in raw.items() if k.isdigit()}
+        raw = read_config_json(path)
+        if raw is not None:
+            logger.info_once(
+                "Using SSM config from %s for selective_state_update.",
+                path,
+                scope="global",
+            )
+            # triton_version included in the config file only for reference
+            raw.pop("triton_version", None)
+            return {int(k): v for k, v in raw.items() if k.isdigit()}
 
     logger.warning_once(
         "Using default Mamba SSU config. Performance might be sub-optimal! "
@@ -213,10 +211,9 @@ def load_ssm_autotune_configs(
     headdim: int, dstate: int, cache_dtype: str
 ) -> dict[int, dict[str, int]]:
     path = get_ssm_autotune_config_file_path(headdim, dstate, cache_dtype)
-    if not os.path.exists(path):
+    raw = read_config_json(path)
+    if raw is None:
         return {}
-    with open(path) as f:
-        raw = json.load(f)
     return {int(k): v for k, v in raw.items() if k.isdigit()}
 
 

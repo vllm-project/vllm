@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -72,6 +73,28 @@ def test_flag_off_does_nothing(monkeypatch):
         triton_autotune, "_tables", lambda: pytest.fail("tables were built")
     )
     triton_autotune.triton_autotune(worker)
+
+
+def test_saved_configs_get_the_umask_mode(tmp_path):
+    path = tmp_path / "cache" / "table.json"
+    triton_autotune.atomic_write_json(str(path), {"1": {"BLOCK_SIZE_M": 16}})
+    umask = os.umask(0)
+    os.umask(umask)
+    assert path.stat().st_mode & 0o777 == 0o666 & ~umask
+    assert triton_autotune.read_config_json(str(path)) == {"1": {"BLOCK_SIZE_M": 16}}
+
+
+@pytest.mark.parametrize("content", ["{not json", "[1, 2]"])
+def test_malformed_config_files_are_skipped(tmp_path, content):
+    path = tmp_path / "table.json"
+    path.write_text(content)
+    assert triton_autotune.read_config_json(str(path)) is None
+
+
+def test_unreadable_config_files_are_skipped(tmp_path):
+    assert triton_autotune.read_config_json(str(tmp_path / "missing.json")) is None
+    # Opening a directory fails even as root, unlike a file without read access.
+    assert triton_autotune.read_config_json(str(tmp_path)) is None
 
 
 def _two_rank_worker(rank, init_method, queue):
