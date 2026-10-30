@@ -26,15 +26,16 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     BlockKey,
-    KeyMetadata,
-    LBHNCStoreLayout,
     MooncakeLookupResult,
     MooncakeStoreConnectorMetadata,
-    PoolKey,
-    RankLocalStoreLayout,
     StoreResidency,
     TailKeyBoundary,
     store_block_key,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout import (
+    KeyMetadata,
+    PoolKey,
+    RankLocalStoreLayout,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
     MooncakeStoreConnectorStats,
@@ -788,42 +789,6 @@ def test_groups_require_their_own_namespaces():
     )
 
     assert events == [rank_specific]
-
-
-def test_store_tp_shards_need_every_store_namespace():
-    """With a shared Store-TP layout each rank covers the shards it holds, and
-    the block is announced once every store shard namespace has reported."""
-    metadata = KeyMetadata("test-model", 0, 0, 0, 0, store_namespace="@store_tp:4")
-    layouts = {
-        tp_rank: LBHNCStoreLayout(
-            metadata,
-            16,
-            16,
-            local_tp_size=2,
-            store_tp_size=4,
-            tp_rank=tp_rank,
-            num_kv_heads=8,
-        )
-        for tp_rank in range(2)
-    }
-    rank_namespaces = [(0, 0, 0, 0), (1, 0, 0, 0)]
-    required = {0: list(layouts[0].lookup_key_prefixes(rank_namespaces))}
-    covered = {
-        tp_rank: frozenset(
-            PoolKey.build_prefix(metadata, tp_rank=shard_id)
-            for shard_id in layout.local_shard_ids
-        )
-        for tp_rank, layout in layouts.items()
-    }
-
-    assert len(required[0]) == 4
-    assert covered[0] | covered[1] == set(required[0])
-
-    connector = _make_scheduler_connector()
-    event = _make_block_stored(b"block", group_idx=0)
-
-    assert _contribute(connector, event, list(covered[0]), required) == []
-    assert _contribute(connector, event, list(covered[1]), required) == [event]
 
 
 def test_residency_outside_the_lookup_namespaces_is_rejected():
