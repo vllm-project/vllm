@@ -290,16 +290,16 @@ impl ModelProcessorSpec for MuseSparkSpec {
 
     /// The reference video processor's `fps`: clips arrive pre-sampled by the
     /// media connector at this rate.
-    fn default_video_sample_fps(&self) -> Option<f32> {
-        Some(processor::DEFAULT_SAMPLING_FPS as f32)
+    fn default_video_sample_fps(&self) -> Option<f64> {
+        Some(processor::DEFAULT_SAMPLING_FPS)
     }
 
-    fn default_video_sample_fps_with(&self, config: Option<&PreProcessorConfig>) -> Option<f32> {
+    fn default_video_sample_fps_with(&self, config: Option<&PreProcessorConfig>) -> Option<f64> {
         Some(
             config
-                .and_then(|config| config.get_extra::<f32>("fps"))
+                .and_then(|config| config.get_extra::<f64>("fps"))
                 .filter(|fps| fps.is_finite() && *fps > 0.0)
-                .unwrap_or(processor::DEFAULT_SAMPLING_FPS as f32),
+                .unwrap_or(processor::DEFAULT_SAMPLING_FPS),
         )
     }
 

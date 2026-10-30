@@ -28,6 +28,7 @@ from vllm.multimodal.inputs import (
 )
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
+from vllm.v1.core import kv_cache_planning
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -268,6 +269,7 @@ def create_requests(
     same_prompt: bool = False,
     block_size: int = 16,
     req_ids: list[str] | None = None,
+    sampling_params: SamplingParams | None = None,
 ) -> list[Request]:
     global _none_hash_initialized
     if not _none_hash_initialized:
@@ -275,12 +277,13 @@ def create_requests(
         _none_hash_initialized = True
 
     block_hasher = get_request_block_hasher(block_size, sha256)
-    sampling_params = SamplingParams(
-        ignore_eos=ignore_eos,
-        max_tokens=max_tokens,
-        stop_token_ids=stop_token_ids,
-        prompt_logprobs=prompt_logprobs,
-    )
+    if sampling_params is None:
+        sampling_params = SamplingParams(
+            ignore_eos=ignore_eos,
+            max_tokens=max_tokens,
+            stop_token_ids=stop_token_ids,
+            prompt_logprobs=prompt_logprobs,
+        )
     sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
     requests = []
 
@@ -412,4 +415,17 @@ def new_mla_spec(cache_dtype_str=None, block_size: int = 16):
         head_size=576,
         dtype=torch.float32,
         cache_dtype_str=cache_dtype_str,
+    )
+
+
+def get_kv_cache_configs(
+    vllm_config: VllmConfig,
+    kv_cache_specs: list[dict[str, KVCacheSpec]],
+    available_memory: list[int],
+) -> list[KVCacheConfig]:
+    return kv_cache_planning.get_kv_cache_configs(
+        vllm_config,
+        kv_cache_specs,
+        available_memory,
+        kv_cache_planning.get_global_kv_cache_groups(vllm_config, kv_cache_specs),
     )

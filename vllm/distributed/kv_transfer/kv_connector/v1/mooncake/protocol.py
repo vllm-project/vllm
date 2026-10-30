@@ -60,3 +60,16 @@ class MooncakeXferResponse(
     # The pull's layout_id once P holds that layout. D omits the layout only
     # after seeing it, so a P that predates this field always gets it.
     layout_id: int = 0
+
+
+class MooncakeLeaseHeartbeat(
+    msgspec.Struct,
+    omit_defaults=True,  # type: ignore[call-arg]
+):
+    """Sent by D to renew P's lease on KV blocks that D has not pulled yet.
+
+    It shares P's side channel with pulls. A pull decodes as a heartbeat with
+    no transfer ids, because msgspec skips the fields it does not know.
+    """
+
+    lease_transfer_ids: list[TransferId] = msgspec.field(default_factory=list)

@@ -40,6 +40,14 @@ class SendBlockMeta:
     sending: int = 0
 
 
+@dataclass
+class LeaseHeartbeat:
+    """Transfers that one P engine holds for this D engine under a lease."""
+
+    remote_bootstrap_addr: str
+    transfer_ids: list[TransferId]
+
+
 class MooncakeConnectorMetadata(KVConnectorMetadata):
     def __init__(self):
         # Use (engine_id, dp_rank) to group reqs with same dp.
@@ -47,6 +55,8 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
         self.reqs_to_recv: dict[EngineId, dict[ReqId, PullReqMeta]] = defaultdict(dict)
         self.reqs_to_send: dict[ReqId, tuple[TransferId, list[list[int]]]] = {}
         self.transfers_not_processed: set[TransferId] = set()
+        # D side: lease renewals to send this step, by remote P engine.
+        self.lease_heartbeats: dict[EngineId, LeaseHeartbeat] = {}
 
     def add_new_req(
         self,
