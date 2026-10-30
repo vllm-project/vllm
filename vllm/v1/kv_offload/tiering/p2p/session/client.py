@@ -524,10 +524,13 @@ class ClientRole:
                 if load.aborted_at is None:
                     if now - load.submitted_at >= load.timeout_s:
                         logger.warning(
-                            "P2PSession %s: %s round=%s timed out, sending abort",
+                            "P2PSession %s: %s round=%s job_id=%d timed out "
+                            "%.1fs after submit, sending abort",
                             self._peer_id,
                             req_id,
                             round_seq,
+                            load.job_id,
+                            now - load.submitted_at,
                         )
                         self._abort_load(req_id, round_seq, load)
                 elif (
