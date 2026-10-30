@@ -713,22 +713,39 @@ def test_hisparse_rejects_unsupported_platform(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "kv_transfer_config",
+    "kv_transfer_config,kv_offloading_size",
     [
-        None,
-        KVTransferConfig(
-            kv_connector="MultiConnector",
-            kv_role="kv_consumer",
-            kv_connector_extra_config={
-                "connectors": [
-                    {"kv_connector": "NixlConnector", "kv_role": "kv_consumer"},
-                ]
-            },
+        (None, None),
+        (
+            KVTransferConfig(
+                kv_connector="MultiConnector",
+                kv_role="kv_consumer",
+                kv_connector_extra_config={
+                    "connectors": [
+                        {"kv_connector": "NixlConnector", "kv_role": "kv_consumer"},
+                    ]
+                },
+            ),
+            None,
+        ),
+        (
+            KVTransferConfig(
+                kv_connector="HiSparseConnector",
+                kv_role="kv_both",
+                kv_connector_extra_config={"host_pool_gib": 128},
+            ),
+            1,
         ),
     ],
-    ids=["no-connector", "multi-connector-without-hisparse"],
+    ids=[
+        "no-connector",
+        "multi-connector-without-hisparse",
+        "offloading-size-replaces-hisparse",
+    ],
 )
-def test_hisparse_requires_hisparse_connector(monkeypatch, kv_transfer_config):
+def test_hisparse_requires_hisparse_connector(
+    monkeypatch, kv_transfer_config, kv_offloading_size
+):
     monkeypatch.setattr(
         current_platform,
         "get_hisparse_backend_cls",
@@ -737,6 +754,7 @@ def test_hisparse_requires_hisparse_connector(monkeypatch, kv_transfer_config):
     with pytest.raises(ValueError, match="requires a KV transfer config"):
         VllmConfig(
             attention_config=AttentionConfig(hisparse_config=HiSparseConfig()),
+            cache_config=CacheConfig(kv_offloading_size=kv_offloading_size),
             kv_transfer_config=kv_transfer_config,
         )
 
