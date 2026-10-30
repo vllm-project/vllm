@@ -48,6 +48,7 @@ from vllm.model_executor.models.gemma4_mm import (
     Gemma4ProcessingInfo,
     _get_max_soft_tokens,
 )
+from vllm.model_executor.models.gemma4_vision import Gemma4VisionModel
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling,
@@ -1011,8 +1012,8 @@ class EmbeddingGemma2Model(nn.Module, SupportsMultiModal, VllmModelForPooling):
     _parse_and_validate_multimodal_inputs = (
         Gemma4ForConditionalGeneration._parse_and_validate_multimodal_inputs
     )
-    _get_max_soft_tokens = Gemma4ForConditionalGeneration._get_max_soft_tokens
-    _embed_patches = Gemma4ForConditionalGeneration._embed_patches
+    _pack_vision = Gemma4ForConditionalGeneration._pack_vision
+    _embed_vision = Gemma4ForConditionalGeneration._embed_vision
     _process_image_input = Gemma4ForConditionalGeneration._process_image_input_local
     _process_video_input = Gemma4ForConditionalGeneration._process_video_input_local
     _process_image_input_local = (
@@ -1023,7 +1024,6 @@ class EmbeddingGemma2Model(nn.Module, SupportsMultiModal, VllmModelForPooling):
     )
     _process_audio_input = Gemma4ForConditionalGeneration._process_audio_input
     embed_multimodal = Gemma4ForConditionalGeneration.embed_multimodal
-    _encoder_chunk = staticmethod(Gemma4ForConditionalGeneration._encoder_chunk)
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
@@ -1036,10 +1036,6 @@ class EmbeddingGemma2Model(nn.Module, SupportsMultiModal, VllmModelForPooling):
         self.model_dtype = vllm_config.model_config.dtype
         self.vllm_config = vllm_config
         self.hf_to_vllm_mapper = _embedding_gemma2_weights_mapper(config)
-        lora_config = vllm_config.lora_config
-        self._enable_mm_lora = bool(
-            lora_config is not None and lora_config.enable_tower_connector_lora
-        )
 
         tower_quant: QuantizationConfig | None
         if quant_config and quant_config.get_name() in [
@@ -1058,21 +1054,21 @@ class EmbeddingGemma2Model(nn.Module, SupportsMultiModal, VllmModelForPooling):
             tower_quant = quant_config if quantizable else None
 
         # ---- Vision tower (shared by image and video) ----
+        self.vision_tower: Gemma4VisionModel | None
         self.embed_vision: Gemma4MultimodalEmbedder | None
         if getattr(config, "vision_config", None) is not None:
             with self._mark_tower_model(vllm_config, {"image", "video"}):
-                self.vision_tower = AutoModel.from_config(config=config.vision_config)
+                self.vision_tower = Gemma4VisionModel(
+                    config.vision_config,
+                    quant_config=tower_quant,
+                    prefix=maybe_prefix(prefix, "vision_tower"),
+                )
                 self.vision_input_norm = build_mm_input_norm(vllm_config.model_config)
                 self.embed_vision = Gemma4MultimodalEmbedder(
                     config.vision_config,
                     config.text_config,
                     quant_config=tower_quant,
                     prefix=maybe_prefix(prefix, "embed_vision"),
-                )
-                recursive_replace_linear(
-                    self.vision_tower,
-                    tower_quant,
-                    prefix=maybe_prefix(prefix, "vision_tower"),
                 )
         else:
             self.vision_tower = None

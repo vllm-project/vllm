@@ -303,7 +303,14 @@ class MMEncoderAttention(CustomOp):
         tp_size: int,
         device: torch.device,
         fp8_padded_hidden_size: int | None = None,
+        separate_qkv: bool = False,
     ) -> torch.Tensor:
+        """`cu_seqlens` in the layout `attn_backend` reads.
+
+        `separate_qkv` tells FlashInfer that Q, K and V are separate
+        contiguous tensors rather than views into a fused QKV projection
+        (out-of-tree overrides keep their own layout and do not receive it).
+        """
         if (oot_class := maybe_get_oot_by_class(cls)) is not cls:
             return oot_class.maybe_recompute_cu_seqlens(  # type: ignore[attr-defined]
                 attn_backend,
@@ -317,11 +324,11 @@ class MMEncoderAttention(CustomOp):
         if attn_backend == AttentionBackendEnum.FLASHINFER:
             batch_size = len(cu_seqlens) - 1
 
-            if fp8_padded_hidden_size is not None:
-                # FP8 path: after quantization Q/K/V are each independent
-                # contiguous tensors with stride H * padded_D per token.
-                # All sections use the same element stride.
-                scale = fp8_padded_hidden_size // tp_size
+            if fp8_padded_hidden_size is not None or separate_qkv:
+                # Q/K/V are each independent contiguous tensors (separate
+                # projections, or FP8 quantization) with stride H * D per
+                # token (D padded for FP8): all sections use the same stride.
+                scale = (fp8_padded_hidden_size or hidden_size) // tp_size
                 cu_seqlens = cu_seqlens * scale
                 cu_seqlens_padded = add_padding_to_seqlens(
                     cu_seqlens, batch_size, cu_seqlens[-1]
