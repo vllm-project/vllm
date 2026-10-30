@@ -1634,14 +1634,13 @@ def _prepare_expert_assignment(
     # repeated read crosses PCIe, so group each expert's tokens instead.
     # On integrated/unified-memory GPUs (e.g. GB10 / DGX Spark), naive block
     # assignment re-reads shared expert weights across multi-token batches,
-    # saturating unified memory bandwidth and causing an 8-52% decode slowdown.
-    # Restrict naive assignment to num_tokens == 1 where no collision occurs.
+    # saturating unified memory bandwidth. Restrict naive assignment to
+    # num_tokens == 1 where no collision occurs.
     device_idx = topk_ids.device.index if topk_ids.device.index is not None else 0
-    max_naive_tokens = 1 if current_platform.is_integrated_gpu(device_idx) else None
     naive_block_assignment = (
         expert_map is None
         and not weights_host_resident
-        and (max_naive_tokens is None or num_tokens <= max_naive_tokens)
+        and (num_tokens == 1 or not current_platform.is_integrated_gpu(device_idx))
         and num_tokens * top_k_num * 4 <= global_num_experts
         and not (
             (use_int8_w8a16 or use_int4_w4a16)
