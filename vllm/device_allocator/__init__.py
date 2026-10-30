@@ -32,7 +32,14 @@ class MemAllocator(Protocol):
 
     def discard(self, tags: tuple[str, ...] | str) -> None: ...
 
-    def wake_up(self, tags: list[str] | None = None) -> None: ...
+    def wake_up(self, tags: list[str] | None = None) -> int:
+        """Restore tagged allocations.
+
+        Returns:
+            Bytes restored from pinned host backups, 0 if none were backed up.
+
+        """
+        ...
 
     def get_current_usage(self) -> int: ...
 

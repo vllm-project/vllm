@@ -328,7 +328,7 @@ class CuMemAllocator:
                 "already-asleep allocations; the existing policy was kept."
             )
 
-    def wake_up(self, tags: list[str] | None = None) -> None:
+    def wake_up(self, tags: list[str] | None = None) -> int:
         """Wake up the allocator from sleep mode.
         All data that is previously offloaded will be loaded back to GPU
         memory, and the rest will have empty memory (zeroed on ROCm).
@@ -338,10 +338,15 @@ class CuMemAllocator:
                 memory; every other tag is always loaded back. If None, all
                 memory allocation will be loaded back to GPU memory.
 
+        Returns:
+            Bytes restored from pinned host backups. Zero when nothing was
+            backed up on the host, e.g. after a level-2 sleep.
+
         """
         gc.collect()
         torch.accelerator.empty_cache()
 
+        restored_bytes = 0
         for ptr, data in self.pointer_to_data.items():
             if not data.is_asleep:
                 continue
@@ -358,10 +363,12 @@ class CuMemAllocator:
                         cpu_ptr = cpu_backup_tensor.data_ptr()
                         libcudart.cudaMemcpy(ptr, cpu_ptr, size_in_bytes)
                         data.cpu_backup_tensor = None
+                        restored_bytes += size_in_bytes
                 elif current_platform.is_rocm():
                     # amdgpu <6.14 may return stale VRAM (#44972); drop with its support
                     libcudart.cudaMemset(ptr, 0, handle[1])
                     torch.accelerator.synchronize()
+        return restored_bytes
 
     @contextmanager
     def use_memory_pool(self, tag: str | None = None):

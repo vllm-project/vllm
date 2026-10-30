@@ -264,7 +264,8 @@ class XpuMemAllocator:
                 "already-asleep allocations; the existing policy was kept."
             )
 
-    def wake_up(self, tags: list[str] | None = None) -> None:
+    def wake_up(self, tags: list[str] | None = None) -> int:
+        restored_bytes = 0
         for ptr, data in self.pointer_to_data.items():
             if not data.is_asleep:
                 continue
@@ -290,6 +291,8 @@ class XpuMemAllocator:
                 device,
             )
             data.cpu_backup_tensor = None
+            restored_bytes += size_in_bytes
+        return restored_bytes
 
     def release_pools(self) -> None:
         """Release pools, retaining allocators until their allocations are freed."""
