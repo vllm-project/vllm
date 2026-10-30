@@ -655,6 +655,18 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         return remote_agents, 0.0
 
 
+def _advertise_one_layer_per_region(worker, *metas: NixlAgentMetadata) -> None:
+    """Give the worker and its peers one layer per region, as registration does,
+    so their regions pair in order."""
+    layer_names = list(worker.kv_cache_config.transfer_group_index_by_layer)
+    num_regions = len(metas[0].kv_caches_base_addr)
+    assert num_regions <= len(layer_names)
+    region_layers = [[name] for name in layer_names[:num_regions]]
+    worker._set_region_layers(region_layers)
+    for meta in metas:
+        meta.region_members = region_layers
+
+
 class TestNixlHandshake:
     @pytest.mark.parametrize(
         ("pcp_rank", "pcp_size", "dcp_size", "expected_tracked"),
@@ -1219,8 +1231,9 @@ class TestNixlHandshake:
                 attn_backend_name=worker.backend_name,
                 physical_blocks_per_logical_kv_block=1,
             )
+            _advertise_one_layer_per_region(worker, meta)
 
-            with pytest.raises(RuntimeError):
+            with pytest.raises(RuntimeError, match="same kv_cache_layout"):
                 # mismatched layout is expected to fail
                 worker.add_remote_agent(meta, remote_tp_size=2)
                 worker.add_remote_agent(meta, remote_tp_size=1)
@@ -1283,6 +1296,7 @@ class TestNixlHandshake:
                 attn_backend_name=worker.backend_name,
                 physical_blocks_per_logical_kv_block=1,
             )
+            _advertise_one_layer_per_region(worker, meta)
 
             # We don't check layout for homogeneous TP and MLA for now, as the
             # whole block is moved.
@@ -1403,6 +1417,7 @@ class TestNixlHandshake:
                 attn_backend_name=worker.backend_name,
                 physical_blocks_per_logical_kv_block=1,
             )
+            _advertise_one_layer_per_region(worker, meta)
             worker.add_remote_agent(meta, remote_tp_size=1)
             assert (
                 FakeNixlConnectorWorker.REMOTE_ENGINE_ID in worker.dst_xfer_side_handles
@@ -1430,6 +1445,7 @@ class TestNixlHandshake:
                 attn_backend_name=worker2.backend_name,
                 physical_blocks_per_logical_kv_block=1,
             )
+            _advertise_one_layer_per_region(worker2, bad_meta)
             with pytest.raises(AssertionError):
                 worker2.add_remote_agent(bad_meta, remote_tp_size=1)
 
@@ -1527,6 +1543,7 @@ class TestNixlHandshake:
             attn_backend_name=worker.backend_name,
             physical_blocks_per_logical_kv_block=1,
         )
+        _advertise_one_layer_per_region(worker, meta)
         return worker, meta, mla_len, draft_len
 
     @patch(
@@ -1726,6 +1743,7 @@ class TestNixlHandshake:
                 attn_backend_name=worker.backend_name,
                 physical_blocks_per_logical_kv_block=1,
             )
+            _advertise_one_layer_per_region(worker, meta)
 
             # Must validate cleanly (used to raise AssertionError).
             worker.add_remote_agent(meta, remote_tp_size=8)
@@ -1785,6 +1803,7 @@ class TestNixlHandshake:
                 attn_backend_name=worker.backend_name,
                 physical_blocks_per_logical_kv_block=1,
             )
+            _advertise_one_layer_per_region(worker, bad_meta)
 
             with pytest.raises(AssertionError):
                 worker.add_remote_agent(bad_meta, remote_tp_size=2)
@@ -1871,6 +1890,7 @@ class TestNixlHandshake:
             attn_backend_name=worker.backend_name,
             physical_blocks_per_logical_kv_block=1,
         )
+        _advertise_one_layer_per_region(worker, meta)
 
         if rejected:
             with pytest.raises(RuntimeError, match="NVFP4"):
