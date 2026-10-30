@@ -8,7 +8,9 @@ use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use tracing::{Level, debug, trace};
 use vllm_engine_core_client::AbortCause;
-use vllm_engine_core_client::protocol::output::{RequestSpecDecodeMetrics, StopReason};
+use vllm_engine_core_client::protocol::output::{
+    PrefillProgress, RequestSpecDecodeMetrics, StopReason,
+};
 use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
 use vllm_llm::{FinishReason, GenerateOutput, PromptCacheUsage, RequestTimestamps, TokenUsage};
 use vllm_tokenizer::{DecodedText, DynTokenizer, IncrementalDecoder};
@@ -111,6 +113,8 @@ pub enum DecodedTextEvent {
         /// remaining prompt positions.
         prompt_logprobs: Option<DecodedPromptLogprobs>,
     },
+    /// Worker-reported progress for the request's prefill work.
+    PrefillProgress(Box<PrefillProgress>),
     /// Decoded text and sampled metadata observed during one output update.
     ///
     /// `decoded` follows the decoder clock. It may be empty while tokens remain
@@ -179,8 +183,19 @@ pub async fn decoded_text_event_stream(
     let text_tokenizer = decode_options.detokenize.then_some(tokenizer.as_ref());
 
     while let Some(next) = raw_stream.next().await {
-        let output = next?;
+        let mut output = next?;
         prompt_cache_usage.merge(output.prompt_cache_usage);
+
+        if let Some(mut progress) = output.prefill_progress.take() {
+            progress.request_id.clone_from(&request_id);
+            y.yield_ok(DecodedTextEvent::PrefillProgress(progress)).await;
+            if output.prompt_info.is_none()
+                && output.token_ids.is_empty()
+                && output.finish_reason.is_none()
+            {
+                continue;
+            }
+        }
 
         // If it's the first output, init states and yield `Start` event.
         if decoder.is_none() {
@@ -365,7 +380,9 @@ pub async fn decoded_text_event_stream(
             return Ok(());
         }
 
-        if intermediate {
+        if intermediate
+            && (!decoded.text.is_empty() || !new_token_ids.is_empty() || decoded_logprobs.is_some())
+        {
             y.yield_ok(DecodedTextEvent::TextDelta {
                 decoded,
                 sampled: SampledDelta {
@@ -445,6 +462,47 @@ mod tests {
             .collect_output()
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn prefill_progress_uses_external_request_id() {
+        let mut first = GenerateOutput::for_test(None, vec![], None);
+        first.prefill_progress = Some(Box::new(PrefillProgress {
+            request_id: "request-12345678".into(),
+            sequence: 1,
+            phase: 3,
+            prompt_tokens: 2,
+            total_compute_tokens: 2,
+            completed_compute_tokens: 1,
+            remaining_compute_tokens: 1,
+            local_cached_tokens: 0,
+            external_cached_tokens: 0,
+            pending_kv_transfer_tokens: 0,
+            cache_accounting_final: true,
+        }));
+        let terminal = GenerateOutput::for_test(
+            Some(Arc::from([1, 2])),
+            ascii_tokens("a"),
+            Some(FinishReason::Length),
+        );
+        let events = decoded_text_event_stream(
+            "request".into(),
+            Arc::new(TestTokenizer::new()),
+            stream::iter([Ok(first), Ok(terminal)]),
+            TextDecodeOptions::default(),
+            true,
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+        let DecodedTextEvent::PrefillProgress(progress) = &events[0] else {
+            panic!("expected prefill progress before generated output");
+        };
+        assert_eq!(progress.request_id, "request");
+        assert_eq!(progress.sequence, 1);
+        assert_eq!(progress.remaining_compute_tokens, 1);
     }
 
     /// Convert ASCII string to token IDs (one byte per token).

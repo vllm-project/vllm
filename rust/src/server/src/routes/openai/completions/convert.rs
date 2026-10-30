@@ -153,6 +153,7 @@ pub(super) fn prepare_completion_request(
                 request.kv_transfer_params.as_ref(),
             ),
             stream_interval: request.stream_interval,
+            include_prefill_progress: false,
         },
         decode_options: TextDecodeOptions {
             skip_special_tokens: request.skip_special_tokens,

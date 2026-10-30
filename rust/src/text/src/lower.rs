@@ -75,6 +75,7 @@ pub fn lower_text_request(
         kv_hints: request.kv_hints.clone(),
         reasoning_parser_kwargs: Some(request.reasoning_parser_kwargs.clone()),
         reasoning_ended: request.reasoning_ended,
+        include_prefill_progress: request.sampling_params.include_prefill_progress,
         lora_request: request.lora_request.clone(),
         arrival_time: request.arrival_time,
         trace_headers: None,
@@ -137,6 +138,7 @@ pub fn lower_sampling_params(
         routed_experts_prompt_start,
         vllm_xargs,
         stream_interval,
+        include_prefill_progress: _,
     } = sampling_params;
 
     validate_logprobs(

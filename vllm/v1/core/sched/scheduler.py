@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
 import time
-from collections import defaultdict, deque
+from collections import OrderedDict, defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
@@ -55,7 +55,13 @@ from vllm.v1.core.sched.request_queue import (
     create_request_queue,
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
-from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.engine import (
+    EngineCoreEventType,
+    EngineCoreOutput,
+    EngineCoreOutputs,
+    FinishReason,
+    PrefillProgress,
+)
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
@@ -68,6 +74,7 @@ from vllm.v1.metrics.stats import (
     KV_FETCH_IN_PROGRESS,
     KV_FETCH_STAGES,
     KV_FETCH_WAITING_TO_START,
+    PrefillStats,
     PrefixCacheStats,
     RequestSpecDecodeMetrics,
     SchedulerStats,
@@ -80,6 +87,10 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
+
+_PREFILL_PROGRESS_MIN_INTERVAL = 0.1
+_PREFILL_PROGRESS_MAX_INTERVAL = 1.0
+_PREFILL_PROGRESS_MAX_UPDATES = 100
 
 
 class Scheduler(SchedulerInterface):
@@ -220,6 +231,9 @@ class Scheduler(SchedulerInterface):
 
         # req_id -> Request
         self.requests: dict[str, Request] = {}
+        # Ordered by last report time; only unresolved prefill needs refresh.
+        self._prefill_progress_requests: OrderedDict[str, Request] = OrderedDict()
+        self._prefill_progress_dirty: set[str] = set()
         # Scheduling policy
         try:
             self.policy = SchedulingPolicy(self.scheduler_config.policy)
@@ -1509,6 +1523,15 @@ class Scheduler(SchedulerInterface):
                     self.kv_cache_manager.record_prefix_cache_stats(
                         request, num_new_local_computed_tokens
                     )
+                    if request.include_prefill_progress:
+                        request.prefill_progress_cache_tokens = (
+                            num_new_local_computed_tokens,
+                            0 if load_kv_async else num_external_computed_tokens,
+                        )
+                        request.prefill_progress_pending_kv_tokens = (
+                            num_external_computed_tokens if load_kv_async else 0
+                        )
+                        self._mark_prefill_progress_dirty(request)
 
                 if load_kv_async:
                     # This path deliberately does not reach `prefill_admitted`
@@ -1819,6 +1842,10 @@ class Scheduler(SchedulerInterface):
         self._inflight_prefills.discard(request)
         request.status = RequestStatus.PREEMPTED
         request.num_computed_tokens = 0
+        if request.include_prefill_progress:
+            request.prefill_progress_cache_tokens = (0, 0)
+            request.prefill_progress_pending_kv_tokens = 0
+            self._mark_prefill_progress_dirty(request)
         if request.spec_token_ids:
             request.spec_token_ids = []
         # Async scheduling: mark all in-flight output as stale. Its tokens are
@@ -1915,6 +1942,8 @@ class Scheduler(SchedulerInterface):
         if session.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
             self.num_waiting_for_streaming_input -= 1
         session.status = RequestStatus.WAITING
+        if session.include_prefill_progress:
+            self._mark_prefill_progress_dirty(session)
 
         if self.log_stats:
             session.record_event(EngineCoreEventType.QUEUED)
@@ -2254,6 +2283,8 @@ class Scheduler(SchedulerInterface):
         scheduler_output: SchedulerOutput,
         model_runner_output: ModelRunnerOutput,
     ) -> dict[int, EngineCoreOutputs]:
+        prefill_progress_timestamp = time.monotonic()
+        sampled_progress_ids: set[str] = set()
         sampled_token_ids = model_runner_output.sampled_token_ids
         logprobs = model_runner_output.logprobs
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
@@ -2486,6 +2517,19 @@ class Scheduler(SchedulerInterface):
                 else:
                     stopped_preempted_reqs.add(request)
 
+            prefill_progress = None
+            if request.include_prefill_progress and (
+                req_id in self._prefill_progress_requests or finish_reason is not None
+            ):
+                sampled_progress_ids.add(req_id)
+                prefill_progress = self._update_prefill_progress(
+                    request,
+                    prefill_stats or request.prefill_stats,
+                    bool(new_token_ids) and not output_is_stale,
+                    finish_reason,
+                    prefill_progress_timestamp,
+                )
+
             if self.return_sampling_mask:
                 sampling_masks = model_runner_output.sampling_masks
                 if new_token_ids and sampling_masks is not None:
@@ -2499,7 +2543,7 @@ class Scheduler(SchedulerInterface):
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
             prompt_token_id_logprobs = prompt_token_id_logprobs_dict.get(req_id)
-            if should_emit_output:
+            if should_emit_output or prefill_progress is not None:
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(
                     EngineCoreOutput(
@@ -2524,6 +2568,7 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        prefill_progress=prefill_progress,
                     )
                 )
             else:
@@ -2629,6 +2674,45 @@ class Scheduler(SchedulerInterface):
             batch = KVEventBatch(ts=time.time(), events=events)
             self.kv_event_publisher.publish(batch)
 
+        dirty = self._prefill_progress_dirty
+        self._prefill_progress_dirty = set()
+        for req_id in dirty:
+            request = self._prefill_progress_requests.get(req_id)
+            if request is None or req_id in sampled_progress_ids:
+                continue
+            progress = self._update_prefill_progress(
+                request, request.prefill_stats, False, None, prefill_progress_timestamp
+            )
+            if progress is not None:
+                outputs[request.client_index].append(
+                    EngineCoreOutput(
+                        request_id=req_id, new_token_ids=[], prefill_progress=progress
+                    )
+                )
+
+        while self._prefill_progress_requests:
+            req_id, request = next(iter(self._prefill_progress_requests.items()))
+            if (
+                prefill_progress_timestamp - request.last_prefill_progress_time
+                < _PREFILL_PROGRESS_MAX_INTERVAL
+            ):
+                break
+            if req_id in sampled_progress_ids:
+                break
+            progress = self._update_prefill_progress(
+                request,
+                request.prefill_stats,
+                False,
+                None,
+                prefill_progress_timestamp,
+            )
+            if progress is not None:
+                outputs[request.client_index].append(
+                    EngineCoreOutput(
+                        request_id=req_id, new_token_ids=[], prefill_progress=progress
+                    )
+                )
+
         # Create EngineCoreOutputs for all clients that have requests with
         # outputs in this step.
         engine_core_outputs = {
@@ -2667,6 +2751,158 @@ class Scheduler(SchedulerInterface):
             eco.scheduler_stats = stats
 
         return engine_core_outputs
+
+    def _mark_prefill_progress_dirty(self, request: Request) -> None:
+        self._prefill_progress_requests[request.request_id] = request
+        self._prefill_progress_dirty.add(request.request_id)
+
+    def _update_prefill_progress(
+        self,
+        request: Request,
+        prefill_stats: PrefillStats | None,
+        has_output_tokens: bool,
+        finish_reason: FinishReason | None,
+        timestamp: float,
+    ) -> PrefillProgress | None:
+        progress = self._make_prefill_progress(
+            request, prefill_stats, has_output_tokens, finish_reason, timestamp
+        )
+        self._prefill_progress_dirty.discard(request.request_id)
+        if progress is not None:
+            if progress.phase in (1, 2, 3, 5):
+                self._prefill_progress_requests.move_to_end(request.request_id)
+            else:
+                self._prefill_progress_requests.pop(request.request_id, None)
+        return progress
+
+    @staticmethod
+    def _make_prefill_progress(
+        request: Request,
+        prefill_stats: PrefillStats | None,
+        has_output_tokens: bool,
+        finish_reason: FinishReason | None,
+        timestamp: float,
+    ) -> PrefillProgress | None:
+        if not request.include_prefill_progress:
+            return None
+
+        prompt_tokens = request.num_prompt_tokens
+        previous = request.last_prefill_progress
+        local_cached = (
+            prefill_stats.num_local_cached_tokens
+            if prefill_stats
+            else previous[4]
+            if previous
+            else 0
+        )
+        external_cached = (
+            prefill_stats.num_external_cached_tokens
+            if prefill_stats
+            else previous[5]
+            if previous
+            else 0
+        )
+        if request.prefill_progress_cache_tokens is not None:
+            local_cached, external_cached = request.prefill_progress_cache_tokens
+        local_cached = min(local_cached, prompt_tokens)
+        external_cached = min(external_cached, prompt_tokens - local_cached)
+        pending_kv = min(
+            request.prefill_progress_pending_kv_tokens,
+            prompt_tokens - local_cached - external_cached,
+        )
+        total = max(0, prompt_tokens - local_cached - external_cached)
+        computed = max(0, request.num_computed_tokens - request.num_in_flight_tokens)
+        if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+            computed = min(computed, local_cached)
+        if finish_reason is not None:
+            phase = {
+                FinishReason.ABORT: 8,  # ABORTED
+                FinishReason.ERROR: 7,  # FAILED
+            }.get(finish_reason, 6)  # FINISHED
+            if finish_reason in (FinishReason.ABORT, FinishReason.ERROR):
+                completed = min(
+                    total, max(0, computed - local_cached - external_cached)
+                )
+            else:
+                completed = total
+            accounting_final = True
+        elif has_output_tokens:
+            phase = 4  # DECODE
+            completed = total
+            accounting_final = True
+        else:
+            phase = {
+                RequestStatus.WAITING: 1,  # QUEUED
+                RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR: 1,
+                RequestStatus.WAITING_FOR_REMOTE_KVS: 2,
+                RequestStatus.PREEMPTED: 5,
+            }.get(request.status, 3)  # PREFILL
+            if computed >= prompt_tokens and request.num_output_tokens:
+                phase = 4  # DECODE
+            completed = min(total, max(0, computed - local_cached - external_cached))
+            accounting_final = request.status == RequestStatus.RUNNING and (
+                prefill_stats is not None
+                or request.prefill_progress_cache_tokens is not None
+            )
+
+        refresh_due = (
+            phase in (1, 2, 3, 5)
+            and timestamp - request.last_prefill_progress_time
+            >= _PREFILL_PROGRESS_MAX_INTERVAL
+        )
+
+        # Only decreasing work may wait: delaying a correction that increases
+        # remaining work would make routing underestimate the request's load.
+        if (
+            previous is not None
+            and not refresh_due
+            and phase == previous[0]
+            and phase in (1, 2, 3, 5)
+            and prompt_tokens == previous[1]
+            and total == previous[2]
+            and previous[3] <= completed < total
+            and local_cached == previous[4]
+            and external_cached == previous[5]
+            and accounting_final == previous[6]
+            and pending_kv == previous[7]
+            and (
+                timestamp - request.last_prefill_progress_time
+                < _PREFILL_PROGRESS_MIN_INTERVAL
+                or completed - previous[3]
+                < max(1, cdiv(total, _PREFILL_PROGRESS_MAX_UPDATES))
+            )
+        ):
+            return None
+
+        snapshot = (
+            phase,
+            prompt_tokens,
+            total,
+            completed,
+            local_cached,
+            external_cached,
+            accounting_final,
+            pending_kv,
+        )
+        if snapshot == request.last_prefill_progress and not refresh_due:
+            return None
+
+        request.prefill_progress_sequence += 1
+        request.last_prefill_progress = snapshot
+        request.last_prefill_progress_time = timestamp
+        return PrefillProgress(
+            request_id=request.request_id,
+            sequence=request.prefill_progress_sequence,
+            phase=phase,
+            prompt_tokens=prompt_tokens,
+            total_compute_tokens=total,
+            completed_compute_tokens=completed,
+            remaining_compute_tokens=total - completed,
+            local_cached_tokens=local_cached,
+            external_cached_tokens=external_cached,
+            pending_kv_transfer_tokens=pending_kv,
+            cache_accounting_final=accounting_final,
+        )
 
     def _ec_transfer_pending(self, request: Request, num_computed_tokens: int) -> bool:
         """Whether an encoder input this request needs is still in transit."""
@@ -2937,6 +3173,8 @@ class Scheduler(SchedulerInterface):
                 request.streaming_queue = deque()
             self._enqueue_waiting_request(request)
             self.requests[request.request_id] = request
+            if request.include_prefill_progress:
+                self._mark_prefill_progress_dirty(request)
             if self.spec_decode_metrics_level != "none":
                 request.spec_decode_metrics = RequestSpecDecodeMetrics.new(
                     self.num_spec_tokens
@@ -3022,6 +3260,9 @@ class Scheduler(SchedulerInterface):
         self, request: Request, delay_free_blocks: bool = False
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         assert request.is_finished()
+        if request.include_prefill_progress:
+            self._prefill_progress_requests.pop(request.request_id, None)
+            self._prefill_progress_dirty.discard(request.request_id)
 
         if self.aux_output_connector is not None:
             self.aux_output_connector.request_finished(request)
@@ -3506,6 +3747,17 @@ class Scheduler(SchedulerInterface):
             request.num_computed_tokens = request.num_tokens - 1
         self.finished_recving_kv_req_ids.remove(request.request_id)
 
+        if request.include_prefill_progress:
+            local_cached, _ = request.prefill_progress_cache_tokens or (0, 0)
+            local_cached = min(local_cached, request.num_computed_tokens)
+            external_cached = min(
+                request.prefill_progress_pending_kv_tokens,
+                max(0, request.num_computed_tokens - local_cached),
+            )
+            request.prefill_progress_cache_tokens = (local_cached, external_cached)
+            request.prefill_progress_pending_kv_tokens = 0
+            self._mark_prefill_progress_dirty(request)
+
     def _handle_blocked_waiting_request(self, request: Request) -> bool:
         """Returns True if scheduling of this request should proceed, False if
         it should be skipped for this step."""
@@ -3650,6 +3902,20 @@ class Scheduler(SchedulerInterface):
                 marked_invalid_block = True
                 # Truncate the computed tokens at the first failed block
                 request.num_computed_tokens = idx * self.block_size
+                if request.include_prefill_progress:
+                    local_cached, external_cached = (
+                        request.prefill_progress_cache_tokens or (0, 0)
+                    )
+                    local_cached = min(local_cached, request.num_computed_tokens)
+                    external_cached = min(
+                        external_cached,
+                        max(0, request.num_computed_tokens - local_cached),
+                    )
+                    request.prefill_progress_cache_tokens = (
+                        local_cached,
+                        external_cached,
+                    )
+                    self._mark_prefill_progress_dirty(request)
                 num_affected_tokens = (
                     req_num_computed_tokens - request.num_computed_tokens
                 )
@@ -3687,6 +3953,10 @@ class Scheduler(SchedulerInterface):
                 affected_req_ids.add(req_id)
                 if self.recompute_kv_load_failures:
                     request.num_computed_tokens = 0
+                    if request.include_prefill_progress:
+                        request.prefill_progress_cache_tokens = (0, 0)
+                        request.prefill_progress_pending_kv_tokens = 0
+                        self._mark_prefill_progress_dirty(request)
                     self.failed_recving_kv_req_ids.add(req_id)
         return set() if self.recompute_kv_load_failures else affected_req_ids
 

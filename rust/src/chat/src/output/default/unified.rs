@@ -249,6 +249,7 @@ pub(crate) async fn unified_event_stream(
                 })
                 .await;
             }
+            DecodedTextEvent::PrefillProgress(_) => {}
             DecodedTextEvent::TextDelta {
                 decoded,
                 sampled:

@@ -149,6 +149,23 @@ pub struct EngineCoreOutput {
     /// when a paused engine rejects a request.
     #[serde(default)]
     pub error: Option<Box<RequestError>>,
+    #[serde(default)]
+    pub prefill_progress: Option<Box<PrefillProgress>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize_tuple, Deserialize_tuple)]
+pub struct PrefillProgress {
+    pub request_id: String,
+    pub sequence: u64,
+    pub phase: u32,
+    pub prompt_tokens: u32,
+    pub total_compute_tokens: u32,
+    pub completed_compute_tokens: u32,
+    pub remaining_compute_tokens: u32,
+    pub local_cached_tokens: u32,
+    pub external_cached_tokens: u32,
+    pub pending_kv_transfer_tokens: u32,
+    pub cache_accounting_final: bool,
 }
 
 /// A request-level error that does not mark the engine as unhealthy.
@@ -595,6 +612,7 @@ mod tests {
                             spec_decode_metrics: None,
                             prompt_token_id_logprobs: None,
                             error: None,
+                            prefill_progress: None,
                         },
                     ],
                     scheduler_stats: None,
