@@ -233,17 +233,11 @@ steps:
 - label: ":intel: (BMG) EPD Correctness (4 GPUs)"
   key: epd-correctness-4-gpus
   timeout_in_minutes: 60
+  device: intel_gpu_k8s
   num_devices: 4
-  device: intel_gpu
-  agent_tags:
-    label: production
-    gpu: 4+
-    mem: 16+
-  no_plugin: true
-  working_dir: "."
+  resource_claim_template: b70-4
+  working_dir: "/workspace/vllm/"
   env:
-    REGISTRY: "public.ecr.aws/q9t5s3a7"
-    REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
     - vllm/distributed/ec_transfer/
@@ -253,10 +247,8 @@ steps:
     - examples/disaggregated/disaggregated_encoder/
     - tests/v1/ec_connector/integration/
   commands:
-    - >-
-      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'cd tests &&
-      USE_TWO_IMAGE_PROMPT=0 DEVICE_PLATFORM=xpu GPU_MEMORY_UTILIZATION=0.8 bash v1/ec_connector/integration/run_epd_correctness_test.sh'
+      - cd tests
+      - USE_TWO_IMAGE_PROMPT=0 DEVICE_PLATFORM=xpu GPU_MEMORY_UTILIZATION=0.8 bash v1/ec_connector/integration/run_epd_correctness_test.sh
 
 - label: ":intel: (BMG) Regression"
   key: regression
