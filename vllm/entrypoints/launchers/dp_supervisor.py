@@ -299,18 +299,18 @@ class DPSupervisor:
         probe_ssl = False if self.args.ssl_keyfile and self.args.ssl_certfile else None
         try:
             async with session.get(
-                _child_base_url(self.args, port) + "/fault_tolerance/status",
+                _child_base_url(self.args, port) + "/v1/fault_tolerance/status",
                 ssl=probe_ssl,
             ) as response:
                 if response.status != HTTPStatus.OK:
                     return "gone"
                 engines = (await response.json()).get("engines", [])
-        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+        except (TimeoutError, aiohttp.ClientError, ValueError):
             return "gone"
         statuses = {engine.get("status") for engine in engines}
         if "healthy" in statuses:
             return "ok"
-        return "recovering" if "unhealthy" in statuses else "gone"
+        return "recovering" if statuses & {"unhealthy", "diagnosing"} else "gone"
 
     async def _probe_fault_tolerant(self, session: aiohttp.ClientSession) -> bool:
         """Poll the ranks' sentinels; False once no rank is serving or recovering."""

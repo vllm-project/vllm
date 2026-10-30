@@ -415,11 +415,16 @@ async def test_child_state_maps_sentinel_status():
             async def __aexit__(self, *_exc):
                 return False
 
-        return SimpleNamespace(get=lambda *_args, **_kwargs: FakeResponse())
+        def get(url, **_kwargs):
+            assert url == "http://127.0.0.1:8000/v1/fault_tolerance/status"
+            return FakeResponse()
+
+        return SimpleNamespace(get=get)
 
     for status, expected in [
         ("healthy", "ok"),
         ("unhealthy", "recovering"),
+        ("diagnosing", "recovering"),
         ("dead", "gone"),
     ]:
         session = session_for({"engines": [{"status": status}]})
