@@ -33,6 +33,7 @@ from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.mamba.abstract import (
     get_mamba_prefill_checkpoint_alignment,
@@ -55,6 +56,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 from vllm.model_executor.layers.quantization.inc import INCConfig
+from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 from vllm.model_executor.model_loader.weight_utils import (
     sharded_weight_loader,
 )
@@ -637,6 +639,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             prefix=f"{prefix}.in_proj_ba",
         )
         self.disable_tp_for_ba_proj = self.maybe_disable_tp(self.quant_config)
+        self._w_qkvz_ba: torch.Tensor | None = None
 
         query_key_settings = (self.key_dim, 0, False)
         value_settings = (self.value_dim, 0, False)
@@ -811,6 +814,37 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if not supports_fused_mtp_decode():
             return "torch.ops._C.fused_gdn_decode_post_conv_mtp is not built"
         return None
+
+    def fuse_in_proj_weights(self) -> None:
+        """Store the in_proj_qkvz and in_proj_ba weights in one buffer, so both
+        projections run as one GEMM on ROCm; the layers keep views into it."""
+        qkvz, ba = self.in_proj_qkvz, self.in_proj_ba
+        if not (
+            current_platform.is_rocm()
+            and not self.gqa_interleaved_layout
+            and not self.disable_tp_for_ba_proj
+            and all(
+                type(m.quant_method) is UnquantizedLinearMethod
+                and m.bias is None
+                and m.weight.dtype in (torch.float16, torch.bfloat16)
+                and m.weight.is_contiguous()
+                for m in (qkvz, ba)
+            )
+            and qkvz.weight.dtype == ba.weight.dtype
+        ):
+            return
+        w = torch.cat([qkvz.weight.data, ba.weight.data])
+        n = qkvz.weight.shape[0]
+        qkvz.weight.data = w[:n]
+        ba.weight.data = w[n:]
+        self._w_qkvz_ba = w
+
+    def _in_proj(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if self._w_qkvz_ba is None:
+            return self.in_proj_qkvz(x)[0], self.in_proj_ba(x)[0]
+        y = dispatch_unquantized_gemm()(self.in_proj_qkvz, x, self._w_qkvz_ba, None)
+        n = self.in_proj_qkvz.weight.shape[0]
+        return y[:, :n], y[:, n:]
 
     def create_qkvz_proj(
         self,
@@ -1234,8 +1268,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
-        mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
-        ba, _ = self.in_proj_ba(hidden_states)
+        mixed_qkvz, ba = self._in_proj(hidden_states)
 
         use_fused_gdn_spec_decode = (
             self.enable_fused_gdn_spec_decode

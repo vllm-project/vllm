@@ -702,6 +702,10 @@ class Qwen4ExpModel(nn.Module):
             weights,
             mapper=mapper,
         )
+        for layer in self.layers:
+            gdn = getattr(layer, "linear_attn", None)
+            if isinstance(gdn, QwenGatedDeltaNetAttention):
+                gdn.fuse_in_proj_weights()
         return loaded
 
 
