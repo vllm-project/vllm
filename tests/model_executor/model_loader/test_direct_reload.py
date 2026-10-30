@@ -304,7 +304,9 @@ class TestRefusals:
     def test_draft_lm_head_quantization_refused(self, monkeypatch):
         # the quantized draft lm_head would be written into the target's
         spec = SimpleNamespace(draft_lm_head_quantization="fp8")
-        config = SimpleNamespace(model_config=None, speculative_config=spec)
+        config = SimpleNamespace(
+            model_config=None, speculative_config=spec, lora_config=None
+        )
         monkeypatch.setattr(direct, "get_current_vllm_config_or_none", lambda: config)
         with pytest.raises(RuntimeError, match="draft_lm_head_quantization"):
             _cold_start(_checkpoint())
@@ -312,9 +314,20 @@ class TestRefusals:
     def test_torchao_refused(self, monkeypatch):
         # its load_weights runs a layerwise reload
         model_config = SimpleNamespace(quantization="torchao")
-        config = SimpleNamespace(model_config=model_config, speculative_config=None)
+        config = SimpleNamespace(
+            model_config=model_config, speculative_config=None, lora_config=None
+        )
         monkeypatch.setattr(direct, "get_current_vllm_config_or_none", lambda: config)
         with pytest.raises(RuntimeError, match="torchao"):
+            _cold_start(_checkpoint())
+
+    def test_lora_refused(self, monkeypatch):
+        # LoRA wrappers forward `quant_method`: a rerun would process twice
+        config = SimpleNamespace(
+            model_config=None, speculative_config=None, lora_config=object()
+        )
+        monkeypatch.setattr(direct, "get_current_vllm_config_or_none", lambda: config)
+        with pytest.raises(RuntimeError, match="LoRA"):
             _cold_start(_checkpoint())
 
     def test_weight_offloading_refused(self, monkeypatch):

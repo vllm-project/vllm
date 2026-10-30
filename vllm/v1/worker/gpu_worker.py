@@ -67,6 +67,7 @@ from vllm.model_executor.layers.quantization.online.lm_head import (
     share_source_lm_heads,
 )
 from vllm.model_executor.model_loader import get_model_loader
+from vllm.model_executor.model_loader.reload.direct import direct_reload_pending
 from vllm.model_executor.model_loader.weight_checksum import (
     compute_tensor_digests,
     zero_weights,
@@ -1644,7 +1645,22 @@ class Worker(WorkerBase):
             )
 
         with set_current_vllm_config(self.vllm_config):
-            self.weight_transfer_engine.finish_weight_update()
+            try:
+                self.weight_transfer_engine.finish_weight_update()
+            except BaseException:
+                model = (
+                    self.get_draft_model()
+                    if self._weight_update_is_draft
+                    else self.get_model()
+                )
+                if model is not None and direct_reload_pending(model):
+                    # a failed direct finish cannot be retried: end the
+                    # session so that a new full update can start
+                    self._weight_update_active = False
+                    self.weight_transfer_engine.reset_weight_update_target()
+                    if self._weight_update_is_draft:
+                        restore_quantized_lm_heads(model, refresh=False)
+                raise
             self.weight_transfer_engine.reset_weight_update_target()
             self._weight_update_active = False
             if self._weight_update_is_draft and (

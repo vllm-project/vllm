@@ -135,6 +135,10 @@ def _check_supported(model: torch.nn.Module) -> None:
         # its load_weights runs a layerwise reload, and its post-load
         # processing replaces the weight parameter
         raise RuntimeError("direct reload: torchao quantization is not supported")
+    if config is not None and config.lora_config is not None:
+        # LoRA wraps layers after cold start; their wrappers forward
+        # `quant_method`, so a rerun would process each base layer twice
+        raise RuntimeError("direct reload: LoRA is not supported")
     spec = config.speculative_config if config is not None else None
     if spec is not None and spec.draft_lm_head_quantization is not None:
         # after `begin` the draft's quantized lm_head is a view of the target

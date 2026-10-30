@@ -20,8 +20,9 @@ from vllm.v1.worker.gpu_worker import Worker
 class _RecordingEngine:
     """Minimal stand-in for a weight transfer engine."""
 
-    def __init__(self, raise_on_update: bool = False):
+    def __init__(self, raise_on_update: bool = False, raise_on_finish: bool = False):
         self.raise_on_update = raise_on_update
+        self.raise_on_finish = raise_on_finish
         self.started = False
         self.finished = False
         self.closed = False
@@ -45,6 +46,8 @@ class _RecordingEngine:
 
     def finish_weight_update(self) -> None:
         self._record_config()
+        if self.raise_on_finish:
+            raise ValueError("boom")
         self.finished = True
 
     def reset_weight_update_target(self) -> None:
@@ -58,12 +61,16 @@ class _RecordingModelRunner:
     def __init__(self) -> None:
         self.seen_config: VllmConfig | None = None
         self.reset_lora_calls = 0
+        self.model = nn.Module()
 
     def reload_weights(self) -> None:
         self.seen_config = get_current_vllm_config()
 
     def reset_lora_state(self) -> None:
         self.reset_lora_calls += 1
+
+    def get_model(self) -> nn.Module:
+        return self.model
 
     def get_draft_model(self) -> nn.Module | None:
         return None
@@ -238,6 +245,22 @@ def test_update_resets_active_on_error():
     # A failed update ends the session so the next start is clean.
     assert engine.reset_count == 1
     assert worker._weight_update_active is False
+
+
+@pytest.mark.parametrize("pending", [True, False])
+def test_failed_finish_ends_session_only_after_direct_reload(pending):
+    engine = _RecordingEngine(raise_on_finish=True)
+    worker = _make_worker(engine)
+    Worker.start_weight_update(worker)
+    worker.model_runner.model._direct_reload_pending = pending
+
+    with pytest.raises(ValueError, match="boom"):
+        Worker.finish_weight_update(worker)
+
+    # a failed direct finish cannot be retried, so the next start must work;
+    # a failed layerwise finish stays active and can be retried
+    assert worker._weight_update_active is not pending
+    assert engine.reset_count == int(pending)
 
 
 def test_missing_engine_raises():
