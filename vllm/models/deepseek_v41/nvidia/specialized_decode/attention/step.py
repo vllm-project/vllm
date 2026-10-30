@@ -23,9 +23,20 @@ low-batch kernels where they apply:
   the index key; the candidate source starts the candidate consumers'
   expansion on a side stream right after its indexer, and index sources first
   join the side-stream sparse-index builds, which read the top-k indices they
-  overwrite.
+  overwrite. The indexers the plan does not take (the stock dense indexer and
+  the candidate consumers) reset their top-k rows there too, instead of after
+  the index query and key.
 - The sparse MLA reuses the step's sparse-index tables and runs on persistent
   KV counters (``sparse_mla``).
+- With ``kv_stream`` (the target's layers), the query's RoPE and FP8
+  quantization move into the CuTe sparse-MLA kernel, and the fused Q/KV norm
+  writes the KV cache bytes of ``_fused_qnorm_rope_kv_insert`` itself (where
+  the norm is not fused, that insert runs on ``kv_stream`` beside ``wq_b``):
+  ``wq_b`` is then the attention's only producer of the layer and launches it
+  early, on the same FP8 bytes.
+- With ``prefetch``, a layer whose sparse-index table an earlier layer built
+  first prefetches the table's KV rows into L2 on a side stream
+  (``sparse_mla.SparseMlaPrefetch``).
 
 ``wo_b``'s output is TP-partial: the next boundary reduces it. The DSpark
 draft's stock layers reduce ``wo_b`` themselves, so for them the step projects
@@ -40,8 +51,12 @@ import torch
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
+from vllm.model_executor.layers.sparse_mqa_indexer import SparseMQAIndexer
 from vllm.models.deepseek_v41.attention import DeepseekV4Indexer
-from vllm.models.deepseek_v41.common.ops.query_quant import fused_q_kv_rmsnorm_quant
+from vllm.models.deepseek_v41.common.ops.query_quant import (
+    KVCacheInsert,
+    fused_q_kv_rmsnorm_quant,
+)
 
 from ...flashinfer_sparse import DeepseekV4FlashInferMLAAttention
 from ...ops.o_proj import dsv41_o_proj
@@ -50,6 +65,7 @@ from .aux_projections import aux_projection_gemm, aux_projection_gemm_accepts
 from .indexer import (
     CandidateOverlap,
     DecodeRowsPlan,
+    consume_decode_rows,
     finish_decode_rows,
     plan_decode_rows,
     rope_quant_q,
@@ -61,7 +77,8 @@ from .mxfp8 import (
     projection_mm,
     wide_or_pinned_mm,
 )
-from .sparse_mla import SparseIndexTables, SparseMlaDecode
+from .sparse_mla import SparseIndexTables, SparseMlaDecode, SparseMlaPrefetch
+from .sparse_mla_cute import HEADS, MAX_CHUNKS, SWA_COLUMNS, QRope, _max_tokens
 
 if TYPE_CHECKING:
     from ...ops.cute_dsl import LamportAllGather
@@ -100,10 +117,13 @@ class AttentionStep:
         source: CandidateOverlap | None,
         consumer: CandidateOverlap | None,
         all_gather: "LamportAllGather | None",
+        kv_stream: torch.cuda.Stream | None = None,
+        prefetch: SparseMlaPrefetch | None = None,
     ) -> None:
         self.attn = attn
         self.tables = tables
         self.mla = mla
+        self.prefetch = prefetch
         # Gathers the row-sharded indexer's slices.
         self.all_gather = all_gather
         self.publisher = (
@@ -125,6 +145,22 @@ class AttentionStep:
         self.key_gemm = wk is not None and aux_projection_gemm_accepts([wk])
         # start, latent ready, index key done, index query done.
         self._events = [torch.cuda.Event() for _ in range(4)]
+        # Where set, the CuTe sparse-MLA kernel ropes the query itself, and the KV
+        # insert runs on this stream beside wq_b unless the fused norm does it.
+        self.kv_stream = (
+            kv_stream
+            if attn.kv_cache_torch_dtype == torch.float8_e4m3fn
+            and not attn.use_pcp
+            and not attn.accepts_unnormed_unroped_query
+            and attn.n_local_heads == attn.padded_heads == HEADS
+            and attn.window_size == SWA_COLUMNS
+            else None
+        )
+        self._kv_done = torch.cuda.Event()
+        # This step's KV was inserted by the norm.
+        self._kv_in_norm = False
+        # This step's top-k rows were reset in _prepare.
+        self._topk_filled = False
 
     def run(
         self,
@@ -136,18 +172,44 @@ class AttentionStep:
         """The layer's TP-partial output for input ``x`` (``quant``: the same
         input as MXFP8), published when ``wo_b`` publishes."""
         attn = self.attn
+        if self.prefetch is not None:
+            # The query scale the attention reads with the fused query RoPE.
+            fused = self.kv_stream is not None
+            self.prefetch.issue(
+                attn, attn._flashinfer_fp8_q_scale_inv if fused else None
+            )
         out = attn._alloc_attn_out(x.shape[0], x)
         assert isinstance(out, torch.Tensor)
         qr_kv, kv_score, indexer_weights = self._input_projections(x, quant, step)
-        qr, qr_scale, kv = self._split_qkv_and_norm(qr_kv)
-        q, index_q, index_q_scale, index_weights, plan = self._prepare(
-            qr, kv, qr_scale, kv_score, indexer_weights, positions, x.shape[0], step
+        insert = self._kv_insert(positions, step)
+        qr, qr_scale, kv = self._split_qkv_and_norm(qr_kv, insert)
+        q, index_q, index_q_scale, index_weights, plan, q_rope = self._prepare(
+            qr,
+            kv,
+            qr_scale,
+            kv_score,
+            indexer_weights,
+            positions,
+            x.shape[0],
+            step,
+            insert,
         )
         indexer = attn.indexer
         if indexer is not None and index_q is not None:
             assert index_weights is not None
             self._indexer(indexer, x, index_q, index_q_scale, index_weights, plan, step)
-        self.mla.run(attn, q, out)
+        if q_rope is None:
+            self.mla.run(attn, q, out)
+        else:
+            if not self._kv_in_norm:
+                # The attention reads the KV inserted beside wq_b.
+                torch.cuda.current_stream().wait_event(self._kv_done)
+            if not self.mla.run(attn, q, out, q_rope):
+                # The stock query (and the same KV again) for TRTLLM-gen.
+                q = attn._fused_qnorm_rope_kv_insert(
+                    q, kv, positions, get_forward_context().attn_metadata
+                )
+                self.mla.run(attn, q, out)
         # The fused wo_a triggers wo_b early up to WIDE_LOW_LATENCY_MAX_ROWS,
         # where wo_b runs on the low-latency GEMM (above 8 rows, where its shape
         # has a wide tactic), which loads its weights before its own wait.
@@ -199,6 +261,9 @@ class AttentionStep:
         streams = attn.aux_stream_list if step.overlap_inputs else None
         start = attn.ln_events[0]
         start.record()
+        # With side streams, fused_wqa_wkv is captured before the side projections
+        # so that it directly follows the boundary's fused kernel in the PDL chain.
+        qr_kv = self._wqa_wkv(x, quant, step) if streams is not None else None
         results: list[torch.Tensor | None] = [None, None]
         for i, fn in enumerate(aux_fns):
             if fn is None:
@@ -212,28 +277,42 @@ class AttentionStep:
                 results[i] = fn()
                 attn.ln_events[1 + i].record()
 
-        if quant is None:
-            qr_kv = attn._fused_wqa_wkv_gemm(x)
-        else:
-            qr_kv = None
-            if self.wqa_mxfp8:
-                qr_kv = projection_mm(attn.fused_wqa_wkv, quant, step.low_batch)
-            if qr_kv is None:
-                qr_kv = attn.fused_wqa_wkv(quant)[0]
+        if qr_kv is None:
+            qr_kv = self._wqa_wkv(x, quant, step)
         return qr_kv, results[0], results[1]
 
+    def _wqa_wkv(
+        self,
+        x: torch.Tensor,
+        quant: QuantizedActivation | None,
+        step: "DecodeStep",
+    ) -> torch.Tensor:
+        """``fused_wqa_wkv`` of the layer input ``x`` (``quant``: as MXFP8)."""
+        attn = self.attn
+        if quant is None:
+            return attn._fused_wqa_wkv_gemm(x)
+        qr_kv = None
+        if self.wqa_mxfp8:
+            qr_kv = projection_mm(attn.fused_wqa_wkv, quant, step.low_batch)
+        if qr_kv is None:
+            qr_kv = attn.fused_wqa_wkv(quant)[0]
+        return qr_kv
+
     def _split_qkv_and_norm(
-        self, qr_kv: torch.Tensor
+        self, qr_kv: torch.Tensor, insert: KVCacheInsert | None
     ) -> tuple[torch.Tensor | QuantizedActivation, torch.Tensor | None, torch.Tensor]:
         """``attn._split_qkv_and_norm``, with the fused norm triggering its
         PDL dependents early up to ``WIDE_LOW_LATENCY_MAX_ROWS`` rows: there
         this step's ``wq_b`` runs on the low-latency GEMM (above 8 rows, where
         its shape has a wide tactic), which loads its weights before its own
-        wait, overlapping them with the norm."""
+        wait, overlapping them with the norm. The fused norm also does
+        ``insert``."""
         attn = self.attn
+        self._kv_in_norm = False
         if attn.q_lora_rank % 32 or not attn._can_fuse_query_quant:
             return attn._split_qkv_and_norm(qr_kv)
         qr, kv = qr_kv.split([attn.q_lora_rank, attn.head_dim], dim=-1)
+        self._kv_in_norm = insert is not None
         qr_quant, kv = fused_q_kv_rmsnorm_quant(
             qr,
             kv,
@@ -241,6 +320,7 @@ class AttentionStep:
             attn.kv_norm.weight.data,
             attn.eps,
             early_trigger=qr.shape[0] <= WIDE_LOW_LATENCY_MAX_ROWS,
+            kv_insert=insert,
         )
         return qr_quant, None, kv
 
@@ -254,12 +334,14 @@ class AttentionStep:
         positions: torch.Tensor,
         num_tokens: int,
         step: "DecodeStep",
+        insert: KVCacheInsert | None,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor | None,
         torch.Tensor | None,
         torch.Tensor | None,
         DecodeRowsPlan | None,
+        QRope | None,
     ]:
         """``_prepare_and_attn`` up to the indexer, with the indexer inputs on
         side streams.
@@ -270,7 +352,9 @@ class AttentionStep:
         key; the current stream runs the main query and KV insertion, a dense
         indexer's plan (``plan_decode_rows``), then the compressed-cache
         insertion once the latent is ready. Returns the query, the indexer
-        query, its scale and weights, and the dense indexer's plan.
+        query, its scale and weights, the dense indexer's plan, and with
+        ``insert`` (on ``kv_stream``, or done by the norm) the RoPE the
+        attention applies to the (then BF16) query.
         """
         attn = self.attn
         indexer, compressor = attn.indexer, attn.compressor
@@ -308,15 +392,17 @@ class AttentionStep:
                     self._produce_k(indexer, latent, positions, step)
                 index_k_done.record()
 
+        q_rope = self._insert_kv_aside(kv, insert)
         q = None
         if self.wq_b_mxfp8:
             q = projection_mm(attn.wq_b, qr, step.low_batch)
         if q is None:
             q = attn._wq_b_proj(qr, qr_scale)
         q = q.view(-1, attn.n_local_heads, attn.head_dim)
-        q = attn._fused_qnorm_rope_kv_insert(
-            q, kv, positions, get_forward_context().attn_metadata
-        )
+        if q_rope is None:
+            q = attn._fused_qnorm_rope_kv_insert(
+                q, kv, positions, get_forward_context().attn_metadata
+            )
         # The plan reads neither the index query nor the keys: this stream
         # would otherwise wait for them here.
         plan = None
@@ -324,13 +410,84 @@ class AttentionStep:
             # The side-stream table builds read the top-k rows it resets.
             self.tables.join()
             plan = plan_decode_rows(indexer.indexer_op, num_tokens)
+        self._topk_filled = False
+        if (
+            indexer is not None
+            and plan is None
+            and isinstance(indexer.indexer_op, SparseAttnIndexer | SparseMQAIndexer)
+        ):
+            # The reset the indexer would run once the index query and key are
+            # ready (sparse_attn_indexer's, SparseMQAIndexer.forward's).
+            self.tables.join()
+            indexer.indexer_op.topk_indices_buffer[:num_tokens] = -1
+            self._topk_filled = True
         if compressor is not None:
             latent_ready.wait()
             compressor.insert_cache(latent, positions, attn.rotary_emb)
             index_k_done.wait()
         if indexer is not None:
             index_q_done.wait()
-        return q, index_q, index_q_scale, index_weights, plan
+        return q, index_q, index_q_scale, index_weights, plan, q_rope
+
+    def _kv_insert(
+        self, positions: torch.Tensor, step: "DecodeStep"
+    ) -> KVCacheInsert | None:
+        """With ``kv_stream``, the step's KV insert into the FP8 SWA cache that
+        the CuTe sparse-MLA kernel reads; None where that kernel would not
+        take the step's rows."""
+        if self.kv_stream is None or step.rows > _max_tokens(
+            positions.device.index, MAX_CHUNKS
+        ):
+            return None
+        attn = self.attn
+        attn_metadata = get_forward_context().attn_metadata
+        assert isinstance(attn_metadata, dict)
+        swa_metadata = cast(Any, attn_metadata[attn.swa_cache_layer.prefix])
+        cache = attn.swa_cache_layer.kv_cache
+        if (
+            cache.dtype != torch.float8_e4m3fn
+            or swa_metadata.decode_swa_width != SWA_COLUMNS
+        ):
+            return None
+        return KVCacheInsert(
+            cache,
+            swa_metadata.slot_mapping,
+            positions,
+            attn.rotary_emb.cos_sin_cache,
+            swa_metadata.block_size,
+            attn._flashinfer_fp8_kv_scale,
+        )
+
+    def _insert_kv_aside(
+        self, kv: torch.Tensor, insert: KVCacheInsert | None
+    ) -> QRope | None:
+        """With ``insert``, unless the norm did it, the KV half of
+        ``_fused_qnorm_rope_kv_insert`` (its kernel without query heads, bit
+        for bit) on ``kv_stream`` from the start event on; and the ``QRope``
+        with which the CuTe sparse-MLA kernel does the query half."""
+        if insert is None:
+            return None
+        attn = self.attn
+        if not self._kv_in_norm:
+            assert self.kv_stream is not None
+            self.kv_stream.wait_event(self._events[0])
+            with torch.cuda.stream(self.kv_stream):
+                torch.ops._C.fused_deepseek_v4_kv_rope_insert(
+                    kv,
+                    insert.cache,
+                    insert.slot_mapping,
+                    insert.positions,
+                    insert.cos_sin_cache,
+                    insert.block_size,
+                    insert.scale,
+                    attn.kv_mxfp8,
+                )
+                self._kv_done.record()
+        return QRope(
+            insert.positions,
+            insert.cos_sin_cache,
+            attn._flashinfer_fp8_q_scale_inv,
+        )
 
     def _produce_k(
         self,
@@ -380,16 +537,42 @@ class AttentionStep:
         its ``plan``."""
         q_quant = (index_q, index_q_scale) if index_q_scale is not None else index_q
         op = indexer.indexer_op
-        if isinstance(op, SparseAttnIndexer):
-            finish_decode_rows(op, x, q_quant, index_weights, plan, self.all_gather)
-        else:
-            # The side-stream table builds read the top-k indices this
-            # overwrites.
-            self.tables.join()
-            if self.consumer is not None:
-                self.consumer.join()
-            op(x, q_quant, None, index_weights)
-        if self.source is not None and self.source.warmed:
+        # The reset _prepare ran replaces the indexer's own.
+        filled, self._topk_filled = self._topk_filled, False
+        if filled:
+            assert isinstance(op, SparseAttnIndexer | SparseMQAIndexer)
+            op.skip_topk_buffer_clear = True
+        try:
+            if isinstance(op, SparseAttnIndexer):
+                if (
+                    plan is not None
+                    and self.source is not None
+                    and self.source.can_fork()
+                ):
+                    # The candidate blocks are selected on the expansion's
+                    # stream, after the token top-k (see below).
+                    plan.defer_blocks = True
+                finish_decode_rows(op, x, q_quant, index_weights, plan, self.all_gather)
+            else:
+                # The side-stream table builds read the top-k indices this
+                # overwrites.
+                self.tables.join()
+                if self.consumer is not None:
+                    self.consumer.join()
+                if not (
+                    isinstance(op, SparseMQAIndexer)
+                    and consume_decode_rows(op, x, q_quant, index_weights)
+                ):
+                    op(x, q_quant, None, index_weights)
+        finally:
+            if filled:
+                assert isinstance(op, SparseAttnIndexer | SparseMQAIndexer)
+                op.skip_topk_buffer_clear = False
+        if plan is not None and plan.blocks is not None:
+            # The deferred candidate-block selection, which fork runs on its stream.
+            assert self.source is not None
+            self.source.fork(plan.blocks, plan.block_reads)
+        elif self.source is not None and self.source.warmed:
             self.source.fork()
 
     def _wo_b_low_batch(self, z: torch.Tensor | QuantizedActivation) -> torch.Tensor:

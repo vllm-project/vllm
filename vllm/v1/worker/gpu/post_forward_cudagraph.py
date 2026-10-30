@@ -32,16 +32,20 @@ each of them, so a moved buffer captures a new graph instead of replaying a
 stale one. The first step of a key runs eagerly (it compiles kernels and warms
 up allocations), the second captures, later ones replay.
 
+On FULL-graph decode steps without structured output, the copy launch starts
+on a side stream beside the target forward (``stage_step_copy``), and ``run``
+joins it.
+
 The graph outputs (sampled tokens, counts) are static. The previous step's
 async output copy may still read them on the output copy stream, so a replay
 waits for that stream first.
 
 The draft context work that reads only the target hidden states (the combined
 hidden states and, if the draft model supports it, every draft layer's context
-KV projection) is forked onto the speculator's side stream after the LM head
-and joined at the end of the draft input preparation, so it runs beside
-sampling. Eager or captured, the fork and join are stream waits inside the
-region.
+KV projection) is forked onto the speculator's side stream before the LM head
+and joined at the end of the draft input preparation, so it runs beside the LM
+head and sampling. Eager or captured, the fork and join are stream waits inside
+the region.
 
 The graphs are captured while serving, into a pool of their own that the
 startup memory profile does not see. They share that pool, so it holds about
@@ -230,6 +234,78 @@ class PostForwardCudaGraphs:
         self.graphs: dict[Hashable, tuple[torch.cuda.CUDAGraph, PostForwardOutput]]
         self.graphs = {}
         self.warmed_up: set[Hashable] = set()
+        # stage_step_copy's side stream, the event that ends its last copy and
+        # the batch that copy is for, until run joins it.
+        self._copy_stream = torch.cuda.Stream()
+        self._copy_done = torch.cuda.Event()
+        self._staged_batch: InputBatch | None = None
+
+    def _host_backed(self, runner: "GPUModelRunner") -> tuple["UvaBackedTensor", ...]:
+        """The host-backed per-request state the region reads."""
+        sampler = runner.sampler
+        assert sampler is not None
+        return (
+            sampler.sampling_states.temperature,
+            sampler.sampling_states.seeds,
+            runner.req_states.prefill_len,
+        )
+
+    def _copy_step_tensors(
+        self, runner: "GPUModelRunner", input_batch: "InputBatch"
+    ) -> None:
+        """Copy the step's tensors into the buffers the region reads."""
+        host_backed = self._host_backed(runner)
+        num_states = host_backed[0].gpu.shape[0]
+        assert all(t.gpu.shape[0] == num_states for t in host_backed)
+        _copy_step_tensors_kernel[(8,)](
+            input_batch.idx_mapping,
+            self.idx_mapping,
+            input_batch.cu_num_logits,
+            self.cu_num_logits,
+            input_batch.expanded_idx_mapping,
+            self.expanded_idx_mapping,
+            input_batch.expanded_local_pos,
+            self.expanded_local_pos,
+            input_batch.logits_indices,
+            self.logits_indices,
+            host_backed[0].gpu,
+            self.temperature[:num_states],
+            host_backed[1].gpu,
+            self.seeds[:num_states],
+            host_backed[2].gpu,
+            self.prefill_len[:num_states],
+            input_batch.num_reqs,
+            input_batch.logits_indices.shape[0],
+            num_states,
+            BLOCK=1024,
+        )
+
+    def stage_step_copy(
+        self, runner: "GPUModelRunner", input_batch: "InputBatch"
+    ) -> None:
+        """Start the step-tensor copy on a side stream after the work queued so
+        far, so that it runs beside the target forward; ``run`` joins it.
+
+        Everything it reads is final by now: ``prepare_inputs`` wrote the
+        per-step tensors, and the host-backed views rotate only in
+        ``add_requests`` (``apply_staged_writes``), before ``prepare_inputs``.
+        The previous step's region, the only reader of the buffers it writes,
+        precedes it on the forward stream.
+        """
+        stream = self._copy_stream
+        stream.wait_stream(current_stream())
+        with torch.cuda.stream(stream):
+            self._copy_step_tensors(runner, input_batch)
+        for t in (
+            input_batch.idx_mapping,
+            input_batch.cu_num_logits,
+            input_batch.expanded_idx_mapping,
+            input_batch.expanded_local_pos,
+            input_batch.logits_indices,
+        ):
+            t.record_stream(stream)
+        self._copy_done.record(stream)
+        self._staged_batch = input_batch
 
     def _step_eligible(
         self,
@@ -279,6 +355,11 @@ class PostForwardCudaGraphs:
         """Sample, update the request states and prepare the draft inputs as
         the eager path does, by running or replaying this shape's graph. None
         if the step is not eligible."""
+        # A staged copy is joined whether or not the step is eligible, so that
+        # the forward stream orders everything after it.
+        staged, self._staged_batch = self._staged_batch, None
+        if staged is not None:
+            current_stream().wait_event(self._copy_done)
         if not self._step_eligible(runner, input_batch, hidden_states, grammar_output):
             return None
         speculator = self.speculator
@@ -288,39 +369,13 @@ class PostForwardCudaGraphs:
 
         num_reqs = input_batch.num_reqs
         num_logits = input_batch.logits_indices.shape[0]
-        # The host-backed per-request state the region reads.
-        host_backed = (
-            sampler.sampling_states.temperature,
-            sampler.sampling_states.seeds,
-            runner.req_states.prefill_len,
-        )
+        host_backed = self._host_backed(runner)
         num_states = host_backed[0].gpu.shape[0]
-        assert all(t.gpu.shape[0] == num_states for t in host_backed)
         temperature = self.temperature[:num_states]
         seeds = self.seeds[:num_states]
         prefill_len = self.prefill_len[:num_states]
-        _copy_step_tensors_kernel[(8,)](
-            input_batch.idx_mapping,
-            self.idx_mapping,
-            input_batch.cu_num_logits,
-            self.cu_num_logits,
-            input_batch.expanded_idx_mapping,
-            self.expanded_idx_mapping,
-            input_batch.expanded_local_pos,
-            self.expanded_local_pos,
-            input_batch.logits_indices,
-            self.logits_indices,
-            host_backed[0].gpu,
-            temperature,
-            host_backed[1].gpu,
-            seeds,
-            host_backed[2].gpu,
-            prefill_len,
-            num_reqs,
-            num_logits,
-            num_states,
-            BLOCK=1024,
-        )
+        if staged is not input_batch:
+            self._copy_step_tensors(runner, input_batch)
         batch = replace(
             input_batch,
             idx_mapping=self.idx_mapping[:num_reqs],
@@ -351,13 +406,13 @@ class PostForwardCudaGraphs:
         )
 
         def post_forward() -> PostForwardOutput:
-            logits = runner.model.compute_logits(hidden_states[batch.logits_indices])
             # The draft context work that reads only the target hidden states
-            # overlaps sampling; prepare_draft_inputs joins it.
+            # overlaps the LM head and sampling; prepare_draft_inputs joins it.
             with use_workspace_lane(runner._draft_workspace_lane):
                 speculator.fork_target_context(
                     batch, drafter_hidden_states, aux_hidden_states
                 )
+            logits = runner.model.compute_logits(hidden_states[batch.logits_indices])
             sampler_output = rejection_sampler(logits, batch, speculator.draft_logits)
             num_sampled = sampler_output.num_sampled
             num_rejected = sampler_output.num_rejected

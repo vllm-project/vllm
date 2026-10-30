@@ -21,6 +21,16 @@ Batches whose clusters fit the GPU at once (at width 640, up to 8 requests with
 DSpark on a GB300) run the CuTe DSL kernel of ``sparse_mla_cute`` instead of
 TRTLLM-gen: it spreads a token's columns over one CTA per 128 instead of at most
 3.
+
+Where that kernel runs, the layer that would build its run's table on the
+current stream (a compressed run's first layer: an index source right after its
+indexer, or a layer whose KV source changes within an index run) attends on the
+table's inputs instead (``sparse_mla_cute.LocalIndices``), and every table its
+run's later layers look up is built on the side stream. The later layers of its
+own SWA group then wait for that build's event, as the other groups' layers
+already do. A layer whose table an earlier layer of the step built prefetches
+the table's KV rows into L2 on a side stream at its start
+(``SparseMlaPrefetch``).
 """
 
 import inspect
@@ -37,11 +47,18 @@ from vllm.utils.flashinfer import flashinfer_trtllm_batch_decode_sparse_mla_dsv4
 from ...flashinfer_sparse import (
     DeepseekV4FlashInferMLAAttention,
     _get_flashinfer_dsv4_workspace,
+    _packed_block_span,
 )
 from .sparse_mla_cute import (
     SWA_COLUMNS,
+    LocalIndices,
+    QRope,
     sparse_mla_decode,
+    sparse_mla_decode_local,
+    sparse_mla_prefetch,
+    supports_local_indices,
     supports_sparse_mla_cute,
+    supports_sparse_mla_prefetch,
 )
 
 logger = init_logger(__name__)
@@ -249,6 +266,48 @@ class SparseIndexTables:
         assert compressed_kv_cache is not None
         return compressed_kv_cache, swa_metadata.seq_lens[:num_reqs], *table
 
+    def misses(
+        self,
+        attn: DeepseekV4FlashInferMLAAttention,
+        swa_metadata: "DeepseekSparseSWAMetadata",
+    ) -> bool:
+        """Whether ``lookup`` would build ``attn``'s table on the current stream."""
+        return (id(swa_metadata), self.keys[attn]) not in self._tables
+
+    def fork_all(
+        self,
+        attn: DeepseekV4FlashInferMLAAttention,
+        kv_cache: torch.Tensor,
+        swa_metadata: "DeepseekSparseSWAMetadata",
+        attn_metadata: DeepseekV4FlashMLAMetadata,
+    ) -> None:
+        """The builds of ``lookup``'s fork for a layer that builds no table of
+        its own (``SparseMlaDecode`` on local indices): its own group's too,
+        when a later layer of the run looks it up."""
+        self._fork(
+            attn,
+            self.keys[attn],
+            kv_cache,
+            swa_metadata,
+            attn_metadata,
+            False,
+            with_own_group=True,
+        )
+
+    def peek(
+        self,
+        attn: DeepseekV4FlashInferMLAAttention,
+        swa_metadata: "DeepseekSparseSWAMetadata",
+    ) -> tuple[SparseIndexTable, torch.cuda.Event | None] | None:
+        """``attn``'s table of this step when an earlier lookup (or
+        ``fork_all``) built or forked it, with the event of a side-stream build
+        not joined yet; None when ``lookup`` would build it."""
+        key = (id(swa_metadata), self.keys[attn])
+        table = self._tables.get(key)
+        if table is None:
+            return None
+        return table, self._pending.get(key)
+
     def join(self) -> None:
         """Make the current stream wait for every build since the last join."""
         if self._forked:
@@ -279,17 +338,19 @@ class SparseIndexTables:
         swa_metadata: "DeepseekSparseSWAMetadata",
         attn_metadata: DeepseekV4FlashMLAMetadata | None,
         swa_only: bool,
+        with_own_group: bool = False,
     ) -> None:
-        """Build, on ``stream``, the tables of the other KV-cache groups whose
-        later layers of the run look ``key`` up: for each group, the build its
-        first such layer would run on a miss. The key fixes the compressed
-        cache and its metadata, so these are ``attn``'s."""
+        """Build, on ``stream``, the tables of the other KV-cache groups (and
+        ``with_own_group``, of ``attn``'s too) whose later layers of the run
+        look ``key`` up: for each group, the build its first such layer would
+        run on a miss. The key fixes the compressed cache and its metadata, so
+        these are ``attn``'s."""
         by_layer = get_forward_context().attn_metadata
         assert isinstance(by_layer, dict)
         builds: list[
             tuple[DeepseekV4FlashInferMLAAttention, DeepseekSparseSWAMetadata]
         ] = []
-        seen = {id(swa_metadata)}
+        seen: set[int] = set() if with_own_group else {id(swa_metadata)}
         for follower in self.followers[attn]:
             metadata = cast(
                 "DeepseekSparseSWAMetadata | None",
@@ -326,6 +387,73 @@ class SparseIndexTables:
             raise
 
 
+class SparseMlaPrefetch:
+    """At the start of a layer whose sparse-index table an earlier layer of
+    the step built, prefetch into L2 on a side stream what the layer's CuTe
+    sparse-MLA kernel reads first (``sparse_mla_prefetch``): the table, its KV
+    rows, the sinks and the query scale. They were last read a layer or more
+    ago, with at least one MoE layer's expert weights streamed through L2
+    since, so otherwise the attention's index loads and then its KV gather can
+    both miss L2 on the critical path.
+
+    The kernel writes nothing and reads the table after every earlier kernel
+    of the current stream (and a pending side-stream build) finished; the
+    stream joins the current one only in ``join``, at the end of the step.
+    """
+
+    def __init__(self, tables: SparseIndexTables) -> None:
+        self.tables = tables
+        self.stream = torch.cuda.Stream()
+        self._forked = False
+
+    def issue(
+        self, attn: DeepseekV4FlashInferMLAAttention, q_scale: torch.Tensor | None
+    ) -> None:
+        """Prefetch ``attn``'s rows of this step if its table is built and the
+        CuTe kernel would take it; ``q_scale``: the ``QRope.scale_inv`` the
+        attention reads, or None."""
+        by_layer = get_forward_context().attn_metadata
+        assert isinstance(by_layer, dict)
+        swa_metadata = cast(
+            "DeepseekSparseSWAMetadata", by_layer[attn.swa_cache_layer.prefix]
+        )
+        if (
+            swa_metadata.num_decode_tokens == 0
+            or attn.window_size != SWA_COLUMNS
+            or swa_metadata.decode_swa_width != SWA_COLUMNS
+        ):
+            return
+        found = self.tables.peek(attn, swa_metadata)
+        if found is None:
+            return
+        (indices, lens), event = found
+        tokens = swa_metadata.num_decode_tokens
+        indices, lens = indices[:tokens], lens[:tokens]
+        swa_k_cache = attn.swa_cache_layer.kv_cache
+        compressed = (
+            swa_k_cache if attn.compress_ratio == 0 else attn._compressed_kv_cache()
+        )
+        if not supports_sparse_mla_prefetch(swa_k_cache, compressed, indices, lens):
+            return
+        self.stream.wait_stream(torch.cuda.current_stream())
+        if event is not None:
+            self.stream.wait_event(event)
+        self._forked = True
+        with torch.cuda.stream(self.stream):
+            sparse_mla_prefetch(
+                swa_k_cache, compressed, indices, lens, attn.attn_sink, q_scale
+            )
+        indices.record_stream(self.stream)
+        lens.record_stream(self.stream)
+
+    def join(self) -> None:
+        """Make the current stream wait for the prefetches since the last
+        join."""
+        if self._forked:
+            torch.cuda.current_stream().wait_stream(self.stream)
+            self._forked = False
+
+
 class SparseMlaDecode:
     """``forward_mqa`` of a pure-decode step on the shared tables and the
     persistent KV counters."""
@@ -335,9 +463,16 @@ class SparseMlaDecode:
         self.kv_counters = kv_counter_buffer(max_rows)
 
     def run(
-        self, attn: DeepseekV4FlashInferMLAAttention, q: torch.Tensor, out: torch.Tensor
-    ) -> None:
-        """Write ``attn``'s sparse MLA of ``q`` into ``out``."""
+        self,
+        attn: DeepseekV4FlashInferMLAAttention,
+        q: torch.Tensor,
+        out: torch.Tensor,
+        q_rope: QRope | None = None,
+    ) -> bool:
+        """Write ``attn``'s sparse MLA of ``q`` into ``out``. With ``q_rope``,
+        ``q`` is ``wq_b``'s BF16 output, which only the CuTe kernel takes (it
+        ropes and quantizes the query as it loads it): returns False, without
+        launching the attention, where that kernel does not run."""
         assert attn.kv_cache_torch_dtype in (torch.bfloat16, torch.float8_e4m3fn)
         by_layer = get_forward_context().attn_metadata
         assert isinstance(by_layer, dict)
@@ -354,8 +489,14 @@ class SparseMlaDecode:
         num_decodes = swa_metadata.num_decodes
         num_tokens = swa_metadata.num_decode_tokens
         if num_tokens == 0:
-            return
+            return True
         swa_only = attn.compress_ratio == 0
+        if (
+            not swa_only
+            and attn_metadata is not None
+            and self._run_local(attn, q, out, q_rope, swa_metadata, attn_metadata)
+        ):
+            return True
         swa_k_cache = attn.swa_cache_layer.kv_cache
         compressed_kv_cache, seq_lens, sparse_indices, sparse_topk_lens = (
             self.tables.lookup(
@@ -374,11 +515,13 @@ class SparseMlaDecode:
         bmm1_scale: float | torch.Tensor = attn.scale
         bmm2_scale: float | torch.Tensor = 1.0
         if attn.kv_cache_torch_dtype == torch.float8_e4m3fn:
-            assert query.dtype == torch.float8_e4m3fn
+            assert query.dtype == (
+                torch.float8_e4m3fn if q_rope is None else torch.bfloat16
+            )
             bmm1_scale = attn._flashinfer_fp8_bmm1_scale
             bmm2_scale = attn._flashinfer_fp8_bmm2_scale
         else:
-            assert query.dtype == torch.bfloat16
+            assert q_rope is None and query.dtype == torch.bfloat16
             query = query.contiguous()
         # TRTLLM-gen requires h_q in {64, 128}: zero-pad the query heads.
         padded_heads = output.shape[1]
@@ -421,6 +564,7 @@ class SparseMlaDecode:
                 bmm1_scale,
                 bmm2_scale,
                 attn.attn_sink,
+                q_rope,
             )
         ):
             sparse_mla_decode(
@@ -433,8 +577,11 @@ class SparseMlaDecode:
                 cast(float, bmm1_scale),
                 cast(float, bmm2_scale),
                 attn.attn_sink,
+                q_rope,
             )
-            return
+            return True
+        if q_rope is not None:
+            return False
         trtllm_decode_sparse_mla_dsv4(
             query=query,
             swa_kv_cache=swa_k_cache,
@@ -451,3 +598,77 @@ class SparseMlaDecode:
             max_q_len=max_decode_query_len,
             kv_counters=self.kv_counters,
         )
+        return True
+
+    def _run_local(
+        self,
+        attn: DeepseekV4FlashInferMLAAttention,
+        q: torch.Tensor,
+        out: torch.Tensor,
+        q_rope: QRope | None,
+        swa_metadata: "DeepseekSparseSWAMetadata",
+        attn_metadata: DeepseekV4FlashMLAMetadata,
+    ) -> bool:
+        """Where ``lookup`` would build ``attn``'s table on the current stream,
+        attend on the table's inputs (the indexer's request-local top-k and the
+        SWA slot ids) without it, and fork the builds of the run's later
+        layers. False, having issued nothing, where the CuTe kernel does not
+        take the step."""
+        if not self.tables.misses(attn, swa_metadata):
+            return False
+        num_tokens = swa_metadata.num_decode_tokens
+        topk = attn.topk_indices_buffer
+        if (
+            attn.kv_cache_torch_dtype != torch.float8_e4m3fn
+            or attn.window_size != SWA_COLUMNS
+            or swa_metadata.decode_swa_width != SWA_COLUMNS
+            or topk is None
+            or swa_metadata.decode_swa_indices is None
+            or swa_metadata.token_to_req_indices is None
+            or swa_metadata.is_valid_token is None
+        ):
+            return False
+        kv_cache = attn._compressed_kv_cache()
+        swa_k_cache = attn.swa_cache_layer.kv_cache
+        num_reqs = swa_metadata.num_decodes + swa_metadata.num_prefills
+        # The inputs _build_sparse_index_metadata gives the table build.
+        local = LocalIndices(
+            topk[:num_tokens],
+            swa_metadata.decode_swa_indices.reshape(num_tokens, SWA_COLUMNS),
+            swa_metadata.block_size,
+            _packed_block_span(swa_k_cache),
+            swa_metadata.token_to_req_indices,
+            swa_metadata.is_valid_token,
+            attn_metadata.block_table[:num_reqs],
+            attn_metadata.block_size // attn.compress_ratio,
+            _packed_block_span(kv_cache),
+        )
+        query = q[:num_tokens]
+        output = out[:num_tokens]
+        bmm1_scale = attn._flashinfer_fp8_bmm1_scale
+        bmm2_scale = attn._flashinfer_fp8_bmm2_scale
+        if not supports_local_indices(
+            query,
+            swa_k_cache,
+            kv_cache,
+            local,
+            output,
+            bmm1_scale,
+            bmm2_scale,
+            attn.attn_sink,
+            q_rope,
+        ):
+            return False
+        self.tables.fork_all(attn, kv_cache, swa_metadata, attn_metadata)
+        sparse_mla_decode_local(
+            query,
+            swa_k_cache,
+            kv_cache,
+            local,
+            output,
+            cast(float, bmm1_scale),
+            cast(float, bmm2_scale),
+            attn.attn_sink,
+            q_rope,
+        )
+        return True

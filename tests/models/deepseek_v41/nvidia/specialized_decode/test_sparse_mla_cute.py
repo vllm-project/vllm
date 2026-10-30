@@ -9,14 +9,27 @@ columns (-1 and columns past a token's length, including a token with no active
 column, whose output is zero), batches from one token to the most the kernel
 takes, sinks and none, and scales other than one. The tolerance allows for the
 probabilities' FP8 rounding (TRTLLM-gen's own error is of the same size).
+
+Two inputs match a stock path bit for bit instead: the BF16 query the kernel
+ropes and quantizes as it loads it (``QRope``), against the FP8 query of the
+CUDA Q + KV insert it splits, and the local indices (``sparse_mla_decode_local``),
+against ``sparse_mla_decode`` on the table built from them.
 """
 
 import pytest
 import torch
 
+from tests.kernels.core.test_fused_q_kv_rmsnorm import tie_rope_table
+from vllm.models.deepseek_v41.common.ops.cache_utils import (
+    build_flashinfer_mixed_sparse_indices,
+)
 from vllm.models.deepseek_v41.nvidia.specialized_decode.attention.sparse_mla_cute import (  # noqa: E501
+    LocalIndices,
+    QRope,
     _max_tokens,
     sparse_mla_decode,
+    sparse_mla_decode_local,
+    supports_local_indices,
     supports_sparse_mla_cute,
 )
 from vllm.platforms import current_platform
@@ -184,3 +197,172 @@ def test_index_rows_wider_than_the_table() -> None:
     sparse_mla_decode(*args_in, view, c["lens"], strided, 0.05, 1.0, c["sinks"])
     torch.accelerator.synchronize()
     assert torch.equal(strided, dense)
+
+
+@pytest.mark.parametrize("width", [128, 640])
+@pytest.mark.parametrize("tokens", [1, 6, 48])
+@pytest.mark.parametrize("scale_inv", [1.0, 0.375])
+def test_q_rope_split_matches_the_fused_insert_bitwise(
+    width: int, tokens: int, scale_inv: float
+) -> None:
+    """The fused query RoPE's split of the CUDA Q + KV insert is exact: the KV
+    insert alone writes the same cache bytes, and the BF16 query roped and
+    quantized as the kernel loads it gives the same attention output, bit for
+    bit, as that insert's FP8 query: on RoPE values at E4M3 rounding ties
+    (``tie_rope_table``), saturated, signed-zero and subnormal values, and
+    positions past the tokens as under graph padding. The tie cases fail unless
+    the kernel contracts the RoPE into FMAs as nvcc does."""
+    c = make_case(tokens, width, seed=width * 7 + tokens)
+    tokens = min(tokens, _max_tokens(c["q"].device.index, -(-width // 128)))
+    c.update({key: c[key][:tokens] for key in ("indices", "lens")})
+    g = torch.Generator(device=DEVICE).manual_seed(tokens * 31 + width)
+    q = (torch.randn((tokens, H, D), device=DEVICE, generator=g) * 3).bfloat16()
+    q[:, 0, 448:] = q[:, 0, 448:].abs().clamp(min=0.5)
+    q[0, 1, 440:456] = 1e4
+    q[0, 2, 448:464] = -0.0
+    q[0, 3, 480:496] = 1e-39
+    q[0, 3, :16] = -1e4
+    kv = (torch.randn((tokens, D), device=DEVICE, generator=g) * 3).bfloat16()
+    positions = torch.randperm(1 << 16, device=DEVICE, generator=g)[: tokens + 5]
+    slots = torch.randperm(4 * 16, device=DEVICE, generator=g)[:tokens]
+    rope = QRope(
+        positions,
+        tie_rope_table(q, positions[:tokens], scale_inv),
+        torch.tensor([scale_inv], dtype=torch.float32, device=DEVICE),
+    )
+    kv_scale = 1.0 / rope.scale_inv
+    q_fp8 = torch.empty_like(q, dtype=torch.float8_e4m3fn)
+    fused_cache = torch.zeros((4, 16, D), dtype=torch.float8_e4m3fn, device=DEVICE)
+    split_cache = torch.zeros_like(fused_cache)
+    torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
+        q,
+        kv,
+        q_fp8,
+        fused_cache,
+        slots,
+        positions[:tokens],
+        rope.cos_sin_cache,
+        kv_scale,
+        rope.scale_inv,
+        1e-6,
+        16,
+        False,
+    )
+    torch.ops._C.fused_deepseek_v4_kv_rope_insert(
+        kv,
+        split_cache,
+        slots,
+        positions[:tokens],
+        rope.cos_sin_cache,
+        16,
+        kv_scale,
+        False,
+    )
+    pools = (c["swa_pool"], c["comp_pool"], c["indices"], c["lens"])
+    scales = (D**-0.5 * 1.25, 0.75)
+    stock = torch.empty((tokens, H, D), dtype=torch.bfloat16, device=DEVICE)
+    fused = torch.empty_like(stock)
+    sparse_mla_decode(q_fp8, *pools, stock, *scales, c["sinks"])
+    assert supports_sparse_mla_cute(q, *pools, fused, *scales, c["sinks"], rope)
+    sparse_mla_decode(q, *pools, fused, *scales, c["sinks"], rope)
+    torch.accelerator.synchronize()
+    assert torch.equal(split_cache.view(torch.uint8), fused_cache.view(torch.uint8))
+    assert torch.equal(fused.view(torch.int16), stock.view(torch.int16))
+
+
+@pytest.mark.parametrize("q_rope", [False, True])
+@pytest.mark.parametrize("with_sinks", [True, False])
+def test_local_indices_match_the_built_table_bitwise(
+    q_rope: bool, with_sinks: bool
+) -> None:
+    """``sparse_mla_decode_local`` on an index source's table inputs gives,
+    bit for bit, ``sparse_mla_decode`` on the table that
+    ``build_flashinfer_mixed_sparse_indices`` builds from them (as
+    ``_build_sparse_index_metadata`` calls it in a decode step): two requests,
+    packed pages in both pools, -1 SWA and top-k entries, a short top-k row, a
+    hole inside a row (which the table's length cuts off), and a token whose
+    compressed columns do not count."""
+    g = torch.Generator(device=DEVICE).manual_seed(17 + 2 * q_rope + with_sinks)
+    tokens, reqs, topk = 12, 2, 512
+    swa_block, swa_span, comp_block, comp_span = 64, 72, 64, 80
+    swa_pool = fp8((32, swa_span, D), 1.0, g)
+    comp_pool = fp8((256, comp_span, D), 1.0, g)
+    blocks_per_req = 96
+    block_table = torch.stack(
+        [
+            torch.randperm(256, device=DEVICE, generator=g)[:blocks_per_req]
+            for _ in range(reqs)
+        ]
+    ).to(torch.int32)
+    token_to_req = torch.arange(tokens, device=DEVICE, dtype=torch.int32) // 6
+    swa = torch.randint(
+        0, 32 * swa_block, (tokens, SWA), device=DEVICE, generator=g
+    ).to(torch.int32)
+    swa[torch.rand(swa.shape, device=DEVICE, generator=g) < 0.05] = -1
+    local = torch.randint(
+        0, blocks_per_req * comp_block, (tokens, topk), device=DEVICE, generator=g
+    ).to(torch.int32)
+    local[1, 100:] = -1  # a short row
+    local[4, 200] = -1  # a hole: the table's length drops the row's last column
+    local[torch.rand(local.shape, device=DEVICE, generator=g) < 0.01] = -1
+    token_valid = torch.ones(tokens, dtype=torch.bool, device=DEVICE)
+    token_valid[3] = False
+    lens_cols = blocks_per_req * comp_block
+    table, lens = build_flashinfer_mixed_sparse_indices(
+        swa,
+        local,
+        None,
+        local[:0, :0],
+        torch.tensor([0, 6, 12], dtype=torch.int32, device=DEVICE),
+        torch.full((reqs,), lens_cols, dtype=torch.int32, device=DEVICE),
+        token_to_req,
+        torch.zeros((reqs, 1), dtype=torch.int32, device=DEVICE),
+        swa_block,
+        block_table,
+        comp_block,
+        SWA,
+        2,
+        0,
+        decode_compressed_indices_are_local=True,
+        decode_is_valid_token=token_valid,
+        swa_block_span=swa_span,
+        compressed_block_span=comp_span,
+        replay_start=torch.zeros(reqs, dtype=torch.int32, device=DEVICE),
+    )
+    indices = LocalIndices(
+        local,
+        swa,
+        swa_block,
+        swa_span,
+        token_to_req,
+        token_valid,
+        block_table,
+        comp_block,
+        comp_span,
+    )
+    rope = None
+    if q_rope:
+        q = (torch.randn((tokens, H, D), device=DEVICE, generator=g) * 3).bfloat16()
+        rope = QRope(
+            torch.randperm(1 << 12, device=DEVICE, generator=g)[:tokens],
+            torch.rand((1 << 12, 64), device=DEVICE, generator=g) * 2 - 1,
+            torch.tensor([0.5], dtype=torch.float32, device=DEVICE),
+        )
+    else:
+        q = fp8((tokens, H, D), 0.5, g)
+    sinks = torch.randn(H, device=DEVICE, generator=g) if with_sinks else None
+    scales = (D**-0.5 * 1.25, 0.75)
+    built = torch.empty((tokens, H, D), dtype=torch.bfloat16, device=DEVICE)
+    direct = torch.empty_like(built)
+    sparse_mla_decode(q, swa_pool, comp_pool, table, lens, built, *scales, sinks, rope)
+    assert supports_local_indices(
+        q, swa_pool, comp_pool, indices, direct, *scales, sinks, rope
+    )
+    sparse_mla_decode_local(
+        q, swa_pool, comp_pool, indices, direct, *scales, sinks, rope
+    )
+    torch.accelerator.synchronize()
+    # The table's lengths count the valid columns, wherever they are.
+    assert int(lens[4]) == SWA + topk - int((local[4] < 0).sum())
+    assert int(lens[3]) == SWA
+    assert torch.equal(direct.view(torch.int16), built.view(torch.int16))

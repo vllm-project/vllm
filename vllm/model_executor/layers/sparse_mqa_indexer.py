@@ -120,6 +120,8 @@ class SparseMQAIndexer(nn.Module):
         self.candidate_blocks = candidate_blocks
         self.candidate_block_size = candidate_block_size
         self.use_fp4_cache = dsa_indexer_uses_fp4(get_current_vllm_config())
+        # Set by a caller that has already reset the step's top-k rows.
+        self.skip_topk_buffer_clear = False
 
     def _reserve_workspaces(self, device: torch.device) -> None:
         """Profiling run: claim the K-gather workspace and the peak sparse
@@ -158,7 +160,8 @@ class SparseMQAIndexer(nn.Module):
         kv_cache = self.k_cache.kv_cache
         topk_tokens = self.topk_tokens
         topk_indices_buffer = self.topk_indices_buffer
-        topk_indices_buffer[: hidden_states.shape[0]] = -1
+        if not self.skip_topk_buffer_clear:
+            topk_indices_buffer[: hidden_states.shape[0]] = -1
         sparse_block_kv = metadata.sparse_block_kv
 
         if metadata.num_prefills > 0:

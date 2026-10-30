@@ -2090,6 +2090,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_connector.pre_forward(
                 scheduler_output, input_batch, attn_metadata=attn_metadata
             )
+            if (
+                self.post_forward_graphs is not None
+                and not dummy_run
+                and not input_batch.has_prefill
+                and not input_batch.has_structured_output_reqs
+            ):
+                self.post_forward_graphs.stage_step_copy(self, input_batch)
             model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
         else:
             # For piecewise and eager mode, just call model().

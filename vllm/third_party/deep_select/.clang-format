@@ -1,0 +1,4 @@
+# Vendored from deepseek-ai/DeepSelect; keep the sources byte-comparable with
+# upstream so re-syncing stays a plain copy. See README.md.
+DisableFormat: true
+SortIncludes: Never

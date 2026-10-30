@@ -22,7 +22,12 @@ from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 
 from ...ops.o_proj import precompile_dsv41_o_proj_early_trigger
 from .. import FUSED_MHC_MAX_ROWS, LOW_BATCH_MAX_ROWS, WIDE_LOW_LATENCY_MAX_ROWS
-from ..attention import decode_topk_cute, sparse_mla_cute
+from ..attention import (
+    cluster_topk,
+    decode_topk_cute,
+    sparse_mla_cute,
+    sparse_topk_small,
+)
 from ..attention.aux_projections import warmup_aux_projection_gemms
 from ..attention.mxfp8 import (
     compile_pinned,
@@ -84,8 +89,10 @@ def warm_up(
         device = torch.accelerator.current_device_index()
         for has_sinks in {step.attn.attn_sink is not None for step in steps}:
             sparse_mla_cute.precompile(device, has_sinks)
-        for width, k, block_mode in _decode_topk_variants(steps):
-            decode_topk_cute.precompile(device, width, k, block_mode)
+        for width, k, block_mode, pdl in _decode_topk_variants(steps):
+            decode_topk_cute.precompile(device, width, k, block_mode, pdl)
+        cluster_topk.precompile(device)
+        sparse_topk_small.build(device)
         # The fused WO-A variant the steps' o_proj launches (early_trigger);
         # one layer per shape compiles every layer's kernels.
         for attn in {
@@ -97,17 +104,22 @@ def warm_up(
         _warm_up_mhc(decode, vllm_config, rows)
 
 
-def _decode_topk_variants(steps: list[AttentionStep]) -> set[tuple[int, int, bool]]:
-    """(logits width, k, block mode) of every ``decode_topk`` call the dense
-    indexers can make: the paged MQA logits are ``max_model_len`` wide."""
-    variants: set[tuple[int, int, bool]] = set()
+def _decode_topk_variants(
+    steps: list[AttentionStep],
+) -> set[tuple[int, int, bool, bool]]:
+    """(logits width, k, block mode, PDL) of every ``decode_topk`` call the
+    dense indexers can make: the paged MQA logits are ``max_model_len`` wide."""
+    variants: set[tuple[int, int, bool, bool]] = set()
     for step in steps:
         op = None if step.attn.indexer is None else step.attn.indexer.indexer_op
         if not isinstance(op, SparseAttnIndexer) or op.topk_backend != "auto":
             continue
-        variants.add((op.max_model_len, op.topk_tokens, False))
+        variants.add((op.max_model_len, op.topk_tokens, False, True))
         if op.candidate_blocks is not None and op.candidate_block_size == 8:
-            variants.add((op.max_model_len, op.candidate_blocks.shape[1], True))
+            k = op.candidate_blocks.shape[1]
+            variants.add((op.max_model_len, k, True, True))
+            # The selection deferred to the candidate stream runs without PDL.
+            variants.add((op.max_model_len, k, True, False))
     return variants
 
 

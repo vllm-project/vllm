@@ -36,6 +36,11 @@ collectives and would hang. Which forward steps use the executor depends
 only on the batch, which every TP rank receives identically, so that needs no
 collective.
 
+The check does not cover the toolchain: the warm-up builds two CUDA extensions
+with `torch.utils.cpp_extension` (`attention/cluster_topk.py`,
+`attention/sparse_topk_small.py`), so the executor needs nvcc and a host
+compiler at runtime.
+
 Four features use FlashInfer internals and run on flashinfer-python 0.7.2 or
 newer (`MIN_FLASHINFER_VERSION`):
 
@@ -57,14 +62,16 @@ it. `test_numerics.py` compares the first two with FlashInfer's own GEMM and
 quantize bitwise, and `test_kernels.py` the last two with the stock layer; run
 them when `requirements/cuda.txt` moves to a new FlashInfer.
 
-Two more depend on FlashInfer's interface, not its version:
+Three more depend on FlashInfer's interface, not its version:
 
 - the pinned low-latency MXFP8 GEMM tactics up to 8 rows (GB300) wrap that
   GEMM's `autotune_tactics`; without it, or when it does not list a pinned tactic,
   the GEMMs tune over every tactic;
 - the sparse-MLA decode's persistent KV counters need the
   `multi_ctas_kv_counter_buffer` argument (0.7.1 added it); without it each
-  decode allocates its own.
+  decode allocates its own;
+- the cluster top-k kernel builds against FlashInfer's CUTLASS headers
+  (`flashinfer.jit.env.CUTLASS_INCLUDE_DIRS`); without them the warm-up raises.
 
 ## Structure
 
@@ -101,13 +108,16 @@ sizes leave no one-request draft graph.
 | --- | --- |
 | Fused Lamport all-reduce + mHC at every sublayer boundary; the next mHC coefficients on the side stream | all executor steps (up to 384 rows) |
 | Every MoE finalize deferred to the next boundary's fused kernel, in a residual-only variant before an Engram layer and after the last layer | all executor steps |
-| The fused kernel also writes the attention input as MXFP8, which `fused_wqa_wkv` reads instead of quantizing again | all executor steps |
+| The fused kernel also writes the attention input as MXFP8, which `fused_wqa_wkv` reads instead of quantizing again, and the MoE input, which the shared expert's `gate_up` reads on its stream | all executor steps; the MoE input 1-192 rows |
+| The fused kernel's consumers let their PDL dependents launch early: the MXFP8 one at its start, the plain one after its poll, the MoE finalize-publish after its wait | steps below `BT_MIN_ROWS` rows; the finalize-publish up to 8 rows |
+| A boundary's main-stream successor is captured before the side-stream kernels forked beside it: the router GEMM before the shared expert, `fused_wqa_wkv` before the side projections | the router GEMM: 1-192 rows (the draft's: 1-8 rows); `fused_wqa_wkv`: up to `VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD` rows |
 | DSpark draft layers through the same steps, finalizing their MoE in the layer; the last layer's output in the fused kernel's residual-only variant | all draft executor steps |
+| The draft's decode metadata refreshed per attention group on side streams beside the context KV insert, in the draft's FULL graph | FULL-graph draft steps, with the post-forward CUDA graphs |
 | DSpark Markov sampling in one kernel per draft position after the bias GEMM (`vllm/v1/worker/gpu/spec_decode/dspark/fused_sample.py`) | probabilistic drafting without draft top-k, watermarking or adaptive verification |
 | The whole Markov chain in one cooperative kernel per rank, the Markov head sharded by vocabulary over the TP ranks (`sharded_markov.py` beside it) | batches of up to 8 request rows |
-| Sampling, the request-state update and the draft input preparation in a post-forward CUDA graph, the draft context projection beside them on a side stream | uniform decode steps without logprobs, grammar or logits processing |
+| Sampling, the request-state update and the draft input preparation in a post-forward CUDA graph; the draft context projection runs beside the LM head and sampling on a side stream, and the graph's input copy beside the target forward on another | uniform decode steps without logprobs, grammar or logits processing |
 | Aux hidden-state means on the mHC side stream | all executor steps |
-| Routed experts on CuTe DSL routing and `tcgen05` GEMM kernels (`moe/routed_expert_gemm.py`) | 1-192 rows (the draft's, with the finalize kernel: 1-8 rows) |
+| Routed experts on CuTe DSL routing and `tcgen05` GEMM kernels (`moe/routed_expert_gemm.py`); the persistent GEMMs leave `RESERVED_SMS` SMs to the shared expert, and GEMM1 lets GEMM2 launch after `GEMM1_TRIGGER_K_TILE` k tiles | 1-192 rows (the draft's, with the finalize kernel: 1-8 rows) |
 | `fused_wqa_wkv`, `wq_b` and `wo_b` on FlashInfer's low-latency CuTe DSL MXFP8 GEMM with pinned tactics | 1-8 rows |
 | `fused_wqa_wkv`, `wq_b` and `wo_b` on the low-latency GEMM with a 16-, 32- or 48-row activation tile where its shape has a wide tactic, else on FlashInfer's `cute-dsl` MXFP8 GEMM with pinned tactics | 9-48 rows |
 | `fused_wqa_wkv`, `wq_b` and `wo_b` on FlashInfer's `cute-dsl` MXFP8 GEMM with pinned tactics instead of per-start autotuning | 49-384 rows |
@@ -118,11 +128,15 @@ sizes leave no one-request draft graph.
 | Indexer query, compressor and index key on side streams, each joined at its first reader | all executor steps; the side projections up to `VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD` rows |
 | Candidate consumers' candidate expansion and MQA-logits schedule on a side stream after the candidate source's indexer | all executor steps |
 | Dense indexer rows sharded over the TP ranks, a contiguous even slice per rank (the last ones may be short or empty), and all-gathered with the executor's Lamport all-gather (`ops/cute_dsl/all_gather.py`), over NCCL above its 4 MiB a rank | uniform decode steps of at least 12 rows |
-| Token top-k, and the candidate source's blocks, selected from the BF16 logits with `decode_topk` (`attention/decode_topk_cute.py`) | up to 64 rows per rank; the candidate source while its 16-CTA rows fit two waves (14 rows on a GB300) |
+| Token top-k, and the candidate source's blocks, selected from the BF16 logits with `decode_topk` (`attention/decode_topk_cute.py`); the token top-k with DeepSelect's cluster kernel instead (`attention/cluster_topk.py`, from `vllm/third_party/deep_select`) where it takes the rows (`supports_cluster_topk`) | up to 64 rows per rank, also in replicated steps of dense indexers without candidates; the candidate source while its 16-CTA rows fit two waves (14 rows on a GB300) |
 | Otherwise the candidate blocks selected with `cooperative_topk` on the upcast logits | up to 64 rows per rank |
+| The candidate source's block selection on the expansion's side stream, after the token top-k, in launches of `DEFERRED_BLOCKS_MAX_ROWS` rows without PDL | replicated steps whose expansion forks |
+| Candidate consumers' top-k selected and remapped to KV positions in one kernel (`attention/sparse_topk_small.py`) | pure-decode steps it takes (`supports_sparse_topk_small`) |
+| Indexers outside the plan reset their top-k rows before their inputs are ready | all executor steps |
 | Compressed layers sharing an index source reuse one sparse-index table; the first of them builds the other KV-cache groups' tables on a side stream | all executor steps |
 | Sparse-MLA decode on a CuTe DSL kernel, a thread block cluster per token with one CTA per 128 columns (`attention/sparse_mla_cute.py`) | the target's causal decode while every token's cluster is resident at once (at width 640, up to 8 requests with DSpark on a GB300) |
 | Otherwise the TRTLLM-gen sparse-MLA decode, launched on a KV-counter buffer zeroed once | all other executor steps |
+| The CuTe DSL sparse-MLA decode ropes and quantizes the BF16 query itself, the Q/KV norm writes the KV cache (else a side stream beside `wq_b`), so the attention follows `wq_b` in the PDL chain; the layer that would build its run's sparse-index table attends on the indexer's request-local top-k instead (`LocalIndices`) and builds the run's tables on the sparse-index tables' side stream, and a layer whose table an earlier layer built prefetches its KV rows into L2 on a side stream at its start (`SparseMlaPrefetch`) | the target's steps the kernel takes |
 | Engram WKV chain on a side stream right after each layer's lookup | all executor steps, with host-offloaded TP-only tables and a CuTe DSL MXFP8 `wkv` |
 | Attention metadata builds recorded at CUDA graph capture, one per batch shape the FULL decode graphs serve, and replayed | FULL-graph uniform decode |
 | LM head on FlashInfer's CuTe DSL BF16 GEMM | 1-16 rows |

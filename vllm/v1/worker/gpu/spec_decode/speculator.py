@@ -17,6 +17,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models import supports_multimodal_embeddings
 from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import current_stream
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.watermarking import create_watermarker
 from vllm.v1.watermarking.spec_decode import (
@@ -206,6 +207,8 @@ class DraftModelSpeculator(BaseSpeculator):
         # Whether every draft attention builder can refresh its decode metadata
         # in place, so the refresh can be recorded in the draft CUDA graph.
         self.supports_decode_metadata_update = False
+        # One side stream per attention group for a forked metadata refresh.
+        self._draft_metadata_streams: list[torch.cuda.Stream] = []
 
     @property
     def max_model_len(self) -> int:
@@ -638,8 +641,11 @@ class DraftModelSpeculator(BaseSpeculator):
         )
 
     def _update_draft_decode_metadata(
-        self, attn_metadata: dict[str, Any], num_reqs: int
-    ) -> None:
+        self, attn_metadata: dict[str, Any], num_reqs: int, fork: bool = False
+    ) -> list[torch.cuda.Stream]:
+        """Refresh every attention group's draft decode metadata. With ``fork``,
+        each group refreshes on a side stream of its own after the work queued
+        so far; the caller joins the returned streams before any reader."""
         if self.block_tables.cp_size > 1:
             prepare_dcp_local_seq_lens(
                 self.input_buffers.dcp_local_seq_lens,
@@ -649,6 +655,18 @@ class DraftModelSpeculator(BaseSpeculator):
                 self.block_tables.cp_rank,
                 self.block_tables.cp_interleave,
             )
-        for groups in self.attn_groups:
+        groups = [group for kv_groups in self.attn_groups for group in kv_groups]
+        if not fork:
             for group in groups:
                 group.update_draft_decode_metadata(attn_metadata)
+            return []
+        # Each group writes its builder's buffers; groups sharing a cached
+        # token-to-request map write the same values into it.
+        streams = self._draft_metadata_streams
+        streams.extend(torch.cuda.Stream() for _ in range(len(groups) - len(streams)))
+        main = current_stream()
+        for group, stream in zip(groups, streams):
+            stream.wait_stream(main)
+            with torch.cuda.stream(stream):
+                group.update_draft_decode_metadata(attn_metadata)
+        return streams[: len(groups)]

@@ -366,6 +366,7 @@ class _QuadFinalizePublishDeviceKernel:
         fp32_weights: bool = False,
         owner_capacity: int | None = None,
         elements_per_thread: int = QUAD_BF16,
+        trigger_after_wait: bool = False,
     ) -> None:
         if elements_per_thread not in (QUAD_BF16, VEC_BF16):
             raise ValueError("elements_per_thread must be 4 or 8")
@@ -400,6 +401,10 @@ class _QuadFinalizePublishDeviceKernel:
         self.prefetch_group = prefetch_group
         self.prefetch_groups = (top_k + prefetch_group - 1) // prefetch_group
         self.fp32_weights = fp32_weights
+        # The consumer launches right after this kernel's wait, not at its
+        # end: its prologue overlaps this kernel, and its own wait still waits
+        # for this whole grid, so what it reads is unchanged.
+        self.trigger_after_wait = enable_pdl and trigger_after_wait
 
     def smem_size_in_bytes(self) -> int:
         return self.top_k * 8
@@ -501,6 +506,8 @@ class _QuadFinalizePublishDeviceKernel:
 
         if cutlass.const_expr(self.enable_pdl):
             cute.arch.griddepcontrol_wait()
+        if cutlass.const_expr(self.trigger_after_wait):
+            cute.arch.griddepcontrol_launch_dependents()
 
         if cutlass.const_expr(  # noqa: SIM102
             self.include_shared_expert and not self.load_shared_expert_before_pdl
@@ -622,7 +629,7 @@ class _QuadFinalizePublishDeviceKernel:
                 stage,
             )
         cute.arch.barrier()
-        if cutlass.const_expr(self.enable_pdl):
+        if cutlass.const_expr(self.enable_pdl and not self.trigger_after_wait):
             cute.arch.griddepcontrol_launch_dependents()
 
 
@@ -767,6 +774,8 @@ class _LamportMHCDeviceKernel:
     and normalized output are unused. With ``reduced_input`` (BT), the mailbox
     holds each token's reduced sum, ``[generation][token]``, from
     ``_OwnerReduceMulticastDeviceKernel``, which also advanced the generation.
+    ``trigger_at`` is where dependents may launch: "end" (after the mHC post),
+    "poll" (once the poll has seen every rank) or "start".
     """
 
     def __init__(
@@ -783,7 +792,10 @@ class _LamportMHCDeviceKernel:
         quantize: bool = False,
         residual_only: bool = False,
         reduced_input: bool = False,
+        trigger_at: str = "end",
     ) -> None:
+        if trigger_at not in ("end", "poll", "start"):
+            raise ValueError("trigger_at must be 'end', 'poll' or 'start'")
         if rank_lanes not in (1, 2, 4, 8):
             raise ValueError("rank_lanes must be 1, 2, 4, or 8")
         if reduced_input and rank_lanes != 1:
@@ -821,6 +833,7 @@ class _LamportMHCDeviceKernel:
         self.rank_lanes = rank_lanes
         self.threads = threads
         self.enable_pdl = enable_pdl
+        self.trigger_at = trigger_at
         self.fragments = hidden // VEC_BF16
         self.scale_cols = hidden // MXFP8_BLOCK
         self.groups_per_cta = threads // rank_lanes
@@ -906,6 +919,10 @@ class _LamportMHCDeviceKernel:
         rank_lane = tidx % self.rank_lanes
         group = tidx // self.rank_lanes
         base_fragment = cluster_rank * self.groups_per_cta + group
+        # Dependents only start their prologues: their griddepcontrol.wait still
+        # waits for this whole grid, and they launch once every CTA of it runs.
+        if cutlass.const_expr(self.enable_pdl and self.trigger_at == "start"):
+            cute.arch.griddepcontrol_launch_dependents()
 
         prenorm_fragments = cute.make_rmem_tensor(
             cute.make_layout(
@@ -1012,6 +1029,10 @@ class _LamportMHCDeviceKernel:
                         dirty = dirty | fragment_has_negative_zero(packed)
                         for word in cutlass.range_constexpr(4):
                             lane_packed[wave, word] = packed[word]
+            if cutlass.const_expr(
+                self.enable_pdl and self.trigger_at == "poll" and trip == self.trips - 1
+            ):
+                cute.arch.griddepcontrol_launch_dependents()
 
             lane_sum = cute.make_rmem_tensor(cute.make_layout((VEC_BF16,)), Float32)
             lane_sum.fill(Float32(0.0))
@@ -1069,7 +1090,7 @@ class _LamportMHCDeviceKernel:
                     stage_state.iterator + NEXT_STAGE,
                     (active_stage + Uint32(1)) % Uint32(LAMPORT_GENERATIONS),
                 )
-        if cutlass.const_expr(self.enable_pdl):
+        if cutlass.const_expr(self.enable_pdl and self.trigger_at == "end"):
             cute.arch.griddepcontrol_launch_dependents()
 
         for trip in cutlass.range_constexpr(self.trips):
@@ -1242,6 +1263,9 @@ class AllReduceMHC:
         device: torch.device,
         quantize_layer_input: bool = False,
         residual_only: bool = False,
+        plain_trigger: str = "end",
+        quant_trigger: str = "end",
+        finalize_trigger_max_rows: int = 0,
     ) -> None:
         group = get_tp_group().device_group
         self.hidden_size = hidden = hidden_size
@@ -1250,6 +1274,9 @@ class AllReduceMHC:
         self.top_k = top_k
         self.quantize_layer_input = quantize_layer_input
         self.residual_only = residual_only
+        # LL finalize-publishes of up to this many rows trigger their consumer
+        # right after their wait (0: none).
+        self.finalize_trigger_max_rows = finalize_trigger_max_rows
         tp = dist.get_world_size(group)
         rank = dist.get_rank(group)
         device = torch.device(device)
@@ -1278,38 +1305,46 @@ class AllReduceMHC:
                 Int32(capacity),
                 current_cu_stream(),
             )
-            self._finalize_publish = cute.compile(
-                _QuadFinalizePublishDeviceKernel(
-                    hidden=hidden,
-                    top_k=top_k,
-                    tp=tp,
-                    rank=rank,
-                    capacity_m=capacity,
-                    threads=128,
-                    # DSV4.1's router folds the scale into the weights.
-                    routed_scaling_factor=1.0,
-                    include_shared_expert=True,
-                    load_shared_expert_before_pdl=False,
-                    enable_pdl=True,
-                    prefetch_group=top_k,
-                    fp32_weights=True,
-                ),
-                make_fake_dynamic_compact_tensor(
-                    BFloat16, alignment=16, divisibility=hidden
-                ),
-                make_fake_dynamic_compact_tensor(
-                    Float32, alignment=4, divisibility=top_k
-                ),
-                make_fake_dynamic_compact_tensor(
-                    Int32, alignment=4, divisibility=top_k
-                ),
-                make_fake_dynamic_compact_tensor(
-                    BFloat16, alignment=16, divisibility=hidden
-                ),
-                make_fake_compact_tensor(Int32, (2,), assumed_align=4),
-                Int64(0),
-                Int32(capacity),
-                current_cu_stream(),
+
+            def compile_finalize_publish(trigger_after_wait: bool):
+                return cute.compile(
+                    _QuadFinalizePublishDeviceKernel(
+                        hidden=hidden,
+                        top_k=top_k,
+                        tp=tp,
+                        rank=rank,
+                        capacity_m=capacity,
+                        threads=128,
+                        # DSV4.1's router folds the scale into the weights.
+                        routed_scaling_factor=1.0,
+                        include_shared_expert=True,
+                        load_shared_expert_before_pdl=False,
+                        enable_pdl=True,
+                        prefetch_group=top_k,
+                        fp32_weights=True,
+                        trigger_after_wait=trigger_after_wait,
+                    ),
+                    make_fake_dynamic_compact_tensor(
+                        BFloat16, alignment=16, divisibility=hidden
+                    ),
+                    make_fake_dynamic_compact_tensor(
+                        Float32, alignment=4, divisibility=top_k
+                    ),
+                    make_fake_dynamic_compact_tensor(
+                        Int32, alignment=4, divisibility=top_k
+                    ),
+                    make_fake_dynamic_compact_tensor(
+                        BFloat16, alignment=16, divisibility=hidden
+                    ),
+                    make_fake_compact_tensor(Int32, (2,), assumed_align=4),
+                    Int64(0),
+                    Int32(capacity),
+                    current_cu_stream(),
+                )
+
+            self._finalize_publish = compile_finalize_publish(False)
+            self._finalize_publish_early = (
+                compile_finalize_publish(True) if finalize_trigger_max_rows else None
             )
             # BT, for instances that can take BT_MIN_ROWS rows; a smaller one
             # (thresholds above its capacity) builds none of its kernels or
@@ -1330,7 +1365,10 @@ class AllReduceMHC:
             self._no_quant_args = (no_quant_cute, no_quant_cute)
 
             def compile_collective(
-                quantize: bool, residual_only: bool, reduced_input: bool
+                quantize: bool,
+                residual_only: bool,
+                reduced_input: bool,
+                trigger_at: str = "end",
             ):
                 if quantize:
                     quant_fakes = (
@@ -1358,6 +1396,7 @@ class AllReduceMHC:
                         quantize=quantize,
                         residual_only=residual_only,
                         reduced_input=reduced_input,
+                        trigger_at=trigger_at,
                     ),
                     make_fake_compact_tensor(
                         BFloat16,
@@ -1396,12 +1435,18 @@ class AllReduceMHC:
                 )
 
             # Consumers by (BT, variant): "plain", "quant" (also the MXFP8
-            # layer input) and "residual" (residual streams only).
+            # layer input) and "residual" (residual streams only). The LL
+            # plain and quant consumers trigger their dependents at
+            # ``plain_trigger`` and ``quant_trigger``.
             self._consumers: dict[tuple[bool, str], Any] = {}
             for bt in (False, True) if bt_enabled else (False,):
-                self._consumers[bt, "plain"] = compile_collective(False, False, bt)
+                self._consumers[bt, "plain"] = compile_collective(
+                    False, False, bt, "end" if bt else plain_trigger
+                )
                 if quantize_layer_input:
-                    self._consumers[bt, "quant"] = compile_collective(True, False, bt)
+                    self._consumers[bt, "quant"] = compile_collective(
+                        True, False, bt, "end" if bt else quant_trigger
+                    )
                 if residual_only:
                     self._consumers[bt, "residual"] = compile_collective(
                         False, True, bt
@@ -1651,7 +1696,14 @@ class AllReduceMHC:
             raise ValueError("expanded_idx_to_permuted_idx must be int32 [M, top_k]")
         bt = m >= self.bt_min_finalize_rows
         consumer = self._consumer(residual, pre, norm_weight, m, mxfp8_out, bt)
-        (self._bt_finalize_publish if bt else self._finalize_publish)(
+        if bt:
+            finalize_publish = self._bt_finalize_publish
+        elif m <= self.finalize_trigger_max_rows:
+            assert self._finalize_publish_early is not None
+            finalize_publish = self._finalize_publish_early
+        else:
+            finalize_publish = self._finalize_publish
+        finalize_publish(
             to_cute_dynamic(gemm2_permuted.flatten(), 16, divisibility=hidden),
             to_cute_dynamic(expert_weights.flatten(), 4, divisibility=top_k),
             to_cute_dynamic(

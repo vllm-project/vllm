@@ -1634,6 +1634,7 @@ package_data = {
         "entrypoints/serve/instrumentator/static/*.js",
         "entrypoints/serve/instrumentator/static/*.css",
         "distributed/kv_transfer/kv_connector/v1/hf3fs/utils/*.cpp",
+        "models/deepseek_v41/nvidia/specialized_decode/attention/*.cu",
         # Built-in multimodal chat template fallbacks (registry.py)
         "transformers_utils/chat_templates/*.jinja",
         "third_party/flash_linear_attention/LICENSE",
@@ -1651,6 +1652,10 @@ package_data = {
         "third_party/fmha_sm100/cutlass/include/**/*.hpp",
         "third_party/fmha_sm100/cutlass/tools/util/include/**/*.h",
         "third_party/fmha_sm100/cutlass/tools/util/include/**/*.hpp",
+        # DeepSelect's cluster top-k, JIT-built by the DSv4.1 specialized decode
+        "third_party/deep_select/LICENSE",
+        "third_party/deep_select/**/*.h",
+        "third_party/deep_select/**/*.cuh",
     ]
 }
 

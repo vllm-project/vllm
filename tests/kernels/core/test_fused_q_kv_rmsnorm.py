@@ -163,6 +163,81 @@ def test_fused_q_kv_rmsnorm_quant_matches_separate(num_tokens, q_size, dtype):
         torch.testing.assert_close(result[1], kv_ref, rtol=0, atol=0)
 
 
+def tie_rope_table(q: torch.Tensor, positions: torch.Tensor, scale_inv: float):
+    """A [max_pos, 64] cos || sin table (no rotation) whose rows at
+    ``positions`` put head 0's rotated RoPE pairs within an FP32 ulp or two of
+    an E4M3 rounding tie (after ``scale_inv``): the even dim of even pairs, the
+    odd dim of odd ones. There the CUDA kernel's FMA contraction of
+    ``even * cos - odd * sin`` and ``even * sin + odd * cos`` decides the FP8
+    byte, which random tables almost never expose."""
+    g = torch.Generator(device=DEVICE).manual_seed(q.shape[0])
+    table = torch.rand((1 << 16, 64), device=DEVICE, generator=g) * 2 - 1
+    even = q[:, 0, 448::2].double()
+    odd = q[:, 0, 449::2].double()
+    sin = table[positions, 32:].double()
+    # Midpoints of adjacent E4M3 values in [2, 4), 1/4 apart, either sign.
+    steps = torch.randint(0, 8, even.shape, device=DEVICE, generator=g)
+    signs = torch.randint(0, 2, even.shape, device=DEVICE, generator=g) * 2 - 1
+    tie = signs * (2.125 + steps.double() / 4) / scale_inv
+    tune_odd = torch.arange(32, device=DEVICE) % 2 == 1
+    cos = torch.where(tune_odd, (tie - even * sin) / odd, (tie + odd * sin) / even)
+    table[positions, :32] = cos.float()
+    return table
+
+
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(100), reason="MXFP8 needs Blackwell"
+)
+@pytest.mark.parametrize("tokens", [1, 6, 48])
+@pytest.mark.parametrize("kv_scale", [1.0, 2.5])
+def test_norm_kv_insert_matches_the_kv_insert_bitwise(
+    tokens: int, kv_scale: float
+) -> None:
+    """The Q/KV norm's cache write is ``fused_deepseek_v4_kv_rope_insert`` of
+    the norm's KV, byte for byte, and leaves the norm's outputs as they were:
+    on RoPE values at E4M3 rounding ties (``tie_rope_table``), saturated
+    values, a -1 slot and tokens past the slots, as under graph padding."""
+    from vllm.models.deepseek_v41.common.ops.query_quant import (
+        KVCacheInsert,
+        fused_q_kv_rmsnorm_quant,
+    )
+
+    g = torch.Generator(device=DEVICE).manual_seed(tokens * 13 + int(kv_scale))
+    qr_kv = (torch.randn((tokens, 1792), device=DEVICE, generator=g) * 3).bfloat16()
+    qr_kv[:, -64:] = qr_kv[:, -64:].abs().clamp(min=0.5)
+    qr, kv = qr_kv.split([1280, 512], dim=-1)
+    q_weight = (torch.rand(1280, device=DEVICE, generator=g) + 0.5).bfloat16()
+    kv_weight = (torch.rand(512, device=DEVICE, generator=g) + 0.5).bfloat16()
+    kv_weight[:4] = 3000.0
+    stock_q, stock_kv = fused_q_kv_rmsnorm_quant(
+        qr, kv, q_weight, kv_weight, 1e-6, early_trigger=True
+    )
+    positions = torch.randperm(1 << 16, device=DEVICE, generator=g)[:tokens]
+    slots = torch.randperm(4 * 16, device=DEVICE, generator=g)[: max(tokens - 2, 1)]
+    slots[1:2] = -1
+    table = tie_rope_table(stock_kv.unsqueeze(1), positions, 1 / kv_scale)
+    scale = torch.tensor([kv_scale], dtype=torch.float32, device=DEVICE)
+    stock_cache = torch.zeros((4, 16, 512), dtype=torch.float8_e4m3fn, device=DEVICE)
+    norm_cache = torch.zeros_like(stock_cache)
+    torch.ops._C.fused_deepseek_v4_kv_rope_insert(
+        stock_kv, stock_cache, slots, positions, table, 16, scale, False
+    )
+    q, norm_kv = fused_q_kv_rmsnorm_quant(
+        qr,
+        kv,
+        q_weight,
+        kv_weight,
+        1e-6,
+        early_trigger=True,
+        kv_insert=KVCacheInsert(norm_cache, slots, positions, table, 16, scale),
+    )
+    torch.accelerator.synchronize()
+    assert torch.equal(norm_cache.view(torch.uint8), stock_cache.view(torch.uint8))
+    assert torch.equal(q.data.view(torch.uint8), stock_q.data.view(torch.uint8))
+    assert torch.equal(q.scale, stock_q.scale)
+    assert torch.equal(norm_kv.view(torch.int16), stock_kv.view(torch.int16))
+
+
 @pytest.mark.skipif(
     not current_platform.has_device_capability(100), reason="MXFP8 needs Blackwell"
 )

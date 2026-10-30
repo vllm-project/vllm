@@ -64,7 +64,7 @@ them; histogram contributions are complete before they are read; and CTA 0
 waits until every peer is done with its shared memory before it exits. The
 kernel waits on its predecessor grid before reading inputs and lets its
 dependents launch once its chunk is in shared memory (programmatic dependent
-launch).
+launch); launched without PDL, it starts once its predecessor has finished.
 """
 
 from functools import cache
@@ -389,11 +389,12 @@ class DecodeTopK:
     threads, else 512); ``vector_count``: 16-byte vectors a thread stages (8,
     or 16 at 8 or 16 CTAs: the first 8 also stay in registers), so a row
     holds at most ``cluster * threads * vector_count`` vectors;
-    ``block_mode``: elements are 8-logit block maxima.
+    ``block_mode``: elements are 8-logit block maxima; ``pdl``: launched as a
+    programmatic dependent of the stream's previous kernel.
     """
 
     def __init__(
-        self, k: int, cluster: int, vector_count: int, block_mode: bool
+        self, k: int, cluster: int, vector_count: int, block_mode: bool, pdl: bool
     ) -> None:
         assert k in TOP_KS and cluster in (4, 8, 16)
         assert vector_count in vector_choices(cluster)
@@ -402,6 +403,7 @@ class DecodeTopK:
         self.threads = threads_for(cluster)
         self.warps = self.threads // 32
         self.block_mode = block_mode
+        self.pdl = pdl
         self.per_vector = 1 if block_mode else 8  # elements a 16-byte vector holds
         self.vector_count = vector_count
         self.vectors = self.threads * vector_count  # a CTA's vectors
@@ -441,7 +443,7 @@ class DecodeTopK:
             block=[self.threads, 1, 1],
             cluster=[self.cluster, 1, 1],
             stream=stream,
-            use_pdl=True,
+            use_pdl=self.pdl,
         )
 
     @cute.jit
@@ -1183,13 +1185,18 @@ def _fake(dtype: type[cutlass.Numeric], align: int):
 
 @cache
 def _kernel(
-    device_index: int, k: int, cluster: int, vector_count: int, block_mode: bool
+    device_index: int,
+    k: int,
+    cluster: int,
+    vector_count: int,
+    block_mode: bool,
+    pdl: bool,
 ):
     """``DecodeTopK`` compiled for a device, k, cluster size, staged vectors
-    a thread and mode."""
+    a thread, mode and launch."""
     with torch.accelerator.device_index(device_index):
         return cute.compile(
-            DecodeTopK(k, cluster, vector_count, block_mode),
+            DecodeTopK(k, cluster, vector_count, block_mode, pdl),
             _fake(Uint32, 16),
             _fake(Int32, 4),
             _fake(Int32, 4),
@@ -1243,10 +1250,12 @@ def cluster_for(rows: int, width: int, device_index: int) -> int:
     return 4
 
 
-def precompile(device_index: int, width: int, k: int, block_mode: bool) -> None:
+def precompile(
+    device_index: int, width: int, k: int, block_mode: bool, pdl: bool = True
+) -> None:
     """Compile the ``DecodeTopK`` variants `decode_topk` launches on rows of
-    ``width`` logits for ``k`` and ``block_mode``, at any row count, and read
-    the cluster occupancy it plans with, before graph capture."""
+    ``width`` logits for ``k``, ``block_mode`` and ``pdl``, at any row count,
+    and read the cluster occupancy it plans with, before graph capture."""
     if k not in TOP_KS:
         return
     if vectors_for(width, 8) is not None:
@@ -1259,7 +1268,7 @@ def precompile(device_index: int, width: int, k: int, block_mode: bool) -> None:
     for cluster in clusters:
         vector_count = vectors_for(width, cluster)
         assert vector_count is not None
-        _kernel(device_index, k, cluster, vector_count, block_mode)
+        _kernel(device_index, k, cluster, vector_count, block_mode, pdl)
 
 
 def supports_decode_topk(
@@ -1293,6 +1302,8 @@ def decode_topk(
     out: torch.Tensor,
     block_mode: bool,
     fallback: bool = False,
+    pdl: bool = True,
+    max_rows: int | None = None,
 ) -> None:
     """Launch `DecodeTopK` on the current stream.
 
@@ -1305,6 +1316,10 @@ def decode_topk(
         block_mode: Select 8-token blocks (the candidate source) instead of
             tokens.
         fallback: Force the direct path (tests).
+        pdl: Launch as a programmatic dependent of the stream's previous
+            kernel; False starts only once that kernel has finished.
+        max_rows: Launch at most this many rows at a time, one launch after
+            another, each with the cluster size one launch of every row takes.
 
     """
     rows, width = logits.shape
@@ -1318,14 +1333,17 @@ def decode_topk(
     )
     cluster = cluster_for(rows, width, logits.device.index)
     vector_count = vectors_for(width, cluster)
-    _kernel(logits.device.index, k, cluster, vector_count, block_mode)(
-        _pointer(Uint32, logits, 16),
-        _pointer(Int32, lengths, 4),
-        _pointer(Int32, out, 4),
-        Int32(rows),
-        Int64(logits.stride(0) * 2),
-        Int32(width),
-        Int32(out.stride(0)),
-        Int32(1 if fallback else 0),
-        current_cu_stream(),
-    )
+    kernel = _kernel(logits.device.index, k, cluster, vector_count, block_mode, pdl)
+    step = max_rows or rows
+    for first in range(0, rows, step):
+        kernel(
+            _pointer(Uint32, logits[first:], 16),
+            _pointer(Int32, lengths[first:], 4),
+            _pointer(Int32, out[first:], 4),
+            Int32(min(step, rows - first)),
+            Int64(logits.stride(0) * 2),
+            Int32(width),
+            Int32(out.stride(0)),
+            Int32(1 if fallback else 0),
+            current_cu_stream(),
+        )

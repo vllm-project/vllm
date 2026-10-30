@@ -1075,6 +1075,8 @@ class SparseAttnIndexer(CustomOp):
         self.candidate_blocks = candidate_blocks
         self.candidate_block_size = candidate_block_size
         self.candidate_write = candidate_write
+        # Set by a caller that has already reset the step's top-k rows.
+        self.skip_topk_buffer_clear = False
         self.dense_mha_metadata_layer_name = ""
         # DCP scalars are constant for the run; resolve them here (config is set
         # during model construction) and pass them into the custom op, rather
@@ -1174,7 +1176,7 @@ class SparseAttnIndexer(CustomOp):
             self.dcp_rank,
             self.dcp_world_size,
             self._parallel_config.cp_kv_cache_interleave_size,
-            False,
+            self.skip_topk_buffer_clear,
             candidate_blocks=self.candidate_blocks,
             candidate_block_size=self.candidate_block_size,
             candidate_write=self.candidate_write,

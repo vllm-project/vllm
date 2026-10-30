@@ -213,10 +213,17 @@ class DFlashSpeculator(DraftModelSpeculator):
             )
         elif self._context_kv is not None:
             projected = self._context_kv[:, :num_context]
+        # Recorded in the FULL graph so replays skip the eager metadata build; with
+        # a context side stream, beside the context KV insert, which reads none of it.
+        metadata = attn_metadata if self.supports_decode_metadata_update else None
+        streams: list[torch.cuda.Stream] = []
+        if metadata is not None and self.context_side_stream is not None:
+            streams = self._update_draft_decode_metadata(metadata, num_reqs, fork=True)
         self._precompute_context_kv(0, num_context, projected=projected)
-        # Recorded in the FULL graph so replays skip the eager metadata build.
-        if attn_metadata is not None and self.supports_decode_metadata_update:
-            self._update_draft_decode_metadata(attn_metadata, num_reqs)
+        if metadata is not None and self.context_side_stream is None:
+            self._update_draft_decode_metadata(metadata, num_reqs)
+        for stream in streams:
+            current_stream().wait_stream(stream)
 
     def _prepare_graph_replay(
         self,
