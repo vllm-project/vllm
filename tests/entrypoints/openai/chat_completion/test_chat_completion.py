@@ -304,3 +304,22 @@ async def test_per_request_metrics_on_final_usage_chunk(client: openai.AsyncOpen
     assert metrics["queue_time_ms"] >= 0
     assert metrics["tokens_per_second"] >= 0
     assert "mean_itl_ms" not in metrics
+
+
+@pytest.mark.asyncio
+async def test_beam_search_chat_completion(client: openai.AsyncOpenAI):
+    """Beam search returns one assistant message per beam, all distinct."""
+    completion = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "Name three fruits."}],
+        n=3,
+        max_completion_tokens=8,
+        temperature=0,
+        extra_body={"use_beam_search": True, "return_token_ids": True},
+    )
+    choices = completion.model_dump()["choices"]
+    assert [choice["index"] for choice in choices] == [0, 1, 2]
+    assert all(choice["message"]["role"] == "assistant" for choice in choices)
+    beams = [tuple(choice["token_ids"]) for choice in choices]
+    assert len(set(beams)) == 3
+    assert completion.usage.completion_tokens == sum(map(len, beams))
