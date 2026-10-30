@@ -175,6 +175,7 @@ def test_fused_mtp_head_ratio_guard(num_v_heads: int, expected: bool) -> None:
             1, SPEC_TOKENS, dtype=torch.int32, device="cuda"
         ),
         spec_sequence_masks=object(),
+        spec_tree_parents=None,
         num_decodes=0,
         num_spec_decodes=1,
     )

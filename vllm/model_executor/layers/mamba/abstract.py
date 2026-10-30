@@ -3,6 +3,7 @@
 from abc import abstractmethod
 from collections.abc import Iterable
 from math import lcm, prod
+from typing import ClassVar
 
 import torch
 
@@ -24,6 +25,17 @@ class MambaBase(AttentionLayerBase):
     # in the shape specified by `self.get_state_shape`.
     kv_cache: tuple[torch.Tensor, ...]
     supports_dcp: bool = False
+
+    # Does this layer's forward verify speculative trees (each row reads the
+    # state of its parent rather than of the row before it)? Not inherited: a
+    # subclass that does not set it in its own body runs kernels of its own, so it
+    # verifies chains only, whatever its parent declares.
+    supports_tree_verify: ClassVar[bool] = False
+
+    def __init_subclass__(cls, **kwargs) -> None:
+        super().__init_subclass__(**kwargs)
+        if "supports_tree_verify" not in cls.__dict__:
+            cls.supports_tree_verify = False
 
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
         """Unpack a raw ``[B, 1, 1, C]`` int8 page view into per-state views.

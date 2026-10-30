@@ -530,6 +530,7 @@ def test_tree_speculator_needs_tree_backends_in_every_target_layer():
             [group(_backend("GDN_ATTN", True), ["t.0"])],
             [group(_backend("FLASH_ATTN", False), ["draft.0"])],
         ],
+        compilation_config=SimpleNamespace(static_forward_context={}),
     )
     GPUModelRunner._check_tree_backends(runner)  # the draft's layers do not count
     runner.attn_groups.append([group(_backend("FLASH_ATTN", False), ["t.1"])])

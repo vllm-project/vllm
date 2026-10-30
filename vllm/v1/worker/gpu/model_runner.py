@@ -1840,6 +1840,28 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 f"{self.max_branching}), but attention backends {refused} do "
                 "not (AttentionBackend.supports_tree_verify)"
             )
+        # A recurrent layer runs its own kernels behind a shared backend, so its
+        # class must declare tree verify as well.
+        from vllm.model_executor.layers.mamba.abstract import MambaBase
+
+        layers = self.compilation_config.static_forward_context
+        chain_only = sorted(
+            {
+                type(layers[name]).__name__
+                for groups in self.attn_groups
+                for group in groups
+                for name in group.layer_names
+                if name not in draft
+                and isinstance(layers.get(name), MambaBase)
+                and not type(layers[name]).supports_tree_verify
+            }
+        )
+        if chain_only:
+            raise ValueError(
+                f"the speculator verifies trees (max_branching="
+                f"{self.max_branching}), but recurrent layers {chain_only} verify "
+                "chains only (MambaBase.supports_tree_verify)"
+            )
 
     def _chain_only(
         self,

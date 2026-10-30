@@ -10,7 +10,7 @@ the backend defaults to 'cpu'.
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from functools import cache
+from functools import cache, partial
 
 import torch
 
@@ -306,6 +306,7 @@ class TritonSSUBackend(MambaSSUBackend):
         num_accepted_tokens: torch.Tensor | None = None,
         cu_seqlens: torch.Tensor | None = None,
         is_blackwell: bool = False,
+        parents: torch.Tensor | None = None,
     ) -> None:
         self._kernel(
             state,
@@ -327,6 +328,7 @@ class TritonSSUBackend(MambaSSUBackend):
             is_blackwell=is_blackwell,
             enable_stochastic_rounding=self._mamba_config.enable_stochastic_rounding,
             cache_philox_rounds=self._mamba_config.stochastic_rounding_philox_rounds,
+            parents=parents,
         )
 
 
@@ -675,12 +677,21 @@ def selective_state_update(
     num_accepted_tokens: torch.Tensor | None = None,
     cu_seqlens: torch.Tensor | None = None,
     is_blackwell: bool = False,
+    parents: torch.Tensor | None = None,
 ) -> None:
     """Unified dispatch for Mamba selective state update.
 
-    Delegates to the initialized backend (Triton or FlashInfer).
+    Delegates to the initialized backend (Triton or FlashInfer). A tree verify
+    (``parents``, see the Triton ``selective_state_update``) runs the Triton
+    backend whatever the configured one: it is the one that follows parents.
     """
-    get_mamba_ssu_backend()(
+    backend = get_mamba_ssu_backend()
+    run: Callable[..., None] = backend
+    if parents is not None:
+        if not isinstance(backend, TritonSSUBackend):
+            backend = TritonSSUBackend(backend._mamba_config)
+        run = partial(backend, parents=parents)
+    run(
         state,
         x,
         dt,
