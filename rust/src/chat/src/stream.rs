@@ -7,7 +7,8 @@ use std::task::{Context, Poll};
 
 use futures::Stream;
 use trait_set::trait_set;
-use vllm_llm::RequestTimestamps;
+use vllm_engine_core_client::protocol::output::RequestSpecDecodeMetrics;
+use vllm_llm::{RequestTimestamps, WeightVersionSpan};
 use vllm_text::{DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs};
 
 use crate::FinishReason;
@@ -24,12 +25,16 @@ pub struct CollectedAssistantMessage {
     pub token_ids: Vec<u32>,
     pub usage: ChatTokenUsage,
     pub timestamps: RequestTimestamps,
+    /// Per-request speculative-decoding statistics emitted by the engine.
+    pub spec_decode_metrics: Option<RequestSpecDecodeMetrics>,
     pub finish_reason: FinishReason,
     /// Connector-specific KV transfer parameters for disaggregated serving.
     pub kv_transfer_params: Option<serde_json::Value>,
     /// Connector-specific encoder cache transfer parameters for disaggregated
     /// serving.
     pub ec_transfer_params: Option<serde_json::Value>,
+    /// Weight-version spans over all generated token positions.
+    pub weight_versions: Option<Vec<WeightVersionSpan>>,
 }
 
 /// Per-request stream of chat events.
@@ -84,9 +89,11 @@ impl ChatEventStream {
                     message: done,
                     usage,
                     timestamps,
+                    spec_decode_metrics,
                     finish_reason,
                     kv_transfer_params,
                     ec_transfer_params,
+                    weight_versions,
                 } => {
                     return Ok(CollectedAssistantMessage {
                         message: done,
@@ -98,9 +105,11 @@ impl ChatEventStream {
                         token_ids,
                         usage,
                         timestamps,
+                        spec_decode_metrics,
                         finish_reason,
                         kv_transfer_params: kv_transfer_params.map(|value| *value),
                         ec_transfer_params: ec_transfer_params.map(|value| *value),
+                        weight_versions,
                     });
                 }
                 ChatEvent::ToolCallEnd { call, .. } => {
@@ -137,6 +146,7 @@ trait_set! {
 mod tests {
 
     use futures::stream;
+    use vllm_engine_core_client::protocol::output::RequestSpecDecodeMetrics;
     use vllm_llm::FinishReason;
     use vllm_text::{
         DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs, DecodedTokenLogprob,
@@ -202,12 +212,19 @@ mod tests {
                     usage: ChatTokenUsage::from(vllm_llm::TokenUsage {
                         prompt_token_count: 2,
                         output_token_count: 1,
-                        cached_token_count: 0,
+                        prompt_cache_usage: Default::default(),
                     }),
                     timestamps: Default::default(),
+                    spec_decode_metrics: Some(RequestSpecDecodeMetrics {
+                        num_spec_tokens: 2,
+                        histogram: vec![0, 1, 0],
+                        num_draft_tokens: 2,
+                        ..Default::default()
+                    }),
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
+                    weight_versions: None,
                 }),
             ]),
         );
@@ -244,12 +261,19 @@ mod tests {
                 usage: ChatTokenUsage::from(vllm_llm::TokenUsage {
                     prompt_token_count: 2,
                     output_token_count: 1,
-                    cached_token_count: 0,
+                    prompt_cache_usage: Default::default(),
                 }),
                 timestamps: Default::default(),
+                spec_decode_metrics: Some(RequestSpecDecodeMetrics {
+                    num_spec_tokens: 2,
+                    histogram: vec![0, 1, 0],
+                    num_draft_tokens: 2,
+                    ..Default::default()
+                }),
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
+                weight_versions: None,
             }
         );
     }

@@ -16,7 +16,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     Mxfp4MoeBackend,
-    _requires_qwen38_tep8_emulation,
     select_mxfp4_moe_backend,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -104,36 +103,8 @@ def _make_qwen38_tep8_moe_config() -> FusedMoEConfig:
     )
 
 
-def test_qwen38_tep8_requires_emulation_only_on_gfx950(monkeypatch):
-    import vllm.model_executor.layers.fused_moe.oracle.mxfp4 as mxfp4_oracle
-
-    config = _make_qwen38_tep8_moe_config()
-    monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
-    monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: True)
-
-    assert _requires_qwen38_tep8_emulation(config, kMxfp4Dynamic)
-
-    config.moe_parallel_config.ep_size = 4
-    config.num_local_experts = 128
-    assert not _requires_qwen38_tep8_emulation(config, kMxfp4Dynamic)
-
-    config = _make_qwen38_tep8_moe_config()
-    monkeypatch.setattr(mxfp4_oracle.current_platform, "is_rocm", lambda: False)
-    assert not _requires_qwen38_tep8_emulation(config, kMxfp4Dynamic)
-
-
-@pytest.mark.parametrize(
-    "requested_backend,expected_backend",
-    [
-        ("auto", Mxfp4MoeBackend.EMULATION),
-        ("aiter", Mxfp4MoeBackend.AITER_MXFP4_MXFP4),
-    ],
-)
-def test_qwen38_tep8_auto_fallback_respects_explicit_backend(
-    requested_backend,
-    expected_backend,
-    monkeypatch,
-):
+@pytest.mark.parametrize("requested_backend", ["auto", "aiter"])
+def test_qwen38_tep8_selects_native_aiter(requested_backend, monkeypatch):
     import vllm.model_executor.layers.fused_moe.oracle.mxfp4 as mxfp4_oracle
 
     class SupportedExperts:
@@ -154,7 +125,7 @@ def test_qwen38_tep8_auto_fallback_respects_explicit_backend(
         config, activation_key=kMxfp4Dynamic
     )
 
-    assert backend == expected_backend
+    assert backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4
     assert experts_cls is SupportedExperts
 
 

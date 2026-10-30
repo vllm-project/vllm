@@ -255,7 +255,7 @@ class SpecDecodeBaseProposer:
             with_numpy=True,
         )
         self._enable_probabilistic_draft_probs = (
-            self.speculative_config.rejection_sample_method == "standard"
+            self.speculative_config.rejection_sample_method in ("standard", "fly")
             and self.speculative_config.draft_sample_method == "probabilistic"
         )
         self._last_draft_probs: torch.Tensor | None = None
@@ -682,6 +682,7 @@ class SpecDecodeBaseProposer:
         # (i.e., not the first proposal).
         if self.num_speculative_tokens > 1 and num_rejected_tokens_gpu is not None:
             common_attn_metadata.seq_lens -= num_rejected_tokens_gpu
+        common_attn_metadata.invalidate_cached_layout()
 
         block_size = self.block_size
         assert block_size > 0, "block_size has not been initialized."
@@ -810,6 +811,8 @@ class SpecDecodeBaseProposer:
 
         if common_attn_metadata.seq_lens_cpu_upper_bound is not None:
             common_attn_metadata.seq_lens_cpu_upper_bound += 1
+        # seq_lens was advanced in place by the kernel above.
+        common_attn_metadata.invalidate_cached_layout()
 
         return positions
 
@@ -1330,10 +1333,13 @@ class SpecDecodeBaseProposer:
             self.vllm_config,
             AttentionLayerBase,  # type: ignore[type-abstract]
         )
+        draft_attn_layer_names = set(all_attn_layers) - target_attn_layer_names
+        for name in draft_attn_layer_names:
+            all_attn_layers[name].is_draft_layer = True
         # Filter to only layers that have KV cache specs.
         self._draft_attn_layer_names = {
             name
-            for name in (set(all_attn_layers.keys()) - target_attn_layer_names)
+            for name in draft_attn_layer_names
             if all_attn_layers[name].get_kv_cache_spec(self.vllm_config) is not None
         }
 
@@ -1478,9 +1484,9 @@ class SpecDecodeBaseProposer:
                 # width check does not apply to them.
                 draft_embed = self.model.model.embed_tokens
                 # Guard with isinstance so non-Tensor weights (e.g. in tests)
-                # are not affected — mirrors the weight-equality check above.
+                # and drafts built without an embedding are not affected.
                 if isinstance(target_embed_tokens.weight, torch.Tensor) and isinstance(
-                    draft_embed.weight, torch.Tensor
+                    getattr(draft_embed, "weight", None), torch.Tensor
                 ):
                     target_dim = target_embed_tokens.weight.shape[-1]
                     draft_dim = draft_embed.weight.shape[-1]
