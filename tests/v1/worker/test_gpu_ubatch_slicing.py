@@ -38,6 +38,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
 )
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.gpu.ubatch_common import UBatchSlice
 from vllm.v1.worker.gpu.ubatch_utils import (
     UBatchRunner,
     UBatchState,
@@ -46,7 +47,6 @@ from vllm.v1.worker.gpu.ubatch_utils import (
     merge_ubatch_outputs,
     slice_model_inputs,
 )
-from vllm.v1.worker.ubatch_utils import UBatchSlice
 from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_id,
     dbo_register_recv_hook,
