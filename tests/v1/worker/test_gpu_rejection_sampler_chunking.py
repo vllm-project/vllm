@@ -72,8 +72,12 @@ def test_iter_request_chunks_preserves_request_boundaries():
 
 
 @pytest.mark.skipif(
-    not (current_platform.is_cuda() or current_platform.is_xpu()),
-    reason="Requires CUDA or XPU",
+    not (
+        current_platform.is_cuda()
+        or current_platform.is_rocm()
+        or current_platform.is_xpu()
+    ),
+    reason="Requires CUDA, ROCm or XPU",
 )
 @pytest.mark.parametrize("logprobs_mode", get_args(LogprobsMode))
 def test_chunked_scores_match_full_batch(
