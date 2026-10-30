@@ -1046,7 +1046,11 @@ def _fused_moe_lora_kernel(
     )
     # get a_ptr,b_ptr,c_ptr
     cur_a_ptr = a_ptr + (slice_id % num_slice_a) * slice_a_size
-    cur_b_ptr = tl.load(b_ptr + slice_id).to(tl.pointer_type(c_ptr.dtype.element_ty))
+    if c_ptr.dtype.element_ty == tl.float32:
+        w_dtype = a_ptr.dtype.element_ty
+    else:
+        w_dtype = c_ptr.dtype.element_ty
+    cur_b_ptr = tl.load(b_ptr + slice_id).to(tl.pointer_type(w_dtype))
     cur_c_ptr = c_ptr + (slice_id % num_slice_c) * slice_c_size
 
     offs_k = pid_sk * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
@@ -1137,8 +1141,7 @@ def _fused_moe_lora_kernel(
         # branches (TMA desc path returns fp32, tl.load returns the pointer's
         # element type). Casting to bfloat16 here silently changes fp16 LoRA
         # operands and can produce incorrect results.
-        dot_dtype = a_ptr.dtype.element_ty
-        accumulator += tl.dot(a.to(dot_dtype), b.to(dot_dtype))
+        accumulator += tl.dot(a.to(w_dtype), b.to(w_dtype))
 
     if MUL_ROUTED_WEIGHT:
         moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0.0)
@@ -1598,7 +1601,7 @@ def _fused_moe_lora(
 
     a_intermediate_cache1 = torch.zeros(
         intermediate_cache_shape,
-        dtype=output.dtype,
+        dtype=torch.float32 if shrink_split_k > 1 else output.dtype,
         device=device,
     )
 

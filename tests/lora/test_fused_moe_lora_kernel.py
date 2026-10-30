@@ -862,7 +862,7 @@ def use_fused_moe_lora_kernel_tensor_parallel(
 # ensures the one-shot logic is correct against the pytorch reference.
 
 
-@pytest.mark.parametrize("num_tokens", [16, 100])
+@pytest.mark.parametrize("num_tokens", [16, 300])
 @pytest.mark.parametrize("top_k_num", [2])
 @pytest.mark.parametrize("num_experts", [8, 64])
 @pytest.mark.parametrize("max_loras", [4])
@@ -1565,3 +1565,198 @@ def test_fused_moe_lora_kernel_rejects_bad_block_size_m(device):
             adapter_enabled,
             block_size,
         )
+
+
+@pytest.mark.parametrize(
+    "op_type,num_tokens,top_k,num_experts,max_loras,num_slices,k,n,rank,smem,expected",
+    [
+        (
+            "fused_moe_lora_w13_shrink",
+            1,
+            4,
+            128,
+            1,
+            2,
+            6144,
+            768,
+            32,
+            232448,
+            {"BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 256, "SPLIT_K": 16},
+        ),
+        (
+            "fused_moe_lora_w2_shrink",
+            1,
+            8,
+            128,
+            1,
+            1,
+            768,
+            2048,
+            32,
+            232448,
+            {"BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 64, "SPLIT_K": 8},
+        ),
+        (
+            "fused_moe_lora_w13_shrink",
+            256,
+            4,
+            128,
+            1,
+            2,
+            6144,
+            768,
+            32,
+            232448,
+            {"BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 256, "SPLIT_K": 2},
+        ),
+        (
+            "fused_moe_lora_w13_shrink",
+            64,
+            8,
+            64,
+            4,
+            2,
+            2048,
+            1024,
+            8,
+            232448,
+            {"BLOCK_SIZE_N": 16, "BLOCK_SIZE_K": 256, "SPLIT_K": 1},
+        ),
+        (
+            "fused_moe_lora_w13_shrink",
+            1,
+            8,
+            256,
+            1,
+            2,
+            7168,
+            256,
+            64,
+            101376,
+            {"BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128, "SPLIT_K": 16},
+        ),
+        (
+            "fused_moe_lora_w13_shrink",
+            4,
+            8,
+            128,
+            1,
+            2,
+            2048,
+            768,
+            256,
+            232448,
+            {"BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 256, "SPLIT_K": 1},
+        ),
+        (
+            "fused_moe_lora_w13_expand",
+            1,
+            4,
+            128,
+            1,
+            2,
+            6144,
+            768,
+            32,
+            232448,
+            {"BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32, "SPLIT_K": 1},
+        ),
+        (
+            "fused_moe_lora_w2_expand",
+            64,
+            4,
+            128,
+            1,
+            1,
+            768,
+            6144,
+            8,
+            232448,
+            {"BLOCK_SIZE_N": 256, "BLOCK_SIZE_K": 16, "SPLIT_K": 1},
+        ),
+    ],
+    ids=[
+        "w13-shrink-m1-split-to-fill-sms",
+        "w2-shrink-m1-small-k-shrinks-block-k",
+        "w13-shrink-m256-caps-k-loop",
+        "w13-shrink-saturated-grid-no-split",
+        "w13-shrink-small-smem-halves-block-k",
+        "w13-shrink-rank256-tiles-rank",
+        "w13-expand-m1-narrow-n-tiles",
+        "w2-expand-m64-wide-n-tiles",
+    ],
+)
+def test_fused_moe_lora_two_kernel_config(
+    op_type,
+    num_tokens,
+    top_k,
+    num_experts,
+    max_loras,
+    num_slices,
+    k,
+    n,
+    rank,
+    smem,
+    expected,
+    monkeypatch,
+):
+    from vllm.lora.ops.triton_ops import utils
+
+    config = utils._fused_moe_lora_two_kernel_config(
+        op_type,
+        num_tokens,
+        top_k,
+        num_experts,
+        max_loras,
+        num_slices,
+        k,
+        n,
+        rank,
+        132,
+        smem,
+    )
+    assert config["BLOCK_SIZE_M"] == 16
+    assert {key: config[key] for key in expected} == expected
+
+    monkeypatch.setattr(utils, "is_batch_invariant", True)
+    utils._fused_moe_lora_two_kernel_config.cache_clear()
+    invariant = utils._fused_moe_lora_two_kernel_config(
+        op_type,
+        num_tokens,
+        top_k,
+        num_experts,
+        max_loras,
+        num_slices,
+        k,
+        n,
+        rank,
+        132,
+        smem,
+    )
+    utils._fused_moe_lora_two_kernel_config.cache_clear()
+    assert invariant["SPLIT_K"] == 1
+
+
+@pytest.mark.parametrize("num_tokens", [1, 64, 256, 257, 1024])
+def test_moe_lora_default_config_block_size_m_matches(num_tokens):
+    from vllm.lora.layers.utils import try_get_optimal_moe_lora_config
+
+    configs = [
+        try_get_optimal_moe_lora_config(
+            f"fused_moe_lora_{kind}",
+            w1_shape=(128, 1536, 6144),
+            w2_shape=(128, 6144, 768),
+            rank=32,
+            top_k=4,
+            dtype=None,
+            M=num_tokens,
+            num_slices=2,
+            max_loras=4,
+        )
+        for kind in ("w13_shrink", "w13_expand", "w2_shrink", "w2_expand")
+    ]
+    block_size_m = {config["BLOCK_SIZE_M"] for config in configs}
+    assert len(block_size_m) == 1
+    assert (block_size_m == {16}) == (
+        num_tokens <= FUSED_MOE_LORA_TWO_KERNEL_MAX_TOKENS
+    )

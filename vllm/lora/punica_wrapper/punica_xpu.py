@@ -595,6 +595,8 @@ class PunicaWrapperXPU(PunicaWrapperBase):
                 top_k=top_k,
                 dtype=config_dtype,
                 M=num_tokens,
+                num_slices=num_slices,
+                max_loras=max_loras,
             )
             shrink_config = get_config(op_type="fused_moe_lora_w13_shrink")
             expand_config = get_config(op_type="fused_moe_lora_w13_expand")
@@ -726,6 +728,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
                 top_k=top_k,
                 dtype=config_dtype,
                 M=num_tokens,
+                max_loras=max_loras,
             )
             shrink_config = get_config(op_type="fused_moe_lora_w2_shrink")
             expand_config = get_config(op_type="fused_moe_lora_w2_expand")
