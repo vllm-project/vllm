@@ -1077,6 +1077,7 @@ def test_packed_loras_layer_override(
         empty_replaced_module_name="up_proj",
     )
     gate_lora = model_lora.get_lora("gate_proj")
+    assert gate_lora is not None
 
     manager = LoRAModelManager(
         model,
