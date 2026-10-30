@@ -3121,6 +3121,9 @@ class VllmConfig:
         """Collect features not supported by the standalone CPU model runner."""
         unsupported: list[str] = []
 
+        if self.is_mm_encoder_only:
+            unsupported.append("multimodal encoder-only instances")
+
         if self.speculative_config is not None:
             unsupported.append("speculative decoding")
 
