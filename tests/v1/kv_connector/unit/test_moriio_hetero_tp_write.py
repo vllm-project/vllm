@@ -220,11 +220,12 @@ def _build_rank(model, tp_rank, tp_size, layout, hma, state, is_producer) -> Ran
     worker._has_mamba = any(layer.kind == "mamba" for layer in layers)
     worker.model_config = SimpleNamespace(get_total_num_kv_heads=lambda: heads)
     worker.kv_caches = caches
+    worker.num_blocks = NUM_BLOCKS
     worker.layer_to_spec = specs
     worker.layer_to_group = {
         layer.name: groups.index(layer.group if hma else "full") for layer in layers
     }
-    worker._mamba_payload_index_by_layer = {
+    worker._hybrid_payload_index_by_layer = {
         layer.name: groups.index("mamba") for layer in layers if layer.kind == "mamba"
     }
     worker._conv_decomp = next(

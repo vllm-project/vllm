@@ -203,6 +203,7 @@ pub(super) fn prepare_chat_request(
             include_stop_str_in_output: request.include_stop_str_in_output,
             stop_strings: request.stop.map(|stop| stop.into_vec()),
             min_tokens: request.min_tokens.unwrap_or(0),
+            detokenize: true,
         },
         intermediate: request.stream,
         prompt_truncation,
@@ -293,9 +294,7 @@ pub(crate) fn convert_message(message: ChatMessage) -> Result<VllmChatMessage, A
             name: _,
         } => {
             let mut blocks = Vec::new();
-            if let Some(reasoning) = reasoning
-                && !reasoning.is_empty()
-            {
+            if let Some(reasoning) = reasoning {
                 blocks.push(AssistantContentBlock::Reasoning { text: reasoning });
             }
             if let Some(content) = content {
@@ -304,7 +303,9 @@ pub(crate) fn convert_message(message: ChatMessage) -> Result<VllmChatMessage, A
             if let Some(tool_calls) = tool_calls {
                 blocks.extend(convert_assistant_tool_calls(tool_calls)?);
             }
-            if blocks.is_empty() {
+            if blocks.iter().all(|block| {
+                matches!(block, AssistantContentBlock::Reasoning { text } if text.is_empty())
+            }) {
                 bail_invalid_request!(
                     "Assistant messages must contain text, reasoning content, or tool_calls."
                 );
@@ -958,6 +959,7 @@ mod tests {
                 include_stop_str_in_output: false,
                 stop_strings: None,
                 min_tokens: 0,
+                detokenize: true,
             }
         );
         assert!(prepared.chat_request.initial_tools().is_empty());
@@ -1033,6 +1035,7 @@ mod tests {
                 include_stop_str_in_output: false,
                 stop_strings: None,
                 min_tokens: 0,
+                detokenize: true,
             }
         );
         assert!(prepared.chat_request.initial_tools().is_empty());
@@ -1425,36 +1428,38 @@ mod tests {
 
     #[test]
     fn prepare_chat_request_accepts_legacy_reasoning_content_alias() {
-        let request = ChatCompletionRequest {
-            messages: vec![
-                serde_json::from_value(json!({
-                    "role": "assistant",
-                    "content": "answer",
-                    "reasoning_content": "inner",
-                }))
-                .expect("legacy reasoning_content alias is accepted"),
-            ],
-            add_generation_prompt: Some(false),
-            ..base_request()
-        };
+        for reasoning in ["inner", ""] {
+            let request = ChatCompletionRequest {
+                messages: vec![
+                    serde_json::from_value(json!({
+                        "role": "assistant",
+                        "content": "answer",
+                        "reasoning_content": reasoning,
+                    }))
+                    .expect("legacy reasoning_content alias is accepted"),
+                ],
+                add_generation_prompt: Some(false),
+                ..base_request()
+            };
 
-        let prepared = prepare_chat_request(
-            request,
-            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
-            ResolvedRequestContext::default(),
-        )
-        .expect("request is valid");
-        assert_eq!(
-            prepared.chat_request.messages,
-            vec![VllmChatMessage::assistant_blocks(vec![
-                AssistantContentBlock::Reasoning {
-                    text: "inner".to_string(),
-                },
-                AssistantContentBlock::Text {
-                    text: "answer".to_string(),
-                },
-            ])]
-        );
+            let prepared = prepare_chat_request(
+                request,
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+            )
+            .expect("request is valid");
+            assert_eq!(
+                prepared.chat_request.messages,
+                vec![VllmChatMessage::assistant_blocks(vec![
+                    AssistantContentBlock::Reasoning {
+                        text: reasoning.to_string(),
+                    },
+                    AssistantContentBlock::Text {
+                        text: "answer".to_string(),
+                    },
+                ])]
+            );
+        }
     }
 
     #[test]

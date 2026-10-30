@@ -2,9 +2,9 @@ meta:
   title: "MiniMax-M3.1-Flash"
   slug: "minimax-m3.1-flash"
   provider: "MiniMax"
-  description: "MiniMax M3.1-Flash vision-language MoE (~428B total / 23B active) with MSA sparse attention throughout and a built-in DSpark draft; quantization-aware trained, MXFP8 dense layers and NVFP4 experts. Served TP4 on NVIDIA Blackwell or AMD MI355X (single node or prefill/decode disaggregated), and TP8 on NVIDIA Hopper."
+  description: "MiniMax M3.1-Flash vision-language MoE (~428B total / 23B active) with MSA sparse attention throughout and a built-in DSpark draft; quantization-aware trained, MXFP8 dense layers and NVFP4 experts. Served TP4 on NVIDIA Blackwell or AMD MI355X, prefill/decode disaggregated as TP4 + TP4 on MI355X or DEP2 + DEP4 on GB200/GB300, and TP8 on NVIDIA Hopper."
   date_added: 2026-10-23
-  date_updated: 2026-10-23
+  date_updated: 2026-10-27
   tasks:
     - text
     - multimodal
@@ -52,7 +52,7 @@ features:
       - "--reasoning-parser"
       - "minimax_m3"
   spec_decoding:
-    description: "DSpark speculative decoding with the draft shipped in the checkpoint (`dspark/`), three speculative tokens, FP8 draft KV cache. Draft attention backend is per-brand: FLASH_ATTN on NVIDIA, TRITON_ATTN on AMD."
+    description: "DSpark speculative decoding with the draft shipped in the checkpoint (`dspark/`), FP8 draft KV cache. Per brand: seven speculative tokens with FLASHINFER_TS draft attention on NVIDIA, three with TRITON_ATTN on AMD."
     # Per-brand draft attention backend (a feature's top-level `args` is the
     # fallback when no hardware_overrides.<gen> matches; both brands are
     # covered here).
@@ -63,7 +63,7 @@ features:
       nvidia:
         args:
           - "--speculative-config"
-          - '{"method":"dspark","num_speculative_tokens":3,"attention_backend":"FLASH_ATTN","kv_cache_dtype":"fp8","draft_sample_method":"probabilistic","rejection_sample_method":"block"}'
+          - '{"method":"dspark","num_speculative_tokens":7,"attention_backend":"FLASHINFER_TS","kv_cache_dtype":"fp8","draft_sample_method":"probabilistic","rejection_sample_method":"block"}'
       amd:
         args:
           - "--speculative-config"
@@ -278,9 +278,46 @@ strategy_overrides:
   # never decodes) and offloads KV to host memory in 1 GiB HugeTLB pages; both
   # nodes use the BLHNC KV layout, so NIXL reads one region per block instead
   # of one per layer.
+  # GB200/GB300 1P1D as in the guide's NVIDIA PD section: a DEP2 prefill on
+  # one tray and a DEP4 decode on a second tray. vllm-router takes
+  # one DP size for both pools, so it sends each request to the endpoint and
+  # each engine picks its own DP rank.
   pd_cluster:
+    router:
+      intra_node_data_parallel_size: 1
     prefill:
+      nodes:
+        gb200: 1
+        gb300: 1
+      parallelism:
+        default: tp
+        gb200: dep
+        gb300: dep
       hardware_overrides:
+        gb200: &m31_gb_prefill
+          extra_args:
+            - "--data-parallel-size"
+            - "2"
+            - "--data-parallel-size-local"
+            - "2"
+            - "--moe-backend"
+            - "deep_gemm_mega_moe"
+            - "--numa-bind"
+            - "--max-num-seqs"
+            - "64"
+            - "--max-num-batched-tokens"
+            - "32768"
+            - "--long-prefill-token-threshold"
+            - "8192"
+            - "--gpu-memory-utilization"
+            - "0.9"
+            - "--enable-prefix-caching"
+            - "--kv-transfer-config"
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"engine_ttl":0}}'
+          extra_env:
+            VLLM_USE_V2_MODEL_RUNNER: "1"
+            VLLM_ENGINE_READY_TIMEOUT_S: "3600"
+        gb300: *m31_gb_prefill
         mi355x:
           extra_args:
             - "--tensor-parallel-size"
@@ -295,7 +332,37 @@ strategy_overrides:
             CUDA_VISIBLE_DEVICES: "0,1,2,3"
             VLLM_KV_CACHE_LAYOUT: "BLHNC"
     decode:
+      nodes:
+        gb200: 1
+        gb300: 1
+      parallelism:
+        default: tp
+        gb200: dep
+        gb300: dep
       hardware_overrides:
+        # 28 sequences per rank; graphs up to 28 x (1 + 7 DSpark tokens).
+        gb200: &m31_gb_decode
+          extra_args:
+            - "--moe-backend"
+            - "deep_gemm_mega_moe"
+            - "--numa-bind"
+            - "--compilation-config"
+            - '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":224}'
+            - "--max-num-seqs"
+            - "28"
+            - "--max-num-batched-tokens"
+            - "8192"
+            - "--gpu-memory-utilization"
+            - "0.95"
+            - "--watermark"
+            - "0.05"
+            - "--no-enable-prefix-caching"
+            - "--kv-transfer-config"
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"engine_ttl":0}}'
+          extra_env:
+            VLLM_USE_V2_MODEL_RUNNER: "1"
+            VLLM_ENGINE_READY_TIMEOUT_S: "3600"
+        gb300: *m31_gb_decode
         mi355x:
           extra_args:
             - "--tensor-parallel-size"
@@ -309,6 +376,651 @@ strategy_overrides:
           extra_env:
             CUDA_VISIBLE_DEVICES: "0,1,2,3"
             VLLM_KV_CACHE_LAYOUT: "BLHNC"
+
+presets:
+  # GB300 AgentX under Dynamo: aggregated TP4 workers, and DEP2 prefill
+  # workers feeding one DEP decode worker. Each preset restates its engine
+  # flags, so it does not depend on the pd_cluster GB300 block above.
+  gb300_agentx_agg:
+    label: "AgentX TP4 (Dynamo)"
+    hardware: gb300
+    strategy: single_node_tp
+    variants: [default]
+    workload: "Agentic (InferenceX AgentX)"
+    description: "Aggregated TP4 vLLM workers, one per 4-GPU GB300 tray, behind the Dynamo KV router with session affinity. Seven-token DSpark draft on FLASH_ATTN and prefill CUDA graphs up to 8192 tokens. KV stays in HBM, or spills to host DRAM through SimpleCPUOffloadConnector."
+    source: { label: "InferenceX #4468", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4468", key: "minimaxm31flash-fp4-gb300-dynamo-vllm-agentic-dspark-agg", revision: 41f7dfe5e5f4a6ad1acb56ca5f2f47412fbdcbb7 }
+    image:
+      vllm: "vllm/vllm-openai:minimax-m31-flash-arm64-cu134"
+      dynamo: "1.6.0.dev20261023"
+      pip: ["ai-dynamo-runtime==1.6.0.dev20261023", "ai-dynamo==1.6.0.dev20261023"]
+    tp: 4
+    select:
+      features: { text_only: true }
+    args:
+      - "--enable-prefix-caching"
+      - "--max-model-len"
+      - "1048576"
+      - "--max-num-batched-tokens"
+      - "32768"
+    env:
+      # Pins the prefix-block hashes, so they match across processes and restarts.
+      PYTHONHASHSEED: "0"
+      # A cold start (JIT builds, graph capture, autotune) takes more than 10 minutes.
+      VLLM_ENGINE_READY_TIMEOUT_S: "7200"
+      VLLM_HTTP_TIMEOUT_KEEP_ALIVE: "600"
+      VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT: "600"
+    json_args:
+      "--compilation-config": { cudagraph_capture_sizes: [8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256, 320, 384, 448, 512, 576, 640, 704, 768, 832, 896, 960, 1024, 1536, 2048, 3072, 4096, 6144, 8192] }
+      "--speculative-config": { attention_backend: "FLASH_ATTN" }
+    # --max-num-seqs is about twice the sessions a worker serves.
+    points:
+      gpu_kv:
+        label: "GPU-resident KV"
+        description: "KV cache in HBM only: --max-num-seqs 32 for about 16 sessions per worker, 64 for up to 32."
+        default: true
+        args: ["--max-num-seqs", "32", "--gpu-memory-utilization", "0.9"]
+        select: { kv_offload: "off" }
+      dram_kv:
+        label: "Host-DRAM KV offload"
+        description: "Adds a host-DRAM KV tier (860 GB per worker) for about 40-56 sessions per worker."
+        args: ["--max-num-seqs", "96", "--gpu-memory-utilization", "0.86"]
+        env: { VLLM_USE_SIMPLE_KV_OFFLOAD: "1" }
+        select: { kv_offload: simple }
+        json_args:
+          "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: null, cpu_bytes_to_use: 860000000000, lazy_offload: true } }
+    runbook: |
+      The GB300 aggregated AgentX lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`minimaxm31flash-fp4-gb300-dynamo-vllm-agentic-dspark-agg`, [SemiAnalysisAI/InferenceX#4468](https://github.com/SemiAnalysisAI/InferenceX/pull/4468)) serves the default checkpoint text-only, with one TP4 `dynamo.vllm` worker per 4-GPU tray behind the Dynamo frontend. Add trays to scale out: the KV router spreads conversations across them. The lane measured 29.2k tok/s/GPU at 416 tok/s/user with 16 sessions per tray (GPU-resident KV, `--max-num-seqs 32`), and 95.0k tok/s/GPU at 180 tok/s/user with 56 sessions per tray (host-DRAM KV offload, `--max-num-seqs 96`).
+
+      **Image and versions.** The lane used an arm64 CUDA 13 build of the `vllm/vllm-openai:minimax-m31-flash` image (tag `minimax-m31-flash-arm64-cu134`); any build of that image family for GB300 will do. Dynamo `1.6.0.dev20261023` was installed on top: `pip install --extra-index-url https://pypi.nvidia.com ai-dynamo-runtime==1.6.0.dev20261023 ai-dynamo==1.6.0.dev20261023`.
+
+      **Tuning rules.**
+
+      - `--max-num-seqs` is about twice the sessions one worker serves: 32 up to 16 sessions, 64 at 32-48, 96 at 56.
+      - **GPU-resident KV** (`--gpu-memory-utilization 0.9`) is enough up to about 32 sessions per tray. Beyond that, multi-turn contexts outgrow HBM and evicted prefixes are recomputed.
+      - **Host-DRAM KV offload** adds `SimpleCPUOffloadConnector` with lazy offload (`VLLM_USE_SIMPLE_KV_OFFLOAD=1`). `cpu_bytes_to_use` is the budget for the whole worker, split across its four ranks: 860 GB pins 215 GB per rank. Size it from the host DRAM that is free after the engine processes are up. Lower `--gpu-memory-utilization` to 0.86 to leave room for the transfer buffers.
+      - The CUDA graph sizes go up to 8192 tokens, so prefill chunks of up to 8192 tokens also replay graphs. `--max-num-batched-tokens 32768` still allows larger mixed steps, which run piecewise.
+
+      **Running under Dynamo.** Start etcd and NATS (32 MB max payload) once:
+
+      ```bash
+      etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://<infra-host>:2379
+      printf 'max_payload: 33554432\n' > nats.conf && nats-server -c nats.conf
+      ```
+
+      On each tray, export `ETCD_ENDPOINTS=http://<infra-host>:2379` and `NATS_SERVER=nats://<infra-host>:4222` together with the generated environment and `DYN_TCP_CONNECT_TIMEOUT=120`, `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT=1024`, `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT=1024` and `DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT=2048`. Then run the generated flags with `python3 -m dynamo.vllm --model MiniMaxAI/MiniMax-M3.1-Flash --served-model-name MiniMaxAI/MiniMax-M3.1-Flash --trust-remote-code` in place of `vllm serve MiniMaxAI/MiniMax-M3.1-Flash`. `dynamo.vllm` rejects vLLM's API-server flags, so leave out `--tool-call-parser minimax_m3 --enable-auto-tool-choice` and add:
+
+      ```bash
+      --dyn-tool-call-parser minimax_m3 --dyn-reasoning-parser minimax_m3 \
+        --kv-events-config '{"publisher":"zmq","topic":"kv-events","enable_kv_cache_events":true,"endpoint":"tcp://*:5200"}'
+      ```
+
+      Start the frontend:
+
+      ```bash
+      export ETCD_ENDPOINTS=http://<infra-host>:2379 NATS_SERVER=nats://<infra-host>:4222
+      export DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS=3600 DYN_TCP_CONNECT_TIMEOUT=120
+      python3 -m dynamo.frontend --http-port 8000 --router-mode kv --router-session-affinity-ttl-secs 14400
+      ```
+
+      The KV router uses the workers' KV events to send each request to the worker that holds its prefix. Session affinity keeps a conversation on that worker for up to four hours; send a stable conversation ID in the `X-Dynamo-Session-ID` request header.
+
+      The InferenceX throughput points replaced block verification with synthetic rejection at the committed golden DSpark acceptance length (4.04), so every point is measured at the same acceptance rate. Production serving keeps the default rejection sampler (`rejection_sample_method: block`), as in the command above.
+
+  gb300_agentx_pd:
+    label: "AgentX PD (Dynamo)"
+    hardware: gb300
+    strategy: pd_cluster
+    variants: [default]
+    workload: "Agentic (InferenceX AgentX)"
+    description: "DEP2 prefill workers, two per GB300 tray, feed one DEP8 decode worker (throughput) or DEP16 (lower latency) over NIXL. Both roles share a Mooncake KV store in host DRAM. The Dynamo KV router routes with session affinity. Seven-token DSpark draft on FLASHINFER_TS, DeepGEMM MegaMoE on both roles."
+    source: { label: "InferenceX #4468", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4468", key: "minimaxm31flash-fp4-gb300-dynamo-vllm-agentic-dspark-disagg", revision: 41f7dfe5e5f4a6ad1acb56ca5f2f47412fbdcbb7 }
+    image:
+      vllm: "vllm/vllm-openai:minimax-m31-flash-arm64-cu134"
+      dynamo: "1.6.0.dev20261023"
+      pip: ["ai-dynamo-runtime==1.6.0.dev20261023", "ai-dynamo==1.6.0.dev20261023", "mooncake-transfer-engine-cuda13==0.3.13.post1"]
+    # Dynamo workers take engine flags only; the tool-call parser moves to
+    # --dyn-tool-call-parser (see the runbook).
+    select:
+      pd_router: dynamo
+      features: { text_only: true, tool_calling: false }
+    args:
+      - "--enable-expert-parallel"
+      - "--moe-backend"
+      - "deep_gemm_mega_moe"
+      - "--numa-bind"
+      - "--enable-prefix-caching"
+      - "--max-model-len"
+      - "1048576"
+    # The RDMA names are a GB300 tray's four NICs; use the host's own.
+    env:
+      PYTHONHASHSEED: "0"
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+      VLLM_ENGINE_READY_TIMEOUT_S: "7200"
+      VLLM_HTTP_TIMEOUT_KEEP_ALIVE: "600"
+      NCCL_NET_GDR_C2C: "1"
+      NCCL_IB_HCA: "mlx5_0,mlx5_1,mlx5_2,mlx5_3"
+      NVSHMEM_REMOTE_TRANSPORT: "none"
+      NVSHMEM_ENABLE_NIC_PE_MAPPING: "1"
+      NVSHMEM_HCA_PE_MAPPING: "mlx5_0:1:1,mlx5_1:1:1,mlx5_2:1:1,mlx5_3:1:1"
+      UCX_TLS: "rc,cuda_copy"
+      UCX_NET_DEVICES: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1"
+      UCX_CUDA_IPC_ENABLE_MNNVL: "n"
+      UCX_MEMTYPE_CACHE: "n"
+      UCX_MEMTYPE_REG_WHOLE: "n"
+      UCX_RNDV_PIPELINE_ERROR_HANDLING: "y"
+      NIXL_UCX_SGL_ENABLE: "1"
+      WITH_NVIDIA_PEERMEM: "0"
+      MC_SLICE_SIZE: "1048576"
+      MC_MAX_MR_SIZE: "4294967296"
+      MC_ENABLE_DEST_DEVICE_AFFINITY: "1"
+      DYN_TCP_CONNECT_TIMEOUT: "120"
+      DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT: "1024"
+      DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT: "1024"
+      DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT: "2048"
+    roles:
+      prefill:
+        # One DEP2 worker on two GPUs; two per tray, as many trays as the load needs.
+        nodes: 1
+        parallelism: dep
+        args:
+          - "--data-parallel-size"
+          - "2"
+          - "--data-parallel-size-local"
+          - "2"
+          - "--max-num-seqs"
+          - "64"
+          - "--max-num-batched-tokens"
+          - "32768"
+          - "--long-prefill-token-threshold"
+          - "4096"
+          - "--gpu-memory-utilization"
+          - "0.85"
+          - "--compilation-config"
+          - '{"cudagraph_mode":"FULL_AND_PIECEWISE"}'
+          - "--max-cudagraph-capture-size"
+          - "2048"
+          - "--kv-events-config"
+          - '{"publisher":"zmq","topic":"kv-events","enable_kv_cache_events":true,"endpoint":"tcp://*:5200"}'
+          - "--kv-transfer-config"
+          - '{"kv_connector":"MultiConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_load_failure_policy":"fail","kv_buffer_device":"cuda","kv_connector_extra_config":{"backends":["UCX"],"enforce_handshake_compat":false,"kv_lease_duration":120}},{"kv_connector":"MooncakeStoreConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"load_async":true,"lookup_async":true,"enable_offload":false}}]}}'
+        env:
+          VLLM_MOONCAKE_LOAD_RECV_THREADS: "8"
+      decode:
+        nodes: 2
+        parallelism: dep
+        # 48 sequences per DP rank; decode graphs cover 48 x (1 + 7) tokens.
+        # Decode also writes the KV it generates into the Mooncake store.
+        remove_args: ["--no-enable-prefix-caching"]
+        args:
+          - "--max-num-seqs"
+          - "48"
+          - "--max-num-batched-tokens"
+          - "8192"
+          - "--watermark"
+          - "0.05"
+          - "--gpu-memory-utilization"
+          - "0.95"
+          - "--compilation-config"
+          - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+          - "--max-cudagraph-capture-size"
+          - "384"
+          - "--numa-bind-nodes"
+          - "0"
+          - "0"
+          - "1"
+          - "1"
+          - "--kv-transfer-config"
+          - '{"kv_connector":"MultiConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_load_failure_policy":"fail","kv_buffer_device":"cuda","kv_connector_extra_config":{"backends":["UCX"],"enforce_handshake_compat":false,"kv_lease_duration":120}},{"kv_connector":"MooncakeStoreConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"load_async":true,"lookup_async":true,"enable_offload":false,"save_decode_cache":true}}]}}'
+        env:
+          VLLM_MOONCAKE_LOAD_RECV_THREADS: "4"
+          VLLM_MAX_ASYNC_KV_ADMITS_PER_STEP: "4"
+          VLLM_RANDOMIZE_DP_DUMMY_INPUTS: "1"
+          VLLM_ALLREDUCE_USE_SYMM_MEM: "0"
+          NCCL_CUMEM_ENABLE: "1"
+          NCCL_MNNVL_ENABLE: "1"
+          NCCL_NVLS_ENABLE: "1"
+    points:
+      dep8:
+        label: "DEP8 decode (throughput)"
+        description: "One DEP8 decode worker across two trays."
+        default: true
+      dep16:
+        label: "DEP16 decode (lower latency)"
+        description: "One DEP16 decode worker across four trays."
+        roles: { decode: { nodes: 4 } }
+    runbook: |
+      The GB300 disaggregated AgentX lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`minimaxm31flash-fp4-gb300-dynamo-vllm-agentic-dspark-disagg`, [SemiAnalysisAI/InferenceX#4468](https://github.com/SemiAnalysisAI/InferenceX/pull/4468)) serves the default checkpoint text-only with Dynamo and vLLM. Six prefill workers, each DEP2 on two GPUs (two per 4-GPU tray, three trays), feed one decode worker that is DEP8 across two trays or DEP16 across four. KV moves from prefill to decode over NIXL (UCX over RDMA), and every rank contributes host DRAM to a shared Mooncake KV store, so a returning conversation's prefix is loaded from the store instead of recomputed. Both roles use expert parallelism with DeepGEMM MegaMoE, attention data parallelism, the V2 model runner and the seven-token DSpark draft on `FLASHINFER_TS`.
+
+      | Prefill workers (DEP2) | Decode | GPUs | Sessions | tok/s/GPU | tok/s/user | TTFT p90 |
+      |---:|---|---:|---:|---:|---:|---:|
+      | 6 | DEP8 | 20 | 280 | 90.0k | 241 | 3.5 s |
+      | 6 | DEP8 | 20 | 320 | 97.1k | 236 | 4.3 s |
+      | 6 | DEP8 | 20 | 360 | 103.9k | 230 | 5.8 s |
+      | 6 | DEP16 | 28 | 300 | 74.0k | 299 | 2.2 s |
+
+      The preset renders one prefill worker and the decode worker. Run more prefill workers with the same command. Two workers share a tray on GPUs 0-1 and 2-3 (`--device-ids 0,1` and `--device-ids 2,3` on `dynamo.vllm`). Give each its own `--data-parallel-rpc-port`, `VLLM_NIXL_SIDE_CHANNEL_PORT` and `--kv-events-config` endpoint port.
+
+      **Image and versions.** The lane used an arm64 CUDA 13 build of the `vllm/vllm-openai:minimax-m31-flash` image (tag `minimax-m31-flash-arm64-cu134`), with Dynamo `1.6.0.dev20261023` and Mooncake `mooncake-transfer-engine-cuda13==0.3.13.post1` installed on every worker and on the Mooncake master host: `pip install --extra-index-url https://pypi.nvidia.com ai-dynamo-runtime==1.6.0.dev20261023 ai-dynamo==1.6.0.dev20261023 mooncake-transfer-engine-cuda13==0.3.13.post1`.
+
+      ### Tuning rules
+
+      - **Prefill pool.** The prefill pool sets TTFT, so scale prefill workers with load. The lane's points kept TTFT p90 between 2.2 and 5.8 s with one DEP2 prefill worker per 45-60 concurrent agentic sessions, so 90-120 sessions per prefill tray (six workers at 280-360 sessions). Add prefill workers when TTFT p90 climbs while decode still has room. Two DEP2 workers per tray give the router twice as many prefill targets as one DEP4 worker.
+      - **DEP8 or DEP16 decode.** DEP8 gives the most tokens per GPU: up to 45 sessions per decode GPU (360 sessions) at 230 tok/s/user. DEP16 halves the batch per rank and gives about 25% more tok/s/user (299 at 300 sessions, against 241 at 280 on DEP8) at about 18% fewer tokens per GPU. `--max-num-seqs 48` per DP rank is a cap, not the operating point. The decode graph cap is `--max-num-seqs` x (1 + 7 draft tokens) = 384. `--watermark 0.05` keeps 5% of the decode KV cache free, so extra requests wait in the queue instead of preempting running ones. Keep decode `--max-num-batched-tokens` at 8192: a preempted request recomputes its context in chunks of that size.
+      - **Prefill batching.** `--long-prefill-token-threshold 4096` chunks long prompts into 4096-token pieces. Short prompts then share each step with them instead of waiting behind a 100K-token context, which lowers the TTFT tail. The recipe's 1P1D section above uses 8192. `--max-num-batched-tokens 32768` bounds a prefill step. Prefill captures CUDA graphs up to 2048 tokens.
+      - **Mooncake pool size.** `global_segment_size` is registered by every DP rank, prefill and decode alike, so a tray pins four times that value. The lane used 160 GB per rank (640 GB per tray). Size it as (host DRAM free per tray after the engines are up - headroom for NIXL and the 4 GB local buffers) / ranks per tray. The decode ranks also write the KV they generate into the store (`save_decode_cache: true`), so the next turn's prefill can load the previous answer instead of recomputing it.
+      - **Routing.** The KV router (`--router-mode kv`) reads the prefill workers' KV events and sends each request to the worker that already holds its prefix. Session affinity (`--router-session-affinity-ttl-secs 14400`) keeps a conversation on that worker for up to four hours. Send a stable conversation ID in the `X-Dynamo-Session-ID` header. The Mooncake store catches the prefixes that miss after a reroute.
+      - **Transport.** Cross-tray NIXL needs `UCX_TLS=rc,cuda_copy` with `UCX_NET_DEVICES` set to the tray's RDMA ports. Without them, UCX can fall back to TCP and transfers stall. Point `UCX_MODULE_DIR` at the UCX bundled with the NIXL wheel (`nixl_cu13.libs/ucx` in the image's `dist-packages`). `kv_lease_duration: 120` holds a prefill's blocks for up to 120 s until decode reads them (the default is 30 s). `VLLM_MAX_ASYNC_KV_ADMITS_PER_STEP=4` caps how many requests with finished KV loads decode admits per step.
+      - **NUMA.** `--numa-bind` pins each rank to its GPU's NUMA node. Decode passes the tray's map, `--numa-bind-nodes 0 0 1 1`, explicitly.
+      - `--moe-backend deep_gemm_mega_moe` is the same as the lane's `--kernel-config '{"moe_backend":"deep_gemm_mega_moe"}'`. `--prefill-schedule-interval 1`, also set by the lane, is vLLM's default.
+
+      ### Services
+
+      Start etcd, NATS and the Mooncake master once:
+
+      ```bash
+      etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://<infra-host>:2379
+      printf 'max_payload: 33554432\n' > nats.conf && nats-server -c nats.conf
+      mooncake_master --rpc_port=50051 \
+        --default_kv_lease_ttl=60000 --eviction_high_watermark_ratio=0.95 --eviction_ratio=0.10
+      ```
+
+      Every worker reads the store configuration from the JSON file that `MOONCAKE_CONFIG_PATH` points to (export it with the rest of the environment):
+
+      ```json
+      {"master_server_address": "<infra-host>:50051", "metadata_server": "P2PHANDSHAKE",
+       "global_segment_size": "160GB", "local_buffer_size": "4GB", "protocol": "rdma",
+       "device_name": "mlx5_0,mlx5_1,mlx5_2,mlx5_3", "enable_offload": false}
+      ```
+
+      ### Workers
+
+      Export `ETCD_ENDPOINTS=http://<infra-host>:2379`, `NATS_SERVER=nats://<infra-host>:4222` and the generated environment on every tray, then run the generated `python3 -m dynamo.vllm` commands. Add `--served-model-name MiniMaxAI/MiniMax-M3.1-Flash --trust-remote-code --dyn-tool-call-parser minimax_m3 --dyn-reasoning-parser minimax_m3` to both roles. `dynamo.vllm` rejects vLLM's API-server flags `--tool-call-parser` and `--enable-auto-tool-choice`. Multi-node DEP decode runs one process per tray with `--data-parallel-start-rank` set to 0, 4, 8 and so on, and a shared `--data-parallel-address` and `--data-parallel-rpc-port`. `--data-parallel-hybrid-lb` lets every tray's Dynamo runtime register its own DP ranks with the frontend.
+
+      ### Frontend
+
+      ```bash
+      export ETCD_ENDPOINTS=http://<infra-host>:2379 NATS_SERVER=nats://<infra-host>:4222
+      export DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS=3600 DYN_TCP_CONNECT_TIMEOUT=120
+      python3 -m dynamo.frontend --http-port 8000 --router-mode kv --router-session-affinity-ttl-secs 14400
+      ```
+
+      The InferenceX throughput points replaced block verification with synthetic rejection at the committed golden DSpark acceptance length (4.04), so every point is measured at the same acceptance rate. Production serving keeps the default rejection sampler (`rejection_sample_method: block`), as in the command above.
+
+  b300_agentx_tp4:
+    label: "AgentX TP4"
+    hardware: b300
+    strategy: single_node_tp
+    variants: [default]
+    workload: "Agentic (InferenceX AgentX)"
+    description: "One TP4 engine on four of the node's eight B300 GPUs with the seven-token DSpark draft on FLASH_ATTN; GPU-resident KV up to concurrency 32, host-DRAM KV offload (about 1.5 TB per engine) at 24 and 40-56."
+    source: { label: "InferenceX #4467", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4467", key: "minimaxm31flash-fp4-b300-vllm-agentic-dspark", revision: 615ee422fa655b90a0551e7fe80230f543f57a10 }
+    image: "vllm/vllm-openai:minimax-m31-flash@sha256:86f582dae25ea92802353727164ae4eb03b37b18baf9119b805ffaec2a7ef07c"
+    tp: 4
+    select:
+      features: { text_only: true }
+    args:
+      - "--enable-prefix-caching"
+      - "--gpu-memory-utilization"
+      - "0.92"
+      - "--max-num-batched-tokens"
+      - "32768"
+      - "--stream-interval"
+      - "20"
+    env:
+      VLLM_HTTP_TIMEOUT_KEEP_ALIVE: "600"
+      VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT: "600"
+    json_args:
+      "--compilation-config": { cudagraph_capture_sizes: [8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256, 320, 384, 448, 512, 576, 640, 704, 768, 832, 896, 960, 1024, 1536, 2048, 3072, 4096, 6144, 8192] }
+      "--speculative-config": { attention_backend: "FLASH_ATTN" }
+    # cpu_bytes_to_use is the engine-wide host budget (split across the TP
+    # ranks); the Simple option's per-rank default is dropped.
+    points:
+      c1: { label: "1", concurrency: 1, args: ["--max-num-seqs", "2"], select: { kv_offload: "off" } }
+      c4: { label: "4", concurrency: 4, args: ["--max-num-seqs", "8"], select: { kv_offload: "off" } }
+      c8: { label: "8", concurrency: 8, args: ["--max-num-seqs", "16"], select: { kv_offload: "off" } }
+      c16: { label: "16", concurrency: 16, args: ["--max-num-seqs", "32"], select: { kv_offload: "off" } }
+      c24:
+        label: "24 (KV offload)"
+        concurrency: 24
+        args: ["--max-num-seqs", "48"]
+        select: { kv_offload: simple }
+        json_args:
+          "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: null, cpu_bytes_to_use: 1499000000000, lazy_offload: true } }
+      c32: { label: "32", concurrency: 32, args: ["--max-num-seqs", "64"], select: { kv_offload: "off" } }
+      c40:
+        label: "40 (KV offload)"
+        concurrency: 40
+        args: ["--max-num-seqs", "64"]
+        select: { kv_offload: simple }
+        json_args:
+          "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: null, cpu_bytes_to_use: 1499000000000, lazy_offload: true } }
+      c48:
+        label: "48 (KV offload)"
+        concurrency: 48
+        args: ["--max-num-seqs", "64"]
+        select: { kv_offload: simple }
+        json_args:
+          "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: null, cpu_bytes_to_use: 1499000000000, lazy_offload: true } }
+      c56:
+        label: "56 (KV offload)"
+        concurrency: 56
+        args: ["--max-num-seqs", "96"]
+        select: { kv_offload: simple }
+        json_args:
+          "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: null, cpu_bytes_to_use: 1499000000000, lazy_offload: true } }
+    runbook: |
+      The B300 AgentX lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`minimaxm31flash-fp4-b300-vllm-agentic-dspark`, [SemiAnalysisAI/InferenceX#4467](https://github.com/SemiAnalysisAI/InferenceX/pull/4467), run [40340506758](https://github.com/SemiAnalysisAI/InferenceX/actions/runs/40340506758)) serves the default checkpoint (MXFP8 dense layers, NVFP4 experts, NVFP4 KV and indexer K caches) as one aggregated text-only vLLM engine on a single 8-GPU B300 node. Its TP4 points run the seven-token DSpark draft with `FLASH_ATTN` draft attention; the recipe's NVIDIA default, `FLASHINFER_TS`, is what the [AgentX TP2](#preset-b300_agentx_tp2) points run.
+
+      - **GPU-resident points** (concurrency 1-16 and 32) keep the whole KV cache in HBM, with `--max-num-seqs` at twice the concurrency (64 at 32).
+      - **KV offload points** (24 and 40-56) add a host-DRAM KV tier through `SimpleCPUOffloadConnector` with lazy offload. `cpu_bytes_to_use` (1,499 GB) is the budget for the whole engine: each of the four ranks pins 349 GiB of host memory, so the engine needs about 1.5 TB of free host RAM. Pinning takes a couple of minutes at startup.
+      - The CUDA graph capture sizes go up to 8192 tokens, so prefill chunks of up to 8192 tokens also replay graphs.
+
+      The InferenceX throughput points replaced block verification with synthetic rejection at the committed golden DSpark acceptance length (4.04) so every point is measured at the same acceptance rate. The command above keeps block verification.
+
+  b300_agentx_tp2:
+    label: "AgentX TP2 + KV offload"
+    hardware: b300
+    strategy: single_node_tp
+    variants: [default]
+    workload: "Agentic (InferenceX AgentX)"
+    description: "One TP2 engine on two of the node's eight B300 GPUs with the seven-token DSpark draft on FLASHINFER_TS and host-DRAM KV offload (about 750 GB per engine)."
+    source: { label: "InferenceX #4467", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4467", key: "minimaxm31flash-fp4-b300-vllm-agentic-dspark", revision: 615ee422fa655b90a0551e7fe80230f543f57a10 }
+    image: "vllm/vllm-openai:minimax-m31-flash@sha256:86f582dae25ea92802353727164ae4eb03b37b18baf9119b805ffaec2a7ef07c"
+    tp: 2
+    select:
+      features: { text_only: true }
+      kv_offload: simple
+    args:
+      - "--enable-prefix-caching"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--max-num-batched-tokens"
+      - "32768"
+      - "--stream-interval"
+      - "20"
+    env:
+      VLLM_HTTP_TIMEOUT_KEEP_ALIVE: "600"
+      VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT: "600"
+    json_args:
+      "--compilation-config": { cudagraph_capture_sizes: [8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256, 320, 384, 448, 512, 576, 640, 704, 768, 832, 896, 960, 1024, 1536, 2048, 3072, 4096, 6144, 8192] }
+      "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: null, cpu_bytes_to_use: 749000000000, lazy_offload: true } }
+    points:
+      c24: { label: "24", concurrency: 24, args: ["--max-num-seqs", "48"] }
+      c32: { label: "32", concurrency: 32, args: ["--max-num-seqs", "48"] }
+      c40: { label: "40", concurrency: 40, args: ["--max-num-seqs", "60"] }
+      c48: { label: "48", concurrency: 48, args: ["--max-num-seqs", "72"] }
+    runbook: |
+      The TP2 points of the B300 AgentX lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`minimaxm31flash-fp4-b300-vllm-agentic-dspark`, [SemiAnalysisAI/InferenceX#4467](https://github.com/SemiAnalysisAI/InferenceX/pull/4467), run [40340506758](https://github.com/SemiAnalysisAI/InferenceX/actions/runs/40340506758)) serve the default checkpoint as one aggregated text-only vLLM engine on two GPUs of an 8-GPU B300 node, with the recipe's seven-token DSpark draft on `FLASHINFER_TS` (the [AgentX TP4](#preset-b300_agentx_tp4) points use `FLASH_ATTN`).
+
+      Every point adds a host-DRAM KV tier through `SimpleCPUOffloadConnector` with lazy offload. `cpu_bytes_to_use` (749 GB) is the budget for the whole engine: each of the two ranks pins about 349 GiB of host memory. The lane ran one engine per node; several TP2 engines on one node each need their own share of host RAM.
+
+      The InferenceX throughput points replaced block verification with synthetic rejection at the committed golden DSpark acceptance length (4.04) so every point is measured at the same acceptance rate. The command above keeps block verification.
+
+  # GB200 AgentX under Dynamo: aggregated TP4 workers, and DEP4 prefill trays
+  # feeding one DEP decode worker. Each preset restates its engine flags, so it
+  # does not depend on the pd_cluster GB200 block above.
+  gb200_agentx_agg:
+    label: "AgentX TP4 (Dynamo)"
+    hardware: gb200
+    strategy: single_node_tp
+    variants: [default]
+    workload: "Agentic (InferenceX AgentX)"
+    description: "Aggregated TP4 vLLM workers, one per 4-GPU GB200 tray, behind the Dynamo KV router with session affinity. Seven-token DSpark draft on FLASH_ATTN and prefill CUDA graphs up to 8192 tokens. KV stays in HBM, or spills to host DRAM through SimpleCPUOffloadConnector."
+    source: { label: "InferenceX #4464", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4464", key: "minimaxm31flash-fp4-gb200-dynamo-vllm-agentic-dspark-agg", revision: 25845c731734bde9298eece5f9ed296e3b0745ca }
+    image:
+      vllm: "vllm/vllm-openai:minimax-m31-flash-arm64-cu134"
+      dynamo: "1.6.0.dev20261023"
+      pip: ["ai-dynamo-runtime==1.6.0.dev20261023", "ai-dynamo==1.6.0.dev20261023"]
+    tp: 4
+    select:
+      features: { text_only: true }
+    args:
+      - "--enable-prefix-caching"
+      - "--max-model-len"
+      - "1048576"
+      - "--max-num-batched-tokens"
+      - "32768"
+    env:
+      # Pins the prefix-block hashes, so they match across processes and restarts.
+      PYTHONHASHSEED: "0"
+      # A cold start (JIT builds, graph capture, autotune) takes more than 10 minutes.
+      VLLM_ENGINE_READY_TIMEOUT_S: "7200"
+    json_args:
+      "--compilation-config": { cudagraph_capture_sizes: [8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256, 320, 384, 448, 512, 576, 640, 704, 768, 832, 896, 960, 1024, 1536, 2048, 3072, 4096, 6144, 8192] }
+      "--speculative-config": { attention_backend: "FLASH_ATTN" }
+    # --max-num-seqs is about twice the sessions a worker serves.
+    points:
+      gpu_kv:
+        label: "GPU-resident KV"
+        description: "KV cache in HBM only, for up to about 16 sessions per worker."
+        default: true
+        args: ["--max-num-seqs", "32", "--gpu-memory-utilization", "0.88"]
+        select: { kv_offload: "off" }
+      dram_kv:
+        label: "Host-DRAM KV offload"
+        description: "Adds a host-DRAM KV tier (360 GB per worker) for about 32-40 sessions per worker."
+        args: ["--max-num-seqs", "64", "--gpu-memory-utilization", "0.82", "--kv-cache-metrics"]
+        select: { kv_offload: simple }
+        json_args:
+          "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: null, cpu_bytes_to_use: 360000000000, lazy_offload: true } }
+    runbook: |
+      The GB200 aggregated AgentX lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`minimaxm31flash-fp4-gb200-dynamo-vllm-agentic-dspark-agg`, [SemiAnalysisAI/InferenceX#4464](https://github.com/SemiAnalysisAI/InferenceX/pull/4464)) serves the default checkpoint text-only, with one TP4 `dynamo.vllm` worker per 4-GPU tray behind the Dynamo frontend. Add trays to scale out: the KV router spreads conversations across them. At 16 sessions per tray (GPU-resident KV) the lane measured 29.0k tok/s/GPU at 402 tok/s/user.
+
+      **Image and versions.** The lane used an arm64 CUDA 13 build of the `vllm/vllm-openai:minimax-m31-flash` image (tag `minimax-m31-flash-arm64-cu134`); any build of that image family for GB200 will do. Dynamo `1.6.0.dev20261023` was installed on top: `pip install --extra-index-url https://pypi.nvidia.com ai-dynamo-runtime==1.6.0.dev20261023 ai-dynamo==1.6.0.dev20261023`.
+
+      **Tuning rules.**
+
+      - `--max-num-seqs` is about twice the sessions one worker serves: 32 up to 16 sessions, 64 at 32-40.
+      - **GPU-resident KV** (`--gpu-memory-utilization 0.88`) is enough up to about 16 sessions per tray. Beyond that, multi-turn contexts outgrow HBM and evicted prefixes are recomputed.
+      - **Host-DRAM KV offload** adds `SimpleCPUOffloadConnector` with lazy offload. `cpu_bytes_to_use` is the budget for the whole worker, split across its four ranks: 360 GB pins 90 GB per rank. Size it from the host DRAM that is free after the engine processes are up. Lower `--gpu-memory-utilization` to 0.82 to leave room for the transfer buffers. `--kv-cache-metrics` exports KV residency metrics, which help with that sizing; it can be left out.
+      - The CUDA graph sizes go up to 8192 tokens, so prefill chunks of up to 8192 tokens also replay graphs. `--max-num-batched-tokens 32768` still allows larger mixed steps, which run piecewise.
+
+      **Running under Dynamo.** Start etcd and NATS (32 MB max payload) once:
+
+      ```bash
+      etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://<infra-host>:2379
+      printf 'max_payload: 33554432\n' > nats.conf && nats-server -c nats.conf
+      ```
+
+      On each tray, export `ETCD_ENDPOINTS=http://<infra-host>:2379` and `NATS_SERVER=nats://<infra-host>:4222` together with the generated environment and `DYN_TCP_CONNECT_TIMEOUT=120`, `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT=1024`, `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT=1024` and `DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT=2048`. Then run the generated flags with `python3 -m dynamo.vllm --model MiniMaxAI/MiniMax-M3.1-Flash --served-model-name MiniMaxAI/MiniMax-M3.1-Flash --trust-remote-code` in place of `vllm serve MiniMaxAI/MiniMax-M3.1-Flash`. `dynamo.vllm` rejects vLLM's API-server flags, so leave out `--tool-call-parser minimax_m3 --enable-auto-tool-choice` and add:
+
+      ```bash
+      --dyn-tool-call-parser minimax_m3 --dyn-reasoning-parser minimax_m3 \
+        --kv-events-config '{"publisher":"zmq","topic":"kv-events","enable_kv_cache_events":true,"endpoint":"tcp://*:5200"}'
+      ```
+
+      Start the frontend:
+
+      ```bash
+      export ETCD_ENDPOINTS=http://<infra-host>:2379 NATS_SERVER=nats://<infra-host>:4222
+      export DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS=3600 DYN_TCP_CONNECT_TIMEOUT=120
+      python3 -m dynamo.frontend --http-port 8000 --router-mode kv --router-session-affinity-ttl-secs 14400
+      ```
+
+      The KV router uses the workers' KV events to send each request to the worker that holds its prefix. Session affinity keeps a conversation on that worker for up to four hours; send a stable conversation ID in the `X-Dynamo-Session-ID` request header.
+
+      The InferenceX throughput points replaced block verification with synthetic rejection at the committed golden DSpark acceptance length (4.04), so every point is measured at the same acceptance rate. Production serving keeps the default rejection sampler (`rejection_sample_method: block`), as in the command above.
+
+  gb200_agentx_pd:
+    label: "AgentX PD (Dynamo)"
+    hardware: gb200
+    strategy: pd_cluster
+    variants: [default]
+    workload: "Agentic (InferenceX AgentX)"
+    description: "DEP4 prefill workers, one per GB200 tray, feed one DEP8 decode worker (throughput) or DEP16 (lower latency) over NIXL. Both roles share a Mooncake KV store in host DRAM. The Dynamo KV router routes with session affinity. Seven-token DSpark draft on FLASHINFER_TS, DeepGEMM MegaMoE on both roles."
+    source: { label: "InferenceX #4464", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4464", key: "minimaxm31flash-fp4-gb200-dynamo-vllm-agentic-dspark-disagg", revision: 25845c731734bde9298eece5f9ed296e3b0745ca }
+    image:
+      vllm: "vllm/vllm-openai:minimax-m31-flash-arm64-cu134"
+      dynamo: "1.6.0.dev20261023"
+      pip: ["ai-dynamo-runtime==1.6.0.dev20261023", "ai-dynamo==1.6.0.dev20261023", "mooncake-transfer-engine-cuda13==0.3.13.post1"]
+    # Dynamo workers take engine flags only; the tool-call parser moves to
+    # --dyn-tool-call-parser (see the runbook).
+    select:
+      pd_router: dynamo
+      features: { text_only: true, tool_calling: false }
+    args:
+      - "--enable-expert-parallel"
+      - "--moe-backend"
+      - "deep_gemm_mega_moe"
+      - "--numa-bind"
+      - "--enable-prefix-caching"
+      - "--max-model-len"
+      - "1048576"
+      - "--load-format"
+      - "fastsafetensors"
+    # The RDMA names are a GB200 tray's four NICs; use the host's own.
+    env:
+      PYTHONHASHSEED: "0"
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+      VLLM_ENGINE_READY_TIMEOUT_S: "7200"
+      VLLM_HTTP_TIMEOUT_KEEP_ALIVE: "600"
+      VLLM_RANDOMIZE_DP_DUMMY_INPUTS: "1"
+      NCCL_NET_GDR_C2C: "1"
+      NCCL_IB_HCA: "mlx5_0,mlx5_1,mlx5_2,mlx5_3"
+      NVSHMEM_REMOTE_TRANSPORT: "none"
+      NVSHMEM_ENABLE_NIC_PE_MAPPING: "1"
+      NVSHMEM_HCA_PE_MAPPING: "mlx5_0:1:1,mlx5_1:1:1,mlx5_2:1:1,mlx5_3:1:1"
+      UCX_TLS: "rc,cuda_copy"
+      UCX_NET_DEVICES: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1"
+      UCX_CUDA_IPC_ENABLE_MNNVL: "n"
+      UCX_MEMTYPE_CACHE: "n"
+      UCX_MEMTYPE_REG_WHOLE: "n"
+      UCX_RNDV_PIPELINE_ERROR_HANDLING: "y"
+      NIXL_UCX_SGL_ENABLE: "1"
+      WITH_NVIDIA_PEERMEM: "0"
+      MC_SLICE_SIZE: "1048576"
+      MC_MAX_MR_SIZE: "4294967296"
+      MC_ENABLE_DEST_DEVICE_AFFINITY: "1"
+      DYN_TCP_CONNECT_TIMEOUT: "120"
+      DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT: "1024"
+      DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT: "1024"
+      DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT: "2048"
+    roles:
+      prefill:
+        # One DEP4 worker per tray; run as many trays as the load needs.
+        nodes: 1
+        parallelism: dep
+        args:
+          - "--data-parallel-size"
+          - "4"
+          - "--data-parallel-size-local"
+          - "4"
+          - "--max-num-seqs"
+          - "64"
+          - "--max-num-batched-tokens"
+          - "16384"
+          - "--long-prefill-token-threshold"
+          - "4096"
+          - "--gpu-memory-utilization"
+          - "0.88"
+          - "--compilation-config"
+          - '{"cudagraph_mode":"FULL_AND_PIECEWISE"}'
+          - "--max-cudagraph-capture-size"
+          - "2048"
+          - "--kv-events-config"
+          - '{"publisher":"zmq","topic":"kv-events","enable_kv_cache_events":true,"endpoint":"tcp://*:5200"}'
+          - "--kv-transfer-config"
+          - '{"kv_connector":"MultiConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_load_failure_policy":"fail","kv_buffer_device":"cuda","kv_connector_extra_config":{"backends":["UCX"],"enforce_handshake_compat":false,"kv_lease_duration":120}},{"kv_connector":"MooncakeStoreConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"load_async":true,"lookup_async":true,"enable_offload":false}}]}}'
+        env:
+          VLLM_MOONCAKE_LOAD_RECV_THREADS: "8"
+      decode:
+        nodes: 2
+        parallelism: dep
+        # 64 sequences per DP rank; decode graphs cover 64 x (1 + 7) tokens.
+        # The decode ranks only add capacity to the Mooncake store.
+        remove_args: ["--no-enable-prefix-caching"]
+        args:
+          - "--max-num-seqs"
+          - "64"
+          - "--max-num-batched-tokens"
+          - "8192"
+          - "--watermark"
+          - "0.05"
+          - "--gpu-memory-utilization"
+          - "0.88"
+          - "--compilation-config"
+          - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+          - "--max-cudagraph-capture-size"
+          - "512"
+          - "--numa-bind-nodes"
+          - "0"
+          - "0"
+          - "1"
+          - "1"
+          - "--kv-transfer-config"
+          - '{"kv_connector":"MultiConnector","kv_role":"kv_both","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_load_failure_policy":"fail","kv_buffer_device":"cuda","kv_connector_extra_config":{"backends":["UCX"],"enforce_handshake_compat":false,"kv_lease_duration":120}},{"kv_connector":"MooncakeStoreConnector","kv_role":"kv_consumer","kv_load_failure_policy":"recompute","kv_connector_extra_config":{"load_async":true,"lookup_async":true,"enable_offload":false,"save_decode_cache":false,"enable_lookup":false}}]}}'
+        env:
+          VLLM_MOONCAKE_LOAD_RECV_THREADS: "4"
+          VLLM_MAX_ASYNC_KV_ADMITS_PER_STEP: "4"
+          VLLM_ALLREDUCE_USE_SYMM_MEM: "0"
+          NCCL_CUMEM_ENABLE: "1"
+          NCCL_MNNVL_ENABLE: "1"
+          NCCL_NVLS_ENABLE: "1"
+    points:
+      dep8:
+        label: "DEP8 decode (throughput)"
+        description: "One DEP8 decode worker across two trays."
+        default: true
+      dep16:
+        label: "DEP16 decode (lower latency)"
+        description: "One DEP16 decode worker across four trays."
+        roles: { decode: { nodes: 4 } }
+    runbook: |
+      The GB200 disaggregated AgentX lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`minimaxm31flash-fp4-gb200-dynamo-vllm-agentic-dspark-disagg`, [SemiAnalysisAI/InferenceX#4464](https://github.com/SemiAnalysisAI/InferenceX/pull/4464)) serves the default checkpoint text-only with Dynamo and vLLM. Several prefill workers, each DEP4 on one 4-GPU tray, feed one decode worker that is DEP8 across two trays or DEP16 across four. KV moves from prefill to decode over NIXL (UCX over RDMA), and every rank contributes host DRAM to a shared Mooncake KV store, so a returning conversation's prefix is loaded from the store instead of recomputed. Both roles use expert parallelism with DeepGEMM MegaMoE, attention data parallelism, the V2 model runner and the seven-token DSpark draft on `FLASHINFER_TS`.
+
+      | Prefill workers (DEP4) | Decode | GPUs | Sessions | tok/s/GPU | tok/s/user | TTFT p90 |
+      |---:|---|---:|---:|---:|---:|---:|
+      | 3 | DEP8 | 20 | 256 | 80.8k | 244 | 4.4 s |
+      | 3 | DEP16 | 28 | 280 | 68.6k | 303 | 2.6 s |
+      | 4 | DEP16 | 32 | 352 | 70.1k | 288 | 4.1 s |
+
+      The preset renders one prefill worker and the decode worker. Run more prefill workers with the same command, one per tray.
+
+      **Image and versions.** The lane used an arm64 CUDA 13 build of the `vllm/vllm-openai:minimax-m31-flash` image (tag `minimax-m31-flash-arm64-cu134`), with Dynamo `1.6.0.dev20261023` and Mooncake `mooncake-transfer-engine-cuda13==0.3.13.post1` installed on every worker and on the Mooncake master host: `pip install --extra-index-url https://pypi.nvidia.com ai-dynamo-runtime==1.6.0.dev20261023 ai-dynamo==1.6.0.dev20261023 mooncake-transfer-engine-cuda13==0.3.13.post1`.
+
+      ### Tuning rules
+
+      - **Prefill pool.** The prefill pool sets TTFT, so scale prefill workers with load. The lane's points kept TTFT p90 between 2.6 and 4.4 s with one DEP4 prefill tray per 85-95 concurrent agentic sessions (3 trays at 256-280 sessions, 4 at 352). Add a prefill tray when TTFT p90 climbs while decode still has room.
+      - **DEP8 or DEP16 decode.** DEP8 gives the most tokens per GPU: 32 sessions per decode GPU at 244 tok/s/user. DEP16 halves the batch per rank and gives about 25% more tok/s/user (303 at 280 sessions) at about 15% fewer tokens per GPU. `--max-num-seqs 64` per DP rank is a cap, not the operating point. The decode graph cap is `--max-num-seqs` x (1 + 7 draft tokens) = 512. `--watermark 0.05` keeps 5% of the decode KV cache free, so extra requests wait in the queue instead of preempting running ones. Keep decode `--max-num-batched-tokens` at 8192: a preempted request recomputes its context in chunks of that size.
+      - **Prefill batching.** `--long-prefill-token-threshold 4096` chunks long prompts into 4096-token pieces. Short prompts then share each step with them instead of waiting behind a 100K-token context, which lowers the TTFT tail. The recipe's 1P1D section above uses 8192. `--max-num-batched-tokens 16384` bounds a prefill step. Prefill captures CUDA graphs up to 2048 tokens.
+      - **Mooncake pool size.** `global_segment_size` is registered by every DP rank, prefill and decode alike, so a tray pins four times that value. The lane used 150 GB per rank (600 GB per tray). Size it as (host DRAM free per tray after the engines are up - headroom for NIXL and the 4 GB local buffers) / ranks per tray. The decode ranks only add capacity to the pool (`kv_consumer` with `enable_lookup: false` and `save_decode_cache: false`): the prefill workers write and read every block.
+      - **Routing.** The KV router (`--router-mode kv`) reads the prefill workers' KV events and sends each request to the worker that already holds its prefix. Session affinity (`--router-session-affinity-ttl-secs 14400`) keeps a conversation on that worker for up to four hours. Send a stable conversation ID in the `X-Dynamo-Session-ID` header. The Mooncake store catches the prefixes that miss after a reroute.
+      - **Transport.** Cross-tray NIXL needs `UCX_TLS=rc,cuda_copy` with `UCX_NET_DEVICES` set to the tray's RDMA ports. Without them, UCX can fall back to TCP and transfers stall. Point `UCX_MODULE_DIR` at the UCX bundled with the NIXL wheel (`nixl_cu13.libs/ucx` in the image's `dist-packages`). `kv_lease_duration: 120` holds a prefill's blocks for up to 120 s until decode reads them (the default is 30 s). `VLLM_MAX_ASYNC_KV_ADMITS_PER_STEP=4` caps how many requests with finished KV loads decode admits per step.
+      - **NUMA.** `--numa-bind` pins each rank to its GPU's NUMA node. Decode passes the tray's map, `--numa-bind-nodes 0 0 1 1`, explicitly.
+      - `--moe-backend deep_gemm_mega_moe` is the same as the lane's `--kernel-config '{"moe_backend":"deep_gemm_mega_moe"}'`. `--prefill-schedule-interval 1`, also set by the lane, is vLLM's default.
+
+      ### Services
+
+      Start etcd, NATS and the Mooncake master once:
+
+      ```bash
+      etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://<infra-host>:2379
+      printf 'max_payload: 33554432\n' > nats.conf && nats-server -c nats.conf
+      mooncake_master --rpc_port=50051 \
+        --default_kv_lease_ttl=60000 --eviction_high_watermark_ratio=0.95 --eviction_ratio=0.10
+      ```
+
+      Every worker reads the store configuration from the JSON file that `MOONCAKE_CONFIG_PATH` points to (export it with the rest of the environment):
+
+      ```json
+      {"master_server_address": "<infra-host>:50051", "metadata_server": "P2PHANDSHAKE",
+       "global_segment_size": "150GB", "local_buffer_size": "4GB", "protocol": "rdma",
+       "device_name": "mlx5_0,mlx5_1,mlx5_2,mlx5_3", "enable_offload": false}
+      ```
+
+      ### Workers
+
+      Export `ETCD_ENDPOINTS=http://<infra-host>:2379`, `NATS_SERVER=nats://<infra-host>:4222` and the generated environment on every tray, then run the generated `python3 -m dynamo.vllm` commands. Add `--served-model-name MiniMaxAI/MiniMax-M3.1-Flash --trust-remote-code --dyn-tool-call-parser minimax_m3 --dyn-reasoning-parser minimax_m3` to both roles. `dynamo.vllm` rejects vLLM's API-server flags `--tool-call-parser` and `--enable-auto-tool-choice`. Multi-node DEP decode runs one process per tray with `--data-parallel-start-rank` set to 0, 4, 8 and so on, and a shared `--data-parallel-address` and `--data-parallel-rpc-port`. `--data-parallel-hybrid-lb` lets every tray's Dynamo runtime register its own DP ranks with the frontend.
+
+      ### Frontend
+
+      ```bash
+      export ETCD_ENDPOINTS=http://<infra-host>:2379 NATS_SERVER=nats://<infra-host>:4222
+      export DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS=3600 DYN_TCP_CONNECT_TIMEOUT=120
+      python3 -m dynamo.frontend --http-port 8000 --router-mode kv --router-session-affinity-ttl-secs 14400
+      ```
+
+      The InferenceX throughput points replaced block verification with synthetic rejection at the committed golden DSpark acceptance length (4.04), so every point is measured at the same acceptance rate. Production serving keeps the default rejection sampler (`rejection_sample_method: block`), as in the command above.
 
 guide: |
   ## Overview
@@ -407,7 +1119,7 @@ guide: |
     --kv-cache-dtype nvfp4 \
     --attention-config '{"indexer_kv_dtype": "nvfp4", "use_prefill_query_quantization": true}' \
     --compilation-config '{"cudagraph_mode": "FULL_AND_PIECEWISE"}' \
-    --speculative-config '{"method":"dspark","num_speculative_tokens":3,"attention_backend":"FLASH_ATTN","kv_cache_dtype":"fp8","draft_sample_method":"probabilistic","rejection_sample_method":"block"}' \
+    --speculative-config '{"method":"dspark","num_speculative_tokens":7,"attention_backend":"FLASHINFER_TS","kv_cache_dtype":"fp8","draft_sample_method":"probabilistic","rejection_sample_method":"block"}' \
     --max-num-seqs 256 \
     --disable-hybrid-kv-cache-manager
   ```
@@ -501,50 +1213,85 @@ guide: |
     echo 2240 | sudo tee /sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages
     ```
 
-  ### Prefill/decode disaggregation (1P1D, TP4 + TP4, NVIDIA GB200)
+  ### Prefill/decode disaggregation (1P1D, DEP2 + DEP4, NVIDIA GB200 / GB300)
 
-  The NVIDIA pair runs NVFP4 KV end to end over NIXL (kv_buffer_device
-  `cuda`); the prefill node skips CUDA graphs (`--enforce-eager`) and carries
-  a 32768-token batch budget, the decode node runs FULL_DECODE_ONLY graphs.
+  A DEP2 prefill on one 4-GPU tray feeds a DEP4 decode on a second tray over
+  NIXL. Both roles run attention data parallel with the NVFP4 experts
+  on the DeepGEMM MegaMoE kernel over expert parallelism, the V2 model runner,
+  NUMA binding, and a seven-token DSpark draft on the FlashInfer PrimiTS
+  (`FLASHINFER_TS`) backend. The settings were tuned on GB300; GB200 uses the
+  same commands.
 
   Prefill node:
 
   ```bash
-  VLLM_FLOAT32_MATMUL_PRECISION=high VLLM_NIXL_SIDE_CHANNEL_HOST=<P_IP> \
+  VLLM_FLOAT32_MATMUL_PRECISION=high VLLM_USE_V2_MODEL_RUNNER=1 \
+  VLLM_ENGINE_READY_TIMEOUT_S=3600 VLLM_NIXL_SIDE_CHANNEL_HOST=<P_IP> \
   vllm serve MiniMaxAI/MiniMax-M3.1-Flash \
-    -tp 4 \
+    --data-parallel-size 2 \
+    --enable-expert-parallel \
+    --moe-backend deep_gemm_mega_moe \
+    --numa-bind \
     --reasoning-parser minimax_m3 \
     --block-size 128 \
     --kv-cache-dtype nvfp4 \
-    --attention-config '{"indexer_kv_dtype": "nvfp4"}' \
-    --speculative-config '{"method":"dspark","num_speculative_tokens":3,"attention_backend":"FLASH_ATTN","kv_cache_dtype":"fp8","draft_sample_method":"probabilistic","rejection_sample_method":"block"}' \
-    --max-num-seqs 16 \
+    --attention-config '{"indexer_kv_dtype": "nvfp4", "use_prefill_query_quantization": true}' \
+    --compilation-config '{"cudagraph_mode": "FULL_AND_PIECEWISE"}' \
+    --speculative-config '{"method":"dspark","num_speculative_tokens":7,"attention_backend":"FLASHINFER_TS","kv_cache_dtype":"fp8","draft_sample_method":"probabilistic","rejection_sample_method":"block"}' \
+    --max-num-seqs 64 \
     --max-num-batched-tokens 32768 \
+    --long-prefill-token-threshold 8192 \
     --gpu-memory-utilization 0.9 \
-    --enforce-eager \
+    --enable-prefix-caching \
+    --disable-hybrid-kv-cache-manager \
     --port 8100 \
-    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail","kv_buffer_device":"cuda","kv_connector_extra_config":{"enforce_handshake_compat":false,"kv_lease_duration":120}}'
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"engine_ttl":0}}'
   ```
 
   Decode node:
 
   ```bash
-  VLLM_FLOAT32_MATMUL_PRECISION=high VLLM_NIXL_SIDE_CHANNEL_HOST=<D_IP> \
+  VLLM_FLOAT32_MATMUL_PRECISION=high VLLM_USE_V2_MODEL_RUNNER=1 \
+  VLLM_ENGINE_READY_TIMEOUT_S=3600 VLLM_NIXL_SIDE_CHANNEL_HOST=<D_IP> \
   vllm serve MiniMaxAI/MiniMax-M3.1-Flash \
-    -tp 4 \
+    --data-parallel-size 4 \
+    --enable-expert-parallel \
+    --moe-backend deep_gemm_mega_moe \
+    --numa-bind \
     --reasoning-parser minimax_m3 \
     --block-size 128 \
     --kv-cache-dtype nvfp4 \
     --attention-config '{"indexer_kv_dtype": "nvfp4", "use_prefill_query_quantization": true}' \
-    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --speculative-config '{"method":"dspark","num_speculative_tokens":3,"attention_backend":"FLASH_ATTN","kv_cache_dtype":"fp8","draft_sample_method":"probabilistic","rejection_sample_method":"block"}' \
-    --max-num-seqs 88 \
-    --max-num-batched-tokens 512 \
-    --gpu-memory-utilization 0.9 \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "max_cudagraph_capture_size": 224}' \
+    --speculative-config '{"method":"dspark","num_speculative_tokens":7,"attention_backend":"FLASHINFER_TS","kv_cache_dtype":"fp8","draft_sample_method":"probabilistic","rejection_sample_method":"block"}' \
+    --max-num-seqs 28 \
+    --max-num-batched-tokens 8192 \
+    --gpu-memory-utilization 0.95 \
+    --watermark 0.05 \
+    --no-enable-prefix-caching \
     --disable-hybrid-kv-cache-manager \
     --port 8200 \
-    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail","kv_buffer_device":"cuda","kv_connector_extra_config":{"enforce_handshake_compat":false,"kv_lease_duration":120}}'
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"engine_ttl":0}}'
   ```
+
+  - `VLLM_ENGINE_READY_TIMEOUT_S=3600`: with data parallel, each API server
+    waits this long for its engines to start (default 600 s). A cold prefill
+    start (JIT builds, CUDA graph capture, FlashInfer autotune) takes longer
+    than 10 minutes.
+  - `--max-num-seqs` is per DP rank. The decode CUDA graphs cover 28 requests
+    of 1 + 7 tokens (224).
+  - `--watermark 0.05` keeps 5% of the decode KV cache free when admitting
+    requests, so extra requests wait in the queue instead of preempting
+    running ones. On GB300 (about 4.5M KV tokens per decode rank) at a
+    200K-token mean context, expect about 19-21 running requests per rank.
+  - Keep the decode `--max-num-batched-tokens` at 8192: a preempted request
+    recomputes its context in chunks of that size, and every DP rank runs
+    eager steps until it finishes.
+  - `engine_ttl: 0` turns off NIXL's cleanup of idle remote engines; with the
+    default one-hour TTL, a decode crashed an hour after its prefill went away.
+  - Prefix caching stays on the prefill node only. For multi-turn traffic, the
+    prefill node can also offload KV to host memory, 180 GiB per rank:
+    `--kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_both","kv_load_failure_policy":"fail","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_connector_extra_config":{"engine_ttl":0}},{"kv_connector":"SimpleCPUOffloadConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use_per_rank":193273528320,"lazy_offload":true}}]}}'`.
 
   For a quick test, put the toy NIXL proxy from the vLLM repository in front of
   the two nodes and send requests to port 8000:
@@ -595,7 +1342,7 @@ guide: |
     cache block size must match (otherwise `No common block size for 16`).
   - **Parsers.** `--tool-call-parser` and `--reasoning-parser` both use
     `minimax_m3`.
-  - **HugeTLB pages (PD prefill node).** See the PD section above.
+  - **HugeTLB pages (PD prefill node).** See the AMD PD section above.
 
   ## References
 
