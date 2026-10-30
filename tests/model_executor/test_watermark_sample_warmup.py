@@ -128,16 +128,16 @@ def _capture_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
 def _capture_synthid_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
     calls: list[dict] = []
 
-    def fake_synthid_watermark_logits(logits, contexts, key, depth, **kwargs):
+    def fake_synthid_sample(logits, contexts, key, depth, *args, **kwargs):
         calls.append(
             {"logits": logits, "contexts": contexts, "key": key, "depth": depth}
             | kwargs
         )
-        return logits.float()
+        return torch.zeros(logits.shape[0], dtype=torch.int64, device=logits.device)
 
+    monkeypatch.setattr("vllm.v1.watermarking.synthid.is_supported", lambda _: True)
     monkeypatch.setattr(
-        "vllm.v1.worker.gpu.sample.watermark.synthid_watermark_logits",
-        fake_synthid_watermark_logits,
+        "vllm.v1.watermarking.synthid.synthid_sample", fake_synthid_sample
     )
     return calls
 
@@ -419,7 +419,7 @@ def test_synthid_warms_every_reachable_specialization(
     deduplicate_contexts: str,
     skip_masks: set[bool],
 ) -> None:
-    """``SynthIDWatermarker.sample`` launches its kernel, not the Gumbel one.
+    """``SynthIDWatermarker.sample`` launches its fused kernels.
 
     It passes the configured key, depth and SynthID-Text Philox stream, the
     model-dtype or fp32 logits and the sampler's skip mask, so the warmup has

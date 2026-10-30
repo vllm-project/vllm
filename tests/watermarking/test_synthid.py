@@ -18,6 +18,11 @@ from vllm.v1.watermarking.synthid import (
     SynthIDWatermarker,
 )
 from vllm.v1.watermarking.watermarker import RandomSampler
+from vllm.v1.worker.gpu.sample.synthid import (
+    is_supported,
+    synthid_sample,
+    synthid_watermark_logits,
+)
 
 
 def test_synthid_config_and_factory():
@@ -354,6 +359,12 @@ def test_synthid_detector_ignores_gumbel_text_with_same_key():
     assert result.p_value > 1e-4
 
 
+requires_fused = pytest.mark.skipif(
+    not torch.cuda.is_available() or not is_supported(torch.device("cuda")),
+    reason="requires the Hopper fused SynthID-Text kernels",
+)
+
+
 def _cuda_sampler_inputs(num_rows, vocab_size, seed=0):
     generator = torch.Generator(device="cuda").manual_seed(seed)
     logits = 3 * torch.randn(num_rows, vocab_size, device="cuda", generator=generator)
@@ -363,6 +374,7 @@ def _cuda_sampler_inputs(num_rows, vocab_size, seed=0):
     logits[2] = torch.linspace(-30, 30, vocab_size, device="cuda")
     # Fully masked leading tiles leave a split's running max at -inf.
     logits[3, : vocab_size - 100] = float("-inf")
+    # -1 pads the context of a sequence shorter than the context width.
     contexts = torch.randint(
         -1, vocab_size, (num_rows, 4), device="cuda", generator=generator
     )
@@ -379,20 +391,37 @@ def _cuda_sampler_inputs(num_rows, vocab_size, seed=0):
     return logits, contexts, random_sampler, skip_mask
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
-@pytest.mark.parametrize("depth", [1, 12, 32])
-def test_synthid_fused_sample_matches_watermarked_logits(depth):
-    """The histogram kernels must sample like Gumbel-max on the PR's logits."""
-    from vllm.v1.worker.gpu.sample.synthid import synthid_sample
+def _reference_probs(watermarker, logits, contexts):
+    """The tournament in fp64 on torch, independent of the fused kernels."""
+    vocabulary = torch.arange(logits.shape[-1], device=logits.device)
+    words = watermarker.prf.uint32(contexts, vocabulary, stream=_STREAM_DOMAIN)
+    probs = torch.softmax(logits.double(), dim=1)
+    return watermarker._update_probs(probs, words, watermarker.depth)
 
+
+@requires_fused
+@pytest.mark.parametrize("depth", [1, 2, 11, 12, 22, 23, 32])
+def test_synthid_fused_logits_match_reference(depth):
+    logits, contexts, _, _ = _cuda_sampler_inputs(64, 5000)
+    watermarker = SynthIDWatermarker(42, context_width=4, depth=depth)
+
+    expected = _reference_probs(watermarker, logits, contexts)
+    actual = synthid_watermark_logits(
+        logits, contexts, watermarker.prf.key, depth, stream=_STREAM_DOMAIN
+    )
+
+    assert torch.equal(torch.isneginf(actual), torch.isneginf(logits))
+    total_variation = (actual.double().exp() - expected).abs().sum(dim=-1) / 2
+    assert total_variation.max() < 1e-5
+
+
+@requires_fused
+@pytest.mark.parametrize("depth", [1, 12, 32])
+def test_synthid_fused_sample_matches_reference(depth):
     logits, contexts, random_sampler, skip_mask = _cuda_sampler_inputs(256, 5000)
     watermarker = SynthIDWatermarker(42, context_width=4, depth=depth)
-    watermarked = torch.where(
-        skip_mask.unsqueeze(-1),
-        logits,
-        watermarker.watermark_logits(logits, contexts),
-    )
-    expected = random_sampler(watermarked)
+    reference = _reference_probs(watermarker, logits, contexts).log().float()
+    expected = random_sampler(torch.where(skip_mask.unsqueeze(-1), logits, reference))
 
     actual = synthid_sample(
         logits,
@@ -407,20 +436,19 @@ def test_synthid_fused_sample_matches_watermarked_logits(depth):
         skip_mask=skip_mask,
     )
 
-    assert torch.equal(actual[:4], expected[:4])
+    assert torch.equal(actual[skip_mask], expected[skip_mask])
     # Rounding differences may flip a rare near-tie of the noised maximum.
     assert (actual == expected).float().mean() >= 0.98
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
-def test_synthid_fused_sample_follows_tournament_distribution():
-    from vllm.v1.worker.gpu.sample.synthid import synthid_sample
-
+@requires_fused
+@pytest.mark.parametrize("use_fp64", [False, True])
+def test_synthid_fused_sample_follows_tournament_distribution(use_fp64):
     num_samples, vocab_size, depth = 200_000, 40, 3
     watermarker = SynthIDWatermarker(7, context_width=2, depth=depth)
     logits = torch.randn(vocab_size, generator=torch.Generator().manual_seed(1))
     contexts = torch.tensor([[5, 9]])
-    expected = watermarker.watermark_logits(logits.double()[None], contexts).exp()[0]
+    expected = _reference_probs(watermarker, logits[None], contexts)[0]
 
     sampled = synthid_sample(
         logits.cuda()[None].expand(num_samples, vocab_size),
@@ -432,6 +460,7 @@ def test_synthid_fused_sample_follows_tournament_distribution():
         torch.tensor([1234], device="cuda"),
         torch.arange(num_samples, device="cuda"),
         stream=_STREAM_DOMAIN,
+        use_fp64=use_fp64,
     )
 
     frequencies = torch.bincount(sampled.cpu(), minlength=vocab_size) / num_samples
@@ -440,33 +469,8 @@ def test_synthid_fused_sample_follows_tournament_distribution():
     )
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
-def test_synthid_top_k_sample_matches_full_vocabulary():
-    from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
-
-    logits, contexts, random_sampler, skip_mask = _cuda_sampler_inputs(64, 5000)
-    top_k = torch.randint(1, 51, (64,), device="cuda", dtype=torch.int32)
-    watermarker = SynthIDWatermarker(42, context_width=4, depth=32)
-    expected = watermarker.sample(
-        apply_top_k_top_p(logits.clone(), top_k, None),
-        contexts,
-        random_sampler,
-        skip_mask=skip_mask,
-    ).token_ids
-
-    values, token_ids = torch.topk(logits, 50, dim=-1)
-    values.masked_fill_(torch.arange(50, device="cuda") >= top_k[:, None], -math.inf)
-    actual = watermarker.sample_top_k(
-        values, token_ids, contexts, random_sampler, skip_mask=skip_mask
-    )
-
-    assert (actual == expected).float().mean() >= 0.98
-
-
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
+@requires_fused
 def test_synthid_detector_recognizes_fused_samples():
-    from vllm.v1.worker.gpu.sample.synthid import synthid_sample
-
     key, width, depth, vocab_size = 42, 4, 32, 1000
     generator = torch.Generator(device="cuda").manual_seed(0)
     tokens: list[int] = []

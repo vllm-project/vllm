@@ -3,13 +3,11 @@
 
 """SynthID-Text watermark generation primitives."""
 
-import functools
 import math
 
 import torch
 
 from vllm.config.watermarking import WatermarkPRFName
-from vllm.platforms import current_platform
 from vllm.v1.watermarking.detector import WatermarkDetector
 from vllm.v1.watermarking.prfs import PhiloxPRF, create_prf
 from vllm.v1.watermarking.watermarker import (
@@ -18,22 +16,14 @@ from vllm.v1.watermarking.watermarker import (
     WatermarkSample,
     _validate_context_width,
 )
+from vllm.v1.worker.gpu.sample.synthid import (
+    is_supported,
+    synthid_sample,
+    synthid_watermark_logits,
+)
 
 # High stream word ("SYNT") keeps SynthID-Text off Gumbel-max's Philox streams.
 _STREAM_DOMAIN = 0x53594E54 << 32
-
-
-# Batches whose top-k is at most this are sampled by one program per row.
-_MAX_COMPACT_TOP_K = 1024
-
-
-@functools.cache
-def _has_fused_sampling() -> bool:
-    if not current_platform.is_cuda():
-        return False
-    from vllm.v1.worker.gpu.sample.synthid import HAS_GLUON
-
-    return HAS_GLUON
 
 
 def _validate_depth(depth: int) -> None:
@@ -59,8 +49,6 @@ class SynthIDWatermarker(Watermarker):
         self.prf = selected_prf
         self._context_width = context_width
         self.depth = depth
-        if type(self.prf) is PhiloxPRF and _has_fused_sampling():
-            self.max_compact_top_k = _MAX_COMPACT_TOP_K
 
     @property
     def context_width(self) -> int:
@@ -76,26 +64,32 @@ class SynthIDWatermarker(Watermarker):
         for bit in range(num_bits):
             # [B, V] -> [B, V]
             g = ((words >> bit) & 1).to(probs.dtype)
+            one_probs = g * probs
 
             # [B, V] -> [B, 1]
-            g_mass = (g * probs).sum(dim=1, keepdim=True)
+            one_mass = one_probs.sum(dim=1, keepdim=True)
+            zero_mass = (probs - one_probs).sum(dim=1, keepdim=True)
 
-            probs = probs * (1 + g - g_mass)  # [B, V]
+            # The factor 1 + g - m is applied as an offset from 1 when m < 0.5
+            # and from the g = 0 mass otherwise: rounding 1 - m moves every
+            # g = 0 token the same way, which compounds over the layers.
+            inv_total = 1 / (zero_mass + one_mass)
+            mean = one_mass * inv_total
+            offset = mean < 0.5
+            factor = torch.where(offset, -mean, zero_mass * inv_total)
+            probs = probs * factor + (probs * offset + one_probs)  # [B, V]
 
         return probs
 
-    def _use_triton(self, logits: torch.Tensor) -> bool:
-        return type(self.prf) is PhiloxPRF and logits.device.type == "cuda"
+    def _use_fused(self, logits: torch.Tensor) -> bool:
+        return type(self.prf) is PhiloxPRF and is_supported(logits.device)
 
     def watermark_logits(
         self,
         logits: torch.Tensor,
         contexts: torch.Tensor,
     ) -> torch.Tensor:
-        if self._use_triton(logits):
-            from vllm.v1.worker.gpu.sample.watermark import synthid_watermark_logits
-
-            # Masked tokens stay -inf, as below.
+        if self._use_fused(logits):
             return synthid_watermark_logits(
                 logits, contexts, self.prf.key, self.depth, stream=_STREAM_DOMAIN
             )
@@ -133,16 +127,11 @@ class SynthIDWatermarker(Watermarker):
             raise ValueError("SynthID-Text requires a random sampler")
 
         if (
-            type(self.prf) is PhiloxPRF
-            and logits.device.type == "cuda"
-            and logits.dtype != torch.float64
-            and _has_fused_sampling()
+            self._use_fused(logits)
             and isinstance(random_sampler, RandomSampler)
             and not random_sampler.is_drafting
             and random_sampler.logits_cache is None
         ):
-            from vllm.v1.worker.gpu.sample.synthid import synthid_sample
-
             token_ids = synthid_sample(
                 logits,
                 contexts,
@@ -166,31 +155,6 @@ class SynthIDWatermarker(Watermarker):
         return WatermarkSample(
             token_ids=random_sampler(watermarked_logits),
             logits=logits,
-        )
-
-    def sample_top_k(
-        self,
-        values: torch.Tensor,
-        token_ids: torch.Tensor,
-        contexts: torch.Tensor,
-        random_sampler: RandomSampler,
-        skip_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        from vllm.v1.worker.gpu.sample.synthid import synthid_sample_top_k
-
-        return synthid_sample_top_k(
-            values,
-            token_ids,
-            contexts,
-            self.prf.key,
-            self.depth,
-            random_sampler.expanded_idx_mapping,
-            random_sampler.temperatures,
-            random_sampler.seeds,
-            random_sampler.positions,
-            stream=_STREAM_DOMAIN,
-            skip_mask=skip_mask,
-            use_fp64=random_sampler.use_fp64,
         )
 
     def _sample_watermarked(
