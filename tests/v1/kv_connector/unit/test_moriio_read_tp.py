@@ -154,6 +154,11 @@ def _make_reader(
     worker.is_producer = False
     worker.dp_rank = 0
     worker._num_mamba_transfer_groups = 1 if worker._has_mamba else 0
+    worker._num_attn_transfer_groups = (
+        len(set(worker.layer_to_group.values())) - worker._num_mamba_transfer_groups
+    )
+    # _groups() puts attention groups before mamba, as the READ payload does.
+    worker._hybrid_payload_index_by_layer = dict(worker.layer_to_group)
     worker.moriio_config = SimpleNamespace(
         backend=backend, transfer_timeout=30.0, recv_abort_timeout=600.0
     )
