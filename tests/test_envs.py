@@ -23,6 +23,25 @@ def test_object_storage_shm_default_name():
     assert len(envs._generate_shm_name()) <= 30
 
 
+@pytest.mark.parametrize(
+    "name,default,choices",
+    [
+        ("VLLM_ROCM_TP_MEGA_MOE_ACT_DTYPE", "fp8", ("fp8", "fp4")),
+        ("VLLM_ROCM_TP_MEGA_MOE_COMM_DTYPE", "bf16", ("bf16", "fp8")),
+        ("VLLM_ROCM_TP_MEGA_MOE_AR_GATHER", "bf16", ("bf16", "fp8", "auto")),
+    ],
+)
+def test_tp_mega_moe_precision_choices(monkeypatch, name, default, choices):
+    monkeypatch.delenv(name, raising=False)
+    assert getattr(envs, name) == default
+    for choice in choices:
+        monkeypatch.setenv(name, choice)
+        assert getattr(envs, name) == choice
+    monkeypatch.setenv(name, "invalid")
+    with pytest.raises(ValueError, match=name):
+        getattr(envs, name)
+
+
 def test_getattr_without_cache(monkeypatch: pytest.MonkeyPatch):
     assert envs.VLLM_HOST_IP == ""
     assert envs.VLLM_PORT is None

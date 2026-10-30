@@ -5,7 +5,7 @@
 import inspect
 import sys
 from types import ModuleType, SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 import pytest
 
@@ -151,6 +151,7 @@ def test_rocm_fp4_builder_selects_bounded_graph_stable_schedule(
     selector.assert_called_once_with(max_decode_tokens, 256)
     capacity = 8 * max_decode_tokens
     buffer = builder.fp4_cta_info_buffer
+    assert buffer is not None
     assert buffer.shape == (capacity, 4)
     assert buffer.dtype == torch.int32 and buffer.device == torch.device("cpu")
     assert all(
@@ -195,15 +196,19 @@ def test_rocm_fp4_builder_selects_bounded_graph_stable_schedule(
             else builder.build(0, common)
         )
         selector.assert_called_with(rows, 256)
-        assert metadata.decode.fp4_total_ctas == 8 * rows
-        assert metadata.decode.fp4_cta_info.shape == (8 * rows, 4)
-        assert metadata.decode.fp4_cta_info.data_ptr() == buffer.data_ptr()
+        decode = metadata.decode
+        assert decode is not None
+        cta_info = decode.fp4_cta_info
+        assert cta_info is not None
+        assert decode.fp4_total_ctas == 8 * rows
+        assert cta_info.shape == (8 * rows, 4)
+        assert cta_info.data_ptr() == buffer.data_ptr()
         assert schedule.call_args.kwargs == {
             "block_k": 256,
             "parallel_unit_num": 8 * rows,
             "max_seq_len": 256,
             "next_n": 1,
-            "cta_info_out": metadata.decode.fp4_cta_info,
+            "cta_info_out": cta_info,
         }
         torch.testing.assert_close(
             schedule.call_args.args[0], torch.full((rows,), 64, dtype=torch.int32)
@@ -432,6 +437,7 @@ def test_fp4_prefill_schedule_uses_chunk_shape_selector(
         fp4_topk_tokens=8,
     )
 
+    assert chunk is not None
     selector.assert_called_once_with(selected_rows, width)
     schedule.assert_called_once_with(
         *windows, block_k=256, parallel_unit_num=total_ctas, max_seq_len=width
@@ -677,11 +683,12 @@ def test_aiter_fp4_probe_checks_schedule_abi(monkeypatch, missing):
         package, "pa_mqa_logits_fp4_common", modules["common"], raising=False
     )
     monkeypatch.setitem(sys.modules, package.__name__, package)
-    monkeypatch.setattr(indexer.logger, "warning", Mock())
+    warning = MagicMock()
+    monkeypatch.setattr(indexer.logger, "warning", warning)
     indexer.aiter_mxfp4_available.cache_clear()
     try:
         assert indexer.dsa_indexer_uses_fp4(_config("mxfp4")) is (missing is None)
-        assert indexer.logger.warning.call_count == (missing is not None)
+        assert warning.call_count == (missing is not None)
     finally:
         indexer.aiter_mxfp4_available.cache_clear()
 
