@@ -1309,8 +1309,51 @@ def test_compile_cache_bundle_round_trip(tmp_path):
     assert (target / "nested" / "kernel.cubin").read_bytes() == b"compiled-kernel"
 
 
+def test_compile_cache_manifest_deduplicates_nested_roots(tmp_path):
+    from vllm.model_executor.model_loader.weight_cache.warmup_cache import (
+        CacheRoot,
+        _manifest,
+    )
+
+    workspace = tmp_path / "workspace"
+    cubins = workspace / "cubins"
+    cubins.mkdir(parents=True)
+    (workspace / "workspace.json").write_bytes(b"workspace")
+    (cubins / "kernel.cubin").write_bytes(b"compiled-kernel")
+
+    manifest = _manifest(
+        (
+            CacheRoot("flashinfer-cubins", cubins),
+            CacheRoot("flashinfer-workspace", workspace),
+        )
+    )
+
+    assert [entry["path"] for entry in manifest.entries].count(
+        "cubins/kernel.cubin"
+    ) == 0
+    assert len(manifest.entries) == 2
+
+
 def test_compile_cache_manifest_rejects_path_traversal():
     from vllm.model_executor.model_loader.weight_cache.warmup_cache import _safe_path
 
     with pytest.raises(ValueError, match="unsafe cache path"):
         _safe_path("../escape")
+
+
+def test_compile_cache_payload_rejects_oversized_bundle():
+    from vllm.model_executor.model_loader.weight_cache.warmup_cache import (
+        BUNDLE_LIMIT,
+        CompileArtifactWarmupCache,
+    )
+
+    payload = {
+        "manifest": {"version": 1, "total_size": 1, "entries": []},
+        "bundle_size": BUNDLE_LIMIT + 1,
+        "transport": "mooncake",
+        "protocol": "tcp",
+        "address": 1,
+        "session": "127.0.0.1:1",
+    }
+    with pytest.raises(ValueError, match="bundle is too large"):
+        CompileArtifactWarmupCache(()).validate_payload(payload)

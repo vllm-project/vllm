@@ -133,6 +133,7 @@ from vllm.model_executor.model_loader.weight_cache.utils import (
 from vllm.model_executor.model_loader.weight_cache.warmup_cache import (
     CompileArtifactWarmupCache,
     FlashInferWarmupCache,
+    WarmupCache,
     _cache_roots,
 )
 from vllm.platforms import current_platform
@@ -230,9 +231,16 @@ class WeightCacheDaemon:
         self.compile_cache = CompileArtifactWarmupCache(
             _cache_roots(),
             compile_cache_protocol,
+            require_mooncake=(
+                self.seed_config.listen is not None
+                or self.seed_config.source is not None
+            ),
         )
-        self.warmup_caches = [FlashInferWarmupCache(), self.compile_cache]
-        self.d2d = SeedTransport(self.warmup_caches, seed_config)
+        self.warmup_caches: list[WarmupCache] = [
+            FlashInferWarmupCache(),
+            self.compile_cache,
+        ]
+        self.d2d = SeedTransport(self.warmup_caches, self.seed_config)
         self.tp_size = parallel_config.tensor_parallel_size
         self.pp_size = parallel_config.pipeline_parallel_size
         self.dp_size = parallel_config.data_parallel_size
