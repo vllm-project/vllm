@@ -113,3 +113,32 @@ def test_gate_rejects_new_realtime_websocket_when_closed():
         ]
 
     asyncio.run(run())
+
+
+def test_probe_paths_match_under_root_path():
+    async def run():
+        called = False
+
+        async def app(scope, receive, send):
+            nonlocal called
+            called = True
+
+        async def send(message):
+            pass
+
+        gate = EngineSnapshotGate()
+        await gate.close()
+        middleware = EngineSnapshotMiddleware(app, gate)
+        await middleware(
+            {
+                "type": "http",
+                "path": "/prefix/health",
+                "root_path": "/prefix",
+            },
+            None,
+            send,
+        )
+
+        assert called
+
+    asyncio.run(run())
