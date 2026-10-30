@@ -41,6 +41,16 @@ The following metrics are exposed:
 
 --8<-- "gen:metrics-spec-decode"
 
+## Fault Tolerance Metrics
+
+With `--enable-fault-tolerance`, `vllm:engine_healthy{engine="<rank>"}` reports
+`1` when the cached engine state is healthy and the client has not failed,
+otherwise `0`. Each API port reports its own ranks, including during recovery,
+without GPU probes or shared metric files. The metric is absent without FT
+or a known engine status. For FT routing, scrape each port and exclude zero,
+missing metrics and failed scrapes. This reflects detected faults; use it for
+traffic eligibility, not container liveness.
+
 ## NIXL KV Connector Metrics
 
 --8<-- "gen:metrics-nixl"
