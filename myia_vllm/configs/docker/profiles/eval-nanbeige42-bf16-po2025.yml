@@ -1,0 +1,85 @@
+# Docker Compose profile — ÉVAL (fenêtre 30/10 soir) : Nanbeige4.2-3B BF16 — réf du quant AWQ
+# Siège po-2025 · GO user 30/10 « Go pour un test comparatif » · issue #70 / Q9
+# ============================================================================
+# NON-PRODUCTION : ce profil ne tourne que pendant la fenêtre d'éval, FrogNano
+# étant à l'arrêt. Référence BF16 du modèle principal `Nanbeige/Nanbeige4.2-3B`
+# (3B non-emb, backend transformers, PR upstream vllm#56071 — vérifié dans
+# notre image v0.32.0). Le candidat quant est `eval-nanbeige42-awq-po2025.yml`.
+#
+# Choix déclarés (isoler la variable poids) : KV `auto` (pas fp8) des deux
+# côtés, max-model-len/seqs/batch identiques à FrogNano pour la comparabilité
+# des portes. Pas d'alias `mini` : le hub gardera son trafic FrogNano en erreur
+# pendant la fenêtre (effet de bord annoncé), plutôt que de router des
+# consommateurs réels sur un moteur d'essai sans le dire.
+services:
+  eval_nanbeige42_bf16:
+    # Overlay maison (pattern tierpin ai-01) : stock v0.32.0 + support natif
+    # Nanbeige du fork officiel — le backend transformers de la PR #56071 crash
+    # sur les noms loopés (voir Dockerfile overlay_v0320_nanbeige/).
+    image: vllm-openai-v0320-nanbeige:v2
+    container_name: myia_vllm-eval-nanbeige42
+    runtime: nvidia
+    labels:
+      - "autoheal=False"
+
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - OMP_NUM_THREADS=4
+      - VLLM_LOGGING_LEVEL=INFO
+      - VLLM_API_KEY=${VLLM_API_KEY_MINI}
+
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+      - vllm-compile-cache-nanbeige42-bf16:/root/.cache/vllm
+
+    ports:
+      - "5003:8000"
+
+    ipc: host
+
+    command: >
+      Nanbeige/Nanbeige4.2-3B
+      --served-model-name nanbeige42-3b
+      --trust-remote-code
+      --host 0.0.0.0
+      --port 8000
+      --dtype auto
+      --gpu-memory-utilization 0.78
+      --max-model-len 32768
+      --max-num-seqs 32
+      --max-num-batched-tokens 8192
+      --kv-cache-dtype fp8
+      --enable-prefix-caching
+      --tool-call-parser nanbeige
+      --enable-auto-tool-choice
+      --reasoning-parser nanbeige
+      --skip-mm-profiling
+      --default-chat-template-kwargs '{"enable_thinking": false}'
+
+    deploy:
+      resources:
+        limits:
+          memory: 16g
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 900s
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "2"
+
+volumes:
+  vllm-compile-cache-nanbeige42-bf16:

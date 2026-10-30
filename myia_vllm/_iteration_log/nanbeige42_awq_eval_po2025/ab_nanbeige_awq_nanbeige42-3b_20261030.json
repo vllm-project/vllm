@@ -1,0 +1,53 @@
+{
+  "model": "nanbeige42-3b",
+  "ts": "2026-10-30T19:58:21",
+  "results": [
+    {
+      "name": "fibonacci_iteratif",
+      "e2e_s": 8.24,
+      "completion_tokens": 681,
+      "tok_s": 82.6,
+      "content": "Voici la fonction `fibonacci(n)` itérative en Python, avec docstring, suivie de 3 assertions pour vérifier son fonctionnement.\n\n```python\ndef fibonacci(n):\n    \"\"\"\n    Calcule le n-ième terme de la suite de Fibonacci en utilisant une approche itérative (sans récursion).\n\n    Args:\n        n (int): Le terme à calculer (0-indexed, donc n=0 donne 0).\n\n    Returns:\n        int: Le n-ième terme de la suite de Fibonacci.\n\n    Raises:\n        ValueError: Si n est un nombre négatif.\n    \"\"\"\n    if n < 0:\n        raise ValueError(\"Le paramètre n doit être un nombre non négatif.\")\n    \n    # Cas particuliers pour les premiers termes\n    if n == 0:\n        return 0\n    if n == 1:\n        return 1\n    \n    # Initialisation des deux premiers termes\n    a, b = 0, 1\n    \n    # Boucle itérative pour calculer jusqu'au terme n\n    for _ in range(2, n + 1):\n        a, b = b, a + b\n        \n    return b\n\n\n# ==========================================\n# 3 ASSERTIONS pour vérifier le code\n# ==========================================\n\n# Assertion 1 : Vérification du premier terme (0-indexed)\nassert fibonacci(0) == 0, \"Erreur : fibonacci(0) doit être 0\"\n\n# Assertion 2 : Vérification d'un terme intermédiaire\nassert fibonacci(5) == 5, \"Erreur : fibonacci(5) doit être 5\"\n\n# Assertion 3 : Vérification d'un terme plus grand et de la cohérence\nassert fibonacci(10) == 55, \"Erreur : fibonacci(10) doit être 55\"\n\nprint(\"✅ Toutes les assertions passent ! La fonction fonctionne correctement.\")\n```\n\n### Explications :\n1. **Approche itérative** : Plutôt que de recréer la fonction avec des appels récursifs (coûteux en mémoire/CPU), on utilise une simple boucle `for` qui se met à incrémenter les deux derniers termes (`a` et `b`) à chaque itération.\n2. **Docstring** : Explique les paramètres, le comportement (avec gestion des erreurs pour les nombres négatifs), et les types de retour.\n3. **Assertions** : \n   - `fibonacci(0)` doit retourner `0` (le premier terme).\n   - `fibonacci(5)` doit retourner `5` (0, 1, 1, 2, 3, **5**).\n   - `fibonacci(10)` doit retourner `55` (pour vérifier la continuité et la correction sur un terme plus grand).",
+      "reasoning_chars": 0,
+      "finish_reason": "stop"
+    },
+    {
+      "name": "somme_dict_comprehension",
+      "e2e_s": 4.94,
+      "completion_tokens": 420,
+      "tok_s": 85.0,
+      "content": "Pour calculer la somme des valeurs supérieures à 8 à partir de la paire de chaîne `ventes = {'a': 10, 'b': 25, 'c': 5}` en une ligne avec une *dict-comprehension*, voici la solution :\n\n```python\nsomme = sum(val for k, val in ventes.items() if val > 8)\n```\n\n### Résultat :\nLa somme des valeurs > 8 est **35**.\n\n**Explication :**\n- `ventes.items()` génère une liste de paires `(clé, valeur)`: `('a', 10)`, `('b', 25)`, `('c', 5)`.\n- La condition `if val > 8` filtre les valeurs : 10 et 25 sont > 8, tandis que 5 n'est pas.\n- `sum(...)` additionne les valeurs filtrées : `10 + 25 = 35`.\n\n> ⚠️ **Remarque technique** : Bien que la requête demande une *dict-comprehension*, en Python une *dict-comprehension* est généralement utilisée pour créer une nouvelle dictionnaire (ex: `{k: val for k, val in ventes if val > 8}`). Pour une **somme**, la syntaxe avec `sum()` et une *generator expression* (qui est une forme de comprehension) est la pratique la plus idiomatique et efficace en une ligne. Si l'on insiste pour une \"dict-comprehension\", on pourrait créer une dict où chaque valeur > 8 est conservée, puis sommer ses valeurs, mais cela serait moins direct. La réponse ci-dessus est la solution la plus naturelle et conforme à l'intention de la question.\n\n**Résultat final : `35`** ✅",
+      "reasoning_chars": 0,
+      "finish_reason": "stop"
+    },
+    {
+      "name": "vitesse_moyenne",
+      "e2e_s": 6.59,
+      "completion_tokens": 580,
+      "tok_s": 88.0,
+      "content": "Pour déterminer la **vitesse moyenne moyenne sur l'ensemble du trajet**, il faut utiliser la formule suivante :\n\n$$\n\\text{Vitesse moyenne} = \\frac{\\text{Distance totale}}{\\text{Temps total}}\n$$\n\n---\n\n### **Étapes de calcul détaillées :**\n\n#### **1. Calculer la distance totale :**\n- Première partie du trajet : **240 km en 3 h**\n- Deuxième partie du trajet : **150 km en 2 h**\n\n$$\n\\text{Distance totale} = 240 \\, \\text{km} + 150 \\, \\text{km} = 390 \\, \\text{km}\n$$\n\n#### **2. Calculer le temps total :**\n- Première partie : **3 h**\n- Deuxième partie : **2 h**\n\n$$\n\\text{Temps total} = 3 \\, \\text{h} + 2 \\, \\text{h} = 5 \\, \\text{h}\n$$\n\n#### **3. Appliquer la formule de la vitesse moyenne :**\n\n$$\n\\text{Vitesse moyenne} = \\frac{390 \\, \\text{km}}{5 \\, \\text{h}} = 78 \\, \\text{km/h}\n$$\n\n---\n\n### **Résultat final :**\nLa vitesse moyenne sur l'ensemble du trajet est :\n\n$$\n\\boxed{78 \\, \\text{km/h}}\n$$\n\n---\n\n### **Remarques importantes :**\n- **Vitesse moyenne ≠ moyenne simple des vitesses** : On ne peut pas simplement calculer la moyenne des vitesses instantanées (ex: $240/3 = 80 \\, \\text{km/h}$ et $150/2 = 75 \\, \\text{km/h}$) puis en prendre la moyenne. La moyenne simple donnant $77.5 \\, \\text{km/h}$ serait incorrecte ici, car elle ne tient pas compte du temps total. La méthode correcte est celle utilisant **distance totale / temps total**, ce qui donne $78 \\, \\text{km/h}$.\n- Cette différence s'explique par la **pondération du temps** : la vitesse moyenne dépend des distances et des temps respectifs, pas seulement des vitesses moyennes par segment.\n\n✅ **Conclusion :** La vitesse moyenne moyenne sur l'ensemble du trajet est **78 km/h**.",
+      "reasoning_chars": 0,
+      "finish_reason": "stop"
+    },
+    {
+      "name": "sql_deuxieme_salaire",
+      "e2e_s": 11.58,
+      "completion_tokens": 1024,
+      "tok_s": 88.4,
+      "content": "Voici la requête SQL pour récupérer le **2ᵉ salaire le plus élevé** de la table `employes(salaire)`, avec une explication détaillée de la gestion des cas ex æquo (exceptions).\n\n---\n\n### 🔹 Requête SQL (solution recommandée)\n\n```sql\nSELECT DISTINCT salaire\nFROM employes\nORDER BY salaire DESC\nLIMIT 1 OFFSET 1;\n```\n\n> **Remarque** : Cette requête fonctionne sur les SGBD modernes comme PostgreSQL, MySQL (avec `LIMIT`), ou SQLite. Pour une compatibilité universelle avec toutes les SGBD (y compris SQL Server), voici une alternative avec `TOP` :\n\n```sql\n-- Alternative pour SQL Server\nSELECT TOP 2 DISTINCT salaire\nFROM employes\nORDER BY salaire DESC\nOFFSET 1 ROWS FETCH NEXT 1 ROWS ONLY;\n```\n\n---\n\n### 🔍 Explication détaillée : gestion des cas ex æquo\n\n#### 1. **Cas des doublons (ex æquo : valeurs répétées)**\nLe terme *ex æquo* ici signifie **\"cas exceptionnel\"** lié à la structure de la donnée. Si plusieurs employés partagent le **même salaire**, une requête naïve pourrait en citer plusieurs fois la même valeur, ce qui dénaturerait le résultat recherché (\"le 2ᵉ salaire le plus élevé\").\n\n→ **Solution** : Utilisation de `DISTINCT` pour considérer uniquement les **valeurs salariales uniques**, en s'assurant d'identifier le rang de salaire, et non les employés.\n\n#### 2. **Cas des salaires égaux au 1er rang**\nImaginons la table :\n\n| employé | salaire |\n|---------|---------|\n| A       | 100000  |\n| B       | 100000  |\n| C       | 90000   |\n| D       | 80000   |\n\n- Une requête sans gestion des doublons (`ORDER BY salaire DESC LIMIT 1`) renverrait **100000** (le 1er).\n- Pour obtenir le **vrai 2ᵉ salaire**, il faut ignorer les doublons : le 2ᵉ salaire unique est **90000**.\n- La requête avec `DISTINCT` + `LIMIT 1 OFFSET 1` garantit que :\n  - On trie les **valeurs uniques** en ordre décroissant.\n  - `LIMIT 1 OFFSET 1` prend le **2ème élément** de cette liste unique → **90000**, correct.\n\n#### 3. **Cas où il n’existe qu’un seul salaire unique**\nSi tous les employés partagent le même salaire (ex: 100000), alors :\n- `DISTINCT` renvoie une seule ligne.\n- `LIMIT 1 OFFSET 1` renvoie **aucun résultat** (pas d'erreur).\n→ C'est un comportement **sécurisé et raisonnable** : il n'existe pas de \"2ᵉ salaire\", donc retourner le vide est approprié.\n\n#### 4. **Cas des `NULL` (valeurs manquantes)**\n⚠️ **Attention** : La requête ci-dessus **ne gère pas explicitement les `NULL`**. En SQL, les `NULL` sont classés en dernier rang lors du tri (`ORDER BY`) selon la SGBD. Si des employés ont un `NULL` de salaire :\n- Dans PostgreSQL/MySQL : `NULL` apparaît en dernier → ne perturbe pas la recherche du 2ᵉ salaire élevé.\n- Dans SQL Server : `NULL` apparaît en premier → pourrait être inclus dans le tri et perturber le résultat.\n\n→ **Pour une gestion complète incluse les `NULL`**, il est fortement recommandé d'exclure les `NULL` :\n\n```sql\nSELECT DISTINCT salaire\nFROM employes\nWHERE salaire IS NOT NULL  -- Exclure les valeurs manquantes\nORDER BY salaire DESC\nLIMIT 1 OFFSET 1;\n```\n\n---\n\n### ✅ Synthèse des gestionnaires ex æquo appliqués\n\n| Cas ex æquo               | Méthode de gestion                          |\n|------------------------",
+      "reasoning_chars": 0,
+      "finish_reason": "length"
+    },
+    {
+      "name": "raccourcir_texte_fr",
+      "e2e_s": 3.71,
+      "completion_tokens": 317,
+      "tok_s": 85.6,
+      "content": "Voici le texte raccourcie en une seule phrase, avec plusieurs options selon le ton souhaité :\n\n**Option 1 (Le plus fidèle au sens original) :**\n> « Le comité, après longues délibérations et réflexion sur tous les éléments soumis, trance la plus prudente. »\n\n**Option 2 (Plus concise et directe) :**\n> « Le comité trance en faveur de l'option la plus prudente après avoir pris en compte tous les éléments soumis. »\n\n**Option 3 (Très courte, en une phrase percutante) :**\n> « Après avoir réfléchi sur tous les éléments, le comité trance en faveur de l'option la plus prudente. »\n\n**Explication des raccourcis :**\n*   « après avoir longuement délibéré et pris en considération l'ensemble des éléments qui lui étaient soumis » → réduit à « après longues délibérations et réflexion sur tous les éléments soumis » ou « après avoir réfléchi sur tous les éléments ».\n*   « a fini par trancher en faveur de l'option la plus prudente » → simplifié en « trance en faveur de l'option la plus prudente ».\n\nVous pouvez choisir celle qui correspond le mieux à votre contexte !",
+      "reasoning_chars": 0,
+      "finish_reason": "stop"
+    }
+  ],
+  "total_tok": 3022,
+  "total_s": 35.06
+}

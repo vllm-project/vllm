@@ -1,0 +1,53 @@
+{
+  "model": "frognano-4b",
+  "ts": "2026-10-30T18:42:35",
+  "results": [
+    {
+      "name": "fibonacci_iteratif",
+      "e2e_s": 3.49,
+      "completion_tokens": 358,
+      "tok_s": 102.5,
+      "content": "Voici une fonction Python itérative calculant le $n$-ième nombre de Fibonacci, accompagnée de trois assertions pour vérifier son bon fonctionnement.\n\n```python\ndef fibonacci(n):\n    \"\"\"\n    Calcule le n-ième nombre de Fibonacci de manière itérative.\n\n    La suite de Fibonacci commence par 0, 1, 1, 2, 3, 5, ...\n    Donc : fibonacci(0) = 0, fibonacci(1) = 1, fibonacci(2) = 1, etc.\n\n    Args:\n        n (int): Un entier non négatif représentant l'index de la suite.\n\n    Returns:\n        int: Le n-ième nombre de Fibonacci.\n    \"\"\"\n    if n < 0:\n        raise ValueError(\"n doit être un entier non négatif.\")\n    \n    if n == 0:\n        return 0\n    if n == 1:\n        return 1\n\n    # Initialisation des deux premiers nombres\n    a, b = 0, 1\n    \n    # Boucle itérative pour calculer jusqu'à n\n    for _ in range(2, n + 1):\n        a, b = b, a + b\n    \n    return b\n\n# Tests avec assertions\nassert fibonacci(0) == 0, \"Erreur : fibonacci(0) doit être 0\"\nassert fibonacci(1) == 1, \"Erreur : fibonacci(1) doit être 1\"\nassert fibonacci(6) == 8, \"Erreur : fibonacci(6) doit être 8 (0,1,1,2,3,5,8)\"\n```",
+      "reasoning_chars": 0,
+      "finish_reason": "stop"
+    },
+    {
+      "name": "somme_dict_comprehension",
+      "e2e_s": 1.96,
+      "completion_tokens": 227,
+      "tok_s": 115.7,
+      "content": "Voici la solution en une seule ligne utilisant une dict-comprehension (bien que pour une simple somme, une expression de liste avec `sum` soit souvent plus lisible, la dict-comprehension reste valide si on veut filtrer dans une structure de dictionnaire) :\n\n```python\nventes = {'a': 10, 'b': 25, 'c': 5}\n\n# Filtrer les valeurs > 8, les convertir en liste, puis sommer\nresultat = sum([v for v in ventes.values() if v > 8])\n\nprint(resultat)  # Affiche 35\n```\n\n**Résultat :** `35`\n\n*Explication :*\n1. `ventes.values()` donne `[10, 25, 5]`.\n2. La liste-compéhension `[v for v in ... if v > 8]` filtre pour ne garder que `10` et `25`.\n3. `sum()` additionne ces valeurs : $10 + 25 = 35$.",
+      "reasoning_chars": 0,
+      "finish_reason": "stop"
+    },
+    {
+      "name": "vitesse_moyenne",
+      "e2e_s": 2.42,
+      "completion_tokens": 291,
+      "tok_s": 120.1,
+      "content": "Pour calculer la vitesse moyenne sur l'ensemble du trajet, il ne faut pas simplement additionner les vitesses horaires. La formule correcte est :\n\n$$V_{moy} = \\frac{\\text{Distance totale}}{\\text{Temps total}}$$\n\nVoici le détail du calcul étape par étape :\n\n**1. Calculer la distance totale parcourue :**\nLe train parcourt deux segments distincts :\n*   Segment 1 : $240 \\text{ km}$\n*   Segment 2 : $150 \\text{ km}$\n\n$$D_{total} = 240 + 150 = 390 \\text{ km}$$\n\n**2. Calculer le temps total passé :**\nLe temps est aussi la somme des deux durées :\n*   Temps 1 : $3 \\text{ h}$\n*   Temps 2 : $2 \\text{ h}$\n\n$$T_{total} = 3 + 2 = 5 \\text{ h}$$\n\n**3. Calculer la vitesse moyenne :**\nEn divisant la distance totale par le temps total :\n\n$$V_{moy} = \\frac{390}{5} = 78 \\text{ km/h}$$\n\nLa vitesse moyenne du train sur l'ensemble du trajet est de **78 km/h**.",
+      "reasoning_chars": 0,
+      "finish_reason": "stop"
+    },
+    {
+      "name": "sql_deuxieme_salaire",
+      "e2e_s": 8.27,
+      "completion_tokens": 1003,
+      "tok_s": 121.4,
+      "content": "Pour répondre à cette question, il faut distinguer deux concepts souvent confus : le **2ᵉ salaire distinct** (le deuxième niveau de salaire unique) et le **2ᵉ salaire le plus élevé par rang** (le salaire qui se trouve à la position 2 si on classe tous les salaires, y compris les doublons).\n\nDans votre demande, l'expression \"2ᵉ salaire le plus élevé\" avec une mention explicite des \"ex æquo\" suggère généralement qu'on cherche le salaire qui occupe la position 2 dans un ordre strict (c'est-à-dire qu'il y a au moins un salaire plus grand, et qu'il n'y a pas deux salaires strictement plus grands).\n\nVoici la solution la plus robuste et la plus lisible, utilisant une fenêtre (`window function`), qui gère parfaitement les ex æquo selon la logique de rang dense ou non dense selon l'interprétation, mais ici nous visons le **rang ordinaire** (le 2ème élément de la liste triée).\n\n### La Requête SQL\n\n```sql\nSELECT salaire\nFROM employes\nORDER BY salaire DESC\nLIMIT 1 OFFSET 1;\n```\n\n*Note : Si votre base de données ne supporte pas les clauses `LIMIT/OFFSET` (comme SQL Server ou Oracle sans ajustement), voici l'équivalent standard SQL :*\n\n```sql\nSELECT salaire\nFROM (\n    SELECT salaire, ROW_NUMBER() OVER (ORDER BY salaire DESC) as rn\n    FROM employes\n) ranked\nWHERE rn = 2;\n```\n\n### Explication de la gestion des ex æquo\n\nLa clé de la réponse réside dans l'utilisation de `ORDER BY` simple combinée à `LIMIT` (ou `ROW_NUMBER()`).\n\n1.  **Tri décroissant** : On trie d'abord par salaire du plus grand au plus petit.\n2.  **Gestion des doublons (Ex æquo)** :\n    *   Si le salaire le plus élevé est `5000` et qu'il y a 10 employés avec ce salaire, la ligne 1 de la liste triée sera `5000`.\n    *   Les lignes suivantes (2ème, 3ème, etc.) seront aussi `5000`.\n    *   La requête `LIMIT 1 OFFSET 1` (ou `WHERE rn = 2`) va alors sélectionner la **2ᵉ ligne de cette liste**.\n    *   Le résultat sera toujours `5000`.\n\n**Interprétation de votre demande :**\nSi votre intention était de trouver le **2ᵉ salaire *distinct*** (c'est-à-dire ignorer tous les doublons du premier), la logique serait différente (il faudrait utiliser `DENSE_RANK()` ou `DISTINCT`).\n\nCependant, l'énoncé \"2ᵉ salaire le plus élevé... en gérant les ex æquo\" est souvent un piège pour vérifier si l'on sait que le rang est basé sur la position dans la liste, pas sur la valeur unique.\n*   Si vous voulez le **2ᵉ niveau de salaire unique** (ignorer les doublons du 1er) :\n    ```sql\n    SELECT DISTINCT salaire\n    FROM employes\n    ORDER BY salaire DESC\n    LIMIT 1 OFFSET 1;\n    ```\n    *Dans ce cas, si le 1er et le 2ème sont ex æquo (ce qui est impossible avec DISTINCT), ou si le 1er a des doublons, on saute directement au prochain niveau unique.*\n\n**Conclusion pour le cas standard (Rang positionnel) :**\nLa requête avec `ROW_NUMBER()` ou `LIMIT/OFFSET` est celle qui respecte strictement l'ordre de position. Si le plus grand salaire est `X` (avec des doublons), le \"2ᵉ salaire\" dans la liste est toujours `X`. Si vous cherchez le salaire qui est strictement plus petit que le maximum, il faut alors filtrer `WHERE salaire < (SELECT MAX(salaire) FROM employes)` puis trier et prendre le 1er.\n\nSi votre besoin est de trouver le salaire qui est **strictement le deuxième niveau de valeur** (le plus grand après le maximum, même s'il y a des doublons au maximum) :\n\n```sql\nSELECT salaire\nFROM employes\nWHERE salaire < (SELECT MAX(salaire) FROM employes)\nORDER BY salaire DESC\nLIMIT 1;\n```\n*Cette version ignore tous les employés ayant le salaire maximal, puis prend le plus grand restant, ce qui est souvent ce que l'on entend par \"2ᵉ salaire\" dans un contexte métier pur.*",
+      "reasoning_chars": 0,
+      "finish_reason": "stop"
+    },
+    {
+      "name": "raccourcir_texte_fr",
+      "e2e_s": 0.24,
+      "completion_tokens": 20,
+      "tok_s": 84.5,
+      "content": "Le comité, après une longue délibération, a choisi l'option la plus prudente.",
+      "reasoning_chars": 0,
+      "finish_reason": "stop"
+    }
+  ],
+  "total_tok": 1899,
+  "total_s": 16.38
+}

@@ -30,7 +30,7 @@ import urllib.request
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 ENV_PATH = os.path.join(REPO, "myia_vllm", ".env")
 LOG_DIR = os.path.join(REPO, "myia_vllm", "_logs")
-MODEL = "frognano-4b"
+MODEL = os.environ.get("BENCH_MODEL", "frognano-4b")
 
 
 def load_key() -> str:

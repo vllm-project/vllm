@@ -1,0 +1,53 @@
+{
+  "model": "nanbeige42-3b",
+  "ts": "2026-10-30T19:32:48",
+  "results": [
+    {
+      "name": "fibonacci_iteratif",
+      "e2e_s": 22.02,
+      "completion_tokens": 631,
+      "tok_s": 28.7,
+      "content": "Voici la fonction Python `fibonacci(n)` itérative (sans récursion), accompagnée d'une docstring et de 3 assertions pour valider son comportement :\n\n```python\ndef fibonacci(n):\n    \"\"\"\n    Calcule le n-ième terme de la suite de Fibonacci en utilisant une approche itérative.\n    \n    Cette approche évite la récursion et utilise une complexité temporelle O(n) avec une complexité spatiale O(1).\n    \n    Args:\n        n (int): Le terme à calculer (index, commençant à 0). Doit être un entier non négatif.\n    \n    Returns:\n        int: Le n-ième terme de la suite de Fibonacci.\n    \n    Raises:\n        ValueError: Si `n` est un nombre négatif.\n    \"\"\"\n    if n < 0:\n        raise ValueError(\"Le paramètre n doit être un entier non négatif.\")\n    if n == 0:\n        return 0\n    if n == 1:\n        return 1\n    \n    a, b = 0, 1\n    for _ in range(2, n + 1):\n        a, b = b, a + b\n    return b\n\n\n# --- 3 assertions pour valider le comportement ---\nassert fibonacci(0) == 0, \"Erreur pour n=0\"\nassert fibonacci(1) == 1, \"Erreur pour n=1\"\nassert fibonacci(10) == 55, \"Erreur pour n=10 (Fibonacci(10) = 55)\"\n```\n\n### Explications :\n1. **Approche itérative** : La fonction utilise deux variables (`a` et `b`) pour suivre les deux termes précédents de la suite. À chaque itération, elle met à jour ces valeurs pour avancer vers le terme désiré.\n2. **Gestion des cas limites** : Les valeurs `n=0` et `n=1` sont gérées explicitement pour éviter les boucles inutiles.\n3. **Validation** : Les assertions vérifient :\n   - Le premier terme (`0`)\n   - Le deuxième terme (`1`)\n   - Un terme intermédiaire (`n=10` donne `55`, comme dans la suite : 0, 1, 1, 2, 3, 5, 8, 13, 21, 34, **55**)\n\nCette implémentation est efficace, évite les risques de dépassement de récursion (stack overflow), et respecte les bonnes pratiques Python avec une docstring détaillée. 🐍✨",
+      "reasoning_chars": 0,
+      "finish_reason": "stop"
+    },
+    {
+      "name": "somme_dict_comprehension",
+      "e2e_s": 13.87,
+      "completion_tokens": 419,
+      "tok_s": 30.2,
+      "content": "Pour calculer la somme des valeurs dans le dictionnaire `ventes` qui sont strictement supérieures à 8, en utilisant une **dict-comprehension** (comprehension sur dictionnaire) en une seule ligne, voici la solution :\n\n```python\nsomme = sum((valeur for cle, valeur in ventes.items() if valeur > 8))\n```\n\n### Explication :\n- `ventes.items()` itère sur les paires `(clé, valeur)`.\n- `if valeur > 8` filtre uniquement les valeurs supérieures à 8.\n- La dict-comprehension (ici une générative de paires) produit les valeurs correspondantes.\n- `sum(...)` additionne ces valeurs filtrées.\n\n### Résultat :\n```python\nsomme = 30\n```\n\n**Détail :**\n- `'a': 10` → 10 > 8 → incluse\n- `'b': 25` → 25 > 8 → incluse\n- `'c': 5` → 5 ≤ 8 → exclue\n\n**Somme = 10 + 25 = 30** ✅\n\n---\n\n⚠️ **Remarque technique :** Bien que la requête demande une *dict-comprehension*, en Python la syntaxe `sum((...))` avec une expression génératrice (qui s'inspire de la dict-comprehension) est la pratique la plus courante et idiomatique pour ce type de calcul en une ligne. Une vraie dict-comprehension (qui retourne un dictionnaire) n'est pas adaptée ici car on souhaite une **somme** (un nombre scalaire), pas un dictionnaire résultant. La solution ci-dessus respecte donc l'intention de la question tout en utilisant une approche concise et Pythonic.",
+      "reasoning_chars": 0,
+      "finish_reason": "stop"
+    },
+    {
+      "name": "vitesse_moyenne",
+      "e2e_s": 16.33,
+      "completion_tokens": 503,
+      "tok_s": 30.8,
+      "content": "Pour déterminer la **vitesse moyenne sur l'ensemble du trajet**, il faut appliquer la formule suivante :\n\n$$\n\\text{Vitesse moyenne} = \\frac{\\text{Distance totale}}{\\text{Temps total}}\n$$\n\n---\n\n### 🔹 Étape 1 : Calculer la distance totale\n\nLe train parcourt deux段 du trajet :\n\n- Première partie : **240 km** en **3 h**\n- Deuxième partie : **150 km** en **2 h**\n\n$$\n\\text{Distance totale} = 240 \\, \\text{km} + 150 \\, \\text{km} = 390 \\, \\text{km}\n$$\n\n---\n\n### 🔹 Étape 2 : Calculer le temps total\n\n$$\n\\text{Temps total} = 3 \\, \\text{h} + 2 \\, \\text{h} = 5 \\, \\text{h}\n$$\n\n---\n\n### 🔹 Étape 3 : Calculer la vitesse moyenne\n\n$$\n\\text{Vitesse moyenne} = \\frac{390 \\, \\text{km}}{5 \\, \\text{h}} = 78 \\, \\text{km/h}\n$$\n\n---\n\n### ✅ Réponse finale :\n\nLa **vitesse moyenne sur l'ensemble du trajet** du train est de **78 km/h**.\n\n---\n\n### 📌 Remarque importante :\n\n⚠️ Il est crucial de ne pas calculer la moyenne simple des vitesse dans chaque partie (par exemple : $ \\frac{240/3 + 150/2}{2} $), car cela ne représente pas la vitesse moyenne sur tout le trajet. La vitesse moyenne correcte dépend uniquement de la **distance totale divisée par le temps total**, ce qui est ce que nous avons fait ici.\n\nCette méthode garantit une moyenne pondérée selon le temps et la distance parcourues, ce qui correspond à la définition mathématique de la vitesse moyenne dans ce contexte. 🚄📏",
+      "reasoning_chars": 0,
+      "finish_reason": "stop"
+    },
+    {
+      "name": "sql_deuxieme_salaire",
+      "e2e_s": 36.61,
+      "completion_tokens": 1024,
+      "tok_s": 28.0,
+      "content": "Voici la requête SQL pour récupérer le **2ᵉ salaire le plus élevé** de la table `employes(salaire)`, avec une gestion propre des cas d'**ex æquo** (cas où plusieurs employés partagent le même salaire).\n\n---\n\n### 🔍 Requête SQL (méthode recommandée avec CTE)\n\n```sql\nWITH Salaires_Triés AS (\n    SELECT \n        salaire,\n        ROW_NUMBER() OVER (ORDER BY salaire DESC) AS rang\n    FROM employes\n    WHERE salaire IS NOT NULL  -- Optionnel mais recommandé pour éviter les NaN/NULLs\n)\nSELECT salaire AS Deuxieme_Salaire_Plus_Eleve\nFROM Salaires_Triés\nWHERE rang = 2\nLIMIT 1;\n```\n\n---\n\n### 📌 Explication de la gestion des *ex æquo* (cas d'ex æquo)\n\n**Ex æquo** signifie ici que plusieurs employés peuvent avoir **le même salaire**. La question porte sur le *\"2ᵉ salaire le plus élevé\"*, ce qui implique une lecture **par valeurs salariales distinctes**, et non par employés individuels. Voici comment la requête gère cela :\n\n#### 1. `ROW_NUMBER()` vs `RANK()` vs `DENSE_RANK()`\n- **`ROW_NUMBER()`** : Attribue un numéro unique à chaque ligne, même si des valeurs sont identiques.  \n  → *Exemple* : Salaires `[1000, 900, 900, 800]` → Rangées : `1, 2, 3, 4`. Le rang 2 correspond à **900**, mais cela \"compte\" deux fois le salaire 900. ❌ *Incorrect pour notre cas*, car le \"2ᵉ salaire le plus élevé\" est bien **900**, mais si on exige un *rangement strict par employé*, cela pourrait prêter à confusion.\n  \n- **`RANK()`** : Attribue le même rang à des valeurs égales, puis saute les rangements suivants.  \n  → *Exemple* : `[1000, 900, 900, 800]` → Rangées : `1, 2, 2, 4`. Le rang 2 correspond à **900** (valeur unique). ✅ *C'est la bonne approche pour identifier le 2ᵉ *valeur salariale* distincte.*\n\n- **`DENSE_RANK()`** : Comme `RANK()`, mais sans sauts de rangements.  \n  → *Exemple* : `[1000, 900, 900, 800]` → Rangées : `1, 2, 2, 3`. Idéal si on veut compter uniquement les *valeurs salariales distinctes*. ✅ *Souvent plus pertinent ici.*\n\n#### 2. Pourquoi la requête utilisée avec `ROW_NUMBER()` est acceptable (avec nuance)\nDans la requête ci-dessus, on utilise `ROW_NUMBER()` puis on filtre `rang = 2`. Elle retourne **la valeur salariale à la position 2 dans l'ordre trié décroissant**, ce qui correspond effectivement au **2ᵉ salaire le plus élevé en valeur unique** (car après le plus élevé, la prochaine *valeur* triée est bien le 2ᵉ maximum distinct).  \n⚠️ **Attention** : Si plusieurs employés partagent le salaire du rang 2 (ex. deux employés à 900), cette requête retournera **une seule ligne** (grâce à `LIMIT 1`), mais la *valeur* retournée (900) est correcte. Si l'on voulait **toutes les employés dont le salaire est le 2ᵉ maximum**, il faudrait remplacer `LIMIT 1` par une condition sur le rang.\n\n#### 💡 Version plus explicite et robuste (recommandée pour l'ex æquo)\nPour une lecture claire sur le *\"2ᵉ salaire le plus élevé\"* (en valeur), une approche avec `DISTINCT` + sous-requête est souvent plus lisible :\n\n```sql\nSELECT DISTINCT salaire AS Deuxieme_Salaire_Plus_Eleve\nFROM employes\nWHERE",
+      "reasoning_chars": 0,
+      "finish_reason": "length"
+    },
+    {
+      "name": "raccourcir_texte_fr",
+      "e2e_s": 8.29,
+      "completion_tokens": 227,
+      "tok_s": 27.4,
+      "content": "Voici le texte raccourci en une seule phrase :\n\n**« Le comité, après délibération et examen des éléments soumis, tranche en faveur de l'option la plus prudente. »**\n\n*Pourquoi cette version ?*\n- **« Après avoir longuement délibéré et pris en considération l'ensemble des éléments qui lui étaient soumis »** est réduit à **« après délibération et examen des éléments soumis »** pour rester fluide et concis.\n- **« a fini par trancher en faveur de l'option la plus prudente »** est conservé telle quelle, car c'est l'essentiel de la phrase.\n\nSi vous souhaitez encore aller plus loin dans la synthèse (par exemple pour un contexte très formel ou administratif), vous pouvez utiliser :\n**« Le comité tranche en faveur de l'option la plus prudente après délibération. »**",
+      "reasoning_chars": 0,
+      "finish_reason": "stop"
+    }
+  ],
+  "total_tok": 2804,
+  "total_s": 97.12
+}
