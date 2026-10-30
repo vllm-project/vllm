@@ -111,6 +111,17 @@ MAX_FUSED_GDN_MTP_TOKENS = 8
 FUSED_GDN_STATE_DTYPES = (torch.float32, torch.bfloat16)
 
 
+def gdn_readout_dtype(
+    activation_dtype: torch.dtype, state_dtype: torch.dtype
+) -> torch.dtype:
+    """Dtype of the GDN readout buffer: fp32 for fp16 activations over an fp32
+    state, where the unnormalized readout can overflow fp16; else the
+    activation dtype (bf16 already has fp32's exponent range)."""
+    if activation_dtype == torch.float16 and state_dtype == torch.float32:
+        return torch.float32
+    return activation_dtype
+
+
 def supports_fused_mtp_decode() -> bool:
     """ROCm runs the Triton port; elsewhere the CUDA op must be built."""
     return current_platform.is_rocm() or hasattr(
@@ -1139,15 +1150,26 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         Only fp16 activations are affected: bf16 shares fp32's exponent range,
         so bf16 and fp32 activations keep their dtype and stay byte-identical.
+
+        The state dtype comes from the config, not from ``kv_cache``: the
+        buffer is allocated inside the compiled graph, which is traced before
+        the cache is bound.
         """
-        if activation_dtype is not torch.float16:
-            return activation_dtype
-        kv_cache = getattr(self, "kv_cache", None)
-        if kv_cache is None or len(kv_cache) < 2:
-            return activation_dtype
-        if getattr(kv_cache[1], "dtype", None) is torch.float32:
-            return torch.float32
-        return activation_dtype
+        return gdn_readout_dtype(activation_dtype, self.get_state_dtype()[1])
+
+    def _check_readout_buffer(
+        self, core_attn_out: torch.Tensor, activation_dtype: torch.dtype
+    ) -> None:
+        """The buffer dtype is fixed when the graph is traced, from the config;
+        this checks it against the state the cache really holds. A mismatch
+        would silently route the readout through a copy that rounds it."""
+        expected = gdn_readout_dtype(activation_dtype, self.kv_cache[1].dtype)
+        if core_attn_out.dtype != expected:
+            raise RuntimeError(
+                f"{self.prefix}: GDN readout buffer is {core_attn_out.dtype}, "
+                f"but {activation_dtype} activations over a "
+                f"{self.kv_cache[1].dtype} state need {expected}"
+            )
 
     def _output_projection(
         self,
@@ -1647,6 +1669,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             return
 
         assert isinstance(attn_metadata, GDNAttentionMetadata)
+        self._check_readout_buffer(core_attn_out, mixed_qkv.dtype)
 
         if (
             self.enable_packed_recurrent_decode

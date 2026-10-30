@@ -73,14 +73,54 @@ def _bare_layer():
 )
 def test_buffer_is_widened_only_when_needed(activation_dtype, state_dtype, expected):
     layer = _bare_layer()
-    layer.kv_cache = [
-        torch.zeros(1, dtype=torch.float16),
-        torch.zeros(1, dtype=state_dtype),
-    ]
+    layer.get_state_dtype = lambda: (torch.float16, state_dtype)
 
     assert layer._core_attn_out_dtype(activation_dtype) is expected
 
 
-def test_no_kv_cache_leaves_the_dtype_alone():
-    """The cache is not bound yet during construction and profiling."""
-    assert _bare_layer()._core_attn_out_dtype(torch.float16) is torch.float16
+def test_widening_does_not_wait_for_the_kv_cache():
+    """The buffer is allocated in the compiled graph, which is traced during
+    profiling, before the cache is bound: the dtype must not depend on it."""
+    layer = _bare_layer()
+    layer.get_state_dtype = lambda: (torch.float16, torch.float32)
+
+    assert getattr(layer, "kv_cache", None) is None
+    assert layer._core_attn_out_dtype(torch.float16) is torch.float32
+
+
+def _layer_with_state(state_dtype):
+    layer = _bare_layer()
+    layer.prefix = "layers.0.linear_attn"
+    layer.kv_cache = [
+        torch.zeros(1, dtype=torch.float16),
+        torch.zeros(1, dtype=state_dtype),
+    ]
+    return layer
+
+
+def test_a_narrow_buffer_over_an_fp32_state_fails_loudly():
+    """The 8-sep regression: the graph froze an fp16 buffer while the cache
+    held fp32 state, and the readout fell back to a rounding copy in silence."""
+    layer = _layer_with_state(torch.float32)
+    buffer = torch.zeros(1, dtype=torch.float16)
+
+    with pytest.raises(RuntimeError, match="need torch.float32"):
+        layer._check_readout_buffer(buffer, torch.float16)
+
+
+@pytest.mark.parametrize(
+    "activation_dtype,state_dtype",
+    [
+        (torch.float16, torch.float32),
+        (torch.float16, torch.float16),
+        (torch.bfloat16, torch.float32),
+    ],
+)
+def test_the_buffer_the_config_picks_passes_the_runtime_check(
+    activation_dtype, state_dtype
+):
+    layer = _layer_with_state(state_dtype)
+    layer.get_state_dtype = lambda: (torch.float16, state_dtype)
+    buffer = torch.zeros(1, dtype=layer._core_attn_out_dtype(activation_dtype))
+
+    layer._check_readout_buffer(buffer, activation_dtype)
