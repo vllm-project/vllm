@@ -150,38 +150,69 @@ def _nvfp4_kv_views(
     return (k_data, v_data), (k_scale, v_scale), "HND" if hnd else "NHD"
 
 
-# trtllm-gen has no NVFP4-KV kernels at this head_dim: decode runs PrimTS, and
-# prefill runs the FP8 context kernel on an FP8 copy of the pages.
+# NVFP4 KV that decodes on PrimTS and prefills with the FP8 context kernel on an
+# FP8 copy of the pages it reads, instead of on trtllm-gen's NVFP4-KV kernels:
+# - head_dim 512 (Gemma 4 global layers): trtllm-gen has no such kernels.
+# - head_dim 256 with a sliding window (Gemma 4 local layers): trtllm-gen's
+#   kernels write only FP8, so each call needs a copy to the model dtype, which
+#   PrimTS and the FP8 context kernel write directly. The FP8 copy holds only
+#   the pages the window can see. Without FlashInfer support these layers stay
+#   on trtllm-gen.
 _NVFP4_KV_NO_TRTLLM_GEN_HEAD_DIM = 512
+_NVFP4_KV_SLIDING_PRIMS_TS_HEAD_DIM = 256
 # The FP8 context kernels stop at 64-token pages; the workspace is sized for it.
 _NVFP4_FP8_CONTEXT_MAX_PAGE_SIZE = 64
 _PRIMS_TS_NVFP4_PAGE_SIZES = (32, 64, 128)
+# Prefills whose window of history fits the sliding-window FP8 copy at once;
+# more are grouped.
+_NVFP4_WINDOWED_CONTEXT_PREFILLS = 8
 
 
-def _nvfp4_context_uses_fp8_copy(nvfp4_trtllm: bool, head_dim: int) -> bool:
-    return nvfp4_trtllm and head_dim == _NVFP4_KV_NO_TRTLLM_GEN_HEAD_DIM
-
-
-def _nvfp4_decode_uses_prims_ts(nvfp4_trtllm: bool, head_dim: int) -> bool:
-    return nvfp4_trtllm and head_dim == _NVFP4_KV_NO_TRTLLM_GEN_HEAD_DIM
-
-
-def _is_sm100_nvfp4_no_trtllm_gen_spec(spec: KVCacheSpec) -> bool:
-    """Whether the spec is an NVFP4 KV cache whose head_dim trtllm-gen lacks,
-    on SM100 (where NVFP4 KV always runs on trtllm-gen otherwise)."""
+def _nvfp4_kv_uses_prims_ts(
+    nvfp4_trtllm: bool, head_dim: int, window_left: int
+) -> bool:
+    """Whether NVFP4 KV decodes on PrimTS and prefills on an FP8 copy."""
+    if not nvfp4_trtllm:
+        return False
+    if head_dim == _NVFP4_KV_NO_TRTLLM_GEN_HEAD_DIM:
+        return True
     return (
-        isinstance(spec, AttentionSpec)
-        and spec.kv_quant_mode.is_nvfp4
-        and spec.head_size == _NVFP4_KV_NO_TRTLLM_GEN_HEAD_DIM
-        and current_platform.is_device_capability_family(100)
+        head_dim == _NVFP4_KV_SLIDING_PRIMS_TS_HEAD_DIM
+        and window_left >= 0
+        and has_flashinfer_nvfp4_kv_head_dim_512()
     )
 
 
-def _nvfp4_context_workspace_tokens(max_model_len: int) -> int:
-    """Token slots of the FP8 context copy: the pages of one full-length
-    request plus the materializer's zero page, at the largest page size."""
+def _spec_window_left(spec: AttentionSpec) -> int:
+    sliding_window = getattr(spec, "sliding_window", None)
+    return -1 if sliding_window is None else sliding_window - 1
+
+
+def _is_sm100_nvfp4_prims_ts_spec(spec: KVCacheSpec) -> bool:
+    """Whether the spec is an NVFP4 KV cache that runs on PrimTS, on SM100
+    (where NVFP4 KV runs on trtllm-gen otherwise)."""
+    return (
+        isinstance(spec, AttentionSpec)
+        and spec.kv_quant_mode.is_nvfp4
+        and current_platform.is_device_capability_family(100)
+        and _nvfp4_kv_uses_prims_ts(True, spec.head_size, _spec_window_left(spec))
+    )
+
+
+def _nvfp4_context_workspace_tokens(vllm_config: VllmConfig, window_left: int) -> int:
+    """Token slots of the FP8 context copy plus the materializer's zero page,
+    at the largest page size. Full attention reads up to one full-length
+    request. A sliding window reads one step's query tokens plus a window and a
+    page of history per prefill (see _window_nvfp4_prefill)."""
     page_size = _NVFP4_FP8_CONTEXT_MAX_PAGE_SIZE
-    return (cdiv(max_model_len, page_size) + 1) * page_size
+    tokens = vllm_config.model_config.max_model_len
+    if window_left >= 0:
+        tokens = min(
+            tokens,
+            vllm_config.scheduler_config.max_num_batched_tokens
+            + _NVFP4_WINDOWED_CONTEXT_PREFILLS * (window_left + 1 + page_size),
+        )
+    return (cdiv(tokens, page_size) + 1) * page_size
 
 
 def _materialize_nvfp4_kv_to_fp8(
@@ -670,9 +701,7 @@ class FlashInferBackend(AttentionBackend):
                 and current_platform.is_device_capability_family(100)
                 and can_use_trtllm_attention(num_qo_heads, num_kv_heads)
             )
-        if kv_cache_spec is not None and _is_sm100_nvfp4_no_trtllm_gen_spec(
-            kv_cache_spec
-        ):
+        if kv_cache_spec is not None and _is_sm100_nvfp4_prims_ts_spec(kv_cache_spec):
             # Pages that both PrimTS decode and the FP8-copy context take.
             return [
                 size
@@ -998,8 +1027,10 @@ class _PrimsTSDecodePlanner:
             for num_decodes in range(1, max_num_reqs + 1):
                 self._wrappers[(num_decodes, q_len)] = self._plan(num_decodes, q_len)
         logger.info(
-            "Planned %d PrimTS decode batch sizes in %.1f s (%.1f MiB).",
+            "Planned %d PrimTS decode batch sizes for head_dim %d in %.1f s "
+            "(%.1f MiB).",
             len(self._wrappers),
+            head_dim,
             time.perf_counter() - start,
             (torch.accelerator.memory_allocated(device) - mem_before) / 2**20,
         )
@@ -1189,16 +1220,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.nvfp4_fa2 = self.nvfp4_trtllm = False
             assert self.kv_cache_spec.dtype == self.model_config.dtype
             self.kv_cache_dtype = self.kv_cache_spec.dtype
-        self.nvfp4_fp8_context = _nvfp4_context_uses_fp8_copy(
-            self.nvfp4_trtllm, self.head_dim
-        )
-        self.nvfp4_prims_ts_decode = _nvfp4_decode_uses_prims_ts(
-            self.nvfp4_trtllm, self.head_dim
+        # global_hyperparameters is set further down; read the window off the spec.
+        window_left = _spec_window_left(self.kv_cache_spec)
+        self.nvfp4_fp8_context = self.nvfp4_prims_ts_decode = _nvfp4_kv_uses_prims_ts(
+            self.nvfp4_trtllm, self.head_dim, window_left
         )
         if self.nvfp4_fp8_context:
             # FP8 pages per prefill group, excluding the materializer's zero page.
             self.nvfp4_context_max_pages = (
-                _nvfp4_context_workspace_tokens(self.model_config.max_model_len)
+                _nvfp4_context_workspace_tokens(vllm_config, window_left)
                 // self.page_size
                 - 1
             )
@@ -1278,8 +1308,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             # The native FlashInfer prefill path cannot read this cache.
             if self.attention_config.disable_flashinfer_q_quantization:
                 raise ValueError(
-                    "NVFP4 KV at head_dim "
-                    f"{_NVFP4_KV_NO_TRTLLM_GEN_HEAD_DIM} requires FP8 queries; "
+                    f"NVFP4 KV at head_dim {self.head_dim} requires FP8 queries; "
                     "unset --attention-config.disable_flashinfer_q_quantization."
                 )
         if (self.nvfp4_prims_ts_decode or self.nvfp4_fp8_context) and (
@@ -1289,8 +1318,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             # PrimTS decode and the grouped FP8-copy prefill plan from host
             # query lengths, which adaptive verification leaves stale.
             raise NotImplementedError(
-                "NVFP4 KV at head_dim "
-                f"{_NVFP4_KV_NO_TRTLLM_GEN_HEAD_DIM} (PrimTS decode) does not "
+                f"NVFP4 KV at head_dim {self.head_dim} (PrimTS decode) does not "
                 "support adaptive verification."
             )
         self.use_xqa = (
@@ -1523,7 +1551,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # call it only past the gate, as get_cudagraph_support does.
         decode_kernel = cls._get_flashinfer_trtllm_api_decode_kernel()
         if any(
-            _is_sm100_nvfp4_no_trtllm_gen_spec(spec)
+            _is_sm100_nvfp4_prims_ts_spec(spec)
             for spec in iter_layer_specs(kv_cache_spec)
         ):
             decode_kernel = FlashInferDecodeKernel.PRIMS_TS
@@ -1833,6 +1861,45 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         )
         self.paged_kv_last_page_len.copy_to_gpu(num_reqs)
         return paged_kv_indices
+
+    def _window_nvfp4_prefill(
+        self,
+        prefill: TRTLLMPrefill,
+        qo_indptr_cpu: torch.Tensor,
+        page_counts: np.ndarray,
+    ) -> tuple[TRTLLMPrefill, np.ndarray]:
+        """Start each sliding-window prefill at the first page its chunk can
+        see, page (context_len - window_left) // page_size, so the FP8 copy and
+        the kernel cover only the window. Masks are relative to the KV end and
+        RoPE is already in K, so only the kernel's KV tiling moves (FP8 rounding
+        of P). GPU-side only (no host sync); the host page counts become upper
+        bounds for the window."""
+        window_left = self.window_left
+        page_size = self.page_size
+        q_lens_cpu = (qo_indptr_cpu[1:] - qo_indptr_cpu[:-1]).numpy()
+        max_pages = cdiv(int(q_lens_cpu.max()) + window_left, page_size) + 1
+        q_lens = prefill.cum_seq_lens_q[1:] - prefill.cum_seq_lens_q[:-1]
+        context_lens = prefill.seq_lens - q_lens
+        first_page = torch.clamp(context_lens - window_left, min=0) // page_size
+        pages = first_page[:, None] + torch.arange(
+            max_pages, device=first_page.device, dtype=first_page.dtype
+        )
+        pages = torch.clamp(pages, max=prefill.block_tables.shape[1] - 1)
+        seq_lens = prefill.seq_lens - first_page * page_size
+        cum_seq_lens_kv = torch.zeros_like(prefill.cum_seq_lens_kv)
+        torch.cumsum(
+            (seq_lens + page_size - 1) // page_size, dim=0, out=cum_seq_lens_kv[1:]
+        )
+        windowed = TRTLLMPrefill(
+            block_tables=torch.gather(prefill.block_tables, 1, pages.long()),
+            seq_lens=seq_lens,
+            cum_seq_lens_q=prefill.cum_seq_lens_q,
+            cum_seq_lens_kv=cum_seq_lens_kv,
+            max_q_len=prefill.max_q_len,
+            max_seq_len=min(prefill.max_seq_len, max_pages * page_size),
+        )
+        window_pages = cdiv(q_lens_cpu + window_left, page_size) + 1
+        return windowed, np.minimum(page_counts, window_pages)
 
     def _plan_nvfp4_fp8_context(
         self,
@@ -2147,10 +2214,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         upper = np.full(num_prefills, max_seq_len)
                     else:
                         upper = upper_bound[prefill_start:num_reqs].numpy()
+                    page_counts = (upper + page_size - 1) // page_size
+                    if self.window_left >= 0:
+                        attn_metadata.prefill, page_counts = self._window_nvfp4_prefill(
+                            attn_metadata.prefill,
+                            qo_indptr_prefill_cpu,
+                            page_counts,
+                        )
                     self._plan_nvfp4_fp8_context(
-                        attn_metadata.prefill,
-                        qo_indptr_prefill_cpu,
-                        (upper + page_size - 1) // page_size,
+                        attn_metadata.prefill, qo_indptr_prefill_cpu, page_counts
                     )
             else:
                 prefill_wrapper = self._get_prefill_wrapper(causal=attn_metadata.causal)
@@ -2411,11 +2483,8 @@ class FlashInferImpl(AttentionImpl):
         self.nvfp4_fa2 = self.is_kvcache_nvfp4 and _nvfp4_kv_on_fa2()
         self.nvfp4_trtllm = self.is_kvcache_nvfp4 and not self.nvfp4_fa2
         self.kv_cache_dtype = "nvfp4" if self.is_kvcache_nvfp4 else kv_cache_dtype
-        self.nvfp4_fp8_context = _nvfp4_context_uses_fp8_copy(
-            self.nvfp4_trtllm, head_size
-        )
-        self.nvfp4_prims_ts_decode = _nvfp4_decode_uses_prims_ts(
-            self.nvfp4_trtllm, head_size
+        self.nvfp4_fp8_context = self.nvfp4_prims_ts_decode = _nvfp4_kv_uses_prims_ts(
+            self.nvfp4_trtllm, head_size, self.window_left
         )
         self.fp4_data_dim = head_size // 2 if self.is_kvcache_nvfp4 else 0
         self.logits_soft_cap = logits_soft_cap
@@ -2504,15 +2573,14 @@ class FlashInferImpl(AttentionImpl):
                 )
             # Reserve the FP8 context copy before KV cache sizing, without
             # retaining a view; prefills are grouped to fit it.
-            tokens = _nvfp4_context_workspace_tokens(
-                vllm_config.model_config.max_model_len
-            )
+            tokens = _nvfp4_context_workspace_tokens(vllm_config, self.window_left)
             spec = ((tokens, 2, num_kv_heads, head_size), FP8_DTYPE)
             current_workspace_manager().get_simultaneous(spec)
             logger.info_once(
                 "Reserved %.1f MiB of workspace for the NVFP4 KV FP8 context "
-                "copy (%d tokens).",
+                "copy at head_dim %d (%d tokens).",
                 tokens * 2 * num_kv_heads * head_size / 2**20,
+                head_size,
                 tokens,
             )
 
@@ -2920,8 +2988,8 @@ class FlashInferImpl(AttentionImpl):
                     assert nvfp4_kv_data is not None
                     assert nvfp4_kv_block_scales is not None
                     if self.nvfp4_fp8_context:
-                        # No NVFP4-KV context kernel at head_dim 512: run the
-                        # FP8 kernel per request group on an FP8 copy of its pages.
+                        # Run the FP8 context kernel per request group on an FP8
+                        # copy of its pages.
                         assert isinstance(out, torch.Tensor)
                         if attn_metadata.prefill.nvfp4_chunks is not None:
                             context_calls = [
