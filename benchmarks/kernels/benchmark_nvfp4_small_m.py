@@ -9,7 +9,12 @@ FlashInfer CUPTI on a CUDA graph that walks ``copies`` distinct weight copies
 whose total size exceeds L2, so every call reads its weight from DRAM.
 
 Bandwidth is reported against the theoretical minimum traffic: FP4 weight +
-E4M3 block scales read once (activation and output are <0.1% at M <= 16).
+E4M3 block scales read once, without any N/K padding a kernel may add
+(activation and output are <0.1% at M <= 16). CUPTI sums kernel durations only,
+so launch gaps between a provider's kernels (quant, pad, GEMM) are not counted.
+
+Providers whose output deviates from the dequantized-weight reference
+(cosine similarity below ``--min-cos``) are reported as errors.
 
 Example:
     python benchmarks/kernels/benchmark_nvfp4_small_m.py \
@@ -25,6 +30,7 @@ import random
 import statistics
 import subprocess
 from dataclasses import asdict, dataclass
+from pathlib import Path
 
 import torch
 import torch.nn.functional as F
@@ -51,7 +57,7 @@ FLOAT8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
 FP4_BYTES_PER_PARAM = 0.5 + 1 / 16
 
 # Qwen3.8-27B (hidden 5120), TP1, fused as in vllm/model_executor/models/qwen3_5.py
-# name: (K, N, layers per forward)
+# name: (K, N, layers per forward); summed into a per-forward estimate
 QWEN3_8_27B_SHAPES = {
     "gdn.in_proj_qkvz": (5120, 16384, 48),
     "gdn.in_proj_ba": (5120, 96, 48),
@@ -79,11 +85,17 @@ PROVIDERS: dict[str, tuple[type[NvFp4LinearKernel], bool, bool]] = {
 DATASHEET_BW_GBPS = {"workstation": 1792.0, "server": 1597.0}
 
 
+def datasheet_edition() -> str:
+    name = torch.cuda.get_device_properties(0).name
+    return "server" if "Server" in name else "workstation"
+
+
 @dataclass
 class Result:
     shape: str
     k: int
     n: int
+    layers: int
     m: int
     provider: str
     us: float | None
@@ -148,10 +160,16 @@ def bench_us(fn, warmup: int, iters: int, shuffles: int) -> list[float]:
 
 
 def run_case(shape: str, m: int, provider: str, args: argparse.Namespace) -> Result:
-    k, n, _ = QWEN3_8_27B_SHAPES[shape]
+    k, n, layers = QWEN3_8_27B_SHAPES[shape]
     weight_bytes = int(k * n * FP4_BYTES_PER_PARAM)
     base = dict(
-        shape=shape, k=k, n=n, m=m, provider=provider, weight_bytes=weight_bytes
+        shape=shape,
+        k=k,
+        n=n,
+        layers=layers,
+        m=m,
+        provider=provider,
+        weight_bytes=weight_bytes,
     )
     try:
         kernel = make_kernel(provider)
@@ -174,14 +192,15 @@ def run_case(shape: str, m: int, provider: str, args: argparse.Namespace) -> Res
 
         if tuned:
             with autotune(True):
-                for x, layer in zip(xs, layers):
-                    kernel.apply_weights(layer, x)
+                kernel.apply_weights(layers[0], xs[0])
             torch.accelerator.synchronize()
 
         out = kernel.apply_weights(layers[0], xs[0])
         ref = F.linear(xs[0], layers[0].ref_weight)
         max_abs_err = (out.float() - ref.float()).abs().max().item()
         cos = F.cosine_similarity(out.float().flatten(), ref.float().flatten(), dim=0)
+        if cos.item() < args.min_cos:
+            raise ValueError(f"cos_sim {cos.item():.4f} < --min-cos {args.min_cos}")
 
         def walk():
             for x, layer in zip(xs, layers):
@@ -203,11 +222,11 @@ def run_case(shape: str, m: int, provider: str, args: argparse.Namespace) -> Res
             us=us,
             us_samples=samples,
             gbps=gbps,
-            pct_bw={k: 100 * gbps / v for k, v in DATASHEET_BW_GBPS.items()},
+            pct_bw={ed: 100 * gbps / bw for ed, bw in DATASHEET_BW_GBPS.items()},
             max_abs_err=max_abs_err,
             cos_sim=cos.item(),
         )
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return Result(
             **base,
             us=None,
@@ -222,20 +241,52 @@ def run_case(shape: str, m: int, provider: str, args: argparse.Namespace) -> Res
 
 def run_quant_only(shape: str, m: int, args: argparse.Namespace) -> Result:
     """Standalone scaled_fp4_quant cost (the W4A4 providers' extra launch)."""
-    k, n, _ = QWEN3_8_27B_SHAPES[shape]
-    x = torch.randn(m, k, dtype=torch.bfloat16)
-    scale = (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / x.abs().max()).float()
-    fn = lambda: ops.scaled_fp4_quant(x, scale, is_sf_swizzled_layout=True)  # noqa: E731
-    fn()
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
+    k = QWEN3_8_27B_SHAPES[shape][0]
+    base = dict(
+        shape=shape,
+        k=k,
+        n=0,
+        layers=0,
+        m=m,
+        provider="quant-only",
+        weight_bytes=0,
+        gbps=None,
+        pct_bw={},
+        max_abs_err=None,
+        cos_sim=None,
+    )
+    try:
+        x = torch.randn(m, k, dtype=torch.bfloat16)
+        scale = (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / x.abs().max()).float()
+        fn = lambda: ops.scaled_fp4_quant(x, scale, is_sf_swizzled_layout=True)  # noqa: E731
         fn()
-    samples = bench_us(graph.replay, args.warmup, args.iters, args.shuffles)
-    return Result(
-        shape=shape, k=k, n=n, m=m, provider="quant-only",
-        us=statistics.median(samples), us_samples=samples, weight_bytes=0,
-        gbps=None, pct_bw={}, max_abs_err=None, cos_sim=None,
-    )  # fmt: skip
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            fn()
+        samples = bench_us(graph.replay, args.warmup, args.iters, args.shuffles)
+    except Exception as e:
+        return Result(
+            **base, us=None, us_samples=[], error=f"{type(e).__name__}: {e}"[:500]
+        )
+    return Result(**base, us=statistics.median(samples), us_samples=samples)
+
+
+def forward_estimate(results: list[Result], shapes: list[str]) -> dict:
+    """Per-forward linear time (ms) per provider and M, summed over all layers.
+
+    Only providers that succeeded on every Qwen3.8-27B shape are reported.
+    """
+    if set(shapes) != set(QWEN3_8_27B_SHAPES):
+        return {}
+    by_key = {(r.provider, r.shape, r.m): r for r in results if r.us is not None}
+    estimate: dict[str, dict[int, float]] = {}
+    for provider, m in {(r.provider, r.m) for r in results}:
+        rs = [by_key.get((provider, s, m)) for s in shapes]
+        if provider != "quant-only" and all(rs):
+            estimate.setdefault(provider, {})[m] = (
+                sum(r.us * r.layers for r in rs) / 1e3  # type: ignore[union-attr]
+            )
+    return estimate
 
 
 def metadata() -> dict:
@@ -243,13 +294,16 @@ def metadata() -> dict:
 
     def cmd(*c: str) -> str:
         try:
-            return subprocess.run(c, capture_output=True, text=True).stdout.strip()
+            return subprocess.run(
+                c, capture_output=True, text=True, cwd=Path(__file__).parent
+            ).stdout.strip()
         except OSError:
             return "unavailable"
 
     props = torch.cuda.get_device_properties(0)
     return {
         "gpu": props.name,
+        "datasheet_edition": datasheet_edition(),
         "capability": f"{props.major}.{props.minor}",
         "sm_count": props.multi_processor_count,
         "l2_bytes": getattr(props, "L2_cache_size", None),
@@ -277,6 +331,7 @@ def main() -> None:
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--iters", type=int, default=100)
     parser.add_argument("--shuffles", type=int, default=3)
+    parser.add_argument("--min-cos", type=float, default=0.98)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output-json", type=str, default=None)
     args = parser.parse_args()
@@ -290,17 +345,34 @@ def main() -> None:
         raise RuntimeError("CUPTI timing requires `uv pip install cupti-python`") from e
     torch.set_default_device("cuda")
     torch.manual_seed(args.seed)
+    edition = datasheet_edition()
 
     cases = [(s, m, p) for s in args.shapes for m in args.m for p in args.providers]
     # Shuffle so clock/thermal drift is shared across providers.
     random.Random(args.seed).shuffle(cases)
-    results = [run_quant_only(s, m, args) for s in args.shapes for m in args.m]
+    results: list[Result] = []
+    if any("w4a4" in p for p in args.providers):
+        first_shape_per_k = {QWEN3_8_27B_SHAPES[s][0]: s for s in args.shapes}
+        results = [
+            run_quant_only(s, m, args)
+            for s in first_shape_per_k.values()
+            for m in args.m
+        ]
     for shape, m, provider in cases:
         r = run_case(shape, m, provider, args)
         results.append(r)
-        status = r.error or f"{r.us:8.2f} us {r.pct_bw.get('workstation', 0):5.1f}%"
+        status = r.error or (
+            f"{r.us:8.2f} us {r.pct_bw[edition]:5.1f}%  cos={r.cos_sim:.4f}"
+        )
         print(f"{shape:18s} M={m:<3d} {provider:20s} {status}", flush=True)
         torch.accelerator.empty_cache()
+
+    estimate = forward_estimate(results, args.shapes)
+    for provider, by_m in sorted(estimate.items()):
+        print(
+            f"forward {provider:20s}",
+            " ".join(f"M={m}:{ms:.2f}ms" for m, ms in sorted(by_m.items())),
+        )
 
     if args.output_json:
         with open(args.output_json, "w") as f:
@@ -309,6 +381,7 @@ def main() -> None:
                     "meta": metadata(),
                     "args": vars(args),
                     "results": [asdict(r) for r in results],
+                    "forward_ms": estimate,
                 },
                 f,
                 indent=1,
