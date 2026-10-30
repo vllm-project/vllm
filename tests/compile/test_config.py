@@ -1004,8 +1004,11 @@ def test_breakable_cudagraph_default_adds_prefill_capture_sizes(
     )
     config.model_config.architectures = [arch]
 
-    with patch.object(
-        current_platform, "is_device_capability_family", return_value=False
+    with (
+        patch.object(current_platform, "is_cuda", return_value=True),
+        patch.object(
+            current_platform, "is_device_capability_family", return_value=False
+        ),
     ):
         VllmConfig._set_cudagraph_sizes(config)
 
@@ -1019,6 +1022,45 @@ def test_breakable_cudagraph_default_adds_prefill_capture_sizes(
         set(token_grid) | ({max_num_seqs} if max_num_seqs <= token_grid_max else set())
     )
     assert compilation_config.max_cudagraph_capture_size == sizes[-1]
+
+
+@pytest.mark.parametrize(
+    ("is_cuda", "blackwell", "mode", "num_speculative_tokens", "expected"),
+    [
+        # Data center Blackwell: the grid starts above its 1024 ceiling.
+        (True, True, CUDAGraphMode.FULL_AND_PIECEWISE, 0, list(range(1088, 2049, 64))),
+        # MTP: uniform decode sizes stay within the ceiling, the grid is added.
+        (True, False, CUDAGraphMode.FULL_AND_PIECEWISE, 2, list(range(576, 2049, 64))),
+        # No piecewise graphs to run prefills in.
+        (True, False, CUDAGraphMode.FULL, 0, []),
+        # Qwen3.5 moves to breakable CUDA graphs on NVIDIA only.
+        (False, False, CUDAGraphMode.FULL_AND_PIECEWISE, 0, []),
+    ],
+)
+def test_breakable_cudagraph_prefill_capture_sizes_by_platform_and_mode(
+    monkeypatch, is_cuda, blackwell, mode, num_speculative_tokens, expected
+):
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
+    compilation_config = CompilationConfig(cudagraph_mode=mode)
+    config = _mock_config_for_cudagraph_sizes(
+        max_num_seqs=512,
+        num_speculative_tokens=num_speculative_tokens,
+        max_num_batched_tokens=8192,
+        compilation_config=compilation_config,
+    )
+    config.model_config.architectures = [QWEN3_5_MOE]
+
+    with (
+        patch.object(current_platform, "is_cuda", return_value=is_cuda),
+        patch.object(
+            current_platform, "is_device_capability_family", return_value=blackwell
+        ),
+    ):
+        VllmConfig._set_cudagraph_sizes(config)
+
+    ceiling = 1024 if blackwell else 512
+    sizes = compilation_config.cudagraph_capture_sizes
+    assert [size for size in sizes if size > ceiling] == expected
 
 
 def test_breakable_cudagraph_keeps_explicit_capture_size(monkeypatch):

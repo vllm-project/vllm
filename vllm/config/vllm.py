@@ -121,7 +121,7 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
 
 # Prefill-sized capture sizes added above the default ceiling for Qwen3.5 on
 # breakable CUDA graphs: every 64 tokens up to 2048.
-_BREAKABLE_PREFILL_CAPTURE_SIZES = tuple(range(576, 2049, 64))
+_QWEN3_5_PREFILL_CAPTURE_SIZES = tuple(range(576, 2049, 64))
 
 
 @lru_cache
@@ -2578,20 +2578,21 @@ class VllmConfig:
                     uniform_decode_sizes = [max_num_seqs]
                 cudagraph_mode = self.compilation_config.cudagraph_mode
                 if (
-                    envs.VLLM_USE_BREAKABLE_CUDAGRAPH
+                    current_platform.is_cuda()
+                    and envs.VLLM_USE_BREAKABLE_CUDAGRAPH
                     and cudagraph_mode.has_piecewise_cudagraphs()
                     and max_cudagraph_capture_size == default_max_graph_size
                     and set(self.model_config.architectures) & _QWEN3_5_ARCHITECTURES
                 ):
                     # Breakable CUDA graphs run attention eagerly between the
                     # captured segments, so prefill-sized batches capture like
-                    # any other size. Qwen3.5 also skips torch.compile, so a
-                    # prefill above the ceiling would launch every op from
-                    # Python instead. A coarse grid keeps the extra capture time
-                    # and graph memory small.
+                    # any other size. Qwen3.5 on NVIDIA also skips
+                    # torch.compile, so a prefill above the ceiling would launch
+                    # every op from Python instead. A coarse grid keeps the
+                    # extra capture time and graph memory small.
                     prefill_sizes = [
                         size
-                        for size in _BREAKABLE_PREFILL_CAPTURE_SIZES
+                        for size in _QWEN3_5_PREFILL_CAPTURE_SIZES
                         if size > default_max_graph_size
                     ]
             max_num_tokens = self.scheduler_config.max_num_batched_tokens
