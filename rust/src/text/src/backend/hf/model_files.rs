@@ -635,7 +635,7 @@ fn discover_chat_template_in_dir(dir: &std::path::Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use tempfile::tempdir;
     use vllm_tokenizer::{TiktokenTokenizer, Tokenizer};
@@ -647,6 +647,142 @@ mod tests {
             id: id.as_ref().to_str().unwrap().to_string(),
             revision: revision.map(str::to_string),
         }
+    }
+
+    /// A fake Hub serving one repo at one commit, recording every request path.
+    #[derive(Clone)]
+    struct FakeHub {
+        commit: String,
+        files: std::sync::Arc<std::collections::BTreeMap<String, Vec<u8>>>,
+        requests: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        /// Answer the listing request with 500, like an unreachable Hub.
+        fail_listing: bool,
+    }
+
+    impl FakeHub {
+        async fn serve(self) -> String {
+            use axum::routing::get;
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let router = axum::Router::new()
+                .route(
+                    "/api/models/{org}/{name}/revision/{rev}",
+                    get(Self::listing),
+                )
+                .route("/{org}/{name}/resolve/{rev}/{file}", get(Self::resolve))
+                .with_state(self);
+            tokio::spawn(axum::serve(listener, router).into_future());
+            endpoint
+        }
+
+        fn record(&self, path: String) {
+            self.requests.lock().unwrap().push(path);
+        }
+
+        fn requests(&self) -> Vec<String> {
+            self.requests.lock().unwrap().clone()
+        }
+
+        async fn listing(
+            axum::extract::State(hub): axum::extract::State<Self>,
+            axum::extract::Path((_, _, rev)): axum::extract::Path<(String, String, String)>,
+        ) -> axum::response::Response {
+            use axum::response::IntoResponse as _;
+            hub.record(format!("listing/{rev}"));
+            if hub.fail_listing {
+                return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+            let siblings: Vec<_> =
+                hub.files.keys().map(|name| serde_json::json!({ "rfilename": name })).collect();
+            axum::Json(serde_json::json!({ "sha": hub.commit, "siblings": siblings }))
+                .into_response()
+        }
+
+        async fn resolve(
+            axum::extract::State(hub): axum::extract::State<Self>,
+            axum::extract::Path((_, _, rev, file)): axum::extract::Path<(
+                String,
+                String,
+                String,
+                String,
+            )>,
+        ) -> axum::response::Response {
+            use axum::response::IntoResponse as _;
+            hub.record(format!("resolve/{rev}/{file}"));
+            let Some(content) = hub.files.get(&file) else {
+                return axum::http::StatusCode::NOT_FOUND.into_response();
+            };
+            // One response serves both hf-hub's metadata probe (headers only) and its
+            // single-chunk download of a small file.
+            (
+                [
+                    ("x-repo-commit", hub.commit.clone()),
+                    ("etag", format!("\"{file}\"")),
+                    ("content-range", format!("bytes 0-0/{}", content.len())),
+                ],
+                content.clone(),
+            )
+                .into_response()
+        }
+    }
+
+    const FAKE_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    /// A cached snapshot of `test/model` at [`FAKE_COMMIT`] holding `files`, as a
+    /// tokenizer-only Python download leaves it.
+    fn partial_snapshot(cache: &std::path::Path, files: &[&str]) -> PathBuf {
+        let repo = cache.join("models--test--model");
+        fs::create_dir_all(repo.join("refs")).unwrap();
+        fs::write(repo.join("refs/main"), FAKE_COMMIT).unwrap();
+        let snapshot = repo.join("snapshots").join(FAKE_COMMIT);
+        fs::create_dir_all(&snapshot).unwrap();
+        for file in files {
+            fs::write(snapshot.join(file), "{}").unwrap();
+        }
+        snapshot
+    }
+
+    /// Rerun this test binary with only `test`, as a child that resolves `test/model`
+    /// against the fake Hub at `endpoint` with `cache` as its HF cache.
+    async fn run_child(
+        test: &str,
+        child_marker: &str,
+        cache: &Path,
+        endpoint: &str,
+        extra_env: &[(&str, &str)],
+    ) {
+        let exe = std::env::current_exe().unwrap();
+        let test = format!("backend::hf::model_files::tests::{test}");
+        let child_marker = child_marker.to_string();
+        let hf_home = cache.with_file_name("hf-home");
+        let cache = cache.to_path_buf();
+        let endpoint = endpoint.to_string();
+        let extra_env: Vec<(String, String)> = extra_env
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        let output = tokio::task::spawn_blocking(move || {
+            let mut command = std::process::Command::new(exe);
+            command
+                .args(["--exact", &test, "--nocapture"])
+                .env(child_marker, "1")
+                .env("HF_HOME", hf_home)
+                .env("HF_HUB_CACHE", cache)
+                .env("HF_ENDPOINT", endpoint)
+                .env_remove("HF_HUB_OFFLINE");
+            for (key, value) in extra_env {
+                command.env(key, value);
+            }
+            command.output().unwrap()
+        })
+        .await
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
@@ -870,6 +1006,192 @@ mod tests {
                 .map(|sha| dir.path().join(repo.folder_name()).join("snapshots").join(sha));
             assert_eq!(super::cached_snapshot_dir(&cache, &repo), expected);
         }
+    }
+
+    const GENERATION_CONFIG: &str = r#"{"eos_token_id":[1,2]}"#;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cached_snapshot_fetches_missing_files_from_the_hub_at_its_commit() {
+        const TEST: &str = "cached_snapshot_fetches_missing_files_from_the_hub_at_its_commit";
+        const CHILD: &str = "VLLM_TEST_HF_SNAPSHOT_FETCH_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let cache = PathBuf::from(std::env::var_os("HF_HUB_CACHE").unwrap());
+            let snapshot = cache.join("models--test--model/snapshots").join(FAKE_COMMIT);
+            let files = ResolvedModelFiles::new("test/model", None).await.unwrap();
+            assert_eq!(files.config_path, Some(snapshot.join("config.json")));
+            // The missing file lands in the same snapshot, at the cached commit.
+            assert_eq!(
+                files.generation_config_path,
+                Some(snapshot.join("generation_config.json"))
+            );
+            assert_eq!(
+                fs::read_to_string(snapshot.join("generation_config.json")).unwrap(),
+                GENERATION_CONFIG
+            );
+            assert_eq!(files.preprocessor_config_path, None);
+            assert_eq!(files.video_preprocessor_config_path, None);
+            assert_eq!(files.processor_config_path, None);
+            return;
+        }
+
+        let dir = tempdir().unwrap();
+        let cache = dir.path().join("hub-cache");
+        partial_snapshot(
+            &cache,
+            &["tokenizer.json", "tokenizer_config.json", "config.json"],
+        );
+        let hub = FakeHub {
+            commit: FAKE_COMMIT.to_string(),
+            files: std::sync::Arc::new(std::collections::BTreeMap::from(
+                [
+                    ("tokenizer.json", "{}"),
+                    ("tokenizer_config.json", "{}"),
+                    ("config.json", "{}"),
+                    ("generation_config.json", GENERATION_CONFIG),
+                ]
+                .map(|(name, content)| (name.to_string(), content.as_bytes().to_vec())),
+            )),
+            requests: Default::default(),
+            fail_listing: false,
+        };
+        let endpoint = hub.clone().serve().await;
+
+        run_child(TEST, CHILD, &cache, &endpoint, &[]).await;
+
+        // One listing at the cached commit, then only the missing file is fetched.
+        let requests = hub.requests();
+        let listing = format!("listing/{FAKE_COMMIT}");
+        let fetch = format!("resolve/{FAKE_COMMIT}/generation_config.json");
+        assert_eq!(
+            requests.iter().filter(|request| **request == listing).count(),
+            1,
+            "{requests:?}"
+        );
+        assert!(
+            requests.iter().all(|request| *request == listing || *request == fetch),
+            "{requests:?}"
+        );
+        // Files the Hub lacks are recorded like huggingface_hub does; fetched ones are not.
+        let no_exist = cache.join("models--test--model/.no_exist").join(FAKE_COMMIT);
+        for file in [
+            "preprocessor_config.json",
+            "video_preprocessor_config.json",
+            "processor_config.json",
+        ] {
+            assert!(no_exist.join(file).exists(), "{file}");
+        }
+        assert!(!no_exist.join("generation_config.json").exists());
+        // The branch ref still points at the cached commit.
+        assert_eq!(
+            fs::read_to_string(cache.join("models--test--model/refs/main")).unwrap(),
+            FAKE_COMMIT
+        );
+
+        // Once complete, a later startup never contacts the Hub.
+        let before = hub.requests().len();
+        run_child(TEST, CHILD, &cache, &endpoint, &[]).await;
+        assert_eq!(
+            hub.requests().len(),
+            before,
+            "{:?}",
+            &hub.requests()[before..]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cached_snapshot_skips_the_hub_for_recorded_absences_offline_and_local_dirs() {
+        const TEST: &str =
+            "cached_snapshot_skips_the_hub_for_recorded_absences_offline_and_local_dirs";
+        const CHILD: &str = "VLLM_TEST_HF_SNAPSHOT_SKIP_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let files = ResolvedModelFiles::new("test/model", None).await.unwrap();
+            assert_eq!(files.generation_config_path, None);
+            // A local model directory is read as given, whatever the Hub has.
+            let local = tempdir().unwrap();
+            for file in ["tokenizer.json", "tokenizer_config.json", "config.json"] {
+                fs::write(local.path().join(file), "{}").unwrap();
+            }
+            let files =
+                ResolvedModelFiles::new(local.path().to_str().unwrap(), None).await.unwrap();
+            assert_eq!(files.generation_config_path, None);
+            return;
+        }
+
+        let dir = tempdir().unwrap();
+        // The Hub has the file, so any lookup would find and fetch it.
+        let hub = FakeHub {
+            commit: FAKE_COMMIT.to_string(),
+            files: std::sync::Arc::new(std::collections::BTreeMap::from([(
+                "generation_config.json".to_string(),
+                GENERATION_CONFIG.as_bytes().to_vec(),
+            )])),
+            requests: Default::default(),
+            fail_listing: false,
+        };
+        let endpoint = hub.clone().serve().await;
+        let partial = ["tokenizer.json", "tokenizer_config.json", "config.json"];
+
+        // Every missing file is already recorded as absent at this commit.
+        let recorded = dir.path().join("recorded");
+        partial_snapshot(&recorded, &partial);
+        let no_exist = recorded.join("models--test--model/.no_exist").join(FAKE_COMMIT);
+        fs::create_dir_all(&no_exist).unwrap();
+        for file in [
+            "generation_config.json",
+            "preprocessor_config.json",
+            "video_preprocessor_config.json",
+            "processor_config.json",
+        ] {
+            fs::write(no_exist.join(file), "").unwrap();
+        }
+        run_child(TEST, CHILD, &recorded, &endpoint, &[]).await;
+
+        // Offline, nothing is looked up or recorded.
+        let offline = dir.path().join("offline");
+        partial_snapshot(&offline, &partial);
+        run_child(TEST, CHILD, &offline, &endpoint, &[("HF_HUB_OFFLINE", "1")]).await;
+        assert!(!offline.join("models--test--model/.no_exist").exists());
+
+        assert_eq!(hub.requests(), Vec::<String>::new());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unreachable_hub_is_asked_once_per_source_and_records_no_absence() {
+        const TEST: &str = "unreachable_hub_is_asked_once_per_source_and_records_no_absence";
+        const CHILD: &str = "VLLM_TEST_HF_SNAPSHOT_UNREACHABLE_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let cache = PathBuf::from(std::env::var_os("HF_HUB_CACHE").unwrap());
+            let snapshot = cache.join("models--test--model/snapshots").join(FAKE_COMMIT);
+            // Resolution still succeeds from what the snapshot has.
+            let files = ResolvedModelFiles::new("test/model", None).await.unwrap();
+            assert_eq!(files.config_path, Some(snapshot.join("config.json")));
+            assert_eq!(files.generation_config_path, None);
+            return;
+        }
+
+        let dir = tempdir().unwrap();
+        let cache = dir.path().join("hub-cache");
+        partial_snapshot(
+            &cache,
+            &["tokenizer.json", "tokenizer_config.json", "config.json"],
+        );
+        let hub = FakeHub {
+            commit: FAKE_COMMIT.to_string(),
+            files: std::sync::Arc::new(std::collections::BTreeMap::from([(
+                "generation_config.json".to_string(),
+                GENERATION_CONFIG.as_bytes().to_vec(),
+            )])),
+            requests: Default::default(),
+            fail_listing: true,
+        };
+        let endpoint = hub.clone().serve().await;
+
+        run_child(TEST, CHILD, &cache, &endpoint, &[]).await;
+
+        // Four files are missing, but the failed listing is not retried for the others.
+        assert_eq!(hub.requests(), vec![format!("listing/{FAKE_COMMIT}")]);
+        // Not knowing whether the files exist, nothing is recorded as absent.
+        assert!(!cache.join("models--test--model/.no_exist").exists());
     }
 
     #[tokio::test]
