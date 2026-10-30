@@ -148,7 +148,7 @@ def _write_consumer_scheduler_for_finished_request(tp_size: int = 2):
     scheduler.tp_size = tp_size
     scheduler._has_mamba = False
     scheduler._reqs_need_recv = {}
-    scheduler.unmap_request_id = MagicMock()
+    scheduler.unmap_request_id = MagicMock()  # type: ignore[method-assign]
     return scheduler
 
 
@@ -447,11 +447,13 @@ def test_write_mode_with_chunked_prefill_saves_local_block_ids():
     for _, (expected_save, expected_recv, expected_send) in enumerate(expected_counts):
         scheduler_output = scheduler.schedule()
         kv_connector_metadata = scheduler_output.kv_connector_metadata
+        assert isinstance(kv_connector_metadata, MoRIIOConnectorMetadata)
 
         assert len(kv_connector_metadata.reqs_to_save) == expected_save
         assert len(kv_connector_metadata.reqs_to_recv) == expected_recv
         assert len(kv_connector_metadata.reqs_to_send) == expected_send
     assert kv_connector_metadata is not None, "kv_connector_metadata is None"
+    assert isinstance(kv_connector_metadata, MoRIIOConnectorMetadata)
     assert request_id in kv_connector_metadata.reqs_to_save, (
         "Request ID not in reqs_to_save"
     )
@@ -578,15 +580,14 @@ def test_send_transfer_release_sends_structured_release_message():
     scheduler._send_transfer_release("xfer-7", "127.0.0.1", 7000)
 
     payload = sock.send.call_args.args[0]
-    # WRITE-mode release advertises the consumer (decode) TP size so the prefill
-    # side counts the right number of ACKs via get_moriio_expected_ack_count,
-    # mirroring the READ-mode release in _pop_done_transfers (see
-    # test_read_completion_sends_structured_release_with_consumer_tp_size). The
-    # fixture's tp_size is 2, so consumer_tp_size == 2.
+    # Unlike the READ-mode release in _pop_done_transfers, which every decode
+    # rank sends, the decode scheduler sends this one once per prefill rank on
+    # behalf of all decode ranks (the fixture's tp_size is 2), so the prefill
+    # rank must count it as its only ACK.
     assert msgspec.msgpack.decode(payload) == {
         "type": "release",
         "transfer_id": "xfer-7",
-        "consumer_tp_size": 2,
+        "consumer_tp_size": 1,
     }
 
 
@@ -625,6 +626,7 @@ def test_register_kv_caches(mock_parallel_groups):
         ),
     ):
         # Create connector
+        assert vllm_config.kv_transfer_config is not None
         vllm_config.kv_transfer_config.kv_connector_extra_config.update(
             {
                 "proxy_ip": "127.0.0.1",
@@ -718,6 +720,7 @@ def test_moriio_handshake_returns_metadata(mock_parallel_groups):
     ):
         handshake_port = _find_free_port()
         # Create connector
+        assert vllm_config.kv_transfer_config is not None
         vllm_config.kv_transfer_config.kv_connector_extra_config.update(
             {
                 "proxy_ip": "127.0.0.1",
@@ -1263,6 +1266,7 @@ def test_worker_layer_to_group_routing(mock_parallel_groups):
     vllm_config = create_vllm_config(role="kv_consumer", read_mode=True)
     # Building the worker directly bypasses MoRIIOConnector._set_port_defaults,
     # so provide the ports manually.
+    assert vllm_config.kv_transfer_config is not None
     vllm_config.kv_transfer_config.kv_connector_extra_config.update(
         {
             "http_port": 12346,

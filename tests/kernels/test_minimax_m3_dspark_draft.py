@@ -326,6 +326,7 @@ def test_draft_attention_fused_qk_norm_rope(
     slots = torch.tensor([5, -1, 17, 18, 40, 63, 0], device="cuda")
     DFlashQwen3Attention.forward(attn, positions, hidden)
     q_ref, k_ref, v_ref = attn.attn.qkv
+    assert k_ref is not None and v_ref is not None
     with set_forward_context(
         None, default_vllm_config, slot_mapping={layer.layer_name: slots}
     ):

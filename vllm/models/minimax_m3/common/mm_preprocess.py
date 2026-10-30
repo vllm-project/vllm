@@ -125,8 +125,8 @@ class MiniMaxM3VLProcessingInfo(BaseProcessingInfo):
         # processor, whose own defaults feed ``resolve_max_long_side_pixel``
         # the same way.
         merged = self.ctx.get_merged_mm_kwargs(mm_kwargs)
-        # nho2's get_merged_mm_kwargs has no ``modality=``: overlay the scoped
-        # dict here, as prod's overlay_modality_mm_kwargs does.
+        # Kwargs scoped to this modality (``images_kwargs`` / ``videos_kwargs``)
+        # override the flat ones.
         scoped = merged.get("images_kwargs" if modality == "image" else "videos_kwargs")
         if isinstance(scoped, Mapping):
             merged = {**merged, **scoped}

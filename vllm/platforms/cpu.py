@@ -21,7 +21,12 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-from .interface import CpuArchEnum, Platform, PlatformEnum
+from .interface import (
+    CpuArchEnum,
+    Platform,
+    PlatformEnum,
+    get_assigned_physical_gpu_ids,
+)
 
 logger = init_logger(__name__)
 
@@ -148,7 +153,13 @@ class CpuPlatform(Platform):
     ) -> str:
         if attn_selector_config.use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on CPU.")
+        kv_cache_dtype = attn_selector_config.kv_cache_dtype
         if attn_selector_config.use_mla:
+            if kv_cache_dtype not in (None, "auto", "bfloat16", "float16"):
+                raise ValueError(
+                    f"--kv-cache-dtype {kv_cache_dtype} is not supported by "
+                    "MLA attention on CPU."
+                )
             amx_available = (
                 cls.get_cpu_architecture() == CpuArchEnum.X86
                 and torch.cpu._is_amx_tile_supported()
@@ -176,6 +187,13 @@ class CpuPlatform(Platform):
             return AttentionBackendEnum.CPU_MLA.get_path()
         if selected_backend and selected_backend != AttentionBackendEnum.CPU_ATTN:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
+        if not AttentionBackendEnum.CPU_ATTN.get_class().supports_kv_cache_dtype(
+            kv_cache_dtype
+        ):
+            raise ValueError(
+                f"--kv-cache-dtype {kv_cache_dtype} is not supported by the CPU "
+                "attention backend on this host."
+            )
         return AttentionBackendEnum.CPU_ATTN.get_path()
 
     @classmethod
@@ -788,7 +806,7 @@ class CpuPlatform(Platform):
     def get_current_memory_usage(
         cls, device: torch.types.Device | None = None
     ) -> float:
-        allowed_mem_node_list = get_visible_memory_node()
+        allowed_mem_node_list = get_visible_memory_node(get_assigned_physical_gpu_ids())
         mem_status_list = [get_memory_node_info(i) for i in allowed_mem_node_list]
         memory_usage = 0
         for s in mem_status_list:

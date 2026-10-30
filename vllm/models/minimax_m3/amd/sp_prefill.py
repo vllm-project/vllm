@@ -271,7 +271,15 @@ def _mxfp8_kernel(layer):
 
 
 def _linear(layer, x_q: torch.Tensor, x_s: torch.Tensor) -> torch.Tensor:
-    return layer.quant_method.kernel.apply_quantized(layer, x_q, x_s, torch.bfloat16)
+    from vllm.model_executor.layers.fusion.quant_activation import (
+        QuantizedActivation,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kMxfp8Dynamic,
+    )
+
+    qa = QuantizedActivation(x_q, x_s, torch.bfloat16, x_q.shape, kMxfp8Dynamic)
+    return layer.quant_method.kernel.apply_weights(layer, qa)
 
 
 def make_o_proj_full(layer, quant_config, prefix: str):

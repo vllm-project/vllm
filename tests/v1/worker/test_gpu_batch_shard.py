@@ -7,6 +7,7 @@ sub-batch, the all-to-all send/recv layout, and the padded result gather must
 compose to a bit-exact round trip of the replicated computation.
 """
 
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest import mock
 
@@ -14,21 +15,23 @@ import numpy as np
 import pytest
 import torch
 
+from vllm.platforms import current_platform
 from vllm.v1.core.sched.output import GrammarOutput
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.sample import batch_shard
 from vllm.v1.worker.gpu.sample.batch_shard import (
     BatchSharder,
-    DraftBatchSharder,
     _shard_grammar_output,
 )
+from vllm.v1.worker.gpu.spec_decode import draft_logits as draft_logits_module
 
-DEVICE = "cuda"
+DEVICE = current_platform.device_type
 
 # The owner-sorted layout is expanded by a Triton kernel, so the routing math
 # can only be exercised on device.
-requires_cuda = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="requires CUDA"
+requires_gpu = pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="requires CUDA or XPU",
 )
 
 
@@ -41,13 +44,10 @@ def _make_batch(
     num_reqs: int,
     max_num_reqs: int,
     max_spec: int,
-    slot_pool: np.ndarray | None = None,
 ) -> InputBatch:
     """Consistent batch with random unique request slots, 1 + k_i logits
     rows per request at the tail of each query segment."""
-    if slot_pool is None:
-        slot_pool = np.arange(max_num_reqs)
-    slots = rng.choice(slot_pool, size=num_reqs, replace=False)
+    slots = rng.choice(max_num_reqs, size=num_reqs, replace=False)
     slots = slots.astype(np.int32)
     k = rng.integers(0, max_spec + 1, size=num_reqs)
     num_logits_per_req = (1 + k).astype(np.int32)
@@ -109,8 +109,26 @@ def _make_batch(
     )
 
 
-def _shard_all_ranks(batch: InputBatch, max_num_reqs: int, tp_size: int):
-    """Simulate every TP rank by faking get_tp_group() per BatchSharder."""
+def _shard_all_ranks(
+    batch: InputBatch,
+    max_num_reqs: int,
+    tp_size: int,
+    adaptive_verification_enabled: bool = False,
+    owners_np: np.ndarray | None = None,
+):
+    """Simulate every TP rank by faking get_tp_group() per BatchSharder.
+
+    ``owners_np`` is a sharded DraftLogitsCache owner table indexed by request
+    slot. Without it, requests are owned by batch position.
+    """
+    draft_logits = None
+    if owners_np is not None:
+        owners_np = owners_np.astype(np.int32)
+        owners = torch.from_numpy(owners_np).to(DEVICE)
+        # BatchSharder reads only the owner table of a sharded cache.
+        draft_logits = SimpleNamespace(
+            owners_of=lambda idx_mapping_np: (owners_np[idx_mapping_np], owners)
+        )
     results = []
     for rank in range(tp_size):
         fake_group = SimpleNamespace(rank_in_group=rank, world_size=tp_size)
@@ -119,12 +137,61 @@ def _shard_all_ranks(batch: InputBatch, max_num_reqs: int, tp_size: int):
                 max_num_reqs=max_num_reqs,
                 max_num_logits_per_req=8,
                 device=torch.device(DEVICE),
+                adaptive_verification_enabled=adaptive_verification_enabled,
+                draft_logits=draft_logits,
             )
         local_batch, sorted_logits_indices, _, metadata = sharder.shard_sampler_inputs(
             batch, None
         )
         results.append((local_batch, sorted_logits_indices, metadata))
     return results
+
+
+@requires_gpu
+@pytest.mark.parametrize("tp_size", [2, 4])
+@pytest.mark.parametrize("seed", [0, 1])
+def test_admitted_counts_give_unpadded_plan(tp_size: int, seed: int):
+    """With the admitted draft counts on the host, an adaptive verification
+    batch shards exactly like a batch scheduled with only the admitted drafts."""
+    rng = np.random.default_rng(seed)
+    max_num_reqs = 64
+    admitted = _make_batch(rng, num_reqs=23, max_num_reqs=max_num_reqs, max_spec=3)
+    assert admitted.num_draft_tokens_per_req is not None
+    admitted_drafts = admitted.num_draft_tokens_per_req
+    # The host only sees the scheduled counts, an upper bound on the admitted ones.
+    scheduled_drafts = admitted_drafts + rng.integers(0, 3, size=23).astype(np.int32)
+    scheduled_cu = np.zeros(24, dtype=np.int32)
+    np.cumsum(1 + scheduled_drafts, out=scheduled_cu[1:])
+    av_batch = replace(
+        admitted,
+        cu_num_logits_np=scheduled_cu,
+        num_draft_tokens_per_req=scheduled_drafts,
+        num_admitted_draft_tokens=SimpleNamespace(wait=lambda: admitted_drafts),
+    )
+
+    expected = _shard_all_ranks(admitted, max_num_reqs, tp_size)
+    actual = _shard_all_ranks(
+        av_batch, max_num_reqs, tp_size, adaptive_verification_enabled=True
+    )
+    for (exp_local, exp_sorted, exp_meta), (local, sorted_idx, meta) in zip(
+        expected, actual
+    ):
+        assert meta.num_logits_per_rank == exp_meta.num_logits_per_rank
+        assert meta.num_local_logits == exp_meta.num_local_logits
+        assert _np(sorted_idx).tolist() == _np(exp_sorted).tolist()
+        assert (local.cu_num_logits_np == exp_local.cu_num_logits_np).all()
+        assert (
+            _np(local.cu_num_logits).tolist() == _np(exp_local.cu_num_logits).tolist()
+        )
+        assert (
+            _np(local.logits_indices).tolist() == _np(exp_local.logits_indices).tolist()
+        )
+        assert (
+            _np(local.expanded_idx_mapping).tolist()
+            == _np(exp_local.expanded_idx_mapping).tolist()
+        )
+        assert local.num_draft_tokens == exp_local.num_draft_tokens
+        assert meta.max_num_logits_per_req == exp_meta.max_num_logits_per_req
 
 
 def _owned_batch_indices(local_batch: InputBatch) -> np.ndarray:
@@ -137,7 +204,7 @@ def _owned_rows(cu: np.ndarray, owned: np.ndarray) -> np.ndarray:
     return np.concatenate([np.arange(cu[r], cu[r + 1]) for r in owned])
 
 
-@requires_cuda
+@requires_gpu
 @pytest.mark.parametrize("tp_size", [2, 4, 8])
 @pytest.mark.parametrize("seed", [0, 1])
 def test_local_batch_partition(tp_size: int, seed: int):
@@ -160,7 +227,7 @@ def test_local_batch_partition(tp_size: int, seed: int):
     for rank, (local, _, metadata) in enumerate(results):
         owned = _owned_batch_indices(local)
         assert local.num_reqs == len(owned) == metadata.num_local_reqs
-        assert (batch.idx_mapping_np[owned] % tp_size == rank).all()
+        assert (owned % tp_size == rank).all()
         # Stable sort: batch order is preserved within an owner.
         assert (np.diff(owned) > 0).all()
         all_owned.extend(owned.tolist())
@@ -226,7 +293,7 @@ def test_local_batch_partition(tp_size: int, seed: int):
     )
 
 
-@requires_cuda
+@requires_gpu
 @pytest.mark.parametrize("tp_size", [2, 4])
 def test_all_to_all_reassembly_simulated(tp_size: int):
     """Vocab shards computed from owner-sorted hidden states and routed
@@ -266,7 +333,7 @@ def test_all_to_all_reassembly_simulated(tp_size: int):
         assert torch.equal(reassembled, expected)
 
 
-@requires_cuda
+@requires_gpu
 def test_shard_no_spec():
     """Batches without draft tokens (one logits row per request) degenerate
     cleanly: rows mirror requests."""
@@ -293,25 +360,22 @@ def test_shard_grammar_output(tp_size: int):
     max_num_reqs = 32
     num_reqs = 12
     slots = rng.choice(np.arange(max_num_reqs), size=num_reqs, replace=False)
-    k = rng.integers(0, 4, size=num_reqs)
-    cu = np.zeros(num_reqs + 1, dtype=np.int32)
-    np.cumsum(1 + k, out=cu[1:])
+    mask_stride = 4
     owner = slots % tp_size
 
     # Grammar requests: every other request, in a scrambled order.
     req_ids = [f"req-{i}" for i in range(num_reqs)]
     grammar_idx = list(rng.permutation(np.arange(0, num_reqs, 2)))
     grammar_req_ids = [req_ids[i] for i in grammar_idx]
-    num_grammar_rows = sum(int(cu[i + 1] - cu[i]) for i in grammar_idx)
+    num_grammar_rows = len(grammar_idx) * mask_stride
     bitmask = rng.integers(0, 2**31, size=(num_grammar_rows, 4), dtype=np.int32)
-    input_batch = SimpleNamespace(req_ids=req_ids, cu_num_logits_np=cu)
 
     # Global row offset of each grammar request within the bitmask.
     row_offsets = {}
     cursor = 0
     for i in grammar_idx:
         row_offsets[i] = cursor
-        cursor += int(cu[i + 1] - cu[i])
+        cursor += mask_stride
 
     grammar_output = GrammarOutput(
         structured_output_request_ids=grammar_req_ids,
@@ -321,7 +385,7 @@ def test_shard_grammar_output(tp_size: int):
     kept_total = 0
     for rank in range(tp_size):
         local_req_ids = [req_ids[i] for i in range(num_reqs) if owner[i] == rank]
-        local = _shard_grammar_output(grammar_output, input_batch, local_req_ids)
+        local = _shard_grammar_output(grammar_output, local_req_ids)
         expected_idx = [i for i in grammar_idx if owner[i] == rank]
         if not expected_idx:
             assert local is None
@@ -330,7 +394,7 @@ def test_shard_grammar_output(tp_size: int):
         assert local.structured_output_request_ids == [req_ids[i] for i in expected_idx]
         expected_rows = np.concatenate(
             [
-                np.arange(row_offsets[i], row_offsets[i] + cu[i + 1] - cu[i])
+                np.arange(row_offsets[i], row_offsets[i] + mask_stride)
                 for i in expected_idx
             ]
         )
@@ -339,22 +403,17 @@ def test_shard_grammar_output(tp_size: int):
     assert kept_total == num_grammar_rows
 
 
-@requires_cuda
+@requires_gpu
 @pytest.mark.parametrize("tp_size", [2, 4])
 def test_gather_src_indices_round_trip(tp_size: int):
     """Padded per-rank result blocks indexed by gathered_src_indices restore
     batch order, including when some rank owns zero requests."""
     rng = np.random.default_rng(3)
     max_num_reqs = 40
-    all_slots = np.arange(max_num_reqs)
-    batch = _make_batch(
-        rng,
-        num_reqs=17,
-        max_num_reqs=max_num_reqs,
-        max_spec=2,
-        slot_pool=all_slots[all_slots % tp_size != 0],  # rank 0 owns nothing
-    )
-    results = _shard_all_ranks(batch, max_num_reqs, tp_size)
+    batch = _make_batch(rng, num_reqs=17, max_num_reqs=max_num_reqs, max_spec=2)
+    # An owner table under which rank 0 owns nothing.
+    owners_np = 1 + np.arange(max_num_reqs) % (tp_size - 1)
+    results = _shard_all_ranks(batch, max_num_reqs, tp_size, owners_np=owners_np)
     metadata0 = results[0][2]
     assert metadata0.num_local_reqs == 0
 
@@ -373,7 +432,7 @@ def test_gather_src_indices_round_trip(tp_size: int):
     assert restored.tolist() == list(range(batch.num_reqs))
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@requires_gpu
 @pytest.mark.parametrize("tp_size", [2, 4])
 def test_gather_sampler_output_kernels(tp_size: int):
     """The fused pack/unpack kernels round-trip per-rank sampler results
@@ -387,7 +446,7 @@ def test_gather_sampler_output_kernels(tp_size: int):
     max_num_reqs = 32
     batch = _make_batch(rng, num_reqs=13, max_num_reqs=max_num_reqs, max_spec=3)
     results = _shard_all_ranks(batch, max_num_reqs, tp_size)
-    device = torch.device("cuda")
+    device = torch.device(DEVICE)
     num_reqs = batch.num_reqs
     width = results[0][2].max_num_logits_per_req
 
@@ -469,7 +528,7 @@ def test_gather_sampler_output_kernels(tp_size: int):
         assert torch.equal(out.num_rejected.cpu(), expected_rejected.to(torch.int32))
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@requires_gpu
 def test_gather_sampler_output_logprobs_and_nans():
     """num_nans is reduced per request and gathered; LogprobsTensors are
     packed into fixed per-request blocks, width-aligned across ranks (pad
@@ -484,7 +543,7 @@ def test_gather_sampler_output_logprobs_and_nans():
     max_num_reqs = 32
     batch = _make_batch(rng, num_reqs=6, max_num_reqs=max_num_reqs, max_spec=3)
     results = _shard_all_ranks(batch, max_num_reqs, tp_size)
-    device = torch.device("cuda")
+    device = torch.device(DEVICE)
     num_reqs = batch.num_reqs
     cu = batch.cu_num_logits_np
     num_logits = int(cu[-1])
@@ -603,76 +662,6 @@ def test_gather_sampler_output_logprobs_and_nans():
             assert lp.cu_num_generated_tokens is None
 
 
-@requires_cuda
-@pytest.mark.parametrize("tp_size", [2, 4, 8])
-@pytest.mark.parametrize(
-    "num_reqs,num_reqs_padded", [(1, 1), (3, 4), (5, 8), (23, 24), (40, 40)]
-)
-def test_draft_shard_plan(tp_size: int, num_reqs: int, num_reqs_padded: int):
-    """A drafter's staged (req, step) rows are owner-sorted like the target's
-    logits (batch order within an owner, padded requests last), and the local
-    views and gather sources address exactly each rank's requests."""
-    rng = np.random.default_rng(num_reqs * 10 + tp_size)
-    max_num_reqs, num_steps, width = 64, 3, 8
-    slots = rng.choice(max_num_reqs, size=num_reqs, replace=False).astype(np.int32)
-    sample_idx_mapping = np.full(max_num_reqs * num_steps, -1, dtype=np.int32)
-    sample_idx_mapping[: num_reqs * num_steps] = np.repeat(slots, num_steps)
-    sample_pos = rng.integers(0, 10_000, size=max_num_reqs * num_steps)
-    num_rows = num_reqs_padded * num_steps
-    # Row r of the vocab shard holds the value r in every column.
-    local_logits = (
-        torch.arange(num_rows, dtype=torch.float32, device=DEVICE)
-        .unsqueeze(1)
-        .repeat(1, width)
-    )
-    sample_idx_mapping_gpu = torch.from_numpy(sample_idx_mapping).to(DEVICE)
-    sample_pos_gpu = torch.from_numpy(sample_pos).to(DEVICE)
-
-    owners = slots % tp_size
-    order = np.argsort(owners, kind="stable")
-    send_reqs = np.concatenate([order, np.arange(num_reqs, num_reqs_padded)])
-    expected_rows = (send_reqs[:, None] * num_steps + np.arange(num_steps)).ravel()
-
-    local_ids = []
-    gathered_src = None
-    for rank in range(tp_size):
-        fake_group = SimpleNamespace(rank_in_group=rank, world_size=tp_size)
-        with mock.patch.object(batch_shard, "get_tp_group", return_value=fake_group):
-            sharder = DraftBatchSharder(
-                max_num_reqs, num_steps, width, torch.float32, torch.device(DEVICE)
-            )
-        # Stale entries must never survive into a smaller batch.
-        sharder.send_rows.fill_(10**9)
-        sharder.stage(
-            local_logits, sample_idx_mapping_gpu, sample_pos_gpu, num_reqs_padded
-        )
-        assert _np(sharder.send_rows[:num_rows]).tolist() == expected_rows.tolist()
-        assert (_np(sharder.send[:num_rows])[:, 0] == expected_rows).all()
-
-        owned = np.flatnonzero(owners == rank)
-        num_owned = len(owned)
-        assert _np(sharder.local_rows[:num_owned]).tolist() == owned.tolist()
-        # Step-major: [step, owned request].
-        owned_rows = owned[None, :] * num_steps + np.arange(num_steps)[:, None]
-        assert (
-            _np(sharder.local_idx_mapping[:, :num_owned])
-            == sample_idx_mapping[owned_rows]
-        ).all()
-        assert (
-            _np(sharder.local_sample_pos[:, :num_owned]) == sample_pos[owned_rows]
-        ).all()
-        src = _np(sharder.gathered_src[:num_reqs])
-        if gathered_src is None:
-            gathered_src = src
-        assert (src == gathered_src).all()
-        # This rank's gather block: its owned slots, then padding.
-        block = np.full(num_reqs_padded, -1, dtype=np.int64)
-        block[:num_owned] = slots[owned]
-        local_ids.append(block)
-    # Indexing the rank-major gather with gathered_src restores batch order.
-    assert (np.concatenate(local_ids)[gathered_src] == slots).all()
-
-
 def test_finish_requests_frees_slots_in_sorted_order():
     """Request slots must be freed in the same order on every TP rank:
     ownership derives from slot indices, and `finished_req_ids` is a set
@@ -688,3 +677,148 @@ def test_finish_requests_frees_slots_in_sorted_order():
     GPUModelRunner.finish_requests(fake_runner, scheduler_output)
     assert removed == sorted(removed)
     assert set(removed) == {"req-a", "req-b", "req-c", "req-d", "req-e"}
+
+
+def _make_sharded_draft_logits(tp_size: int, max_num_reqs: int) -> list:
+    """One sharded DraftLogitsCache per simulated TP rank."""
+    caches = []
+    for rank in range(tp_size):
+        fake_group = SimpleNamespace(rank_in_group=rank, world_size=tp_size)
+        with mock.patch.object(
+            draft_logits_module, "get_tp_group", return_value=fake_group
+        ):
+            caches.append(
+                draft_logits_module.DraftLogitsCache(
+                    max_num_reqs,
+                    1,
+                    1,
+                    dtype=torch.float32,
+                    fill=0.0,
+                    device=torch.device(DEVICE),
+                    sharded=True,
+                )
+            )
+    return caches
+
+
+def _draft_batch(slots: list[int], num_logits_per_req: int) -> SimpleNamespace:
+    """The fields of an InputBatch that DraftLogitsCache reads."""
+    slots_np = np.array(slots, dtype=np.int32)
+    return SimpleNamespace(
+        idx_mapping=torch.from_numpy(slots_np).to(DEVICE),
+        idx_mapping_np=slots_np,
+        expanded_idx_mapping=torch.from_numpy(
+            np.repeat(slots_np, num_logits_per_req)
+        ).to(DEVICE),
+        expanded_local_pos=torch.arange(num_logits_per_req, device=DEVICE).repeat(
+            len(slots)
+        ),
+    )
+
+
+@requires_gpu
+@pytest.mark.parametrize("tp_size", [2, 4])
+def test_sharded_draft_logits_balance_and_stale_rows(tp_size: int):
+    """Owners follow batch position, every rank caches at most
+    cdiv(num_reqs, tp_size) requests, and a request skipped while another
+    request took its row has stale drafts."""
+    max_num_reqs = 64
+    num_logits_per_req = 3
+    owners = _make_sharded_draft_logits(tp_size, max_num_reqs)
+    # Skewed slots: under slot % tp_size, rank 0 would own every request.
+    step0 = [s * tp_size for s in range(2 * tp_size)]
+    batch0 = _draft_batch(step0, num_logits_per_req)
+    for o in owners:
+        o.assign(batch0.idx_mapping, batch0.idx_mapping_np)
+
+    for rank, o in enumerate(owners):
+        assert o.shard_mapping_np[step0].tolist() == [
+            i % tp_size for i in range(len(step0))
+        ]
+        rows = _np(o.row_mapping)[step0]
+        owned = [i for i in range(len(step0)) if i % tp_size == rank]
+        assert rows[owned].tolist() == [i // tp_size for i in owned]
+        assert (np.delete(rows, owned) == -1).all()
+        assert _np(o.inverse_row_mapping)[: len(owned)].tolist() == [
+            step0[i] for i in owned
+        ]
+
+    # Every drafted request verifies against its own row.
+    for rank, o in enumerate(owners):
+        owned = [s for s in step0 if o.shard_mapping_np[s] == rank]
+        stale = _np(o.stale_drafts(_draft_batch(owned, num_logits_per_req)))
+        assert not stale.any()
+
+    # Step 1 skips the request at position 1 and puts a new request there.
+    skipped, new = step0[1], 63
+    step1 = [step0[0], new] + step0[2:]
+    batch1 = _draft_batch(step1, num_logits_per_req)
+    for o in owners:
+        o.assign(batch1.idx_mapping, batch1.idx_mapping_np)
+
+    # The skipped request keeps its owner, whose row now holds `new`.
+    owner_of_skipped = 1 % tp_size
+    o = owners[owner_of_skipped]
+    assert o.shard_mapping_np[skipped] == owner_of_skipped
+    stale = _np(o.stale_drafts(_draft_batch([skipped, new], num_logits_per_req)))
+    stale = stale.reshape(2, num_logits_per_req)
+    # Only draft rows (local position > 0) of the skipped request are stale.
+    assert stale[0].tolist() == [False] + [True] * (num_logits_per_req - 1)
+    assert not stale[1].any()
+
+
+@pytest.mark.parametrize("pcp_size", [1, 2])
+def test_draft_logits_stay_replicated_under_pcp(pcp_size: int):
+    """PCPManager.sync_drafts indexes the draft logits cache by request state,
+    so PCP keeps the cache replicated even under batch-sharded sampling."""
+    from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+
+    speculator = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp_size)
+        ),
+        max_num_reqs=8,
+        num_speculative_steps=2,
+        vocab_size=4,
+        device=torch.device("cpu"),
+        draft_watermarker=None,
+        draft_logits_spec=lambda _: (torch.float32, 0.0),
+        supports_batch_sharded_draft_logits=lambda: True,
+    )
+    fake_group = SimpleNamespace(rank_in_group=0, world_size=2)
+    with (
+        mock.patch(
+            "vllm.v1.worker.gpu.spec_decode.speculator.batch_sharded_sampling_enabled",
+            return_value=True,
+        ),
+        mock.patch.object(draft_logits_module, "get_tp_group", return_value=fake_group),
+    ):
+        DraftModelSpeculator._init_draft_logits(speculator, target_model=None)
+
+    draft_logits = speculator.draft_logits
+    assert (draft_logits.row_mapping is not None) == (pcp_size == 1)
+    assert draft_logits.values.shape[0] == (4 if pcp_size == 1 else 8)
+
+
+def test_owners_of_reads_owner_table_or_batch_position():
+    """A sharded cache owns each request at the rank its owner table records;
+    a replicated cache leaves requests round-robin over batch positions."""
+    fake_group = SimpleNamespace(rank_in_group=1, world_size=4)
+    idx_mapping_np = np.array([6, 1, 3, 4, 0], dtype=np.int32)
+    with mock.patch.object(
+        draft_logits_module, "get_tp_group", return_value=fake_group
+    ):
+        sharded, replicated = (
+            draft_logits_module.DraftLogitsCache(
+                8, 1, 1, dtype=torch.float32, fill=0.0, device="cpu", sharded=sharded
+            )
+            for sharded in (True, False)
+        )
+        sharded_owners_np, sharded_owners = sharded.owners_of(idx_mapping_np)
+        replicated_owners_np, replicated_owners = replicated.owners_of(idx_mapping_np)
+
+    # Before any assign(), a sharded cache owns each request by its slot.
+    assert sharded_owners_np.tolist() == (idx_mapping_np % 4).tolist()
+    assert sharded_owners is sharded.shard_mapping
+    assert replicated_owners_np.tolist() == [0, 1, 2, 3, 0]
+    assert replicated_owners is None

@@ -63,7 +63,10 @@ def test_mixed_warmup_disables_watermarking():
         for request in output.scheduled_new_reqs
     ]
     assert len(sampling_params) == 2
-    assert all(params.watermarking is False for params in sampling_params)
+    assert all(
+        params is not None and params.watermarking is False
+        for params in sampling_params
+    )
 
 
 @pytest.mark.parametrize("fail_warmup", [False, True])
@@ -73,8 +76,13 @@ def test_kernel_warmup_restores_uncalibrated_adaptive_manager(monkeypatch, fail_
     rejection_sampler = SimpleNamespace(enable_adaptive_verification=True)
     runner = SimpleNamespace(
         adaptive_verification=manager,
+        speculator=None,
         rejection_sampler=rejection_sampler,
-        num_speculative_steps=3,
+        speculative_config=SimpleNamespace(),
+    )
+    budget_warmups = []
+    manager.warmup_budget_kernel = lambda: budget_warmups.append(
+        runner.adaptive_verification
     )
 
     def run_steps(model_runner, execute, sample, greedy=False):
@@ -92,33 +100,30 @@ def test_kernel_warmup_restores_uncalibrated_adaptive_manager(monkeypatch, fail_
     assert runner.adaptive_verification is manager
     assert manager.cost_tables is None
     assert rejection_sampler.enable_adaptive_verification
+    # The budget kernel is warmed once, after the manager is restored.
+    assert budget_warmups == ([] if fail_warmup else [manager])
 
 
-@pytest.mark.parametrize("num_spec_steps", [0, 3])
-def test_greedy_warmup_runs_the_same_passes_on_all_pp_ranks(
-    monkeypatch, num_spec_steps
-):
-    """A last-rank-only extra pass waits forever for upstream PP inputs."""
-    passes = []
+@pytest.mark.parametrize("speculative", [False, True])
+def test_kernel_warmup_runs_same_rounds_on_every_pp_stage(monkeypatch, speculative):
+    """PP receivers need a matching sender for every speculative warmup round."""
+    rounds = []
     monkeypatch.setattr(
         warmup,
         "_warmup_kernels",
-        lambda runner, execute, sample, greedy=False: passes.append(greedy),
+        lambda runner, execute, sample, greedy=False: rounds.append(greedy),
     )
-    schedules = []
-    for rank in range(4):
-        sampler = (
-            SimpleNamespace(enable_adaptive_verification=False)
-            if rank == 3 and num_spec_steps > 0
-            else None
-        )
+    for is_last_pp_rank in (False, True):
+        rounds.clear()
         runner = SimpleNamespace(
             adaptive_verification=None,
-            rejection_sampler=sampler,
-            num_speculative_steps=num_spec_steps,
+            speculator=None,
+            speculative_config=SimpleNamespace() if speculative else None,
+            rejection_sampler=(
+                SimpleNamespace(enable_adaptive_verification=False)
+                if is_last_pp_rank and speculative
+                else None
+            ),
         )
-        passes.clear()
         warmup.warmup_kernels(runner, _fail, _fail)
-        schedules.append(list(passes))
-    expected = [False, True] if num_spec_steps else [False]
-    assert schedules == [expected] * 4
+        assert rounds == ([False, True] if speculative else [False])

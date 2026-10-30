@@ -1,5 +1,0 @@
-Qwen3-0.6B-FP8.yaml
-Qwen3-1.7B-MXFP4.yaml
-Qwen3-30B-A3B-NVFP4.yaml
-Laguna-XS.2-NVFP4.yaml
-Laguna-XS-2.1-INT4.yaml

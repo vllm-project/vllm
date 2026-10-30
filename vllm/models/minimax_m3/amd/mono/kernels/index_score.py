@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
 """Indexer block scores for K4's sparse selection (``select_blocks`` polls them).
@@ -370,8 +373,8 @@ def emit_index_scores(
 
 
 def q_frag_from(iq, heads=ONE_INDEX_HEAD):
-    """(``q_frag``, ``q_frag_head``) reading index q from memory: [token][head]
-    [HEAD_DIM] bf16, ``heads.count`` heads a token."""
+    """(`q_frag`, `q_frag_head`) reading index q from memory:
+    `[token][head][HEAD_DIM]` bf16, `heads.count` heads a token."""
 
     def q_frag_head(tk, s, head):
         lane = fx.thread_idx.x % 64

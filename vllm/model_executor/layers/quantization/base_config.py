@@ -97,6 +97,7 @@ class QuantizeMethodBase(ABC):
         Returns:
             The dequantized weight for linear layers. For MoE layers, an
             iterator of ``(experts, w13, w2)`` over groups of experts.
+
         """
         raise NotImplementedError(
             f"The quantization method {type(self)} does not implement "
@@ -355,9 +356,7 @@ def resolve_quant_method(
             # The checkpoint quant method is applied as there is no online override.
             return base_quant_method
 
-        online_quant_method = quant_config.online_quantization_config.get_quant_method(
-            layer, prefix
-        )
+        online_quant_method = online_config.get_quant_method(layer, prefix)
 
         assert base_quant_method is not None and not isinstance(
             base_quant_method, (UnquantizedLinearMethod, UnquantizedFusedMoEMethod)
@@ -374,4 +373,4 @@ def resolve_quant_method(
         return base_quant_method
 
     # Quantize an unquantized layer with the online method.
-    return quant_config.online_quantization_config.get_quant_method(layer, prefix)
+    return online_config.get_quant_method(layer, prefix)

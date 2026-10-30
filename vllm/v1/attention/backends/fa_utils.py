@@ -6,7 +6,7 @@ from typing import Any
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
 logger = init_logger(__name__)
 

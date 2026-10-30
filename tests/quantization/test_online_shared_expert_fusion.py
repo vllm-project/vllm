@@ -330,6 +330,13 @@ def _write_minimal_moe_config(
     (model_path / "config.json").write_text(json.dumps(config))
 
 
+def _unpadded_block(padded: torch.Tensor, expected: torch.Tensor) -> torch.Tensor:
+    # Backends may pad hidden/intermediate sizes (e.g. AITER W4A4 pads 64 to
+    # 256/128), so loaded shards occupy only the leading block of their slot.
+    rows, cols = expected.shape
+    return padded[:rows, :cols]
+
+
 @pytest.mark.parametrize(
     "load_path", ["load_weights", "fused_gate_up", "weight_loader"]
 )
@@ -413,14 +420,16 @@ def test_online_shared_expert_loads_bf16_weights_into_mxfp4_slot(
     expected_gate, expected_gate_scale = mxfp4_quantize(shared_gate)
     expected_up, expected_up_scale = mxfp4_quantize(shared_up)
     expected_down, expected_down_scale = mxfp4_quantize(shared_down)
-    assert torch.equal(layer.w13_weight[2, :intermediate_size], expected_gate)
-    assert torch.equal(layer.w13_weight[2, intermediate_size:], expected_up)
-    assert torch.equal(layer.w2_weight[2], expected_down)
-    assert torch.equal(
-        layer.w13_weight_scale[2, :intermediate_size], expected_gate_scale
-    )
-    assert torch.equal(layer.w13_weight_scale[2, intermediate_size:], expected_up_scale)
-    assert torch.equal(layer.w2_weight_scale[2], expected_down_scale)
+    gate_up_rows = layer.w13_weight.shape[1] // 2
+    for actual, expected in (
+        (layer.w13_weight[2, :gate_up_rows], expected_gate),
+        (layer.w13_weight[2, gate_up_rows:], expected_up),
+        (layer.w2_weight[2], expected_down),
+        (layer.w13_weight_scale[2, :gate_up_rows], expected_gate_scale),
+        (layer.w13_weight_scale[2, gate_up_rows:], expected_up_scale),
+        (layer.w2_weight_scale[2], expected_down_scale),
+    ):
+        assert torch.equal(_unpadded_block(actual, expected), expected)
 
 
 def test_online_shared_expert_reload_compatibility(
@@ -476,9 +485,9 @@ def test_online_shared_expert_reload_compatibility(
             ]
 
         list(layer.load_weights(checkpoint_weights(shared_gate)))
-        old_weight = layer.w13_weight[2, :64].clone()
         reloaded_gate = shared_gate + 1
         expected_weight, expected_scale = mxfp4_quantize(reloaded_gate)
+        old_weight = _unpadded_block(layer.w13_weight[2], expected_weight).clone()
         assert not torch.equal(old_weight, expected_weight)
 
         record_metadata_for_reloading(layer)
@@ -488,8 +497,12 @@ def test_online_shared_expert_reload_compatibility(
         list(layer.load_weights(checkpoint_weights(reloaded_gate)))
         finalize_layerwise_reload(layer, default_vllm_config.model_config)
         assert not layer.w13_weight.is_meta
-        assert torch.equal(layer.w13_weight[2, :64], expected_weight)
-        assert torch.equal(layer.w13_weight_scale[2, :64], expected_scale)
+        assert torch.equal(
+            _unpadded_block(layer.w13_weight[2], expected_weight), expected_weight
+        )
+        assert torch.equal(
+            _unpadded_block(layer.w13_weight_scale[2], expected_scale), expected_scale
+        )
 
 
 # TODO: Add DeepseekV4ForConditionalGeneration once it uses
@@ -645,6 +658,7 @@ _MINIMAX_NVFP4_ROUTED_MXFP8_SHARED_QUANT_CONFIG: dict[str, Any] = {
     "moe_quant_format": "nvfp4-pack-quantized",
 }
 
+
 def _quark_moe_config(
     routed: dict[str, Any], shared: dict[str, Any] | None = None
 ) -> dict[str, Any]:
@@ -778,7 +792,12 @@ _ROUTED_SHARED_MXFP4 = {**_ROUTED_MXFP4, "*shared_expert*": "mxfp4"}
 # (targets, fse_requested, routed_method_cls, id) of routed experts requantization.
 _ROUTED_TARGET_CASES = [
     (_ROUTED_SHARED_MXFP4, True, Mxfp4OnlineMoEMethod, "fse_routed_shared_mxfp4"),
-    ({"*block_sparse_moe.experts*": "mxfp8"}, False, Mxfp8OnlineMoEMethod, "routed_mxfp8"),
+    (
+        {"*block_sparse_moe.experts*": "mxfp8"},
+        False,
+        Mxfp8OnlineMoEMethod,
+        "routed_mxfp8",
+    ),
     (_ROUTED_MXFP4, False, Mxfp4OnlineMoEMethod, "routed_mxfp4"),
     (_ROUTED_SHARED_MXFP4, False, Mxfp4OnlineMoEMethod, "routed_shared_mxfp4"),
     # FSE refused: the shared expert, kept as stored, does not match.
@@ -880,8 +899,8 @@ def test_fse_online_quantization_routed_shared(
     # the routed experts' online keys.
     if fse_requested and "*shared_expert*" not in targets:
         assert any(
-            "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled but "
-            "cannot be enabled" in warning
+            "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled but cannot be enabled"
+            in warning
             and "do not match the routed expert keys" in warning
             for warning in _fse_warnings(caplog_vllm)
         ), _fse_warnings(caplog_vllm)
@@ -1011,6 +1030,7 @@ def test_fse_online_quantization_bf16_routed_quantized_shared_raises(
 
 def test_fse_online_quantization_routed_shared_loads_checkpoint_weights(
     default_vllm_config,
+    monkeypatch,
     single_rank_parallel_state,
 ) -> None:
     """Routed NVFP4 and shared MXFP8 weights land in their MXFP4 expert slots.
@@ -1088,7 +1108,9 @@ def test_fse_online_quantization_routed_shared_loads_checkpoint_weights(
         ckpt_names = {"gate_proj": "w1", "up_proj": "w3", "down_proj": "w2"}
         weights = []
         for (expert, projection), (packed, scale, global_scale) in routed.items():
-            prefix = f"block_sparse_moe.experts.{expert}.{ckpt_names[projection]}"
+            prefix = (
+                f"layers.0.block_sparse_moe.experts.{expert}.{ckpt_names[projection]}"
+            )
             weights += [
                 (f"{prefix}.weight_packed", packed),
                 (f"{prefix}.weight_scale", scale),
@@ -1096,7 +1118,7 @@ def test_fse_online_quantization_routed_shared_loads_checkpoint_weights(
                 (f"{prefix}.input_global_scale", torch.ones(1)),
             ]
         for projection, (weight, scale) in shared.items():
-            prefix = f"block_sparse_moe.shared_experts.{projection}"
+            prefix = f"layers.0.block_sparse_moe.shared_experts.{projection}"
             weights += [
                 (f"{prefix}.weight", weight),
                 (f"{prefix}.weight_scale_inv", scale),
@@ -1111,10 +1133,21 @@ def test_fse_online_quantization_routed_shared_loads_checkpoint_weights(
         model.config = SimpleNamespace(
             num_local_experts=num_routed_experts, n_shared_experts=1
         )
-        model.is_fused_shared_expert_enabled = True
-        model.block_sparse_moe = torch.nn.Module()
-        model.block_sparse_moe.experts = runner
-        model.load_weights(weights)
+        # Per-layer FSE: the shared expert of layer 0 is fused.
+        model.fused_shared_expert_layers = frozenset({0})
+        decoder_layer = torch.nn.Module()
+        decoder_layer.block_sparse_moe = torch.nn.Module()
+        decoder_layer.block_sparse_moe.experts = runner
+        model.layers = torch.nn.ModuleList([decoder_layer])
+        # `load_weights` only redirects the shared expert of the layers in
+        # `fused_shared_expert_layers` when AITER fused shared experts are
+        # enabled. Enable that gate only for loading, so the expert kernels
+        # selected above stay unchanged.
+        with monkeypatch.context() as m:
+            m.setattr(
+                rocm_aiter_ops, "is_fusion_moe_shared_experts_enabled", lambda: True
+            )
+            model.load_weights(weights)
         layer.quant_method.process_weights_after_loading(layer)
 
     def check_slot(slot: int, gate, up, down) -> None:
@@ -1182,14 +1215,13 @@ def test_online_gate_up_proj_target_disables_fse(
     [warning] = _fse_warnings(caplog_vllm)
     assert warning.startswith(
         "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled but cannot be "
-        "enabled - skipping for this layer: shared expert (weight, activation) keys "
+        "enabled - skipping shared-expert fusion: shared expert (weight, activation) "
+        "keys "
     )
-    assert (
-        "at model.layers.0.mlp.shared_experts do not match the routed expert keys"
-        in warning
-    )
+    assert "at <shared_expert> do not match the routed expert keys" in warning
 
 
+@pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("num_shared", [0, 1, 2])
 @pytest.mark.parametrize("experts_per_chunk", [1, 3, 4])
 def test_online_moe_quantize_weights_places_routed_then_shared_experts(
@@ -1355,9 +1387,7 @@ def test_nvfp4_oracle_only_skipped_for_requantized_layers(
         moe_quant_algo="NVFP4",
     )
     quant_config.online_quantization_config = OnlineQuantizationConfig(
-        QuantizationConfigArgs(
-            targets={"*layers.0.block_sparse_moe.experts*": "mxfp4"}
-        )
+        QuantizationConfigArgs(targets={"*layers.0.block_sparse_moe.experts*": "mxfp4"})
     )
 
     real_select = nvfp4_oracle.select_nvfp4_moe_backend

@@ -204,7 +204,7 @@ def test_nvfp4_emulation_support_check_rejects_bias_and_lora(
         moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
         activation=MoEActivation.SILU,
         in_dtype=torch.bfloat16,
-        device="cuda",
+        device=current_platform.device_type,
         routing_method=RoutingMethodType.TopK,
         **config_kwargs,
     )
@@ -866,6 +866,7 @@ def test_nvfp4_dense_emulation(
     assert torch.equal(layer.weight_scale.view(torch.uint8), original_scale)
 
 
+@pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("invert_global_scales", [True, False])
 @pytest.mark.parametrize("experts_per_chunk", [1, 2, 3, 8])
 def test_dequantize_nvfp4_moe_weights_chunked_matches_full(

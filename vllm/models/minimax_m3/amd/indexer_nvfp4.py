@@ -13,14 +13,14 @@ import torch
 from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.models.minimax_m3.amd.indexer_aiter import (
+from vllm.models.minimax_m3.amd.indexer_msa import (
     MSA_INDEX_HEAD_DIM,
     MSA_SCORE_TYPE,
     MSA_SPARSE_BLOCK_SIZE,
     MSA_TOPK_BLOCKS,
-    MiniMaxM3IndexerAiterBackend,
-    MiniMaxM3IndexerAiterMetadata,
-    score_block_width,
+    MiniMaxM3IndexerMSABackend,
+    MiniMaxM3IndexerMSAMetadata,
+    _score_width,
 )
 from vllm.models.minimax_m3.common.indexer import MiniMaxM3IndexerImpl
 from vllm.platforms import current_platform
@@ -82,7 +82,7 @@ def init_rocm_nvfp4_indexer_decode_cp(max_model_len: int) -> bool:
         return False
     index_cp.init(
         torch.device("cuda", torch.accelerator.current_device_index()),
-        score_block_width(max_model_len, MSA_SPARSE_BLOCK_SIZE),
+        _score_width(max_model_len, MSA_SPARSE_BLOCK_SIZE),
     )
     if index_cp.get() is None:
         return False
@@ -94,7 +94,7 @@ class MiniMaxM3IndexerRocmNvfp4Impl(MiniMaxM3IndexerImpl):
     """FlyDSL NVFP4 index scores + top-k block ids for prefill and decode."""
 
     # Its builder materializes the prefill rows' block counts.
-    indexer_backend_cls = MiniMaxM3IndexerAiterBackend
+    indexer_backend_cls = MiniMaxM3IndexerMSABackend
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -119,7 +119,7 @@ class MiniMaxM3IndexerRocmNvfp4Impl(MiniMaxM3IndexerImpl):
             (
                 self.num_index_heads,
                 rows,
-                score_block_width(max_seq_len, self.block_size),
+                _score_width(max_seq_len, self.block_size),
             ),
             dtype=torch.float32,
             device=self.index_cache.kv_cache.device,
@@ -159,7 +159,7 @@ class MiniMaxM3IndexerRocmNvfp4Impl(MiniMaxM3IndexerImpl):
         if not isinstance(attn_metadata, dict):
             return None, None  # profiling run; caches unbound
         md = attn_metadata[self.index_cache.prefix]
-        assert isinstance(md, MiniMaxM3IndexerAiterMetadata)
+        assert isinstance(md, MiniMaxM3IndexerMSAMetadata)
         num_tokens = md.num_actual_tokens
         nd = md.num_decode_tokens
         iq = index_query[:num_tokens].view(
@@ -189,7 +189,7 @@ class MiniMaxM3IndexerRocmNvfp4Impl(MiniMaxM3IndexerImpl):
                     d.seq_lens,
                     self.init_blocks,
                     self.local_blocks,
-                    score_block_width(d.max_seq_len, self.block_size),
+                    _score_width(d.max_seq_len, self.block_size),
                 )
             else:
                 score = self._new_score(nd, d.max_seq_len)

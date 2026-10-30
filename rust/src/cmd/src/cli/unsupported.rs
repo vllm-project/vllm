@@ -137,7 +137,7 @@ Remove these arguments to continue."
 /// recognizes but does not support yet.
 ///
 /// Source of truth in Python vLLM:
-/// - `vllm.entrypoints.openai.cli_args.make_arg_parser(...)`
+/// - `vllm.entrypoints.common.cli_args.make_arg_parser(...)`
 /// - `vllm.entrypoints.cli.serve.ServeSubcommand.subparser_init(...)`
 ///
 /// These are not part of `EngineArgs`, `AsyncEngineArgs`, `BaseFrontendArgs`,
@@ -178,16 +178,6 @@ pub struct TopLevelUnsupportedArgs {
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Eq, Default, Args, Serialize, Deserialize)]
 pub struct EngineUnsupportedArgs {
-    /// Name or path of the Hugging Face tokenizer to use. If unspecified, model
-    /// name or path will be used.
-    #[arg(long)]
-    pub tokenizer: Option<Unsupported>,
-
-    /// Name or path of the Hugging Face config to use. If unspecified, model
-    /// name or path will be used.
-    #[arg(long)]
-    pub hf_config_path: Option<Unsupported>,
-
     /// Allowing API requests to read local images or videos from directories
     /// specified by the server file system. This is a security risk. Should
     /// only be enabled in trusted environments.
@@ -198,12 +188,6 @@ pub struct EngineUnsupportedArgs {
     /// multi-modal inputs.
     #[arg(long)]
     pub allowed_media_domains: Option<Unsupported>,
-
-    /// The specific revision to use for the tokenizer on the Hugging Face Hub.
-    /// It can be a branch name, a tag name, or a commit id. If unspecified,
-    /// will use the default version.
-    #[arg(long)]
-    pub tokenizer_revision: Option<Unsupported>,
 
     /// Skip initialization of tokenizer and detokenizer. Expects valid
     /// `prompt_token_ids` and `None` for prompt from the input. The generated
@@ -258,36 +242,6 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub reasoning_parser_plugin: Option<Unsupported>,
 
-    /// Rank of the data parallel group.
-    #[arg(long, env = "VLLM_DP_RANK")]
-    pub data_parallel_rank: Option<Unsupported>,
-
-    /// Whether to use "hybrid" DP LB mode. Applies only to online serving
-    /// and when data_parallel_size > 0. Enables running an AsyncLLM
-    /// and API server on a "per-node" basis where vLLM load balances
-    /// between local data parallel ranks, but an external LB balances
-    /// between vLLM nodes/replicas. Set explicitly in conjunction with
-    /// --data-parallel-start-rank.
-    #[arg(
-        long,
-        visible_alias = "no-data-parallel-hybrid-lb",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub data_parallel_hybrid_lb: Option<Unsupported>,
-
-    /// Whether to use "external" DP LB mode. Applies only to online serving
-    /// and when data_parallel_size > 0. This is useful for a "one-pod-per-rank"
-    /// wide-EP setup in Kubernetes. Set implicitly when --data-parallel-rank
-    /// is provided explicitly to vllm serve.
-    #[arg(
-        long,
-        visible_alias = "no-data-parallel-external-lb",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub data_parallel_external_lb: Option<Unsupported>,
-
     /// Enable fault tolerance for detailed error recovery, such as scaling
     /// down fault DPEngineCore.
     #[arg(
@@ -298,6 +252,15 @@ pub struct EngineUnsupportedArgs {
     )]
     pub enable_fault_tolerance: Option<Unsupported>,
 
+    /// Enable elastic expert parallelism with stateless NCCL groups for DP/EP.
+    #[arg(
+        long,
+        visible_alias = "no-enable-elastic-ep",
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    pub enable_elastic_ep: Option<Unsupported>,
+
     /// This feature is work in progress and no prefill optimization takes place
     /// with this flag enabled currently.
     #[arg(
@@ -307,6 +270,17 @@ pub struct EngineUnsupportedArgs {
         num_args = 0..=1
     )]
     pub kv_sharing_fast_prefill: Option<Unsupported>,
+
+    /// If `True`, LoRA support for the tower (vision encoder) and connector
+    /// of multimodal models will be enabled. This is an experimental feature
+    /// and currently only supports some MM models such as the Qwen VL series.
+    #[arg(
+        long,
+        visible_alias = "no-enable-tower-connector-lora",
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    pub enable_tower_connector_lora: Option<Unsupported>,
 
     /// Additional args passed to process media inputs, keyed by modalities.
     #[arg(long)]
@@ -370,10 +344,6 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub max_num_queued_tokens: Option<Unsupported>,
 
-    /// Structured outputs configuration.
-    #[arg(long)]
-    pub structured_outputs_config: Option<Noop>,
-
     /// Log aggregate rather than per-engine statistics when using data
     /// parallelism.
     #[arg(long, default_missing_value = "true", num_args = 0..=1)]
@@ -384,8 +354,8 @@ pub struct EngineUnsupportedArgs {
 /// does not support yet.
 ///
 /// Source of truth in Python vLLM:
-/// - `vllm.entrypoints.openai.cli_args.BaseFrontendArgs`
-/// - `vllm.entrypoints.openai.cli_args.FrontendArgs`
+/// - `vllm.entrypoints.common.cli_args.BaseFrontendArgs`
+/// - `vllm.entrypoints.common.cli_args.FrontendArgs`
 ///
 /// These are not engine args. They belong to the Python OpenAI-compatible
 /// frontend / API-server layer itself, for example chat-template configuration,
@@ -394,17 +364,6 @@ pub struct EngineUnsupportedArgs {
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Eq, Default, Args, Serialize, Deserialize)]
 pub struct ServerUnsupportedArgs {
-    /// Whether to trust the chat template provided in the request. If False,
-    /// the server will always use the chat template specified by
-    /// `--chat-template` or the ones from tokenizer.
-    #[arg(
-        long,
-        visible_alias = "no-trust-request-chat-template",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub trust_request_chat_template: Option<Unsupported>,
-
     /// Whether to trust per-request multimodal kwargs (`mm_processor_kwargs`
     /// and `media_io_kwargs`). If False, the server rejects non-empty values
     /// because they can change multimodal preprocessing resource usage.
@@ -420,17 +379,6 @@ pub struct ServerUnsupportedArgs {
     #[arg(long)]
     pub response_role: Option<Unsupported>,
 
-    /// When `--max-logprobs` is specified, represents single tokens as
-    /// strings of the form 'token_id:{token_id}' so that tokens that are not
-    /// JSON-encodable can be identified.
-    #[arg(
-        long,
-        visible_alias = "no-return-tokens-as-token-ids",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub return_tokens_as_token_ids: Option<Unsupported>,
-
     /// Enable auto tool choice for supported models. Use `--tool-call-parser`
     /// to specify which parser to use.
     #[arg(
@@ -441,16 +389,6 @@ pub struct ServerUnsupportedArgs {
         hide = true
     )]
     pub enable_auto_tool_choice: Option<Noop>,
-
-    /// If specified, exclude tool definitions in prompts when
-    /// tool_choice='none'.
-    #[arg(
-        long,
-        visible_alias = "no-exclude-tools-when-tool-choice-none",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub exclude_tools_when_tool_choice_none: Option<Unsupported>,
 
     /// Special the tool parser plugin write to parse the model-generated tool
     /// into OpenAI API format, the name register in this plugin can be used in
@@ -471,11 +409,6 @@ pub struct ServerUnsupportedArgs {
     #[arg(long, /* env = "VLLM_LOGGING_CONFIG_PATH" */)]
     pub log_config_file: Option<Unsupported>,
 
-    /// Max number of prompt characters or prompt ID numbers being printed in
-    /// log. The default of None means unlimited.
-    #[arg(long)]
-    pub max_log_len: Option<Unsupported>,
-
     /// If set to True, enable tracking server_load_metrics in the app state.
     #[arg(
         long,
@@ -493,41 +426,6 @@ pub struct ServerUnsupportedArgs {
         num_args = 0..=1
     )]
     pub enable_force_include_usage: Option<Unsupported>,
-
-    /// Enable the `/tokenizer_info` endpoint. May expose chat
-    /// templates and other tokenizer configuration.
-    ///
-    /// Accepted as a no-op: the Rust frontend serves `/tokenize` and
-    /// `/detokenize`, but does not implement `/tokenizer_info` yet.
-    #[arg(
-        long,
-        visible_alias = "no-enable-tokenizer-info-endpoint",
-        default_missing_value = "true",
-        num_args = 0..=1,
-        hide = true
-    )]
-    pub enable_tokenizer_info_endpoint: Option<Noop>,
-
-    /// If set to True, log model outputs (generations).
-    /// Requires `--enable-log-requests`. As with `--enable-log-requests`,
-    /// information is only logged at INFO level at maximum.
-    #[arg(
-        long,
-        visible_alias = "no-enable-log-outputs",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub enable_log_outputs: Option<Unsupported>,
-
-    /// If set to False, output deltas will not be logged. Relevant only if
-    /// --enable-log-outputs is set.
-    #[arg(
-        long,
-        visible_alias = "no-enable-log-deltas",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub enable_log_deltas: Option<Unsupported>,
 
     /// If set to True, log the stack trace of error responses
     #[arg(
@@ -562,23 +460,6 @@ pub struct ServerUnsupportedArgs {
     #[arg(long)]
     pub uvicorn_log_level: Option<Unsupported>,
 
-    /// Disable uvicorn access log.
-    #[arg(
-        long,
-        visible_alias = "no-disable-uvicorn-access-log",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub disable_uvicorn_access_log: Option<Noop>,
-
-    /// Comma-separated list of endpoint paths to exclude from uvicorn access
-    /// logs. This is useful to reduce log noise from high-frequency endpoints
-    /// like health checks. Example: "/health,/metrics,/ping".
-    /// When set, access logs for requests to these paths will be suppressed
-    /// while keeping logs for other endpoints.
-    #[arg(long)]
-    pub disable_access_log_for_endpoints: Option<Noop>,
-
     /// Refresh SSL Context when SSL certificate files change
     #[arg(
         long,
@@ -587,10 +468,6 @@ pub struct ServerUnsupportedArgs {
         num_args = 0..=1
     )]
     pub enable_ssl_refresh: Option<Unsupported>,
-
-    /// FastAPI root_path when app is behind a path based routing proxy.
-    #[arg(long)]
-    pub root_path: Option<Unsupported>,
 
     /// Additional ASGI middleware to apply to the app. We accept multiple
     /// --middleware arguments. The value should be an import path. If a
@@ -601,13 +478,17 @@ pub struct ServerUnsupportedArgs {
     pub middleware: Option<Unsupported>,
 
     /// Disable FastAPI's OpenAPI schema, Swagger UI, and ReDoc endpoint.
+    ///
+    /// Accepted as a no-op: the Rust frontend does not serve these docs
+    /// endpoints at all.
     #[arg(
         long,
         visible_alias = "no-disable-fastapi-docs",
         default_missing_value = "true",
-        num_args = 0..=1
+        num_args = 0..=1,
+        hide = true
     )]
-    pub disable_fastapi_docs: Option<Unsupported>,
+    pub disable_fastapi_docs: Option<Noop>,
 
     /// Maximum size (bytes) of an incomplete HTTP event (header or body) for
     /// h11 parser. Helps mitigate header abuse. Default: 4194304 (4 MB).

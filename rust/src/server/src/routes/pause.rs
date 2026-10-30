@@ -48,7 +48,7 @@ pub async fn pause(
 
     state
         .engine_core_client()
-        .pause_scheduler(params.mode, params.clear_cache)
+        .pause_generation(params.mode, params.clear_cache)
         .await
         .map_err(|error| utility_call_error("pause", error))?;
 
