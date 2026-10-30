@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -61,7 +63,8 @@ def test_flashinfer_bf16_auto_correctness(m: int, n: int, k: int, tune: bool) ->
     from flashinfer import autotune
 
     gemm = layer_utils.dispatch_unquantized_gemm("flashinfer")
-    assert gemm is not layer_utils.default_unquantized_gemm
+    # A plain function here means the F.linear fallback.
+    assert isinstance(gemm, functools.partial)
     assert gemm.keywords == {"vllm_backend": "flashinfer", "pdl": None}
 
     torch.manual_seed(0)
