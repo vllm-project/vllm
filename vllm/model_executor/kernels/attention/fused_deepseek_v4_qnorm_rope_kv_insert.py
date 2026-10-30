@@ -32,6 +32,15 @@ order (fp addition is not associative), and ceil(log2(absmax/448)) is
 computed from the float's exponent field, which is exact for normal inputs.
 Scalar min/max/abs/rsqrt go through cute.arch/cute.math, which lower to the
 same hardware instructions as the .cu's fmaxf/fminf/fabsf/rsqrtf.
+
+Memory access matches the .cu's width too: every per-lane group moves as
+128-bit vector ops (the .cu's uint4 loads/stores and float4 cos/sin loads).
+Host-side views expose each lane's group as a statically-shaped trailing
+mode, and the kernels move them with CopyG2ROp/CopyR2GOp copy atoms, so a
+512-wide head is 2 loads + 2 stores per lane instead of 16 + 16 scalars.
+This is why the wrappers reject inputs the .cu could not have handled
+either: row strides and base pointers must be 16-byte aligned where the
+.cu's uint4/float4 accesses required it.
 """
 
 from dataclasses import dataclass
@@ -42,6 +51,8 @@ import cutlass.cute as cute
 import torch
 from cuda.bindings.driver import CUstream
 from cutlass import Float32, Int32, Int64, Uint8, Uint32
+from cutlass._mlir.dialects import llvm
+from cutlass.cutlass_dsl import T, dsl_user_op
 
 from vllm.cute_utils import recast_val
 from vllm.cute_utils.cvt import (
@@ -91,18 +102,31 @@ def _dummy_tensor(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
     return tensor
 
 
-def _dummy_3d(
-    device: torch.device, dtype: torch.dtype, width: int, heads: int
+def _dummy_q_words(
+    device: torch.device, heads: int, interleaved: bool, group_words: int
 ) -> torch.Tensor:
-    # The JIT binds the head dim across arguments of one call, so a stand-in
-    # for an unused [rows, heads, width] output must carry the real head
-    # count; rows stay symbolic.
-    key = (device, dtype, "3d", width, heads)
+    # Stand-in for an unused per-lane word view. The head count is real so
+    # the JIT's static strides match the compiled specialization; a
+    # zero-head launch is floored at one head exactly like its warmup fake.
+    h = max(heads, 1)
+    key = (device, "qw", heads, interleaved, group_words)
     tensor = _DUMMY_TENSORS.get(key)
     if tensor is None:
-        tensor = torch.empty((1, heads, width), dtype=dtype, device=device)
+        if interleaved:
+            tensor = torch.empty(
+                (1, 32, h, group_words), dtype=torch.uint32, device=device
+            )
+        else:
+            tensor = torch.empty(
+                (1, h, 32, group_words), dtype=torch.uint32, device=device
+            )
         _DUMMY_TENSORS[key] = tensor
     return tensor
+
+
+def _cos_sin_word_view(cos_sin: torch.Tensor) -> torch.Tensor:
+    # (max_pos, 16, 4): one float4 row per cos/sin quarter.
+    return cos_sin.reshape(cos_sin.shape[0], ROPE_DIM // 4, 4)
 
 
 @cute.jit
@@ -139,6 +163,83 @@ def _decode_words(words: cute.Tensor, elems: cute.Tensor) -> None:
         even, odd = bf16x2_to_fp32x2(words[w])
         elems[2 * w] = even
         elems[2 * w + 1] = odd
+
+
+@dsl_user_op
+def _q_tail_store_bf16(
+    q: cute.Tensor,
+    token: Int32,
+    slot: Int32,
+    lane: Int32,
+    elems: cute.Tensor,
+    row_words: int,
+    *,
+    loc=None,
+    ip=None,
+) -> Uint32:
+    """Q-path bf16 tail: encode this lane's 16 floats and store both 128-bit
+    halves in a single inline-asm block.
+
+    The eight ``cvt.rn.bf16x2.f32`` are F2FP ops; with cute.copy the store
+    address folds at trace time, so nothing overlaps the converts and they
+    bunch up at the warp tail. Interleaving the dependent store-address
+    chain among the converts gives ptxas the same latency-hiding structure
+    the CUDA kernel gets from its runtime-division address math. The
+    converts and stores are the same instructions cute.copy would emit
+    (verified bit-exact), just scheduled around the address math.
+
+    q has the (rows, heads, 32, 8) word layout from _q_word_views; the byte
+    address of (token, slot, lane, word 0) is
+    (token * row_words + slot * 256 + lane * 8) * 4, where row_words is the
+    token stride in words (HQ * 256). In ``cvt.rn.bf16x2.f32 d, a, b`` a
+    lands in the upper 16 bits and b in the lower, so word w packs
+    elems[2w+1] high and elems[2w] low.
+    """
+    ptr = q.iterator.to_llvm_ptr(loc=loc, ip=ip)
+    addr = llvm.ptrtoint(T.i64(), ptr, loc=loc, ip=ip)
+    ins = [
+        addr,
+        token.ir_value(loc=loc, ip=ip),
+        slot.ir_value(loc=loc, ip=ip),
+        lane.ir_value(loc=loc, ip=ip),
+    ]
+    ins += [elems[i].ir_value(loc=loc, ip=ip) for i in range(ELEMS_PER_LANE)]
+    asm = (
+        "{\n\t"
+        ".reg .b32 t0, t1, w0, w1, w2, w3, w4, w5, w6, w7;\n\t"
+        ".reg .b64 d0, d1;\n\t"
+        "shl.b32 t0, $3, 8;\n\t"
+        "cvt.rn.bf16x2.f32 w0, $6, $5;\n\t"
+        "cvt.u64.u32 d0, t0;\n\t"
+        "cvt.rn.bf16x2.f32 w1, $8, $7;\n\t"
+        f"mad.wide.u32 d1, $2, {row_words}, d0;\n\t"
+        "cvt.rn.bf16x2.f32 w2, $10, $9;\n\t"
+        "shl.b32 t1, $4, 3;\n\t"
+        "cvt.rn.bf16x2.f32 w3, $12, $11;\n\t"
+        "cvt.u64.u32 d0, t1;\n\t"
+        "cvt.rn.bf16x2.f32 w4, $14, $13;\n\t"
+        "add.u64 d1, d1, d0;\n\t"
+        "cvt.rn.bf16x2.f32 w5, $16, $15;\n\t"
+        "shl.b64 d1, d1, 2;\n\t"
+        "cvt.rn.bf16x2.f32 w6, $18, $17;\n\t"
+        "add.u64 d1, d1, $1;\n\t"
+        "cvt.rn.bf16x2.f32 w7, $20, $19;\n\t"
+        "st.global.v4.b32 [d1], {w0, w1, w2, w3};\n\t"
+        "st.global.v4.b32 [d1+16], {w4, w5, w6, w7};\n\t"
+        "mov.u32 $0, w0;\n\t"
+        "}\n"
+    )
+    out = llvm.inline_asm(
+        T.i32(),
+        ins,
+        asm,
+        "=r,l,r,r,r" + ",f" * ELEMS_PER_LANE,
+        has_side_effects=True,
+        is_align_stack=False,
+        loc=loc,
+        ip=ip,
+    )
+    return Uint32(out)
 
 
 @cute.jit
@@ -185,13 +286,39 @@ def _apply_kv_norm(
 
 
 @cute.jit
-def _apply_rope(
-    elems: cute.Tensor, pos: Int64, dim_base: Int32, cos_sin: cute.Tensor
+def _load_cos_sin(
+    cos_sin: cute.Tensor,
+    pos: Int64,
+    dim_base: Int32,
+    cs_atom: cute.CopyAtom,
+    cos_v: cute.Tensor,
+    sin_v: cute.Tensor,
 ) -> None:
+    # cos_sin is viewed (max_pos, 16, 4): rows 0..7 hold cos, 8..15 sin, one
+    # float4 per row. On rope lanes half_base is a multiple of 8, so this
+    # lane's 8 cos and 8 sin values are exactly two rows each — the .cu's
+    # four float4 loads. `& 7` is the identity on those lanes and parks every
+    # other lane on a valid stand-in row, so all 32 lanes can issue the loads
+    # up front — before the q/kv load and the RMSNorm reduction — instead of
+    # paying the latency inside the rope branch.
     half_base = (dim_base - NOPE_DIM) >> 1
+    hb4 = (half_base >> 2) & Int32(7)
+    for j in cutlass.range_constexpr(2):
+        cute.copy(cs_atom, cos_sin[pos, Int32(hb4 + j), None], cos_v[j, None])
+        cute.copy(
+            cs_atom,
+            cos_sin[pos, Int32(HALF_ROPE // 4 + hb4 + j), None],
+            sin_v[j, None],
+        )
+
+
+@cute.jit
+def _apply_rope(elems: cute.Tensor, cos_v: cute.Tensor, sin_v: cute.Tensor) -> None:
+    # cos_v/sin_v carry this lane's 8 cos and 8 sin values, preloaded by
+    # _load_cos_sin; only rope lanes call this.
     for p in cutlass.range_constexpr(ELEMS_PER_LANE // 2):
-        c = cos_sin[pos, Int64(half_base + p)]
-        s = cos_sin[pos, Int64(HALF_ROPE + half_base + p)]
+        c = cos_v[p // 4, p % 4]
+        s = sin_v[p // 4, p % 4]
         x_even = elems[2 * p]
         x_odd = elems[2 * p + 1]
         elems[2 * p] = x_even * c - x_odd * s
@@ -251,8 +378,9 @@ def _paged_cache_views(
             f"k_cache row width {flat.shape[1]} is smaller than one "
             f"{cache_block_size}-token block ({block_bytes} bytes)"
         )
-    if flat.stride(0) % 4 != 0:
-        raise ValueError("k_cache block stride must be 4-byte aligned")
+    if flat.stride(0) % 16 != 0:
+        # The .cu's uint4 stores (and this port's 128-bit copies) require it.
+        raise ValueError("k_cache block stride must be 16-byte aligned")
     num_blocks = flat.shape[0]
     if kv_mxfp8:
         records = flat[:, :block_bytes].view(
@@ -271,6 +399,71 @@ def _paged_cache_views(
             cache_block_size * V4_DATA_BYTES : cache_block_size * V4_BYTES_PER_TOKEN,
         ].view(num_blocks, cache_block_size, V4_SCALE_BYTES)
     return data, scale
+
+
+def _cache_word_views(
+    data: torch.Tensor, kv_mxfp8: bool
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Split a (blocks, bs, words) u32 cache-data view into the per-lane
+    group views the kernel copies through: 4-word groups for the fp8 stores
+    and 8-word groups for the V4 bf16 rope tail. Under mxfp8 the 8-word view
+    is a stand-in that no store ever targets."""
+    num_blocks, block_slots = data.shape[0], data.shape[1]
+    stride0 = data.stride(0)
+    if kv_mxfp8:
+        fp8 = data.as_strided(
+            (num_blocks, block_slots, MXFP8_DATA_WORDS // 4, 4),
+            (stride0, MXFP8_BYTES_PER_TOKEN // 4, 4, 1),
+        )
+        bf16 = data.as_strided(
+            (num_blocks, block_slots, MXFP8_DATA_WORDS // 8, 8),
+            (stride0, MXFP8_DATA_WORDS, 8, 1),
+        )
+    else:
+        fp8 = data.as_strided(
+            (num_blocks, block_slots, V4_DATA_WORDS // 4, 4),
+            (stride0, V4_DATA_WORDS, 4, 1),
+        )
+        bf16 = data.as_strided(
+            (num_blocks, block_slots, V4_DATA_WORDS // 8, 8),
+            (stride0, V4_DATA_WORDS, 8, 1),
+        )
+    return fp8, bf16
+
+
+def _q_word_views(t: torch.Tensor, heads: int, interleaved: bool) -> torch.Tensor:
+    """View a [rows, heads, 512] bf16 tensor as u32 words grouped per lane:
+    (rows, heads, 32, 8), or (rows, 32, heads, 8) for the FlashMLA
+    chunk-interleaved layout. The trailing (8,) mode is one lane's group,
+    32 bytes at a 32-byte boundary."""
+    rows = t.shape[0]
+    words = t.view(torch.uint32)
+    if interleaved:
+        return words.as_strided((rows, 32, heads, 8), (heads * 256, heads * 8, 8, 1))
+    return words.reshape(rows, heads, 32, 8)
+
+
+def _kv_word_view(kv: torch.Tensor) -> torch.Tensor:
+    words = kv.view(torch.uint32)
+    return words.as_strided((words.shape[0], 32, 8), (words.stride(0), 8, 1))
+
+
+def _full_cache_word_views(
+    cache_u32: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """(blocks, bs, 512-wide rows) u32 cache -> 8-word and 4-word group
+    views, each exactly covering the row. Only the one selected by the
+    store dtype is ever sliced."""
+    num_blocks, block_slots = cache_u32.shape[0], cache_u32.shape[1]
+    stride0, row = cache_u32.stride(0), cache_u32.stride(1)
+    row_words = cache_u32.shape[2]
+    bf16 = cache_u32.as_strided(
+        (num_blocks, block_slots, row_words // 8, 8), (stride0, row, 8, 1)
+    )
+    fp8 = cache_u32.as_strided(
+        (num_blocks, block_slots, row_words // 4, 4), (stride0, row, 4, 1)
+    )
+    return fp8, bf16
 
 
 def _check_common(
@@ -295,8 +488,12 @@ def _check_common(
         raise ValueError(f"{op_name}: kv must be bfloat16, got {kv.dtype}")
     if kv.dim() != 2 or kv.shape[1] != HEAD_DIM or kv.stride(1) != 1:
         raise ValueError(f"{op_name}: kv must be [tokens, {HEAD_DIM}] row-major")
-    if kv.stride(0) % 2 != 0:
-        raise ValueError(f"{op_name}: kv row stride must be even")
+    if kv.stride(0) % 8 != 0:
+        # 16 bytes: the .cu's uint4 loads require it, and so do this
+        # port's 128-bit vector loads.
+        raise ValueError(f"{op_name}: kv row stride must be 16-byte aligned")
+    if kv.data_ptr() % 16 != 0:
+        raise ValueError(f"{op_name}: kv must be 16-byte aligned")
     for name, tensor in (
         ("slot_mapping", slot_mapping),
         ("position_ids", position_ids),
@@ -328,6 +525,8 @@ def _check_common(
         raise ValueError(
             f"{op_name}: cos_sin_cache must be contiguous float32 [max_pos, {ROPE_DIM}]"
         )
+    if cos_sin_cache.data_ptr() % 16 != 0:
+        raise ValueError(f"{op_name}: cos_sin_cache must be 16-byte aligned")
     if cos_sin_cache.device != kv.device:
         raise ValueError(f"{op_name}: cos_sin_cache must be on the KV device")
 
@@ -373,20 +572,6 @@ class _PagedInsertKernel(VllmCuTeDSLJitKernel[PagedCompileKey]):
         EPS = Float32(compile_key.eps)
         USE_PDL = current_platform.is_arch_support_pdl()
 
-        def q_in_off(token: Int32, slot: Int32, lane: Int32, w: int) -> Int64:
-            if Q_INTERLEAVED:
-                return Int64(token) * Int64(HQ * (HEAD_DIM // 2)) + Int64(
-                    lane * HQ * 8 + slot * 8 + w
-                )
-            return (Int64(token) * Int64(HQ) + Int64(slot)) * 256 + Int64(8 * lane + w)
-
-        def q_out_off(token: Int32, slot: Int32, lane: Int32, w: int) -> Int64:
-            if Q_INTERLEAVED:
-                return Int64(token) * Int64(QP * (HEAD_DIM // 2)) + Int64(
-                    lane * QP * 8 + slot * 8 + w
-                )
-            return (Int64(token) * Int64(QP) + Int64(slot)) * 256 + Int64(8 * lane + w)
-
         @cute.jit
         def process_slot(
             token: Int32,
@@ -396,12 +581,16 @@ class _PagedInsertKernel(VllmCuTeDSLJitKernel[PagedCompileKey]):
             q_in: cute.Tensor,
             q_out: cute.Tensor,
             kv: cute.Tensor,
-            cache_data: cute.Tensor,
+            cache_fp8: cute.Tensor,
+            cache_bf16: cute.Tensor,
             cache_scale: cute.Tensor,
             slots: cute.Tensor,
             pos_ids: cute.Tensor,
             cos_sin: cute.Tensor,
             norm_w: cute.Tensor,
+            load_atom: cute.CopyAtom,
+            store_atom: cute.CopyAtom,
+            cs_atom: cute.CopyAtom,
             n_insert: Int32,
             block_size: Int32,
         ) -> None:
@@ -411,15 +600,19 @@ class _PagedInsertKernel(VllmCuTeDSLJitKernel[PagedCompileKey]):
                 if token < n_insert:
                     if cutlass.const_expr(USE_PDL):
                         cute.arch.griddepcontrol_wait()
+                    pos = pos_ids[token]
+                    cs_layout = cute.make_layout((2, 4), stride=(4, 1))
+                    cos_v = cute.make_rmem_tensor(cs_layout, Float32)
+                    sin_v = cute.make_rmem_tensor(cs_layout, Float32)
+                    _load_cos_sin(cos_sin, pos, dim_base, cs_atom, cos_v, sin_v)
                     elems = cute.make_rmem_tensor((ELEMS_PER_LANE,), Float32)
                     words = cute.make_rmem_tensor((BF16_WORDS_PER_LANE,), Uint32)
-                    for w in cutlass.range_constexpr(BF16_WORDS_PER_LANE):
-                        words[w] = kv[token, 8 * lane + w]
+                    cute.copy(load_atom, kv[token, Int32(lane), None], words[None])
                     _decode_words(words, elems)
                     if cutlass.const_expr(HAS_KV_NORM):
                         _apply_kv_norm(elems, dim_base, EPS, norm_w)
                     if dim_base >= Int32(NOPE_DIM):
-                        _apply_rope(elems, pos_ids[token], dim_base, cos_sin)
+                        _apply_rope(elems, cos_v, sin_v)
                     sid = slots[token]
                     if sid >= Int64(0):
                         block = sid // Int64(block_size)
@@ -444,15 +637,20 @@ class _PagedInsertKernel(VllmCuTeDSLJitKernel[PagedCompileKey]):
                         else:
                             store_fp8 = dim_base < Int32(NOPE_DIM)
                         if store_fp8:
+                            packed = cute.make_rmem_tensor(
+                                (FP8_WORDS_PER_LANE,), Uint32
+                            )
                             for w in cutlass.range_constexpr(FP8_WORDS_PER_LANE):
                                 v0 = _clamp_fp8(elems[4 * w] * inv_scale)
                                 v1 = _clamp_fp8(elems[4 * w + 1] * inv_scale)
                                 v2 = _clamp_fp8(elems[4 * w + 2] * inv_scale)
                                 v3 = _clamp_fp8(elems[4 * w + 3] * inv_scale)
-                                packed = fp32x4_to_fp8x4(v0, v1, v2, v3)
-                                cache_data[block, pib, Int64(dim_base // 4 + w)] = (
-                                    packed
-                                )
+                                packed[w] = fp32x4_to_fp8x4(v0, v1, v2, v3)
+                            cute.copy(
+                                store_atom,
+                                packed[None],
+                                cache_fp8[block, pib, Int32(lane), None],
+                            )
                             encoded = exponent + 127
                             if encoded > 255:
                                 encoded = 255
@@ -476,11 +674,13 @@ class _PagedInsertKernel(VllmCuTeDSLJitKernel[PagedCompileKey]):
                                     ] = Uint8(0)
                         else:
                             _encode_words(elems, words)
-                            # (dim_base - NOPE_DIM) counts elements; a word
-                            # holds two bf16s, so the word stride is half.
-                            rope_word = V4_ROPE_WORD_BASE + (dim_base - NOPE_DIM) // 2
-                            for w in cutlass.range_constexpr(BF16_WORDS_PER_LANE):
-                                cache_data[block, pib, Int64(rope_word + w)] = words[w]
+                            # The rope tail lands at words [8L-112, 8L-104)
+                            # of the token row = tile L-14 of the 8-word view.
+                            cute.copy(
+                                store_atom,
+                                words[None],
+                                cache_bf16[block, pib, Int32(lane - 14), None],
+                            )
                     if cutlass.const_expr(USE_PDL):
                         cute.arch.griddepcontrol_launch_dependents()
             else:
@@ -489,23 +689,62 @@ class _PagedInsertKernel(VllmCuTeDSLJitKernel[PagedCompileKey]):
                 if cutlass.const_expr(USE_PDL):
                     cute.arch.griddepcontrol_wait()
                 if slot < Int32(HQ):
+                    if cutlass.const_expr(APPLY_Q_ROPE):
+                        pos = pos_ids[token]
+                        cs_layout = cute.make_layout((2, 4), stride=(4, 1))
+                        cos_v = cute.make_rmem_tensor(cs_layout, Float32)
+                        sin_v = cute.make_rmem_tensor(cs_layout, Float32)
+                        _load_cos_sin(cos_sin, pos, dim_base, cs_atom, cos_v, sin_v)
                     elems = cute.make_rmem_tensor((ELEMS_PER_LANE,), Float32)
                     words = cute.make_rmem_tensor((BF16_WORDS_PER_LANE,), Uint32)
-                    for w in cutlass.range_constexpr(BF16_WORDS_PER_LANE):
-                        words[w] = q_in[q_in_off(token, slot, lane, w)]
+                    if cutlass.const_expr(Q_INTERLEAVED):
+                        cute.copy(
+                            load_atom,
+                            q_in[token, Int32(lane), slot, None],
+                            words[None],
+                        )
+                    else:
+                        cute.copy(
+                            load_atom,
+                            q_in[token, slot, Int32(lane), None],
+                            words[None],
+                        )
                     _decode_words(words, elems)
                     if cutlass.const_expr(APPLY_Q_NORM):
                         _apply_q_norm(elems, EPS)
                     if cutlass.const_expr(APPLY_Q_ROPE):  # noqa: SIM102
                         if dim_base >= Int32(NOPE_DIM):
-                            _apply_rope(elems, pos_ids[token], dim_base, cos_sin)
+                            _apply_rope(elems, cos_v, sin_v)
                     _encode_words(elems, words)
-                    for w in cutlass.range_constexpr(BF16_WORDS_PER_LANE):
-                        q_out[q_out_off(token, slot, lane, w)] = words[w]
+                    if cutlass.const_expr(Q_INTERLEAVED):
+                        cute.copy(
+                            store_atom,
+                            words[None],
+                            q_out[token, Int32(lane), slot, None],
+                        )
+                    else:
+                        cute.copy(
+                            store_atom,
+                            words[None],
+                            q_out[token, slot, Int32(lane), None],
+                        )
                 else:
                     # FlashMLA reads the pad slots; bf16 +0.0 is 0x0000.
+                    words = cute.make_rmem_tensor((BF16_WORDS_PER_LANE,), Uint32)
                     for w in cutlass.range_constexpr(BF16_WORDS_PER_LANE):
-                        q_out[q_out_off(token, slot, lane, w)] = Uint32(0)
+                        words[w] = Uint32(0)
+                    if cutlass.const_expr(Q_INTERLEAVED):
+                        cute.copy(
+                            store_atom,
+                            words[None],
+                            q_out[token, Int32(lane), slot, None],
+                        )
+                    else:
+                        cute.copy(
+                            store_atom,
+                            words[None],
+                            q_out[token, slot, Int32(lane), None],
+                        )
                 if cutlass.const_expr(USE_PDL):
                     cute.arch.griddepcontrol_launch_dependents()
 
@@ -514,12 +753,16 @@ class _PagedInsertKernel(VllmCuTeDSLJitKernel[PagedCompileKey]):
             q_in: cute.Tensor,
             q_out: cute.Tensor,
             kv: cute.Tensor,
-            cache_data: cute.Tensor,
+            cache_fp8: cute.Tensor,
+            cache_bf16: cute.Tensor,
             cache_scale: cute.Tensor,
             slots: cute.Tensor,
             pos_ids: cute.Tensor,
             cos_sin: cute.Tensor,
             norm_w: cute.Tensor,
+            load_atom: cute.CopyAtom,
+            store_atom: cute.CopyAtom,
+            cs_atom: cute.CopyAtom,
             n_full: Int32,
             n_insert: Int32,
             block_size: Int32,
@@ -540,12 +783,16 @@ class _PagedInsertKernel(VllmCuTeDSLJitKernel[PagedCompileKey]):
                     q_in,
                     q_out,
                     kv,
-                    cache_data,
+                    cache_fp8,
+                    cache_bf16,
                     cache_scale,
                     slots,
                     pos_ids,
                     cos_sin,
                     norm_w,
+                    load_atom,
+                    store_atom,
+                    cs_atom,
                     n_insert,
                     block_size,
                 )
@@ -555,12 +802,16 @@ class _PagedInsertKernel(VllmCuTeDSLJitKernel[PagedCompileKey]):
             q_in: cute.Tensor,
             q_out: cute.Tensor,
             kv: cute.Tensor,
-            cache_data: cute.Tensor,
+            cache_fp8: cute.Tensor,
+            cache_bf16: cute.Tensor,
             cache_scale: cute.Tensor,
             slots: cute.Tensor,
             pos_ids: cute.Tensor,
             cos_sin: cute.Tensor,
             norm_w: cute.Tensor,
+            load_atom: cute.CopyAtom,
+            store_atom: cute.CopyAtom,
+            cs_atom: cute.CopyAtom,
             n_full: Int32,
             n_insert: Int32,
             block_size: Int32,
@@ -590,12 +841,16 @@ class _PagedInsertKernel(VllmCuTeDSLJitKernel[PagedCompileKey]):
                             q_in,
                             q_out,
                             kv,
-                            cache_data,
+                            cache_fp8,
+                            cache_bf16,
                             cache_scale,
                             slots,
                             pos_ids,
                             cos_sin,
                             norm_w,
+                            load_atom,
+                            store_atom,
+                            cs_atom,
                             n_insert,
                             block_size,
                         )
@@ -608,7 +863,8 @@ class _PagedInsertKernel(VllmCuTeDSLJitKernel[PagedCompileKey]):
             q_in: cute.Tensor,
             q_out: cute.Tensor,
             kv: cute.Tensor,
-            cache_data: cute.Tensor,
+            cache_fp8: cute.Tensor,
+            cache_bf16: cute.Tensor,
             cache_scale: cute.Tensor,
             slots: cute.Tensor,
             pos_ids: cute.Tensor,
@@ -616,20 +872,33 @@ class _PagedInsertKernel(VllmCuTeDSLJitKernel[PagedCompileKey]):
             norm_w: cute.Tensor,
             stream: CUstream,
         ):
+            load_atom = cute.make_copy_atom(
+                cute.nvgpu.CopyG2ROp(), Uint32, num_bits_per_copy=128
+            )
+            store_atom = cute.make_copy_atom(
+                cute.nvgpu.CopyR2GOp(), Uint32, num_bits_per_copy=128
+            )
+            cs_atom = cute.make_copy_atom(
+                cute.nvgpu.CopyG2ROp(), Float32, num_bits_per_copy=128
+            )
             n = kv.shape[0]
             ni = slots.shape[0]
-            bs = cache_data.shape[1]
+            bs = cache_fp8.shape[1]
             if REDUCED:
                 device_kernel_reduced(
                     q_in,
                     q_out,
                     kv,
-                    cache_data,
+                    cache_fp8,
+                    cache_bf16,
                     cache_scale,
                     slots,
                     pos_ids,
                     cos_sin,
                     norm_w,
+                    load_atom,
+                    store_atom,
+                    cs_atom,
                     n,
                     ni,
                     bs,
@@ -644,12 +913,16 @@ class _PagedInsertKernel(VllmCuTeDSLJitKernel[PagedCompileKey]):
                     q_in,
                     q_out,
                     kv,
-                    cache_data,
+                    cache_fp8,
+                    cache_bf16,
                     cache_scale,
                     slots,
                     pos_ids,
                     cos_sin,
                     norm_w,
+                    load_atom,
+                    store_atom,
+                    cs_atom,
                     n,
                     ni,
                     bs,
@@ -676,6 +949,10 @@ class _PagedInsertKernel(VllmCuTeDSLJitKernel[PagedCompileKey]):
         return []
 
     def warmup_inputs(self, compile_key: PagedCompileKey) -> tuple[Any, ...]:
+        # Head counts are compile-key constants, so the q views' strides are
+        # static; a stand-in for an unused q view is floored at one head.
+        hq = max(compile_key.num_heads_q, 1)
+        qp = max(compile_key.q_head_padded, 1)
         n = cute.sym_int()
         i = cute.sym_int()
         p = cute.sym_int()
@@ -684,36 +961,58 @@ class _PagedInsertKernel(VllmCuTeDSLJitKernel[PagedCompileKey]):
         qt = cute.sym_int()
         qot = cute.sym_int()
         wt = cute.sym_int()
-        data_stride0 = cute.sym_int64(divisibility=1)
+        data_stride0 = cute.sym_int64(divisibility=4)
         scale_stride0 = cute.sym_int64(divisibility=1)
-        kv_row = cute.sym_int64(divisibility=1)
+        kv_row = cute.sym_int64(divisibility=4)
         if compile_key.kv_mxfp8:
-            data_words = MXFP8_DATA_WORDS
-            data_row = MXFP8_BYTES_PER_TOKEN // 4
+            fp8_tiles, fp8_row = MXFP8_DATA_WORDS // 4, MXFP8_BYTES_PER_TOKEN // 4
+            # The bf16-group view is only sliced by the V4 rope-tail store;
+            # under mxfp8 it stands in, never accessed.
+            bf16_tiles, bf16_row = MXFP8_DATA_WORDS // 8, MXFP8_DATA_WORDS
             scale_bytes = MXFP8_SCALE_BYTES
             scale_row = MXFP8_BYTES_PER_TOKEN
         else:
-            data_words = V4_DATA_WORDS
-            data_row = V4_DATA_WORDS
+            fp8_tiles, fp8_row = V4_DATA_WORDS // 4, V4_DATA_WORDS
+            bf16_tiles, bf16_row = V4_DATA_WORDS // 8, V4_DATA_WORDS
             scale_bytes = V4_SCALE_BYTES
             scale_row = V4_SCALE_BYTES
-        q_in = cute.runtime.make_fake_tensor(
-            Uint32, (qt,), stride=(1,), assumed_align=4
-        )
-        q_out = cute.runtime.make_fake_tensor(
-            Uint32, (qot,), stride=(1,), assumed_align=4
-        )
+        if compile_key.is_q_interleaved:
+            q_in = cute.runtime.make_fake_tensor(
+                Uint32,
+                (qt, 32, hq, 8),
+                stride=(hq * 256, hq * 8, 8, 1),
+                assumed_align=16,
+            )
+            q_out = cute.runtime.make_fake_tensor(
+                Uint32,
+                (qot, 32, qp, 8),
+                stride=(qp * 256, qp * 8, 8, 1),
+                assumed_align=16,
+            )
+        else:
+            q_in = cute.runtime.make_fake_tensor(
+                Uint32, (qt, hq, 32, 8), stride=(hq * 256, 256, 8, 1), assumed_align=16
+            )
+            q_out = cute.runtime.make_fake_tensor(
+                Uint32, (qot, qp, 32, 8), stride=(qp * 256, 256, 8, 1), assumed_align=16
+            )
         kv = cute.runtime.make_fake_tensor(
             Uint32,
-            (n, HEAD_DIM // 2),
-            stride=(kv_row, 1),
-            assumed_align=4,
+            (n, 32, 8),
+            stride=(kv_row, 8, 1),
+            assumed_align=16,
         )
-        cache_data = cute.runtime.make_fake_tensor(
+        cache_fp8 = cute.runtime.make_fake_tensor(
             Uint32,
-            (b, bs, data_words),
-            stride=(data_stride0, data_row, 1),
-            assumed_align=4,
+            (b, bs, fp8_tiles, 4),
+            stride=(data_stride0, fp8_row, 4, 1),
+            assumed_align=16,
+        )
+        cache_bf16 = cute.runtime.make_fake_tensor(
+            Uint32,
+            (b, bs, bf16_tiles, 8),
+            stride=(data_stride0, bf16_row, 8, 1),
+            assumed_align=16,
         )
         cache_scale = cute.runtime.make_fake_tensor(
             Uint8,
@@ -726,7 +1025,7 @@ class _PagedInsertKernel(VllmCuTeDSLJitKernel[PagedCompileKey]):
             Int64, (n,), stride=(1,), assumed_align=8
         )
         cos_sin = cute.runtime.make_fake_tensor(
-            Float32, (p, ROPE_DIM), stride=(ROPE_DIM, 1), assumed_align=4
+            Float32, (p, ROPE_DIM // 4, 4), stride=(ROPE_DIM, 4, 1), assumed_align=16
         )
         norm_w = cute.runtime.make_fake_tensor(
             Uint32, (wt,), stride=(1,), assumed_align=4
@@ -735,7 +1034,8 @@ class _PagedInsertKernel(VllmCuTeDSLJitKernel[PagedCompileKey]):
             q_in,
             q_out,
             kv,
-            cache_data,
+            cache_fp8,
+            cache_bf16,
             cache_scale,
             slots,
             pos_ids,
@@ -749,7 +1049,8 @@ class _PagedInsertKernel(VllmCuTeDSLJitKernel[PagedCompileKey]):
         q_in: torch.Tensor,
         q_out: torch.Tensor,
         kv: torch.Tensor,
-        cache_data: torch.Tensor,
+        cache_fp8: torch.Tensor,
+        cache_bf16: torch.Tensor,
         cache_scale: torch.Tensor,
         slots: torch.Tensor,
         pos_ids: torch.Tensor,
@@ -781,7 +1082,8 @@ class _PagedInsertKernel(VllmCuTeDSLJitKernel[PagedCompileKey]):
             q_in,
             q_out,
             kv,
-            cache_data,
+            cache_fp8,
+            cache_bf16,
             cache_scale,
             slots,
             pos_ids,
@@ -820,13 +1122,17 @@ class _FullCacheInsertKernel(VllmCuTeDSLJitKernel[FullCacheCompileKey]):
             q: cute.Tensor,
             q_fp8: cute.Tensor,
             kv: cute.Tensor,
-            cache_data: cute.Tensor,
+            cache_fp8: cute.Tensor,
+            cache_bf16: cute.Tensor,
             slots: cute.Tensor,
             pos_ids: cute.Tensor,
             cos_sin: cute.Tensor,
             norm_w: cute.Tensor,
             kv_scale: cute.Tensor,
             q_scale_inv: cute.Tensor,
+            load_atom: cute.CopyAtom,
+            store_atom: cute.CopyAtom,
+            cs_atom: cute.CopyAtom,
             n_full: Int32,
             n_insert: Int32,
             block_size: Int32,
@@ -843,66 +1149,82 @@ class _FullCacheInsertKernel(VllmCuTeDSLJitKernel[FullCacheCompileKey]):
                     if token < n_insert:
                         if cutlass.const_expr(USE_PDL):
                             cute.arch.griddepcontrol_wait()
+                        pos = pos_ids[token]
+                        cs_layout = cute.make_layout((2, 4), stride=(4, 1))
+                        cos_v = cute.make_rmem_tensor(cs_layout, Float32)
+                        sin_v = cute.make_rmem_tensor(cs_layout, Float32)
+                        _load_cos_sin(cos_sin, pos, dim_base, cs_atom, cos_v, sin_v)
                         elems = cute.make_rmem_tensor((ELEMS_PER_LANE,), Float32)
                         words = cute.make_rmem_tensor((BF16_WORDS_PER_LANE,), Uint32)
-                        for w in cutlass.range_constexpr(BF16_WORDS_PER_LANE):
-                            words[w] = kv[token, 8 * lane + w]
+                        cute.copy(load_atom, kv[token, Int32(lane), None], words[None])
                         _decode_words(words, elems)
                         if cutlass.const_expr(HAS_KV_NORM):
                             _apply_kv_norm(elems, dim_base, EPS, norm_w)
                         # Full-cache rows rope the KV unconditionally; this
                         # variant has no apply_q_rope knob.
                         if dim_base >= Int32(NOPE_DIM):
-                            _apply_rope(elems, pos_ids[token], dim_base, cos_sin)
+                            _apply_rope(elems, cos_v, sin_v)
                         sid = slots[token]
                         if sid >= Int64(0):
                             block = sid // Int64(block_size)
                             pib = sid % Int64(block_size)
                             if cutlass.const_expr(STORE_KV_FP8):
                                 inv = Float32(1.0) / kv_scale[0]
+                                packed = cute.make_rmem_tensor(
+                                    (FP8_WORDS_PER_LANE,), Uint32
+                                )
                                 for w in cutlass.range_constexpr(FP8_WORDS_PER_LANE):
                                     v0 = _clamp_fp8(elems[4 * w] * inv)
                                     v1 = _clamp_fp8(elems[4 * w + 1] * inv)
                                     v2 = _clamp_fp8(elems[4 * w + 2] * inv)
                                     v3 = _clamp_fp8(elems[4 * w + 3] * inv)
-                                    packed = fp32x4_to_fp8x4(v0, v1, v2, v3)
-                                    cache_data[block, pib, Int64(dim_base // 4 + w)] = (
-                                        packed
-                                    )
+                                    packed[w] = fp32x4_to_fp8x4(v0, v1, v2, v3)
+                                cute.copy(
+                                    store_atom,
+                                    packed[None],
+                                    cache_fp8[block, pib, Int32(lane), None],
+                                )
                             else:
                                 _encode_words(elems, words)
-                                for w in cutlass.range_constexpr(BF16_WORDS_PER_LANE):
-                                    cache_data[block, pib, Int64(dim_base // 2 + w)] = (
-                                        words[w]
-                                    )
+                                cute.copy(
+                                    store_atom,
+                                    words[None],
+                                    cache_bf16[block, pib, Int32(lane), None],
+                                )
                         if cutlass.const_expr(USE_PDL):
                             cute.arch.griddepcontrol_launch_dependents()
                 else:
                     if cutlass.const_expr(USE_PDL):
                         cute.arch.griddepcontrol_wait()
+                    pos = pos_ids[token]
+                    cs_layout = cute.make_layout((2, 4), stride=(4, 1))
+                    cos_v = cute.make_rmem_tensor(cs_layout, Float32)
+                    sin_v = cute.make_rmem_tensor(cs_layout, Float32)
+                    _load_cos_sin(cos_sin, pos, dim_base, cs_atom, cos_v, sin_v)
                     elems = cute.make_rmem_tensor((ELEMS_PER_LANE,), Float32)
                     words = cute.make_rmem_tensor((BF16_WORDS_PER_LANE,), Uint32)
-                    for w in cutlass.range_constexpr(BF16_WORDS_PER_LANE):
-                        words[w] = q[token, slot, 8 * lane + w]
+                    cute.copy(load_atom, q[token, slot, Int32(lane), None], words[None])
                     _decode_words(words, elems)
                     if cutlass.const_expr(APPLY_Q_NORM):
                         _apply_q_norm(elems, EPS)
                     if dim_base >= Int32(NOPE_DIM):
-                        _apply_rope(elems, pos_ids[token], dim_base, cos_sin)
+                        _apply_rope(elems, cos_v, sin_v)
                     if cutlass.const_expr(STORE_Q_FP8):
                         sinv = q_scale_inv[0]
+                        packed = cute.make_rmem_tensor((FP8_WORDS_PER_LANE,), Uint32)
                         for w in cutlass.range_constexpr(FP8_WORDS_PER_LANE):
                             v0 = _clamp_fp8(elems[4 * w] * sinv)
                             v1 = _clamp_fp8(elems[4 * w + 1] * sinv)
                             v2 = _clamp_fp8(elems[4 * w + 2] * sinv)
                             v3 = _clamp_fp8(elems[4 * w + 3] * sinv)
-                            q_fp8[token, slot, 4 * lane + w] = fp32x4_to_fp8x4(
-                                v0, v1, v2, v3
-                            )
+                            packed[w] = fp32x4_to_fp8x4(v0, v1, v2, v3)
+                        cute.copy(
+                            store_atom,
+                            packed[None],
+                            q_fp8[token, slot, Int32(lane), None],
+                        )
                     else:
-                        _encode_words(elems, words)
-                        for w in cutlass.range_constexpr(BF16_WORDS_PER_LANE):
-                            q[token, slot, 8 * lane + w] = words[w]
+                        _q_tail_store_bf16(q, token, slot, Int32(lane), elems, HQ * 256)
                     if cutlass.const_expr(USE_PDL):
                         cute.arch.griddepcontrol_launch_dependents()
 
@@ -911,7 +1233,8 @@ class _FullCacheInsertKernel(VllmCuTeDSLJitKernel[FullCacheCompileKey]):
             q: cute.Tensor,
             q_fp8: cute.Tensor,
             kv: cute.Tensor,
-            cache_data: cute.Tensor,
+            cache_fp8: cute.Tensor,
+            cache_bf16: cute.Tensor,
             slots: cute.Tensor,
             pos_ids: cute.Tensor,
             cos_sin: cute.Tensor,
@@ -920,20 +1243,33 @@ class _FullCacheInsertKernel(VllmCuTeDSLJitKernel[FullCacheCompileKey]):
             q_scale_inv: cute.Tensor,
             stream: CUstream,
         ):
+            load_atom = cute.make_copy_atom(
+                cute.nvgpu.CopyG2ROp(), Uint32, num_bits_per_copy=128
+            )
+            store_atom = cute.make_copy_atom(
+                cute.nvgpu.CopyR2GOp(), Uint32, num_bits_per_copy=128
+            )
+            cs_atom = cute.make_copy_atom(
+                cute.nvgpu.CopyG2ROp(), Float32, num_bits_per_copy=128
+            )
             n = kv.shape[0]
             ni = slots.shape[0]
-            bs = cache_data.shape[1]
+            bs = cache_fp8.shape[1]
             device_kernel(
                 q,
                 q_fp8,
                 kv,
-                cache_data,
+                cache_fp8,
+                cache_bf16,
                 slots,
                 pos_ids,
                 cos_sin,
                 norm_w,
                 kv_scale,
                 q_scale_inv,
+                load_atom,
+                store_atom,
+                cs_atom,
                 n,
                 ni,
                 bs,
@@ -970,10 +1306,9 @@ class _FullCacheInsertKernel(VllmCuTeDSLJitKernel[FullCacheCompileKey]):
         wt = cute.sym_int()
         s1 = cute.sym_int()
         s2 = cute.sym_int()
-        kv_row = cute.sym_int64(divisibility=1)
-        cache_stride0 = cute.sym_int64(divisibility=1)
-        cache_row = cute.sym_int64(divisibility=1)
-        data_words = HEAD_DIM // 4 if compile_key.store_kv_fp8 else HEAD_DIM // 2
+        kv_row = cute.sym_int64(divisibility=4)
+        cache_stride0 = cute.sym_int64(divisibility=4)
+        cache_row = cute.sym_int64(divisibility=4)
         # A Q-less launch compiles with num_heads_q == 0, but a zero shape
         # mode is not a legal CuTe layout; floor the fake at one head. The
         # grid never dispatches a Q slot when num_heads_q == 0, so the
@@ -981,34 +1316,44 @@ class _FullCacheInsertKernel(VllmCuTeDSLJitKernel[FullCacheCompileKey]):
         heads = max(compile_key.num_heads_q, 1)
         q = cute.runtime.make_fake_tensor(
             Uint32,
-            (qn, heads, HEAD_DIM // 2),
-            stride=(heads * (HEAD_DIM // 2), HEAD_DIM // 2, 1),
-            assumed_align=4,
+            (qn, heads, 32, 8),
+            stride=(heads * (HEAD_DIM // 2), HEAD_DIM // 2, 8, 1),
+            assumed_align=16,
         )
         q_fp8 = cute.runtime.make_fake_tensor(
             Uint32,
-            (qfn, heads, HEAD_DIM // 4),
-            stride=(heads * (HEAD_DIM // 4), HEAD_DIM // 4, 1),
-            assumed_align=4,
+            (qfn, heads, 32, 4),
+            stride=(heads * (HEAD_DIM // 4), HEAD_DIM // 4, 4, 1),
+            assumed_align=16,
         )
         kv = cute.runtime.make_fake_tensor(
             Uint32,
-            (n, HEAD_DIM // 2),
-            stride=(kv_row, 1),
-            assumed_align=4,
+            (n, 32, 8),
+            stride=(kv_row, 8, 1),
+            assumed_align=16,
         )
-        cache_data = cute.runtime.make_fake_tensor(
+        # Both cache group views exactly cover a 512-wide row in its store
+        # dtype: 8-word groups for bf16 stores, 4-word groups for fp8. Only
+        # the one selected by store_kv_fp8 is ever sliced.
+        row_words = HEAD_DIM // 4 if compile_key.store_kv_fp8 else HEAD_DIM // 2
+        cache_bf16 = cute.runtime.make_fake_tensor(
             Uint32,
-            (b, bs, data_words),
-            stride=(cache_stride0, cache_row, 1),
-            assumed_align=4,
+            (b, bs, row_words // 8, 8),
+            stride=(cache_stride0, cache_row, 8, 1),
+            assumed_align=16,
+        )
+        cache_fp8 = cute.runtime.make_fake_tensor(
+            Uint32,
+            (b, bs, row_words // 4, 4),
+            stride=(cache_stride0, cache_row, 4, 1),
+            assumed_align=16,
         )
         slots = cute.runtime.make_fake_tensor(Int64, (i,), stride=(1,), assumed_align=8)
         pos_ids = cute.runtime.make_fake_tensor(
             Int64, (n,), stride=(1,), assumed_align=8
         )
         cos_sin = cute.runtime.make_fake_tensor(
-            Float32, (p, ROPE_DIM), stride=(ROPE_DIM, 1), assumed_align=4
+            Float32, (p, ROPE_DIM // 4, 4), stride=(ROPE_DIM, 4, 1), assumed_align=16
         )
         norm_w = cute.runtime.make_fake_tensor(
             Uint32, (wt,), stride=(1,), assumed_align=4
@@ -1023,7 +1368,8 @@ class _FullCacheInsertKernel(VllmCuTeDSLJitKernel[FullCacheCompileKey]):
             q,
             q_fp8,
             kv,
-            cache_data,
+            cache_fp8,
+            cache_bf16,
             slots,
             pos_ids,
             cos_sin,
@@ -1038,7 +1384,8 @@ class _FullCacheInsertKernel(VllmCuTeDSLJitKernel[FullCacheCompileKey]):
         q: torch.Tensor,
         q_fp8: torch.Tensor,
         kv: torch.Tensor,
-        cache_data: torch.Tensor,
+        cache_fp8: torch.Tensor,
+        cache_bf16: torch.Tensor,
         slots: torch.Tensor,
         pos_ids: torch.Tensor,
         cos_sin: torch.Tensor,
@@ -1065,7 +1412,8 @@ class _FullCacheInsertKernel(VllmCuTeDSLJitKernel[FullCacheCompileKey]):
             q,
             q_fp8,
             kv,
-            cache_data,
+            cache_fp8,
+            cache_bf16,
             slots,
             pos_ids,
             cos_sin,
@@ -1124,33 +1472,36 @@ def fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
         raise ValueError(f"{op_name}: k_cache must be uint8")
     if k_cache.device != kv.device:
         raise ValueError(f"{op_name}: k_cache must be on the KV device")
+    if q_in.data_ptr() % 16 != 0:
+        raise ValueError(f"{op_name}: q_in must be 16-byte aligned")
     num_tokens_full = q_in.shape[0]
     num_heads_q = q_in.shape[1]
     if q_head_padded == 0:
         q_out = torch.empty((0,), dtype=q_in.dtype, device=q_in.device)
-        q_in_u32 = _dummy_tensor(q_in.device, torch.uint32)
-        q_out_u32 = q_in_u32
+        q_in_v = _dummy_q_words(q_in.device, num_heads_q, is_q_interleaved, 8)
+        q_out_v = _dummy_q_words(q_in.device, 0, is_q_interleaved, 8)
     else:
         q_out = torch.empty(
             (num_tokens_full, q_head_padded, HEAD_DIM),
             dtype=q_in.dtype,
             device=q_in.device,
         )
-        q_in_u32 = q_in.view(torch.uint32).reshape(-1)
-        q_out_u32 = q_out.view(torch.uint32).reshape(-1)
+        q_in_v = _q_word_views(q_in, num_heads_q, is_q_interleaved)
+        q_out_v = _q_word_views(q_out, q_head_padded, is_q_interleaved)
     if num_tokens_full == 0:
         return q_out
-    kv_u32 = kv.view(torch.uint32)
     cache_data, cache_scale = _paged_cache_views(k_cache, cache_block_size, kv_mxfp8)
+    cache_fp8_v, cache_bf16_v = _cache_word_views(cache_data, kv_mxfp8)
     _PAGED_INSERT_KERNEL(
-        q_in_u32,
-        q_out_u32,
-        kv_u32,
-        cache_data,
+        q_in_v,
+        q_out_v,
+        _kv_word_view(kv),
+        cache_fp8_v,
+        cache_bf16_v,
         cache_scale,
         slot_mapping,
         position_ids,
-        cos_sin_cache,
+        _cos_sin_word_view(cos_sin_cache),
         _dummy_tensor(q_in.device, torch.uint32),
         num_heads_q=num_heads_q,
         q_head_padded=q_head_padded,
@@ -1209,16 +1560,20 @@ def fused_deepseek_v4_kv_rope_insert(
     elif k_cache.dtype == torch.float8_e4m3fn:
         if k_cache.shape[2] != HEAD_DIM:
             raise ValueError(f"{op_name}: fp8 cache row width must be {HEAD_DIM}")
-        if k_cache.stride(0) % 4 != 0 or k_cache.stride(1) % 4 != 0:
-            raise ValueError(f"{op_name}: fp8 cache strides must be 4-aligned")
+        if k_cache.stride(0) % 16 != 0 or k_cache.stride(1) % 16 != 0:
+            raise ValueError(f"{op_name}: fp8 cache strides must be 16-byte aligned")
+        if k_cache.data_ptr() % 16 != 0:
+            raise ValueError(f"{op_name}: fp8 cache must be 16-byte aligned")
         if fp8_scale is None:
             raise ValueError(f"{op_name}: fp8 cache requires one float32 KV scale")
         normed_scale = _check_scalar(op_name, "fp8_scale", fp8_scale, kv.device)
     elif k_cache.dtype == torch.bfloat16:
         if k_cache.shape[2] != HEAD_DIM:
             raise ValueError(f"{op_name}: bf16 cache row width must be {HEAD_DIM}")
-        if k_cache.stride(0) % 2 != 0 or k_cache.stride(1) % 2 != 0:
-            raise ValueError(f"{op_name}: bf16 cache strides must be even")
+        if k_cache.stride(0) % 8 != 0 or k_cache.stride(1) % 8 != 0:
+            raise ValueError(f"{op_name}: bf16 cache strides must be 16-byte aligned")
+        if k_cache.data_ptr() % 16 != 0:
+            raise ValueError(f"{op_name}: bf16 cache must be 16-byte aligned")
     else:
         raise ValueError(
             f"{op_name}: cache must be uint8, bfloat16 or float8_e4m3fn, "
@@ -1227,7 +1582,6 @@ def fused_deepseek_v4_kv_rope_insert(
     num_tokens = slot_mapping.shape[0]
     if num_tokens == 0:
         return
-    kv_u32 = kv.view(torch.uint32)
     eps = kv_norm_eps if has_kv_norm else 0.0
     norm_w_u32 = (
         kv_norm_weight.view(torch.uint32).reshape(-1)
@@ -1238,15 +1592,17 @@ def fused_deepseek_v4_kv_rope_insert(
         cache_data, cache_scale = _paged_cache_views(
             k_cache, cache_block_size, kv_mxfp8
         )
+        cache_fp8_v, cache_bf16_v = _cache_word_views(cache_data, kv_mxfp8)
         _PAGED_INSERT_KERNEL(
-            _dummy_tensor(kv.device, torch.uint32),
-            _dummy_tensor(kv.device, torch.uint32),
-            kv_u32,
-            cache_data,
+            _dummy_q_words(kv.device, 0, False, 8),
+            _dummy_q_words(kv.device, 0, False, 8),
+            _kv_word_view(kv),
+            cache_fp8_v,
+            cache_bf16_v,
             cache_scale,
             slot_mapping,
             position_ids,
-            cos_sin_cache,
+            _cos_sin_word_view(cos_sin_cache),
             norm_w_u32,
             num_heads_q=0,
             q_head_padded=0,
@@ -1259,14 +1615,16 @@ def fused_deepseek_v4_kv_rope_insert(
             eps=eps,
         )
     elif k_cache.dtype == torch.float8_e4m3fn:
+        cache_fp8_v, cache_bf16_v = _full_cache_word_views(k_cache.view(torch.uint32))
         _FULL_CACHE_INSERT_KERNEL(
-            _dummy_3d(kv.device, torch.uint32, HEAD_DIM // 2, 1),
-            _dummy_3d(kv.device, torch.uint32, HEAD_DIM // 4, 1),
-            kv_u32,
-            k_cache.view(torch.uint32),
+            _dummy_q_words(kv.device, 0, False, 8),
+            _dummy_q_words(kv.device, 0, False, 4),
+            _kv_word_view(kv),
+            cache_fp8_v,
+            cache_bf16_v,
             slot_mapping,
             position_ids,
-            cos_sin_cache,
+            _cos_sin_word_view(cos_sin_cache),
             norm_w_u32,
             normed_scale,
             _dummy_tensor(kv.device, torch.float32),
@@ -1278,14 +1636,16 @@ def fused_deepseek_v4_kv_rope_insert(
             eps=eps,
         )
     else:
+        cache_fp8_v, cache_bf16_v = _full_cache_word_views(k_cache.view(torch.uint32))
         _FULL_CACHE_INSERT_KERNEL(
-            _dummy_3d(kv.device, torch.uint32, HEAD_DIM // 2, 1),
-            _dummy_3d(kv.device, torch.uint32, HEAD_DIM // 4, 1),
-            kv_u32,
-            k_cache.view(torch.uint32),
+            _dummy_q_words(kv.device, 0, False, 8),
+            _dummy_q_words(kv.device, 0, False, 4),
+            _kv_word_view(kv),
+            cache_fp8_v,
+            cache_bf16_v,
             slot_mapping,
             position_ids,
-            cos_sin_cache,
+            _cos_sin_word_view(cos_sin_cache),
             norm_w_u32,
             _dummy_tensor(kv.device, torch.float32),
             _dummy_tensor(kv.device, torch.float32),
@@ -1317,6 +1677,8 @@ def _full_cache_checks(
         raise ValueError(f"{op_name}: q must be on the KV device")
     if not q.is_contiguous() or not kv.is_contiguous():
         raise ValueError(f"{op_name}: q and kv must be contiguous")
+    if q.data_ptr() % 16 != 0:
+        raise ValueError(f"{op_name}: q must be 16-byte aligned")
     if q.shape[0] != kv.shape[0]:
         raise ValueError(
             f"{op_name}: q/kv row counts must match ({q.shape[0]} vs {kv.shape[0]})"
@@ -1361,18 +1723,22 @@ def fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
         cos_sin_cache,
         cache_block_size,
     )
-    if k_cache.stride(0) % 2 != 0 or k_cache.stride(1) % 2 != 0:
-        raise ValueError(f"{op_name}: bf16 cache strides must be even")
+    if k_cache.stride(0) % 8 != 0 or k_cache.stride(1) % 8 != 0:
+        raise ValueError(f"{op_name}: bf16 cache strides must be 16-byte aligned")
+    if k_cache.data_ptr() % 16 != 0:
+        raise ValueError(f"{op_name}: bf16 cache must be 16-byte aligned")
     if q.shape[0] == 0:
         return
+    cache_fp8_v, cache_bf16_v = _full_cache_word_views(k_cache.view(torch.uint32))
     _FULL_CACHE_INSERT_KERNEL(
-        q.view(torch.uint32),
-        _dummy_3d(q.device, torch.uint32, HEAD_DIM // 4, q.shape[1]),
-        kv.view(torch.uint32),
-        k_cache.view(torch.uint32),
+        _q_word_views(q, q.shape[1], False),
+        _dummy_q_words(q.device, q.shape[1], False, 4),
+        _kv_word_view(kv),
+        cache_fp8_v,
+        cache_bf16_v,
         slot_mapping,
         position_ids,
-        cos_sin_cache,
+        _cos_sin_word_view(cos_sin_cache),
         _dummy_tensor(q.device, torch.uint32),
         _dummy_tensor(q.device, torch.float32),
         _dummy_tensor(q.device, torch.float32),
@@ -1421,20 +1787,26 @@ def fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
             f"{op_name}: q_fp8 must be a contiguous float8_e4m3fn tensor "
             "matching q's shape on the KV device"
         )
-    if k_cache.stride(0) % 4 != 0 or k_cache.stride(1) % 4 != 0:
-        raise ValueError(f"{op_name}: fp8 cache strides must be 4-aligned")
+    if k_cache.stride(0) % 16 != 0 or k_cache.stride(1) % 16 != 0:
+        raise ValueError(f"{op_name}: fp8 cache strides must be 16-byte aligned")
+    if k_cache.data_ptr() % 16 != 0:
+        raise ValueError(f"{op_name}: fp8 cache must be 16-byte aligned")
+    if q_fp8.data_ptr() % 16 != 0:
+        raise ValueError(f"{op_name}: q_fp8 must be 16-byte aligned")
     kv_scale = _check_scalar(op_name, "fp8_scale", fp8_scale, q.device)
     q_scale_inv = _check_scalar(op_name, "q_fp8_scale_inv", q_fp8_scale_inv, q.device)
     if q.shape[0] == 0:
         return
+    cache_fp8_v, cache_bf16_v = _full_cache_word_views(k_cache.view(torch.uint32))
     _FULL_CACHE_INSERT_KERNEL(
-        q.view(torch.uint32),
-        q_fp8.view(torch.uint32),
-        kv.view(torch.uint32),
-        k_cache.view(torch.uint32),
+        _q_word_views(q, q.shape[1], False),
+        q_fp8.view(torch.uint32).reshape(q.shape[0], q.shape[1], 32, 4),
+        _kv_word_view(kv),
+        cache_fp8_v,
+        cache_bf16_v,
         slot_mapping,
         position_ids,
-        cos_sin_cache,
+        _cos_sin_word_view(cos_sin_cache),
         _dummy_tensor(q.device, torch.uint32),
         kv_scale,
         q_scale_inv,
