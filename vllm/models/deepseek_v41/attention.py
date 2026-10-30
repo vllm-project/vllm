@@ -134,11 +134,11 @@ def _fill_short_context_topk_indices(
 # bytes -- only in its SM100 sparse-decode kernels. Every other arch keeps the
 # V4 record: 448 fp8 NoPE + 64 bf16 RoPE plus 7 UE8M0 scales of 64 dims and a
 # pad byte (584 B, 576 B pages).
-def _use_v41_mxfp8_kv_record() -> bool:
+def _use_v41_mxfp8_kv_record(vllm_config: VllmConfig) -> bool:
     if current_platform.is_rocm():
         from vllm.models.deepseek_v41.amd.rocm import _rocm_v41_mxfp8_kv_record
 
-        return _rocm_v41_mxfp8_kv_record()
+        return _rocm_v41_mxfp8_kv_record(vllm_config)
     return current_platform.is_device_capability_family(100)
 
 
@@ -525,7 +525,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             cache_config,
             self.packed_kv_cache_dtype,
         )
-        self.kv_mxfp8 = _use_v41_mxfp8_kv_record()
+        self.kv_mxfp8 = _use_v41_mxfp8_kv_record(vllm_config)
         self.swa_bytes_per_token = 528 if self.kv_mxfp8 else 584
         # nvfp4_ds_mla keeps the MXFP8 sliding-window record and stores the
         # compressed cache as NVFP4 (256 B of e2m1 pairs + 32 e4m3 scales).
@@ -1296,9 +1296,8 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
             "fp8_ds_mla",
             "nvfp4_ds_mla",
         )
-        page_alignment = (
-            576 if uses_fp8_ds_mla_layout and not _use_v41_mxfp8_kv_record() else 512
-        )
+        v41_record = uses_fp8_ds_mla_layout and _use_v41_mxfp8_kv_record(vllm_config)
+        page_alignment = 576 if uses_fp8_ds_mla_layout and not v41_record else 512
         return MLAAttentionSpec(
             block_size=self.cache_config.block_size,
             num_kv_heads=1,
@@ -1313,12 +1312,7 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
             # DeepGEMM's paged sparse logits need a 256B-aligned block stride;
             # V4 records keep their TMA stride (V4.1's is on the SWA spec).
             block_stride_alignment=(
-                math.lcm(
-                    256,
-                    1
-                    if uses_fp8_ds_mla_layout and _use_v41_mxfp8_kv_record()
-                    else page_alignment,
-                )
+                math.lcm(256, 1 if v41_record else page_alignment)
                 if self.sparse_logits and not self.rocm_mxfp4
                 else None
             ),
