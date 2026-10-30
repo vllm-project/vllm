@@ -6,13 +6,6 @@ from vllm.triton_utils import tl, triton
 
 
 @triton.jit
-def _argmax_pair(av, ai, bv, bi):
-    an, bn = av != av, bv != bv
-    take_a = (an & ~bn) | ((an == bn) & ((av > bv) | (((av == bv) | an) & (ai < bi))))
-    return tl.where(take_a, av, bv), tl.where(take_a, ai, bi)
-
-
-@triton.jit
 def _argmax_partial(
     X,
     PV,
@@ -25,10 +18,12 @@ def _argmax_partial(
     row, part = tl.program_id(0), tl.program_id(1)
     col = part * BLOCK + tl.arange(0, BLOCK)
     value = tl.load(X + row.to(tl.int64) * SX + col, col < N, float("-inf"))
-    index = tl.where(col < N, col, N)
-    value, index = tl.reduce((value.to(tl.float32), index), 0, _argmax_pair)
-    tl.store(PV + row * SPLITS + part, value)
-    tl.store(PI + row * SPLITS + part, index)
+    value = value.to(tl.float32)
+    # NaN breaks tl.argmax index bounds, as in the rejection sampler.
+    value = tl.where(value != value, float("-inf"), value)
+    index = tl.argmax(value, axis=0)
+    tl.store(PV + row * SPLITS + part, tl.max(value, axis=0))
+    tl.store(PI + row * SPLITS + part, part * BLOCK + index)
 
 
 @triton.jit
@@ -36,12 +31,16 @@ def _argmax_finish(PV, PI, OUT, SPLITS: tl.constexpr, BLOCK: tl.constexpr):
     row = tl.program_id(0)
     col = tl.arange(0, BLOCK)
     value = tl.load(PV + row * SPLITS + col, col < SPLITS, float("-inf"))
-    index = tl.load(PI + row * SPLITS + col, col < SPLITS, 0x7FFFFFFF)
-    _, index = tl.reduce((value, index), 0, _argmax_pair)
-    tl.store(OUT + row, index.to(tl.int64))
+    part = tl.argmax(value, axis=0)
+    tl.store(OUT + row, tl.load(PI + row * SPLITS + part).to(tl.int64))
 
 
 def greedy_argmax(logits: torch.Tensor) -> torch.Tensor:
+    """``logits.argmax(dim=-1)`` over a large vocabulary, split across CTAs.
+
+    Ties resolve to the first index. NaN logits are treated as -inf, so a row
+    with NaN may differ from ``torch.argmax``, which returns the NaN's index.
+    """
     if (
         not logits.is_cuda
         or logits.dtype not in (torch.bfloat16, torch.float32)

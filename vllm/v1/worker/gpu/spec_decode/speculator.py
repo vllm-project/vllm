@@ -32,6 +32,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.gpu.sample.greedy_argmax import greedy_argmax
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
     OnlineAcceptanceEstimator,
@@ -432,7 +433,7 @@ class DraftModelSpeculator(BaseSpeculator):
             return self.model.get_top_tokens(hidden_states)
         else:
             logits = self.model.compute_logits(hidden_states)
-            sampled = logits.argmax(dim=-1)
+            sampled = greedy_argmax(logits)
         self._maybe_predict_acceptance(logits, idx_mapping, draft_step)
         return sampled
 

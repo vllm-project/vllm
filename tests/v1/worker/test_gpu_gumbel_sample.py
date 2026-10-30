@@ -542,5 +542,6 @@ def test_greedy_argmax_matches_torch(dtype, vocab):
     logits[4, -1] = 1
     logits[5].round_().clamp_(max=2)
     logits[5, :4096].clamp_(max=1)
-    expected = logits.argmax(-1)
+    # NaN is treated as -inf, as in the rejection sampler.
+    expected = logits.masked_fill(logits.isnan(), float("-inf")).argmax(-1)
     torch.testing.assert_close(greedy_argmax(logits), expected, rtol=0, atol=0)
