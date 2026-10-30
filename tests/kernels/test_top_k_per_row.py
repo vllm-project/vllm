@@ -1140,6 +1140,7 @@ def test_persistent_topk_sampled_graph(
                 1,
                 top_k - 1,
                 top_k,
+                32768,
                 32769,
                 min_sampled_length - 1,
                 min_sampled_length,

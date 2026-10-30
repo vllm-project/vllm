@@ -349,11 +349,11 @@ class KernelConfig:
     sparse_indexer_topk_backend: SparseIndexerTopkBackend = "auto"
     """Backend for the DSA sparse indexer decode top-k kernel. Available options:
 
-    - "auto": The pre-existing chain (cooperative -> persistent -> per_row);
-      the other backends are opt-in
+    - "auto": The pre-existing chain (cooperative -> persistent -> per_row)
+      on CUDA and per_row on ROCm; the other backends are opt-in
     - "deep_select": Use DeepSelect kernels (SM100a/SM103a only)
     - "cooperative": Use vLLM's cooperative_topk kernel
-    - "persistent": Use vLLM's persistent_topk kernel
+    - "persistent": Use vLLM's persistent_topk kernel (CUDA and ROCm)
     - "per_row": Use vLLM's top_k_per_row_decode kernel
     - "flashinfer": Use FlashInfer's top_k_ragged_transform kernel
     - "torch": Use a plain torch.topk implementation (debug reference)

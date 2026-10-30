@@ -15,7 +15,6 @@ from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CUDAGraphMode, get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.layers.indexer_topk import RADIX_TOPK_WORKSPACE_SIZE
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import LayerNameType, direct_register_custom_op
@@ -37,8 +36,10 @@ FP8_DTYPE = current_platform.fp8_dtype()
 
 
 def _decode_logits_workspace(num_rows: int, max_model_len: int) -> torch.Tensor:
-    # SparseIndexerTopk takes its top-k workspace from the start of the same
-    # buffer while it reads these logits.
+    from vllm.model_executor.layers.indexer_topk import RADIX_TOPK_WORKSPACE_SIZE
+
+    # GLM-5-next's kpool indexer runs SparseIndexerTopk on these logits, which
+    # takes its top-k workspace from the start of the same buffer.
     _, logits = current_workspace_manager().get_simultaneous(
         ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
         ((num_rows, max_model_len), torch.float32),
