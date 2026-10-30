@@ -16,7 +16,7 @@ from .mteb_score_utils import mteb_test_rerank_models
 MODELS = [
     ########## BertModel
     EmbedModelInfo(
-        "thenlper/gte-large",
+        "vllm-project/gte-large",
         mteb_score=0.76807651,
         mteb_tol=2e-3,
         architecture="BertModel",
@@ -26,14 +26,20 @@ MODELS = [
         is_chunked_prefill_supported=False,
         enable_test=True,
     ),
-    EmbedModelInfo("thenlper/gte-base", architecture="BertModel", enable_test=False),
-    EmbedModelInfo("thenlper/gte-small", architecture="BertModel", enable_test=False),
     EmbedModelInfo(
-        "thenlper/gte-large-zh", architecture="BertModel", enable_test=False
+        "vllm-project/gte-base", architecture="BertModel", enable_test=False
     ),
-    EmbedModelInfo("thenlper/gte-base-zh", architecture="BertModel", enable_test=False),
     EmbedModelInfo(
-        "thenlper/gte-small-zh", architecture="BertModel", enable_test=False
+        "vllm-project/gte-small", architecture="BertModel", enable_test=False
+    ),
+    EmbedModelInfo(
+        "vllm-project/gte-large-zh", architecture="BertModel", enable_test=False
+    ),
+    EmbedModelInfo(
+        "vllm-project/gte-base-zh", architecture="BertModel", enable_test=False
+    ),
+    EmbedModelInfo(
+        "vllm-project/gte-small-zh", architecture="BertModel", enable_test=False
     ),
     ########### NewModel
     # These three architectures are almost the same, but not exactly the same.

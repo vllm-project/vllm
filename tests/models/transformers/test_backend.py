@@ -264,7 +264,7 @@ def test_distributed(
 @pytest.mark.parametrize(
     "model, quantization_kwargs",
     [
-        ("TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ", {}),
+        ("vllm-project/TinyLlama-1.1B-Chat-v0.3-AWQ", {}),
         ("LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit", {}),
     ],
 )

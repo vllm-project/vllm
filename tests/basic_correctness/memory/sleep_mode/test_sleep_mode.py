@@ -91,7 +91,7 @@ def _model_state(worker) -> dict[str, list]:
     [
         "vllm-project/tiny-random-LlamaForCausalLM",
         # Its MRV2 model state holds device tensors.
-        "yujiepan/mamba2-codestral-v0.1-tiny-random",
+        "vllm-project/mamba2-codestral-v0.1-tiny-random",
     ],
 )
 def test_deep_sleep(model, monkeypatch, gpu_memory_cleared):

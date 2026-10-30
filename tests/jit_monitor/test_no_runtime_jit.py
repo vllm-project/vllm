@@ -37,13 +37,13 @@ JIT_MONITOR_MODELS = [
     JitModel("deepseek-ai/DeepSeek-V3", trust_remote_code=True),
     JitModel("ibm-granite/granite-4.0-tiny-preview"),
     JitModel(
-        "luccafong/deepseek_mtp_main_random",
-        draft="luccafong/deepseek_mtp_draft_random",
+        "vllm-project/deepseek_mtp_main_random",
+        draft="vllm-project/deepseek_mtp_draft_random",
         trust_remote_code=True,
     ),
     JitModel(
-        "eagle618/deepseek-v3-random",
-        draft="eagle618/eagle-deepseek-v3-random",
+        "vllm-project/deepseek-v3-random",
+        draft="vllm-project/eagle-deepseek-v3-random",
         trust_remote_code=True,
     ),
 ]

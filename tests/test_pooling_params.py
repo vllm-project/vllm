@@ -18,7 +18,7 @@ from vllm.exceptions import VLLMValidationError
 from vllm.pooling_params import LateChunkingParams, LateInteractionParams
 
 EMBEDDING_MODELS = [
-    EmbedModelInfo("intfloat/multilingual-e5-small", is_matryoshka=False),
+    EmbedModelInfo("vllm-project/multilingual-e5-small", is_matryoshka=False),
     EmbedModelInfo(
         "Snowflake/snowflake-arctic-embed-m-v1.5",
         is_matryoshka=True,

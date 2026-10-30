@@ -20,7 +20,7 @@ RERANK_MODELS = [
         mteb_tol=1e-2,
     ),
     RerankModelInfo(
-        "tomaarsen/Qwen3-Reranker-0.6B-seq-cls",
+        "vllm-project/Qwen3-Reranker-0.6B-seq-cls",
         architecture="Qwen3ForSequenceClassification",
         seq_pooling_type="LAST",
         attn_type="decoder",

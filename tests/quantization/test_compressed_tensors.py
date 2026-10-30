@@ -469,7 +469,7 @@ def test_compressed_tensors_nvfp4(args, dist_init, workspace_init):
 )
 @pytest.mark.parametrize(
     "args",
-    [("czhu-cohere/TinyLlama-1.1B-Chat-v1.0-W4A8-e2e", CompressedTensorsW4A8Fp8)],
+    [("vllm-project/TinyLlama-1.1B-Chat-v1.0-W4A8-e2e", CompressedTensorsW4A8Fp8)],
 )
 def test_compressed_tensors_w4a8_fp8(vllm_runner, args):
     model, scheme = args
@@ -926,7 +926,7 @@ def test_scheme_selection(
 )
 def test_compressed_tensors_mxfp8_moe_setup(vllm_runner):
     """Verify MXFP8 scheme, dtypes, and generation for a MoE model."""
-    model_path = "AliEdalati97/Qwen3-30B-A3B-MXFP8"
+    model_path = "vllm-project/Qwen3-30B-A3B-MXFP8"
     with vllm_runner(
         model_path,
         enforce_eager=True,

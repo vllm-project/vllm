@@ -152,7 +152,7 @@ TEXT_GENERATION_MODELS = {
 
 EMBEDDING_MODELS = {  # type: ignore[var-annotated]
     # [Text-only]
-    "intfloat/e5-mistral-7b-instruct": PPTestSettings.fast(runner="pooling"),
+    "vllm-project/e5-mistral-7b-instruct": PPTestSettings.fast(runner="pooling"),
     "BAAI/bge-multilingual-gemma2": PPTestSettings.fast(runner="pooling"),
     "Qwen/Qwen2.5-Math-RM-72B": PPTestSettings.fast(
         load_format="dummy", runner="pooling"
@@ -188,7 +188,7 @@ TEST_MODELS = [
     "ibm/PowerLM-3b",
     "deepseek-ai/DeepSeek-V2-Lite-Chat",
     # [LANGUAGE EMBEDDING]
-    "intfloat/e5-mistral-7b-instruct",
+    "vllm-project/e5-mistral-7b-instruct",
     "BAAI/bge-multilingual-gemma2",
     # [MULTIMODAL GENERATION]
     "OpenGVLab/InternVL3-1B",

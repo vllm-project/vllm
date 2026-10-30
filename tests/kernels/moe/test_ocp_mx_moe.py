@@ -90,11 +90,11 @@ def enable_pickle(monkeypatch):
 @pytest.mark.parametrize(
     "model_case",
     [
-        ModelCase("fxmarty/qwen_1.5-moe-a2.7b-mxfp4", tp=2),
-        ModelCase("fxmarty/deepseek_r1_3_layers_mxfp4", tp=8),
-        ModelCase("mawong-amd/Llama-4-Scout-17B-16E-Instruct-2-layers-mxfp4", tp=1),
-        ModelCase("fxmarty/Llama-3.1-70B-Instruct-2-layers-mxfp6", tp=1),
-        ModelCase("fxmarty/Llama-3.1-70B-Instruct-2-layers-mxfp6", tp=4),
+        ModelCase("vllm-project/qwen_1.5-moe-a2.7b-mxfp4", tp=2),
+        ModelCase("vllm-project/deepseek_r1_3_layers_mxfp4", tp=8),
+        ModelCase("vllm-project/Llama-4-Scout-17B-16E-Instruct-2-layers-mxfp4", tp=1),
+        ModelCase("vllm-project/Llama-3.1-70B-Instruct-2-layers-mxfp6", tp=1),
+        ModelCase("vllm-project/Llama-3.1-70B-Instruct-2-layers-mxfp6", tp=4),
     ],
 )
 @pytest.mark.skipif(
@@ -134,7 +134,7 @@ def test_mxfp4_loading_and_execution_moe(vllm_runner, model_case: ModelCase):
         #     assert isinstance(layer.mlp.experts.quant_method,
         #                       QuarkOCP_MX_MoEMethod)
 
-        # if model_case.model_id == "fxmarty/qwen_1.5-moe-a2.7b-mxfp4":
+        # if model_case.model_id == "vllm-project/qwen_1.5-moe-a2.7b-mxfp4":
         #     llm.apply_model(check_model)
         output = llm.generate_greedy("Today I am in the French Alps and", max_tokens=20)
         assert output

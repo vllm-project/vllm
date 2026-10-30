@@ -935,7 +935,7 @@ def test_modelopt_mixed_dspark_checkpoint(tmp_path, monkeypatch, vllm_runner):
 )
 def test_modelopt_fp8_pc_pt_checkpoint_setup(monkeypatch, dist_init, workspace_init):
     """Test ModelOpt FP8_PER_CHANNEL_PER_TOKEN checkpoint setup."""
-    model_id = "CedricHwang/qwen2.5-0.5b-modelopt-fp8-pc-pt"
+    model_id = "vllm-project/qwen2.5-0.5b-modelopt-fp8-pc-pt"
     model_path = _snapshot_download_or_skip(model_id)
 
     model, vllm_config = load_model_without_vllm_runner(
@@ -985,7 +985,7 @@ def test_modelopt_fp8_pc_pt_checkpoint_setup(monkeypatch, dist_init, workspace_i
 )
 def test_modelopt_fp8_pb_wo_checkpoint_setup(monkeypatch, dist_init, workspace_init):
     """Test ModelOpt FP8_PB_WO checkpoint setup."""
-    model_id = "CedricHwang/qwen2.5-0.5b-modelopt-fp8-pb-wo"
+    model_id = "vllm-project/qwen2.5-0.5b-modelopt-fp8-pb-wo"
     model_path = _snapshot_download_or_skip(model_id)
 
     model, vllm_config = load_model_without_vllm_runner(
