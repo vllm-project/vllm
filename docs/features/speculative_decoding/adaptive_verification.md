@@ -14,7 +14,7 @@ The practical effect is that one configuration holds up across the whole load ra
 
 Adaptive verification is supported for model-based drafters (EAGLE, MTP, DFlash, DSpark and standalone draft models). The per-position acceptance estimates come from one of two sources:
 
-- **Confidence head**: DSpark checkpoints that ship a trained confidence head use its predictions directly.
+- **Confidence head**: DSpark checkpoints that ship a trained confidence head use its predictions directly. Set `"confidence_head": "online_estimator"` in the speculative config to use the online estimator instead.
 - **Online acceptance estimator**: every other drafter predicts acceptance from its draft logits with a small logistic model, recalibrated during serving against the target's verification results.
 
 ## Usage

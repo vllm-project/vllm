@@ -22,10 +22,10 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
     speculator_class = (
         "vllm.v1.worker.gpu.spec_decode.dspark.speculator.DSparkSpeculator"
     )
-    supported_options = frozenset({"dspark_draft_topk", "draft_lm_head_quantization"})
+    supported_options = frozenset(
+        {"dspark_draft_topk", "draft_lm_head_quantization", "confidence_head"}
+    )
     uses_separate_workspace_lane = True
-    # DSpark predicts acceptance with its own confidence head.
-    adaptive_verification_uses_draft_logits = False
     supports_pcp = True
 
     @classmethod
@@ -76,6 +76,8 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
 
     @classmethod
     def apply_options(cls, spec: "SpeculativeConfig") -> None:
+        if spec.confidence_head is not None and not spec.enable_adaptive_verification:
+            raise ValueError("confidence_head requires enable_adaptive_verification.")
         draft = spec.draft_model_config
         hf_config = draft.hf_config
         dspark_draft_topk = spec.dspark_draft_topk
@@ -117,6 +119,13 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
         )
 
     @property
+    def adaptive_verification_uses_draft_logits(self) -> bool:
+        # DSpark predicts acceptance with its own confidence head, unless the
+        # online estimator is requested (or the checkpoint has no head, which
+        # is only known once it is loaded).
+        return self.spec_config.confidence_head == "online_estimator"
+
+    @property
     def num_lookahead_tokens(self) -> int:
         hf_config = self.spec_config.draft_model_config.hf_config
         if getattr(hf_config, "sample_from_anchor", True):
@@ -128,7 +137,10 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
 
     def hash_factors(self) -> list[Any]:
         # Adaptive verification changes the DSpark draft graph.
-        return [self.spec_config.enable_adaptive_verification]
+        return [
+            self.spec_config.enable_adaptive_verification,
+            self.spec_config.confidence_head,
+        ]
 
     def pcp_unsupported_reason(self, parallel_config: "ParallelConfig") -> str | None:
         dcp_size = parallel_config.decode_context_parallel_size

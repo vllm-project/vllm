@@ -109,6 +109,21 @@ def test_dspark_adaptive_verification_separates_graph_cache():
     fixed_hash = config.compute_hash()
     config.enable_adaptive_verification = True
     assert config.compute_hash() != fixed_hash
+    trained_hash = config.compute_hash()
+    config.confidence_head = "online_estimator"
+    assert config.compute_hash() != trained_hash
+
+
+@pytest.mark.parametrize(
+    ("confidence_head", "expected"),
+    [(None, False), ("trained", False), ("online_estimator", True)],
+)
+def test_dspark_adaptive_verification_uses_draft_logits(confidence_head, expected):
+    from vllm.v1.worker.gpu.spec_decode.dspark.config import DSparkSpeculatorConfig
+
+    spec = SimpleNamespace(confidence_head=confidence_head)
+    config = DSparkSpeculatorConfig(spec)  # type: ignore[arg-type]
+    assert config.adaptive_verification_uses_draft_logits is expected
 
 
 def _write_json(path: Path, value: object) -> None:

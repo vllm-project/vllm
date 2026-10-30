@@ -52,7 +52,6 @@ class SpeculatorConfig:
     prefer_dense_token_history: ClassVar[bool] = False
     # Proposes draft tokens (unlike e.g. hidden state extraction).
     proposes_draft_tokens: ClassVar[bool] = True
-    adaptive_verification_uses_draft_logits: ClassVar[bool] = True
     # The draft model has its own vocabulary, which must match the target's
     # unless use_heterogeneous_vocab is set.
     draft_has_own_vocab: ClassVar[bool] = False
@@ -103,6 +102,12 @@ class SpeculatorConfig:
     @final
     def num_speculative_tokens(self) -> int:
         return self.spec_config.num_speculative_tokens
+
+    @property
+    def adaptive_verification_uses_draft_logits(self) -> bool:
+        """Whether adaptive verification predicts acceptance from the draft
+        logits (with the online acceptance estimator)."""
+        return True
 
     @property
     def uses_aux_hidden_states(self) -> bool:

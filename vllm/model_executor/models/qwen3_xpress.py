@@ -120,7 +120,12 @@ class XPressRefinerHead(nn.Module):
         anchor_ids: torch.Tensor,
         tok_am1_ids: torch.Tensor,
         num_passes: int,
-    ) -> torch.Tensor:
+        with_logits: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """The refined draft ids [N, B-1] and, if with_logits, the last pass's
+        refined logits per draft slot [N * (B-1), C or V]: over the top-C
+        candidates if topc is set, else over the vocabulary (a scratch buffer
+        that the next call overwrites)."""
         # Greedy, so a settled prefix stays settled and K passes converge monotonically.
         N, B, _ = base_logits_full.shape
         hcache = self.hidden_cache(h_full)
@@ -180,7 +185,8 @@ class XPressRefinerHead(nn.Module):
                 kernels.fused_topc_argmax_to_blk(
                     base_c.view(N, B - 1, c), bias_c, cand.view(N, B - 1, c), blk
                 )
-            return blk[:, 1:]
+            logits = base_c + bias_c.view(rows, c) if with_logits else None
+            return blk[:, 1:], logits
 
         sc = self._scratch_buffers(base_logits_full.dtype, base_logits_full.device)
         lat, bias = sc["lat"][:N], sc["bias"][:rows]
@@ -204,7 +210,9 @@ class XPressRefinerHead(nn.Module):
             )
             torch.mm(lat.view(rows, self.rank), buf["w2_t"], out=bias)
             kernels.fused_add_argmax_to_blk(base, bias, ov, oi, blk)
-        return blk[:, 1:]
+        # The next pass overwrites bias, so the sum can take its place.
+        logits = bias.add_(base) if with_logits else None
+        return blk[:, 1:], logits
 
     @torch.no_grad()
     def build_fused_buffers(self) -> None:

@@ -163,9 +163,17 @@ class DSparkSpeculator(DFlashSpeculator):
                 dtype=self.draft_logits_spec(self.vllm_config)[0],
                 device=self.device,
             )
+        has_confidence_head = model.model.confidence_head is not None
+        requested = self.speculative_config.confidence_head
+        if requested == "trained" and not has_confidence_head:
+            raise ValueError(
+                "confidence_head='trained' requires a draft checkpoint with a "
+                "confidence head."
+            )
         self.use_confidence_head = (
             self.enable_adaptive_verification
-            and model.model.confidence_head is not None
+            and has_confidence_head
+            and requested != "online_estimator"
         )
         if self.use_confidence_head:
             # The acceptance estimator is not needed when a trained confidence head

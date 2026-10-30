@@ -64,10 +64,38 @@ def test_jacobi_is_deterministic():
     anchor = torch.randint(0, V, (2,), device="cuda")
     tok_am1 = torch.randint(0, V, (2,), device="cuda")
 
-    first = head.jacobi_refine_greedy(base, h, anchor, tok_am1, 4)
-    second = head.jacobi_refine_greedy(base, h, anchor, tok_am1, 4)
+    first, _ = head.jacobi_refine_greedy(base, h, anchor, tok_am1, 4)
+    second, _ = head.jacobi_refine_greedy(base, h, anchor, tok_am1, 4)
     assert first.shape == (2, B - 1)
     assert torch.equal(first, second)
+
+
+# The online acceptance estimator reads these logits, so they must be the ones
+# the draft was picked from, and asking for them must not change the draft.
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+@pytest.mark.parametrize("topc", [0, 16])
+def test_jacobi_refined_logits(topc: int):
+    dtype = torch.bfloat16
+    head = _head(device="cuda", dtype=dtype)
+    head.topc = topc
+    head.fold_from_raw_(torch.randn(R, B, B, dtype=dtype, device="cuda") * 0.3)
+    head.build_fused_buffers()
+    torch.manual_seed(13)
+    base = torch.randn(2, B, V, dtype=dtype, device="cuda")
+    h = torch.randn(2, B, H, dtype=dtype, device="cuda")
+    anchor = torch.randint(0, V, (2,), device="cuda")
+    tok_am1 = torch.randint(0, V, (2,), device="cuda")
+
+    draft, no_logits = head.jacobi_refine_greedy(base, h, anchor, tok_am1, 4)
+    same, logits = head.jacobi_refine_greedy(
+        base, h, anchor, tok_am1, 4, with_logits=True
+    )
+    assert no_logits is None
+    assert torch.equal(draft, same)
+    assert logits is not None and logits.shape == (2 * (B - 1), topc or V)
+    if not topc:
+        picked = logits.gather(1, draft.reshape(-1, 1)).squeeze(1)
+        torch.testing.assert_close(picked, logits.max(dim=-1).values)
 
 
 def _head(
