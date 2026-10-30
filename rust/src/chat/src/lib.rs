@@ -64,12 +64,13 @@ mod stream;
 
 use std::collections::HashMap;
 
+use futures::Stream;
 use tracing::warn;
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
-use vllm_llm::Llm;
+use vllm_llm::{GenerateOutput, GeneratePromptInfo, Llm, Logprobs};
 use vllm_text::{Prompt, TextLlm, TextRequest, TextRequestProcessor};
 
 /// Chat request preparation shared by inference and render-only frontends.
@@ -97,6 +98,17 @@ pub struct ChatRequestProcessor {
 
 static OUTPUT_GRAMMAR_SKIPPED_ONCE: Once = Once::new();
 
+/// One chunk of output generated elsewhere, for
+/// [`ChatRequestProcessor::detokenize_stream`].
+#[derive(Debug, Clone, Default)]
+pub struct DetokenizeChunk {
+    pub token_ids: Vec<u32>,
+    /// Logprobs aligned with `token_ids`, when generated.
+    pub logprobs: Option<Logprobs>,
+    /// Set on the final chunk only.
+    pub finish_reason: Option<FinishReason>,
+}
+
 impl ChatRequestProcessor {
     /// Create a processor with multimodal support using the effective model
     /// dtype reported by the engine.
@@ -113,7 +125,9 @@ impl ChatRequestProcessor {
         }
     }
 
-    /// Create a render-only processor that rejects multimodal requests.
+    /// Create a processor for a frontend without an engine handshake. It
+    /// rejects multimodal requests until [`Self::with_model_dtype`] sets the
+    /// dtype to encode media tensors in.
     pub fn render_only(backend: DynChatBackend) -> Self {
         Self {
             backend,
@@ -125,6 +139,20 @@ impl ChatRequestProcessor {
             reasoning_effort_map: HashMap::new(),
             exclude_tools_when_tool_choice_none: false,
         }
+    }
+
+    /// Configure the downstream engine's model dtype, enabling multimodal
+    /// preprocessing when the backend supports it.
+    pub fn with_model_dtype(mut self, model_dtype: ModelDtype) -> Self {
+        self.model_dtype = Some(model_dtype);
+        self
+    }
+
+    /// Configure the downstream engine's context length, which bounds the
+    /// token budget image processors may size images by.
+    pub fn with_max_model_len(mut self, max_model_len: Option<u32>) -> Self {
+        self.max_model_len = max_model_len.map(|len| len as usize);
+        self
     }
 
     /// Configure the parser selections used to prepare generation requests.
@@ -279,14 +307,7 @@ impl ChatRequestProcessor {
         request.validate()?;
         self.map_reasoning_effort(&mut request);
 
-        let mut output_processor = self.backend.new_chat_output_processor(
-            &mut request,
-            NewChatOutputProcessorOptions {
-                tool_call_parser: &self.tool_call_parser,
-                reasoning_parser: &self.reasoning_parser,
-                tool_strict_level: self.tool_strict_level,
-            },
-        )?;
+        let mut output_processor = self.new_output_processor(&mut request)?;
         let mut text_request = self.prepare_text_request(request).await?;
 
         // Initialize the output processor from the final prompt token IDs and apply
@@ -312,6 +333,110 @@ impl ChatRequestProcessor {
         }
 
         Ok((text_request, output_processor))
+    }
+
+    /// Parse output token IDs generated for a prepared request into the final
+    /// assistant message, without an engine.
+    ///
+    /// `request` must be the request passed to [`Self::prepare`] and
+    /// `prompt_token_ids` the prompt it produced, so that parsers resolve and
+    /// initialize the same way as they would during generation.
+    pub async fn detokenize(
+        &self,
+        mut request: ChatRequest,
+        text_processor: &TextRequestProcessor,
+        prompt_token_ids: Vec<u32>,
+        output: DetokenizeChunk,
+    ) -> Result<CollectedAssistantMessage> {
+        request.intermediate = false;
+        self.detokenize_outputs(
+            request,
+            text_processor,
+            prompt_token_ids,
+            futures::stream::iter([output]),
+        )?
+        .collect_message()
+        .await
+    }
+
+    /// Streaming [`Self::detokenize`]: parse output chunks as they arrive,
+    /// emitting deltas.
+    ///
+    /// The stream ends at the first chunk with a finish reason, or earlier when
+    /// a stop string in `request.decode_options` matches, dropping `outputs`.
+    /// It fails if `outputs` ends without a finish reason.
+    pub fn detokenize_stream(
+        &self,
+        mut request: ChatRequest,
+        text_processor: &TextRequestProcessor,
+        prompt_token_ids: Vec<u32>,
+        outputs: impl Stream<Item = DetokenizeChunk> + Send + Unpin + 'static,
+    ) -> Result<ChatEventStream> {
+        request.intermediate = true;
+        self.detokenize_outputs(request, text_processor, prompt_token_ids, outputs)
+    }
+
+    fn detokenize_outputs(
+        &self,
+        mut request: ChatRequest,
+        text_processor: &TextRequestProcessor,
+        prompt_token_ids: Vec<u32>,
+        outputs: impl Stream<Item = DetokenizeChunk> + Send + Unpin + 'static,
+    ) -> Result<ChatEventStream> {
+        request.validate()?;
+        // Decoding skips the text request, which validates these in generation.
+        request.decode_options.validate(&request.request_id)?;
+
+        let mut output_processor = self.new_output_processor(&mut request)?;
+        output_processor.initialize(&prompt_token_ids)?;
+
+        let request_id = request.request_id.clone();
+        // The decoder reads the prompt from the first output.
+        let mut prompt_info = Some(Box::new(GeneratePromptInfo {
+            prompt_token_ids: prompt_token_ids.into(),
+            prompt_logprobs: None,
+            prompt_token_id_logprobs: None,
+        }));
+        let outputs = outputs.map(move |chunk| {
+            Ok(GenerateOutput {
+                request_id: request_id.clone(),
+                prompt_info: prompt_info.take(),
+                token_ids: chunk.token_ids,
+                logprobs: chunk.logprobs,
+                finish_reason: chunk.finish_reason,
+                prompt_cache_usage: Default::default(),
+                kv_transfer_params: None,
+                ec_transfer_params: None,
+                sampling_mask: None,
+                spec_decode_metrics: None,
+                weight_versions: None,
+                routed_experts: None,
+                timestamps: Default::default(),
+            })
+        });
+        let decoded_stream = vllm_text::output::decoded_text_event_stream(
+            request.request_id.clone(),
+            text_processor.tokenizer(),
+            outputs,
+            request.decode_options,
+            request.intermediate,
+        )
+        .map_err(Error::from)
+        .boxed();
+
+        let structured_stream = output_processor.process(decoded_stream)?;
+        Ok(ChatEventStream::new(request.request_id, structured_stream))
+    }
+
+    fn new_output_processor(&self, request: &mut ChatRequest) -> Result<DynChatOutputProcessor> {
+        self.backend.new_chat_output_processor(
+            request,
+            NewChatOutputProcessorOptions {
+                tool_call_parser: &self.tool_call_parser,
+                reasoning_parser: &self.reasoning_parser,
+                tool_strict_level: self.tool_strict_level,
+            },
+        )
     }
 }
 

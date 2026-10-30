@@ -37,7 +37,7 @@ use vllm_server::{
     ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
     CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL,
     DEFAULT_REQUEST_BODY_LIMIT_BYTES, HttpListenerMode, LoraModulePath, OutputLogging,
-    ParserSelection, ReasoningEffort, RenderConfig, RendererSelection,
+    ParserSelection, ReasoningEffort, RenderConfig, RenderDtype, RendererSelection,
 };
 use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
 
@@ -128,6 +128,10 @@ pub struct RenderArgs {
     /// HTTP bind port.
     #[arg(long, default_value_t = 8000)]
     port: u16,
+    /// TCP port for the gRPC Render service, bound on the HTTP host. When not
+    /// set, no gRPC server is started.
+    #[arg(long)]
+    grpc_port: Option<u16>,
     /// Public model names accepted by the API.
     #[arg(long, num_args = 0..)]
     served_model_name: Vec<String>,
@@ -179,6 +183,29 @@ pub struct RenderArgs {
     /// Maximum accepted logprobs count; -1 disables the cap.
     #[arg(long, value_parser = clap::value_parser!(i32).range(-1..), allow_negative_numbers = true)]
     max_logprobs: Option<i32>,
+    /// LoRA adapters whose names are accepted as the request model, each as
+    /// `name=path` or a JSON object: `{"name": "name", "path": "lora_path",
+    /// "base_model_name": "id"}`. Rendering does not load adapter weights.
+    #[arg(long, num_args = 1.., value_name = "MODULE")]
+    lora_modules: Vec<LoraModulePath>,
+    /// Disable multimodal preprocessing and treat the model as language-only.
+    #[arg(long)]
+    language_model_only: bool,
+    /// Dtype that multimodal inputs are preprocessed in; set it to the
+    /// engine's `--dtype`. `auto` follows the model config, running float32
+    /// checkpoints in bfloat16 like vLLM.
+    #[arg(long, default_value = "auto")]
+    dtype: RenderDtype,
+    /// The maximum number of input items allowed per prompt for each
+    /// modality, as a JSON object (e.g. `{"image": 16, "video": 2}`); set it
+    /// to the engine's `--limit-mm-per-prompt`. Unspecified modalities are
+    /// unlimited.
+    ///
+    /// Also accepts the engine's configurable form
+    /// (e.g. `{"video": {"count": 1, "num_frames": 32}}`); only `count`
+    /// applies to rendering.
+    #[arg(long, value_parser = parse_json::<MmLimitPerPrompt>, value_name = "JSON", default_value = "{}")]
+    limit_mm_per_prompt: MmLimitPerPrompt,
     /// TLS options for HTTPS/mTLS.
     #[command(flatten)]
     ssl: SslArgs,
@@ -202,6 +229,7 @@ impl RenderArgs {
             served_model_name: self.served_model_name,
             host: self.host,
             port: self.port,
+            grpc_port: self.grpc_port,
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
             tool_strict_level: self.tool_strict_level,
@@ -214,6 +242,10 @@ impl RenderArgs {
             chat_template_content_format: self.chat_template_content_format,
             max_model_len: self.max_model_len,
             max_logprobs: self.max_logprobs,
+            lora_modules: self.lora_modules,
+            language_model_only: self.language_model_only,
+            dtype: self.dtype,
+            limit_mm_per_prompt: self.limit_mm_per_prompt,
             tls,
         }
     }

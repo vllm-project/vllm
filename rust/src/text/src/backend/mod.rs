@@ -128,6 +128,12 @@ pub trait TextBackend: Send + Sync {
         usize::MAX
     }
 
+    /// Return the checkpoint dtype name declared by the model config, such as
+    /// `bfloat16`, if any.
+    fn config_dtype(&self) -> Option<&str> {
+        None
+    }
+
     /// Return the full tokenizer vocabulary size (Python `len(tokenizer)`).
     /// Used to range-check `allowed_token_ids` and token-id prompts.
     fn tokenizer_vocab_size(&self) -> usize {

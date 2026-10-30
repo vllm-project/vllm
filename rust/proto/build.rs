@@ -7,6 +7,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let protos = [
         proto_dir.join("control.proto"),
         proto_dir.join("inference.proto"),
+        proto_dir.join("render.proto"),
     ];
 
     for proto in &protos {
@@ -18,6 +19,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_prost_build::configure()
         .build_server(true)
         .build_client(true)
+        // Both variants are large messages.
+        .boxed(".vllm.DetokenizeStreamRequest.request.start")
+        .boxed(".vllm.DetokenizeStreamRequest.request.output")
         .compile_fds(file_descriptor_set)?;
 
     Ok(())

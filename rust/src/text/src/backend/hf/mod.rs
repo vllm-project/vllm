@@ -143,6 +143,10 @@ impl TextBackend for HfTextBackend {
         self.model_vocab_size
     }
 
+    fn config_dtype(&self) -> Option<&str> {
+        self.model_config.dtype()
+    }
+
     fn model_id(&self) -> &str {
         &self.model_id
     }

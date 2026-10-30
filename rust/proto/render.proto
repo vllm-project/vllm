@@ -1,0 +1,294 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+syntax = "proto3";
+package vllm;
+
+import "google/protobuf/struct.proto";
+import "inference.proto";
+
+// Engine-free chat rendering, the gRPC counterpart of the HTTP render API.
+//
+// A client renders a chat request with Tokenize, builds its own GenerateRequest
+// from the TokenizeResponse fields, runs it with Inference.Generate, and parses
+// the output token IDs with Detokenize, or streams GenerateStream chunks
+// through DetokenizeStream. Setting `response.output_token_ids = true` and
+// `response.output_text = false` on the GenerateRequest returns exactly what
+// Detokenize needs.
+service Render {
+  // Renders a chat request into prompt token IDs plus the generation settings
+  // that rendering decides.
+  rpc Tokenize (TokenizeRequest) returns (TokenizeResponse) {}
+  // Parses the output token IDs of Inference.Generate into assistant content,
+  // reasoning and tool calls.
+  rpc Detokenize (DetokenizeRequest) returns (DetokenizeResponse) {}
+  // Incremental Detokenize over the chunks of Inference.GenerateStream. The
+  // responses carry the decoded deltas in order, and one response can cover
+  // several request chunks or part of one; the server ends the stream after
+  // the response carrying `finish_info`.
+  rpc DetokenizeStream (stream DetokenizeStreamRequest) returns (stream DetokenizeStreamResponse) {}
+}
+
+// ======================================================================================
+// Tokenize
+// ======================================================================================
+
+message TokenizeRequest {
+  ChatRequest chat = 1;
+  // Leave `kwargs` unset in `TokenizeResponse.media`, keeping the hashes and
+  // placeholder ranges. For callers that only route on the prompt layout, such
+  // as cache-aware routers; such media cannot be sent to Inference.Generate.
+  bool omit_media_kwargs = 2;
+}
+
+// Copy each field into the GenerateRequest sent to Inference.Generate.
+message TokenizeResponse {
+  // The rendered prompt, already truncated. Send as `token_ids`.
+  repeated uint32 prompt_token_ids = 1;
+  // Output grammar built by the tool-call parser, which already includes the
+  // chat request's structured output. When set, send it as
+  // `decoding.structural_tag` in place of that structured output.
+  optional string structural_tag = 2;
+  // Send as `response.skip_special_tokens`. False when the parser needs
+  // special tokens in the output.
+  bool skip_special_tokens = 3;
+  // Send as `engine_reasoning_gate`.
+  EngineReasoningGate engine_reasoning_gate = 4;
+  // Preprocessed media items, ordered by their placeholder ranges in
+  // `prompt_token_ids`. Send as `media`.
+  repeated MediaItem media = 5;
+}
+
+// ======================================================================================
+// Detokenize
+// ======================================================================================
+
+message DetokenizeRequest {
+  // The chat request passed to Tokenize, so that parsers resolve the same way.
+  ChatRequest chat = 1;
+  // `TokenizeResponse.prompt_token_ids`, used to initialize the parsers.
+  repeated uint32 prompt_token_ids = 2;
+  // The complete output from Inference.Generate: `GenerateResponse.outputs` of
+  // a unary call, or the streamed chunks concatenated. Reads `token_ids`,
+  // the logprob fields when present, and `finish_info`; an omitted or
+  // NOT_FINISHED `finish_info` means the output did not end with a stop token.
+  SequenceOutput output = 3;
+  // Stop strings that end the output: the output is cut where the first one
+  // completes, past the first `min_new_tokens` tokens. A stop string reported
+  // in `output.finish_info` is applied as well and must match, so a client
+  // that passed these to Inference.Generate with `response.output_text = true`
+  // gets the same text either way.
+  repeated string stop_strings = 4;
+  // Keep the matched stop string, and a terminal stop token, in the output.
+  bool include_stop_strings = 5;
+  // As in `StoppingCriteria.min_new_tokens`.
+  uint32 min_new_tokens = 6;
+}
+
+message DetokenizeResponse {
+  // Final answer text, with reasoning and tool-call markup removed.
+  string content = 1;
+  // Reasoning text, when a reasoning parser is active.
+  string reasoning = 2;
+  repeated ChatToolCall tool_calls = 3;
+  // Number of output tokens attributed to reasoning.
+  uint32 num_reasoning_tokens = 4;
+  // Decoded logprobs, one entry per output token, when the output carries
+  // logprobs.
+  repeated TokenLogprobs logprobs = 5;
+  // `output.finish_info` after applying stop strings: `finish_reason` and
+  // `stop_reason` say how the returned output ended, `num_output_tokens`
+  // counts the tokens kept, and the other fields are copied.
+  FinishInfo finish_info = 6;
+}
+
+message DetokenizeStreamRequest {
+  oneof request {
+    // First message: the request, with `output` holding the first chunk or
+    // unset. Text is sent before the output finishes, so only these
+    // `stop_strings` apply: a chunk that reports a stop string missing from
+    // them is rejected.
+    DetokenizeRequest start = 1;
+    // Each later message: `GenerateResponse.outputs` of the next
+    // GenerateStream chunk of the same sequence. Closing the request stream
+    // before a finished chunk ends the output as in Detokenize with an
+    // omitted `finish_info`.
+    SequenceOutput output = 2;
+  }
+}
+
+// Deltas decoded from one request chunk. Text can lag behind the tokens while
+// it may still be part of a stop string or of tool-call markup.
+message DetokenizeStreamResponse {
+  string content = 1;
+  string reasoning = 2;
+  repeated ChatToolCallDelta tool_calls = 3;
+  repeated TokenLogprobs logprobs = 4;
+  // Set on the last response only, as in `DetokenizeResponse.finish_info`
+  // from the finished request chunk, if any. A `stop_string` stop that
+  // Inference.Generate did not report means generation is still running:
+  // cancel it.
+  FinishInfo finish_info = 5;
+  // Set on the last response only.
+  uint32 num_reasoning_tokens = 6;
+}
+
+// Part of one tool call. `id` and `name` are set on the first delta of a call
+// only; `arguments` is appended across deltas with the same `index`.
+message ChatToolCallDelta {
+  uint32 index = 1;
+  string id = 2;
+  string name = 3;
+  string arguments = 4;
+}
+
+// Decoded logprobs for one output position.
+message TokenLogprobs {
+  // The sampled token first, then the candidate tokens.
+  repeated DecodedTokenLogprob tokens = 1;
+}
+
+message DecodedTokenLogprob {
+  uint32 id = 1;
+  // Decoded token text.
+  string token = 2;
+  float logprob = 3;
+  uint32 rank = 4;
+}
+
+// ======================================================================================
+// Chat request
+// ======================================================================================
+
+message ChatRequest {
+  repeated ChatMessage messages = 1;
+  // Tools the model may call.
+  repeated ChatTool tools = 2;
+  // Omitted means "auto" when tools are present.
+  ChatToolChoice tool_choice = 3;
+  // Defaults to true when omitted.
+  optional bool parallel_tool_calls = 4;
+  // Omitted means true, unless `continue_final_message` is set.
+  optional bool add_generation_prompt = 5;
+  // Leave the final assistant message open so generation continues it.
+  bool continue_final_message = 6;
+  // Add tokenizer special tokens (e.g. BOS) on top of the chat template.
+  bool add_special_tokens = 7;
+  // Per-request Jinja chat template override.
+  optional string chat_template = 8;
+  // Additional keyword arguments passed to the chat template.
+  google.protobuf.Struct chat_template_kwargs = 9;
+  // Model-specific reasoning effort, such as "low" or "high".
+  optional string reasoning_effort = 10;
+  // Served model name. Empty means the default model.
+  string model = 11;
+  // Structured-output constraint on the answer, as in
+  // `DecodingParameters.structured_output`. The tool-call parser composes it
+  // into its output grammar; see `TokenizeResponse.structural_tag`.
+  oneof structured_output {
+    string json = 12;
+    string regex = 13;
+    DecodingParameters.StringChoices choice = 14;
+    string grammar = 15;
+    bool json_object = 16;
+    string structural_tag = 17;
+  }
+  // Keep only the last N prompt tokens. Default (0) means no truncation.
+  uint32 truncate_prompt_tokens = 18;
+  // Defaults to true when omitted. Overridden to false when the parser needs
+  // special tokens in the output.
+  optional bool skip_special_tokens = 19;
+}
+
+message ChatMessage {
+  // "system", "developer", "user", "assistant" or "tool". Other roles are
+  // passed to the chat template unchanged.
+  string role = 1;
+  oneof content {
+    string text = 2;
+    ChatContentParts parts = 3;
+  }
+  // Assistant only: reasoning content of a previous turn.
+  string reasoning = 4;
+  // Assistant only: tool calls of a previous turn.
+  repeated ChatToolCall tool_calls = 5;
+  // Tool only: ID of the tool call this message responds to.
+  string tool_call_id = 6;
+  // Developer only: message-scoped tools.
+  repeated ChatTool tools = 7;
+}
+
+message ChatContentParts {
+  repeated ChatContentPart parts = 1;
+}
+
+message ChatContentPart {
+  oneof part {
+    string text = 1;
+    ChatImageUrl image_url = 2;
+    ChatMediaUrl video_url = 3;
+    ChatMediaUrl audio_url = 4;
+    ChatInputAudio input_audio = 5;
+  }
+}
+
+message ChatImageUrl {
+  // http(s) or data URL.
+  string url = 1;
+  // "auto", "low" or "high".
+  optional string detail = 2;
+  // Caller-assigned item ID, used in place of the content hash for caching.
+  optional string uuid = 3;
+}
+
+message ChatMediaUrl {
+  // http(s) or data URL.
+  string url = 1;
+  // Caller-assigned item ID, used in place of the content hash for caching.
+  optional string uuid = 2;
+}
+
+message ChatInputAudio {
+  // Base64-encoded audio bytes.
+  string data = 1;
+  // Audio format, such as "wav" or "mp3".
+  optional string format = 2;
+  // Caller-assigned item ID, used in place of the content hash for caching.
+  optional string uuid = 3;
+}
+
+message ChatTool {
+  // Function name.
+  string name = 1;
+  optional string description = 2;
+  // JSON schema of the function arguments, encoded as a JSON string so that
+  // the rendered prompt keeps the schema's key order.
+  string parameters_json = 3;
+  // Whether to enforce the schema on the generated arguments.
+  optional bool strict = 4;
+  // Whether the schema is loaded on demand via tool search.
+  optional bool defer_loading = 5;
+}
+
+message ChatToolCall {
+  string id = 1;
+  // Function name.
+  string name = 2;
+  // Function arguments as a JSON string.
+  string arguments = 3;
+}
+
+message ChatToolChoice {
+  enum Mode {
+    MODE_UNSPECIFIED = 0;  // Same as AUTO
+    MODE_AUTO = 1;
+    MODE_NONE = 2;
+    MODE_REQUIRED = 3;
+  }
+
+  oneof choice {
+    Mode mode = 1;
+    // Force a call to the named function.
+    string function_name = 2;
+  }
+}

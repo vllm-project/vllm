@@ -14,6 +14,7 @@ use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
 use vllm_llm::WeightVersionSpan;
 use vllm_text::TruncationSide;
 
+use crate::routes::inference::generate::MmPayload;
 use crate::routes::openai::utils::metrics::{PerRequestMetrics, StreamPerRequestMetrics};
 use crate::routes::openai::utils::structured_outputs::ResponseFormat;
 use crate::routes::openai::utils::types::{
@@ -276,6 +277,13 @@ pub struct ChatCompletionRequest {
     /// Parameters for detecting repetitive N-gram patterns in output tokens
     pub repetition_detection: Option<RepetitionDetectionParams>,
 
+    /// Which multimodal payload chat render returns. Other routes ignore it.
+    pub mm_payload: Option<MmPayload>,
+
+    /// Deprecated alias: `false` is the same as `mm_payload: "none"`. Ignored
+    /// when `mm_payload` is set.
+    pub return_mm_kwargs: Option<bool>,
+
     /// Number of tokens to batch into each streamed chunk. Raises the server's
     /// `--stream-interval` for this request. Values below the server setting
     /// are clamped up to it. The first and last chunks are always sent
@@ -351,6 +359,8 @@ impl Default for ChatCompletionRequest {
             ec_transfer_params: None,
             vllm_xargs: None,
             repetition_detection: None,
+            mm_payload: None,
+            return_mm_kwargs: None,
             stream_interval: None,
         }
     }

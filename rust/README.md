@@ -43,8 +43,8 @@ For example:
 VLLM_USE_RUST_FRONTEND=1 vllm serve Qwen/Qwen3-0.6B
 ```
 
-To also expose the Rust frontend's gRPC inference and control services, add
-`--grpc-port`. The HTTP listener remains on `--port`:
+To also expose the Rust frontend's gRPC inference, control, and render services,
+add `--grpc-port`. The HTTP listener remains on `--port`:
 
 ```bash
 VLLM_USE_RUST_FRONTEND=1 vllm serve Qwen/Qwen3-0.6B \
@@ -61,7 +61,7 @@ frontend process and cannot be combined with `--headless` or
 
 The separate `vllm serve MODEL --grpc --port 50051` command launches the Python
 SMG `VllmEngine` gRPC server in place of HTTP. The Rust listener exposes the
-`vllm.Inference` and `vllm.Control` services alongside HTTP. These are different
+`vllm.Inference`, `vllm.Control`, and `vllm.Render` services alongside HTTP. These are different
 gRPC APIs; `--grpc` and `--grpc-port` are mutually exclusive.
 
 ### RL weight synchronization
@@ -109,8 +109,8 @@ To build the `vllm-rs` in isolation:
 
 ### Engine-free renderer
 
-`vllm-rs render` serves text-only request preprocessing without starting or
-connecting to a Python inference engine:
+`vllm-rs render` serves request preprocessing without starting or connecting
+to a Python inference engine:
 
 ```bash
 cargo run --manifest-path rust/Cargo.toml -p vllm-cmd --release -- \
@@ -119,8 +119,21 @@ cargo run --manifest-path rust/Cargo.toml -p vllm-cmd --release -- \
 ```
 
 It exposes `/v1/chat/completions/render` and `/v1/completions/render`. Only
-tokenizer and model configuration files are loaded; model weights, PyTorch,
-and vLLM kernels are not required.
+tokenizer, model and processor configuration files are loaded; model weights,
+PyTorch, and vLLM kernels are not required.
+
+For multimodal models, chat render fetches and preprocesses images, video and
+audio, and returns them as the `features` object that `/inference/v1/generate`
+accepts, in the format the Python render API uses. The tensors are produced in
+`--dtype`, which must match the engine's: `auto` (the default) follows the
+model config, running float32 checkpoints in bfloat16 like vLLM. Set
+`"mm_payload": "none"` on a render request to get only item hashes and
+placeholder ranges, for example for cache-aware routing; such a response cannot
+be sent to generate. Pass `--language-model-only` to skip multimodal
+processing, and set `--limit-mm-per-prompt` to the engine's limits so that
+render rejects the same requests. Pass `--lora-modules name=path ...` to accept LoRA adapter names as
+the request `model`; rendering does not load the adapter weights, and the
+adapter name is passed through to generate.
 
 To serve HTTPS, pass `--ssl-certfile`. If the certificate and private key are
 in separate files, pass `--ssl-keyfile` for the key; otherwise the key is read from
@@ -163,6 +176,15 @@ curl http://127.0.0.1:8000/v1/chat/completions/render \
     "max_completion_tokens": 16
   }'
 ```
+
+Pass `--grpc-port` to also serve the `vllm.Render` gRPC service on `--host`.
+`Render.Tokenize` renders a chat request into prompt token IDs plus the
+settings rendering decides (tool-call grammar, `skip_special_tokens`, reasoning
+gate, preprocessed media), which the client copies into its
+`vllm.GenerateRequest` for `Inference.Generate`. `Render.Detokenize` takes the
+output of `Inference.Generate` and returns the answer text, reasoning, parsed
+tool calls, and decoded logprobs. Stop strings are not supported; see
+[`render.proto`](proto/render.proto).
 
 ### Example Request
 
