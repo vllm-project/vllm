@@ -6,11 +6,11 @@ usages où le modèle est **réellement fiable**, livrer des **sous-agents tout 
 Critère d'acceptation d'un usage : **le coût de vérification doit rester très inférieur au coût
 de faire soi-même**.
 
-## 1. Classes d'usage (état mesuré au 30/10 — 25 mesures : la 23ᵉ est dans la PR #277 ouverte, la 24ᵉ et la 25ᵉ ci-dessous)
+## 1. Classes d'usage (état mesuré au 30/10 — 25 mesures : les 23ᵉ, 24ᵉ et 25ᵉ ci-dessous)
 
 | Classe | Statut | Preuve |
 |---|---|---|
-| **Extraction verbatim en fan-out** (sortie = sous-ensemble exact de l'entrée) | **VALIDÉE sur corpus de logs — verbatimité NON stable, variable dans les deux sens (22e/23e/24e/25e)** | 72/73 au pilote, 216/217 puis 100 % sur 735 lignes, 49/49 sur région inédite, 18/18 post-reboot (21e), **22e : contenu 17/17 exact mais préfixe horodaté supprimé sur 17/17 → 0/17 verbatim**, 23e : 12/12 exactes ET 12/12 verbatim (PR #277 ouverte), **24e : 6/6 exactes ET 6/6 verbatim**, **25e : 14/14 exactes ET 14/14 verbatim (md5 identique dans les deux sens) → 3 mesures sur 4 conservent le préfixe ; le mode d'échec est minoritaire mais réel** |
+| **Extraction verbatim en fan-out** (sortie = sous-ensemble exact de l'entrée) | **VALIDÉE sur corpus de logs — verbatimité NON stable, variable dans les deux sens (22e/23e/24e/25e)** | 72/73 au pilote, 216/217 puis 100 % sur 735 lignes, 49/49 sur région inédite, 18/18 post-reboot (21e), **22e : contenu 17/17 exact mais préfixe horodaté supprimé sur 17/17 → 0/17 verbatim**, 23e : 12/12 exactes ET 12/12 verbatim (PR #277), **24e : 6/6 exactes ET 6/6 verbatim**, **25e : 14/14 exactes ET 14/14 verbatim (md5 identique dans les deux sens) → 3 mesures sur 4 conservent le préfixe ; le mode d'échec est minoritaire mais réel** |
 | **Étiquetage d'un champ structurel** (préfixer chaque ligne par la valeur de son champ, p.ex. `machine=`) | **VALIDÉE — 30/30** | 11e mesure : 30 lignes, distribution recomptée identique, **seau « AUCUN » (champ absent) traité correctement** |
 | Tally catégoriel, étiquette neutre (`FIN`, pas `DONE`) | Validée sur 1 forme (8 lignes, 2/2 exact) | cause `DONE` confirmée 25/10 20:05Z |
 | Extraction verbatim sur **prose** (lignes-paragraphe de 1-2 Ko) | **CONDITIONNELLE** — 23 % seul, 60 % après découpage en phrases, **100 % avec l'étage de vérification** | 9e mesure |
@@ -365,6 +365,43 @@ Trois apports :
 Ce que cette mesure **ne** prouve pas : que le comportement est aléatoire (2 mesures —
 1 passe, 1 échec — ne suffisent pas pour une loi) ; rien sur la prose, le sémantique, ni les
 classes refusées (cf. §1), qui restent refusées.
+
+### Vingt-troisième mesure — le préfixe horodaté EST conservé : la variance est confirmée des deux côtés (30/10 01:1x locale)
+
+Corpus : `myia_vllm/_logs/gpu-thermal.log`, **capture par commande** (`grep vram=`), **12 lignes**.
+Mission : « recopie EXACTEMENT chaque ligne contenant `vram=` ». Étiquette `model_used:
+frognano-4b` contrôlée sur la réponse.
+
+Résultat : **12/12 exactes**, 0 manquante, 0 extra, 0 fabrication — et **12/12 verbatim** : le
+préfixe horodaté (20 caractères) a été **conservé** sur toutes les lignes. Oracle =
+**lecture du fichier** (12 lignes relues par regex sur la source), pas une retranscription ;
+comparaison par **découpage positionnel**, jamais par `-replace` (la 22ᵉ mesure a montré qu'un
+`-replace` mal écrit produit 34 faux écarts).
+
+**Ce que cette mesure ajoute** : avec 21ᵉ (18/18 verbatim), 22ᵉ (0/17 verbatim) et 23ᵉ
+(12/12 verbatim), la verbatimité est **confirmée variable d'un appel à l'autre** — et cette
+fois **des deux côtés** : un même type de corpus (journal horodaté, capture par commande) donne
+un appel verbatim et un appel normalisé, sans que rien dans le corpus ne diffère. Ce n'est donc
+ni une dérive du corpus, ni une dérive du modèle au fil du temps : c'est une **variance
+d'appel**. Conséquence opératoire, déjà énoncée en 22ᵉ et désormais étayée par trois points :
+**« sortie = sous-ensemble exact » est une propriété à vérifier à chaque appel**, jamais une
+garantie du modèle — et le juge doit comparer **la source**, jamais sa propre transcription
+(corpus = sortie de commande, jamais retapé).
+
+**L'identification de l'appel, sans ambiguïté.** Pour attribuer chaque requête Frognano à son
+auteur, la méthode a été la **correspondance horodatée hub ↔ moteur** (`fin − durée_ms` = début
+moteur au milliseconde), doublée d'un second discriminant indépendant : `text_len` (taille du
+texte répondu) vs **nombre de lignes** demandées. Les **6** requêtes Frognano du 29/10
+16:04Z → 30/10 00:17Z se recoupent à **≤ 5 ms** sur 6/6, sans exception ni résidu : chaque POST
+moteur de cette fenêtre a une trace hub, et le tireur cadencé a **produit zéro requête** à ses
+créneaux de 20:0x et de 00:0x (ni via le hub, ni en direct sur le moteur) ⇒ **muet depuis
+16:04:51Z**, deux créneaux consécutifs manqués.
+
+**Un piège d'instrument, à ne pas re-commettre** : le log du conteneur hub **démarre à
+13:19:47Z** (redémarrage du proxy, ligne `Standalone proxy running`). Une requête antérieure à
+cette heure **n'a pas de trace hub** — mais cela ne prouve **rien** : c'est **hors couverture**,
+pas « passée en direct ». Conclure « tir #3 direct, aucune trace hub » à partir de ce log est
+une **inférence non prouvée** : l'absence de trace n'y est pas une mesure.
 
 ### Vingt-quatrième mesure — R1 : verbatim conservée (30/10 12:2x locale), la variance est confirmée des deux côtés
 
