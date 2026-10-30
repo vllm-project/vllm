@@ -23,9 +23,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator imp
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     BoundaryPut,
     ChunkedTokenDatabase,
-    KeyMetadata,
     LoadSpec,
     ReqMeta,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout import (  # noqa: E501
+    KeyMetadata,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler import (  # noqa: E501
     _partial_tail_non_mamba_puts,
@@ -237,7 +239,7 @@ def test_e2e_swa_plus_full_save_then_lookup_hits():
     _register_with_fake_threads(worker, kv_caches)
 
     # Each group's store values hold only its own layer.
-    assert [db.kv_caches_base_addr for db in worker.token_dbs] == [
+    assert [db.store_layout.kv_caches_base_addr for db in worker.token_dbs] == [
         [raw_full.data_ptr()],
         [raw_swa.data_ptr()],
     ]
@@ -361,7 +363,8 @@ def test_hybrid_mamba_values_hold_only_group_states():
     raw = torch.empty(0, dtype=torch.int8).set_(kv_caches["A0"].untyped_storage())
     raw.copy_(torch.randint(-128, 128, raw.shape, dtype=torch.int8))
     before = raw.clone()
-    addrs, sizes = mamba_db.prepare_value_for_block(2)
+    chunk_addrs, chunk_sizes, _ = mamba_layout.prepare_values([(0, 16)], [2], [0])
+    addrs, sizes = chunk_addrs[0], chunk_sizes[0]
     saved = [ctypes.string_at(addr, size) for addr, size in zip(addrs, sizes)]
     # The value is each state of block 2 in turn.
     assert saved == [
@@ -505,12 +508,11 @@ def test_store_values_round_trip_every_layout(model, layout):
 
     for group, db in zip(groups, worker.token_dbs, strict=True):
         store_layout = db.store_layout
-        addrs, sizes = store_layout.prepare_value_for_block(block)
         chunk_addrs, chunk_sizes, _ = store_layout.prepare_values(
             [(0, 16), (16, 32)], [block, block], [0, 0]
         )
-        # Chunked saves and loads copy the same pieces as a single block.
-        assert chunk_addrs == [addrs, addrs] and chunk_sizes == [sizes, sizes]
+        addrs, sizes = chunk_addrs[0], chunk_sizes[0]
+        assert chunk_addrs[1] == addrs and chunk_sizes[1] == sizes
 
         value = _span_mask([(a - base, n) for a, n in zip(addrs, sizes)], nbytes)
         owned = torch.zeros(nbytes, dtype=torch.bool)
@@ -558,8 +560,8 @@ def test_recv_skips_swa_blocks_before_window():
     ]
     md0 = KeyMetadata("m", 0, 0, 0, 0, group_id=0)
     md1 = KeyMetadata("m", 0, 0, 0, 0, group_id=1)
-    db_full = ChunkedTokenDatabase(md0, block_size=16, hash_block_size=16)
-    db_swa = ChunkedTokenDatabase(md1, block_size=16, hash_block_size=16)
+    db_full = ChunkedTokenDatabase(md0, chunk_size=16, hash_block_size=16)
+    db_swa = ChunkedTokenDatabase(md1, chunk_size=16, hash_block_size=16)
     db_full.set_kv_caches_base_addr([0])
     db_full.set_block_len([1024])
     db_swa.set_kv_caches_base_addr([1 << 20])
@@ -612,7 +614,7 @@ def test_chunked_token_database_hash_block_size_smaller_than_block_size():
     """DSv4-style: hash_block_size=4, group block_size=16 — process_tokens
     keys each chunk by its ending fine hash, including a partial tail."""
     md = KeyMetadata("m", 0, 0, 0, 0, group_id=3)
-    db = ChunkedTokenDatabase(md, block_size=16, hash_block_size=4)
+    db = ChunkedTokenDatabase(md, chunk_size=16, hash_block_size=4)
     db.set_kv_caches_base_addr([0])
     db.set_block_len([512])
     fine_hashes = [BlockHash(bytes([i + 1]) * 4) for i in range(8)]
@@ -643,7 +645,7 @@ def _resolve_partial_tail(thread, req: ReqMeta) -> ReqMeta:
     """Add the tail's non-Mamba puts as the scheduler does before the worker."""
     req.boundary_puts = [BoundaryPut(*put) for put in req.boundary_puts or []]
     req.boundary_puts[:0] = _partial_tail_non_mamba_puts(
-        thread.coord, req, [db.block_size for db in thread.token_databases]
+        thread.coord, req, [db.store_layout.block_size for db in thread.token_databases]
     )
     return req
 
@@ -687,7 +689,7 @@ def test_sub_block_partial_tail_offload_reads_cow_block():
     for g_idx in range(2):
         db = ChunkedTokenDatabase(
             KeyMetadata("m", 0, 0, 0, 0, group_id=g_idx),
-            block_size=16,
+            chunk_size=16,
             hash_block_size=4,
         )
         db.set_kv_caches_base_addr([g_idx * 10_000])
@@ -726,8 +728,8 @@ def test_sub_block_partial_tail_offload_reads_cow_block():
 
     # boundary = 12 // 4 * 4 = 12 -> keyed by hs[12 // 4 - 1] = hs[2].
     partial_hash = hs[2]
-    fa_key = token_dbs[0].key_for(partial_hash)
-    mamba_key = token_dbs[1].key_for(partial_hash)
+    fa_key = token_dbs[0].store_layout.key_for(0, partial_hash)
+    mamba_key = token_dbs[1].store_layout.key_for(0, partial_hash)
     assert set(store.puts) == {fa_key, mamba_key}
     # FA reads block_ids[0][0] = block 1: addr = base(0) + 1 * 512.
     assert store.puts[fa_key] == [512]
@@ -768,7 +770,7 @@ def test_offload_syncs_event_before_put():
     for g_idx in range(2):
         db = ChunkedTokenDatabase(
             KeyMetadata("m", 0, 0, 0, 0, group_id=g_idx),
-            block_size=16,
+            chunk_size=16,
             hash_block_size=4,
         )
         db.set_kv_caches_base_addr([g_idx * 10_000])
@@ -851,7 +853,7 @@ def test_sub_block_partial_tail_offload_covers_smaller_group_blocks():
     for g_idx, block_size in enumerate([4, 16]):
         db = ChunkedTokenDatabase(
             KeyMetadata("m", 0, 0, 0, 0, group_id=g_idx),
-            block_size=block_size,
+            chunk_size=block_size,
             hash_block_size=4,
         )
         db.set_kv_caches_base_addr([g_idx * 10_000])
@@ -889,9 +891,9 @@ def test_sub_block_partial_tail_offload_covers_smaller_group_blocks():
     # block-end hashes; mamba (block 16): the partial boundary block under
     # the boundary sub-hash, read from the CoW target.
     expected = {
-        token_dbs[0].key_for(hs[0]): [1 * 512],
-        token_dbs[0].key_for(hs[1]): [2 * 512],
-        token_dbs[1].key_for(hs[1]): [10_000 + mamba_cow_block * 512],
+        token_dbs[0].store_layout.key_for(0, hs[0]): [1 * 512],
+        token_dbs[0].store_layout.key_for(0, hs[1]): [2 * 512],
+        token_dbs[1].store_layout.key_for(0, hs[1]): [10_000 + mamba_cow_block * 512],
     }
     assert store.puts == expected
 
@@ -1070,7 +1072,7 @@ def test_worker_setup_tolerates_finer_scratch_group():
         group_participates=[True, True],
     )
 
-    # Persist the sub-block partial tail at boundary 8 (keyed by hs[8//8-1]).
+    # Persist a hash-aligned tail within the 16-token physical block.
     hs = [BlockHash(bytes([i + 1]) * 8) for i in range(3)]
     req = ReqMeta(
         req_id="r0",
