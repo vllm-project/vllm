@@ -73,6 +73,7 @@ async def test_role_switch_waits_for_http_and_kv_drain():
         await asyncio.wait_for(prepared.wait(), 1)
         assert "commit_pd_role" not in calls
         release_kv.set()
+        assert state.task is not None
         await state.task
         status = committed_status[0]
         assert status["phase"] != "ready" or status["transition_seconds"] is not None
@@ -103,6 +104,7 @@ async def test_role_switch_recovers_only_before_commit(failure):
     state.start("decode", 0, 1)
     with pytest.raises(ValueError, match="in progress"):
         state.start("decode", 0, 1)
+    assert state.task is not None
     await state.task
     assert (state.role, state.epoch) == ("prefill", 0)
     assert state.phase == ("ready" if failure == "drain" else "failed")
@@ -118,10 +120,12 @@ async def test_http_drain_timeout_keeps_existing_request_and_epoch():
     state.active_requests = 1
     state.idle.clear()
     state.start("prefill", 0, 0.01)
+    assert state.task is not None
     await state.task
     assert state.phase == "ready"
     assert state.active_requests == 1
     assert (state.role, state.epoch) == ("decode", 0)
+    assert state.error is not None
     assert "TimeoutError" in state.error
 
 
@@ -173,6 +177,7 @@ async def test_prepare_timeout_cancels_every_prepared_rank():
             assert rejected.json()["phase"] == "rolling_back"
         finally:
             release_cancel.set()
+            assert state.task is not None
             await state.task
         status = (await client.get("/v1/pd_role")).json()
         assert status["phase"] == "ready"
