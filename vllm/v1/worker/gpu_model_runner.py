@@ -1326,14 +1326,14 @@ class GPUModelRunner(
         ):
             for req_id, toks in scheduled_spec_tokens.items():
                 original_num_spec_per_req[req_id] = len(toks)
-            n_draft_tokens_by_req: dict[str, int] = update_scheduler_for_invalid_drafts(
+            num_draft_tokens_by_req = update_scheduler_for_invalid_drafts(
                 self._num_valid_draft_tokens_event,
                 self._num_valid_draft_tokens_cpu,
                 scheduler_output,
                 self.input_batch.req_id_to_index,
             )
             # The -1 padding of ngram_gpu drafts is not a drafted token.
-            self._num_drafted_tokens.update(n_draft_tokens_by_req)
+            self._num_drafted_tokens.update(num_draft_tokens_by_req)
         if self.use_async_spec_decode:
             self.prev_num_draft_tokens.np.fill(0)
 

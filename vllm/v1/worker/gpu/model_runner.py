@@ -2392,7 +2392,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         Must run before the drafter overwrites the draft tokens being verified.
         """
-        if input_batch.num_draft_tokens_per_req is None:
+        if self.speculator is None or input_batch.num_draft_tokens_per_req is None:
             return None, None
         draft_tokens = self.req_states.draft_tokens[input_batch.idx_mapping]
         # -1 marks a draft slot without a draft token.
