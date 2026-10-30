@@ -83,6 +83,7 @@ def test_attention_sink_model_loading_shards_once(
     model = cls.__new__(cls)
     torch.nn.Module.__init__(model)
     model.hf_to_vllm_mapper = WeightsMapper()
+    model._context_kv_proj = None  # set by DFlashQwen3Model.__init__
     model.model = torch.nn.Module()
     model.model.mtp = torch.nn.Module()
     sink = torch.nn.Parameter(torch.zeros(4), requires_grad=False)

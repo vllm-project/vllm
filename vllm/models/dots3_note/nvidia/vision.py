@@ -230,8 +230,9 @@ class MoESwiGLUFFNFP8(MoESwiGLUFFN):
 
     @torch.no_grad()
     def process_weights_after_loading(self) -> None:
-        # Reruns on every reload: refill the fused FP8 buffers in place
-        # (captured CUDA graphs keep the startup addresses).
+        if hasattr(self, "_fused_w13_fp8"):
+            return
+
         w13_weights = []
         w13_scales = []
         w2_weights = []
@@ -245,17 +246,27 @@ class MoESwiGLUFFNFP8(MoESwiGLUFFN):
             w2_weights.append(w2)
             w2_scales.append(s2)
 
-        # The checkpoint experts stay registered: a reload writes into them.
-        for name, parts in (
-            ("_fused_w13_fp8", w13_weights),
-            ("_fused_w13_scale", w13_scales),
-            ("_fused_w2_fp8", w2_weights),
-            ("_fused_w2_scale", w2_scales),
-        ):
-            if name in self._buffers:
-                torch.stack(parts, out=self._buffers[name])
-            else:
-                self.register_buffer(name, torch.stack(parts), persistent=False)
+        self.register_buffer(
+            "_fused_w13_fp8",
+            torch.stack(w13_weights).contiguous(),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_fused_w13_scale",
+            torch.stack(w13_scales).contiguous(),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_fused_w2_fp8",
+            torch.stack(w2_weights).contiguous(),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_fused_w2_scale",
+            torch.stack(w2_scales).contiguous(),
+            persistent=False,
+        )
+        del self.experts
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if not hasattr(self, "_fused_w13_fp8"):

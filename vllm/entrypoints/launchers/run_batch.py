@@ -163,6 +163,15 @@ BatchRequestInputBody: TypeAlias = (
     | BatchTranslationRequest
 )
 
+# Build once: constructing a TypeAdapter rebuilds its core schema (~0.5 ms).
+_EMBEDDING_REQUEST_ADAPTER: TypeAdapter[EmbeddingRequest] = TypeAdapter(
+    EmbeddingRequest
+)
+_SCORE_REQUEST_ADAPTER: TypeAdapter[ScoreRequest] = TypeAdapter(ScoreRequest)
+_BATCH_REQUEST_INPUT_BODY_ADAPTER: TypeAdapter[BatchRequestInputBody] = TypeAdapter(
+    BatchRequestInputBody
+)
+
 
 class BatchRequestInput(OpenAIBaseModel):
     """The per-line object of the batch input file.
@@ -197,16 +206,16 @@ class BatchRequestInput(OpenAIBaseModel):
         if url == "/v1/completions":
             return CompletionRequest.model_validate(value)
         if url == "/v1/embeddings":
-            return TypeAdapter(EmbeddingRequest).validate_python(value)
+            return _EMBEDDING_REQUEST_ADAPTER.validate_python(value)
         if url.endswith("/score"):
-            return TypeAdapter(ScoreRequest).validate_python(value)
+            return _SCORE_REQUEST_ADAPTER.validate_python(value)
         if url.endswith("/rerank"):
             return RerankRequest.model_validate(value)
         if url == "/v1/audio/transcriptions":
             return BatchTranscriptionRequest.model_validate(value)
         if url == "/v1/audio/translations":
             return BatchTranslationRequest.model_validate(value)
-        return TypeAdapter(BatchRequestInputBody).validate_python(value)
+        return _BATCH_REQUEST_INPUT_BODY_ADAPTER.validate_python(value)
 
 
 AllResponse: TypeAlias = (
@@ -218,6 +227,10 @@ AllResponse: TypeAlias = (
     | TranscriptionResponseVariant
     | TranslationResponse
     | TranslationResponseVerbose
+)
+
+_ALL_RESPONSE_ADAPTER: TypeAdapter[AllResponse | ErrorResponse] = TypeAdapter(
+    AllResponse | ErrorResponse
 )
 
 
@@ -626,9 +639,7 @@ async def run_request(
 
     if isinstance(response, JSONResponse):
         with contextlib.suppress(pydantic.ValidationError):
-            response = TypeAdapter(AllResponse | ErrorResponse).validate_python(
-                json.loads(response.body)
-            )
+            response = _ALL_RESPONSE_ADAPTER.validate_python(json.loads(response.body))
 
     if isinstance(response, AllResponse):
         batch_output = BatchRequestOutput(
@@ -752,18 +763,11 @@ def make_transcription_wrapper(
                 request_dict = batch_request_body.model_dump(exclude={"file_url"})
                 request_dict["file"] = mock_file
 
+                request: TranslationRequest | TranscriptionRequest
                 if is_translation:
-                    # Create TranslationRequest from BatchTranslationRequest
-                    translation_request = TranslationRequest.model_validate(
-                        request_dict
-                    )
-                    return await handler_fn(audio_data, translation_request)
+                    request = TranslationRequest.model_validate(request_dict)
                 else:
-                    # Create TranscriptionRequest from BatchTranscriptionRequest
-                    transcription_request = TranscriptionRequest.model_validate(
-                        request_dict
-                    )
-                    return await handler_fn(audio_data, transcription_request)
+                    request = TranscriptionRequest.model_validate(request_dict)
             except Exception as e:
                 operation = "translation" if is_translation else "transcription"
                 return ErrorResponse(
@@ -773,6 +777,8 @@ def make_transcription_wrapper(
                         code=HTTPStatus.BAD_REQUEST.value,
                     )
                 )
+
+            return await handler_fn(audio_data, request)
 
         return transcription_wrapper
 

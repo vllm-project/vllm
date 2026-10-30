@@ -517,7 +517,7 @@ class Gemma4MTP(nn.Module):
         draft_cfg = speculative_config.draft_model_config
         gen_cfg = draft_cfg.try_get_generation_config()
         self._suppress_token_ids = gen_cfg.get("suppress_tokens") if gen_cfg else None
-        # Materialized on-device in load_weights: compute_logits runs under CUDA
+        # Materialized on-device after loading: compute_logits runs under CUDA
         # graph capture in the V2 speculator, where indexing with a Python list
         # would issue an unpinned H2D copy (illegal during capture).
         self._suppress_idx: torch.Tensor | None = None
