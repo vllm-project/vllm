@@ -920,9 +920,11 @@ def _use_row_scales(layer: LinearBase) -> None:
         data=scale.new_empty(layer.weight.shape[0], scale.shape[1]),
         input_dim=1,
         output_dim=0,
-        weight_loader=scale.weight_loader,
+        weight_loader=default_weight_loader,
     )
     layer.register_parameter("weight_scale_inv", row_scales)
+    # `_load_fused_fp8_qkv` hands both over in this rank's layout
+    layer.weight.weight_loader = default_weight_loader
     layer.quant_method.__class__ = _Fp8RowScalesLinearMethod
 
 
@@ -953,7 +955,8 @@ def _load_fused_fp8_qkv(
         tensor, layer.requantize_rows = _fused_qkv_row_scales(
             tensor, *geometry, rows, tp_size, ckpt_tp, block, attn.kv_chunk_rows
         )
-    default_weight_loader(getattr(layer, kind), tensor)
+    param = getattr(layer, kind)
+    getattr(param, "weight_loader", default_weight_loader)(param, tensor)
 
 
 @support_torch_compile

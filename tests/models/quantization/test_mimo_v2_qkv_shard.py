@@ -20,7 +20,13 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+from vllm.model_executor.model_loader.reload import (
+    finalize_layerwise_reload,
+    initialize_layerwise_reload,
+    record_metadata_for_reloading,
+)
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.mimo_v2 import (
     _fused_qkv_kv_chunk_rows,
     _shard_fp8_qkv_proj,
@@ -504,6 +510,8 @@ def _fused_qkv_model(monkeypatch, geometry, tp_rank, tp_size):
     )
     qkv.weight_block_size = [BLOCK, BLOCK]
     qkv.quant_method = _RowScalesMethod()
+    for param in qkv.parameters():  # as `_use_row_scales` sets them
+        param.weight_loader = default_weight_loader
     layer = torch.nn.Module()
     layer.self_attn = attn
 
@@ -612,3 +620,27 @@ def test_direct_reload_equals_cold_start(monkeypatch, geometry, tp_size, left_ou
 
     _assert_shard(model, _expected_shard(model, new[0], new[1], tp_rank, tp_size))
     assert {n: p.data_ptr() for n, p in model.named_parameters()} == ptrs
+
+
+@pytest.mark.parametrize("geometry,tp_size", [("ga", 2), ("ga", 8)])
+def test_layerwise_reload_equals_cold_start(monkeypatch, geometry, tp_size):
+    """A layerwise reload (layers on meta until all their tensors arrive) loads
+    the rows and row scales through their weight loaders."""
+    from vllm.model_executor.models import mimo_v2
+
+    tp_rank = tp_size - 1
+    model = _fused_qkv_model(monkeypatch, geometry, tp_rank, tp_size)
+    record_metadata_for_reloading(model)
+    prefix = "layers.0.self_attn.qkv_proj"
+    old = _fused_qkv_checkpoint(geometry, 3)
+    mimo_v2.MiMoV2Model.load_weights(model, [(f"{prefix}.weight", old[0])])
+    mimo_v2.MiMoV2Model.load_weights(model, [(f"{prefix}.weight_scale_inv", old[1])])
+    process_weights_after_loading(model, _MODEL_CONFIG, torch.device("cpu"))
+
+    new = _fused_qkv_checkpoint(geometry, 4)
+    initialize_layerwise_reload(model)
+    for kind, tensor in (("weight_scale_inv", new[1]), ("weight", new[0])):
+        mimo_v2.MiMoV2Model.load_weights(model, [(f"{prefix}.{kind}", tensor)])
+    finalize_layerwise_reload(model, _MODEL_CONFIG)
+
+    _assert_shard(model, _expected_shard(model, new[0], new[1], tp_rank, tp_size))
