@@ -78,6 +78,18 @@ PREFILL_DTYPE_CASES = [
     pytest.param((2, 4), (64, 64), torch.bfloat16, id="bf16-representative"),
     pytest.param((2, 4), (64, 64), torch.float16, id="fp16-representative"),
 ]
+SPEC_SHAPE_CASES = [
+    pytest.param((2, 4), (32, 32), id="h2x4-d32x32"),
+    pytest.param((2, 4), (64, 48), id="h2x4-d64x48-vtail"),
+    pytest.param((16, 32), (128, 128), id="qwen3.6"),
+]
+# (query lens, num_accepted) per request; 0 accepted exercises the clamp.
+SPEC_BATCHES = [
+    pytest.param([8], [3], id="b1"),
+    pytest.param([4, 4], [1, 4], id="b2"),
+    pytest.param([8, 1, 3], [0, 2, 1], id="b3-uneven"),
+    pytest.param([3, 0, 5], [2, 1, 5], id="b3-empty-row"),
+]
 
 
 @functools.lru_cache(maxsize=128, typed=False)
@@ -298,6 +310,127 @@ def test_fused_sigmoid_gating_delta_rule_update_cpu(
         final_state_ref.float(),
         atol=1e-2,
         rtol=1e-2,
+    )
+
+
+def ref_spec_gated_delta_rule(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    state: torch.Tensor,
+    spec_state_indices: torch.Tensor,
+    num_accepted: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """q/k: [T, HK, K], v: [T, HV, V], state: [slots, HV, K, V]."""
+    g, _ = ref_gdn_gating(A_log, a, b, dt_bias)
+    beta = torch.sigmoid(b.float())
+    group = v.shape[1] // q.shape[1]
+    scale = q.shape[-1] ** -0.5
+    q_f = ref_l2norm(q.float()).repeat_interleave(group, dim=1) * scale
+    k_f = ref_l2norm(k.float()).repeat_interleave(group, dim=1)
+    out = torch.zeros(v.shape, dtype=torch.float32)
+    state_out = state.clone()
+    for i in range(cu_seqlens.numel() - 1):
+        begin, end = int(cu_seqlens[i]), int(cu_seqlens[i + 1])
+        if end == begin:
+            continue
+        prev = int(spec_state_indices[i, max(int(num_accepted[i]) - 1, 0)])
+        h = state[prev].float()
+        for t in range(end - begin):
+            tok = begin + t
+            h = h * g[tok].exp()[:, None, None]
+            kv_mem = torch.einsum("hkv,hk->hv", h, k_f[tok])
+            delta = (v[tok].float() - kv_mem) * beta[tok][:, None]
+            h = h + k_f[tok][:, :, None] * delta[:, None, :]
+            out[tok] = torch.einsum("hkv,hk->hv", h, q_f[tok])
+            state_out[int(spec_state_indices[i, t])] = h.to(state.dtype)
+    return out.to(v.dtype), state_out
+
+
+@pytest.mark.parametrize("misaligned_state", [False, True])
+@pytest.mark.parametrize("query_lens,num_accepted", SPEC_BATCHES)
+@pytest.mark.parametrize("num_heads,head_dims", SPEC_SHAPE_CASES)
+@pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16, torch.float16])
+@torch.inference_mode()
+def test_fused_sigmoid_gating_delta_rule_update_spec_cpu(
+    query_lens: list[int],
+    num_accepted: list[int],
+    num_heads: tuple[int, int],
+    head_dims: tuple[int, int],
+    state_dtype: torch.dtype,
+    misaligned_state: bool,
+) -> None:
+    total_tokens = sum(query_lens)
+    q, k, v, a, b, A_log, dt_bias = gdn_inputs(
+        num_tokens=total_tokens,
+        num_heads=num_heads,
+        head_dims=head_dims,
+    )
+    q, k, v = q.squeeze(0), k.squeeze(0), v.squeeze(0)
+    _, num_v_heads = num_heads
+    head_dim, v_head_dim = head_dims
+
+    batch_size = len(query_lens)
+    num_cols = max(max(query_lens), max(num_accepted))
+    # Distinct slots per (request, column), plus spare slots that must stay intact.
+    num_slots = batch_size * num_cols + 3
+    generator = torch.Generator().manual_seed(0)
+    spec_state_indices = (
+        torch.randperm(num_slots, generator=generator)[: batch_size * num_cols]
+        .view(batch_size, num_cols)
+        .to(torch.int32)
+    )
+    state = torch.randn(
+        num_slots, num_v_heads, head_dim, v_head_dim, generator=generator
+    ).to(state_dtype)
+    cu_seqlens = torch.tensor([0, *query_lens], dtype=torch.int32).cumsum(0).to(
+        torch.int32
+    )
+    num_accepted_t = torch.tensor(num_accepted, dtype=torch.int32)
+
+    out_ref, state_ref = ref_spec_gated_delta_rule(
+        q,
+        k,
+        v,
+        a,
+        b,
+        A_log,
+        dt_bias,
+        state,
+        spec_state_indices,
+        num_accepted_t,
+        cu_seqlens,
+    )
+
+    state_out = state.clone()
+    if misaligned_state:
+        # Shift by one element so no state row is 64-byte aligned.
+        storage = torch.empty(state.numel() + 1, dtype=state_dtype)
+        state_out = storage[1:].view_as(state)
+        state_out.copy_(state)
+    out = ops.fused_sigmoid_gating_delta_rule_update_spec_cpu(
+        A_log=A_log,
+        dt_bias=dt_bias,
+        q=q,
+        k=k,
+        v=v,
+        a=a,
+        b=b,
+        initial_state_source=state_out,
+        spec_state_indices=spec_state_indices,
+        num_accepted_tokens=num_accepted_t,
+        cu_seqlens=cu_seqlens,
+        use_qk_l2norm_in_kernel=True,
+    )
+
+    torch.testing.assert_close(out, out_ref, atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(
+        state_out.float(), state_ref.float(), atol=1e-2, rtol=1e-2
     )
 
 
