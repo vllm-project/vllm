@@ -148,7 +148,7 @@ from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
 from vllm.v1.worker.gpu.pp_utils import PPHandler
 from vllm.v1.worker.gpu.sample.batch_shard import (
     BatchSharder,
-    all_to_all_logits,
+    all_to_all_vocab_shards,
     batch_sharded_sampling_enabled,
     gather_sampler_output,
 )
@@ -1677,7 +1677,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # produces full-vocab logits for just the locally-owned requests.
             sample_hidden_states = hidden_states[sorted_logits_indices]
             local_logits = self.model.compute_logits_local(sample_hidden_states)
-            logits = all_to_all_logits(local_logits, shard_metadata)
+            logits = all_to_all_vocab_shards(
+                local_logits,
+                shard_metadata.num_logits_per_rank,
+                shard_metadata.num_local_logits,
+            )
             logits = logits[:, : self.vocab_size]
         else:
             sample_hidden_states = hidden_states[input_batch.logits_indices]
