@@ -146,6 +146,30 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
                 col1 = tl.load(conv_states_ptrs, mask_w, 0.0)
                 conv_states_ptrs = prior_tokens - 3 * stride_conv_state_tok  # [BLOCK_N]
                 col0 = tl.load(conv_states_ptrs, mask_w, 0.0)
+            if KERNEL_WIDTH == 6:
+                conv_states_ptrs = prior_tokens  # [BLOCK_N]
+                col4 = tl.load(conv_states_ptrs, mask_w, 0.0)
+                conv_states_ptrs = prior_tokens - 1 * stride_conv_state_tok  # [BLOCK_N]
+                col3 = tl.load(conv_states_ptrs, mask_w, 0.0)
+                conv_states_ptrs = prior_tokens - 2 * stride_conv_state_tok  # [BLOCK_N]
+                col2 = tl.load(conv_states_ptrs, mask_w, 0.0)
+                conv_states_ptrs = prior_tokens - 3 * stride_conv_state_tok  # [BLOCK_N]
+                col1 = tl.load(conv_states_ptrs, mask_w, 0.0)
+                conv_states_ptrs = prior_tokens - 4 * stride_conv_state_tok  # [BLOCK_N]
+                col0 = tl.load(conv_states_ptrs, mask_w, 0.0)
+            if KERNEL_WIDTH == 7:
+                conv_states_ptrs = prior_tokens  # [BLOCK_N]
+                col5 = tl.load(conv_states_ptrs, mask_w, 0.0)
+                conv_states_ptrs = prior_tokens - 1 * stride_conv_state_tok  # [BLOCK_N]
+                col4 = tl.load(conv_states_ptrs, mask_w, 0.0)
+                conv_states_ptrs = prior_tokens - 2 * stride_conv_state_tok  # [BLOCK_N]
+                col3 = tl.load(conv_states_ptrs, mask_w, 0.0)
+                conv_states_ptrs = prior_tokens - 3 * stride_conv_state_tok  # [BLOCK_N]
+                col2 = tl.load(conv_states_ptrs, mask_w, 0.0)
+                conv_states_ptrs = prior_tokens - 4 * stride_conv_state_tok  # [BLOCK_N]
+                col1 = tl.load(conv_states_ptrs, mask_w, 0.0)
+                conv_states_ptrs = prior_tokens - 5 * stride_conv_state_tok  # [BLOCK_N]
+                col0 = tl.load(conv_states_ptrs, mask_w, 0.0)
         else:
             # prior-tokens are zeros
             if KERNEL_WIDTH >= 2:  # STRATEGY1
@@ -157,6 +181,10 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
                 col2 = tl.zeros((BLOCK_N,), dtype=x_ptr.dtype.element_ty)
             if KERNEL_WIDTH >= 5:  # STRATEGY1
                 col3 = tl.zeros((BLOCK_N,), dtype=x_ptr.dtype.element_ty)
+            if KERNEL_WIDTH >= 6:  # STRATEGY1
+                col4 = tl.zeros((BLOCK_N,), dtype=x_ptr.dtype.element_ty)
+            if KERNEL_WIDTH >= 7:  # STRATEGY1
+                col5 = tl.zeros((BLOCK_N,), dtype=x_ptr.dtype.element_ty)
 
         # STEP 2:
         # here prepare data for updating conv_state
@@ -293,6 +321,30 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
             col1 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
             conv_states_ptrs = prior_tokens - 3 * stride_x_token  # [BLOCK_N]
             col0 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+        if KERNEL_WIDTH == 6:
+            conv_states_ptrs = prior_tokens  # [BLOCK_N]
+            col4 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+            conv_states_ptrs = prior_tokens - 1 * stride_x_token  # [BLOCK_N]
+            col3 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+            conv_states_ptrs = prior_tokens - 2 * stride_x_token  # [BLOCK_N]
+            col2 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+            conv_states_ptrs = prior_tokens - 3 * stride_x_token  # [BLOCK_N]
+            col1 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+            conv_states_ptrs = prior_tokens - 4 * stride_x_token  # [BLOCK_N]
+            col0 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+        if KERNEL_WIDTH == 7:
+            conv_states_ptrs = prior_tokens  # [BLOCK_N]
+            col5 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+            conv_states_ptrs = prior_tokens - 1 * stride_x_token  # [BLOCK_N]
+            col4 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+            conv_states_ptrs = prior_tokens - 2 * stride_x_token  # [BLOCK_N]
+            col3 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+            conv_states_ptrs = prior_tokens - 3 * stride_x_token  # [BLOCK_N]
+            col2 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+            conv_states_ptrs = prior_tokens - 4 * stride_x_token  # [BLOCK_N]
+            col1 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
+            conv_states_ptrs = prior_tokens - 5 * stride_x_token  # [BLOCK_N]
+            col0 = tl.load(conv_states_ptrs, mask_w, 0.0, cache_modifier=".ca")
 
     if HAS_BIAS:
         bias = bias_ptr + idx_feats
@@ -318,6 +370,15 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     if KERNEL_WIDTH >= 4:
         w_ptrs = w_base + (3 * stride_w_width)  # [BLOCK_N] tensor
         w_col3 = tl.load(w_ptrs, mask_w, other=0.0)
+    if KERNEL_WIDTH >= 5:
+        w_ptrs = w_base + (4 * stride_w_width)  # [BLOCK_N] tensor
+        w_col4 = tl.load(w_ptrs, mask_w, other=0.0)
+    if KERNEL_WIDTH >= 6:
+        w_ptrs = w_base + (5 * stride_w_width)  # [BLOCK_N] tensor
+        w_col5 = tl.load(w_ptrs, mask_w, other=0.0)
+    if KERNEL_WIDTH >= 7:
+        w_ptrs = w_base + (6 * stride_w_width)  # [BLOCK_N] tensor
+        w_col6 = tl.load(w_ptrs, mask_w, other=0.0)
     mask_x_1d = idx_feats < dim
 
     if launch_pdl:
@@ -353,6 +414,57 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
                     matrix_w = w_col3
                     x_ptrs_1d = x_base_1d + idx_token * stride_x_token  # [BLOCK_N]
                     matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d)
+            elif KERNEL_WIDTH == 5:
+                if j == 1:
+                    matrix_w = w_col1
+                    matrix_x = col1
+                elif j == 2:
+                    matrix_w = w_col2
+                    matrix_x = col2
+                elif j == 3:
+                    matrix_w = w_col3
+                    matrix_x = col3
+                elif j == 4:
+                    matrix_w = w_col4
+                    x_ptrs_1d = x_base_1d + idx_token * stride_x_token  # [BLOCK_N]
+                    matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d)
+            elif KERNEL_WIDTH == 6:
+                if j == 1:
+                    matrix_w = w_col1
+                    matrix_x = col1
+                elif j == 2:
+                    matrix_w = w_col2
+                    matrix_x = col2
+                elif j == 3:
+                    matrix_w = w_col3
+                    matrix_x = col3
+                elif j == 4:
+                    matrix_w = w_col4
+                    matrix_x = col4
+                elif j == 5:
+                    matrix_w = w_col5
+                    x_ptrs_1d = x_base_1d + idx_token * stride_x_token  # [BLOCK_N]
+                    matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d)
+            elif KERNEL_WIDTH == 7:
+                if j == 1:
+                    matrix_w = w_col1
+                    matrix_x = col1
+                elif j == 2:
+                    matrix_w = w_col2
+                    matrix_x = col2
+                elif j == 3:
+                    matrix_w = w_col3
+                    matrix_x = col3
+                elif j == 4:
+                    matrix_w = w_col4
+                    matrix_x = col4
+                elif j == 5:
+                    matrix_w = w_col5
+                    matrix_x = col5
+                elif j == 6:
+                    matrix_w = w_col6
+                    x_ptrs_1d = x_base_1d + idx_token * stride_x_token  # [BLOCK_N]
+                    matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d)
 
             acc += matrix_x * matrix_w  # [BLOCK_N]
 
@@ -365,6 +477,24 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
             col0 = col1
             col1 = col2
             col2 = matrix_x
+        elif KERNEL_WIDTH == 5:
+            col0 = col1
+            col1 = col2
+            col2 = col3
+            col3 = matrix_x
+        elif KERNEL_WIDTH == 6:
+            col0 = col1
+            col1 = col2
+            col2 = col3
+            col3 = col4
+            col4 = matrix_x
+        elif KERNEL_WIDTH == 7:
+            col0 = col1
+            col1 = col2
+            col2 = col3
+            col3 = col4
+            col4 = col5
+            col5 = matrix_x
 
         if SILU_ACTIVATION:
             acc = acc / (1 + tl.exp(-acc))
@@ -765,6 +895,9 @@ def _causal_conv1d_update_kernel(
     if KERNEL_WIDTH >= 6:
         conv_states_ptrs = prior_tokens + 4 * stride_conv_state_tok  # [BLOCK_N]
         col4 = tl.load(conv_states_ptrs, mask_w, 0.0)
+    if KERNEL_WIDTH >= 7:
+        conv_states_ptrs = prior_tokens + 5 * stride_conv_state_tok  # [BLOCK_N]
+        col5 = tl.load(conv_states_ptrs, mask_w, 0.0)
 
     # STEP 2: assume state_len > seqlen
     idx_tokens = tl.arange(0, NP2_STATELEN)  # [BLOCK_M]
@@ -847,6 +980,9 @@ def _causal_conv1d_update_kernel(
     if KERNEL_WIDTH >= 6:
         w_ptrs = w_base + (5 * stride_w_width)  # [BLOCK_N] tensor
         w_col5 = tl.load(w_ptrs, mask_w, other=0.0)
+    if KERNEL_WIDTH >= 7:
+        w_ptrs = w_base + (6 * stride_w_width)  # [BLOCK_N] tensor
+        w_col6 = tl.load(w_ptrs, mask_w, other=0.0)
 
     x_base_1d = x_base  # starting of chunk [BLOCK_N]
     mask_x_1d = idx_feats < dim
@@ -916,6 +1052,26 @@ def _causal_conv1d_update_kernel(
                     matrix_w = w_col5
                     x_ptrs_1d = x_base_1d + idx_token * stride_x_token  # [BLOCK_N]
                     matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d)
+            elif KERNEL_WIDTH == 7:
+                if j == 1:
+                    matrix_w = w_col1
+                    matrix_x = col1
+                elif j == 2:
+                    matrix_w = w_col2
+                    matrix_x = col2
+                elif j == 3:
+                    matrix_w = w_col3
+                    matrix_x = col3
+                elif j == 4:
+                    matrix_w = w_col4
+                    matrix_x = col4
+                elif j == 5:
+                    matrix_w = w_col5
+                    matrix_x = col5
+                elif j == 6:
+                    matrix_w = w_col6
+                    x_ptrs_1d = x_base_1d + idx_token * stride_x_token  # [BLOCK_N]
+                    matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d)
 
             acc += matrix_x * matrix_w  # [BLOCK_N]
 
@@ -939,6 +1095,13 @@ def _causal_conv1d_update_kernel(
             col2 = col3
             col3 = col4
             col4 = matrix_x
+        elif KERNEL_WIDTH == 7:
+            col0 = col1
+            col1 = col2
+            col2 = col3
+            col3 = col4
+            col4 = col5
+            col5 = matrix_x
 
         if SILU_ACTIVATION:
             acc = acc / (1 + tl.exp(-acc))
