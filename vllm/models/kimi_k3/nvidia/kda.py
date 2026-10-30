@@ -422,14 +422,15 @@ def _flashkda_prefill(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     import vllm._flashkda_C  # noqa: F401
 
-    # FlashKDA hardcodes dense Q/K/V/G strides. Beta may be row-strided because
-    # FlashKDA materializes its transposed [H, T] layout internally.
+    # FlashKDA accepts row-strided Q/K/V, so the packed q|k|v views are passed
+    # without a copy. Beta may be row-strided because FlashKDA materializes its
+    # transposed [H, T] layout internally.
     # TODO: Teach FlashKDA to consume beta in [T, H] layout directly instead
     # of transposing it to contiguous [H, T] storage internally.
     torch.ops._flashkda_C.fwd(
-        q.contiguous(),
-        k.contiguous(),
-        v.contiguous(),
+        q,
+        k,
+        v,
         g.contiguous(),
         beta,
         q.shape[-1] ** -0.5,
@@ -1206,12 +1207,6 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         conv_weights = self.conv1d.weight.view(
             self.conv1d.weight.size(0), self.conv1d.weight.size(2)
         )
-        q_conv_weight, k_conv_weight, v_conv_weight = conv_weights.split(
-            self.local_projection_size, dim=0
-        )
-        q_conv_state, k_conv_state, v_conv_state = conv_state.split(
-            self.local_projection_size, dim=-2
-        )
 
         # Separate multi-query speculative tokens from prefill/plain decode.
         if has_spec_decode:
@@ -1311,35 +1306,24 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             if non_spec_token_start is not None:
                 non_spec_out = core_attn_out[:, non_spec_slice]
             if m.num_prefills > 0:
-                q_ns, k_ns, v_ns = mixed_qkv_ns.split(
-                    self.local_projection_size, dim=-1
-                )
-
-                # Separate convolution calls accept row-strided packed inputs
-                # and produce dense Q/K/V without an additional V copy.
-                def _prefill_conv(
-                    x: torch.Tensor,
-                    state: torch.Tensor,
-                    weight: torch.Tensor,
-                ) -> torch.Tensor:
-                    return causal_conv1d_fn(
-                        x.transpose(0, 1),
-                        weight,
-                        None,
-                        activation="silu",
-                        conv_states=state,
-                        has_initial_state=has_initial_state,
-                        cache_indices=non_spec_state_indices_tensor,
-                        query_start_loc=non_spec_query_start_loc,
-                        metadata=m,
-                    ).transpose(0, 1)
-
-                q_ns = _prefill_conv(q_ns, q_conv_state, q_conv_weight)
-                k_ns = _prefill_conv(k_ns, k_conv_state, k_conv_weight)
-                v_ns = _prefill_conv(v_ns, v_conv_state, v_conv_weight)
+                # One merged convolution over the packed q|k|v input: the conv
+                # weights and state are already stored packed, and the split
+                # output views keep contiguous H/D rows with a 3*H*D token
+                # stride, which FlashKDA consumes without copies.
+                mixed_qkv_ns = causal_conv1d_fn(
+                    mixed_qkv_ns.transpose(0, 1),
+                    conv_weights,
+                    None,
+                    activation="silu",
+                    conv_states=conv_state,
+                    has_initial_state=has_initial_state,
+                    cache_indices=non_spec_state_indices_tensor,
+                    query_start_loc=non_spec_query_start_loc,
+                    metadata=m,
+                ).transpose(0, 1)
                 q_ns, k_ns, v_ns = (
                     rearrange(x, "n (h d) -> 1 n h d", d=self.head_dim)
-                    for x in (q_ns, k_ns, v_ns)
+                    for x in mixed_qkv_ns.split(self.local_projection_size, dim=-1)
                 )
 
                 assert non_spec_state_indices_tensor is not None
