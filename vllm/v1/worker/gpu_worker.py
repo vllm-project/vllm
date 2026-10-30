@@ -123,7 +123,9 @@ def _num_workspace_lanes(vllm_config: VllmConfig, use_v2_model_runner: bool) -> 
     spec_config = vllm_config.speculative_config
     return (
         2
-        if use_v2_model_runner and spec_config is not None and spec_config.use_dspark()
+        if use_v2_model_runner
+        and spec_config is not None
+        and spec_config.uses_separate_workspace_lane
         else 1
     )
 
@@ -706,20 +708,16 @@ class Worker(WorkerBase):
         ):
             self.model_runner.profile_run(randomize_inputs=self.randomize_dummy_inputs)
 
-        # Profile CUDA graph memory if graphs will be captured.
+        # Profile CUDA graph memory if graphs will be captured. The V2 runner
+        # decides itself, since encoder graphs don't depend on cudagraph_mode.
         # ROCm is included: #44825 moved the profiler to
         # torch.accelerator.get_memory_info (reliable on ROCm, as used by
         # the AMD-CI mem tests), and graph_pool_handle resolves to the same
         # torch.cuda handle the live capture path already uses on ROCm.
         cudagraph_memory_estimate = 0
-        compilation_config = self.vllm_config.compilation_config
         if (current_platform.is_cuda_alike() or current_platform.is_xpu()) and (
-            compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            or (
-                self.use_v2_model_runner
-                and compilation_config.cudagraph_mm_encoder
-                and not self.model_config.enforce_eager
-            )
+            self.use_v2_model_runner
+            or self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
         ):
             cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 

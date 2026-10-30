@@ -10,6 +10,7 @@ use serde_json::{Map, Value};
 use serde_with::DefaultOnNull;
 use validator::Validate;
 use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
+use vllm_llm::WeightVersionSpan;
 use vllm_text::{Prompt, TruncationSide};
 
 use crate::routes::openai::utils::metrics::{PerRequestMetrics, StreamPerRequestMetrics};
@@ -163,6 +164,9 @@ pub struct CompletionRequest {
     /// Restrict output to these token IDs only
     pub allowed_token_ids: Option<Vec<u32>>,
 
+    /// List of bad words to avoid during generation
+    pub bad_words: Option<Vec<String>>,
+
     /// Number of prompt logprobs to return
     pub prompt_logprobs: Option<i32>,
 
@@ -205,7 +209,7 @@ pub struct CompletionRequest {
     pub return_token_ids: Option<bool>,
 
     /// Include the weight-version spans that sampled each choice's output
-    /// tokens. Not supported yet.
+    /// tokens.
     pub return_weight_versions: Option<bool>,
 
     /// Salt for prefix cache isolation in multi-user environments
@@ -250,6 +254,8 @@ pub(super) struct CompletionResponse {
     pub created: u64,
     pub model: String,
     pub choices: Vec<CompletionChoice>,
+    /// Always `None`: the Rust frontend does not implement service tiers.
+    pub service_tier: Option<String>,
     pub usage: Option<Usage>,
     pub metrics: Option<PerRequestMetrics>,
     pub system_fingerprint: Option<String>,
@@ -268,6 +274,11 @@ pub(super) struct CompletionChoice {
     pub prompt_logprobs: Option<PromptLogprobs>,
     pub token_ids: Option<Vec<u32>>,
     pub prompt_token_ids: Option<Vec<u32>>,
+    /// Always `None`.
+    /// TODO: return routed experts when `--enable-return-routed-experts` is set.
+    pub routed_experts: Option<String>,
+    /// Contiguous weight-version spans over output-token indexes.
+    pub weight_versions: Option<Vec<WeightVersionSpan>>,
 }
 
 /// Mirrors the Python vLLM `CompletionStreamResponse` class.
@@ -279,6 +290,8 @@ pub(super) struct CompletionStreamResponse {
     pub choices: Vec<CompletionStreamChoice>,
     pub usage: Option<Usage>,
     pub metrics: Option<StreamPerRequestMetrics>,
+    /// Set only on the chunk carrying the finish reason.
+    pub kv_transfer_params: Option<Value>,
 }
 
 impl CompletionStreamResponse {
@@ -289,6 +302,7 @@ impl CompletionStreamResponse {
             choices: Vec::new(),
             usage: None,
             metrics: None,
+            kv_transfer_params: None,
         }
     }
 }
@@ -304,6 +318,8 @@ pub(super) struct CompletionStreamChoice {
     pub stop_reason: Option<Value>,
     pub token_ids: Option<Vec<u32>>,
     pub prompt_token_ids: Option<Vec<u32>>,
+    /// Set on the final chunk only; covers the whole output.
+    pub weight_versions: Option<Vec<WeightVersionSpan>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
