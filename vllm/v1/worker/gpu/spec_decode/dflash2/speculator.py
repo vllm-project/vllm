@@ -8,9 +8,12 @@ import torch
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.gpu.sample.batch_shard import shard_owner, shard_row
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_noised_argmax, spec_step_seed
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
+from vllm.v1.worker.gpu.spec_decode.draft_logits import (
+    DraftLogitsCache,
+    draft_logits_row,
+)
 
 
 @triton.jit
@@ -83,31 +86,24 @@ def _cache_draft_logits_kernel(
     candidate_ptr,
     scores_ptr,
     req_state_ptr,
+    draft_logits_row_mapping_ptr,
     draft_logits_stride_0,
     draft_logits_stride_1,
     num_steps: tl.constexpr,
     top_k: tl.constexpr,
     BLOCK_K: tl.constexpr,
-    CACHE_NUM_SHARDS: tl.constexpr,
-    CACHE_SHARD_IDX: tl.constexpr,
 ):
     flat = tl.program_id(0)
     req_state = tl.load(req_state_ptr + flat)
     step = flat % num_steps
     offsets = tl.arange(0, BLOCK_K)
-    mask = (
-        (req_state >= 0)
-        & (offsets < top_k)
-        # A batch-sharded cache holds only this rank's requests, packed by row.
-        & (shard_owner(req_state, CACHE_NUM_SHARDS) == CACHE_SHARD_IDX)
-    )
+    row = draft_logits_row(req_state, draft_logits_row_mapping_ptr)
+    mask = (row >= 0) & (offsets < top_k)
     candidate_base = flat * top_k
-    cache_base = (req_state * num_steps + step) * top_k
+    cache_base = (row * num_steps + step) * top_k
     old_token_ids = tl.load(cached_candidate_ptr + cache_base + offsets, mask=mask)
     logits_base = (
-        draft_logits_ptr
-        + shard_row(req_state, CACHE_NUM_SHARDS) * draft_logits_stride_0
-        + step * draft_logits_stride_1
+        draft_logits_ptr + row * draft_logits_stride_0 + step * draft_logits_stride_1
     )
     tl.store(logits_base + old_token_ids, -float("inf"), mask=mask)
     token_ids = tl.load(candidate_ptr + candidate_base + offsets, mask=mask)
@@ -141,10 +137,8 @@ class CandidateSampler:
         temperature: torch.Tensor,
         seeds: torch.Tensor,
         draft_tokens: torch.Tensor,
-        draft_logits: torch.Tensor | None,
+        draft_logits: DraftLogitsCache | None,
         use_fp64: bool,
-        draft_logits_num_shards: int = 1,
-        draft_logits_shard_idx: int = 0,
     ) -> None:
         candidate_ids = candidate_ids.contiguous()
         sample_pos = sample_pos.contiguous()
@@ -173,8 +167,6 @@ class CandidateSampler:
                 num_reqs * self.num_steps,
                 idx_mapping,
                 draft_logits,
-                draft_logits_num_shards,
-                draft_logits_shard_idx,
             )
 
     def _cache_draft_logits(
@@ -182,24 +174,21 @@ class CandidateSampler:
         candidate_ids: torch.Tensor,
         num_sample: int,
         idx_mapping: torch.Tensor,
-        draft_logits: torch.Tensor,
-        draft_logits_num_shards: int,
-        draft_logits_shard_idx: int,
+        draft_logits: DraftLogitsCache,
     ) -> None:
         block_k = triton.next_power_of_2(self.top_k)
         _cache_draft_logits_kernel[(num_sample,)](
-            draft_logits,
+            draft_logits.values,
             self.cached_candidate_ids,
             candidate_ids,
             self.scores,
             idx_mapping,
-            draft_logits.stride(0),
-            draft_logits.stride(1),
+            draft_logits.row_mapping,
+            draft_logits.values.stride(0),
+            draft_logits.values.stride(1),
             num_steps=self.num_steps,
             top_k=self.top_k,
             BLOCK_K=block_k,
-            CACHE_NUM_SHARDS=draft_logits_num_shards,
-            CACHE_SHARD_IDX=draft_logits_shard_idx,
             num_warps=1,
         )
 
@@ -261,8 +250,6 @@ class DFlash2Speculator(DFlashSpeculator):
             self.draft_tokens,
             self.draft_logits,
             self.use_fp64_gumbel,
-            self.draft_logits_num_shards,
-            self.draft_logits_shard_idx,
         )
         if self.enable_adaptive_verification:
             self._maybe_predict_acceptance(

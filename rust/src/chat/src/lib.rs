@@ -228,6 +228,10 @@ impl ChatRequestProcessor {
             request.tool_context.exclude_initial_tools_if_none();
         }
         let renderer = self.backend.chat_renderer();
+        if request.chat_options.chat_template.is_some() && !renderer.renders_request_chat_template()
+        {
+            return Err(Error::UnsupportedRequestChatTemplate);
+        }
         let (mut rendered, request) = tokio::task::spawn_blocking(move || {
             renderer.render(&request).map(|rendered| (rendered, request))
         })
