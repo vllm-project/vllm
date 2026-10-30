@@ -238,13 +238,14 @@ def validate_peer_dcp_layout(
     *,
     writes_into_peer: bool,
     block_size: int,
-    is_mla: bool,
+    non_mla_layer: str | None = None,
     whole_block_layer: str | None = None,
 ) -> None:
     """Refuse a peer whose DCP layout this worker cannot transfer KV with.
 
     Equal DCP sizes transfer rank to rank. A WRITE producer without DCP can
-    also write into a DCP consumer, one write per group of interleaved tokens;
+    also write into a DCP consumer, one write per group of interleaved tokens,
+    for MLA layers only (``non_mla_layer`` names another DCP-sharded layer);
     ``whole_block_layer`` names a layer whose blocks can only be written whole,
     which needs the consumer's interleave to be the block size. A peer that
     does not advertise its layout predates these checks and is accepted as
@@ -271,11 +272,12 @@ def validate_peer_dcp_layout(
             "size on both instances, or a prefill instance without decode "
             "context parallelism in WRITE mode"
         )
-    if not is_mla:
+    if non_mla_layer is not None:
         raise ValueError(
             "MoRIIO WRITE from a prefill instance without decode context "
             "parallelism into a decode instance with "
-            f"decode_context_parallel_size={peer_dcp_size} supports MLA models only"
+            f"decode_context_parallel_size={peer_dcp_size} supports MLA layers "
+            f"only; layer {non_mla_layer} is not MLA"
         )
     if peer_interleave_size is None or block_size % peer_interleave_size:
         raise ValueError(

@@ -2261,7 +2261,7 @@ class MoRIIOConnectorWorker:
                     metadata.cp_kv_cache_interleave_size,
                     writes_into_peer=self.is_producer and self.mode == MoRIIOMode.WRITE,
                     block_size=self.block_size,
-                    is_mla=self.use_mla,
+                    non_mla_layer=self._non_mla_dcp_layer(),
                     whole_block_layer=self._whole_block_dcp_layer(
                         metadata.cp_kv_cache_interleave_size
                     ),
@@ -3723,6 +3723,19 @@ class MoRIIOConnectorWorker:
                     self._mla_latent_size,
                 )
                 is None
+            ),
+            None,
+        )
+
+    def _non_mla_dcp_layer(self) -> str | None:
+        """A DCP-sharded layer that is not MLA, e.g. of a draft model that the
+        decode instance may run without DCP and so keep unsharded."""
+        return next(
+            (
+                layer_name
+                for layer_name in self.kv_caches
+                if self.layer_to_spec[layer_name].dcp_sharded
+                and not self._is_mla_cache_layer(layer_name)
             ),
             None,
         )

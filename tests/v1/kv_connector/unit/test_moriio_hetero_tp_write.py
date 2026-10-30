@@ -450,18 +450,23 @@ def test_write_lands_every_shard_byte_exact(
 def test_hybrid_write_into_dcp_splits_mla_tokens_but_not_the_state(
     monkeypatch, producer_tp, interleave
 ):
-    """Prefill without DCP -> decode TP2 x DCP2 of an MLA + KDA model: each
-    decode rank receives the MLA tokens of its DCP rank and the whole recurrent
+    """Prefill without DCP -> decode TP2 x DCP2 of an MLA + KDA model with an
+    MLA DSpark draft in its own group, as Kimi-K3: each decode rank receives
+    the MLA tokens of its DCP rank, target and draft, and the whole recurrent
     state of its TP heads, and completes once each of its writers is done."""
     monkeypatch.setattr(
         ssm_conv_transfer_utils, "is_conv_state_dim_first", lambda: True
     )
     monkeypatch.setattr(moriio_engine, "get_role", lambda: ROLE.CONSUMER)
-    heads, layers = MODELS["mla_hybrid"]
+    draft = Layer("draft0", "mla", "draft")
+    monkeypatch.setitem(MODELS, "k3", (1, [*MODELS["mla_hybrid"][1], draft]))
+    monkeypatch.setitem(PREFILL_BLOCKS, "draft", [0, 5])
+    monkeypatch.setitem(DECODE_BLOCKS, "draft", [4, 1])
+    heads, layers = MODELS["k3"]
     state = _global_state(layers, heads)
-    groups = _groups("mla_hybrid", True)
+    groups = _groups("k3", True)
     consumers = [
-        _build_rank("mla_hybrid", d, 2, KVCacheLayout.LBNHC, True, state, False)
+        _build_rank("k3", d, 2, KVCacheLayout.LBNHC, True, state, False)
         for d in range(2)
     ]
     for consumer in consumers:
@@ -470,10 +475,11 @@ def test_hybrid_write_into_dcp_splits_mla_tokens_but_not_the_state(
     done_after = {}
     for p in range(producer_tp):
         producer = _build_rank(
-            "mla_hybrid", p, producer_tp, KVCacheLayout.LBNHC, True, state, True
+            "k3", p, producer_tp, KVCacheLayout.LBNHC, True, state, True
         )
         producer.worker.dcp_size = 1
         producer.worker.model_config.get_head_size = lambda: 8
+        assert producer.worker._non_mla_dcp_layer() is None
         _connect(
             producer,
             consumers,
@@ -511,14 +517,17 @@ def test_hybrid_write_into_dcp_splits_mla_tokens_but_not_the_state(
     for d, consumer in enumerate(consumers):
         kda = consumer.caches["kda0"].view(NUM_BLOCKS, -1)
         assert torch.equal(kda, _expected(layers[1], "mamba", state, heads, d, 2, kda))
-        mla = torch.zeros_like(consumer.caches["mla0"])
-        for token in range(len(PREFILL_BLOCKS["full"]) * BLOCK_SIZE):
-            if token // interleave % 2 == d:
-                pos = token // (2 * interleave) * interleave + token % interleave
-                src = PREFILL_BLOCKS["full"][token // BLOCK_SIZE]
-                dst = DECODE_BLOCKS["full"][pos // BLOCK_SIZE]
-                mla[dst, :, pos % BLOCK_SIZE] = state["mla0"][src, :, token % BLOCK_SIZE]
-        assert torch.equal(consumer.caches["mla0"], mla), d
+        for name, group in (("mla0", "full"), ("draft0", "draft")):
+            mla = torch.zeros_like(consumer.caches[name])
+            for token in range(len(PREFILL_BLOCKS[group]) * BLOCK_SIZE):
+                if token // interleave % 2 == d:
+                    pos = token // (2 * interleave) * interleave + token % interleave
+                    src = PREFILL_BLOCKS[group][token // BLOCK_SIZE]
+                    dst = DECODE_BLOCKS[group][pos // BLOCK_SIZE]
+                    mla[dst, :, pos % BLOCK_SIZE] = state[name][
+                        src, :, token % BLOCK_SIZE
+                    ]
+            assert torch.equal(consumer.caches[name], mla), (name, d)
 
 
 def test_write_refuses_peer_with_different_block_size(monkeypatch):

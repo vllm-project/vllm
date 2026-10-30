@@ -35,7 +35,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_tp_mapping impor
     validate_peer_dcp_layout,
 )
 from vllm.utils.math_utils import cdiv
-from vllm.v1.kv_cache_interface import MLAAttentionSpec, SparseCacheRole
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    MambaSpec,
+    MLAAttentionSpec,
+    SparseCacheRole,
+)
 
 from .utils import make_moriio_writer
 
@@ -94,7 +99,7 @@ def _validate(local_dcp, local_interleave, peer_dcp, peer_interleave, **kwargs):
         peer_dcp,
         peer_interleave,
         block_size=BLOCK_SIZE,
-        **{"writes_into_peer": True, "is_mla": True, **kwargs},
+        **{"writes_into_peer": True, **kwargs},
     )
 
 
@@ -104,7 +109,7 @@ def _validate(local_dcp, local_interleave, peer_dcp, peer_interleave, **kwargs):
         ((1, 1, 4, 64), {}),
         ((1, 1, 4, 1), {}),
         ((1, 1, 1, 64), {}),
-        ((8, 1, 8, 1), {"is_mla": False}),
+        ((8, 1, 8, 1), {"non_mla_layer": "attn0"}),
         ((8, 1, None, None), {"writes_into_peer": False}),
     ],
     ids=[
@@ -128,7 +133,7 @@ def test_peer_dcp_layout_accepted(layout, kwargs):
             {"whole_block_layer": "layer0"},
             "layer layer0 in whole blocks only.*needs --cp-kv-cache-interleave-size 64",
         ),
-        ((1, 1, 4, 64), {"is_mla": False}, "supports MLA models only"),
+        ((1, 1, 4, 64), {"non_mla_layer": "attn0"}, "layer attn0 is not MLA"),
         ((2, 1, 4, 1), {}, "between decode_context_parallel_size=2 here and 4"),
         ((1, 1, 4, 64), {"writes_into_peer": False}, "=1 here and 4 on the peer"),
         ((8, 64, 8, 1), {"writes_into_peer": False}, "64 here, 1 on the peer"),
@@ -192,6 +197,75 @@ def test_only_known_token_layouts_are_written_in_runs(specs, whole_block_layer):
     for interleave in (1, 16):
         assert worker._whole_block_dcp_layer(interleave) == whole_block_layer
     assert worker._whole_block_dcp_layer(BLOCK_SIZE) is None
+
+
+KDA = MambaSpec(
+    block_size=BLOCK_SIZE, shapes=((4, 3), (2, 8, 8)), dtypes=(torch.uint8,) * 2
+)
+GQA = FullAttentionSpec(
+    block_size=BLOCK_SIZE, num_kv_heads=8, head_size=64, dtype=torch.uint8
+)
+
+
+@pytest.mark.parametrize(
+    ("mla_specs", "other_specs", "refused"),
+    [
+        (
+            {**SPECS, "indexer": _spec(132, cache_role=SparseCacheRole.INDEXER)},
+            {},
+            {1: "layer indexer in whole blocks only.*interleave-size 64"},
+        ),
+        (
+            {"latent": _spec(576, tokens_per_state=4)},
+            {},
+            {1: "layer latent in whole blocks only.*interleave-size 64"},
+        ),
+        (SPECS, {"kda": KDA}, {}),
+        (
+            {**SPECS, "draft": _spec(576, non_causal_multi_token_decode=True)},
+            {"kda": KDA},
+            {},
+        ),
+        (
+            SPECS,
+            {"kda": KDA, "draft": GQA},
+            dict.fromkeys((1, BLOCK_SIZE), "layer draft is not MLA"),
+        ),
+        ({}, {"attn": GQA}, dict.fromkeys((1, BLOCK_SIZE), "layer attn is not MLA")),
+    ],
+    ids=[
+        "glm5-deepseek-v32",
+        "compressed-states",
+        "kimi-linear",
+        "kimi-k3-dspark",
+        "non-mla-draft",
+        "gqa",
+    ],
+)
+def test_handshake_accepts_each_model_at_its_interleaves(
+    mla_specs, other_specs, refused
+):
+    """A prefill instance without DCP writes a DCP decode instance's MLA
+    layers. DSpark and DFlash run a draft without MLA without DCP, so the
+    decode instance keeps its cache whole, which the prefill instance cannot
+    see: such a draft is refused."""
+    worker = _worker(0, 1, mla_specs)
+    worker.use_mla = bool(mla_specs)
+    for name, spec in other_specs.items():
+        worker.kv_caches[name] = None
+        worker.layer_to_spec[name] = spec
+    # A layer whose KV is not transferred is never written.
+    worker.layer_to_spec["not_transferred"] = GQA
+    for interleave in (1, BLOCK_SIZE):
+        kwargs = {
+            "non_mla_layer": worker._non_mla_dcp_layer(),
+            "whole_block_layer": worker._whole_block_dcp_layer(interleave),
+        }
+        if interleave in refused:
+            with pytest.raises(ValueError, match=refused[interleave]):
+                _validate(1, 1, 4, interleave, **kwargs)
+        else:
+            _validate(1, 1, 4, interleave, **kwargs)
 
 
 def _wrapper() -> MoRIIOWrapper:
