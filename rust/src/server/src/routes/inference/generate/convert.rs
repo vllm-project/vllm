@@ -14,6 +14,8 @@ use crate::utils::{ResolvedRequestContext, merge_ec_transfer_params, merge_kv_tr
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct PreparedRequest {
     pub request_id: String,
+    /// The `model` reported in non-streaming responses.
+    pub response_model: String,
     pub text_request: TextRequest,
     pub stream: bool,
     /// Public response rendering options for route-layer helpers.
@@ -91,6 +93,7 @@ pub(super) fn prepare_generate_request(
 
     Ok(PreparedRequest {
         request_id: ctx.request_id,
+        response_model: lora_resolution.response_model(),
         text_request,
         stream,
         options: ResponseOptions {
