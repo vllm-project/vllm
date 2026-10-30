@@ -1,19 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from collections.abc import Iterable
 from itertools import islice
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from transformers import Lfm2Config
 
+import vllm.envs as envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention import Attention, EncoderOnlyAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
     MergedColumnParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
@@ -26,6 +32,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
 )
 from vllm.model_executor.layers.mamba.short_conv import ShortConv
+from vllm.model_executor.layers.pooler.seqwise import pooler_for_embed
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -35,6 +42,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import HasInnerState, IsHybrid, SupportsLoRA, SupportsPP, SupportsQuant
+from .interfaces_base import attn_type, default_pooling_type
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -44,6 +52,8 @@ from .utils import (
     make_layers,
     maybe_prefix,
 )
+
+logger = init_logger(__name__)
 
 
 class Lfm2MLP(nn.Module):
@@ -102,6 +112,7 @@ class Lfm2Attention(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        bidirectional: bool = False,
     ) -> None:
         super().__init__()
         self.layer_idx = layer_idx
@@ -150,7 +161,8 @@ class Lfm2Attention(nn.Module):
             rope_parameters=config.rope_parameters,
             is_neox_style=True,
         )
-        self.attn = Attention(
+        attention_cls = EncoderOnlyAttention if bidirectional else Attention
+        self.attn = attention_cls(
             self.num_heads,
             self.head_dim,
             self.scaling,
@@ -190,6 +202,7 @@ class Lfm2AttentionDecoderLayer(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        bidirectional: bool = False,
     ) -> None:
         super().__init__()
         self.prefix = prefix
@@ -208,6 +221,7 @@ class Lfm2AttentionDecoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
+            bidirectional=bidirectional,
         )
 
         self.feed_forward = Lfm2MLP(
@@ -239,6 +253,85 @@ class Lfm2AttentionDecoderLayer(nn.Module):
         return self.feed_forward(hidden_states), residual
 
 
+def _bidirectional_conv1d(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    positions: torch.Tensor,
+    is_padding: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Same-padding depthwise convolution over packed, complete sequences."""
+    kernel_size = weight.shape[-1]
+    padding = kernel_size // 2
+    # Each encoder request starts at position zero. For packed requests
+    # x = [a0, a1, a2, b0, b1], positions = [0, 1, 2, 0, 1] gives
+    # sequence_ids = [1, 1, 1, 2, 2].
+    sequence_ids = (positions == 0).cumsum(0)
+    if is_padding is not None:
+        # Keep runtime padding (e.g. CUDA graph padding) distinct from real requests.
+        sequence_ids = sequence_ids.masked_fill(is_padding, -2)
+    # With kernel_size=3 and no runtime padding, the example becomes:
+    # padded_ids = [-1, 1, 1, 1, 2, 2, -1]
+    # padded_x   = [ 0, a0, a1, a2, b0, b1, 0]
+    padded_ids = F.pad(sequence_ids, (padding, padding), value=-1)
+    padded_x = F.pad(x, (0, 0, padding, padding))
+    output = torch.zeros_like(x, dtype=torch.float32)
+    for tap in range(kernel_size):
+        # Exclude neighbors across request boundaries (e.g. a2 and b0).
+        same_sequence = padded_ids[tap : tap + x.shape[0]] == sequence_ids
+        values = padded_x[tap : tap + x.shape[0]].float()
+        values = values.masked_fill(~same_sequence[:, None], 0)
+        output = output + values * weight[:, 0, tap].float()
+    if bias is not None:
+        output = output + bias.float()
+    return output.to(x.dtype)
+
+
+class Lfm2BidirectionalShortConv(nn.Module):
+    def __init__(
+        self,
+        config: Lfm2Config,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ):
+        super().__init__()
+        dim = config.conv_dim
+        self.conv = ColumnParallelLinear(
+            config.conv_L_cache, dim, bias=config.conv_bias, prefix=f"{prefix}.conv1d"
+        )
+        self.conv.weight.data = self.conv.weight.data.unsqueeze(1)
+        self.in_proj = MergedColumnParallelLinear(
+            dim,
+            [dim] * 3,
+            bias=config.conv_bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.in_proj",
+        )
+        self.out_proj = RowParallelLinear(
+            dim,
+            dim,
+            bias=config.conv_bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.out_proj",
+        )
+
+    def forward(
+        self, hidden_states: torch.Tensor, positions: torch.Tensor
+    ) -> torch.Tensor:
+        projected, _ = self.in_proj(hidden_states)
+        b, c, x = projected.chunk(3, dim=-1)
+        is_padding = get_forward_context().is_padding
+        output = _bidirectional_conv1d(
+            b * x,
+            self.conv.weight,
+            self.conv.bias,
+            positions,
+            is_padding[: hidden_states.shape[0]] if is_padding is not None else None,
+        )
+        output, _ = self.out_proj(c * output)
+        return output
+
+
 class Lfm2ShortConvDecoderLayer(nn.Module):
     def __init__(
         self,
@@ -248,18 +341,25 @@ class Lfm2ShortConvDecoderLayer(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        bidirectional: bool = False,
     ) -> None:
         super().__init__()
         self.layer_idx = layer_idx
-        self.short_conv = ShortConv(
-            config=config,
-            dim=config.conv_dim,
-            layer_idx=layer_idx,
-            model_config=model_config,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.short_conv",
-        )
+        self.bidirectional = bidirectional
+        if bidirectional:
+            self.short_conv = Lfm2BidirectionalShortConv(
+                config, quant_config=quant_config, prefix=f"{prefix}.short_conv"
+            )
+        else:
+            self.short_conv = ShortConv(
+                config=config,
+                dim=config.conv_dim,
+                layer_idx=layer_idx,
+                model_config=model_config,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.short_conv",
+            )
 
         self.feed_forward = Lfm2MLP(
             dim=config.block_dim,
@@ -277,6 +377,7 @@ class Lfm2ShortConvDecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
+        positions: torch.Tensor | None = None,
         **kwargs,
     ):
         if residual is None:
@@ -284,11 +385,12 @@ class Lfm2ShortConvDecoderLayer(nn.Module):
             hidden_states = self.operator_norm(hidden_states)
         else:
             hidden_states, residual = self.operator_norm(hidden_states, residual)
-        output = torch.empty_like(hidden_states)
-        self.short_conv(
-            hidden_states,
-            output,
-        )
+        if self.bidirectional:
+            assert positions is not None
+            output = self.short_conv(hidden_states, positions)
+        else:
+            output = torch.empty_like(hidden_states)
+            self.short_conv(hidden_states, output)
         hidden_states, residual = self.ffn_norm(output, residual)
         hidden_states = self.feed_forward(hidden_states)
         return hidden_states, residual
@@ -310,7 +412,9 @@ class Lfm2Model(nn.Module):
         },
     )
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(
+        self, *, vllm_config: VllmConfig, prefix: str = "", bidirectional: bool = False
+    ):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
@@ -339,6 +443,7 @@ class Lfm2Model(nn.Module):
                 cache_config,
                 quant_config=quant_config,
                 prefix=prefix,
+                bidirectional=bidirectional,
             )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
@@ -390,6 +495,26 @@ class Lfm2Model(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+
+@attn_type("encoder_only")
+@default_pooling_type(seq_pooling_type="CLS")
+class Lfm2BidirectionalModel(Lfm2Model):
+    is_pooling_model = True
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        if not envs.VLLM_MOE_SKIP_PADDING:
+            logger.warning_once(
+                "Enabling VLLM_MOE_SKIP_PADDING for Lfm2BidirectionalModel "
+                "because bidirectional convolution requires an accurate "
+                "runtime padding mask."
+            )
+        os.environ["VLLM_MOE_SKIP_PADDING"] = "1"
+
+        super().__init__(vllm_config=vllm_config, prefix=prefix, bidirectional=True)
+        pooler_config = vllm_config.model_config.pooler_config
+        assert pooler_config is not None
+        self.pooler = pooler_for_embed(pooler_config)
 
 
 class Lfm2ForCausalLM(

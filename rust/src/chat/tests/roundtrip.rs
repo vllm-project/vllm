@@ -81,6 +81,10 @@ enum ThinkingBehavior {
         enabled: &'static str,
         disabled: &'static str,
     },
+    /// The chat template disables thinking through a dedicated
+    /// `disable_reasoning` kwarg, and reasons by `default` when the request
+    /// does not specify it.
+    DisableReasoning { default: bool },
 }
 
 impl ThinkingBehavior {
@@ -89,12 +93,13 @@ impl ThinkingBehavior {
             Self::Toggleable { default } => default,
             Self::Always { value } => value,
             Self::ReasoningEffort { default, .. } => default,
+            Self::DisableReasoning { default } => default,
         }
     }
 
     fn fixtures(self) -> Vec<Option<bool>> {
         match self {
-            Self::Toggleable { .. } => vec![
+            Self::Toggleable { .. } | Self::DisableReasoning { .. } => vec![
                 Some(true),  // explicitly enable thinking
                 Some(false), // explicitly disable thinking
                 None,        // use default template behavior
@@ -129,6 +134,12 @@ impl ThinkingBehavior {
                     "reasoning_effort".to_string(),
                     if thinking { enabled } else { disabled }.into(),
                 );
+            }
+            Self::DisableReasoning { .. } => {
+                request
+                    .chat_options
+                    .template_kwargs
+                    .insert("disable_reasoning".to_string(), (!thinking).into());
             }
         }
     }
@@ -424,6 +435,53 @@ impl RoundtripCase {
         }
     }
 
+    /// Muse Spark recipient-routed segments with ATEM tool calls (generic
+    /// HF Jinja renderer + unified parser).
+    fn muse_spark() -> Self {
+        Self {
+            model_id: "amd/Muse-Spark-Open-816B-A42B-Quark-MXFP4",
+            assistant_stop_suffix: "<|eot|>",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            // The template's true thinking switch is the `disable_reasoning`
+            // kwarg: it drops "self" from the valid recipients and suppresses
+            // the "Reasoning strength" hint. `reasoning_effort`
+            // minimal/low/medium/high only tunes the strength hint while
+            // reasoning stays enabled.
+            thinking_behavior: ThinkingBehavior::DisableReasoning { default: true },
+            json_fmt: compact_json_fmt(),
+            sort_json_keys: false,
+            // The Muse parser builds no tool grammar, so the schema excludes the
+            // calls.
+            with_schema: &[
+                ToolCallMixVariant::NoneSchema,
+                ToolCallMixVariant::AutoSchemaContent,
+            ],
+        }
+    }
+
+    /// Muse Glimmer shares the Muse Spark output format and unified parser,
+    /// with its own chat template.
+    fn muse_glimmer() -> Self {
+        Self {
+            model_id: "meta-models/Muse-Glimmer-30B",
+            assistant_stop_suffix: "<|eot|>",
+            tool_call_parser: ParserSelection::Explicit("muse".to_owned()),
+            reasoning_parser: ParserSelection::Explicit("muse".to_owned()),
+            // The template has no thinking switch; `reasoning_strength` only
+            // tunes the hint.
+            thinking_behavior: ThinkingBehavior::Always { value: true },
+            json_fmt: compact_json_fmt(),
+            sort_json_keys: false,
+            // The Muse parser builds no tool grammar, so the schema excludes the
+            // calls.
+            with_schema: &[
+                ToolCallMixVariant::NoneSchema,
+                ToolCallMixVariant::AutoSchemaContent,
+            ],
+        }
+    }
+
     /// HY3 suffixed reasoning/tool markers discovered from tokenizer added vocab.
     fn hy_v3() -> Self {
         Self {
@@ -465,6 +523,20 @@ impl RoundtripCase {
     fn step3p5() -> Self {
         Self {
             model_id: "stepfun-ai/Step-3.5-Flash",
+            assistant_stop_suffix: "<|im_end|>\n",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::Always { value: true },
+            json_fmt: compact_json_fmt(),
+            sort_json_keys: false,
+            with_schema: ToolCallMixVariant::WITH_SCHEMA,
+        }
+    }
+
+    /// Step-5's bare reasoning tags and adjacent XML tool calls.
+    fn step5() -> Self {
+        Self {
+            model_id: "stepfun-ai/Step-5-Preview",
             assistant_stop_suffix: "<|im_end|>\n",
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
@@ -552,6 +624,7 @@ roundtrip_tests! {
     glm52 => [reasoning_and_content, tool_call_mix],
     seed_oss => [reasoning_and_content, tool_call_mix],
     step3p5 => [reasoning_and_content],
+    step5 => [reasoning_and_content, tool_call_mix],
     nemotron_v3 => [reasoning_and_content],
     gemma4 => [tool_call_mix], // Gemma4 strips reasoning in history if there's no tool call
     gemma4_hf => [tool_call_mix],
@@ -561,6 +634,8 @@ roundtrip_tests! {
     // HY3's final plain-assistant history omits EOS; tool-call history keeps it
     // and exercises both stages of the tokenizer-derived unified parser.
     hy_v3 => [tool_call_mix],
+    muse_spark => [reasoning_and_content, tool_call_mix],
+    muse_glimmer => [reasoning_and_content], // Glimmer drops content on tool-call turns in history
     gpt_oss => [tool_call_mix], // Harmony strips reasoning in history if there's no tool call
     inkling => [reasoning_and_content, tool_call_mix],
 }
@@ -1051,6 +1126,7 @@ fn decoded_completion_stream(
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     sampling_mask: None,
+                    spec_decode_metrics: None,
                     timestamps: Default::default(),
                 })),
             }
@@ -1064,6 +1140,7 @@ fn decoded_completion_stream(
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 sampling_mask: None,
+                spec_decode_metrics: None,
                 timestamps: Default::default(),
             });
             events.push(DecodedTextEvent::TextDelta {
