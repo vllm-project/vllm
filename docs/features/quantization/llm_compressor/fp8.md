@@ -159,7 +159,8 @@ print(result[0].outputs[0].text)
 ## Weight cache daemon
 
 Supported serialized `compressed-tensors` FP8 linear layers can reuse
-processed GPU weights across engine restarts with the CUTLASS backend. See
+processed GPU weights across engine restarts with the CUTLASS or
+[Marlin weight-only backend](../../preload.md#compressed-tensors-fp8-with-marlin). See
 the [Preload quick start](../../preload.md#quick-start) and
 [quantization requirements](../../preload.md#limitations) for enabling
 commands, supported weight and activation layouts, and excluded configurations.
