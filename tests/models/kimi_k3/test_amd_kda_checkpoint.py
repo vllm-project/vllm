@@ -7,6 +7,8 @@ a position the chunk kernel will actually write, and the conv window saved
 there must be the one a resumed prefill would have left.
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -54,6 +56,7 @@ class _StubSpeculativeConfig:
     method = "dspark"
     parallel_drafting = False
     enable_adaptive_verification = False
+    speculator_config = SimpleNamespace(speculator_class="DSparkSpeculator")
 
     def __init__(self, num_speculative_tokens: int) -> None:
         self.num_speculative_tokens = num_speculative_tokens
