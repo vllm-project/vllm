@@ -41,7 +41,7 @@ def test_reload_keeps_moe_output(
         kernel_config={"enable_jit_warmup": False, "moe_backend": moe_backend},
     ) as llm:
         before = llm.generate_greedy_logprobs(PROMPTS, max_tokens=32, num_logprobs=5)
-        llm.collective_rpc("reload_weights", kwargs={"weights_path": model})
+        llm.collective_rpc("reload_weights")  # the served checkpoint
         after = llm.generate_greedy_logprobs(PROMPTS, max_tokens=32, num_logprobs=5)
     check_logprobs_close(
         outputs_0_lst=before,
