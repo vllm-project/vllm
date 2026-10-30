@@ -126,7 +126,7 @@ class GlmMoeDsaForCausalLM(VerifyAndUpdateConfig):
             spec_config = vllm_config.speculative_config
             if (
                 spec_config is not None
-                and spec_config.method not in ("mtp", "dspark")
+                and spec_config.method not in ("mtp", "dspark", "dflash")
                 and spec_config.kv_cache_dtype is None
             ):
                 spec_config.kv_cache_dtype = "auto"
@@ -1326,6 +1326,9 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "NemotronHForCausalLM": NemotronHForCausalLMConfig,
     "NemotronHPuzzleForCausalLM": NemotronHForCausalLMConfig,
     "NemotronH_Nano_VL_V2": NemotronHNanoVLV2Config,
+    "NemotronH_Nano_Omni_Reasoning_V3": NemotronHNanoVLV2Config,
+    "NemotronH_Super_Omni_Reasoning_V3": NemotronHNanoVLV2Config,
+    "NemotronH_Omni_Reasoning_V3": NemotronHNanoVLV2Config,
     "Nemotron3_5TranscribeForConditionalGeneration": (
         Nemotron3_5TranscribeForConditionalGenerationConfig
     ),
