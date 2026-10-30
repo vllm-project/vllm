@@ -365,7 +365,7 @@ def _decode(vllm_runner, monkeypatch, prompts, path: str) -> list:
         # length)
         max_num_batched_tokens=32768,
         enable_prefix_caching=False,
-        gpu_memory_utilization=0.15,
+        gpu_memory_utilization=0.5,
     ) as runner:
         runner.llm.collective_rpc("capture_steps")
         params = SamplingParams(temperature=0.0, max_tokens=STEPS + 1)

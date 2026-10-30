@@ -669,22 +669,28 @@ def _mono_index(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
 def _k1_taps(runner, taps: dict):
     """Each K1 launch followed by a copy of its step's scratch into ``taps``:
     K2 reuses K1's X8 regions."""
-    kernels = runner.kernels
+    from vllm.models.deepseek_v41.amd.mono import runner as runner_module
+
+    kernels, run = runner.kernels, runner_module._run_compiled
+    k1_tokens: dict[int, int] = {}
 
     def tapped(tokens, *key):
         k1, k2 = kernels(tokens, *key)
+        k1_tokens[id(k1)] = tokens
+        return k1, k2
 
-        def k1_tap(*args, **kwargs):
-            k1(*args, **kwargs)
-            taps["k1"] = runner.scratch(tokens).clone()
-
-        return k1_tap, k2
+    def run_tapped(launcher, *args):
+        run(launcher, *args)
+        if id(launcher) in k1_tokens:
+            taps["k1"] = runner.scratch(k1_tokens[id(launcher)]).clone()
 
     runner.kernels = tapped
+    runner_module._run_compiled = run_tapped
     try:
         yield
     finally:
         del runner.kernels
+        runner_module._run_compiled = run
 
 
 def _bench(rank: int, tp: int, device, draft: bool = False, seed: int = 0, stage=None):
@@ -1534,7 +1540,7 @@ def _check_index_source(rank: int, tp: int, device) -> None:
         pytest.param(_mono_numerics_vllm, id="vllm_ops"),
     ],
 )
-@pytest.mark.parametrize("tp", [2, 4])
+@pytest.mark.parametrize("tp", [2, 4, 8])
 def test_mono_decode_layer_matches_vllm(
     monkeypatch: pytest.MonkeyPatch, tp: int, target
 ):

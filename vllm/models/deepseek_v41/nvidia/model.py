@@ -13,7 +13,6 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.config.kernel import MEGA_MOE_BACKENDS, NATIVE_MEGA_MOE_BACKENDS
 from vllm.distributed import (
-    get_engram_dp_size,
     get_pcp_group,
     get_pp_group,
     get_tensor_model_parallel_world_size,
@@ -583,6 +582,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                 engram_hashes[:, self.engram.layer_hash_index],
                 engram_mask,
             )
+            del previous_post
             post_mix, res_mix, x, attn_pre = mhc_pre(
                 residual,
                 self.hc_attn_fn,
@@ -1000,8 +1000,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
 
         # Engram n-gram hashes for the whole (flattened) batch, computed once
         # on the full token stream — before any sequence-parallel sharding —
-        # and consumed by the engram layers (1 and 14) below. Skipped on
-        # profile runs (KV cache unbound).
+        # and consumed by the engram layers (1 and 14) below. Profile runs
+        # (KV cache unbound) look up dead rows instead.
         engram_hashes: torch.Tensor | None = None
         engram_mask: torch.Tensor | None = None
         if (
@@ -1042,9 +1042,10 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                     swa_metadata.slot_mapping,
                     swa_metadata.block_table,
                 )
-            elif not self.engram_dp_shared_memory and get_engram_dp_size() > 1:
+            else:
                 # DP-sharded lookups are collective, so a replica skipping the
-                # hash still has to reach them.
+                # hash still has to reach them; the memory profile also has to
+                # see the Engram activations.
                 engram_hashes, engram_mask = self.engram_hash.dummy_hashes(input_ids)
             if engram_hashes is not None:
                 # Gather all Engram rows before entering the decoder layers.

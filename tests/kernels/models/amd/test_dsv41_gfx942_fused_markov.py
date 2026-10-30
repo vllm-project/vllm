@@ -89,6 +89,7 @@ class _Model:
 
 
 def _speculator(temp: float, seed: int):
+    from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
     from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
     dev = torch.device("cuda")
@@ -107,9 +108,9 @@ def _speculator(temp: float, seed: int):
     s._d2t_scatter_index = None
     s._draft_scatter_buf = None
     s.use_fp64_gumbel = False
-    s.draft_logits = torch.zeros(MAX_REQS, N_SPEC, VOCAB, dtype=bf16, device=dev)
-    s.draft_logits_num_shards = 1
-    s.draft_logits_shard_idx = 0
+    s.draft_logits = DraftLogitsCache(
+        MAX_REQS, N_SPEC, VOCAB, dtype=bf16, fill=0.0, device=dev
+    )
     s.temperature = torch.full((MAX_REQS,), temp, dtype=torch.float32, device=dev)
     s.seeds = torch.randint(0, 2**62, (MAX_REQS,), generator=g, device=dev)
     s._step_cols = torch.arange(N_SPEC, dtype=torch.int32, device=dev)
@@ -141,17 +142,17 @@ def test_fused_markov_matches_vllm_loop(monkeypatch, num_reqs, temp):
     _set_gate(monkeypatch, on=False)
     DSparkSpeculator._sample_sequential(s, num_reqs, hidden)
     torch.accelerator.synchronize()
-    ref_tok, ref_cache = s.draft_tokens.clone(), s.draft_logits.clone()
+    ref_tok, ref_cache = s.draft_tokens.clone(), s.draft_logits.values.clone()
 
     s.draft_tokens.zero_()
-    s.draft_logits.zero_()
+    s.draft_logits.values.zero_()
     _set_gate(monkeypatch, on=True)
     try:
         assert fused_markov.sample_sequential(s, num_reqs, hidden)
         torch.accelerator.synchronize()
     finally:
         _set_gate(monkeypatch, on=False)
-    got_tok, got_cache = s.draft_tokens.clone(), s.draft_logits.clone()
+    got_tok, got_cache = s.draft_tokens.clone(), s.draft_logits.values.clone()
 
     # rc and gc are [num_reqs, N_SPEC, VOCAB]: the cached logits of each
     # request and draft step. The differences are counted for each request

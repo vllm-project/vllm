@@ -463,10 +463,10 @@ def test_opt_in_with_another_arch_for_flydsl_raises(monkeypatch, cdna, tp, targe
         md.MonoDecodeLayer.create(_decoder_layer(), _config())
 
 
-@pytest.mark.parametrize("tp", [1, 8])
+@pytest.mark.parametrize("tp", [1, 16])
 def test_opt_in_outside_the_kernels_tp_raises(monkeypatch, tp):
     _deployment(monkeypatch, tp=tp)
-    with pytest.raises(ValueError, match="tensor parallel size 2 or 4"):
+    with pytest.raises(ValueError, match="tensor parallel size 2, 4 or 8"):
         md.MonoDecodeLayer.create(_decoder_layer(), _config())
 
 
