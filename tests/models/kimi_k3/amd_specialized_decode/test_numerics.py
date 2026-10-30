@@ -1351,7 +1351,7 @@ def test_m1a_pad_through_aiter_cprr(monkeypatch: pytest.MonkeyPatch, qlen: int) 
         qp = torch.empty(nr * qlen, H, cp.HEAD_SIZE, dtype=fp8, device=device)
         qp.copy_(am.AiterMLAHelper.get_mla_padded_q(n, q8, target_heads=H))
         layer = cp._Layer(device)
-        layer.impl = cp._build_impl(NH, dcp, rank)
+        layer.impl = cp._build_impl(NH, dcp, rank)  # type: ignore[attr-defined]
         o_m1a, lse_m1a = mla.attend(SimpleNamespace(mla_attn=layer), qp, kv, md)
         torch.accelerator.synchronize()
 
