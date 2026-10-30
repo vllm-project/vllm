@@ -183,7 +183,7 @@ def test_measure_kv_cache_bytes():
 
 def test_measured_sizing_caps_torch_memory(monkeypatch):
     """Torch's caching allocator may grow into what stays free once the cache
-    is extended, less multimodal IPC memory and the margin's non-torch share,
+    is extended, less multimodal IPC memory and the non-torch reserve,
     rather than caching fragmented segments until other allocations fail."""
     gib = 1 << 30
     limits: list[int | None] = []
@@ -224,14 +224,8 @@ def test_measured_sizing_caps_torch_memory(monkeypatch):
     )
 
     assert num_blocks == 4
-    margin = max(
-        extensible_kv_cache.KV_CACHE_MARGIN_FLOOR_BYTES,
-        int(gib * extensible_kv_cache.KV_CACHE_MARGIN_FRACTION),
-    )
     # 6 GiB free, of which extending to 4 blocks takes 3 and IPC keeps 1.
-    left_free = 2 * gib - int(
-        margin * extensible_kv_cache.KV_CACHE_NON_TORCH_MARGIN_FRACTION
-    )
+    left_free = 2 * gib - extensible_kv_cache.KV_CACHE_NON_TORCH_RESERVE_BYTES
     assert limits == [2 * gib + left_free]
 
 

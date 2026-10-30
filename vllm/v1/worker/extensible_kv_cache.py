@@ -58,10 +58,12 @@ logger = init_logger(__name__)
 # it, so ROCm keeps a larger floor.
 KV_CACHE_MARGIN_FLOOR_BYTES = (2 if current_platform.is_rocm() else 1) << 30
 KV_CACHE_MARGIN_FRACTION = 0.75
-# Share of the margin kept for allocations outside torch's caching allocator
+# Part of the margin kept for allocations outside torch's caching allocator
 # (kernel scratch, NCCL/RCCL buffers, lazily loaded code objects); the
-# allocator is capped to leave it free.
-KV_CACHE_NON_TORCH_MARGIN_FRACTION = 0.5
+# allocator is capped to leave it free. The rest absorbs torch's fragmentation,
+# which scales with the transient where these do not: serving grew them by at
+# most 0.17 GiB on MI355 and not at all on GB200.
+KV_CACHE_NON_TORCH_RESERVE_BYTES = (2 if current_platform.is_rocm() else 1) << 29
 # Share of the headroom warmup leaves uncommitted, on top of the profiled
 # activation peak, for transients the profiling run does not exercise.
 KV_CACHE_WARMUP_RESERVE_FRACTION = 0.1
@@ -491,8 +493,7 @@ def measure_kv_cache_blocks(
     warmup's allocated (not reserved) transient peak. Torch's cache is emptied
     first: its blocks may not fit the large workspaces the first real steps
     allocate. Then caps torch's caching allocator to leave
-    KV_CACHE_NON_TORCH_MARGIN_FRACTION of the margin free for allocations
-    outside it.
+    KV_CACHE_NON_TORCH_RESERVE_BYTES free for allocations outside it.
     """
     torch.accelerator.synchronize()
     gc.collect()
@@ -516,14 +517,11 @@ def measure_kv_cache_blocks(
     )
     # Torch may grow into what stays free once the cache is extended, less the
     # memory kept for multimodal IPC and for allocations outside torch.
-    margin = max(
-        KV_CACHE_MARGIN_FLOOR_BYTES, int(transient_peak * KV_CACHE_MARGIN_FRACTION)
-    )
     left_free = (
         free_memory
         - (kv_cache.physical_bytes_for(num_blocks) - kv_cache.physical_bytes)
         - (available - kv_cache_bytes)
-        - int(margin * KV_CACHE_NON_TORCH_MARGIN_FRACTION)
+        - KV_CACHE_NON_TORCH_RESERVE_BYTES
     )
     torch_memory_limit = torch.accelerator.memory_reserved(device) + max(left_free, 0)
     kv_cache.set_torch_memory_limit(torch_memory_limit)
