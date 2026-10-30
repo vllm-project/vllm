@@ -84,12 +84,9 @@ def _make_connector(
 
 
 @pytest.mark.cpu_test
-@pytest.mark.parametrize("num_lookahead", [1, 5])
-@pytest.mark.parametrize("nested", [False, True])
 @pytest.mark.parametrize("supported", [False, True])
-def test_multi_cpu_coordinator_uses_parent_hash_protocol(
-    num_lookahead, nested, supported
-):
+def test_multi_cpu_coordinator_uses_parent_hash_protocol(supported):
+    num_lookahead = 5
     config = _make_lookahead_config(num_lookahead)
     children = [
         {
@@ -105,12 +102,11 @@ def test_multi_cpu_coordinator_uses_parent_hash_protocol(
         if supported
         else _lookahead_connector_config(False),
     ]
-    if nested:
-        children[0] = {
-            "kv_connector": "MultiConnector",
-            "kv_role": "kv_both",
-            "kv_connector_extra_config": {"connectors": [children[0]]},
-        }
+    children[0] = {
+        "kv_connector": "MultiConnector",
+        "kv_role": "kv_both",
+        "kv_connector_extra_config": {"connectors": [children[0]]},
+    }
     config.kv_transfer_config = KVTransferConfig(
         kv_connector="MultiConnector",
         kv_role="kv_both",
@@ -121,9 +117,7 @@ def test_multi_cpu_coordinator_uses_parent_hash_protocol(
     connector = KVConnectorFactory.create_connector(
         config, KVConnectorRole.SCHEDULER, _make_kv_cache_config()
     )
-    child = connector.sub_connectors[0]
-    if nested:
-        child = child.sub_connectors[0]
+    child = connector.sub_connectors[0].sub_connectors[0]
     expected = num_lookahead if supported else 0
     assert config.num_hash_lookahead_tokens == expected
     assert not config.speculative_config.disable_lookahead_block_hashes

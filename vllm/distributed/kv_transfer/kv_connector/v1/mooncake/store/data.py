@@ -748,15 +748,6 @@ class RequestTracker:
     prefill_end_tokens: int = 0
     partial_tail_sent: bool = False
 
-    def reset(self) -> None:
-        self.token_len = 0
-        self.allocated_block_ids = ()
-        self.num_saved_tokens = 0
-        self.token_ids = None
-        self.has_pending_offload = False
-        self.prefill_end_tokens = 0
-        self.partial_tail_sent = False
-
     def update(
         self,
         new_block_ids: tuple[list[int], ...] | list[int],

@@ -964,7 +964,7 @@ class SimpleCPUOffloadScheduler:
                     )
                     lora_req = request.lora_request
                     extra_keys, curr_mm_idx = (
-                        self.cpu_block_pool._generate_event_extra_keys(
+                        self.cpu_block_pool.generate_event_extra_keys(
                             request, token_start, token_end, curr_mm_idx
                         )
                     )
@@ -978,7 +978,7 @@ class SimpleCPUOffloadScheduler:
                             lora_name=lora_req.name if lora_req else None,
                             extra_keys=extra_keys,
                             lookahead_token_ids=(
-                                self.cpu_block_pool._lookahead_token_ids(
+                                self.cpu_block_pool.get_lookahead_token_ids(
                                     request, token_end
                                 )
                                 if self.cpu_block_pool.num_hash_lookahead_tokens
@@ -997,7 +997,7 @@ class SimpleCPUOffloadScheduler:
                         hash_start = hash_idx * self.hash_block_size
                         hash_end = hash_start + self.hash_block_size
                         secondary_extra_keys, secondary_mm_idx = (
-                            self.cpu_block_pool._generate_event_extra_keys(
+                            self.cpu_block_pool.generate_event_extra_keys(
                                 request,
                                 hash_start,
                                 hash_end,
@@ -1018,7 +1018,7 @@ class SimpleCPUOffloadScheduler:
                             extra_keys=secondary_extra_keys,
                             block_size=self.hash_block_size,
                             lookahead_token_ids=(
-                                self.cpu_block_pool._lookahead_token_ids(
+                                self.cpu_block_pool.get_lookahead_token_ids(
                                     request, hash_end
                                 )
                                 if self.cpu_block_pool.num_hash_lookahead_tokens

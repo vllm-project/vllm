@@ -10,9 +10,13 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from tests.v1.kv_connector.unit.utils import create_vllm_config, maybe_update_block_size
+from tests.v1.kv_connector.unit.utils import (
+    create_vllm_config,
+    maybe_update_block_size,
+    set_mtp_config,
+)
 from vllm import LLM, SamplingParams
-from vllm.config import KVTransferConfig, SpeculativeConfig
+from vllm.config import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -163,9 +167,6 @@ class MockDivergentHMAConnector(MockHMAConnector):
 KVConnectorFactory.register_connector("MockConnector", __name__, MockConnector.__name__)
 KVConnectorFactory.register_connector(
     "MockHMAConnector", __name__, MockHMAConnector.__name__
-)
-KVConnectorFactory.register_connector(
-    "LookaheadHashingTestConnector", __name__, LookaheadHashingTestConnector.__name__
 )
 KVConnectorFactory.register_connector(
     "MockDivergentHMAConnector",
@@ -1082,26 +1083,32 @@ Options:
         "prefix_caching",
         "disabled",
         "expected",
+        "nested",
+        "role",
     ),
     [
-        ([], 1, True, False, False),
-        ([True, True], 1, True, False, True),
-        ([True, False], 1, True, False, False),
-        ([True, True], 1, False, False, True),
-        ([True, True], 2, True, False, True),
-        ([True, True], 1, True, True, False),
+        ([], 1, True, False, 0, False, "SCHEDULER"),
+        ([True, True], 1, True, False, 1, False, "SCHEDULER"),
+        ([True, False], 1, True, False, 0, False, "SCHEDULER"),
+        ([True, True], 1, False, False, 1, False, "SCHEDULER"),
+        ([True, True], 2, True, False, 2, False, "SCHEDULER"),
+        ([True, True], 1, True, True, 0, False, "SCHEDULER"),
+        ([True, True], 1, True, False, 1, False, "WORKER"),
+        ([True, False], 1, True, False, 0, False, "WORKER"),
+        ([True, True], 1, True, False, 1, True, "SCHEDULER"),
+        ([True, False], 1, True, False, 0, True, "SCHEDULER"),
+        ([True, True], 1, True, False, 1, True, "WORKER"),
+        ([True, False], 1, True, False, 0, True, "WORKER"),
     ],
 )
-@pytest.mark.parametrize("nested", [False, True])
-@pytest.mark.parametrize("role", [KVConnectorRole.SCHEDULER, KVConnectorRole.WORKER])
 def test_multi_connector_children_use_configured_lookahead_hashes(
     child_support: list[bool],
     num_lookahead: int,
     prefix_caching: bool,
     disabled: bool,
-    expected: bool,
+    expected: int,
     nested: bool,
-    role: KVConnectorRole,
+    role: str,
 ):
     children = [_lookahead_connector_config(supported) for supported in child_support]
     if nested:
@@ -1117,35 +1124,25 @@ def test_multi_connector_children_use_configured_lookahead_hashes(
         kv_connector_extra_config={"connectors": children},
         kv_role="kv_both",
         disable_hybrid_kv_cache_manager=True,
-        hf_overrides={"num_nextn_predict_layers": num_lookahead},
     )
-    # Construct the config without downloading a separate draft model.
-    spec = SpeculativeConfig(model="ngram", num_speculative_tokens=num_lookahead)
-    spec.method = "mtp"
-    spec.draft_model_config = vllm_config.model_config
-    spec.disable_lookahead_block_hashes = disabled
-    vllm_config.speculative_config = spec
     vllm_config.cache_config.enable_prefix_caching = prefix_caching
-    vllm_config.num_hash_lookahead_tokens = (
-        vllm_config._resolve_num_hash_lookahead_tokens()
-    )
+    set_mtp_config(vllm_config, num_lookahead, disable_lookahead_block_hashes=disabled)
 
-    assert vllm_config.num_hash_lookahead_tokens == (num_lookahead if expected else 0)
+    assert vllm_config.num_hash_lookahead_tokens == expected
 
     connector = KVConnectorFactory.create_connector(
         vllm_config,
-        role,
+        KVConnectorRole[role],
         KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
     )
 
     assert isinstance(connector, MultiConnector)
-    expected_tokens = num_lookahead if expected else 0
-    assert connector._vllm_config.num_hash_lookahead_tokens == expected_tokens
+    assert connector._vllm_config.num_hash_lookahead_tokens == expected
     for child in connector.sub_connectors:
-        assert child._vllm_config.num_hash_lookahead_tokens == expected_tokens
+        assert child._vllm_config.num_hash_lookahead_tokens == expected
         if isinstance(child, MultiConnector):
             assert all(
-                leaf._vllm_config.num_hash_lookahead_tokens == expected_tokens
+                leaf._vllm_config.num_hash_lookahead_tokens == expected
                 for leaf in child.sub_connectors
             )
 

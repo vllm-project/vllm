@@ -11,7 +11,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 
-from tests.v1.kv_connector.unit.utils import create_scheduler
+from tests.v1.kv_connector.unit.utils import create_scheduler, set_mtp_config
 from vllm import SamplingParams
 from vllm.config import (
     CacheConfig,
@@ -227,15 +227,9 @@ class SchedulerFixture:
 
 def _make_lookahead_config(num_lookahead: int) -> VllmConfig:
     config = _make_vllm_config()
-    spec = SpeculativeConfig(
-        model="ngram", num_speculative_tokens=max(1, num_lookahead)
+    set_mtp_config(
+        config, max(1, num_lookahead), disable_lookahead_block_hashes=num_lookahead == 0
     )
-    spec.method = "mtp"
-    spec.draft_model_config = config.model_config
-    config.model_config.hf_config.num_nextn_predict_layers = max(1, num_lookahead)
-    spec.disable_lookahead_block_hashes = num_lookahead == 0
-    config.speculative_config = spec
-    config.num_hash_lookahead_tokens = config._resolve_num_hash_lookahead_tokens()
     return config
 
 

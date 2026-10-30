@@ -179,6 +179,26 @@ def create_vllm_config(
     )
 
 
+def set_mtp_config(
+    config: VllmConfig,
+    num_lookahead: int = 1,
+    *,
+    disable_lookahead_block_hashes: bool = False,
+) -> None:
+    """Configure test MTP without loading a separate draft model."""
+    assert config.model_config is not None
+    config.model_config.hf_config.num_nextn_predict_layers = num_lookahead
+    spec = SpeculativeConfig(
+        model="ngram",
+        num_speculative_tokens=num_lookahead,
+        disable_lookahead_block_hashes=disable_lookahead_block_hashes,
+    )
+    spec.method = "mtp"
+    spec.draft_model_config = config.model_config
+    config.speculative_config = spec
+    config.num_hash_lookahead_tokens = config._resolve_num_hash_lookahead_tokens()
+
+
 def create_scheduler(
     vllm_config: VllmConfig,
     num_blocks: int = 10000,

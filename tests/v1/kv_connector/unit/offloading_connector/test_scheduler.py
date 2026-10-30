@@ -23,6 +23,7 @@ from tests.v1.kv_connector.unit.utils import (
     create_request,
     create_scheduler,
     create_vllm_config,
+    set_mtp_config,
 )
 from vllm import SamplingParams
 from vllm.config import KVEventsConfig, KVTransferConfig, SpeculativeConfig
@@ -4845,11 +4846,8 @@ class TestEagle:
         """Only chunks whose entire lookahead window is known can hit."""
         init_none_hash(sha256)
         block_size = 4
-        spec = SpeculativeConfig(model="ngram", num_speculative_tokens=num_lookahead)
-        spec.method = "mtp"
         config = create_vllm_config(
             block_size=block_size,
-            hf_overrides={"num_nextn_predict_layers": num_lookahead},
             kv_connector="OffloadingConnector",
             kv_role="kv_both",
             kv_connector_extra_config={
@@ -4858,9 +4856,7 @@ class TestEagle:
                 "block_size": block_size * blocks_per_chunk,
             },
         )
-        spec.draft_model_config = config.model_config
-        config.speculative_config = spec
-        config.num_hash_lookahead_tokens = config._resolve_num_hash_lookahead_tokens()
+        set_mtp_config(config, num_lookahead)
         caches = KVCacheConfig(
             num_blocks=100,
             kv_cache_tensors=[],
@@ -5388,9 +5384,13 @@ class TestEagle:
 
     @pytest.mark.cpu_test
     @pytest.mark.parametrize("async_scheduling", [True, False])
-    @pytest.mark.parametrize("num_lookahead", [1, 5])
+    @pytest.mark.parametrize("num_lookahead, expected_blocks", [(1, 4), (5, 2)])
     def test_lookahead_store_includes_block_hashed_by_sampled_token(
-        self, request_runner, async_scheduling: bool, num_lookahead: int
+        self,
+        request_runner,
+        async_scheduling: bool,
+        num_lookahead: int,
+        expected_blocks,
     ):
         """Final stores include newly proven chunks and exclude unproven tails."""
         block_size = 8
@@ -5420,14 +5420,7 @@ class TestEagle:
 
         runner.run(
             decoded_tokens=[EOS_TOKEN_ID],
-            expected_stored=tuple(
-                (0, i)
-                for i in range(
-                    (block_size * 4 + 1 - num_lookahead)
-                    // (block_size * blocks_per_chunk)
-                    * blocks_per_chunk
-                )
-            ),
+            expected_stored=tuple((0, i) for i in range(expected_blocks)),
         )
 
     @pytest.mark.parametrize("async_scheduling", [True, False])
@@ -6532,8 +6525,7 @@ def _make_lookahead_hybrid_engine(lookahead=1, eagle=True):
     config.cache_config.prefix_match_unit = 4
     config.cache_config.prefix_cache_retention_interval = 16
     config.cache_config.mamba_cache_mode = "align"
-    config.speculative_config.method = "mtp"
-    config.speculative_config.draft_model_config = config.model_config
+    set_mtp_config(config, lookahead)
     caches = make_kv_cache_config(
         block_size=16,
         mamba_enabled=True,
@@ -6547,8 +6539,6 @@ def _make_lookahead_hybrid_engine(lookahead=1, eagle=True):
     group.kv_cache_spec = replace(
         group.kv_cache_spec, num_speculative_blocks=1, num_prefill_checkpoint_blocks=1
     )
-    config.model_config.hf_config.num_nextn_predict_layers = lookahead
-    config.num_hash_lookahead_tokens = config._resolve_num_hash_lookahead_tokens()
     init_none_hash(sha256)
     return create_scheduler(config, kv_cache_config=caches, hash_block_size=4)
 

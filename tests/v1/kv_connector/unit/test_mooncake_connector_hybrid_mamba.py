@@ -19,7 +19,7 @@ import torch
 
 from tests.v1.attention.utils import dense_kv_cache_views
 from vllm import SamplingParams
-from vllm.config import SpeculativeConfig, set_current_vllm_config
+from vllm.config import set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
     KVConnectorRole,
     MooncakeConnector,
@@ -49,7 +49,12 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.request import Request
 
 from .test_mooncake_connector import patch_worker_dependencies
-from .utils import create_request, create_vllm_config, maybe_update_block_size
+from .utils import (
+    create_request,
+    create_vllm_config,
+    maybe_update_block_size,
+    set_mtp_config,
+)
 
 
 def noop_shutdown():
@@ -178,14 +183,9 @@ def test_lookahead_hashes_follow_truncated_prefill(
     config = create_vllm_config(
         kv_connector=connector_name,
         kv_role="kv_producer",
-        hf_overrides={"num_nextn_predict_layers": num_lookahead},
     )
     if num_lookahead:
-        spec = SpeculativeConfig(model="ngram", num_speculative_tokens=num_lookahead)
-        spec.method = "mtp"
-        spec.draft_model_config = config.model_config
-        config.speculative_config = spec
-        config.num_hash_lookahead_tokens = config._resolve_num_hash_lookahead_tokens()
+        set_mtp_config(config, num_lookahead)
     config.cache_config.prefix_match_unit = hash_block_size
     kv_config = make_hybrid_gdn_kv_cache_config(block_size)
     kv_config.hash_block_size = hash_block_size

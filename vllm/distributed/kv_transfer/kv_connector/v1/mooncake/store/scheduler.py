@@ -205,7 +205,8 @@ class MooncakeStoreScheduler:
 
         # Per-request state
         self.load_specs: dict[str, LoadSpec] = {}  # to be loaded
-        self._request_trackers: dict[str, RequestTracker] = {}  # scheduled new requests
+        # Save progress starts when a request is scheduled for compute.
+        self._request_trackers: dict[str, RequestTracker] = {}
         self._unfinished_requests: dict[str, tuple[Request, tuple[list[int], ...]]] = {}
         self._unfinished_request_ids: set[str] = set()
         self._finished_partial_tail_metas: dict[str, ReqMeta] = {}
@@ -325,8 +326,7 @@ class MooncakeStoreScheduler:
         preempted_ids = scheduler_output.preempted_req_ids or set()
         for req_id in preempted_ids:
             self.load_specs.pop(req_id, None)
-            if request_tracker := self._request_trackers.get(req_id):
-                request_tracker.reset()
+            self._request_trackers.pop(req_id, None)
             self._unfinished_requests.pop(req_id, None)
 
         meta = MooncakeStoreConnectorMetadata(
@@ -499,7 +499,6 @@ class MooncakeStoreScheduler:
                     allocated_block_ids=block_ids,
                     num_saved_tokens=0,
                 )
-                self._request_trackers[request_id] = request_tracker
                 req_meta = ReqMeta.from_request_tracker(
                     request_tracker,
                     self._block_size,
