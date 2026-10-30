@@ -157,6 +157,9 @@ class EngineCoreSentinel:
             while scheduler.running:
                 request = scheduler.running.pop()
                 scheduler._preempt_request(request, timestamp)
+            # Clear abandoned outputs: already-preempted requests also wait
+            # for stale outputs that recovery discards.
+            for request in scheduler.requests.values():
                 request.num_in_flight_tokens = 0
                 request.num_stale_output_tokens = 0
             scheduler.prev_step_scheduled_req_ids.clear()

@@ -387,6 +387,7 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
     The injection is armed (via /collective_rpc) only after the baseline
     accuracy eval; accuracy is compared before and after recovery, mirroring
     test_elastic_ep.py.
+    EOS is ignored so the stream must reach its fixed token count.
     """
     _install_fault_injection(monkeypatch, tmp_path, rank=1)
     dp_size = 2
@@ -410,6 +411,8 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
             prompt="Hello, my name is",
             max_tokens=max_tokens,
             temperature=0.0,
+            # Enforce fixed-length recovery so EOS cannot bypass the fault.
+            extra_body={"ignore_eos": True},
             stream=True,
             timeout=600.0,
         )
