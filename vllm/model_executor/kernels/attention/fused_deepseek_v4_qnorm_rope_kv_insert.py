@@ -600,11 +600,15 @@ class _PagedInsertKernel(VllmCuTeDSLJitKernel[PagedCompileKey]):
                 if token < n_insert:
                     if cutlass.const_expr(USE_PDL):
                         cute.arch.griddepcontrol_wait()
-                    pos = pos_ids[token]
                     cs_layout = cute.make_layout((2, 4), stride=(4, 1))
                     cos_v = cute.make_rmem_tensor(cs_layout, Float32)
                     sin_v = cute.make_rmem_tensor(cs_layout, Float32)
-                    _load_cos_sin(cos_sin, pos, dim_base, cs_atom, cos_v, sin_v)
+                    # Only rope lanes (dim_base >= NOPE_DIM, 4 of 32) read
+                    # cos_v/sin_v; skip the 128-bit cos/sin loads elsewhere,
+                    # matching the .cu's is_rope_lane guard.
+                    if dim_base >= Int32(NOPE_DIM):
+                        pos = pos_ids[token]
+                        _load_cos_sin(cos_sin, pos, dim_base, cs_atom, cos_v, sin_v)
                     elems = cute.make_rmem_tensor((ELEMS_PER_LANE,), Float32)
                     words = cute.make_rmem_tensor((BF16_WORDS_PER_LANE,), Uint32)
                     cute.copy(load_atom, kv[token, Int32(lane), None], words[None])
@@ -690,11 +694,13 @@ class _PagedInsertKernel(VllmCuTeDSLJitKernel[PagedCompileKey]):
                     cute.arch.griddepcontrol_wait()
                 if slot < Int32(HQ):
                     if cutlass.const_expr(APPLY_Q_ROPE):
-                        pos = pos_ids[token]
                         cs_layout = cute.make_layout((2, 4), stride=(4, 1))
                         cos_v = cute.make_rmem_tensor(cs_layout, Float32)
                         sin_v = cute.make_rmem_tensor(cs_layout, Float32)
-                        _load_cos_sin(cos_sin, pos, dim_base, cs_atom, cos_v, sin_v)
+                        # Same rope-lane guard as the KV slot above.
+                        if dim_base >= Int32(NOPE_DIM):
+                            pos = pos_ids[token]
+                            _load_cos_sin(cos_sin, pos, dim_base, cs_atom, cos_v, sin_v)
                     elems = cute.make_rmem_tensor((ELEMS_PER_LANE,), Float32)
                     words = cute.make_rmem_tensor((BF16_WORDS_PER_LANE,), Uint32)
                     if cutlass.const_expr(Q_INTERLEAVED):
