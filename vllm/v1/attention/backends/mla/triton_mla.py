@@ -141,6 +141,11 @@ class TritonMLABackend(MLACommonBackend):
         return True
 
     @classmethod
+    def supports_sliding_window(cls) -> bool:
+        # Decode only (windowed DSpark drafts); prefill raises.
+        return True
+
+    @classmethod
     def supports_non_causal(cls) -> bool:
         # DSpark non-causal blocks are flattened to single-token decode rows in
         # TritonMLAImpl.forward_mqa (decode_attention_fwd has no causal flag /
@@ -181,12 +186,17 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             **mla_args,
         )
 
-        unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
+        unsupported_features = [alibi_slopes, logits_soft_cap]
         if any(unsupported_features):
             raise NotImplementedError(
                 "TritonMLAImpl does not support one of the following: "
-                "alibi_slopes, sliding_window, logits_soft_cap"
+                "alibi_slopes, logits_soft_cap"
             )
+        # Each decode row attends to the last `decode_sliding_window` keys.
+        self.decode_sliding_window = sliding_window
+        assert sliding_window is None or self.dcp_world_size == 1, (
+            "Sliding-window Triton MLA does not support decode context parallelism"
+        )
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError(
@@ -243,6 +253,12 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             self.kv_lora_rank,
         )
 
+    def forward_mha(self, *args, **kwargs) -> None:
+        if self.decode_sliding_window is not None:
+            # Windowed DSpark drafts only run non-causal decode blocks.
+            raise NotImplementedError("Sliding-window Triton MLA prefill")
+        return super().forward_mha(*args, **kwargs)
+
     def forward_mqa(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
@@ -268,9 +284,10 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         if envs.VLLM_BATCH_INVARIANT:
             num_kv_splits = 1
         else:
-            num_kv_splits = _compute_num_kv_splits(
-                attn_metadata.max_seq_len, self._sm_count
-            )
+            max_kv_len = attn_metadata.max_seq_len
+            if self.decode_sliding_window is not None:
+                max_kv_len = min(max_kv_len, self.decode_sliding_window)
+            num_kv_splits = _compute_num_kv_splits(max_kv_len, self._sm_count)
 
         # NOTE: the +1 stores the LogSumExp (LSE) that the stage2 kernel uses to
         # merge partial attention outputs across splits. The scratch is served
@@ -340,6 +357,7 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             k_scale=layer._k_scale,
             v_scale=layer._k_scale,
             is_mla=True,
+            sliding_window=self.decode_sliding_window,
         )
 
         return o, lse

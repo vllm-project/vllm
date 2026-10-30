@@ -226,6 +226,7 @@ from vllm.config import (
 from vllm.config.cache import CacheDType
 from vllm.distributed.parallel_state import (
     get_dcp_group,
+    get_dcp_world_size_and_rank,
     get_tp_group,
     is_global_first_rank,
 )
@@ -503,6 +504,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 kv_cache_dtype,
             )
 
+        if sliding_window is not None and kv_cache_dtype in (
+            "fp8_ds_mla",
+            "nvfp4_ds_mla",
+        ):
+            raise ValueError(
+                f"Sliding-window MLA does not support kv_cache_dtype={kv_cache_dtype}."
+            )
         dtype = torch.get_default_dtype()
         if attn_backend is not None:
             assert attn_backend.is_mla(), (
@@ -518,6 +526,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 use_mla=True,
                 use_sparse=use_sparse,
                 num_heads=self.num_heads,
+                has_sliding_window=sliding_window is not None,
             )
 
         normalized_kv_cache_dtype = _canonicalize_sparse_mla_kv_cache_dtype(
@@ -1392,6 +1401,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             return SlidingWindowMLASpec(
                 **common_kwargs,
                 sliding_window=self.sliding_window,
+                non_causal_multi_token_decode=self.non_causal_multi_token_decode,
             )
         spec = MLAAttentionSpec(
             **common_kwargs,
@@ -2308,6 +2318,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             speculative_config is None
             or getattr(speculative_config, "method", None) != "dspark"
             or parallel_config.decode_context_parallel_size <= 1
+            or not self.kv_cache_spec.dcp_sharded
         ):
             return
 
@@ -2445,11 +2456,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         )
         attention_layer = self.compilation_config.static_forward_context[layer_names[0]]
 
-        try:
-            self.dcp_world_size = get_dcp_group().world_size
-        except AssertionError:
-            # DCP might not be initialized in testing
-            self.dcp_world_size = 1
+        self.dcp_world_size, _ = get_dcp_world_size_and_rank(kv_cache_spec.dcp_sharded)
         self.dcp_local_block_size = parallel_config.cp_kv_cache_interleave_size
         self.dcp_virtual_block_size = self.dcp_local_block_size * self.dcp_world_size
         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size

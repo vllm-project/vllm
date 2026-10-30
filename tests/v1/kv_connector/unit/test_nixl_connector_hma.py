@@ -34,6 +34,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheTensor,
     MLAAttentionSpec,
+    SlidingWindowMLASpec,
 )
 
 from .utils import (
@@ -83,6 +84,7 @@ def region_pull_worker():
         ],
     )
     worker._group_spec_types = (MLAAttentionSpec, MLAAttentionSpec)
+    worker._dcp_replicated_groups = set()
     worker.region_group_ids = [0, 1]
     worker.dst_region_group_ids = {"P": [0, 0]}
     worker.num_regions = 2
@@ -252,6 +254,60 @@ def test_dcp_region_pull(region_pull_worker, num_pages, region_groups):
         if num_pages
         else None
     )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("tp_rank", [0, 3])
+def test_dcp_pull_reads_replicated_draft_group_from_one_rank(
+    region_pull_worker, tp_rank
+):
+    """A DCP prefill keeps its sliding-window MLA draft whole on every rank:
+    read each target page from its DCP rank and the draft group from one rank."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        RemoteMeta,
+        ReqMeta,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import TPMapping
+
+    worker = region_pull_worker
+    worker.tp_rank = tp_rank
+    worker._group_spec_types = (MLAAttentionSpec, SlidingWindowMLASpec)
+    worker._dcp_replicated_groups = {1}
+    worker.dst_region_group_ids = {"P": [0, 1]}
+    worker.dst_uses_region_group_mapping = {"P": True}
+    worker._uses_region_group_mapping = True
+    remote = worker.transfer_topo.get_engine_info.return_value
+    remote.remote_tp_size = remote.remote_dcp_size = 4
+    remote.remote_physical_blocks_per_logical = 1
+    ranks = tuple(range(4))
+    worker.tp_mappings["P"] = TPMapping((ranks, ranks), ranks, {r: r for r in ranks}, 0)
+    worker.dst_xfer_side_handles = {"P": {r: 1000 + r for r in ranks}}
+    worker._remote_agents = {"P": {(0, r): f"P-rank{r}" for r in ranks}}
+    # 8 pages: target pages are interleaved over the 4 remote DCP ranks (2 remote
+    # blocks each), the draft window keeps the last 3 pages on every rank.
+    local = [list(range(30, 38)), [45, 46, 47]]
+    meta = ReqMeta(
+        local,
+        local,
+        tp_size=4,
+        local_num_computed_blocks=(0, 0),
+        remote=RemoteMeta([[10, 11], [20, 21, 22, 23]], "localhost", 1, "P", "P-req"),
+    )
+    worker._read_blocks_for_req("request", meta)
+    reads = {
+        call.kwargs["remote_xfer_side_handle"] - 1000: list(
+            zip(
+                call.kwargs["local_block_descs_ids"],
+                call.kwargs["remote_block_descs_ids"],
+            )
+        )
+        for call in worker._read_blocks_mixed.call_args_list
+    }
+    for rank in ranks:
+        expected = [(30 + rank + 4 * i, 10 + i) for i in range(2)]
+        if rank == tp_rank:
+            expected += [(100 + 45 + i, 100 + 21 + i) for i in range(3)]
+        assert reads[rank] == expected
 
 
 @pytest.mark.cpu_test
