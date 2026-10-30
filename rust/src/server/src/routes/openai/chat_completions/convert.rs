@@ -57,6 +57,8 @@ pub(super) struct ResponseOptions {
     /// The request's `return_tokens_as_token_ids`; `None` falls back to the
     /// server's `--return-tokens-as-token-ids`.
     pub return_tokens_as_token_ids: Option<bool>,
+    /// Whether to return the weight-version spans on each finished choice.
+    pub return_weight_versions: bool,
     /// Whether the request forces one named function tool.
     pub is_named_tool_choice: bool,
 }
@@ -80,11 +82,7 @@ pub(super) fn prepare_chat_request(
     .map_err(|error| text_submit_error("invalid prompt truncation", error))?;
 
     let request_id = format!("chatcmpl-{}", ctx.request_id);
-    let response_model = lora_resolution
-        .lora_request
-        .as_ref()
-        .map(|request| request.lora_name.clone())
-        .unwrap_or_else(|| lora_resolution.model_names.first().cloned().unwrap_or_default());
+    let response_model = lora_resolution.response_model();
     let include_reasoning = request.include_reasoning;
     let echo = request
         .echo
@@ -229,6 +227,7 @@ pub(super) fn prepare_chat_request(
             echo,
             return_token_ids: request.return_token_ids.unwrap_or(false),
             return_tokens_as_token_ids: request.return_tokens_as_token_ids,
+            return_weight_versions: request.return_weight_versions.unwrap_or(false),
             is_named_tool_choice,
         },
         chat_request,
