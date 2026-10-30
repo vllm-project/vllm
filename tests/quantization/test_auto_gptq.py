@@ -260,6 +260,18 @@ def test_auto_gptq_moe_quant_method_follows_checkpoint(
         UnquantizedFusedMoEMethod,
     )
 
+    # MTP experts the checkpoint did quantize keep the quantized method.
+    config = _gptq_config(
+        modules_in_block_to_quantize=[
+            f"{layer_prefix}.mlp.experts.{expert}.{proj}"
+            for layer_prefix in ("model.layers.0", "mtp.layers.0")
+            for expert in range(4)
+            for proj in ("gate_proj", "up_proj", "down_proj")
+        ]
+    )
+    for prefix in ("model.layers.0.mlp.experts", "mtp.layers.0.mlp.experts"):
+        assert isinstance(config.get_quant_method(layer, prefix), quantized_method)
+
     # Negative dynamic rules exclude the layer on either path.
     config = _gptq_config(dynamic={r"-:.*mtp.*": {}})
     assert isinstance(
