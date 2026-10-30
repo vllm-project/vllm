@@ -719,13 +719,13 @@ def test_sparse_group_miss_registers_shared_prefix_junction():
     request = _make_partial_tail_request(scheduler)
     request.shared_prefix_boundary = 0
     stored: set[OffloadKey] = set()
-    scheduler.manager.lookup.side_effect = _hybrid_lookup(stored)
+    _as_mock(scheduler.manager.lookup).side_effect = _hybrid_lookup(stored)
 
     assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
     assert request.shared_prefix_boundary == 16
 
     # The recompute's Mamba state at the junction is handed off and stored.
-    scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
+    _as_mock(scheduler.manager.prepare_store).side_effect = lambda keys, req_context: (
         generate_store_output(keys)
     )
     jobs = scheduler._build_aligned_boundary_store_jobs({"req": [(1, 77, 16)]})
@@ -742,7 +742,7 @@ def test_shared_prefix_junction_is_not_lowered():
     request = _make_partial_tail_request(scheduler)
     # e.g. a longer junction from the local prefix cache
     request.shared_prefix_boundary = 24
-    scheduler.manager.lookup.side_effect = _hybrid_lookup(set())
+    _as_mock(scheduler.manager.lookup).side_effect = _hybrid_lookup(set())
 
     assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
     assert request.shared_prefix_boundary == 24
@@ -752,7 +752,7 @@ def test_no_shared_prefix_junction_when_sparse_group_hits():
     scheduler = _make_sparse_retention_scheduler()
     request = _make_partial_tail_request(scheduler)
     request.shared_prefix_boundary = 0
-    scheduler.manager.lookup.return_value = LookupResult.HIT
+    _as_mock(scheduler.manager.lookup).return_value = LookupResult.HIT
 
     tokens, _ = scheduler.get_num_new_matched_tokens(request, 0)
     assert tokens == 28
@@ -1827,12 +1827,12 @@ def test_finish_mid_prefill_stores_only_computed_blocks(
     runner.scheduler.finish_requests(req_id, finish_status)
     metadata = runner.scheduler.schedule().kv_connector_metadata
     assert isinstance(metadata, OffloadingConnectorMetadata)
-    stored_blocks = sorted(
-        int(block_id)
-        for job in metadata.store_jobs.values()
-        if job.req_id == req_id
-        for block_id in job.src_spec.block_ids
-    )
+    stored_blocks: list[int] = []
+    for job in metadata.store_jobs.values():
+        if job.req_id == req_id:
+            assert isinstance(job.src_spec, GPULoadStoreSpec)
+            stored_blocks.extend(int(block_id) for block_id in job.src_spec.block_ids)
+    stored_blocks.sort()
     assert not stored_blocks, (
         f"{finish_status.name}: stored {len(stored_blocks)} blocks {stored_blocks} "
         f"but only {6 // block_size} full block(s) were computed "
