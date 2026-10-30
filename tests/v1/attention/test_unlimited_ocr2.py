@@ -43,6 +43,15 @@ def test_extra_response_marker_restarts_final_page_offset():
     # Routing follows response markers even when RoPE has reached its last bucket.
     assert query_page.tolist() == [-1, 0, 0, 0, -1, 0, 0, 1, 1]
 
+    from vllm.model_executor.layers.dash_attention import prompt_page_positions
+
+    positions = prompt_page_positions(
+        roles.tolist(), {"image_token_id": 1, "page_token_id": 2}
+    )
+    # The transport must retain routing pages beyond the final RoPE bucket.
+    assert (positions[1] - 1).tolist() == query_page.tolist()
+    assert positions[0].tolist() == tok.tolist()
+
 
 @pytest.mark.parametrize("nq", [1, 17, 200])
 def test_selected_remote_and_local_overlap_is_counted_once(nq):
@@ -498,15 +507,24 @@ def test_chunked_prefill_matches_full_prompt_across_page_and_block_boundaries(ba
 
 
 @pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER"])
-def test_recomputed_output_remains_outside_remote_input_prefix(backend):
+@pytest.mark.parametrize("extra_marker", [False, True])
+@pytest.mark.parametrize("tail_tokens", [1, 2])
+def test_recomputed_output_remains_outside_remote_input_prefix(
+    backend, extra_marker, tail_tokens
+):
     """Recomputing after preemption must match R-SWA token-by-token decode."""
     from vllm.model_executor.layers.dash_attention import prompt_page_positions
-    from vllm.v1.attention.ops.dash_attention import paged_dash_prefill
+    from vllm.v1.attention.ops.dash_attention import (
+        paged_dash_decode,
+        paged_dash_prefill,
+    )
 
     torch.manual_seed(73)
     device, dtype = "cuda", torch.bfloat16
     prompt = [2] + [1] * 38 + [2] + [1] * 30 + [0] * 3
     output = [0] * 5 + [2] + [0] * 70 + [2] + [0] * 65
+    if extra_marker:
+        output += [2] + [0] * 65
     roles = torch.tensor(prompt + output, device=device)
     length, h, d, block_size = len(roles), 2, 128, 16
     sp = {
@@ -546,7 +564,7 @@ def test_recomputed_output_remains_outside_remote_input_prefix(backend):
     )
     # Include a chunk crossing the prompt/output boundary and one containing
     # only output; the prompt also ends in the middle of a summary block.
-    for start, end in [(0, 80), (80, length)]:
+    for start, end in [(0, 80), (80, length - tail_tokens)]:
         actual = paged_dash_prefill(
             q[start:end],
             k[start:end],
@@ -568,6 +586,51 @@ def test_recomputed_output_remains_outside_remote_input_prefix(backend):
         torch.testing.assert_close(
             actual, expected[start:end], atol=0.00390625, rtol=0.01
         )
+
+    # A recomputation tail can enter either the prefill or single-token branch.
+    start = length - tail_tokens
+    prefix = torch.tensor([len(prompt)], device=device, dtype=torch.int32)
+    if tail_tokens == 1:
+        actual = paged_dash_decode(
+            q[start:],
+            k[start:],
+            v[start:],
+            iq[start:],
+            ik[start:],
+            roles[start:],
+            cache,
+            table,
+            torch.tensor([length], device=device, dtype=torch.int32),
+            slots[start:],
+            cls,
+            sp,
+            0,
+            512,
+            prefix,
+            backend=backend,
+            cached_summaries=True,
+            positions=positions[:, start:],
+        )
+    else:
+        actual = paged_dash_prefill(
+            q[start:],
+            k[start:],
+            v[start:],
+            iq[start:],
+            ik[start:],
+            roles[start:],
+            positions[:, start:],
+            cache,
+            table,
+            length,
+            slots[start:],
+            cls,
+            sp,
+            0,
+            backend,
+            prefix_lens=prefix,
+        )
+    torch.testing.assert_close(actual, expected[start:], atol=0.00390625, rtol=0.01)
 
 
 def test_flashinfer_plan_cache_is_bounded_without_invalidating_graphs():

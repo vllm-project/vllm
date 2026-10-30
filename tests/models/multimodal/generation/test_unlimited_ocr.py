@@ -238,3 +238,87 @@ def test_unlimited_ocr2_chunked_prefill_under_encoder_pressure(
         for output in outputs:
             for text in expected:
                 assert text in output.outputs[0].text
+
+
+@pytest.mark.core_model
+@pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER"])
+def test_unlimited_ocr2_excess_markers_survive_preemption(
+    vllm_runner, monkeypatch, backend
+):
+    """Recomputation preserves raw logits after routing passes the last page."""
+    import torch
+
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    requests = []
+    for idx in range(2):
+        pages = []
+        for text in [
+            f"The access code is ORANGE {2468 + idx}.",
+            f"The invoice total is {125 + idx} dollars.",
+        ]:
+            image = Image.new("RGB", (1024, 1024), "white")
+            ImageDraw.Draw(image).text(
+                (70, 200), text, fill="black", font=ImageFont.load_default(size=40)
+            )
+            pages.append(image)
+        requests.append(
+            {
+                "prompt": "<PAGE><image><PAGE><image>Multi page parsing.",
+                "multi_modal_data": {"image": pages},
+            }
+        )
+    with vllm_runner(
+        "baidu/Unlimited-OCR-2",
+        max_model_len=1024,
+        max_num_seqs=2,
+        max_num_batched_tokens=128,
+        num_gpu_blocks_override=80,
+        kv_cache_memory_bytes=1024**3,
+        enable_chunked_prefill=True,
+        enable_prefix_caching=False,
+        enforce_eager=True,
+        attention_config={"backend": backend},
+        logprobs_mode="raw_logits",
+        disable_log_stats=False,
+        mm_encoder_attn_backend="TORCH_SDPA",
+        mm_processor_kwargs={"crop_mode": False},
+        limit_mm_per_prompt={"image": 2},
+    ) as runner:
+        page_id = runner.llm.get_tokenizer().convert_tokens_to_ids("<PAGE>")
+        sampling = SamplingParams(
+            temperature=0,
+            min_tokens=192,
+            max_tokens=192,
+            ignore_eos=True,
+            allowed_token_ids=[page_id],
+            logprobs=0,
+        )
+        baseline = [runner.llm.generate([request], sampling)[0] for request in requests]
+        assert (
+            sum(
+                m.value
+                for m in runner.llm.get_metrics()
+                if m.name == "vllm:num_preemptions"
+            )
+            == 0
+        )
+        outputs = runner.llm.generate(requests, sampling)
+        assert (
+            sum(
+                m.value
+                for m in runner.llm.get_metrics()
+                if m.name == "vllm:num_preemptions"
+            )
+            > 0
+        )
+        for before, after in zip(baseline, outputs):
+            expected, actual = before.outputs[0], after.outputs[0]
+            assert actual.token_ids == expected.token_ids == [page_id] * 192
+            # Raw scores are measured before the forced-token mask. Allow BF16
+            # variation across batch sizes and recomputation chunk boundaries.
+            torch.testing.assert_close(
+                torch.tensor([p[page_id].logprob for p in actual.logprobs]),
+                torch.tensor([p[page_id].logprob for p in expected.logprobs]),
+                atol=0.5,
+                rtol=0,
+            )

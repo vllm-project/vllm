@@ -432,7 +432,9 @@ def _prefill_metadata(
     row = tl.program_id(0)
     count = -tl.load(Positions + 3 * PS + row) - 1
     if (count >= 0) & (tl.load(Slots + row) >= 0):
-        page = tl.load(Positions + PS + row).to(tl.int32)
+        page = tl.minimum(
+            tl.load(Positions + PS + row), tl.load(Positions + 2 * PS + row)
+        ).to(tl.int32)
         byte = tl.arange(0, 4)
         if tl.load(Positions + row) == 0:
             count_block = tl.load(T + row * TS + page // B).to(tl.int64)
@@ -479,13 +481,14 @@ def paged_dash_prefill(
 ):
     """Extend a prompt using paged history and full-prompt page coordinates."""
     n, h, dim = k.shape
-    coords = torch.stack(
-        (positions[0], positions[1], positions[2], positions[1] - 1), -1
-    ).to(torch.int32)
-    q = page_rope(q, positions[0], positions[1], sp, main=True)
-    k = page_rope(k, positions[0], positions[1], sp, main=True)
-    iq = page_rope(iq, positions[0], positions[1], sp, main=False)
-    ik = page_rope(ik, positions[0], positions[1], sp, main=False)
+    page = torch.minimum(positions[1], positions[2])
+    coords = torch.stack((positions[0], page, positions[2], positions[1] - 1), -1).to(
+        torch.int32
+    )
+    q = page_rope(q, positions[0], page, sp, main=True)
+    k = page_rope(k, positions[0], page, sp, main=True)
+    iq = page_rope(iq, positions[0], page, sp, main=False)
+    ik = page_rope(ik, positions[0], page, sp, main=False)
     cb, ch, ct, _ = cache.stride()
     b = cache.shape[2]
     _write[(n, h + 1)](
@@ -597,8 +600,9 @@ def paged_dash_decode(
         max_model_len,
     )
     if positions is not None:
+        page = torch.minimum(positions[1], positions[2])
         prompt = torch.stack(
-            (positions[0], positions[1], positions[2], positions[1] - 1), -1
+            (positions[0], page, positions[2], positions[1] - 1), -1
         ).to(torch.int32)
         coords = torch.where((positions[3] < 0)[:, None], prompt, coords)
     q = decode_page_rope(q, coords[:, 0], coords[:, 1], sp, main=True)
