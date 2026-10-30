@@ -37,7 +37,7 @@ use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::graceful::GracefulShutdown;
 use hyper_util::service::TowerToHyperService;
-pub use render::{RenderConfig, serve_render};
+pub use render::{RenderConfig, RenderDtype, serve_render};
 pub use routes::openai::utils::types::ReasoningEffort;
 use tokio::time::{Instant, sleep_until};
 use tokio_util::sync::CancellationToken;

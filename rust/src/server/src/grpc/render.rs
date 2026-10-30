@@ -27,6 +27,7 @@ use vllm_text::{
 
 use super::convert::{self, json_to_proto_struct};
 use super::inference::text_error_to_status;
+use super::media;
 use super::pb;
 use super::pb::render_server::{Render, RenderServer};
 use crate::error::ApiError;
@@ -40,7 +41,8 @@ pub(crate) type RenderGrpcService<S> = RenderServer<RenderServiceImpl<S>>;
 pub(crate) trait RenderContext: Send + Sync + 'static {
     fn chat_processor(&self) -> &ChatRequestProcessor;
     fn text_processor(&self) -> &TextRequestProcessor;
-    fn served_model_names(&self) -> &[String];
+    /// Whether `model` names a served model or LoRA adapter.
+    fn is_served_model(&self, model: &str) -> impl Future<Output = bool> + Send;
 }
 
 impl RenderContext for AppState {
@@ -52,8 +54,9 @@ impl RenderContext for AppState {
         self.chat.text().request_processor()
     }
 
-    fn served_model_names(&self) -> &[String] {
-        AppState::served_model_names(self)
+    async fn is_served_model(&self, model: &str) -> bool {
+        let resolution = self.resolve_model_with_loras(Some(model)).await;
+        resolution.model_names.iter().any(|name| name == model)
     }
 }
 
@@ -66,8 +69,8 @@ impl RenderContext for RenderState {
         &self.text
     }
 
-    fn served_model_names(&self) -> &[String] {
-        &self.served_model_names
+    async fn is_served_model(&self, model: &str) -> bool {
+        self.model_names().iter().any(|name| name == model)
     }
 }
 
@@ -88,9 +91,18 @@ impl<S: RenderContext> Render for RenderServiceImpl<S> {
         &self,
         request: Request<pb::TokenizeRequest>,
     ) -> Result<Response<pb::TokenizeResponse>, Status> {
-        let chat = request.into_inner().chat.unwrap_or_default();
+        let pb::TokenizeRequest {
+            chat,
+            omit_media_kwargs,
+        } = request.into_inner();
         let span = info_span!("grpc_render", rpc = "Tokenize");
-        let result = tokenize(self.state.as_ref(), chat).instrument(span.clone()).await;
+        let result = tokenize(
+            self.state.as_ref(),
+            chat.unwrap_or_default(),
+            omit_media_kwargs,
+        )
+        .instrument(span.clone())
+        .await;
         log_failure(&span, &result);
         result.map(Response::new)
     }
@@ -122,8 +134,10 @@ fn log_failure<T>(span: &tracing::Span, result: &Result<T, Status>) {
 async fn tokenize(
     state: &impl RenderContext,
     chat: pb::ChatRequest,
+    omit_media_kwargs: bool,
 ) -> Result<pb::TokenizeResponse, Status> {
-    let chat_request = to_chat_request(state, chat)?;
+    check_model(state, &chat.model).await?;
+    let chat_request = to_chat_request(chat)?;
     let structured_outputs = chat_request.sampling_params.structured_outputs.clone();
 
     let (text_request, _) = state
@@ -133,6 +147,9 @@ async fn tokenize(
         .map_err(chat_error_to_status)?;
     let prepared = state.text_processor().prepare(text_request).map_err(text_error_to_status)?;
     let text_request = prepared.text_request;
+    let media = (prepared.generate_request.mm_features.into_iter().flatten())
+        .map(|feature| media::feature_to_proto(feature, !omit_media_kwargs))
+        .try_collect()?;
 
     // A parser-built output grammar replaces the request's structured output.
     let structural_tag = text_request
@@ -161,6 +178,7 @@ async fn tokenize(
 
     Ok(pb::TokenizeResponse {
         prompt_token_ids: prepared.generate_request.prompt_token_ids,
+        media,
         structural_tag,
         skip_special_tokens: text_request.decode_options.skip_special_tokens,
         engine_reasoning_gate,
@@ -174,18 +192,22 @@ async fn detokenize(
     let pb::DetokenizeRequest {
         chat,
         prompt_token_ids,
-        token_ids,
-        finish_info,
+        output,
     } = request;
-    let chat_request = to_chat_request(state, chat.unwrap_or_default())?;
+    let output = output.unwrap_or_default();
+    let logprobs = convert::output_logprobs_from_proto(&output)?;
+    let chat = chat.unwrap_or_default();
+    check_model(state, &chat.model).await?;
+    let chat_request = to_chat_request(chat)?;
     let collected = state
         .chat_processor()
         .detokenize(
             chat_request,
             state.text_processor(),
             prompt_token_ids,
-            token_ids,
-            finish_reason_from_proto(finish_info.as_ref()),
+            output.token_ids,
+            logprobs,
+            finish_reason_from_proto(output.finish_info.as_ref()),
         )
         .await
         .map_err(chat_error_to_status)?;
@@ -203,6 +225,24 @@ async fn detokenize(
             })
             .collect(),
         num_reasoning_tokens: collected.usage.reasoning_tokens as u32,
+        logprobs: collected
+            .logprobs
+            .map(|logprobs| logprobs.positions)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|position| pb::TokenLogprobs {
+                tokens: position
+                    .entries
+                    .into_iter()
+                    .map(|entry| pb::DecodedTokenLogprob {
+                        id: entry.token_id,
+                        token: entry.token,
+                        logprob: entry.logprob,
+                        rank: entry.rank,
+                    })
+                    .collect(),
+            })
+            .collect(),
     })
 }
 
@@ -233,17 +273,17 @@ fn finish_reason_from_proto(finish_info: Option<&pb::FinishInfo>) -> FinishReaso
 // Request conversion
 // ========================================================================================
 
-fn to_chat_request(
-    state: &impl RenderContext,
-    chat: pb::ChatRequest,
-) -> Result<ChatRequest, Status> {
-    if !chat.model.is_empty() && !state.served_model_names().contains(&chat.model) {
-        return Err(Status::not_found(format!(
-            "model `{}` not found",
-            chat.model
-        )));
+/// Reject a model that is neither served nor a LoRA adapter. An empty name
+/// selects the default model.
+async fn check_model(state: &impl RenderContext, model: &str) -> Result<(), Status> {
+    if model.is_empty() || state.is_served_model(model).await {
+        Ok(())
+    } else {
+        Err(Status::not_found(format!("model `{model}` not found")))
     }
+}
 
+fn to_chat_request(chat: pb::ChatRequest) -> Result<ChatRequest, Status> {
     let messages: Vec<_> = chat.messages.into_iter().map(message_from_proto).try_collect()?;
     let generation_prompt_mode = normalize_generation_prompt_mode(
         chat.add_generation_prompt,
@@ -321,7 +361,7 @@ fn message_from_proto(message: pb::ChatMessage) -> Result<ChatMessage, Status> {
         tool_call_id,
         tools,
     } = message;
-    let content = content_from_proto(content);
+    let content = content_from_proto(content)?;
     Ok(match role.as_str() {
         "system" => ChatMessage::system(content),
         "user" => ChatMessage::user(content),
@@ -338,10 +378,14 @@ fn message_from_proto(message: pb::ChatMessage) -> Result<ChatMessage, Status> {
             match content {
                 ChatContent::Text(text) => blocks.push(AssistantContentBlock::Text { text }),
                 ChatContent::Parts(parts) => {
-                    blocks.extend(parts.into_iter().map(|part| match part {
-                        ChatContentPart::Text { text } => AssistantContentBlock::Text { text },
-                        _ => unreachable!("proto content parts are text only"),
-                    }))
+                    for part in parts {
+                        let ChatContentPart::Text { text } = part else {
+                            return Err(Status::invalid_argument(
+                                "assistant messages support text content parts only",
+                            ));
+                        };
+                        blocks.push(AssistantContentBlock::Text { text });
+                    }
                 }
             }
             blocks.extend(tool_calls.into_iter().map(|call| {
@@ -358,23 +402,54 @@ fn message_from_proto(message: pb::ChatMessage) -> Result<ChatMessage, Status> {
     })
 }
 
-fn content_from_proto(content: Option<pb::chat_message::Content>) -> ChatContent {
+fn content_from_proto(content: Option<pb::chat_message::Content>) -> Result<ChatContent, Status> {
     use pb::chat_content_part::Part;
     use pb::chat_message::Content;
 
-    match content {
+    Ok(match content {
         None => ChatContent::Text(String::new()),
         Some(Content::Text(text)) => ChatContent::Text(text),
         Some(Content::Parts(parts)) => ChatContent::Parts(
             parts
                 .parts
                 .into_iter()
-                .filter_map(|part| match part.part? {
-                    Part::Text(text) => Some(ChatContentPart::text(text)),
+                .filter_map(|part| part.part)
+                .map(|part| {
+                    Ok(match part {
+                        Part::Text(text) => ChatContentPart::text(text),
+                        Part::ImageUrl(image) => ChatContentPart::ImageUrl {
+                            image_url: image.url,
+                            detail: image
+                                .detail
+                                .map(|detail| {
+                                    serde_json::from_value(serde_json::Value::String(detail))
+                                        .map_err(|error| {
+                                            Status::invalid_argument(format!(
+                                                "invalid image detail: {error}"
+                                            ))
+                                        })
+                                })
+                                .transpose()?,
+                            uuid: image.uuid,
+                        },
+                        Part::VideoUrl(video) => ChatContentPart::VideoUrl {
+                            video_url: video.url,
+                            uuid: video.uuid,
+                        },
+                        Part::AudioUrl(audio) => ChatContentPart::AudioUrl {
+                            audio_url: audio.url,
+                            uuid: audio.uuid,
+                        },
+                        Part::InputAudio(audio) => ChatContentPart::InputAudio {
+                            data: audio.data,
+                            format: audio.format,
+                            uuid: audio.uuid,
+                        },
+                    })
                 })
-                .collect(),
+                .collect::<Result<_, Status>>()?,
         ),
-    }
+    })
 }
 
 fn tools_from_proto(tools: Vec<pb::ChatTool>) -> Result<Vec<ChatTool>, Status> {

@@ -69,7 +69,7 @@ use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
-use vllm_llm::{GenerateOutput, GeneratePromptInfo, Llm};
+use vllm_llm::{GenerateOutput, GeneratePromptInfo, Llm, Logprobs};
 use vllm_text::{Prompt, TextLlm, TextRequest, TextRequestProcessor};
 
 /// Chat request preparation shared by inference and render-only frontends.
@@ -113,7 +113,9 @@ impl ChatRequestProcessor {
         }
     }
 
-    /// Create a render-only processor that rejects multimodal requests.
+    /// Create a processor for a frontend without an engine handshake. It
+    /// rejects multimodal requests until [`Self::with_model_dtype`] sets the
+    /// dtype to encode media tensors in.
     pub fn render_only(backend: DynChatBackend) -> Self {
         Self {
             backend,
@@ -125,6 +127,20 @@ impl ChatRequestProcessor {
             reasoning_effort_map: HashMap::new(),
             exclude_tools_when_tool_choice_none: false,
         }
+    }
+
+    /// Configure the downstream engine's model dtype, enabling multimodal
+    /// preprocessing when the backend supports it.
+    pub fn with_model_dtype(mut self, model_dtype: ModelDtype) -> Self {
+        self.model_dtype = Some(model_dtype);
+        self
+    }
+
+    /// Configure the downstream engine's context length, which bounds the
+    /// token budget image processors may size images by.
+    pub fn with_max_model_len(mut self, max_model_len: Option<u32>) -> Self {
+        self.max_model_len = max_model_len.map(|len| len as usize);
+        self
     }
 
     /// Configure the parser selections used to prepare generation requests.
@@ -319,6 +335,7 @@ impl ChatRequestProcessor {
         text_processor: &TextRequestProcessor,
         prompt_token_ids: Vec<u32>,
         output_token_ids: Vec<u32>,
+        logprobs: Option<Logprobs>,
         finish_reason: FinishReason,
     ) -> Result<CollectedAssistantMessage> {
         request.validate()?;
@@ -334,7 +351,7 @@ impl ChatRequestProcessor {
                 prompt_token_id_logprobs: None,
             })),
             token_ids: output_token_ids,
-            logprobs: None,
+            logprobs,
             finish_reason: Some(finish_reason),
             prompt_cache_usage: Default::default(),
             kv_transfer_params: None,

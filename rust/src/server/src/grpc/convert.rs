@@ -7,6 +7,7 @@
 use tonic::Status;
 use uuid::Uuid;
 use vllm_engine_core_client::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
+use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs, TokenLogprob};
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
@@ -441,6 +442,46 @@ fn prompt_logprobs_to_proto(
     ranks.insert(0, 0);
     candidates.insert(0, pb::CandidateTokenInfo { tokens: vec![] });
     (logprobs, ranks, candidates)
+}
+
+/// Rebuild output logprobs from the flat proto arrays of a `SequenceOutput`;
+/// the inverse of [`positions_to_proto`]. `None` when the output carries no
+/// logprobs.
+pub(super) fn output_logprobs_from_proto(
+    output: &pb::SequenceOutput,
+) -> Result<Option<Logprobs>, Status> {
+    if output.logprobs.is_empty() {
+        return Ok(None);
+    }
+    let len = output.token_ids.len();
+    if output.logprobs.len() != len
+        || output.ranks.len() != len
+        || !(output.candidate_tokens.is_empty() || output.candidate_tokens.len() == len)
+    {
+        return Err(Status::invalid_argument(
+            "output logprobs, ranks and candidate_tokens must align with token_ids",
+        ));
+    }
+    let positions = (0..len)
+        .map(|index| {
+            let sampled = TokenLogprob {
+                token_id: output.token_ids[index],
+                logprob: output.logprobs[index],
+                rank: output.ranks[index],
+            };
+            let candidates = output.candidate_tokens.get(index).into_iter().flat_map(|info| {
+                info.tokens.iter().map(|token| TokenLogprob {
+                    token_id: token.id,
+                    logprob: token.logprob,
+                    rank: token.rank,
+                })
+            });
+            PositionLogprobs {
+                entries: std::iter::once(sampled).chain(candidates).collect(),
+            }
+        })
+        .collect();
+    Ok(Some(Logprobs { positions }))
 }
 
 /// Shared helper: convert a slice of decoded position logprobs to flat proto

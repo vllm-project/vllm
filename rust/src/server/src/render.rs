@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail};
@@ -14,12 +15,13 @@ use vllm_chat::{
     ChatRequestProcessor, ChatTemplateContentFormatOption, LoadModelBackendsOptions,
     ParserSelection, RendererSelection, ToolStrictLevel, load_model_backends,
 };
+use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_text::TextRequestProcessor;
 use vllm_text::backend::hf::{HfOverrides, ModelSource};
 
 use crate::{
     DEFAULT_REQUEST_BODY_LIMIT_BYTES, GRPC_KEEPALIVE_INTERVAL, GRPC_KEEPALIVE_TIMEOUT,
-    HttpListenerMode, ReasoningEffort, TlsConfig, grpc,
+    HttpListenerMode, LoraModulePath, ReasoningEffort, TlsConfig, grpc,
     listener::{Listener, MaybeTlsListener},
     tls,
 };
@@ -51,6 +53,13 @@ pub struct RenderConfig {
     pub chat_template_content_format: ChatTemplateContentFormatOption,
     pub max_model_len: Option<u32>,
     pub max_logprobs: Option<i32>,
+    /// LoRA adapters whose names are accepted as the request model. Rendering
+    /// does not depend on adapter weights, so they are not loaded.
+    pub lora_modules: Vec<LoraModulePath>,
+    /// Disable multimodal preprocessing and treat the model as language-only.
+    pub language_model_only: bool,
+    /// Dtype multimodal tensors are produced in; must match the engine's.
+    pub dtype: RenderDtype,
     pub tls: Option<TlsConfig>,
 }
 
@@ -69,6 +78,51 @@ impl RenderConfig {
     }
 }
 
+/// Model dtype selection for the render server, which has no engine to report
+/// it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RenderDtype {
+    /// Follow the model config, like vLLM's `--dtype auto`.
+    #[default]
+    Auto,
+    Fixed(ModelDtype),
+}
+
+impl FromStr for RenderDtype {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Ok(match value {
+            "auto" => Self::Auto,
+            "half" | "float16" => Self::Fixed(ModelDtype::Float16),
+            "bfloat16" => Self::Fixed(ModelDtype::BFloat16),
+            "float" | "float32" => Self::Fixed(ModelDtype::Float32),
+            _ => {
+                return Err(format!(
+                    "unsupported dtype `{value}`; expected auto, half, float16, bfloat16, float, or float32"
+                ));
+            }
+        })
+    }
+}
+
+impl RenderDtype {
+    /// Resolve the dtype from the checkpoint's config dtype the way vLLM's
+    /// `auto` does: float32 or missing dtypes run in bfloat16.
+    fn resolve(self, config_dtype: Option<&str>) -> Result<ModelDtype> {
+        match self {
+            Self::Fixed(dtype) => Ok(dtype),
+            Self::Auto => match config_dtype.unwrap_or("float32") {
+                "float16" => Ok(ModelDtype::Float16),
+                "bfloat16" | "float32" => Ok(ModelDtype::BFloat16),
+                other => {
+                    bail!("cannot infer the model dtype from config dtype `{other}`; pass --dtype")
+                }
+            },
+        }
+    }
+}
+
 pub(crate) struct RenderState {
     pub(crate) model: String,
     pub(crate) served_model_names: Vec<String>,
@@ -77,6 +131,17 @@ pub(crate) struct RenderState {
     pub(crate) max_model_len: Option<u32>,
     pub(crate) text: TextRequestProcessor,
     pub(crate) chat: ChatRequestProcessor,
+    pub(crate) lora_modules: Vec<LoraModulePath>,
+}
+
+impl RenderState {
+    /// Served model names followed by LoRA adapter names.
+    pub(crate) fn model_names(&self) -> Vec<String> {
+        (self.served_model_names.iter())
+            .chain(self.lora_modules.iter().map(|module| &module.name))
+            .cloned()
+            .collect()
+    }
 }
 
 async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
@@ -89,7 +154,7 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
             hf_overrides: config.hf_overrides.clone(),
             generation_config: Default::default(),
             renderer: config.renderer,
-            language_model_only: true,
+            language_model_only: config.language_model_only,
             chat_template: config.chat_template.clone(),
             trust_request_chat_template: config.trust_request_chat_template,
             chat_template_content_format: config.chat_template_content_format,
@@ -101,10 +166,19 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
     .context("failed to load renderer/tokenizer backends")?;
     let served_model_names =
         crate::effective_served_model_names(&config.model, &config.served_model_name);
+    // Only multimodal preprocessing reads the dtype, so text-only models never
+    // fail on an unusual config dtype.
+    let model_dtype = loaded
+        .chat_backend
+        .multimodal_model_info()
+        .is_some()
+        .then(|| config.dtype.resolve(loaded.text_backend.config_dtype()))
+        .transpose()?;
     let max_model_len = config.max_model_len.unwrap_or(u32::MAX);
     let text = TextRequestProcessor::new(loaded.text_backend, max_model_len)
         .with_max_logprobs(config.max_logprobs);
-    let chat = ChatRequestProcessor::render_only(loaded.chat_backend)
+    let mut chat = ChatRequestProcessor::render_only(loaded.chat_backend)
+        .with_max_model_len(config.max_model_len)
         .with_parser_selections(
             config.tool_call_parser.clone(),
             config.reasoning_parser.clone(),
@@ -118,12 +192,20 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
                 .collect(),
         )
         .with_exclude_tools_when_tool_choice_none(config.exclude_tools_when_tool_choice_none);
+    if let Some(model_dtype) = model_dtype {
+        info!(
+            dtype = model_dtype.as_str(),
+            "multimodal preprocessing enabled"
+        );
+        chat = chat.with_model_dtype(model_dtype);
+    }
     Ok(Arc::new(RenderState {
         model: config.model.clone(),
         served_model_names,
         max_model_len: config.max_model_len,
         text,
         chat,
+        lora_modules: config.lora_modules.clone(),
     }))
 }
 
@@ -229,6 +311,25 @@ pub async fn serve_render(config: RenderConfig, shutdown: CancellationToken) -> 
 mod tests {
     use super::*;
 
+    #[test]
+    fn render_dtype_auto_follows_config_like_vllm() {
+        let auto = RenderDtype::Auto;
+        assert_eq!(auto.resolve(Some("float16")).unwrap(), ModelDtype::Float16);
+        assert_eq!(
+            auto.resolve(Some("bfloat16")).unwrap(),
+            ModelDtype::BFloat16
+        );
+        assert_eq!(auto.resolve(Some("float32")).unwrap(), ModelDtype::BFloat16);
+        assert_eq!(auto.resolve(None).unwrap(), ModelDtype::BFloat16);
+        assert!(auto.resolve(Some("float8_e4m3fn")).is_err());
+
+        let fixed: RenderDtype = "half".parse().unwrap();
+        assert_eq!(
+            fixed.resolve(Some("bfloat16")).unwrap(),
+            ModelDtype::Float16
+        );
+    }
+
     #[tokio::test]
     async fn serve_render_rejects_unknown_parser_before_startup() {
         let shutdown = CancellationToken::new();
@@ -256,6 +357,9 @@ mod tests {
                 chat_template_content_format: ChatTemplateContentFormatOption::Auto,
                 max_model_len: Some(128),
                 max_logprobs: None,
+                lora_modules: Vec::new(),
+                language_model_only: false,
+                dtype: RenderDtype::Auto,
                 tls: None,
             },
             shutdown,

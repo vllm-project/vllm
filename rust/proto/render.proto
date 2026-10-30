@@ -29,6 +29,10 @@ service Render {
 
 message TokenizeRequest {
   ChatRequest chat = 1;
+  // Leave `kwargs` unset in `TokenizeResponse.media`, keeping the hashes and
+  // placeholder ranges. For callers that only route on the prompt layout, such
+  // as cache-aware routers; such media cannot be sent to Inference.Generate.
+  bool omit_media_kwargs = 2;
 }
 
 // Copy each field into the GenerateRequest sent to Inference.Generate.
@@ -44,6 +48,9 @@ message TokenizeResponse {
   bool skip_special_tokens = 3;
   // Send as `engine_reasoning_gate`.
   EngineReasoningGate engine_reasoning_gate = 4;
+  // Preprocessed media items, ordered by their placeholder ranges in
+  // `prompt_token_ids`. Send as `media`.
+  repeated MediaItem media = 5;
 }
 
 // ======================================================================================
@@ -55,11 +62,11 @@ message DetokenizeRequest {
   ChatRequest chat = 1;
   // `TokenizeResponse.prompt_token_ids`, used to initialize the parsers.
   repeated uint32 prompt_token_ids = 2;
-  // All output token IDs from Inference.Generate, in order.
-  repeated uint32 token_ids = 3;
-  // Finish info from the final Inference.Generate response. Omitted means the
-  // output did not end with a stop token.
-  FinishInfo finish_info = 4;
+  // The complete output from Inference.Generate: `GenerateResponse.outputs` of
+  // a unary call, or the streamed chunks concatenated. Reads `token_ids`,
+  // the logprob fields when present, and `finish_info`; an omitted
+  // `finish_info` means the output did not end with a stop token.
+  SequenceOutput output = 3;
 }
 
 message DetokenizeResponse {
@@ -70,6 +77,23 @@ message DetokenizeResponse {
   repeated ChatToolCall tool_calls = 3;
   // Number of output tokens attributed to reasoning.
   uint32 num_reasoning_tokens = 4;
+  // Decoded logprobs, one entry per output token, when the output carries
+  // logprobs.
+  repeated TokenLogprobs logprobs = 5;
+}
+
+// Decoded logprobs for one output position.
+message TokenLogprobs {
+  // The sampled token first, then the candidate tokens.
+  repeated DecodedTokenLogprob tokens = 1;
+}
+
+message DecodedTokenLogprob {
+  uint32 id = 1;
+  // Decoded token text.
+  string token = 2;
+  float logprob = 3;
+  uint32 rank = 4;
 }
 
 // ======================================================================================
@@ -139,10 +163,38 @@ message ChatContentParts {
 }
 
 message ChatContentPart {
-  // TODO: support multimodal parts.
   oneof part {
     string text = 1;
+    ChatImageUrl image_url = 2;
+    ChatMediaUrl video_url = 3;
+    ChatMediaUrl audio_url = 4;
+    ChatInputAudio input_audio = 5;
   }
+}
+
+message ChatImageUrl {
+  // http(s) or data URL.
+  string url = 1;
+  // "auto", "low" or "high".
+  optional string detail = 2;
+  // Caller-assigned item ID, used in place of the content hash for caching.
+  optional string uuid = 3;
+}
+
+message ChatMediaUrl {
+  // http(s) or data URL.
+  string url = 1;
+  // Caller-assigned item ID, used in place of the content hash for caching.
+  optional string uuid = 2;
+}
+
+message ChatInputAudio {
+  // Base64-encoded audio bytes.
+  string data = 1;
+  // Audio format, such as "wav" or "mp3".
+  optional string format = 2;
+  // Caller-assigned item ID, used in place of the content hash for caching.
+  optional string uuid = 3;
 }
 
 message ChatTool {

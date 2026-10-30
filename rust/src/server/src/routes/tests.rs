@@ -774,15 +774,28 @@ fn test_render_app_with(
     tool_call_parser: ParserSelection,
     reasoning_parser: ParserSelection,
 ) -> axum::Router {
+    build_render_router(Arc::new(test_render_state(
+        max_model_len,
+        tool_call_parser,
+        reasoning_parser,
+    )))
+}
+
+fn test_render_state(
+    max_model_len: Option<u32>,
+    tool_call_parser: ParserSelection,
+    reasoning_parser: ParserSelection,
+) -> RenderState {
     let backend = Arc::new(FakeChatBackend::new());
-    build_render_router(Arc::new(RenderState {
+    RenderState {
         model: "backend-model".to_string(),
         served_model_names: vec!["render-model".to_string()],
         max_model_len,
         text: TextRequestProcessor::new(backend.clone(), max_model_len.unwrap_or(u32::MAX)),
         chat: ChatRequestProcessor::render_only(backend)
             .with_parser_selections(tool_call_parser, reasoning_parser),
-    }))
+        lora_modules: Vec::new(),
+    }
 }
 
 async fn test_app_with_dev_mode(dev_mode_enabled: bool) -> axum::Router {
@@ -1722,6 +1735,49 @@ async fn render_list_models_reports_configured_max_model_len() {
     }
 }
 
+/// Like Python, render accepts a LoRA adapter name as the model and passes it
+/// through to the generate request; `/v1/models` lists the adapter.
+#[tokio::test]
+async fn render_accepts_lora_adapter_model() {
+    let mut app = build_render_router(Arc::new(RenderState {
+        lora_modules: vec!["adapter-a=org/adapter-a".parse().expect("lora module")],
+        ..test_render_state(Some(128), ParserSelection::Auto, ParserSelection::Auto)
+    }));
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions/render")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "adapter-a",
+                        "messages": [{"role": "user", "content": "hello"}],
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(json["model"], "adapter-a");
+
+    let response = app
+        .call(Request::builder().uri("/v1/models").body(Body::empty()).expect("build request"))
+        .await
+        .expect("call app");
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    let lora_card = &json["data"][1];
+    assert_eq!(lora_card["id"], "adapter-a");
+    assert_eq!(lora_card["root"], "org/adapter-a");
+    assert_eq!(lora_card["parent"], "render-model");
+}
+
 /// Like Python's `TokenizeParams` check, a requested output budget above the
 /// context window is a 400, while one that fits the window is accepted.
 #[tokio::test]
@@ -1804,6 +1860,7 @@ async fn render_glm_tools_for_none_follow_server_exclusion_setting() {
             text: TextRequestProcessor::new(Arc::new(FakeChatBackend::new()), 4096),
             chat: ChatRequestProcessor::render_only(backend.clone())
                 .with_exclude_tools_when_tool_choice_none(exclude),
+            lora_modules: Vec::new(),
         }));
         let (status, json) = post_json(
             &mut app,

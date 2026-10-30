@@ -45,29 +45,41 @@ async fn health() -> StatusCode {
     StatusCode::OK
 }
 
+/// Base cards carry `max_model_len` and `root` = model path; LoRA cards carry
+/// `root` = adapter path and `parent` = base model.
 async fn list_models(State(state): State<Arc<RenderState>>) -> Json<ListModelsResponse> {
     let created = unix_timestamp() as i64;
+    let base_cards = state.served_model_names.iter().map(|model| ModelObject {
+        id: model.clone(),
+        object: "model".to_string(),
+        created,
+        owned_by: "vllm".to_string(),
+        root: Some(state.model.clone()),
+        parent: None,
+        max_model_len: state.max_model_len,
+    });
+    let primary = state.served_model_names.first().cloned().unwrap_or_default();
+    let lora_cards = state.lora_modules.iter().map(|module| ModelObject {
+        id: module.name.clone(),
+        object: "model".to_string(),
+        created,
+        owned_by: "vllm".to_string(),
+        root: Some(module.path.clone()),
+        parent: Some(module.base_model_name.clone().unwrap_or_else(|| primary.clone())),
+        max_model_len: None,
+    });
     Json(ListModelsResponse {
         object: "list".to_string(),
-        data: state
-            .served_model_names
-            .iter()
-            .map(|model| ModelObject {
-                id: model.clone(),
-                object: "model".to_string(),
-                created,
-                owned_by: "vllm".to_string(),
-                root: Some(state.model.clone()),
-                parent: None,
-                max_model_len: state.max_model_len,
-            })
-            .collect(),
+        data: base_cards.chain(lora_cards).collect(),
     })
 }
 
+/// Accept LoRA adapter names as the model, like Python. Rendering does not use
+/// the adapter, so no LoRA request is resolved; the adapter name is passed
+/// through as the generate request's model.
 fn model_resolution(state: &RenderState) -> LoraModelResolution {
     LoraModelResolution {
-        model_names: state.served_model_names.clone(),
+        model_names: state.model_names(),
         lora_request: None,
     }
 }
@@ -126,7 +138,7 @@ fn lower_render_request(
         .then_some(text_request.reasoning_parser_kwargs),
         other: Default::default(),
     };
-    validate_generate_request(&request, &state.served_model_names)?;
+    validate_generate_request(&request, &state.model_names())?;
     Ok(request)
 }
 

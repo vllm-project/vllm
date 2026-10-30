@@ -11,10 +11,11 @@ use tonic::Status;
 use url::Url;
 use vllm_chat::MediaContentPart;
 use vllm_chat::multimodal::MultimodalInput;
+use vllm_engine_core_client::protocol::encode_msgpack;
 use vllm_engine_core_client::protocol::multimodal::{
     MmFeatureSpec, MmKwargsItem, MmModality, PlaceholderRange,
 };
-use vllm_engine_core_client::protocol::tensor::WireTensor;
+use vllm_engine_core_client::protocol::tensor::{WireArrayData, WireTensor};
 
 use super::pb;
 
@@ -111,6 +112,47 @@ fn decode_inline_mm_kwargs(bytes: &[u8]) -> Result<MmKwargsItem, Status> {
         ));
     }
     Ok(kwargs)
+}
+
+/// Convert one prepared feature into the preprocessed-media form accepted by
+/// [`from_proto`]. Without `include_kwargs`, the processed tensors are left
+/// out and only the hash and placeholder range remain.
+pub(super) fn feature_to_proto(
+    feature: MmFeatureSpec,
+    include_kwargs: bool,
+) -> Result<pb::MediaItem, Status> {
+    let kwargs = match feature.data.filter(|_| include_kwargs) {
+        Some(data) => Some(
+            encode_msgpack(&data).map_err(|error| Status::internal(error.to_report_string()))?,
+        ),
+        None => None,
+    };
+    let is_embed = match feature.mm_position.is_embed {
+        Some(WireTensor {
+            data: WireArrayData::RawView(mask),
+            ..
+        }) => mask.iter().map(|&byte| byte != 0).collect(),
+        Some(_) => return Err(Status::internal("is_embed mask must be stored inline")),
+        None => Vec::new(),
+    };
+    Ok(pb::MediaItem {
+        modality: match feature.modality {
+            MmModality::Image => pb::Modality::Image,
+            MmModality::Video => pb::Modality::Video,
+            MmModality::Audio => pb::Modality::Audio,
+        } as i32,
+        source: Some(pb::media_item::Source::Features(
+            pb::PreprocessedMediaFeatures {
+                kwargs,
+                identifier: feature.identifier,
+                offset: feature.mm_position.offset as u64,
+                length: feature.mm_position.length as u64,
+                mm_hash: feature.mm_hash,
+                is_embed,
+            },
+        )),
+        ..Default::default()
+    })
 }
 
 fn mixed_media_error() -> Status {

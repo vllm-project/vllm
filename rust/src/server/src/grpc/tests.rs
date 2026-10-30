@@ -37,7 +37,7 @@ use vllm_engine_core_client::mock_engine::{
     MockEngineConfig, connect_to_bootstrapped_frontend, default_ready_response,
 };
 use vllm_engine_core_client::protocol::decode_value;
-use vllm_engine_core_client::protocol::dtype::TensorDtype;
+use vllm_engine_core_client::protocol::dtype::{ModelDtype, TensorDtype};
 use vllm_engine_core_client::protocol::handshake::{EngineCoreReadyResponse, KvEventsConfig};
 use vllm_engine_core_client::protocol::multimodal::{
     MmBatchedField, MmField, MmFieldElem, MmKwargValue,
@@ -325,6 +325,14 @@ fn multimodal_backend() -> Arc<dyn ChatTextBackend> {
 fn multimodal_backend_with_limits(
     limit_mm_per_prompt: MmLimitPerPrompt,
 ) -> Arc<dyn ChatTextBackend> {
+    Arc::new(FakeMultimodalBackend {
+        model_info: qwen_multimodal_model_info(limit_mm_per_prompt),
+    })
+}
+
+fn qwen_multimodal_model_info(
+    limit_mm_per_prompt: MmLimitPerPrompt,
+) -> vllm_chat::multimodal::MultimodalModelInfo {
     let config_path = std::env::temp_dir().join(format!(
         "vllm-grpc-qwen-config-{}.json",
         uuid::Uuid::new_v4()
@@ -347,7 +355,7 @@ fn multimodal_backend_with_limits(
     .expect("load multimodal info")
     .expect("qwen multimodal info is registered");
     let _ = fs::remove_file(config_path);
-    Arc::new(FakeMultimodalBackend { model_info })
+    model_info
 }
 
 /// Build the gRPC service + mock engine that serves a single request with the
@@ -2878,15 +2886,20 @@ impl ChatRenderer for FakeRenderBackend {
     }
 }
 
-fn render_service() -> RenderServiceImpl<RenderState> {
+fn render_state() -> RenderState {
     let backend = Arc::new(FakeRenderBackend);
-    RenderServiceImpl::new(Arc::new(RenderState {
+    RenderState {
         model: "Qwen/Qwen3-0.6B".to_string(),
         served_model_names: vec!["render-model".to_string()],
         max_model_len: Some(1024),
         text: TextRequestProcessor::new(backend.clone(), 1024),
         chat: ChatRequestProcessor::render_only(backend),
-    }))
+        lora_modules: Vec::new(),
+    }
+}
+
+fn render_service() -> RenderServiceImpl<RenderState> {
+    RenderServiceImpl::new(Arc::new(render_state()))
 }
 
 fn weather_chat_request() -> pb::ChatRequest {
@@ -2913,6 +2926,14 @@ fn render_token_ids(text: &str) -> Vec<u32> {
     FakeRenderBackend.tokenizer().encode(text, false).expect("encode")
 }
 
+fn render_eos_finish_info() -> pb::FinishInfo {
+    pb::FinishInfo {
+        finish_reason: pb::finish_info::FinishReason::Stop as i32,
+        stop_reason: Some(pb::finish_info::StopReason::EosTokenId(RENDER_EOS_TOKEN_ID)),
+        ..Default::default()
+    }
+}
+
 async fn render_tokenize(
     service: &RenderServiceImpl<RenderState>,
     chat: pb::ChatRequest,
@@ -2920,6 +2941,7 @@ async fn render_tokenize(
     service
         .tokenize(tonic::Request::new(pb::TokenizeRequest {
             chat: Some(chat),
+            ..Default::default()
         }))
         .await
         .expect("tokenize")
@@ -2964,11 +2986,31 @@ async fn render_tokenize_rejects_unknown_model() {
                 model: "other-model".to_string(),
                 ..weather_chat_request()
             }),
+            ..Default::default()
         }))
         .await
         .expect_err("unknown model");
 
     assert_eq!(status.code(), tonic::Code::NotFound);
+}
+
+#[tokio::test]
+async fn render_tokenize_accepts_lora_adapter_model() {
+    let service = RenderServiceImpl::new(Arc::new(RenderState {
+        lora_modules: vec!["adapter-a=org/adapter-a".parse().expect("lora module")],
+        ..render_state()
+    }));
+    let chat = pb::ChatRequest {
+        model: "adapter-a".to_string(),
+        ..weather_chat_request()
+    };
+
+    let rendered = render_tokenize(&service, chat).await;
+
+    assert_eq!(
+        rendered.prompt_token_ids,
+        render_token_ids("user: Weather in Paris?\nassistant:")
+    );
 }
 
 #[tokio::test]
@@ -3024,10 +3066,9 @@ async fn render_detokenize_parses_reasoning_and_tool_calls() {
         .detokenize(tonic::Request::new(pb::DetokenizeRequest {
             chat: Some(chat),
             prompt_token_ids: rendered.prompt_token_ids,
-            token_ids,
-            finish_info: Some(pb::FinishInfo {
-                finish_reason: pb::finish_info::FinishReason::Stop as i32,
-                stop_reason: Some(pb::finish_info::StopReason::EosTokenId(RENDER_EOS_TOKEN_ID)),
+            output: Some(pb::SequenceOutput {
+                token_ids,
+                finish_info: Some(render_eos_finish_info()),
                 ..Default::default()
             }),
         }))
@@ -3051,7 +3092,282 @@ async fn render_detokenize_parses_reasoning_and_tool_calls() {
                 },
             ],
             num_reasoning_tokens: 10,
+            logprobs: [],
         }
     "#]]
     .assert_debug_eq(&response);
+}
+
+#[tokio::test]
+async fn render_detokenize_decodes_output_logprobs() {
+    let service = render_service();
+    let chat = weather_chat_request();
+    let rendered = render_tokenize(&service, chat.clone()).await;
+    let candidate = |id: u32, logprob: f32, rank: u32| pb::candidate_token_info::TokenInfo {
+        id,
+        logprob,
+        rank,
+    };
+
+    let response = service
+        .detokenize(tonic::Request::new(pb::DetokenizeRequest {
+            chat: Some(chat),
+            prompt_token_ids: rendered.prompt_token_ids,
+            output: Some(pb::SequenceOutput {
+                token_ids: vec![u32::from(b'h'), u32::from(b'i'), RENDER_EOS_TOKEN_ID],
+                logprobs: vec![-0.1, -0.2, -0.3],
+                ranks: vec![1, 2, 1],
+                candidate_tokens: vec![
+                    pb::CandidateTokenInfo {
+                        tokens: vec![candidate(u32::from(b'h'), -0.1, 1)],
+                    },
+                    pb::CandidateTokenInfo {
+                        tokens: vec![candidate(u32::from(b'o'), -0.15, 1)],
+                    },
+                    pb::CandidateTokenInfo { tokens: vec![] },
+                ],
+                finish_info: Some(render_eos_finish_info()),
+                ..Default::default()
+            }),
+        }))
+        .await
+        .expect("detokenize")
+        .into_inner();
+
+    assert_eq!(response.content, "hi");
+    expect_test::expect![[r#"
+        [
+            TokenLogprobs {
+                tokens: [
+                    DecodedTokenLogprob {
+                        id: 104,
+                        token: "h",
+                        logprob: -0.1,
+                        rank: 1,
+                    },
+                    DecodedTokenLogprob {
+                        id: 104,
+                        token: "h",
+                        logprob: -0.1,
+                        rank: 1,
+                    },
+                ],
+            },
+            TokenLogprobs {
+                tokens: [
+                    DecodedTokenLogprob {
+                        id: 105,
+                        token: "i",
+                        logprob: -0.2,
+                        rank: 2,
+                    },
+                    DecodedTokenLogprob {
+                        id: 111,
+                        token: "o",
+                        logprob: -0.15,
+                        rank: 1,
+                    },
+                ],
+            },
+            TokenLogprobs {
+                tokens: [
+                    DecodedTokenLogprob {
+                        id: 61456,
+                        token: "",
+                        logprob: -0.3,
+                        rank: 1,
+                    },
+                ],
+            },
+        ]
+    "#]]
+    .assert_debug_eq(&response.logprobs);
+}
+
+#[tokio::test]
+async fn render_detokenize_rejects_misaligned_logprobs() {
+    let status = render_service()
+        .detokenize(tonic::Request::new(pb::DetokenizeRequest {
+            chat: Some(weather_chat_request()),
+            output: Some(pb::SequenceOutput {
+                token_ids: vec![u32::from(b'h'), u32::from(b'i')],
+                logprobs: vec![-0.1],
+                ranks: vec![1],
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
+        .await
+        .expect_err("misaligned logprobs");
+
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+}
+
+/// Qwen2-VL-like backend whose renderer writes one `<|image_pad|>` per image.
+struct FakeMultimodalRenderBackend {
+    model_info: vllm_chat::multimodal::MultimodalModelInfo,
+}
+
+impl TextBackend for FakeMultimodalRenderBackend {
+    fn tokenizer(&self) -> DynTokenizer {
+        Arc::new(TestTokenizer::new().with_regular_token("<|image_pad|>", QWEN_IMAGE_TOKEN_ID))
+    }
+
+    fn model_id(&self) -> &str {
+        "test-model"
+    }
+}
+
+impl ChatBackend for FakeMultimodalRenderBackend {
+    fn chat_renderer(&self) -> DynChatRenderer {
+        Arc::new(FakeImagePadRenderer)
+    }
+
+    fn multimodal_model_info(&self) -> Option<&vllm_chat::multimodal::MultimodalModelInfo> {
+        Some(&self.model_info)
+    }
+
+    fn new_chat_output_processor(
+        &self,
+        request: &mut ChatRequest,
+        options: NewChatOutputProcessorOptions<'_>,
+    ) -> vllm_chat::Result<DynChatOutputProcessor> {
+        Ok(Box::new(DefaultChatOutputProcessor::new(
+            request,
+            self.model_id(),
+            self.tokenizer(),
+            options.tool_call_parser,
+            options.reasoning_parser,
+            options.tool_strict_level,
+        )?))
+    }
+}
+
+struct FakeImagePadRenderer;
+
+impl ChatRenderer for FakeImagePadRenderer {
+    fn render(&self, request: &ChatRequest) -> vllm_chat::Result<RenderedPrompt> {
+        let mut prompt = String::new();
+        for message in &request.messages {
+            if let vllm_chat::ChatMessage::User {
+                content: vllm_chat::ChatContent::Parts(parts),
+            } = message
+            {
+                for part in parts {
+                    match part {
+                        vllm_chat::ChatContentPart::Text { text } => prompt.push_str(text),
+                        _ => prompt.push_str("<|image_pad|>"),
+                    }
+                }
+            }
+        }
+        Ok(RenderedPrompt {
+            prompt: Prompt::Text(prompt),
+            media_order: None,
+            effective_template_kwargs: Default::default(),
+        })
+    }
+}
+
+fn multimodal_render_service() -> RenderServiceImpl<RenderState> {
+    let backend = Arc::new(FakeMultimodalRenderBackend {
+        model_info: qwen_multimodal_model_info(Default::default()),
+    });
+    RenderServiceImpl::new(Arc::new(RenderState {
+        text: TextRequestProcessor::new(backend.clone(), 1024),
+        chat: ChatRequestProcessor::render_only(backend).with_model_dtype(ModelDtype::BFloat16),
+        ..render_state()
+    }))
+}
+
+fn image_chat_request() -> pb::ChatRequest {
+    use pb::chat_content_part::Part;
+
+    pb::ChatRequest {
+        messages: vec![pb::ChatMessage {
+            role: "user".to_string(),
+            content: Some(pb::chat_message::Content::Parts(pb::ChatContentParts {
+                parts: vec![
+                    pb::ChatContentPart {
+                        part: Some(Part::ImageUrl(pb::ChatImageUrl {
+                            url: TINY_PNG_DATA_URI.to_string(),
+                            ..Default::default()
+                        })),
+                    },
+                    pb::ChatContentPart {
+                        part: Some(Part::Text("Describe".to_string())),
+                    },
+                ],
+            })),
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+}
+
+/// Tokenize preprocesses images into expanded placeholders plus the inline
+/// features that `Inference.Generate` accepts as preprocessed media.
+#[tokio::test]
+async fn render_tokenize_returns_preprocessed_media_for_generate() {
+    let rendered = render_tokenize(&multimodal_render_service(), image_chat_request()).await;
+
+    let [item] = rendered.media.as_slice() else {
+        panic!("expected one media item: {:?}", rendered.media);
+    };
+    let Some(pb::media_item::Source::Features(features)) = &item.source else {
+        panic!("expected preprocessed features: {item:?}");
+    };
+    let placeholder =
+        &rendered.prompt_token_ids[features.offset as usize..][..features.length as usize];
+    assert!(placeholder.len() > 1, "placeholder is expanded");
+    assert!(placeholder.iter().all(|&id| id == QWEN_IMAGE_TOKEN_ID));
+    assert!(features.mm_hash.is_some());
+
+    // The media decodes the way Inference.Generate decodes it.
+    let vllm_chat::multimodal::MultimodalInput::Preprocessed(decoded) =
+        super::media::from_proto(rendered.media).expect("decode media")
+    else {
+        panic!("expected preprocessed media");
+    };
+    assert!(decoded[0].data.is_some());
+}
+
+/// Detokenize does not fetch or preprocess the chat request's media.
+#[tokio::test]
+async fn render_detokenize_accepts_multimodal_chat() {
+    let service = multimodal_render_service();
+    let rendered = render_tokenize(&service, image_chat_request()).await;
+
+    let response = service
+        .detokenize(tonic::Request::new(pb::DetokenizeRequest {
+            chat: Some(image_chat_request()),
+            prompt_token_ids: rendered.prompt_token_ids,
+            output: Some(pb::SequenceOutput {
+                token_ids: vec![u32::from(b'o'), u32::from(b'k')],
+                ..Default::default()
+            }),
+        }))
+        .await
+        .expect("detokenize")
+        .into_inner();
+
+    assert_eq!(response.content, "ok");
+}
+
+#[tokio::test]
+async fn render_tokenize_can_omit_media_kwargs() {
+    let rendered = multimodal_render_service()
+        .tokenize(tonic::Request::new(pb::TokenizeRequest {
+            chat: Some(image_chat_request()),
+            omit_media_kwargs: true,
+        }))
+        .await
+        .expect("tokenize")
+        .into_inner();
+
+    let Some(pb::media_item::Source::Features(features)) = &rendered.media[0].source else {
+        panic!("expected preprocessed features");
+    };
+    assert_eq!(features.kwargs, None);
+    assert!(features.mm_hash.is_some());
 }
