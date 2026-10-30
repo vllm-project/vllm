@@ -4,7 +4,7 @@ meta:
   provider: "Muse (Meta)"
   description: "Dense 29.6B vision-language model with a ViT-G/14 perception encoder and 128K context, distilled from Muse Spark for local agentic use. Emits channel-scoped reasoning and XML-style ATEM tool calls rather than JSON, so it needs the dedicated `muse_glimmer` tool-call and reasoning parsers."
   date_added: 2026-08-09
-  date_updated: 2026-09-09
+  date_updated: 2026-10-30
   tasks:
     - text
     - multimodal
@@ -16,6 +16,7 @@ meta:
   default_hardware: dgx_spark_gb10
   hardware:
     gb300: verified
+    h100: supported
     # Single GB10 with 128 GB unified memory. gpu_count is 1, so autoFitTp caps
     # TP at 1 — this is a plain single-card deployment, no sharding.
     dgx_spark_gb10: verified
@@ -116,6 +117,22 @@ variants:
     # from the real files instead — 12.06 GB + 13.36 GB = 25.42 GB x 1.2.
     vram_minimum_gb: 31
     description: "ModelOpt NVFP4 W4A4 — weights and activations at 4 bits, group size 16. 25.42 GB on disk, fits one GPU."
+  redhat_nvfp4:
+    model_id: "RedHatAI/Muse-Glimmer-30B-NVFP4"
+    precision: nvfp4
+    label: "NVFP4 (RedHatAI)"
+    # Estimate pending exact shard-size inspection; do not use for capacity planning yet.
+    vram_minimum_gb: 31
+    description: "RedHatAI NVFP4 checkpoint; 31 GB is an unverified footprint estimate"
+    supported_hardware: [arch:sm100, arch:sm103]
+  redhat_int4:
+    model_id: "RedHatAI/Muse-Glimmer-30B-INT4"
+    precision: int4
+    label: "INT4 (RedHatAI)"
+    # Estimate pending exact shard-size inspection; do not use for capacity planning yet.
+    vram_minimum_gb: 18
+    description: "RedHatAI compressed-tensors INT4 checkpoint"
+    supported_hardware: [arch:sm90, arch:sm100, arch:sm103]
 
 compatible_strategies:
   - single_node_tp
@@ -378,3 +395,8 @@ guide: |
   `[1, 13, 25, 37, 49]`, and ties its embedding and output projection to the
   target — so it stores neither and is useless on its own. It must be paired with
   the specific target it was distilled against, not merely a compatible one.
+
+  ## References
+
+  - RedHatAI NVFP4 checkpoint: https://huggingface.co/RedHatAI/Muse-Glimmer-30B-NVFP4
+  - RedHatAI INT4 checkpoint: https://huggingface.co/RedHatAI/Muse-Glimmer-30B-INT4

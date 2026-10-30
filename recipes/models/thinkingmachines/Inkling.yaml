@@ -4,13 +4,14 @@ meta:
   provider: "Thinking Machines Lab"
   description: "Natively multimodal 1T-parameter MoE from Thinking Machines Lab — text/image/audio in, text out, up to 1M context — with relative attention, short convolution, and shared expert sinks."
   date_added: 2026-07-15
-  date_updated: 2026-08-04
+  date_updated: 2026-10-30
   tasks:
     - multimodal
   performance_headline: "380 tok/s/user with MTP8 (mean acceptance length 4.5) and 140 tok/s/user without MTP on 4× GB200 GPUs"
   related_recipes: []
   hardware:
     gb200: verified
+    h100: supported
     b200: verified
     h200: verified
     mi300x: verified
@@ -172,6 +173,15 @@ variants:
     label: "NVFP4 (RedHat)"
     vram_minimum_gb: 618
     description: "RedHatAI NVFP4 quantization"
+  redhat_nvfp4_fp8_block:
+    model_id: "RedHatAI/Inkling-NVFP4-FP8-BLOCK"
+    precision: nvfp4
+    label: "NVFP4 + FP8 Block (RedHatAI)"
+    precision_hardware:
+      brand: NVIDIA
+    vram_minimum_gb: 618
+    description: "RedHatAI mixed NVFP4 and block-FP8 checkpoint; capacity estimate follows the existing RedHatAI NVFP4 variant"
+    supported_hardware: [arch:sm90, arch:sm100, arch:sm103]
 
 compatible_strategies:
   - single_node_tp
@@ -352,6 +362,7 @@ guide: |
   ## References
 
   - [TML Inkling (NVFP4)](https://huggingface.co/thinkingmachines/Inkling-NVFP4)
+  - [RedHatAI mixed NVFP4-FP8 checkpoint](https://huggingface.co/RedHatAI/Inkling-NVFP4-FP8-BLOCK)
   - [TML Inkling (BF16)](https://huggingface.co/thinkingmachines/Inkling)
   - [Inkling MXFP4](https://huggingface.co/lightseekorg/Inkling-MXFP4)
   - [vLLM integration PR](https://github.com/Inferact/mlj/pull/16)
