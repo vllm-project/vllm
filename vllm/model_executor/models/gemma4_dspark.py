@@ -29,7 +29,6 @@ from .qwen3_dflash import (
     DFlashQwen3Model,
     _dflash_layer_causal,
     _reads_raw_weights,
-    _refill,
 )
 from .qwen3_dspark import (
     DSparkConfidenceHead,
@@ -236,23 +235,15 @@ class Gemma4DSparkModel(DFlashQwen3Model):
     ) -> None:
         self._hidden_norm_weight = self.hidden_norm.weight.data
         self._context_k_projs = [a.k_proj for a in layers_attn]
-        fused_k_weight = fused_k_bias = None
+        self._fused_k_weight: torch.Tensor | None = None
+        self._fused_k_bias: torch.Tensor | None = None
         if _reads_raw_weights(self._context_k_projs):
-            fused_k_weight = _refill(
-                getattr(self, "_fused_k_weight", None),
-                torch.cat([p.weight for p in self._context_k_projs]),
-            )
+            self._fused_k_weight = torch.cat([p.weight for p in self._context_k_projs])
             if has_bias:
-                fused_k_bias = _refill(
-                    getattr(self, "_fused_k_bias", None),
-                    torch.cat([p.bias for p in self._context_k_projs]),
-                )
-        self._fused_k_weight: torch.Tensor | None = fused_k_weight
-        self._fused_k_bias: torch.Tensor | None = fused_k_bias
-        self._k_norm_weights = _refill(
-            getattr(self, "_k_norm_weights", None),
-            torch.stack([a.k_norm.weight.data for a in layers_attn], dim=0),
-        )
+                self._fused_k_bias = torch.cat([p.bias for p in self._context_k_projs])
+        self._k_norm_weights = torch.stack(
+            [a.k_norm.weight.data for a in layers_attn], dim=0
+        ).contiguous()
         # v_norm has no learnable scale; ones matching the K-norm call shape.
         self._v_norm_weights = torch.ones(
             len(layers_attn),
