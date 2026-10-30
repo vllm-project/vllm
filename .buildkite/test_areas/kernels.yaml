@@ -702,6 +702,7 @@ steps:
   commands:
     - nvidia-smi
     - python3 examples/basic/offline_inference/chat.py
+    - pytest -v -s tests/kernels/moe/test_trtllm_bf16_moe.py
     - pytest -v -s tests/kernels/attention/test_attention_selector.py
     - pytest -v -s tests/kernels/attention/test_cache.py -k nvfp4
     - pytest -v -s tests/kernels/attention/test_flashinfer_trtllm_attention.py
@@ -729,7 +730,6 @@ steps:
     - pytest -v -s tests/kernels/quantization/test_mxfp4_qutlass.py
     - pytest -v -s tests/kernels/moe/test_flashinfer.py
     - pytest -v -s tests/kernels/moe/test_trtllm_nvfp4_moe.py
-    - pytest -v -s tests/kernels/moe/test_trtllm_bf16_moe.py
     - pytest -v -s tests/kernels/mamba/test_gdn_prefill_cutedsl.py
   mirror:
     amd:
