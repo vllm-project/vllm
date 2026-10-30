@@ -1242,7 +1242,9 @@ def _fused_moe_lora_shrink(
     a_desc = None
     b_desc = None
     if use_tma and num_slices == 1:
-        b_desc = triton.tools.tensor_descriptor.TensorDescriptor.from_tensor(
+        from triton.tools.tensor_descriptor import TensorDescriptor
+
+        b_desc = TensorDescriptor.from_tensor(
             lora_a_stacked[0],
             [1, 1, shrink_config["BLOCK_SIZE_N"], shrink_config["BLOCK_SIZE_K"]],
         )
@@ -1372,13 +1374,15 @@ def _fused_moe_lora_expand(
     a_desc = None
     b_desc = None
     if use_tma:
+        from triton.tools.tensor_descriptor import TensorDescriptor
+
         if sorted_token_ids is not None:
-            a_desc = triton.tools.tensor_descriptor.TensorDescriptor.from_tensor(
+            a_desc = TensorDescriptor.from_tensor(
                 a_intermediate_cache1,
                 [expand_config["BLOCK_SIZE_M"], expand_config["BLOCK_SIZE_K"]],
             )
         if num_slices == 1:
-            b_desc = triton.tools.tensor_descriptor.TensorDescriptor.from_tensor(
+            b_desc = TensorDescriptor.from_tensor(
                 lora_b_stacked[0],
                 [1, 1, expand_config["BLOCK_SIZE_N"], expand_config["BLOCK_SIZE_K"]],
             )

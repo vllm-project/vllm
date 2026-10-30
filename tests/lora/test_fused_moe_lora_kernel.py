@@ -6,7 +6,11 @@ import random
 import pytest
 import torch
 
-from tests.utils import ensure_current_vllm_config, multi_gpu_test
+from tests.utils import (
+    ensure_current_vllm_config,
+    multi_gpu_test,
+    spawn_new_process_for_each_test,
+)
 from vllm import _custom_ops as ops
 from vllm.distributed import (
     init_distributed_environment,
@@ -453,6 +457,13 @@ def test_fused_moe_lora_kernel_large_rank_fallback(
         torch.testing.assert_close(output.float(), expected, atol=1e-2, rtol=8e-4)
     else:
         torch.testing.assert_close(output, expected, atol=2e-2, rtol=2e-2)
+
+
+@spawn_new_process_for_each_test
+def test_fused_moe_lora_kernel_large_rank_fallback_fresh_process():
+    test_fused_moe_lora_kernel_large_rank_fallback(
+        256, True, 1, torch.bfloat16, DEVICES[0]
+    )
 
 
 def use_fused_moe_lora_kernel_naive(
