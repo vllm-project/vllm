@@ -1008,6 +1008,7 @@ def test_finished_hybrid_tail_restores_every_byte(socket_dir, device):
     output = make_scheduler_output(finished={"tail"})
     try:
         metadata = scheduler.build_connector_meta(output)
+        assert isinstance(metadata, UMBPConnectorMetadata)
         assert len(metadata.store_plans) == 2
         worker.enqueue_stores(metadata)
         worker.wait_for_save()
@@ -1042,7 +1043,9 @@ def test_finished_hybrid_tail_restores_every_byte(socket_dir, device):
             expected = torch.zeros_like(cache)
             expected[block_id] = pages[name]
             assert torch.equal(cache, expected), name
-        counters = worker.get_kv_connector_stats().reduce()
+        connector_stats = worker.get_kv_connector_stats()
+        assert connector_stats is not None
+        counters = connector_stats.reduce()
         page_bytes = sum(group.kv_cache_spec.page_size_bytes for group in groups)
         assert counters["load_num_bytes"] == page_bytes
         assert counters["store_num_bytes"] == page_bytes

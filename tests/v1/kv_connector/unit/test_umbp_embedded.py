@@ -164,10 +164,14 @@ def test_bulk_load_preserves_group_order_failures_and_new_buffers(
         )
         supplied = plans
         if batched:
+            group_ids: list[int] = []
+            for plan in plans:
+                assert plan.group_id is not None
+                group_ids.append(plan.group_id)
             supplied = BlockLoadBatch(
                 [p.key for p in plans],
                 [p.block_id for p in plans],
-                [p.group_id for p in plans],
+                group_ids,
                 "r",
             )
             monkeypatch.setattr(
@@ -225,10 +229,14 @@ def test_bulk_load_falls_back_for_entire_mixed_batch(bulk_worker, special):
         buffers["c"] = torch.empty((16, 32), dtype=torch.uint8)
         worker.register_kv_caches(buffers)
         if special == "batch-subblocks":
+            group_ids: list[int] = []
+            for plan in plans:
+                assert plan.group_id is not None
+                group_ids.append(plan.group_id)
             plans = BlockLoadBatch(
                 [p.key for p in plans],
                 [p.block_id for p in plans],
-                [p.group_id for p in plans],
+                group_ids,
                 "r",
             )
     else:
@@ -304,6 +312,7 @@ def test_runtime_config_resolves_total_embedded_capacity_per_rank():
     ).resolve_for_rank_count(4)
 
     runtime = EmbeddedRuntime.from_config(config)
+    assert isinstance(runtime, EmbeddedRuntime)
     assert runtime.options["capacity_bytes"] == 1024
     assert config.options["total_capacity_bytes"] == 4096
     assert "capacity_bytes" not in config.options
@@ -327,6 +336,7 @@ def test_lookup_sockets_separate_engines_and_data_parallel_ranks(socket_dir):
         handle = EmbeddedRuntime.from_config(
             replace(config, dp_index=dp_index)
         ).create_scheduler_handle("same-model", RankTopology(), None)
+        assert isinstance(handle, _MoriSchedulerHandle)
         return handle._paths[RankTopology().local_namespace]
 
     assert path({}) == path({})
