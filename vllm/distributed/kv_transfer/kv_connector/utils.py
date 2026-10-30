@@ -52,7 +52,8 @@ def get_sliding_window_blocks_per_group(kv_cache_config: KVCacheConfig) -> list[
     """Blocks a connector transfers per transfer group, 0 for non-window groups.
 
     A sliding-window group transfers its window plus the tokens retained below
-    it, and one more block for the window/block boundary overlap.
+    it, and one more block for the window/block boundary overlap. Packed
+    layers share the group's allocation policy and logical block size.
 
     Args:
         kv_cache_config: Config supplying the transfer groups.

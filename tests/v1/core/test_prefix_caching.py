@@ -18,6 +18,7 @@ import torch
 import vllm.v1.core.kv_cache_manager as kv_cache_manager
 import vllm.v1.core.kv_cache_planning as kv_cache_planning
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
+from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm.config import KVTransferConfig, ModelConfig, VllmConfig
 from vllm.distributed.kv_events import (
     MEDIUM_CPU,
@@ -81,8 +82,6 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
-
-from tests.v1.spec_decode.utils import fake_speculative_config
 
 from .utils import full_layer, mamba_layer, new_kv_cache_group, sliding_window_layer
 
@@ -5137,17 +5136,22 @@ def test_eagle_grouped_swa_siblings_use_same_cache_mask():
     assert num_computed_tokens == 8 * block_size
 
 
-def _sliding_window_scheduler_kv_cache_config(packed: bool, block_size: int, drop: bool):
+def _sliding_window_scheduler_kv_cache_config(
+    packed: bool, block_size: int, drop: bool, hash_lookahead: int = 0
+):
     """Full attention plus a four-block sliding window on a KV transfer instance."""
     config = VllmConfig(model_config=ModelConfig(max_model_len=512))
     config.cache_config.kv_cache_layout = "BLHNC" if packed else "LBNHC"
-    config.kv_transfer_config = KVTransferConfig(kv_connector="NixlConnector", kv_role="kv_both")
-    if drop:
+    config.kv_transfer_config = KVTransferConfig(
+        kv_connector="NixlConnector", kv_role="kv_both"
+    )
+    if drop or hash_lookahead:
         config.speculative_config = fake_speculative_config(
             method="eagle",
             use_eagle_block_drop=lambda: True,
             use_multi_module_mtp=lambda: False,
         )
+    config.num_hash_lookahead_tokens = hash_lookahead
     layers = {
         "full": full_layer(
             AttentionSpec(
@@ -5166,13 +5170,20 @@ def _sliding_window_scheduler_kv_cache_config(packed: bool, block_size: int, dro
         ),
     }
     groups = kv_cache_planning.get_global_kv_cache_groups(config, [layers])
-    return KVCacheConfig(
-        num_blocks=100, kv_cache_tensors=[], kv_cache_groups=groups
-    )
+    builder = kv_cache_planning.get_kv_cache_config_builder(config)
+    worker_config = builder.get_kv_cache_config_from_groups(config, groups, 100)
+    return kv_cache_utils.generate_scheduler_kv_cache_config([worker_config])
 
-@pytest.mark.parametrize("drop", [False, True])
+
+@pytest.mark.parametrize(
+    "drop,hash_lookahead",
+    [(False, 0), (True, 0), (False, 1)],
+    ids=["plain", "eagle-drop", "eagle-lookahead"],
+)
 @pytest.mark.parametrize("packed", [False, True])
-def test_sliding_window_resend_hits_after_connector_import(packed, drop):
+def test_sliding_window_resend_hits_after_connector_import(
+    packed, drop, hash_lookahead
+):
     """A prompt longer than the window, imported through a KV connector, must
     serve a resend from the prefix cache like a prompt computed locally. The
     sliding-window lookup scans whole blocks below the window (one more with
@@ -5184,7 +5195,7 @@ def test_sliding_window_resend_hits_after_connector_import(packed, drop):
     block_size = 16
     window = 4 * block_size
     kv_cache_config = _sliding_window_scheduler_kv_cache_config(
-        packed, block_size, drop
+        packed, block_size, drop, hash_lookahead
     )
 
     for num_prompt_tokens in range(window + 1, window + 8 * block_size + 1):
@@ -5195,15 +5206,20 @@ def test_sliding_window_resend_hits_after_connector_import(packed, drop):
             hash_block_size=block_size,
             use_eagle=drop,
             retention_interval=0,
+            num_hash_lookahead_tokens=hash_lookahead,
         )
         token_ids = list(range(num_prompt_tokens))
-        req0 = make_request("0", token_ids, block_size, sha256)
+        req0 = make_request(
+            "0", token_ids, block_size, sha256, num_hash_lookahead_tokens=hash_lookahead
+        )
         assert allocate_external_prefix(manager, req0, num_prompt_tokens) is not None
         # The scheduler caches the loaded blocks once the transfer lands.
         manager.cache_blocks(req0, num_prompt_tokens)
         manager.free(req0)
 
-        req1 = make_request("1", token_ids, block_size, sha256)
+        req1 = make_request(
+            "1", token_ids, block_size, sha256, num_hash_lookahead_tokens=hash_lookahead
+        )
         _, num_computed_tokens, _ = manager.get_computed_blocks(req1)
         # The last token is recomputed; the drop gives up one more block.
         expected = (
@@ -5329,7 +5345,7 @@ def test_sliding_window_connector_import_writes_every_allocated_block(
 ):
     """Every block a KV connector import allocates on the decoder must receive
     the prefill's KV for the same token positions. The sliding-window group
-    retains whole blocks below the window, and ``cache_blocks`` hashes
+    retains whole blocks below the window, and `cache_blocks` hashes
     them after the load: a retained block the connector does not write would
     serve a resend a prefix-cache hit on unwritten KV. Checked for every prompt
     length up to eight blocks past the window, which covers each residue both
