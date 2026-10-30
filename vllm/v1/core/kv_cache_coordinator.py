@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
-from typing import NamedTuple
 
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.core.block_pool import BlockPool
@@ -23,7 +22,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
-    KVCacheGroup,
+    prefix_lookup_groups,
 )
 from vllm.v1.request import Request
 
@@ -598,24 +597,6 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         return hit_blocks, hit_length, 0
 
 
-class SpecGroup(NamedTuple):
-    """KV cache groups with the same ``block_table_key``, batched together for
-    a single cache-hit lookup.
-
-    ``use_eagle`` is True iff any member group is an EAGLE/MTP group. Members
-    are cached and looked up jointly, so the EAGLE last-block drop is
-    necessarily decided for the whole batch.
-    """
-
-    kv_cache_group_spec: KVCacheGroup
-    group_ids: list[int]
-    use_eagle: bool
-
-    @property
-    def is_full_attention(self) -> bool:
-        return issubclass(self.kv_cache_group_spec.manager_cls, FullAttentionManager)
-
-
 class HybridKVCacheCoordinator(KVCacheCoordinator):
     """KV cache coordinator for hybrid models with multiple KV cache types, and
     thus multiple kv cache groups.
@@ -724,30 +705,16 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         """Groups KV cache groups by their manager policy for efficient batch processing
         during cache hit lookup.
         """
-        self.attention_groups: list[SpecGroup] = []
-        for i, g in enumerate(self.kv_cache_config.kv_cache_groups):
-            # Skip groups that opt out of prefix caching (e.g. circular
-            # buffers): their blocks are per-request scratch, never
-            # shareable, so they must not participate in hit lookup (their
-            # manager-level hooks already no-op). Their slot in the per-group
-            # hit tuple stays empty.
-            if not g.prefix_cacheable:
-                continue
-            use_eagle = i in self.drop_eagle_group_ids
-
-            # Try to find an existing group with the same block table key
-            for idx, group in enumerate(self.attention_groups):
-                if (
-                    group.kv_cache_group_spec.block_table_key == g.block_table_key
-                    and self.single_type_managers[group.group_ids[0]].block_pool
-                    is self.single_type_managers[i].block_pool
-                ):
-                    group.group_ids.append(i)
-                    if use_eagle and not group.use_eagle:
-                        self.attention_groups[idx] = group._replace(use_eagle=True)
-                    break
-            else:
-                self.attention_groups.append(SpecGroup(g, [i], use_eagle))
+        # Groups that opt out of prefix caching (e.g. circular buffers) hold
+        # per-request scratch and never take part in hit lookup; their slot in
+        # the per-group hit tuple stays empty.
+        groups = self.kv_cache_config.kv_cache_groups
+        self.attention_groups = [
+            g._replace(
+                use_eagle=any(i in self.drop_eagle_group_ids for i in g.group_ids)
+            )
+            for g in prefix_lookup_groups(groups)
+        ]
 
         assert self.attention_groups, (
             "HybridKVCacheCoordinator requires at least one cacheable group."
@@ -755,7 +722,9 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 
         # Put full attention first: its efficient left-to-right scan provides
         # a tighter initial bound, reducing work for subsequent groups.
-        self.attention_groups.sort(key=lambda g: not g.is_full_attention)
+        self.attention_groups.sort(
+            key=lambda g: not issubclass(g.manager_cls, FullAttentionManager)
+        )
 
         # Dense reference group for per-group lookups (None when the model
         # has no full-attention layers): full attention is downward-closed,
@@ -763,7 +732,9 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         # per-group hits is not consistent at a single boundary (#46453).
         first = self.attention_groups[0]
         self.full_attention_group_id: int | None = (
-            first.group_ids[0] if first.is_full_attention else None
+            first.group_ids[0]
+            if issubclass(first.manager_cls, FullAttentionManager)
+            else None
         )
 
         # Propagate the eagle bit to each manager (default to ``use_eagle=False``).
@@ -833,9 +804,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 
         # Simple hybrid (1 full attn + 1 other): one iteration suffices.
         # Full attn is always first if it exists.
-        is_simple_hybrid = (
-            len(self.attention_groups) == 2
-            and self.attention_groups[0].is_full_attention
+        is_simple_hybrid = len(self.attention_groups) == 2 and issubclass(
+            self.attention_groups[0].manager_cls, FullAttentionManager
         )
 
         # Attention-group indices whose EAGLE drop is verified at the current
@@ -846,17 +816,17 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         while True:
             curr_hit_length = hit_length
 
-            for idx, (kv_cache_group, group_ids, use_eagle) in enumerate(
+            for idx, (manager_config, block_size, group_ids, use_eagle) in enumerate(
                 self.attention_groups
             ):
-                manager_cls = kv_cache_group.manager_cls
+                manager_cls = manager_config.manager_cls
                 first_group_id = group_ids[0]
                 # DCP/PCP shard each block's KV across ranks, so the manager's
                 # effective block size may exceed the spec's.
                 group_block_size = self.single_type_managers[first_group_id].block_size
                 cached_blocks = hit_blocks_by_group[first_group_id]
                 if (
-                    issubclass(kv_cache_group.manager_cls, FullAttentionManager)
+                    issubclass(manager_cls, FullAttentionManager)
                     and cached_blocks is not None
                 ):
                     # Full attention is downward-closed: we only need to look
@@ -891,8 +861,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     max_length=_max_length,
                     kv_cache_group_ids=group_ids,
                     block_pool=self.single_type_managers[first_group_id].block_pool,
-                    block_size=kv_cache_group.block_size,
-                    manager_config=kv_cache_group.manager_config,
+                    block_size=block_size,
+                    manager_config=manager_config,
                     drop_eagle_block=drop_eagle_block,
                     alignment_tokens=self._cache_hit_alignment_tokens,
                     dcp_world_size=self.single_type_managers[
@@ -923,7 +893,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         # Truncate every full-attention group (target and draft) blocks
         # to final hit_length.
         for group in self.attention_groups:
-            if not group.is_full_attention:
+            if not issubclass(group.manager_cls, FullAttentionManager):
                 continue
             manager = self.single_type_managers[group.group_ids[0]]
             if manager.retains_longer_hit:
@@ -959,8 +929,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         hit_blocks: list[list[KVCacheBlock]] = [[] for _ in range(num_groups)]
         hit_lengths: list[int] = [0] * num_groups
 
-        for kv_cache_group, group_ids, use_eagle in self.attention_groups:
-            manager_cls = kv_cache_group.manager_cls
+        for manager_config, block_size, group_ids, use_eagle in self.attention_groups:
+            manager_cls = manager_config.manager_cls
             manager = self.single_type_managers[group_ids[0]]
             lookup_length = max_cache_hit_length
             if use_eagle and not issubclass(manager_cls, MambaManager):
@@ -979,8 +949,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 max_length=lookup_length,
                 kv_cache_group_ids=group_ids,
                 block_pool=manager.block_pool,
-                block_size=kv_cache_group.block_size,
-                manager_config=kv_cache_group.manager_config,
+                block_size=block_size,
+                manager_config=manager_config,
                 drop_eagle_block=use_eagle,
                 alignment_tokens=self._cache_hit_alignment_tokens,
                 dcp_world_size=manager.dcp_world_size,
