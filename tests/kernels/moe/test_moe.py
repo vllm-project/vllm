@@ -83,6 +83,7 @@ def _xpu_qwen3_5_moe(tmp_path, dtype, quantized, rank=0, tp=1, reduce_results=Tr
         initialize_model_parallel,
     )
     from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+    from vllm.model_executor.model_loader.reload import record_metadata_for_reloading
     from vllm.models.qwen3_5.xpu.model import Qwen3_5SparseMoeBlock
     from vllm.utils.torch_utils import set_default_torch_dtype
     from vllm.v1.worker.workspace import init_workspace_manager, reset_workspace_manager
@@ -140,6 +141,7 @@ def _xpu_qwen3_5_moe(tmp_path, dtype, quantized, rank=0, tp=1, reduce_results=Tr
                             if param.dtype != torch.float8_e4m3fn:
                                 values *= 0.0625
                             param.copy_(values.to(param.dtype))
+                record_metadata_for_reloading(block)
                 for layer in block.modules():
                     method = getattr(layer, "quant_method", None)
                     if method is not None:
@@ -213,9 +215,11 @@ def test_xpu_qwen3_5_unsupported_fallback(xpu_qwen3_5_moe, num_tokens):
 
 @pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
 @pytest.mark.parametrize("xpu_qwen3_5_moe", [(torch.float16, True)], indirect=True)
-def test_xpu_qwen3_5_missing_provider_fallback(xpu_qwen3_5_moe):
-    """Run separately in the stock-wheel CI environment without #670."""
-    assert not hasattr(torch.ops._xpu_C, "moe_shared_fused_decode_interface")
+def test_xpu_qwen3_5_missing_provider_fallback(xpu_qwen3_5_moe, monkeypatch):
+    """Missing provider falls back even when native operators are installed."""
+    monkeypatch.setitem(
+        sys.modules, "vllm_xpu_kernels.moe_shared_fused_interface", None
+    )
     _check_xpu_qwen3_5_decode(xpu_qwen3_5_moe, 2, should_fuse=False)
 
 
@@ -246,6 +250,65 @@ def test_xpu_qwen3_5_provider_import_failure_cached(xpu_qwen3_5_moe, monkeypatch
     finally:
         sys.settrace(previous)
     assert failures == 1
+
+
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
+@pytest.mark.parametrize(
+    "xpu_qwen3_5_moe", [(torch.float16, True), (torch.bfloat16, True)], indirect=True
+)
+def test_xpu_qwen3_5_checkpoint_then_kernel_scale_reload(xpu_qwen3_5_moe):
+    """Kernel scale updates survive refresh after checkpoint processing."""
+    from vllm.forward_context import set_forward_context
+    from vllm.model_executor.model_loader.reload import (
+        finalize_layerwise_reload,
+        initialize_layerwise_reload,
+    )
+    from vllm.model_executor.model_loader.reload.inplace import reload_weights
+
+    block, config, _ = xpu_qwen3_5_moe
+    routed = block.experts.routed_experts
+    x = torch.ones(1, 128, dtype=config.model_config.dtype, device=DEVICE_TYPE)
+    with torch.inference_mode(), set_forward_context(None, config):
+        before = block(x)
+        plan = block._xpu_moe_shared_fused_plan
+        assert plan is not None
+        scale_ptrs = [plan.w13_scales.data_ptr(), plan.w2_scales.data_ptr()]
+        w1, w3 = routed.w13_weight.transpose(1, 2).chunk(2, dim=1)
+        w2 = routed.w2_weight.transpose(1, 2)
+        checkpoint = [
+            ("w13_weight", "w1", w1.contiguous()),
+            ("w13_weight", "w3", w3.contiguous()),
+            ("w2_weight", "w2", w2.contiguous()),
+            ("w13_weight_scale", "w1", routed.w13_weight_scale.clone()),
+            ("w13_weight_scale", "w3", routed.w13_weight_scale.clone()),
+            ("w2_weight_scale", "w2", routed.w2_weight_scale.clone()),
+        ]
+        initialize_layerwise_reload(routed)
+        for name, shard, weights in checkpoint:
+            for expert_id, weight in enumerate(weights):
+                param = routed.get_parameter(name)
+                param.weight_loader(param, weight, name, shard, expert_id)
+        finalize_layerwise_reload(routed, config.model_config)
+        block.refresh_fused_weights()
+
+        updates = [
+            (name, torch.zeros_like(param))
+            for name, param in block.named_parameters()
+            if name.endswith(("w13_weight_scale", "w2_weight_scale"))
+        ]
+        assert len(updates) == 2
+        reload_weights(config, block, updates, None, is_checkpoint_format=False)
+        block.refresh_fused_weights()
+        for name, expected in updates:
+            torch.testing.assert_close(
+                block.get_parameter(name), expected, rtol=0, atol=0
+            )
+        actual = block(x)
+        expected = block.shared_expert(x)
+        torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
+        assert not torch.equal(actual, before)
+        assert block._xpu_moe_shared_fused_plan is plan
+        assert [plan.w13_scales.data_ptr(), plan.w2_scales.data_ptr()] == scale_ptrs
 
 
 @pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")

@@ -96,7 +96,7 @@ steps:
       kernels/moe/test_moe.py
       models/test_qwen3_5.py
       v1/worker/test_gpu_worker_weight_transfer.py
-      -k (xpu_qwen3_5 or xpu_worker_refreshes_model_weight_hooks) and not missing_provider'
+      -k xpu_qwen3_5 or xpu_worker_refreshes_model_weight_hooks'
 
 - label: ":intel: (BMG) Qwen3.5 Stock-Wheel Fallback"
   key: qwen35-shared-expert-fallback
