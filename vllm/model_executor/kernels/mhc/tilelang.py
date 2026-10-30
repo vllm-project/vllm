@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
+import vllm.envs as envs
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -14,6 +15,13 @@ def _hc_prenorm_gemm_outputs(
     hc_mult: int,
     use_tilelang_fallback: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if envs.VLLM_BATCH_INVARIANT:
+        from vllm.model_executor.kernels.mhc.triton import (
+            hc_prenorm_gemm_batch_invariant,
+        )
+
+        return hc_prenorm_gemm_batch_invariant(x, fn)
+
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
         compute_num_split,
     )
@@ -883,7 +891,11 @@ def _mhc_fused_post_pre_tilelang_impl(
     post_layer_mix_flat = post_layer_mix.view(num_tokens, hc_mult)
     comb_res_mix_flat = comb_res_mix.view(num_tokens, hc_mult, hc_mult)
 
-    fused_config = mhc_fused_post_pre_split_config(num_tokens, hidden_size, hc_mult)
+    fused_config = (
+        None
+        if envs.VLLM_BATCH_INVARIANT
+        else mhc_fused_post_pre_split_config(num_tokens, hidden_size, hc_mult)
+    )
 
     post_mix_cur = torch.empty(
         num_tokens,
