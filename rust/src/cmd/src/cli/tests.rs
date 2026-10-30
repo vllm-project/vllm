@@ -1072,7 +1072,7 @@ fn serve_disable_access_log_accepts_python_flag_name() {
         let Command::Serve(args) = cli.command else {
             panic!("expected serve args");
         };
-        let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+        let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args));
         config.access_log.enabled
     };
 
