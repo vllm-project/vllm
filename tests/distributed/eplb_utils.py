@@ -78,12 +78,10 @@ def set_env_vars_and_device(env: dict[str, str]) -> None:
     device = torch.device(f"{accelerator_type}:{local_rank}")
     torch.accelerator.set_device_index(device)
 
-    backend = "xccl" if current_platform.is_xpu() else "nccl"
-
     # Create a minimal vllm config for init_distributed_environment
     vllm_config = VllmConfig()
     with set_current_vllm_config(vllm_config):
-        init_distributed_environment(backend=backend)
+        init_distributed_environment(backend=current_platform.dist_backend)
     atexit.register(_destroy_process_group_if_initialized)
     # Ensure each worker process has the same random seed
     random.seed(42)
