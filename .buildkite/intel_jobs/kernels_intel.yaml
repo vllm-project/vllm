@@ -64,6 +64,7 @@ steps:
     REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
+    - vllm/models/qwen3_5/__init__.py
     - vllm/models/qwen3_5/xpu/
     - vllm/model_executor/layers/fused_moe/
     - vllm/model_executor/models/qwen3_next.py
@@ -113,6 +114,7 @@ steps:
     REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
+    - vllm/models/qwen3_5/__init__.py
     - vllm/models/qwen3_5/xpu/
     - tests/kernels/moe/test_moe.py
     - requirements/xpu.txt
