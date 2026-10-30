@@ -127,6 +127,12 @@ pub enum Error {
         #[source]
         error: BoxedError,
     },
+    #[error(
+        "Tool calling that constrains output is not supported with beam search: \
+         `tool_choice` `required` or a named function, strict tools or \
+         `--tool-strict-level`, or a tool parser that always constrains output."
+    )]
+    OutputGrammarWithBeamSearch { param: Option<&'static str> },
     #[error(transparent)]
     Text(#[from] vllm_text::Error),
     #[error(transparent)]
@@ -151,6 +157,7 @@ impl Error {
             | Self::AllToolsDeferred
             | Self::ParserUnavailableForModel { .. }
             | Self::ParserDisabled { .. }
+            | Self::OutputGrammarWithBeamSearch { .. }
             | Self::UnsupportedChatRole { .. }
             | Self::UntrustedRequestChatTemplate
             | Self::UnsupportedRequestChatTemplate
@@ -181,6 +188,7 @@ impl Error {
     pub fn param(&self) -> Option<&'static str> {
         match self {
             Self::Text(error) => error.param(),
+            Self::OutputGrammarWithBeamSearch { param } => *param,
             Self::UnsupportedRequestChatTemplate => Some("chat_template"),
             _ => None,
         }
