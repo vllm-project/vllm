@@ -44,6 +44,10 @@ def test_pp_cudagraph(
         "--distributed-executor-backend",
         "mp",
     ]
+    if current_platform.is_rocm():
+        # MI250 reports ~2.7 GiB in use per idle GPU, which leaves too little
+        # headroom for the default 0.92 utilization once workers start.
+        cudagraph_args += ["--gpu-memory-utilization", "0.85"]
     # On ROCm, defer to the platform attention selector instead of forcing a backend.
     if ATTN_BACKEND is not None:
         cudagraph_args.append(f"--attention-backend={ATTN_BACKEND}")
