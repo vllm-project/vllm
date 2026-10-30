@@ -77,6 +77,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
+from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 from vllm.v1.worker.utils import select_common_block_size
 
@@ -148,6 +149,19 @@ def _block_ids_for_region(
         "Transfer region references a missing KV group."
     )
     return list(block_ids_by_group[group_index])
+
+
+def _contiguous_runs(
+    src_ids: np.ndarray, dst_ids: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Start index and length of each run that steps by +1 on both sides."""
+    assert len(src_ids) == len(dst_ids), "Source and destination ids must pair up."
+    if len(src_ids) == 0:
+        empty = np.empty(0, dtype=np.int64)
+        return empty, empty
+    breaks = np.flatnonzero((np.diff(src_ids) != 1) | (np.diff(dst_ids) != 1)) + 1
+    starts = np.concatenate(([0], breaks))
+    return starts, np.diff(np.append(starts, len(src_ids)))
 
 
 def _get_tp_ratio(local_tp_size: int, remote_tp_size: int) -> int:
@@ -663,6 +677,38 @@ class MooncakeXferResponse(
     layout_id: int = 0
 
 
+class MooncakeLeaseHeartbeat(
+    msgspec.Struct,
+    omit_defaults=True,  # type: ignore[call-arg]
+):
+    """Sent by D to renew P's lease on KV blocks that D has not pulled yet.
+
+    It shares P's side channel with pulls. A pull decodes as a heartbeat with
+    no transfer ids, because msgspec skips the fields it does not know.
+    """
+
+    lease_transfer_ids: list[TransferId] = msgspec.field(default_factory=list)
+
+
+@dataclass
+class LeaseHeartbeat:
+    """Transfers that one P engine holds for this D engine under a lease."""
+
+    remote_bootstrap_addr: str
+    transfer_ids: list[TransferId]
+
+
+def _get_kv_lease_duration(kv_transfer_config: KVTransferConfig) -> float | None:
+    """Return `kv_lease_duration` in seconds, or None when leases are off."""
+    duration = kv_transfer_config.get_from_extra_config("kv_lease_duration", None)
+    if duration is None:
+        return None
+    duration = float(duration)
+    if duration <= 0:
+        raise ValueError(f"kv_lease_duration must be positive, got {duration}.")
+    return duration
+
+
 @dataclass
 class PullReqMeta:
     d_req_id: ReqId
@@ -698,6 +744,8 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
         self.reqs_to_recv: dict[EngineId, dict[ReqId, PullReqMeta]] = defaultdict(dict)
         self.reqs_to_send: dict[ReqId, tuple[TransferId, list[list[int]]]] = {}
         self.reqs_not_processed: set[TransferId] = set()
+        # D side: lease renewals to send this step, by remote P engine.
+        self.lease_heartbeats: dict[EngineId, LeaseHeartbeat] = {}
 
     def add_new_req(
         self,
@@ -800,6 +848,10 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     def on_new_request(self, request: "Request") -> None:
         assert self.connector_scheduler is not None
         self.connector_scheduler.on_new_request(request)
+
+    def update_connector_output(self, connector_output: KVConnectorOutput):
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.update_connector_output(connector_output)
 
     def request_finished(
         self,
@@ -967,6 +1019,13 @@ class MooncakeConnectorScheduler:
         # remote prefill or aborted.
         self._reqs_not_processed: set[TransferId] = set()
 
+        # D side: requests whose KV P still holds under a lease, from arrival
+        # until the pull settles. A request can wait in the queue for longer
+        # than the lease, so renewal cannot wait until it is scheduled.
+        self._kv_lease_duration = _get_kv_lease_duration(vllm_config.kv_transfer_config)
+        self._lease_reqs: dict[ReqId, tuple[EngineId, str, TransferId]] = {}
+        self._last_heartbeat_time = 0.0
+
         # Compute sliding window block counts per KV cache group.
         sw_sizes_tokens: list[tuple[int, int]] = [
             (g.kv_cache_spec.sliding_window, g.kv_cache_spec.block_size)
@@ -1020,9 +1079,9 @@ class MooncakeConnectorScheduler:
             params is not None
             and not params.get("_p_side_truncated")
             and request.num_prompt_tokens > 1
-            # A request that skips reading the prefix cache (prompt logprobs)
-            # loads nothing on the decoder, which recomputes its whole prompt.
-            and not request.get_skip_reading_prefix_cache()
+            # A request that skips reading external KV (prompt logprobs)
+            # loads nothing on the decoder, which recomputes past its local hit.
+            and not request.skip_reading_external_kv
         ):
             if request.prompt_token_ids is not None:
                 request.prompt_token_ids.pop()
@@ -1044,6 +1103,26 @@ class MooncakeConnectorScheduler:
             and (self._has_mamba or self._bounded_replay)
         ):
             self._truncate_mamba_request_for_prefill(request)
+
+        if (
+            self._kv_lease_duration is not None
+            and params is not None
+            and params.get("do_remote_prefill")
+            and all(
+                params.get(p)
+                for p in ("remote_engine_id", "remote_bootstrap_addr", "transfer_id")
+            )
+        ):
+            self._lease_reqs[request.request_id] = (
+                params["remote_engine_id"],
+                params["remote_bootstrap_addr"],
+                params["transfer_id"],
+            )
+
+    def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
+        # Failed pulls are reported here too.
+        for req_id in connector_output.finished_recving or ():
+            self._lease_reqs.pop(req_id, None)
 
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
@@ -1118,6 +1197,10 @@ class MooncakeConnectorScheduler:
                 local_block_ids = self.get_sw_clipped_blocks(unhashed_block_ids)
                 # Get unhashed blocks to pull from remote.
                 self._reqs_need_recv[request.request_id] = (request, local_block_ids)
+                if not any(local_block_ids):
+                    # This pull only releases P's blocks and never reaches
+                    # finished_recving, so stop renewing the lease now.
+                    self._lease_reqs.pop(request.request_id, None)
             else:
                 logger.warning(
                     "Got invalid KVTransferParams: %s. This "
@@ -1152,6 +1235,23 @@ class MooncakeConnectorScheduler:
                 )
             self._reqs_need_recv.clear()
 
+            # Renew every lease in one message per P engine, every
+            # kv_lease_duration / 6 seconds (as NixlConnector does).
+            now = time.perf_counter()
+            if (
+                self._lease_reqs
+                and self._kv_lease_duration is not None
+                and now - self._last_heartbeat_time >= self._kv_lease_duration / 6
+            ):
+                self._last_heartbeat_time = now
+                for engine_id, bootstrap_addr, transfer_id in self._lease_reqs.values():
+                    heartbeat = meta.lease_heartbeats.get(engine_id)
+                    if heartbeat is None:
+                        heartbeat = meta.lease_heartbeats[engine_id] = LeaseHeartbeat(
+                            remote_bootstrap_addr=bootstrap_addr, transfer_ids=[]
+                        )
+                    heartbeat.transfer_ids.append(transfer_id)
+
         if not self.is_kv_consumer:
             for req_id, (req, block_ids) in self._reqs_need_send.items():
                 assert req.kv_transfer_params is not None
@@ -1183,6 +1283,7 @@ class MooncakeConnectorScheduler:
             request.status,
             params,
         )
+        self._lease_reqs.pop(request.request_id, None)
         if not params or not params.get("transfer_id"):
             return False, None
 
@@ -1322,6 +1423,14 @@ class MooncakeConnectorWorker:
         self.kv_caches_base_addr: list[int] = []
         self.device_kv_caches: dict[str, torch.Tensor] = {}
         self.reqs_need_send: dict[TransferId, SendBlockMeta] = {}
+        # P holds a finished request's blocks for kv_lease_duration seconds,
+        # and each renewal from D moves the deadline to at least 2/3 of that
+        # from now (as NixlConnector does). Unset keeps the fixed
+        # VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT.
+        self._kv_lease_duration = _get_kv_lease_duration(kv_transfer_config)
+        # Expired transfers in expiry order, so a late pull fails at once
+        # instead of waiting for a prefill that already happened.
+        self._expired_transfer_ids: OrderedDict[TransferId, float] = OrderedDict()
 
         # For kv_both, we will act both prefiller and decoder.
         if not self.is_kv_consumer:
@@ -1409,6 +1518,7 @@ class MooncakeConnectorWorker:
         self._encoder = msgspec.msgpack.Encoder()
         self._xfer_meta_decoder = msgspec.msgpack.Decoder(MooncakeXferMetadata)
         self._xfer_resp_decoder = msgspec.msgpack.Decoder(MooncakeXferResponse)
+        self._heartbeat_decoder = msgspec.msgpack.Decoder(MooncakeLeaseHeartbeat)
 
     def _sync_block_size_with_kernel(self) -> None:
         # When speculative decoding (e.g. Eagle) is enabled, the main model
@@ -1527,6 +1637,15 @@ class MooncakeConnectorWorker:
         try:
             while True:
                 identity, metadata_bytes = await sock.recv_multipart()
+                # Renew here, not in a sender worker: those can all be
+                # waiting for prefills, and the renewal must not wait.
+                heartbeat = self._decode_heartbeat(metadata_bytes)
+                if heartbeat is not None:
+                    response = self._renew_kv_leases(heartbeat.lease_transfer_ids)
+                    await sock.send_multipart(
+                        (identity, self._encoder.encode(response))
+                    )
+                    continue
                 await self.sender_worker_queue.put((identity, metadata_bytes))
         except zmq.ContextTerminated:
             logger.debug("ZMQ context terminated, exiting Mooncake sender thread.")
@@ -1538,6 +1657,29 @@ class MooncakeConnectorWorker:
                 task.cancel()
             await asyncio.gather(*sender_tasks, return_exceptions=True)
             sock.close()
+
+    def _decode_heartbeat(self, message: bytes) -> MooncakeLeaseHeartbeat | None:
+        try:
+            heartbeat = self._heartbeat_decoder.decode(message)
+        except msgspec.DecodeError:
+            # Leave malformed messages to the sender worker, which reports them.
+            return None
+        return heartbeat if heartbeat.lease_transfer_ids else None
+
+    def _renew_kv_leases(self, transfer_ids: list[TransferId]) -> MooncakeXferResponse:
+        if self._kv_lease_duration is None:
+            return MooncakeXferResponse(
+                status=MooncakeXferResponseStatus.ERROR,
+                err_msg="kv_lease_duration is not set on this prefill instance.",
+            )
+        new_expire_time = time.perf_counter() + self._kv_lease_duration * 2 / 3
+        for transfer_id in transfer_ids:
+            # Skip transfers not prefilled yet or already freed; a renewal
+            # must not recreate them.
+            send_meta = self.reqs_need_send.get(transfer_id)
+            if send_meta is not None:
+                send_meta.expire_time = max(send_meta.expire_time, new_expire_time)
+        return MooncakeXferResponse(status=MooncakeXferResponseStatus.FINISH)
 
     async def _sender_worker(self, sock: zmq.asyncio.Socket):
         while True:
@@ -1643,8 +1785,12 @@ class MooncakeConnectorWorker:
             )
             await sock.send_multipart((identity, self._encoder.encode(response)))
             return
+        expired_reqs: list[ReqId] = []
         for d_req_id, (transfer_id, _) in meta.req_blocks.items():
             if transfer_id not in self.reqs_need_send:
+                if transfer_id in self._expired_transfer_ids:
+                    expired_reqs.append(d_req_id)
+                    continue
                 # This req is not enqueued in P side yet, create it here.
                 self.reqs_need_send[transfer_id] = SendBlockMeta(
                     p_req_id="",
@@ -1654,6 +1800,21 @@ class MooncakeConnectorWorker:
                 )
             send_meta = self.reqs_need_send[transfer_id]
             pending_reqs[d_req_id] = send_meta
+
+        if expired_reqs:
+            logger.warning(
+                "Requests %s were pulled after their KV expired on P side.",
+                expired_reqs,
+            )
+            response = MooncakeXferResponse(
+                status=MooncakeXferResponseStatus.CONTINUE
+                if pending_reqs
+                else MooncakeXferResponseStatus.FINISH,
+                err_reqs=expired_reqs,
+                err_msg="KV expired on P side before the pull.",
+                layout_id=meta.layout_id,
+            )
+            await sock.send_multipart((identity, self._encoder.encode(response)))
 
         async def wait_and_ret(
             d_req_id: ReqId, send_meta: SendBlockMeta
@@ -1917,8 +2078,8 @@ class MooncakeConnectorWorker:
             if not any(local_block_ids_by_group):
                 continue
 
-            # Normalize before kernel expansion so group_concurrent_contiguous
-            # can coalesce the resulting ascending kernel runs.
+            # Normalize before kernel expansion so _contiguous_runs can
+            # coalesce the resulting ascending kernel runs.
             for group_index, (local_group, remote_group) in enumerate(
                 zip(local_block_ids_by_group, remote_block_ids_by_group)
             ):
@@ -1935,28 +2096,40 @@ class MooncakeConnectorWorker:
                 remote_block_ids_by_group
             )
 
+            # Regions of the same KV group share block ids; group them once.
+            block_runs: dict[tuple[int, tuple[int, ...]], tuple[np.ndarray, ...]] = {}
             for local_region, remote_region in zip(local_regions, remote_regions):
                 assert local_region.group_index == remote_region.group_index, (
                     "Aligned Mooncake transfer regions must belong to the same "
                     "KV group."
                 )
-                local_block_ids = _block_ids_for_region(
-                    local_block_ids_by_group,
-                    local_region.group_index,
-                    local_region.shared_group_ids,
-                )
-                remote_block_ids = _block_ids_for_region(
-                    remote_block_ids_by_group,
-                    remote_region.group_index,
-                    local_region.shared_group_ids,
-                )
-                if not local_block_ids:
+                group_key = (local_region.group_index, local_region.shared_group_ids)
+                if group_key not in block_runs:
+                    local_ids = np.asarray(
+                        _block_ids_for_region(
+                            local_block_ids_by_group,
+                            local_region.group_index,
+                            local_region.shared_group_ids,
+                        ),
+                        dtype=np.int64,
+                    )
+                    remote_ids = np.asarray(
+                        _block_ids_for_region(
+                            remote_block_ids_by_group,
+                            remote_region.group_index,
+                            local_region.shared_group_ids,
+                        ),
+                        dtype=np.int64,
+                    )
+                    block_runs[group_key] = (
+                        local_ids,
+                        remote_ids,
+                        *_contiguous_runs(local_ids, remote_ids),
+                    )
+                local_ids, remote_ids, run_starts, run_lens = block_runs[group_key]
+                if len(local_ids) == 0:
                     continue
 
-                # Group by indices within this region's KV-cache group only.
-                group_local_block_ids, group_remote_block_ids = (
-                    group_concurrent_contiguous(local_block_ids, remote_block_ids)
-                )
                 (
                     should_transfer,
                     src_region_offset,
@@ -1992,36 +2165,24 @@ class MooncakeConnectorWorker:
                     transfer_len=transfer_len,
                 )
 
-                for group_local_block_id, group_remote_block_id in zip(
-                    group_local_block_ids, group_remote_block_ids
-                ):
-                    if can_coalesce:
-                        src_ptrs.append(
-                            local_region.base_addr
-                            + group_local_block_id[0] * local_region.block_len
-                            + src_region_offset
-                        )
-                        dst_ptrs.append(
-                            remote_region.base_addr
-                            + group_remote_block_id[0] * remote_region.block_len
-                            + dst_region_offset
-                        )
-                        lengths.append(transfer_len * len(group_local_block_id))
-                    else:
-                        for local_block_id, remote_block_id in zip(
-                            group_local_block_id, group_remote_block_id
-                        ):
-                            src_ptrs.append(
-                                local_region.base_addr
-                                + local_block_id * local_region.block_len
-                                + src_region_offset
-                            )
-                            dst_ptrs.append(
-                                remote_region.base_addr
-                                + remote_block_id * remote_region.block_len
-                                + dst_region_offset
-                            )
-                            lengths.append(transfer_len)
+                if can_coalesce:
+                    local_ids = local_ids[run_starts]
+                    remote_ids = remote_ids[run_starts]
+                    lengths.extend((run_lens * transfer_len).tolist())
+                else:
+                    lengths.extend([transfer_len] * len(local_ids))
+                src_ptrs.extend(
+                    (
+                        local_ids * local_region.block_len
+                        + (local_region.base_addr + src_region_offset)
+                    ).tolist()
+                )
+                dst_ptrs.extend(
+                    (
+                        remote_ids * remote_region.block_len
+                        + (remote_region.base_addr + dst_region_offset)
+                    ).tolist()
+                )
 
             logger.debug(
                 "Sending kv_caches for request %s (%d blocks) to %s",
@@ -2342,24 +2503,41 @@ class MooncakeConnectorWorker:
         now = time.perf_counter()
 
         expired_transfer_id = []
+        # Scan every entry: renewals move deadlines, so the map is not in
+        # expiry order.
         for transfer_id, send_meta in self.reqs_need_send.items():
             if (
                 send_meta.p_req_id
                 and send_meta.expire_time < now
                 and send_meta.sending == 0
             ):
-                logger.warning(
-                    "Request %s timed out after %d seconds without "
-                    "being sent. Freeing its blocks on the producer side.",
-                    send_meta.p_req_id,
-                    envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT,
-                )
+                if self._kv_lease_duration is None:
+                    logger.warning(
+                        "Request %s timed out after %d seconds without "
+                        "being sent. Freeing its blocks on the producer side.",
+                        send_meta.p_req_id,
+                        envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT,
+                    )
+                else:
+                    logger.warning(
+                        "KV lease of request %s expired before the decoder "
+                        "pulled it. Freeing its blocks on the producer side.",
+                        send_meta.p_req_id,
+                    )
                 self.xfer_stats.record_kv_expired_req()
                 finished_sending_reqs.add(send_meta.p_req_id)
                 expired_transfer_id.append(transfer_id)
 
         for transfer_id in expired_transfer_id:
             del self.reqs_need_send[transfer_id]
+            self._expired_transfer_ids[transfer_id] = now
+        # A pull later than this falls back to the ready-wait timeout.
+        horizon = now - envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
+        while self._expired_transfer_ids:
+            transfer_id, expired_at = next(iter(self._expired_transfer_ids.items()))
+            if expired_at >= horizon:
+                break
+            del self._expired_transfer_ids[transfer_id]
 
         return finished_sending_reqs
 
@@ -2630,31 +2808,46 @@ class MooncakeConnectorWorker:
         self._pending_bootstrap_queries[remote_bootstrap_addr].set()
         del self._pending_bootstrap_queries[remote_bootstrap_addr]
 
+    def _select_remote_workers(
+        self, remote_engine_id: EngineId
+    ) -> dict[int, list[int]]:
+        """Return the producer PP ranks to pull from, by producer TP rank."""
+        remote_tp_ranks = self.transfer_topo.handshake_target_ranks(
+            self._tp_size[remote_engine_id]
+        )
+        selected_remote_pp: dict[int, list[int]] = {}
+        for remote_tp_rank in remote_tp_ranks:
+            pp_to_addr = self._remote_agents[remote_engine_id][remote_tp_rank]
+            if self.pp_size == len(pp_to_addr) and self.pp_rank in pp_to_addr:
+                selected_remote_pp[remote_tp_rank] = [self.pp_rank]
+            else:
+                selected_remote_pp[remote_tp_rank] = sorted(pp_to_addr)
+        return selected_remote_pp
+
+    def _remote_worker_addrs(
+        self, remote_engine_id: EngineId, selected_remote_pp: dict[int, list[int]]
+    ) -> list[str]:
+        agents = self._remote_agents[remote_engine_id]
+        return [
+            agents[tp_rank][pp_rank]
+            for tp_rank, pp_ranks in selected_remote_pp.items()
+            for pp_rank in pp_ranks
+        ]
+
     def receive_kv(
         self,
         remote_engine_id: EngineId,
         pull_metas: dict[ReqId, PullReqMeta],
     ):
-        remote_tp_ranks = self.transfer_topo.handshake_target_ranks(
-            self._tp_size[remote_engine_id]
-        )
-        worker_addrs: list[str] = []
-        selected_remote_pp: dict[int, list[int]] = {}
-        for remote_tp_rank in remote_tp_ranks:
-            pp_to_addr = self._remote_agents[remote_engine_id][remote_tp_rank]
-            if self.pp_size == len(pp_to_addr) and self.pp_rank in pp_to_addr:
-                pp_ranks = [self.pp_rank]
-            else:
-                pp_ranks = sorted(pp_to_addr)
-            selected_remote_pp[remote_tp_rank] = pp_ranks
-            worker_addrs.extend(pp_to_addr[pp_rank] for pp_rank in pp_ranks)
+        selected_remote_pp = self._select_remote_workers(remote_engine_id)
+        worker_addrs = self._remote_worker_addrs(remote_engine_id, selected_remote_pp)
 
         count = len(worker_addrs)
         logger.debug(
             "Receiving Mooncake KV for engine %s from producer TP ranks %s "
             "and PP ranks %s",
             remote_engine_id,
-            remote_tp_ranks,
+            list(selected_remote_pp),
             selected_remote_pp,
         )
         for pull_meta in pull_metas.values():
@@ -2664,17 +2857,76 @@ class MooncakeConnectorWorker:
                 self.receive_kv_from_single_worker(worker_addr, pull_metas)
             )
 
+    async def _query_bootstrap(self, remote_bootstrap_addr: str):
+        """Query a bootstrap server, or wait for the query already running."""
+        if remote_bootstrap_addr not in self._pending_bootstrap_queries:
+            self._pending_bootstrap_queries[remote_bootstrap_addr] = asyncio.Event()
+            await self._connect_to_prefiller_bootstrap(remote_bootstrap_addr)
+        else:
+            await self._pending_bootstrap_queries[remote_bootstrap_addr].wait()
+
+    async def _send_lease_heartbeat(
+        self, remote_engine_id: EngineId, heartbeat: LeaseHeartbeat
+    ):
+        """Renew the leases one P engine holds for this worker's requests."""
+        if remote_engine_id not in self._remote_agents:
+            # The requests may still be queued. Query now so this renewal,
+            # and the pull later, can reach P's workers.
+            await self._query_bootstrap(heartbeat.remote_bootstrap_addr)
+            if remote_engine_id not in self._remote_agents:
+                logger.warning(
+                    "Skipping KV lease renewal for %d requests: remote "
+                    "engine_id %s not found from bootstrap server %s.",
+                    len(heartbeat.transfer_ids),
+                    remote_engine_id,
+                    heartbeat.remote_bootstrap_addr,
+                )
+                return
+        payload = self._encoder.encode(
+            MooncakeLeaseHeartbeat(lease_transfer_ids=heartbeat.transfer_ids)
+        )
+        selected_remote_pp = self._select_remote_workers(remote_engine_id)
+        await asyncio.gather(
+            *(
+                self._send_heartbeat_to_worker(addr, payload)
+                for addr in self._remote_worker_addrs(
+                    remote_engine_id, selected_remote_pp
+                )
+            )
+        )
+
+    async def _send_heartbeat_to_worker(self, worker_addr: str, payload: bytes):
+        assert self._kv_lease_duration is not None
+        try:
+            with make_zmq_socket(
+                self.async_zmq_ctx, worker_addr, zmq.DEALER, bind=False, linger=0
+            ) as sock:
+                # Wait for the reply: linger=0 drops a message still unsent.
+                sock.setsockopt(zmq.RCVTIMEO, int(self._kv_lease_duration / 6 * 1000))
+                await sock.send(payload)
+                response = self._xfer_resp_decoder.decode(await sock.recv())
+        except zmq.ContextTerminated:
+            return
+        except Exception as e:
+            # The pull reports a P that is really gone.
+            logger.debug("KV lease renewal to %s failed: %s", worker_addr, e)
+            return
+        if response.status == MooncakeXferResponseStatus.ERROR:
+            logger.warning_once(
+                "Mooncake prefill worker %s rejected a KV lease renewal (%s). "
+                "Set the same kv_lease_duration on prefill and decode "
+                "instances.",
+                worker_addr,
+                response.err_msg,
+            )
+
     async def handle_new_engine_id(
         self,
         remote_engine_id: EngineId,
         pull_metas: dict[ReqId, PullReqMeta],
     ):
         remote_bootstrap_addr = next(iter(pull_metas.values())).remote_bootstrap_addr
-        if remote_bootstrap_addr not in self._pending_bootstrap_queries:
-            self._pending_bootstrap_queries[remote_bootstrap_addr] = asyncio.Event()
-            await self._connect_to_prefiller_bootstrap(remote_bootstrap_addr)
-        else:
-            await self._pending_bootstrap_queries[remote_bootstrap_addr].wait()
+        await self._query_bootstrap(remote_bootstrap_addr)
 
         if remote_engine_id not in self._remote_agents:
             self._handle_failed_recv(
@@ -2705,8 +2957,8 @@ class MooncakeConnectorWorker:
                 send_meta = self.reqs_need_send[transfer_id]
                 send_meta.p_req_id = p_req_id
                 send_meta.local_block_ids = block_ids
-                send_meta.expire_time = (
-                    time.perf_counter() + envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
+                send_meta.expire_time = time.perf_counter() + (
+                    self._kv_lease_duration or envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
                 )
                 send_meta.ready.set()
             else:
@@ -2726,10 +2978,22 @@ class MooncakeConnectorWorker:
             if send_meta:
                 assert not send_meta.ready.is_set()
 
+    async def _send_lease_heartbeats(
+        self, lease_heartbeats: dict[EngineId, LeaseHeartbeat]
+    ):
+        for remote_engine_id, heartbeat in lease_heartbeats.items():
+            asyncio.create_task(self._send_lease_heartbeat(remote_engine_id, heartbeat))
+
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
         if not self.is_kv_producer and metadata.reqs_to_recv:
             asyncio.run_coroutine_threadsafe(
                 self._start_load_kv(metadata.reqs_to_recv), self.receiver_loop
+            )
+
+        if not self.is_kv_producer and metadata.lease_heartbeats:
+            asyncio.run_coroutine_threadsafe(
+                self._send_lease_heartbeats(metadata.lease_heartbeats),
+                self.receiver_loop,
             )
 
         if not self.is_kv_consumer and (
@@ -3057,23 +3321,6 @@ def _normalize_paired_block_order(
         src_ids[start : stop + 1] = src_ids[start : stop + 1][::-1]
         dst_ids[start : stop + 1] = dst_ids[start : stop + 1][::-1]
     return src_ids, dst_ids
-
-
-def group_concurrent_contiguous(
-    src_indices: list[int], dst_indices: list[int]
-) -> tuple[list[list[int]], list[list[int]]]:
-    """Vectorised NumPy implementation."""
-    if len(src_indices) == 0:
-        return [], []
-
-    brk = np.where((np.diff(src_indices) != 1) | (np.diff(dst_indices) != 1))[0] + 1
-    src_groups = np.split(src_indices, brk)
-    dst_groups = np.split(dst_indices, brk)
-
-    src_groups = [g.tolist() for g in src_groups]
-    dst_groups = [g.tolist() for g in dst_groups]
-
-    return src_groups, dst_groups
 
 
 def get_mooncake_side_channel_port(vllm_config: VllmConfig) -> int:

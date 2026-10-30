@@ -44,10 +44,11 @@ class EngramConfig:
     dp_shared_memory: bool | None = None
     """Share CPU-offloaded embedding weights between co-located
     DP replicas. Each node stores one copy of every TP shard, reducing host
-    memory without per-step Engram DP collectives. Requires sufficient
-    /dev/shm capacity and a shared IPC namespace. Defaults to enabled whenever
-    the other settings allow it, falling back to per-replica tables when DP
-    replicas are not co-located on one node or /dev/shm cannot hold them."""
+    memory without per-step Engram DP collectives. Uses host-NUMA cuMem shared
+    by FABRIC handle where supported, else /dev/shm (which then needs capacity
+    and a shared IPC namespace). Defaults to enabled whenever the other settings
+    allow it, falling back to per-replica tables when DP replicas are not
+    co-located on one node or the host cannot hold them."""
 
     use_thp: bool = False
     """Back private CPU-offloaded tables with transparent huge pages (best
