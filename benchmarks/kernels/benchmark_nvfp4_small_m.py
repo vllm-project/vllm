@@ -360,6 +360,10 @@ def main() -> None:
         ]
     for shape, m, provider in cases:
         r = run_case(shape, m, provider, args)
+        if r.error and "operation failed due to a previous error" in r.error:
+            # Sporadic stream-capture invalidation; a fresh attempt succeeds.
+            torch.accelerator.synchronize()
+            r = run_case(shape, m, provider, args)
         results.append(r)
         status = r.error or (
             f"{r.us:8.2f} us {r.pct_bw[edition]:5.1f}%  cos={r.cos_sim:.4f}"
