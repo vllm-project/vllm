@@ -12,6 +12,10 @@
 # the real model store is that nested dir. Prod avoids the trap by mounting the parent
 # onto /root/.cache/huggingface (HF_HOME); here we mount the nested dir straight onto
 # /root/.cache/huggingface/hub.
+# ISOLATION (measured 2026-10-30): under WSL2 `--gpus device=2` NO LONGER isolates —
+# the container enumerates all 3 GPUs and CUDA index 0 is PROD GPU 0 (pci 01:00.0).
+# CUDA_DEVICE_ORDER=PCI_BUS_ID + CUDA_VISIBLE_DEVICES=2 below are what pin GPU 2
+# (pci 72:00.0). On 2026-09-12 the flag alone did isolate; what changed is not established.
 # Run from Git Bash in d:/vllm:
 #   MSYS_NO_PATHCONV=1 bash myia_vllm/_iteration_log/qwen38_27b_gpu2/serve_qwen38.sh
 set -e
@@ -20,6 +24,8 @@ sleep 10  # let the killed engine's CUDA context release VRAM before the new one
 MSYS_NO_PATHCONV=1 docker run -d --name qwen38-eval \
   --gpus '"device=2"' \
   -p 127.0.0.1:5022:5022 \
+  -e CUDA_DEVICE_ORDER=PCI_BUS_ID \
+  -e CUDA_VISIBLE_DEVICES=2 \
   -e HF_HUB_OFFLINE=1 \
   -e VLLM_WSL2_ENABLE_PIN_MEMORY=1 \
   -e VLLM_USE_FLASHINFER_SAMPLER=0 \
