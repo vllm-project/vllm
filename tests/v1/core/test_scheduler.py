@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import numpy as np
+import prometheus_client
 import pytest
 import torch
 
@@ -70,6 +71,8 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
+from vllm.v1.metrics.loggers import PrometheusStatLogger
+from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.outputs import (
     DraftTokenIds,
     ECConnectorOutput,
@@ -2781,6 +2784,71 @@ def test_preemption_re_records_prefix_cache_query():
     scheduler.schedule()
     assert request.status == RequestStatus.RUNNING
     assert stats.preempted_requests == 1
+
+
+def test_preemption_of_aborted_request_is_counted():
+    """vllm:num_preemptions counts a request that is preempted and then aborted
+    before producing more output. Its PREEMPTED event never reaches the
+    frontend in that case, so the count must come from the scheduler."""
+    # 10 usable blocks: two 80-token requests fill them, so the second request
+    # is preempted when the first one needs a new block.
+    scheduler = create_scheduler(
+        max_num_batched_tokens=100,
+        block_size=16,
+        num_blocks=11,
+        enable_prefix_caching=False,
+    )
+    first, second = create_requests(num_requests=2, num_tokens=80, block_size=16)
+    scheduler.add_request(first)
+    first_output = scheduler.schedule()
+    scheduler.add_request(second)
+    scheduler.schedule()
+    scheduler.update_from_output(
+        first_output,
+        ModelRunnerOutput(
+            req_ids=[first.request_id],
+            req_id_to_index={first.request_id: 0},
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    preempting_output = scheduler.schedule()
+    assert second.status == RequestStatus.PREEMPTED
+    scheduler.finish_requests(
+        [first.request_id, second.request_id], RequestStatus.FINISHED_ABORTED
+    )
+    # A step with no request outputs still carries the stats.
+    engine_core_outputs = scheduler.update_from_output(
+        preempting_output,
+        ModelRunnerOutput(
+            req_ids=[],
+            req_id_to_index={},
+            sampled_token_ids=[],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    eco = next(iter(engine_core_outputs.values()))
+    assert not eco.outputs
+
+    try:
+        stat_logger = PrometheusStatLogger(scheduler.vllm_config)
+        stat_logger.record(eco.scheduler_stats, iteration_stats=None)
+        stat_logger.record(scheduler.make_stats(), iteration_stats=None)
+        num_preemptions = sum(
+            sample.value
+            for metric in prometheus_client.REGISTRY.collect()
+            if metric.name == "vllm:num_preemptions"
+            for sample in metric.samples
+            if sample.name == "vllm:num_preemptions_total"
+        )
+        # Counted once, not again on the next stats.
+        assert num_preemptions == 1
+    finally:
+        unregister_vllm_metrics()
 
 
 def test_preemption_processes_stale_aux_output():
