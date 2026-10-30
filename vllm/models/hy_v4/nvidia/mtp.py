@@ -8,13 +8,9 @@ from collections.abc import Callable, Iterable
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
-from vllm.distributed import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -59,7 +55,7 @@ _MTP_QUANT_EXCLUSION_ATTRS = ("ignored_layers", "exclude_modules")
 
 
 def _get_spec_layer_idx_from_weight_name(
-    config: PretrainedConfig, weight_name: str
+    config: PreTrainedConfig, weight_name: str
 ) -> int | None:
     """Return the MTP layer index a checkpoint weight belongs to, or None.
 
@@ -106,6 +102,7 @@ def _resolve_fused_expert_param(
 
     Returns:
         The matching draft parameter name, or None when there is none.
+
     """
     if not ckpt_suffix:
         return param_base if param_base in params_dict else None
@@ -146,7 +143,7 @@ def _prepare_mtp_fp8_expert_scale(
 
 
 def _create_mtp_quant_config(
-    hf_config: PretrainedConfig,
+    hf_config: PreTrainedConfig,
     backbone_quant_config: QuantizationConfig | None = None,
 ) -> QuantizationConfig | None:
     """Create the quantization config for the MTP layers.
@@ -164,6 +161,7 @@ def _create_mtp_quant_config(
     Returns:
         The quantization config to use for the MTP layers, or None when the MTP
         layers are unquantized.
+
     """
     mtp_quant_algo = getattr(hf_config, "mtp_quant_algo", None)
 
@@ -241,6 +239,7 @@ def _remap_mtp_quant_exclusions(
 
     Returns:
         A shallow copy with the translated exclusions, or the input unchanged.
+
     """
     if quant_config is None:
         return None
@@ -300,7 +299,7 @@ class HYV4SharedHead(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
@@ -326,7 +325,7 @@ class HYV4MultiTokenPredictorLayer(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         prefix: str,
         vllm_config: VllmConfig,
         model_config: ModelConfig,
@@ -671,6 +670,7 @@ class HYV4MTP(nn.Module):
         Returns:
             True when the weight was consumed (even if this rank holds none of
             the addressed experts).
+
         """
         base = name.split(".experts.")[0]
         for ckpt_proj, tag in (
@@ -740,11 +740,6 @@ class HYV4MTP(nn.Module):
         }
 
         num_experts = getattr(self.config, "n_routed_experts", 0)
-        sink_tp_size = get_tensor_model_parallel_world_size()
-        sink_tp_rank = get_tensor_model_parallel_rank()
-        n_local_head = self.config.num_attention_heads // sink_tp_size
-        head_rank_start = n_local_head * sink_tp_rank
-        head_rank_end = n_local_head * (sink_tp_rank + 1)
 
         # Routed-expert weights come in two checkpoint layouts:
         #   split: mlp.experts.<id>.gate_proj.weight
@@ -877,15 +872,6 @@ class HYV4MTP(nn.Module):
                     num_experts,
                 )
             if is_loaded:
-                continue
-
-            if "learnable_sink_param" in name:
-                if name in params_dict:
-                    narrow_weight = loaded_weight[head_rank_start:head_rank_end]
-                    n = narrow_weight.shape[0]
-                    with torch.no_grad():
-                        params_dict[name][:n].copy_(narrow_weight)
-                    loaded_params.add(name)
                 continue
 
             remapped_name = maybe_remap_kv_scale_name(name, params_dict)

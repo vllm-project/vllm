@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use vllm_tokenizer::{DecodedText, DynTokenizer};
 use winnow::ascii::multispace0 as ws0;
 use winnow::combinator::{alt, delimited, eof, repeat, seq, terminated};
 use winnow::prelude::*;
@@ -21,9 +22,9 @@ const PARAMETER_END: &str = "</parameter>";
 
 /// Model-specific configuration for the shared Qwen Coder grammar.
 ///
-/// Only the tool-call wrapper tokens vary across models that reuse this
-/// grammar; the inner `<function=...>` / `<parameter=...>` tags are always
-/// byte-identical. Seed-OSS, for example, wraps the same body in
+/// Models may vary the tool-call wrapper and parameter newline framing;
+/// the inner `<function=...>` / `<parameter=...>` tags are byte-identical.
+/// Seed-OSS, for example, wraps the same body in
 /// `<seed:tool_call>` / `</seed:tool_call>`.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct QwenCoderConfig {
@@ -35,6 +36,8 @@ pub(crate) struct QwenCoderConfig {
     pub(crate) next_tool_call_start: &'static str,
     /// Marker that closes a tool-call block.
     pub(crate) tool_call_end: &'static str,
+    /// Consume one template-inserted newline at each parameter value boundary.
+    pub(crate) trim_parameter_newlines: bool,
 }
 
 const QWEN_CODER_CONFIG: QwenCoderConfig = QwenCoderConfig {
@@ -43,6 +46,7 @@ const QWEN_CODER_CONFIG: QwenCoderConfig = QwenCoderConfig {
     first_tool_call_start: "\n\n<tool_call>",
     next_tool_call_start: "\n<tool_call>",
     tool_call_end: TOOL_CALL_END,
+    trim_parameter_newlines: true,
 };
 
 type QwenCoderInput<'i> = Partial<&'i str>;
@@ -143,7 +147,7 @@ impl Qwen3CoderToolParser {
 }
 
 impl ToolParser for Qwen3CoderToolParser {
-    fn create(tools: &[Tool]) -> Result<Box<dyn ToolParser>>
+    fn create(tools: &[Tool], _tokenizer: DynTokenizer) -> Result<Box<dyn ToolParser>>
     where
         Self: Sized + 'static,
     {
@@ -154,8 +158,8 @@ impl ToolParser for Qwen3CoderToolParser {
         Some(xgrammar_structural_tag::Model::Qwen3Coder.builder())
     }
 
-    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
-        self.buffer.push_str(chunk);
+    fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
+        self.buffer.push_str(&chunk.text);
         let config = self.config;
 
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
@@ -200,7 +204,7 @@ fn parse_next_qwen_coder_event(
     match mode {
         QwenCoderMode::Text => parse_text_event(input, config, after_tool_call),
         QwenCoderMode::ToolCall { end_marker_scan } => {
-            tool_call_event(input, end_marker_scan, config.tool_call_end)
+            tool_call_event(input, end_marker_scan, config)
         }
     }
 }
@@ -231,26 +235,26 @@ fn parse_text_event(
 fn tool_call_event(
     input: &mut QwenCoderInput<'_>,
     end_marker_scan: &mut MarkerScanState,
-    tool_call_end: &'static str,
+    config: QwenCoderConfig,
 ) -> ModalResult<QwenCoderEvent> {
     let (body,) = seq!(
         _: ws0,
-        take_until_marker(tool_call_end, end_marker_scan),
-        _: literal(tool_call_end),
+        take_until_marker(config.tool_call_end, end_marker_scan),
+        _: literal(config.tool_call_end),
     )
     .parse_next(input)?;
 
-    parse_tool_call_body(body)
+    parse_tool_call_body(body, config.trim_parameter_newlines)
 }
 
 /// Parse a Qwen Coder function block.
-fn function_event(input: &mut &str) -> ModalResult<QwenCoderEvent> {
+fn function_event(input: &mut &str, trim_parameter_newlines: bool) -> ModalResult<QwenCoderEvent> {
     let (name, raw_params) = seq!(
         _: literal(FUNCTION_START),
         take_until(1.., ">"),
         _: ">",
         _: ws0,
-        repeat(0.., terminated(parameter, ws0)),
+        repeat(0.., terminated(|input: &mut &str| parameter(input, trim_parameter_newlines), ws0)),
         _: literal(FUNCTION_END),
     )
     .parse_next(input)?;
@@ -262,23 +266,33 @@ fn function_event(input: &mut &str) -> ModalResult<QwenCoderEvent> {
 }
 
 /// Parse a Qwen Coder parameter block.
-fn parameter(input: &mut &str) -> ModalResult<(String, String)> {
+fn parameter(input: &mut &str, trim_newlines: bool) -> ModalResult<(String, String)> {
     let (name, value) = seq!(
         _: literal(PARAMETER_START),
         take_until(1.., ">"),
         _: ">",
-        take_until(0.., PARAMETER_END).map(trim_one_wrapping_newline),
+        take_until(0.., PARAMETER_END),
         _: literal(PARAMETER_END),
     )
     .parse_next(input)?;
 
+    let value = if trim_newlines {
+        trim_one_wrapping_newline(value)
+    } else {
+        value
+    };
     Ok((name.to_string(), value.to_string()))
 }
 
 /// Parse a Qwen Coder tool-call body.
-fn parse_tool_call_body(body: &str) -> ModalResult<QwenCoderEvent> {
+fn parse_tool_call_body(body: &str, trim_parameter_newlines: bool) -> ModalResult<QwenCoderEvent> {
     let mut input = body;
-    delimited(ws0, function_event, (ws0, eof)).parse_next(&mut input)
+    delimited(
+        ws0,
+        |input: &mut &str| function_event(input, trim_parameter_newlines),
+        (ws0, eof),
+    )
+    .parse_next(&mut input)
 }
 
 /// Trim a single leading and trailing newline from a parameter value.
@@ -293,7 +307,7 @@ mod tests {
     use serde_json::{Value, json};
     use thiserror_ext::AsReport;
 
-    use super::{Qwen3CoderToolParser, ToolParser};
+    use super::{Qwen3CoderToolParser, Tool, ToolParser};
     use crate::tool::test_utils::{collect_stream, split_by_chars, test_tools};
     use crate::tool::tests::assert_tool_framing_preserves_body_whitespace;
     use crate::tool::{ToolParserOutput, ToolParserTestExt as _};
@@ -529,6 +543,39 @@ mod tests {
             json!({
                 "data": { "key": "value", "count": 42 },
             })
+        );
+    }
+
+    #[test]
+    fn qwen_coder_parse_complete_resolves_schema_references() {
+        let tools = [Tool {
+            name: "plan_trip".to_string(),
+            description: None,
+            parameters: json!({
+                "$defs": {
+                    "Place": { "type": "object", "properties": { "city": { "type": "string" } } },
+                    "Days": { "type": "integer" }
+                },
+                "type": "object",
+                "properties": {
+                    "place": { "$ref": "#/$defs/Place" },
+                    "days": { "$ref": "#/$defs/Days" }
+                }
+            }),
+            strict: None,
+            defer_loading: None,
+        }];
+        let mut parser = Qwen3CoderToolParser::new(&tools);
+        let output = parser
+            .parse_complete(&build_tool_call(
+                "plan_trip",
+                &[("place", "\n{\"city\": \"Paris\"}\n"), ("days", "\n3\n")],
+            ))
+            .unwrap();
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
+            json!({ "place": { "city": "Paris" }, "days": 3 })
         );
     }
 

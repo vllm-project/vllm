@@ -9,6 +9,25 @@ It's a living document, updated as new features and datasets become available.
 
     For benchmarking production vLLM servers, we recommend [GuideLLM](https://github.com/vllm-project/guidellm), an established performance benchmarking framework with live progress updates and automatic report generation. It is also more flexible than `vllm bench serve` in terms of dataset loading, request formatting, and workload patterns.
 
+## Model Forward Benchmark
+
+For exact-batch model timing, including steady-state pipeline-parallel forwards,
+see [vllm bench forward](../cli/README.md#forward).
+
+## Attention Kernel Benchmark
+
+Run the attention kernel smoke benchmark from the repository root using the
+exact backend names:
+
+```bash
+python3 benchmarks/attention_benchmarks/benchmark.py \
+  --backends FLASH_ATTN FLASHINFER --batch-specs "8q1s1k"
+```
+
+If any configuration fails, the benchmark exits with status `1` after reporting
+results and writing any requested CSV or JSON output. Successful runs exit with
+status `0`. Profiling runs also propagate failures, but do not save timing metrics.
+
 ## Dataset Overview
 
 <style>
@@ -23,7 +42,6 @@ th {
 | ShareGPT4V (Image) | ✅ | ✅ | `wget https://huggingface.co/datasets/Lin-Chen/ShareGPT4V/resolve/main/sharegpt4v_instruct_gpt4-vision_cap100k.json`<br>Note that the images need to be downloaded separately. For example, to download COCO's 2017 Train images:<br>`wget http://images.cocodataset.org/zips/train2017.zip` |
 | ShareGPT4Video (Video) | ✅ | ✅ | `git clone https://huggingface.co/datasets/ShareGPT4Video/ShareGPT4Video` |
 | BurstGPT | ✅ | ✅ | `wget https://github.com/HPMLL/BurstGPT/releases/download/v1.1/BurstGPT_without_fails_2.csv` |
-| Sonnet (deprecated) | ✅ | ✅ | Local file: `benchmarks/sonnet.txt` |
 | Random | ✅ | ✅ | `synthetic` |
 | RandomMultiModal (Image/Video) | ✅ | ✅ | `synthetic` |
 | RandomForReranking | ✅ | ✅ | `synthetic` |
@@ -147,7 +165,7 @@ With standard decoding, each streamed output usually contains one token, so ITL
 and TPOT are typically similar.
 
 With speculative decoding, one streamed output can contain multiple tokens,
-such as several accepted draft tokens within a single engine tstep. ITL records
+such as several accepted draft tokens within a single engine step. ITL records
 only the gaps between streamed outputs; it does not add zero-duration gaps for
 tokens in the same output. TPOT instead amortizes the request's decoding time
 over every output token.
@@ -158,6 +176,56 @@ over every output token.
 In this example, the benchmark observes two 40 ms ITL samples. The three tokens
 in the second streamed output do not create additional ITL samples, so mean ITL
 is 40 ms. TPOT is `(180 ms - 100 ms) / (5 - 1) = 20 ms/token`.
+
+#### Saving Server-Side Per-Request Metrics
+
+When the server is started with
+[`--enable-per-request-metrics`](../features/per_request_metrics.md#enabling),
+`vllm bench serve` can preserve the server-side queue time and TTFT for each
+request. These fields are populated only by the `openai`, `vllm`, and
+`openai-chat` backends.
+
+Start the server:
+
+```bash
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
+  --enable-per-request-metrics
+```
+
+Then run the benchmark in another terminal:
+
+```bash
+vllm bench serve \
+  --backend openai \
+  --endpoint /v1/completions \
+  --model meta-llama/Llama-3.1-8B-Instruct \
+  --save-result \
+  --save-detailed
+```
+
+The detailed result includes `server_queue_times` and `server_ttfts`, in
+seconds, when at least one request has an available server queue time or
+TTFT. Their indices align with the other per-request arrays, with unavailable
+values represented as `null`. Both arrays are omitted when neither metric is
+available for any request.
+
+`server_queue_times` measures server scheduler waiting time, while
+`server_ttfts` measures time from scheduling to first token generation.
+Client-side `ttfts` measures time from sending a request until receiving its
+first streamed token. Approximately, for each request:
+
+```text
+ttft ≈ server_queue_time + server_ttft + frontend/network overhead
+```
+
+Frontend/network overhead includes tokenization, chat-template application,
+multimodal preprocessing, detokenization, and transport. Client-side
+`queue_times` measures waiting for a benchmark concurrency slot before the
+request is sent, separately from the TTFT decomposition above.
+
+Enabling per-request metrics adds server CPU overhead, especially at high
+concurrency. Treat these as diagnostic runs rather than headline performance
+measurements.
 
 #### Results Visualization
 
@@ -451,7 +519,7 @@ vllm bench serve \
     --num-prompts -1
 ```
 
-Available categories include `[high_entropy, mixed, low_entropy]`, where high entropy data contains unstructued data such as creative writing while low entropy data contains more structured data such as coding, more details are in the dataset card.
+Available categories include `[high_entropy, mixed, low_entropy]`, where high entropy data contains unstructured data such as creative writing while low entropy data contains more structured data such as coding, more details are in the dataset card.
 
 #### BFCL (Tool-Calling) Benchmark
 
@@ -596,6 +664,46 @@ vllm bench serve \
     --max-concurrency 512
 ```
 
+#### Responses API Benchmark
+
+The `openai-responses` backend benchmarks vLLM's
+[Responses API](../serving/online_serving/openai_compatible_server.md#responses-api)
+directly, instead of routing the same workload through `/v1/chat/completions`.
+
+```bash
+# Server
+vllm serve openai/gpt-oss-20b
+
+# Client
+vllm bench serve \
+    --backend openai-responses \
+    --endpoint /v1/responses \
+    --model openai/gpt-oss-20b \
+    --dataset-name random \
+    --random-input-len 1024 \
+    --random-output-len 1024 \
+    --num-prompts 200
+```
+
+Reasoning deltas (`response.reasoning_text.delta`) count towards TTFT and ITL,
+because the server is already decoding tokens when it emits them. Only output
+text (`response.output_text.delta`) is collected as the generated text, which
+matches how the `openai-chat` backend treats `DeltaMessage.reasoning`. End-to-end
+latency stops at the last token event, so `latency - ttft` equals `sum(itl)` and
+TPOT is comparable with the other endpoints. The input and output token counts
+come from the usage block on `response.completed`, which is still required: a
+stream that ends without a terminal event is reported as a failed request.
+
+The backend measures one streamed text-generation request per prompt. Built-in
+tools, MCP, and multi-turn state via `previous_response_id` are out of scope.
+All sampling parameter flags are supported except `--min-p`, which the
+Responses API does not accept.
+
+!!! warning
+    Do not pass `--extra-body '{"include_reasoning": false}'` when benchmarking
+    a reasoning model. The server still generates reasoning tokens but emits no
+    events for them, so the whole reasoning phase is absorbed into TTFT.
+
 #### Running With Sampling Parameters
 
 When using OpenAI-compatible backends such as `vllm`, optional sampling
@@ -733,16 +841,17 @@ Using KV cache metrics for load pattern configuration:
 ```bash
 vllm bench throughput \
   --model NousResearch/Hermes-3-Llama-3.1-8B \
-  --dataset-name sonnet \
-  --dataset-path vllm/benchmarks/sonnet.txt \
+  --dataset-name random \
+  --random-input-len 500 \
+  --random-output-len 150 \
   --num-prompts 10
 ```
 
 If successful, you will see the following output
 
 ```text
-Throughput: 7.15 requests/s, 4656.00 total tokens/s, 1072.15 output tokens/s
-Total num prompt tokens:  5014
+Throughput: 7.15 requests/s, 4647.50 total tokens/s, 1072.50 output tokens/s
+Total num prompt tokens:  5000
 Total num output tokens:  1500
 ```
 

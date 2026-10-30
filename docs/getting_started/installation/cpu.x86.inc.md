@@ -33,7 +33,7 @@ uv pip install "https://github.com/vllm-project/vllm/releases/download/v${VLLM_V
     pip install "https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cpu-cp38-abi3-manylinux_2_34_x86_64.whl" --extra-index-url https://download.pytorch.org/whl/cpu
     ```
 !!! warning "set `LD_PRELOAD`"
-    Before use vLLM CPU installed via wheels, make Intel OpenMP is added to `LD_PRELOAD`:
+    Before use vLLM CPU installed via wheels, make sure Intel OpenMP is added to `LD_PRELOAD`:
     ```bash
     # manually find the path
     sudo find / -iname *libiomp5.so
@@ -183,6 +183,40 @@ docker run \
     vllm/vllm-openai-cpu:latest-x86_64 <args...>
 ```
 
+### Serve with vLLM Recipes
+
+The CPU image includes the [vLLM Recipes](https://recipes.vllm.ai/) deployment
+tool. Recipe-assisted serving queries the site at runtime, so the image can use
+the latest published recipe for the selected model and hardware.
+
+To find the value for `--hardware`, open vLLM Recipes, select the model, and
+choose the target in the **Hardware** picker. The selected page URL also
+contains the hardware key; for example, `?hardware=xeon6` maps to
+`--hardware xeon6`.
+
+Keep the normal image entrypoint for regular serving. For recipe-assisted
+serving, override it with `serve_with_recipe.sh`:
+
+```bash
+docker run --rm \
+    --shm-size=4g \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    -p 8000:8000 \
+    --env "HF_TOKEN=<secret>" \
+    --entrypoint tools/recipes/serve_with_recipe.sh \
+    vllm/vllm-openai-cpu:latest-x86_64 \
+    --model meta-llama/Llama-3.1-8B-Instruct \
+    --hardware xeon6
+```
+
+For Xeon 6, the script enables hardware detection automatically, generates
+`config.yml` and `env.sh`, and starts `vllm serve`. The image keeps
+`/vllm-workspace` as its working directory so relative recipe assets under
+`examples/` continue to resolve.
+
+See the [Recipes tool documentation](../../../tools/recipes/README.md) for
+interactive discovery and additional options.
+
 --8<-- [end:pre-built-images]
 --8<-- [start:build-image-from-source]
 
@@ -239,7 +273,9 @@ Otherwise, vLLM falls back to the default `CpuPlatform` (oneDNN / sgl-kernel pat
 
 ### Supported dtypes
 
-`float16` is **not** supported on `ZenCpuPlatform`. `ZenCpuPlatform.supported_dtypes` advertises only `bfloat16` and `float32`, so models declared with `torch_dtype=float16` are auto-downcast to `bfloat16` at load time with the standard `"Your device 'cpu' doesn't support torch.float16. Falling back to torch.bfloat16 for compatibility."` warning emitted from `vllm/config/model.py`.
+`ZenCpuPlatform.supported_dtypes` always advertises `bfloat16` and `float32`, and adds `float16` when `torch.ops.zentorch.zentorch_is_fp16_supported()` reports AVX512-FP16, which AMD ships from Venice (6th Gen EPYC) onwards. On Turin (5th Gen EPYC) and earlier, models declared with `torch_dtype=float16` are auto-downcast to `bfloat16` at load time with the standard `"Your device 'cpu' doesn't support torch.float16. Falling back to torch.bfloat16 for compatibility."` warning emitted from `vllm/config/model.py`.
+
+`bfloat16` is listed first either way, so `--dtype auto` keeps resolving to it.
 
 ### Environment variables
 

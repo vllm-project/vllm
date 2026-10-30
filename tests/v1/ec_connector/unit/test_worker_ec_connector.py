@@ -20,6 +20,7 @@ from vllm.v1.worker.gpu.ec_connector import NO_OP_EC_CONNECTOR, ActiveECConnecto
 pytestmark = pytest.mark.cpu_test
 
 WORKER_META = object()
+CONNECTOR_STATS = object()
 
 
 def _scheduler_output() -> SimpleNamespace:
@@ -38,6 +39,7 @@ def _connector(
     fake.is_consumer = is_consumer
     fake.get_finished.return_value = (None, None)
     fake.build_connector_worker_meta.return_value = WORKER_META
+    fake.get_ec_connector_stats.return_value = CONNECTOR_STATS
     with patch("vllm.v1.worker.gpu.ec_connector.get_ec_transfer", return_value=fake):
         return ActiveECConnector(SimpleNamespace(), encoder_cache or {}), fake
 
@@ -66,10 +68,22 @@ def test_worker_meta_is_reported_on_context_exit():
     connector, fake = _connector()
 
     with connector.maybe_get_output(_scheduler_output()) as output:
+        assert output is not None
         assert output.ec_connector_worker_meta is None
 
     assert output.ec_connector_worker_meta is WORKER_META
     assert fake.clear_connector_metadata.called
+
+
+def test_connector_stats_are_reported_on_context_exit():
+    """Reported in the finally block, alongside the worker meta."""
+    connector, fake = _connector()
+
+    with connector.maybe_get_output(_scheduler_output()) as output:
+        assert output is not None
+        assert output.ec_connector_stats is None
+
+    assert output.ec_connector_stats is CONNECTOR_STATS
 
 
 def test_v1_producer_receives_existing_encoder_cache():
@@ -97,6 +111,7 @@ def test_no_forward_reports_without_running_the_model():
 
     output = connector.no_forward(_scheduler_output())
 
+    assert output.ec_connector_output is not None
     assert output.ec_connector_output.ec_connector_worker_meta is WORKER_META
 
     empty = NO_OP_EC_CONNECTOR.no_forward(_scheduler_output())

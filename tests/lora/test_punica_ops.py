@@ -5,7 +5,9 @@ from threading import Lock
 import pytest
 import torch
 
+import vllm.lora.ops.torch_ops as torch_ops
 import vllm.lora.ops.triton_ops as triton_ops
+from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.lora.ops.triton_ops import LoRAKernelMeta
 from vllm.lora.ops.triton_ops.utils import _LORA_A_PTR_DICT, _LORA_B_PTR_DICT
 from vllm.platforms import current_platform
@@ -33,6 +35,13 @@ def reset_device(reset_default_device):
 def cleanup_fixture():
     """Override conftest's cleanup_fixture— not needed for punica tests."""
     yield
+
+
+@pytest.fixture(autouse=True, scope="module")
+def cleanup_after_module():
+    """Release this module's cached GPU memory before later engine tests."""
+    yield
+    cleanup_dist_env_and_memory()
 
 
 @pytest.fixture(autouse=True)
@@ -160,8 +169,7 @@ def check_lora_shrink_kernel(
     seq_length: int,
     scaling: float,
 ):
-    """
-    Compare outputs of torch_ops.sgmv_shrink and triton_ops.lora_shrink
+    """Compare outputs of torch_ops.sgmv_shrink and triton_ops.lora_shrink
     kernels.
     """
     data: PunicaTensors = generate_data_for_nslices(
@@ -234,8 +242,7 @@ def check_lora_expand_kernel(
     seq_length: int,
     add_inputs: bool,
 ):
-    """
-    Compare outputs of torch_ops.sgmv_expand and triton_ops.lora_expand
+    """Compare outputs of torch_ops.sgmv_expand and triton_ops.lora_expand
     kernels.
     """
     data: PunicaTensors = generate_data_for_nslices(
@@ -438,9 +445,7 @@ def test_kernels(
     seed: int,
     op_type: str,
 ):
-    """
-    Tests LoRA kernels.
-    """
+    """Tests LoRA kernels."""
     torch.set_default_device(device)
     torch.accelerator.set_device_index(device)
     set_random_seed(seed)
@@ -491,9 +496,7 @@ def test_kernels_hidden_size(
     seed: int,
     op_type: str,
 ):
-    """
-    Tests SGMV and LoRA kernels.
-    """
+    """Tests SGMV and LoRA kernels."""
     torch.set_default_device(device)
     torch.accelerator.set_device_index(device)
     set_random_seed(seed)
@@ -526,8 +529,7 @@ def test_kernels_hidden_size(
 
 @pytest.mark.parametrize("device", DEVICES)
 def test_add_lora_fused_moe_early_exit(device):
-    """
-    Ensures add_lora_fused_moe does not invoke the LoRA kernel or
+    """Ensures add_lora_fused_moe does not invoke the LoRA kernel or
     modify the output tensor when no_lora_flag_cpu is True
     """
     from types import SimpleNamespace
@@ -646,3 +648,57 @@ def test_add_lora_fused_moe_early_exit(device):
     assert torch.equal(y, y_snapshot), (
         "add_lora_fused_moe modified output tensor despite no_lora_flag_cpu=True"
     )
+
+
+def test_torch_ops_bgmv_skips_no_lora_tokens():
+    """The CPU torch bgmv ops must apply no delta to tokens with index -1.
+
+    ``token_lora_indices`` uses -1 to mark "no LoRA" (PunicaWrapperBase); the
+    triton kernels early-exit on ``lora_id == -1``. The torch reference indexed
+    ``lora_weights[-1]`` instead, applying the last stacked adapter to
+    base-model tokens in a mixed batch. Fixing bgmv also fixes sgmv, which
+    delegates to it.
+    """
+    torch.manual_seed(0)
+    num_loras, in_dim, rank, out_dim = 2, 8, 4, 6
+    # token 0 uses LoRA 0; token 1 is a base-model token (no LoRA).
+    lora_indices = torch.tensor([0, -1], dtype=torch.long)
+
+    # shrink: [T, in] x [L, rank, in] -> [T, rank]
+    x = torch.randn(2, in_dim)
+    a = torch.randn(num_loras, rank, in_dim)
+    y = torch.zeros(2, rank)
+    torch_ops.bgmv_shrink(x, a, y, lora_indices, scaling=1.0)
+    assert torch.count_nonzero(y[1]) == 0
+    torch.testing.assert_close(y[0], x[0] @ a[0].T)
+
+    # expand (add): [T, rank] x [L, out, rank] -> [T, out]
+    xe = torch.randn(2, rank)
+    b = torch.randn(num_loras, out_dim, rank)
+    ye = torch.zeros(2, out_dim)
+    torch_ops.bgmv_expand(xe, b, ye, lora_indices, add_inputs=True)
+    assert torch.count_nonzero(ye[1]) == 0
+    torch.testing.assert_close(ye[0], xe[0] @ b[0].T)
+
+    # expand (overwrite): the no-LoRA row keeps its prior value, as the
+    # triton kernel leaves it untouched rather than writing zeros.
+    ye = torch.full((2, out_dim), 5.0)
+    torch_ops.bgmv_expand(xe, b, ye, lora_indices, add_inputs=False)
+    assert torch.equal(ye[1], torch.full((out_dim,), 5.0))
+    torch.testing.assert_close(ye[0], xe[0] @ b[0].T)
+
+    # expand_slice (add into a column slice): [T, rank] x [L, slice, rank]
+    offset = 3
+    ys = torch.zeros(2, out_dim + offset)
+    torch_ops.bgmv_expand_slice(
+        xe, b, ys, lora_indices, offset, out_dim, add_inputs=True
+    )
+    assert torch.count_nonzero(ys[1]) == 0
+    torch.testing.assert_close(ys[0, offset : offset + out_dim], xe[0] @ b[0].T)
+
+    ys = torch.full((2, out_dim + offset), 5.0)
+    torch_ops.bgmv_expand_slice(
+        xe, b, ys, lora_indices, offset, out_dim, add_inputs=False
+    )
+    assert torch.equal(ys[1], torch.full((out_dim + offset,), 5.0))
+    torch.testing.assert_close(ys[0, offset : offset + out_dim], xe[0] @ b[0].T)

@@ -5,7 +5,6 @@ from vllm.utils.jsontree import json_count_leaves
 
 def test_json_count_leaves():
     """Test json_count_leaves function from jsontree utility."""
-
     # Single leaf values
     assert json_count_leaves(42) == 1
     assert json_count_leaves("hello") == 1

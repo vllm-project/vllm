@@ -145,7 +145,9 @@ class DeepseekV4MoE(nn.Module):
 
         self.gate.e_score_correction_bias = None
         self.gate.tid2eid = None
-        is_hash_moe = extract_layer_index(prefix) < config.num_hash_layers
+        is_hash_moe = extract_layer_index(prefix) < config.mlp_layer_types.count(
+            "hash_moe"
+        )
         self.hash_indices_dtype = torch.int32
         if is_hash_moe:
             # hash MoE doesn't use e_score_correction_bias
@@ -214,14 +216,6 @@ class DeepseekV4MoE(nn.Module):
             swiglu_limit=self.swiglu_limit,
             router_logits_dtype=torch.float32,
         )
-        if is_hash_moe:
-            # apply_monolithic() never sees hash_indices_table via the
-            # router path (modular-only) -- stash it on RoutedExperts
-            # directly. object.__setattr__ avoids nn.Module re-registering
-            # (and duplicating in the state_dict) this alias.
-            object.__setattr__(
-                self.experts.routed_experts, "hash_indices_table", self.gate.tid2eid
-            )
 
     def forward(
         self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None = None
@@ -663,14 +657,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 return inv_name
             return name
 
-        # TP for attention
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        n_head = self.config.num_attention_heads
-        n_local_head = n_head // tp_size
-        head_rank_start = n_local_head * tp_rank
-        head_rank_end = n_local_head * (tp_rank + 1)
-
         # Pre-compute expert mapping ONCE.
         expert_mapping = self.get_expert_mapping()
 
@@ -754,14 +740,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                             name = name_mapped
                             break
                     loaded_params.add(name_mapped)
-                    continue
-                elif "attn_sink" in name:
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    narrow_weight = loaded_weight[head_rank_start:head_rank_end]
-                    n = narrow_weight.shape[0]
-                    params_dict[name][:n].copy_(narrow_weight)
-                    loaded_params.add(name)
                     continue
                 else:
                     if is_pp_missing_parameter(name, self):

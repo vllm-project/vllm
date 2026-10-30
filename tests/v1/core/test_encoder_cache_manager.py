@@ -114,6 +114,7 @@ def test_eviction_when_cache_is_full():
 
     # 'x' should have been evicted.
     assert "x" not in manager.cached
+    assert "x" not in manager.num_embeds_by_hash
     assert "req1" not in manager.request_cached_ids
     assert "x" in manager.get_freed_mm_hashes()
 
@@ -273,6 +274,31 @@ def test_encoder_cache_with_is_embed_mask():
     assert savings_ratio == 12.5
 
 
+def test_encoder_cache_tracks_embedding_count_by_identifier():
+    class MockRequestWithMask(MockRequest):
+        def get_num_encoder_embeds(self, input_id: int) -> int:
+            return self.mm_features[input_id].mm_position.get_num_embeds()
+
+    is_embed = torch.tensor([False, True, True, False, True, False])
+    request = MockRequestWithMask("owner", ["img1"], [len(is_embed)])
+    request.mm_features[0] = MultiModalFeatureSpec(
+        data=None,
+        modality="image",
+        identifier="img1",
+        mm_position=PlaceholderRange(offset=0, length=6, is_embed=is_embed),
+    )
+
+    manager = EncoderCacheManager(cache_size=10)
+    manager.allocate(request, 0)
+    assert manager.get_cached_num_encoder_embeds(request, 0) == 3
+
+    manager.free(request)
+    assert manager.get_cached_num_encoder_embeds(request, 0) == 3
+
+    manager.reset()
+    assert manager.get_cached_num_encoder_embeds(request, 0) is None
+
+
 def test_encoder_cache_mask_based_retrieval():
     class MockRequestWithMask(MockRequest):
         def get_num_encoder_embeds(self, input_id: int) -> int:
@@ -336,6 +362,7 @@ def test_reset_clears_all_state():
     manager.reset()
 
     assert len(manager.cached) == 0
+    assert len(manager.num_embeds_by_hash) == 0
     assert len(manager.request_cached_ids) == 0
     assert len(manager.freeable) == 0
     assert len(manager.freed) == 0
@@ -416,6 +443,31 @@ def test_duplicate_mm_hash_is_not_evicted_before_last_use():
     assert not manager.can_allocate(other, 0, int(1e9), 0)
     assert manager.check_and_update_cache(req, 1)
     assert manager.get_freed_mm_hashes() == []
+
+
+def test_many_inputs_release_each_hash_at_its_last_occurrence():
+    """A request with many items, one repeated, releases every entry exactly
+    once its last cached occurrence is freed."""
+    num_items = 64
+    hashes = [f"img{i}" for i in range(num_items)] + ["img0"]
+    manager = EncoderCacheManager(cache_size=num_items)
+    req = MockRequest("r1", hashes, [1] * len(hashes))
+
+    for i in range(num_items):
+        manager.allocate(req, i)
+    assert manager.check_and_update_cache(req, num_items)
+
+    manager.free_encoder_input(req, 0)
+    assert "img0" not in manager.freeable
+    for i in range(1, num_items):
+        manager.free_encoder_input(req, i)
+        assert manager.freeable[f"img{i}"] == 1
+
+    manager.free_encoder_input(req, num_items)
+    assert manager.freeable["img0"] == 1
+    assert manager.num_freeable_slots == num_items
+    assert "r1" not in manager.request_cached_ids
+    assert "r1" not in manager.request_hash_refs
 
 
 def test_encoder_decoder_cache_manager_reset():

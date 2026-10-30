@@ -6,6 +6,7 @@ These validate that the engine-driven parser correctly handles
 Qwen3 XML-style tool calls.
 """
 
+import dataclasses
 import json
 from unittest.mock import MagicMock
 
@@ -272,6 +273,53 @@ class TestNonStreaming:
         assert args == {
             "questions": '[{"question": "Pick a color",'
             ' "multiSelect": false, "answer": null}]',
+        }
+
+    @pytest.mark.parametrize(
+        "unclosed_func",
+        ["<function=function_name", "<function=function_name>"],
+    )
+    def test_regression_issue_58227(self, parser, mock_request, unclosed_func):
+        """Regression issue 58227
+        Check cases:
+        * <function=...<tool_call>
+        * <function=abc>...<function=
+        """
+        text = (
+            f"Use <tool_call>\n{unclosed_func}\n"
+            "Wait, let me call the real tool via <tool_call>:\n"
+            "<tool_call>\n"
+            "<function=get_weather>\n"
+            "<parameter=city>Tokyo</parameter>\n"
+            "</function>\n"
+            "</tool_call>"
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert result.tool_calls[-1].function.name == "get_weather"
+        assert json.loads(result.tool_calls[-1].function.arguments) == {
+            "city": "Tokyo",
+        }
+
+    def test_tool_call_tag_is_ok_inside_parameter(self, parser, mock_request):
+        """Regression issue 58227
+        Check that <tool_call> tag is ok inside parameter value
+        """
+        text = (
+            "<tool_call>\n"
+            "<function=write_file>\n"
+            "<parameter=content>Document <tool_call> usage</parameter>\n"
+            "</function>\n"
+            "</tool_call>"
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "write_file"
+        assert json.loads(result.tool_calls[0].function.arguments) == {
+            "content": "Document <tool_call> usage",
         }
 
 
@@ -635,6 +683,69 @@ class TestStreaming:
         assert "Bash" in names
         assert "Read" in names
 
+    @pytest.mark.parametrize(
+        "unclosed_func",
+        ["<function=function_name", "<function=function_name>"],
+    )
+    def test_streaming_regression_issue_58227(
+        self, parser, mock_request, unclosed_func
+    ):
+        """Regression issue 58227
+        Check cases:
+        * <function=...<tool_call>
+        * <function=abc>...<function=
+        """
+        chunks = [
+            "Use <tool_call>\n",
+            f"{unclosed_func}\n",
+            "Wait, let me call the real tool via ",
+            "<tool_call>",
+            ":\n",
+            "<tool_call>\n",
+            "<function=get_weather>\n",
+            "<parameter=city>Tokyo</parameter>\n",
+            "</function>\n",
+            "</tool_call>",
+        ]
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+
+        calls_by_index: dict[int, dict[str, str]] = {}
+        for delta, _ in results:
+            if delta and delta.tool_calls:
+                for tc in delta.tool_calls:
+                    entry = calls_by_index.setdefault(
+                        tc.index, {"name": "", "arguments": ""}
+                    )
+                    if tc.function:
+                        if tc.function.name:
+                            entry["name"] += tc.function.name
+                        if tc.function.arguments:
+                            entry["arguments"] += tc.function.arguments
+
+        last_call = calls_by_index[max(calls_by_index)]
+        assert last_call["name"] == "get_weather"
+        assert json.loads(last_call["arguments"]) == {"city": "Tokyo"}
+
+    def test_streaming_tool_call_tag_is_ok_inside_parameter(self, parser, mock_request):
+        """Regression issue 58227
+        Check that <tool_call> tag is ok inside parameter value
+        """
+        chunks = [
+            "<tool_call>\n",
+            "<function=write_file>\n",
+            "<parameter=content>Document ",
+            "<tool_call>",
+            " usage</parameter>\n",
+            "</function>\n",
+            "</tool_call>",
+        ]
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+
+        assert collect_function_name(results) == "write_file"
+        assert json.loads(collect_tool_arguments(results)) == {
+            "content": "Document <tool_call> usage",
+        }
+
 
 class TestArgConverter:
     """Direct tests for the Qwen3 arg_converter with multi-line values."""
@@ -696,6 +807,136 @@ class TestArgConverter:
         raw = "<parameter=city>Tokyo</parameter>\n<parameter=expr>x<5"
         result = json.loads(_qwen3_arg_converter(raw, partial=True))
         assert result == {"city": "Tokyo", "expr": "x<5"}
+
+
+WRITE_CALL_HEAD = (
+    "<tool_call>\n<function=write_file>\n"
+    "<parameter=path>\n/repo/app.py\n</parameter>\n"
+    "<parameter=mode>\n644\n</parameter>\n"
+    "<parameter=content>\n"
+)
+WRITE_CALL_TAIL = "\n</parameter>\n</function>\n</tool_call>"
+# Escapes, non-ASCII, blank lines and tag-like text that must stay inside
+# the value, including prefixes of the closing and next-parameter tags.
+CONTENT_LINE = 'if a < b > c: print("x\\y")  # </p> </param <parameter\té\n\n'
+
+
+class TestArgValueExtender:
+    """The open parameter value streams without re-running the converter."""
+
+    @pytest.fixture
+    def write_tool(self):
+        from vllm.entrypoints.openai.chat_completion.protocol import (
+            ChatCompletionToolsParam,
+        )
+
+        return ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "write_file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "mode": {"type": "integer"},
+                        "content": {"type": "string"},
+                    },
+                },
+            },
+        )
+
+    @pytest.mark.parametrize("use_schema", [False, True], ids=["no_schema", "schema"])
+    @pytest.mark.parametrize("parser_name", ["qwen3", "mimo"])
+    def test_long_call_streams_non_streaming_arguments(
+        self, mock_tokenizer, mock_request, write_tool, use_schema, parser_name
+    ):
+        from vllm.parser.mimo import MiMoParser
+        from vllm.parser.qwen3 import Qwen3Parser
+
+        cls = MiMoParser if parser_name == "mimo" else Qwen3Parser
+        mock_request.tools = [write_tool] if use_schema else []
+        text = WRITE_CALL_HEAD + CONTENT_LINE * 200 + WRITE_CALL_TAIL
+
+        def make_parser():
+            return cls(mock_tokenizer, chat_template_kwargs={"enable_thinking": False})
+
+        results = simulate_tool_streaming(
+            make_parser(),
+            mock_request,
+            [text[i : i + 7] for i in range(0, len(text), 7)],
+        )
+        result = make_parser().extract_tool_calls(text, mock_request)
+
+        assert collect_tool_arguments(results) == (
+            result.tool_calls[0].function.arguments
+        )
+        # MiMo keeps the newlines around the value; the schema coerces both.
+        mode = '"\\n644\\n"' if parser_name == "mimo" else '"644"'
+        if use_schema:
+            mode = "644"
+        assert f'"mode": {mode},' in collect_tool_arguments(results)
+
+    def test_conversions_do_not_grow_with_argument_length(
+        self, mock_tokenizer, mock_request, write_tool
+    ):
+        mock_request.tools = [write_tool]
+        base = qwen3_config(thinking=False)
+        converter = base.arg_converter
+        assert converter is not None
+
+        def streaming_conversions(lines: int) -> int:
+            calls = 0
+
+            def counting_converter(raw_args: str, partial: bool) -> str:
+                nonlocal calls
+                calls += partial
+                return converter(raw_args, partial)
+
+            parser = ParserEngine(
+                mock_tokenizer,
+                parser_engine_config=dataclasses.replace(
+                    base, arg_converter=counting_converter
+                ),
+            )
+            text = WRITE_CALL_HEAD + CONTENT_LINE * lines + WRITE_CALL_TAIL
+            simulate_tool_streaming(
+                parser,
+                mock_request,
+                [text[i : i + 4] for i in range(0, len(text), 4)],
+            )
+            return calls
+
+        assert streaming_conversions(lines=20) == streaming_conversions(lines=200)
+
+    def test_extender_follows_newline_trimming_and_split_end(self):
+        from vllm.parser.qwen3 import _qwen3_arg_value_extender
+
+        extend = _qwen3_arg_value_extender("<parameter=k>")
+        assert extend is not None
+        deltas = ["\n", 'a"\n', "b", "\n", "</param", "eter>"]
+        expected = ["", 'a\\"', "\\nb", "", "\\n</param", None]
+        assert [extend(d) for d in deltas] == expected
+
+    def test_extender_stops_at_split_next_parameter(self):
+        from vllm.parser.qwen3 import _qwen3_arg_value_extender
+
+        extend = _qwen3_arg_value_extender("<parameter=k>x")
+        assert extend is not None
+        assert [extend(d) for d in ["< para", "meter ="]] == ["< para", None]
+
+    @pytest.mark.parametrize(
+        "raw_args",
+        [
+            "<parameter=k>x</parameter>",
+            "<parameter=k",
+            "<parameter=k>1</parameter><parameter=j>2</parameter><parameter=k>3",
+        ],
+        ids=["closed_value", "open_name", "repeated_key_not_last"],
+    )
+    def test_no_extender_unless_open_value_is_last(self, raw_args):
+        from vllm.parser.qwen3 import _qwen3_arg_value_extender
+
+        assert _qwen3_arg_value_extender(raw_args) is None
 
 
 class TestSchemaAwareTypeCoercion:
@@ -1175,3 +1416,27 @@ class TestNestedSchemaCoercion:
         assert questions[0]["question"] == "Pick a color"
         assert questions[0]["multiSelect"] is False
         assert questions[0]["answer"] is None
+
+
+@pytest.mark.parametrize("value", ["\n北京 &amp;\n", "null", "42", "", "a\nb"])
+@pytest.mark.parametrize("chunk_size", [1, 7, 1000])
+def test_mimo_preserves_verbatim_parameter_values(
+    mock_tokenizer, mock_request, value, chunk_size
+):
+    from vllm.parser.mimo import MiMoParser
+
+    text = (
+        f"<tool_call><function=run><parameter=text>{value}</parameter>"
+        "</function></tool_call>"
+    )
+    parser = MiMoParser(mock_tokenizer, chat_template_kwargs={"enable_thinking": False})
+    result = parser.extract_tool_calls(text, mock_request)
+    assert json.loads(result.tool_calls[0].function.arguments) == {"text": value}
+    parser = MiMoParser(mock_tokenizer, chat_template_kwargs={"enable_thinking": False})
+    results = simulate_tool_streaming(
+        parser,
+        mock_request,
+        [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)],
+    )
+    assert collect_function_name(results) == "run"
+    assert json.loads(collect_tool_arguments(results)) == {"text": value}

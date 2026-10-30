@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Unit tests for the breakable cudagraph primitives.
-"""
+"""Unit tests for the breakable cudagraph primitives."""
 
 from __future__ import annotations
 
@@ -13,16 +11,27 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
+from vllm.platforms import current_platform
+
+DEVICE_TYPE = current_platform.device_type
+HAS_DEVICE_GRAPH = current_platform.is_cuda_alike() or current_platform.is_xpu()
+
+if current_platform.is_xpu():
+    from vllm.v1.worker.xpu_model_runner import _torch_cuda_wrapper
+
+    # Route torch.cuda graph/stream APIs to torch.xpu, as XPUModelRunner does.
+    with _torch_cuda_wrapper():
+        pass
+
 
 @pytest.fixture(autouse=True)
 def _enable_breakable_cudagraph(monkeypatch: pytest.MonkeyPatch):
     """Enable breakable cudagraphs for this module's tests only.
 
-    eager_break_during_capture reads the env at decoration time, which
-    happens inside the test bodies, so a per-test fixture suffices.
-    monkeypatch restores the env so other test files running in the same
-    pytest process are unaffected (a module-level os.environ assignment
-    used to leak into test_cudagraph_dispatch.py and break it).
+    A per-test fixture suffices. monkeypatch restores the env so other
+    test files running in the same pytest process are unaffected (a
+    module-level os.environ assignment used to leak into
+    test_cudagraph_dispatch.py and break it).
     """
     import vllm.envs as envs
 
@@ -43,6 +52,7 @@ def test_piecewise_capture_builds_fresh_metadata_for_both_passes():
     manager._capture_descs = {CUDAGraphMode.PIECEWISE: [desc]}
     manager._graphs_captured = False
     manager.use_breakable_cg = True
+    manager.ubatch_runner = None
 
     create_calls = []
     forward_calls = []
@@ -97,8 +107,8 @@ def cuda_capture_stream():
     stream, so all capture-using tests need to run under
     ``torch.cuda.stream(...)`` for a separate stream.
     """
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA required")
+    if not HAS_DEVICE_GRAPH:
+        pytest.skip("CUDA or XPU graph required")
     from vllm.utils.torch_utils import _current_stream_tls
 
     prev_stream = getattr(_current_stream_tls, "value", None)
@@ -131,6 +141,99 @@ def test_decorator_passthrough_outside_capture():
 
     assert f(3) == 6
     assert calls == [3]
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_decorator_passthrough_returns_fn_result(
+    monkeypatch: pytest.MonkeyPatch, enabled: bool
+):
+    from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+
+    if not enabled:
+        monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH")
+    sentinel = object()
+
+    @eager_break_during_capture
+    def f():
+        return sentinel
+
+    assert f() is sentinel
+
+
+def test_decorator_breaks_when_enabled_after_decoration(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """VllmConfig can enable breakable cudagraphs after the decorated module
+    was imported (e.g. on a cold model-info cache); the op must still break."""
+    from vllm.compilation.breakable_cudagraph import (
+        BreakableCUDAGraphCapture,
+        eager_break_during_capture,
+    )
+
+    monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH")
+
+    @eager_break_during_capture
+    def op(x):
+        return x + 1
+
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
+
+    class _Capture:
+        _capturing = True
+
+        def __init__(self):
+            self.eager = []
+
+        def add_eager(self, fn):
+            self.eager.append(fn)
+            return fn()
+
+    capture = _Capture()
+    BreakableCUDAGraphCapture._tls.active = capture
+    assert op(1) == 2
+    assert len(capture.eager) == 1
+
+
+def test_attention_op_breaks_when_imported_before_enable(tmp_path):
+    """Importing the attention module before the flag is set must still yield
+    the breakable wrapper (functools.wraps copies __name__/__wrapped__, so
+    compare code objects)."""
+    import os
+    import subprocess
+    import sys
+
+    env = {k: v for k, v in os.environ.items() if k != "VLLM_USE_BREAKABLE_CUDAGRAPH"}
+    env["VLLM_CACHE_ROOT"] = str(tmp_path)
+    code = (
+        "import vllm.model_executor.layers.attention.attention as a\n"
+        "import vllm.compilation.breakable_cudagraph as b\n"
+        "c = a.unified_attention_with_output.__code__\n"
+        "w = b.eager_break_during_capture(lambda: None).__code__\n"
+        "assert (c.co_filename, c.co_name) == (w.co_filename, w.co_name), c\n"
+    )
+    subprocess.run([sys.executable, "-c", code], env=env, check=True)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_decorated_op_traces_without_graph_break(
+    monkeypatch: pytest.MonkeyPatch, enabled: bool
+):
+    from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+
+    if not enabled:
+        monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH")
+
+    @eager_break_during_capture
+    def op(x):
+        return x * 2 + 1
+
+    def f(x):
+        return op(x).sin()
+
+    torch._dynamo.reset()
+    x = torch.randn(4)
+    compiled = torch.compile(f, fullgraph=True, backend="eager")
+    torch.testing.assert_close(compiled(x), f(x))
 
 
 # ---------------------------------------------------------------------------
@@ -201,7 +304,7 @@ def test_active_state_isolated_across_threads(cuda_capture_stream):
 def test_capture_with_no_eager_break_records_one_graph(cuda_capture_stream):
     from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
 
-    x = torch.zeros(4, device="cuda")
+    x = torch.zeros(4, device=DEVICE_TYPE)
     cap = BreakableCUDAGraphCapture()
     with cap:
         x.add_(1.0)
@@ -213,7 +316,7 @@ def test_capture_with_no_eager_break_records_one_graph(cuda_capture_stream):
 def test_add_eager_creates_alternating_graph_eager_graph(cuda_capture_stream):
     from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
 
-    x = torch.zeros(4, device="cuda")
+    x = torch.zeros(4, device=DEVICE_TYPE)
     counter = {"eager_calls": 0}
 
     def eager_step():
@@ -254,7 +357,7 @@ def test_capture_replay_matches_eager_simple(cuda_capture_stream):
     """
     from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
 
-    x = torch.zeros(8, device="cuda")
+    x = torch.zeros(8, device=DEVICE_TYPE)
     log: list[str] = []
 
     def eager_break_op():
@@ -270,21 +373,21 @@ def test_capture_replay_matches_eager_simple(cuda_capture_stream):
     # Capture-time: graph kernels were recorded only; eager segment ran
     # once on x == 0, leaving x == 0.
     torch.accelerator.synchronize()
-    assert torch.equal(x, torch.zeros(8, device="cuda"))
+    assert torch.equal(x, torch.zeros(8, device=DEVICE_TYPE))
     assert log == ["eager"]
 
     # Replay with a fresh input: 10 -> 11 -> 22 -> 27.
     x.fill_(10.0)
     cap.replay()
     torch.accelerator.synchronize()
-    assert torch.equal(x, torch.full((8,), 27.0, device="cuda"))
+    assert torch.equal(x, torch.full((8,), 27.0, device=DEVICE_TYPE))
     assert log == ["eager", "eager"]
 
     # Replay again with another input: 100 -> 101 -> 202 -> 207.
     x.fill_(100.0)
     cap.replay()
     torch.accelerator.synchronize()
-    assert torch.equal(x, torch.full((8,), 207.0, device="cuda"))
+    assert torch.equal(x, torch.full((8,), 207.0, device=DEVICE_TYPE))
     assert log == ["eager", "eager", "eager"]
 
 
@@ -302,13 +405,13 @@ def test_decorator_breaks_when_invoked_inside_capture(cuda_capture_stream):
         # In-place double; stands in for "real" attention work.
         t.mul_(2.0)
 
-    x = torch.zeros(4, device="cuda")
+    x = torch.zeros(4, device=DEVICE_TYPE)
 
     # Outside capture: decorator should just call through.
     x.fill_(3.0)
     attention_like(x)
     torch.accelerator.synchronize()
-    assert torch.equal(x, torch.full((4,), 6.0, device="cuda"))
+    assert torch.equal(x, torch.full((4,), 6.0, device=DEVICE_TYPE))
 
     # Inside capture: decorator should split the graph. Only the eager
     # segment actually mutates state during capture.
@@ -319,7 +422,7 @@ def test_decorator_breaks_when_invoked_inside_capture(cuda_capture_stream):
         attention_like(x)  # eager: x *= 2 (on x == 0, no-op)
         x.add_(1.0)  # recorded
     torch.accelerator.synchronize()
-    assert torch.equal(x, torch.zeros(4, device="cuda"))
+    assert torch.equal(x, torch.zeros(4, device=DEVICE_TYPE))
     # 2 graph segments + 1 eager segment, ordered G E G; the arithmetic
     # equivalence check below verifies the ordering.
     assert len(cap.segments) == 3
@@ -330,7 +433,7 @@ def test_decorator_breaks_when_invoked_inside_capture(cuda_capture_stream):
     x.fill_(2.0)
     cap.replay()
     torch.accelerator.synchronize()
-    assert torch.equal(x, torch.full((4,), 15.0, device="cuda"))
+    assert torch.equal(x, torch.full((4,), 15.0, device=DEVICE_TYPE))
 
 
 @pytest.mark.parametrize("keyword", [False, True])
@@ -353,7 +456,7 @@ def test_quantized_activation_replay_does_not_retain_tensors(
         data_out.copy_(x.data)
         scale_out.copy_(x.scale)
 
-    source = torch.ones((128, 128), device="cuda", dtype=torch.bfloat16)
+    source = torch.ones((128, 128), device=DEVICE_TYPE, dtype=torch.bfloat16)
     data_out = source.to(torch.float8_e4m3fn)
     scale_out = source[:, ::32].to(torch.uint8)
     output = torch.empty_like(source)
@@ -392,7 +495,7 @@ def test_eager_attention_inside_multistream_overlap(cuda_capture_stream):
     )
     from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 
-    x = torch.zeros(1024, device="cuda")
+    x = torch.zeros(1024, device=DEVICE_TYPE)
     output = torch.empty_like(x)
     aux_stream = torch.cuda.Stream()
     main_event = torch.cuda.Event()
@@ -441,7 +544,7 @@ def test_replay_invokes_eager_segments_in_order(cuda_capture_stream):
     from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
 
     log: list[str] = []
-    x = torch.zeros(1, device="cuda")
+    x = torch.zeros(1, device=DEVICE_TYPE)
 
     def make_eager(name):
         def step():
@@ -503,7 +606,7 @@ def test_nested_decorated_op_runs_inline(cuda_capture_stream):
         eager_break_during_capture,
     )
 
-    x = torch.zeros(4, device="cuda")
+    x = torch.zeros(4, device=DEVICE_TYPE)
     inner_calls = 0
 
     @eager_break_during_capture
@@ -534,7 +637,7 @@ def test_nested_decorated_op_runs_inline(cuda_capture_stream):
     cap.replay()
     torch.accelerator.synchronize()
     # 0 -> +2 -> +1 (inner) -> +10 (outer) -> +100 = 113
-    assert torch.equal(x, torch.full((4,), 113.0, device="cuda"))
+    assert torch.equal(x, torch.full((4,), 113.0, device=DEVICE_TYPE))
     assert inner_calls == 2  # replay invokes the outer's lambda again
 
 

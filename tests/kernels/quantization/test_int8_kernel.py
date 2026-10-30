@@ -54,7 +54,6 @@ def native_w8a8_per_token_matmul(A, B, As, Bs, output_dtype=torch.float16):
 def torch_w8a8_per_column_moe(a, w1, w2, w1_s, w2_s, topk, topk_weight, topk_ids):
     """This function performs fused moe with per-column int8 quantization
     using native torch."""
-
     B, D = a.shape
     # Perform per-token quantization
     a_q, a_s = per_token_quant_int8(a)

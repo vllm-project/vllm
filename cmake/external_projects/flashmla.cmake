@@ -19,7 +19,7 @@ else()
   FetchContent_Declare(
         flashmla
         GIT_REPOSITORY https://github.com/vllm-project/FlashMLA
-        GIT_TAG 6bc49418c5ead572ff0339191ddf3b155749e183
+        GIT_TAG e2afa5fd8c220fbd05fe03fc24c9d5e64c24641b
         GIT_PROGRESS TRUE
         CONFIGURE_COMMAND ""
         BUILD_COMMAND ""
@@ -76,43 +76,88 @@ if(FLASH_MLA_ARCHS)
 
     set(FlashMLA_SOURCES
         ${flashmla_SOURCE_DIR}/csrc/api/api.cpp
+        ${flashmla_SOURCE_DIR}/csrc/api/sparse_prefill.cpp
+        ${flashmla_SOURCE_DIR}/csrc/api/sparse_decode.cpp
+        ${flashmla_SOURCE_DIR}/csrc/api/dense_decode.cpp
+        ${flashmla_SOURCE_DIR}/csrc/api/fused_norm_rope_attn_rope_cast_fwd.cpp
 
-        # Misc kernels for decoding
-        ${flashmla_SOURCE_DIR}/csrc/smxx/decode/get_decoding_sched_meta/get_decoding_sched_meta.cu
-        ${flashmla_SOURCE_DIR}/csrc/smxx/decode/combine/combine.cu
+        # Current kernels (DeepSeek V4.1, token-interleaved KV cache scales)
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/smxx/decode/get_decoding_sched_meta/get_decoding_sched_meta.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/smxx/decode/combine/combine.cu
 
-        # sm90 dense decode
-        ${flashmla_SOURCE_DIR}/csrc/sm90/decode/dense/instantiations/fp16.cu
-        ${flashmla_SOURCE_DIR}/csrc/sm90/decode/dense/instantiations/bf16.cu
-
-        # sm90 sparse decode
-        ${flashmla_SOURCE_DIR}/csrc/sm90/decode/sparse_fp8/instantiations/model1_persistent_h64.cu
-        ${flashmla_SOURCE_DIR}/csrc/sm90/decode/sparse_fp8/instantiations/model1_persistent_h128.cu
-        ${flashmla_SOURCE_DIR}/csrc/sm90/decode/sparse_fp8/instantiations/v32_persistent_h64.cu
-        ${flashmla_SOURCE_DIR}/csrc/sm90/decode/sparse_fp8/instantiations/v32_persistent_h128.cu
-
-        # sm90 sparse prefill
-        ${flashmla_SOURCE_DIR}/csrc/sm90/prefill/sparse/fwd.cu
-        ${flashmla_SOURCE_DIR}/csrc/sm90/prefill/sparse/instantiations/phase1_k512.cu
-        ${flashmla_SOURCE_DIR}/csrc/sm90/prefill/sparse/instantiations/phase1_k512_topklen.cu
-        ${flashmla_SOURCE_DIR}/csrc/sm90/prefill/sparse/instantiations/phase1_k576.cu
-        ${flashmla_SOURCE_DIR}/csrc/sm90/prefill/sparse/instantiations/phase1_k576_topklen.cu
-
-        # sm100 dense prefill & backward
-        ${flashmla_SOURCE_DIR}/csrc/sm100/prefill/dense/fmha_cutlass_fwd_sm100.cu
+        # sm100 dense prefill (inference-only: dense backward stays out)
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/sm100/prefill/dense/fmha_cutlass_fwd_sm100.cu
 
         # sm100 sparse prefill
-        ${flashmla_SOURCE_DIR}/csrc/sm100/prefill/sparse/fwd/head64/instantiations/phase1_k512.cu
-        ${flashmla_SOURCE_DIR}/csrc/sm100/prefill/sparse/fwd/head64/instantiations/phase1_k576.cu
-        ${flashmla_SOURCE_DIR}/csrc/sm100/prefill/sparse/fwd/head128/instantiations/phase1_k512.cu
-        ${flashmla_SOURCE_DIR}/csrc/sm100/prefill/sparse/fwd/head128/instantiations/phase1_k576.cu
-        ${flashmla_SOURCE_DIR}/csrc/sm100/prefill/sparse/fwd_for_small_topk/head128/instantiations/phase1_prefill_k512.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/sm100/prefill/sparse/fwd/head64/instantiations/phase1_h64_k512.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/sm100/prefill/sparse/fwd/head128/instantiations/phase1_k512.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/sm100/prefill/sparse/fwd_for_small_topk/head128/instantiations/phase1_k512.cu
 
         # sm100 sparse decode
-        ${flashmla_SOURCE_DIR}/csrc/sm100/decode/head64/instantiations/v32.cu
-        ${flashmla_SOURCE_DIR}/csrc/sm100/decode/head64/instantiations/model1.cu
-        ${flashmla_SOURCE_DIR}/csrc/sm100/decode/head64/instantiations/v32_nvfp4_fp8rope.cu
-        ${flashmla_SOURCE_DIR}/csrc/sm100/prefill/sparse/fwd_for_small_topk/head128/instantiations/phase1_decode_k512.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/sm100/decode/sparse/head64/instantiations/v41_h64.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/sm100/decode/sparse/head64/instantiations/v41_h64_no_split.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/sm100/decode/sparse/head64/instantiations/v41fp4_h64.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/sm100/decode/sparse/head64/instantiations/v41fp4_h64_no_split.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/sm100/prefill/sparse/fwd_for_small_topk/head128/instantiations/phase1_decode_k512_v41.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/sm100/prefill/sparse/fwd_for_small_topk/head128/instantiations/phase1_decode_k512_v41_splitkv.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/sm100/prefill/sparse/fwd_for_small_topk/head128/instantiations/phase1_decode_k512_v41fp4.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/sm100/prefill/sparse/fwd_for_small_topk/head128/instantiations/phase1_decode_k512_v41fp4_splitkv.cu
+
+        # sm100 fused norm + rope + attn + rope + cast
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/sm100/prefill/sparse/fused_norm_rope_attn_rope_cast_fwd/core_attn/instantiations/v41_h64_prefill_norm.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/sm100/prefill/sparse/fused_norm_rope_attn_rope_cast_fwd/core_attn/instantiations/v41_h64_prefill_nonorm.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/sm100/prefill/sparse/fused_norm_rope_attn_rope_cast_fwd/core_attn/instantiations/v41_h64_decode_norm.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/sm100/prefill/sparse/fused_norm_rope_attn_rope_cast_fwd/core_attn/instantiations/v41_h64_decode_nonorm.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/sm100/prefill/sparse/fused_norm_rope_attn_rope_cast_fwd/core_attn/instantiations/v41fp4_h64_decode_norm.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/sm100/prefill/sparse/fused_norm_rope_attn_rope_cast_fwd/core_attn/instantiations/v41fp4_h64_decode_nonorm.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/sm100/prefill/sparse/fused_norm_rope_attn_rope_cast_fwd/core_attn/instantiations/v41_h128_prefill_norm.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/sm100/prefill/sparse/fused_norm_rope_attn_rope_cast_fwd/core_attn/instantiations/v41_h128_prefill_nonorm.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/sm100/prefill/sparse/fused_norm_rope_attn_rope_cast_fwd/core_attn/instantiations/v41_h128_decode_norm.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/sm100/prefill/sparse/fused_norm_rope_attn_rope_cast_fwd/core_attn/instantiations/v41_h128_decode_nonorm.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/sm100/prefill/sparse/fused_norm_rope_attn_rope_cast_fwd/core_attn/instantiations/v41fp4_h128_decode_norm.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/sm100/prefill/sparse/fused_norm_rope_attn_rope_cast_fwd/core_attn/instantiations/v41fp4_h128_decode_nonorm.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/sm100/prefill/sparse/fused_norm_rope_attn_rope_cast_fwd/permute_q_b_proj/kernel.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/sm100/prefill/sparse/fused_norm_rope_attn_rope_cast_fwd/permute_wv_proj/kernel.cu
+
+        # Legacy kernels (upstream keeps them under cuda_kernels/legacy/):
+        # V4, V3.2 and V3.2-NVFP4, and everything on Hopper
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/legacy/smxx/decode/get_decoding_sched_meta/get_decoding_sched_meta.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/legacy/smxx/decode/combine/combine.cu
+
+        # sm90 dense decode
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/legacy/sm90/decode/dense/instantiations/fp16.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/legacy/sm90/decode/dense/instantiations/bf16.cu
+
+        # sm90 sparse decode
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/legacy/sm90/decode/sparse/instantiations/v4_persistent_h64.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/legacy/sm90/decode/sparse/instantiations/v4_persistent_h128.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/legacy/sm90/decode/sparse/instantiations/v32_persistent_h64.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/legacy/sm90/decode/sparse/instantiations/v32_persistent_h128.cu
+
+        # sm90 sparse prefill
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/legacy/sm90/prefill/sparse/instantiations/phase1_k512.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/legacy/sm90/prefill/sparse/instantiations/phase1_k512_topklen.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/legacy/sm90/prefill/sparse/instantiations/phase1_k576.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/legacy/sm90/prefill/sparse/instantiations/phase1_k576_topklen.cu
+
+        # sm100 sparse prefill, d_qk = 576
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/legacy/sm100/prefill/sparse/fwd/head64/instantiations/phase1_h64_k576.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/legacy/sm100/prefill/sparse/fwd/head128/instantiations/phase1_k576.cu
+
+        # sm100 sparse decode
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/legacy/sm100/decode/sparse/head64/instantiations/v32_h64.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/legacy/sm100/decode/sparse/head64/instantiations/v32_h64_no_split.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/legacy/sm100/decode/sparse/head64/instantiations/v4_h64.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/legacy/sm100/decode/sparse/head64/instantiations/v4_h64_no_split.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/legacy/sm100/decode/sparse/nvfp4_head64/instantiations/v32_nvfp4_fp8rope.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/legacy/sm100/prefill/sparse/fwd_for_small_topk/head128/instantiations/phase1_decode_k512.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/legacy/sm100/prefill/sparse/fwd_for_small_topk/head128/instantiations/phase1_decode_k512_splitkv.cu
+
+        # sm100 fused norm + rope + attn + rope + cast, V4 decode
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/legacy/sm100/prefill/sparse/fused_norm_rope_attn_rope_cast_fwd/core_attn/instantiations/v4_h64_decode_norm.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/legacy/sm100/prefill/sparse/fused_norm_rope_attn_rope_cast_fwd/core_attn/instantiations/v4_h64_decode_nonorm.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/legacy/sm100/prefill/sparse/fused_norm_rope_attn_rope_cast_fwd/core_attn/instantiations/v4_h128_decode_norm.cu
+        ${flashmla_SOURCE_DIR}/csrc/cuda_kernels/legacy/sm100/prefill/sparse/fused_norm_rope_attn_rope_cast_fwd/core_attn/instantiations/v4_h128_decode_nonorm.cu
     )
 
     set(FlashMLA_Extension_SOURCES
@@ -124,18 +169,17 @@ if(FLASH_MLA_ARCHS)
 
     set(FlashMLA_INCLUDES
         ${flashmla_SOURCE_DIR}/csrc
-        ${flashmla_SOURCE_DIR}/csrc/kerutils/include
-        ${flashmla_SOURCE_DIR}/csrc/sm90
-        ${flashmla_SOURCE_DIR}/csrc/cutlass/include
-        ${flashmla_SOURCE_DIR}/csrc/cutlass/tools/util/include
+        ${flashmla_SOURCE_DIR}/csrc/3rdparty/kerutils/include
+        ${flashmla_SOURCE_DIR}/csrc/3rdparty/cutlass/include
+        ${flashmla_SOURCE_DIR}/csrc/3rdparty/cutlass/tools/util/include
     )
 
     set(FlashMLA_Extension_INCLUDES
         ${flashmla_SOURCE_DIR}/csrc
-        ${flashmla_SOURCE_DIR}/csrc/kerutils/include
+        ${flashmla_SOURCE_DIR}/csrc/3rdparty/kerutils/include
         ${flashmla_SOURCE_DIR}/csrc/extension/sm90/dense_fp8/
-        ${flashmla_SOURCE_DIR}/csrc/cutlass/include
-        ${flashmla_SOURCE_DIR}/csrc/cutlass/tools/util/include
+        ${flashmla_SOURCE_DIR}/csrc/3rdparty/cutlass/include
+        ${flashmla_SOURCE_DIR}/csrc/3rdparty/cutlass/tools/util/include
     )
 
     set_gencode_flags_for_srcs(
@@ -168,6 +212,12 @@ if(FLASH_MLA_ARCHS)
     if(VLLM_GPU_LANG STREQUAL "CUDA")
         target_compile_definitions(_flashmla_C PRIVATE USE_CUDA)
     endif()
+
+    # Select the CUDA branch of FlashMLA's params.h and kerutils; kerutils
+    # detects CUDA by itself in .cu files, so only host files need the flag.
+    target_compile_definitions(_flashmla_C PRIVATE
+        FLASH_MLA_IS_BUILD_ON_CUDA
+        $<$<COMPILE_LANGUAGE:CXX>:KERUTILS_IS_BUILD_ON_CUDA>)
 
     define_extension_target(
         _flashmla_extension_C
