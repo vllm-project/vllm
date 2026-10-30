@@ -11,11 +11,13 @@ use tokio::time::{Duration, Instant, sleep_until};
 use tracing::warn;
 use vllm_chat::ChatLlm;
 use vllm_engine_core_client::EngineCoreClient;
-use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::runtime::BackgroundShutdownRuntime;
 
-use crate::config::{ApiServerOptions, CorsConfig};
-use crate::lora::{LoadLoraError, LoraManager, LoraModelResolution, UnloadLoraError};
+use crate::config::{AccessLogConfig, ApiServerOptions, CorsConfig, LoraModulePath};
+use crate::lora::{
+    LoadLoraError, LoadedLora, LoraDisabledError, LoraManager, LoraModelResolution, UnloadLoraError,
+};
+use crate::model_names::ServedModelNames;
 use crate::runtime::build_request_runtime;
 use crate::server_info::{ServerInfoConfigFormat, ServerInfoSnapshot};
 
@@ -38,10 +40,10 @@ pub struct AppState {
     pub api_server_options: ApiServerOptions,
     /// CORS settings applied to every HTTP response.
     pub cors: CorsConfig,
+    /// HTTP access log settings.
+    pub access_log: AccessLogConfig,
     /// Runtime server information returned by `/server_info`, when available.
     server_info: Option<ServerInfoSnapshot>,
-    /// Deployment-wide data-parallel size retained by the frontend.
-    data_parallel_size: usize,
     /// SHA-256 hashes of API keys accepted as bearer tokens for guarded routes.
     api_key_hashes: Vec<ApiKeyHash>,
     /// Number of in-flight inference requests currently owned by this frontend.
@@ -71,14 +73,13 @@ impl AppState {
             !served_model_names.is_empty(),
             "served_model_names must not be empty"
         );
-        let data_parallel_size = chat.engine_core_client().engine_count();
         Self {
             served_model_names,
             chat,
             api_server_options: ApiServerOptions::default(),
             cors: CorsConfig::default(),
+            access_log: AccessLogConfig::default(),
             server_info: None,
-            data_parallel_size,
             api_key_hashes: Vec::new(),
             server_load: AtomicU64::new(0),
             lora_manager: LoraManager::new(),
@@ -100,6 +101,12 @@ impl AppState {
         self
     }
 
+    /// Set the HTTP access log settings.
+    pub fn with_access_log(mut self, access_log: AccessLogConfig) -> Self {
+        self.access_log = access_log;
+        self
+    }
+
     /// Set the backend model path reported as `root` for base-model cards.
     pub fn with_model_path(mut self, model_path: String) -> Self {
         self.model_path = Some(model_path);
@@ -116,17 +123,6 @@ impl AppState {
     pub(crate) fn with_server_info(mut self, server_info: ServerInfoSnapshot) -> Self {
         self.server_info = Some(server_info);
         self
-    }
-
-    /// Set the deployment-wide data-parallel size reported by frontend APIs.
-    pub(crate) fn with_data_parallel_size(mut self, size: usize) -> Self {
-        self.data_parallel_size = size;
-        self
-    }
-
-    /// Return the deployment-wide data-parallel size.
-    pub(crate) fn data_parallel_size(&self) -> usize {
-        self.data_parallel_size
     }
 
     /// Build a `/server_info` response payload.
@@ -172,45 +168,83 @@ impl AppState {
     }
 
     /// Snapshot the loaded LoRA adapters in load order, for `/v1/models` cards.
-    pub async fn served_lora_requests(&self) -> Vec<LoraRequest> {
-        self.lora_manager.served_lora_requests().await
+    pub async fn served_loras(&self) -> Vec<LoadedLora> {
+        self.lora_manager.served_loras().await
+    }
+
+    /// Snapshot loaded LoRA adapters for the lifecycle API.
+    ///
+    /// Returns error if the engine was started without LoRA support.
+    pub async fn list_loras(&self) -> Result<Vec<LoadedLora>, LoraDisabledError> {
+        self.ensure_lora_enabled()?;
+        Ok(self.lora_manager.served_loras().await)
+    }
+
+    /// The base model names a request may select, before LoRA adapters.
+    pub(crate) fn base_model_names(&self) -> ServedModelNames {
+        ServedModelNames::new(self.served_model_names.clone())
+            .with_accept_any(self.api_server_options.skip_model_name_validation)
     }
 
     /// Resolve the requested model against one dynamic LoRA registry snapshot.
     pub async fn resolve_model_with_loras(&self, model_name: Option<&str>) -> LoraModelResolution {
-        self.lora_manager.resolve_model(&self.served_model_names, model_name).await
+        self.lora_manager.resolve_model(self.base_model_names(), model_name).await
     }
 
     /// Load one dynamic LoRA adapter and register it as a public model name.
+    ///
+    /// Returns error if the engine was started without LoRA support.
     pub async fn load_lora(
         &self,
-        lora_name: String,
-        lora_path: String,
+        module: LoraModulePath,
         load_inplace: bool,
-        is_3d_lora_weight: bool,
-    ) -> Result<LoraRequest, LoadLoraError> {
+    ) -> Result<LoadedLora, LoadLoraError> {
+        self.ensure_lora_enabled()?;
         self.lora_manager
             .load_lora(
                 self.engine_core_client(),
                 &self.served_model_names,
-                lora_name,
-                lora_path,
+                module,
                 load_inplace,
-                is_3d_lora_weight,
             )
+            .await
+    }
+
+    /// Load one adapter from `--lora-modules` and register it as a public
+    /// model name.
+    ///
+    /// Returns error if the engine was started without LoRA support.
+    pub async fn load_static_lora(
+        &self,
+        module: &LoraModulePath,
+    ) -> Result<LoadedLora, LoadLoraError> {
+        self.ensure_lora_enabled()?;
+        self.lora_manager
+            .load_static_lora(self.engine_core_client(), &self.served_model_names, module)
             .await
     }
 
     /// Remove one dynamic LoRA adapter from the engine and public model
     /// registry.
+    ///
+    /// Returns error if the engine was started without LoRA support.
     pub async fn unload_lora(
         &self,
         lora_name: &str,
         lora_int_id: Option<u64>,
-    ) -> Result<LoraRequest, UnloadLoraError> {
+    ) -> Result<LoadedLora, UnloadLoraError> {
+        self.ensure_lora_enabled()?;
         self.lora_manager
             .unload_lora(self.engine_core_client(), lora_name, lora_int_id)
             .await
+    }
+
+    fn ensure_lora_enabled(&self) -> Result<(), LoraDisabledError> {
+        self.engine_core_client()
+            .ready_response()
+            .supports_lora
+            .then_some(())
+            .ok_or(LoraDisabledError)
     }
 
     /// Return a reference to the underlying engine core client for utility

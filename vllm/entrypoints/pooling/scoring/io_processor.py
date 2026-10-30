@@ -2,22 +2,27 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
 from collections.abc import Sequence
+from functools import cached_property
 from typing import Any, TypeAlias, cast
 
 import torch.nn.functional as F
 
 from vllm import PoolingParams, PoolingRequestOutput, TokensPrompt
-from vllm.renderers import TokenizeParams
-from vllm.renderers.hf import safe_apply_chat_template
+from vllm.exceptions import ChatTemplateResolutionError, VLLMValidationError
+from vllm.logger import init_logger
+from vllm.renderers import TokenizeParams, merge_kwargs
+from vllm.renderers.hf import resolve_chat_template, safe_apply_chat_template
 from vllm.renderers.inputs.preprocess import (
     extract_target_prompt,
     parse_model_prompt,
     prompt_to_seq,
 )
 from vllm.tasks import PoolingTask
+from vllm.transformers_utils.config import (
+    get_sentence_transformers_chat_template_kwargs,
+)
 from vllm.utils.mistral import is_mistral_tokenizer
 
-from ...chat_utils import ChatTemplateResolutionError
 from ..base.io_processor import PoolingIOProcessor
 from ..pooling.protocol import PoolingCompletionRequest
 from ..typing import (
@@ -35,6 +40,7 @@ from ..typing import (
     RequestGenerator,
     ScoringRenderParams,
 )
+from ..utils import reserve_tokens
 from .protocol import RerankRequest, ScoreRequest, ScoringRequest
 from .typing import ScoreData, ScoreInput, ScoringData
 from .utils import (
@@ -47,6 +53,8 @@ from .utils import (
     validate_score_input,
 )
 
+logger = init_logger(__name__)
+
 ScoringServeContext: TypeAlias = PoolingServeContext[ScoringRequest]
 
 
@@ -55,32 +63,38 @@ def _apply_post_tokenization_to_token_type_ids(
     tok_params: TokenizeParams,
     token_type_ids: list[int],
 ) -> list[int]:
+    # Must stay in the same order as `TokenizeParams._validate_tokens`, which
+    # truncates before padding. These ids are parallel to the prompt tokens
+    # and locate the query/document boundary for the cross-encoder; applying
+    # the two steps in a different order silently misplaces that boundary.
+    max_length = tok_params.truncate_prompt_tokens
+    if max_length is not None and max_length < 0:
+        max_length = tok_params.max_input_tokens
+
+    if max_length is not None and max_length < len(token_type_ids):
+        if max_length == 0:
+            token_type_ids = token_type_ids[:0]
+        else:
+            side = tok_params.truncation_side or (
+                tokenizer.truncation_side if tokenizer is not None else None
+            )
+            token_type_ids = (
+                token_type_ids[-max_length:]
+                if side == "left"
+                else token_type_ids[:max_length]
+            )
+
     pad_length = tok_params.pad_prompt_tokens
     if pad_length is not None and pad_length < 0:
         pad_length = tok_params.max_input_tokens
 
     if pad_length is not None and pad_length > len(token_type_ids):
-        pad_token_type_id = token_type_ids[-1] if token_type_ids else 0
+        pad_token_type_id = getattr(tokenizer, "pad_token_type_id", 0) or 0
         token_type_ids = token_type_ids + [pad_token_type_id] * (
             pad_length - len(token_type_ids)
         )
 
-    max_length = tok_params.truncate_prompt_tokens
-    if max_length is not None and max_length < 0:
-        max_length = tok_params.max_input_tokens
-
-    if max_length is None or max_length >= len(token_type_ids):
-        return token_type_ids
-    if max_length == 0:
-        return token_type_ids[:0]
-
-    side = tok_params.truncation_side or (
-        tokenizer.truncation_side if tokenizer is not None else None
-    )
-    if side == "left":
-        return token_type_ids[-max_length:]
-
-    return token_type_ids[:max_length]
+    return token_type_ids
 
 
 class ScoringIOProcessor(PoolingIOProcessor):
@@ -181,6 +195,27 @@ class ScoringIOProcessor(PoolingIOProcessor):
 
         scoring_data = self.valid_inputs(data_1, data_2)
         return scoring_data
+
+    def _pair_error_output(
+        self,
+        output_1: PoolingRequestOutput,
+        output_2: PoolingRequestOutput,
+    ) -> PoolingRequestOutput | None:
+        failed = output_1 if output_1.error is not None else output_2
+        if failed.error is None:
+            return None
+
+        padding = [self.pad_token_id] if self.pad_token_id is not None else []
+        return PoolingRequestOutput(
+            request_id=f"{output_1.request_id}_{output_2.request_id}",
+            outputs=failed.outputs,
+            prompt_token_ids=(
+                output_1.prompt_token_ids + padding + output_2.prompt_token_ids
+            ),
+            num_cached_tokens=(output_1.num_cached_tokens + output_2.num_cached_tokens),
+            finished=failed.finished,
+            error=failed.error,
+        )
 
 
 class BiEncoderIOProcessor(ScoringIOProcessor):
@@ -301,6 +336,10 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
 
         final_res_batch: list[PoolingRequestOutput] = []
         for emb_1, emb_2 in zip(emb_data_1, emb_data_2):
+            if error_output := self._pair_error_output(emb_1, emb_2):
+                final_res_batch.append(error_output)
+                continue
+
             pair_score = F.cosine_similarity(
                 emb_1.outputs.data.float(), emb_2.outputs.data.float(), dim=0
             )
@@ -343,6 +382,10 @@ class LateInteractionIOProcessor(BiEncoderIOProcessor):
 
         # Compute MaxSim scores
         for emb_1, emb_2 in zip(emb_data_1, emb_data_2):
+            if error_output := self._pair_error_output(emb_1, emb_2):
+                final_res_batch.append(error_output)
+                continue
+
             # emb_1.outputs.data: [query_len, dim]
             # emb_2.outputs.data: [doc_len, dim]
             q_emb = emb_1.outputs.data
@@ -419,6 +462,72 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         self.model = model if self.supports_score_template else None
         self.use_sep_token = self.model_config.use_sep_token
 
+        self.saved_chat_template: str | None = None
+        self.saved_chat_template_kwargs: dict[str, Any] = {}
+        if not self.supports_score_template:
+            try:
+                self.saved_chat_template, self.saved_chat_template_kwargs = (
+                    self._get_saved_chat_template()
+                )
+            except ValueError:
+                # An explicit chat template takes precedence anyway.
+                if self.chat_template is None:
+                    raise
+
+        if (
+            getattr(self.model_config.hf_config, "is_original_qwen3_reranker", False)
+            and self.chat_template is None
+            and self.saved_chat_template is None
+        ):
+            suggested_template = (
+                "examples/pooling/score/template/qwen3_vl_reranker.jinja"
+                if self.model_config.is_multimodal_model
+                else "examples/pooling/score/template/qwen3_reranker.jinja"
+            )
+            logger.warning(
+                "Serving an original Qwen3 reranker (%s) without a "
+                "--chat-template. The model was trained with a specific prompt "
+                "template; running without it may produce inaccurate relevance "
+                "scores. Consider specifying `--chat-template %s`.",
+                self.model_config.model,
+                suggested_template,
+            )
+
+    def _get_saved_chat_template(self) -> tuple[str | None, dict[str, Any]]:
+        """Get the chat template and kwargs declared by the Sentence
+        Transformers config, if any."""
+        saved_kwargs = get_sentence_transformers_chat_template_kwargs(
+            self.model_config.model, self.model_config.revision
+        )
+        if saved_kwargs is None:
+            return None, {}
+
+        saved_kwargs = dict(saved_kwargs)
+        name = saved_kwargs.pop("chat_template", None)
+        if name == "default":
+            name = None
+        template = resolve_chat_template(
+            self.tokenizer,
+            chat_template=name,
+            tools=None,
+            model_config=self.model_config,
+        )
+        # Hugging Face returns an unknown template name unchanged.
+        if template is None or template == name:
+            raise ValueError(
+                "The Sentence Transformers config declares message inputs, but "
+                f"the checkpoint has no {name or 'default'!r} chat template."
+            )
+
+        if self.chat_template is None:
+            logger.info_once(
+                "Scoring with the %r chat template declared by the Sentence "
+                "Transformers config. Its suffix is not restored after "
+                "truncation; use max_tokens_per_doc to truncate documents.",
+                name or "default",
+            )
+        return template, saved_kwargs
+
     #######################################
     # online APIs
 
@@ -492,7 +601,11 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 yield ScoringRenderParams(
                     data_1=data_1[i],
                     data_2=data_2[i],
-                    chat_template=ctx.chat_template,
+                    chat_template=(
+                        self.chat_template
+                        if ctx.chat_template is None
+                        else ctx.chat_template
+                    ),
                     max_tokens_per_query=max_tokens_per_query,
                     max_tokens_per_doc=max_tokens_per_doc,
                     tok_params=tok_params,
@@ -507,6 +620,14 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
 
     #######################################
     # helpers
+
+    @cached_property
+    def num_post_process_tokens(self) -> int:
+        if self.model is None:
+            return 0
+        probe = TokensPrompt(prompt_token_ids=[])
+        self.model.post_process_tokens(probe)
+        return len(probe["prompt_token_ids"])
 
     def render(
         self,
@@ -526,6 +647,11 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         params = render_params["params"]
         prompt_extras = render_params["prompt_extras"]
 
+        # Leave room for the tokens that post_process_tokens appends after
+        # truncation (e.g. the JinaVL score token), so the limits count them.
+        if self.num_post_process_tokens:
+            tok_params = reserve_tokens(tok_params, self.num_post_process_tokens)
+
         _, engine_prompt = self.get_score_prompt(
             data_1=render_params["data_1"],
             data_2=render_params["data_2"],
@@ -539,6 +665,9 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         )
 
         tok_params.apply_post_tokenization(self.tokenizer, engine_prompt)
+
+        if self.model is not None:
+            self.model.post_process_tokens(engine_prompt)
 
         if token_type_ids := engine_prompt.pop("token_type_ids", None):
             params = params.clone()
@@ -588,13 +717,19 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         model_config = self.model_config
         tokenizer = self.tokenizer
 
+        if chat_template is None and self.saved_chat_template is not None:
+            chat_template = self.saved_chat_template
+            chat_template_kwargs = merge_kwargs(
+                self.saved_chat_template_kwargs, chat_template_kwargs
+            )
+
         prompt_1, prompt_2, mm_data, mm_uuids = parse_score_data(
             data_1,
             data_2,
             model_config,
         )
 
-        # Apply truncation before defining closures
+        # Limit the query and document separately before composing them.
         if max_tokens_per_query > 0 and isinstance(prompt_1, str):
             prompt_1 = truncate_text_to_tokens(
                 prompt_1, tokenizer, max_tokens_per_query
@@ -619,7 +754,11 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                         query_tokens = tokenizer.encode(
                             prompt_1, add_special_tokens=False
                         )
-                        num_special = get_num_special_tokens_for_pair(tokenizer)
+                        num_special = (
+                            get_num_special_tokens_for_pair(tokenizer)
+                            if local_kwargs.get("add_special_tokens", True)
+                            else 0
+                        )
                         doc_limit_max_length = (
                             len(query_tokens) + max_tokens_per_doc + num_special
                         )
@@ -630,8 +769,9 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                             )
                         else:
                             effective_max_length = doc_limit_max_length
-                        local_kwargs["truncation"] = "only_second"
-                        local_kwargs["max_length"] = effective_max_length
+                        if len(query_tokens) + num_special < effective_max_length:
+                            local_kwargs["truncation"] = "only_second"
+                            local_kwargs["max_length"] = effective_max_length
 
                     prompt_inputs = tokenizer(
                         text=prompt_1, text_pair=prompt_2, **local_kwargs
@@ -639,19 +779,12 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                     full_prompt = tokenizer.decode(prompt_inputs["input_ids"])
                 else:
                     # `llm as reranker` defaults to not using separating token.
-                    if max_tokens_per_doc > 0 and isinstance(prompt_2, str):
-                        query_ids = tokenizer.encode(prompt_1, add_special_tokens=False)
-                        doc_ids = tokenizer.encode(prompt_2, add_special_tokens=False)
-                        doc_ids = doc_ids[:max_tokens_per_doc]
-                        input_ids = query_ids + doc_ids
-                        full_prompt = tokenizer.decode(input_ids)
-                        prompt_inputs = {"input_ids": input_ids}
-                    else:
-                        full_prompt = prompt_1 + prompt_2
-                        prompt_inputs = tokenizer(text=full_prompt, **local_kwargs)
+                    full_prompt = prompt_1 + prompt_2
+                    prompt_inputs = tokenizer(text=full_prompt, **local_kwargs)
             return full_prompt, prompt_inputs
 
-        # FIXME: For now, we only apply a template when one is explicitly provided.
+        # FIXME: For now, we only apply a template when one is explicitly provided,
+        # either directly or by the Sentence Transformers config.
         # We cannot rely on the tokenizer's chat template because many models
         # inherit junk templates from their base LLM, which breaks both the models
         # and the tests that use them.
@@ -692,9 +825,6 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         if (token_type_ids := prompt_inputs.get("token_type_ids")) is not None:
             engine_prompt["token_type_ids"] = token_type_ids
 
-        if self.model is not None:
-            self.model.post_process_tokens(engine_prompt)
-
         if mm_data is not None:
             engine_prompt["multi_modal_data"] = mm_data
         if mm_uuids is not None:
@@ -703,7 +833,17 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         return full_prompt, engine_prompt
 
 
-class JinaRankingIOProcessorMixin:
+class JinaRankingIOProcessorMixin(PoolingIOProcessor):
+    def render(self, render_params: AnyRenderParam) -> PoolingEngineInput:
+        if render_params["tok_params"].truncate_prompt_tokens is not None:
+            raise VLLMValidationError(
+                "JinaForRanking does not support truncate_prompt_tokens. Use "
+                "max_tokens_per_query and max_tokens_per_doc for scoring, or "
+                "truncate each input text on the client.",
+                parameter="truncate_prompt_tokens",
+            )
+        return super().render(render_params)
+
     @staticmethod
     def format_docs_prompts_func(
         query: str,
@@ -722,9 +862,12 @@ class JinaRankingIOProcessorMixin:
             special_tokens = default_special_tokens
 
         def sanitize_input(text: str) -> str:
-            for token in special_tokens.values():
-                text = text.replace(token, "")
-            return text
+            while True:
+                previous = text
+                for token in special_tokens.values():
+                    text = text.replace(token, "")
+                if text == previous:
+                    return text
 
         query = sanitize_input(query)
         docs = [sanitize_input(doc) for doc in docs]
@@ -820,10 +963,6 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
                 for q, d in zip(queries, docs)
             ]
 
-        # Forward truncation from the real request: the base factory reads
-        # these off ctx.request, so omitting them here silently drops
-        # truncate_prompt_tokens for Jina rerank/score (unlike the embed and
-        # bi/cross-encoder paths, which read them from the real request).
         ctx.request = PoolingCompletionRequest(
             task="token_embed",
             input=prompts,
@@ -839,7 +978,14 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
     ) -> tuple[RequestFactory, int]:
         assert isinstance(ctx, OfflineScoringInputsContext)
 
+        max_tokens_per_query, max_tokens_per_doc = self._get_token_limits(
+            pooling_params=ctx.pooling_params
+        )
         scoring_data = ctx.scoring_data
+        if max_tokens_per_query > 0 or max_tokens_per_doc > 0:
+            scoring_data = self._truncate_scoring_data(
+                scoring_data, max_tokens_per_query, max_tokens_per_doc
+            )
         prompt_extras = ctx.pooling_params.extra_kwargs
 
         queries = self.ensure_str(scoring_data.data_1)
@@ -881,6 +1027,10 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
         final_res_batch: list[PoolingRequestOutput] = []
 
         for i in range(len(outputs)):
+            if outputs[i].error is not None:
+                final_res_batch.append(outputs[i])
+                continue
+
             embeds = outputs[i].outputs.data.float()
 
             # The JinaForRanking model concatenates docs first, then query.

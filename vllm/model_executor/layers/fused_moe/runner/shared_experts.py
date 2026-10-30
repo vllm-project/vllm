@@ -6,6 +6,7 @@ from enum import IntEnum
 import torch
 
 import vllm.envs as envs
+from vllm.config import get_current_vllm_config_or_none
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -57,6 +58,15 @@ class SharedExperts(torch.nn.Module):
 
         self._mk_can_overlap_shared_experts = mk_can_overlap_shared_experts
 
+        # With fully-sharded LoRA the shared experts' LoRA layers issue TP
+        # collectives themselves, so they must not run on the aux stream
+        # (see _disable_shared_experts_overlap).
+        vllm_config = get_current_vllm_config_or_none()
+        lora_config = vllm_config.lora_config if vllm_config is not None else None
+        self._lora_fully_sharded = (
+            lora_config is not None and lora_config.fully_sharded_loras
+        )
+
         # Allow disabling of the separate shared experts stream for
         # debug purposes.
         # TODO: Remove this after more extensive testings with TP/DP
@@ -65,16 +75,12 @@ class SharedExperts(torch.nn.Module):
             logger.debug_once("Disabling MoE shared_experts cuda stream")
             self._stream = None
         else:
-            # TODO(rob): enable shared expert overlap with non-cuda-alike.
-            # aux_stream() returns None on non-cuda-alike platforms.
             self._stream = aux_stream()
             if self._stream is not None:
                 logger.debug_once("Enabled separate cuda stream for MoE shared_experts")
-
-        if self._stream is not None:
-            # One pair per DBO ubatch id.
-            self._input_ready_event = [torch.cuda.Event(), torch.cuda.Event()]
-            self._output_ready_event = [torch.cuda.Event(), torch.cuda.Event()]
+                # One pair per DBO ubatch id to sync aux and main stream.
+                self._input_ready_event = [torch.cuda.Event(), torch.cuda.Event()]
+                self._output_ready_event = [torch.cuda.Event(), torch.cuda.Event()]
 
     # TODO(bnell): Hack for elastic_ep. Get rid of this
     def _set_moe_config(self, new_moe_config: FusedMoEConfig):
@@ -85,10 +91,20 @@ class SharedExperts(torch.nn.Module):
         # Disable shared expert overlap if:
         #   - we are using eplb with non-safe backend, because of correctness issues
         #   - we are using flashinfer with DP, since there nothing to gain
+        #   - we are using fully-sharded LoRA: the shared experts' LoRA layers
+        #     all-gather / all-reduce across TP, and so does the routed
+        #     experts' fused MoE LoRA kernel on the main stream. Two
+        #     collectives in flight on the same communicator from different
+        #     streams become independent branches under CUDA graph capture,
+        #     and replay order is not guaranteed to match across ranks, which
+        #     deadlocks NCCL (https://github.com/vllm-project/vllm/issues/60845).
+        if self._lora_fully_sharded:
+            return True
 
         # Both these comm backends have been shown to be safe for shared expert overlap.
         _EPLB_OVERLAP_SAFE_BACKENDS = (
             "allgather_reducescatter",
+            "deepep_v2",
             "flashinfer_nvlink_one_sided",
         )
 
@@ -100,14 +116,6 @@ class SharedExperts(torch.nn.Module):
             parallel_config.enable_eplb
             and parallel_config.all2all_backend not in _EPLB_OVERLAP_SAFE_BACKENDS
         ) or parallel_config.use_fi_nvl_two_sided_kernels
-
-    @property
-    def _should_enable_stream_overlap_heuristic(self) -> bool:
-        # On ROCm, empirically it's shown that only DPA deployments benefit from
-        # multi-stream shared experts
-        if not current_platform.is_rocm():
-            return True
-        return self._moe_config.moe_parallel_config.dp_size > 1
 
     def _determine_shared_experts_order(
         self,
@@ -124,7 +132,6 @@ class SharedExperts(torch.nn.Module):
             and self._stream is not None
             and hidden_states.shape[0]
             <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
-            and self._should_enable_stream_overlap_heuristic
         )
 
         if should_run_shared_in_aux_stream:

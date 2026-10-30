@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use vllm_tokenizer::DecodedText;
 use winnow::ascii::multispace0 as ws0;
 use winnow::combinator::{alt, eof, repeat, seq, terminated};
 use winnow::prelude::*;
@@ -8,7 +9,7 @@ use winnow::stream::Partial;
 use winnow::token::{literal, rest, take_until, take_while};
 
 use super::parameters::ToolSchemas;
-use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len, take_until_marker};
+use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len_mul, take_until_marker};
 use super::{Result, ToolCallDelta, ToolParserOutput};
 use crate::tool::Tool;
 
@@ -19,6 +20,7 @@ pub use glm45_moe::Glm45MoeToolParser;
 pub use glm47_moe::Glm47MoeToolParser;
 
 const TOOL_CALL_START: &str = "<tool_call>";
+const FRAMED_TOOL_CALL_START: &str = "\n<tool_call>";
 const TOOL_CALL_END: &str = "</tool_call>";
 const ARG_KEY_START: &str = "<arg_key>";
 const ARG_KEY_END: &str = "</arg_key>";
@@ -113,8 +115,8 @@ impl GlmXmlToolParser {
         std::mem::take(&mut self.buffer)
     }
 
-    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
-        self.buffer.push_str(chunk);
+    fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
+        self.buffer.push_str(&chunk.text);
 
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
             parse_next_glm_event(input, &mut self.mode, self.separator)
@@ -149,7 +151,7 @@ fn parse_next_glm_event(
     separator: Separator,
 ) -> ModalResult<GlmEvent> {
     match mode {
-        GlmMode::Text => parse_text_event(input),
+        GlmMode::Text => parse_text_event(input, separator),
         GlmMode::ToolCall { tool_call_end_scan } => {
             tool_call_event(input, separator, tool_call_end_scan)
         }
@@ -158,18 +160,25 @@ fn parse_next_glm_event(
 }
 
 /// Parse a text-mode GLM event.
-fn parse_text_event(input: &mut GlmInput<'_>) -> ModalResult<GlmEvent> {
-    alt((tool_call_start_event, safe_text_event)).parse_next(input)
+fn parse_text_event(input: &mut GlmInput<'_>, separator: Separator) -> ModalResult<GlmEvent> {
+    let framed_start = match separator {
+        Separator::Newline => FRAMED_TOOL_CALL_START,
+        Separator::Flexible => TOOL_CALL_START,
+    };
+    alt((
+        literal(framed_start).value(GlmEvent::ToolCallStart),
+        tool_call_start_event,
+        |input: &mut GlmInput<'_>| {
+            safe_text_len_mul(input, &[framed_start, TOOL_CALL_START])
+                .map(|len| GlmEvent::Text { len })
+        },
+    ))
+    .parse_next(input)
 }
 
 /// Parse a GLM tool-call start marker.
 fn tool_call_start_event(input: &mut GlmInput<'_>) -> ModalResult<GlmEvent> {
     literal(TOOL_CALL_START).value(GlmEvent::ToolCallStart).parse_next(input)
-}
-
-/// Parse a safe text run before the next GLM marker.
-fn safe_text_event(input: &mut GlmInput<'_>) -> ModalResult<GlmEvent> {
-    safe_text_len(input, TOOL_CALL_START).map(|len| GlmEvent::Text { len })
 }
 
 /// Parse text after a completed GLM tool call.
@@ -253,7 +262,7 @@ fn parse_parameter(input: &mut &str) -> ModalResult<(String, String)> {
         _: literal(ARG_KEY_END),
         _: ws0,
         _: literal(ARG_VALUE_START),
-        take_until(0.., ARG_VALUE_END).map(str::trim),
+        take_until(0.., ARG_VALUE_END),
         _: literal(ARG_VALUE_END),
     )
     .parse_next(input)?;
@@ -266,8 +275,8 @@ mod tests {
     use serde_json::{Value, json};
     use thiserror_ext::AsReport;
 
-    use super::Glm45MoeToolParser;
-    use crate::tool::test_utils::{collect_stream, split_by_chars, test_tools};
+    use super::{Glm45MoeToolParser, Glm47MoeToolParser};
+    use crate::tool::test_utils::{collect_stream, split_by_chars, test_tokenizer, test_tools};
     use crate::tool::{ToolParser, ToolParserTestExt as _};
 
     fn glm45_tool_call(function_name: &str, params: &[(&str, &str)]) -> String {
@@ -303,13 +312,45 @@ mod tests {
 
         let output = parser.parse_complete(&output).unwrap();
 
-        assert_eq!(output.normal_text(), "Let me search for that.\n");
+        assert_eq!(output.normal_text(), "Let me search for that.");
         assert_eq!(output.calls().len(), 1);
         assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
         assert_eq!(
             serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
             json!({"city": "Beijing", "date": "2024-12-25"})
         );
+    }
+
+    #[test]
+    fn glm_parse_complete_preserves_string_whitespace() {
+        let tools = test_tools();
+        let text = glm45_tool_call("get_weather", &[("city", "  Paris \n"), ("days", " 2 ")]);
+        for mut parser in [
+            Glm45MoeToolParser::create(&tools, test_tokenizer()).unwrap(),
+            Glm47MoeToolParser::create(&tools, test_tokenizer()).unwrap(),
+        ] {
+            let output = parser.parse_complete(&text).unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
+                json!({"city": "  Paris \n", "days": 2})
+            );
+        }
+    }
+
+    #[test]
+    fn glm_streaming_preserves_string_whitespace() {
+        let tools = test_tools();
+        let text = glm45_tool_call("get_weather", &[("city", "  Paris \n"), ("days", " 2 ")]);
+        for mut parser in [
+            Glm45MoeToolParser::create(&tools, test_tokenizer()).unwrap(),
+            Glm47MoeToolParser::create(&tools, test_tokenizer()).unwrap(),
+        ] {
+            let output = collect_stream(&mut *parser, &split_by_chars(&text, 7));
+            assert_eq!(
+                serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
+                json!({"city": "  Paris \n", "days": 2})
+            );
+        }
     }
 
     #[test]

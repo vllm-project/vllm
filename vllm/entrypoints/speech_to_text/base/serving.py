@@ -16,14 +16,13 @@ from transformers import PreTrainedTokenizerBase
 
 import vllm.envs as envs
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.generate.base.serving import GenerateBaseServing
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
-    ErrorResponse,
     RequestResponseMetadata,
-    UsageInfo,
 )
+from vllm.entrypoints.generate.base.serving import GenerateBaseServing
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.engine.typing import SpeechToTextRequest
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
@@ -32,7 +31,7 @@ from vllm.inputs import EncoderDecoderInput, EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.model_executor.models import SupportsTranscription
-from vllm.multimodal.audio import get_audio_duration, split_audio
+from vllm.multimodal.audio import AudioResampler, get_audio_duration, split_audio
 from vllm.multimodal.media.audio import load_audio
 from vllm.outputs import RequestOutput
 from vllm.renderers.inputs import DictPrompt, EncoderDecoderDictPrompt
@@ -124,7 +123,6 @@ class SpeechToTextBaseServing(GenerateBaseServing):
 
         self.enable_force_include_usage = enable_force_include_usage
 
-        self.max_audio_filesize_mb = envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB
         self.max_audio_decode_duration_s: int = envs.VLLM_MAX_AUDIO_DECODE_DURATION_S
         self.max_audio_decode_bytes: int = envs.VLLM_MAX_AUDIO_DECODE_BYTES
         if self.model_cls.supports_segment_timestamp:
@@ -175,14 +173,20 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         # NOTE resample to model SR here for efficiency. This is also a
         # pre-requisite for chunking, as it assumes Whisper SR.
         try:
+            resample_method = self.asr_config.audio_resample_method
             with io.BytesIO(audio_data) as buf:
                 y, sr = load_audio(
                     buf,
-                    sr=self.asr_config.sample_rate,
+                    sr=None if resample_method else self.asr_config.sample_rate,
                     mono=True,
                     max_duration_s=self.max_audio_decode_duration_s,
                     max_decode_bytes=self.max_audio_decode_bytes,
                 )
+            if resample_method:
+                y = AudioResampler(
+                    target_sr=self.asr_config.sample_rate, method=resample_method
+                ).resample(y, orig_sr=sr)
+                sr = self.asr_config.sample_rate
         except ValueError:
             raise
         except Exception as exc:
@@ -231,6 +235,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             max_tokens=1,
             temperature=0.0,
             allowed_token_ids=allowed_token_ids,
+            watermarking=False,
         )
 
         result_generator = self.engine_client.generate(
@@ -273,13 +278,6 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             if request.to_language
             else None
         )
-
-        if len(audio_data) / 1024**2 > self.max_audio_filesize_mb:
-            raise VLLMValidationError(
-                "Maximum file size exceeded",
-                parameter="audio_filesize_mb",
-                value=len(audio_data) / 1024**2,
-            )
 
         # Run cpu intensive preprocess step in a separate thread pool executor.
         chunks, duration = await self._decode_and_chunk_speech_async(audio_data)
@@ -367,8 +365,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         segment_class: type[SpeechToTextSegment],
         start_time: float = 0,
     ) -> list[SpeechToTextSegment]:
-        """
-        Convert tokens to verbose segments.
+        """Convert tokens to verbose segments.
 
         This method expects the model to produce
         timestamps as tokens (similar to Whisper).
@@ -449,11 +446,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         if not request.model:
             request.model = self.models.model_name()
 
-        # If the engine is dead, raise the engine's DEAD_ERROR.
-        # This is required for the streaming case, where we return a
-        # success status before we actually start generating text :).
-        if self.engine_client.errored:
-            raise self.engine_client.dead_error
+        self._preflight()
 
         if request.response_format not in [
             "text",

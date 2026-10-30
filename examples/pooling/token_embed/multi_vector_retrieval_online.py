@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-Example online usage of Pooling API for multi vector retrieval.
+"""Example online usage of Pooling API for multi vector retrieval.
 
 Run `vllm serve <model> --runner pooling`
 to start up the server in vLLM. e.g.

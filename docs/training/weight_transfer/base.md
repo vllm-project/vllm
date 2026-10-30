@@ -20,49 +20,72 @@ vice versa, so the registries stay independent.
 
 ### WeightSource
 
-A `WeightSource` is a **re-iterable** source of the trainer's weights with two
-channels:
+`WeightSource` adapts your trainer's weights to the engines. vLLM ships
+[`ModuleSource`](#modulesource) for modules that every rank holds whole; for
+anything else (a pipeline stage, a rank's experts, a Megatron export) you
+typically write your own. Engines receive HF-format names, so any gathering,
+re-fusing or renaming happens in the source.
 
-- **`metadata() -> list[ParamMeta]`** — the name, wire dtype, and full shape of
-  every parameter, *without transferring anything*. Cheap when shapes are known
-  locally (an FSDP `DTensor` knows its global shape); may be expensive on the
-  first call for producers that must materialize to learn shapes (a
-  Megatron-Bridge export), in which case it should cache.
-- **iteration** — yields fully-materialized `(name, tensor)` pairs, one at a
-  time.
+A source implements `metadata` and one or both iteration modes:
+
+| Method | Yields |
+| ------ | ------ |
+| `metadata` | a `functools.cached_property`: a `ParamMeta` for every parameter of the whole model, identical on every rank; transfers nothing |
+| `iter_full()` | `(name, full tensor)` for each name this rank owns |
+| `iter_local()` | `(name, this rank's piece)` for each name this rank owns |
+
+NCCL broadcast, IPC and sharded RDT consume `iter_full()`; NCCL M2N consumes
+`iter_local()`. Each engine checks at `trainer_init` that the source implements
+the mode it needs (`implements_iter_full()` / `implements_iter_local()`).
+
+#### ParamMeta: ownership and layout
 
 ```python
 @dataclass(frozen=True)
 class ParamMeta:
     name: str
     dtype: torch.dtype
-    shape: tuple[int, ...]
+    shape: tuple[int, ...]                           # full HF shape
+    owners: tuple[int, ...] | None = None            # trainer ranks, mesh order; None = all
+    mesh_shape: tuple[int, ...] | None = None        # row-major over owners; default (len(owners),)
+    placements: tuple[Placement, ...] | None = None  # one per mesh axis; None = replicated
 ```
 
-!!! warning "The two channels must agree, element for element"
-    `metadata()` must declare exactly what iteration will yield: the same
-    parameters, in the same order, with the same dtypes and shapes. This is an
-    invariant of the ABC, not of any one backend — a source that reorders, omits,
-    or re-dtypes a parameter between the two channels is broken even if the
-    backend you happen to test against never notices. Backends are free to read
-    both channels and to trust that they match; dense NCCL does, and
-    [enforces it](nccl.md#the-two-weightsource-channels-must-agree).
+- **`owners`** are global trainer ranks, the `rank` on `TrainerInitInfo`.
+- **`placements`** are `Replicate()` or `Shard(dim)`, one per mesh axis, and
+  describe what `iter_local()` yields. `Shard` splits the way `torch.chunk`
+  does. A source without `iter_local()` leaves them unset.
 
-Materializing is typically a collective, so **every trainer rank must iterate the
-same source in the same order, in lockstep**, or ranks deadlock. `metadata()` can
-itself be a collective for custom producers, so it too runs on every rank — only
-the sender ships the result. Under pipeline parallelism a rank may not own a
-parameter at all; iterating still drives the collective, and the yielded tensor
-is only meaningful on the sender.
+Because metadata is the same on every rank, every engine plans from it without
+exchanging anything. `source.owned_names(rank)` gives the names a rank iterates.
+For example, under pipeline parallelism 2 x tensor parallelism 2 (stage 0 is
+ranks 0–1, stage 1 is ranks 2–3):
 
-`iter(source)` must yield a *fresh* pass each round.
+| name | owners | placements |
+| ---- | ------ | ---------- |
+| `model.embed_tokens.weight` | `(0, 1)` | `(Shard(0),)` |
+| `model.layers.0.self_attn.o_proj.weight` | `(0, 1)` | `(Shard(1),)` |
+| `model.layers.27.self_attn.o_proj.weight` | `(2, 3)` | `(Shard(1),)` |
+| `lm_head.weight` | `(2, 3)` | `(Shard(0),)` |
+
+#### Iteration
+
+Both modes yield exactly `owned_names(rank)`, in metadata order,
+with the declared dtypes and shapes. Either may run collectives among a
+parameter's owners (an FSDP all-gather per tensor or per layer), as long as
+every owner iterates in that order. Each call starts a fresh pass.
+
+Keep names that share a layer index (`model.layers.3.*`) contiguous in
+`metadata`: sharded RDT transfers [a layer at a time](sharded_rdt.md).
 
 #### ModuleSource
 
-`ModuleSource(module)` is the common case, over `module.named_parameters()`. It
-handles plain and FSDP-sharded modules with no special casing: iteration
-all-gathers each `DTensor` via `full_tensor()`, while `metadata()` reads the
-*global* `.shape` / `.dtype` and so never triggers a gather.
+`ModuleSource(model)` covers `module.named_parameters()` when every rank holds
+the whole module. A plain tensor is owned by every rank. A `DTensor` (FSDP2, TP)
+is owned by its device mesh's ranks, with the mesh's shape and placements;
+`iter_full()` yields `full_tensor()` and `iter_local()` yields `to_local()`.
+A `DTensor` with other placements (`Partial`, strided shards) is declared
+replicated, and `iter_local()` gathers it.
 
 ```python
 from vllm.distributed.weight_transfer import ModuleSource
@@ -70,34 +93,43 @@ from vllm.distributed.weight_transfer import ModuleSource
 source = ModuleSource(model)
 ```
 
-#### Custom Sources
+#### Custom sources
 
-Subclass `WeightSource` when the weights you want to send require additional processing to convert to a HF compatible format.
+A source that knows its layout declares it. Here each pipeline stage sends its
+own layers:
 
 ```python
+from functools import cached_property
+
 from vllm.distributed.weight_transfer import ParamMeta, WeightSource
 from vllm.distributed.weight_transfer.base import materialize_full_tensor
 
 
-class MyExportSource(WeightSource):
-    def __init__(self, model):
-        self._model = model
-        self._meta: list[ParamMeta] | None = None
+class PipelineStageSource(WeightSource):
+    """`layout` lists the whole model's (name, dtype, shape, stage) on every
+    rank; `stage_ranks[s]` are stage s's trainer ranks; `module` holds this
+    rank's stage, with HF names."""
 
-    def metadata(self) -> list[ParamMeta]:
-        # Cache: for producers that must materialize to learn shapes, this is
-        # the expensive channel. Runs on every rank (it may be a collective).
-        if self._meta is None:
-            self._meta = [
-                ParamMeta(name, t.dtype, tuple(t.shape)) for name, t in self._export()
-            ]
-        return self._meta
+    def __init__(self, module, layout, stage_ranks):
+        self._module = module
+        self._layout = layout
+        self._stage_ranks = stage_ranks
 
-    def __iter__(self):
-        # Must yield exactly what metadata() declared, in the same order.
-        for name, tensor in self._export():
-            yield name, materialize_full_tensor(tensor)
+    @cached_property
+    def metadata(self):
+        return [
+            ParamMeta(name, dtype, shape, owners=self._stage_ranks[stage])
+            for name, dtype, shape, stage in self._layout
+        ]
+
+    def iter_full(self):
+        params = dict(self._module.named_parameters())
+        for meta in self.metadata:
+            if meta.name in params:
+                yield meta.name, materialize_full_tensor(params[meta.name])
 ```
+
+Each engine's page says which ownership layouts it can send.
 
 ### VLLMWeightSyncClient
 
@@ -131,7 +163,7 @@ Two implementations ship with vLLM:
 | `RayVLLMWeightSyncClient(handle)` | One or more `AsyncLLM`/`LLM` Ray actors. Accepts a list and fans each call out to every handle, blocking on all of them, so a multi-actor (e.g. multi-DP) deployment is driven as one unit |
 | `HTTPVLLMWeightSyncClient(base_url, timeout=300)` | A vLLM server over the RLHF HTTP routes |
 
-Custom weight sync clients can be implement like so:
+Custom weight sync clients can be implemented like so:
 
 ```python
 class MyFrameworkWeightSyncClient:
@@ -297,9 +329,9 @@ class MyTrainerWeightTransferEngine(TrainerWeightTransferEngine[MyTrainerInitInf
 
     def send_weights(self) -> None:
         assert self.source is not None
-        meta = self.source.metadata()      # every rank: may be a collective
+        meta = self.source.metadata
         if not self.is_sender:
-            for _ in self.source:          # stay in the trainer-side collective
+            for _ in self.source.iter_full():  # join the source's collectives
                 pass
             return
 
@@ -311,7 +343,7 @@ class MyTrainerWeightTransferEngine(TrainerWeightTransferEngine[MyTrainerInitInf
                 "shapes": [list(m.shape) for m in meta],
             }
         )
-        for name, tensor in self.source:
+        for name, tensor in self.source.iter_full():
             ...                            # transmit
         self.client.finish_weight_update()
 ```
@@ -372,7 +404,7 @@ Subclasses must implement five methods:
 The base class provides:
 
 1. `__init__`, taking `config` (`WeightTransferConfig`), `vllm_config` (`VllmConfig`), `device` (`torch.device`), and `model` (`nn.Module`).
-2. `update_weights(update_info_dict)`, a thin wrapper for `receive_weights`: it parses the dict into the typed dataclass, calls `receive_weights`, and synchronizes the device.
+2. `update_weights(update_info_dict)`, a thin wrapper for `receive_weights`: it parses the dict into the typed dataclass, calls `receive_weights`, and synchronizes the device — unless the engine sets `defers_processing`, below.
 3. `parse_init_info` / `parse_update_info`, which convert API-level dicts into the typed dataclasses and raise `ValueError` on a bad payload.
 4. `set_weight_update_target` / `reset_weight_update_target`, used to retarget an update at the speculative draft model.
 
@@ -382,6 +414,25 @@ The base class provides:
     `init_transfer_engine`, then read from `self` in `receive_weights`. Per-round
     update info carries only per-round metadata. This is what makes a
     trainer/worker mismatch unrepresentable.
+
+!!! note "`defers_processing`: when a returned update means queued, not applied"
+    An engine that pipelines its GPU post-processing onto background threads
+    cannot let `update_weights` synchronize the device — that would block on
+    those threads and serialize the pipeline. Such an engine sets the class
+    attribute `defers_processing = True`, omits the per-update sync, and
+    guarantees completion in `finish_weight_update` instead.
+
+    Callers that go through `finish_weight_update` need do nothing; the engine
+    drains there. A caller that drives the tail itself — running its own
+    `finalize_layerwise_reload`, say — must check the flag and call
+    `drain_pending()` first, because with it set a returned `update_weights`
+    means *queued*, not *applied*. `drain_pending()` is idempotent, and a no-op
+    on an engine that processes synchronously, so it is always safe to call.
+
+    [Sharded RDT](sharded_rdt.md) is the built-in engine that sets it: it
+    scatters and quantizes on background threads with their own CUDA streams, so
+    its `drain_pending()` joins both queues and syncs both streams before
+    `finalize_layerwise_reload` runs.
 
 ### Request Classes
 
@@ -497,7 +548,7 @@ Once registered, users select your backend via `WeightTransferConfig(backend="my
 
 ### WeightTransferEngineFactory
 
-The factory uses a registry pattern with lazy loading. Built-in engines (`nccl`, `ipc`, and `sparse_nccl`) are registered at import time but their modules are only loaded when the backend is actually requested. This avoids importing heavy dependencies (like NCCL communicators) when they aren't needed.
+The factory uses a registry pattern with lazy loading. Built-in engines (`nccl`, `ipc`, `sparse_nccl` and `sharded_rdt`) are registered at import time but their modules are only loaded when the backend is actually requested. This avoids importing heavy dependencies (like NCCL communicators) when they aren't needed.
 
 ```python
 from vllm.distributed.weight_transfer import WeightTransferEngineFactory

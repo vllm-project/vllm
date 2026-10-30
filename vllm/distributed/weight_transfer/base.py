@@ -2,21 +2,23 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Base class for weight transfer engines."""
 
+import math
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from functools import cached_property
 from typing import (
     TYPE_CHECKING,
     Any,
     ClassVar,
     Generic,
     Protocol,
+    Self,
     TypeVar,
     runtime_checkable,
 )
 
 import torch
-from typing_extensions import Self
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -27,93 +29,335 @@ from vllm.config.weight_transfer import WeightTransferConfig
 TInitInfo = TypeVar("TInitInfo", bound="WeightTransferInitInfo")
 TUpdateInfo = TypeVar("TUpdateInfo", bound="WeightTransferUpdateInfo")
 TTrainerInitInfo = TypeVar("TTrainerInitInfo", bound="TrainerInitInfo")
+WeightTransferUpdatePayload = dict[str, Any] | list[dict[str, Any]]
 
-# A trainer supplies its parameters as a `WeightSource` (defined below): a
-# re-iterable stream of materialized `(name, tensor)` pairs plus a `metadata()`
-# channel. The built-in `ModuleSource` uses `materialize_full_tensor`.
+
+def _stack_key(name: str) -> tuple[str, int] | None:
+    """``(prefix, index)`` of the OUTERMOST integer segment, or None if there is
+    none.
+
+    Outermost is what keeps a MoE layer whole:
+    ``model.layers.3.mlp.experts.7.w1`` keys on the layer, not the expert.
+    """
+    parts = name.split(".")
+    for i, part in enumerate(parts):
+        if part.isdigit():
+            return ".".join(parts[:i]), int(part)
+    return None
+
+
+def layerwise_groups(names: list[str]) -> list[list[str]]:
+    """Partition flat parameter names into one group per decoder layer, keyed on
+    the outermost index segment of each name.
+
+    This defines what a *group index* means for backends that transfer a layer
+    at a time: index *g* names the same group on every trainer rank and every
+    consumer, because it is derived from `metadata` order, which every rank
+    shares.
+
+    Keying on the index rather than a literal prefix needs no per-architecture
+    naming table: ``model.layers.0.``, ``model.language_model.layers.0.``,
+    ``transformer.h.0.``, ``backbone.layers.0.`` and a vision tower's
+    ``visual.blocks.0.`` all partition alike. Matching one fixed prefix does not,
+    and its failure is silent — every name lands in a single group holding the
+    whole model, which defeats the per-layer bound below.
+
+    Un-indexed names split by POSITION relative to the first indexed one: the pre
+    block (embeddings) and the post block (the final norm, `lm_head`, and any
+    inter-stack projector). Post lands last however early it arrived, which is
+    what a pipeline-parallel source needs — Megatron-Bridge streams the last
+    stage's output block *before* its layers.
+
+    Stacks come out in first-appearance order of their prefix and ascending index
+    within it, whatever order the source yielded them, so a source can normalize
+    an arbitrary export order by flattening this partition.
+
+    Backends that gather and free per group (sharded RDT) also use it as the unit
+    of transfer, which bounds their buffer sizes: without it a whole model becomes
+    one chunk.
+    """
+    pre: list[str] = []
+    post: list[str] = []
+    stacks: dict[tuple[str, int], list[str]] = {}
+    order: list[tuple[str, int]] = []
+    for name in names:
+        key = _stack_key(name)
+        if key is None:
+            (post if order else pre).append(name)
+            continue
+        if key not in stacks:
+            stacks[key] = []
+            order.append(key)
+        stacks[key].append(name)
+
+    prefix_rank: dict[str, int] = {}
+    for key in order:
+        prefix_rank.setdefault(key[0], len(prefix_rank))
+    order.sort(key=lambda key: (prefix_rank[key[0]], key[1]))
+
+    groups: list[list[str]] = [pre] if pre else []
+    groups += [stacks[key] for key in order]
+    if post:
+        groups.append(post)
+    return groups
 
 
 def materialize_full_tensor(tensor: torch.Tensor) -> torch.Tensor:
     """Return a full, locally-materialized tensor ready to send.
 
     FSDP shards (DTensors) expose `full_tensor()`, a collective all-gather;
-    regular tensors do not and are returned unchanged. Trainer engines call
-    this at send time so the (potentially expensive) gather happens exactly
-    once — reading `.shape`/`.dtype` for metadata does not trigger it.
+    regular tensors do not and are returned unchanged. Sources call this at
+    iteration time, so the gather happens once per round; reading
+    `.shape`/`.dtype` for metadata does not trigger it.
     """
     full_tensor = getattr(tensor, "full_tensor", None)
     return full_tensor() if callable(full_tensor) else tensor
 
 
 @dataclass(frozen=True)
+class Replicate:
+    """Every coordinate along this mesh axis holds the whole extent."""
+
+
+@dataclass(frozen=True)
+class Shard:
+    """This mesh axis splits tensor dim `dim` the way `torch.chunk` does."""
+
+    dim: int
+
+
+Placement = Replicate | Shard
+
+
+@dataclass(frozen=True)
 class ParamMeta:
-    """Name / wire dtype / full (HF) shape for one output parameter."""
+    """One output parameter: its name, wire dtype and full (HF) shape, plus
+    which trainer ranks own it and how it is laid out across them.
+
+    Metadata is identical on every trainer rank, ownership included, so every
+    rank and every engine derives the same plan from it without a runtime
+    exchange.
+
+    Attributes:
+        owners: Global trainer ranks (`TrainerInitInfo.rank`) that own this
+            parameter, in mesh order. `None` means every rank.
+        mesh_shape: Row-major shape of the mesh over `owners`. Defaults to
+            `(len(owners),)`.
+        placements: One `Replicate` or `Shard` per mesh axis, describing what
+            `WeightSource.iter_local` yields on each owner; `Shard` splits the
+            way `torch.chunk` does, outer mesh axis first when two axes shard
+            one dim. `None` means replicated; a source without `iter_local`
+            leaves it unused.
+
+    """
 
     name: str
     dtype: torch.dtype
     shape: tuple[int, ...]
+    owners: tuple[int, ...] | None = field(default=None, kw_only=True)
+    mesh_shape: tuple[int, ...] | None = field(default=None, kw_only=True)
+    placements: tuple[Placement, ...] | None = field(default=None, kw_only=True)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "shape", tuple(self.shape))
+        if self.owners is None:
+            if self.mesh_shape is not None or self.placements is not None:
+                raise ValueError(
+                    f"parameter {self.name!r} declares a mesh or placements "
+                    "without owners"
+                )
+            return
+        owners = tuple(self.owners)
+        if (
+            not owners
+            or any(not isinstance(r, int) or isinstance(r, bool) for r in owners)
+            or min(owners) < 0
+            or len(set(owners)) != len(owners)
+        ):
+            raise ValueError(
+                f"parameter {self.name!r} owners must be distinct non-negative "
+                f"ranks, got {self.owners}"
+            )
+        mesh_shape = (len(owners),) if self.mesh_shape is None else self.mesh_shape
+        mesh_shape = tuple(mesh_shape)
+        if any(d <= 0 for d in mesh_shape) or math.prod(mesh_shape) != len(owners):
+            raise ValueError(
+                f"parameter {self.name!r} mesh_shape {mesh_shape} does not cover "
+                f"its {len(owners)} owners"
+            )
+        placements = self.placements
+        if placements is not None:
+            placements = tuple(placements)
+            if len(placements) != len(mesh_shape):
+                raise ValueError(
+                    f"parameter {self.name!r} has {len(placements)} placements "
+                    f"for a {len(mesh_shape)}-D mesh"
+                )
+            for p in placements:
+                if isinstance(p, Shard):
+                    if not 0 <= p.dim < len(self.shape):
+                        raise ValueError(
+                            f"parameter {self.name!r} shards dim {p.dim} of a "
+                            f"{len(self.shape)}-D tensor"
+                        )
+                elif not isinstance(p, Replicate):
+                    raise TypeError(
+                        f"parameter {self.name!r} placement {p!r} is neither "
+                        "Replicate nor Shard"
+                    )
+            if all(isinstance(p, Replicate) for p in placements):
+                placements = None
+        object.__setattr__(self, "owners", owners)
+        object.__setattr__(self, "mesh_shape", mesh_shape)
+        object.__setattr__(self, "placements", placements)
 
 
 class WeightSource(ABC):
-    """A re-iterable source of the trainer's weights, handed to a trainer engine.
+    """The trainer's weights, as metadata plus one or two iteration modes.
 
-    Two channels:
+    * `metadata` declares every parameter of the whole model, on every rank:
+      name, wire dtype, full shape, and which ranks own it in what layout (see
+      `ParamMeta`). It transfers nothing.
+    * `iter_full()` yields each owned parameter as a full tensor.
+    * `iter_local()` yields each owned parameter as this rank's piece, shaped
+      by `ParamMeta.placements`.
 
-    * `metadata()` — `(name, wire dtype, full shape)` for every parameter,
-      *without* transferring. Cheap when shapes are known locally (FSDP
-      `DTensor` global shape); may be expensive on first call for backends that
-      must materialize to learn shapes (e.g. a Megatron-Bridge export), in which
-      case it should cache.
-    * iteration — yields fully-materialized `(name, tensor)` pairs, one at a
-      time. Materializing is typically a collective (FSDP `full_tensor()`, a
-      Megatron export), so every trainer rank must iterate the same source in the
-      same order in lockstep, or ranks deadlock. Under pipeline parallelism a
-      rank may not own a parameter at all — iterating still drives the collective
-      and the yielded tensor is only meaningful on the sender.
+    A source implements one mode or both, and nothing is derived from one mode
+    to the other. Each engine consumes the mode it needs: broadcast, IPC and
+    RDT consume `iter_full`, NCCL M2N consumes `iter_local`.
 
-    `iter(source)` must yield a *fresh* pass each round. Backends with custom
-    producer logic (Megatron export, RDT plans, MoE re-fusing) subclass this.
+    Both modes yield `(name, tensor)` pairs: exactly `owned_names(rank)`, in
+    metadata order. Either may run collectives among a parameter's
+    owners (an FSDP all-gather, one per layer if it likes); every owner
+    iterates in metadata order, so the collectives line up. Work is enqueued
+    on the caller's current stream. Each call starts a fresh pass.
     """
 
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        metadata = cls.__dict__.get("metadata")
+        if metadata is not None and not isinstance(metadata, cached_property):
+            raise TypeError(
+                f"{cls.__name__}.metadata must be a functools.cached_property: "
+                "engines read it repeatedly and it must not change."
+            )
+
+    @property
     @abstractmethod
     def metadata(self) -> list[ParamMeta]:
-        """Declare what iteration will yield, without transferring anything.
+        """Every parameter, declared without transferring anything.
 
-        Must agree with iteration element for element: the same parameters, in
-        the same order, with the same dtypes and shapes. Backends may read both
-        channels and trust that they match (dense NCCL sizes the worker's receive
-        buffers and its packed chunk boundaries from this, then sends the bytes
-        from iteration), so a source that disagrees between the two splits the
-        stream differently on each side.
+        Implement it as a `functools.cached_property`. Must be identical on
+        every trainer rank, including ownership: engines plan from it without
+        exchanging it.
         """
         raise NotImplementedError
 
-    @abstractmethod
-    def __iter__(self) -> Iterator[tuple[str, torch.Tensor]]:
-        raise NotImplementedError
+    def owned_names(self, rank: int) -> list[str]:
+        """The names `rank` owns, in metadata order: exactly what it iterates."""
+        return [m.name for m in self.metadata if m.owners is None or rank in m.owners]
+
+    def implements_iter_full(self) -> bool:
+        return type(self).iter_full is not WeightSource.iter_full
+
+    def implements_iter_local(self) -> bool:
+        return type(self).iter_local is not WeightSource.iter_local
+
+    def iter_full(self) -> Iterator[tuple[str, torch.Tensor]]:
+        """Yield the full tensor of each name this rank owns."""
+        raise NotImplementedError(f"{type(self).__name__} does not implement iter_full")
+
+    def iter_local(self) -> Iterator[tuple[str, torch.Tensor]]:
+        """Yield this rank's piece of each name it owns."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement iter_local"
+        )
+
+
+def _dtensor_layout(
+    param: torch.Tensor,
+) -> tuple[tuple[int, ...], tuple[int, ...], tuple[Placement, ...] | None] | None:
+    """`(owners, mesh_shape, placements)` of a DTensor, or None for a plain
+    tensor. Placements are None when the layout is not plain `Shard` /
+    `Replicate` (e.g. `Partial`, or FSDP+TP's strided shards)."""
+    device_mesh = getattr(param, "device_mesh", None)
+    if device_mesh is None:
+        return None
+    from torch.distributed.tensor import Replicate as TorchReplicate
+    from torch.distributed.tensor import Shard as TorchShard
+
+    grid = device_mesh.mesh
+    placements: list[Placement] = []
+    for p in param.placements:  # type: ignore[attr-defined]
+        if type(p) is TorchShard:
+            placements.append(Shard(p.dim))
+        elif type(p) is TorchReplicate:
+            placements.append(Replicate())
+        else:
+            return tuple(grid.flatten().tolist()), tuple(grid.shape), None
+    return tuple(grid.flatten().tolist()), tuple(grid.shape), tuple(placements)
+
+
+def _is_member(param: torch.Tensor) -> bool:
+    device_mesh = getattr(param, "device_mesh", None)
+    return device_mesh is None or device_mesh.get_coordinate() is not None
 
 
 class ModuleSource(WeightSource):
-    """`WeightSource` over `module.named_parameters()` — the common case.
+    """`WeightSource` over `module.named_parameters()`: plain, FSDP or DTensor.
 
-    Handles both plain dense modules and FSDP-sharded ones with no special
-    casing: iteration all-gathers each `DTensor` via `full_tensor()` (a
-    collective) and passes regular tensors through. `metadata()` reads the
-    *global* `.shape` / `.dtype`, so it never triggers a gather.
+    A plain tensor is owned by every rank. A `DTensor` is owned by the global
+    ranks of its device mesh, with the mesh's shape and the DTensor's
+    placements. `iter_full` gathers each DTensor with `full_tensor()` (a
+    collective among its owners); `iter_local` yields `to_local()`. A DTensor
+    whose placements are not plain `Shard` / `Replicate` is declared replicated,
+    and `iter_local` gathers it. `metadata` reads global shapes, never
+    gathers, and is cached on first read, so shard the module first.
+
+    The mesh ranks are taken as trainer ranks, so the default process group's
+    ranks must be the `TrainerInitInfo.rank`s.
     """
 
     def __init__(self, module: torch.nn.Module) -> None:
         self._module = module
 
+    @cached_property
     def metadata(self) -> list[ParamMeta]:
-        return [
-            ParamMeta(name, p.dtype, tuple(p.shape))
-            for name, p in self._module.named_parameters()
-        ]
+        metas = []
+        for name, p in self._module.named_parameters():
+            layout = _dtensor_layout(p)
+            if layout is None:
+                metas.append(ParamMeta(name, p.dtype, tuple(p.shape)))
+                continue
+            owners, mesh_shape, placements = layout
+            metas.append(
+                ParamMeta(
+                    name,
+                    p.dtype,
+                    tuple(p.shape),
+                    owners=owners,
+                    mesh_shape=mesh_shape,
+                    placements=placements,
+                )
+            )
+        return metas
 
-    def __iter__(self) -> Iterator[tuple[str, torch.Tensor]]:
+    def iter_full(self) -> Iterator[tuple[str, torch.Tensor]]:
         for name, param in self._module.named_parameters():
-            yield name, materialize_full_tensor(param)
+            if _is_member(param):
+                yield name, materialize_full_tensor(param)
+
+    def iter_local(self) -> Iterator[tuple[str, torch.Tensor]]:
+        for name, param in self._module.named_parameters():
+            if not _is_member(param):
+                continue
+            layout = _dtensor_layout(param)
+            if layout is None:
+                yield name, param
+            elif layout[2] is None:
+                yield name, materialize_full_tensor(param)
+            else:
+                yield name, param.to_local()  # type: ignore[attr-defined]
 
 
 # Base protocols for backend-specific dataclasses
@@ -178,12 +422,11 @@ class WeightTransferInitRequest:
 class WeightTransferUpdateRequest:
     """API-level weight update request."""
 
-    update_info: dict[str, Any] = field(default_factory=dict)
+    update_info: WeightTransferUpdatePayload = field(default_factory=dict)
 
 
 class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
-    """
-    Base class for weight transfer engines that handle transport of model weights
+    """Base class for weight transfer engines that handle transport of model weights
     from a trainer to inference workers.
 
     This abstraction separates weight transfer transport logic from the worker
@@ -207,6 +450,31 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
 
     supports_draft_weight_update: bool = True
 
+    defers_processing: bool = False
+    """Whether `update_weights` returns before the weights are on the device.
+
+    An engine that pipelines its GPU post-processing onto background threads
+    cannot let `update_weights` synchronize the device — that would block on those
+    threads and serialize the pipeline. Such an engine sets this True, omits the
+    per-update sync, and guarantees completion in `finish_weight_update` instead.
+
+    Callers that go through `finish_weight_update` need do nothing: the engine
+    drains there. A caller that instead drives the tail itself — running its own
+    `finalize_layerwise_reload`, say — must read this flag and call
+    `drain_pending()` first, because with it set a returned `update_weights` means
+    "queued", not "applied".
+    """
+
+    def drain_pending(self) -> None:
+        """Block until every deferred update has been applied to the model.
+
+        The companion to `defers_processing`: a caller that has taken over the
+        update tail calls this to re-establish the guarantee that
+        `finish_weight_update` would otherwise have given it. Idempotent, and a
+        no-op by default — an engine that processes synchronously has nothing to
+        drain, so this is always safe to call.
+        """
+
     def __init__(
         self,
         config: WeightTransferConfig,
@@ -214,14 +482,14 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         device: torch.device,
         model: torch.nn.Module,
     ) -> None:
-        """
-        Initialize the weight transfer engine.
+        """Initialize the weight transfer engine.
 
         Args:
             config: The configuration for the weight transfer engine
             vllm_config: The full vLLM config (provides parallel/model config)
             device: The device this worker's model lives on
             model: The local model instance which will receive the weights
+
         """
         self.config = config
         self.vllm_config = vllm_config
@@ -247,8 +515,7 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         self.model_config = self._default_model_config
 
     def parse_init_info(self, init_dict: dict[str, Any]) -> TInitInfo:
-        """
-        Construct typed init info from dict with validation.
+        """Construct typed init info from dict with validation.
 
         Args:
             init_dict: Dictionary containing backend-specific initialization parameters
@@ -258,6 +525,7 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
 
         Raises:
             ValueError: If init_dict is invalid for this backend
+
         """
         try:
             return self.init_info_cls(**init_dict)
@@ -267,8 +535,7 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
             ) from e
 
     def parse_update_info(self, update_dict: dict[str, Any]) -> TUpdateInfo:
-        """
-        Construct typed update info from dict with validation.
+        """Construct typed update info from dict with validation.
 
         Args:
             update_dict: Dictionary containing backend-specific update parameters
@@ -278,6 +545,7 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
 
         Raises:
             ValueError: If update_dict is invalid for this backend
+
         """
         try:
             return self.update_info_cls(**update_dict)
@@ -288,19 +556,18 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
 
     @abstractmethod
     def init_transfer_engine(self, init_info: TInitInfo) -> None:
-        """
-        Initialize the weight transfer mechanism.
+        """Initialize the weight transfer mechanism.
         This is called once at the beginning of training.
 
         Args:
             init_info: Backend-specific initialization info
+
         """
         raise NotImplementedError
 
     @abstractmethod
     def start_weight_update(self) -> None:
-        """
-        Prepare the engine for a new weight update.
+        """Prepare the engine for a new weight update.
 
         Engines that receive weights in checkpoint format initialize layerwise reloading
         here, else this is typically a no-op.
@@ -310,8 +577,7 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
 
     @abstractmethod
     def finish_weight_update(self) -> None:
-        """
-        Finalize the current weight update.
+        """Finalize the current weight update.
 
         Checkpoint-format engines finalize layerwise reloading here; engines
         that apply weights in place leave this as a no-op.
@@ -319,11 +585,11 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         raise NotImplementedError
 
     def update_weights(self, update_info: dict[str, Any]) -> None:
-        """
-        Receive one weight update chunk and load it into the model.
+        """Receive one weight update chunk and load it into the model.
 
         Args:
             update_info: Dictionary containing backend-specific update info
+
         """
         typed_update_info = self.parse_update_info(update_info)
         self.receive_weights(typed_update_info)
@@ -333,21 +599,18 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
 
     @abstractmethod
     def receive_weights(self, update_info: TUpdateInfo) -> None:
-        """
-        Receive weights from the trainer and load them into the model.
+        """Receive weights from the trainer and load them into the model.
 
         Args:
             update_info: Backend-specific update info containing parameter metadata
                         and any backend-specific data
+
         """
         raise NotImplementedError
 
     @abstractmethod
     def shutdown(self) -> None:
-        """
-        Shutdown the weight transfer engine.
-        This should be called when the worker is shutting down.
-        """
+        """Release transfer resources without shutting down the inference worker."""
         raise NotImplementedError
 
 
@@ -374,7 +637,7 @@ class VLLMWeightSyncClient(Protocol):
 
     def start_weight_update(self) -> None: ...
 
-    def update_weights(self, update_info: dict[str, Any]) -> None: ...
+    def update_weights(self, update_info: WeightTransferUpdatePayload) -> None: ...
 
     def finish_weight_update(self, weight_version: str | None = None) -> None: ...
 
@@ -385,7 +648,11 @@ class TrainerWeightTransferEngine(ABC, Generic[TTrainerInitInfo]):
     Symmetric to `WeightTransferEngine` but lives in the training process.
     Constructed via the `trainer_init` factory classmethod; carries any
     backend-specific state (NCCL communicators, IPC device info, transfer
-    plans) on `self`.
+    plans) on `self`. Full-resync backends (NCCL, IPC) take a `WeightSource` at
+    `trainer_init` and replay it each round via the no-argument
+    `send_weights()`. Backends that push per-round deltas instead (e.g. sparse
+    patches) leave `source` as `None` and take their payload as a `send_weights`
+    argument.
 
     Unlike the worker engine, the trainer side does not take a
     `WeightTransferConfig`: the backend is selected from the init info's
@@ -415,8 +682,10 @@ class TrainerWeightTransferEngine(ABC, Generic[TTrainerInitInfo]):
         client: "VLLMWeightSyncClient",
         source: "WeightSource | None" = None,
         is_sender: bool = True,
+        rank: int = 0,
     ) -> None:
         self.is_sender = is_sender
+        self.rank = rank
         # The real client is held on every rank; each engine only *calls* it when
         # `is_sender`, so non-sender ranks never touch the wire.
         self.client = client

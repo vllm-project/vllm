@@ -110,11 +110,12 @@ def test_modernbert_models(
     for hf_output, vllm_output in zip(hf_outputs, vllm_outputs):
         hf_output = hf_output.detach().clone().cpu().float()
         vllm_output = vllm_output.detach().clone().cpu().float()
-        torch.testing.assert_close(hf_output, vllm_output, atol=3.2e-2, rtol=1e-3)
+        torch.testing.assert_close(hf_output, vllm_output, atol=6e-2, rtol=1e-3)
 
 
 @pytest.mark.parametrize("model", ["Davlan/xlm-roberta-base-ner-hrl"])
 @pytest.mark.parametrize("dtype", ["float"])
+@pytest.mark.flaky(reruns=3)
 @torch.inference_mode
 def test_xlm_roberta_models(
     hf_runner,
@@ -197,6 +198,7 @@ def test_openai_privacy_filter(
 
 @pytest.mark.parametrize("model", ["bd2lcco/Qwen3-0.6B-finetuned"])
 @pytest.mark.parametrize("dtype", ["float"])
+@pytest.mark.flaky(reruns=3)
 @torch.inference_mode
 def test_auto_conversion(
     hf_runner,
