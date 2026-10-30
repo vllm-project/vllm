@@ -69,13 +69,15 @@ def _trim_wrapping_newlines(value: str) -> str:
 
 def _qwen3_arg_converter(raw_args: str, partial: bool) -> str:
     params: dict[str, object] = {}
+    closed = raw_args.endswith(FUNC_END)
+    raw_args = raw_args.removesuffix(FUNC_END)
 
     for match in _PARAM_RE.finditer(raw_args):
         name = match.group(1)
         value = match.group(2)
         params[name] = _trim_wrapping_newlines(value)
 
-    if partial:
+    if partial or closed:
         remaining = _PARAM_RE.sub("", raw_args)
         m = _PARTIAL_PARAM_RE.search(remaining)
         if m:
@@ -87,8 +89,8 @@ def _qwen3_arg_converter(raw_args: str, partial: bool) -> str:
     return json.dumps(params, ensure_ascii=False)
 
 
-# What ends an open value in ``_PARAM_RE``: a closing tag or the next opener.
-_PARAM_VALUE_END_RE = re.compile(r"<\s*/\s*parameter\s*>|<\s*parameter\s*=")
+# What ends an open value: a closing tag, the next opener or ``</function>``.
+_PARAM_VALUE_END_RE = re.compile(r"<\s*/\s*parameter\s*>|<\s*parameter\s*=|</function>")
 
 
 def _param_value_end_window(text: str) -> str:
@@ -251,7 +253,7 @@ def qwen3_config(
             ),
             (ParserState.TOOL_ARGS, "FUNC_END"): Transition(
                 ParserState.TOOL_BETWEEN,
-                (EventType.TOOL_CALL_END,),
+                (EventType.ARG_VALUE_CHUNK, EventType.TOOL_CALL_END),
             ),
             # regression issue 58227
             # <function=abc>...<function=
