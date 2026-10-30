@@ -3720,6 +3720,8 @@ def _make_bare_worker(
     worker.kv_recv_threads = []
     worker.num_recv_threads = 1
     worker.recv_request_queue = queue.Queue()
+    worker._device_regions = {}
+    worker._released_regions = set()
     worker.finished_store_req = set()
     worker.tp_size = 1
     worker.store_tp_size = None
@@ -4772,6 +4774,117 @@ def test_register_kv_caches_separate_head_groups():
     assert db.kv_caches_base_addr == expected_addrs
     assert db.block_stride == [head_block_bytes] * len(expected_addrs)
     worker.store.register_buffer.assert_called_once_with(raw.data_ptr(), raw.nbytes)
+
+
+# ---------------------------------------------------------------------------
+# Sleep mode: release / restore of the KV cache registration
+# ---------------------------------------------------------------------------
+
+
+class _FakeRegistrationStore:
+    """Keeps the registered regions like the store; `fail` fails one region."""
+
+    def __init__(self):
+        self.registered: dict[int, int] = {}
+        self.fail: tuple[str, int] | None = None
+
+    def register_buffer(self, addr: int, length: int) -> int:
+        if self.fail == ("register", addr) or addr in self.registered:
+            return -1
+        self.registered[addr] = length
+        return 0
+
+    def unregister_buffer(self, addr: int) -> int:
+        if self.fail == ("unregister", addr) or addr not in self.registered:
+            return -1
+        del self.registered[addr]
+        return 0
+
+
+def _registered_worker(kind: str = "dense"):
+    """A worker that registered its KV caches with a fake store, plus the device
+    and host regions it registered."""
+    worker = _make_bare_worker(num_gpu_blocks=2)
+    if kind == "dense":  # two device regions
+        worker.token_dbs[0].store_layout = MagicMock()
+        caches = {n: torch.zeros(2, 4) for n in ("layer0", "__cross_layer__")}
+    else:  # one host region and one device region
+        from vllm.v1.kv_cache_interface import KVCacheTensor
+
+        spec = FullAttentionSpec(
+            block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float16
+        )
+        config = KVCacheConfig(
+            num_blocks=2,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=4 * 32,
+                    layers=["source"],
+                    layer_stride=4 * 32,
+                    block_stride=32,
+                    host_resident=True,
+                ),
+                KVCacheTensor(
+                    size=2 * 32, layers=["layer0"], layer_stride=2 * 32, block_stride=32
+                ),
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(["source"], spec, host_resident=True),
+                KVCacheGroupSpec(["layer0"], spec),
+            ],
+            hisparse_host_num_blocks=4,
+        )
+        worker._kv_cache_config = config
+        worker._kv_cache_groups = list(config.transfer_groups)
+        worker.token_dbs = [
+            ChunkedTokenDatabase(KeyMetadata("test-model", 0, 0, 0, 0), block_size=16)
+            for _ in worker._kv_cache_groups
+        ]
+        caches = {
+            "source": torch.zeros(4, 32, dtype=torch.uint8),
+            "layer0": torch.zeros(2, 32, dtype=torch.uint8),
+        }
+    worker.store = _FakeRegistrationStore()
+    _register_with_mocked_threads(worker, caches)
+    worker.kv_send_thread = SimpleNamespace(request_queue=queue.Queue())
+    host = {c.data_ptr(): c.nbytes for n, c in caches.items() if n == "source"}
+    device = {c.data_ptr(): c.nbytes for n, c in caches.items() if n != "source"}
+    return worker, device, host
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("kind", ["dense", "hisparse"])
+def test_sleep_cycle_releases_and_restores_device_regions(kind: str):
+    """Asleep, only host regions stay registered; waking registers the same
+    device addresses and lengths again. Both calls are idempotent."""
+    worker, device, host = _registered_worker(kind)
+    assert device and worker.store.registered == device | host
+    worker.restore_kv_caches()  # a wake-up without a sleep
+    for _ in range(2):
+        worker.unregister_kv_caches()
+        worker.unregister_kv_caches()  # sleeping after a discard
+        assert worker.store.registered == host
+        worker.restore_kv_caches()
+        worker.restore_kv_caches()  # a retried wake-up
+        assert worker.store.registered == device | host
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("op", ["unregister", "register"])
+def test_failed_store_call_raises_and_retry_converges(op: str):
+    """A failed region keeps its state and is the only one a retry touches."""
+    worker, device, _ = _registered_worker()
+    if op == "register":
+        worker.unregister_kv_caches()
+    step = worker.restore_kv_caches if op == "register" else worker.unregister_kv_caches
+    _, failing = device
+    worker.store.fail = (op, failing)
+    with pytest.raises(RuntimeError, match=f"{op}_buffer failed"):
+        step()
+    assert (failing in worker.store.registered) == (op == "unregister")
+    worker.store.fail = None
+    step()
+    assert worker.store.registered == (device if op == "register" else {})
 
 
 # ---------------------------------------------------------------------------
