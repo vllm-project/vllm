@@ -9,6 +9,7 @@ import contextlib
 import functools
 import importlib
 import os
+import shutil
 from collections.abc import Callable
 from enum import Enum
 from typing import Any, NoReturn
@@ -24,9 +25,13 @@ from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_gemm
 from vllm.utils.math_utils import cdiv
 
-_DEEPGEMM_BLACKWELL_EXCLUDED_MODEL_TYPES: set[str] = {
-    "qwen3_5_text",
-    "qwen3_5_moe_text",
+# Model type -> Blackwell device capability families to auto-disable DeepGemm on.
+_DEEPGEMM_BLACKWELL_EXCLUDED_MODEL_TYPES: dict[str, tuple[int, ...]] = {
+    # Accuracy
+    "qwen3_5_text": (100, 120),
+    "qwen3_5_moe_text": (100, 120),
+    # Latency
+    "kolibri1": (120,),
 }
 
 
@@ -39,17 +44,15 @@ def get_paged_mqa_page_sizes() -> tuple[int, ...]:
 def should_auto_disable_deep_gemm(model_type: str | None) -> bool:
     """Check if DeepGemm should be auto-disabled for this model on Blackwell.
 
-    Returns True if the model is known to have accuracy degradation with
-    DeepGemm's E8M0 scale format on Blackwell GPUs (SM100+).
+    Returns True if DeepGemm is known to hurt this model's accuracy or
+    latency on the current Blackwell GPU family.
     """
     if model_type is None:
         return False
-    if not (
-        current_platform.is_device_capability_family(100)
-        or current_platform.is_device_capability_family(120)
-    ):
-        return False
-    return model_type in _DEEPGEMM_BLACKWELL_EXCLUDED_MODEL_TYPES
+    return any(
+        current_platform.is_device_capability_family(family)
+        for family in _DEEPGEMM_BLACKWELL_EXCLUDED_MODEL_TYPES.get(model_type, ())
+    )
 
 
 class DeepGemmQuantScaleFMT(Enum):
@@ -107,13 +110,45 @@ class DeepGemmQuantScaleFMT(Enum):
         return cached
 
 
+_DEFAULT_CUDA_HOME = "/usr/local/cuda"
+
+
+def _deep_gemm_nvcc_path() -> str | None:
+    """Return the nvcc DeepGEMM's JIT would run, or None if it is missing.
+
+    Mirrors ``deep_jit::CUDA::find_cuda_toolkit()``, which DeepGEMM runs on
+    the first use of any kernel and which asserts when the toolkit is missing.
+    """
+    cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
+    if not cuda_home:
+        nvcc = shutil.which("nvcc")
+        cuda_home = (
+            os.path.dirname(os.path.dirname(nvcc)) if nvcc else _DEFAULT_CUDA_HOME
+        )
+    if not os.path.exists(cuda_home):
+        return None
+    nvcc = os.environ.get(
+        "DG_JIT_NVCC_COMPILER", os.environ.get("DJ_JIT_NVCC_COMPILER")
+    ) or os.path.join(cuda_home, "bin", "nvcc")
+    return shutil.which(nvcc)
+
+
 @functools.cache
 def is_deep_gemm_supported() -> bool:
     """Return `True` if DeepGEMM is supported on the current platform.
     Currently, only Hopper and Blackwell GPUs are supported.
     """
     is_supported_arch = current_platform.support_deep_gemm()
-    return is_supported_arch and envs.VLLM_USE_DEEP_GEMM and has_deep_gemm()
+    if not (is_supported_arch and envs.VLLM_USE_DEEP_GEMM and has_deep_gemm()):
+        return False
+    if _deep_gemm_nvcc_path() is None:
+        logger.warning_once(
+            "DeepGEMM kernels are disabled: DeepGEMM JIT-compiles its kernels "
+            "with nvcc, which is missing (CUDA_HOME, CUDA_PATH, PATH or "
+            "/usr/local/cuda). Set CUDA_HOME to a CUDA toolkit to enable them."
+        )
+        return False
+    return True
 
 
 @functools.cache
@@ -946,7 +981,7 @@ def fp8_fp4_paged_sparse_mqa_logits(
     Args:
         q: ``(q_values, q_scale)``; q_values is [num_q_tokens, 1, H, D].
         kv_cache: Fused paged cache [num_pages, page_kv, 1, D' + 4] uint8,
-            page stride 512B-aligned.
+            page stride 256B-aligned.
         weights: [num_q_tokens, H] ``torch.bfloat16``.
         metadata: From `get_paged_sparse_mqa_logits_metadata`.
         num_max_sparse_blocks: Candidate blocks per row.
