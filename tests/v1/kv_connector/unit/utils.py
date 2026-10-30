@@ -568,6 +568,7 @@ def make_nixl_scheduler(
         block_size=16,
         mamba_enabled=has_mamba,
     )
+    sched.kv_cache_config.hash_block_size = 16
     sched.vllm_config = SimpleNamespace(
         num_prefill_lookahead_tokens=0,
         num_hash_lookahead_tokens=0,
@@ -641,6 +642,7 @@ def make_nixl_push_scheduler(
         block_size=16,
         mamba_enabled=has_mamba,
     )
+    sched.kv_cache_config.hash_block_size = 16
 
     # vllm_config is consulted for parallel_config.tensor_parallel_size, and by
     # `_prefill_backoff` on both the P and D prefill paths.

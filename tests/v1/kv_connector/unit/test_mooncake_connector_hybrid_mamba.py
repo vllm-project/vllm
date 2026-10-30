@@ -66,6 +66,7 @@ def make_hybrid_gdn_kv_cache_config(block_size: int) -> KVCacheConfig:
     assert gdn_spec.mamba_type == MambaAttentionBackendEnum.GDN_ATTN
     return KVCacheConfig(
         num_blocks=16,
+        hash_block_size=block_size,
         kv_cache_tensors=[],
         kv_cache_groups=[
             KVCacheGroupSpec(
@@ -187,6 +188,7 @@ def test_lookahead_hashes_follow_truncated_prefill(
         config.num_hash_lookahead_tokens = config._resolve_num_hash_lookahead_tokens()
     config.cache_config.prefix_match_unit = hash_block_size
     kv_config = make_hybrid_gdn_kv_cache_config(block_size)
+    kv_config.hash_block_size = hash_block_size
     group = kv_config.kv_cache_groups[1]
     group.kv_cache_spec = replace(group.kv_cache_spec, mamba_cache_mode="align")
     scheduler = scheduler_cls(config, "test-engine", kv_config)
