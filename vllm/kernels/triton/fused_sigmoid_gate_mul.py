@@ -4,6 +4,7 @@
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 
@@ -64,6 +65,8 @@ def fused_sigmoid_gate_mul(
         or not x.is_contiguous()
         or not gate.is_contiguous()
         or not x.is_cuda
+        # The FP8 output is hardcoded to e4m3fn; ROCm GEMMs take fnuz.
+        or (scale is not None and not current_platform.is_cuda())
     ):
         out = x * torch.sigmoid(gate)
         if scale is None:
