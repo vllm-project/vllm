@@ -129,11 +129,12 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
     def __init__(
         self,
         num_chunks: int,
-        mmap_region: SharedOffloadRegion,
+        mmap_region: SharedOffloadRegion | None,
         cache_policy: str = "lru",
         cache_policy_module_path: str | None = None,
         enable_events: bool = False,
         info: CPUOffloadingInfo | None = None,
+        chunk_size_bytes: int | None = None,
     ):
         super().__init__(
             num_chunks=num_chunks,
@@ -153,7 +154,16 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         # release to the free pool is deferred until release_deferred_write().
         self._deferred_release_chunk_ids: set[int] = set()
 
-        self._kv_memoryview = mmap_region.create_kv_memoryview()
+        self._kv_memoryview = (
+            mmap_region.create_kv_memoryview() if mmap_region is not None else None
+        )
+        if self._kv_memoryview is not None:
+            assert self._kv_memoryview.strides is not None
+            self.chunk_size_bytes = self._kv_memoryview.strides[0]
+        else:
+            if chunk_size_bytes is None:
+                raise ValueError("Worker-only CPU regions require chunk_size_bytes")
+            self.chunk_size_bytes = chunk_size_bytes
 
     def prepare_read(
         self, keys: Collection[OffloadKey], req_context: ReqContext
@@ -220,13 +230,17 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         SharedOffloadRegion mmap.  Secondary tiers address chunk *c* as
         ``view[c]``.
         """
+        if self._kv_memoryview is None:
+            raise RuntimeError("Worker-only CPU regions have no secondary-tier view")
         return self._kv_memoryview
 
     @override
     def shutdown(self) -> None:
         super().shutdown()
-        self._kv_memoryview.release()
-        self._mmap_region.cleanup()
+        if self._kv_memoryview is not None:
+            self._kv_memoryview.release()
+        if self._mmap_region is not None:
+            self._mmap_region.cleanup()
 
 
 class _SecondaryTierFacingParent(ParentManager):
@@ -311,12 +325,10 @@ class TieringOffloadingManager(OffloadingManager):
         self._deferred_releases: dict[JobId, _DeferredRelease] = {}
         # Set by reset_cache() until on_reset_flushed(); see lookup().
         self._promotions_held = False
-        primary_view = self.primary_tier.get_kv_memoryview()
-        assert primary_view.strides is not None
         self._metrics = TieringMetricsTracker(
             tier_types=[tier.tier_type for tier in self.secondary_tiers],
             num_primary_chunks=self.primary_tier._num_chunks,
-            primary_chunk_size=primary_view.strides[0],
+            primary_chunk_size=self.primary_tier.chunk_size_bytes,
         )
 
         # Pending promotion requests accumulated during lookup() calls; flushed

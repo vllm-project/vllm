@@ -329,11 +329,11 @@ def test_tiering_spec_passes_the_cpu_facts_to_the_primary_tier():
         manager.shutdown()
 
 
-def test_tiering_spec_aligns_row_size():
+def test_tiering_cpu_only_spec_accounts_for_rank_page_padding():
     alignment = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
     spec = _create_spec(
         spec_name="TieringOffloadingSpec",
-        cpu_bytes_to_use=alignment * 3,
+        cpu_bytes_to_use=alignment * 18,
         worker_kv_bytes_per_block=16,
         blocks_per_chunk=2,
         world_size=6,
@@ -343,7 +343,7 @@ def test_tiering_spec_aligns_row_size():
 
     assert isinstance(spec, TieringOffloadingSpec)
     assert spec.cpu_page_size_per_worker == 32
-    assert spec.kv_bytes_per_chunk == alignment
+    assert spec.kv_bytes_per_chunk == alignment * 6
     assert spec.num_chunks == 3
 
 
@@ -366,7 +366,7 @@ def test_tiering_spec_replicated_sizing_removes_world_factor(world_size: int):
 
 
 def test_tiering_spec_create_worker_uses_single_slot_for_replicated_layout(monkeypatch):
-    import vllm.v1.kv_offload.tiering.spec as tiering_spec_module
+    import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
 
     worker_kv_bytes_per_block = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
     spec = _create_spec(
@@ -390,8 +390,8 @@ def test_tiering_spec_create_worker_uses_single_slot_for_replicated_layout(monke
         worker_calls.append(kwargs)
         return MagicMock()
 
-    monkeypatch.setattr(tiering_spec_module, "SharedOffloadRegion", fake_region_ctor)
-    monkeypatch.setattr(tiering_spec_module, "CPUOffloadingWorker", fake_worker_ctor)
+    monkeypatch.setattr(cpu_spec_module, "SharedOffloadRegion", fake_region_ctor)
+    monkeypatch.setattr(cpu_spec_module, "CPUOffloadingWorker", fake_worker_ctor)
     monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 5)
 
     kv_caches = MagicMock()
@@ -404,7 +404,7 @@ def test_tiering_spec_create_worker_uses_single_slot_for_replicated_layout(monke
 
 
 def test_tiering_spec_create_worker_uses_worker_rank_for_sharded_layout(monkeypatch):
-    import vllm.v1.kv_offload.tiering.spec as tiering_spec_module
+    import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
 
     spec = _create_spec(
         spec_name="TieringOffloadingSpec",
@@ -420,8 +420,8 @@ def test_tiering_spec_create_worker_uses_worker_rank_for_sharded_layout(monkeypa
         region_calls.append(kwargs)
         return MagicMock()
 
-    monkeypatch.setattr(tiering_spec_module, "SharedOffloadRegion", fake_region_ctor)
-    monkeypatch.setattr(tiering_spec_module, "CPUOffloadingWorker", MagicMock())
+    monkeypatch.setattr(cpu_spec_module, "SharedOffloadRegion", fake_region_ctor)
+    monkeypatch.setattr(cpu_spec_module, "CPUOffloadingWorker", MagicMock())
     monkeypatch.setattr(
         torch.accelerator,
         "current_device_index",
@@ -430,7 +430,8 @@ def test_tiering_spec_create_worker_uses_worker_rank_for_sharded_layout(monkeypa
 
     spec.create_worker(MagicMock())
 
-    assert region_calls[0]["rank"] == 1
+    assert region_calls[0]["rank"] == 0
+    assert region_calls[0]["engine_id"] == "test-engine_1"
 
 
 @pytest.mark.parametrize("world_size", [2, 4, 8])
@@ -830,6 +831,7 @@ def test_tiering_spec_rejects_secondary_tiers_across_nodes(
     monkeypatch, secondary_tiers, spanning_group, rejected
 ):
     import vllm.distributed.parallel_state as parallel_state
+    import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
     import vllm.v1.kv_offload.tiering.spec as tiering_spec_module
 
     spec = _create_spec(
@@ -860,6 +862,8 @@ def test_tiering_spec_rejects_secondary_tiers_across_nodes(
     worker_ctor = MagicMock()
     monkeypatch.setattr(tiering_spec_module, "SharedOffloadRegion", region_ctor)
     monkeypatch.setattr(tiering_spec_module, "CPUOffloadingWorker", worker_ctor)
+    monkeypatch.setattr(cpu_spec_module, "SharedOffloadRegion", region_ctor)
+    monkeypatch.setattr(cpu_spec_module, "CPUOffloadingWorker", worker_ctor)
 
     if rejected:
         with pytest.raises(NotImplementedError, match="span several nodes"):
