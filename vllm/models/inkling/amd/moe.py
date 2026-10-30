@@ -632,8 +632,15 @@ class InklingMoE(nn.Module):
         tp_rank = experts.moe_config.moe_parallel_config.tp_rank
         tp_size = experts.moe_config.moe_parallel_config.tp_size
         # AITER pads the intermediate dim; the padding keeps the value the
-        # weights (zero) and scales (one) are created with
-        pad = 1.0 if key.endswith("_scale") else 0.0
+        # weights (zero) and scales (one) are created with. A parameter that
+        # declares weight_loader_numel (unquantized AITER) counts only the
+        # checkpoint's elements and its method zeroes the padding itself, so
+        # writing the padding would over-count and finish the layer early.
+        pad = (
+            None
+            if hasattr(param, "weight_loader_numel")
+            else (1.0 if key.endswith("_scale") else 0.0)
+        )
 
         if key.endswith("_scale_2"):
             # Per-expert scalars, vectorized over the local experts. The

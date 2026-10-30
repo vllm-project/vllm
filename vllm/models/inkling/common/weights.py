@@ -47,21 +47,26 @@ def deinterleave_into(
 
 
 def copy_padded(
-    slot: int, width: int, pad: float
+    slot: int, width: int, pad: float | None = None
 ) -> Callable[[torch.Tensor, torch.Tensor], None]:
-    """Write into the first ``width`` columns of ``slot`` and set the padding
-    columns after them to ``pad``."""
+    """Write into the first ``width`` columns of ``slot``. If ``pad`` is given,
+    also set the padding columns after them to it."""
 
     def write(param: torch.Tensor, weight: torch.Tensor) -> None:
         dst = param.data[slot]
         dst[..., :width].copy_(weight)
-        _fill(dst[..., width:], pad)
+        if pad is not None:
+            _fill(dst[..., width:], pad)
 
     return write
 
 
 def copy_into_slots(slots: list[int]) -> Callable[[torch.Tensor, torch.Tensor], None]:
+    """Write ``weight[i]`` into slot ``slots[i]`` of the parameter's leading
+    (expert) dim, after one upload of ``weight`` to the parameter's device."""
+
     def write(param: torch.Tensor, weight: torch.Tensor) -> None:
+        weight = weight.to(param.device)
         for i, slot in enumerate(slots):
             param.data[slot].copy_(weight[i])
 
