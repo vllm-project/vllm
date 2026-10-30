@@ -10,7 +10,19 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from tests.v1.kv_connector.umbp_test_utils import _kv_cache_config, _vllm_config
+from tests.v1.kv_connector.umbp_test_utils import (
+    _kv_cache_config,
+    _vllm_config,
+    handshake,
+    install_memory_runtime,
+    make_kv_caches,
+)
+from tests.v1.kv_connector.unit.utils import (
+    create_model_runner_output,
+    create_request,
+    create_scheduler,
+    create_vllm_config,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.connector import (
     UMBPStoreConnector,
@@ -43,6 +55,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.worker import (
     UMBPStoreConnectorWorker,
 )
 from vllm.platforms import current_platform
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    KVCacheTensor,
+    SlidingWindowSpec,
+)
+from vllm.v1.request import RequestStatus
 
 mori_available = importlib.util.find_spec("mori") is not None
 
@@ -574,3 +594,133 @@ def test_lookup_server_close_does_not_unlink_a_replacement(socket_dir):
         assert scheduler.lookup(["k"]) == [True]
     finally:
         second.close()
+
+
+def _engine_step(scheduler, worker, before_load=lambda: None):
+    """One engine step with the worker connector driven as the model runner does."""
+    output = scheduler.schedule()
+    before_load()
+    worker.bind_connector_metadata(output.kv_connector_metadata)
+    worker.start_load_kv(None)
+    worker.wait_for_save()
+    results = worker.get_transfer_results(output.finished_req_ids)
+    runner_output = create_model_runner_output(
+        [scheduler.requests[req_id] for req_id in output.num_scheduled_tokens],
+        finished_sending=results.finished_sending,
+        finished_recving=results.finished_recving,
+        failed_recving=results.failed_recving,
+        invalid_block_ids=worker.get_block_ids_with_load_errors(),
+        kv_connector_worker_meta=worker.build_connector_worker_meta(),
+    )
+    worker.clear_connector_metadata()
+    scheduler.update_from_output(output, runner_output)
+    return output
+
+
+def _run_to_completion(scheduler, worker) -> dict[str, int]:
+    scheduled: dict[str, int] = {}
+    for _ in range(10):
+        if not scheduler.has_requests():
+            return scheduled
+        output = _engine_step(scheduler, worker)
+        for req_id, count in output.num_scheduled_tokens.items():
+            scheduled[req_id] = scheduled.get(req_id, 0) + count
+    raise AssertionError("the engine did not drain")
+
+
+def _attention_and_sliding_window_config() -> KVCacheConfig:
+    shape = dict(block_size=16, num_kv_heads=2, head_size=8, dtype=torch.float16)
+    groups = [
+        KVCacheGroupSpec(["full"], FullAttentionSpec(**shape)),
+        KVCacheGroupSpec(["window"], SlidingWindowSpec(**shape, sliding_window=64)),
+    ]
+    page_bytes = groups[0].kv_cache_spec.page_size_bytes
+    return KVCacheConfig(
+        num_blocks=16,
+        kv_cache_groups=groups,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=16 * page_bytes,
+                layers=group.layer_names,
+                layer_stride=16 * page_bytes,
+                block_stride=page_bytes,
+            )
+            for group in groups
+        ],
+    )
+
+
+@pytest.mark.parametrize(
+    ("num_groups", "load_async"), [(1, True), (1, False), (2, True)]
+)
+@pytest.mark.parametrize("policy", ["fail", "recompute"])
+def test_object_evicted_after_lookup_follows_failure_policy(
+    monkeypatch, socket_dir, num_groups, load_async, policy
+):
+    """A hit that is gone by load time must fail or recompute, never reuse KV."""
+    runtime = install_memory_runtime(monkeypatch)
+    if num_groups == 1:
+        kv_cache_config = _kv_cache_config()
+        kv_caches = make_kv_caches()
+    else:
+        kv_cache_config = _attention_and_sliding_window_config()
+        kv_caches = {
+            name: torch.zeros(
+                (16, kv_cache_config.kv_cache_tensors[0].block_stride),
+                dtype=torch.uint8,
+            )
+            for name in ("full", "window")
+        }
+    vllm_config = create_vllm_config(
+        kv_connector="UMBPStoreConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "mode": "embedded",
+            "lookup_dir": socket_dir,
+            "load_async": load_async,
+        },
+        kv_load_failure_policy=policy,
+    )
+    scheduler = create_scheduler(
+        vllm_config,
+        num_blocks=kv_cache_config.num_blocks,
+        kv_cache_config=kv_cache_config,
+    )
+    worker = UMBPStoreConnector(vllm_config, KVConnectorRole.WORKER, kv_cache_config)
+    worker.register_kv_caches(kv_caches)
+    handshake(scheduler.connector, worker)
+    num_tokens = 3 * scheduler.block_size + 1
+    num_hit_tokens = 3 * scheduler.block_size
+
+    def same_prompt():
+        return create_request(
+            num_tokens=num_tokens, common_prefix_len=num_tokens, max_tokens=1
+        )
+
+    scheduler.add_request(same_prompt())
+    _run_to_completion(scheduler, worker)
+    assert scheduler.reset_prefix_cache()
+
+    request = same_prompt()
+    scheduler.add_request(request)
+    free_blocks = scheduler.kv_cache_manager.block_pool.get_num_free_blocks()
+
+    def evict_after_lookup():
+        assert request.prefill_stats.num_external_cached_tokens == num_hit_tokens
+        runtime.evict_all()
+
+    _engine_step(scheduler, worker, before_load=evict_after_lookup)
+    if policy == "fail":
+        assert request.status == RequestStatus.FINISHED_ERROR
+        _run_to_completion(scheduler, worker)
+        assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() == (
+            free_blocks
+        )
+    else:
+        scheduled = _run_to_completion(scheduler, worker)
+        assert request.status == RequestStatus.FINISHED_LENGTH_CAPPED
+        assert scheduled[request.request_id] >= num_tokens
+    # Blocks the failed load left unfilled must never serve a prefix hit.
+    _, num_cached, _ = scheduler.kv_cache_manager.get_computed_blocks(same_prompt())
+    assert num_cached == (0 if policy == "fail" else num_hit_tokens)
+    worker.shutdown()

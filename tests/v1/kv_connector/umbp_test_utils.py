@@ -225,6 +225,9 @@ class MemoryRuntime(IUMBPRuntime):
         del namespace
         return _MemoryWorkerHandle(self._store, topology, layout)
 
+    def evict_all(self) -> None:
+        self._store.clear()
+
 
 def mori_has_umbp() -> bool:
     try:

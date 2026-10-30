@@ -210,6 +210,7 @@ steps:
   - vllm/v1/kv_cache_interface.py
   - tests/v1/kv_connector/unit/test_umbp_
   - tests/v1/kv_connector/umbp_test_utils.py
+  - tests/v1/kv_connector/unit/utils.py
   - tests/v1/kv_connector/conftest.py
   - docker/Dockerfile.rocm_base
   commands:
