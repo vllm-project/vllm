@@ -436,6 +436,7 @@ def _register_overlaid_mla_worker(
     worker.nixl_memory_type = "VRAM"
     worker.nixl_backends = None
     worker.nixl_wrapper = _RecordingNixl()
+    worker._has_agent = True
     worker._registered_descs = []
     worker.dst_num_blocks = {}
     worker.dst_region_num_blocks = {}
