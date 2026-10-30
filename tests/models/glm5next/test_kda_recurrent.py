@@ -278,15 +278,16 @@ def _aiter_kda_decode_runnable() -> bool:
     not _aiter_kda_decode_runnable(),
     reason="Needs AITER's Gluon KDA decode kernel (CDNA4+)",
 )
+@pytest.mark.parametrize("dim_first", [False, True])
 @torch.inference_mode()
-def test_aiter_decode_route_follows_replayed_step(dist_init, monkeypatch):
+def test_aiter_decode_route_follows_replayed_step(dist_init, monkeypatch, dim_first):
     """AITER's single-launch decode kernel runs on plain decode steps only.
 
     Breakable PIECEWISE graphs replay ``_forward`` against each step's metadata,
     so the route is chosen there. Capture on an all-decode batch, then replay a
     mixed step (stock chain) and a decode step (one fused launch); a route fixed
     in ``forward`` fails one of the two. The reference is a layer built without
-    AITER, with the same weights and caches.
+    AITER, with the same weights and caches, in the same conv-state layout.
     """
     from transformers import Glm5NextTextConfig
 
@@ -352,7 +353,13 @@ def test_aiter_decode_route_follows_replayed_step(dist_init, monkeypatch):
     # conv weight; vLLM's loaders end with this hook.
     for layer in layers.values():
         layer.process_weights_after_loading(vllm_config.model_config.dtype)
+    # get_state_shape orients the conv state by the process-wide layout: (dim,
+    # state_len) per slot when dim-first (DS), else (state_len, dim) (SD).
     conv_shape, state_shape = stock.get_state_shape()
+    if stock._conv_state_dim_first != dim_first:
+        conv_shape = conv_shape[::-1]
+    for layer in layers.values():
+        layer._conv_state_dim_first = dim_first
     saved_caches = (
         (0.5 * torch.randn(num_slots, *conv_shape, device=device)).bfloat16(),
         0.1 * torch.randn(num_slots, *state_shape, device=device),
