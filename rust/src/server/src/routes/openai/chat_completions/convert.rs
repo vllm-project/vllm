@@ -303,12 +303,13 @@ pub(crate) fn convert_message(message: ChatMessage) -> Result<VllmChatMessage, A
             if let Some(tool_calls) = tool_calls {
                 blocks.extend(convert_assistant_tool_calls(tool_calls)?);
             }
+            // Like Python, null, missing or `[]` content renders as an empty turn.
             if blocks.iter().all(|block| {
                 matches!(block, AssistantContentBlock::Reasoning { text } if text.is_empty())
             }) {
-                bail_invalid_request!(
-                    "Assistant messages must contain text, reasoning content, or tool_calls."
-                );
+                blocks.push(AssistantContentBlock::Text {
+                    text: String::new(),
+                });
             }
 
             Ok(VllmChatMessage::assistant_blocks(blocks))
