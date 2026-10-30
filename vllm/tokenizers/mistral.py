@@ -253,8 +253,7 @@ class MistralTokenizer(TokenizerLike):
 
         # Reverse order to ensure that the lowest token id is kept.
         self._vocab_dict = {
-            self.tokenizer.id_to_piece(i): i
-            for i in range(self.vocab_size - 1, -1, -1)
+            self.tokenizer.id_to_piece(i): i for i in range(self.vocab_size - 1, -1, -1)
         }
         # Sort the dict for convenience
         self._vocab_dict = dict(sorted(self._vocab_dict.items(), key=lambda x: x[1]))
@@ -497,7 +496,9 @@ class MistralTokenizer(TokenizerLike):
         if not skip_special_tokens:
             if self.is_tekken:
                 # Tekken tokenizer returns byte-fallback as bytes
-                return tekken_convert_ids_to_tokens(self.tokenizer, ids)
+                return cast(
+                    list[str], tekken_convert_ids_to_tokens(self.tokenizer, ids)
+                )
             return [self.tokenizer.id_to_piece(token_id) for token_id in ids]
 
         non_skip_special_tokens_ids = {
