@@ -339,6 +339,26 @@ def test_rocm_aiter_topk_gating_shared_expert_suffix():
     assert torch.equal(topk_ids[:, topk:], shared_ids.expand_as(topk_ids[:, topk:]))
 
 
+def _assert_softmax_topk(
+    weights: torch.Tensor,
+    ids: torch.Tensor,
+    logits: torch.Tensor,
+    renormalize: bool,
+):
+    # BF16 logits can tie at the top-k boundary, so check the selection against
+    # the cutoff and the weights against the scores of the selected experts.
+    ids = ids.long()
+    sorted_ids = ids.sort(dim=-1).values
+    assert (sorted_ids[:, 1:] != sorted_ids[:, :-1]).all()
+    scores = torch.softmax(logits.float(), dim=-1)
+    cutoff = scores.topk(ids.shape[-1], dim=-1).values[:, -1:]
+    selected = scores.gather(1, ids)
+    assert (selected >= cutoff).all()
+    if renormalize:
+        selected = selected / selected.sum(dim=-1, keepdim=True)
+    torch.testing.assert_close(weights, selected)
+
+
 @pytest.fixture
 def aiter_shared_expert_fusion(monkeypatch: pytest.MonkeyPatch):
     for name in (
@@ -401,24 +421,53 @@ def test_rocm_aiter_shared_routed_router_without_shared_expert_gate(
     hidden_states = torch.empty((num_tokens, 16), dtype=dtype, device="cuda")
     weights, ids = router.select_experts(hidden_states, logits)
 
-    # BF16 logits can tie at the top-k boundary, so check the selection against
-    # the cutoff and the weights against the scores of the selected experts.
-    routed_ids = ids[:, :topk].long()
-    assert set(last_experts) <= set(routed_ids[0].tolist())
-    sorted_ids = routed_ids.sort(dim=-1).values
-    assert (sorted_ids[:, 1:] != sorted_ids[:, :-1]).all()
-    scores = torch.softmax(logits.float(), dim=-1)
-    cutoff = scores.topk(topk, dim=-1).values[:, -1:]
-    selected = scores.gather(1, routed_ids)
-    assert (selected >= cutoff).all()
-    if renormalize:
-        selected = selected / selected.sum(dim=-1, keepdim=True)
-    torch.testing.assert_close(weights[:, :topk], selected)
+    assert set(last_experts) <= set(ids[0, :topk].tolist())
+    _assert_softmax_topk(weights[:, :topk], ids[:, :topk], logits, renormalize)
     shared_ids = torch.arange(
         num_experts, num_experts + num_shared, device="cuda", dtype=torch.int32
     )
     assert torch.equal(ids[:, topk:], shared_ids.expand(num_tokens, -1))
     assert (weights[:, topk:] == shared_expert_weight).all()
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32], ids=["bf16", "fp32"])
+def test_rocm_aiter_shared_routed_router_with_shared_expert_gate(
+    aiter_shared_expert_fusion, dtype: torch.dtype
+):
+    """Qwen3-Next: the shared-expert gate logits follow the routed logits, and
+    the shared slot weight is their sigmoid."""
+    num_experts, topk, num_shared = 512, 10, 1
+    rocm_aiter_moe.init_aiter_topK_meta_data(
+        n_routed_experts=num_experts,
+        n_shared_experts=num_shared,
+        top_k=topk,
+        tp_rank=0,
+        tp_size=1,
+        max_num_tokens=64,
+    )
+    router = create_fused_moe_router(
+        top_k=topk,
+        global_num_experts=num_experts,
+        renormalize=True,
+        num_fused_shared_experts=num_shared,
+        has_shared_expert_gate=True,
+    )
+    assert isinstance(router, AiterSharedRoutedFusedMoERouter)
+
+    set_random_seed(0)
+    num_tokens = 33
+    logits = torch.randn((num_tokens, num_experts + num_shared), device="cuda") * 3
+    logits = logits.to(dtype)
+    hidden_states = torch.empty((num_tokens, 16), dtype=dtype, device="cuda")
+    weights, ids = router.select_experts(hidden_states, logits)
+
+    _assert_softmax_topk(
+        weights[:, :topk], ids[:, :topk], logits[:, :num_experts], renormalize=True
+    )
+    assert (ids[:, topk:] == num_experts).all()
+    torch.testing.assert_close(
+        weights[:, topk:], torch.sigmoid(logits[:, num_experts:].float())
+    )
 
 
 def test_rocm_aiter_topk_gating_torch_compile_compatibility():
