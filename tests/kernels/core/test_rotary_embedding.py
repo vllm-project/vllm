@@ -10,6 +10,7 @@ from vllm.model_executor.layers.rotary_embedding import (
     LinearScalingRotaryEmbedding,
     RotaryEmbedding,
 )
+from vllm.model_executor.layers.rotary_embedding.fope import FourierRotaryEmbedding
 
 
 @pytest.mark.parametrize("scaled", [False, True])
@@ -44,6 +45,24 @@ def test_rotation_description_matches_partial_rotary_forward(
         rotation.is_neox,
     )
     torch.testing.assert_close(actual, expected)
+
+
+def test_fourier_rotary_embedding_has_no_rotation(default_vllm_config):
+    """Fourier RoPE rotates by per-KV-head angles, not a cos/sin table."""
+    rot = FourierRotaryEmbedding(
+        head_size=64,
+        rotary_dim=64,
+        max_position_embeddings=128,
+        base=10000,
+        is_neox_style=True,
+        dtype=torch.float16,
+        init_cache=False,
+        num_key_value_heads=2,
+        num_inv_freq=32,
+        fope_sep_head=True,
+        fope_init_factor=1.0,
+    )
+    assert rot.get_rotation(torch.arange(4), torch.float16) is None
 
 
 def rotary_embedding_opcheck(
