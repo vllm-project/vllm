@@ -32,7 +32,6 @@ from vllm.v1.worker.ubatch_utils import (
     UBatchSlice,
     UBatchSlices,
     create_sm_control_context,
-    maybe_create_ubatch_slices,
 )
 from vllm.v1.worker.ubatching import make_ubatch_contexts
 from vllm.v1.worker.utils import AttentionGroup
@@ -66,31 +65,37 @@ def create_ubatch_slices(
     on a request boundary instead, so each microbatch stays a uniform decode.
     `uniform_token_count` must be agreed across DP ranks.
     """
-    split_point = None
+    num_reqs = input_batch.num_reqs
+    num_reqs_padded = input_batch.num_reqs_after_padding
+    num_tokens_padded = input_batch.num_tokens_after_padding
+
+    split_point = num_tokens_padded // num_ubatches
     if uniform_token_count is not None and uniform_token_count > 1:
-        num_tokens = input_batch.num_tokens_after_padding
-        reqs_per_ubatch = num_tokens // (uniform_token_count * num_ubatches)
+        reqs_per_ubatch = num_tokens_padded // (uniform_token_count * num_ubatches)
         if reqs_per_ubatch > 0:
             split_point = reqs_per_ubatch * uniform_token_count
-    _, ubatch_slices = maybe_create_ubatch_slices(
-        True,
-        input_batch.num_scheduled_tokens,
-        input_batch.num_tokens_after_padding,
-        input_batch.num_reqs_after_padding,
-        num_ubatches,
-        split_point=split_point,
-    )
-    assert ubatch_slices is not None
-    return [
-        UBatchSlice(
-            slice(
-                min(s.request_slice.start, input_batch.num_reqs - 1),
-                min(s.request_slice.stop, input_batch.num_reqs_after_padding),
-            ),
-            s.token_slice,
+    token_bounds = [split_point * i for i in range(num_ubatches)]
+    token_bounds.append(num_tokens_padded)
+
+    cu_num_tokens = np.zeros(len(input_batch.num_scheduled_tokens) + 1, np.int32)
+    np.cumsum(input_batch.num_scheduled_tokens, out=cu_num_tokens[1:])
+
+    ubatch_slices = []
+    for i in range(num_ubatches):
+        start, stop = token_bounds[i], token_bounds[i + 1]
+        # The microbatch holds the requests overlapping [start, stop); the
+        # trailing one also takes every padded request.
+        req_start = int(np.searchsorted(cu_num_tokens, start, side="right")) - 1
+        req_stop = num_reqs_padded
+        if i < num_ubatches - 1:
+            req_stop = int(np.searchsorted(cu_num_tokens, stop, side="left"))
+        ubatch_slices.append(
+            UBatchSlice(
+                slice(min(req_start, num_reqs - 1), min(req_stop, num_reqs_padded)),
+                slice(start, stop),
+            )
         )
-        for s in ubatch_slices
-    ]
+    return ubatch_slices
 
 
 def _slice_input_batch(
