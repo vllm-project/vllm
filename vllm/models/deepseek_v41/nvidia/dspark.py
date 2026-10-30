@@ -21,6 +21,9 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.kernel import NATIVE_MEGA_MOE_BACKENDS
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.attention.fused_deepseek_v4_qnorm_rope_kv_insert_dispatch import (  # noqa: E501
+    fused_deepseek_v4_kv_rope_insert,
+)
 from vllm.model_executor.kernels.mhc.tilelang import (
     mhc_post_tilelang,
 )
@@ -275,7 +278,7 @@ def _insert_context_kv(
     # differ). block_size stays the layer's, so the op's size(1) check still
     # cross-checks the two rather than restating the tensor.
     cache = attn.swa_cache_layer.kv_cache
-    torch.ops._C.fused_deepseek_v4_kv_rope_insert(
+    fused_deepseek_v4_kv_rope_insert(
         kv,
         cache,
         slot_mapping,

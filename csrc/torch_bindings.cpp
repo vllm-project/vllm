@@ -413,6 +413,11 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "bool is_neox, Tensor position_ids, "
       "int forced_token_heads_per_warp=-1) -> ()");
 
+// DeepseekV4 fused qnorm/RoPE KV-insert: on CUDA these run as CuTe DSL
+// kernels (vllm/model_executor/kernels/attention/
+// fused_deepseek_v4_qnorm_rope_kv_insert.py, jitted at first use), so the
+// extension ops are registered only for ROCm, which builds the kernel.
+#ifdef USE_ROCM
   // q_head_padded is the padded Q head count of the returned tensor, or 0 to
   // do the KV insert alone and return an empty tensor.  The Q knobs are
   // independent: apply_q_norm and apply_q_rope each drop that step for Q
@@ -446,6 +451,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor slot_mapping, Tensor position_ids, Tensor cos_sin_cache, "
       "Tensor fp8_scale, Tensor q_fp8_scale_inv, float eps, "
       "int cache_block_size, bool apply_q_norm=True) -> ()");
+#endif
 
   // Kimi-K3 MLA epilogues: optional RoPE followed by concat/cache insertion.
   ops.def(
@@ -854,6 +860,10 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   // Positional encoding kernels (shared CUDA/ROCm)
   ops.impl("rotary_embedding", TORCH_BOX(&rotary_embedding));
   ops.impl("fused_qk_norm_rope", TORCH_BOX(&fused_qk_norm_rope));
+// DeepseekV4 fused qnorm/RoPE KV-insert impls: CUDA runs the CuTe DSL
+// kernels instead, so these are registered only for ROCm, which builds
+// the extension kernel (matching the #ifdef USE_ROCM schema defs above).
+#ifdef USE_ROCM
   ops.impl("fused_deepseek_v4_kv_rope_insert",
            TORCH_BOX(&fused_deepseek_v4_kv_rope_insert));
   ops.impl("fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert",
@@ -864,6 +874,7 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl(
       "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert",
       TORCH_BOX(&fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert));
+#endif
   ops.impl("fused_kimi_k3_mla_key_concat_kv_cache_insert",
            TORCH_BOX(&fused_kimi_k3_mla_key_concat_kv_cache_insert));
   ops.impl("fused_kimi_k3_mla_key_concat_ds_mla_insert",
