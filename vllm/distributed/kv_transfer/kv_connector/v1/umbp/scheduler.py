@@ -500,10 +500,11 @@ class UMBPStoreConnectorScheduler:
                 request.request_id,
             )
             return 0, False
-        per_rank = self.topology.rank_count
+        assert self.codec is not None
         offset = 0
         logical_hits_by_group: dict[int, list[bool]] = {}
         for group_id in group_ids:
+            per_rank = self.codec.keys_per_object(self.topology, group_id)
             group_size = len(logical_objects_by_group[group_id]) * per_rank
             group_hits = hits[offset : offset + group_size]
             offset += group_size
@@ -998,9 +999,13 @@ class UMBPStoreConnectorScheduler:
             return [], False
 
         plans: list[BlockTransferPlan] = []
-        rank_count = self.topology.rank_count
-        for index, (block, key, group_id, block_hash) in enumerate(candidates):
-            if all(hits[index * rank_count : (index + 1) * rank_count]):
+        offset = 0
+        for block, key, group_id, block_hash in candidates:
+            # TP-replicated groups have one key per object, not one per rank.
+            width = self.codec.keys_per_object(self.topology, group_id)
+            resident = all(hits[offset : offset + width])
+            offset += width
+            if resident:
                 continue
             plans.append(
                 BlockTransferPlan(
@@ -1303,10 +1308,10 @@ class UMBPStoreConnectorScheduler:
             return {}
         if len(hits) != len(keys):
             return {}
-        ranks = self.topology.rank_count
         offset = 0
         resident = {}
         for group_id, indices in candidates.items():
+            ranks = self.codec.keys_per_object(self.topology, group_id)
             resident[group_id] = {
                 index
                 for position, index in enumerate(indices)
@@ -1562,14 +1567,21 @@ class UMBPStoreConnectorScheduler:
             if not pending.future.done():
                 return
             self._event_lookup = None
+            widths = [
+                self.codec.keys_per_object(self.topology, group_id)
+                for (group_id, _), _ in pending.objects
+            ]
             try:
                 hits = list(pending.future.result())
-                if len(hits) != len(pending.objects) * self.topology.rank_count:
+                if len(hits) != sum(widths):
                     raise ValueError("invalid UMBP event residency result length")
             except Exception as exc:
                 logger.debug("UMBP event residency check failed: %s", exc)
                 hits = None
-            for index, (identity, serial) in enumerate(pending.objects):
+            offset = 0
+            for (identity, serial), width in zip(pending.objects, widths, strict=True):
+                start = offset
+                offset += width
                 record = self._event_objects.get(identity)
                 if record is None or record.serial != serial:
                     continue
@@ -1580,8 +1592,7 @@ class UMBPStoreConnectorScheduler:
                     if record.published:
                         self._event_objects[identity] = record
                     continue
-                ranks = self.topology.rank_count
-                resident = all(hits[index * ranks : (index + 1) * ranks])
+                resident = all(hits[start : start + width])
                 if not resident:
                     if record.published:
                         group_id, block_hash = identity

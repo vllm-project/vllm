@@ -334,6 +334,8 @@ class _StandaloneWorkerHandle(_SharedPoolWorkerHandle):
 class StandaloneRuntime(IUMBPRuntime):
     """Runtime whose objects live in a node-local standalone server."""
 
+    shares_pool_across_ranks = True
+
     def __init__(self, config: UMBPRuntimeConfig) -> None:
         self._options = _resolve_standalone_options(config)
         self._address = normalize_endpoint(self._options["endpoint"])
