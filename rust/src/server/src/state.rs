@@ -13,7 +13,7 @@ use vllm_chat::ChatLlm;
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::runtime::BackgroundShutdownRuntime;
 
-use crate::config::{ApiServerOptions, CorsConfig, LoraModulePath};
+use crate::config::{AccessLogConfig, ApiServerOptions, CorsConfig, LoraModulePath};
 use crate::lora::{
     LoadLoraError, LoadedLora, LoraDisabledError, LoraManager, LoraModelResolution, UnloadLoraError,
 };
@@ -39,6 +39,8 @@ pub struct AppState {
     pub api_server_options: ApiServerOptions,
     /// CORS settings applied to every HTTP response.
     pub cors: CorsConfig,
+    /// HTTP access log settings.
+    pub access_log: AccessLogConfig,
     /// Runtime server information returned by `/server_info`, when available.
     server_info: Option<ServerInfoSnapshot>,
     /// SHA-256 hashes of API keys accepted as bearer tokens for guarded routes.
@@ -75,6 +77,7 @@ impl AppState {
             chat,
             api_server_options: ApiServerOptions::default(),
             cors: CorsConfig::default(),
+            access_log: AccessLogConfig::default(),
             server_info: None,
             api_key_hashes: Vec::new(),
             server_load: AtomicU64::new(0),
@@ -94,6 +97,12 @@ impl AppState {
     /// Set the CORS settings applied to every HTTP response.
     pub fn with_cors(mut self, cors: CorsConfig) -> Self {
         self.cors = cors;
+        self
+    }
+
+    /// Set the HTTP access log settings.
+    pub fn with_access_log(mut self, access_log: AccessLogConfig) -> Self {
+        self.access_log = access_log;
         self
     }
 

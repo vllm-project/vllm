@@ -46,14 +46,6 @@ pub(super) fn validate_request_compat(
         bail_invalid_request!(param = "prompt_embeds", "prompt_embeds is not supported.");
     }
 
-    // TODO: return the per-choice `weight_versions` spans.
-    if request.return_weight_versions == Some(true) {
-        bail_invalid_request!(
-            param = "return_weight_versions",
-            "return_weight_versions is not supported."
-        );
-    }
-
     if let Some(logprobs) = request.logprobs
         && logprobs < 0
         && logprobs != -1
@@ -244,30 +236,6 @@ mod tests {
         .expect("parse request");
         assert!(
             validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok()
-        );
-    }
-
-    #[test]
-    fn validate_request_compat_rejects_return_weight_versions() {
-        for return_weight_versions in [json!(null), json!(false)] {
-            let request: CompletionRequest = serde_json::from_value(json!({
-                "prompt": "hello",
-                "return_weight_versions": return_weight_versions,
-            }))
-            .expect("parse request");
-            assert!(
-                validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"]))
-                    .is_ok()
-            );
-        }
-
-        let request: CompletionRequest = serde_json::from_value(json!({
-            "prompt": "hello",
-            "return_weight_versions": true,
-        }))
-        .expect("parse request");
-        assert!(
-            validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err()
         );
     }
 

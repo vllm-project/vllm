@@ -125,6 +125,17 @@ pub(crate) struct LoraModelResolution {
     pub lora_request: Option<LoraRequest>,
 }
 
+impl LoraModelResolution {
+    /// The `model` reported in responses: the LoRA adapter name when the
+    /// request resolved to one, otherwise the first served model name.
+    pub fn response_model(&self) -> String {
+        self.lora_request
+            .as_ref()
+            .map(|request| request.lora_name.clone())
+            .unwrap_or_else(|| self.model_names.first().cloned().unwrap_or_default())
+    }
+}
+
 /// Runtime registry for dynamically loaded LoRA adapters.
 pub(crate) struct LoraManager {
     /// Dynamically loaded LoRA adapters keyed by public model name, in load order.
