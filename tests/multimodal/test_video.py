@@ -40,8 +40,10 @@ from vllm.multimodal.video_decoders.opencv import OpenCVVideoBackendMixin
 from vllm.multimodal.video_decoders.pynvvideocodec import (
     PYNVVIDEOCODEC_DECODE_BATCH_SIZE,
     PYNVVIDEOCODEC_DECODER_CACHE_SIZE,
+    PYNVVIDEOCODEC_DECODER_CAPS_CACHE_SIZE,
     PyNvVideoCodecDecoderSlot,
     PyNvVideoCodecVideoBackendMixin,
+    _get_decoder_caps,
     _pynv_decoder_pool,
 )
 from vllm.platforms import current_platform
@@ -874,6 +876,54 @@ def test_pynvvideocodec_clamps_configured_bounds_per_codec():
         max_width=7680,
         max_height=4320,
     ) == (4096, 4096)
+
+
+def test_pynvvideocodec_caches_decoder_caps_per_stream_format():
+    calls = []
+
+    class FakeDemuxer:
+        def __init__(self, codec):
+            self.codec = codec
+
+        def Width(self):
+            return 1280
+
+        def Height(self):
+            return 720
+
+        def GetNvCodecId(self):
+            return self.codec
+
+        def ChromaFormat(self):
+            return "420"
+
+        def BitDepth(self):
+            return 8
+
+    class FakeNvc:
+        @staticmethod
+        def CreateDemuxer(file_path):
+            return FakeDemuxer("hevc" if "hevc" in file_path else "h264")
+
+        @staticmethod
+        def GetDecoderCaps(device_index, codec, chroma_format, bit_depth):
+            calls.append(codec)
+            return {
+                "supported": 1,
+                "width_min": 48,
+                "width_max": 8192,
+                "height_min": 16,
+                "height_max": 8192,
+                "mb_num_max": 262144,
+            }
+
+    for path in ("a.mp4", "b.mp4", "c-hevc.mp4", "d-hevc.mp4"):
+        assert PyNvVideoCodecVideoBackendMixin._validate_decoder_caps(
+            path, FakeNvc
+        ) == (1280, 1280)
+    assert calls == ["h264", "hevc"]
+    cache_size = _get_decoder_caps.cache_info().maxsize
+    assert cache_size == PYNVVIDEOCODEC_DECODER_CAPS_CACHE_SIZE
 
 
 @pytest.mark.parametrize(
