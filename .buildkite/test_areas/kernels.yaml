@@ -588,6 +588,9 @@ steps:
   device: b200-k8s
   # optional: true
   source_file_dependencies:
+  - vllm/model_executor/kernels/linear/scaled_mm/flashinfer.py
+  - vllm/utils/flashinfer.py
+  - tests/kernels/quantization/test_flashinfer_scaled_mm.py
   - csrc/quantization/fp4/
   - csrc/nvfp4_kv_cache_kernels.cu
   - csrc/quantization/w8a8/cutlass/
