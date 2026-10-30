@@ -661,7 +661,14 @@ def _weight_update_worker(
         buffer=SimpleNamespace(physical_bytes=50 * GiB),
         release_physical=lambda: log.append("release"),
         recommit=lambda: log.append("recommit"),
+        torch_memory_limit=None,
     )
+
+    def set_torch_memory_limit(num_bytes):
+        kv_cache.torch_memory_limit = num_bytes
+        log.append(f"torch limit {num_bytes}")
+
+    kv_cache.set_torch_memory_limit = set_torch_memory_limit
     runner = SimpleNamespace(
         extensible_kv_cache=kv_cache,
         get_model=lambda: None,
@@ -698,6 +705,28 @@ def test_weight_reload_makes_room_from_an_emptied_kv_cache(
     with patch.object(gpu_worker, "set_current_vllm_config", nullcontext):
         worker.reload_weights()
     assert log == expected
+
+
+def test_weight_reload_lifts_the_torch_memory_cap(monkeypatch: pytest.MonkeyPatch):
+    """Weight processing allocates through torch, beyond the cap sized for
+    serving; the cap returns afterwards, failed reload or not."""
+    log: list[str] = []
+    worker = _weight_update_worker(
+        monkeypatch, free_bytes=4 * GiB, layer_bytes=GiB, reclaimable=False, log=log
+    )
+    worker.model_runner.extensible_kv_cache.torch_memory_limit = 7
+
+    def fail(*args):
+        log.append("reload")
+        raise ValueError("bad checkpoint")
+
+    worker.model_runner.reload_weights = fail
+    with (
+        patch.object(gpu_worker, "set_current_vllm_config", nullcontext),
+        pytest.raises(ValueError),
+    ):
+        worker.reload_weights()
+    assert log == ["torch limit None", "reload", "torch limit 7"]
 
 
 def test_weight_reload_fails_before_loading_when_a_layer_cannot_fit(

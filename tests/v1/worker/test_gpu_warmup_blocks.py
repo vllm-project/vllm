@@ -528,77 +528,27 @@ def test_num_lookahead_tokens_without_speculation():
     assert config.num_lookahead_tokens == 0
 
 
-def _prompt_logprobs_runner(
-    max_logprobs: int, calls: list, max_model_len: int = 4096
-) -> SimpleNamespace:
-    hidden_size, vocab_size = 8, 32
-
-    def compute_logits(hidden_states: torch.Tensor) -> torch.Tensor:
-        calls.append(("logits", tuple(hidden_states.shape)))
-        return torch.zeros(hidden_states.shape[0], vocab_size)
-
-    return SimpleNamespace(
-        prompt_logprobs_worker=object(),
-        model=SimpleNamespace(compute_logits=compute_logits),
-        model_config=SimpleNamespace(
-            max_logprobs=max_logprobs,
-            get_hidden_size=lambda: hidden_size,
-            dtype=torch.float32,
-        ),
-        device=torch.device("cpu"),
-        max_model_len=max_model_len,
-        lora_config=None,
+@pytest.mark.parametrize("max_logprobs", [0, 5, -1])
+def test_sizing_warmup_requests_prompt_logprobs_on_its_prefill(max_logprobs):
+    """Prompt logprobs materialize full-vocab logits a chunk at a time, which
+    no other step reaches. The sizing step requests them on its real prefill,
+    so the runtime path computes them from the model's own hidden states."""
+    runner = _make_runner([_attention_group()], num_lookahead_tokens=0)
+    runner.model_config = SimpleNamespace(
+        get_vocab_size=lambda: 64, max_logprobs=max_logprobs, use_mla=False
     )
+    recorder = _StepRecorder()
+    requested: dict[str, int | None] = {}
 
+    def execute_model(scheduler_output) -> None:
+        for new_req in scheduler_output.scheduled_new_reqs:
+            requested[new_req.req_id] = new_req.sampling_params.prompt_logprobs
+        recorder.execute_model(scheduler_output)
 
-@pytest.mark.parametrize(("max_logprobs", "expected_topk"), [(5, 5), (-1, 32)])
-def test_prompt_logprobs_warmup_materializes_one_chunk(
-    monkeypatch, max_logprobs, expected_topk
-):
-    """One chunk of full-vocab logits is computed and scored with the configured
-    (or, uncapped, the whole-vocab) number of logprobs."""
-    calls: list = []
-    monkeypatch.setattr(
-        warmup,
-        "compute_topk_scores",
-        lambda logits, num_logprobs, token_ids: calls.append(
-            ("topk", tuple(logits.shape), num_logprobs, tuple(token_ids.shape))
-        ),
-    )
-    warmup._warmup_prompt_logprobs(_prompt_logprobs_runner(max_logprobs, calls))
-    chunk = warmup.PROMPT_LOGPROBS_CHUNK_SIZE
-    assert calls == [
-        ("logits", (chunk, 8)),
-        ("topk", (chunk, 32), expected_topk, (chunk,)),
-    ]
+    warmup.run_kv_cache_sizing_warmup(runner, execute_model, recorder.sample_tokens)
 
-
-def test_prompt_logprobs_warmup_chunk_is_capped_by_model_len(monkeypatch):
-    """A prompt cannot exceed max_model_len, so neither does the warmup chunk."""
-    calls: list = []
-    monkeypatch.setattr(
-        warmup,
-        "compute_topk_scores",
-        lambda logits, num_logprobs, token_ids: calls.append(tuple(logits.shape)),
-    )
-    warmup._warmup_prompt_logprobs(_prompt_logprobs_runner(5, calls, max_model_len=100))
-    assert calls == [("logits", (100, 8)), (100, 32)]
-
-
-def test_prompt_logprobs_warmup_skips_when_unavailable():
-    """Nothing runs for pooling / non-last-PP ranks (no worker), LoRA (no
-    per-token adapter mapping outside a batch), disabled logprobs, or models
-    without a logits head."""
-    calls: list = []
-    runner = _prompt_logprobs_runner(5, calls)
-    runner.prompt_logprobs_worker = None
-    warmup._warmup_prompt_logprobs(runner)
-    runner = _prompt_logprobs_runner(5, calls)
-    runner.lora_config = object()
-    warmup._warmup_prompt_logprobs(runner)
-    runner = _prompt_logprobs_runner(0, calls)
-    warmup._warmup_prompt_logprobs(runner)
-    runner = _prompt_logprobs_runner(5, calls)
-    runner.model = SimpleNamespace()
-    warmup._warmup_prompt_logprobs(runner)
-    assert calls == []
+    expected = None if max_logprobs == 0 else max_logprobs
+    assert {
+        "prefill" if "_prefill_" in req_id else "decode": value
+        for req_id, value in requested.items()
+    } == {"prefill": expected, "decode": None}

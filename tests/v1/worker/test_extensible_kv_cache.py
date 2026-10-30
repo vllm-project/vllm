@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -20,6 +21,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
+from vllm.v1.worker import extensible_kv_cache
 from vllm.v1.worker.extensible_kv_cache import (
     ExtensibleKVCache,
     measure_kv_cache_bytes,
@@ -177,6 +179,81 @@ def test_measure_kv_cache_bytes():
     )
     # The result never goes negative.
     assert measure_kv_cache_bytes(requested_memory=2 * gib, **common) == 0
+
+
+def test_measured_sizing_caps_torch_memory(monkeypatch):
+    """Torch's caching allocator may grow into what stays free once the cache
+    is extended, less multimodal IPC memory and the margin's non-torch share,
+    rather than caching fragmented segments until other allocations fail."""
+    gib = 1 << 30
+    limits: list[int | None] = []
+    kv_cache = SimpleNamespace(
+        reserved_headroom_bytes=gib,
+        physical_bytes=gib,
+        bytes_per_block=gib,
+        blocks_within=lambda num_bytes, aligned: num_bytes // gib,
+        physical_bytes_for=lambda num_blocks: num_blocks * gib,
+        set_torch_memory_limit=limits.append,
+    )
+    accelerator = extensible_kv_cache.torch.accelerator
+    monkeypatch.setattr(accelerator, "synchronize", lambda *args: None)
+    monkeypatch.setattr(accelerator, "empty_cache", lambda: None)
+    monkeypatch.setattr(accelerator, "memory_stats", lambda *args: {})
+    monkeypatch.setattr(accelerator, "get_memory_info", lambda *args: (6 * gib, 0))
+    monkeypatch.setattr(accelerator, "memory_reserved", lambda *args: 2 * gib)
+    monkeypatch.setattr(
+        extensible_kv_cache, "measure_kv_cache_bytes", lambda **kwargs: 5 * gib
+    )
+    # One GiB of the 5 GiB budget is held for multimodal IPC.
+    monkeypatch.setattr(
+        extensible_kv_cache,
+        "reserve_mm_ipc_gpu_memory",
+        lambda available, *args: available - gib,
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(multimodal_config=None),
+        parallel_config=SimpleNamespace(),
+        kv_transfer_config=None,
+    )
+
+    num_blocks = extensible_kv_cache.measure_kv_cache_blocks(
+        kv_cache,  # type: ignore[arg-type]
+        vllm_config,  # type: ignore[arg-type]
+        torch.device("cpu"),
+        init_free_memory=10 * gib,
+        requested_memory=10 * gib,
+    )
+
+    assert num_blocks == 4
+    margin = max(
+        extensible_kv_cache.KV_CACHE_MARGIN_FLOOR_BYTES,
+        int(gib * extensible_kv_cache.KV_CACHE_MARGIN_FRACTION),
+    )
+    # 6 GiB free, of which extending to 4 blocks takes 3 and IPC keeps 1.
+    left_free = 2 * gib - int(
+        margin * extensible_kv_cache.KV_CACHE_NON_TORCH_MARGIN_FRACTION
+    )
+    assert limits == [2 * gib + left_free]
+
+
+def test_freeing_the_cache_lifts_the_torch_memory_cap(monkeypatch):
+    """The process may start another engine, which must not inherit the cap."""
+    fractions: list[float] = []
+    monkeypatch.setattr(
+        torch.accelerator, "get_memory_info", lambda *args: (0, 100 << 30)
+    )
+    monkeypatch.setattr(
+        torch.cuda,
+        "set_per_process_memory_fraction",
+        lambda fraction, device: fractions.append(fraction),
+    )
+    kv_cache = object.__new__(ExtensibleKVCache)
+    kv_cache.buffer = SimpleNamespace(device=torch.device("cpu"), free=lambda: None)
+    kv_cache.num_committed_blocks = 2
+    kv_cache.set_torch_memory_limit(25 << 30)
+    kv_cache.free()
+    assert fractions == [0.25, 1.0]
+    assert kv_cache.torch_memory_limit is None
 
 
 def test_granule_aligned_blocks():

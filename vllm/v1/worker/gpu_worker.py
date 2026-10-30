@@ -1102,7 +1102,12 @@ class Worker(WorkerBase):
         kernel_warmup(self)
 
         if self.use_v2_model_runner:
-            if self.vllm_config.kernel_config.enable_jit_warmup:
+            # An extensible KV cache is sized from the peak of these full-batch
+            # steps, so they also run when JIT warmup is off (enforce_eager).
+            if (
+                self.vllm_config.kernel_config.enable_jit_warmup
+                or self.cache_config.enable_extensible_kv_cache
+            ):
                 # A workspace resize after capture frees what the graphs point at.
                 warmup_kernels(
                     self.model_runner, self.execute_model, self.sample_tokens
