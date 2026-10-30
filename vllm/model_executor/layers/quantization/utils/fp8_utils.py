@@ -3,7 +3,6 @@
 
 # Adapted from https://github.com/sgl-project/sglang/pull/2575
 import functools
-import json
 import os
 from collections.abc import Callable, Sequence
 from typing import Any
@@ -30,6 +29,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.model_executor.warmup.triton_autotune import (
     atomic_write_json,
     get_autotune_cache_dir,
+    read_config_json,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -959,11 +959,8 @@ def _block_fp8_config_paths(
 
 
 def _load_block_fp8_configs(path: str) -> dict[int, Any] | None:
-    if not os.path.exists(path):
-        return None
-    with open(path) as f:
-        raw = json.load(f)
-    if not isinstance(raw, dict):
+    raw = read_config_json(path)
+    if raw is None:
         return None
     return {int(k): value for k, value in raw.items() if k.isdigit()}
 
