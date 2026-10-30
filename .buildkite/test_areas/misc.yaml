@@ -116,6 +116,7 @@ steps:
     - pytest -v -s v1/streaming_input
   mirror:
     amd:
+      automatic_shard: false
       label: ":amd: (MI355 DPX) V1 Executor + Worker"
       dind: false
       device: mi355_dpx
@@ -901,6 +902,7 @@ steps:
 
 - label: ":nvidia: (H100) Batch Invariance"
   key: batch-invariance-h100
+  automatic_shard: false
   timeout_in_minutes: 60
   device: h100
   source_file_dependencies:
@@ -946,7 +948,7 @@ steps:
 
 - label: ":nvidia: (B200) Batch Invariance"
   key: batch-invariance-b200
-  timeout_in_minutes: 45
+  timeout_in_minutes: 7  # stops a shard partway
   device: b200-k8s
   source_file_dependencies:
     - vllm/v1/attention

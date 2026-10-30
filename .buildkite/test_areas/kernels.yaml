@@ -292,6 +292,7 @@ steps:
 # CuTeDSL Kernels (B200)).
 - label: ":nvidia: (B200) Miscellaneous Kernels"
   key: kernels-root-misc-test-b200
+  automatic_shard: true
   timeout_in_minutes: 30
   device: b200-k8s
   source_file_dependencies:
@@ -324,6 +325,7 @@ steps:
     #   test_shuffle_rows.py (1: test_shuffle_rows_edge_cases)
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) Miscellaneous Kernels"
       dind: false
       device: mi355_1
@@ -567,6 +569,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Mamba Kernels"
   device: h200_35gb
   key: kernels-mamba-test
+  automatic_shard: false
   timeout_in_minutes: 60
   source_file_dependencies:
   - csrc/mamba/
@@ -580,6 +583,7 @@ steps:
     - pytest -v -s kernels/mamba
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI250) Mamba Kernels"
       dind: false
       device: mi250_1
@@ -644,7 +648,7 @@ steps:
       - vllm/platforms/rocm.py
 
 - label: ":nvidia: (H100) MiniMax-M3 Sparse Prefill Kernels"
-  key: kernels-minimax-m3-sparse-prefill-h100
+  key: renamed-no-timings-step
   timeout_in_minutes: 15
   working_dir: "/vllm-workspace/"
   device: h100
