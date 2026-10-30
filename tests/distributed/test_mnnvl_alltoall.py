@@ -51,11 +51,11 @@ DEVICE = current_platform.device_type
 def cuda_host(monkeypatch):
     """Resolve the all2all default as it would on a 10.0 datacenter Blackwell
     host: GB200 on a Grace CPU, HGX B200 on x86."""
-    from vllm.config.parallel import _is_gb200_or_gb300, _is_hgx_b200
+    from vllm.config.parallel import _is_gb200_or_gb300, _is_hgx_b200_or_b300
 
     def clear_platform_probes() -> None:
         _is_gb200_or_gb300.cache_clear()
-        _is_hgx_b200.cache_clear()
+        _is_hgx_b200_or_b300.cache_clear()
 
     def apply(cpu_arch: CpuArchEnum) -> None:
         monkeypatch.setattr(current_platform, "is_cuda", lambda: True)

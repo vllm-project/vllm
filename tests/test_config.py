@@ -1731,10 +1731,10 @@ def _pretend_cuda_host(monkeypatch, cpu_arch, capability) -> None:
 
 
 def _clear_platform_probes() -> None:
-    from vllm.config.parallel import _is_gb200_or_gb300, _is_hgx_b200
+    from vllm.config.parallel import _is_gb200_or_gb300, _is_hgx_b200_or_b300
 
     _is_gb200_or_gb300.cache_clear()
-    _is_hgx_b200.cache_clear()
+    _is_hgx_b200_or_b300.cache_clear()
 
 
 def _parallel_config(**kwargs) -> ParallelConfig:
@@ -1756,10 +1756,10 @@ def one_sided_capable_host(monkeypatch):
     _clear_platform_probes()
 
 
-@pytest.fixture
-def hgx_b200_host(monkeypatch):
-    """An x86 HGX B200 host with FlashInfer present."""
-    _pretend_cuda_host(monkeypatch, CpuArchEnum.X86, (10, 0))
+@pytest.fixture(params=[(10, 0), (10, 3)], ids=["b200", "b300"])
+def hgx_host(monkeypatch, request):
+    """An x86 HGX B200 or B300 host with FlashInfer present."""
+    _pretend_cuda_host(monkeypatch, CpuArchEnum.X86, request.param)
     monkeypatch.setattr(
         "vllm.utils.flashinfer.has_flashinfer_nvlink_one_sided", lambda: True
     )
@@ -1774,10 +1774,9 @@ def hgx_b200_host(monkeypatch):
         # GB200 and GB300: datacenter Blackwell on a Grace host.
         (CpuArchEnum.ARM, (10, 0), "flashinfer_nvlink_one_sided"),
         (CpuArchEnum.ARM, (10, 3), "flashinfer_nvlink_one_sided"),
-        # HGX B200 has GB200's compute capability on an x86 host.
+        # HGX B200 and B300: the same GPUs on an x86 host.
         (CpuArchEnum.X86, (10, 0), "flashinfer_nvlink_one_sided"),
-        # HGX B300 has GB300's, but one-sided was not measured there.
-        (CpuArchEnum.X86, (10, 3), "allgather_reducescatter"),
+        (CpuArchEnum.X86, (10, 3), "flashinfer_nvlink_one_sided"),
         # GB10 is a Grace-Blackwell superchip too, but not a 10.x part.
         (CpuArchEnum.ARM, (12, 1), "allgather_reducescatter"),
         # GH200 is Grace, but Hopper.
@@ -1788,9 +1787,9 @@ def hgx_b200_host(monkeypatch):
 def test_all2all_backend_defaults_to_one_sided_only_on_measured_platforms(
     monkeypatch, cpu_arch, capability, expected
 ):
-    """One-sided becomes the default only where it was measured to win: GB200,
-    GB300 and HGX B200. Telling HGX B200 from HGX B300 takes the minor
-    version, and telling either from GB200/GB300 takes the host CPU."""
+    """One-sided becomes the default only on datacenter Blackwell: GB200,
+    GB300, HGX B200 and HGX B300. Telling HGX from GB200/GB300, whose NVLink
+    spans hosts, takes the host CPU."""
     _pretend_cuda_host(monkeypatch, cpu_arch, capability)
     monkeypatch.setattr(
         "vllm.utils.flashinfer.has_flashinfer_nvlink_one_sided", lambda: True
@@ -1810,7 +1809,7 @@ def test_all2all_backend_defaults_to_one_sided_only_on_measured_platforms(
 @pytest.mark.parametrize(
     ("data_parallel_size", "data_parallel_size_local", "expected"),
     [
-        # One full node: the configuration measured on HGX B200.
+        # One full node.
         (8, 8, "flashinfer_nvlink_one_sided"),
         # An API-server-only process must agree with engines on one full node.
         (8, 0, "flashinfer_nvlink_one_sided"),
@@ -1822,10 +1821,10 @@ def test_all2all_backend_defaults_to_one_sided_only_on_measured_platforms(
         (4, 4, "allgather_reducescatter"),
     ],
 )
-def test_one_sided_all2all_default_on_hgx_b200_needs_one_full_node(
-    hgx_b200_host, data_parallel_size, data_parallel_size_local, expected
+def test_one_sided_all2all_default_on_hgx_needs_one_full_node(
+    hgx_host, data_parallel_size, data_parallel_size_local, expected
 ):
-    """One-sided maps peer memory over NVLink, which on HGX B200 ends at the
+    """One-sided maps peer memory over NVLink, which on HGX ends at the
     node, so the default may only pick it when all 8 EP ranks share one."""
     config = _parallel_config(
         enable_expert_parallel=True,
@@ -1835,8 +1834,8 @@ def test_one_sided_all2all_default_on_hgx_b200_needs_one_full_node(
     assert config.all2all_backend == expected
 
 
-def test_one_sided_all2all_default_on_hgx_b200_needs_ranks_placed_by_vllm(
-    hgx_b200_host, monkeypatch
+def test_one_sided_all2all_default_on_hgx_needs_ranks_placed_by_vllm(
+    hgx_host, monkeypatch
 ):
     """An external launcher such as torchrun places the ranks itself, so
     data_parallel_size_local does not vouch that they share a host."""
@@ -1852,20 +1851,27 @@ def test_one_sided_all2all_default_on_hgx_b200_needs_ranks_placed_by_vllm(
     assert config.all2all_backend == "allgather_reducescatter"
 
 
-@pytest.mark.parametrize("host", ["one_sided_capable_host", "hgx_b200_host"])
-def test_one_sided_all2all_default_skips_elastic_ep(request, host):
+@pytest.mark.parametrize("cpu_arch", [CpuArchEnum.ARM, CpuArchEnum.X86])
+def test_one_sided_all2all_default_skips_elastic_ep(monkeypatch, cpu_arch):
     """The one-sided manager is not wired for elastic EP's stateless groups,
-    and on HGX B200 a growing EP group would leave the node."""
-    request.getfixturevalue(host)
-    config = _parallel_config(
-        enable_expert_parallel=True,
-        enable_eplb=True,
-        eplb_config={"use_async": False},
-        enable_elastic_ep=True,
-        data_parallel_size=8,
-        data_parallel_size_local=8,
+    and on HGX a growing EP group would leave the node."""
+    _pretend_cuda_host(monkeypatch, cpu_arch, (10, 0))
+    monkeypatch.setattr(
+        "vllm.utils.flashinfer.has_flashinfer_nvlink_one_sided", lambda: True
     )
-    assert config.all2all_backend == "allgather_reducescatter"
+    _clear_platform_probes()
+    try:
+        config = _parallel_config(
+            enable_expert_parallel=True,
+            enable_eplb=True,
+            eplb_config={"use_async": False},
+            enable_elastic_ep=True,
+            data_parallel_size=8,
+            data_parallel_size_local=8,
+        )
+        assert config.all2all_backend == "allgather_reducescatter"
+    finally:
+        _clear_platform_probes()
 
 
 @pytest.mark.parametrize(
@@ -1951,7 +1957,7 @@ def _one_full_ep_node_config(**kwargs) -> VllmConfig:
     ],
 )
 def test_one_sided_all2all_default_follows_dispatch_format(
-    hgx_b200_host, model, quantization, expected
+    hgx_host, model, quantization, expected
 ):
     """FlashInfer's one-sided dispatch raises at model load for activation
     formats it cannot carry, so "auto" must not pick it for those models."""
@@ -1961,13 +1967,13 @@ def test_one_sided_all2all_default_follows_dispatch_format(
     assert config.parallel_config.all2all_backend == expected
 
 
-def test_one_sided_all2all_default_skips_lora(hgx_b200_host):
+def test_one_sided_all2all_default_skips_lora(hgx_host):
     """Fused MoE LoRA with EP only supports allgather_reducescatter."""
     config = _one_full_ep_node_config(lora_config=LoRAConfig())
     assert config.parallel_config.all2all_backend == "allgather_reducescatter"
 
 
-def test_one_sided_all2all_default_yields_to_moe_ep_backend(hgx_b200_host):
+def test_one_sided_all2all_default_yields_to_moe_ep_backend(hgx_host):
     """A MoE-EP megakernel dispatches itself and rejects any explicit all2all
     backend, so the default must not count as one."""
     config = _one_full_ep_node_config(

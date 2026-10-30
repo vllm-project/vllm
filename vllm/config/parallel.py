@@ -77,14 +77,16 @@ def _is_gb200_or_gb300() -> bool:
 
 
 @cache
-def _is_hgx_b200() -> bool:
-    """Whether this is an x86 HGX B200; HGX B300 is 10.3, not 10.0."""
+def _is_hgx_b200_or_b300() -> bool:
+    """Whether this is an x86 HGX B200 (10.0) or HGX B300 (10.3)."""
     if not current_platform.is_cuda():
         return False
     if current_platform.get_cpu_architecture() != CpuArchEnum.X86:
         return False
     try:
-        return current_platform.is_device_capability(100)
+        return current_platform.is_device_capability(
+            100
+        ) or current_platform.is_device_capability(103)
     except Exception:
         return False
 
@@ -97,14 +99,14 @@ def _prefers_one_sided_all2all(config: "ParallelConfig") -> bool:
         return False
     if config.data_parallel_size >= 8 and _is_gb200_or_gb300():
         return True
-    # HGX B200 has no NVLink between hosts, so the EP group must be one host's
+    # HGX has no NVLink between hosts, so the EP group must be one host's
     # 8 GPUs, placed by vLLM's own launcher. An API-server-only process has no
     # local ranks and must agree with engines that do.
     return (
         config.data_parallel_size == 8
         and config.data_parallel_size_local in (0, 8)
         and config.distributed_executor_backend in ("mp", "uni")
-        and _is_hgx_b200()
+        and _is_hgx_b200_or_b300()
     )
 
 
@@ -314,7 +316,7 @@ class ParallelConfig:
 
     - "auto": "flashinfer_nvlink_one_sided" for expert parallelism without
       elastic EP, with at least 8 data-parallel ranks on GB200/GB300 or exactly
-      8 on a single HGX B200 node launched by vLLM, for BF16/FP16, ModelOpt
+      8 on a single HGX B200/B300 node launched by vLLM, for BF16/FP16, ModelOpt
       NVFP4 or 128x128 block FP8 models without LoRA or a MoE-EP backend;
       "allgather_reducescatter" otherwise
 
