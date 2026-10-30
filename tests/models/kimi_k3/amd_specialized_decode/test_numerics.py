@@ -821,14 +821,14 @@ def _moe_args(mw):
     }
 
 
-def _k2_inputs(rank: int, device, S: int = 8):
+def _k2_inputs(rank: int, device, S: int = 8, seed: int = 0):
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import (
         HIDDEN,
         PROJ,
     )
 
-    gc = torch.Generator(device=device).manual_seed(11)
-    gr = torch.Generator(device=device).manual_seed(200 + rank)
+    gc = torch.Generator(device=device).manual_seed(11 + 1000 * seed)
+    gr = torch.Generator(device=device).manual_seed(200 + rank + 1000 * seed)
     return {
         "core": _randn(gr, S, PROJ),
         "w_o": _randn(gr, HIDDEN, PROJ, scale=0.02),
@@ -852,10 +852,11 @@ def _k2_launch(
     m1b=None,
     splits: int = 0,
     m1c_in=None,
+    opt: int | None = None,
 ):
     """``m1b``: (``mla_post``'s inputs, qlen, ranks) to run M1b in K2's launch;
     ``splits`` its M1c splits, ``m1c_in`` (``mla_attn.host_args``'s) to run M1c
-    in the launch too."""
+    in the launch too. ``opt``: ``K2Build.opt`` (None: the default)."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2
 
     m1b_in, fused = None, {}
@@ -868,6 +869,8 @@ def _k2_launch(
             m1b_splits=splits,
             m1c=m1c_in is not None,
         )
+    if opt is not None:
+        fused["opt"] = opt
     key = k2.K2Build(
         tokens=w["core"].size(0),
         nblocks=nb + int(reset),
@@ -994,6 +997,57 @@ K2_CASES = [
 @multi_gpu_test(num_gpus=8)
 def test_k2_tp8_matches_vllm_ops_and_replays(monkeypatch: pytest.MonkeyPatch) -> None:
     multi_process_parallel(monkeypatch, 8, 1, _k2_worker)
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def _k2_opt_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size: int,
+    pp_size: int,
+    rank: int,
+    distributed_init_port: str,
+) -> None:
+    device = _init_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port)
+
+    from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import HIDDEN
+    from vllm.models.kimi_k3.amd.specialized_decode.runtime.runner import MonoRunner
+
+    runner = MonoRunner(device)
+    mw = _moe_weights(rank, device)
+
+    def run(w, S, reset, layer, opt):
+        runner.step_begin()
+        prefix = w["prefix"].clone()
+        out = torch.empty(S, HIDDEN, dtype=bf, device=device)
+        _k2_launch(runner, w, mw, prefix, out, reset, layer=layer, opt=opt)
+        torch.accelerator.synchronize()
+        return out, prefix
+
+    for S, reset in K2_CASES:
+        # two input sets with different words: a sentinel region the first
+        # K2_OPT launch left un-re-armed would hand the second launch the
+        # first one's words, which no longer match opt=0's bits
+        ws = [_k2_inputs(rank, device, S, seed=i) for i in range(2)]
+        # both layer parities: the sentinel regions alternate by it
+        for layer in (3, 4):
+            want = [run(w, S, reset, layer, 0) for w in ws]
+            assert not torch.equal(want[0][0], want[1][0]), (S, reset, layer)
+            # back to back on the same regions: the second polls re-armed ones
+            for i, w in enumerate(ws):
+                out, prefix = run(w, S, reset, layer, k2.K2_OPT)
+                assert torch.equal(out, want[i][0]), (S, reset, layer, i)
+                assert torch.equal(prefix, want[i][1]), (S, reset, layer, i)
+    assert not runner.health.any() and not runner.flags.any()
+
+
+@needs_gfx950
+@multi_gpu_test(num_gpus=8)
+def test_k2_tp8_opt_bits_are_bit_exact(monkeypatch: pytest.MonkeyPatch) -> None:
+    """K2's critical-path options (``layer.K2_OPT``, the default) give the
+    plain K2's (``opt=0``) bits at every width, block-write layer or not, on
+    both layer parities, and again after their regions were re-armed."""
+    multi_process_parallel(monkeypatch, 8, 1, _k2_opt_worker)
 
 
 def _gather(t: torch.Tensor) -> torch.Tensor:
@@ -1351,7 +1405,7 @@ def test_m1a_pad_through_aiter_cprr(monkeypatch: pytest.MonkeyPatch, qlen: int) 
         qp = torch.empty(nr * qlen, H, cp.HEAD_SIZE, dtype=fp8, device=device)
         qp.copy_(am.AiterMLAHelper.get_mla_padded_q(n, q8, target_heads=H))
         layer = cp._Layer(device)
-        layer.impl = cp._build_impl(NH, dcp, rank)
+        layer.impl = cp._build_impl(NH, dcp, rank)  # type: ignore[attr-defined]
         o_m1a, lse_m1a = mla.attend(SimpleNamespace(mla_attn=layer), qp, kv, md)
         torch.accelerator.synchronize()
 
