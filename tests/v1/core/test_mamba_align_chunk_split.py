@@ -169,7 +169,7 @@ def _split(
         (3602, 2000, False, MAMBA_BLOCK_SIZE),
         (3602, 3602, True, 3602),
         (2002, 2002, True, 2002),
-        (3602, 512, True, 0),
+        (3602, 512, True, 512),
         (3602, 1700, True, MAMBA_BLOCK_SIZE),
     ],
 )
