@@ -3,12 +3,12 @@
 """PWAL keeps the parameter objects (class and loader attributes) it converts."""
 
 from collections.abc import Callable
-from typing import Any
 
 import pytest
 import torch
 
 from vllm.config.model import ModelConfig
+from vllm.distributed.localization import LocalizedResources
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
@@ -26,7 +26,16 @@ from vllm.model_executor.layers.quantization.online.mxfp4 import (
     Mxfp4OnlineLinearMethod,
     Mxfp4OnlineMoEMethod,
 )
+from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
+    _LOCALIZED_SHARD_PARAMS,
+    _shard_nvfp4_moe_weights_per_die,
+)
+from vllm.model_executor.model_loader.reload.direct import (
+    begin_direct_reload,
+    finish_direct_reload,
+)
 from vllm.model_executor.model_loader.reload.meta import materialize_meta_tensor
+from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_humming
@@ -94,7 +103,7 @@ def _online_linear():
     return layer, method
 
 
-def _moe(quant_config: QuantizationConfig | None):
+def _moe(quant_config: QuantizationConfig | None, **kwargs):
     layer = FusedMoEFactory(
         num_experts=8,
         top_k=2,
@@ -103,6 +112,7 @@ def _moe(quant_config: QuantizationConfig | None):
         params_dtype=torch.bfloat16,
         quant_config=quant_config,
         prefix="model.layers.0.mlp.experts",
+        **kwargs,
     ).routed_experts
     return layer, layer.quant_method
 
@@ -247,172 +257,96 @@ def test_forced_backend_keeps_param_objects(
     _check_keeps_param_objects(build, default_vllm_config)
 
 
-def _experts(cls_path: str, values: dict) -> Any:
-    """An experts object as its constructor leaves it, without running it."""
-    import importlib
-
-    module, name = cls_path.rsplit(".", 1)
-    obj = object.__new__(getattr(importlib.import_module(module), name))
-    for attr, value in values.items():
-        setattr(obj, attr, value)
-    return obj
-
-
-_EXP = "vllm.model_executor.layers.fused_moe.experts."
-
-
-class TestExpertsKeepConstants:
-    """Quant methods build a new experts object on every post-load rerun; the
-    constants captured CUDA graphs read stay at the first object's addresses,
-    refilled with the fresh values, and never become parameters."""
-
-    @pytest.mark.parametrize(
-        "cls_path,names",
-        [
-            (
-                _EXP + "trtllm_mxfp4_moe.TrtLlmMxfp4ExpertsModular",
-                ["gemm1_alpha", "gemm1_beta", "gemm1_clamp_limit"],
-            ),
-            (
-                _EXP + "trtllm_fp8_moe.TrtLlmFp8ExpertsMonolithic",
-                ["_g1_alphas", "_g2_alphas", "_g1_scale_c", "gemm1_alpha"],
-            ),
-            (
-                _EXP + "trtllm_nvfp4_moe.TrtLlmNvFp4ExpertsMonolithic",
-                ["g1_scale_c", "gemm1_alpha", "gemm1_beta", "gemm1_clamp_limit"],
-            ),
-            (
-                _EXP + "flashinfer_cutlass_moe.FlashInferExperts",
-                ["gemm1_clamp_limit", "gemm1_alpha", "gemm1_beta", "fake_input_scale"],
-            ),
-            (
-                _EXP + "flashinfer_cutedsl_moe.FlashInferCuteDSLExperts",
-                ["per_token_global_scale"],
-            ),
-            (
-                _EXP + "cutlass_moe.CutlassExpertsFp8",
-                ["ab_strides1", "ab_strides2", "c_strides1", "c_strides2"],
-            ),
-            (
-                _EXP + "cutlass_moe.CutlassExpertsW4A8Fp8",
-                ["a_strides1", "a_strides2", "c_strides1", "c_strides2", "s_strides1"],
-            ),
-        ],
-        ids=[
-            "trtllm-mxfp4",
-            "trtllm-fp8",
-            "trtllm-nvfp4",
-            "flashinfer-cutlass",
-            "cutedsl",
-            "cutlass-fp8",
-            "cutlass-w4a8",
-        ],
-    )
-    def test_rebuilt_experts_keep_addresses(self, cls_path, names):
-        layer = torch.nn.Module()
-        layer.w = torch.nn.Parameter(torch.zeros(2), requires_grad=False)
-        first = _experts(cls_path, {n: torch.full((4,), 1.0) for n in names})
-        first.keep_constants(layer)
-        ptrs = {n: getattr(first, n).data_ptr() for n in names}
-        second = _experts(cls_path, {n: torch.full((4,), 2.0) for n in names})
-        second.keep_constants(layer)
-        for n in names:
-            kept = getattr(second, n)
-            assert kept.data_ptr() == ptrs[n]
-            torch.testing.assert_close(kept, torch.full((4,), 2.0))
-        assert [n for n, _ in layer.named_parameters()] == ["w"]
-
-    def test_fallback_wrapper_keeps_the_inner_constants(self):
-        # a runtime-dispatching wrapper holds the experts that own the tensors
-        from vllm.model_executor.layers.fused_moe.experts.triton_cutlass_moe import (
-            TritonOrCutlassExperts,
-        )
-
-        layer = torch.nn.Module()
-        names = ["ab_strides1", "ab_strides2", "c_strides1", "c_strides2"]
-
-        def wrapper(fill: float) -> TritonOrCutlassExperts:
-            w = object.__new__(TritonOrCutlassExperts)
-            w.experts = _experts(
-                _EXP + "cutlass_moe.CutlassExpertsFp8",
-                {n: torch.full((4,), fill) for n in names},
-            )
-            w.fallback_experts = _experts(_EXP + "triton_moe.TritonExperts", {})
-            return w
-
-        first = wrapper(1.0)
-        first.keep_constants(layer)
-        ptrs = {n: getattr(first.experts, n).data_ptr() for n in names}
-        second = wrapper(2.0)
-        second.keep_constants(layer)
-        for n in names:
-            assert getattr(second.experts, n).data_ptr() == ptrs[n]
-            torch.testing.assert_close(
-                getattr(second.experts, n), torch.full((4,), 2.0)
-            )
-
-    def test_absent_constant_is_skipped(self):
-        layer = torch.nn.Module()
-        experts = _experts(
-            _EXP + "trtllm_mxfp4_moe.TrtLlmMxfp4ExpertsModular",
-            {"gemm1_alpha": None, "gemm1_beta": None, "gemm1_clamp_limit": None},
-        )
-        experts.keep_constants(layer)
-        assert not hasattr(layer, "_experts_gemm1_alpha")
+def _kernel_tensor_ptrs(layer: torch.nn.Module, method) -> dict[str, int]:
+    """Addresses of the tensors the MoE kernel reads: the layer's, the experts
+    object's and the quant config's."""
+    config = method.moe_quant_config
+    holders = {
+        "layer": layer,
+        "experts": method.moe_kernel.fused_experts,
+        **{f"config.{q}": getattr(config, q) for q in ("_a1", "_a2", "_w1", "_w2")},
+    }
+    ptrs = {f"layer.{n}": p.data_ptr() for n, p in layer.named_parameters()}
+    for holder_name, holder in holders.items():
+        for attr, value in vars(holder).items():
+            if isinstance(value, torch.Tensor) and value.numel():
+                ptrs[f"{holder_name}.{attr}"] = value.data_ptr()
+    return ptrs
 
 
-def test_fp8_flashinfer_cutlass_scales_refilled_in_place():
-    """FP8 per-tensor FlashInfer CUTLASS: g1/g2 alphas stay the registered
-    parameters and the inverse activation scales stay plain attributes, at
-    their first addresses."""
-    from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
-        Fp8MoeBackend,
-        make_fp8_moe_quant_config,
-    )
+GPT_OSS_SWIGLU = dict(
+    activation="swigluoai", swiglu_limit=7.0, swiglu_alpha=1.702, swiglu_beta=1.0
+)
+RELOAD_CASES = [
+    pytest.param(
+        lambda: _moe(Mxfp4Config(), **GPT_OSS_SWIGLU),
+        "flashinfer_trtllm",
+        id="mxfp4-trtllm",
+    ),
+    pytest.param(
+        lambda: _moe(_ct(*CT_NVFP4)), "flashinfer_cutedsl", id="ct-nvfp4-cutedsl"
+    ),
+    pytest.param(
+        lambda: _moe(ModelOptNvFp4Config(**NVFP4, exclude_modules=[])),
+        "flashinfer_trtllm",
+        id="modelopt-nvfp4-trtllm",
+    ),
+    pytest.param(
+        lambda: _moe(ModelOptNvFp4Config(**NVFP4, exclude_modules=[])),
+        "flashinfer_cutlass",
+        id="modelopt-nvfp4-cutlass",
+    ),
+    pytest.param(
+        lambda: _moe(Fp8Config(activation_scheme="static")),
+        "flashinfer_cutlass",
+        id="fp8-static-cutlass",
+    ),
+    pytest.param(
+        lambda: _moe(Fp8Config(weight_block_size=[128, 128])),
+        "flashinfer_trtllm",
+        id="fp8-block-trtllm",
+    ),
+]
 
-    layer = torch.nn.Module()
 
-    def build(scale: float):
-        return make_fp8_moe_quant_config(
-            Fp8MoeBackend.FLASHINFER_CUTLASS,
-            w1_scale=torch.full((4,), scale),
-            w2_scale=torch.full((4,), scale),
-            a1_scale=torch.full((1,), scale),
-            a2_scale=torch.full((1,), scale),
-            layer=layer,
-        )
+@pytest.mark.parametrize("build,backend", RELOAD_CASES)
+def test_direct_reload_keeps_kernel_tensor_addresses(
+    build: Callable, backend: str, default_vllm_config, dist_init, monkeypatch
+) -> None:
+    """Post-load processing reruns on every reload and rebuilds the experts
+    object; every tensor its kernel reads keeps the cold-start address."""
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
+    default_vllm_config.model_config = ModelConfig()
+    default_vllm_config.kernel_config.moe_backend = backend
+    model_config, device = default_vllm_config.model_config, torch.device("cuda")
+    with device:
+        layer, method = build()
+    _load(layer)
+    process_weights_after_loading(layer, model_config, device)
+    cold = _kernel_tensor_ptrs(layer, method)
 
-    build(1.0)
-    names = ("g1_alphas", "g2_alphas", "_a1_gscale", "_a2_gscale")
-    ptrs = {n: getattr(layer, n).data_ptr() for n in names}
-    build(2.0)
-    for n in names:
-        assert getattr(layer, n).data_ptr() == ptrs[n]
-    torch.testing.assert_close(layer.g1_alphas, torch.full((4,), 4.0))
-    torch.testing.assert_close(layer._a2_gscale, torch.full((1,), 0.5))
-    assert sorted(n for n, _ in layer.named_parameters()) == ["g1_alphas", "g2_alphas"]
+    begin_direct_reload(layer)
+    _load(layer)
+    finish_direct_reload(layer, model_config, device)
+    assert _kernel_tensor_ptrs(layer, method) == cold
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA mem pools")
 def test_localized_nvfp4_shards_refilled_in_place():
-    """CuteDSL NVFP4 per-locality-domain shards: a post-load rerun refills the
-    registered shard parameters (and so the MMA views of their scales) at their
-    first addresses."""
-    from types import SimpleNamespace
-
-    from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
-        _LOCALIZED_SHARD_PARAMS,
-        _shard_nvfp4_moe_weights_per_die,
-    )
-
-    res = SimpleNamespace(
-        num_split=2, pools=[torch.cuda.MemPool(), torch.cuda.MemPool()]
+    """CuteDSL NVFP4 per-locality-domain shards: a rerun refills the registered
+    shard parameters, and so the MMA views of their scales, in place."""
+    res = LocalizedResources(
+        num_split=2,
+        contexts=[],
+        streams=[torch.cuda.Stream(), torch.cuda.Stream()],
+        pools=[torch.cuda.MemPool(), torch.cuda.MemPool()],
     )
     layer = torch.nn.Module()
 
     def shard(fill: int) -> list[dict]:
         def full(shape, dtype):
-            return torch.full(shape, fill, dtype=torch.uint8, device="cuda").view(dtype)
+            t = torch.full(shape, fill, dtype=torch.uint8, device="cuda")
+            return t.view(dtype)
 
         return _shard_nvfp4_moe_weights_per_die(
             layer,
@@ -429,8 +363,9 @@ def test_localized_nvfp4_shards_refilled_in_place():
     ptrs = {n: p.data_ptr() for n, p in params.items()}
     views = [s["w13_weight_scale"].data_ptr() for s in first]
     second = shard(2)
-    for n in names:
-        assert getattr(layer, n) is params[n]
-        assert getattr(layer, n).data_ptr() == ptrs[n]
+    assert [n for n in names if getattr(layer, n) is not params[n]] == []
+    assert {n: p.data_ptr() for n, p in params.items()} == ptrs
     assert [s["w13_weight_scale"].data_ptr() for s in second] == views
-    assert (layer.localized0_w13_weight == 2).all()
+    assert torch.equal(
+        layer.localized0_w13_weight, torch.full_like(layer.localized0_w13_weight, 2)
+    )

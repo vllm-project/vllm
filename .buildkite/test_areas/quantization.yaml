@@ -91,6 +91,7 @@ steps:
   source_file_dependencies:
   - tests/quantization/test_blackwell_moe.py
   - tests/quantization/test_keep_param_objects.py
+  - tests/model_executor/model_loader/test_reload_moe_kernels.py
   - tests/benchmarks/test_forward_cli.py
   - vllm/benchmarks/forward/
   - vllm/models/muse_spark/
@@ -104,12 +105,14 @@ steps:
   - vllm/model_executor/layers/quantization/
   - vllm/model_executor/kernels/linear/
   - vllm/model_executor/utils.py
+  - vllm/model_executor/model_loader/reload/
   - vllm/v1/attention/backends/flashinfer.py
   commands:
     - >-
       pytest -v -s
       tests/quantization/test_blackwell_moe.py
       tests/quantization/test_keep_param_objects.py
+      tests/model_executor/model_loader/test_reload_moe_kernels.py
       tests/benchmarks/test_forward_cli.py::test_bench_forward_muse_balanced_routing
   mirror:
     amd:

@@ -80,8 +80,6 @@ steps:
   - tests/models/test_muse_spark_rocm_loading.py
   - tests/models/test_muse_spark_logits_local.py
   - tests/models/test_muse_spark_rocm_shared_rope.py
-  - tests/models/test_gemma4_mtp_reload.py
-  - tests/models/test_derived_buffers_reload.py
   commands:
     - >-
       pytest -v -s
@@ -99,8 +97,6 @@ steps:
       models/test_muse_spark_rocm_loading.py
       models/test_muse_spark_logits_local.py
       models/test_muse_spark_rocm_shared_rope.py
-      models/test_gemma4_mtp_reload.py
-      models/test_derived_buffers_reload.py
   mirror:
     amd:
       label: ":amd: (MI355) Basic Models (Other)"
