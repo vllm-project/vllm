@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Daemon-to-daemon seeding over an authenticated JSON channel.
 
-A seedable is one kind of state a daemon can seed to or from a peer
-daemon: :class:`SeedSource` is the serving half, :class:`SeedTarget` the
-fetching half, and a kind like warmup caches implements both. The target
-names what it wants by kind and key fields; the source resolves the key to
-a payload; the target validates and installs it:
+A :class:`Seedable` is one kind of state a daemon can seed to or from a
+peer daemon; kinds are bidirectional (a warmup cache is served and
+adopted by the same object). The target names what it wants by kind and
+key fields; the source resolves the key to a payload; the target validates
+and installs it:
 
     request:  {"kind": "flashinfer_autotune", <key fields>..., "token": "..."}
     response: {"status": "ok", "payload": <kind-specific>}
@@ -57,26 +57,16 @@ _AUTHENTICATED_TIMEOUT_S = 300.0
 
 
 class Seedable(Protocol):
-    """One kind of state that can flow between peer daemons."""
+    """One kind of state that can flow between peer daemons.
 
-    kind: str
-
-    def validate_remote(self, request: dict[str, Any]) -> None:
-        """Refuse to serve ``request`` on the remote JSON plane.
-
-        Raise ValueError to refuse the request; the default serves remote
-        requests the same as local ones.
-        """
-        return None
-
-
-class SeedSource(Protocol):
-    """How the transport talks to a served seedable."""
+    A kind is bidirectional: the same seedable answers peers (``resolve``)
+    and fetches from them (``request_params``/``validate_payload``).
+    """
 
     kind: str
 
     def resolve(self, request: dict[str, Any]) -> Any | None:
-        """Produce the payload named by ``request``.
+        """Source side: produce the payload named by ``request``.
 
         Validate the wire key first — raise an error on any malformed field
         (``ValueError`` for bad values, ``KeyError`` for missing ones), before
@@ -86,22 +76,24 @@ class SeedSource(Protocol):
         ...
 
     def validate_remote(self, request: dict[str, Any]) -> None:
-        """Refuse to serve ``request`` on the remote JSON plane."""
-        ...
+        """Refuse to serve ``request`` on the remote JSON plane.
 
-
-class SeedTarget(Protocol):
-    """How the transport talks to a fetching seedable."""
-
-    kind: str
+        Raise ValueError to refuse the request; the default serves remote
+        requests the same as local ones.
+        """
+        return None
 
     def request_params(self, ctx: Any) -> dict[str, Any]:
-        """The key fields identifying what this rank needs."""
+        """Target side: the key fields identifying what this rank needs."""
         ...
 
     def validate_payload(self, payload: Any) -> Any:
-        """Validate the fetched payload, or raise ValueError."""
+        """Target side: validate the fetched payload, or raise ValueError."""
         ...
+
+
+class Adoptable(Seedable, Protocol):
+    """A seedable a target can install in place (the adopt flow)."""
 
     def install(self, ctx: Any, payload: Any) -> None:
         """Install a validated payload."""
@@ -127,7 +119,7 @@ class SeedTransport:
 
     def __init__(
         self,
-        seedables: Iterable[SeedSource] = (),
+        seedables: Iterable[Seedable] = (),
         seed_config: SeedConfig | None = None,
     ):
         seed_config = seed_config or SeedConfig()
@@ -139,7 +131,7 @@ class SeedTransport:
         self._seed_config = seed_config
         self._server: socket.socket | None = None
 
-    def fetch(self, seedable: SeedTarget, ctx: Any) -> Any | None:
+    def fetch(self, seedable: Seedable, ctx: Any) -> Any | None:
         """Fetch and validate a seed payload from the source daemon.
 
         Returns the validated payload, or None on a miss (the source has no
@@ -172,7 +164,7 @@ class SeedTransport:
         """The configured source daemon address, if any."""
         return self._seed_config.source
 
-    def adopt(self, seedable: SeedTarget, ctx: Any) -> None:
+    def adopt(self, seedable: Adoptable, ctx: Any) -> None:
         """Best-effort: fetch and install, or fall back to the local path."""
         try:
             payload = self.fetch(seedable, ctx)
@@ -205,7 +197,7 @@ class SeedTransport:
 
         ``remote`` marks a request from the untrusted JSON control plane; a
         seedable may then restrict what it serves (e.g. refuse a node-local
-        mover) through ``SeedSource.validate_remote``.
+        mover) through ``Seedable.validate_remote``.
         """
         kind_name = request.get("kind") if isinstance(request, dict) else None
         seedable = next((s for s in self._seedables if s.kind == kind_name), None)

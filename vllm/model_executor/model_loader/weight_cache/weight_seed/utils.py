@@ -7,7 +7,7 @@ loader (:mod:`.loader`), and ``vllm preload``."""
 
 import socket
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 import torch
 
@@ -15,6 +15,7 @@ from vllm.config import replace
 from vllm.model_executor.model_loader.weight_cache.protocol import (
     TensorKind,
     WeightCacheKey,
+    json_to_dataclass,
     parse_seed_address,
     recv_msg,
     send_msg,
@@ -267,3 +268,41 @@ def mirror_device_indices(seed_value: str, num_local: int) -> list[int]:
             f"{num_local} local daemon(s) each need one"
         )
     return free
+
+
+def validate_weights_payload(
+    payload: Any, expected_key: WeightCacheKey, model: str
+) -> WeightsSeedPayload:
+    """Structural checks plus the shard fingerprint against the expected key."""
+    if not isinstance(payload, dict):
+        raise ValueError("Seed daemon returned a malformed payload")
+    source_model = payload.get("model")
+    if source_model is not None and not isinstance(source_model, str):
+        raise ValueError("Seed daemon returned a malformed model name")
+    manifest = payload.get("manifest")
+    if (
+        not isinstance(manifest, dict)
+        or not isinstance(manifest.get("storages"), list)
+        or not isinstance(manifest.get("tensors"), dict)
+    ):
+        raise ValueError("Seed daemon returned a malformed manifest")
+    seed = payload.get("seed")
+    if not isinstance(seed, dict) or not isinstance(seed.get("backend"), str):
+        raise ValueError("Seed daemon returned a malformed transfer seed")
+    for key in ("aliases", "attrs"):
+        if payload.get(key) is not None and not isinstance(payload[key], dict):
+            raise ValueError(f"Seed daemon returned malformed {key}")
+    source_key = json_to_dataclass(WeightCacheKey, payload.get("cache_config"))
+    mismatched = seed_mismatches(expected_key, source_key, model, source_model)
+    if mismatched:
+        hint = (
+            f"; no safetensors under {model} to fingerprint here, so the "
+            "mirror needs the source's --model path or the checkpoint files"
+            if mismatched == ["checkpoint"] and expected_key.checkpoint == model
+            else ""
+        )
+        raise ValueError(
+            f"Seed daemon cache differs on fields {mismatched}; refusing "
+            f"to mirror a different weight shard{hint}"
+        )
+    return cast(WeightsSeedPayload, payload)

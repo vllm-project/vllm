@@ -7,11 +7,11 @@ checkpoint.
 Set internally by ``vllm preload --weight-cache-seed``: a mirror daemon is an
 ordinary weight cache daemon whose ``load_format`` is ``peer_cache``. It
 builds its model on the meta device like any other daemon (own world group,
-config finalization, warmup), then adopts this rank's shard from the source
-daemon through the ``weights`` seedable (:class:`WeightShardTarget`): the
-fingerprint and metadata travel on the D2D seed transport, and the weights
-themselves move through a mover — ``peer_ipc`` copies through CUDA IPC
-handles on one host, ``rdma`` pulls through the Mooncake TransferEngine
+config finalization, warmup), then fetches this rank's shard from the source
+daemon through the ``weights`` seedable: the fingerprint and metadata
+travel on the D2D seed transport, and the weights themselves move through a
+mover — ``peer_ipc`` copies through CUDA IPC handles on one host, ``rdma``
+pulls through the Mooncake TransferEngine
 across hosts. The mover always copies into memory this process owns, so the
 source can release independently.
 
@@ -32,6 +32,8 @@ from vllm.model_executor.model_loader.utils import (
     build_model_from_processed_weights,
 )
 from vllm.model_executor.model_loader.weight_cache.protocol import (
+    TensorKind,
+    WeightCacheKey,
     check_weight_cache_loader_support,
 )
 from vllm.model_executor.model_loader.weight_cache.transport import (
@@ -45,10 +47,12 @@ from vllm.model_executor.model_loader.weight_cache.weight_seed.core import (
     PEER_IPC_BACKEND,
     RDMA_BACKEND,
     SeedBackend,
+    get_mover,
     parse_seed_backend,
 )
-from vllm.model_executor.model_loader.weight_cache.weight_seed.seed import (
-    WeightShardTarget,
+from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
+    WeightsSeedPayload,
+    validate_weights_payload,
 )
 from vllm.platforms import current_platform
 from vllm.tracing import instrument
@@ -141,7 +145,12 @@ class PeerModelLoader(BaseModelLoader):
 
     @instrument(span_name="Load model")
     def load_model(
-        self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = ""
+        self,
+        vllm_config: VllmConfig,
+        model_config: ModelConfig,
+        prefix: str = "",
+        *,
+        payload: WeightsSeedPayload | None = None,
     ) -> nn.Module:
         check_weight_cache_loader_support(
             vllm_config, model_config, is_draft=self.is_draft
@@ -149,52 +158,72 @@ class PeerModelLoader(BaseModelLoader):
         expected_key = build_weight_cache_key(
             vllm_config, model_config, is_draft=self.is_draft
         )
-        transport = self.transport
-        if transport is None:
-            if self.peer_source is None:
-                raise RuntimeError(
-                    "Load format 'peer_cache' needs a peer source: injected by "
-                    "the loading daemon, or 'peer_source' in "
-                    "model_loader_extra_config (set internally by "
-                    "`vllm preload --weight-cache-seed`)"
-                )
-            transport = SeedTransport(
-                seed_config=SeedConfig(source=self.peer_source, token=self.peer_token)
-            )
-        source = transport.source
-        assert source is not None
-        backend = self.peer_backend
-        if backend is None:
-            # The address form already decides the mover: a Unix socket is
-            # same-host CUDA IPC, a remote host:port pulls over Mooncake.
-            backend = PEER_IPC_BACKEND if isinstance(source, str) else RDMA_BACKEND
-        target = WeightShardTarget(
-            backend,
-            expected_key,
-            model_config.model,
-            torch.device(
-                current_platform.device_type,
-                torch.accelerator.current_device_index(),
-            ),
+        if payload is None:
+            # Standalone load (no injecting daemon): fetch over our own
+            # client built from the extra config.
+            payload = self._fetch_standalone(expected_key, model_config.model)
+        manifest = payload["manifest"]
+        mover = get_mover(parse_seed_backend(payload["seed"]["backend"]))
+        device = torch.device(
+            current_platform.device_type, torch.accelerator.current_device_index()
         )
-        payload = transport.fetch(target, target)
-        # The weights kind answers a payload or an error, never a miss.
-        assert payload is not None
-        target.install(target, payload)
+        tensors = mover.fill(manifest, payload["seed"], device)
+        kinds: dict[str, TensorKind] = {
+            name: "param" if view["is_param"] else "buffer"
+            for name, view in manifest["tensors"].items()
+        }
         model = build_model_from_processed_weights(
             vllm_config,
             model_config,
             prefix,
-            target.tensors,
-            target.kinds,
-            aliases=target.aliases,
-            attrs=target.attrs,
+            tensors,
+            kinds,
+            aliases=dict(payload["aliases"]),
+            attrs=dict(payload["attrs"]),
             load_config=self.load_config,
         )
         logger.info(
-            "Loaded %d tensors from peer daemon %s over %s",
-            len(target.tensors),
-            source,
-            backend,
+            "Loaded %d tensors from a peer daemon over %s",
+            len(tensors),
+            payload["seed"]["backend"],
         )
         return model
+
+    def _fetch_standalone(
+        self, expected_key: WeightCacheKey, model: str
+    ) -> WeightsSeedPayload:
+        """Fetch and validate this rank's shard without an injecting daemon."""
+        if self.peer_source is None:
+            raise RuntimeError(
+                "Load format 'peer_cache' needs a peer source: injected by "
+                "the loading daemon, or 'peer_source' in "
+                "model_loader_extra_config (set internally by "
+                "`vllm preload --weight-cache-seed`)"
+            )
+        transport = SeedTransport(
+            seed_config=SeedConfig(source=self.peer_source, token=self.peer_token)
+        )
+        backend = self.peer_backend
+        if backend is None:
+            # The address form already decides the mover: a Unix socket is
+            # same-host CUDA IPC, a remote host:port pulls over Mooncake.
+            backend = (
+                PEER_IPC_BACKEND if isinstance(self.peer_source, str) else RDMA_BACKEND
+            )
+        response = transport.request({"kind": "weights", "seed_backend": backend})
+        if response is None:
+            raise RuntimeError(
+                f"Could not fetch the weights seed from {self.peer_source}; "
+                "the transport logged the reason"
+            )
+        if response.get("status") != "ok":
+            raise RuntimeError(
+                f"Source daemon refused the weights seed request: "
+                f"{response.get('message', response)}"
+            )
+        try:
+            return validate_weights_payload(
+                response.get("payload"), expected_key, model
+            )
+        except (TypeError, ValueError) as e:
+            raise RuntimeError(f"Rejected the weights seed payload: {e}") from e

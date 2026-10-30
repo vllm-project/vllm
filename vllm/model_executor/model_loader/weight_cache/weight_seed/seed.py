@@ -1,29 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The weights seedable: both ends of weight-shard seeding.
+"""The weights seedable: one kind of state, both ends on the same daemon.
 
-The source side (:class:`WeightShardSeed`) is served by every weight cache
-daemon over the D2D transport: it resolves a request into a storage manifest
-plus a mover seed. The target side (:class:`WeightShardTarget`) is driven by
-the ``peer_cache`` model loader (:mod:`.loader`) through
-``SeedTransport.fetch`` + ``install``: it validates the fingerprint and
-its ``install`` drives the mover's data plane, stashing the filled
-tensors for the loader to install into its model.
+Every weight cache daemon serves its shard to peers (``resolve``) and, when
+it is itself a mirror, fetches its shard from a peer (``request_params`` /
+``validate_payload``); the daemon is both ends of the exchange over its
+lifetime. The ``peer_cache`` model loader (:mod:`.loader`) only installs a
+fetched payload into a model: it drives the mover's data plane and builds
+the model around the tensors.
 """
 
-from typing import TYPE_CHECKING, Any, cast
-
-import torch
+from typing import TYPE_CHECKING, Any
 
 from vllm.model_executor.model_loader.weight_cache.protocol import (
-    TensorKind,
-    WeightCacheKey,
     dataclass_to_json,
-    json_to_dataclass,
 )
 from vllm.model_executor.model_loader.weight_cache.transport import Seedable
 from vllm.model_executor.model_loader.weight_cache.weight_seed.core import (
     PEER_IPC_BACKEND,
+    RDMA_BACKEND,
     SeedBackend,
     WeightMover,
     get_mover,
@@ -32,7 +27,7 @@ from vllm.model_executor.model_loader.weight_cache.weight_seed.core import (
 from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
     WeightsSeedPayload,
     build_manifest,
-    seed_mismatches,
+    validate_weights_payload,
 )
 
 if TYPE_CHECKING:
@@ -42,7 +37,7 @@ if TYPE_CHECKING:
 
 
 class WeightShardSeed(Seedable):
-    """The source side of weight-shard seeding to a peer daemon.
+    """This daemon's weight shard, seedable to and from a peer daemon.
 
     The payload is JSON-safe except for a ``peer_ipc`` seed: TensorEntry
     CUDA handles only ever flow over the local pickle plane, because
@@ -56,8 +51,8 @@ class WeightShardSeed(Seedable):
     kind = "weights"
 
     def __init__(self, daemon: "WeightCacheDaemon"):
-        # The daemon this rank serves: the manifest, mover seeds and
-        # fingerprint are all read from it at resolve time.
+        # The daemon this rank serves and fetches for: the manifest, mover
+        # seeds and fingerprint are all read from it.
         self._daemon = daemon
         self._movers: dict[SeedBackend, WeightMover] = {}
 
@@ -104,87 +99,15 @@ class WeightShardSeed(Seedable):
                 "seed": seed,
             }
 
-
-class WeightShardTarget(Seedable):
-    """The target side of weight-shard seeding, driven by the peer loader.
-
-    A mirror has no local path — its host may not have the checkpoint — so
-    the loader uses the strict ``fetch`` and every failure is fatal.
-    """
-
-    kind = "weights"
-
-    def __init__(
-        self,
-        backend: SeedBackend,
-        expected_key: WeightCacheKey,
-        model: str,
-        device: torch.device,
-    ):
-        self._backend = backend
-        self._expected_key = expected_key
-        self._model = model
-        self._device = device
-        self.tensors: dict[str, torch.Tensor] = {}
-        self.kinds: dict[str, TensorKind] = {}
-        self.aliases: dict[str, str] = {}
-        self.attrs: dict[str, bool] = {}
-
     def request_params(self, ctx: Any) -> dict[str, Any]:
-        return {"seed_backend": self._backend}
+        """Ask this daemon's source for the shard, over the fitting mover."""
+        source = self._daemon.d2d.source
+        backend = PEER_IPC_BACKEND if isinstance(source, str) else RDMA_BACKEND
+        return {"seed_backend": backend}
 
     def validate_payload(self, payload: Any) -> WeightsSeedPayload:
-        validated = _validate_payload(payload)
-        source_key = json_to_dataclass(WeightCacheKey, validated.get("cache_config"))
-        mismatched = seed_mismatches(
-            self._expected_key, source_key, self._model, validated.get("model")
+        """Structural checks plus the shard fingerprint against this daemon."""
+        daemon = self._daemon
+        return validate_weights_payload(
+            payload, daemon.cache_key, daemon.model_config.model
         )
-        if mismatched:
-            hint = (
-                f"; no safetensors under {self._model} to fingerprint here, "
-                "so the mirror needs the source's --model path or the "
-                "checkpoint files"
-                if mismatched == ["checkpoint"]
-                and self._expected_key.checkpoint == self._model
-                else ""
-            )
-            raise ValueError(
-                f"Seed daemon cache differs on fields {mismatched}; refusing "
-                f"to mirror a different weight shard{hint}"
-            )
-        return validated
-
-    def install(self, ctx: Any, payload: WeightsSeedPayload) -> None:
-        """Copy the source's storages with the payload's mover."""
-        manifest = payload["manifest"]
-        mover = get_mover(parse_seed_backend(payload["seed"]["backend"]))
-        self.tensors = mover.fill(manifest, payload["seed"], self._device)
-        self.kinds = {
-            name: "param" if view["is_param"] else "buffer"
-            for name, view in manifest["tensors"].items()
-        }
-        self.aliases = dict(payload["aliases"])
-        self.attrs = dict(payload["attrs"])
-
-
-def _validate_payload(payload: Any) -> WeightsSeedPayload:
-    """Structural checks on the source daemon's weights seed payload."""
-    if not isinstance(payload, dict):
-        raise ValueError("Seed daemon returned a malformed payload")
-    model = payload.get("model")
-    if model is not None and not isinstance(model, str):
-        raise ValueError("Seed daemon returned a malformed model name")
-    manifest = payload.get("manifest")
-    if (
-        not isinstance(manifest, dict)
-        or not isinstance(manifest.get("storages"), list)
-        or not isinstance(manifest.get("tensors"), dict)
-    ):
-        raise ValueError("Seed daemon returned a malformed manifest")
-    seed = payload.get("seed")
-    if not isinstance(seed, dict) or not isinstance(seed.get("backend"), str):
-        raise ValueError("Seed daemon returned a malformed transfer seed")
-    for key in ("aliases", "attrs"):
-        if payload.get(key) is not None and not isinstance(payload[key], dict):
-            raise ValueError(f"Seed daemon returned malformed {key}")
-    return cast(WeightsSeedPayload, payload)

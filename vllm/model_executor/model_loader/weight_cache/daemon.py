@@ -363,14 +363,18 @@ class WeightCacheDaemon:
         # Attention backends may take workspace at construction, like in the
         # engine's worker init.
         init_workspace_manager(target_device)
+        if isinstance(loader, PeerModelLoader):
+            # The daemon is both ends of the weights kind: it fetches this
+            # rank's shard from its source over its own D2D endpoint, and
+            # the loader installs the payload into a model.
+            payload = self.d2d.fetch(self.weight_seed, self)
+            # The weights kind answers a payload or an error, never a miss.
+            assert payload is not None
+            return loader.load_model(vllm_config, model_config, payload=payload)
         if getattr(loader, "loads_pre_processed_weights", False):
             # The loader fetches fully post-processed weights from a peer
             # daemon and builds the model around them itself, handling
             # dtype, device and post-processing internally.
-            if isinstance(loader, PeerModelLoader):
-                # The daemon's own D2D endpoint already addresses the source,
-                # so the loader fetches over it instead of a second channel.
-                loader.transport = self.d2d
             return loader.load_model(vllm_config, model_config)
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
