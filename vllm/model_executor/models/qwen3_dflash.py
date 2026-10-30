@@ -33,6 +33,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.reload.utils import adopt_fused_tensor
 from vllm.model_executor.model_loader.weight_utils import make_attention_sink
 from vllm.model_executor.utils import (
     is_weights_pre_processed,
@@ -536,10 +537,14 @@ class DFlashQwen3Model(nn.Module):
         ):
             # KV projection weights: [num_layers * 2 * kv_size, hidden_size]
             kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
-            self._fused_kv_weight: torch.Tensor | None = torch.cat(kv_weights, dim=0)
+            self._fused_kv_weight: torch.Tensor | None = adopt_fused_tensor(
+                self, "_fused_kv_weight", torch.cat(kv_weights, dim=0)
+            )
             if has_bias:
                 kv_biases = [a.qkv_proj.bias[a.q_size :] for a in layers_attn]
-                self._fused_kv_bias: torch.Tensor | None = torch.cat(kv_biases, dim=0)
+                self._fused_kv_bias: torch.Tensor | None = adopt_fused_tensor(
+                    self, "_fused_kv_bias", torch.cat(kv_biases, dim=0)
+                )
             else:
                 self._fused_kv_bias = None
         else:
@@ -556,9 +561,13 @@ class DFlashQwen3Model(nn.Module):
 
         # K-norm weights stacked into one contiguous [num_layers, head_dim]
         # tensor so the per-layer K-norm runs as a single grouped kernel.
-        self._k_norm_weights = torch.stack(
-            [a.k_norm.weight.data for a in layers_attn], dim=0
-        ).contiguous()
+        self._k_norm_weights = adopt_fused_tensor(
+            self,
+            "_k_norm_weights",
+            torch.stack(
+                [a.k_norm.weight.data for a in layers_attn], dim=0
+            ).contiguous(),
+        )
 
     @staticmethod
     def _build_mxfp8_context_kv_proj(
