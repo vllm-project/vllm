@@ -128,6 +128,11 @@ from vllm.models.minimax_m3.common.sparse_attention import (
     select_main_backend_and_impl_cls,
 )
 from vllm.models.minimax_m3.common.vision_tower import MiniMaxVLVisionModel
+from vllm.models.minimax_m3.nvidia.cutedsl_moe import MiniMaxM3RoutedExperts
+from vllm.models.minimax_m3.nvidia.deferred_finalize_runner import (
+    DeferredMoETail,
+    MiniMaxM3DeferredFinalizeRunner,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -218,6 +223,19 @@ def _use_mega_moe(vllm_config: VllmConfig) -> bool:
             "--enable-expert-parallel."
         )
     return True
+
+
+def _use_cutedsl_moe(vllm_config: VllmConfig) -> bool:
+    """Whether MoE layers run the MiniMax-M3 CuTeDSL NVFP4 MoE.
+
+    Engages for ``moe_backend="flashinfer_cutedsl"`` on checkpoints with NVFP4
+    routed experts (MiniMax-M3.1); other checkpoints keep the generic CuTeDSL
+    path.
+    """
+    return (
+        vllm_config.kernel_config.moe_backend == "flashinfer_cutedsl"
+        and getattr(vllm_config.quant_config, "moe_quant_algo", None) == "NVFP4"
+    )
 
 
 # MiniMax-M3.1 QAT quantizes the FC2 input with a fixed global scale of 16;
@@ -410,6 +428,7 @@ class MiniMaxM3MoE(nn.Module):
         reduce_results: bool = True,
         prefix: str = "",
         use_mega_moe: bool = False,
+        use_cutedsl_moe: bool = False,
     ) -> None:
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -486,6 +505,8 @@ class MiniMaxM3MoE(nn.Module):
             qat_activation_key=kNvfp4DynamicToken,
             shared_experts=self.shared_experts,
             quant_config=quant_config,
+            routed_experts_cls=MiniMaxM3RoutedExperts if use_cutedsl_moe else None,
+            runner_cls=MiniMaxM3DeferredFinalizeRunner if use_cutedsl_moe else None,
             reduce_results=reduce_results,
             prefix=f"{prefix}.experts",
         )
@@ -594,7 +615,7 @@ class MiniMaxM3MoE(nn.Module):
         assert isinstance(routed, UnfinalizedMoEOutput)
         return MoEOutput(routed=routed, shared_output=shared_output)
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor | DeferredMoETail:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
         if self.use_mega_moe:
@@ -605,6 +626,10 @@ class MiniMaxM3MoE(nn.Module):
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
+        # A DeferredMoETail is finalized by the next layer's input norm (or
+        # materialized at a pipeline boundary); it is already [M, H]-shaped.
+        if isinstance(final_hidden_states, DeferredMoETail):
+            return final_hidden_states
 
         return final_hidden_states.view(num_tokens, hidden_dim)
 
@@ -1201,6 +1226,7 @@ class MiniMaxM3DecoderLayer(nn.Module):
                 reduce_results=reduce_results,
                 prefix=f"{prefix}.block_sparse_moe",
                 use_mega_moe=use_mega_moe,
+                use_cutedsl_moe=_use_cutedsl_moe(vllm_config),
             )
         else:
             self.mlp = MiniMaxM3MLP(
@@ -1234,15 +1260,36 @@ class MiniMaxM3DecoderLayer(nn.Module):
     def forward(
         self,
         positions: torch.Tensor,
-        hidden_states: torch.Tensor | MoEOutput,
+        hidden_states: torch.Tensor | MoEOutput | DeferredMoETail,
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor | MoEOutput, torch.Tensor]:
         hidden_states, residual = self.forward_input_norm(hidden_states, residual)
-        return self.forward_after_input_norm(positions, hidden_states, residual)
+        hidden_states, residual = self.forward_after_input_norm(
+            positions, hidden_states, residual
+        )
+        # The composed forward is a public boundary (e.g. the MTP draft layer
+        # reduces the result itself); only the split call path used by the
+        # main model loop hands a deferred tail to the next layer.
+        if isinstance(hidden_states, DeferredMoETail):
+            hidden_states = hidden_states.materialize()
+        return hidden_states, residual
 
     def forward_input_norm(
-        self, hidden_states: torch.Tensor | MoEOutput, residual: torch.Tensor | None
+        self,
+        hidden_states: torch.Tensor | MoEOutput | DeferredMoETail,
+        residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor | QuantizedActivation, torch.Tensor]:
+        if isinstance(hidden_states, DeferredMoETail):
+            # The previous layer's MoE left its output unfinalized. Fuse the
+            # top-k finalize + shared-expert add with this layer's input norm
+            # + MXFP8 quant when possible; otherwise just materialize it.
+            if (
+                self.input_norm_mxfp8
+                and residual is not None
+                and residual.is_contiguous()
+            ):
+                return self._finalize_tail_norm_mxfp8(hidden_states, residual)
+            hidden_states = hidden_states.materialize()
         if isinstance(hidden_states, MoEOutput):
             # The preceding MoE left a small batch unfinalized: finalize,
             # all-reduce, norm and MXFP8-quantize the qkv_proj input at once.
@@ -1300,12 +1347,46 @@ class MiniMaxM3DecoderLayer(nn.Module):
         )
         return qa, residual
 
+    def _finalize_tail_norm_mxfp8(
+        self, tail: DeferredMoETail, residual: torch.Tensor
+    ) -> tuple[QuantizedActivation, torch.Tensor]:
+        """Finalize the previous layer's deferred MoE output, fused with this
+        layer's input norm emitting MXFP8 for qkv_proj (one kernel pass).
+
+        Rounding-level differences vs the unfused chain (no emulation of the
+        intermediate bf16 roundings); unlike `_input_norm_mxfp8` the residual
+        is written to a new tensor rather than updated in place.
+        """
+        from vllm.models.minimax_m3.nvidia.ops.moe_finalize_add import (
+            moe_finalize_add_norm_mxfp8,
+        )
+
+        norm = self.input_layernorm
+        unfinalized = tail.unfinalized
+        residual_out, data, scale = moe_finalize_add_norm_mxfp8(
+            unfinalized.gemm2_permuted,
+            unfinalized.expert_weights,
+            unfinalized.expanded_idx_to_permuted_idx,
+            tail.shared_output,
+            residual,
+            norm.weight,
+            norm.variance_epsilon,
+        )
+        qa = QuantizedActivation(
+            data=data,
+            scale=scale,
+            orig_dtype=residual.dtype,
+            orig_shape=residual.shape,
+            quant_key=kMxfp8Dynamic,
+        )
+        return qa, residual_out
+
     def forward_after_input_norm(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor | QuantizedActivation,
         residual: torch.Tensor,
-    ) -> tuple[torch.Tensor | MoEOutput, torch.Tensor]:
+    ) -> tuple[torch.Tensor | MoEOutput | DeferredMoETail, torch.Tensor]:
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
@@ -1498,6 +1579,10 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
 
         if not get_pp_group().is_last_rank:
             # Under PP every FFN reduces its own output: no all-reduce is pending.
+            # A deferred MoE tail must materialize before crossing the stage
+            # boundary (the fusing input norm lives on the next rank).
+            if isinstance(hidden_states, DeferredMoETail):
+                hidden_states = hidden_states.materialize()
             self._maybe_add_hidden_state(
                 aux_hidden_states, self.end_layer, hidden_states, residual
             )
@@ -1509,6 +1594,9 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                 }
             )
 
+        if isinstance(hidden_states, DeferredMoETail):
+            # The last layer's tail has no next input norm to fuse with.
+            hidden_states = hidden_states.materialize()
         if self.fuse_final_norm_allreduce:
             hidden_states, residual = fused_allreduce_gemma_rms_norm(
                 hidden_states, residual, self.norm
