@@ -1,68 +1,72 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Token-level correctness tests for the MORI-backed UMBP runtime."""
+"""End-to-end restore through the MORI-backed UMBP runtime."""
 
-import os
 import time
 
 import pytest
 
-from vllm import LLM, SamplingParams, TokensPrompt
+from tests.models.utils import check_logprobs_close
+from tests.v1.kv_connector.rocm_pd_accuracy_utils import _REVISIONS, QWEN_MODEL
+from tests.v1.kv_connector.umbp_test_utils import mori_has_umbp
+from vllm import SamplingParams, TokensPrompt
 from vllm.config import KVTransferConfig
 from vllm.platforms import current_platform
 
-mori_cpp = pytest.importorskip("mori.cpp")
-assert hasattr(mori_cpp, "UMBPClient"), "MORI was built without UMBP"
-
-if not current_platform.is_cuda_alike():
-    pytest.skip("requires CUDA or ROCm", allow_module_level=True)
-
-
-def _flush_gpu_cache(llm: LLM, sampling_params: SamplingParams) -> None:
-    cache_config = llm.llm_engine.vllm_config.cache_config
-    total_tokens = int(cache_config.num_gpu_blocks * cache_config.block_size * 1.5)
-    tokens_per_request = 512
-    num_requests = (total_tokens + tokens_per_request - 1) // tokens_per_request
-    for start in range(0, num_requests, 16):
-        prompts = [
-            TokensPrompt(prompt_token_ids=[(index % 100) + 3] * tokens_per_request)
-            for index in range(start, min(start + 16, num_requests))
-        ]
-        llm.generate(prompts, sampling_params, use_tqdm=False)
+pytestmark = pytest.mark.skipif(
+    not (current_platform.is_rocm() and mori_has_umbp()),
+    reason="requires ROCm and MORI built with UMBP",
+)
 
 
-def test_mori_external_kv_preserves_generated_tokens(socket_dir):
-    model = os.environ.get("VLLM_UMBP_TEST_MODEL", "Qwen/Qwen3-0.6B")
-    llm = LLM(
-        model=model,
+def _external_tokens(llm) -> int:
+    return sum(
+        metric.value
+        for metric in llm.get_metrics()
+        if metric.name == "vllm:prompt_tokens_by_source"
+        and metric.labels.get("source") == "external_kv_transfer"
+    )
+
+
+def _reset_gpu_prefix_cache(llm) -> None:
+    """Drop the GPU prefix cache once UMBP has released the stored blocks."""
+    deadline = time.monotonic() + 60
+    while not llm.reset_prefix_cache():
+        assert time.monotonic() < deadline, "UMBP stores never released GPU blocks"
+        llm.generate(
+            TokensPrompt(prompt_token_ids=[0]),
+            SamplingParams(max_tokens=1),
+            use_tqdm=False,
+        )
+
+
+def test_restore_from_umbp_matches_recompute(vllm_runner, socket_dir):
+    prompts = ["The first ten natural numbers are " * 32]
+    with vllm_runner(
+        QWEN_MODEL,
+        revision=_REVISIONS[QWEN_MODEL],
         enforce_eager=True,
-        compilation_config={"custom_ops": ["none"]},
-        max_model_len=1024,
-        # A few max-length requests fit, so the flush below evicts the prompt.
-        block_size=16,
-        num_gpu_blocks_override=128,
         enable_prefix_caching=True,
+        disable_log_stats=False,
         kv_transfer_config=KVTransferConfig(
             kv_connector="UMBPStoreConnector",
             kv_role="kv_both",
             kv_connector_extra_config={
                 "mode": "embedded",
-                # Holds the prompt and every flush request: only GPU memory evicts.
-                "capacity_bytes": 2 << 30,
+                "capacity_bytes": 1 << 30,
                 "lookup_dir": socket_dir,
-                "num_workers": 2,
-                "timeout_ms": 60000,
-                "load_async": False,
             },
         ),
+    ) as runner:
+        computed = runner.generate_greedy_logprobs(prompts, 16, 5)
+        _reset_gpu_prefix_cache(runner.llm)
+        before = _external_tokens(runner.llm)
+        restored = runner.generate_greedy_logprobs(prompts, 16, 5)
+        assert _external_tokens(runner.llm) > before
+
+    check_logprobs_close(
+        outputs_0_lst=computed,
+        outputs_1_lst=restored,
+        name_0="computed",
+        name_1="restored",
     )
-    sampling_params = SamplingParams(max_tokens=4, temperature=0)
-    prompt = "The first ten natural numbers are " * 32
-
-    cold = llm.generate(prompt, sampling_params, use_tqdm=False)[0]
-    _flush_gpu_cache(llm, SamplingParams(max_tokens=1, temperature=0))
-    time.sleep(1)
-    restored = llm.generate(prompt, sampling_params, use_tqdm=False)[0]
-
-    assert restored.outputs[0].token_ids == cold.outputs[0].token_ids
-    assert restored.num_cached_tokens > 0
