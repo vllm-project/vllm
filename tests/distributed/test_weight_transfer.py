@@ -1745,10 +1745,12 @@ class TestDeferredProcessingContract:
 
     def _engines(self):
         registry = dict(WeightTransferEngineFactory._registry)
-        # ModelExpress is an optional, separately installed package, but its
-        # backend is always registered. Skip it when the package is missing.
-        if importlib.util.find_spec("modelexpress") is None:
-            registry.pop("modelexpress")
+        # ModelExpress and Connex are optional, separately installed packages,
+        # but their backends are always registered. Skip each one whose
+        # package is missing.
+        for name, package in (("modelexpress", "modelexpress"), ("connex", "connex")):
+            if importlib.util.find_spec(package) is None:
+                registry.pop(name)
         return {name: loader() for name, loader in registry.items()}
 
     def test_every_engine_declares_whether_it_defers(self):
