@@ -15,6 +15,8 @@ import pytest
 import torch
 
 from tests.utils_tree import depths_and_ancestors, path_to, random_parents
+from vllm.config import CacheConfig
+from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu import model_runner as model_runner_module
 from vllm.v1.worker.gpu.input_batch import prepare_pos_seq_lens
@@ -29,6 +31,12 @@ from vllm.v1.worker.gpu.spec_decode.commit import (
     accept_result_of,
     accepted_rows,
     kv_cache_layout,
+)
+from vllm.v1.worker.gpu.spec_decode.kernels import (
+    CommitStep,
+    KernelContext,
+    KernelRegistry,
+    SpecLayerSpec,
 )
 from vllm.v1.worker.gpu.spec_decode.plan_kernels import (
     PlanLayout,
@@ -585,8 +593,8 @@ def test_chain_accept_result_is_a_view_of_the_constant_path():
 
 def _commit_runner(plan, model_state):
     runner = SimpleNamespace(
-        kv_compactor=None,
-        conv_window_aligner=False,
+        spec_kernels=None,
+        spec_kernel_context=None,
         model_state=model_state,
         is_last_pp_rank=False,
         req_states=SimpleNamespace(
@@ -609,7 +617,9 @@ def test_chain_commit_moves_nothing(monkeypatch):
     )
     model_state = SimpleNamespace(postprocess_state=Mock())
     runner, batch = _commit_runner(plan, model_state)
-    runner._build_kv_compactor = Mock(side_effect=AssertionError("no compaction"))
+    runner.spec_kernels = SimpleNamespace(
+        commit=Mock(side_effect=AssertionError("no compaction"))
+    )
     result = AcceptResult(
         chain_path(2, 3, torch.device("cpu")),
         torch.tensor([3, 1], dtype=torch.int32),
@@ -633,8 +643,16 @@ def test_tree_commit_compacts_and_resumes_from_the_path(monkeypatch):
     )
     model_state = SimpleNamespace(postprocess_state=Mock())
     runner, batch = _commit_runner(plan, model_state)
-    compactor = SimpleNamespace(compact=Mock())
-    runner._build_kv_compactor = Mock(return_value=compactor)
+    # The reference commit kernels as bound for a model without conv states.
+    registry = KernelRegistry()
+    kv_commit = registry.get(("layout:paged_token", "commit"))
+    state_commit = registry.get(("layout:mamba_state@slots", "commit"))
+    assert isinstance(kv_commit, KvCompactor) and state_commit is not None
+    compact = Mock()
+    monkeypatch.setattr(kv_commit, "commit", compact)
+    registry._commits = [kv_commit, state_commit]
+    runner.spec_kernels = registry
+    runner.spec_kernel_context = object()
     result = AcceptResult(
         torch.tensor([[0, 2, 0], [0, 1, 2]], dtype=torch.int32),
         torch.tensor([2, 3], dtype=torch.int32),
@@ -643,9 +661,9 @@ def test_tree_commit_compacts_and_resumes_from_the_path(monkeypatch):
     row = GPUModelRunner.commit_round(runner, batch, result)
     assert row is not None
     assert row.tolist() == [2, 2]
-    compactor.compact.assert_called_once_with(plan.count, batch.seq_lens, result, 2)
-    GPUModelRunner.commit_round(runner, batch, result)
-    runner._build_kv_compactor.assert_called_once()
+    compact.assert_called_once_with(
+        CommitStep(result, 2, count=plan.count, seq_lens=batch.seq_lens)
+    )
 
     monkeypatch.setattr(model_runner_module, "post_update", Mock())
     GPUModelRunner.postprocess_sampled(runner, "idx", "s", "n", "r", accepted_row=row)
@@ -720,21 +738,20 @@ def test_kv_compaction_moves_the_path_to_the_chain_slots(kind, seed):
         for _ in range(2)
     ]
     before = [layer.clone() for layer in layers]
-    layout = kv_cache_layout(layers[0], num_kernel_blocks)
     table = torch.tensor(tables, device=DEVICE)
-    compactor = KvCompactor(
-        layers, [layout] * 2, [table] * 2, [table_block_size] * 2, torch.device(DEVICE)
-    )
+    compactor = _bound_compactor(layers, num_kernel_blocks, table, table_block_size)
     result = AcceptResult(
         path=torch.tensor(path, device=DEVICE),
         path_len=torch.tensor(path_len, device=DEVICE),
         sampled=torch.zeros(num_reqs, max_rows, dtype=torch.int64, device=DEVICE),
     )
-    compactor.compact(
-        torch.tensor(counts, device=DEVICE),
-        torch.tensor(seq_lens, device=DEVICE),
-        result,
-        num_reqs,
+    compactor.commit(
+        CommitStep(
+            result,
+            num_reqs,
+            count=torch.tensor(counts, device=DEVICE),
+            seq_lens=torch.tensor(seq_lens, device=DEVICE),
+        )
     )
 
     def token(b, position):
@@ -759,19 +776,19 @@ def test_kv_compaction_of_a_chain_path_changes_nothing():
     layers = [torch.randn(2, 8, 4, 2, 16).to(DEVICE)]
     before = layers[0].clone()
     table = torch.tensor([[3, 1], [0, 2]], dtype=torch.int32, device=DEVICE)
-    compactor = KvCompactor(
-        layers, [kv_cache_layout(layers[0], 8)], [table], [4], torch.device(DEVICE)
-    )
+    compactor = _bound_compactor(layers, 8, table, 4)
     result = AcceptResult(
         path=chain_path(2, 4, torch.device(DEVICE)),
         path_len=torch.tensor([4, 2], dtype=torch.int32, device=DEVICE),
         sampled=torch.zeros(2, 4, dtype=torch.int64, device=DEVICE),
     )
-    compactor.compact(
-        torch.tensor([4, 4], dtype=torch.int32, device=DEVICE),
-        torch.tensor([7, 5], dtype=torch.int32, device=DEVICE),
-        result,
-        2,
+    compactor.commit(
+        CommitStep(
+            result,
+            2,
+            count=torch.tensor([4, 4], dtype=torch.int32, device=DEVICE),
+            seq_lens=torch.tensor([7, 5], dtype=torch.int32, device=DEVICE),
+        )
     )
     assert torch.equal(layers[0], before)
 
@@ -807,8 +824,10 @@ def test_kv_compactor_takes_block_sizes_from_the_kv_cache_group(monkeypatch):
     )
     runner.kernel_block_sizes = [kernel_block]
     runner.block_tables = SimpleNamespace(input_block_tables=[table])
+    runner.cache_config = CacheConfig()
 
-    compactor = GPUModelRunner._build_kv_compactor(runner)
+    compactor = KvCompactor()
+    compactor.bind(SimpleNamespace(device=runner.device), runner._spec_kernel_layers())
 
     [(layout, *_, table_sizes)] = compactor.launches
     assert layout.block_size == kernel_block
@@ -820,6 +839,39 @@ def test_kv_cache_layout_refuses_what_it_cannot_read():
         kv_cache_layout(torch.zeros(3, 4, 5, 6), num_blocks=8)
     with pytest.raises(NotImplementedError, match="copy"):
         kv_cache_layout(torch.zeros(2, 8, 4, 2, 16, dtype=torch.float64), 8)
+
+
+def _kernel_context(device) -> KernelContext:
+    return KernelContext(
+        device=device,
+        plan_kind="tree",
+        max_num_reqs=4,
+        max_candidates=4,
+        capture_shapes=(PlanShape(4),),
+    )
+
+
+def _bound_compactor(layers, blocks, table, block_size):
+    compactor = KvCompactor()
+    compactor.bind(
+        _kernel_context(torch.device(DEVICE)),
+        [
+            _layer(f"l{i}", SimpleNamespace(kv_cache=cache), table, block_size, blocks)
+            for i, cache in enumerate(layers)
+        ],
+    )
+    return compactor
+
+
+def _layer(name, module, block_table, block_size=0, num_blocks=0):
+    return SpecLayerSpec(
+        name,
+        kind=None,
+        module=module,
+        block_table=block_table,
+        block_size=block_size,
+        num_blocks=num_blocks,
+    )
 
 
 def _chain_order_window_commit(window, slot, path, length, width):
@@ -864,8 +916,16 @@ def test_conv_window_alignment_reads_what_a_chain_order_commit_reads(width, seed
     ]
     before = window.clone()
 
-    aligner = ConvWindowAligner([window], [table.to(DEVICE)], width, window.device)
-    aligner.align(result, num_reqs)
+    layer = SimpleNamespace(
+        kv_cache=[window if is_conv_state_dim_first() else window.mT],
+        conv1d=SimpleNamespace(weight=torch.empty(dim, 1, width)),
+    )
+    aligner = ConvWindowAligner()
+    aligner.bind(
+        _kernel_context(window.device),
+        [_layer("conv", layer, table.to(DEVICE))],
+    )
+    aligner.commit(CommitStep(result, num_reqs, count=None, seq_lens=None))
 
     for b in range(num_reqs - 1):
         last = paths[b][lengths[b] - 1]

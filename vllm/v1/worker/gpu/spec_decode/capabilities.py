@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, Literal, get_args
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.spec_decode.kernels import KernelRegistry
     from vllm.v1.worker.gpu.spec_decode.round import SpecResources
     from vllm.v1.worker.gpu.spec_decode.speculator_config import SpeculatorConfig
     from vllm.v1.worker.utils import AttentionGroup
@@ -50,13 +51,16 @@ class SpecLayerKind:
     """What a layer is to speculative decoding, derived from the KV cache spec
     or the layer class (a plugin cannot invent one)."""
 
-    family: Literal["attn", "mamba", "indexer"]
+    family: Literal["attn", "mamba", "layout"]
     variant: str
     """attn: the ``KVCacheSpecKind`` value; mamba: the layer class's
-    ``spec_layer_variant``; indexer: ``"dsa"``."""
+    ``spec_layer_variant``; layout: what a commit moves,
+    ``"paged_token"`` (KV of one tensor per layer, any element size),
+    ``"paged_split_scale"`` (KV with separate scales: nvfp4, per-token-head) or
+    ``"mamba_state"``."""
     state_mode: str = ""
-    """mamba only: how drafts keep recurrent state, ``"slots"``, ``"replay"``
-    or ``"recover"``."""
+    """mamba and layout ``mamba_state`` only: how drafts keep recurrent state,
+    ``"slots"``, ``"replay"`` or ``"recover"``."""
 
     def key(self) -> str:
         suffix = f"@{self.state_mode}" if self.state_mode else ""
@@ -114,18 +118,20 @@ def layer_spec_limits(
     layers: Mapping[str, Any],
     mamba_state_mode: str,
     excluded_layer_names: frozenset[str] = frozenset(),
+    kernels: "KernelRegistry | None" = None,
 ) -> tuple[list[SpecLimit], bool]:
     """The plan kind caps of the target's layers, one per (layer kind, reason)
     with its layer count, and whether a layer's builder needs uniform rows.
 
-    An attention layer verifies what its metadata builder's
-    ``spec_verify_plan_kind`` returns for the layer's features. A recurrent layer
-    (``MambaBase``) verifies nothing when its class sets
-    ``spec_chain_supported = False``, chains when it declares no
-    ``spec_layer_variant`` or keeps its state by replay or recovery, and
-    otherwise what its builder verifies. Draft layers (and
-    ``excluded_layer_names``), hidden-state caches and encoder or cross
-    attention (whose rows do not attend to each other) do not count.
+    A layer verifies what the spec kernels it needs support for it
+    (``KernelRegistry.plan_kind``; ``kernels`` defaults to the reference
+    kernels). An attention layer is further capped by what its metadata
+    builder's ``spec_verify_plan_kind`` returns for the layer's features. A
+    recurrent layer (``MambaBase``) verifies nothing when its class sets
+    ``spec_chain_supported = False`` and chains when it declares no
+    ``spec_layer_variant``. Draft layers (and ``excluded_layer_names``),
+    hidden-state caches and encoder or cross attention (whose rows do not
+    attend to each other) do not count.
     """
     from vllm.model_executor.layers.attention.mla_attention import QueryLenSupport
     from vllm.model_executor.layers.mamba.abstract import MambaBase
@@ -133,12 +139,12 @@ def layer_spec_limits(
         CrossAttentionSpec,
         EncoderOnlyAttentionSpec,
         HiddenStateCacheSpec,
-        MLAAttentionSpec,
-        SparseCacheRole,
         UniformTypeKVCacheSpecs,
-        get_kv_cache_spec_kind,
     )
+    from vllm.v1.worker.gpu.spec_decode.kernels import KernelRegistry, SpecLayerSpec
 
+    if kernels is None:
+        kernels = KernelRegistry()
     # (plan kind, what the layers are, why) -> number of layers
     num_layers: Counter[tuple[PlanKind, str, str]] = Counter()
     tree_requires_uniform_rows = False
@@ -165,20 +171,19 @@ def layer_spec_limits(
                 layer = layers.get(name)
                 if isinstance(layer, MambaBase):
                     num_layers[
-                        _mamba_layer_limit(layer, builder, mamba_state_mode)
+                        _mamba_layer_limit(name, layer, kernels, mamba_state_mode)
                     ] += 1
                     continue
-                if (
-                    isinstance(spec, MLAAttentionSpec)
-                    and spec.cache_role == SparseCacheRole.INDEXER
-                ):
-                    kind = SpecLayerKind("indexer", "dsa")
-                else:
-                    kind = SpecLayerKind("attn", get_kv_cache_spec_kind(spec).value)
+                kind = attn_layer_kind(spec)
                 plan_kind = builder.spec_verify_plan_kind(
                     **attn_layer_features(layer, spec)
                 )
                 why = f"{type(builder).__name__} verifies {plan_kind}"
+                kernel_kind, kernel_why = kernels.plan_kind(
+                    SpecLayerSpec(name, kind, layer, layout=attn_layout(layer, spec))
+                )
+                if plan_kind_rank(kernel_kind) < plan_kind_rank(plan_kind):
+                    plan_kind, why = kernel_kind, kernel_why
                 num_layers[(plan_kind, kind.key(), why)] += 1
                 if (
                     getattr(builder, "query_len_support", None)
@@ -194,34 +199,45 @@ def layer_spec_limits(
 
 
 def _mamba_layer_limit(
-    layer: Any, builder: Any, state_mode: str
+    name: str, layer: Any, kernels: "KernelRegistry", state_mode: str
 ) -> tuple[PlanKind, str, str]:
+    from vllm.v1.worker.gpu.spec_decode.kernels import SpecLayerSpec
+
     layer_cls = type(layer)
     if not layer_cls.spec_chain_supported:
         return ("none", layer_cls.__name__, "decodes one token per request")
     variant = layer_cls.spec_layer_variant
     if variant is None:
         return ("chain", layer_cls.__name__, "declares no spec_layer_variant")
-    what = SpecLayerKind("mamba", variant, state_mode).key()
-    if state_mode != "slots":
-        # The tree kernels read a state slot per draft row, which replay and
-        # recovery do not keep.
-        return ("chain", what, "trees need a state slot per draft row")
-    plan_kind = builder.spec_verify_plan_kind(**NO_ATTN_FEATURES)
-    return (plan_kind, what, f"{type(builder).__name__} verifies {plan_kind}")
+    # The state mode is part of the key: the slots kernels read a state slot
+    # per draft row, which replay and recovery do not keep.
+    kind = SpecLayerKind("mamba", variant, state_mode)
+    plan_kind, why = kernels.plan_kind(
+        SpecLayerSpec(name, kind, layer, layout="mamba_state")
+    )
+    return (plan_kind, kind.key(), why)
 
 
-NO_ATTN_FEATURES: dict[str, Any] = dict(
-    kv_cache_dtype="auto",
-    sliding_window=None,
-    has_sinks=False,
-    logits_soft_cap=None,
-    has_alibi=False,
-    chunk_size=None,
-    rswa_window=None,
-    kv_sharing_target=None,
-)
-"""``spec_verify_plan_kind`` arguments of a layer without attention features."""
+def attn_layer_kind(spec: Any) -> SpecLayerKind:
+    """The kind of an attention layer with KV cache spec ``spec``."""
+    from vllm.v1.kv_cache_interface import get_kv_cache_spec_kind
+
+    return SpecLayerKind("attn", get_kv_cache_spec_kind(spec).value)
+
+
+def attn_layout(layer: Any, spec: Any) -> str:
+    """What committing an attention layer's accepted path moves: ``""`` for a
+    cache not paged by slot (its model keeps its own commit),
+    ``"paged_split_scale"`` for KV quantised with separate scales, else
+    ``"paged_token"``."""
+    from vllm.v1.kv_cache_interface import KVQuantMode, get_kv_quant_mode
+
+    if not getattr(spec, "uses_slot_mapping", True):
+        return ""
+    mode = get_kv_quant_mode(str(getattr(layer, "kv_cache_dtype", "auto")))
+    if mode == KVQuantMode.NVFP4 or mode.is_per_token_head:
+        return "paged_split_scale"
+    return "paged_token"
 
 
 def attn_layer_features(layer: Any, spec: Any) -> dict[str, Any]:

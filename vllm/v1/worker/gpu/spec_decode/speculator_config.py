@@ -63,6 +63,11 @@ class SpeculatorConfig:
     supports_watermarking: ClassVar[bool] = False
     # Prefill context parallelism.
     supports_pcp: ClassVar[bool] = False
+    # Fully qualified names of `(vllm_config) -> SpecKernelProvider` factories
+    # whose spec kernels overlay the in-tree ones, in order: a later one wins a
+    # key (vllm/v1/worker/gpu/spec_decode/kernels.py). A provider may supply any
+    # subset of keys.
+    spec_kernel_providers: ClassVar[tuple[str, ...]] = ()
 
     # --- SpeculativeConfig setup ---
 
@@ -152,10 +157,9 @@ class SpeculatorConfig:
         """What speculation holds, declared once at startup; memory is sized for
         it. The engine core may lower it to what the model verifies
         (`adapt_resources`). The default is a chain of up to K drafts
-        (``max_candidates`` K + 1) with a recurrent-state row per draft. Its
-        decode graphs are the uniform K + 1 shape, or one uniform shape per K of
-        a Dynamic SD schedule, plus the variable-length shape under adaptive
-        verification.
+        (``max_candidates`` K + 1). Its decode graphs are the uniform K + 1
+        shape, or one uniform shape per K of a Dynamic SD schedule, plus the
+        variable-length shape under adaptive verification.
         """
         from vllm.v1.worker.gpu.spec_decode.round import PlanShape, SpecResources
 

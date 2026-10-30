@@ -108,6 +108,7 @@ def _build_layer(
     """A minimal object that runs the real ``_forward_core`` bound to it."""
     layer = types.SimpleNamespace()
     layer.prefix = PREFIX
+    layer.spec_verify_kernel = None
     layer.enable_packed_recurrent_decode = False
     layer.tp_size = 1
     layer.num_k_heads = H

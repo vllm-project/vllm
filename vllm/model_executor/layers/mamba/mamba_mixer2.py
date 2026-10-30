@@ -918,7 +918,39 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 )
 
         # Process decode requests
-        if has_decode:
+        if has_decode and self.spec_verify_kernel is not None:
+            # A provider's verify kernel reads the projections as they are and
+            # writes the decode rows' output.
+            from vllm.v1.worker.gpu.spec_decode.kernels import Mamba2SpecRows
+
+            assert state_indices_tensor_d is not None
+            assert num_accepted_tokens is not None
+            assert query_start_loc_d is not None
+            self.spec_verify_kernel.verify(  # type: ignore[attr-defined]
+                Mamba2SpecRows(
+                    layer_name=self.prefix,
+                    hidden_states_B_C=hidden_states_B_C_d,
+                    dt=dt_d,
+                    conv_state=conv_state,
+                    conv_weight=self.conv_weights,
+                    conv_bias=self.conv1d.bias,
+                    activation=self.activation,
+                    ssm_state=ssm_state,
+                    A=self.A,
+                    D=self.D,
+                    dt_bias=self.dt_bias,
+                    num_heads=self.num_heads // self.tp_size,
+                    head_dim=self.head_dim,
+                    n_groups=self.n_groups // self.tp_size,
+                    ssm_state_size=self.ssm_state_size,
+                    state_indices=state_indices_tensor_d,
+                    num_accepted_tokens=num_accepted_tokens,
+                    query_start_loc=query_start_loc_d,
+                    parents=attn_metadata.tree_parents_d,
+                    out=preallocated_ssm_out_d,
+                )
+            )
+        elif has_decode:
             assert state_indices_tensor_d is not None
             if (
                 self.use_replayssm

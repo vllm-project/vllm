@@ -23,7 +23,7 @@ from collections.abc import Iterable
 from contextlib import AbstractContextManager, nullcontext
 from copy import deepcopy
 from dataclasses import replace
-from typing import Any, Literal, NamedTuple
+from typing import Any, NamedTuple
 
 import numpy as np
 import torch
@@ -169,18 +169,21 @@ from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
 )
 from vllm.v1.worker.gpu.spec_decode.capabilities import (
     SpecCapabilities,
+    SpecLayerKind,
     SpecLimit,
+    attn_layer_kind,
+    attn_layout,
     layer_spec_limits,
 )
-from vllm.v1.worker.gpu.spec_decode.commit import (
-    ConvWindowAligner,
-    KvCompactor,
-    accept_result_of,
-    accepted_rows,
-    kv_cache_layout,
-)
+from vllm.v1.worker.gpu.spec_decode.commit import accept_result_of, accepted_rows
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     set_eagle3_aux_hidden_state_layers,
+)
+from vllm.v1.worker.gpu.spec_decode.kernels import (
+    CommitStep,
+    KernelContext,
+    KernelRegistry,
+    SpecLayerSpec,
 )
 from vllm.v1.worker.gpu.spec_decode.plan_kernels import (
     PlanLayout,
@@ -379,8 +382,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.chain_count = torch.ones(
                 self.max_num_reqs, dtype=torch.int32, device=self.device
             )
-        self.kv_compactor: KvCompactor | None = None
-        self.conv_window_aligner: ConvWindowAligner | Literal[False] | None = None
+        # The spec verify and commit kernels (_spec_kernel_registry), bound by
+        # set_spec_resources.
+        self.spec_kernels: KernelRegistry | None = None
+        self.spec_kernel_context: KernelContext | None = None
 
         # Draft tokens propagation - for spec-dec + struct outputs.
         self.draft_tokens_handler = DraftTokensHandler(self.device)
@@ -1260,6 +1265,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     if self.speculator is not None:
                         with use_workspace_lane(self._draft_workspace_lane):
                             self.speculator.capture()
+                    if self.spec_kernel_context is not None:
+                        assert self.spec_kernels is not None
+                        self.spec_kernels.capture(self.spec_kernel_context)
                     if self.adaptive_verification is not None and not profile_only:
                         with self.step_timing.collect() as timings:
                             for batch in self.adaptive_verification.batches_to_profile(
@@ -1854,19 +1862,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         order. None without speculative decoding."""
         if self.speculative_config is None:
             return None
-        if self.cache_config.use_replayssm:
-            mamba_state_mode = "replay"
-        elif self.cache_config.use_kda_recoverssm:
-            mamba_state_mode = "recover"
-        else:
-            mamba_state_mode = "slots"
         limits, tree_requires_uniform_rows = layer_spec_limits(
             self.attn_groups,
             self.compilation_config.static_forward_context,
-            mamba_state_mode,
+            _mamba_state_mode(self.cache_config),
             excluded_layer_names=frozenset(
                 getattr(self.speculator, "draft_attn_layer_names", None) or ()
             ),
+            kernels=self._spec_kernel_registry(),
         )
         settings = {
             "pipeline parallelism (no tree path broadcast)": self.use_pp,
@@ -1902,6 +1905,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.cudagraph_manager.set_spec_resources(resources)
         if self.speculator is not None:
             self.speculator.bind_resources(resources)
+        self.spec_kernel_context = KernelContext(
+            device=self.device,
+            plan_kind=resources.plan_kind,
+            max_num_reqs=self.max_num_reqs,
+            max_candidates=resources.max_candidates,
+            capture_shapes=resources.capture_shapes,
+        )
+        self._spec_kernel_registry().bind(
+            self.spec_kernel_context, self._spec_kernel_layers()
+        )
+
+    def _spec_kernel_registry(self) -> KernelRegistry:
+        """The speculator's spec kernels, built once per worker."""
+        if self.spec_kernels is None:
+            self.spec_kernels = KernelRegistry.from_config(self.vllm_config)
+        return self.spec_kernels
 
     def _chain_only(
         self,
@@ -2091,101 +2110,79 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def commit_round(
         self, input_batch: InputBatch, result: AcceptResult | None
     ) -> torch.Tensor | None:
-        """Commit the accepted path: move its KV to the chain slots, gather its
-        conv inputs into the window the next step reads, and return the verify
-        row each request's recurrent state resumes from. A chain's accepted rows
-        already sit where the next step reads them and its state rows follow from
-        ``num_sampled``, so a chain commits nothing here and returns None."""
+        """Commit the accepted path with the bound commit kernels (move its KV
+        to the chain slots, gather its conv inputs into the window the next step
+        reads) and return the verify row each request's recurrent state resumes
+        from. A chain's accepted rows already sit where the next step reads them
+        and its state rows follow from ``num_sampled``, so a chain commits
+        nothing here and returns None."""
         plan = input_batch.verify_plan
         if result is None or _is_chain(plan):
             return None
         assert plan is not None and plan.count is not None
-        if self.kv_compactor is None:
-            self.kv_compactor = self._build_kv_compactor()
-        self.kv_compactor.compact(
-            plan.count, input_batch.seq_lens, result, input_batch.num_reqs
+        assert self.spec_kernels is not None and self.spec_kernel_context is not None, (
+            "set_spec_resources binds the commit kernels"
         )
-        if self.conv_window_aligner is None:
-            self.conv_window_aligner = self._build_conv_window_aligner()
-        if self.conv_window_aligner is not False:
-            self.conv_window_aligner.align(result, input_batch.num_reqs)
-        return accepted_rows(result, input_batch.num_reqs)
-
-    def _build_conv_window_aligner(self) -> "ConvWindowAligner | Literal[False]":
-        """An aligner over the target's recurrent layers with a conv state, or
-        False for a model without any."""
-        from vllm.model_executor.layers.mamba.abstract import MambaBase
-        from vllm.model_executor.layers.mamba.mamba_utils import (
-            is_conv_state_dim_first,
+        num_reqs = input_batch.num_reqs
+        self.spec_kernels.commit(
+            CommitStep(result, num_reqs, plan.count, input_batch.seq_lens)
         )
+        return accepted_rows(result, num_reqs)
 
-        forward_context = self.compilation_config.static_forward_context
-        specs = get_kv_cache_spec(self.vllm_config)
-        windows, tables, widths = [], [], set()
-        for gid, group in enumerate(self.kv_cache_config.kv_cache_groups):
-            for name in group.layer_names:
-                layer = forward_context.get(name)
-                if (
-                    not isinstance(layer, MambaBase)
-                    or not hasattr(layer, "conv1d")
-                    or getattr(specs.get(name), "is_draft", False)
-                ):
-                    continue
-                conv = layer.kv_cache[0]
-                windows.append(conv if is_conv_state_dim_first() else conv.mT)
-                tables.append(self.block_tables.input_block_tables[gid])
-                widths.add(layer.conv1d.weight.shape[-1])
-        if not windows:
-            return False
-        if len(widths) != 1:
-            raise NotImplementedError(
-                "verify plans that are not chains need one conv width per model"
-            )
-        return ConvWindowAligner(windows, tables, widths.pop(), self.device)
-
-    def _build_kv_compactor(self) -> KvCompactor:
-        """A compactor over the target's own attention KV caches: no draft layers,
-        no layers that read another layer's cache, no encoder or cross attention,
-        no hidden-state caches and no caches not paged by slot (a ring buffer
-        keeps its own chain commit).
+    def _spec_kernel_layers(self) -> list[SpecLayerSpec]:
+        """The target's layers the spec kernels may run on, with their KV cache
+        group's block table and block size: no draft layers, no encoder or
+        cross attention and no hidden-state caches.
 
         Block sizes come from the KV cache group, as the cache was allocated and
         the block table is kept: a hybrid model's group blocks are larger than its
         layers' own specs say (attention pages grow to the recurrent state's).
         """
+        from vllm.model_executor.layers.mamba.abstract import MambaBase
+
         forward_context = self.compilation_config.static_forward_context
         specs = get_kv_cache_spec(self.vllm_config)
-        caches, layouts, tables, table_block_sizes = [], [], [], []
+        mamba_state_mode = _mamba_state_mode(self.cache_config)
+        layers = []
         for gid, group in enumerate(self.kv_cache_config.kv_cache_groups):
             for name in group.layer_names:
                 spec = specs.get(name)
-                if (
-                    not isinstance(spec, AttentionSpec)
-                    or isinstance(
-                        spec,
-                        (
-                            EncoderOnlyAttentionSpec,
-                            CrossAttentionSpec,
-                            HiddenStateCacheSpec,
-                        ),
-                    )
-                    or not spec.uses_slot_mapping
-                    or spec.is_draft
+                layer = forward_context.get(name)
+                if getattr(spec, "is_draft", False) or isinstance(
+                    spec,
+                    (
+                        EncoderOnlyAttentionSpec,
+                        CrossAttentionSpec,
+                        HiddenStateCacheSpec,
+                    ),
                 ):
                     continue
                 group_spec = group.kv_cache_spec
                 if isinstance(group_spec, UniformTypeKVCacheSpecs):
                     group_spec = group_spec.kv_cache_specs[name]
                 block_size = group_spec.block_size
-                cache = forward_context[name].kv_cache
-                num_kernel_blocks = self.kv_cache_config.num_blocks * (
-                    block_size // self.kernel_block_sizes[gid]
+                placement = dict(
+                    block_table=self.block_tables.input_block_tables[gid],
+                    block_size=block_size,
+                    num_blocks=self.kv_cache_config.num_blocks
+                    * (block_size // self.kernel_block_sizes[gid]),
                 )
-                caches.append(cache)
-                layouts.append(kv_cache_layout(cache, num_kernel_blocks))
-                tables.append(self.block_tables.input_block_tables[gid])
-                table_block_sizes.append(block_size)
-        return KvCompactor(caches, layouts, tables, table_block_sizes, self.device)
+                if isinstance(layer, MambaBase):
+                    variant = type(layer).spec_layer_variant
+                    if variant is None:
+                        continue
+                    kind = SpecLayerKind("mamba", variant, mamba_state_mode)
+                    layers.append(
+                        SpecLayerSpec(name, kind, layer, "mamba_state", **placement)
+                    )
+                elif isinstance(spec, AttentionSpec):
+                    layout = attn_layout(layer, spec)
+                    layers.append(
+                        SpecLayerSpec(
+                            name, attn_layer_kind(spec), layer, layout, **placement
+                        )
+                    )
+        return layers
 
     def _merge_ec_connector_no_forward(
         self, scheduler_output: SchedulerOutput, output: ModelRunnerOutput
@@ -3073,6 +3070,15 @@ def sort_batch_req_ids(
         num,
     )
     return sorted(num_tokens_per_req, key=key)
+
+
+def _mamba_state_mode(cache_config: Any) -> str:
+    """How recurrent layers keep the drafts' states."""
+    if cache_config.use_replayssm:
+        return "replay"
+    if cache_config.use_kda_recoverssm:
+        return "recover"
+    return "slots"
 
 
 def _is_chain(plan: VerifyPlan | None) -> bool:

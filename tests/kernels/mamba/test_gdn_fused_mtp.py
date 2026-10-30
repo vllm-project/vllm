@@ -108,6 +108,7 @@ def _build_layer(
 ):
     layer = types.SimpleNamespace(
         prefix=PREFIX,
+        spec_verify_kernel=None,
         enable_packed_recurrent_decode=False,
         disable_tp_for_ba_proj=False,
         tp_size=1,
@@ -169,6 +170,7 @@ def test_fused_mtp_head_ratio_guard(num_v_heads: int, expected: bool) -> None:
         num_v_heads=num_v_heads,
         kv_cache=(None, torch.empty(1, dtype=torch.float32, device="cuda")),
         gdn_decode_kernel="cuda",
+        spec_verify_kernel=None,
     )
     attn_metadata = types.SimpleNamespace(
         spec_state_indices_tensor=torch.ones(

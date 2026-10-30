@@ -60,6 +60,8 @@ from vllm.v1.worker.gpu.spec_decode.capabilities import (
     reduce_spec_capabilities,
     resolve_spec_resources,
 )
+from vllm.v1.worker.gpu.spec_decode.commit import KvCompactor
+from vllm.v1.worker.gpu.spec_decode.kernels import KernelContext, KernelRegistry
 from vllm.v1.worker.gpu.spec_decode.round import PlanShape, SpecResources
 from vllm.v1.worker.gpu.spec_decode.speculator_config import SpeculatorConfig
 
@@ -363,7 +365,7 @@ def test_recurrent_layers_without_tree_kernels_verify_chains(layer, builder):
     [limit] = caps.limits
     assert limit.reason in (
         f"{layer.__name__}, 3 layers: declares no spec_layer_variant",
-        f"mamba:short_conv@slots, 3 layers: {builder.__name__} verifies chain",
+        "mamba:short_conv@slots, 3 layers: no mamba:short_conv@slots/verify kernel",
     )
 
 
@@ -439,6 +441,7 @@ def _runner(**overrides):
     attn_groups, layers = _llama(_TreeBuilder)
     runner = SimpleNamespace(
         speculative_config=object(),
+        _spec_kernel_registry=KernelRegistry,
         cache_config=CacheConfig(),
         attn_groups=attn_groups,
         compilation_config=SimpleNamespace(static_forward_context=layers),
@@ -699,5 +702,21 @@ def test_compactor_skips_ring_and_hidden_state_caches(monkeypatch):
     runner.block_tables = SimpleNamespace(
         input_block_tables=[torch.zeros(2, 4, dtype=torch.int32)] * 3
     )
-    compactor = GPUModelRunner._build_kv_compactor(runner)
-    assert len(compactor.launches) == 1
+    runner.cache_config = CacheConfig()
+    layers = GPUModelRunner._spec_kernel_layers(runner)
+    assert [(layer.name, layer.layout) for layer in layers] == [
+        ("attn", "paged_token"),
+        ("ring", ""),
+    ]
+    registry = KernelRegistry()
+    ctx = KernelContext(
+        device=runner.device,
+        plan_kind="tree",
+        max_num_reqs=4,
+        max_candidates=4,
+        capture_shapes=(PlanShape(4),),
+    )
+    registry.bind(ctx, layers)
+    (commit,) = registry._commits
+    assert isinstance(commit, KvCompactor)
+    assert len(commit.launches) == 1

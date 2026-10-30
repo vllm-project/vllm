@@ -22,6 +22,14 @@ import torch
 
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
+from vllm.v1.worker.gpu.spec_decode.capabilities import PlanKind
+from vllm.v1.worker.gpu.spec_decode.kernels import (
+    ABOVE_NONE,
+    CommitStep,
+    KernelContext,
+    SpecKernel,
+    SpecLayerSpec,
+)
 from vllm.v1.worker.gpu.spec_decode.round import AcceptResult
 
 
@@ -182,75 +190,71 @@ def _compact_kv_kernel(
             tl.debug_barrier()
 
 
-class KvCompactor:
-    """Moves the KV of accepted path rows to the chain slots in the given layers.
+class KvCompactor(SpecKernel):
+    """The ``layout:paged_token`` commit: moves the KV of accepted path rows to
+    the chain slots in the layers it is bound to.
 
-    ``block_tables[i]`` is layer ``i``'s KV cache group's block table as the forward
-    got it (the batch's rows) and ``table_block_sizes[i]`` its tokens per block. Layers
-    that share one layout go in one launch. A layer that reads another layer's cache
-    (KV sharing) must not be listed: it would be compacted twice.
+    Each layer is read through its KV cache group's block table as the forward
+    got it (the batch's rows) and that group's tokens per block. Layers that
+    share one layout go in one launch. A layer that reads another layer's cache
+    (KV sharing) must not be bound: it would be compacted twice.
     """
 
-    def __init__(
-        self,
-        kv_caches: Sequence[torch.Tensor],
-        layouts: Sequence[KvCacheLayout],
-        block_tables: Sequence[torch.Tensor],
-        table_block_sizes: Sequence[int],
-        device: torch.device,
-    ):
-        if any(t.dtype != torch.int32 for t in block_tables):
-            raise ValueError("block tables must be int32")
-        by_layout: dict[KvCacheLayout, list[int]] = {}
-        for i, layout in enumerate(layouts):
-            by_layout.setdefault(layout, []).append(i)
-        self.launches = []
-        for layout, layers in by_layout.items():
-            self.launches.append(
-                (
-                    layout,
-                    torch.tensor(
-                        [kv_caches[i].data_ptr() for i in layers],
-                        dtype=torch.uint64,
-                        device=device,
-                    ),
-                    torch.tensor(
-                        [block_tables[i].data_ptr() for i in layers],
-                        dtype=torch.uint64,
-                        device=device,
-                    ),
-                    torch.tensor(
-                        [block_tables[i].stride(0) for i in layers],
-                        dtype=torch.int64,
-                        device=device,
-                    ),
-                    torch.tensor(
-                        [table_block_sizes[i] for i in layers],
-                        dtype=torch.int32,
-                        device=device,
-                    ),
-                )
-            )
+    def __init__(self) -> None:
+        self.launches: list[
+            tuple[KvCacheLayout, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+        ] = []
 
-    def compact(
-        self,
-        count: torch.Tensor,
-        seq_lens: torch.Tensor,
-        result: AcceptResult,
-        num_reqs: int,
-    ) -> None:
+    def supports(self, layer: SpecLayerSpec) -> frozenset[PlanKind]:
+        cache = getattr(layer.module, "kv_cache", None)
+        if isinstance(cache, torch.Tensor) and not copies_dtype(cache.dtype):
+            return frozenset()
+        return ABOVE_NONE
+
+    def bind(self, ctx: KernelContext, layers: Sequence[SpecLayerSpec]) -> None:
+        # layout -> (caches, block tables, table strides, tokens per block)
+        by_layout: dict[KvCacheLayout, tuple[list[int], ...]] = {}
+        for layer in layers:
+            cache, table = layer.module.kv_cache, layer.block_table
+            assert table is not None
+            if table.dtype != torch.int32:
+                raise ValueError("block tables must be int32")
+            layout = kv_cache_layout(cache, layer.num_blocks)
+            ptrs = by_layout.setdefault(layout, ([], [], [], []))
+            ptrs[0].append(cache.data_ptr())
+            ptrs[1].append(table.data_ptr())
+            ptrs[2].append(table.stride(0))
+            ptrs[3].append(layer.block_size)
+        dtypes = (torch.uint64, torch.uint64, torch.int64, torch.int32)
+        self.launches = [
+            (
+                layout,
+                *(
+                    torch.tensor(values, dtype=dtype, device=ctx.device)
+                    for values, dtype in zip(ptrs, dtypes)
+                ),
+            )
+            for layout, ptrs in by_layout.items()
+        ]
+
+    def commit(self, step: CommitStep) -> None:
         """Copy the KV of ``result.path[b, j]`` to chain slot ``j`` of the first
         ``num_reqs`` batch rows, whose ``count[b]`` verify rows end at
         ``seq_lens[b]``."""
+        result = step.result
         for layout, layer_ptrs, table_ptrs, table_strides, table_sizes in self.launches:
-            grid = (num_reqs, layer_ptrs.shape[0], layout.num_planes * layout.num_heads)
+            grid = (
+                step.num_reqs,
+                layer_ptrs.shape[0],
+                layout.num_planes * layout.num_heads,
+            )
             _compact_kv_kernel[grid](
                 layer_ptrs,
                 table_ptrs,
                 table_strides,
                 table_sizes,
-                count,
-                seq_lens,
+                step.count,
+                step.seq_lens,
                 result.path,
                 result.path.stride(0),
                 result.path_len,
@@ -273,8 +277,13 @@ class KvCompactor:
 _BITS = {1: "int8", 2: "int16", 4: "int32"}
 
 
+def copies_dtype(dtype: torch.dtype) -> bool:
+    """Whether the compactor and the aligner copy caches of ``dtype``."""
+    return dtype.itemsize in _BITS
+
+
 def _check_dtype(dtype: torch.dtype) -> None:
-    if dtype.itemsize not in _BITS:
+    if not copies_dtype(dtype):
         raise NotImplementedError(f"KV compaction does not copy {dtype} caches")
 
 
@@ -325,33 +334,53 @@ def _align_conv_window_kernel(
         tl.store(base + (WIDTH - 2 + last - i) * stride_tok, value, mask=mask)
 
 
-class ConvWindowAligner:
-    """Lines up the conv windows of recurrent layers with the accepted path.
+class ConvWindowAligner(SpecKernel):
+    """The ``layout:mamba_state@slots`` commit: lines up the conv windows of
+    recurrent layers with the accepted path.
 
     After a verify step the conv state of a request holds the conv inputs of its
     rows in row order, and the next step reads the ``k - 1`` columns that end at
     the last accepted row (``num_accepted_tokens - 1``). For a chain those are
     the accepted rows; for a tree they must be gathered from the path. The SSM
     state needs no move: it resumes from the state row the last accepted row
-    wrote.
-
-    ``windows[i]`` is layer ``i``'s conv state viewed ``[slot, dim, tok]`` and
-    ``block_tables[i]`` its group's block table as the forward got it (column 0
-    is the request's state slot).
+    wrote. Column 0 of a layer's block table is the request's state slot.
     """
 
-    def __init__(
-        self,
-        windows: Sequence[torch.Tensor],
-        block_tables: Sequence[torch.Tensor],
-        width: int,
-        device: torch.device,
-    ):
+    def __init__(self) -> None:
+        self.window_ptrs: torch.Tensor | None = None
+
+    def supports(self, layer: SpecLayerSpec) -> frozenset[PlanKind]:
+        return ABOVE_NONE
+
+    def bind(self, ctx: KernelContext, layers: Sequence[SpecLayerSpec]) -> None:
+        from vllm.model_executor.layers.mamba.mamba_utils import (
+            is_conv_state_dim_first,
+        )
+
+        windows: list[torch.Tensor] = []
+        tables: list[torch.Tensor] = []
+        widths: set[int] = set()
+        for layer in layers:
+            if not hasattr(layer.module, "conv1d"):
+                continue
+            assert layer.block_table is not None
+            conv = layer.module.kv_cache[0]
+            # Viewed [slot, dim, tok].
+            windows.append(conv if is_conv_state_dim_first() else conv.mT)
+            tables.append(layer.block_table)
+            widths.add(layer.module.conv1d.weight.shape[-1])
+        if not windows:
+            return
+        if len(widths) != 1:
+            raise NotImplementedError(
+                "verify plans that are not chains need one conv width per model"
+            )
+        width = widths.pop()
         first = windows[0]
         for window in windows:
             if window.stride() != first.stride() or window.dtype != first.dtype:
                 raise ValueError("every conv state must share one layout and dtype")
-        if any(t.dtype != torch.int32 for t in block_tables):
+        if any(t.dtype != torch.int32 for t in tables):
             raise ValueError("block tables must be int32")
         if first.shape[2] < width - 1:
             raise ValueError("the conv state is narrower than its kernel")
@@ -360,20 +389,21 @@ class ConvWindowAligner:
         self.strides = first.stride()
         self.dtype = getattr(tl, _BITS[first.dtype.itemsize])
         self.window_ptrs = torch.tensor(
-            [w.data_ptr() for w in windows], dtype=torch.uint64, device=device
+            [w.data_ptr() for w in windows], dtype=torch.uint64, device=ctx.device
         )
         self.table_ptrs = torch.tensor(
-            [t.data_ptr() for t in block_tables], dtype=torch.uint64, device=device
+            [t.data_ptr() for t in tables], dtype=torch.uint64, device=ctx.device
         )
         self.table_strides = torch.tensor(
-            [t.stride(0) for t in block_tables], dtype=torch.int64, device=device
+            [t.stride(0) for t in tables], dtype=torch.int64, device=ctx.device
         )
 
-    def align(self, result: AcceptResult, num_reqs: int) -> None:
-        if num_reqs == 0:
+    def commit(self, step: CommitStep) -> None:
+        if self.window_ptrs is None or step.num_reqs == 0:
             return
+        result = step.result
         block = 256
-        grid = (num_reqs, self.window_ptrs.shape[0], triton.cdiv(self.dim, block))
+        grid = (step.num_reqs, self.window_ptrs.shape[0], triton.cdiv(self.dim, block))
         _align_conv_window_kernel[grid](
             self.window_ptrs,
             self.table_ptrs,

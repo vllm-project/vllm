@@ -412,6 +412,8 @@ def _make_capture_runner(
     runner.lora_config = None
     monkeypatch.setattr(runner, "maybe_setup_dummy_loras", _no_dummy_loras)
     runner.speculator = None
+    runner.spec_kernels = None
+    runner.spec_kernel_context = None
     runner.adaptive_verification = None
     runner.model = None
     runner.input_buffers = object()
@@ -455,6 +457,26 @@ def test_capture_model_locks_workspace_after_capture(monkeypatch):
         runner.kv_cache_config,
         runner.cudagraph_manager.capture_stream,
     )
+
+
+def test_capture_model_runs_the_spec_kernels(monkeypatch):
+    """Capture runs every bound spec kernel for every capture shape
+    (KernelRegistry.capture), so a commit replays inside the graphs."""
+    runner = _make_capture_runner(monkeypatch, captured=True)
+    monkeypatch.setattr(
+        model_runner_module, "freeze_gc_for_cudagraph_capture", contextlib.nullcontext
+    )
+    monkeypatch.setattr(torch.accelerator, "empty_cache", lambda: None)
+    monkeypatch.setattr(
+        torch.accelerator, "get_memory_info", lambda: (1 << 30, 1 << 30)
+    )
+    monkeypatch.setattr(model_runner_module, "lock_workspace", lambda: None)
+    runner.spec_kernels = Mock()
+    runner.spec_kernel_context = object()
+
+    runner.capture_model()
+
+    runner.spec_kernels.capture.assert_called_once_with(runner.spec_kernel_context)
 
 
 def test_capture_model_skips_lock_when_nothing_captured(monkeypatch):

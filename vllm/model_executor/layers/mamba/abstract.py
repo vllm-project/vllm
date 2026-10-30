@@ -3,7 +3,7 @@
 from abc import abstractmethod
 from collections.abc import Iterable
 from math import lcm, prod
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 import torch
 
@@ -14,6 +14,9 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.selector import get_mamba_attn_backend
 from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.spec_decode.kernels import SpecKernel
 
 
 class MambaBase(AttentionLayerBase):
@@ -27,7 +30,8 @@ class MambaBase(AttentionLayerBase):
     supports_dcp: bool = False
 
     # What the layer is to speculative decoding beyond a chain: the variant of
-    # its verify kernels ("gdn", "mamba2", "short_conv"), whose builder then says
+    # its verify kernels ("gdn", "mamba2", "short_conv"), the key under which the
+    # spec kernel registry (vllm/v1/worker/gpu/spec_decode/kernels.py) says
     # whether they take trees. Not inherited: a subclass that does not set it in
     # its own body runs kernels of its own, so it verifies chains only, whatever
     # its parent declares.
@@ -35,6 +39,10 @@ class MambaBase(AttentionLayerBase):
     # Whether the layer verifies a chain of drafts at all: False for a layer
     # that decodes one token per request, which refuses speculative decoding.
     spec_chain_supported: ClassVar[bool] = True
+    # The provider kernel that verifies the layer's spec-decode rows, bound by
+    # the spec kernel registry before capture; None runs the layer's own
+    # kernels. Only layers with a ``spec_layer_variant`` read it.
+    spec_verify_kernel: "SpecKernel | None" = None
 
     def __init_subclass__(cls, **kwargs) -> None:
         super().__init_subclass__(**kwargs)

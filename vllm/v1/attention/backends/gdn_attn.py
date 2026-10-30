@@ -4,7 +4,7 @@
 
 import math
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 
 import torch
 
@@ -29,9 +29,6 @@ from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
-
-if TYPE_CHECKING:
-    from vllm.v1.worker.gpu.spec_decode.capabilities import PlanKind
 
 # FlashInfer's GDN prefill emits states every N tokens, N a multiple of its
 # 64-token chunk, so checkpoint offsets must be multiples of 64.
@@ -156,11 +153,6 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         return max_decode_query_len(vllm_config)
 
     reorder_batch_threshold: int = 1
-
-    def spec_verify_plan_kind(self, **features: object) -> "PlanKind":
-        # Each decode row's recurrent state starts from its parent row's
-        # (CommonAttentionMetadata.tree_parents); attention features do not apply.
-        return "tree"
 
     def __init__(
         self,
