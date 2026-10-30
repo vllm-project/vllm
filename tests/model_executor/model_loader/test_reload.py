@@ -17,7 +17,7 @@ from torch.nn.parameter import UninitializedParameter
 
 import vllm.model_executor.model_loader.reload.layerwise as reload_layerwise
 import vllm.model_executor.model_loader.reload.meta as reload_meta
-from vllm.config import ModelConfig
+from vllm.config import CacheConfig, ModelConfig
 from vllm.distributed.weight_transfer.sparse_nccl_engine import (
     SparseNCCLWeightTransferEngine,
 )
@@ -1383,6 +1383,8 @@ def test_reload_weights(
         enable_prefix_caching=False,
         max_model_len=16,
         max_num_seqs=1,
+        # Reloading without a pause that empties the KV cache needs headroom.
+        gpu_memory_utilization=CacheConfig.DEFAULT_GPU_MEMORY_UTILIZATION,
     ) as llm:
         # Reloading must update tensors in place: captured graphs keep pointers.
         ptrs = llm.collective_rpc(_device_tensor_ptrs)

@@ -84,7 +84,7 @@ def _fits_in_memory_budget(nbytes: int, device: torch.device) -> bool:
     from vllm.v1.worker.gpu.attn_utils import get_kv_cache_spec
 
     vllm_config = get_current_vllm_config()
-    util = vllm_config.cache_config.gpu_memory_utilization
+    util = vllm_config.cache_config.resolved_gpu_memory_utilization
     min_kv_bytes = max_memory_usage_bytes(
         vllm_config, get_kv_cache_spec(vllm_config).values()
     )
