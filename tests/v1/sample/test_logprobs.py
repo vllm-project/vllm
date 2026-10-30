@@ -498,8 +498,12 @@ def test_prompt_logprob_token_ids_validation():
     with pytest.raises(VLLMValidationError, match="at most 15 scored rows"):
         verify(prompt_logprob_token_ids=[[]] * 15 + [[1]])
     # prompt_logprob_start alone is a caller mistake, not a silent no-op.
-    with pytest.raises(VLLMValidationError, match="requires prompt_logprob_token_ids"):
+    with pytest.raises(VLLMValidationError, match="requires prompt_logprobs or"):
         verify(prompt_logprob_start=3)
+    # It also offsets top-K prompt logprobs.
+    verify(prompt_logprobs=1, prompt_logprob_start=3)
+    with pytest.raises(VLLMValidationError, match="non-negative"):
+        verify(prompt_logprobs=1, prompt_logprob_start=-1)
 
 
 def test_prompt_logprob_token_ids_require_v2_model_runner():
@@ -528,6 +532,14 @@ def test_prompt_logprob_token_ids_require_v2_model_runner():
         InputProcessor._validate_params(processor, params, ("generate",))
         processor.vllm_config.cache_config.kv_sharing_fast_prefill = True
         with pytest.raises(VLLMValidationError, match="fast-prefill"):
+            InputProcessor._validate_params(processor, params, ("generate",))
+
+        # Top-K prompt logprobs only honor prompt_logprob_start on the V2 runner.
+        processor.vllm_config.cache_config.kv_sharing_fast_prefill = False
+        params = SamplingParams(prompt_logprobs=1, prompt_logprob_start=2)
+        InputProcessor._validate_params(processor, params, ("generate",))
+        processor.vllm_config.use_v2_model_runner = False
+        with pytest.raises(VLLMValidationError, match="V2 model runner"):
             InputProcessor._validate_params(processor, params, ("generate",))
 
 
@@ -1532,14 +1544,15 @@ def test_prompt_logprob_token_ids_with_chunking_and_preemption(monkeypatch):
             assert scores[row] == pytest.approx(expected, abs=1e-3)
 
 
-def test_prompt_logprob_token_ids_drop_partially_scored_prefills(monkeypatch):
-    """A prefill that starts past the first scored row returns no scores.
-
-    Such a prefill (here a prefix-cache hit the caller opted back into) never
-    computes the leading rows, so emitting the buffer would return values the
-    model never produced for them.
-    """
+def test_prompt_logprob_token_ids_preserve_scores_with_prefix_cache(monkeypatch):
+    """Prefix reuse preserves every requested suffix score, for both fixed-ID
+    scores and top-K prompt logprobs offset by prompt_logprob_start."""
+    start = 17
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    # Cached and uncached prefills have different execution shapes; batch
+    # invariance makes their scores comparable bit for bit.
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
     text = "The capital of France is Paris. " * 20
 
@@ -1547,6 +1560,7 @@ def test_prompt_logprob_token_ids_drop_partially_scored_prefills(monkeypatch):
         "Qwen/Qwen3-0.6B",
         max_model_len=512,
         enable_prefix_caching=True,
+        block_size=16,
         gpu_memory_utilization=0.25,
     ) as vllm_model:
         token_ids = vllm_model.llm.get_tokenizer()(text).input_ids
@@ -1554,18 +1568,32 @@ def test_prompt_logprob_token_ids_drop_partially_scored_prefills(monkeypatch):
         sampling_params = SamplingParams(
             temperature=0.0,
             max_tokens=1,
-            prompt_logprob_token_ids=np.tile([10, 100, 1000], (len(token_ids) - 1, 1)),
-            skip_reading_prefix_cache=False,
+            prompt_logprobs=2,
+            prompt_logprob_start=start,
+            prompt_logprob_token_ids=np.tile(
+                [10, 100, 1000], (len(token_ids) - 1 - start, 1)
+            ),
+            skip_reading_prefix_cache=True,
         )
 
         first = vllm_model.llm.generate([prompt], sampling_params)[0]
         assert first.prompt_token_id_logprobs is not None
         assert math.isfinite(float(first.prompt_token_id_logprobs.min()))
+        # Top-K prompt logprobs start at the same row: position p is predicted
+        # by row p - 1, so positions up to and including start are None.
+        assert first.prompt_logprobs is not None
+        assert len(first.prompt_logprobs) == len(token_ids)
+        assert all(lp is None for lp in first.prompt_logprobs[: start + 1])
+        assert all(first.prompt_logprobs[start + 1 :])
 
-        # The re-send is served from the prefix cache, so its prefill starts
-        # past row 0 and the leading rows are never computed.
+        sampling_params.skip_reading_prefix_cache = False
         second = vllm_model.llm.generate([prompt], sampling_params)[0]
-        assert second.prompt_token_id_logprobs is None
+        assert second.num_cached_tokens == 16
+        assert second.prompt_token_id_logprobs.shape == (len(token_ids) - 1 - start, 3)
+        np.testing.assert_array_equal(
+            second.prompt_token_id_logprobs, first.prompt_token_id_logprobs
+        )
+        assert second.prompt_logprobs == first.prompt_logprobs
 
 
 @large_gpu_mark(min_gb=24)
@@ -1600,3 +1628,85 @@ def test_token_logprobs_large_batch_int64_row_offset():
     assert torch.allclose(logprobs[last, 0], ref, atol=1e-2), (
         f"logprob {logprobs[last, 0].item()} != ref {ref.item()}"
     )
+
+
+def test_trace_replay_with_spec_decode(monkeypatch):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+
+    prompt = "Hello world " * 50
+    llm_kwargs = dict(
+        max_model_len=512,
+        max_logprobs=5,
+        seed=42,
+        enable_trace_replay=True,
+        enable_chunked_prefill=True,
+        max_num_batched_tokens=32,
+        enable_prefix_caching=False,
+        gpu_memory_utilization=0.25,
+        **GPU_DETERMINISM_KWARGS,
+    )
+
+    def replay(runner, traces):
+        outputs = runner.llm.generate(
+            [prompt] * len(traces),
+            [
+                SamplingParams(
+                    trace_decode_token_ids=trace, max_tokens=len(trace), logprobs=3
+                )
+                for trace in traces
+            ],
+        )
+        results = []
+        for output in outputs:
+            completion = output.outputs[0]
+            assert completion.logprobs is not None
+            results.append((list(completion.token_ids), completion.logprobs))
+        return results
+
+    with VllmRunner("Qwen/Qwen3-0.6B", **llm_kwargs) as ref_runner:
+        sampled = ref_runner.llm.generate(
+            [prompt, prompt],
+            [
+                SamplingParams(temperature=0.0, max_tokens=32, ignore_eos=True),
+                SamplingParams(temperature=1.0, seed=7, max_tokens=32, ignore_eos=True),
+            ],
+        )
+        greedy_trace = list(sampled[0].outputs[0].token_ids)
+        sampled_trace = list(sampled[1].outputs[0].token_ids)
+        diverged_trace = greedy_trace[:10] + sampled_trace[10:20] + greedy_trace[20:]
+        traces = [greedy_trace, sampled_trace, diverged_trace]
+        ref_results = replay(ref_runner, traces)
+
+    with VllmRunner(
+        "Qwen/Qwen3-0.6B",
+        speculative_config={
+            "method": "ngram",
+            "prompt_lookup_max": 5,
+            "prompt_lookup_min": 3,
+            "num_speculative_tokens": 3,
+        },
+        disable_log_stats=False,
+        **llm_kwargs,
+    ) as spec_runner:
+        spec_results = replay(spec_runner, traces)
+        num_accepted = sum(
+            m.value
+            for m in spec_runner.llm.get_metrics()
+            if m.name == "vllm:spec_decode_num_accepted_tokens"
+        )
+    assert num_accepted > 0
+
+    for trace, (ref_ids, ref_lps), (spec_ids, spec_lps) in zip(
+        traces, ref_results, spec_results
+    ):
+        assert ref_ids == trace
+        assert spec_ids == trace
+        assert len(ref_lps) == len(trace)
+        assert len(spec_lps) == len(trace)
+        for token_id, ref_lp, spec_lp in zip(trace, ref_lps, spec_lps):
+            assert math.isclose(
+                ref_lp[token_id].logprob,
+                spec_lp[token_id].logprob,
+                rel_tol=5e-2,
+                abs_tol=2.5e-1,
+            )

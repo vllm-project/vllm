@@ -123,7 +123,9 @@ def _num_workspace_lanes(vllm_config: VllmConfig, use_v2_model_runner: bool) -> 
     spec_config = vllm_config.speculative_config
     return (
         2
-        if use_v2_model_runner and spec_config is not None and spec_config.use_dspark()
+        if use_v2_model_runner
+        and spec_config is not None
+        and spec_config.uses_separate_workspace_lane
         else 1
     )
 
@@ -516,6 +518,13 @@ class Worker(WorkerBase):
             # Set random seed.
             set_random_seed(self.model_config.seed)
 
+            # Initialize shared locality resources before weight loading and capture.
+            from vllm.distributed.localization import (
+                maybe_init_localized_resources,
+            )
+
+            self.localized_resources = maybe_init_localized_resources(self.device)
+
             # cuBLAS(Lt) asks CUDA for its handle memory directly. When torch's own
             # cudaMalloc fails, torch frees its unused cache and retries, but a cuBLAS
             # request never triggers that because torch doesn't see it. Profiling can
@@ -699,15 +708,17 @@ class Worker(WorkerBase):
         ):
             self.model_runner.profile_run(randomize_inputs=self.randomize_dummy_inputs)
 
-        # Profile CUDA graph memory if graphs will be captured.
+        # Profile CUDA graph memory if graphs will be captured. The V2 runner
+        # decides itself, since encoder graphs don't depend on cudagraph_mode.
         # ROCm is included: #44825 moved the profiler to
         # torch.accelerator.get_memory_info (reliable on ROCm, as used by
         # the AMD-CI mem tests), and graph_pool_handle resolves to the same
         # torch.cuda handle the live capture path already uses on ROCm.
         cudagraph_memory_estimate = 0
-        if (
-            current_platform.is_cuda_alike() or current_platform.is_xpu()
-        ) and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+        if (current_platform.is_cuda_alike() or current_platform.is_xpu()) and (
+            self.use_v2_model_runner
+            or self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+        ):
             cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
         # Respect the opt-in flag as originally designed.

@@ -136,6 +136,10 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             progress_bar_desc="Capturing multi-module MTP CUDA graphs",
         )
 
+    def supports_batch_sharded_draft_logits(self) -> bool:
+        # Every draft logits write goes through sample_draft.
+        return True
+
     @torch.inference_mode()
     def propose(
         self,
@@ -210,6 +214,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             dp_rank=self.dp_rank,
             need_eager=is_profile,
             dp_sync_state=dp_sync_state,
+            parallel_config=self.vllm_config.parallel_config,
         )
         num_tokens_across_dp = (
             batch_sync.num_tokens_across_dp if batch_sync is not None else None
