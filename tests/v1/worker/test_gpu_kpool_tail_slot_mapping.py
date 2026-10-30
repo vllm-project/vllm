@@ -47,11 +47,7 @@ def make_tail_spec():
 def test_kpool_tail_group_never_position_indexes_its_block_table():
     device = torch.device(current_platform.device_type)
     group = new_kv_cache_group(["tail"], make_tail_spec())
-    tail_width = get_block_table_width(
-        group.max_num_blocks_per_req(None, MAX_MODEL_LEN),
-        group.block_size,
-        token_alignment=group.block_table_token_alignment,
-    )
+    tail_width = group.block_table_width(None, MAX_MODEL_LEN)
     mla_width = get_block_table_width(MAX_MODEL_LEN // MLA_BLOCK_SIZE, MLA_BLOCK_SIZE)
 
     # Positions chosen against the tail row: `in_row` still lands inside
