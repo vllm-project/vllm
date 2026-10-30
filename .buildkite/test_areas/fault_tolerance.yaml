@@ -62,6 +62,7 @@ steps:
 # Keep the AMD job: its commands do not run this installation.
 - label: ':amd: (MI355) MoRI EP Healthy Baseline'
   key: amd-fault-tolerance-e2e-2xh100
+  automatic_shard: true
   timeout_in_minutes: 10
   device: mi355_2
   num_devices: 2
