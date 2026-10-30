@@ -236,6 +236,7 @@ def test_basic_cumem(register_error, monkeypatch):
     assert device_index in sync_devices
     assert_released(temp_backups)
     assert not cpu_backups(allocator, set())
+    assert backup_ptrs is not None
     released = [*backup_ptrs.values(), *data_ptrs(temp_backups).values()]
     assert sorted(unregistered) == (sorted(released) if pinned else [])
     assert bool(warnings) == (PIN_MEMORY and bool(register_error))
@@ -299,6 +300,7 @@ def test_release_kv_cache_memory_preserves_generation(full_sleep, monkeypatch):
         if full_sleep == 2:
             llm.collective_rpc("reload_weights")
         if full_sleep:
+            assert backups is not None
             state = llm.collective_rpc(backup_state)[0][0]
             assert {ptr: state[ptr] for ptr in backups} == backups
         assert llm.collective_rpc(get_mapped_bytes_by_tag)[0][0] == mapped_before
@@ -329,7 +331,7 @@ def test_sleep_with_only_weights_asleep(first_level, second_level, monkeypatch):
     def get_mapped_bytes(worker):
         return mapped_usage(get_mem_allocator_instance())
 
-    backups_by_level = {}
+    backups_by_level: dict[int, dict[int, tuple]] = {}
     for level, other_level in (
         (first_level, second_level),
         (second_level, first_level),
