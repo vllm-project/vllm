@@ -161,7 +161,7 @@ def test_manager_requires_one_lsa_team(monkeypatch, world_size, lsa_size):
     monkeypatch.setattr(
         torch.distributed, "broadcast_object_list", lambda *a, **k: None
     )
-    monkeypatch.setattr(all2all.ctypes, "CDLL", lambda name: Mock())
+    monkeypatch.setattr(all2all, "CudaRTLibrary", Mock)
     device_comm = Mock(lsa_size=lsa_size)
     calls = Mock()  # records the order of op.close and comm.destroy
     comm = calls.comm
@@ -213,7 +213,7 @@ def _unique_id_worker(rank, init_method):
         self.__dict__.update(rank=g.rank(), world_size=g.size(), cpu_group=g)
 
     All2AllManagerBase.__init__ = fake_init  # type: ignore[method-assign]
-    all2all.ctypes.CDLL = lambda name: Mock()  # type: ignore[misc]
+    all2all.CudaRTLibrary = Mock  # type: ignore[misc]
     communicator = Mock()
     communicator.get_unique_id.return_value = f"uid-of-rank-{rank}"
     communicator.init.return_value.create_dev_comm.return_value = Mock(lsa_size=2)
@@ -309,6 +309,18 @@ _MODELOPT_FP8 = {"quantization": "modelopt", "quant_cfg": {"quant_algo": "FP8"}}
 _MODELOPT_NVFP4 = {"quantization": "modelopt", "quant_cfg": {"quant_algo": "NVFP4"}}
 
 
+def _ct(strategy):
+    act = {"type": "float", "num_bits": 8, "strategy": strategy}
+    cfg = {"config_groups": {"group_0": {"input_activations": act}}}
+    return {"quantization": "compressed-tensors", "quant_cfg": cfg}
+
+
+def _quark(qscheme):
+    inputs = {"dtype": "fp8_e4m3", "qscheme": qscheme}
+    cfg = {"global_quant_config": {"input_tensors": inputs}}
+    return {"quantization": "quark", "quant_cfg": cfg}
+
+
 @pytest.mark.parametrize(
     "parallel,model,moe_backend,env,ep_v2",
     [
@@ -342,6 +354,10 @@ _MODELOPT_NVFP4 = {"quantization": "modelopt", "quant_cfg": {"quant_algo": "NVFP
         ({}, _FP8_BLOCK, "aiter", {}, True),
         ({}, _MODELOPT_FP8, "aiter", {}, False),
         ({}, _MODELOPT_NVFP4, "aiter", {}, True),
+        ({}, _ct("tensor"), "aiter", {}, False),
+        ({}, _ct("group"), "aiter", {}, True),
+        ({}, _quark("per_tensor"), "aiter", {}, False),
+        ({}, _quark("per_group"), "aiter", {}, True),
     ],
 )
 def test_mori_picks_epv2_where_supported(

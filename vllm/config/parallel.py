@@ -1361,9 +1361,20 @@ def _quantizes_activations_per_tensor(model_config: "ModelConfig") -> bool:
     quant_cfg = getattr(arch_config, "quantization_config", None)
     if not isinstance(quant_cfg, dict):
         quant_cfg = {}
-    quant_cfg = quant_cfg.get("quantization", quant_cfg)
     if method == "fp8":
         return not quant_cfg.get("weight_block_size")
     if method == "modelopt":
-        return quant_cfg.get("quant_algo") == "FP8"
+        return quant_cfg.get("quantization", quant_cfg).get("quant_algo") == "FP8"
+    if method == "compressed-tensors":
+        groups = (quant_cfg.get("config_groups") or {}).values()
+        acts = [group.get("input_activations") or {} for group in groups]
+        per_tensor = [
+            a.get("strategy") == "tensor" for a in acts if a.get("type") == "float"
+        ]
+        return any(per_tensor)
+    if method == "quark":
+        global_cfg = quant_cfg.get("global_quant_config") or {}
+        inputs = global_cfg.get("input_tensors") or {}
+        dtype = str(inputs.get("dtype", ""))
+        return inputs.get("qscheme") == "per_tensor" and dtype.startswith("fp8")
     return False

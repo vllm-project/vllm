@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import ctypes
 import os
 import threading
 from collections.abc import Iterator
@@ -14,6 +13,7 @@ import torch.distributed as dist
 import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_dp_group, get_ep_group, get_pcp_group
+from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
@@ -1108,7 +1108,7 @@ class MoriEPv2All2AllManager(All2AllManagerBase):
         # unsupported, leaves hipErrorNotSupported as the HIP last error; the
         # next torch call that checks it (an allocation) would raise it. MoRI
         # clears it itself since ROCm/mori#761, which no release has yet.
-        ctypes.CDLL("libamdhip64.so").hipGetLastError()
+        CudaRTLibrary().cudaGetLastError()
         window = _MoriEPv2Window(comm, nbytes)
         self._windows.append(window)
         return window
