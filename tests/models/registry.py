@@ -403,7 +403,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
             "hermes": "NousResearch/Hermes-3-Llama-3.1-8B",
             "fp8": "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8",
             "fp8_1b": "RedHatAI/Llama-3.2-1B-Instruct-FP8",
-            "tiny": "hmellor/tiny-random-LlamaForCausalLM",
+            "tiny": "vllm-project/tiny-random-LlamaForCausalLM",
         },
     ),
     "LLaMAForCausalLM": _HfExamplesInfo(
@@ -1926,7 +1926,7 @@ _TRANSFORMERS_BACKEND_MODELS = {
         "papluca/xlm-roberta-base-language-detection",
     ),
     "TransformersForCausalLM": _HfExamplesInfo(
-        "hmellor/Ilama-3.2-1B", trust_remote_code=True
+        "vllm-project/Ilama-3.2-1B", trust_remote_code=True
     ),
     "TransformersMultiModalForCausalLM": _HfExamplesInfo("BAAI/Emu3-Chat-hf"),
     "TransformersMoEForCausalLM": _HfExamplesInfo("allenai/OLMoE-1B-7B-0924"),

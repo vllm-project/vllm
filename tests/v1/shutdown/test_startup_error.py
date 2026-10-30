@@ -18,7 +18,7 @@ from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.platforms import current_platform
 from vllm.v1.engine.async_llm import AsyncLLM
 
-MODELS = ["hmellor/tiny-random-LlamaForCausalLM"]
+MODELS = ["vllm-project/tiny-random-LlamaForCausalLM"]
 
 
 def evil_method(self, *args, **kwargs):
