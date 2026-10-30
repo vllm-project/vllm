@@ -130,6 +130,8 @@ def _check_tail_layout(
     device: torch.device, tp_world: int, rank: int, row_sharded: bool
 ) -> None:
     transform, weight = _build_transform(device, tp_world, rank, row_sharded)
+    assert transform.norm is not None
+    norm_weight = transform.norm.weight
     runner = _tail_runner(transform, tp_world)
     group = get_tp_group().device_group
 
@@ -142,7 +144,7 @@ def _check_tail_layout(
             F.rms_norm(
                 _all_reduced(routed, group),
                 (LATENT_SIZE,),
-                transform.norm.weight,
+                norm_weight,
                 EPS,
             ),
             weight,
