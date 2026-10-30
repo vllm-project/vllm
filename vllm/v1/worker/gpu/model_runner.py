@@ -1015,26 +1015,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         dummy_input_batch = InputBatch.make_dummy(
             num_reqs, num_reqs, self.input_buffers
         )
-        if self.batch_sharder is not None:
-            # Take the sharded path, so that the all-to-all allocates its NCCL
-            # buffers before the KV cache is sized.
-            dummy_input_batch, sorted_logits_indices, _, shard_metadata = (
-                self.batch_sharder.shard_sampler_inputs(dummy_input_batch, None)
-            )
-            local_logits = self.model.compute_logits_local(
-                hidden_states[sorted_logits_indices]
-            )
-            logits = all_to_all_logits(local_logits, shard_metadata)
-            logits = logits[:, : self.vocab_size]
-            if dummy_input_batch.num_reqs == 0:
-                return
-        else:
-            logits = self.model.compute_logits(hidden_states)
 
         assert self.sampler is not None
         # Default pass: compiles the kernels the first real step uses (logits in
-        # the model dtype, no per-request processing).
-        self.sampler(logits, dummy_input_batch)
+        # the model dtype, no per-request processing) and, under batch-sharded
+        # sampling, allocates the all-to-all buffers.
+        self.sample(hidden_states, dummy_input_batch, None)
         if current_platform.is_cpu():
             # The CPU worker sizes the KV cache from process RSS, which would
             # keep the extra pass's buffers, and has no warmup OOM to prevent.
@@ -1045,7 +1031,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         for req_idx in range(num_reqs):
             self.sampler.add_request(req_idx, warmup_params)
         self.sampler.apply_staged_writes()
-        self.sampler(logits, dummy_input_batch)
+        self.sample(hidden_states, dummy_input_batch, None)
+        if self.batch_sharder is not None and num_reqs < self.batch_sharder.tp_size:
+            # sample() skipped the sampler on ranks that own no dummy request.
+            # Profile it on one local row; all ranks take this branch.
+            one_row_batch = InputBatch.make_dummy(1, 1, self.input_buffers)
+            self.sampler(hidden_states.new_zeros(1, self.vocab_size), one_row_batch)
 
     @torch.inference_mode()
     def _dummy_pooler_run(self, hidden_states: torch.Tensor) -> None:
