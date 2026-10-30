@@ -156,6 +156,7 @@ from vllm.v1.worker.gpu.sample.logits_processor import build_custom_logits_proce
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.prompt_logprob import PromptLogprobsWorker
 from vllm.v1.worker.gpu.sample.sampler import Sampler
+from vllm.v1.worker.gpu.sample.screened_head import ScreenedLMHead
 from vllm.v1.worker.gpu.shutdown import free_before_shutdown
 from vllm.v1.worker.gpu.spec_decode import init_speculator
 from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
@@ -196,6 +197,8 @@ logger = init_logger(__name__)
 
 
 class GPUModelRunner(LoRAModelRunnerMixin):
+    screened_head_cls: type[ScreenedLMHead] = ScreenedLMHead
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -341,6 +344,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.sampler: Sampler | None = None
         self.rejection_sampler: RejectionSampler | None = None
         self.batch_sharder: BatchSharder | None = None
+        self.screened_head: ScreenedLMHead | None = None
         self.prompt_logprobs_worker: PromptLogprobsWorker | None = None
         self.structured_outputs_worker: StructuredOutputsWorker | None = None
         self.cudagraph_manager: ModelCudaGraphManager | None = None
@@ -535,6 +539,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         self.vllm_config.watermark_config
                     ),
                 )
+            if self.model_config.screened_lm_head:
+                self.screened_head = self.screened_head_cls.from_model(
+                    self.model,
+                    self.sampler,
+                    self.vocab_size,
+                    self.max_num_reqs * self.decode_query_len,
+                )
             self.prompt_logprobs_worker = PromptLogprobsWorker(
                 self.max_num_reqs,
                 self.device,
@@ -613,6 +624,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.reset_lora_state()
         self.reset_encoder_cache()
         self.reset_mm_cache()
+        if self.screened_head is not None:
+            self.screened_head.refresh()
 
     @functools.cached_property
     def main_stream(self) -> torch.cuda.Stream:
@@ -1656,6 +1669,28 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         return block_tables, slot_mappings
 
+    def _screened_logits(
+        self,
+        sample_hidden_states: torch.Tensor,
+        input_batch: InputBatch,
+        grammar_output: GrammarOutput | None,
+    ) -> torch.Tensor | None:
+        """Logits from the screened lm_head, or None when the batch needs the
+        full lm_head."""
+        # Rejection sampling reads the draft rows the screen may drop.
+        if (
+            self.screened_head is None
+            or grammar_output is not None
+            or input_batch.num_draft_tokens > 0
+        ):
+            return None
+        top_k = self.screened_head.required_top_k(
+            input_batch.idx_mapping_np, sample_hidden_states.shape[0]
+        )
+        if top_k is None:
+            return None
+        return self.screened_head(sample_hidden_states, top_k)
+
     def sample(
         self,
         hidden_states: torch.Tensor,
@@ -1679,7 +1714,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logits = logits[:, : self.vocab_size]
         else:
             sample_hidden_states = hidden_states[input_batch.logits_indices]
-            logits = self.model.compute_logits(sample_hidden_states)
+            logits = self._screened_logits(
+                sample_hidden_states, input_batch, grammar_output
+            )
+            if logits is None:
+                logits = self.model.compute_logits(sample_hidden_states)
 
         # A diffusion prefill has no logit rows even when a bitmask row
         # arrived for it.
