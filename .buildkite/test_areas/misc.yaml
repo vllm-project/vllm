@@ -40,6 +40,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 18GB) V1 Logits + Oracle"
   key: v1-logits-oracle
+  automatic_shard: true
   timeout_in_minutes: 45
   device: h200_18gb
   source_file_dependencies: *v1-sample-logits-deps
@@ -55,6 +56,7 @@ steps:
     amd:
       label: ":amd: (MI355 DPX) V1 Logits + Oracle"
       dind: false
+      automatic_shard: true
       device: mi355_dpx
       timeout_in_minutes: 70
       depends_on:
@@ -121,6 +123,7 @@ steps:
     amd:
       label: ":amd: (MI355 DPX) V1 Executor + Worker"
       dind: false
+      automatic_shard: true
       device: mi355_dpx
       timeout_in_minutes: 60
       depends_on:
@@ -566,6 +569,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Async Engine, Inputs, Utils, Worker"
   device: h200_35gb
   key: async-engine-inputs-utils-worker
+  automatic_shard: true
   timeout_in_minutes: 25
   source_file_dependencies:
   - vllm/assets/
@@ -593,6 +597,7 @@ steps:
     amd:
       label: ":amd: (MI355 DPX) Async Engine, Inputs, Utils, Worker"
       dind: false
+      automatic_shard: true
       device: mi355_dpx
       timeout_in_minutes: 50
       depends_on:
@@ -950,6 +955,7 @@ steps:
     amd:
       label: ":amd: (MI355) Batch Invariance"
       dind: false
+      automatic_shard: true
       device: mi355_1
       timeout_in_minutes: 60
       depends_on:

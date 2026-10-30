@@ -979,6 +979,7 @@ steps:
 
 - label: ":nvidia: (H100) FusedMoE Layer Kernels"
   key: kernels-fusedmoe-layer-test-2-h100s
+  automatic_shard: true
   timeout_in_minutes: 30
   device: h100
   num_devices: 2
@@ -996,6 +997,7 @@ steps:
     amd:
       label: ":amd: (MI355) FusedMoE Layer Kernels"
       dind: false
+      automatic_shard: true
       device: mi355_2
       timeout_in_minutes: 35
       working_dir: "/vllm-workspace/tests"
