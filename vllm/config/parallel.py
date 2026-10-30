@@ -24,7 +24,6 @@ if TYPE_CHECKING:
     from ray.runtime_env import RuntimeEnv
     from ray.util.placement_group import PlacementGroup
 
-    from vllm.config.fault_tolerance import FaultToleranceConfig
     from vllm.v1.executor import Executor
 else:
     RuntimeEnv = Any
@@ -40,7 +39,7 @@ DataParallelBackend = Literal["ray", "mp"]
 EPLBPolicyOption = Literal["default"]
 DCPCommBackend = Literal["ag_rs", "a2a"]
 EPLBCommunicatorBackend = Literal[
-    "torch_nccl", "torch_gloo", "torch_xccl", "nixl", "pynccl"
+    "torch_nccl", "torch_gloo", "torch_xccl", "nixl", "pynccl", "symm_mem"
 ]
 All2AllBackend = Literal[
     "naive",
@@ -102,6 +101,8 @@ class EPLBConfig:
     - "torch_xccl": Use torch.distributed XCCL device P2P on XPU
     - "nixl": Use NIXL with staged send/recv buffers
     - "pynccl": Use PyNccl send/recv
+    - "symm_mem": Push expert rows over CUDA symmetric memory; needs all EP
+      ranks in one NVLink domain (MNNVL across nodes)
     - None: Auto-select backend ("torch_xccl" on XPU, prefers "nixl" 
       on CUDA, falls back to "torch_gloo")
     """
@@ -326,15 +327,31 @@ class ParallelConfig:
     nnodes: int = Field(default=1, ge=1)
     """num of nodes for multi-node distributed
     inference when distributed_executor_backend is mp."""
-    numa_bind: bool = False
+    numa_bind: bool | None = None
     """Enable NUMA binding for GPU worker subprocesses.
 
-    By default, workers are pinned to their GPU's NUMA-local CPUs and
-    memory; on PCT-capable Xeons they also auto-bind to the SKU's
-    PCT priority cores.
+    Workers are pinned to their GPU's NUMA-local CPUs; on PCT-capable
+    Xeons they also auto-bind to the SKU's PCT priority cores.
+
+    If None (default), vLLM binds only when the environment supports it
+    (multiple NUMA nodes, `numactl` installed, unrestricted CPU affinity,
+    a default NUMA memory policy, and the `spawn` start method with an
+    mp/uni executor and mp DP, including PCP).
+    Ray, external launchers and device-ID remapping are excluded
+    from automatic binding. Automatic mode prefers GPU-local memory but
+    permits allocations on other nodes. Unsupported environments start
+    unbound. With `True`, strict memory binding may override an existing
+    policy, and a missing `numactl` or undetectable GPU-to-NUMA topology is
+    a startup error; `False` disables binding.
     """
+    _numa_bind_auto: bool = Field(default=False, repr=False)
+    """Internal launch decision: use soft memory preference in spawned children."""
     numa_bind_nodes: list[int] | None = None
     """NUMA node to bind each GPU worker to.
+
+    Setting this list implies explicit `numa_bind=True` and requests strict
+    `--membind`, not automatic soft memory preference. It cannot be combined
+    with `numa_bind=False`.
 
     Specify one NUMA node per visible GPU, for example `[0, 0, 1, 1]`
     for a 4-GPU system with GPUs 0-1 on NUMA node 0 and GPUs 2-3 on
@@ -344,6 +361,10 @@ class ParallelConfig:
     """
     numa_bind_cpus: list[str] | None = None
     """Optional CPU lists to bind each GPU worker to.
+
+    Setting this list implies explicit `numa_bind=True` and requests strict
+    `--membind`, not CPU-only binding or automatic soft memory preference.
+    It cannot be combined with `numa_bind=False`.
 
     Specify one CPU list per visible GPU, for example
     `["0-3", "4-7", "8-11", "12-15"]`. When set, vLLM uses
@@ -465,7 +486,7 @@ class ParallelConfig:
 
     enable_fault_tolerance: bool = False
     """Enable fault tolerance for detailed error recovery,
-    such as scaling down fault DPEngineCore.
+    such as scaling down faulty DPEngineCores.
     """
 
     fault_tolerance_config: FaultToleranceConfig = Field(
@@ -553,12 +574,12 @@ class ParallelConfig:
                 "data_parallel_external_lb can only be set when data_parallel_size > 1"
             )
 
-        if not self.numa_bind and (
-            self.numa_bind_nodes is not None or self.numa_bind_cpus is not None
-        ):
-            raise ValueError(
-                "numa_bind_nodes and numa_bind_cpus require numa_bind=True."
-            )
+        if self.numa_bind_nodes is not None or self.numa_bind_cpus is not None:
+            if self.numa_bind is False:
+                raise ValueError(
+                    "NUMA binding lists cannot be combined with numa_bind=False."
+                )
+            self.numa_bind = True
 
         if self.enable_eplb:
             if not current_platform.is_cuda_alike() and not current_platform.is_xpu():
@@ -661,6 +682,18 @@ class ParallelConfig:
         seconds = self.cpu_distributed_timeout_seconds
         return timedelta(seconds=seconds) if seconds is not None else None
 
+    @property
+    def effective_cpu_distributed_timeout(self) -> timedelta | None:
+        """The timeout cpu groups operate with right now: the configured
+        value, except under FT before steady state, where group timeouts
+        are deferred because uneven rank startup would trip them."""
+        if self.enable_fault_tolerance:
+            from vllm.distributed.utils import steady_state_entered
+
+            if not steady_state_entered():
+                return None
+        return self.cpu_distributed_timeout
+
     def get_next_dp_init_port(self) -> int:
         """We might need to initialize process groups in multiple
         processes that is related to data parallelism,
@@ -728,6 +761,10 @@ class ParallelConfig:
             stateless_init_torch_distributed_process_group,
         )
 
+        # Under FT, startup-created groups get no configured timeout: uneven
+        # rank startup would trip it. The sentinel applies it after startup.
+        timeout = self.effective_cpu_distributed_timeout
+
         max_retries = 5
         last_exc: Exception | None = None
         for _ in range(max_retries):
@@ -742,7 +779,7 @@ class ParallelConfig:
                     backend="gloo",
                     return_store=return_store,
                     listen_socket=listen_socket,
-                    timeout=self.cpu_distributed_timeout,
+                    timeout=timeout,
                 )
             except DistNetworkError as e:
                 # We only want to retry when the root cause is EADDRINUSE.
@@ -949,6 +986,7 @@ class ParallelConfig:
             # NUMA node in numa_bind_nodes (see vllm/utils/numa_utils.py
             # `_get_numa_node`), which would otherwise diverge the DP hash.
             "numa_bind",
+            "_numa_bind_auto",
             "numa_bind_nodes",
             "numa_bind_cpus",
             "assigned_physical_gpu_ids",
