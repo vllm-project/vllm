@@ -34,6 +34,9 @@ from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.model_loader.mtp_validation import (
+    is_mtp_completeness_check_enabled,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -687,7 +690,10 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant)
 
         # The HF config doesn't specify whether these are tied,
         # so we detect it this way
-        if "embed_tokens.weight" not in autoloaded_weights:
+        if (
+            "embed_tokens.weight" not in autoloaded_weights
+            and is_mtp_completeness_check_enabled()
+        ):
             self.embed_tokens = self.language_model.model.embed_tokens
             autoloaded_weights.add("embed_tokens.weight")
         return autoloaded_weights

@@ -618,6 +618,8 @@ class DFlash2BeamForCausalLM(nn.Module):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loaded = {f"model.{name}" for name in self.model.load_weights(weights)}
-        self.model.build_context_kv_weights()
         # Aliased to the target's after loading.
         return loaded | {"model.embed_tokens.weight", "lm_head.weight"}
+
+    def process_weights_after_loading(self) -> None:
+        self.model.build_context_kv_weights()

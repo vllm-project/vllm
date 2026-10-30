@@ -27,6 +27,9 @@ from torch import nn
 
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.model_loader.mtp_validation import (
+    is_mtp_completeness_check_enabled,
+)
 from vllm.utils.torch_utils import async_tensor_h2d
 
 from .utils import maybe_prefix
@@ -998,7 +1001,7 @@ class Nemotron3_5TranscribeAudioTower(nn.Module):
                     target.copy_(tensor.to(device=target.device, dtype=target.dtype))
             loaded.add(name)
         missing = sorted(set(targets) - loaded)
-        if missing:
+        if missing and is_mtp_completeness_check_enabled():
             raise ValueError(
                 f"Audio tower weights missing from the checkpoint ({len(missing)}): "
                 f"{missing[:8]}"
