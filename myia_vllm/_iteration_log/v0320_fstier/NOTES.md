@@ -4774,3 +4774,21 @@ Il reste donc **90 s fixes** au primaire, quelle que soit la taille du statut.
 **Ce qu'un statut complet demande.** Mesure directe à 12:38Z, en non-streaming avec `max_tokens 7200` : **1 500 tokens en 64,3 s, soit 23,3 tok/s par flux** (préremplissage inclus), à 3,91 caractères/token. Un statut proche du plafond (15 360 o) fait ~3 800 tokens, soit **~165 s**. En 90 s, le primaire ne peut produire que ~7-8 Ko. Le résumé, plus court, passe ; le statut tombe au repli.
 
 La réponse faite à hermes (« famille file d'attente ») est corrigée. La mesure est versée à roo-extensions#4434 (c.6523091171). **Aucun changement moteur** : le levier est dans l'outil (budget proportionnel, streaming, statut plus court), instruit aux volets 4-5 de #4434.
+
+## 30/10 14:1xZ — Cycle de surveillance : moteur sain, un scanner externe refusé, un 400 window+1 après le reboot
+
+**Prod** (14:11Z, 2 h 10 après le boot) : health 200 en 4,6 ms, RC=0, 3/3 Up, OOM 0. VRAM **22 697 / 21 674 / 45 MiB** (sous le seuil de 23 000). `/dev/shm` 51 %. Commit hôte **62,6 %**. Préemptions **0**. KV 68 % avec 5 requêtes en cours. Cumuls depuis le boot : **GPU 87,5 % · tier 16,0 % · combiné 89,5 %**. Watchdog : 4 `WEDGE fail 1/2` (12:39, 13:43, 13:45, 13:48Z), jamais 2/2, compteurs en progression, donc pas de redémarrage.
+
+**Trafic** (128 min) : 915 requêtes, ~7,1 req/min. Statuts : 878 × 200, 36 × 401, 1 × 400. Machines attribuées par le hub : po-2023 136, ai-01 40, po-2024 21, po-2027 3.
+
+**400 window+1 après le reboot.** À **12:55:51Z**, po-2024 envoie via le hub (`swift-1.5-27b`) un corps de **971 Ko** : rejet frontal, sans préremplissage. C'est la première occurrence depuis le reboot ; po-2024 reste la principale source (117 sur 159 le 29/10).
+
+**Scanner externe.** `23.151.8.10`, UA `ai-endpoint-hunter/1.0 (bounded public research)` : **5 × 401** sur `/v1/models` par l'hôte public `api.medium…`, entre 13:24:41 et 13:24:43Z, chaque fois avec une clé différente. C'est sa **première apparition** dans le journal, ouvert depuis le 23/10. Aucun 200 : la garde de clé a tenu. Ce n'est pas une alerte au sens du §5, qui vise une IP inconnue **avec** des 200.
+
+**Clés mortes testées en local après le reboot.**
+- 12:51-12:53Z : `curl` 8.22.0 vers l'IP LAN de ai-01 essaie 4 clés. Parmi elles, **la clé d'embeddings de `roo-extensions/.env`** (`50829b227a2a`).
+- 13:00:25Z : une session PowerShell 7.6.9 locale essaie `5cb29436afca` (Q49) et `2703beff17f8`.
+
+Tout est en 401, sur `/v1/models` (lecture seule). Q49 est complétée au registre ; la clé reste introuvable dans 183 fichiers de configuration locaux.
+
+**Condensation.** Le statut tombe toujours au repli cloud après 90 s (`LLM status update timeout` à 14:11:49Z, puis `pass deadline reached the cloud reserve`), comme mesuré à 12:4xZ. Suivi : roo-extensions#4434.
