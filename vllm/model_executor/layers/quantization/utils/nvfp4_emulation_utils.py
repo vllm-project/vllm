@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Iterator
 from types import SimpleNamespace
 
 import torch
@@ -16,6 +17,9 @@ __all__ = [
     "nvfp4_gathered_bias",
     "ref_nvfp4_quant",
 ]
+
+# Target size of the dequantized expert chunks yielded for requantization.
+_DEQUANT_CHUNK_BYTES = 1 << 30
 
 FLOAT4_E2M1_MAX = scalar_types.float4_e2m1f.max()
 FLOAT4_E2M1_MAX_RECIPROCAL = 1 / FLOAT4_E2M1_MAX
@@ -630,7 +634,7 @@ def dequantize_to_dtype(
     return out.to(dtype)
 
 
-def dequantize_nvfp4_moe_weights(
+def _dequantize_nvfp4_moe_experts(
     w13_weight_packed: torch.Tensor,
     w13_weight_scale: torch.Tensor,
     w13_weight_global_scale: torch.Tensor,
@@ -638,16 +642,9 @@ def dequantize_nvfp4_moe_weights(
     w2_weight_scale: torch.Tensor,
     w2_weight_global_scale: torch.Tensor,
     dtype: torch.dtype,
-    group_size: int = 16,
-    *,
-    invert_global_scales: bool = True,
+    group_size: int,
+    invert_global_scales: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Materialize serialized NVFP4 MoE weights for requantization.
-
-    Compressed-tensors stores global encode scales, while ModelOpt stores
-    ``weight_scale_2`` as the corresponding decode multiplier. Set
-    ``invert_global_scales`` according to the source checkpoint convention.
-    """
     if invert_global_scales:
         w13_weight_global_scale = 1.0 / w13_weight_global_scale
         w2_weight_global_scale = 1.0 / w2_weight_global_scale
@@ -680,6 +677,54 @@ def dequantize_nvfp4_moe_weights(
         swizzle=False,
     )
     return w13, w2
+
+
+@torch.no_grad()
+def dequantize_nvfp4_moe_weights(
+    w13_weight_packed: torch.Tensor,
+    w13_weight_scale: torch.Tensor,
+    w13_weight_global_scale: torch.Tensor,
+    w2_weight_packed: torch.Tensor,
+    w2_weight_scale: torch.Tensor,
+    w2_weight_global_scale: torch.Tensor,
+    dtype: torch.dtype,
+    group_size: int = 16,
+    *,
+    invert_global_scales: bool = True,
+) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
+    """Dequantize serialized NVFP4 MoE weights for requantization.
+
+    Compressed-tensors stores global encode scales, while ModelOpt stores
+    ``weight_scale_2`` as the corresponding decode multiplier. Set
+    ``invert_global_scales`` according to the source checkpoint convention.
+
+    Returns:
+        An iterator of ``(experts, w13, w2)`` over groups of experts, so that
+        the dequantized staging tensors stay around ``_DEQUANT_CHUNK_BYTES``.
+
+    """
+    num_experts = w13_weight_packed.shape[0]
+    # Two fp4 values per packed byte.
+    expert_bytes = (
+        dtype.itemsize
+        * 2
+        * (w13_weight_packed[0].numel() + w2_weight_packed[0].numel())
+    )
+    experts_per_chunk = max(1, _DEQUANT_CHUNK_BYTES // expert_bytes)
+    for start in range(0, num_experts, experts_per_chunk):
+        experts = slice(start, min(start + experts_per_chunk, num_experts))
+        w13, w2 = _dequantize_nvfp4_moe_experts(
+            w13_weight_packed[experts],
+            w13_weight_scale[experts],
+            w13_weight_global_scale[experts],
+            w2_weight_packed[experts],
+            w2_weight_scale[experts],
+            w2_weight_global_scale[experts],
+            dtype,
+            group_size,
+            invert_global_scales,
+        )
+        yield experts, w13, w2
 
 
 def get_reciprocal(x):

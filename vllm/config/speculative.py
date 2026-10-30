@@ -3,6 +3,7 @@
 
 import copy
 import functools
+import os
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Literal, Self, get_args
 
@@ -16,6 +17,7 @@ from vllm.config.parallel import ParallelConfig
 from vllm.config.utils import config, replace
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_hf_text_config, iter_rope_parameters
+from vllm.transformers_utils.repo_utils import get_subfolder_path
 from vllm.utils.hashing import safe_hash
 from vllm.utils.import_utils import LazyLoader, has_arctic_inference
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -112,6 +114,31 @@ def _rope_only_sizes_cache(hf_config: PreTrainedConfig) -> bool:
         params.get("rope_type", "default") in _CACHE_ONLY_ROPE_TYPES
         for params in iter_rope_parameters(hf_config)
     )
+
+
+_MINIMAX_M3_MODEL_TYPES = ("minimax_m3_vl", "minimax_m3_text")
+_MINIMAX_M3_DSPARK_SUBFOLDER = "dspark"
+
+
+def _get_minimax_m3_dspark_draft(
+    target_model_config: ModelConfig, cache_dir: str | None
+) -> str:
+    """MiniMax-M3 checkpoints ship the DSpark draft as a standalone checkpoint
+    in their `dspark/` subfolder."""
+    draft = get_subfolder_path(
+        target_model_config.model,
+        _MINIMAX_M3_DSPARK_SUBFOLDER,
+        revision=target_model_config.revision,
+        cache_dir=cache_dir,
+    )
+    if not os.path.isfile(os.path.join(draft, "config.json")):
+        raise ValueError(
+            f"MiniMax-M3 DSpark found no draft checkpoint in the "
+            f"'{_MINIMAX_M3_DSPARK_SUBFOLDER}/' subfolder of "
+            f"{target_model_config.model}. Set speculative_config.model to the "
+            "draft checkpoint."
+        )
+    return draft
 
 
 def _is_qwen3_omni_target(model_config: ModelConfig) -> bool:
@@ -1134,7 +1161,25 @@ class SpeculativeConfig:
                 text_config.num_kv_shared_layers = 0
             hf_config.update({"n_predict": 1, "architectures": ["Gemma4MTPModel"]})
 
-        if (
+        if initial_architecture == "DSparkMiniMaxDraftModel":
+            quantization_config = getattr(hf_config, "quantization_config", None)
+            hf_config = getattr(hf_config, "text_config", hf_config)
+            if (
+                quantization_config is not None
+                and getattr(hf_config, "quantization_config", None) is None
+            ):
+                hf_config.update({"quantization_config": quantization_config})
+            dflash_config = dict(getattr(hf_config, "dflash_config", None) or {})
+            dflash_config.setdefault("causal", False)
+            hf_config.model_type = "minimax_m3_dspark"
+            hf_config.update(
+                {
+                    "architectures": ["DSparkMiniMaxDraftModel"],
+                    "dflash_config": dflash_config,
+                    "markov_rank": hf_config.dspark_markov_rank,
+                }
+            )
+        elif (
             hf_config.model_type == "minimax_m3_vl"
             or initial_architecture == "MiniMaxM3SparseForConditionalGeneration"
         ):
@@ -1269,7 +1314,11 @@ class SpeculativeConfig:
             )
             self.method = "mtp"
 
-        if self.model is None and self.num_speculative_tokens is not None:
+        # DSpark drafts carry their own width (block size), so the default
+        # draft is resolved even without num_speculative_tokens.
+        if self.model is None and (
+            self.num_speculative_tokens is not None or self.method == "dspark"
+        ):
             if self.method == "mtp":
                 if self.target_model_config is None:
                     raise ValueError("target_model_config must be present for mtp")
@@ -1287,12 +1336,24 @@ class SpeculativeConfig:
                 if not self.quantization:
                     self.quantization = self.target_model_config.quantization
             elif self.method == "dspark":
-                # DeepSeek DSpark can ship the weights inside the target checkpoint
                 if self.target_model_config is None:
                     raise ValueError("target_model_config must be present for dspark")
-                self.model = self.target_model_config.model
-                if not self.quantization:
-                    self.quantization = self.target_model_config.quantization
+                if (
+                    self.target_model_config.hf_config.model_type
+                    in _MINIMAX_M3_MODEL_TYPES
+                ):
+                    self.model = _get_minimax_m3_dspark_draft(
+                        self.target_model_config,
+                        self.draft_load_config.download_dir
+                        if self.draft_load_config
+                        else None,
+                    )
+                else:
+                    # DeepSeek DSpark can ship the weights inside the target
+                    # checkpoint
+                    self.model = self.target_model_config.model
+                    if not self.quantization:
+                        self.quantization = self.target_model_config.quantization
             elif self.method in ("ngram", "[ngram]"):
                 self.model = "ngram"
             elif self.method == "ngram_gpu":
@@ -1568,6 +1629,8 @@ class SpeculativeConfig:
                     not in self.draft_model_config.architectures
                     and "Gemma4DSparkModel" not in self.draft_model_config.architectures
                     and "K3DSparkModel" not in self.draft_model_config.architectures
+                    and "DSparkMiniMaxDraftModel"
+                    not in self.draft_model_config.architectures
                 ):
                     # DeepSeek-V4(.1) DSpark reuses the full target config
                     # and its weights ship in the target checkpoint.
