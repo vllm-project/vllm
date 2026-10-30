@@ -9,6 +9,7 @@ from torch import nn
 
 from vllm.models.inkling.amd.moe import InklingMoE
 from vllm.models.inkling.common.weights import write_loader
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 
 def _fake_moe() -> tuple[InklingMoE, SimpleNamespace]:
@@ -69,3 +70,18 @@ def test_unflattens_quark_scales_and_preserves_scale_padding():
     assert torch.all(routed.w13_weight_scale[:, 7] == 1)
     torch.testing.assert_close(routed.w2_weight_scale[:, :, :2], w2_scale[:, :, 2:4])
     assert torch.all(routed.w2_weight_scale[:, :, 2] == 1)
+
+
+def test_input_amax_scale_is_float32_under_bf16_default_dtype():
+    moe, routed = _fake_moe()
+    routed.w13_input_scale = nn.Parameter(torch.empty(4, 2), False)
+    routed.w13_input_scale.weight_loader = write_loader
+    amax = 4.375
+
+    # weights load under the model's default dtype; the fp32 scale must not
+    # round through it
+    with set_default_torch_dtype(torch.bfloat16):
+        moe.load_expert_weight("experts.w13_weight.input_amax", torch.tensor([amax]))
+
+    expected = torch.full((4, 2), amax / (448.0 * 6.0), dtype=torch.float32)
+    torch.testing.assert_close(routed.w13_input_scale.data, expected, rtol=0, atol=0)

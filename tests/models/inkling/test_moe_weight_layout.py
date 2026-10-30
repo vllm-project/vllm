@@ -164,7 +164,7 @@ def test_moe_loads_calibrated_input_scale(projection: str, amax: float) -> None:
 
     scale = getattr(experts, f"{projection}_input_scale")
     expected = torch.full_like(scale, amax / (448.0 * 6.0))
-    torch.testing.assert_close(scale, expected)
+    torch.testing.assert_close(scale, expected, rtol=0, atol=0)
     assert loaded == [f"experts.routed_experts.{projection}_input_scale"]
 
 
