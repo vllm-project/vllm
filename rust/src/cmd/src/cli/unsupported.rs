@@ -374,10 +374,6 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub max_num_queued_tokens: Option<Unsupported>,
 
-    /// Structured outputs configuration.
-    #[arg(long)]
-    pub structured_outputs_config: Option<Noop>,
-
     /// Log aggregate rather than per-engine statistics when using data
     /// parallelism.
     #[arg(long, default_missing_value = "true", num_args = 0..=1)]
@@ -465,27 +461,6 @@ pub struct ServerUnsupportedArgs {
         num_args = 0..=1
     )]
     pub enable_force_include_usage: Option<Unsupported>,
-
-    /// If set to True, log model outputs (generations).
-    /// Requires `--enable-log-requests`. As with `--enable-log-requests`,
-    /// information is only logged at INFO level at maximum.
-    #[arg(
-        long,
-        visible_alias = "no-enable-log-outputs",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub enable_log_outputs: Option<Unsupported>,
-
-    /// If set to False, output deltas will not be logged. Relevant only if
-    /// --enable-log-outputs is set.
-    #[arg(
-        long,
-        visible_alias = "no-enable-log-deltas",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub enable_log_deltas: Option<Unsupported>,
 
     /// If set to True, log the stack trace of error responses
     #[arg(
