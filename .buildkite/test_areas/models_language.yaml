@@ -4,7 +4,6 @@ depends_on:
 steps:
 - label: ":nvidia: (H200 MIG 18GB) Language Models (Standard)"
   key: language-models-tests-standard
-  automatic_shard: true
   timeout_in_minutes: 30
   device: h200_18gb
   source_file_dependencies:
@@ -19,7 +18,6 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Language Models (Standard)"
-      automatic_shard: true
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 60
@@ -29,7 +27,6 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Language Models (Extra Standard)"
   device: h200_35gb
   key: language-models-tests-extra-standard
-  automatic_shard: true
   timeout_in_minutes: 40
   source_file_dependencies:
   - vllm/model_executor/models/
@@ -44,7 +41,6 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Language Models (Extra Standard)"
-      automatic_shard: true
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 40
@@ -64,6 +60,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Language Models (Hybrid) Shard %N"
   device: h200_35gb
   key: language-models-tests-hybrid
+  automatic_shard: false  # builds mamba-ssm from source, which every shard would repeat
   timeout_in_minutes: 65
   env:
     # GitHub intermittently rejects HTTP/2 upload-pack requests from the H200
@@ -102,6 +99,7 @@ steps:
 # correctness test on L4 until its H200 output matches the Transformers reference.
 - label: ":nvidia: (L4) Granite Language Model Compatibility"
   key: language-models-tests-granite-l4-compatibility
+  automatic_shard: false  # builds mamba-ssm from source, which every shard would repeat
   device: l4
   num_devices: 1
   timeout_in_minutes: 65
@@ -140,6 +138,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) [Nightly] Language Models (Extended Generation)"
   device: h200_35gb
   key: language-models-test-extended-generation
+  automatic_shard: false  # builds mamba-ssm from source, which every shard would repeat
   timeout_in_minutes: 80
   optional: true
   source_file_dependencies:
@@ -207,7 +206,6 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) [Nightly] Language Models (Extended Pooling)"
   device: h200_35gb
   key: language-models-test-extended-pooling
-  automatic_shard: true
   timeout_in_minutes: 120
   optional: true
   source_file_dependencies:
@@ -221,6 +219,7 @@ steps:
     - pytest -v -s models/language/pooling -m 'not core_model' --timeout=900 --timeout-method=thread
   mirror:
     amd:
+      automatic_shard: false  # keeps its fixed split until its own enrollment PR merges
       parallelism: 4
       commands:
         - "pytest -v -s models/language/pooling -m 'not core_model' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB"
@@ -233,7 +232,6 @@ steps:
 
 - label: ":nvidia: (H200 MIG 35GB) [Nightly] Language Models (MTEB)"
   key: language-models-test-mteb
-  automatic_shard: true
   timeout_in_minutes: 68
   device: h200_35gb
   optional: true
@@ -246,7 +244,6 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI250) Language Models (MTEB)"
-      automatic_shard: true
       dind: false
       device: mi250_1
       timeout_in_minutes: 60

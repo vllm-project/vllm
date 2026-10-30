@@ -29,7 +29,6 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Basic Models (Extra Initialization)"
   device: h200_35gb
   key: basic-models-tests-extra-initialization
-  automatic_shard: true
   timeout_in_minutes: 30
   source_file_dependencies:
   - vllm/model_executor/models/
@@ -43,7 +42,6 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Basic Models (Extra Initialization)"
-      automatic_shard: true
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 60
@@ -61,7 +59,6 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Basic Models (Other)"
   device: h200_35gb
   key: basic-models-tests-other
-  automatic_shard: true
   timeout_in_minutes: 38
   source_file_dependencies:
   - vllm/
@@ -101,7 +98,6 @@ steps:
     amd:
       label: ":amd: (MI355) Basic Models (Other)"
       dind: false
-      automatic_shard: true
       device: mi355_1
       timeout_in_minutes: 65
       depends_on:
@@ -250,7 +246,6 @@ steps:
 #   key: kimi-k3-prefix-cache-4xb200
 #   # Nightly only: 4-GPU B200 pods wait hours behind smaller jobs on per-PR runs.
 #   optional: true
-#   automatic_shard: true
 #   timeout_in_minutes: 75
 #   device: b200-k8s
 #   num_devices: 4
@@ -370,6 +365,7 @@ steps:
 
 - label: ":computer: (CPU) Qwen4 Exp"
   key: qwen4-exp-unit-tests-cpu
+  automatic_shard: false  # CPU step: held out until its owners agree; main has no test timings for it
   depends_on:
   - image-build-cpu
   timeout_in_minutes: 20
@@ -387,6 +383,7 @@ steps:
 
 - label: ":computer: (CPU) Basic Models Other"
   key: basic-models-test-other-cpu
+  automatic_shard: false  # CPU step: held out until its owners agree; main has no test timings for it
   depends_on:
   - image-build-cpu
   timeout_in_minutes: 30
@@ -517,6 +514,7 @@ steps:
 
 - label: ":nvidia: (4xB200) DeepSeek-V4.1 Specialized Decode"
   key: dsv41-nvidia-specialized-decode-4xb200
+  automatic_shard: false  # fails on main: enrollment waits until it passes
   # Nightly only: 4-GPU B200 pods wait hours behind smaller jobs on per-PR runs.
   optional: true
   timeout_in_minutes: 40

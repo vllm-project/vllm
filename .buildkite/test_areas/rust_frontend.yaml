@@ -4,7 +4,6 @@ depends_on:
 steps:
 - label: ":nvidia: (H200 MIG 18GB) Rust Frontend OpenAI Coverage"
   key: rust-frontend-openai-coverage
-  automatic_shard: true
   timeout_in_minutes: 50
   device: h200_18gb
   working_dir: "/vllm-workspace/tests"
@@ -63,7 +62,6 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Rust Frontend OpenAI Coverage"
-      automatic_shard: true
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 55
@@ -96,6 +94,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 18GB) Rust Frontend Serve/Admin Coverage"
   key: rust-frontend-serve-admin-coverage
+  automatic_shard: false  # its command's PYTHONPATH= would hide the sharding plugin, until the plugin moves to site-packages
   timeout_in_minutes: 45
   device: h200_18gb
   working_dir: "/vllm-workspace/tests"

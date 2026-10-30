@@ -26,7 +26,6 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Entrypoints Unit"
   device: h200_35gb
   key: entrypoints-unit-tests
-  automatic_shard: true
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -43,7 +42,6 @@ steps:
     amd:
       label: ":amd: (MI355 DPX) Entrypoints Unit"
       dind: false
-      automatic_shard: true
       device: mi355_dpx
       timeout_in_minutes: 50
       depends_on:
@@ -54,7 +52,6 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (LLM)"
   device: h200_35gb
   key: entrypoints-integration-llm
-  automatic_shard: true
   timeout_in_minutes: 60
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -74,7 +71,6 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Entrypoints Integration (LLM)"
-      automatic_shard: true
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 90
@@ -83,6 +79,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (API Server) %N"
   key: entrypoints-integration-api-server
+  automatic_shard: false  # its command's PYTHONPATH= would hide the sharding plugin, until the plugin moves to site-packages
   device: h200_35gb
   timeout_in_minutes: 75
   parallelism: 4
@@ -144,7 +141,6 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (OpenAI API chat_completion)"
   device: h200_35gb
   key: entrypoints-integration-api-server-openai-chat_completion
-  automatic_shard: true
   timeout_in_minutes: 83
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -156,7 +152,6 @@ steps:
   - pytest -v -s entrypoints/openai/chat_completion
   mirror:
     amd:
-      automatic_shard: true
       label: ":amd: (MI355 DPX) Entrypoints Integration (OpenAI API chat_completion)"
       dind: false
       device: mi355_dpx
@@ -167,7 +162,6 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (API Server Generate)"
   device: h200_35gb
   key: entrypoints-integration-api-server-generate
-  automatic_shard: true
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -186,7 +180,6 @@ steps:
   - pytest -v -s entrypoints/cohere
   mirror:
     amd:
-      automatic_shard: true
       label: ":amd: (MI355 DPX) Entrypoints Integration (API Server Generate)"
       dind: false
       device: mi355_dpx
@@ -197,7 +190,6 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (Responses API)"
   device: h200_35gb
   key: entrypoints-integration-responses-api
-  automatic_shard: true
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -218,7 +210,6 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (Speech to Text)"
   device: h200_35gb
   key: entrypoints-integration-speech_to_text
-  automatic_shard: true
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -232,7 +223,6 @@ steps:
     amd:
       label: ":amd: (MI355 DPX) Entrypoints Integration (Speech to Text)"
       dind: false
-      automatic_shard: true
       device: mi355_dpx
       timeout_in_minutes: 60
       working_dir: "/vllm-workspace/tests"
@@ -242,7 +232,6 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (Multimodal)"
   device: h200_35gb
   key: entrypoints-integration-multimodal
-  automatic_shard: true
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -256,7 +245,6 @@ steps:
     amd:
       label: ":amd: (MI355 DPX) Entrypoints Integration (Multimodal)"
       dind: false
-      automatic_shard: true
       device: mi355_dpx
       timeout_in_minutes: 55
       depends_on:
@@ -265,7 +253,6 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (Pooling)"
   device: h200_35gb
   key: entrypoints-integration-pooling
-  automatic_shard: true
   timeout_in_minutes: 75
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -279,7 +266,6 @@ steps:
     amd:
       label: ":amd: (MI355 DPX) Entrypoints Integration (Pooling)"
       dind: false
-      automatic_shard: true
       device: mi355_dpx
       timeout_in_minutes: 65
       working_dir: "/vllm-workspace/tests"
