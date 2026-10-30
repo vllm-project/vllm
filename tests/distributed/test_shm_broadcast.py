@@ -589,6 +589,58 @@ def test_reader_timeout_caps_indefinite_waits(should_warn):
         assert timeout.timeout_ms() == 7
 
 
+def test_shutdown_wakes_remote_reader_waiting_for_payload():
+    writer = MessageQueue(
+        n_reader=1,
+        n_local_reader=0,
+        max_chunk_bytes=1024,
+        max_chunks=1,
+        connect_ip="127.0.0.1",
+    )
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    recv_started = threading.Event()
+    result = {}
+
+    def dequeue_in_thread():
+        try:
+            result["value"] = reader.dequeue()
+        except Exception as exc:
+            result["exc"] = exc
+
+    original_recv = MessageQueue.recv
+
+    def record_recv(socket, timeout):
+        recv_started.set()
+        return original_recv(socket, timeout)
+
+    read_thread = threading.Thread(target=dequeue_in_thread, daemon=True)
+    try:
+        writer.wait_until_ready()
+        reader.wait_until_ready()
+        with pytest.raises(TimeoutError):
+            reader.dequeue(timeout=0.01)
+        with (
+            mock.patch.object(MessageQueue, "recv", side_effect=record_recv),
+            mock.patch.object(shm_broadcast, "SHM_READER_RECHECK_INTERVAL_MS", new=10),
+        ):
+            read_thread.start()
+            assert recv_started.wait(timeout=5)
+            reader.shutdown()
+            read_thread.join(timeout=1)
+
+        assert not read_thread.is_alive()
+        assert isinstance(result.get("exc"), RuntimeError)
+        assert str(result["exc"]) == "cancelled"
+    finally:
+        if read_thread.is_alive():
+            writer.enqueue("cleanup")
+            read_thread.join(timeout=5)
+        reader.shutdown()
+        writer.shutdown()
+        reader.remote_socket.close(linger=0)
+        writer.remote_socket.close(linger=0)
+
+
 def test_reader_rechecks_shm_after_idle_wait_timeout_without_notify():
     writer = MessageQueue(
         n_reader=1,

@@ -1002,12 +1002,22 @@ class MessageQueue:
                         all_buffers.append(buffer if i == 0 else bytearray(buffer))
                     obj = pickle.loads(all_buffers[0], buffers=all_buffers[1:])
             if overflow:
-                obj = MessageQueue.recv(self.local_socket, timeout)
+                obj = self._recv_interruptible(self.local_socket, timeout)
         elif self._is_remote_reader:
-            obj = MessageQueue.recv(self.remote_socket, timeout)
+            obj = self._recv_interruptible(self.remote_socket, timeout)
         else:
             raise RuntimeError("Only readers can dequeue")
         return obj
+
+    def _recv_interruptible(self, socket: zmq.Socket, timeout: float | None) -> Any:
+        read_timeout = self.ReadTimeoutWithWarnings(timeout, should_warn=False)
+        while not self.shutting_down:
+            poll_timeout = read_timeout.timeout_ms() / 1000
+            try:
+                return MessageQueue.recv(socket, poll_timeout)
+            except TimeoutError:
+                pass
+        raise RuntimeError("cancelled")
 
     @staticmethod
     def recv(socket: zmq.Socket, timeout: float | None) -> Any:
