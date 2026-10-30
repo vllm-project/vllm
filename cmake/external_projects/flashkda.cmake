@@ -12,8 +12,8 @@ if(FLASH_KDA_SRC_DIR)
 else()
   FetchContent_Declare(
     flashkda
-    GIT_REPOSITORY https://github.com/vllm-project/FlashKDA.git
-    GIT_TAG 17a037d98da546deb4591e967cf961a43c034d8b
+    GIT_REPOSITORY https://github.com/simon-veitner-redhat/FlashKDA.git
+    GIT_TAG e090a196dcf56e19cc084d06e95f3c94c9b08ca9
     GIT_PROGRESS TRUE
     GIT_SUBMODULES cutlass
   )
