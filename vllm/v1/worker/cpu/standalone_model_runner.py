@@ -36,11 +36,7 @@ from vllm.tasks import SupportedTask
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-from vllm.v1.kv_cache_interface import (
-    KVCacheConfig,
-    KVCacheLayerConfig,
-    get_block_table_width,
-)
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheLayerConfig
 from vllm.v1.outputs import ECConnectorOutput, ModelRunnerOutput
 from vllm.v1.watermarking import create_watermarker
 from vllm.v1.worker.cpu.attn_utils import (
@@ -380,15 +376,11 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
             block_sizes.append(kv_cache_group.block_size)
             slot_mapping_enabled.append(kv_cache_group.uses_slot_mapping)
             sliding_window_reach.append(kv_cache_group.sliding_window_reach)
-            max_num_blocks = kv_cache_group.max_num_blocks_per_req(
-                self.vllm_config, block_table_max_model_len
+            max_num_blocks_per_group.append(
+                kv_cache_group.block_table_width(
+                    self.vllm_config, block_table_max_model_len
+                )
             )
-            max_num_blocks = get_block_table_width(
-                max_num_blocks,
-                kv_cache_group.block_size,
-                token_alignment=kv_cache_group.block_table_token_alignment,
-            )
-            max_num_blocks_per_group.append(max_num_blocks)
 
         with self.jit_warmup_registry.activate():
             self.attn_groups, self.kernel_block_sizes = init_attn_backend(
