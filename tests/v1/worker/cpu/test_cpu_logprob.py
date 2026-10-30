@@ -6,7 +6,6 @@ import math
 import numpy as np
 import pytest
 import torch
-import vllm._C  # noqa: F401
 
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.sampling_params import SamplingParams
@@ -20,6 +19,9 @@ from vllm.v1.worker.cpu.logprob import (
     compute_topk_scores,
     get_prompt_logprobs_token_ids,
 )
+
+if current_platform.is_cpu():
+    import vllm._C  # noqa: F401
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_cpu()

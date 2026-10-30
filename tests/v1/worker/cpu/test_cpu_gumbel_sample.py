@@ -5,12 +5,14 @@ import math
 
 import pytest
 import torch
-import vllm._C  # noqa: F401
 
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.worker.cpu.gumbel import gumbel_sample
 from vllm.v1.worker.cpu.sampler import CPUSamplingStates
+
+if current_platform.is_cpu():
+    import vllm._C  # noqa: F401
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_cpu()

@@ -4,7 +4,6 @@
 import numpy as np
 import pytest
 import torch
-import vllm._C  # noqa: F401
 from transformers import LlamaConfig
 
 import vllm.config.reasoning as reasoning_config_module
@@ -27,6 +26,9 @@ from vllm.v1.worker.cpu.sampler import (
     get_num_nans,
 )
 from vllm.v1.worker.cpu.states import CPURequestState
+
+if current_platform.is_cpu():
+    import vllm._C  # noqa: F401
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_cpu()

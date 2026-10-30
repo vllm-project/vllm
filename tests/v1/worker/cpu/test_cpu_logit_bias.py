@@ -4,7 +4,6 @@
 import numpy as np
 import pytest
 import torch
-import vllm._C  # noqa: F401
 
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
@@ -15,6 +14,9 @@ from vllm.v1.worker.cpu.logits_processors import (
     LogitsProcRequestState,
 )
 from vllm.v1.worker.cpu.states import CPURequestState
+
+if current_platform.is_cpu():
+    import vllm._C  # noqa: F401
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_cpu()
