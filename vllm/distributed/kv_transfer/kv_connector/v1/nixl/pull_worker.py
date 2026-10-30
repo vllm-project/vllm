@@ -185,6 +185,11 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
 
         dcp_active = self.dcp_size > 1 or remote_info.remote_dcp_size > 1
+        different_block_sizes = (
+            self.block_size != remote_info.remote_block_size
+            or remote_info.remote_physical_blocks_per_logical
+            != self._physical_blocks_per_logical_kv_block
+        )
         local_block_ids = meta.local_physical_block_ids
         remote_region_groups = self.dst_region_group_ids[engine_id]
         local_region_groups = self.region_group_ids or remote_region_groups
@@ -280,11 +285,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         elif (
             not dcp_active
             and meta.remote.num_tokens is not None
-            and (
-                self.block_size != remote_info.remote_block_size
-                or remote_info.remote_physical_blocks_per_logical
-                != self._physical_blocks_per_logical_kv_block
-            )
+            and different_block_sizes
         ):
             # Each side pads to its own logical block past the last token, so
             # pair the lists by that token once, for every read.
@@ -314,6 +315,14 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 for rank in plan.all_source_ranks
             ]
         else:
+            if not dcp_active and different_block_sizes:
+                logger.warning_once(
+                    "Remote engine %s sent no remote_num_tokens, so P/D blocks are "
+                    "paired by position across different block sizes and KV may "
+                    "land in the wrong blocks. Upgrade the prefill instance, or "
+                    "make the proxy forward remote_num_tokens.",
+                    engine_id,
+                )
             remote_logical_block_ids = meta.remote.block_ids
             meta.remote.block_ids = self._logical_to_kernel_block_ids(
                 remote_logical_block_ids,
