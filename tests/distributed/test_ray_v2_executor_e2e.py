@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Orchestration-level integration tests for RayExecutorV2.
-"""
+"""Orchestration-level integration tests for RayExecutorV2."""
 
 import gc
 import os
@@ -40,7 +38,6 @@ def ray_init():
 
 class _AsyncLLMActor:
     def start(self, pg, bundle_indices=None, ray_runtime_env=None):
-        os.environ["VLLM_USE_RAY_V2_EXECUTOR_BACKEND"] = "1"
         # Needed so collective_rpc can pickle _get_env_var over the
         # AsyncLLM -> EngineCore ZMQ boundary.
         os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
@@ -158,8 +155,7 @@ def test_multi_replicas_with_bundle_indices(ray_init):
 
 
 def test_env_var_and_runtime_env_propagation():
-    """
-    Verify env vars (NCCL_, HF_) and parallel_config.ray_runtime_env
+    """Verify env vars (NCCL_, HF_) and parallel_config.ray_runtime_env
     propagate to RayWorkerProc actors.
     """
     sentinel_vars = {

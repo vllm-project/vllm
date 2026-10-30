@@ -38,7 +38,7 @@ pub(super) fn build_batched_items(
             let keep_on_cpu = spec.keep_on_cpu_keys.contains(key);
             let (value, field) = match spec.field_layout_for(key) {
                 Some(FieldLayout::Batched) => (
-                    tensor.batched_value_at(index)?,
+                    tensor.batched_wire_value_at(index)?,
                     MmField::Batched(MmBatchedField { keep_on_cpu }),
                 ),
                 Some(FieldLayout::Flat { sizes_key }) => {
@@ -47,7 +47,7 @@ pub(super) fn build_batched_items(
                     })?;
                     let (start, end) = tensor::flat_range_for_index(sizes, sizes_key, index)?;
                     (
-                        tensor.flat_value_range(start, end)?,
+                        tensor.flat_wire_value_range(start, end)?,
                         MmField::Flat(MmFlatField {
                             slices: vec![MmSlice::Slice(SliceSpec {
                                 start: Some(0),
@@ -60,7 +60,7 @@ pub(super) fn build_batched_items(
                     )
                 }
                 None => (
-                    tensor.clone(),
+                    tensor.try_into()?,
                     MmField::Shared(MmSharedField {
                         batch_size: len,
                         keep_on_cpu,
@@ -71,7 +71,7 @@ pub(super) fn build_batched_items(
             data.insert(
                 key.clone(),
                 MmFieldElem {
-                    data: Some(value.try_into()?),
+                    data: Some(value),
                     field,
                 },
             );

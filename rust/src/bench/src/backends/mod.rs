@@ -3,6 +3,7 @@
 
 pub mod openai_chat;
 pub mod openai_completions;
+pub mod openai_responses;
 pub mod pooling;
 pub mod streaming;
 
@@ -21,6 +22,7 @@ pub struct CompletionChunk {
     #[serde(default)]
     pub choices: Vec<CompletionChoice>,
     pub usage: Option<ChunkUsage>,
+    pub metrics: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -34,6 +36,7 @@ pub struct ChatChunk {
     #[serde(default)]
     pub choices: Vec<ChatChoice>,
     pub usage: Option<ChunkUsage>,
+    pub metrics: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -49,6 +52,21 @@ pub struct ChatDelta {
 #[derive(Deserialize)]
 pub struct ChunkUsage {
     pub completion_tokens: Option<u64>,
+    pub prompt_tokens: Option<u64>,
+}
+
+impl ChunkUsage {
+    /// Record the server-reported token counts on `output`. A zero
+    /// `prompt_tokens` keeps the client estimate: some OpenAI-compatible
+    /// servers send placeholder zeros in usage chunks.
+    pub fn apply(&self, output: &mut RequestFuncOutput) {
+        if let Some(ct) = self.completion_tokens {
+            output.output_tokens = ct as usize;
+        }
+        if let Some(pt) = self.prompt_tokens.filter(|&pt| pt > 0) {
+            output.prompt_len = pt as usize;
+        }
+    }
 }
 
 use crate::cli::BackendKind;
@@ -101,6 +119,9 @@ pub struct RequestFuncOutput {
     pub prompt_len: usize,
     pub error: String,
     pub start_time: f64,
+    pub server_queue_time: Option<f64>,
+    pub server_ttft: Option<f64>,
+    pub num_input_sequences: usize,
 }
 
 impl Default for RequestFuncOutput {
@@ -116,8 +137,27 @@ impl Default for RequestFuncOutput {
             prompt_len: 0,
             error: String::new(),
             start_time: 0.0,
+            server_queue_time: None,
+            server_ttft: None,
+            num_input_sequences: 1,
         }
     }
+}
+
+fn update_server_metrics(output: &mut RequestFuncOutput, metrics: Option<&serde_json::Value>) {
+    let Some(metrics) = metrics.and_then(serde_json::Value::as_object) else {
+        return;
+    };
+
+    let to_seconds = |name| {
+        metrics
+            .get(name)
+            .and_then(serde_json::Value::as_f64)
+            .map(|value| value / 1000.0)
+    };
+
+    output.server_queue_time = to_seconds("queue_time_ms");
+    output.server_ttft = to_seconds("time_to_first_token_ms");
 }
 
 impl Default for RequestFuncInput {
@@ -148,6 +188,7 @@ impl Default for RequestFuncInput {
 pub enum Backend {
     OpenAICompletions(openai_completions::OpenAICompletionsBackend),
     OpenAIChat(openai_chat::OpenAIChatBackend),
+    OpenAIResponses(openai_responses::OpenAIResponsesBackend),
     Pooling(pooling::PoolingBackend),
 }
 
@@ -161,6 +202,7 @@ impl Backend {
         match self {
             Backend::OpenAICompletions(b) => b.send_request(input, client).await,
             Backend::OpenAIChat(b) => b.send_request(input, client).await,
+            Backend::OpenAIResponses(b) => b.send_request(input, client).await,
             Backend::Pooling(b) => b.send_request(input, client).await,
         }
     }
@@ -173,6 +215,9 @@ pub fn get_backend(kind: BackendKind) -> Result<Backend> {
             openai_completions::OpenAICompletionsBackend,
         )),
         BackendKind::OpenaiChat => Ok(Backend::OpenAIChat(openai_chat::OpenAIChatBackend)),
+        BackendKind::OpenaiResponses => Ok(Backend::OpenAIResponses(
+            openai_responses::OpenAIResponsesBackend,
+        )),
         kind if kind.is_pooling() => Ok(Backend::Pooling(pooling::PoolingBackend { kind })),
         _ => unreachable!(),
     }
@@ -210,4 +255,70 @@ pub fn build_headers(
     }
 
     headers
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A placeholder zero `prompt_tokens` must not replace the client estimate.
+    #[test]
+    fn chunk_usage_ignores_zero_prompt_tokens() {
+        let mut output = RequestFuncOutput {
+            prompt_len: 100,
+            ..Default::default()
+        };
+        ChunkUsage {
+            completion_tokens: Some(3),
+            prompt_tokens: Some(0),
+        }
+        .apply(&mut output);
+        assert_eq!((output.prompt_len, output.output_tokens), (100, 3));
+    }
+
+    #[test]
+    fn test_update_server_metrics_converts_ms_to_seconds() {
+        let chunk: CompletionChunk = serde_json::from_value(serde_json::json!({
+            "metrics": {
+                "queue_time_ms": 0.0,
+                "time_to_first_token_ms": 1250.0,
+            }
+        }))
+        .unwrap();
+        let mut output = RequestFuncOutput::default();
+
+        update_server_metrics(&mut output, chunk.metrics.as_ref());
+
+        assert_eq!(output.server_queue_time, Some(0.0));
+        assert_eq!(output.server_ttft, Some(1.25));
+    }
+
+    #[test]
+    fn test_update_server_metrics_tolerates_unavailable_values() {
+        for value in [
+            serde_json::json!({}),
+            serde_json::json!({"metrics": null}),
+            serde_json::json!({"metrics": "invalid"}),
+            serde_json::json!({"metrics": {"queue_time_ms": null}}),
+        ] {
+            let chunk: ChatChunk = serde_json::from_value(value).unwrap();
+            let mut output = RequestFuncOutput::default();
+
+            update_server_metrics(&mut output, chunk.metrics.as_ref());
+
+            assert_eq!(output.server_queue_time, None);
+            assert_eq!(output.server_ttft, None);
+        }
+    }
+
+    #[test]
+    fn test_update_server_metrics_handles_partial_metrics() {
+        let metrics = serde_json::json!({"time_to_first_token_ms": 500.0});
+        let mut output = RequestFuncOutput::default();
+
+        update_server_metrics(&mut output, Some(&metrics));
+
+        assert_eq!(output.server_queue_time, None);
+        assert_eq!(output.server_ttft, Some(0.5));
+    }
 }

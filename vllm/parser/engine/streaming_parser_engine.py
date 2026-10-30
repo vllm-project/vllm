@@ -19,6 +19,7 @@ from vllm.parser.engine.incremental_lexer import (
 from vllm.parser.engine.parser_engine_config import (
     ParserEngineConfig,
     ParserState,
+    ToolCallBodyCollection,
     Transition,
 )
 from vllm.parser.engine.token_id_scanner import (
@@ -51,7 +52,7 @@ def _build_drop_info(
 
     configured_texts = (
         set(config.token_id_terminals.values())
-        | set(config.terminals.values())
+        | config.terminal_literals
         | config.preserve_tokens
     )
 
@@ -156,9 +157,32 @@ class StreamingParserEngine:
             for (state, terminal), tr in config.transitions.items()
             if tr.next_state in self._TOOL_STATES or state in self._TOOL_STATES
         )
+        # TOOL_CALL_END may close an inner call rather than its lexical wrapper,
+        # as in MiniMax, so identify exits from state transitions instead.
+        self._tool_exit_terminals: frozenset[str] = frozenset(
+            terminal
+            for (state, terminal), tr in config.transitions.items()
+            if state in self._TOOL_STATES and tr.next_state not in self._TOOL_STATES
+        )
+
+        self._reasoning_markup_terminals: frozenset[str] = (
+            self._compute_reasoning_markup_terminals()
+        )
 
         self.skip_tool_parsing = False
+        self.skip_reasoning_parsing = False
         self.reset(initial_state=initial_state)
+
+    @property
+    def reasoning_token_count(self) -> int:
+        return self._reasoning_token_count
+
+    def _record_reasoning_tokens(self, events: Sequence[SemanticEvent]) -> None:
+        self._reasoning_token_count += sum(
+            event.token_count
+            for event in events
+            if event.type == EventType.REASONING_CHUNK
+        )
 
     def _reset_args_state(self) -> None:
         self._args_buffer: str = ""
@@ -166,6 +190,13 @@ class StreamingParserEngine:
         self._args_brace_depth: int = 0
         self._args_in_string: bool = False
         self._args_escape_next: bool = False
+
+    def _reset_json_collection_state(self) -> None:
+        # State shared by JSON-array and semicolon-separated tool bodies.
+        self._json_collection_started: bool = False
+        self._json_collection_in_element: bool = False
+        self._json_collection_had_element: bool = False
+        self._json_collection_separator_seen: bool = False
 
     def reset(self, initial_state: ParserState | None = None) -> None:
         """Reset mutable state for reuse across requests.
@@ -179,13 +210,18 @@ class StreamingParserEngine:
         )
         self.tool_index = -1
         self._ever_had_token_ids = False
+        self._reasoning_token_count = 0
         # DO NOT reset skip_tool_parsing here — callers set it before
         # calling methods that trigger reset() (e.g. extract_reasoning),
         # and clearing it silently breaks non-streaming tool-call-as-
         # implicit-reasoning-end (content returns None).
         self._scanner.reset()
         self._lexer.reset()
+        self._message_header_buffer = ""
+        self._message_header_token_count = 0
+        self._in_skipped_tool_span = False
         self._reset_args_state()
+        self._reset_json_collection_state()
 
     def feed(
         self,
@@ -209,18 +245,30 @@ class StreamingParserEngine:
                     has_special = True
                     break
             if not has_special:
-                return self._emit_for_state(delta_text)
+                events = self._emit_for_state(
+                    delta_text, token_count=len(delta_token_ids)
+                )
+                self._record_reasoning_tokens(events)
+                return events
 
         scanner_items = self._scanner.scan(delta_text, delta_token_ids)
 
         if len(scanner_items) == 1 and isinstance(scanner_items[0], TextChunk):
-            lex_tokens = self._lexer.feed(scanner_items[0].text)
+            item = scanner_items[0]
+            lex_tokens = self._lexer.feed(item.text, item.token_texts, item.token_count)
             if len(lex_tokens) == 1 and lex_tokens[0].terminal == CONTENT_TERMINAL:
-                text = lex_tokens[0].value
-                return self._emit_for_state(text)
-            return self._process_lex_tokens(lex_tokens)
+                events = self._emit_for_state(
+                    lex_tokens[0].value,
+                    token_count=lex_tokens[0].token_count,
+                )
+            else:
+                events = self._process_lex_tokens(lex_tokens)
+            self._record_reasoning_tokens(events)
+            return events
 
-        return self._process_scanner_items(scanner_items)
+        events = self._process_scanner_items(scanner_items)
+        self._record_reasoning_tokens(events)
+        return events
 
     def _process_scanner_items(
         self, items: Sequence[LexerInput]
@@ -231,7 +279,18 @@ class StreamingParserEngine:
                 events.extend(self._process_lex_tokens(self._lexer.flush()))
                 events.extend(self._on_terminal(item.terminal, item.text))
             elif isinstance(item, TextChunk):
-                events.extend(self._process_lex_tokens(self._lexer.feed(item.text)))
+                if not item.text and item.token_count:
+                    events.extend(
+                        self._emit_for_state("", token_count=item.token_count)
+                    )
+                else:
+                    events.extend(
+                        self._process_lex_tokens(
+                            self._lexer.feed(
+                                item.text, item.token_texts, item.token_count
+                            )
+                        )
+                    )
         return events
 
     def finish(self) -> list[SemanticEvent]:
@@ -256,7 +315,14 @@ class StreamingParserEngine:
             ParserState.TOOL_NAME,
             ParserState.TOOL_BETWEEN,
         ):
-            if self.tool_index >= 0:
+            # In collection mode a closed element has already emitted its
+            # TOOL_CALL_END; only a truncated (still-open) element needs one.
+            end_open_call = (
+                self._json_collection_in_element
+                if self.config.tool_call_body_collection is not None
+                else True
+            )
+            if end_open_call and self.tool_index >= 0:
                 events.append(
                     SemanticEvent(
                         EventType.TOOL_CALL_END,
@@ -270,8 +336,20 @@ class StreamingParserEngine:
             )
             self.state = ParserState.CONTENT
         elif self.state == ParserState.MESSAGE_HEADER:
+            if self._message_header_buffer:
+                events.append(
+                    SemanticEvent(
+                        EventType.TEXT_CHUNK,
+                        value=self._message_header_buffer,
+                        tool_index=self.tool_index,
+                        token_count=self._message_header_token_count,
+                    )
+                )
+                self._message_header_buffer = ""
+                self._message_header_token_count = 0
             self.state = ParserState.CONTENT
 
+        self._record_reasoning_tokens(events)
         return events
 
     def parse_complete(self, text: str) -> list[SemanticEvent]:
@@ -285,9 +363,11 @@ class StreamingParserEngine:
         strict = self._token_id_terminal_names if self._ever_had_token_ids else None
         for tok in tokens:
             if tok.terminal == CONTENT_TERMINAL or (strict and tok.terminal in strict):
-                events.extend(self._on_content(tok.value))
+                events.extend(self._on_content(tok.value, tok.token_count))
             else:
-                events.extend(self._on_terminal(tok.terminal, tok.value))
+                events.extend(
+                    self._on_terminal(tok.terminal, tok.value, tok.token_count)
+                )
         return events
 
     _TOOL_STATES = frozenset(
@@ -299,60 +379,119 @@ class StreamingParserEngine:
         }
     )
 
-    def _on_terminal(self, terminal: str, value: str) -> list[SemanticEvent]:
+    _PLAIN_STATES = frozenset({ParserState.CONTENT, ParserState.REASONING})
+
+    _REASONING_EVENTS = frozenset({EventType.REASONING_START, EventType.REASONING_END})
+
+    def _compute_reasoning_markup_terminals(self) -> frozenset[str]:
+        """Terminals the ``skip_reasoning_parsing`` bypass may neutralize.
+
+        Only reasoning-exclusive markers qualify: every transition they
+        participate in stays within CONTENT/REASONING and emits nothing
+        but reasoning events. Inkling's ``<|end_message|>`` is labelled
+        THINK_END yet also closes text, header, and tool blocks;
+        bypassing a shared marker would eat that structure, so one impure
+        marker disables the bypass for the whole config.
+        """
+        markers = frozenset(
+            terminal
+            for (state, terminal), tr in self.config.transitions.items()
+            if ParserState.REASONING in (state, tr.next_state)
+            and tr.next_state not in self._TOOL_STATES
+        )
+        for (state, terminal), tr in self.config.transitions.items():
+            if terminal not in markers:
+                continue
+            if (
+                state not in self._PLAIN_STATES
+                or tr.next_state not in self._PLAIN_STATES
+                or not self._REASONING_EVENTS.issuperset(tr.events)
+            ):
+                return frozenset()
+        return markers
+
+    def _on_terminal(
+        self, terminal: str, value: str, token_count: int = 0
+    ) -> list[SemanticEvent]:
         key = (self.state, terminal)
         transition = self.config.transitions.get(key)
 
         if transition is None:
-            if (
-                self._has_drops
-                and terminal == DROP_TERMINAL
-                # Preserve drop tokens when skip_tool_parsing is active so
-                # the reasoning pass doesn't silently remove tokens that a
-                # later tool-call pass might need to see.
-                and not self.skip_tool_parsing
-            ):
+            if self._has_drops and terminal == DROP_TERMINAL:
                 return []
-            return self._emit_for_state(value)
+            # The projected skip state may not define the wrapper closer.
+            if self.skip_tool_parsing and terminal in self._tool_exit_terminals:
+                self._in_skipped_tool_span = False
+            return self._emit_for_state(value, token_count)
+
+        if self.skip_reasoning_parsing and terminal in self._reasoning_markup_terminals:
+            return self._emit_for_state(value, token_count)
 
         if self.skip_tool_parsing and terminal in self._tool_terminals:
-            if self.state == ParserState.MESSAGE_HEADER:
-                self.state = ParserState.CONTENT
-                return [
-                    SemanticEvent(
-                        EventType.TEXT_CHUNK,
-                        value=value,
-                        tool_index=self.tool_index,
-                    )
-                ]
-            if EventType.REASONING_END in transition.events:
-                self.state = ParserState.CONTENT
-                return [
-                    SemanticEvent(
-                        EventType.REASONING_END,
-                        value=value,
-                        tool_index=self.tool_index,
-                    ),
-                    SemanticEvent(
-                        EventType.TEXT_CHUNK,
-                        value=value,
-                        tool_index=self.tool_index,
-                    ),
-                ]
-            content_type = self.config.content_events.get(self.state)
-            if content_type is not None:
-                return [
-                    SemanticEvent(content_type, value=value, tool_index=self.tool_index)
-                ]
-            return []
+            # Inkling reuses one terminal for tool, text, and reasoning exits.
+            # Outside a forwarded tool span, apply its normal transition.
+            is_opener = transition.next_state in self._TOOL_STATES
+            is_exit = terminal in self._tool_exit_terminals
+            used_as_plain_closer = (
+                is_exit and not is_opener and not self._in_skipped_tool_span
+            )
+            if not used_as_plain_closer:
+                if is_opener:
+                    self._in_skipped_tool_span = True
+                elif is_exit:
+                    self._in_skipped_tool_span = False
+                leaving_message_header = self.state == ParserState.MESSAGE_HEADER
+                if leaving_message_header:
+                    self._message_header_buffer = ""
+                    self._message_header_token_count = 0
+                # A tool terminal that implicitly ends reasoning must report
+                # that even from the header state, or the reasoning pass never
+                # hands the block to the tool pass.
+                if EventType.REASONING_END in transition.events:
+                    self.state = ParserState.CONTENT
+                    return [
+                        SemanticEvent(
+                            EventType.REASONING_END,
+                            value=value,
+                            tool_index=self.tool_index,
+                        ),
+                        SemanticEvent(
+                            EventType.TEXT_CHUNK,
+                            value=value,
+                            tool_index=self.tool_index,
+                        ),
+                    ]
+                elif leaving_message_header:
+                    self.state = ParserState.CONTENT
+                    return [
+                        SemanticEvent(
+                            EventType.TEXT_CHUNK,
+                            value=value,
+                            tool_index=self.tool_index,
+                        )
+                    ]
+                content_type = self.config.content_events.get(self.state)
+                if content_type is not None:
+                    return [
+                        SemanticEvent(
+                            content_type, value=value, tool_index=self.tool_index
+                        )
+                    ]
+                return []
 
         if transition.skip_in_token_id_mode and self._ever_had_token_ids:
-            return self._emit_for_state(value)
+            return self._emit_for_state(value, token_count)
 
-        return self._apply_transition(transition, value)
+        return self._apply_transition(transition, value, token_count)
 
-    def _emit_for_state(self, text: str) -> list[SemanticEvent]:
+    def _emit_for_state(self, text: str, token_count: int = 0) -> list[SemanticEvent]:
+        if self.state == ParserState.MESSAGE_HEADER:
+            self._message_header_buffer += text
+            self._message_header_token_count += token_count
+            return []
         if self.state == ParserState.TOOL_ARGS:
+            if self.config.tool_call_body_collection is not None:
+                return self._feed_json_collection_text(text)
             if self.config.tool_args_json:
                 return self._feed_args_text(text)
             return [
@@ -360,24 +499,36 @@ class StreamingParserEngine:
                     EventType.ARG_VALUE_CHUNK,
                     value=text,
                     tool_index=self.tool_index,
+                    token_count=token_count,
                 )
             ]
         content_type = self.config.content_events.get(self.state)
         if content_type is not None:
-            return [SemanticEvent(content_type, value=text, tool_index=self.tool_index)]
+            return [
+                SemanticEvent(
+                    content_type,
+                    value=text,
+                    tool_index=self.tool_index,
+                    token_count=token_count,
+                )
+            ]
         return []
 
-    def _on_content(self, text: str) -> list[SemanticEvent]:
+    def _on_content(self, text: str, token_count: int = 0) -> list[SemanticEvent]:
         if not text:
             return []
-        return self._emit_for_state(text)
+        return self._emit_for_state(text, token_count)
 
     def _apply_transition(
         self,
         transition: Transition,
         value: str,
+        token_count: int = 0,
     ) -> list[SemanticEvent]:
         events: list[SemanticEvent] = []
+        previous_state = self.state
+        message_header = ""
+        message_header_token_count = 0
 
         if (
             self.state == ParserState.TOOL_ARGS
@@ -393,16 +544,36 @@ class StreamingParserEngine:
             )
             self._args_buffer = ""
 
+        if previous_state == ParserState.MESSAGE_HEADER:
+            message_header = self._message_header_buffer
+            message_header_token_count = self._message_header_token_count
+            self._message_header_buffer = ""
+            self._message_header_token_count = 0
+
         self.state = transition.next_state
 
         for event_type in transition.events:
             if event_type == EventType.TOOL_CALL_START:
                 self.tool_index += 1
+            event_value = (
+                message_header
+                if previous_state == ParserState.MESSAGE_HEADER
+                and event_type == EventType.TEXT_CHUNK
+                else value
+            )
+            if event_type == EventType.TEXT_CHUNK and not event_value:
+                continue
             events.append(
                 SemanticEvent(
                     event_type,
-                    value=value,
+                    value=event_value,
                     tool_index=self.tool_index,
+                    token_count=(
+                        message_header_token_count
+                        if previous_state == ParserState.MESSAGE_HEADER
+                        and event_type == EventType.TEXT_CHUNK
+                        else token_count
+                    ),
                 )
             )
 
@@ -411,6 +582,8 @@ class StreamingParserEngine:
             self._args_in_string = False
             self._args_escape_next = False
             self._args_safe_end = 0
+            if self.config.tool_call_body_collection is not None:
+                self._reset_json_collection_state()
 
         return events
 
@@ -481,3 +654,111 @@ class StreamingParserEngine:
                 tool_index=self.tool_index,
             )
         ]
+
+    # ── Multi-object JSON tool bodies ───────────────────────────────────
+
+    def _feed_json_collection_text(self, text: str) -> list[SemanticEvent]:
+        """Split a framed sequence of JSON objects into individual tool calls."""
+        events: list[SemanticEvent] = []
+        for i, ch in enumerate(text):
+            if self.state != ParserState.TOOL_ARGS:
+                # The collection closed or parsing bailed out mid-chunk.
+                events.extend(self._emit_for_state(text[i:]))
+                break
+            events.extend(self._feed_json_collection_char(ch))
+        return events
+
+    def _feed_json_collection_char(self, ch: str) -> list[SemanticEvent]:
+        if self._json_collection_in_element:
+            events = self._feed_args_char(ch)
+            # Element object closed: top-level '}' with all braces balanced.
+            if (
+                ch == "}"
+                and not self._args_in_string
+                and not self._args_escape_next
+                and self._args_brace_depth == 0
+            ):
+                events.extend(self._end_json_element())
+            return events
+
+        # Delimiters are interpreted only between complete JSON objects, never
+        # inside strings or nested values.
+        if ch in " \t\r\n":
+            return []
+
+        mode = self.config.tool_call_body_collection
+        if mode is ToolCallBodyCollection.JSON_ARRAY:
+            return self._feed_json_array_delimiter(ch)
+        if mode is ToolCallBodyCollection.SEMICOLON_SEQUENCE:
+            return self._feed_semicolon_sequence_delimiter(ch)
+        raise AssertionError("JSON collection parser used without a collection mode")
+
+    def _feed_json_array_delimiter(self, ch: str) -> list[SemanticEvent]:
+        if not self._json_collection_started:
+            if ch == "[":
+                self._json_collection_started = True
+                return []
+            return self._bail_json_collection_to_content(ch)
+        if ch == ",":
+            return []
+        if ch == "{":
+            return self._start_json_element(ch)
+        if ch == "]":
+            self.state = ParserState.CONTENT
+            self._reset_json_collection_state()
+            return []
+        return self._bail_json_collection_to_content(ch)
+
+    def _feed_semicolon_sequence_delimiter(self, ch: str) -> list[SemanticEvent]:
+        if ch == ";":
+            if (
+                self._json_collection_had_element
+                and not self._json_collection_separator_seen
+            ):
+                self._json_collection_separator_seen = True
+                return []
+            return self._bail_json_collection_to_content(ch)
+        if ch == "{":
+            if (
+                self._json_collection_had_element
+                and not self._json_collection_separator_seen
+            ):
+                return self._bail_json_collection_to_content(ch)
+            self._json_collection_started = True
+            self._json_collection_separator_seen = False
+            return self._start_json_element(ch)
+        return self._bail_json_collection_to_content(ch)
+
+    def _start_json_element(self, ch: str) -> list[SemanticEvent]:
+        self.tool_index += 1
+        self._reset_args_state()
+        self._json_collection_in_element = True
+        events = [SemanticEvent(EventType.TOOL_CALL_START, tool_index=self.tool_index)]
+        events.extend(self._feed_args_char(ch))
+        return events
+
+    def _end_json_element(self) -> list[SemanticEvent]:
+        self._json_collection_in_element = False
+        self._json_collection_had_element = True
+        events: list[SemanticEvent] = []
+        # Flush the held closing '}' so the slot body is the full element.
+        if self._args_buffer:
+            events.append(
+                SemanticEvent(
+                    EventType.ARG_VALUE_CHUNK,
+                    value=self._args_buffer,
+                    tool_index=self.tool_index,
+                )
+            )
+            self._args_buffer = ""
+            self._args_safe_end = 0
+        events.append(
+            SemanticEvent(EventType.TOOL_CALL_END, tool_index=self.tool_index)
+        )
+        return events
+
+    def _bail_json_collection_to_content(self, ch: str) -> list[SemanticEvent]:
+        # A malformed outer frame returns the remaining text to normal content.
+        self.state = ParserState.CONTENT
+        self._reset_json_collection_state()
+        return self._emit_for_state(ch)

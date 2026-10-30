@@ -14,7 +14,7 @@ else()
   FetchContent_Declare(
     tml_fa4
     GIT_REPOSITORY https://github.com/vllm-project/tml-fa4.git
-    GIT_TAG 13374f0c855acc1add1bf30444bd67aebbc24a8e
+    GIT_TAG 75765e76a9c2c012c1f6ecd64577eb646eb4d303
     GIT_PROGRESS TRUE
     CONFIGURE_COMMAND ""
     BUILD_COMMAND "")

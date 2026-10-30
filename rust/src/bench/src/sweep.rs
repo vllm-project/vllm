@@ -16,7 +16,7 @@ async fn reset_prefix_cache(base_url: &str) -> Result<()> {
         .await
         .map_err(|e| BenchError::Backend(format!("Failed to reset prefix cache: {e}")))?;
     if resp.status().is_success() {
-        println!("Prefix cache reset successfully.");
+        tracing::info!(url = %url, "reset prefix cache");
     } else {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
@@ -295,6 +295,7 @@ fn print_sweep_summary(param_name: &str, points: &[SweepPoint], summary_percenti
 fn build_summary_columns(summary_percentiles: &[f64]) -> Vec<SummaryColumn> {
     let mut columns = vec![
         SummaryColumn::new("Req/s", "request_throughput", 10),
+        SummaryColumn::new("Inputs/s", "input_sequence_throughput", 10),
         SummaryColumn::new("Tok/s", "output_throughput", 10),
         SummaryColumn::new("Total tok/s", "total_token_throughput", 12),
         SummaryColumn::new("SS req/s", SS_REQUEST_THROUGHPUT_KEY, 10),
@@ -375,9 +376,15 @@ impl SummaryColumn {
 pub fn parse_concurrency_values(s: &str) -> Result<Vec<usize>> {
     s.split(',')
         .map(|v| {
-            v.trim().parse::<usize>().map_err(|_| {
+            let value = v.trim().parse::<usize>().map_err(|_| {
                 BenchError::Config(format!("Invalid concurrency value: '{}'", v.trim()))
-            })
+            })?;
+            if value == 0 {
+                return Err(BenchError::Config(
+                    "--sweep-max-concurrency values must be greater than 0, got 0".into(),
+                ));
+            }
+            Ok(value)
         })
         .collect()
 }
@@ -452,6 +459,7 @@ mod tests {
             headers,
             vec![
                 "Req/s",
+                "Inputs/s",
                 "Tok/s",
                 "Total tok/s",
                 "SS req/s",
@@ -495,6 +503,7 @@ mod tests {
             headers,
             vec![
                 "Req/s",
+                "Inputs/s",
                 "Tok/s",
                 "Total tok/s",
                 "SS req/s",
@@ -557,5 +566,26 @@ mod tests {
             dash_count >= 2,
             "expected at least 2 dashes, got {dash_count}: {row}"
         );
+    }
+
+    #[test]
+    fn parse_concurrency_values_rejects_zero() {
+        for input in ["0", "0,1", "1,0", "1,0,16"] {
+            let err = parse_concurrency_values(input).expect_err("0 must be rejected");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("--sweep-max-concurrency") && msg.contains("greater than 0"),
+                "{input}: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_concurrency_values_accepts_positive() {
+        assert_eq!(
+            parse_concurrency_values("1,10,50").unwrap(),
+            vec![1, 10, 50]
+        );
+        assert_eq!(parse_concurrency_values(" 8 , 16 ").unwrap(), vec![8, 16]);
     }
 }

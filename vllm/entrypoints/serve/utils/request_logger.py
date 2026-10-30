@@ -6,6 +6,9 @@ from collections.abc import Sequence
 
 import torch
 
+from vllm import envs
+from vllm.entrypoints.pooling.typing import AnyPoolingRequest
+from vllm.entrypoints.serve.engine.typing import AnyRequest
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
@@ -29,7 +32,7 @@ class RequestLogger:
                 "`--enable-log-requests` is set but "
                 "the minimum log level is higher than DEBUG. "
                 "Only limited information will be logged to minimize overhead. "
-                "To view more details, set `VLLM_LOGGING_LEVEL=DEBUG`."
+                "To view more details, set `--log-level DEBUG`."
             )
 
     def log_inputs(
@@ -67,6 +70,24 @@ class RequestLogger:
             lora_request,
         )
 
+    def log_request_body(self, request: AnyRequest | AnyPoolingRequest) -> None:
+        try:
+            level = logging.getLevelNamesMapping()[envs.VLLM_REQUEST_BODY_LOG_LEVEL]
+        except KeyError:
+            logger.warning_once(
+                "Invalid logging level for request content: %s. "
+                "Request JSON body will not be logged.",
+                envs.VLLM_REQUEST_BODY_LOG_LEVEL,
+            )
+            return
+
+        logger.log(
+            level,
+            "Request %s JSON body: %s",
+            getattr(request, "request_id", "N/A"),
+            request.model_dump_json(exclude_unset=True)[: self.max_log_len],
+        )
+
     def log_outputs(
         self,
         request_id: str,
@@ -77,24 +98,28 @@ class RequestLogger:
         delta: bool = False,
     ) -> None:
         max_log_len = self.max_log_len
-        if max_log_len is not None:
-            if outputs is not None:
-                outputs = outputs[:max_log_len]
-
-            if output_token_ids is not None:
-                # Convert to list and apply truncation
-                output_token_ids = list(output_token_ids)[:max_log_len]
+        if max_log_len is not None and outputs is not None:
+            outputs = outputs[:max_log_len]
 
         stream_info = ""
         if is_streaming:
             stream_info = " (streaming delta)" if delta else " (streaming complete)"
 
+        if logger.isEnabledFor(logging.DEBUG):
+            if max_log_len is not None and output_token_ids is not None:
+                output_token_ids = list(output_token_ids)[:max_log_len]
+
+            logger.debug(
+                "Generated response %s%s details: output_token_ids: %s",
+                request_id,
+                stream_info,
+                output_token_ids,
+            )
+
         logger.info(
-            "Generated response %s%s: output: %r, "
-            "output_token_ids: %s, finish_reason: %s",
+            "Generated response %s%s: output: %r, finish_reason: %s",
             request_id,
             stream_info,
             outputs,
-            output_token_ids,
             finish_reason,
         )

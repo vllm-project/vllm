@@ -4,9 +4,14 @@ import os
 
 import lm_eval
 import openai
+import requests
 
 BASE_URL = "http://localhost:8192/v1"
-NUM_CONCURRENT = 100
+# Comma-separated server URLs to sleep and wake up before the eval.
+SLEEP_WAKE_URLS = [
+    url for url in os.environ.get("SLEEP_WAKE_URLS", "").split(",") if url
+]
+NUM_CONCURRENT = int(os.getenv("NUM_CONCURRENT", "100"))
 TASK = "gsm8k"
 FILTER = "exact_match,strict-match"
 # TODO(#43186): Widened from 0.03 to absorb chunk_scan/SSU numeric jitter
@@ -38,6 +43,19 @@ SIMPLE_PROMPT = (
 MODEL_NAME = os.environ.get("TEST_MODEL", "Qwen/Qwen3-0.6B")
 
 
+def _meets_accuracy_threshold(measured_value: float, expected_value: float) -> bool:
+    return measured_value >= expected_value - RTOL
+
+
+def test_accuracy_threshold_is_one_sided():
+    expected_value = 0.77
+    minimum_value = expected_value - RTOL
+
+    assert _meets_accuracy_threshold(minimum_value, expected_value)
+    assert _meets_accuracy_threshold(expected_value + RTOL + 0.01, expected_value)
+    assert not _meets_accuracy_threshold(minimum_value - 0.01, expected_value)
+
+
 def run_simple_prompt():
     client = openai.OpenAI(api_key="EMPTY", base_url=BASE_URL)
     completion = client.completions.create(model=MODEL_NAME, prompt=SIMPLE_PROMPT)
@@ -48,9 +66,18 @@ def run_simple_prompt():
     print("-" * 50)
 
 
+def sleep_and_wake_up(urls: list[str]):
+    for url in urls:
+        requests.post(f"{url}/sleep", params={"level": 1}).raise_for_status()
+    for url in urls:
+        requests.post(f"{url}/wake_up").raise_for_status()
+
+
 def test_accuracy():
     """Run the end to end accuracy test."""
     run_simple_prompt()
+    if SLEEP_WAKE_URLS:
+        sleep_and_wake_up(SLEEP_WAKE_URLS)
 
     if "gemma-4" in MODEL_NAME:
         # Gemma4 is quite sensible to having a chat template applied, so we evaluate
@@ -59,7 +86,8 @@ def test_accuracy():
             f"model={MODEL_NAME},"
             f"base_url={BASE_URL}/chat/completions,"
             f"num_concurrent={NUM_CONCURRENT},"
-            "tokenizer_backend=huggingface"
+            "tokenizer_backend=huggingface,"
+            "trust_remote_code=True"
         )
         results = lm_eval.simple_evaluate(
             model="local-chat-completions",
@@ -72,7 +100,8 @@ def test_accuracy():
         model_args = (
             f"model={MODEL_NAME},"
             f"base_url={BASE_URL}/completions,"
-            f"num_concurrent={NUM_CONCURRENT},tokenized_requests=False"
+            f"num_concurrent={NUM_CONCURRENT},tokenized_requests=False,"
+            "trust_remote_code=True"
         )
         results = lm_eval.simple_evaluate(
             model="local-completions",
@@ -91,7 +120,7 @@ def test_accuracy():
         )
         return
 
-    assert (
-        measured_value - RTOL < expected_value
-        and measured_value + RTOL > expected_value
-    ), f"Expected: {expected_value} | Measured: {measured_value}"
+    minimum_value = expected_value - RTOL
+    assert _meets_accuracy_threshold(measured_value, expected_value), (
+        f"Expected at least: {minimum_value} | Measured: {measured_value}"
+    )

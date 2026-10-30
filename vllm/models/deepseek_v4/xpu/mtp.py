@@ -19,10 +19,6 @@ import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig
-from vllm.distributed import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -32,13 +28,16 @@ from vllm.model_executor.layers.mhc import HCHeadOp
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.mtp_validation import (
+    is_mtp_completeness_check_enabled,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.deepseek_mtp import SharedHead
 from vllm.model_executor.models.deepseek_v2 import get_spec_layer_idx_from_weight_name
 from vllm.model_executor.models.utils import maybe_prefix
-from vllm.models.deepseek_v4.common.ops import (
-    fused_mtp_input_rmsnorm,
-    mtp_shared_head_rmsnorm,
+from vllm.models.deepseek_v4.common.ops.fused_mtp_input_rmsnorm import (
+    _FUSED_MTP_INPUT_RMSNORM_KERNEL,
+    _MTP_SHARED_HEAD_RMSNORM_KERNEL,
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -51,7 +50,7 @@ from .model import (
 logger = init_logger(__name__)
 
 # MoE expert scales are fused into per-layer w13/w2 tensors. The exact
-# parameter suffix depends on which FusedMoE method handles the experts:
+# parameter suffix depends on which FusedMoEFactory method handles the experts:
 # - fp4 experts (Mxfp4MoEMethod) register ``w{1,2,3}_weight_scale``;
 # - fp8 experts (Fp8MoEMethod with block_quant=True) register
 #   ``w{1,2,3}_weight_scale_inv``.
@@ -127,6 +126,10 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
 
         self.hc_head_op = HCHeadOp()
 
+        if vllm_config.kernel_config.enable_jit_warmup:
+            _FUSED_MTP_INPUT_RMSNORM_KERNEL.register_warmup()
+            _MTP_SHARED_HEAD_RMSNORM_KERNEL.register_warmup()
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -143,7 +146,7 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
             -1, self.hc_mult, self.config.hidden_size
         )
         # Fused: mask inputs at position 0 (not needed by MTP), enorm, hnorm.
-        inputs_embeds, previous_hidden_states = fused_mtp_input_rmsnorm(
+        inputs_embeds, previous_hidden_states = _FUSED_MTP_INPUT_RMSNORM_KERNEL(
             inputs_embeds,
             positions,
             previous_hidden_states,
@@ -250,7 +253,7 @@ class DeepSeekV4MultiTokenPredictor(nn.Module):
             mtp_layer.rms_norm_eps,
             mtp_layer.hc_eps,
         )
-        hidden_states = mtp_shared_head_rmsnorm(
+        hidden_states = _MTP_SHARED_HEAD_RMSNORM_KERNEL(
             hidden_states,
             mtp_layer.shared_head.norm.weight.data,
             mtp_layer.shared_head.norm.variance_epsilon,
@@ -327,14 +330,6 @@ class DeepSeekV4MTP(nn.Module):
         ]
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-
-        # TP for attention
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        n_head = self.config.num_attention_heads
-        n_local_head = n_head // tp_size
-        head_rank_start = n_local_head * tp_rank
-        head_rank_end = n_local_head * (tp_rank + 1)
 
         # Pre-compute expert mapping ONCE.
         first_layer = next(iter(self.model.layers.values()))
@@ -434,12 +429,6 @@ class DeepSeekV4MTP(nn.Module):
                             loaded_params.add(name_mapped)
                             break
                     continue
-                elif "attn_sink" in name:
-                    narrow_weight = loaded_weight[head_rank_start:head_rank_end]
-                    n = narrow_weight.shape[0]
-                    params_dict[name][:n].copy_(narrow_weight)
-                    loaded_params.add(name)
-                    continue
                 else:
                     if ".shared_experts.w2" in name:
                         name = name.replace(
@@ -469,7 +458,7 @@ class DeepSeekV4MTP(nn.Module):
             self.model.mtp_start_layer_idx,
             self.model.mtp_start_layer_idx + self.model.num_mtp_layers,
         ):
-            if layer_idx not in loaded_layers:
+            if layer_idx not in loaded_layers and is_mtp_completeness_check_enabled():
                 raise ValueError(
                     f"MTP speculative decoding layer {layer_idx} weights "
                     f"missing from checkpoint. The checkpoint may have "
@@ -486,8 +475,7 @@ class DeepSeekV4MTP(nn.Module):
             layer.mtp_block.ffn.finalize_mega_moe_weights()
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
-        """
-        Rewrite the weight name to match the format of the original model.
+        """Rewrite the weight name to match the format of the original model.
         Add .mtp_block for modules in transformer layer block for spec layer
         and rename shared layer weights to be top level.
         """

@@ -27,7 +27,7 @@ Now supports 9 types of connectors:
   --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both", "kv_buffer_device":"cuda", "kv_connector_extra_config":{"backends":["UCX", "GDS"]}}'
   ```
 
-- **MooncakeConnector**: refer to [examples/disaggregated/mooncake_connector/run_mooncake_connector.sh](../../examples/disaggregated/mooncake_connector/run_mooncake_connector.sh) for the example usage of MooncakeConnector disaggregated prefilling. For detailed usage guide, see [MooncakeConnector Usage Guide](mooncake_connector_usage.md).
+- **MooncakeConnector**: refer to [examples/disaggregated/mooncake_connector/run_mooncake_connector.sh](../../examples/disaggregated/mooncake_connector/run_mooncake_connector.sh) for the example usage of MooncakeConnector disaggregated prefilling. For detailed usage guide, see [MooncakeConnector Usage Guide](mooncake_connector_usage.md). For multimodal encoder-cache transfer, see [ECMooncakeConnector Usage Guide](mooncake_ec_connector_usage.md).
 - **MoRIIOConnector** (ROCm only): see [MoRI-IO Usage Guide](moriio_connector_usage.md) for example usage and detailed documentation.
 - **MultiConnector**: take advantage of the kv_connector_extra_config: dict[str, Any] already present in KVTransferConfig to stash all the connectors we want in an ordered list of kwargs.such as:
 
@@ -48,6 +48,42 @@ Now supports 9 types of connectors:
   ```bash
   --kv-transfer-config '{"kv_connector":"FlexKVConnectorV1","kv_role":"kv_both"}'
   ```
+
+## Reusing prefill token ids on decode
+
+!!! note
+    This applies to disaggregated prefill and decode serving on the `/v1/chat/completions` endpoint, using a KV connector configured as in the Usage example above. It is experimental and subject to change.
+
+In disaggregated serving, the prefill and decode stages both render the chat prompt from `messages` and tokenize it. Because the prefill stage has already produced the token ids, the decode stage can reuse them and skip its own templating and tokenization. The output is otherwise identical to a normal chat completion: it is detokenized to text, and tool and reasoning parsing, streaming, and structured output constraints all still apply.
+
+The token ids are passed to the decode stage through `kv_transfer_params`, the dict already attached to the decode request to coordinate the transfer:
+
+1. Send the prefill request with `return_token_ids` enabled, and read `prompt_token_ids` from the response.
+2. Set `kv_transfer_params["prompt_token_ids"]` to those ids on the decode request. `messages` is still required, but its content is not tokenized when the ids are present.
+
+```python
+prefill = client.chat.completions.create(
+    model=model,
+    messages=messages,
+    extra_body={"return_token_ids": True, "kv_transfer_params": {"do_remote_decode": True}},
+)
+ids = prefill.prompt_token_ids
+
+decode = client.chat.completions.create(
+    model=model,
+    messages=messages,
+    stream=True,
+    extra_body={"kv_transfer_params": {"do_remote_prefill": True, "prompt_token_ids": ids}},
+)
+```
+
+If `messages` has non-text content or `echo` is set, the ids are ignored and `messages` is rendered instead, so it must match the prefill request. Otherwise `kv_transfer_params["prompt_token_ids"]` must be a non-empty list of non-negative integers, or the request fails with HTTP 400, as it always does on `/v1/chat/completions/batch`.
+
+## Generate API output modes
+
+When the prefill and decode stages use the [Generate API](../serving/online_serving/token_in_token_out.md) (`/inference/v1/generate`), only the decode response reaches the client, so set `output_mode` on the decode request only. A proxy that reuses the client's request body for the prefill request must reset `output_mode` to `tokens` there. A prefill instance started with `--tokens-only` has no tokenizer and rejects `output_mode: "text"` with a 400.
+
+A decode instance that returns text needs a tokenizer, so start it with `--enable-scale-out` and without `--tokens-only`. Prefill instances can keep `--tokens-only`.
 
 ## Development
 

@@ -10,11 +10,10 @@ through vLLM's FusedMoE (which handles TP/EP); the sink experts run in
 activates every sink) and always bf16 (the checkpoint excludes every
 ``shared_experts`` from quantization).
 
-NVFP4 routed experts reuse vLLM's ModelOpt NVFP4 fused-MoE method; excluded
-(bf16) layers fall back to the unquantized method. The checkpoint's fused
-stacked tensors (interleaved gate/up rows, ``.scale`` / ``.scale2`` /
-``.input_amax`` aux tensors) are translated to the standard per-expert loads
-in :meth:`InklingMoE.load_expert_weight`.
+NVFP4 routed experts reuse vLLM's fused-MoE methods; excluded (bf16) layers
+fall back to the unquantized method. Checkpoint fused stacked tensors are
+translated to the standard per-expert loads in
+:meth:`InklingMoE.load_expert_weight`.
 """
 
 from __future__ import annotations
@@ -35,7 +34,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.model_executor.kernels.linear.cute_dsl import ll_bf16
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, tldevice, triton
@@ -43,20 +42,19 @@ from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import aux_stream
 
 from ..configs import InklingModelConfig
-from ..nvfp4 import FLOAT4_E2M1_MAX, FLOAT8_E4M3_MAX
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.routed_experts import (
         RoutedExperts,
     )
-
-    from ..nvfp4 import InklingNvfp4Config
+    from vllm.model_executor.layers.quantization import QuantizationConfig
 
 # ---------------------------------------------------------------------------
 # Gate / expert selection
 # ---------------------------------------------------------------------------
 
 _INKLING_LL_BF16_MAX_TOKENS = 64
+_NVFP4_INPUT_SCALE_DENOMINATOR = torch.finfo(torch.float8_e4m3fn).max * 6.0
 
 
 def _linear_with_fp32_out(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
@@ -412,10 +410,9 @@ class InklingMoE(nn.Module):
     def __init__(
         self,
         config: InklingModelConfig,
-        layer_id: int,
         *,
         prefix: str = "",
-        nvfp4_config: InklingNvfp4Config | None = None,
+        quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
         # Overfit to the served checkpoint: sigmoid gate renormalized after
@@ -436,35 +433,19 @@ class InklingMoE(nn.Module):
             use_gate_bias=config.use_gate_bias,
         )
 
-        moe_quant_config = None
-        if nvfp4_config is not None and nvfp4_config.experts_quantized(layer_id):
-            from vllm.model_executor.layers.quantization.modelopt import (
-                ModelOptNvFp4Config,
-            )
-
-            # The Inkling checkpoint is ModelOpt NVFP4; exclusion is decided per
-            # layer right here, so no exclude list is needed.
-            moe_quant_config = ModelOptNvFp4Config(
-                quant_method="NVFP4",
-                is_checkpoint_nvfp4_serialized=True,
-                kv_cache_quant_algo=None,
-                exclude_modules=[],
-                group_size=nvfp4_config.group_size,
-            )
-
         # TRTLLM MoE kernels assume equal, contiguous per-rank expert slabs
         # (local_expert_offset = ep_rank * local_num_experts), so pad the
         # expert count to a multiple of the EP size. A no-op for the usual
         # power-of-two EP sizes (n_routed is a power of two).
         num_experts = n_routed + (-n_routed) % _inkling_moe_ep_size()
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             num_experts=num_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
             renormalize=False,
-            quant_config=moe_quant_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.experts",
             custom_routing_function=self._select_routed,
             router_logits_dtype=torch.float32,
@@ -476,11 +457,6 @@ class InklingMoE(nn.Module):
         self.experts.moe_config.skip_final_all_reduce = True
 
         self._routed_sel: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
-        # The sinks are always bf16; fail loudly on a checkpoint that
-        # quantizes them instead of silently misloading.
-        assert nvfp4_config is None or not nvfp4_config.shared_experts_quantized(
-            layer_id
-        ), f"layer {layer_id}: NVFP4 shared experts are not supported"
 
         sink_experts_cls = (
             InklingSinkExpertsLinear
@@ -525,7 +501,7 @@ class InklingMoE(nn.Module):
         weights, ids = self.gate.select_experts(gating_output)
         return weights[:, :topk].contiguous(), ids[:, :topk].contiguous()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor | None:
+    def forward_partials(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         router_logits = self.gate.compute_logits(x)
         num_tokens = x.shape[0]
         # One gate select per layer: the routed slice is stashed for the
@@ -551,7 +527,11 @@ class InklingMoE(nn.Module):
         )
         self._routed_sel = None
 
-        return out + sink_out
+        return out, sink_out
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out, sink_out = self.forward_partials(x)
+        return out.add_(sink_out)
 
     # -- weight loading ----------------------------------------------------
 
@@ -589,7 +569,7 @@ class InklingMoE(nn.Module):
                 f"bad {projection} input_amax: {amax}"
             )
             input_scale = getattr(experts, f"{projection}_input_scale")
-            input_scale.data.fill_(amax / (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX))
+            input_scale.data.fill_(amax / _NVFP4_INPUT_SCALE_DENOMINATOR)
             return [f"experts.routed_experts.{projection}_input_scale"]
 
         param = getattr(experts, key)
@@ -598,11 +578,24 @@ class InklingMoE(nn.Module):
         lids = [slots[g] for g in gids]
         tp_rank = experts.moe_config.moe_parallel_config.tp_rank
 
-        if key.endswith("_scale_2"):
+        if key.endswith(("_scale_2", "_global_scale")):
             # Per-expert scalars, vectorized over the local experts. The
-            # fused w13 param carries one slot per gate/up half.
-            vals = weight[gids].float().to(param.device)
-            param.data[lids] = vals[:, None] if param.data.ndim == 2 else vals
+            # fused w13 params carry one slot per gate/up half. A single
+            # checkpoint value is shared by both halves.
+            vals = weight[gids].float().reshape(len(gids), -1)
+            target_width = math.prod(param.shape[1:])
+            if vals.shape[1] == 1:
+                vals = vals.expand(-1, target_width)
+            elif vals.shape[1] != target_width:
+                raise ValueError(
+                    f"cannot load {tuple(weight.shape)} into {tuple(param.shape)}"
+                )
+            param.data[lids] = vals.reshape(len(gids), *param.shape[1:]).to(
+                param.device
+            )
+        elif key == "w2_weight_scale" and weight.shape[-1] == 1:
+            # Per-output-channel scales are replicated across TP ranks.
+            param.data[lids] = weight[gids].to(device=param.device, dtype=param.dtype)
         elif key.startswith("w13"):
             # Checkpoint w13 rows are interleaved [g0, u0, g1, u1, ...]; the
             # fused param layout is [w1(gate); w3(up)]. The TP-local rows form

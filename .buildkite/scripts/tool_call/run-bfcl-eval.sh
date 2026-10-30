@@ -75,6 +75,7 @@ fi
 
 # ---- Cleanup handler ----
 SERVER_PID=""
+# shellcheck disable=SC2329  # invoked via `trap cleanup EXIT` below
 cleanup() {
     if [ -n "$SERVER_PID" ]; then
         echo "Stopping vLLM server (pid=$SERVER_PID)..."

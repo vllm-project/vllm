@@ -1,0 +1,199 @@
+meta:
+  title: "Nemotron-3-Nano-Omni-30B-A3B-Reasoning"
+  slug: "nemotron-3-nano-omni-30b-a3b-reasoning"
+  provider: "NVIDIA"
+  description: "Mamba2-Transformer hybrid MoE omnimodal model (31B total / 3B active) with unified video, audio, image, and text understanding; reasoning + tool calling; BF16, FP8, and NVFP4 variants"
+  date_added: 2026-04-28
+  date_updated: 2026-04-29
+  tasks:
+    - multimodal
+    - text
+  related_recipes:
+    - nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+    - nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16
+  hardware:
+    h100: verified
+    h200: verified
+    b200: verified
+
+model:
+  model_id: "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16"
+  min_vllm_version: "0.20.0"
+  install:
+    pip:
+      command: 'uv pip install "vllm[audio]==0.28.0"'
+      note: "Pinned to 0.28.0 with the audio extra (required for audio + use_audio_in_video)."
+  architecture: moe
+  parameter_count: "31B"
+  active_parameters: "3B"
+  context_length: 262144
+  base_args:
+    - "--trust-remote-code"
+    - "--max-model-len"
+    - "131072"
+    - "--media-io-kwargs"
+    - '{"video": {"num_frames": 512, "fps": 1}}'
+    - "--video-pruning-rate"
+    - "0.5"
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "Qwen3 Coder tool-call parser with automatic tool choice"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "qwen3_coder"
+  reasoning:
+    description: "Nemotron v3 reasoning parser (chain-of-thought with <think> tags)"
+    args:
+      - "--reasoning-parser"
+      - "nemotron_v3"
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 75
+    description: "BF16 weights — full-precision reference"
+  fp8:
+    model_id: "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-FP8"
+    precision: fp8
+    vram_minimum_gb: 38
+    description: "ModelOpt FP8 weights + FP8 KV cache"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+  nvfp4:
+    model_id: "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4"
+    precision: nvfp4
+    vram_minimum_gb: 28
+    description: "ModelOpt NVFP4 weights — Blackwell-only; smallest footprint"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+kv_offload_support:
+  offloading_cpu: verified
+  offloading_fs: verified
+
+hardware_overrides: {}
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  NVIDIA Nemotron-3-Nano-Omni-30B-A3B-Reasoning is a Mamba2-Transformer hybrid
+  MoE omnimodal model (31B total / 3B active) that unifies video, audio, image,
+  and text understanding. It is built on the Nemotron-3-Nano-30B-A3B LLM
+  backbone with a CRADIO v4-H vision encoder and a Parakeet speech encoder, and
+  ships in BF16, ModelOpt FP8, and ModelOpt NVFP4 variants.
+
+  Capabilities:
+  - Video (mp4, up to 2 minutes, sampled at 1–2 FPS / 128–256 frames)
+  - Audio (wav, mp3, up to 1 hour, ≥8 kHz)
+  - Image (jpeg, png)
+  - Text (English, up to 256K context)
+  - Reasoning with chain-of-thought (`<think>` tags)
+  - Tool calling
+  - Word-level timestamps for transcription
+
+  ## Prerequisites
+
+  - vLLM **0.28.0** (pinned: `pip install vllm[audio]==0.28.0`,
+    or pull `vllm/vllm-openai:v0.28.0`)
+  - Hardware: 1× B200 / H200 / H100 (single-GPU TP1 is the documented profile)
+  - The `audio` extra is required for any audio input, including
+    `use_audio_in_video=true`
+
+  ### Pull the Docker image
+
+  ```bash
+  # CUDA 13:
+  docker pull vllm/vllm-openai:v0.28.0
+  # CUDA 12.9:
+  docker pull vllm/vllm-openai:v0.28.0-cu129
+  ```
+
+  ## Launch command
+
+  General single-GPU invocation (B200 / H200 / H100):
+
+  ```bash
+  vllm serve nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16 \
+    --served-model-name nemotron \
+    --host 0.0.0.0 \
+    --port 5000 \
+    --tensor-parallel-size 1 \
+    --max-model-len 131072 \
+    --trust-remote-code \
+    --video-pruning-rate 0.5 \
+    --media-io-kwargs '{"video": {"num_frames": 512, "fps": 1}}' \
+    --reasoning-parser nemotron_v3 \
+    --enable-auto-tool-choice \
+    --tool-call-parser qwen3_coder
+  ```
+
+  Swap the model id for the FP8 or NVFP4 checkpoint and add `--kv-cache-dtype fp8`:
+
+  ```bash
+  vllm serve nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4 \
+    --kv-cache-dtype fp8 \
+    ...
+  ```
+
+  ### Platform-specific notes
+
+  - **RTX Pro:** append `--moe-backend triton` (FlashInfer + RTX Pro bug).
+  - **NVFP4 + TP>1:** append `--moe-backend flashinfer_cutlass` (TRTLLM_GEN MoE
+    kernel bug at TP>1 on NVFP4).
+  - **DGX Spark (aarch64):** unified LPDDR5X memory; lower
+    `--gpu-memory-utilization` to 0.70 and reduce `--max-model-len` (e.g. 32768)
+    if you hit OOM. Use `--max-num-seqs 8`.
+
+  ## Recommended sampling
+
+  | Mode | temperature | top_p | top_k | max_tokens | reasoning_budget |
+  |------|------------:|------:|------:|-----------:|------------------:|
+  | Thinking | 0.6 | 0.95 | — | 20480 | 16384 |
+  | Instruct | 0.2 | — | 1 | 1024 | — |
+
+  Toggle thinking mode via `chat_template_kwargs={"enable_thinking": true}`
+  (default) or `false` to disable.
+
+  ## Client usage
+
+  ```python
+  from openai import OpenAI
+  client = OpenAI(base_url="http://localhost:8000/v1", api_key="")
+  resp = client.chat.completions.create(
+      model="nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4",
+      messages=[{"role": "user", "content": "Hello!"}],
+      extra_body={"chat_template_kwargs": {"enable_thinking": True}},
+  )
+  ```
+
+  ## Benchmarking
+
+  ```bash
+  vllm bench serve \
+    --model nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-FP8 \
+    --trust-remote-code \
+    --dataset-name random \
+    --random-input-len 1024 --random-output-len 1024 \
+    --num-warmups 20 --ignore-eos \
+    --max-concurrency 1024 --num-prompts 2048
+  ```
+
+  ## References
+
+  - [BF16 model card](https://huggingface.co/nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16)
+  - [FP8 model card](https://huggingface.co/nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-FP8)
+  - [NVFP4 model card](https://huggingface.co/nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4)
+  - [Nemotron 3 Nano LLM backbone](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16)

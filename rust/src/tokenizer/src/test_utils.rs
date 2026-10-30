@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::{Result, Tokenizer, TokenizerError};
+use crate::{DecodedText, IncrementalDecoder, Result, Tokenizer, TokenizerError};
 
 const FIRST_CONFIGURED_TOKEN_ID: u32 = 256;
 
@@ -69,6 +69,7 @@ struct TestToken {
 pub struct TestTokenizer {
     token_to_id: BTreeMap<String, u32>,
     id_to_token: BTreeMap<u32, TestToken>,
+    added_vocab: Vec<(String, u32)>,
     unknown_decode: UnknownDecode,
     vocab_size: Option<usize>,
     bos_token_id: Option<u32>,
@@ -86,6 +87,7 @@ impl TestTokenizer {
         Self {
             token_to_id: BTreeMap::new(),
             id_to_token: BTreeMap::new(),
+            added_vocab: Vec::new(),
             unknown_decode: UnknownDecode::Error,
             vocab_size: None,
             bos_token_id: None,
@@ -154,9 +156,21 @@ impl TestTokenizer {
         if self.token_to_id.insert(token.clone(), id).is_some() {
             panic!("configured test token text {token:?} was registered more than once");
         }
-        if self.id_to_token.insert(id, TestToken { text: token, kind }).is_some() {
+        if self
+            .id_to_token
+            .insert(
+                id,
+                TestToken {
+                    text: token.clone(),
+                    kind,
+                },
+            )
+            .is_some()
+        {
             panic!("configured test token id {id} was registered more than once");
         }
+        self.added_vocab.push((token, id));
+        self.added_vocab.sort_unstable_by_key(|(_, id)| *id);
     }
 
     fn byte_to_token(id: u32) -> Option<String> {
@@ -208,6 +222,10 @@ impl Tokenizer for TestTokenizer {
         Ok(ids)
     }
 
+    fn encode_ordinary(&self, text: &str) -> Result<Vec<u32>> {
+        Ok(text.as_bytes().iter().copied().map(u32::from).collect())
+    }
+
     fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> Result<String> {
         let mut output = String::new();
         let mut pending_bytes = Vec::new();
@@ -250,12 +268,82 @@ impl Tokenizer for TestTokenizer {
             .or_else(|| Self::byte_to_token(id))
     }
 
+    fn added_vocab(&self) -> &[(String, u32)] {
+        &self.added_vocab
+    }
+
     fn vocab_size(&self) -> usize {
         self.vocab_size.unwrap_or_else(|| self.inferred_vocab_size())
     }
 
     fn is_special_id(&self, token_id: u32) -> bool {
         self.id_to_token.get(&token_id).is_some_and(|token| token.kind.is_special())
+    }
+}
+
+/// Decode the concatenated `chunks` as the frontend streams them, split back
+/// at the chunk boundaries.
+///
+/// The concatenation is encoded with `tokenizer`'s configured tokens (so a
+/// marker spelled in full is its dedicated token) and run through the
+/// incremental decoder once, so every chunk carries the attributions of the
+/// tokens that produced it, and a token split across chunks keeps its anchor in
+/// the chunk holding its first byte.
+pub fn decode_chunks(tokenizer: &dyn Tokenizer, chunks: &[&str]) -> Vec<DecodedText> {
+    let mut rest = decode_ids(
+        tokenizer,
+        &tokenizer.encode(&chunks.concat(), false).unwrap(),
+    );
+    chunks.iter().map(|chunk| rest.drain_prefix(chunk.len())).collect()
+}
+
+/// Decode generated `token_ids` through the incremental decoder, as the
+/// frontend does, keeping each token's attribution.
+pub fn decode_ids(tokenizer: &dyn Tokenizer, token_ids: &[u32]) -> DecodedText {
+    let mut decoder = tokenizer.create_decode_stream(&[], false, 0);
+    for &token_id in token_ids {
+        decoder.push_token(token_id).unwrap();
+    }
+    decoder.flush(None).unwrap().1
+}
+
+/// Tokenizer that panics on any encode, decode or token lookup, for tests that
+/// prove a path never tokenizes or detokenizes.
+#[derive(Debug)]
+pub struct PanickingTokenizer;
+
+impl Tokenizer for PanickingTokenizer {
+    fn encode(&self, _text: &str, _add_special_tokens: bool) -> Result<Vec<u32>> {
+        panic!("unexpected tokenizer call: encode")
+    }
+
+    fn encode_ordinary(&self, _text: &str) -> Result<Vec<u32>> {
+        panic!("unexpected tokenizer call: encode_ordinary")
+    }
+
+    fn decode(&self, _token_ids: &[u32], _skip_special_tokens: bool) -> Result<String> {
+        panic!("unexpected tokenizer call: decode")
+    }
+
+    fn token_to_id(&self, _token: &str) -> Option<u32> {
+        panic!("unexpected tokenizer call: token_to_id")
+    }
+
+    fn id_to_token(&self, _id: u32) -> Option<String> {
+        panic!("unexpected tokenizer call: id_to_token")
+    }
+
+    fn is_special_id(&self, _token_id: u32) -> bool {
+        panic!("unexpected tokenizer call: is_special_id")
+    }
+
+    fn create_decode_stream(
+        &self,
+        _prompt_token_ids: &[u32],
+        _skip_special_tokens: bool,
+        _min_bytes_to_buffer: usize,
+    ) -> Box<dyn IncrementalDecoder + '_> {
+        panic!("unexpected tokenizer call: create_decode_stream")
     }
 }
 
@@ -372,6 +460,32 @@ mod tests {
         );
         assert!(tokenizer.is_special_id(0xF001));
         assert!(!tokenizer.is_special_id(0xF002));
+    }
+
+    #[test]
+    fn ordinary_encoding_bypasses_all_configured_tokens() {
+        let tokenizer = TestTokenizer::new()
+            .with_bos_token("<bos>", 256)
+            .with_special_token("<control>", 257)
+            .with_regular_token("<visible>", 258);
+        let ordinary_text = "user <control> and <visible>";
+
+        assert_eq!(tokenizer.encode("<control>", false).unwrap(), vec![257]);
+        assert_eq!(tokenizer.encode("<visible>", false).unwrap(), vec![258]);
+        assert_eq!(
+            tokenizer.encode_ordinary(ordinary_text).unwrap(),
+            ordinary_text.as_bytes().iter().copied().map(u32::from).collect::<Vec<_>>()
+        );
+
+        let mut segmented = tokenizer.encode("<control>", false).unwrap();
+        segmented.extend(tokenizer.encode_ordinary(ordinary_text).unwrap());
+        segmented.extend(tokenizer.encode("<visible>", false).unwrap());
+        assert_eq!(segmented.first(), Some(&257));
+        assert_eq!(segmented.last(), Some(&258));
+        assert_eq!(
+            tokenizer.decode(&segmented, false).unwrap(),
+            format!("<control>{ordinary_text}<visible>")
+        );
     }
 
     #[test]

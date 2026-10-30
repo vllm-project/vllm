@@ -3,12 +3,13 @@
 
 import torch
 
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.experts.lora_context import MoELoRAContext
 
 
 class LoRAExpertsMixin:
-    """
-    Mixin for FusedMoEExpertsModular subclasses that natively handle
+    """Mixin for FusedMoEExpertsModular subclasses that natively handle
     MoELoRAContext inside their apply() implementation.
 
     Mixing this class in:
@@ -23,6 +24,7 @@ class LoRAExpertsMixin:
     state is on lora_context or passed as arguments.
     """
 
+    moe_config: FusedMoEConfig
     _lora_context: MoELoRAContext | None = None
 
     def set_lora_context(self, ctx: MoELoRAContext) -> None:
@@ -46,6 +48,7 @@ class LoRAExpertsMixin:
         num_tokens: int,
         top_k_num: int,
         add_inputs: bool = True,
+        swap_w13_slices: bool = False,
     ) -> tuple[
         torch.Tensor | None,
         torch.Tensor | None,
@@ -53,6 +56,7 @@ class LoRAExpertsMixin:
         torch.Tensor | None,
     ]:
         w13_lora_a_stacked = lora_context.w13_lora_a_stacked
+        w13_lora_b_stacked = lora_context.w13_lora_b_stacked
         if lora_context.enable_moe_shared_loras:
             # w13 lora_A is shared across experts (collapsed expert-dim 1);
             # broadcast to local_num_experts via a stride-0 view. The kernel
@@ -61,11 +65,24 @@ class LoRAExpertsMixin:
                 a.expand(-1, lora_context.local_num_experts, -1, -1)
                 for a in w13_lora_a_stacked
             )
-        return lora_context.punica_wrapper.add_lora_w13(
-            y,
+        if swap_w13_slices:
+            # The expand kernel writes slice j into the j-th half of y's last
+            # dim. Reversing the (gate, up) slice tuples makes it emit
+            # [up, gate] order directly -- used by the FlashInfer trtllm path,
+            # whose SwiGLU expects the up half first, to avoid an out-of-place
+            # concat swap afterwards.
+            w13_lora_a_stacked = w13_lora_a_stacked[::-1]
+            w13_lora_b_stacked = w13_lora_b_stacked[::-1]
+        interleave_w13 = (
+            lora_context.w13_num_slices == 2
+            and self.moe_config.activation == MoEActivation.SWIGLUOAI
+        )
+        lora_output = torch.zeros_like(y) if interleave_w13 else y
+        result = lora_context.punica_wrapper.add_lora_w13(
+            lora_output,
             x,
             w13_lora_a_stacked,
-            lora_context.w13_lora_b_stacked,
+            w13_lora_b_stacked,
             topk_ids,
             topk_weights,
             expert_map,
@@ -80,9 +97,18 @@ class LoRAExpertsMixin:
             lora_context.w13_num_slices,
             lora_context.fully_sharded,
             lora_context.use_tuned_config,
-            add_inputs=add_inputs,
+            add_inputs=add_inputs or interleave_w13,
             token_lora_mapping=lora_context.local_token_lora_mapping,
         )
+        if interleave_w13:
+            # Map gate/up slices onto even/odd output channels without a copy.
+            gate_up_delta = lora_output.unflatten(-1, (2, -1))
+            gate_up_output = y.unflatten(-1, (-1, 2)).transpose(-1, -2)
+            if add_inputs:
+                gate_up_output.add_(gate_up_delta)
+            else:
+                gate_up_output.copy_(gate_up_delta)
+        return result
 
     def apply_w2_lora(
         self,

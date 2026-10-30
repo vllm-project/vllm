@@ -3,15 +3,22 @@
 """Unit tests for SharedOffloadRegion."""
 
 import contextlib
+import ctypes
+import errno
 import mmap
 import os
 import threading
 import time
 import uuid
+from types import SimpleNamespace
+from unittest.mock import MagicMock, call
 
 import pytest
 
 from vllm.utils.system_utils import get_mp_context
+from vllm.v1.kv_offload.cpu import gpu_worker
+from vllm.v1.kv_offload.cpu import host_register as host_register_module
+from vllm.v1.kv_offload.cpu import shared_offload_region as region_module
 from vllm.v1.kv_offload.cpu.shared_offload_region import (
     SharedOffloadRegion,
     _wait_for_file_size,
@@ -35,18 +42,22 @@ def _set_spawn_method(monkeypatch):
 
 def _make_region(
     engine_id: str,
-    num_blocks: int = 4,
+    num_chunks: int = 4,
     cpu_page_size: int = PAGE_SIZE,
     num_workers: int = 1,
     rank: int = 0,
+    barrier=None,
+    populate_shard: tuple[int, int] | None = None,
 ) -> SharedOffloadRegion:
     assert cpu_page_size % PAGE_SIZE == 0
     return SharedOffloadRegion(
         engine_id=engine_id,
-        num_blocks=num_blocks,
+        num_chunks=num_chunks,
         rank=rank,
-        kv_bytes_per_block=num_workers * cpu_page_size,
+        kv_bytes_per_chunk=num_workers * cpu_page_size,
         cpu_page_size=cpu_page_size,
+        barrier=barrier,
+        populate_shard=populate_shard,
     )
 
 
@@ -54,6 +65,29 @@ def _cleanup_file(path: str) -> None:
     """Best-effort file removal for test teardown."""
     with contextlib.suppress(FileNotFoundError):
         os.unlink(path)
+
+
+def _page_residency(mmap_obj: mmap.mmap, length: int) -> list[bool]:
+    """Return Linux page-residency bits for a writable mmap."""
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        mincore = libc.mincore
+    except AttributeError:
+        pytest.skip("mincore is unavailable")
+
+    page_count = (length + PAGE_SIZE - 1) // PAGE_SIZE
+    mincore.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_size_t,
+        ctypes.POINTER(ctypes.c_ubyte),
+    ]
+    mincore.restype = ctypes.c_int
+    vector = (ctypes.c_ubyte * page_count)()
+    address = ctypes.addressof(ctypes.c_ubyte.from_buffer(mmap_obj))
+    result = mincore(ctypes.c_void_p(address), length, vector)
+    if result != 0:
+        raise OSError(ctypes.get_errno())
+    return [bool(value & 1) for value in vector]
 
 
 @contextlib.contextmanager
@@ -71,16 +105,16 @@ def _region(engine_id: str, **kwargs):
 def _multi_region(
     engine_id: str,
     num_workers: int,
-    num_blocks: int = 4,
+    num_chunks: int = 4,
     cpu_page_size: int = PAGE_SIZE,
 ):
     """Context manager: create one SharedOffloadRegion per rank, clean up on exit."""
     regions = [
         SharedOffloadRegion(
             engine_id=engine_id,
-            num_blocks=num_blocks,
+            num_chunks=num_chunks,
             rank=rank,
-            kv_bytes_per_block=num_workers * cpu_page_size,
+            kv_bytes_per_chunk=num_workers * cpu_page_size,
             cpu_page_size=cpu_page_size,
         )
         for rank in range(num_workers)
@@ -96,7 +130,7 @@ def _multi_region(
 def _race_construct(
     engine_id: str,
     num_workers: int,
-    num_blocks: int = 4,
+    num_chunks: int = 4,
     cpu_page_size: int = PAGE_SIZE,
 ) -> tuple[list[SharedOffloadRegion], list[Exception]]:
     """Spawn num_workers threads that all race to construct SharedOffloadRegion."""
@@ -109,9 +143,9 @@ def _race_construct(
         try:
             regions[rank] = SharedOffloadRegion(
                 engine_id=engine_id,
-                num_blocks=num_blocks,
+                num_chunks=num_chunks,
                 rank=rank,
-                kv_bytes_per_block=num_workers * cpu_page_size,
+                kv_bytes_per_chunk=num_workers * cpu_page_size,
                 cpu_page_size=cpu_page_size,
             )
         except Exception as e:
@@ -128,7 +162,7 @@ def _race_construct(
 
 def _mp_race_construct_and_write(
     engine_id: str,
-    num_blocks: int,
+    num_chunks: int,
     rank: int,
     num_workers: int,
     cpu_page_size: int,
@@ -142,17 +176,70 @@ def _mp_race_construct_and_write(
     try:
         region = SharedOffloadRegion(
             engine_id=engine_id,
-            num_blocks=num_blocks,
+            num_chunks=num_chunks,
             rank=rank,
-            kv_bytes_per_block=num_workers * cpu_page_size,
+            kv_bytes_per_chunk=num_workers * cpu_page_size,
             cpu_page_size=cpu_page_size,
         )
-        t = region.create_next_view(cpu_page_size)
+        t = region.create_next_worker_view(cpu_page_size)
         t[:, :] = fill_value
         done_queue.put({"rank": rank, "error": None})
         cleanup_queue.get()  # wait for parent's verification to finish
         del t  # release view before cleanup to avoid BufferError
         region.cleanup()
+    except Exception as e:
+        done_queue.put({"rank": rank, "error": repr(e)})
+
+
+def _mp_barrier_construct_and_hold(
+    engine_id: str,
+    rank: int,
+    num_workers: int,
+    barrier,
+    fill_value: int,
+    done_queue,
+    replicated: bool = False,
+) -> None:
+    """Construct with a real cross-process barrier, write, then hold the
+    mapping (no cleanup) until the parent SIGKILLs this process."""
+    try:
+        populate_calls = 0
+        get_populate_write_fn = region_module._get_populate_write_fn
+
+        def track_population(mmap_obj):
+            nonlocal populate_calls
+            populate_calls += 1
+            return get_populate_write_fn(mmap_obj)
+
+        region_module._get_populate_write_fn = track_population
+        region = SharedOffloadRegion(
+            engine_id=engine_id,
+            num_chunks=2,
+            rank=0 if replicated else rank,
+            kv_bytes_per_chunk=PAGE_SIZE if replicated else num_workers * PAGE_SIZE,
+            cpu_page_size=PAGE_SIZE,
+            barrier=lambda: barrier.wait(30),
+            populate_shard=(rank, num_workers) if replicated else None,
+        )
+        # The constructor's barrier precedes the creator's unlink.
+        barrier.wait(30)
+        t = region.create_next_worker_view(PAGE_SIZE)
+        if not replicated or rank == 0:
+            t[:, :] = fill_value
+        barrier.wait(30)
+        # fd is only cleared by cleanup(), which this holder never calls.
+        assert region.fd is not None
+        done_queue.put(
+            {
+                "rank": rank,
+                "error": None,
+                "inode": os.fstat(region.fd).st_ino,
+                "path_exists": os.path.exists(region.mmap_path),
+                "populate_calls": populate_calls,
+                "contents_match": bool((t == (1 if replicated else fill_value)).all()),
+            }
+        )
+        time.sleep(60)  # hold the mapping until killed
     except Exception as e:
         done_queue.put({"rank": rank, "error": repr(e)})
 
@@ -164,131 +251,133 @@ def iid():
 
 
 # ---------------------------------------------------------------------------
-# create_next_view — shape, stride and storage offset
+# create_next_worker_view — shape, stride and storage offset
 # ---------------------------------------------------------------------------
 
 
-def test_create_next_view_shape_and_stride(iid):
-    """Returned tensor must have shape (num_blocks, tensor_page_size) and
+def test_create_next_worker_view_shape_and_stride(iid):
+    """Returned tensor must have shape (num_chunks, tensor_page_size) and
     stride (row_stride, 1) where row_stride = cpu_page_size * num_workers."""
-    with _region(iid, num_blocks=4, cpu_page_size=2 * PAGE_SIZE) as r:
-        t = r.create_next_view(PAGE_SIZE)
+    with _region(iid, num_chunks=4, cpu_page_size=2 * PAGE_SIZE) as r:
+        t = r.create_next_worker_view(PAGE_SIZE)
         assert t.shape == (4, PAGE_SIZE)
         # num_workers=1 → row_stride = cpu_page_size
         assert t.stride() == (2 * PAGE_SIZE, 1)
         del t
 
 
-def test_create_next_view_storage_offset_rank0(iid):
+def test_create_next_worker_view_storage_offset_rank0(iid):
     """rank=0 worker's first tensor must start at byte 0 of the mmap."""
     with _region(iid, cpu_page_size=PAGE_SIZE, num_workers=2, rank=0) as r:
-        t = r.create_next_view(PAGE_SIZE)
+        t = r.create_next_worker_view(PAGE_SIZE)
         assert t.data_ptr() == r._base.data_ptr()  # storage_offset == 0
         del t
 
 
-def test_create_next_view_storage_offset_rank1(iid):
+def test_create_next_worker_view_storage_offset_rank1(iid):
     """rank=1 worker's first tensor must start cpu_page_size bytes into the mmap."""
-    with _multi_region(iid, num_workers=2, num_blocks=4) as (r0, r1):
-        t1 = r1.create_next_view(PAGE_SIZE)
+    with _multi_region(iid, num_workers=2, num_chunks=4) as (r0, r1):
+        t1 = r1.create_next_worker_view(PAGE_SIZE)
         assert t1.data_ptr() == r1._base.data_ptr() + PAGE_SIZE
         del t1
 
 
-def test_create_next_view_row_stride_with_multiple_workers(iid):
+def test_create_next_worker_view_row_stride_with_multiple_workers(iid):
     """With num_workers=4, row_stride must be 4 * cpu_page_size."""
-    with _region(iid, num_blocks=2, num_workers=4) as r:
-        t = r.create_next_view(PAGE_SIZE)
+    with _region(iid, num_chunks=2, num_workers=4) as r:
+        t = r.create_next_worker_view(PAGE_SIZE)
         assert t.stride(0) == 4 * PAGE_SIZE
         del t
 
 
 # ---------------------------------------------------------------------------
-# create_next_view — cursor advancement
+# create_next_worker_view — cursor advancement
 # ---------------------------------------------------------------------------
 
 
-def test_create_next_view_cursor_advances(iid):
-    """Each call to create_next_view must advance _worker_offset by tensor_page_size."""
+def test_create_next_worker_view_cursor_advances(iid):
+    """Each create_next_worker_view call must advance _worker_offset by
+    tensor_page_size."""
     with _region(iid, cpu_page_size=3 * PAGE_SIZE) as r:
         assert r._worker_offset == 0
-        r.create_next_view(PAGE_SIZE)
+        r.create_next_worker_view(PAGE_SIZE)
         assert r._worker_offset == PAGE_SIZE
-        r.create_next_view(PAGE_SIZE)
+        r.create_next_worker_view(PAGE_SIZE)
         assert r._worker_offset == 2 * PAGE_SIZE
-        r.create_next_view(PAGE_SIZE)
+        r.create_next_worker_view(PAGE_SIZE)
         assert r._worker_offset == 3 * PAGE_SIZE  # exactly at area end
 
 
-def test_create_next_view_exact_fill_succeeds(iid):
+def test_create_next_worker_view_exact_fill_succeeds(iid):
     """Allocations whose total exactly equals cpu_page_size must all succeed."""
     with _region(iid, cpu_page_size=2 * PAGE_SIZE) as r:
-        r.create_next_view(PAGE_SIZE)  # first half
-        r.create_next_view(PAGE_SIZE)  # fills to area end — must not raise
+        r.create_next_worker_view(PAGE_SIZE)  # first half
+        r.create_next_worker_view(PAGE_SIZE)  # fills to area end — must not raise
 
 
 # ---------------------------------------------------------------------------
-# create_next_view — overflow guard
+# create_next_worker_view — overflow guard
 # ---------------------------------------------------------------------------
 
 
-def test_create_next_view_single_overflow_raises(iid):
+def test_create_next_worker_view_single_overflow_raises(iid):
     """A single allocation larger than cpu_page_size must raise AssertionError."""
     with (
         _region(iid) as r,
         pytest.raises(AssertionError, match="exceeds worker area end"),
     ):
-        r.create_next_view(PAGE_SIZE + 1)
+        r.create_next_worker_view(PAGE_SIZE + 1)
 
 
-def test_create_next_view_cumulative_overflow_raises(iid):
+def test_create_next_worker_view_cumulative_overflow_raises(iid):
     """Successive allocations that cumulatively exceed cpu_page_size must raise."""
     with _region(iid, cpu_page_size=2 * PAGE_SIZE) as r:
-        r.create_next_view(PAGE_SIZE)  # ok — half used
-        r.create_next_view(PAGE_SIZE)  # ok — full
+        r.create_next_worker_view(PAGE_SIZE)  # ok — half used
+        r.create_next_worker_view(PAGE_SIZE)  # ok — full
         with pytest.raises(AssertionError, match="exceeds worker area end"):
-            r.create_next_view(1)  # one byte too many
+            r.create_next_worker_view(1)  # one byte too many
 
 
-def test_create_next_view_overflow_does_not_mutate_cursor(iid):
-    """A failed create_next_view must leave _worker_offset unchanged."""
+def test_create_next_worker_view_overflow_does_not_mutate_cursor(iid):
+    """A failed create_next_worker_view must leave _worker_offset unchanged."""
     with _region(iid) as r:
         offset_before = r._worker_offset
         with pytest.raises(AssertionError):
-            r.create_next_view(PAGE_SIZE + 1)
+            r.create_next_worker_view(PAGE_SIZE + 1)
         assert r._worker_offset == offset_before
 
 
 # ---------------------------------------------------------------------------
-# create_next_view — data correctness and layout
+# create_next_worker_view — data correctness and layout
 # ---------------------------------------------------------------------------
 
 
-def test_create_next_view_write_visible_in_raw_mmap(iid):
-    """Writes into a create_next_view view must appear at the correct raw mmap offset"""
-    with _region(iid, num_blocks=4) as r:
-        t = r.create_next_view(PAGE_SIZE)
-        t[2, :] = 42  # write to block row 2
+def test_create_next_worker_view_write_visible_in_raw_mmap(iid):
+    """Writes into a create_next_worker_view view must appear at the correct
+    raw mmap offset"""
+    with _region(iid, num_chunks=4) as r:
+        t = r.create_next_worker_view(PAGE_SIZE)
+        t[2, :] = 42  # write to chunk row 2
 
         raw = memoryview(r.mmap_obj)
-        # num_workers=1 → row_stride = PAGE_SIZE; block 2 starts at byte 2*PAGE_SIZE
+        # num_workers=1 → row_stride = PAGE_SIZE; chunk 2 starts at byte 2*PAGE_SIZE
         chunk = bytes(raw[2 * PAGE_SIZE : 3 * PAGE_SIZE])
         assert all(b == 42 for b in chunk)
         del raw, t
 
 
-def test_create_next_view_multi_tensor_layout(iid):
+def test_create_next_worker_view_multi_tensor_layout(iid):
     """Two tensors from the same worker land at consecutive byte offsets per row."""
-    with _region(iid, num_blocks=2, cpu_page_size=2 * PAGE_SIZE) as r:
-        ta = r.create_next_view(PAGE_SIZE)
-        tb = r.create_next_view(PAGE_SIZE)
+    with _region(iid, num_chunks=2, cpu_page_size=2 * PAGE_SIZE) as r:
+        ta = r.create_next_worker_view(PAGE_SIZE)
+        tb = r.create_next_worker_view(PAGE_SIZE)
 
         ta[:, :] = 1
         tb[:, :] = 2
 
         raw = memoryview(r.mmap_obj)
-        for blk in range(2):
-            row_offset = blk * 2 * PAGE_SIZE  # num_workers=1
+        for chunk in range(2):
+            row_offset = chunk * 2 * PAGE_SIZE  # num_workers=1
             assert all(b == 1 for b in raw[row_offset : row_offset + PAGE_SIZE])
             assert all(
                 b == 2 for b in raw[row_offset + PAGE_SIZE : row_offset + 2 * PAGE_SIZE]
@@ -296,11 +385,11 @@ def test_create_next_view_multi_tensor_layout(iid):
         del raw, ta, tb
 
 
-def test_create_next_view_multiprocess_slots(iid):
-    """Each worker process calls create_next_view and writes distinct data;
+def test_create_next_worker_view_multiprocess_slots(iid):
+    """Each worker process calls create_next_worker_view and writes distinct data;
     the parent verifies each slot lands at the correct interleaved offset."""
     num_workers = 2
-    num_blocks = 4
+    num_chunks = 4
 
     ctx = get_mp_context()
     done_queue = ctx.Queue()
@@ -309,9 +398,9 @@ def test_create_next_view_multiprocess_slots(iid):
     # Parent is rank 0 (creator); child is rank 1 (joiner).
     region = SharedOffloadRegion(
         engine_id=iid,
-        num_blocks=num_blocks,
+        num_chunks=num_chunks,
         rank=0,
-        kv_bytes_per_block=num_workers * PAGE_SIZE,
+        kv_bytes_per_chunk=num_workers * PAGE_SIZE,
         cpu_page_size=PAGE_SIZE,
     )
     try:
@@ -319,7 +408,7 @@ def test_create_next_view_multiprocess_slots(iid):
             target=_mp_race_construct_and_write,
             args=(
                 iid,
-                num_blocks,
+                num_chunks,
                 1,
                 num_workers,
                 PAGE_SIZE,
@@ -330,19 +419,20 @@ def test_create_next_view_multiprocess_slots(iid):
         )
         child.start()
 
-        t0 = region.create_next_view(PAGE_SIZE)
+        t0 = region.create_next_worker_view(PAGE_SIZE)
         t0[:, :] = 11
 
         result = done_queue.get(timeout=30)
         assert result["error"] is None, result["error"]
 
+        assert region.mmap_obj is not None
         raw = memoryview(region.mmap_obj)
-        for blk in range(num_blocks):
-            row_start = blk * num_workers * PAGE_SIZE
+        for chunk in range(num_chunks):
+            row_start = chunk * num_workers * PAGE_SIZE
             w0 = bytes(raw[row_start : row_start + PAGE_SIZE])
             w1 = bytes(raw[row_start + PAGE_SIZE : row_start + 2 * PAGE_SIZE])
-            assert all(b == 11 for b in w0), f"block {blk}: rank0 slot wrong"
-            assert all(b == 22 for b in w1), f"block {blk}: rank1 slot wrong"
+            assert all(b == 11 for b in w0), f"chunk {chunk}: rank0 slot wrong"
+            assert all(b == 22 for b in w1), f"chunk {chunk}: rank1 slot wrong"
 
         del raw, t0  # release before finally triggers cleanup
         cleanup_queue.put(True)
@@ -353,24 +443,24 @@ def test_create_next_view_multiprocess_slots(iid):
         _cleanup_file(region.mmap_path)
 
 
-def test_create_next_view_worker_isolation(iid):
+def test_create_next_worker_view_worker_isolation(iid):
     """Writes by worker 0 must not affect worker 1's slot and vice versa."""
     num_workers = 2
-    num_blocks = 4
-    with _multi_region(iid, num_workers=num_workers, num_blocks=num_blocks) as regions:
-        t0 = regions[0].create_next_view(PAGE_SIZE)
-        t1 = regions[1].create_next_view(PAGE_SIZE)
+    num_chunks = 4
+    with _multi_region(iid, num_workers=num_workers, num_chunks=num_chunks) as regions:
+        t0 = regions[0].create_next_worker_view(PAGE_SIZE)
+        t1 = regions[1].create_next_worker_view(PAGE_SIZE)
 
         t0[:, :] = 11
         t1[:, :] = 22
 
         raw = memoryview(regions[0].mmap_obj)
-        for blk in range(num_blocks):
-            row_start = blk * num_workers * PAGE_SIZE
+        for chunk in range(num_chunks):
+            row_start = chunk * num_workers * PAGE_SIZE
             w0 = bytes(raw[row_start : row_start + PAGE_SIZE])
             w1 = bytes(raw[row_start + PAGE_SIZE : row_start + 2 * PAGE_SIZE])
-            assert all(b == 11 for b in w0), f"block {blk}: worker0 slot corrupted"
-            assert all(b == 22 for b in w1), f"block {blk}: worker1 slot corrupted"
+            assert all(b == 11 for b in w0), f"chunk {chunk}: worker0 slot corrupted"
+            assert all(b == 22 for b in w1), f"chunk {chunk}: worker1 slot corrupted"
         del raw, t0, t1  # release before finally triggers cleanup
 
 
@@ -400,8 +490,205 @@ def test_file_exists_after_construction(iid):
 
 def test_file_has_correct_size(iid):
     """The mmap file size on disk must equal total_size_bytes."""
-    with _region(iid, num_blocks=4) as r:
+    with _region(iid, num_chunks=4) as r:
         assert os.path.getsize(r.mmap_path) == 4 * PAGE_SIZE
+
+
+def test_madvise_success_selects_madvise_population(iid, monkeypatch):
+    """A successful probe must keep using MADV_POPULATE_WRITE — the fallback
+    helper must never be invoked on a kernel that accepts the advice.
+
+    Spies on both helpers so we can verify call counts: 1 probe call +
+    N populate calls, fallback 0 times.
+    """
+    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
+    madvise_calls: list[tuple[int, int, int]] = []
+    fallback_calls: list[tuple[int, int]] = []
+
+    def _spy_madvise(mm, off, ln):
+        madvise_calls.append((off, ln, id(mm)))
+
+    def _spy_fallback(mm, off, ln):
+        fallback_calls.append((off, ln))
+
+    monkeypatch.setattr(sor, "_madvise_populate_write", _spy_madvise)
+    monkeypatch.setattr(sor, "_fallback_populate_write", _spy_fallback)
+
+    num_chunks = 3
+    num_workers = 2
+    with _region(iid, num_chunks=num_chunks, num_workers=num_workers, rank=1):
+        # 1 probe (PAGESIZE) + N populate calls (one per chunk per worker column).
+        expected_populate = num_chunks  # ranked path: one call per chunk
+        mmap_id = madvise_calls[0][2]
+        assert madvise_calls == [
+            (0, mmap.PAGESIZE, mmap_id),
+            (mmap.PAGESIZE, mmap.PAGESIZE, mmap_id),
+            (3 * mmap.PAGESIZE, mmap.PAGESIZE, mmap_id),
+            (5 * mmap.PAGESIZE, mmap.PAGESIZE, mmap_id),
+        ]
+        assert len(madvise_calls) == 1 + expected_populate
+        assert fallback_calls == [], (
+            "native-path constructor must not invoke the fallback helper"
+        )
+
+
+@pytest.mark.parametrize(
+    "shard, expected",
+    [((1, 2), [(3 * PAGE_SIZE, 3 * PAGE_SIZE)]), ((3, 4), [])],
+)
+def test_populate_shard_prefaults_only_its_share(iid, monkeypatch, shard, expected):
+    """Workers that map the same bytes each pre-fault one contiguous share
+    (page-rounded; a trailing share may be empty) instead of the whole region."""
+    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
+    madvise_calls: list[tuple[int, int]] = []
+
+    def populate(mm, off, ln):
+        assert not os.path.exists(f"/dev/shm/vllm_offload_{iid}.mmap")
+        madvise_calls.append((off, ln))
+
+    monkeypatch.setattr(sor, "_madvise_populate_write", populate)
+
+    def check_population():
+        if barrier.call_count == 2:
+            assert madvise_calls == [(0, PAGE_SIZE), *expected]
+
+    barrier = MagicMock(side_effect=check_population)
+    with _region(
+        iid, num_chunks=3, num_workers=2, populate_shard=shard, barrier=barrier
+    ):
+        assert madvise_calls == [(0, PAGE_SIZE), *expected]
+        assert barrier.call_count == 2
+
+
+def test_madvise_einval_selects_fallback_for_ranked_region(iid, monkeypatch):
+    """An EINVAL probe must select fallback for every ranked chunk."""
+    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
+    fallback_calls: list[tuple[int, int]] = []
+    real_fallback = sor._fallback_populate_write
+
+    def _raise_einval(mm, off, ln):
+        raise OSError(errno.EINVAL, "simulated unsupported kernel")
+
+    def _spy_fallback(mm, off, ln):
+        fallback_calls.append((off, ln))
+        return real_fallback(mm, off, ln)
+
+    monkeypatch.setattr(sor, "_madvise_populate_write", _raise_einval)
+    monkeypatch.setattr(sor, "_fallback_populate_write", _spy_fallback)
+
+    with _region(iid, num_chunks=3, num_workers=2, rank=1):
+        assert fallback_calls == [
+            (mmap.PAGESIZE, mmap.PAGESIZE),
+            (3 * mmap.PAGESIZE, mmap.PAGESIZE),
+            (5 * mmap.PAGESIZE, mmap.PAGESIZE),
+        ]
+
+
+def test_madvise_einval_selects_fallback_for_unranked_region(iid, monkeypatch):
+    """An EINVAL probe must select fallback for the whole unranked region."""
+    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
+    fallback_calls: list[tuple[int, int]] = []
+    real_fallback = sor._fallback_populate_write
+
+    def _raise_einval(mm, off, ln):
+        raise OSError(errno.EINVAL, "simulated unsupported kernel")
+
+    def _spy_fallback(mm, off, ln):
+        fallback_calls.append((off, ln))
+        return real_fallback(mm, off, ln)
+
+    monkeypatch.setattr(sor, "_madvise_populate_write", _raise_einval)
+    monkeypatch.setattr(sor, "_fallback_populate_write", _spy_fallback)
+
+    with _region(iid, num_chunks=3, num_workers=2, rank=None):
+        assert fallback_calls == [(0, 6 * mmap.PAGESIZE)]
+
+
+def test_fallback_populate_write_preserves_bytes_and_faults_pages():
+    """Fallback preserves existing bytes and touches every target page."""
+    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
+    size = 3 * mmap.PAGESIZE
+    if not hasattr(mmap, "MADV_DONTNEED"):
+        pytest.skip("MADV_DONTNEED is unavailable")
+
+    mmap_obj = mmap.mmap(
+        -1,
+        size,
+        flags=mmap.MAP_SHARED,
+        prot=mmap.PROT_READ | mmap.PROT_WRITE,
+    )
+    try:
+        mmap_obj.madvise(mmap.MADV_DONTNEED, 0, size)
+        if any(_page_residency(mmap_obj, size)):
+            pytest.skip("kernel did not discard anonymous mmap pages")
+
+        mmap_obj[0] = 0xAB
+        assert _page_residency(mmap_obj, size) == [True, False, False]
+
+        sor._fallback_populate_write(mmap_obj, 0, size)
+
+        assert _page_residency(mmap_obj, size) == [True, True, True]
+        assert mmap_obj[0] == 0xAB
+    finally:
+        mmap_obj.close()
+
+
+def test_madvise_unexpected_oserror_propagates(iid, monkeypatch):
+    """Only EINVAL triggers the fallback.  Other OSErrors (e.g. EIO) must
+    propagate out of __init__, not be silently masked by the fallback branch.
+    """
+    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
+    monkeypatch.setattr(
+        sor,
+        "_madvise_populate_write",
+        lambda mm, off, ln: (_ for _ in ()).throw(
+            OSError(errno.EIO, "simulated I/O failure")
+        ),
+    )
+    with pytest.raises(OSError) as exc_info:
+        _make_region(iid)
+    assert exc_info.value.errno == errno.EIO
+
+
+def test_segmented_region_maps_files_back_to_back(iid, monkeypatch):
+    """Rows split over three shm files mapped back to back: each worker sees
+    the other's writes in every file, and the creator removes every file."""
+    monkeypatch.setattr(region_module, "_MIN_SEGMENT_BYTES", PAGE_SIZE)
+    regions = [
+        SharedOffloadRegion(
+            engine_id=iid,
+            num_chunks=5,
+            rank=rank,
+            kv_bytes_per_chunk=2 * PAGE_SIZE,
+            cpu_page_size=PAGE_SIZE,
+            num_segments=3,
+        )
+        for rank in range(2)
+    ]
+    segments = regions[0]._segments
+    try:
+        assert [length // PAGE_SIZE for _, _, length in segments] == [4, 4, 2]
+        for rank, region in enumerate(regions):
+            ranges = list(region.iter_worker_slot_ranges())
+            first_row = rank * 5 // 2
+            assert ranges[0] == ((first_row * 2 + rank) * PAGE_SIZE, PAGE_SIZE)
+            assert sorted(ranges) == [
+                ((row * 2 + rank) * PAGE_SIZE, PAGE_SIZE) for row in range(5)
+            ]
+            region.create_next_worker_view(PAGE_SIZE).fill_(rank + 1)
+        rows = regions[0].base_tensor.view(5, 2, PAGE_SIZE)
+        assert (rows[:, 0] == 1).all() and (rows[:, 1] == 2).all()
+        del rows
+    finally:
+        for region in regions:
+            region.cleanup()
+    assert not any(os.path.exists(path) for path, _, _ in segments)
 
 
 # ---------------------------------------------------------------------------
@@ -425,6 +712,7 @@ def test_multi_worker_race_exactly_one_creator(iid):
         )
 
         for r in regions:
+            assert r.mmap_obj is not None
             assert not r.mmap_obj.closed
             assert r.total_size_bytes == 4 * num_workers * PAGE_SIZE
     finally:
@@ -439,8 +727,11 @@ def test_multi_worker_race_shared_memory_visible(iid):
     regions, errors = _race_construct(iid, num_workers=num_workers)
     assert not errors
     try:
-        regions[0].mmap_obj[0:1] = b"\xab"
+        writer_mmap = regions[0].mmap_obj
+        assert writer_mmap is not None
+        writer_mmap[0:1] = b"\xab"
         for r in regions[1:]:
+            assert r.mmap_obj is not None
             assert memoryview(r.mmap_obj)[0:1] == b"\xab"
     finally:
         for r in regions:
@@ -452,7 +743,7 @@ def test_multiprocess_race_construct_and_write(iid):
     """N processes race to construct the same SharedOffloadRegion, each writes
     fill_value = rank+1 into their slot; parent verifies interleaved layout."""
     num_workers = 4
-    num_blocks = 3
+    num_chunks = 3
 
     ctx = get_mp_context()
     done_queue = ctx.Queue()
@@ -463,7 +754,7 @@ def test_multiprocess_race_construct_and_write(iid):
             target=_mp_race_construct_and_write,
             args=(
                 iid,
-                num_blocks,
+                num_chunks,
                 rank,
                 num_workers,
                 PAGE_SIZE,
@@ -490,13 +781,13 @@ def test_multiprocess_race_construct_and_write(iid):
     with open(mmap_path, "rb") as f:
         raw = f.read()
 
-    for blk in range(num_blocks):
+    for chunk in range(num_chunks):
         for w in range(num_workers):
-            slot_start = (blk * num_workers + w) * PAGE_SIZE
+            slot_start = (chunk * num_workers + w) * PAGE_SIZE
             slot = raw[slot_start : slot_start + PAGE_SIZE]
             expected = w + 1  # fill_value = rank + 1
             assert all(b == expected for b in slot), (
-                f"block {blk}, worker {w}: expected {expected} but got wrong bytes"
+                f"chunk {chunk}, worker {w}: expected {expected} but got wrong bytes"
             )
 
     # Unblock all workers to clean up.
@@ -516,8 +807,11 @@ def test_cleanup_creator_all_effects(iid):
     """cleanup() on the creator closes mmap, closes fd, and removes the file."""
     r = _make_region(iid)
     path = r.mmap_path
+    # captured before cleanup(), which clears both attributes on the region
     fd = r.fd
     mmap_obj = r.mmap_obj
+    assert fd is not None
+    assert mmap_obj is not None
 
     r.cleanup()
 
@@ -532,8 +826,11 @@ def test_cleanup_non_creator_all_effects(iid):
     r0 = _make_region(iid)  # creator
     r1 = _make_region(iid)  # joiner
     path = r0.mmap_path
+    # captured before cleanup(), which clears both attributes on the region
     fd1 = r1.fd
     mmap_obj1 = r1.mmap_obj
+    assert fd1 is not None
+    assert mmap_obj1 is not None
     try:
         r1.cleanup()
 
@@ -553,14 +850,204 @@ def test_cleanup_idempotent(iid):
     r.cleanup()  # must be a no-op
 
 
-def test_cleanup_after_create_next_view_releases_mmap(iid):
-    """cleanup() must close the mmap even after create_next_view was called.
-    create_next_view returns a view that shares storage with _base; both must be
+def test_cleanup_unregisters_every_pinned_chunk(iid, monkeypatch):
+    """cleanup() must release every chunk from a split host registration."""
+    r = _make_region(iid)
+    unregister = MagicMock()
+    monkeypatch.setattr(region_module, "host_unregister", unregister)
+    r.pinned_addresses = [0x100000, 0x200000, 0x300000]
+    r.is_pinned = True
+
+    r.cleanup()
+
+    assert unregister.call_args_list == [
+        call(0x300000),
+        call(0x200000),
+        call(0x100000),
+    ]
+
+
+@pytest.fixture
+def host_register(monkeypatch):
+    """Mock the cross-platform host_register/host_unregister helpers with
+    registrations capped at seven pages. The same unregister mock backs both
+    pin_mmap_region's rollback path and the region's cleanup() on exit from
+    ``_region``.
+    """
+    register = MagicMock(return_value=True)
+    unregister = MagicMock()
+    monkeypatch.setattr(gpu_worker, "MAX_HOST_REGISTER_CHUNK_BYTES", 7 * PAGE_SIZE)
+    monkeypatch.setattr(gpu_worker, "MIN_HOST_REGISTER_SAVED_BYTES", PAGE_SIZE)
+    monkeypatch.setattr(gpu_worker, "host_register", register)
+    monkeypatch.setattr(gpu_worker, "host_unregister", unregister)
+    monkeypatch.setattr(region_module, "host_unregister", unregister)
+    return register, unregister
+
+
+@pytest.mark.parametrize("worker_slot_only", [False, True])
+def test_pin_mmap_region_registers_row_aligned_chunks(
+    iid, host_register, worker_slot_only
+):
+    """Chunks end on row boundaries: 3-page rows under a 7-page cap register
+    as 6 + 6 + 3 pages, where a raw byte cap would give 7 + 7 + 1. A slot
+    spanning the whole row registers the same way."""
+    register, unregister = host_register
+    with _region(iid, num_chunks=5, cpu_page_size=3 * PAGE_SIZE) as region:
+        gpu_worker.pin_mmap_region(region, worker_slot_only=worker_slot_only)
+        base = region._base.data_ptr()
+        assert register.call_args_list == [
+            call(base, 6 * PAGE_SIZE),
+            call(base + 6 * PAGE_SIZE, 6 * PAGE_SIZE),
+            call(base + 12 * PAGE_SIZE, 3 * PAGE_SIZE),
+        ]
+        assert region.is_pinned
+
+    assert unregister.call_args_list == [
+        call(base + 12 * PAGE_SIZE),
+        call(base + 6 * PAGE_SIZE),
+        call(base),
+    ]
+
+
+def test_pin_mmap_region_worker_slot_only_registers_own_slots(
+    iid, host_register, monkeypatch
+):
+    """Rank 1's 1.5-page slot in 4-page rows registers pages [1, 3) of each row."""
+    register, _ = host_register
+    populate = MagicMock()
+    monkeypatch.setattr(region_module, "_get_populate_write_fn", lambda _: populate)
+    region = SharedOffloadRegion(
+        engine_id=iid,
+        num_chunks=3,
+        rank=1,
+        kv_bytes_per_chunk=4 * PAGE_SIZE,
+        cpu_page_size=PAGE_SIZE + PAGE_SIZE // 2,
+    )
+    try:
+        gpu_worker.pin_mmap_region(region, worker_slot_only=True)
+        base = region._base.data_ptr() + PAGE_SIZE
+        assert register.call_args_list == [
+            call(base + row * 4 * PAGE_SIZE, 2 * PAGE_SIZE) for row in range(3)
+        ]
+        assert populate.call_args_list == [
+            call(region.mmap_obj, (1 + row * 4) * PAGE_SIZE, 2 * PAGE_SIZE)
+            for row in range(3)
+        ]
+    finally:
+        region.cleanup()
+        _cleanup_file(region.mmap_path)
+
+
+def _unmapped_registration_region(num_chunks, slot_size, num_workers):
+    """Describe a large region without allocating it; registration is mocked."""
+    region = object.__new__(SharedOffloadRegion)
+    region.rank = 1
+    region.num_chunks = num_chunks
+    region.page_size = PAGE_SIZE
+    region.cpu_page_size = slot_size
+    region._row_stride = num_workers * slot_size
+    region.total_size_bytes = region.num_chunks * region._row_stride
+    region._segments = [("unused", 0, region.total_size_bytes)]
+    region._base = SimpleNamespace(data_ptr=lambda: 0x100000)
+    region.pinned_addresses = []
+    region.is_pinned = False
+    return region
+
+
+@pytest.mark.parametrize(
+    "num_rows,slot_mib,own_slots",
+    [(2, 2, False), (2, 3, True), ((1 << 16) + 1, 3, True)],
+)
+def test_pin_mmap_region_selects_by_savings_not_row_count(
+    monkeypatch, num_rows, slot_mib, own_slots
+):
+    """Small savings favor whole-region calls; large row counts do not disable slots."""
+    slot = slot_mib * 1024**2
+    region = _unmapped_registration_region(num_rows, slot, 2)
+    registrations = []
+
+    def register(ptr, size):
+        registrations.append((ptr, size))
+        return True
+
+    monkeypatch.setattr(gpu_worker, "host_register", register)
+    gpu_worker.pin_mmap_region(region, worker_slot_only=True)
+
+    assert region.is_pinned
+    assert registrations == (
+        [(0x100000 + (2 * row + 1) * slot, slot) for row in range(num_rows)]
+        if own_slots
+        else [(0x100000, region.total_size_bytes)]
+    )
+
+
+def test_host_registration_reuses_cudart(monkeypatch):
+    """Registering and releasing multiple slots constructs one runtime wrapper."""
+    cudart = MagicMock()
+    cudart.cudaHostRegister.return_value = 0
+    cudart.cudaHostUnregister.return_value = 0
+    constructor = MagicMock(return_value=cudart)
+    monkeypatch.setattr(host_register_module, "CudaRTLibrary", constructor)
+    monkeypatch.setattr(
+        host_register_module.current_platform, "is_cuda_alike", lambda: True
+    )
+    host_register_module._get_cudart.cache_clear()
+    try:
+        for ptr in (0x100000, 0x200000):
+            assert host_register_module.host_register(ptr, PAGE_SIZE)
+            host_register_module.host_unregister(ptr)
+        constructor.assert_called_once_with()
+        assert cudart.cudaHostRegister.call_count == 2
+        assert cudart.cudaHostUnregister.call_count == 2
+    finally:
+        host_register_module._get_cudart.cache_clear()
+
+
+@pytest.mark.parametrize("fail_at", [0, 1, 2])
+def test_pin_mmap_region_failure_leaves_region_pageable(iid, host_register, fail_at):
+    """A failed chunk unregisters the chunks before it on the same range, so
+    the region is pinned whole or not at all."""
+    register, unregister = host_register
+    register.side_effect = [True] * fail_at + [False]
+    with _region(iid, num_chunks=5, cpu_page_size=3 * PAGE_SIZE) as region:
+        gpu_worker.pin_mmap_region(region)
+        base = region._base.data_ptr()
+        assert not region.is_pinned
+        assert region.pinned_addresses == []
+
+    registered = [base + i * 6 * PAGE_SIZE for i in range(fail_at)]
+    failed_size = min(6, 15 - 6 * fail_at) * PAGE_SIZE
+    assert register.call_args_list == [
+        *(call(address, 6 * PAGE_SIZE) for address in registered),
+        call(base + fail_at * 6 * PAGE_SIZE, failed_size),
+    ]
+    assert unregister.call_args_list == [
+        call(address) for address in reversed(registered)
+    ]
+
+
+def test_pin_mmap_region_when_host_register_unsupported_stays_pageable(
+    iid, monkeypatch
+):
+    """A platform without host registration support (host_register()
+    returning False) leaves the region pageable instead of failing worker
+    startup."""
+    monkeypatch.setattr(gpu_worker, "host_register", lambda ptr, num_bytes: False)
+    with _region(iid) as region:
+        gpu_worker.pin_mmap_region(region)
+        assert not region.is_pinned
+        assert region.pinned_addresses == []
+
+
+def test_cleanup_after_create_next_worker_view_releases_mmap(iid):
+    """cleanup() must close the mmap even after create_next_worker_view was called.
+    create_next_worker_view returns a view that shares storage with _base; both must be
     released before mmap.close() can succeed."""
     r = _make_region(iid)
-    mmap_obj = r.mmap_obj
+    mmap_obj = r.mmap_obj  # captured before cleanup() clears it
+    assert mmap_obj is not None
 
-    t = r.create_next_view(PAGE_SIZE)
+    t = r.create_next_worker_view(PAGE_SIZE)
     del t
 
     r.cleanup()
@@ -610,3 +1097,308 @@ def test_wait_for_file_size_timeout(tmp_path):
             _wait_for_file_size(fd, PAGE_SIZE, timeout=0.1)
     finally:
         os.close(fd)
+
+
+@pytest.mark.skip_global_cleanup
+def test_wait_for_file_size_rejects_unlinked_file(tmp_path):
+    path = tmp_path / "unlinked.mmap"
+    fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        os.unlink(path)
+        with pytest.raises(RuntimeError, match="creator failed"):
+            _wait_for_file_size(fd, PAGE_SIZE, timeout=1.0)
+    finally:
+        os.close(fd)
+
+
+# ---------------------------------------------------------------------------
+# Constructor — capacity validation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.skipif(not os.path.isdir("/dev/shm"), reason="requires /dev/shm")
+def test_creator_memory_check_runs_only_for_creator(iid):
+    checked_sizes: list[int] = []
+    creator = SharedOffloadRegion(
+        engine_id=iid,
+        num_chunks=4,
+        rank=0,
+        kv_bytes_per_chunk=PAGE_SIZE,
+        cpu_page_size=PAGE_SIZE,
+        creator_memory_check=checked_sizes.append,
+    )
+    joiner: SharedOffloadRegion | None = None
+    try:
+        joiner = SharedOffloadRegion(
+            engine_id=iid,
+            num_chunks=4,
+            rank=0,
+            kv_bytes_per_chunk=PAGE_SIZE,
+            cpu_page_size=PAGE_SIZE,
+            creator_memory_check=checked_sizes.append,
+        )
+        assert checked_sizes == [4 * PAGE_SIZE]
+    finally:
+        if joiner is not None:
+            joiner.cleanup()
+        creator.cleanup()
+        _cleanup_file(creator.mmap_path)
+
+
+def test_insufficient_space_raises_clear_error(monkeypatch):
+    """A failed creator capacity check must clean up and give a clear error."""
+    import vllm.v1.kv_offload.cpu.shared_offload_region as region
+
+    engine_id = str(uuid.uuid4())
+    mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
+    mock_open = MagicMock(return_value=9999)
+    mock_unlink = MagicMock()
+    mock_close = MagicMock()
+    monkeypatch.setattr(region.os, "open", mock_open)
+    monkeypatch.setattr(region.os, "unlink", mock_unlink)
+    monkeypatch.setattr(region.os, "close", mock_close)
+    mock_check = MagicMock(
+        side_effect=RuntimeError("Insufficient space in /dev/shm: 30 GB required.")
+    )
+    monkeypatch.setattr(
+        region,
+        "check_shm_free_space",
+        mock_check,
+    )
+
+    with pytest.raises(RuntimeError, match="Insufficient space"):
+        SharedOffloadRegion(
+            engine_id=engine_id,
+            num_chunks=4,
+            rank=0,
+            kv_bytes_per_chunk=PAGE_SIZE,
+            cpu_page_size=PAGE_SIZE,
+        )
+
+    mock_unlink.assert_called_once_with(mmap_path)
+    mock_close.assert_called_once_with(9999)
+    mock_check.assert_called_once_with(
+        4 * PAGE_SIZE,
+        allocation_name="CPU KV offload shared region in /dev/shm",
+    )
+
+
+def test_ftruncate_failure_cleans_up_creator(monkeypatch):
+    """A failed creator ftruncate must close and unlink before re-raising."""
+    import vllm.v1.kv_offload.cpu.shared_offload_region as region
+
+    engine_id = str(uuid.uuid4())
+    mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
+    mock_unlink = MagicMock()
+    mock_close = MagicMock()
+    monkeypatch.setattr(region.os, "open", MagicMock(return_value=9999))
+    monkeypatch.setattr(region.os, "unlink", mock_unlink)
+    monkeypatch.setattr(region.os, "close", mock_close)
+    monkeypatch.setattr(region, "check_shm_free_space", MagicMock())
+    monkeypatch.setattr(
+        region.os,
+        "ftruncate",
+        MagicMock(side_effect=OSError("ftruncate failed")),
+    )
+
+    with pytest.raises(OSError, match="ftruncate failed"):
+        SharedOffloadRegion(
+            engine_id=engine_id,
+            num_chunks=4,
+            rank=0,
+            kv_bytes_per_chunk=PAGE_SIZE,
+            cpu_page_size=PAGE_SIZE,
+        )
+
+    mock_unlink.assert_called_once_with(mmap_path)
+    mock_close.assert_called_once_with(9999)
+
+
+# ---------------------------------------------------------------------------
+# Unlink-after-barrier — leak immunity to hard kills
+# ---------------------------------------------------------------------------
+
+
+def test_cleanup_keeps_region_mapped_while_buffers_are_exported(iid):
+    """A native user's buffer export must block unmapping -- unmapping under it
+    would let the NIC write into reused address space. The pathname still goes."""
+    region = _make_region(iid)
+    export = ctypes.c_char.from_buffer(region.mmap_obj)
+    try:
+        region.cleanup()
+        assert region.mmap_obj is not None and not region.mmap_obj.closed
+        assert not os.path.exists(region.mmap_path), "pathname must still go"
+        assert region.mmap_obj[0:1] == b"\x00", "mapping must stay readable"
+    finally:
+        del export
+        region.mmap_obj.close()  # type: ignore[union-attr]
+        _cleanup_file(region.mmap_path)
+
+
+def test_backing_file_unlinked_after_barrier(iid):
+    """The file must exist until the barrier releases (late joiners need the
+    name) and be gone right after, so no exit path can leak it."""
+    path = f"/dev/shm/vllm_offload_{iid}.mmap"
+    seen_at_barrier = []
+
+    region = _make_region(
+        iid, barrier=lambda: seen_at_barrier.append(os.path.exists(path))
+    )
+    try:
+        assert seen_at_barrier == [True], "file must exist during rendezvous"
+        assert not os.path.exists(path), "name must be dropped after the barrier"
+        assert region._creator is False, "nothing left for cleanup() to unlink"
+        t = region.create_next_worker_view(PAGE_SIZE)
+        t[:, :] = 7
+        assert region.mmap_obj is not None
+        assert memoryview(region.mmap_obj)[0] == 7, "mapping must stay valid"
+        del t
+    finally:
+        region.cleanup()
+        _cleanup_file(path)
+
+
+@pytest.mark.parametrize("populate_shard", [None, (0, 1)])
+def test_barrier_failure_unlinks_creator_and_raises(iid, populate_shard):
+    """A failed rendezvous must remove the creator's file and re-raise, not
+    leave a stub that wedges the next start in _wait_for_file_size."""
+    path = f"/dev/shm/vllm_offload_{iid}.mmap"
+    with pytest.raises(RuntimeError, match="peer died"):
+        _make_region(
+            iid,
+            barrier=MagicMock(side_effect=RuntimeError("peer died")),
+            populate_shard=populate_shard,
+        )
+    assert not os.path.exists(path)
+
+
+@pytest.mark.parametrize("replicated", [False, True])
+def test_mp_barrier_unlinks_file_and_survives_sigkill(iid, replicated):
+    """With a real cross-process barrier every worker maps one shared inode,
+    the name is gone while they run, and SIGKILL leaks nothing."""
+    num_workers = 2
+    path = f"/dev/shm/vllm_offload_{iid}.mmap"
+    ctx = get_mp_context()
+    barrier = ctx.Barrier(num_workers)
+    done_queue = ctx.Queue()
+    procs = [
+        ctx.Process(
+            target=_mp_barrier_construct_and_hold,
+            args=(iid, rank, num_workers, barrier, rank + 1, done_queue, replicated),
+        )
+        for rank in range(num_workers)
+    ]
+    try:
+        for p in procs:
+            p.start()
+        results = [done_queue.get(timeout=30) for _ in range(num_workers)]
+        for r in results:
+            assert r["error"] is None, f"rank {r['rank']}: {r['error']}"
+        assert len({r["inode"] for r in results}) == 1, "workers split onto two files"
+        assert not any(r["path_exists"] for r in results)
+        assert all(r["contents_match"] for r in results)
+        assert sum(r["populate_calls"] for r in results) == num_workers
+        assert not os.path.exists(path)
+    finally:
+        for p in procs:
+            p.kill()  # SIGKILL: no cleanup() runs
+            p.join(timeout=10)
+
+    assert not os.path.exists(path), "SIGKILL must not leak the file"
+    with _region(iid) as restarted:
+        assert restarted._creator is True, "restart must be able to create anew"
+
+
+@pytest.mark.parametrize(
+    "failure_phase,populate_shard",
+    [("shm", None), ("memory", None)]
+    + [
+        (phase, (0, 1))
+        for phase in ("shm", "memory", "probe", "population", "population_view")
+    ],
+)
+def test_setup_failure_before_barrier_releases_peers(
+    iid, monkeypatch, failure_phase, populate_shard
+):
+    """A worker that dies before the rendezvous must still arrive at the
+    barrier, or its peers block in the collective until it times out."""
+    failure = MagicMock(side_effect=ValueError("setup failed"))
+    memory_check = failure if failure_phase == "memory" else None
+    if failure_phase == "shm":
+        monkeypatch.setattr(region_module, "check_shm_free_space", failure)
+    elif failure_phase in ("probe", "population", "population_view"):
+
+        def populate(mm, offset, length):
+            failure(memoryview(mm) if failure_phase == "population_view" else None)
+
+        monkeypatch.setattr(
+            region_module,
+            "_get_populate_write_fn",
+            failure if failure_phase == "probe" else lambda mm: populate,
+        )
+    path = f"/dev/shm/vllm_offload_{iid}.mmap"
+    seen_at_barrier = []
+    barrier = MagicMock(
+        side_effect=lambda: seen_at_barrier.append(os.path.exists(path))
+    )
+
+    with pytest.raises(ValueError, match="setup failed"):
+        SharedOffloadRegion(
+            engine_id=iid,
+            num_chunks=1,
+            rank=0,
+            kv_bytes_per_chunk=PAGE_SIZE,
+            cpu_page_size=PAGE_SIZE,
+            barrier=barrier,
+            creator_memory_check=memory_check,
+            populate_shard=populate_shard,
+        )
+
+    assert barrier.call_count == (2 if populate_shard is not None else 1)
+    assert seen_at_barrier == (
+        [False] * barrier.call_count
+        if failure_phase in ("shm", "memory")
+        else [True, False]
+    )
+
+
+def test_mmap_failure_unlinks_creator_before_releasing_peers(iid, monkeypatch):
+    """A creator that fails after sizing the file must drop it before arriving
+    at the barrier, so the next start does not land on a stale file."""
+    path = f"/dev/shm/vllm_offload_{iid}.mmap"
+    monkeypatch.setattr("mmap.mmap", MagicMock(side_effect=OSError("mmap")))
+    seen_at_barrier = []
+
+    with pytest.raises(OSError, match="mmap"):
+        _make_region(iid, barrier=lambda: seen_at_barrier.append(os.path.exists(path)))
+
+    assert seen_at_barrier == [False], "file must be gone before peers release"
+
+
+@pytest.mark.parametrize("failure_phase", ["shm", "population"])
+def test_barrier_release_failure_keeps_original_error(iid, monkeypatch, failure_phase):
+    """When releasing the peers fails too, the setup error that explains the
+    failure must be the one that propagates."""
+    import vllm.v1.kv_offload.cpu.shared_offload_region as region
+
+    failure = MagicMock(side_effect=RuntimeError("setup failed"))
+    if failure_phase == "shm":
+        monkeypatch.setattr(region, "check_shm_free_space", failure)
+    else:
+        monkeypatch.setattr(region, "_get_populate_write_fn", lambda mm: failure)
+
+    barrier = MagicMock(
+        side_effect=[None, TimeoutError("barrier")]
+        if failure_phase == "population"
+        else TimeoutError("barrier")
+    )
+    with pytest.raises(RuntimeError, match="setup failed"):
+        _make_region(
+            iid,
+            barrier=barrier,
+            populate_shard=(0, 1) if failure_phase == "population" else None,
+        )
+
+    assert barrier.call_count == (2 if failure_phase == "population" else 1)
+    assert not os.path.exists(f"/dev/shm/vllm_offload_{iid}.mmap")

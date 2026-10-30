@@ -44,6 +44,15 @@ ROCM_AITER_UNIFIED_ATTN = pytest.param(
     ),
 )
 
+ROCM_AITER_MLA_ATTN = pytest.param(
+    AttentionBackendCase(backend=AttentionBackendEnum.ROCM_AITER_MLA),
+    id="ROCM_AITER_MLA",
+    marks=pytest.mark.skipif(
+        not is_aiter_found_and_supported(),
+        reason="ROCM_AITER_MLA only for AMD when AITER is installed",
+    ),
+)
+
 FLASHINFER_MLA_ATTN = pytest.param(
     AttentionBackendCase(backend=AttentionBackendEnum.FLASHINFER_MLA),
     id="FLASHINFER_MLA",
@@ -58,26 +67,12 @@ TRITON_MLA_ATTN = pytest.param(
     id="TRITON_MLA",
 )
 
-FLASHMLA_SPARSE_ATTN = pytest.param(
-    AttentionBackendCase(
-        backend=AttentionBackendEnum.FLASHMLA_SPARSE,
-        model_kwargs=dict(kv_cache_dtype="fp8_ds_mla"),
-    ),
-    id="FLASHMLA_SPARSE",
-    marks=pytest.mark.skipif(
-        not is_blackwell(),
-        reason="FlashMLA Sparse requires Blackwell",
-    ),
-)
-
 # Models
 llama3_8b = ModelFusionInfo(
     model_name="meta-llama/Llama-3.1-8B-Instruct",
     matches=lambda n_layers: Matches(
         ar_rms_fusion=n_layers * 2 + 1,
-        aiter_ar_rms_fusion=n_layers * 2,
-        sequence_parallel=n_layers * 2 + 1,
-        async_tp=n_layers * 4,
+        aiter_ar_rms_fusion=n_layers * 2 + 1,
     ),
 )
 
@@ -88,8 +83,6 @@ llama3_8b_fp8 = ModelFusionInfo(
         act_quant_fusion=n_layers,
         attn_quant_fusion=n_layers,
         ar_rms_fusion=n_layers * 2 + 1,
-        sequence_parallel=n_layers * 2 + 1,
-        async_tp=n_layers * 4,
     ),
 )
 
@@ -99,9 +92,21 @@ llama3_8b_fp4 = ModelFusionInfo(
         act_quant_fusion=n_layers,
         attn_quant_fusion=n_layers,
         ar_rms_fusion=n_layers * 2 + 1,
-        sequence_parallel=n_layers * 2 + 1,
-        async_tp=n_layers * 4,
     ),
+)
+
+# ModelOpt MIXED_PRECISION: FP8 attention projections, NVFP4 MLPs. It resolves to
+# modelopt_mixed, not modelopt_fp4, and its MLP has no manual act+quant fusion, so
+# every MLP boundary is left to ActivationQuantFusionPass.
+qwen3_8_27b_mixed_fp4 = ModelFusionInfo(
+    model_name="nvidia/Qwen3.8-27B-NVFP4",
+    hf_overrides=lambda n_layers: {
+        "text_config": {
+            "num_hidden_layers": n_layers,
+            "layer_types": ["linear_attention"] * (n_layers - 1) + ["full_attention"],
+        }
+    },
+    matches=lambda n_layers: Matches(act_quant_fusion=n_layers),
 )
 
 # MoEs cannot do act+quant fusion because those ops are hidden from torch.compile.
@@ -116,8 +121,6 @@ llama4_scout_fp8 = ModelFusionInfo(
         rms_quant_fusion=n_layers,
         attn_quant_fusion=n_layers,
         ar_rms_fusion=n_layers * 2,
-        sequence_parallel=n_layers * 2,
-        async_tp=n_layers * 2 - 1,
     ),
 )
 
@@ -127,8 +130,6 @@ llama4_scout_fp4 = ModelFusionInfo(
     matches=lambda n_layers: Matches(
         attn_quant_fusion=n_layers,
         ar_rms_fusion=n_layers * 2,
-        sequence_parallel=n_layers * 2,
-        async_tp=n_layers * 2 - 1,
     ),
 )
 
@@ -137,9 +138,7 @@ qwen3_a3b = ModelFusionInfo(
     matches=lambda n_layers: Matches(
         norm_rope_fusion=n_layers,
         ar_rms_fusion=n_layers * 2 + 1,
-        aiter_ar_rms_fusion=n_layers * 2,
-        sequence_parallel=n_layers * 2 + 1,
-        async_tp=n_layers * 2,
+        aiter_ar_rms_fusion=n_layers * 2 + 1,
     ),
 )
 
@@ -150,8 +149,6 @@ qwen3_a3b_fp8 = ModelFusionInfo(
         norm_rope_fusion=n_layers,
         attn_quant_fusion=0,  # attn + group quant not supported
         ar_rms_fusion=n_layers * 2 + 1,
-        sequence_parallel=n_layers * 2 + 1,
-        async_tp=n_layers * 2,
     ),
 )
 
@@ -181,9 +178,6 @@ deepseek_v3_fp8 = ModelFusionInfo(
         # MLA attn + per-group FP8 quant
         attn_quant_fusion=n_layers,
         ar_rms_fusion=n_layers * 2 + 1,
-        # TODO
-        # sequence_parallel= n_layers * 2 + 1,
-        # async_tp=n_layers * 2,
     ),
 )
 
@@ -197,25 +191,11 @@ deepseek_r1_fp4 = ModelFusionInfo(
     ),
 )
 
-deepseek_v32_fp4 = ModelFusionInfo(
-    model_name="nvidia/DeepSeek-V3.2-NVFP4",
-    matches=lambda n_layers: Matches(
-        rms_quant_fusion=0,
-        # silu+quant on dense layers only; MoE hides the act+quant site
-        act_quant_fusion=min(3, n_layers),
-        # MLA attn + NVFP4 output quant fuses on sparse MLA output path
-        attn_quant_fusion=n_layers,
-        ar_rms_fusion=n_layers * 2 + 1,
-    ),
-)
-
 gpt_oss_20b = ModelFusionInfo(
     model_name="openai/gpt-oss-20b",
     matches=lambda n_layers: Matches(
         ar_rms_fusion=n_layers * 2 + 1,
         aiter_ar_rms_fusion=n_layers + 1,
-        sequence_parallel=n_layers * 2 + 1,
-        async_tp=n_layers * 2,
     ),
     model_kwargs=(
         {"quantization_config": {"moe": {"activation": "mxfp8"}}}

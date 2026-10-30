@@ -19,8 +19,7 @@ from vllm.platforms import current_platform
 
 
 class TrtLlmMxint4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
-    """
-    FlashInfer TRT-LLM MxInt4 MoE kernel. Monolithic interface
+    """FlashInfer TRT-LLM MxInt4 MoE kernel. Monolithic interface
     (fused router + experts).
 
     Wraps flashinfer_trtllm_mxint4_moe().
@@ -93,7 +92,6 @@ class TrtLlmMxint4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             RoutingMethodType.RenormalizeNaive,
             RoutingMethodType.DeepSeekV3,
             RoutingMethodType.Llama4,
-            RoutingMethodType.Simulated,
         ]
 
     @staticmethod
@@ -103,11 +101,7 @@ class TrtLlmMxint4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
     ) -> bool:
         if router_logits_dtype == torch.float32:
             # DeepSeekV3 routing handles float32 logits internally.
-            # Simulated routing generates synthetic decisions.
-            return routing_method in (
-                RoutingMethodType.DeepSeekV3,
-                RoutingMethodType.Simulated,
-            )
+            return routing_method == RoutingMethodType.DeepSeekV3
         return True
 
     @staticmethod
@@ -120,6 +114,9 @@ class TrtLlmMxint4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
     @property
     def expects_unquantized_inputs(self) -> bool:
         # The kernel handles quantization internally.
+        return True
+
+    def supports_routing_replay_capture(self) -> bool:
         return True
 
     def apply(
@@ -137,6 +134,7 @@ class TrtLlmMxint4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
+        routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor:
         from vllm.model_executor.layers.quantization.utils.flashinfer_mxint4_moe import (  # noqa: E501
             flashinfer_trtllm_mxint4_moe,
@@ -144,7 +142,8 @@ class TrtLlmMxint4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
 
         assert self.w1_scale is not None
         assert self.w2_scale is not None
-        return flashinfer_trtllm_mxint4_moe(
+
+        result = flashinfer_trtllm_mxint4_moe(
             x=hidden_states,
             router_logits=router_logits,
             w13_weight_packed=w1,
@@ -160,4 +159,6 @@ class TrtLlmMxint4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             topk_group=topk_group,
             e_score_correction_bias=e_score_correction_bias,
             routing_method_type=self.routing_method,
+            routing_replay_out=routing_replay_out,
         )
+        return result
