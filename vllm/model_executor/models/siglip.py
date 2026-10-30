@@ -320,7 +320,7 @@ class SiglipVisionEmbeddings(nn.Module):
         target_dtype = self.patch_embedding.weight.dtype
         patch_embeds = self.patch_embedding(
             pixel_values.to(dtype=target_dtype)
-        )  # shape = [*, width, grid, grid]
+        )  # shape = [*, embed_dim, grid, grid]
         embeddings = patch_embeds.flatten(2).transpose(1, 2)
 
         if interpolate_pos_encoding:
@@ -746,7 +746,6 @@ class SiglipVisionTransformer(nn.Module):
         select_layers: list[int] | None = None,
         feature_select_strategy: VisionFeatureSelectStrategy | None = None,
     ) -> torch.Tensor:
-        # pixel_values shape: (16, 3, 896, 896)
         pixel_values = self.input_norm(pixel_values.to(device=self.device), self.dtype)
         hidden_states = self.embeddings(
             pixel_values,
