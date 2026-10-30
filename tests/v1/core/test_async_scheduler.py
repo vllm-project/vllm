@@ -8,7 +8,7 @@ import pytest
 
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
-from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
+from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import RequestStatus
 from vllm.v1.structured_output import StructuredOutputGrammar
 from vllm.v1.utils import ConstantList
@@ -120,7 +120,7 @@ def test_pp_decode_limit_does_not_block_prefill_chunks(prefill_tokens):
     assert chunked.is_prefill_chunk == (prefill_tokens == 8)
 
 
-def test_pp_decode_limit_does_not_defer_waiting_admission():
+def test_pp_waiting_decodes_share_quota_without_limiting_prefill():
     scheduler = create_scheduler(
         async_scheduling=True,
         use_v2_model_runner=True,
@@ -145,10 +145,94 @@ def test_pp_decode_limit_does_not_defer_waiting_admission():
         "running": 1,
         "0": 1,
         "1": 1,
-        "2": 1,
         "prefill": prefill.num_prompt_tokens,
     }
-    assert all(request.status == RequestStatus.RUNNING for request in waiting)
+    assert all(request.status == RequestStatus.RUNNING for request in waiting[:2])
+    assert waiting[2].status == RequestStatus.WAITING
+    assert scheduler.schedule().num_scheduled_tokens == {"2": 1}
+
+
+@pytest.mark.parametrize("policy", ["fcfs", "priority"])
+@pytest.mark.parametrize("priority", [-1, 20])
+def test_pp_resumed_decode_competes_for_the_same_quota(policy, priority):
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        use_v2_model_runner=True,
+        max_num_seqs=4,
+        pipeline_parallel_size=2,
+        scheduling_policy=policy,
+        enable_prefix_caching=True,
+    )
+    running = create_requests(num_requests=2, num_tokens=16, same_prompt=True)
+    for request in running:
+        request.priority = 10
+        scheduler.add_request(request)
+    prefill = scheduler.schedule()
+    scheduler.update_from_output(prefill, _make_model_runner_output(prefill))
+    assert not scheduler.schedule().num_scheduled_tokens
+    (resumed,) = create_requests(num_requests=1, num_tokens=16, req_ids=["resumed"])
+    resumed.append_output_token_ids(7)
+    resumed.status = RequestStatus.PREEMPTED
+    resumed.priority = priority
+    scheduler.add_request(resumed)
+
+    output = scheduler.schedule()
+    expected = (
+        {"resumed", "0"} if policy == "priority" and priority < 10 else {"0", "1"}
+    )
+    assert set(output.num_scheduled_tokens) == expected
+    assert set(output.num_scheduled_tokens.values()) == {1}
+    assert not output.preempted_req_ids
+    assert len(scheduler.running) <= 4
+    if "resumed" not in expected:
+        assert resumed.status == RequestStatus.PREEMPTED
+        assert scheduler.schedule().num_scheduled_tokens == {"resumed": 1}
+
+
+@pytest.mark.parametrize("kv_ready", [False, True])
+def test_pp_priority_waits_for_kv_without_reserving_decode_quota(kv_ready):
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        use_v2_model_runner=True,
+        max_num_seqs=4,
+        pipeline_parallel_size=2,
+        scheduling_policy="priority",
+        use_kv_connector=mock_kv(matched_tokens=16, is_async=True),
+    )
+    running = create_requests(num_requests=2, num_tokens=16)
+    for request in running:
+        request.priority = 10
+        scheduler.add_request(request)
+    loading = scheduler.schedule()
+    loaded = _make_model_runner_output(loading)
+    loaded.kv_connector_output = KVConnectorOutput(finished_recving={"0", "1"})
+    scheduler.update_from_output(loading, loaded)
+    prefill = scheduler.schedule()
+    scheduler.update_from_output(prefill, _make_model_runner_output(prefill))
+    assert not scheduler.schedule().num_scheduled_tokens
+
+    (resumed,) = create_requests(num_requests=1, num_tokens=16, req_ids=["resumed"])
+    resumed.append_output_token_ids(7)
+    resumed.status = RequestStatus.PREEMPTED
+    resumed.num_preemptions = 1
+    resumed.priority = -1
+    scheduler.add_request(resumed)
+    output = scheduler.schedule()
+    assert set(output.num_scheduled_tokens) == {"0", "1"}
+    assert resumed.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    scheduler.update_from_output(output, _make_model_runner_output(output))
+    idle = scheduler.schedule()
+    assert not idle.num_scheduled_tokens
+    loaded = _make_model_runner_output(idle)
+    if kv_ready:
+        loaded.kv_connector_output = KVConnectorOutput(finished_recving={"resumed"})
+    scheduler.update_from_output(idle, loaded)
+
+    output = scheduler.schedule()
+    expected = {"resumed", "0"} if kv_ready else {"0", "1"}
+    assert set(output.num_scheduled_tokens) == expected
+    assert set(output.num_scheduled_tokens.values()) == {1}
+    assert not output.preempted_req_ids
 
 
 def test_pp_priority_preemption_releases_decode_slot(monkeypatch):
@@ -251,7 +335,7 @@ def test_pp_dynamic_decode_target_respects_floor_and_active_limit(
     scheduler.update_from_output(prefill, _make_model_runner_output(prefill))
     for _ in range(3):
         assert not scheduler.schedule().num_scheduled_tokens
-    scheduled_ids = set()
+    scheduled_ids: set[str] = set()
     for _ in range(4):
         output = scheduler.schedule()
         batch_ids = set(output.num_scheduled_tokens)
@@ -818,6 +902,48 @@ def _assert_positions_consistent(req, engine: PipelinedEngine) -> None:
             f"output {i} of {req.request_id}: token sampled for position "
             f"{actual}, delivered as position {expected}"
         )
+
+
+@pytest.mark.parametrize("num_spec", [0, 3])
+def test_pp_priority_quota_preserves_output_under_kv_pressure(num_spec):
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        use_v2_model_runner=True,
+        pipeline_parallel_size=3,
+        scheduling_policy="priority",
+        pp_min_decode_batch_size=1,
+        max_num_seqs=8,
+        max_num_batched_tokens=512,
+        num_blocks=5,
+        block_size=16,
+        num_speculative_tokens=num_spec or None,
+        speculative_method="ngram_gpu" if num_spec else None,
+    )
+    max_tokens = 24
+    requests = create_requests(
+        num_requests=8, num_tokens=8, max_tokens=max_tokens, ignore_eos=True
+    )
+
+    def add_requests(step: int, engine: PipelinedEngine):
+        step += 1
+        if step < len(requests):
+            requests[step].priority = -step
+            scheduler.add_request(requests[step])
+
+    scheduler.add_request(requests[0])
+    engine = PipelinedEngine(
+        scheduler,
+        queue_size=4,
+        accept_drafts=lambda step, req_id, n: (step + int(req_id)) % (n + 1),
+    )
+    engine.run(before_step=add_requests)
+
+    assert any(req.num_preemptions > 0 for req in requests)
+    for req in requests:
+        assert req.is_finished()
+        assert req.num_output_tokens == max_tokens
+        assert list(req.output_token_ids) == engine.emitted[req.request_id][:max_tokens]
+        _assert_positions_consistent(req, engine)
 
 
 @pytest.mark.parametrize("num_spec", [0, 3])

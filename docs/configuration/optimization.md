@@ -126,7 +126,10 @@ llm = LLM(
 #### Decode Batch Balancing
 
 Model Runner V2 balances established decode requests across PP steps, without
-limiting prefill or first/resumed request admission. The per-step decode target is
+limiting prefill or output-token recomputation. Running and ready resumed decodes
+share the same per-step quota. With priority scheduling, ready waiting requests
+compete with running requests by priority; requests still loading KV do not
+reserve decode slots. The per-step decode target is
 the running decode count divided by `pipeline_parallel_size`, rounded up. It is
 bounded above by `ceil(max_num_active_seqs / pipeline_parallel_size)` (using
 `max_num_seqs` when `max_num_active_seqs` is unset).

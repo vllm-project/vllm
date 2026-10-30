@@ -23,8 +23,8 @@ from ..utils import (
     [None] if current_platform.is_rocm() else ["FLASH_ATTN"],
 )
 @pytest.mark.parametrize(
-    ("pp_min_decode_batch_size", "cudagraph_mode"),
-    [(8, None), (1, "FULL_DECODE_ONLY")],
+    ("pp_min_decode_batch_size", "cudagraph_mode", "scheduling_policy"),
+    [(8, None, "fcfs"), (1, "FULL_DECODE_ONLY", "priority")],
 )
 @create_new_process_for_each_test()
 def test_pp_cudagraph(
@@ -33,6 +33,7 @@ def test_pp_cudagraph(
     ATTN_BACKEND: str | None,
     pp_min_decode_batch_size: int,
     cudagraph_mode: str | None,
+    scheduling_policy: str,
 ):
     if current_platform.is_rocm():
         # ROCm CI can hand this test a device that is still lazily
@@ -53,6 +54,8 @@ def test_pp_cudagraph(
         "32",
         "--pp-min-decode-batch-size",
         str(pp_min_decode_batch_size),
+        "--scheduling-policy",
+        scheduling_policy,
     ]
     if cudagraph_mode is not None:
         cudagraph_args.extend(
