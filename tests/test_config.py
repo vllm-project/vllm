@@ -51,7 +51,7 @@ from vllm.config.mamba import MambaBackendEnum
 from vllm.config.speculative import _validate_qwen3_omni_dspark
 from vllm.config.utils import get_field
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
-from vllm.platforms import Platform, PlatformEnum, current_platform
+from vllm.platforms import CpuArchEnum, Platform, PlatformEnum, current_platform
 from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.config import (
     _patch_hf_transformers_nested_rope_validation,
@@ -581,7 +581,13 @@ def test_model_runner_default_preserves_backend_fallback(
     monkeypatch.setattr(vllm_config_module, "HAS_TRITON", has_triton)
 
     config = VllmConfig()
-    assert config.use_v2_model_runner == (has_triton or platform.is_unspecified())
+    # non-x86 CPUs support MRv2 without Triton
+    supports_v2_without_triton = (
+        platform.is_cpu() and platform.get_cpu_architecture() != CpuArchEnum.X86
+    )
+    assert config.use_v2_model_runner == (
+        has_triton or platform.is_unspecified() or supports_v2_without_triton
+    )
 
 
 def test_v2_frontend_config_can_be_created_without_triton():

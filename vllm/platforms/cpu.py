@@ -650,6 +650,13 @@ class CpuPlatform(Platform):
         return True
 
     @classmethod
+    def uses_standalone_cpu_model_runner(cls) -> bool:
+        # Only non-x86 CPUs have a standalone no-Triton MRV2 runner.
+        from vllm.triton_utils import HAS_TRITON
+
+        return not HAS_TRITON and cls.get_cpu_architecture() != CpuArchEnum.X86
+
+    @classmethod
     def num_compute_units(cls, device_id: int = 0) -> int:
         return torch.get_num_threads()
 
