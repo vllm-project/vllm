@@ -311,6 +311,63 @@ def test_cpu_fused_moe(
     )
 
 
+@pytest.mark.parametrize("isa", ISA)
+def test_cpu_fused_moe_bf16_output_rounding(default_vllm_config, isa: str):
+    hidden_size = 32
+    # Cover round-up and halfway cases with even and odd retained mantissas.
+    topk_weights = torch.tensor([[0.503], [0.501953125], [0.505859375], [0.5009765625]])
+    input = torch.zeros((len(topk_weights), hidden_size), dtype=torch.bfloat16)
+    w13 = torch.zeros((1, 2 * hidden_size, hidden_size), dtype=input.dtype)
+    w2 = torch.zeros((1, hidden_size, hidden_size), dtype=input.dtype)
+    w2_bias = torch.tensor([[1, -1] * (hidden_size // 2)], dtype=input.dtype)
+    topk_ids = torch.zeros(topk_weights.shape, dtype=torch.int32)
+    output = torch.empty_like(input)
+
+    cpu_fused_moe(
+        output,
+        input,
+        cpu_prepack_moe_weight(w13, isa),
+        cpu_prepack_moe_weight(w2, isa),
+        None,
+        w2_bias,
+        topk_weights,
+        topk_ids,
+        MoEActivation.SWIGLUOAI.value,
+        isa,
+    )
+
+    expected = (topk_weights * w2_bias.float()).to(input.dtype)
+    torch.testing.assert_close(output, expected, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("isa", ISA)
+def test_cpu_fused_moe_bf16_activation_rounding(default_vllm_config, isa: str):
+    hidden_size = 32
+    input = torch.zeros((1, hidden_size), dtype=torch.bfloat16)
+    w13 = torch.zeros((1, 2 * hidden_size, hidden_size), dtype=input.dtype)
+    # An identity down-projection exposes the rounded activation directly.
+    w2 = torch.eye(hidden_size, dtype=input.dtype).unsqueeze(0)
+    w13_bias = torch.full((1, 2 * hidden_size), 0.5, dtype=input.dtype)
+    output = torch.empty_like(input)
+
+    cpu_fused_moe(
+        output,
+        input,
+        cpu_prepack_moe_weight(w13, isa),
+        cpu_prepack_moe_weight(w2, isa),
+        w13_bias,
+        None,
+        torch.ones((1, 1)),
+        torch.zeros((1, 1), dtype=torch.int32),
+        MoEActivation.SWIGLUOAI.value,
+        isa,
+    )
+
+    # 1.5 * 0.5 * sigmoid(1.702 * 0.5) rounds to this BF16 value.
+    expected = torch.full_like(output, 0.52734375)
+    torch.testing.assert_close(output, expected, atol=0, rtol=0)
+
+
 @pytest.mark.skipif(
     current_platform.get_cpu_architecture()
     not in (CpuArchEnum.ARM, CpuArchEnum.POWERPC),
