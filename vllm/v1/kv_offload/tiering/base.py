@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Abstract interfaces and data types for the secondary tiering layer."""
 
+import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable
@@ -66,6 +67,8 @@ class TieringOffloadingMetrics:
     BACKPRESSURE_STORES_DROPPED = "vllm:kv_offload_tiering_backpressure_stores_dropped"
     BACKPRESSURE_BLOCKS_DROPPED = "vllm:kv_offload_tiering_backpressure_blocks_dropped"
     PROMOTION_LATENCY = "vllm:kv_offload_tiering_promotion_latency_seconds"
+    DEFERRED_RELEASE_CHUNKS = "vllm:kv_offload_tiering_deferred_release_chunks"
+    DEFERRED_RELEASE_HOLD = "vllm:kv_offload_tiering_deferred_release_hold_seconds"
 
 
 @dataclass
@@ -93,6 +96,13 @@ class JobResult:
     successful_keys: Collection[OffloadKey] | None = None
     transfer_time: float | None = None
     transfer_bytes: int | None = None
+    # Only applicable to failed promotion jobs. Set when the tier's I/O may
+    # still write into the primary chunks of the failed keys: the manager fails
+    # those keys now but defers releasing their chunks to the free pool until
+    # the tier sets the event. The tier may set it from any thread, once its
+    # I/O can no longer touch those chunks; the manager applies the release on
+    # its own polling path.
+    deferred_release: threading.Event | None = None
 
 
 class ParentManager(ABC):
@@ -384,6 +394,10 @@ class SecondaryTierManager(ABC):
         would corrupt either the primary memoryview or the secondary backing
         store. Queued (not-yet-started) transfers may be cancelled, but their
         failure result must still appear in `get_finished_jobs()`.
+
+        Likewise, every ``JobResult.deferred_release`` event must be set
+        before this returns, so the tier must bound how long it can defer a
+        release.
         """
         pass
 
