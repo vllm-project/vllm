@@ -230,6 +230,34 @@ steps:
       PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2 bash v1/kv_connector/nixl_integration/run_xpu_disagg_accuracy_test.sh &&
       PREFILLER_TP_SIZE=2 DECODER_TP_SIZE=2 bash v1/kv_connector/nixl_integration/run_xpu_disagg_accuracy_test.sh'
 
+- label: ":intel: (BMG) EPD Correctness (4 GPUs)"
+  key: epd-correctness-4-gpus
+  timeout_in_minutes: 60
+  num_devices: 4
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 4+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/distributed/ec_transfer/
+    - vllm/distributed/kv_transfer/
+    - vllm/v1/worker/ec_connector_model_runner_mixin.py
+    - vllm/platforms/xpu.py
+    - examples/disaggregated/disaggregated_encoder/
+    - tests/v1/ec_connector/integration/
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests &&
+      USE_TWO_IMAGE_PROMPT=0 DEVICE_PLATFORM=xpu GPU_MEMORY_UTILIZATION=0.8 bash v1/ec_connector/integration/run_epd_correctness_test.sh'
+
 - label: ":intel: (BMG) Regression"
   key: regression
   timeout_in_minutes: 50
