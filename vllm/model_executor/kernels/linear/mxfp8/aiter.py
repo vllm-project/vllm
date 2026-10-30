@@ -28,12 +28,12 @@ class AiterMxfp8LinearKernel(Mxfp8LinearKernel):
             return False, "AITER is only supported on ROCm"
 
         if not current_platform.supports_mx():
-            return False, "native MX requires CDNA4 (gfx95x)"
+            return False, "requires platform with MX support"
 
         if envs.VLLM_BATCH_INVARIANT:
             return False, "tuned buckets use split K; not batch invariant"
 
-        if rocm_aiter_ops.is_enabled():
+        if rocm_aiter_ops.is_linear_enabled():
             return True, None
         return False, "AITER not found or not supported on the current platform"
 
