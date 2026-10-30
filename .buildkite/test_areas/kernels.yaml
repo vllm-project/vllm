@@ -4,6 +4,7 @@ depends_on:
 steps:
 - label: ":nvidia: (H200 MIG 18GB) vLLM IR"
   key: vllm-ir-tests
+  automatic_shard: true
   timeout_in_minutes: 35
   device: h200_18gb
   working_dir: "/vllm-workspace/"
@@ -15,6 +16,7 @@ steps:
     - pytest -v -s tests/kernels/ir
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) vLLM IR"
       dind: false
       device: mi355_dpx
@@ -41,6 +43,7 @@ steps:
   - vllm/kernels/triton/
   - tests/kernels/test_concat_mla_q.py
   - tests/kernels/test_fused_qk_norm_rope_gate.py
+  - vllm/model_executor/layers/fused_qk_norm_rope.py
   commands:
     - >-
       pytest -v -s
@@ -71,6 +74,7 @@ steps:
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
       - tests/kernels/test_fused_qk_norm_rope_gate.py
+      - vllm/model_executor/layers/fused_qk_norm_rope.py
       commands:
       - >-
         pytest -v -s
@@ -83,6 +87,7 @@ steps:
 
 - label: ":nvidia: (H100) MiniMax Reduce RMS Kernels"
   key: kernels-minimax-reduce-rms-test-2-gpus
+  automatic_shard: true
   timeout_in_minutes: 20
   num_devices: 2
   device: h100
@@ -98,6 +103,7 @@ steps:
     - pytest -v -s kernels/core/test_minimax_reduce_rms.py
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) MiniMax Reduce RMS Kernels"
       dind: false
       device: mi355_2
@@ -146,6 +152,7 @@ steps:
 
 - label: ":nvidia: (H100) BF16x3 Router GEMM Kernels"
   key: kernels-bf16x3-router-gemm-h100
+  automatic_shard: true
   timeout_in_minutes: 20
   device: h100
   source_file_dependencies:
@@ -157,6 +164,7 @@ steps:
 
 - label: ":nvidia: (B200) DeepSeek V4 Kernels"
   key: deepseek-v4-kernel-test-b200
+  automatic_shard: true
   timeout_in_minutes: 20
   device: b200-k8s
   source_file_dependencies:
@@ -173,13 +181,14 @@ steps:
   - vllm/model_executor/layers/sparse_mqa_indexer.py
   - tests/model_executor/layers/test_mla_short_prefill_indexer.py
   commands:
-    - pytest -v -s kernels/test_fused_deepseek_v4_*.py
+    - pytest -v -s kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
     - pytest -v -s kernels/moe/test_deep_gemm_mega_moe.py
     - pytest -v -s models/test_deepseek_v4_mega_moe.py
     # DeepSeek V4.1 sparse MQA logits (MXFP4 and FP8 indexer cache); SM100 only.
     - pytest -v -s model_executor/layers/test_mla_short_prefill_indexer.py -k sparse_mqa_logits
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) DeepSeek V4 MoE Integration"
       dind: false
       device: mi355_1
@@ -212,6 +221,7 @@ steps:
 # ptxas override.
 - label: ":nvidia: (B200) mHC Kernels"
   key: kernels-mhc-test-b200
+  automatic_shard: true
   timeout_in_minutes: 25
   device: b200-k8s
   source_file_dependencies:
@@ -223,6 +233,7 @@ steps:
     - pytest -v -s kernels/mhc
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) mHC Kernels"
       dind: false
       device: mi355_1
@@ -238,6 +249,7 @@ steps:
 
 - label: ":nvidia: (B200) FLA Ops Kernels"
   key: kernels-fla-ops-test-b200
+  automatic_shard: true
   timeout_in_minutes: 25
   device: b200-k8s
   source_file_dependencies:
@@ -249,6 +261,7 @@ steps:
     - pytest -v -s kernels/fla
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) FLA Ops Kernels"
       dind: false
       device: mi355_1
@@ -264,6 +277,7 @@ steps:
 
 - label: ":nvidia: (B200) MiniMax M3 MegaMoE"
   key: minimax-m3-mega-moe-test-b200
+  automatic_shard: true
   timeout_in_minutes: 20
   device: b200-k8s
   source_file_dependencies:
@@ -276,6 +290,7 @@ steps:
 
 - label: ":nvidia: (B200) MiniMax-M3 Model Tests"
   key: minimax-m3-model-tests-b200
+  automatic_shard: true
   timeout_in_minutes: 20
   device: b200-k8s
   source_file_dependencies:
@@ -410,6 +425,7 @@ steps:
 
 - label: ":nvidia: (H100) Attention DiffKV Kernels"
   key: kernels-attention-diffkv-test-h100
+  automatic_shard: true
   timeout_in_minutes: 20
   device: h100
   num_devices: 1
@@ -422,6 +438,7 @@ steps:
     - pytest -v -s kernels/attention/test_triton_unified_attention_diffkv.py
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) Attention DiffKV Kernels"
       dind: false
       device: mi355_dpx
@@ -441,6 +458,7 @@ steps:
 
 - label: ":nvidia: (H100) MLA Kernel Test"
   key: kernels-flashmla-test-h100
+  automatic_shard: true
   timeout_in_minutes: 25
   device: h100
   num_devices: 1
@@ -462,6 +480,7 @@ steps:
     - pytest -v -s kernels/attention/test_mla_cross_layer_kernel_equivalence.py
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) MLA Kernels"
       dind: false
       device: mi355_dpx
@@ -627,6 +646,7 @@ steps:
 
 - label: ":nvidia: (B200) MiniMax-M3 Attention Kernels"
   key: kernels-minimax-m3-attention-b200
+  automatic_shard: true
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"
   device: b200-k8s
@@ -641,6 +661,7 @@ steps:
     - pytest -v -s tests/kernels/attention/test_minimax_m3.py
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) MiniMax-M3 Attention Kernels"
       dind: false
       device: mi355_dpx
@@ -654,6 +675,7 @@ steps:
 
 - label: ":nvidia: (H100) MiniMax-M3 Sparse Prefill Kernels"
   key: kernels-minimax-m3-sparse-prefill-h100
+  automatic_shard: true
   timeout_in_minutes: 15
   working_dir: "/vllm-workspace/"
   device: h100
@@ -751,6 +773,7 @@ steps:
     - pytest -v -s tests/kernels/mamba/test_gdn_prefill_cutedsl.py
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) NVFP4 Dense Emulation"
       dind: false
       device: mi355_1
@@ -778,6 +801,7 @@ steps:
 
 - label: ":nvidia: (B200) Gate Linear CuTeDSL Kernels"
   key: kernels-gate-linear-cutedsl-b200
+  automatic_shard: true
   timeout_in_minutes: 15
   working_dir: "/vllm-workspace/"
   device: b200-k8s
@@ -799,6 +823,7 @@ steps:
     - pytest -v -s tests/kernels/test_ll_fp32w_gemm.py
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) Gate Linear Router Kernels"
       dind: false
       device: mi355_1
@@ -889,6 +914,7 @@ steps:
  
 - label: ":nvidia: (H100) [Nightly] FP8 MoE Kernels"
   key: kernels-fp8-moe-test-1xh100
+  automatic_shard: true
   timeout_in_minutes: 40
   device: h100
   num_devices: 1
@@ -937,6 +963,7 @@ steps:
 
 - label: ":nvidia: (B200) [Nightly] FP4 MoE Kernels"
   key: kernels-fp4-moe-test-b200
+  automatic_shard: true
   timeout_in_minutes: 25
   device: b200-k8s
   num_devices: 1
@@ -948,6 +975,7 @@ steps:
     - pytest -v -s kernels/moe/test_ocp_mx_moe.py
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) FP4 and INT4 MoE Kernels"
       dind: false
       device: mi355_dpx
@@ -979,6 +1007,7 @@ steps:
 
 - label: ":nvidia: (H100) FusedMoE Layer Kernels"
   key: kernels-fusedmoe-layer-test-2-h100s
+  automatic_shard: true
   timeout_in_minutes: 30
   device: h100
   num_devices: 2
@@ -996,6 +1025,7 @@ steps:
     amd:
       label: ":amd: (MI355) FusedMoE Layer Kernels"
       dind: false
+      automatic_shard: true
       device: mi355_2
       timeout_in_minutes: 35
       working_dir: "/vllm-workspace/tests"
@@ -1039,6 +1069,7 @@ steps:
     - pytest -v -s kernels/moe/test_deepep_v2_moe.py
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) MoRI EP Numerics"
       dind: false
       device: mi355_2
@@ -1072,6 +1103,7 @@ steps:
 
 - label: ":amd: (MI355 DPX) Native Quantization Kernels"
   key: amd-native-quantization-kernels-mi355
+  automatic_shard: true
   dind: false
   device: mi355_dpx
   num_devices: 1
@@ -1100,6 +1132,7 @@ steps:
 
 - label: ":amd: (MI355 DPX) FP8 MoE Kernels"
   key: amd-fp8-moe-kernels-mi355
+  automatic_shard: true
   dind: false
   device: mi355_dpx
   num_devices: 1
@@ -1130,6 +1163,7 @@ steps:
 
 - label: ":amd: (MI355 DPX) Kernels"
   key: amd-kernels-mi355
+  automatic_shard: true
   dind: false
   device: mi355_dpx
   num_devices: 1

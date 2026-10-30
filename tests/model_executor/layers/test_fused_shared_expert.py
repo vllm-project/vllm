@@ -1260,6 +1260,7 @@ def _build_mtp_model(
     speculative_config: dict[str, object] = {
         "draft_model_config": SimpleNamespace(**draft_model_config),
         "method": "mtp",
+        "speculator_config": SimpleNamespace(speculator_class="MTP"),
         "parallel_drafting": False,
         "enable_adaptive_verification": False,
         "use_dspark": lambda: False,
