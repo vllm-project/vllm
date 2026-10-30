@@ -1096,7 +1096,6 @@ class MambaSpec(KVCacheSpec):
     dtypes: tuple[torch.dtype, ...]
     page_size_padded: int | None = None
     mamba_type: MambaAttentionBackendEnum = MambaAttentionBackendEnum.MAMBA2
-    mamba_cache_mode: str = "none"
     num_speculative_blocks: int = 0
     num_prefill_checkpoint_blocks: int = 0
     prefill_checkpoint_alignment: int | None = None
@@ -1133,7 +1132,7 @@ class MambaSpec(KVCacheSpec):
         return None
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        if vllm_config.cache_config.mamba_cache_mode == "align":
+        if vllm_config.cache_config.enable_prefix_caching:
             return self.page_size_bytes * (
                 2 + self.num_speculative_blocks + self.num_prefill_checkpoint_blocks
             )
@@ -1143,7 +1142,7 @@ class MambaSpec(KVCacheSpec):
     def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
         # Mamba state is replicated across DCP/PCP ranks, never sharded, so
         # no CP scaling applies.
-        if vllm_config.cache_config.mamba_cache_mode == "align":
+        if vllm_config.cache_config.enable_prefix_caching:
             # Block table rows are position-indexed over the full sequence
             # even though only 2 + num_speculative_blocks state blocks are
             # resident at a time (earlier states are nulled out by

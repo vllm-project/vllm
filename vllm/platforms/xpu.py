@@ -504,7 +504,7 @@ class XPUPlatform(Platform):
             return
 
         pre_block_size = cache_config.block_size
-        if cache_config.mamba_cache_mode == "align":
+        if cache_config.enable_prefix_caching:
             cache_config.mamba_block_size = new_block_size
         original_mamba_page_size_padded = cache_config.mamba_page_size_padded
         if cache_config.mamba_page_size_padded is not None:

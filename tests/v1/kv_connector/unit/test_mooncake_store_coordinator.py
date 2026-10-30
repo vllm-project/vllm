@@ -27,7 +27,6 @@ def _mamba_align(block_size=32):
         block_size=block_size,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
     )
 
 
@@ -645,7 +644,6 @@ def _mamba(block_size=16):
         block_size=block_size,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
     )
 
 

@@ -772,7 +772,6 @@ def partial_hash_hits_enabled(
     """
     if not any(
         isinstance(spec, MambaSpec)
-        and spec.mamba_cache_mode == "align"
         and (
             (dcp_world_size == 1 and spec.block_size > hash_block_size)
             or (dcp_world_size > 1 and spec.block_size >= hash_block_size)
@@ -831,7 +830,7 @@ def resolve_kv_cache_block_sizes(
       ``cache_config.prefix_match_unit`` override if set, else the GCD of
       group block sizes; every group's block size must be divisible by it.
       Returns the scheduler block size (i.e. disables finer hashing) if block
-      hashing is inactive or a mamba group is not using cache mode "align".
+      hashing is inactive, or prefix caching is off for a mamba group.
     """
     cache_config = vllm_config.cache_config
     dcp = vllm_config.parallel_config.decode_context_parallel_size
@@ -872,11 +871,10 @@ def resolve_kv_cache_block_sizes(
     if not (cache_config.enable_prefix_caching or connector_enabled):
         return scheduler_block_size, scheduler_block_size
 
-    # Mamba groups outside align mode break divisibility; back off to the
-    # scheduler block size. Read the mode from the resolved group spec because
-    # its block size may have been updated independently of cache_config.
-    if any(
-        isinstance(spec, MambaSpec) and spec.mamba_cache_mode != "align"
+    # Without prefix caching, a Mamba block spans max_model_len and breaks
+    # divisibility; back off to the scheduler block size.
+    if not cache_config.enable_prefix_caching and any(
+        isinstance(spec, MambaSpec)
         for group in groups
         for spec in iter_layer_specs(group.kv_cache_spec)
     ):

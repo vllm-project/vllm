@@ -142,7 +142,6 @@ spec_args_map: dict[type[KVCacheSpec], dict[str, Any]] = {
         block_size=64,
         shapes=((2, 512), (3, 32, 32)),
         dtypes=(torch.float32, torch.float32),
-        mamba_cache_mode="align",
         num_speculative_blocks=2,
     ),
     CrossAttentionSpec: dict(

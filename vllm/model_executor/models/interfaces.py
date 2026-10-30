@@ -1023,7 +1023,7 @@ class IsHybrid(Protocol):
             to the Mamba states produced by the model. Each callable accepts
             (state, block_ids, cur_block_idx, num_accepted_tokens) and returns
             a MambaCopySpec describing the memory-copy parameters for prefix
-            caching in align mode.
+            caching.
 
         """
         ...

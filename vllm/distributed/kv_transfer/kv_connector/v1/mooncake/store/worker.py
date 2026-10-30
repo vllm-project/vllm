@@ -575,9 +575,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
         the prefix ending at its ``num_tokens``.
 
         The scheduler resolves and pins every block, so none is looked up
-        positionally here. That matters for mamba "align" states: ``store_mask``
+        positionally here. That matters for mamba states: ``store_mask``
         masks mamba groups out of the normal save, which resolves a chunk's
-        address as ``req_meta.block_ids[g][start // block_size]``. An align-mode
+        address as ``req_meta.block_ids[g][start // block_size]``. A mamba
         table is mutated in place (a superseded state block is freed and
         nulled; speculative blocks relocate) without telling the connector, so
         a retried positional read could hit a block that now belongs to another

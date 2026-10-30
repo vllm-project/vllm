@@ -183,9 +183,9 @@ class MooncakeStoreScheduler:
         self._store_coord: MooncakeStoreCoordinator | None = None
         self.enable_partial_hash_hits = False
         if not self._capacity_only:
-            assert all(
-                spec.mamba_cache_mode == "align" for spec in mamba_groups.values()
-            ), "MooncakeStoreScheduler requires mamba_cache_mode='align'"
+            assert not mamba_groups or vllm_config.cache_config.enable_prefix_caching, (
+                "MooncakeStoreScheduler requires prefix caching for Mamba layers"
+            )
             self._store_coord = MooncakeStoreCoordinator.from_kv_cache_config(
                 kv_cache_config, vllm_config, self._block_size, self._hash_block_size
             )

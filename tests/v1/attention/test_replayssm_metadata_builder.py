@@ -41,7 +41,7 @@ class ReplaySSMBuildCase:
     buffer_len: int
     expected_write_pos: list[int]
     expected_is_flush: list[int]
-    mamba_cache_mode: str = "none"
+    enable_prefix_caching: bool = False
 
 
 REPLAYSSM_BUILD_CASES = {
@@ -127,7 +127,7 @@ REPLAYSSM_BUILD_CASES = {
         buffer_len=16,
         expected_write_pos=[5],
         expected_is_flush=[0],
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     ),
     # First-block boundary (num_computed+1 == 112) forces a flush even though
     # write_pos (11) != buffer_len - 1.
@@ -139,7 +139,7 @@ REPLAYSSM_BUILD_CASES = {
         buffer_len=16,
         expected_write_pos=[11],
         expected_is_flush=[1],
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     ),
     # First step of a new block re-anchors write_pos to 0.
     "align_new_block_start_zero": ReplaySSMBuildCase(
@@ -150,7 +150,7 @@ REPLAYSSM_BUILD_CASES = {
         buffer_len=16,
         expected_write_pos=[0],
         expected_is_flush=[0],
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     ),
     # block_size % buffer_len == 0: a later boundary lands on write_pos ==
     # buffer_len - 1, so the boundary flush coincides with the natural flush.
@@ -162,7 +162,7 @@ REPLAYSSM_BUILD_CASES = {
         buffer_len=16,
         expected_write_pos=[15],
         expected_is_flush=[1],
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     ),
     # block_size % buffer_len != 0 (buffer_len 6): the boundary step still flushes
     # although write_pos (3) != buffer_len - 1.
@@ -174,9 +174,9 @@ REPLAYSSM_BUILD_CASES = {
         buffer_len=6,
         expected_write_pos=[3],
         expected_is_flush=[1],
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     ),
-    # Per-row independence in align mode: partial-block / new-block / boundary.
+    # Per-row independence with prefix caching: partial-block / new-block / boundary.
     "align_mixed_rows": ReplaySSMBuildCase(
         seq_lens=[105, 113, 112],
         query_lens=[1, 1, 1],
@@ -185,7 +185,7 @@ REPLAYSSM_BUILD_CASES = {
         buffer_len=16,
         expected_write_pos=[4, 0, 11],
         expected_is_flush=[0, 0, 1],
-        mamba_cache_mode="align",
+        enable_prefix_caching=True,
     ),
 }
 
@@ -216,7 +216,7 @@ def _make_mamba_spec(
 
 def _create_replayssm_builder(
     buffer_len: int,
-    mamba_cache_mode: str = "none",
+    enable_prefix_caching: bool = False,
     *,
     mamba_backend: MambaBackendEnum = MambaBackendEnum.TRITON,
     num_speculative_tokens: int = 0,
@@ -228,7 +228,7 @@ def _create_replayssm_builder(
     # (it requires a real SupportsReplaySSM model) on the mock model.
     vllm_config.cache_config.use_replayssm = True
     vllm_config.cache_config.replayssm_buffer_len = buffer_len
-    vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
+    vllm_config.cache_config.enable_prefix_caching = enable_prefix_caching
     vllm_config.mamba_config.backend = mamba_backend
     if num_speculative_tokens > 0:
         # Triton ReplaySSM requires exact synchronous CPU metadata.
@@ -262,7 +262,7 @@ def _build(
     "case", REPLAYSSM_BUILD_CASES.values(), ids=REPLAYSSM_BUILD_CASES.keys()
 )
 def test_replayssm_write_pos(case: ReplaySSMBuildCase):
-    builder = _create_replayssm_builder(case.buffer_len, case.mamba_cache_mode)
+    builder = _create_replayssm_builder(case.buffer_len, case.enable_prefix_caching)
     meta = _build(builder, case)
 
     assert meta.write_pos_d is not None

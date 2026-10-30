@@ -687,8 +687,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     "full-attention, Mamba, and replicated draft groups, got: "
                     f"{type(spec).__name__}."
                 )
-        # Fine-grained hash hits require Mamba "align" and compatible cache
-        # managers in every group. TP needs hashing finer than the Mamba block;
+        # Fine-grained hash hits require compatible cache managers in every
+        # group. TP needs hashing finer than the Mamba block;
         # DCP accepts equality because it scales the effective full-attention
         # block instead.
         self.enable_partial_hash_hits = (

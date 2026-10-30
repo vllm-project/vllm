@@ -119,7 +119,6 @@ def _make_mixed_kv_cache_config(
             block_size=mamba_block_size,
             shapes=((NUM_KV_HEADS, HEAD_SIZE, HEAD_SIZE),),
             dtypes=(DTYPE,),
-            mamba_cache_mode="align",
         )
         groups.append(KVCacheGroupSpec(m_layers, m_spec))
         m_bytes = _BYTES_PER_BLOCK * num_blocks

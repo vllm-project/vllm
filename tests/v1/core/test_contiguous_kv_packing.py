@@ -200,7 +200,6 @@ def _shared_layout_config():
     config.cache_config.block_size = 16
     config.cache_config.enable_prefix_caching = False
     config.cache_config.prefix_match_unit = None
-    config.cache_config.mamba_cache_mode = "none"
     return config
 
 
@@ -278,14 +277,7 @@ class TestCSALinearGrouping:
         neither divides the hit length nor bounds the (empty) block list."""
         config = _shared_layout_config()
         config.cache_config.enable_prefix_caching = True
-        config.cache_config.mamba_cache_mode = "align"
-        specs = {
-            name: replace(spec, mamba_cache_mode="align")
-            if isinstance(spec, MambaSpec)
-            else spec
-            for name, spec in _make_csa_linear_specs().items()
-        }
-        groups = get_kv_cache_groups(config, specs)
+        groups = get_kv_cache_groups(config, _make_csa_linear_specs())
         kv_cache_config = get_kv_cache_config_from_groups(
             config, groups, available_memory=BYTES_PER_BLOCK * 64
         )
@@ -317,14 +309,7 @@ class TestCSALinearGrouping:
         config = _shared_layout_config()
         config.cache_config.enable_prefix_caching = True
         config.cache_config.prefix_match_unit = 16
-        config.cache_config.mamba_cache_mode = "align"
-        specs = {
-            name: replace(spec, mamba_cache_mode="align")
-            if isinstance(spec, MambaSpec)
-            else spec
-            for name, spec in _make_csa_linear_specs(num_tuples=1).items()
-        }
-        groups = get_kv_cache_groups(config, specs)
+        groups = get_kv_cache_groups(config, _make_csa_linear_specs(num_tuples=1))
         kv_cache_config = get_kv_cache_config_from_groups(
             config, groups, available_memory=8 * MAIN_KV_PAGE_BYTES
         )
@@ -339,14 +324,7 @@ class TestCSALinearGrouping:
     def test_scratch_ring_does_not_drag_hash_granularity(self):
         config = _shared_layout_config()
         config.cache_config.enable_prefix_caching = True
-        config.cache_config.mamba_cache_mode = "align"
-        specs = {
-            name: replace(spec, mamba_cache_mode="align")
-            if isinstance(spec, MambaSpec)
-            else spec
-            for name, spec in _make_csa_linear_specs(num_tuples=1).items()
-        }
-        groups = get_kv_cache_groups(config, specs)
+        groups = get_kv_cache_groups(config, _make_csa_linear_specs(num_tuples=1))
         kv_cache_config = get_kv_cache_config_from_groups(
             config, groups, available_memory=8 * MAIN_KV_PAGE_BYTES
         )

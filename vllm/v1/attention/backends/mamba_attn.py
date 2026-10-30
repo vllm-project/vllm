@@ -51,7 +51,7 @@ class BaseMambaAttentionMetadata:
     # Includes the bonus token (so minimum is 1)
     num_accepted_tokens: torch.Tensor | None  # shape: [batch,]
 
-    # The following tensor is only used for prefix caching in align mode
+    # The following tensor is only used for prefix caching
     seq_lens: torch.Tensor
 
     # cu_chunk_seqlen_p is a tensor of shape (nchunks+1,) that contains, for
@@ -470,7 +470,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             common_attn_metadata.block_table_tensor,
             common_attn_metadata.seq_lens,
             self.kv_cache_spec,
-            self.vllm_config.cache_config.mamba_cache_mode,
+            self.vllm_config.cache_config.enable_prefix_caching,
         )
 
         if state_indices_tensor.dim() == 1:
@@ -536,10 +536,10 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             )
             num_computed_d = seq_lens_cpu[:num_decodes] - query_lens_cpu
             decode_base_d = decode_base_cpu[:num_decodes]
-            align_mode = self.vllm_config.cache_config.mamba_cache_mode == "align"
+            prefix_caching = self.vllm_config.cache_config.enable_prefix_caching
             block_size = self.kv_cache_spec.block_size
-            if align_mode:
-                # After a boundary the align copy leaves an exact checkpoint at
+            if prefix_caching:
+                # After a boundary the pre-copy leaves an exact checkpoint at
                 # the block start and the new block's ring restarts empty, so
                 # re-anchor there; max() keeps the prompt-end anchor for the
                 # first (partial) block.
@@ -568,7 +568,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             is_flush_cpu = (
                 write_pos_cpu == self.replayssm_buffer_len - 1
             ) | leftover_prompt
-            if align_mode:
+            if prefix_caching:
                 # Force a flush on the step completing a mamba block so the exact
                 # boundary state is materialized for prefix caching.
                 is_flush_cpu = is_flush_cpu | (
@@ -730,7 +730,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             blk_table,
             metadata.seq_lens,
             self.kv_cache_spec,
-            self.vllm_config.cache_config.mamba_cache_mode,
+            self.vllm_config.cache_config.enable_prefix_caching,
         )
         if state_indices_tensor.dim() == 1:
             state_indices_tensor = state_indices_tensor.unsqueeze(-1)

@@ -956,6 +956,7 @@ class GPUModelRunner(
         self.kv_connector_output: KVConnectorOutput | None = None
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_bufs: mamba_utils.MambaBuffers | None = None
+        self.mamba_prefix_caching = False
         self._mamba_state_copy_funcs: MambaStateCopyFuncsByType | None = None
         self.layerwise_nvtx_hooks_registered = False
 
@@ -1016,10 +1017,9 @@ class GPUModelRunner(
         return self._mamba_state_copy_funcs
 
     def _get_mamba_bufs(self) -> mamba_utils.MambaBuffers:
-        # Only reachable on the ``mamba_cache_mode == "align"`` path.
-        # The postprocess sub-object is additionally gated on spec
-        # decode + hybrid model.
-        assert self.cache_config.mamba_cache_mode == "align"
+        # Only reachable with Mamba prefix caching. The postprocess sub-object
+        # is additionally gated on spec decode + hybrid model.
+        assert self.mamba_prefix_caching
         if self._mamba_bufs is None:
             self._mamba_bufs = mamba_utils.MambaBuffers.create(
                 max_num_reqs=self.max_num_reqs,
@@ -1565,7 +1565,7 @@ class GPUModelRunner(
         num_reqs = output_token_ids.size(0)
         self.num_accepted_tokens.gpu[:num_reqs] = (output_token_ids != -1).sum(dim=1)
 
-        if self.cache_config.mamba_cache_mode == "align":
+        if self.mamba_prefix_caching:
             # Fused GPU postprocess: state copies + per-request accepted-token
             # update without CPU-GPU sync. The metadata
             # (num_scheduled_tokens, num_draft_tokens, num_computed_tokens) is
@@ -2066,10 +2066,10 @@ class GPUModelRunner(
 
         # Sync num_accepted_tokens from CPU (set by
         # _update_states_after_model_execute for hybrid models).
-        # Skipped under async scheduling (non-align): the CPU copy races with
-        # the in-flight D2H copy and with input-batch row moves.
+        # Skipped under async scheduling without Mamba prefix caching: the CPU
+        # copy races with the in-flight D2H copy and with input-batch row moves.
         needs_cpu_accepted_counts = self.num_accepted_tokens_event is not None and not (
-            self.use_async_scheduling and self.cache_config.mamba_cache_mode != "align"
+            self.use_async_scheduling and not self.mamba_prefix_caching
         )
         if needs_cpu_accepted_counts:
             assert self.num_accepted_tokens_event is not None
@@ -4046,7 +4046,7 @@ class GPUModelRunner(
             )
             pad_attn = cudagraph_mode == CUDAGraphMode.FULL
 
-            if self.cache_config.mamba_cache_mode == "align":
+            if self.mamba_prefix_caching:
                 # preprocess_mamba reads req_state.num_computed_tokens (CPU)
                 # to decide copy operations, so we must apply deferred
                 # corrections before it runs.
@@ -7005,6 +7005,9 @@ class GPUModelRunner(
         """
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
+        self.mamba_prefix_caching = (
+            self.cache_config.enable_prefix_caching and kv_cache_config.has_mamba_layers
+        )
         self._mamba_bufs = None
         self._mamba_state_copy_funcs = None
         self.may_add_encoder_only_layers_to_kv_cache_config()

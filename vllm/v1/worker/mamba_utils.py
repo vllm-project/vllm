@@ -572,7 +572,7 @@ def precopy_mamba_align_fused_kernel(
     # the 2D-grid contract; > 1 requires a 3D grid.
     TEMPORAL_TILES: tl.constexpr = 1,
 ):
-    """Pre-copy mamba "align" state across block boundaries.
+    """Pre-copy mamba state across block boundaries.
 
     Before the forward pass, copy each request's last SSM/conv state from its
     previous block column into the new window block column, so the kernels read
@@ -739,7 +739,6 @@ class MambaCopyBuffers:
         assert all(
             spec.block_size == mamba_spec.block_size
             and spec.num_speculative_blocks == mamba_spec.num_speculative_blocks
-            and spec.mamba_cache_mode == mamba_spec.mamba_cache_mode
             for spec in mamba_groups
         ), "all mamba groups must share cache scheduling parameters"
         mamba_group_ids = get_mamba_group_ids(mamba_groups)
@@ -771,7 +770,7 @@ class MambaSpecDecodeGPUContext:
     fused postprocess path.
 
     Only used when speculative decoding is enabled on a hybrid model
-    (and the mamba_cache_config is in align mode).
+    with prefix caching.
 
     Precomputes memory layout metadata (base addresses, strides, element sizes)
     so the GPU kernel can perform state copies without CPU-GPU sync.
@@ -818,7 +817,7 @@ class MambaSpecDecodeGPUContext:
     # Per-request staging buffers (CPU+GPU mirrors). The runner stages
     # values into the CPU view in ``_prepare_inputs`` and the fused kernel
     # reads the GPU side. These only exist when the postprocess kernel is
-    # enabled (spec decode + hybrid + align mode).
+    # enabled (spec decode + hybrid + prefix caching).
     mamba_state_idx_buf: CpuGpuBuffer | None = None
     num_scheduled_tokens_buf: CpuGpuBuffer | None = None
     num_computed_tokens_buf: CpuGpuBuffer | None = None
@@ -845,7 +844,6 @@ class MambaSpecDecodeGPUContext:
         assert all(
             spec.block_size == mamba_spec.block_size
             and spec.num_speculative_blocks == mamba_spec.num_speculative_blocks
-            and spec.mamba_cache_mode == mamba_spec.mamba_cache_mode
             for spec in mamba_groups
         ), "all mamba groups must share cache scheduling parameters"
         copy_funcs_by_spec = {
@@ -1306,8 +1304,8 @@ class MambaBuffers:
     """Single owner for all mamba-specific runner buffers.
 
     The two sub-objects have different gates:
-    ``preprocess`` is needed whenever ``mamba_cache_mode == "align"``;
-    ``postprocess_align`` is needed only when align is combined with
+    ``preprocess`` is needed whenever prefix caching is enabled;
+    ``postprocess_align`` is needed only when prefix caching is combined with
     speculative decoding on a hybrid model, and is ``None`` otherwise.
     """
 
@@ -1560,7 +1558,7 @@ def postprocess_mamba_align_gpu(
     forward_context: dict[str, Any],
     mamba_state_copy_funcs: MambaStateCopyFuncsByType,
 ) -> None:
-    """GPU-side mamba postprocess for spec decode + hybrid + align mode.
+    """GPU-side mamba postprocess for spec decode + hybrid + prefix caching.
 
     Lazily binds the fused-kernel context to the persistent block tables and
     forward-context state pointers on the first call, runs the fused kernel,

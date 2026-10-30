@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Internal prefill checkpoints for Mamba2 align-mode prefix caching."""
+"""Internal prefill checkpoints for Mamba2 prefix caching."""
 
 import torch
 
@@ -73,21 +73,20 @@ DEVICE = torch.device("cpu")
 
 
 def _create_mamba2_builder(
-    mamba_cache_mode: str = "align",
+    enable_prefix_caching: bool = True,
     num_prefill_checkpoint_blocks: int = 1,
     prefill_checkpoint_alignment: int | None = 1,
 ) -> Mamba2AttentionMetadataBuilder:
     vllm_config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B", block_size=MAMBA_BLOCK_SIZE
     )
-    vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
+    vllm_config.cache_config.enable_prefix_caching = enable_prefix_caching
     # get_mamba_chunk_size() reads `mamba_chunk_size` then `chunk_size`.
     vllm_config.model_config.hf_text_config.mamba_chunk_size = CHUNK_SIZE
     spec = MambaSpec(
         block_size=MAMBA_BLOCK_SIZE,
         shapes=((16, 64),),
         dtypes=(torch.float16,),
-        mamba_cache_mode=mamba_cache_mode,
         num_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks,
         prefill_checkpoint_alignment=prefill_checkpoint_alignment,
     )
@@ -161,8 +160,8 @@ def test_update_block_table_regathers_checkpoint_blocks():
     ]
 
 
-def test_builder_emits_nothing_outside_align_mode():
-    builder = _create_mamba2_builder(mamba_cache_mode="none")
+def test_builder_emits_nothing_without_prefix_caching():
+    builder = _create_mamba2_builder(enable_prefix_caching=False)
     meta = _build(builder, seq_lens=[900], query_lens=[900])
 
     assert meta.checkpoint_chunk_idx is None

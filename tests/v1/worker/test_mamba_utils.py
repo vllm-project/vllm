@@ -397,7 +397,6 @@ def _make_kv_cache_config(cfg: _TestConfig, layer_names: list[str]) -> KVCacheCo
             (cfg.temporal_state_dim,),
         ),
         dtypes=(cfg.dtype, cfg.dtype),
-        mamba_cache_mode="align",
     )
     group = KVCacheGroupSpec(
         layer_names=layer_names,
@@ -485,7 +484,6 @@ def test_mamba_groups_support_different_state_specs():
         shapes=((4, 4), (2, 4, 4)),
         dtypes=(torch.float16, torch.float32),
         mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
-        mamba_cache_mode="align",
         num_speculative_blocks=3,
     )
     short_conv_spec = MambaSpec(
@@ -493,7 +491,6 @@ def test_mamba_groups_support_different_state_specs():
         shapes=((12, 8),),
         dtypes=(torch.float16,),
         mamba_type=MambaAttentionBackendEnum.SHORT_CONV,
-        mamba_cache_mode="align",
         num_speculative_blocks=3,
     )
     kv_cache_config = KVCacheConfig(
@@ -559,7 +556,6 @@ def test_mamba_groups_support_mixed_specs_in_uniform_group():
         shapes=((4, 4), (2, 4, 4)),
         dtypes=(torch.float16, torch.float32),
         mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
-        mamba_cache_mode="align",
         num_speculative_blocks=3,
     )
     short_conv_spec = MambaSpec(
@@ -567,7 +563,6 @@ def test_mamba_groups_support_mixed_specs_in_uniform_group():
         shapes=((12, 8),),
         dtypes=(torch.float16,),
         mamba_type=MambaAttentionBackendEnum.SHORT_CONV,
-        mamba_cache_mode="align",
         num_speculative_blocks=3,
     )
     layer_specs = {
@@ -660,7 +655,7 @@ def test_v2_align_ctx_binds_request_slot_tables_for_state_copies():
     )
 
     state = object.__new__(MambaHybridModelState)
-    state._align_mode = True
+    state.prefix_caching = True
     state._mamba_group_ids = []
     state._mamba_spec = None
     state._mamba_state_copy_funcs = _COPY_FUNCS

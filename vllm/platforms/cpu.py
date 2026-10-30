@@ -535,6 +535,14 @@ class CpuPlatform(Platform):
             and model_config.use_mla
             and not amx_mla_or_dsv4_enabled
         ):
+            if (
+                model_config.is_hybrid
+                and vllm_config.cache_config.enable_prefix_caching
+            ):
+                raise ValueError(
+                    "MLA on a non-GPU platform does not support prefix caching "
+                    "for hybrid Mamba models; pass --no-enable-prefix-caching."
+                )
             logger.info_once(
                 "MLA is enabled on a non-GPU platform; forcing chunked "
                 "prefill and prefix caching to be disabled."

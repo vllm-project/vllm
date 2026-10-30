@@ -118,7 +118,6 @@ def _make_engine_core_with_dcp_manager() -> EngineCore:
         block_size=BASE_BLOCK_SIZE,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
     )
     config = KVCacheConfig(
         num_blocks=32,

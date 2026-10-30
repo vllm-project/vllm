@@ -262,7 +262,6 @@ def _mamba_spec() -> MambaSpec:
         block_size=16,
         shapes=((1, 1),),
         dtypes=(torch.float32,),
-        mamba_cache_mode="align",
     )
 
 
@@ -289,7 +288,6 @@ def _make_mamba_hybrid_kv_cache_config() -> KVCacheConfig:
                     block_size=16,
                     shapes=((1, 1),),
                     dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
                 ),
             ),
         ],

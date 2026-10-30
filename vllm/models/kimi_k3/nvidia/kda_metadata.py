@@ -102,9 +102,9 @@ def _mamba_get_block_table_tensor(
     block_table: torch.Tensor,
     seq_lens: torch.Tensor,
     kv_cache_spec: MambaSpec,
-    mamba_cache_mode: str,
+    enable_prefix_caching: bool,
 ) -> torch.Tensor:
-    if mamba_cache_mode == "none":
+    if not enable_prefix_caching:
         return block_table
 
     assert block_table.is_cuda and seq_lens.is_cuda
@@ -368,12 +368,12 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         query_start_loc = m.query_start_loc
         query_start_loc_cpu = m.query_start_loc_cpu
         assert isinstance(self.kv_cache_spec, MambaSpec)
-        # Equivalent PyTorch "align" path:
+        # Equivalent PyTorch path with prefix caching:
         #   start = ((seq_lens - 1) // block_size).clamp_(min=0)
         #   offsets = torch.arange(1 + num_speculative_blocks, dtype=torch.int32)
         #   indices = (start[:, None] + offsets).to(torch.int64)
         #   block_table_tensor = torch.gather(block_table, 1, indices)
-        if self.vllm_config.cache_config.mamba_cache_mode == "align":
+        if self.vllm_config.cache_config.enable_prefix_caching:
             if self.mamba_aligned_state_indices is not None:
                 block_table_tensor = self.mamba_aligned_state_indices[: m.num_reqs]
             else:
@@ -385,7 +385,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                     m.block_table_tensor,
                     m.seq_lens,
                     self.kv_cache_spec,
-                    self.vllm_config.cache_config.mamba_cache_mode,
+                    self.vllm_config.cache_config.enable_prefix_caching,
                 )
         else:
             block_table_tensor = m.block_table_tensor
@@ -669,7 +669,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             assert spec_state_indices_tensor is not None
             assert spec_query_start_loc is not None
             align = None
-            if self.kv_cache_spec.mamba_cache_mode == "align":
+            if self.vllm_config.cache_config.enable_prefix_caching:
                 align = KDARecoverSSMAlignMetadata(
                     block_table=m.block_table_tensor,
                     num_computed_tokens=m.compute_num_computed_tokens(),

@@ -64,7 +64,7 @@ class MambaBase(AttentionLayerBase):
 
     def get_prefill_checkpoint_alignment(self) -> int | None:
         """Token alignment of the checkpoint offsets this layer can export from
-        inside a prefill, if any; in align mode, the platform makes Mamba blocks
+        inside a prefill, if any; with prefix caching, the platform makes Mamba blocks
         multiples of it.
         """
         return None
@@ -80,7 +80,6 @@ class MambaBase(AttentionLayerBase):
             page_size_padded=page_size_padded,
             mamba_type=self.mamba_type,
             tp_replicated=self.is_kv_cache_tp_replicated,
-            mamba_cache_mode=vllm_config.cache_config.mamba_cache_mode,
             # ReplaySSM verifies the whole window off one checkpoint, so it
             # never writes the baseline's per-draft-token state slots.
             num_speculative_blocks=(
