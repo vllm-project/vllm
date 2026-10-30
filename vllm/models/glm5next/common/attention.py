@@ -295,8 +295,8 @@ class Indexer(nn.Module):
         )
 
     def refresh_post_load_cache(self) -> None:
-        """(Re)build the fp32 head-gate projection from the loaded weights, in
-        place once it exists (captured CUDA graphs hold its address)."""
+        """Build the fp32 head-gate projection from the loaded weights; reloads
+        refill it in place."""
         wp = (
             self.wk_weights_proj.weight.data[self.head_dim :, :]
             .t()

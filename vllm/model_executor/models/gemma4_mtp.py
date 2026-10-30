@@ -596,10 +596,7 @@ class Gemma4MTP(nn.Module):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def process_weights_after_loading(self) -> None:
-        # Captured CUDA graphs read the gathered lm_head weight and the suppress
-        # indices at their startup addresses: refill the gather in place, and
-        # build the indices (constant token ids) only once. The gather is built
-        # here at cold start, outside inference mode, so a reload can refill it.
+        # Built here, outside inference mode, and refilled in place on reload.
         if (
             self.masked_embedding is not None
             and get_tensor_model_parallel_world_size() > 1

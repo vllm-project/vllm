@@ -164,8 +164,7 @@ class TrtLlmNvFp4ExpertsBase:
             layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
         # Recompute g1_scale_c since g1_alphas was just fused in-place.
         # Register as a layer parameter so EPLB rearranges it alongside
-        # other expert weights. A weight reload refills these parameters in
-        # place: captured CUDA graphs keep their startup addresses.
+        # other expert weights; reloads refill it in place.
         replace_parameter(layer, "g1_scale_c", self._compute_g1_scale_c())
         self.g1_scale_c = layer.g1_scale_c
 

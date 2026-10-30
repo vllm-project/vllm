@@ -264,8 +264,7 @@ class MuseSpark1xNormPreservingResidualConnection(MuseSpark1xResidualConnection)
         return alpha, beta
 
     def materialize_coefficients(self) -> None:
-        """Cache alpha/beta as fp32 buffers. Reruns on every weight reload and
-        refills them in place: CUDA graphs keep the addresses from startup."""
+        """Cache alpha/beta as fp32 buffers, refilled in place on reload."""
         w = self.gate.detach().float() / self.temperature
         alpha, beta = self.coefficients(w)
         for name, value in (("beta", beta), ("alpha", alpha)):

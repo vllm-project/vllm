@@ -151,8 +151,7 @@ def _check_supported(model: torch.nn.Module) -> None:
                 f"({name}: {type(method).__name__})"
             )
         if isinstance(method, HummingMoEMethod):
-            # its post-load processing runs once per quant method (a guard on
-            # the method, not the module): a reload would keep checkpoint bytes
+            # its post-load processing runs once per quant method
             raise RuntimeError(f"direct reload: humming MoE is not supported ({name})")
 
 

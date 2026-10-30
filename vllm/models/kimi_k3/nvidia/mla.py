@@ -475,8 +475,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         # Precompute reciprocal scales once here (scales are final after load;
         # K3 has no runtime calculate_kv_scales path) so the fp8 fused kernels
         # in the decode/prefill hot path take a ready inverse instead of
-        # launching a per-step reciprocal kernel. A weight reload refills them
-        # in place: captured CUDA graphs keep the startup addresses.
+        # launching a per-step reciprocal kernel. Reloads refill them in place.
         for name, scale in (
             ("_q_scale_inv", self._q_scale),
             ("_k_scale_inv", self._k_scale),

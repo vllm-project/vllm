@@ -165,8 +165,7 @@ def _shard_nvfp4_moe_weights_per_die(layer, res, w13, w13_scale, w2, w2_scale):
             torch.cuda.current_stream(w2_scale.device).synchronize()
 
         # Register shards for EPLB; Parameter wrapping preserves their pool storage.
-        # A post-load rerun (weight reload) refills the registered shards in
-        # place, so captured CUDA graphs keep their addresses.
+        # Reloads refill the registered shards in place.
         for name in _LOCALIZED_SHARD_PARAMS:
             shard[name] = replace_parameter(layer, f"localized{i}_{name}", shard[name])
 

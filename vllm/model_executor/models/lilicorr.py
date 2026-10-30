@@ -259,9 +259,8 @@ class LiLiCorrHead(nn.Module):
     def materialize_inference_buffers(
         self, device: torch.device, dtype: torch.dtype
     ) -> None:
-        """Build inference-only views/copies after checkpoint weights are loaded.
-        Reruns on every weight reload and refills them in place: captured CUDA
-        graphs keep the addresses from startup."""
+        """Build inference-only copies of the loaded weights; reloads refill them
+        in place."""
         topk = self.candidate_topk
         refill_derived(
             self, "_attn_bias", self._build_attention_bias(device=device, dtype=dtype)
