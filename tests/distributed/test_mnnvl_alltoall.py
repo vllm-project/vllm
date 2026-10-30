@@ -16,8 +16,25 @@ import pytest
 import torch
 import torch.multiprocessing as mp
 
+from vllm.config import (
+    ParallelConfig,
+    VllmConfig,
+    get_current_vllm_config,
+    set_current_vllm_config,
+)
 from vllm.distributed import get_ep_group
-from vllm.platforms import current_platform
+from vllm.distributed.device_communicators.all2all import (
+    AgRsAll2AllManager,
+    All2AllManagerBase,
+    FlashInferNVLinkOneSidedManager,
+)
+from vllm.distributed.device_communicators.base_device_communicator import (
+    DeviceCommunicatorBase,
+)
+from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
+from vllm.engine.arg_utils import EngineArgs
+from vllm.platforms import CpuArchEnum, current_platform
+from vllm.platforms.interface import DeviceCapability
 from vllm.utils.flashinfer import (
     has_flashinfer_nvlink_one_sided,
     has_flashinfer_nvlink_two_sided,
@@ -28,6 +45,146 @@ from vllm.utils.network_utils import get_open_port
 from ..utils import init_test_distributed_environment
 
 DEVICE = current_platform.device_type
+
+
+@pytest.fixture
+def cuda_host(monkeypatch):
+    """Resolve the all2all default as it would on a 10.0 datacenter Blackwell
+    host: GB200 on a Grace CPU, HGX B200 on x86."""
+    from vllm.config.parallel import _is_gb200_or_gb300, _is_hgx_b200_or_b300
+
+    def clear_platform_probes() -> None:
+        _is_gb200_or_gb300.cache_clear()
+        _is_hgx_b200_or_b300.cache_clear()
+
+    def apply(cpu_arch: CpuArchEnum) -> None:
+        monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+        monkeypatch.setattr(current_platform, "get_cpu_architecture", lambda: cpu_arch)
+        # `is_device_capability_family` is a classmethod, so it reads the
+        # capability off the class rather than the instance patched above.
+        monkeypatch.setattr(
+            type(current_platform),
+            "get_device_capability",
+            staticmethod(lambda device_id=0: DeviceCapability(major=10, minor=0)),
+        )
+        clear_platform_probes()
+
+    yield apply
+    clear_platform_probes()
+
+
+_needs_one_sided = pytest.mark.skipif(
+    not has_flashinfer_nvlink_one_sided(),
+    reason="FlashInfer NVLink one-sided not available",
+)
+
+
+@pytest.mark.parametrize(
+    ("cpu_arch", "data_parallel_size_local", "expected_backend"),
+    [
+        # GB200: NVLink spans hosts, so rank placement does not matter.
+        pytest.param(
+            CpuArchEnum.ARM, 1, "flashinfer_nvlink_one_sided", marks=_needs_one_sided
+        ),
+        # HGX B200: only when the EP group is one node.
+        pytest.param(
+            CpuArchEnum.X86, 8, "flashinfer_nvlink_one_sided", marks=_needs_one_sided
+        ),
+        (CpuArchEnum.X86, 1, "allgather_reducescatter"),
+    ],
+)
+def test_default_ep_communicator_uses_platform_all2all_backend(
+    monkeypatch, cuda_host, cpu_arch, data_parallel_size_local, expected_backend
+):
+    def init_device_communicator(
+        self,
+        cpu_group,
+        device,
+        device_group,
+        unique_name,
+        global_ranks,
+        global_world_size,
+        *,
+        use_all2all,
+    ):
+        self.cpu_group = cpu_group
+        self.device = device
+        self.device_group = device_group
+        self.unique_name = unique_name
+        self.world_size = 1
+        self.use_all2all = unique_name.startswith("ep:") and use_all2all
+        self.all2all_backend = get_current_vllm_config().parallel_config.all2all_backend
+        self.all2all_manager = None
+
+    def init_all2all_manager(self, cpu_group, tcp_store_group=None):
+        # The real base __init__ needs DP/TP groups, which aren't initialized
+        # here. Set only what the manager subclasses read on construction.
+        self.cpu_group = cpu_group
+        self.rank = 0
+        self.world_size = 1
+
+    cuda_host(cpu_arch)
+    monkeypatch.setattr(DeviceCommunicatorBase, "__init__", init_device_communicator)
+    monkeypatch.setattr(All2AllManagerBase, "__init__", init_all2all_manager)
+
+    vllm_config = VllmConfig(
+        parallel_config=ParallelConfig(
+            enable_expert_parallel=True,
+            data_parallel_size=8,
+            data_parallel_size_local=data_parallel_size_local,
+            distributed_executor_backend="mp",
+        )
+    )
+    with set_current_vllm_config(vllm_config):
+        device_comm_cls = CudaCommunicator
+        device_communicator = device_comm_cls(
+            cpu_group=object(),
+            device=torch.device("cuda:0"),
+            device_group=object(),
+            unique_name="ep:test",
+            use_all2all=True,
+        )
+
+    assert device_communicator.all2all_backend == expected_backend
+    if expected_backend == "flashinfer_nvlink_one_sided":
+        assert isinstance(
+            device_communicator.all2all_manager, FlashInferNVLinkOneSidedManager
+        )
+    else:
+        assert isinstance(device_communicator.all2all_manager, AgRsAll2AllManager)
+
+
+@pytest.mark.parametrize(
+    ("cpu_arch", "expected_backend"),
+    [
+        (CpuArchEnum.ARM, "flashinfer_nvlink_one_sided"),
+        (CpuArchEnum.X86, "allgather_reducescatter"),
+    ],
+)
+def test_engine_args_all2all_backend_default_round_trips(
+    monkeypatch, cuda_host, cpu_arch, expected_backend
+):
+    """`EngineArgs` mirrors this field from `ParallelConfig` and
+    `create_engine_config()` passes the value straight back, so the default has
+    to survive that round trip as a plain string. Anything else (a `FieldInfo`,
+    a sentinel the config does not accept) fails every launch that omits
+    `--all2all-backend`."""
+    cuda_host(cpu_arch)
+    monkeypatch.setattr(
+        "vllm.utils.flashinfer.has_flashinfer_nvlink_one_sided", lambda: True
+    )
+
+    backend = EngineArgs().all2all_backend
+    assert backend == "auto"
+
+    config = ParallelConfig(
+        all2all_backend=backend,
+        enable_expert_parallel=True,
+        data_parallel_size=8,
+        distributed_executor_backend="mp",
+    )
+    assert config.all2all_backend == expected_backend
+
 
 # ---------------------------------------------------------------------------
 # Helpers

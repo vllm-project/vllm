@@ -5,6 +5,7 @@ import os
 import socket
 from collections.abc import Callable
 from datetime import timedelta
+from functools import cache
 from typing import TYPE_CHECKING, Any, Literal, Self, overload
 
 import regex as re
@@ -17,7 +18,7 @@ from vllm.config.fault_tolerance import FaultToleranceConfig
 from vllm.config.utils import config
 from vllm.distributed.utils import cpu_all_reduce_
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.network_utils import get_open_ports_list
 
 if TYPE_CHECKING:
@@ -56,7 +57,98 @@ All2AllBackend = Literal[
     "flashinfer_nvlink_two_sided",
     "flashinfer_nvlink_one_sided",
     "passthrough",
+    "auto",
 ]
+
+
+@cache
+def _is_gb200_or_gb300() -> bool:
+    """Whether this is a GB200 or GB300."""
+    if not current_platform.is_cuda():
+        return False
+    if current_platform.get_cpu_architecture() != CpuArchEnum.ARM:
+        # Corner case to distinguish x86 HGX B200/B300 from ARM GB200/GB300
+        return False
+    try:
+        return current_platform.is_device_capability_family(100)
+    except Exception:
+        return False
+
+
+@cache
+def _is_hgx_b200_or_b300() -> bool:
+    """Whether this is an x86 HGX B200 (10.0) or HGX B300 (10.3)."""
+    if not current_platform.is_cuda():
+        return False
+    if current_platform.get_cpu_architecture() != CpuArchEnum.X86:
+        return False
+    try:
+        return current_platform.is_device_capability(
+            100
+        ) or current_platform.is_device_capability(103)
+    except Exception:
+        return False
+
+
+def _prefers_one_sided_all2all(config: "ParallelConfig") -> bool:
+    """Whether "auto" picks flashinfer_nvlink_one_sided: only where it was
+    measured to beat allgather_reducescatter."""
+    # The one-sided manager is not wired for elastic EP's stateless groups.
+    if not config.enable_expert_parallel or config.enable_elastic_ep:
+        return False
+    if config.data_parallel_size >= 8 and _is_gb200_or_gb300():
+        return True
+    # HGX has no NVLink between hosts, so the EP group must be one host's
+    # 8 GPUs, placed by vLLM's own launcher. An API-server-only process has no
+    # local ranks and must agree with engines that do.
+    return (
+        config.data_parallel_size == 8
+        and config.data_parallel_size_local in (0, 8)
+        and config.distributed_executor_backend in ("mp", "uni")
+        and _is_hgx_b200_or_b300()
+    )
+
+
+def _resolve_all2all_backend(config: "ParallelConfig") -> All2AllBackend:
+    """Pick the all2all backend, resolving "auto" against the deployment.
+
+    Returns:
+        A concrete backend; never "auto".
+
+    """
+    requested = config.all2all_backend
+    if requested in ("pplx", "naive"):
+        logger.warning(
+            "The '%s' all2all backend has been removed. "
+            "Falling back to 'allgather_reducescatter'.",
+            requested,
+        )
+        return "allgather_reducescatter"
+
+    if requested == "auto":
+        if not _prefers_one_sided_all2all(config):
+            return "allgather_reducescatter"
+        requested = "flashinfer_nvlink_one_sided"
+
+    if requested == "flashinfer_nvlink_one_sided":
+        if not config.enable_expert_parallel:
+            logger.debug(
+                "Expert parallel is disabled; using the "
+                "'allgather_reducescatter' all2all backend instead of "
+                "'flashinfer_nvlink_one_sided'."
+            )
+            return "allgather_reducescatter"
+        # Deferred so the ~3s FlashInfer import stays off non-EP paths.
+        from vllm.utils.flashinfer import has_flashinfer_nvlink_one_sided
+
+        if not has_flashinfer_nvlink_one_sided():
+            logger.warning_once(
+                "FlashInfer NVLink one-sided all2all is unavailable; falling "
+                "back to the 'allgather_reducescatter' all2all backend."
+            )
+            return "allgather_reducescatter"
+
+    return requested
 
 
 @config
@@ -218,8 +310,14 @@ class ParallelConfig:
       with 4 experts and 2 ranks, rank 0 will have experts [0, 2] and rank 1
       will have experts [1, 3]. This strategy can help improve load balancing
       for grouped expert models with no redundant experts."""
-    all2all_backend: All2AllBackend = "allgather_reducescatter"
+    all2all_backend: All2AllBackend = "auto"
     """All2All backend for MoE expert parallel communication. Available options:
+
+    - "auto": "flashinfer_nvlink_one_sided" for expert parallelism without
+      elastic EP, with at least 8 data-parallel ranks on GB200/GB300 or exactly
+      8 on a single HGX B200/B300 node launched by vLLM, for BF16/FP16, ModelOpt
+      NVFP4 or 128x128 block FP8 models without LoRA or a MoE-EP backend;
+      "allgather_reducescatter" otherwise
 
     - "allgather_reducescatter": All2all based on allgather and reducescatter
     - "deepep_high_throughput": Use deepep high-throughput kernels
@@ -233,6 +331,9 @@ class ParallelConfig:
     - "passthrough": No all2all at all: the MoE backend dispatches and combines
       itself (e.g. the FlashInfer MoE-EP megakernels). Bound automatically for
       such MoE backends; not selectable from the CLI."""
+    _all2all_backend_auto_one_sided: bool = Field(default=False, repr=False)
+    """Whether "auto" picked "flashinfer_nvlink_one_sided"; VllmConfig falls
+    back to "allgather_reducescatter" for models it does not support."""
 
     max_parallel_loading_workers: int | None = Field(default=None, ge=1)
     """Maximum number of parallel loading workers when loading model
@@ -555,13 +656,12 @@ class ParallelConfig:
                 "The FT system assumes one AsyncMPClient manages all engines."
             )
 
-        if self.all2all_backend in ["pplx", "naive"]:
-            logger.warning(
-                "The '%s' all2all backend has been removed. "
-                "Falling back to 'allgather_reducescatter'.",
-                self.all2all_backend,
+        picked_by_auto = self.all2all_backend == "auto"
+        self.all2all_backend = _resolve_all2all_backend(self)
+        if picked_by_auto:
+            self._all2all_backend_auto_one_sided = (
+                self.all2all_backend == "flashinfer_nvlink_one_sided"
             )
-            self.all2all_backend = "allgather_reducescatter"
 
         if self.data_parallel_size_local > self.data_parallel_size:
             raise ValueError(
@@ -987,6 +1087,8 @@ class ParallelConfig:
             # `_get_numa_node`), which would otherwise diverge the DP hash.
             "numa_bind",
             "_numa_bind_auto",
+            # all2all_backend itself is hashed.
+            "_all2all_backend_auto_one_sided",
             "numa_bind_nodes",
             "numa_bind_cpus",
             "assigned_physical_gpu_ids",

@@ -1122,6 +1122,48 @@ class VllmConfig:
         )
         speculative_config.num_speculative_tokens_per_batch_size = None
 
+    def _one_sided_all2all_unsupported_reason(self) -> str | None:
+        """Why the model cannot use flashinfer_nvlink_one_sided, if it can't."""
+        from vllm.config.kernel import FLASHINFER_MOE_EP_BACKENDS
+
+        if self.lora_config is not None:
+            return "LoRA"
+        if self.kernel_config.moe_backend in FLASHINFER_MOE_EP_BACKENDS:
+            return f"moe_backend={self.kernel_config.moe_backend!r}"
+        model_config = self.model_config
+        if model_config is None:
+            return None
+        # One-sided dispatch carries BF16/FP16, NVFP4 or 128x128 block FP8.
+        quantization = model_config.quantization
+        if quantization is None:
+            if model_config.dtype in (torch.bfloat16, torch.float16):
+                return None
+            return f"dtype={model_config.dtype}"
+        if quantization == "modelopt_fp4":
+            return None
+        quant_cfg = model_config.model_arch_config.quantization_config or {}
+        if quantization == "fp8" and quant_cfg.get("weight_block_size") == [128, 128]:
+            return None
+        return f"quantization={quantization!r}"
+
+    def _maybe_fall_back_from_auto_one_sided_all2all(self) -> None:
+        """Keep the "auto" all2all default to models one-sided supports."""
+        parallel_config = self.parallel_config
+        if (
+            not parallel_config._all2all_backend_auto_one_sided
+            or parallel_config.all2all_backend != "flashinfer_nvlink_one_sided"
+        ):
+            return
+        reason = self._one_sided_all2all_unsupported_reason()
+        if reason is None:
+            return
+        logger.info_once(
+            "all2all_backend='auto': using 'allgather_reducescatter' instead of "
+            "'flashinfer_nvlink_one_sided', which does not support %s.",
+            reason,
+        )
+        parallel_config.all2all_backend = "allgather_reducescatter"
+
     def _maybe_disable_dynamic_sd_for_data_parallel(self) -> None:
         speculative_config = self.speculative_config
         if (
@@ -1864,6 +1906,9 @@ class VllmConfig:
                 self.compilation_config.custom_ops.append("none")
             else:
                 self.compilation_config.custom_ops.append("all")
+
+        # Must run before binding a MoE-EP backend, which rejects one-sided.
+        self._maybe_fall_back_from_auto_one_sided_all2all()
 
         # This populates IR op priorities,
         # must happen after compilation mode and backend are decided,
