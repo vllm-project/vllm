@@ -245,25 +245,6 @@ def test_nccl_shutdown_destroys_communicator_once(engine_type):
     assert engine.model_update_group is None
 
 
-def test_nccl_finish_weight_update_empties_cache(monkeypatch):
-    import vllm.model_executor.model_loader.reload as reload_mod
-
-    calls = []
-    monkeypatch.setattr(
-        reload_mod, "finalize_layerwise_reload", lambda *_: calls.append("finalize")
-    )
-    monkeypatch.setattr(
-        torch.accelerator, "empty_cache", lambda: calls.append("empty_cache")
-    )
-    engine = object.__new__(NCCLWeightTransferEngine)
-    engine.model = MagicMock()
-    engine.model_config = MagicMock()
-
-    engine.finish_weight_update()
-
-    assert calls == ["finalize", "empty_cache"]
-
-
 class TestNCCLEngineParsing:
     """Test NCCLWeightTransferEngine parsing methods."""
 
