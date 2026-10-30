@@ -656,8 +656,10 @@ class Worker(WorkerBase):
     def _init_pp_send_buffer(self) -> int:
         """Allocate the PP send buffer sized by the profile run, after its peak,
         and return the device memory it took."""
-        nbytes = self.model_runner.profile_pp_send_bytes
-        if nbytes == 0 or self._pp_send_buffer is not None:
+        if not self.use_v2_model_runner or self._pp_send_buffer is not None:
+            return 0
+        nbytes = getattr(self.model_runner, "profile_pp_send_bytes", 0)
+        if nbytes == 0:
             return 0
         free_before, _ = torch.accelerator.get_memory_info(self.device)
         with self._maybe_get_memory_pool_context("workspace"):
