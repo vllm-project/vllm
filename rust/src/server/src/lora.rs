@@ -133,7 +133,7 @@ impl LoraModelResolution {
         self.lora_request
             .as_ref()
             .map(|request| request.lora_name.clone())
-            .unwrap_or_else(|| self.model_names.first().cloned().unwrap_or_default())
+            .unwrap_or_else(|| self.model_names.primary().to_string())
     }
 }
 
