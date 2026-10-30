@@ -258,11 +258,10 @@ def resolve_current_platform_cls_qualname() -> str:
             if platform_cls_qualname is not None:
                 activated_plugins.append(name)
         except Exception:
-            logger.debug(
-                "Platform plugin %s failed during detection.",
-                name,
-                exc_info=True,
-            )
+            # Built-in plugins handle their own expected failures, so anything
+            # escaping from an out-of-tree plugin is likely a real bug.
+            log = logger.debug if name in builtin_platform_plugins else logger.warning
+            log("Platform plugin %s failed during detection.", name, exc_info=True)
 
     activated_builtin_plugins = list(
         set(activated_plugins) & set(builtin_platform_plugins.keys())

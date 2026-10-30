@@ -20,6 +20,7 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    max_decode_query_len,
 )
 from vllm.v1.attention.backends.utils import (
     NULL_BLOCK_ID,
@@ -27,7 +28,7 @@ from vllm.v1.attention.backends.utils import (
     mamba_get_block_table_tensor,
     split_decodes_and_prefills,
 )
-from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 
 # FlashInfer's GDN prefill emits states every N tokens, N a multiple of its
 # 64-token chunk, so checkpoint offsets must be multiples of 64.
@@ -84,6 +85,10 @@ class GDNAttentionBackend(AttentionBackend):
     def is_ssm(cls) -> bool:
         return True
 
+    @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        return True
+
 
 @dataclass
 class GDNAttentionMetadata:
@@ -135,6 +140,15 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
     kv_cache_spec: MambaSpec
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
 
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> int | None:
+        del kv_cache_spec
+        return max_decode_query_len(vllm_config)
+
     reorder_batch_threshold: int = 1
 
     def __init__(
@@ -147,6 +161,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.compilation_config = vllm_config.compilation_config
         self.speculative_config = vllm_config.speculative_config
+        self._adaptive_verification = bool(
+            self.speculative_config
+            and self.speculative_config.enable_adaptive_verification
+        )
         self.checkpoint_builder = MambaPrefillCheckpointBuilder(
             vllm_config, kv_cache_spec
         )
@@ -398,7 +416,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             non_spec_sequence_masks_cpu = ~spec_sequence_masks_cpu
             query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
             spec_query_lens_cpu = query_lens_cpu[spec_sequence_masks_cpu]
-            if spec_query_lens_cpu.numel() > 0:
+            if spec_query_lens_cpu.numel() > 0 and not self._adaptive_verification:
                 first_spec_sequence_length = int(spec_query_lens_cpu[0])
                 if first_spec_sequence_length > 0 and bool(
                     torch.all(spec_query_lens_cpu == first_spec_sequence_length)
