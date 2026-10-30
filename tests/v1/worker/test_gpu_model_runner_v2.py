@@ -12,7 +12,7 @@ import torch
 
 import vllm.distributed.aux_output_connector.worker as aux_output_worker
 import vllm.v1.worker.gpu.model_runner as model_runner_module
-from vllm.config import CacheConfig, LoRAConfig, ParallelConfig
+from vllm.config import CacheConfig, LoadConfig, LoRAConfig, ParallelConfig
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
@@ -66,7 +66,7 @@ def test_non_last_pp_rank_uses_global_batch_for_sample_feedback(monkeypatch):
 
     runner.sample_tokens(None)
 
-    pp_receive.assert_called_once_with(global_batch)
+    pp_receive.assert_called_once_with(global_batch, recv_drafts=False)
     postprocess_num_computed_tokens.assert_called_once_with(global_batch)
     postprocess_state.assert_called_once_with(global_batch.idx_mapping, 0)
     restore_for_sampling.assert_not_called()
@@ -525,6 +525,10 @@ def test_standalone_draft_kv_dtype_override(
     get_model = Mock(return_value=object())
     monkeypatch.setattr(ar_module, "get_model", get_model)
     monkeypatch.setattr(ar_module, "set_model_tag", lambda _: contextlib.nullcontext())
+    monkeypatch.setattr(ar_module, "get_draft_load_config", lambda _: LoadConfig())
+    monkeypatch.setattr(
+        ar_module, "get_pp_safe_draft_load_config", lambda load_config: load_config
+    )
 
     speculator.load_draft_model(object(), set())
 
