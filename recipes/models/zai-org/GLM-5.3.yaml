@@ -4,7 +4,7 @@ meta:
   provider: "GLM (Z-AI)"
   description: "GLM-5.3 — Frontier Coding with Emergent Cyber Capabilities"
   date_added: 2026-08-28
-  date_updated: 2026-10-19
+  date_updated: 2026-10-30
   tasks:
     - text
   performance_headline: "Latest GLM-5 series MoE — native FP8 by default, 5-token MTP, 1M context"
@@ -178,6 +178,22 @@ variants:
           - "--kv-cache-dtype"
           - "fp8_ds_mla"
     description: "GPUStack Hopper-native W4A8 (gpustack/GLM-5.3-W4A8). Routed experts are INT4 group-128; non-expert layers stay FP8. Weights drop from 704 GB to 372 GB, roughly doubling KV cache on 8×H200/H20 with no measurable accuracy drop vs official FP8. CUTLASS W4A8 is SM90-only — H100/H200/H20; Blackwell and AMD are unsupported."
+  redhat_mxfp4:
+    model_id: "RedHatAI/GLM-5.3-MXFP4"
+    precision: mxfp4
+    label: "MXFP4 (RedHatAI)"
+    vram_minimum_gb: 447
+    supported_hardware: [arch:sm100, arch:sm103]
+    description: "RedHatAI OCP MXFP4 weights and dynamic FP4 activations; evaluated on 4x B200"
+  redhat_nvfp4:
+    model_id: "RedHatAI/GLM-5.3-NVFP4"
+    precision: nvfp4
+    label: "NVFP4 (RedHatAI)"
+    vram_minimum_gb: 558
+    supported_hardware: [arch:sm100, arch:sm103]
+    description: "RedHatAI NVFP4 weights and activations on routed experts; non-expert layers retain higher precision"
+    extra_args:
+      - "--trust-remote-code"
   bf16:
     model_id: "zai-org/GLM-5.3-BF16"
     precision: bf16
@@ -481,6 +497,8 @@ guide: |
   ## References
 
   - [Model card](https://huggingface.co/zai-org/GLM-5.3)
+  - [RedHatAI MXFP4 checkpoint](https://huggingface.co/RedHatAI/GLM-5.3-MXFP4)
+  - [RedHatAI NVFP4 checkpoint](https://huggingface.co/RedHatAI/GLM-5.3-NVFP4)
   - [BF16 checkpoint](https://huggingface.co/zai-org/GLM-5.3-BF16)
   - [NVFP4 checkpoint (Inferact)](https://huggingface.co/Inferact/GLM-5.3-NVFP4)
   - [DSpark draft](https://huggingface.co/RedHatAI/GLM-5.3-speculator.dspark)
