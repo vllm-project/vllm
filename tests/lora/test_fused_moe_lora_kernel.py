@@ -1760,3 +1760,86 @@ def test_moe_lora_default_config_block_size_m_matches(num_tokens):
     assert (block_size_m == {16}) == (
         num_tokens <= FUSED_MOE_LORA_TWO_KERNEL_MAX_TOKENS
     )
+
+
+@pytest.mark.parametrize(
+    "num_tokens,top_k_num,num_experts,max_loras,max_lora_rank,K,N,num_slices,dtype,"
+    "shrink_split_k",
+    [
+        (4, 2, 64, 4, 32, 2048, 1024, 2, BF16, 4),
+        (32, 2, 8, 4, 32, 2048, 1024, 1, BF16, 8),
+        (16, 8, 64, 1, 16, 2048, 1408, 2, BF16, 1),
+        (8, 4, 32, 2, 64, 1024, 2048, 1, FP16, 4),
+    ],
+    ids=["naive-splitk4", "sorted-splitk8", "sorted-splitk1", "fp16-splitk4"],
+)
+@pytest.mark.parametrize("device", DEVICES)
+def test_fused_moe_lora_two_kernel_matches_rounded_reference(
+    num_tokens,
+    top_k_num,
+    num_experts,
+    max_loras,
+    max_lora_rank,
+    K,
+    N,
+    num_slices,
+    dtype,
+    shrink_split_k,
+    device,
+):
+    torch.set_default_device(device)
+    set_random_seed(0)
+    topk_ids, topk_weights, token_lora_mapping, lora_ids = sample_data(
+        num_tokens, min(num_tokens, 4), max_loras, num_experts, top_k_num
+    )
+    lora_a_stacked = [
+        (torch.randn((max_loras, num_experts, max_lora_rank, K)) / K**0.5).to(dtype)
+        for _ in range(num_slices)
+    ]
+    lora_b_stacked = [
+        (
+            torch.randn((max_loras, num_experts, N // num_slices, max_lora_rank))
+            / max_lora_rank**0.5
+        ).to(dtype)
+        for _ in range(num_slices)
+    ]
+    hidden_states = torch.randn((num_tokens, K)).to(dtype)
+    residual = torch.randn((num_tokens, top_k_num, N)).to(dtype)
+    output = residual.clone()
+    args = (
+        topk_ids,
+        topk_weights,
+        token_lora_mapping,
+        max_lora_rank,
+        top_k_num,
+        lora_ids,
+        lora_a_stacked,
+        lora_b_stacked,
+        hidden_states,
+        output,
+        max_loras,
+    )
+    if num_tokens * top_k_num * 8 <= num_experts * max_loras:
+        use_fused_moe_lora_kernel_naive(*args, 16, shrink_split_k=shrink_split_k)
+    else:
+        use_fused_moe_lora_kernel(*args, num_experts, 16, shrink_split_k=shrink_split_k)
+    lora = token_lora_mapping.long()[:, None]
+    experts = topk_ids.long()
+    exact = residual.double() + torch.cat(
+        [
+            torch.einsum(
+                "tknr,tkr->tkn",
+                lora_b[lora, experts].double(),
+                torch.einsum(
+                    "tkrd,td->tkr",
+                    lora_a[lora, experts].double(),
+                    hidden_states.double(),
+                ),
+            )
+            for lora_a, lora_b in zip(lora_a_stacked, lora_b_stacked)
+        ],
+        dim=-1,
+    )
+    rounding = (exact.to(dtype).double() - exact).abs().max()
+    error = (output.double() - exact).abs().max()
+    assert error <= 1.01 * rounding, (error.item(), rounding.item())

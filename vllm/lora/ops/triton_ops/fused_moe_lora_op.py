@@ -1141,7 +1141,14 @@ def _fused_moe_lora_kernel(
         # branches (TMA desc path returns fp32, tl.load returns the pointer's
         # element type). Casting to bfloat16 here silently changes fp16 LoRA
         # operands and can produce incorrect results.
-        accumulator += tl.dot(a.to(w_dtype), b.to(w_dtype))
+        if a_ptr.dtype.element_ty == w_dtype:
+            accumulator += tl.dot(a.to(w_dtype), b.to(w_dtype))
+        else:
+            a_fp32 = a.to(tl.float32)
+            a_hi = a_fp32.to(w_dtype)
+            a_lo = (a_fp32 - a_hi.to(tl.float32)).to(w_dtype)
+            accumulator += tl.dot(a_hi, b.to(w_dtype))
+            accumulator += tl.dot(a_lo, b.to(w_dtype))
 
     if MUL_ROUTED_WEIGHT:
         moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0.0)
@@ -1357,7 +1364,7 @@ def _fused_moe_lora_expand(
         "SPLIT_K": 1,  # Set split_k = 1 for expand calls
         "USE_GDC": use_gdc,
         "launch_pdl": use_gdc,  # triton kernel metadata
-        "FP32_ADD_INPUTS": device.type == "xpu",
+        "FP32_ADD_INPUTS": True,
         "USE_TMA": use_tma,
     }
 
@@ -1601,7 +1608,9 @@ def _fused_moe_lora(
 
     a_intermediate_cache1 = torch.zeros(
         intermediate_cache_shape,
-        dtype=torch.float32 if shrink_split_k > 1 else output.dtype,
+        dtype=torch.float32
+        if shrink_split_k > 1 or M <= FUSED_MOE_LORA_TWO_KERNEL_MAX_TOKENS
+        else output.dtype,
         device=device,
     )
 
