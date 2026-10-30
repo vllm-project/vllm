@@ -283,6 +283,10 @@ def _parallel_config(**overrides):
         mori_ep_v2=None,
         tensor_parallel_size=1,
         data_parallel_size=8,
+        data_parallel_size_local=8,
+        data_parallel_external_lb=False,
+        data_parallel_backend="mp",
+        nnodes_within_dp=1,
         prefill_context_parallel_size=1,
     )
     return SimpleNamespace(**(fields | overrides))
@@ -292,11 +296,21 @@ def _model_config(**overrides):
     return SimpleNamespace(**({"dtype": torch.bfloat16} | overrides))
 
 
+_EXTERNAL_LB = {"data_parallel_size_local": 1, "data_parallel_external_lb": True}
+
+
 @pytest.mark.parametrize(
     "parallel,model,moe_backend,env,ep_v2",
     [
         ({}, {}, "aiter", {}, True),
+        # EP across hosts: DP over two nodes, even with ep_size <= 8.
         ({"data_parallel_size": 16}, {}, "aiter", {}, False),
+        ({"data_parallel_size_local": 4}, {}, "aiter", {}, False),
+        # A DP replica (TP/PP) spanning nodes.
+        ({"nnodes_within_dp": 2}, {}, "aiter", {}, False),
+        # External LB only sees its own rank: fall back to the EP size.
+        (_EXTERNAL_LB, {}, "aiter", {}, True),
+        (_EXTERNAL_LB | {"data_parallel_size": 16}, {}, "aiter", {}, False),
         # The LSA team may span hosts (gfx1250); the manager checks it.
         ({"data_parallel_size": 16, "lsa_spans_hosts": True}, {}, "aiter", {}, True),
         ({}, {}, "aiter", {"MORI_ENABLE_SDMA": "1"}, False),

@@ -1286,6 +1286,22 @@ def _resolve_mori_ep_v2(
     return False
 
 
+# Used only when the launch layout cannot tell whether EP spans hosts.
+_MORI_GPUS_PER_HOST = 8
+
+
+def _ep_spans_hosts(parallel_config: ParallelConfig, ep_size: int) -> bool:
+    if parallel_config.nnodes_within_dp > 1:
+        return True
+    if (
+        parallel_config.data_parallel_external_lb
+        or parallel_config.data_parallel_backend == "ray"
+    ):
+        # Each launch only knows its own DP ranks.
+        return ep_size > _MORI_GPUS_PER_HOST
+    return parallel_config.data_parallel_size_local < parallel_config.data_parallel_size
+
+
 def _mori_epv2_unsupported_reason(
     parallel_config: ParallelConfig,
     model_config: "ModelConfig | None",
@@ -1298,10 +1314,10 @@ def _mori_epv2_unsupported_reason(
         * parallel_config.data_parallel_size
         * parallel_config.prefill_context_parallel_size
     )
-    # A rough guess before startup; MoriEPv2All2AllManager checks the actual
+    # A guess before startup; MoriEPv2All2AllManager checks the actual
     # CCO-LSA team.
-    if ep_size > 8 and not lsa_spans_hosts:
-        return f"ep_size={ep_size} across hosts (EPv2 is validated within one host)"
+    if not lsa_spans_hosts and _ep_spans_hosts(parallel_config, ep_size):
+        return f"ep_size={ep_size} across hosts (EPv2 needs one host)"
     sdma = os.environ.get("MORI_ENABLE_SDMA", "0").lower() in ("1", "true")
     if sdma and sdma_picks_epv1:
         return "MORI_ENABLE_SDMA=1 (SDMA is EPv1-only)"
