@@ -14,19 +14,15 @@ that every rank gets exactly the weights it should own, for TP sizes below,
 equal to and above ``ckpt_tp`` (the last case replicating KV heads).
 """
 
-from types import SimpleNamespace
-
 import pytest
 import torch
 
-from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.reload import (
     finalize_layerwise_reload,
     initialize_layerwise_reload,
     record_metadata_for_reloading,
 )
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.mimo_v2 import (
     _fused_qkv_kv_chunk_rows,
     _fused_qkv_rank_rows,
@@ -40,9 +36,6 @@ from vllm.utils.torch_utils import set_default_torch_num_threads
 
 pytestmark = pytest.mark.cpu_test
 
-_MODEL_CONFIG = SimpleNamespace(
-    word_embeddings_untied_by_checkpoint=False, quantization=None, dtype=torch.bfloat16
-)
 
 BLOCK = 128
 FP8_DTYPE = torch.float8_e4m3fn
@@ -494,66 +487,86 @@ def test_requantized_rows_match_the_checkpoint_rows(tp_size):
         assert torch.equal(got_s, want_s)
 
 
-class _RowScalesMethod(QuantizeMethodBase):
-    """The row-scale step of `_Fp8RowScalesLinearMethod`, without the fp8
-    kernel's own processing."""
-
-    def create_weights(self, *args, **kwargs):
-        raise NotImplementedError
-
-    def apply(self, *args, **kwargs):
-        raise NotImplementedError
-
-    def process_weights_after_loading(self, layer):
-        from vllm.model_executor.models.mimo_v2 import _process_row_scales
-
-        _process_row_scales(layer)
+requires_gpu = pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="Fp8LinearMethod kernels need a GPU"
+)
 
 
-def _fused_qkv_model(monkeypatch, geometry, tp_rank, tp_size):
-    """A MiMoV2Model with one attention layer whose fused fp8 qkv_proj loads
-    as rows and row scales, and its checkpoint (weight, scale)."""
-    from vllm.model_executor.models import mimo_v2
+@pytest.fixture
+def model_config(dist_init):
+    """A real VllmConfig for Fp8LinearMethod; the model itself is not loaded."""
+    from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 
-    monkeypatch.setattr(mimo_v2, "get_tensor_model_parallel_rank", lambda: tp_rank)
-    monkeypatch.setattr(
-        mimo_v2, "get_tensor_model_parallel_world_size", lambda: tp_size
+    config = ModelConfig(
+        "facebook/opt-125m", dtype="bfloat16", skip_tokenizer_init=True
     )
-    num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp = GEOMETRIES[geometry]
-    kv_chunk_rows = _fused_qkv_kv_chunk_rows(
-        num_heads, num_kv_heads, head_dim, v_head_dim, tp_size, ckpt_tp
-    )
-    kv_per_rank = max(1, num_kv_heads // tp_size)
-    rows = num_heads // tp_size * head_dim
-    if kv_chunk_rows:
-        rows += ckpt_tp // tp_size * kv_chunk_rows
-    else:
-        rows += kv_per_rank * (head_dim + v_head_dim)
+    with set_current_vllm_config(VllmConfig(model_config=config)):
+        yield config
 
-    attn = torch.nn.Module()
-    attn.total_num_heads, attn.total_num_kv_heads = num_heads, num_kv_heads
-    attn.head_dim, attn.v_head_dim = head_dim, v_head_dim
-    attn.kv_chunk_rows = kv_chunk_rows
-    attn.qkv_proj = qkv = torch.nn.Module()
-    qkv.weight = torch.nn.Parameter(
-        torch.empty(rows, COLS, dtype=FP8_DTYPE), requires_grad=False
-    )
-    qkv.weight_scale_inv = torch.nn.Parameter(  # one scale per row
-        torch.empty(rows, COLS // BLOCK), requires_grad=False
-    )
-    qkv.weight_block_size = [BLOCK, BLOCK]
-    qkv.quant_method = _RowScalesMethod()
-    for param in qkv.parameters():  # as `_use_row_scales` sets them
-        param.weight_loader = default_weight_loader
-    layer = torch.nn.Module()
-    layer.self_attn = attn
 
-    model = mimo_v2.MiMoV2Model.__new__(mimo_v2.MiMoV2Model)
-    torch.nn.Module.__init__(model)
-    model.layers = torch.nn.ModuleList([layer])
-    model.config = SimpleNamespace(num_key_value_heads=ckpt_tp)
-    monkeypatch.setattr(model, "get_expert_mapping", lambda: [])
-    return model
+class _FusedQkv(torch.nn.Module):
+    """One rank's fused fp8 ``qkv_proj``, built as MiMoV2Attention builds it
+    for that rank (a TP-1 layer of the rank's size), loading as rows and row
+    scales from the fused checkpoint."""
+
+    def __init__(self, geometry, tp_rank, tp_size):
+        super().__init__()
+        from vllm.model_executor.layers.linear import (
+            MergedColumnParallelLinear,
+            QKVParallelLinear,
+        )
+        from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+        from vllm.model_executor.models.mimo_v2 import _use_row_scales
+
+        num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp = GEOMETRIES[geometry]
+        self.geometry = (num_heads, num_kv_heads, head_dim, v_head_dim)
+        self.tp_rank, self.tp_size, self.ckpt_tp = tp_rank, tp_size, ckpt_tp
+        self.kv_chunk_rows = _fused_qkv_kv_chunk_rows(*self.geometry, tp_size, ckpt_tp)
+        config = Fp8Config(
+            is_checkpoint_fp8_serialized=True,
+            activation_scheme="dynamic",
+            weight_block_size=[BLOCK, BLOCK],
+        )
+        kv_heads = max(1, num_kv_heads // tp_size)
+        with torch.device("cuda"):
+            if self.kv_chunk_rows:
+                self.qkv_proj = MergedColumnParallelLinear(
+                    COLS,
+                    [
+                        num_heads // tp_size * head_dim,
+                        ckpt_tp // tp_size * self.kv_chunk_rows,
+                    ],
+                    bias=False,
+                    params_dtype=torch.bfloat16,
+                    quant_config=config,
+                )
+            else:
+                self.qkv_proj = QKVParallelLinear(
+                    COLS,
+                    head_dim,
+                    num_heads // tp_size,
+                    kv_heads,
+                    bias=False,
+                    params_dtype=torch.bfloat16,
+                    quant_config=config,
+                    v_head_size=v_head_dim,
+                )
+        _use_row_scales(self.qkv_proj)
+
+    def load_weights(self, weights) -> None:
+        from vllm.model_executor.models.mimo_v2 import _load_fused_fp8_qkv
+
+        for kind, tensor in weights:
+            _load_fused_fp8_qkv(
+                self.qkv_proj,
+                kind,
+                tensor,
+                self.geometry,
+                self.kv_chunk_rows,
+                self.tp_rank,
+                self.tp_size,
+                self.ckpt_tp,
+            )
 
 
 def _fused_qkv_checkpoint(geometry, seed):
@@ -561,116 +574,93 @@ def _fused_qkv_checkpoint(geometry, seed):
     rows_per_chunk = _chunk_rows(num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp)
     gen = torch.Generator().manual_seed(seed)
     truth = torch.randn(ckpt_tp * rows_per_chunk, COLS, generator=gen)
-    return _quantize_chunks(
+    weight, scale = _quantize_chunks(
         truth, num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp
     )
+    return {"weight_scale_inv": scale.cuda(), "weight": weight.cuda()}
 
 
-def _expected_shard(model, weight, scale, tp_rank, tp_size):
-    attn = model.layers[0].self_attn
-    return _shard_fp8_qkv_proj(
-        weight,
-        scale,
-        num_heads=attn.total_num_heads,
-        num_kv_heads=attn.total_num_kv_heads,
-        head_dim=attn.head_dim,
-        v_head_dim=attn.v_head_dim,
-        tp_rank=tp_rank,
-        tp_size=tp_size,
-        ckpt_tp=model.config.num_key_value_heads,
-        kv_chunk_rows=attn.kv_chunk_rows,
-    )
+def _cold_start(geometry, tp_rank, tp_size, ckpt, model_config):
+    model = _FusedQkv(geometry, tp_rank, tp_size)
+    record_metadata_for_reloading(model)
+    for item in ckpt.items():  # scale first, each in its own call
+        model.load_weights([item])
+    process_weights_after_loading(model, model_config, torch.device("cuda"))
+    return model
 
 
-def _assert_shard(model, expected):
-    qkv = model.layers[0].self_attn.qkv_proj
-    assert torch.equal(qkv.weight.view(torch.uint8), expected[0].view(torch.uint8))
-    assert torch.equal(qkv.weight_scale_inv, expected[1])
+def _assert_same_params(model, reference):
+    for (name, got), (_, want) in zip(
+        model.named_parameters(), reference.named_parameters(), strict=True
+    ):
+        assert torch.equal(got.view(torch.uint8), want.view(torch.uint8)), name
 
 
-# ga at 4: one chunk per rank; ga at 2: padded block permutation; ga at 8 and
-# swa at 8: requantized
-@pytest.mark.parametrize(
-    "geometry,tp_size", [("ga", 4), ("ga", 2), ("ga", 8), ("swa", 8)]
-)
-@pytest.mark.parametrize("scale_first", [False, True])
-def test_load_weights_split_fp8_qkv_proj_and_skips_absent_layers(
-    monkeypatch, geometry, tp_size, scale_first
+# ga at 4: one chunk per rank; ga at 2: padded block permutation; ga and swa
+# at 8: requantized
+_LAYOUTS = [("ga", 4), ("ga", 2), ("ga", 8), ("swa", 8)]
+
+
+@requires_gpu
+@pytest.mark.parametrize("geometry,tp_size", _LAYOUTS)
+@pytest.mark.parametrize("scale_first", [True, False])
+def test_weight_and_scale_load_on_their_own(
+    geometry, tp_size, scale_first, model_config
 ):
-    """Through ``MiMoV2Model.load_weights``: a layer's fused fp8 ``qkv_proj``
-    weight and scale arriving in separate calls, in either order, load on their
-    own; post-load processing gives the rank's shard. The pair for a layer the
-    instance does not have (checkpoint deeper than ``num_hidden_layers``) is
-    skipped.
-    """
-    from vllm.model_executor.models import mimo_v2
+    """The weight and its scale arrive in separate calls, in either order;
+    the row scales become this rank's shard, as the paired sharding made it."""
+    from vllm.model_executor.models.mimo_v2 import _process_row_scales
 
     tp_rank = tp_size - 1
-    model = _fused_qkv_model(monkeypatch, geometry, tp_rank, tp_size)
-    weight, scale = _fused_qkv_checkpoint(geometry, 0)
-    present, absent = "layers.0.self_attn.qkv_proj", "layers.7.self_attn.qkv_proj"
-    calls = [
-        [(f"{present}.weight", weight), (f"{absent}.weight", weight)],
-        [(f"{absent}.weight_scale_inv", scale), (f"{present}.weight_scale_inv", scale)],
-    ]
-    loaded = set()
-    for call in reversed(calls) if scale_first else calls:
-        loaded |= mimo_v2.MiMoV2Model.load_weights(model, call)
-    assert loaded == {f"{present}.weight", f"{present}.weight_scale_inv"}
+    model = _FusedQkv(geometry, tp_rank, tp_size)
+    ckpt = _fused_qkv_checkpoint(geometry, 0)
+    items = list(ckpt.items())
+    for item in items if scale_first else reversed(items):
+        model.load_weights([item])
+    _process_row_scales(model.qkv_proj)
+    weight, scale = _shard_fp8_qkv_proj(
+        ckpt["weight"].cpu(),
+        ckpt["weight_scale_inv"].cpu(),
+        *GEOMETRIES[geometry][:4],
+        tp_rank,
+        tp_size,
+        GEOMETRIES[geometry][4],
+        kv_chunk_rows=model.kv_chunk_rows,
+    )
+    got = model.qkv_proj
+    assert torch.equal(got.weight.cpu().view(torch.uint8), weight.view(torch.uint8))
+    assert torch.equal(got.weight_scale_inv.cpu(), scale)
 
-    process_weights_after_loading(model, _MODEL_CONFIG, torch.device("cpu"))
-    _assert_shard(model, _expected_shard(model, weight, scale, tp_rank, tp_size))
 
-
+@requires_gpu
 @pytest.mark.parametrize("geometry,tp_size", [("ga", 2), ("ga", 8)])
-def test_direct_reload_equals_cold_start(monkeypatch, geometry, tp_size):
-    """A direct reload views the scale back to its row layout; the new rows
-    load in separate calls and processing gives what a cold start gives."""
+@pytest.mark.parametrize("mode", ["direct", "layerwise"])
+def test_reload_equals_cold_start(monkeypatch, model_config, geometry, tp_size, mode):
+    """A reload with weight and scale in separate calls ends with the bytes a
+    cold start on the new checkpoint gives, at the same addresses."""
     from vllm.model_executor.model_loader.reload.direct import (
         begin_direct_reload,
         finish_direct_reload,
     )
-    from vllm.model_executor.models import mimo_v2
 
-    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
+    monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
     tp_rank = tp_size - 1
-    model = _fused_qkv_model(monkeypatch, geometry, tp_rank, tp_size)
-    prefix = "layers.0.self_attn.qkv_proj"
-    old = _fused_qkv_checkpoint(geometry, 1)
-    mimo_v2.MiMoV2Model.load_weights(model, [(f"{prefix}.weight", old[0])])
-    mimo_v2.MiMoV2Model.load_weights(model, [(f"{prefix}.weight_scale_inv", old[1])])
-    process_weights_after_loading(model, _MODEL_CONFIG, torch.device("cpu"))
+    model = _cold_start(
+        geometry, tp_rank, tp_size, _fused_qkv_checkpoint(geometry, 1), model_config
+    )
     ptrs = {n: p.data_ptr() for n, p in model.named_parameters()}
-
     new = _fused_qkv_checkpoint(geometry, 2)
-    begin_direct_reload(model)
-    for kind, tensor in (("weight_scale_inv", new[1]), ("weight", new[0])):
-        mimo_v2.MiMoV2Model.load_weights(model, [(f"{prefix}.{kind}", tensor)])
-    finish_direct_reload(model, _MODEL_CONFIG, torch.device("cpu"))
-
-    _assert_shard(model, _expected_shard(model, new[0], new[1], tp_rank, tp_size))
+    if mode == "direct":
+        begin_direct_reload(model)
+    else:
+        initialize_layerwise_reload(model)
+    for item in new.items():
+        model.load_weights([item])
+    if mode == "direct":
+        finish_direct_reload(model, model_config, torch.device("cuda"))
+    else:
+        finalize_layerwise_reload(model, model_config)
+    _assert_same_params(
+        model, _cold_start(geometry, tp_rank, tp_size, new, model_config)
+    )
     assert {n: p.data_ptr() for n, p in model.named_parameters()} == ptrs
-
-
-@pytest.mark.parametrize("geometry,tp_size", [("ga", 2), ("ga", 8)])
-def test_layerwise_reload_equals_cold_start(monkeypatch, geometry, tp_size):
-    """A layerwise reload (layers on meta until all their tensors arrive) loads
-    the rows and row scales through their weight loaders."""
-    from vllm.model_executor.models import mimo_v2
-
-    tp_rank = tp_size - 1
-    model = _fused_qkv_model(monkeypatch, geometry, tp_rank, tp_size)
-    record_metadata_for_reloading(model)
-    prefix = "layers.0.self_attn.qkv_proj"
-    old = _fused_qkv_checkpoint(geometry, 3)
-    mimo_v2.MiMoV2Model.load_weights(model, [(f"{prefix}.weight", old[0])])
-    mimo_v2.MiMoV2Model.load_weights(model, [(f"{prefix}.weight_scale_inv", old[1])])
-    process_weights_after_loading(model, _MODEL_CONFIG, torch.device("cpu"))
-
-    new = _fused_qkv_checkpoint(geometry, 4)
-    initialize_layerwise_reload(model)
-    for kind, tensor in (("weight_scale_inv", new[1]), ("weight", new[0])):
-        mimo_v2.MiMoV2Model.load_weights(model, [(f"{prefix}.{kind}", tensor)])
-    finalize_layerwise_reload(model, _MODEL_CONFIG)
-
-    _assert_shard(model, _expected_shard(model, new[0], new[1], tp_rank, tp_size))

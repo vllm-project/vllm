@@ -912,34 +912,34 @@ def _use_row_scales(layer: LinearBase) -> None:
 
 
 def _load_fused_fp8_qkv(
-    attn: "MiMoV2Attention",
+    layer: LinearBase,
     kind: str,
     tensor: torch.Tensor,
+    geometry: tuple[int, int, int, int],
+    kv_chunk_rows: int,
     tp_rank: int,
     tp_size: int,
     ckpt_tp: int,
 ) -> None:
     """Load the fused checkpoint's fp8 qkv_proj ``weight`` or
-    ``weight_scale_inv`` (``kind``) into this rank's rows, on its own."""
-    layer = attn.qkv_proj
-    geometry = (
-        attn.total_num_heads,
-        attn.total_num_kv_heads,
-        attn.head_dim,
-        attn.v_head_dim,
-    )
+    ``weight_scale_inv`` (``kind``) into this rank's rows, on its own.
+    ``geometry``: (num_heads, num_kv_heads, head_dim, v_head_dim)."""
     block = layer.weight_block_size[0]
     rows = _fused_qkv_rank_rows(
-        *geometry, tp_rank, tp_size, ckpt_tp, block, attn.kv_chunk_rows
+        *geometry, tp_rank, tp_size, ckpt_tp, block, kv_chunk_rows
     )
     if kind == "weight":
         tensor = _fused_qkv_weight_rows(tensor, *geometry, rows, ckpt_tp)
     else:
         tensor, layer.requantize_rows = _fused_qkv_row_scales(
-            tensor, *geometry, rows, tp_size, ckpt_tp, block, attn.kv_chunk_rows
+            tensor, *geometry, rows, tp_size, ckpt_tp, block, kv_chunk_rows
         )
     param = getattr(layer, kind)
     getattr(param, "weight_loader", default_weight_loader)(param, tensor)
+
+
+def _qkv_geometry(attn: "MiMoV2Attention") -> tuple[int, int, int, int]:
+    return attn.total_num_heads, attn.total_num_kv_heads, attn.head_dim, attn.v_head_dim
 
 
 @support_torch_compile
@@ -1185,10 +1185,13 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
             # Layer absent from this instance, e.g. truncated num_hidden_layers.
             return True
         prefix, kind = name.rsplit(".", 1)
+        attn = self.get_submodule(prefix.rsplit(".", 1)[0])
         _load_fused_fp8_qkv(
-            self.get_submodule(prefix.rsplit(".", 1)[0]),
+            attn.qkv_proj,
             kind,
             tensor,
+            _qkv_geometry(attn),
+            attn.kv_chunk_rows,
             tp_rank,
             tp_size,
             # The fused qkv_proj is pre-sharded for this many ranks.

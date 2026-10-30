@@ -142,6 +142,7 @@ steps:
   timeout_in_minutes: 65
   source_file_dependencies:
   - vllm/model_executor/layers/quantization
+  - vllm/model_executor/models/mimo_v2.py
   - tests/models/quantization
   commands:
     - pytest -v -s models/quantization

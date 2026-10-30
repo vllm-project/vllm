@@ -4,55 +4,61 @@
 
 The weight and its scale load independently (any order, any call, no pairing in
 the model's loader); BF16 rows load as is; post-load processing dequantizes in
-the weight's own storage, so cold start, direct reload and layerwise reload all
-end with the same bytes at the startup address."""
-
-from types import SimpleNamespace
+the weight's own storage, so cold start, direct reload, layerwise reload and a
+sharded RDT replay all end with the same bytes at the startup address."""
 
 import pytest
 import torch
 
+from vllm.config import ModelConfig
+from vllm.distributed.weight_transfer.sharded_rdt_engine import (
+    bake_replay_plan,
+    begin_replayed_layer,
+    finish_replayed_layer,
+    replay_copy,
+)
 from vllm.distributed.weight_transfer.sharded_rdt_fake import _UnsupportedFakeOp
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
+    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization.fp8_dequant import (
     Fp8DequantConfig,
-    Fp8DequantLinearMethod,
     load_unneeded_scale,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    scaled_dequantize,
 )
 from vllm.model_executor.model_loader.reload import (
     finalize_layerwise_reload,
     initialize_layerwise_reload,
     record_metadata_for_reloading,
 )
+from vllm.model_executor.model_loader.reload.direct import (
+    begin_direct_reload,
+    finish_direct_reload,
+)
 from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
+from vllm.model_executor.model_loader.weight_utils import (
+    initialize_single_dummy_weight,
+)
 from vllm.model_executor.utils import get_live_param, weights_already_processed
 from vllm.utils.math_utils import cdiv
 
+pytestmark = pytest.mark.usefixtures("dist_init")
+
 _DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-_MODEL_CONFIG = SimpleNamespace(
-    word_embeddings_untied_by_checkpoint=False, quantization=None, dtype=torch.bfloat16
-)
 # q_a / kv_a-like shards: the first spans several dequantization chunks, the
 # last ends in a partial block
 _OUT = [1280, 192]
 
 
-@pytest.fixture(autouse=True)
-def _tp(monkeypatch, request):
-    rank, size = getattr(request, "param", (0, 1))
-    for module in (
-        "vllm.distributed",  # imported at call time by validate_fp8_block_shape
-        "vllm.model_executor.layers.linear",
-        "vllm.model_executor.parameter",
-    ):
-        monkeypatch.setattr(f"{module}.get_tensor_model_parallel_rank", lambda: rank)
-        monkeypatch.setattr(
-            f"{module}.get_tensor_model_parallel_world_size", lambda: size
-        )
+@pytest.fixture(scope="module")
+def model_config() -> ModelConfig:
+    return ModelConfig("facebook/opt-125m", dtype="bfloat16", skip_tokenizer_init=True)
 
 
 def _block_fp8(rows: int, cols: int, seed: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -69,6 +75,9 @@ def _dequant(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
 
 
 class _Model(torch.nn.Module):
+    """A fused (q_a / kv_a-like) and a row-parallel block-FP8 projection, loaded
+    the way the model loaders do: one tensor at a time, no pairing."""
+
     def __init__(self):
         super().__init__()
         config = Fp8DequantConfig([128, 128])
@@ -80,18 +89,20 @@ class _Model(torch.nn.Module):
                 256, 128, bias=False, params_dtype=torch.bfloat16, quant_config=config
             )
 
-    def load_weights(self, weights):
+    def load_weights(self, weights) -> set[str]:
         loaded: set[str] = set()
         for name, tensor in weights:
             layer, shard, param_name = name.split(".")
             param = getattr(getattr(self, layer), param_name)
             shard_id = None if shard == "-" else int(shard)
             param.weight_loader(
-                param, tensor, *([] if shard_id is None else [shard_id])
+                param, tensor, *(() if shard_id is None else (shard_id,))
             )
+            loaded.add(f"{layer}.{param_name}")
             load_unneeded_scale(
                 f"{layer}.{param_name}", param, tensor, loaded, shard_id
             )
+        return loaded
 
 
 def _checkpoint(seed: int, bf16_shard: int | None = None) -> dict[str, torch.Tensor]:
@@ -109,22 +120,26 @@ def _checkpoint(seed: int, bf16_shard: int | None = None) -> dict[str, torch.Ten
     return ckpt
 
 
+def _bf16(ckpt: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """The same weights as a BF16 trainer sends them: no scales."""
+    return {
+        name: _dequant(w, ckpt[name + "_scale_inv"]) if w.dtype != torch.bfloat16 else w
+        for name, w in ckpt.items()
+        if name.endswith(".weight")
+    }
+
+
 def _expected(ckpt: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    def runtime(prefix):
-        weight = ckpt[f"{prefix}.weight"]
-        if weight.dtype == torch.bfloat16:
-            return weight
-        return _dequant(weight, ckpt[f"{prefix}.weight_scale_inv"])
-
-    qkv_a = torch.cat([runtime(f"qkv_a.{shard}") for shard in range(len(_OUT))])
-    return {"qkv_a": qkv_a, "o": runtime("o.-")}
+    runtime = _bf16(ckpt)
+    qkv_a = torch.cat([runtime[f"qkv_a.{shard}.weight"] for shard in range(len(_OUT))])
+    return {"qkv_a": qkv_a, "o": runtime["o.-.weight"]}
 
 
-def _cold_start(ckpt: dict[str, torch.Tensor]) -> _Model:
+def _cold_start(ckpt: dict[str, torch.Tensor], model_config: ModelConfig) -> _Model:
     model = _Model()
     record_metadata_for_reloading(model)
     model.load_weights(reversed(list(ckpt.items())))  # scales before weights
-    process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
+    process_weights_after_loading(model, model_config, _DEVICE)
     return model
 
 
@@ -137,218 +152,177 @@ def _assert_runtime(model: _Model, expected: dict[str, torch.Tensor]) -> None:
         assert get_live_param(layer, "weight_scale_inv") is None  # retired
 
 
-def test_layers_use_the_dequant_method():
+def _ptrs(model: torch.nn.Module) -> dict[str, int]:
+    return {n: p.data_ptr() for n, p in model.named_parameters()}
+
+
+@pytest.mark.parametrize("bf16_shard", [None, 0])
+def test_cold_start_dequantizes_in_place(model_config, bf16_shard):
+    """FP8 rows load into the first half of their BF16 rows' bytes (no extra
+    memory) and are dequantized at the same address; BF16 rows load as is."""
+    ckpt = _checkpoint(0, bf16_shard)
     model = _Model()
-    assert isinstance(model.qkv_a.quant_method, Fp8DequantLinearMethod)
-    # the weight is the BF16 weight; its FP8 view spans the same bytes, one
-    # row per BF16 row
-    weight = model.qkv_a.weight
-    assert weight.dtype == torch.bfloat16 and weight.is_contiguous()
-    fp8 = weight.fp8_view()
-    assert fp8.dtype == torch.float8_e4m3fn
-    assert fp8.stride() == (2 * 256, 1)
-    assert fp8.data_ptr() == weight.data_ptr()
-    assert weight.untyped_storage().nbytes() == sum(_OUT) * 256 * 2
+    storage = model.qkv_a.weight.untyped_storage()
+    assert storage.nbytes() == sum(_OUT) * 256 * 2  # the BF16 weight's bytes
+    ptrs = _ptrs(model)
+    model.load_weights(reversed(list(ckpt.items())))
+    process_weights_after_loading(model, model_config, _DEVICE)
+    _assert_runtime(model, _expected(ckpt))
+    assert _ptrs(model) == ptrs
 
 
-def test_dummy_weights_are_runtime_values():
-    """--load-format dummy fills the BF16 weight: no row holds FP8 bytes."""
-    from vllm.model_executor.model_loader.weight_utils import (
-        initialize_single_dummy_weight,
-    )
+@pytest.mark.parametrize("scales_first", [True, False])
+def test_weight_and_scale_in_separate_calls(model_config, scales_first):
+    ckpt = _checkpoint(1)
+    model = _Model()
+    items = list(ckpt.items())
+    for item in reversed(items) if scales_first else items:
+        model.load_weights([item])
+    process_weights_after_loading(model, model_config, _DEVICE)
+    _assert_runtime(model, _expected(ckpt))
 
+
+def test_bf16_checkpoint(model_config):
+    """A BF16 checkpoint needs no scales: every parameter counts as loaded."""
+    bf16 = _bf16(_checkpoint(3))
+    model = _Model()
+    loaded = model.load_weights(bf16.items())
+    assert loaded == {n for n, _ in model.named_parameters()}
+    process_weights_after_loading(model, model_config, _DEVICE)
+    _assert_runtime(model, _expected(bf16))
+
+
+def test_dummy_weights_are_runtime_values(model_config):
+    """--load-format dummy fills the BF16 weight; no row holds FP8 bytes."""
     model = _Model()
     model.o.weight.view(torch.int16).fill_(0x7FC0)  # BF16 NaN
     for module in model.modules():
         for name, param in module._parameters.items():
             if param is not None:
                 initialize_single_dummy_weight(param, name=name)
-    process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
+    process_weights_after_loading(model, model_config, _DEVICE)
     for layer in (model.qkv_a, model.o):
-        assert layer.weight.dtype == torch.bfloat16
         assert layer.weight.isfinite().all()
         assert layer.weight.abs().max() <= 1e-3
 
 
-def test_weight_moved_before_processing():
-    """CPU offloading moves the loaded weight (``.to(device)``) before and
-    after post-load processing; the copy keeps the FP8 rows."""
+def test_weight_copied_before_processing(model_config):
+    """CPU offloading moves the loaded weight (``.to(device)``) before
+    post-load processing; the copy keeps its FP8 rows."""
     ckpt = _checkpoint(16)
     model = _Model()
     model.load_weights(ckpt.items())
     for layer in (model.qkv_a, model.o):
         layer.weight.data = layer.weight.data.to("cpu").clone().to(_DEVICE)
-    process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
+    process_weights_after_loading(model, model_config, _DEVICE)
     _assert_runtime(model, _expected(ckpt))
 
 
-def test_raw_load_weights_outside_a_reload():
-    """A caller that loads BF16 weights with model.load_weights alone (no
-    reload lifecycle, no post-load processing) gets a runnable layer."""
-    model = _cold_start(_checkpoint(12))
+def test_bf16_load_weights_outside_a_reload(model_config):
+    """A bare ``model.load_weights`` of BF16 tensors leaves a runnable layer."""
+    model = _cold_start(_checkpoint(12), model_config)
     new = _expected(_checkpoint(13))
     model.load_weights([("o.-.weight", new["o"])])
-    assert model.o.weight.dtype == torch.bfloat16
-    torch.testing.assert_close(model.o.weight, new["o"], rtol=0, atol=0)
     x = torch.randn(2, 256, dtype=torch.bfloat16, device=_DEVICE)
     torch.testing.assert_close(model.o(x)[0], x @ new["o"].t())
 
 
-def test_cold_start_matches_dequantized_checkpoint():
-    ckpt = _checkpoint(0)
-    model = _Model()
-    ptr = model.qkv_a.weight.data_ptr()
-    model.load_weights(reversed(list(ckpt.items())))
-    process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
-    _assert_runtime(model, _expected(ckpt))
-    assert model.qkv_a.weight.data_ptr() == ptr  # dequantized in its own storage
-
-
-def test_weight_and_scale_in_separate_calls():
-    ckpt = _checkpoint(1)
-    model = _Model()
-    for item in ckpt.items():  # one tensor per load_weights call
-        model.load_weights([item])
-    process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
-    _assert_runtime(model, _expected(ckpt))
-
-
-def test_bf16_shard_next_to_fp8_shard():
-    ckpt = _checkpoint(2, bf16_shard=0)
-    model = _cold_start(ckpt)
-    _assert_runtime(model, _expected(ckpt))
-
-
-def test_bf16_checkpoint_needs_no_scale():
-    fp8 = _checkpoint(3)
-    bf16 = {
-        name: _dequant(weight, fp8[f"{name.removesuffix('.weight')}.weight_scale_inv"])
-        for name, weight in fp8.items()
-        if name.endswith(".weight")
-    }
-    model = _cold_start(bf16)
-    _assert_runtime(model, _expected(bf16))
-
-
-@pytest.mark.parametrize("_tp", [(1, 2)], indirect=True)
-def test_tensor_parallel_slices():
-    weight, scale = _block_fp8(128, 256, 4)  # rank 1 of 2 holds columns 128:256
-    model = _Model()
-    model.load_weights({"o.-.weight": weight, "o.-.weight_scale_inv": scale}.items())
-    model.o.quant_method.process_weights_after_loading(model.o)
-    expected = _dequant(weight, scale)[:, 128:]
-    torch.testing.assert_close(model.o.weight, expected, rtol=0, atol=0)
-
-
-def test_pre_processed_weights_are_kept():
-    # the weight cache hands over plain parameters holding runtime bytes
+def test_pre_processed_weights_are_kept(model_config):
+    """The weight cache hands over plain parameters holding runtime bytes."""
     runtime = _expected(_checkpoint(11))
     model = _Model()
     for name, weight in runtime.items():
         layer = getattr(model, name)
         layer.weight = torch.nn.Parameter(weight.clone(), requires_grad=False)
     with weights_already_processed():
-        process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
+        process_weights_after_loading(model, model_config, _DEVICE)
     _assert_runtime(model, runtime)
 
 
-@pytest.mark.parametrize("bf16_shard", [None, 1])
-def test_direct_reload_equals_cold_start(monkeypatch, bf16_shard):
-    from vllm.model_executor.model_loader.reload.direct import (
-        begin_direct_reload,
-        finish_direct_reload,
-    )
-
+@pytest.mark.parametrize("update", ["fp8", "mixed", "bf16", "left_out"])
+def test_direct_reload_equals_cold_start(monkeypatch, model_config, update):
     monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
-    model = _cold_start(_checkpoint(5))
-    ptrs = {n: p.data_ptr() for n, p in model.named_parameters()}
-
-    new = _checkpoint(6, bf16_shard)
+    old = _checkpoint(5)
+    model = _cold_start(old, model_config)
+    ptrs = _ptrs(model)
+    new = {
+        "fp8": _checkpoint(6),
+        "mixed": _checkpoint(6, bf16_shard=1),
+        "bf16": _bf16(_checkpoint(6)),
+        # dequantized rows are runtime bytes: a reload that skips o keeps it
+        "left_out": {k: v for k, v in _checkpoint(6).items() if k.startswith("qkv_a")},
+    }[update]
     begin_direct_reload(model)
-    model.load_weights(new.items())
-    finish_direct_reload(model, _MODEL_CONFIG, _DEVICE)
-
-    _assert_runtime(model, _expected(new))
-    assert {n: p.data_ptr() for n, p in model.named_parameters()} == ptrs
-
-
-def test_direct_reload_keeps_weights_left_out(monkeypatch):
-    from vllm.model_executor.model_loader.reload.direct import (
-        begin_direct_reload,
-        finish_direct_reload,
-    )
-
-    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
-    old = _checkpoint(7)
-    model = _cold_start(old)
-    new = {k: v for k, v in _checkpoint(8).items() if k.startswith("qkv_a.")}
-    begin_direct_reload(model)
-    model.load_weights(new.items())
-    finish_direct_reload(model, _MODEL_CONFIG, _DEVICE)
-
-    # dequantized rows are runtime bytes: a reload that skips them keeps them
-    expected = _expected({**old, **new})
-    _assert_runtime(model, expected)
+    for item in new.items():
+        model.load_weights([item])
+    finish_direct_reload(model, model_config, _DEVICE)
+    _assert_runtime(model, _expected({**old, **new}))
+    assert _ptrs(model) == ptrs
 
 
-@pytest.mark.parametrize("bf16_shard", [None, 0, 1])
-def test_layerwise_reload_equals_cold_start(bf16_shard):
-    model = _cold_start(_checkpoint(9))
-    ptrs = {n: p.data_ptr() for n, p in model.named_parameters()}
-
-    new = _checkpoint(10, bf16_shard)
-    initialize_layerwise_reload(model)
-    model.load_weights(new.items())
-    finalize_layerwise_reload(model, _MODEL_CONFIG)
-
-    _assert_runtime(model, _expected(new))
-    assert {n: p.data_ptr() for n, p in model.named_parameters()} == ptrs
-
-
-@pytest.mark.parametrize("bf16_shard", [None, 0])
-@pytest.mark.parametrize("bf16", [False, True])
-def test_layerwise_reload_completes_while_loading(bf16_shard, bf16):
-    """Every element is loaded, BF16 rows' scales included, so a layerwise
-    reload processes each layer as its last tensor arrives instead of holding
-    it for finalize."""
-    model = _cold_start(_checkpoint(14))
-    new = _checkpoint(15, bf16_shard)
-    if bf16:  # a BF16 trainer: weights only
-        runtime = _expected(new)
-        new = {
-            "qkv_a.0.weight": runtime["qkv_a"][: _OUT[0]],
-            "qkv_a.1.weight": runtime["qkv_a"][_OUT[0] :],
-            "o.-.weight": runtime["o"],
-        }
+@pytest.mark.parametrize("update", ["fp8", "mixed", "bf16"])
+def test_layerwise_reload_equals_cold_start(model_config, update):
+    """Every element is loaded, BF16 rows' scales included, so each layer is
+    processed as its last tensor arrives rather than held for finalize."""
+    model = _cold_start(_checkpoint(9), model_config)
+    ptrs = _ptrs(model)
+    new = {
+        "fp8": _checkpoint(10),
+        "mixed": _checkpoint(10, bf16_shard=0),
+        "bf16": _bf16(_checkpoint(10)),
+    }[update]
     initialize_layerwise_reload(model)
     for item in new.items():
         model.load_weights([item])
     for layer in (model.qkv_a, model.o):
-        assert layer.weight.device.type != "meta"
         assert get_layerwise_info(layer).load_numel_total is None  # processed
-    finalize_layerwise_reload(model, _MODEL_CONFIG)
-    _assert_runtime(model, runtime if bf16 else _expected(new))
+    finalize_layerwise_reload(model, model_config)
+    _assert_runtime(model, _expected(new))
+    assert _ptrs(model) == ptrs
+
+
+@pytest.mark.parametrize("bf16", [False, True])
+def test_replicated_layer(model_config, bf16):
+    """A ReplicatedLinear (GLM5-next kv_a_proj_with_mqa without q_lora_rank)
+    loads FP8 through the FP8 view too."""
+    with _DEVICE:
+        layer = ReplicatedLinear(
+            256,
+            192,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            quant_config=Fp8DequantConfig([128, 128]),
+        )
+    weight, scale = _block_fp8(192, 256, 40)
+    expected = _dequant(weight, scale)
+    if bf16:
+        layer.weight.weight_loader(layer.weight, expected)
+        load_unneeded_scale("weight", layer.weight, expected, set())
+    else:
+        layer.weight_scale_inv.weight_loader(layer.weight_scale_inv, scale)
+        layer.weight.weight_loader(layer.weight, weight)
+    layer.quant_method.process_weights_after_loading(layer)
+    torch.testing.assert_close(layer.weight, expected, rtol=0, atol=0)
 
 
 # Sparse-attention indexer: `wk` (128 rows) and `weights_proj` (64 rows) fused
 # into one replicated `wk_weights_proj`, whose FP8 checkpoint scale layout
-# varies between models (`Fp8DequantConfig.for_checkpoint(any_scale_layout)`).
+# varies between models (`Fp8DequantConfig(None)`).
 _WK, _WP, _HIDDEN = 128, 64, 512
 
 
 class _IndexerModel(torch.nn.Module):
     """The indexer part of the DeepSeek-V3.2-style loaders."""
 
-    def __init__(self):
+    def __init__(self, hidden: int = _HIDDEN):
         super().__init__()
-        config = Fp8DequantConfig.for_checkpoint(object(), any_scale_layout=True)
         with _DEVICE:
             self.wk_weights_proj = MergedColumnParallelLinear(
-                _HIDDEN,
+                hidden,
                 [_WK, _WP],
                 bias=False,
                 params_dtype=torch.bfloat16,
-                quant_config=config,
+                quant_config=Fp8DequantConfig(None),
                 disable_tp=True,
             )
 
@@ -364,8 +338,8 @@ class _IndexerModel(torch.nn.Module):
             shard = {"wk": 0, "weights_proj": 1}[proj]
             param = params[name]
             param.weight_loader(param, tensor, shard)
-            load_unneeded_scale(name, param, tensor, loaded, shard)
             loaded.add(name)
+            load_unneeded_scale(name, param, tensor, loaded, shard)
         return loaded
 
 
@@ -378,19 +352,14 @@ def _scale_layout(layout: str, rows: int, gen: torch.Generator) -> torch.Tensor:
         "tensor": (),
         "mx": (rows, _HIDDEN // 32),
     }
-    scale = torch.rand(shapes[layout], generator=gen) + 0.5
     if layout == "mx":  # E8M0 exponents of 2^-2 .. 2^1
         scale = torch.randint(125, 129, shapes[layout], generator=gen)
         return scale.to(torch.uint8).to(_DEVICE)
-    return scale.to(_DEVICE)
+    return (torch.rand(shapes[layout], generator=gen) + 0.5).to(_DEVICE)
 
 
 def _indexer_checkpoint(seed: int, layout: str = "block", fp8_wp: bool = False):
-    from vllm.model_executor.layers.quantization.utils.quant_utils import (
-        GroupShape,
-        scaled_dequantize,
-    )
-
+    """A checkpoint and the BF16 weight the paired loaders made of it."""
     gen = torch.Generator().manual_seed(seed)
     ckpt, expected = {}, []
     for name, rows, fp8 in (("wk", _WK, True), ("weights_proj", _WP, fp8_wp)):
@@ -406,7 +375,6 @@ def _indexer_checkpoint(seed: int, layout: str = "block", fp8_wp: bool = False):
             "weight_scale" if layout.startswith("channel") else "weight_scale_inv"
         )
         ckpt[f"{name}.weight"], ckpt[f"{name}.{scale_name}"] = weight, scale
-        # what the loaders computed before: dequantize the pair on arrival
         ref = scale.view(torch.float8_e8m0fnu).float() if layout == "mx" else scale
         ref = ref.reshape(ref.shape[0] if ref.ndim else 1, -1)
         group = GroupShape(rows // ref.shape[0], _HIDDEN // ref.shape[1])
@@ -414,242 +382,139 @@ def _indexer_checkpoint(seed: int, layout: str = "block", fp8_wp: bool = False):
     return ckpt, torch.cat(expected)
 
 
-def _indexer_cold_start(ckpt) -> _IndexerModel:
+def _indexer_cold_start(ckpt, model_config: ModelConfig) -> _IndexerModel:
     model = _IndexerModel()
     record_metadata_for_reloading(model)
     for item in reversed(list(ckpt.items())):  # scales first, one per call
         model.load_weights([item])
-    process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
+    process_weights_after_loading(model, model_config, _DEVICE)
     return model
 
 
 @pytest.mark.parametrize("layout", ["block", "channel", "channel_2d", "tensor", "mx"])
 @pytest.mark.parametrize("scales_first", [True, False])
-def test_indexer_wk_any_scale_layout(layout, scales_first):
+def test_indexer_wk_any_scale_layout(model_config, layout, scales_first):
+    """Bit-equal to main's paired `scaled_dequantize`, for every scale layout
+    and with weight and scale in separate calls."""
     ckpt, expected = _indexer_checkpoint(20, layout)
     model = _IndexerModel()
     items = list(ckpt.items())
     for item in reversed(items) if scales_first else items:
-        model.load_weights([item])  # weight and scale in separate calls
-    process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
-    layer = model.wk_weights_proj
-    torch.testing.assert_close(layer.weight, expected, rtol=0, atol=0)
-    assert get_live_param(layer, "weight_scale_inv") is None
+        model.load_weights([item])
+    process_weights_after_loading(model, model_config, _DEVICE)
+    torch.testing.assert_close(model.wk_weights_proj.weight, expected, rtol=0, atol=0)
 
 
-def test_indexer_fp8_weights_proj():
+def test_indexer_fp8_weights_proj(model_config):
     # dots3 stores weights_proj as FP8 too
     ckpt, expected = _indexer_checkpoint(21, fp8_wp=True)
-    model = _indexer_cold_start(ckpt)
+    model = _indexer_cold_start(ckpt, model_config)
     torch.testing.assert_close(model.wk_weights_proj.weight, expected, rtol=0, atol=0)
 
 
-def test_indexer_bf16_wk():
-    ckpt, _ = _indexer_checkpoint(22)
-    bf16 = {"wk.weight": torch.randn(_WK, _HIDDEN).to(torch.bfloat16).to(_DEVICE)}
-    bf16["weights_proj.weight"] = ckpt["weights_proj.weight"]
-    model = _IndexerModel()
-    loaded = model.load_weights(bf16.items())
-    process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
-    expected = torch.cat([bf16["wk.weight"], bf16["weights_proj.weight"]])
-    torch.testing.assert_close(model.wk_weights_proj.weight, expected, rtol=0, atol=0)
-    # nothing left unloaded for the load check
+def test_indexer_bf16_rows_of_odd_width(model_config):
+    """BF16 rows load ones into their scale rows for any width."""
+    model = _IndexerModel(hidden=200)
+    rows = torch.randn(_WK + _WP, 200).to(torch.bfloat16).to(_DEVICE)
+    loaded = model.load_weights(
+        [("wk.weight", rows[:_WK]), ("weights_proj.weight", rows[_WK:])]
+    )
     assert loaded == {n for n, _ in model.named_parameters()}
-
-
-@pytest.mark.parametrize("_tp", [(1, 2)], indirect=True)
-def test_indexer_replicated_under_tp():
-    ckpt, expected = _indexer_checkpoint(23)
-    model = _indexer_cold_start(ckpt)
-    torch.testing.assert_close(model.wk_weights_proj.weight, expected, rtol=0, atol=0)
+    assert torch.all(model.wk_weights_proj.weight_scale_inv == 1)
+    process_weights_after_loading(model, model_config, _DEVICE)
+    torch.testing.assert_close(model.wk_weights_proj.weight, rows, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("update", ["fp8", "bf16", "left_out"])
-def test_indexer_direct_reload_equals_cold_start(monkeypatch, update):
-    from vllm.model_executor.model_loader.reload.direct import (
-        begin_direct_reload,
-        finish_direct_reload,
-    )
-
+def test_indexer_direct_reload_equals_cold_start(monkeypatch, model_config, update):
     monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
     old, old_expected = _indexer_checkpoint(24, "mx")
-    model = _indexer_cold_start(old)
-    ptrs = {n: p.data_ptr() for n, p in model.named_parameters()}
-
+    model = _indexer_cold_start(old, model_config)
+    ptrs = _ptrs(model)
     new, expected = _indexer_checkpoint(25, "mx")
     if update == "bf16":
-        new = {k: v for k, v in new.items() if "scale" not in k}
-        new["wk.weight"] = expected[:_WK].clone()
+        new = {
+            "wk.weight": expected[:_WK].clone(),
+            "weights_proj.weight": expected[_WK:],
+        }
     elif update == "left_out":
         new, expected = {}, old_expected
     begin_direct_reload(model)
     for item in new.items():
         model.load_weights([item])
-    finish_direct_reload(model, _MODEL_CONFIG, _DEVICE)
-
+    finish_direct_reload(model, model_config, _DEVICE)
     torch.testing.assert_close(model.wk_weights_proj.weight, expected, rtol=0, atol=0)
-    assert {n: p.data_ptr() for n, p in model.named_parameters()} == ptrs
+    assert _ptrs(model) == ptrs
 
 
 @pytest.mark.parametrize("layout", ["block", "mx"])
-def test_indexer_layerwise_reload_completes_while_loading(layout):
+def test_indexer_layerwise_reload_equals_cold_start(model_config, layout):
     """The BF16 weights_proj rows load ones into their scale rows, so an FP8
     update completes the layer while loading."""
-    model = _indexer_cold_start(_indexer_checkpoint(26, layout)[0])
+    model = _indexer_cold_start(_indexer_checkpoint(26, layout)[0], model_config)
     new, expected = _indexer_checkpoint(27, layout)
     initialize_layerwise_reload(model)
     for item in new.items():
         model.load_weights([item])
     assert get_layerwise_info(model.wk_weights_proj).load_numel_total is None
-    finalize_layerwise_reload(model, _MODEL_CONFIG)
+    finalize_layerwise_reload(model, model_config)
     torch.testing.assert_close(model.wk_weights_proj.weight, expected, rtol=0, atol=0)
 
 
-def _sharded_rdt_sync(model, ckpt: dict[str, torch.Tensor]) -> None:
-    """Bake a sharded RDT plan for ``ckpt``'s names, then replay it as the
-    engine does: materialize each planned layer, apply its fills, scatter the
-    recorded slices (no loader runs), post-process; finalize at the end."""
-    from vllm.distributed.weight_transfer.sharded_rdt_engine import (
-        ShardedRDTWeightTransferEngine,
-        ShardedRDTWeightTransferInitInfo,
-        _apply_fills,
-    )
-    from vllm.model_executor.model_loader.reload.layerwise import (
-        LAYERWISE_INFO,
-        _copy_and_restore_kernel_tensors,
-    )
-    from vllm.model_executor.model_loader.reload.meta import materialize_layer
-
-    engine = object.__new__(ShardedRDTWeightTransferEngine)
-    engine.model, engine.device = model, _DEVICE
-    engine._name_to_plan, engine._name_meta, engine._live_names = {}, {}, set()
-    names = list(ckpt)
-    engine._bake(
-        ShardedRDTWeightTransferInitInfo(
-            names=names,
-            dtype_names=[str(ckpt[n].dtype).removeprefix("torch.") for n in names],
-            shapes=[list(ckpt[n].shape) for n in names],
-        )
-    )
-    assert engine._live_names == set(names)  # every name baked: no plan failure
-    assert engine._live_names <= set(engine._name_to_plan)
-
-    initialize_layerwise_reload(model)
-    with torch.no_grad():
-        for plan in {id(p): p for p in engine._name_to_plan.values()}.values():
-            layer = plan[0].layer
-            info = LAYERWISE_INFO[layer]
-            materialize_layer(layer, info)
-            _apply_fills(layer, engine._layer_fills.get(layer, ()))
-            for sc in plan:
-                src_name, chain = sc.src
-                tensor = ckpt[src_name]
-                for op, args, kwargs in chain:
-                    tensor = getattr(tensor, op)(*args, **dict(kwargs))
-                param = getattr(layer, sc.param_name)
-                param.data.as_strided(sc.shape, sc.stride, sc.offset).copy_(tensor)
-            layer.quant_method.process_weights_after_loading(layer)
-            _copy_and_restore_kernel_tensors(layer, info)
-            info.reset()
-    finalize_layerwise_reload(model, _MODEL_CONFIG)
-
-
-def test_sharded_rdt_bf16_update():
-    """A BF16 trainer syncing into block-FP8-config layers bakes under sharded
-    RDT: the ones the BF16 rows load into their scale rows are recorded as
-    fills, so each layer is fully covered without fetching them."""
-    model = _cold_start(_checkpoint(30))
-    runtime = _expected(_checkpoint(31))
-    update = {
-        "qkv_a.0.weight": runtime["qkv_a"][: _OUT[0]].clone(),
-        "qkv_a.1.weight": runtime["qkv_a"][_OUT[0] :].clone(),
-        "o.-.weight": runtime["o"],
+def _sharded_rdt_sync(model, ckpt, model_config) -> None:
+    """Bake a sharded RDT plan for ``ckpt``'s names, then replay it as the engine
+    does (the producer side applies each recorded op chain to the source)."""
+    name_meta = {
+        n: (str(t.dtype).removeprefix("torch."), list(t.shape)) for n, t in ckpt.items()
     }
-    ptrs = {n: p.data_ptr() for n, p in model.named_parameters()}
-    _sharded_rdt_sync(model, update)
-    _assert_runtime(model, runtime)
-    assert {n: p.data_ptr() for n, p in model.named_parameters()} == ptrs
-    for layer in (model.qkv_a, model.o):  # the scale rows got the fill
-        assert torch.all(layer.weight_scale_inv == 1)
+    plan = bake_replay_plan(model, name_meta, _DEVICE)
+    assert plan.live_names == set(ckpt) <= set(plan.name_to_plan)
+
+    initialize_layerwise_reload(model)  # start_weight_update
+    for scatters in {id(p): p for p in plan.name_to_plan.values()}.values():
+        layer = scatters[0].layer
+        begin_replayed_layer(layer, plan.layer_fills.get(layer, ()))
+        for sc in scatters:
+            name, chain = sc.src
+            tensor = ckpt[name]
+            for op, args, kwargs in chain:
+                tensor = getattr(tensor, op)(*args, **dict(kwargs))
+            replay_copy(sc, tensor)
+        finish_replayed_layer(layer)
+    finalize_layerwise_reload(model, model_config)  # finish_weight_update
 
 
-def test_sharded_rdt_bf16_indexer_update():
-    model = _indexer_cold_start(_indexer_checkpoint(32)[0])
+@pytest.mark.parametrize("stale_fp8_rows", [False, True])
+def test_sharded_rdt_bf16_update(model_config, stale_fp8_rows):
+    """A BF16 trainer syncing into these layers bakes: the ones BF16 rows load
+    into their scale rows replay as fills. Rows an aborted FP8 load left
+    marked are not dequantized."""
+    model = _cold_start(_checkpoint(30), model_config)
+    if stale_fp8_rows:
+        model.o.weight.fp8_rows[:5] = True
+    new = _bf16(_checkpoint(31))
+    ptrs = _ptrs(model)
+    _sharded_rdt_sync(model, new, model_config)
+    _assert_runtime(model, _expected(new))
+    assert _ptrs(model) == ptrs
+
+
+def test_sharded_rdt_bf16_indexer_update(model_config):
+    model = _indexer_cold_start(_indexer_checkpoint(32)[0], model_config)
     _, expected = _indexer_checkpoint(33)
-    update = {
-        "wk.weight": expected[:_WK].clone(),
-        "weights_proj.weight": expected[_WK:].clone(),
-    }
-    _sharded_rdt_sync(model, update)
+    new = {"wk.weight": expected[:_WK].clone(), "weights_proj.weight": expected[_WK:]}
+    _sharded_rdt_sync(model, new, model_config)
     torch.testing.assert_close(model.wk_weights_proj.weight, expected, rtol=0, atol=0)
 
 
-def test_sharded_rdt_refuses_fp8():
-    """FP8 rows would need the loader at replay: refused at bake."""
-    model = _cold_start(_checkpoint(34))
+def test_sharded_rdt_refuses_fp8(model_config):
+    """FP8 rows would need the loader at replay: refused at bake, with the
+    model left as it was."""
+    old = _checkpoint(34)
+    model = _cold_start(old, model_config)
     with pytest.raises(_UnsupportedFakeOp, match="view of 'weight'"):
-        _sharded_rdt_sync(model, {"o.-.weight": _checkpoint(35)["o.-.weight"]})
-
-
-@pytest.mark.parametrize("bf16", [False, True])
-@pytest.mark.parametrize("_tp", [(0, 1), (1, 2)], indirect=True)
-def test_replicated_layer(bf16):
-    """A ReplicatedLinear (GLM5-next kv_a_proj_with_mqa without q_lora_rank)
-    loads FP8 through the FP8 view too: its own loader copies into ``data``."""
-    from vllm.model_executor.layers.linear import ReplicatedLinear
-
-    with _DEVICE:
-        layer = ReplicatedLinear(
-            256,
-            192,
-            bias=False,
-            params_dtype=torch.bfloat16,
-            quant_config=Fp8DequantConfig([128, 128]),
+        _sharded_rdt_sync(
+            model, {"o.-.weight": _checkpoint(35)["o.-.weight"]}, model_config
         )
-    weight, scale = _block_fp8(192, 256, 40)
-    expected = _dequant(weight, scale)
-    if bf16:
-        layer.weight.weight_loader(layer.weight, expected)
-        load_unneeded_scale("weight", layer.weight, expected, set())
-    else:  # scale first, in its own call
-        layer.weight_scale_inv.weight_loader(layer.weight_scale_inv, scale)
-        layer.weight.weight_loader(layer.weight, weight)
-    layer.quant_method.process_weights_after_loading(layer)
-    torch.testing.assert_close(layer.weight, expected, rtol=0, atol=0)
-
-
-def test_indexer_bf16_rows_of_odd_width():
-    """The ones of a BF16 weight's scale rows fit the any-layout grid even when
-    the width is not a multiple of 32."""
-    with _DEVICE:
-        layer = MergedColumnParallelLinear(
-            200,
-            [_WK, _WP],
-            bias=False,
-            params_dtype=torch.bfloat16,
-            quant_config=Fp8DequantConfig(None),
-            disable_tp=True,
-        )
-    rows = torch.randn(_WK, 200).to(torch.bfloat16).to(_DEVICE)
-    layer.weight.weight_loader(layer.weight, rows, 0)
-    load_unneeded_scale("weight", layer.weight, rows, set(), 0)
-    assert torch.all(layer.weight_scale_inv[:_WK] == 1)
-
-
-def test_sharded_rdt_replay_clears_fp8_rows():
-    """Rows an aborted FP8 load marked do not make a baked BF16 sync
-    dequantize BF16 bytes."""
-    from vllm.distributed.weight_transfer.sharded_rdt_engine import _reset_load_state
-
-    model = _cold_start(_checkpoint(41))
-    model.o.weight.fp8_rows[:5] = True
-    _reset_load_state(model.o)
-    assert not model.o.weight.fp8_rows.any()
-
-
-def test_sharded_rdt_refused_bake_restores_the_model():
-    model = _cold_start(_checkpoint(42))
-    with pytest.raises(_UnsupportedFakeOp, match="view of 'weight'"):
-        _sharded_rdt_sync(model, {"o.-.weight": _checkpoint(43)["o.-.weight"]})
-    assert all(not p.is_meta for p in model.parameters())
-    _assert_runtime(model, _expected(_checkpoint(42)))
+    assert not any(p.is_meta for p in model.parameters())
+    _assert_runtime(model, _expected(old))

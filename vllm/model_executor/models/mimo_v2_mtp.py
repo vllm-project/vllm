@@ -51,6 +51,7 @@ from .mimo_v2 import (
     MiMoV2MLP,
     _fused_qkv_chunks,
     _load_fused_fp8_qkv,
+    _qkv_geometry,
     _use_row_scales,
 )
 from .utils import _merge_multimodal_embeddings, maybe_prefix
@@ -312,10 +313,13 @@ class MiMoV2MTP(nn.Module):
                         continue
                     prefix, kind = name.rsplit(".", 1)
                     # Geometry comes from the module the weights belong to.
+                    attn = self.get_submodule(prefix.rsplit(".", 1)[0])
                     _load_fused_fp8_qkv(
-                        self.get_submodule(prefix.rsplit(".", 1)[0]),
+                        attn.qkv_proj,
                         kind,
                         loaded_weight,
+                        _qkv_geometry(attn),
+                        attn.kv_chunk_rows,
                         tp_rank,
                         tp_size,
                         ckpt_tp=self.config.num_key_value_heads,
