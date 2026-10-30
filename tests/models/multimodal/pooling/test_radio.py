@@ -204,6 +204,10 @@ def test_native_format_weight_loading(default_vllm_config, dist_init):
     # the legacy layout the integration test covers.
     config = RadioConfig(model_name="vit_small_patch16_224")
     model = RadioModel(config, num_hidden_layers_override=2)
+    # Uninitialized parameters may hold NaN, which never compares equal.
+    with torch.no_grad():
+        for param in model.parameters():
+            param.normal_()
 
     # Every parameter (including layer_scale) must load from the native keys.
     expected = {
@@ -262,7 +266,7 @@ def test_native_format_from_transformers(default_vllm_config, dist_init):
 
     # Guard that the saved checkpoint is genuinely native-layout (split attention
     # under ``encoder.layer.N``), not the legacy ``radio_model.model.blocks.*``.
-    assert any(".attention.attention.query" in name for name in native_weights), (
+    assert any(".attention.q_proj." in name for name in native_weights), (
         "expected native-layout keys in the save_original_format=False checkpoint"
     )
     assert not any(name.startswith("radio_model.") for name in native_weights)
@@ -281,20 +285,20 @@ def test_native_format_from_transformers(default_vllm_config, dist_init):
     assert not missing, f"native weights not loaded: {sorted(missing)}"
 
     # Values match the reference: the fused qkv is the concatenation of the
-    # native split query/key/value, and proj is the native output.dense.
+    # native split q/k/v_proj, and proj is the native o_proj.
     for name, param in vllm_model.named_parameters():
         if ".attention.qkv." in name:
             base, suffix = name.split(".attention.qkv.")
             ref = torch.cat(
                 [
-                    native_weights[f"{base}.attention.attention.{proj}.{suffix}"]
-                    for proj in ("query", "key", "value")
+                    native_weights[f"{base}.attention.{proj}_proj.{suffix}"]
+                    for proj in ("q", "k", "v")
                 ],
                 dim=0,
             )
         elif ".attention.proj." in name:
             base, suffix = name.split(".attention.proj.")
-            ref = native_weights[f"{base}.attention.output.dense.{suffix}"]
+            ref = native_weights[f"{base}.attention.o_proj.{suffix}"]
         elif name in native_weights:
             ref = native_weights[name]
         else:
