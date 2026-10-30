@@ -108,14 +108,17 @@ class FourierRotaryEmbedding(RotaryEmbedding):
             sin = torch.einsum("htD, hDd -> thd", pos_sin, self.sin_coef.float())
             cos = torch.einsum("htD, hDd -> thd", pos_cos, self.cos_coef.float())
         else:
-            sin = torch.einsum("tD, Dd -> td", pos_sin, self.sin_coef.float())
-            cos = torch.einsum("tD, Dd -> td", pos_cos, self.cos_coef.float())
+            sin = torch.einsum("tD, Dd -> td", pos_sin, self.sin_coef[0].float())
+            cos = torch.einsum("tD, Dd -> td", pos_cos, self.cos_coef[0].float())
 
+        # Channels beyond the retained frequencies keep the zero-frequency
+        # component, i.e. cos(0) = 1 and sin(0) = 0, so they pass through
+        # unrotated. Padding sin with 1 instead would mix in rotate_neox().
         sin = F.pad(
             input=sin,
             pad=(0, self.head_size // 2 - sin.size(-1)),
             mode="constant",
-            value=1,
+            value=0,
         )
         cos = F.pad(
             input=cos,
