@@ -386,7 +386,7 @@ pub(super) struct ChatCompletionResponse {
     pub system_fingerprint: Option<String>,
     pub prompt_logprobs: Option<PromptLogprobs>,
     pub prompt_token_ids: Option<Vec<u32>>,
-    /// Always `None` until `return_prompt_text` is supported.
+    /// The rendered prompt text when the request sets `return_prompt_text`.
     pub prompt_text: Option<String>,
     pub kv_transfer_params: Option<Value>,
     pub ec_transfer_params: Option<Value>,
@@ -470,7 +470,7 @@ impl ChatCompletionStreamResponse {
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct ChatCompletionStreamPrompt {
     pub prompt_token_ids: Option<Vec<u32>>,
-    /// Always `None` until `return_prompt_text` is supported.
+    /// The rendered prompt text when the request sets `return_prompt_text`.
     pub prompt_text: Option<String>,
 }
 
