@@ -26,31 +26,13 @@ from vllm.utils.flashinfer import (
     flashinfer_convert_sf_to_mma_layout,
     has_flashinfer_b12x_moe,
 )
-from vllm.utils.math_utils import round_up
 
-# Eager (non-CUDA-graph) batches above the graph capture range are bucketed
-# to this granularity so the W4A16 kernels compile a bounded set of shapes.
-_W4A16_LARGE_BATCH_BUCKET = 128
-
-
-def w4a16_padded_num_tokens(num_tokens: int, max_num_tokens: int) -> int:
-    """Round a token count up to the W4A16 compile bucket.
-
-    FlashInfer's SM12x W4A16 MoE kernels are JIT-specialized on the exact
-    token count (~1-3 s per new shape), so every distinct batch size seen while
-    serving would trigger a recompile.  Buckets mirror vLLM's default CUDA graph
-    capture sizes (1-8, then multiples of 8 up to 256 and of 16 up to 512) so
-    captured shapes are unchanged, and coarsen above that.
-    """
-    if num_tokens <= 8:
-        padded = num_tokens
-    elif num_tokens <= 256:
-        padded = round_up(num_tokens, 8)
-    elif num_tokens <= 512:
-        padded = round_up(num_tokens, 16)
-    else:
-        padded = round_up(num_tokens, _W4A16_LARGE_BATCH_BUCKET)
-    return min(padded, max(max_num_tokens, num_tokens))
+# FlashInfer picks the W4A16 kernel variant from the routes-per-expert band
+# (M * topk / num_experts) plus small-M specializations, and each variant is
+# otherwise token-count generic.  Sweeping token counts at this stride during
+# warmup reaches every band above the CUDA graph sizes; counts that hit an
+# already-compiled variant cost milliseconds.
+_W4A16_WARMUP_STRIDE = 128
 
 
 class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
@@ -134,7 +116,7 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
             # 1/w_gs into the FP8 block scales would re-round them and lose
             # precision the W4A16 path is meant to preserve.
             self._fc2_input_scale = None
-            # Pre-compile the bucketed W4A16 shapes in b12x_warmup so they
+            # Pre-compile the W4A16 kernel variants in b12x_warmup so they
             # are not JIT-compiled during serving.
             layer.b12x_warmup_provider = self
         else:
@@ -333,23 +315,8 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         wrapper = self._wrapper
         assert wrapper is not None
 
-        num_tokens = hidden_states.shape[0]
         topk_ids = topk_ids.to(torch.int32)
-        assert self.max_num_tokens is not None
-        padded_num_tokens = (
-            w4a16_padded_num_tokens(num_tokens, self.max_num_tokens)
-            if self.use_a16
-            else num_tokens
-        )
-        if padded_num_tokens != num_tokens:
-            pad = padded_num_tokens - num_tokens
-            # Padding rows carry expert id -1, which FlashInfer's routing
-            # treats as unrouted, so they add no MoE work and no output.
-            hidden_states = torch.nn.functional.pad(hidden_states, (0, 0, 0, pad))
-            topk_ids = torch.nn.functional.pad(topk_ids, (0, 0, 0, pad), value=-1)
-            topk_weights = torch.nn.functional.pad(topk_weights, (0, 0, 0, pad))
-
-        wrapper_output = wrapper.run(
+        return wrapper.run(
             x=hidden_states,
             w1_weight=w1,
             w1_weight_sf=self.w1_sf_mma,
@@ -361,7 +328,6 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
             token_selected_experts=topk_ids,
             token_final_scales=topk_weights,
         )
-        return wrapper_output[:num_tokens]
 
     def get_b12x_warmup_unit(
         self,
@@ -369,21 +335,23 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         token_counts: tuple[int, ...],
         output_dtype: torch.dtype,
     ) -> B12xWarmupUnit:
-        """Compile every W4A16 shape bucket serving can hit (see
-        ``w4a16_padded_num_tokens``): the padded form of each provided
-        count plus the coarse buckets above the CUDA graph range."""
+        """Compile every W4A16 kernel variant serving can hit.
+
+        FlashInfer JIT-compiles one fused FC1+FC2 kernel (seconds each) per
+        variant: the small-M specializations (M = 1, <= 4, <= 6, <= 8) and
+        one per routes-per-expert band.  Its compile cache dedups the rest,
+        so a token count whose variant is already built costs milliseconds.
+        Warming 1..8, every serving size and a stride sweep up to the token
+        limit therefore builds each variant once without replicating
+        FlashInfer's band selection here.
+        """
         w1 = layer.w13_weight
         w2 = layer.w2_weight
-        assert self.max_num_tokens is not None
-        max_tokens = max(self.max_num_tokens, *token_counts, 1)
-        counts = {w4a16_padded_num_tokens(t, max_tokens) for t in token_counts if t > 0}
-        counts.update(
-            range(
-                round_up(512 + 1, _W4A16_LARGE_BATCH_BUCKET),
-                max_tokens,
-                _W4A16_LARGE_BATCH_BUCKET,
-            )
-        )
+        max_tokens = self.max_num_tokens
+        assert max_tokens is not None
+        counts = set(range(1, min(8, max_tokens) + 1))
+        counts.update(t for t in token_counts if 0 < t <= max_tokens)
+        counts.update(range(_W4A16_WARMUP_STRIDE, max_tokens, _W4A16_WARMUP_STRIDE))
         counts.add(max_tokens)
 
         def compile() -> None:

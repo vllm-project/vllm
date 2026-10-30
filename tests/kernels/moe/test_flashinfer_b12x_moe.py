@@ -44,7 +44,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.experts.flashinfer_b12x_moe import (
     FlashInferB12xExperts,
-    w4a16_padded_num_tokens,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     reorder_w1w3_to_w3w1,
@@ -397,29 +396,7 @@ def _dequantize_per_expert_nvfp4(
     )
 
 
-@pytest.mark.parametrize(
-    "num_tokens,max_num_tokens,expected",
-    [
-        (1, 2048, 1),
-        (8, 2048, 8),
-        (9, 2048, 16),
-        (37, 2048, 40),
-        (256, 2048, 256),
-        (257, 2048, 272),
-        (512, 2048, 512),
-        (513, 2048, 640),
-        (851, 2048, 896),
-        (2048, 2048, 2048),
-        # Never pad past the wrapper's max_num_tokens.
-        (1000, 1024, 1024),
-        (1030, 1024, 1030),
-    ],
-)
-def test_w4a16_padded_num_tokens(num_tokens, max_num_tokens, expected):
-    assert w4a16_padded_num_tokens(num_tokens, max_num_tokens) == expected
-
-
-# Includes token counts off the CUDA graph buckets to exercise W4A16 padding.
+# Includes token counts off the CUDA graph sizes: W4A16 runs the exact M.
 W4A16_MNK_FACTORS = [*MNK_FACTORS, (37, 128, 256), (600, 128, 256)]
 
 
@@ -478,7 +455,6 @@ def test_flashinfer_b12x_moe_w4a16(
             hidden_dim=k,
             intermediate_size=n,
             in_dtype=dtype,
-            # Leave headroom above m so token-count padding can round up.
             max_num_tokens=2048,
         )
 
