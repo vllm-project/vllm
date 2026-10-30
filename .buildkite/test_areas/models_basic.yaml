@@ -469,6 +469,7 @@ steps:
 
 - label: ':amd: (MI355) DeepSeek-V4.1 Mono Decode Numerics TP8'
   key: dsv41-mono-decode-numerics-tp8-amd
+  automatic_shard: true
   dind: false
   device: mi355_8
   num_devices: 8
