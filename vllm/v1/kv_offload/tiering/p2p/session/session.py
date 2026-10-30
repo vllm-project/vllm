@@ -147,6 +147,7 @@ class P2PSession:
 
         # First cause recorded by _mark_dead; see death_reason.
         self._death_reason: str | None = None
+        self._accept_buffered_terminals = True
         self._peer_fault_at: float | None = None
         self._abort_ack_fault: str | None = None
 
@@ -532,6 +533,8 @@ class P2PSession:
         """Mark the connection dead, recording the first cause."""
         if self._conn is None:
             return
+        if reason != "peer disconnected":
+            self._accept_buffered_terminals = False
         if self._death_reason is None:
             self._death_reason = reason
         self._conn.mark_dead()
@@ -542,7 +545,10 @@ class P2PSession:
         if (
             self._conn is not None
             and not self._conn.alive
-            and msg_type not in (TransferDoneMsg.TYPE, AbortAckMsg.TYPE)
+            and (
+                not self._accept_buffered_terminals
+                or msg_type not in (TransferDoneMsg.TYPE, AbortAckMsg.TYPE)
+            )
         ):
             return
         if msg_type == ConnectMsg.TYPE:
