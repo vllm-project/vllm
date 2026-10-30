@@ -904,6 +904,7 @@ def _absorb_marker_tool_config() -> ParserEngineConfig:
         name="absorb_marker_tool_test",
         initial_state=ParserState.REASONING,
         terminals={
+            "THINK_START": "🤔",
             "THINK_END": "</think>",
             "TOOL_START": "<tool_call>",
             "TOOL_END": "</tool_call>",
@@ -916,6 +917,10 @@ def _absorb_marker_tool_config() -> ParserEngineConfig:
             (ParserState.CONTENT, "THINK_END"): Transition(
                 ParserState.CONTENT,
                 (),
+            ),
+            (ParserState.CONTENT, "THINK_START"): Transition(
+                ParserState.REASONING,
+                (EventType.REASONING_START,),
             ),
             (ParserState.CONTENT, "TOOL_START"): Transition(
                 ParserState.TOOL_ARGS,
@@ -940,6 +945,20 @@ class TestSkipToolParsingMarkerPassthrough:
 
     _TEXT = "reason</think><tool_call>alpha </think> omega</tool_call></think>"
     _SPAN = "<tool_call>alpha </think> omega</tool_call>"
+
+    def test_think_start_inside_skipped_span_forwarded_verbatim(self):
+        # A start marker (</think>) inside a quoted argument is the worse case: on main it
+        # sent the rest of the call to reasoning. A skipped span must stay verbatim.
+        engine = StreamingParserEngine(_absorb_marker_tool_config(), tokenizer=None)
+        engine.skip_tool_parsing = True
+
+        text = "reason</think><tool_call>alpha  </tool_call>"
+        span = "<tool_call>alpha  </tool_call>"
+        events = engine.parse_complete(text)
+
+        content = "".join(e.value for e in events if e.type == EventType.TEXT_CHUNK)
+        assert content == span
+        assert not any(e.type == EventType.REASONING_START for e in events)
 
     def test_marker_inside_skipped_span_forwarded_verbatim(self):
         engine = StreamingParserEngine(_absorb_marker_tool_config(), tokenizer=None)
