@@ -8,6 +8,8 @@ from collections.abc import Generator
 from vllm.config import CompilationMode, VllmConfig
 from vllm.logger import init_logger
 
+from .depyf_compat import prepare_debug
+
 logger = init_logger(__name__)
 
 # Shared global so backends.py can read the start time for Dynamo timing.
@@ -41,11 +43,9 @@ def monitor_torch_compile(
     depyf_cm = None
     path = vllm_config.compile_debug_dump_path()
     if compilation_config.mode == CompilationMode.VLLM_COMPILE and path:
-        import depyf
-
         path.mkdir(parents=True, exist_ok=True)
         logger.debug("Dumping depyf output to %s", path)
-        depyf_cm = depyf.prepare_debug(path.as_posix())
+        depyf_cm = prepare_debug(path.as_posix())
         depyf_cm.__enter__()
 
     try:
