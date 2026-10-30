@@ -1,10 +1,9 @@
-# Fusions
+# Fusion torch.compile passes
 
-This page covers kernel/operator fusions controlled by fields in
-[`PassConfig`][vllm.config.compilation.PassConfig]. vLLM applies them either
-explicitly in model definitions or through custom
-[`torch.compile`](torch_compile.md) Inductor passes; supported configurations
-may enable them at the documented [optimization levels](optimization_levels.md).
+vLLM applies a set of kernel/operator fusions at compile time (via custom [`torch.compile`](torch_compile.md) Inductor passes)
+to separate optimizations from model definitions and avoid breaking layer abstractions in model code.
+These fusions are controlled by fields in [`PassConfig`][vllm.config.compilation.PassConfig] and are automatically enabled
+at appropriate [optimization levels](optimization_levels.md).
 
 ## Quick Reference
 
@@ -24,7 +23,7 @@ or just on the low or high end.
 | [AllReduce + RMSNorm](#allreduce--rmsnorm-fuse_allreduce_rms)                  | `fuse_allreduce_rms`         | All-reduce → RMSNorm (+residual_add) (→ quant) | O2 (Hopper/Blackwell + TP > 1) | 5-20%              | No        | Low          |
 | [Attention + Quant](#attention--quantization-fuse_attn_quant)                  | `fuse_attn_quant`            | Attention output → FP8/NVFP4 quant             | Off by default                 | 3-7%               | Yes       | Always       |
 | [MLA Attention + Quant](#attention--quantization-fuse_attn_quant)              | `fuse_attn_quant`            | MLA Attention output → FP8/NVFP4 quant         | Off by default                 | TBD                | Yes       | Always       |
-| [RoPE + KV-Cache Update](#rope--kv-cache-update-fuse_rope_kvcache)             | `fuse_rope_kvcache`          | Rotary embedding → KV cache write              | O2 (ROCm/AITER); CUDA opt-in   | 2-4%               | No        | Low          |
+| [RoPE + KV-Cache Update](#rope--kv-cache-update-fuse_rope_kvcache)             | `fuse_rope_kvcache`          | Rotary embedding → KV cache write              | O2 (ROCm/AITER); CUDA opt-in   | 2-4% (ROCm)        | No        | Low          |
 | [QK Norm + RoPE](#qk-norm--rope-enable_qk_norm_rope_fusion)                    | `enable_qk_norm_rope_fusion` | Q/K RMSNorm → rotary embedding                 | Off by default                 | 2-3%               | No        | Low          |
 | [RMSNorm + Quant](#rmsnorm--quantization-fuse_norm_quant)                      | `fuse_norm_quant`            | RMSNorm (+residual add) → FP8/FP4 quant        | O1 (conditional)               | 1-4%               | No        | Always       |
 | [SiLU+Mul + Quant](#silumul--quantization-fuse_act_quant)                      | `fuse_act_quant`             | SiLU+Mul activation → FP8/FP4 quant            | O1 (conditional)               | 1-4%               | No        | Always       |
@@ -163,78 +162,34 @@ Other attention backends do not support fused output quantization yet.
 ### RoPE + KV-Cache Update (`fuse_rope_kvcache`)
 
 !!! info
-    The fusion is enabled automatically at O2 on ROCm with AITER. NVIDIA CUDA with
-    FlashAttention is available when `PassConfig.fuse_rope_kvcache=True` is set
-    explicitly. CPU is not supported.
-
-    By default, the fusion is limited to `num_tokens ≤ 256`, targeting small decode
-    batches where avoiding the extra launch and memory traffic is useful. This
-    threshold is configurable via `PassConfig.rope_kvcache_fusion_max_token_num`.
-    CUDA inherits this conservative default; its useful range depends on the
-    workload and GPU and should be selected from CUDA measurements.
+    Enabled automatically on ROCm with AITER. Opt-in on NVIDIA CUDA, where it currently
+    applies to Llama models with the FlashAttention backend. Not available on CPU.
+    The fusion is only enabled for `num_tokens ≤ 256` by default; larger batches, such as
+    prefill, use the unfused kernels. This threshold is configurable via
+    `PassConfig.rope_kvcache_fusion_max_token_num`.
 
 **What it fuses.** Fuses the rotary positional embedding kernel with the KV-cache scatter/write into
-a single kernel, eliminating one launch and the intermediate write/read of rotated K.
+a single kernel, avoiding separate reads and writes of the key and value tensors.
 
-The Llama model definition passes positions and its rotary module to `Attention`.
-The rotary module's `get_rotation()` describes a supported rotation as positions,
-a `[cos | sin]` table, and the NeoX/interleaved convention. `Attention` owns the
-selection between fusion and the ordinary rotary call; it does not inspect rotary
-subclass method identities. Modules without this interface or returning `None`
-keep their existing forward, including Fourier RoPE and MRoPE. Ordinary RoPE and
-cache-only scaling variants support this interface; the FlashInfer rotary path
-retains its existing cache-precision behavior and stays unfused.
+On ROCm, a compiler pass performs the fusion. It requires AITER enabled, the `rotary_embedding`
+custom op active (automatic), and the `kv_cache` update op visible in the graph: either by using
+Inductor graph partition or removed from `splitting_ops`.
+If these conditions are set, the fusion is enabled automatically for optimization level O1 and above.
 
-On supported NVIDIA FlashAttention decoder layers, the fused operation writes
-rotated Q to graph-owned storage and writes
-K/V directly to the paged cache before attention. The CUDA kernel consumes logical
-cache views and their strides, so it supports every physical KV-cache layout advertised
-by FlashAttention. Unsupported cache formats, attention variants, and parallelism
-retain the ordinary RoPE and cache-update path. Eager calls also retain that path above
-the token threshold. Compiled calls keep the custom-op entry stable because vLLM drops
-dynamic-shape guards; above the threshold, the op copies Q, clones K, and invokes the
-ordinary rotary and cache writer before attention. Profiling runs without a layer slot
-mapping rotate Q only and skip the unobserved K/V work; attention is also skipped
-because those runs have no attention metadata. CUDA does not register the legacy graph
-pass for this flag.
-
-The CUDA model path requires matching, unquantized Q/K/V and cache storage and
-is not combined with `fuse_attn_quant`. Other configurations retain the
-ordinary path.
-
-ROCm model definitions continue to use the compiler pass and require the
-`rotary_embedding` and `kv_cache` update ops to be visible in the same graph,
-either through Inductor graph partition or by removing the cache update from
-`splitting_ops`. They additionally require AITER. Other CUDA model definitions
-retain the unfused path until they gain a manual call site.
-
-**CUDA performance tuning.** Sweep token counts as well as attention shapes;
-the kernel has no intrinsic boundary at 256 tokens. Cache working-set size and
-head configuration can change the benefit of fusion, so validate a chosen
-threshold with end-to-end prefill and decode measurements too. In particular,
-the compiled above-threshold path includes the Q/K copies described above.
-
-The matched operator benchmark supports token sweeps and verifies output/cache
-parity before timing each shape:
+On CUDA, the model passes its positions and rotary embedding to `Attention`, which writes the
+rotated query, key, and value in one kernel before attention. This requires FP16/BF16 activations
+and a KV cache of the same dtype; KV-cache quantization, KV sharing, decode context parallelism,
+and `fuse_attn_quant` keep the unfused path.
 
 ```bash
-python benchmarks/kernels/benchmark_fused_rope_kvcache.py \
-  --cases mha gqa mqa tinyllama-gqa --layouts LBHNC LBNHC \
-  --num-tokens 1 8 128 256 257 512 1024 2048 --raw-json
+vllm serve meta-llama/Llama-3.1-8B-Instruct --attention-backend FLASH_ATTN \
+    -cc.pass_config.fuse_rope_kvcache=True
 ```
-
-Repeat with `--cuda-graph` to time captured batches of calls without per-op host
-submission. Both modes repeatedly access the same input and cache allocations;
-their ratios are operator measurements, not serving speedups. Use
-`--num-cache-tokens` with a larger `--num-tokens` value to measure padded rows
-separately. Without overrides, the benchmark keeps its original small-decode
-and padded presets.
 
 **Code locations.**
 
 - Pass: [`vllm/compilation/passes/fusion/rope_kvcache_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/rope_kvcache_fusion.py)
-- CUDA manual call site: [`vllm/model_executor/models/llama.py`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/llama.py)
-- Attention integration: [`vllm/model_executor/layers/attention/attention.py`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/attention/attention.py)
+- CUDA call site: [`vllm/model_executor/layers/attention/attention.py`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/attention/attention.py)
 - CUDA kernel: [`csrc/rope_kvcache_fusion_kernels.cu`](https://github.com/vllm-project/vllm/blob/main/csrc/rope_kvcache_fusion_kernels.cu)
 - Benchmark: [`benchmarks/kernels/benchmark_fused_rope_kvcache.py`](https://github.com/vllm-project/vllm/blob/main/benchmarks/kernels/benchmark_fused_rope_kvcache.py)
 
