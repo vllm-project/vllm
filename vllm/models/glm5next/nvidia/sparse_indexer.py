@@ -479,9 +479,7 @@ def sparse_attn_indexer_kpool(
                 # padded [B, lmax] layout. int32 tensors can't go through
                 # pack_seq_triton (float/uint8 only). Reuse gather indices
                 # across keys, gates, slots, and positions.
-                gather_idx = _build_decode_gather_indices(
-                    group_lens, lmax, num_decode_tokens
-                )
+                gather_idx = _build_decode_gather_indices(group_lens, lmax)
                 dec_k = _gather_decode_tokens_by_request(
                     k[:num_decode_tokens], 0, gather_idx
                 )

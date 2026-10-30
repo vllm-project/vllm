@@ -11,11 +11,10 @@ MXFP4_BLOCK_SIZE = 32
 
 
 def _build_decode_gather_indices(
-    decode_lens: torch.Tensor, lmax: int, n: int
+    decode_lens: torch.Tensor, lmax: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Source indices and validity mask for a padded [requests, lmax] grid.
 
-    ``n`` is the number of input token rows, including graph padding.
     Reused across token tensors in a step. Graph-padding input rows are ignored.
     """
     dl = decode_lens.to(torch.int64)
@@ -24,7 +23,7 @@ def _build_decode_gather_indices(
     indices = starts[:, None] + columns[None, :]
     valid = columns[None, :] < dl[:, None]
     # Invalid cells still need in-bounds indices before gathering.
-    indices = indices.clamp(max=max(n - 1, 0))
+    indices = torch.where(valid, indices, 0)
     return indices, valid
 
 
@@ -65,7 +64,7 @@ def _decode_topk_seq_lens(
     n = batch_size * next_n
     if not requires_padding:
         return positions[:n].to(torch.int32) + 1
-    gather_idx = _build_decode_gather_indices(decode_lens, next_n, num_decode_tokens)
+    gather_idx = _build_decode_gather_indices(decode_lens, next_n)
     padded = _gather_decode_tokens_by_request(
         positions[:num_decode_tokens].to(torch.int32), -1, gather_idx
     )

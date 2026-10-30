@@ -63,7 +63,7 @@ def test_decode_gather_discards_full_graph_token_padding():
     decode_lens = torch.tensor([3, 3, 0, 0], dtype=torch.int64)
     # Input graph padding exceeds the output row width and must be ignored.
     tokens = torch.arange(12, dtype=torch.int32)
-    gather_indices = _build_decode_gather_indices(decode_lens, 3, 12)
+    gather_indices = _build_decode_gather_indices(decode_lens, 3)
 
     out = _gather_decode_tokens_by_request(tokens, -1, gather_indices)
 
@@ -78,7 +78,7 @@ def test_decode_gather_discards_full_graph_token_padding():
 def test_decode_gather_without_graph_padding_is_unchanged():
     decode_lens = torch.tensor([1, 3, 2], dtype=torch.int64)
     tokens = torch.arange(6, dtype=torch.int32)
-    gather_indices = _build_decode_gather_indices(decode_lens, 3, 6)
+    gather_indices = _build_decode_gather_indices(decode_lens, 3)
 
     out = _gather_decode_tokens_by_request(tokens, -1, gather_indices)
 
@@ -92,7 +92,7 @@ def test_decode_gather_cuda_graph_replays_with_smaller_live_budget():
     tokens = torch.arange(12, dtype=torch.int32, device="cuda")
 
     def run_gather():
-        gather_indices = _build_decode_gather_indices(decode_lens, 3, 12)
+        gather_indices = _build_decode_gather_indices(decode_lens, 3)
         return _gather_decode_tokens_by_request(tokens, -1, gather_indices)
 
     # Warm allocation and gather kernels before capture.
