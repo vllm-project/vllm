@@ -260,8 +260,8 @@ def test_tier_that_did_not_opt_in_is_not_serviced_off_thread():
         with manager.lock:
             manager.on_schedule_end(_EMPTY_SCHEDULE_END)
 
-        # on_schedule_end still serves every tier, so the thread dying degrades
-        # to per-step servicing rather than to none.
+        # on_schedule_end serves every tier, so the unpolled tier is serviced
+        # once per step.
         assert quiet.serves == 1
     finally:
         manager.shutdown()
@@ -350,6 +350,141 @@ def test_parent_lookup_while_serving_keeps_the_round_contained():
         manager.shutdown()
 
 
+class _HitTier(_FakeTier):
+    """Second tier whose lookup HITs, so the parent queues a promotion."""
+
+    tolerates_off_thread_polling: ClassVar[bool] = False
+
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
+        return LookupResult.HIT
+
+
+class _PromotingTier(_FakeTier):
+    """Opted-in tier that serves a peer lookup through its parent.
+
+    The parent lookup excludes this tier and lands on _HitTier, so the
+    tiering manager queues a promotion in _pending_load_submissions, which
+    only on_schedule_end() flushes.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.on_serve = self._promote
+        self.promoted = threading.Event()
+
+    def _promote(self, parent: ParentManager) -> None:
+        parent.lookup(OffloadKey(b"\x07" * 8), ReqContext(req_id="peer"))
+        self.promoted.set()
+
+
+def _multi_tier_manager(primary, tier_cls, second_cls, **kwargs):
+    common = {
+        "offloading_spec": MagicMock(),
+        "primary_kv_view": primary.get_kv_memoryview(),
+    }
+    return TieringOffloadingManager(
+        primary_tier=primary,
+        secondary_tiers=[
+            tier_cls(tier_type="first", **common),
+            second_cls(tier_type="second", **common),
+        ],
+        **kwargs,
+    )
+
+
+def test_multi_tier_manager_keeps_the_engine_stepping_while_idle():
+    """With more than one secondary tier, a polled tier must keep the engine
+    stepping even when idle.
+
+    A tier-poll round can serve a peer whose lookup promotes a chunk out of
+    another secondary tier. poll_tiers() never flushes promotions and only a
+    scheduler step collects their completions, so if the engine parked it would
+    never take that step and the load would strand. has_pending_work() is
+    consulted before the park, so it must stay True here.
+    """
+    num_chunks = 8
+    primary = CPUPrimaryTierOffloadingManager(
+        num_chunks=num_chunks,
+        mmap_region=_mock_mmap_region(num_chunks),
+    )
+    manager = _multi_tier_manager(primary, _FakeTier, _HitTier)
+    try:
+        assert manager._tier_poll_thread is not None
+        assert manager.has_pending_work() is True
+    finally:
+        manager.shutdown()
+
+
+def test_two_polled_tiers_keep_the_engine_stepping_while_idle():
+    """Two polled tiers strand the same way as one polled plus one unpolled.
+
+    A serve on the first can promote out of the second, and poll_tiers() never
+    flushes it, so the keep-alive cannot key on the promoted tier being
+    unpolled.
+    """
+    num_chunks = 8
+    primary = CPUPrimaryTierOffloadingManager(
+        num_chunks=num_chunks,
+        mmap_region=_mock_mmap_region(num_chunks),
+    )
+    manager = _multi_tier_manager(primary, _FakeTier, _FakeTier)
+    try:
+        assert manager._tier_poll_thread is not None
+        assert manager.has_pending_work() is True
+    finally:
+        manager.shutdown()
+
+
+def test_off_thread_promotion_is_flushed_by_the_next_step():
+    """An off-thread serve queues a promotion that only a step submits.
+
+    Shows the queue actually fills from the control thread, which is why a
+    multi-tier manager must keep the engine stepping (see
+    test_multi_tier_manager_keeps_the_engine_stepping_while_idle).
+    """
+    num_chunks = 8
+    primary = CPUPrimaryTierOffloadingManager(
+        num_chunks=num_chunks,
+        mmap_region=_mock_mmap_region(num_chunks),
+    )
+    manager = _multi_tier_manager(primary, _PromotingTier, _HitTier)
+    tier = manager.secondary_tiers[0]
+    try:
+        assert tier.promoted.wait(_SETTLE_S), "control thread never served"
+
+        with manager.lock:
+            assert manager._pending_load_submissions
+            manager.on_schedule_end(_EMPTY_SCHEDULE_END)
+            assert not manager._pending_load_submissions
+    finally:
+        manager.shutdown()
+
+
+def test_dead_poll_thread_makes_the_manager_keep_the_engine_stepping(
+    manager_and_tier,
+):
+    """With no live thread the engine tick is the only driver.
+
+    A failing loop now backs off rather than exiting, so this guards the
+    defensive branch: if the field ever holds a finished thread (for example a
+    join that failed to clear it), the manager must keep the engine stepping.
+    """
+    manager, tier = manager_and_tier
+    assert tier.served.wait(_SETTLE_S)
+    assert manager.has_pending_work() is False
+
+    manager._stop_tier_poll_thread()
+    # _stop_tier_poll_thread() clears the field only when the join succeeds.
+    # Simulate a finished thread left in the field.
+    dead = threading.Thread(target=lambda: None)
+    dead.start()
+    dead.join()
+    manager._tier_poll_thread = dead
+
+    assert not dead.is_alive()
+    assert manager.has_pending_work() is True
+
+
 def test_shutdown_joins_the_control_thread_before_tier_teardown(manager_and_tier):
     """The thread drives tier transports, so it must be stopped first.
 
@@ -408,7 +543,7 @@ def test_shutdown_raises_when_the_caller_holds_the_lock(manager_and_tier, monkey
 
 
 def test_failure_burst_does_not_stop_the_thread(manager_and_tier):
-    """The give-up budget is time, not rounds.
+    """The backoff budget is time, not rounds.
 
     At a 1 ms interval, a few hundred failing rounds take well under a second;
     a fault that short must not turn the tier-poll thread off for good.
@@ -431,8 +566,13 @@ def test_failure_burst_does_not_stop_the_thread(manager_and_tier):
     assert _live_control_threads()
 
 
-def test_sustained_failure_stops_the_thread(monkeypatch):
-    monkeypatch.setattr(tiering_manager, "_TIER_POLL_GIVE_UP_AFTER_S", 0.2)
+def test_sustained_failure_backs_off_but_keeps_serving(monkeypatch):
+    """The backoff path is non-terminal: an idle engine parks, so a thread that
+    exited after sustained failure would leave peers unserved with nothing to
+    wake the engine. It must back off and keep retrying, then resume the normal
+    interval once a round succeeds."""
+    monkeypatch.setattr(tiering_manager, "_TIER_POLL_BACK_OFF_AFTER_S", 0.2)
+    monkeypatch.setattr(tiering_manager, "_TIER_POLL_BACKOFF_S", 0.05)
     manager, tier = _make_manager()
     try:
         assert tier.served.wait(_SETTLE_S)
@@ -441,12 +581,135 @@ def test_sustained_failure_stops_the_thread(monkeypatch):
             raise RuntimeError("persistent")
 
         tier.on_serve = always_fails
-        deadline = time.monotonic() + 5
-        while _live_control_threads() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert not _live_control_threads()
+        time.sleep(0.5)
+        assert _live_control_threads(), "thread must survive sustained failure"
+
+        tier.served.clear()
+        tier.on_serve = None
+        assert tier.served.wait(_SETTLE_S * 2), "thread did not resume serving"
     finally:
         manager.shutdown()
+
+
+class _RecordingStop:
+    """Stand-in for the tier-poll stop Event that records the waits it is given.
+
+    Lets a test drive _tier_poll_loop() on the calling thread and read back the
+    interval each round paused for, without real sleeping.
+    """
+
+    def __init__(self, rounds: int):
+        self.waits: list[float] = []
+        self._rounds = rounds
+        self._set = False
+
+    def is_set(self) -> bool:
+        return self._set or len(self.waits) >= self._rounds
+
+    def set(self) -> None:
+        self._set = True
+
+    def wait(self, timeout: float | None = None) -> bool:
+        self.waits.append(timeout)
+        return False
+
+
+def _run_failing_rounds(manager, rounds: int, monkeypatch, **constants):
+    """Drive _tier_poll_loop() on this thread through `rounds` failing rounds.
+
+    Stops the real control thread first so only this call drives the loop, and
+    returns the interval each round paused for.
+    """
+    for name, value in constants.items():
+        monkeypatch.setattr(tiering_manager, name, value)
+    manager._stop_tier_poll_thread()
+    manager.secondary_tiers[0].on_serve = lambda parent: (_ for _ in ()).throw(
+        RuntimeError("persistent")
+    )
+    stop = _RecordingStop(rounds)
+    manager._tier_poll_stop = stop
+    manager._tier_poll_loop()
+    return stop.waits
+
+
+def test_backoff_waits_at_least_the_configured_interval(monkeypatch):
+    """Backing off must never poll faster than tier_poll_interval_s.
+
+    The wait is max(tier_poll_interval_s, 1 s), so a user who set a slow
+    interval does not get a faster loop after a fault.
+    """
+    manager, _ = _make_manager(tier_poll_interval_s=3.0)
+    try:
+        waits = _run_failing_rounds(
+            manager, 4, monkeypatch, _TIER_POLL_BACK_OFF_AFTER_S=0.0
+        )
+    finally:
+        manager.shutdown()
+    assert waits == [3.0, 3.0, 3.0, 3.0]
+
+
+def test_backoff_floors_at_one_second_for_a_fast_interval(monkeypatch):
+    """A sub-second interval still backs off to the 1 s floor."""
+    manager, _ = _make_manager(tier_poll_interval_s=0.001)
+    try:
+        waits = _run_failing_rounds(
+            manager, 3, monkeypatch, _TIER_POLL_BACK_OFF_AFTER_S=0.0
+        )
+    finally:
+        manager.shutdown()
+    assert waits == [1.0, 1.0, 1.0]
+
+
+def test_sustained_failure_logs_one_traceback_then_summaries(monkeypatch):
+    """A permanent fault must not emit a full traceback every round.
+
+    The first failure of a run logs a traceback; later ones are one-line
+    summaries, so an idle rank with a broken peer cannot flood the log.
+    """
+    manager, _ = _make_manager()
+    fake_logger = MagicMock()
+    monkeypatch.setattr(tiering_manager, "logger", fake_logger)
+    try:
+        _run_failing_rounds(
+            manager,
+            4,
+            monkeypatch,
+            _TIER_POLL_BACK_OFF_AFTER_S=0.0,
+            _TIER_POLL_ERROR_LOG_INTERVAL_S=0.0,
+        )
+    finally:
+        manager.shutdown()
+    assert fake_logger.exception.call_count == 1
+    assert fake_logger.warning.call_count == 3
+
+
+def test_alternating_failure_logs_at_most_one_traceback(monkeypatch):
+    """A fault that alternates with successes must not log a traceback per
+    failure.
+
+    The failure run restarts on every success, so keying the traceback off the
+    run's first round would emit one per failing round at the default interval.
+    """
+    manager, tier = _make_manager()
+    fake_logger = MagicMock()
+    monkeypatch.setattr(tiering_manager, "logger", fake_logger)
+    manager._stop_tier_poll_thread()
+    calls = {"n": 0}
+
+    def alternating(parent):
+        calls["n"] += 1
+        if calls["n"] % 2:
+            raise RuntimeError("intermittent")
+
+    tier.on_serve = alternating
+    stop = _RecordingStop(6)
+    manager._tier_poll_stop = stop
+    try:
+        manager._tier_poll_loop()
+    finally:
+        manager.shutdown()
+    assert calls["n"] == 6
+    assert fake_logger.exception.call_count == 1
 
 
 def test_lock_releases_on_error(manager_and_tier):
