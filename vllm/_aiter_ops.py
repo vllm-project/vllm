@@ -4461,6 +4461,77 @@ class rocm_aiter_ops:
             return False
 
     @staticmethod
+    def fused_bf16_bmm_rope_cat_quant_pad_cache_mla(
+        q_nope: torch.Tensor,
+        w_uk_t: torch.Tensor,
+        q_pe: torch.Tensor,
+        q_scale: torch.Tensor,
+        kv_c: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        k_scale: torch.Tensor,
+        positions: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        is_neox: bool,
+        num_padded_heads: int,
+    ) -> torch.Tensor:
+        """fused_bf16_bmm_cat_quant_pad_mla on the unroped q_pe (B, N, R), plus
+        what concat_and_cache_mla_rope_fused does for B decode tokens: RoPE of
+        q_pe and k_pe (B, R) and the fp8 write of [kv_c | k_pe] / k_scale to
+        kv_cache (num_blocks, block_size, L + R). Bit-exact to that op."""
+        from aiter.ops.triton.fusions.fused_bf16_bmm_cat_quant_pad_mla import (
+            fused_bf16_bmm_rope_cat_quant_pad_cache_mla,
+        )
+
+        from vllm.model_executor.layers.quantization.utils.quant_utils import (
+            get_fp8_min_max,
+        )
+
+        out = torch.empty(
+            (q_pe.shape[0], num_padded_heads, w_uk_t.shape[-1] + q_pe.shape[-1]),
+            dtype=current_platform.fp8_dtype(),
+            device=q_pe.device,
+        )
+        return fused_bf16_bmm_rope_cat_quant_pad_cache_mla(
+            q_nope,
+            w_uk_t,
+            q_pe,
+            q_scale,
+            kv_c,
+            k_pe,
+            kv_cache,
+            slot_mapping,
+            k_scale,
+            positions,
+            cos_sin_cache,
+            is_neox,
+            num_padded_heads,
+            out=out,
+            fp8_max=get_fp8_min_max()[1],
+        )
+
+    @staticmethod
+    @functools.cache
+    def is_fused_bf16_bmm_rope_cat_quant_pad_cache_mla_tuned(
+        B: int, N: int, K: int
+    ) -> bool:
+        """Whether AITER ships fused_bf16_bmm_rope_cat_quant_pad_cache_mla with a
+        tuned config for B heads, kv_lora_rank N and qk_nope_head_dim K."""
+        if not current_platform.is_rocm():
+            return False
+        try:
+            import aiter.ops.triton.fusions.fused_bf16_bmm_cat_quant_pad_mla as fused
+
+            if not hasattr(fused, "fused_bf16_bmm_rope_cat_quant_pad_cache_mla"):
+                return False
+            return _triton_gemm_config_is_tuned(
+                "FUSED-BF16-BMM-ROPE-CAT-QUANT-PAD-CACHE-MLA", N, K, B=B
+            )
+        except (AssertionError, ImportError, KeyError, OSError, TypeError):
+            return False
+
+    @staticmethod
     def triton_fp8_bmm(
         X: torch.Tensor,
         WQ: torch.Tensor,

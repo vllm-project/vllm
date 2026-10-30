@@ -380,6 +380,62 @@ def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
     torch.testing.assert_close(layer.W_UK_T, old_w_uk_t + 100)
 
 
+# Kimi-K2 MLA at TP8.
+_KIMI_TP8_MLA_DIMS = dict(
+    num_heads=8, kv_lora_rank=512, qk_nope_head_dim=128, qk_rope_head_dim=64
+)
+
+
+def _kimi_decode_query_inputs(num_tokens: int):
+    """q_nope (N, B, P) and q_pe (B, N, R) as strided views of the q_b_proj
+    output, and W_UK^T as split_kv_b_proj + process_weights_after_loading lay
+    it out."""
+    num_heads = _KIMI_TP8_MLA_DIMS["num_heads"]
+    kv_lora_rank = _KIMI_TP8_MLA_DIMS["kv_lora_rank"]
+    nope, rope = (
+        _KIMI_TP8_MLA_DIMS["qk_nope_head_dim"],
+        _KIMI_TP8_MLA_DIMS["qk_rope_head_dim"],
+    )
+    q = torch.randn(
+        num_tokens, num_heads, nope + rope, dtype=torch.bfloat16, device="cuda"
+    )
+    q_nope, q_pe = q.split([nope, rope], dim=-1)
+    kv_b_weight = 0.05 * torch.randn(
+        num_heads * 2 * nope, kv_lora_rank, dtype=torch.bfloat16, device="cuda"
+    )
+    w_uk, _ = kv_b_weight.T.view(kv_lora_rank, num_heads, -1).split(
+        [nope, nope], dim=-1
+    )
+    return q_nope.transpose(0, 1), q_pe, w_uk.permute(1, 2, 0)
+
+
+def _unfused_padded_decode_query(q_nope, w_uk_t, q_pe, scale):
+    """The padded fp8 query MLAAttention builds without the fused AITER kernel:
+    torch.bmm into a token-major buffer, _DecodeConcatQuantFP8, then
+    get_mla_padded_q."""
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAHelper
+
+    num_heads, num_tokens, _ = q_nope.shape
+    ql_nope = q_nope.new_empty(num_tokens, num_heads, w_uk_t.shape[-1])
+    torch.bmm(q_nope, w_uk_t, out=ql_nope.transpose(0, 1))
+    with set_current_vllm_config(VllmConfig()):
+        concat_quant = _DecodeConcatQuantFP8(
+            static=True, group_shape=GroupShape.PER_TENSOR, compile_native=True
+        )
+    return AiterMLAHelper.get_mla_padded_q(
+        num_heads, concat_quant.forward_native(ql_nope, q_pe, scale)
+    )
+
+
+def _assert_fused_decode_query_close(out, ref):
+    assert out.shape == ref.shape and out.dtype == ref.dtype
+    # A different accumulation order can flip a bf16 rounding of the BMM
+    # result, which moves the fp8 value by at most one step.
+    torch.testing.assert_close(out.float(), ref.float(), atol=2**-9, rtol=2**-3)
+    mismatch = (out.view(torch.uint8) != ref.view(torch.uint8)).float().mean()
+    assert mismatch.item() < 0.01
+
+
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="AITER is ROCm-only")
 @pytest.mark.parametrize("num_tokens", [1, 64, 300])
 @pytest.mark.parametrize("q_scale", [1.0, 0.37])
@@ -390,57 +446,115 @@ def test_aiter_fused_decode_query_matches_unfused_ops(num_tokens, q_scale):
     from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
     from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAHelper
 
-    num_heads, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim = 8, 512, 128, 64
     if not is_aiter_found_and_supported():
         pytest.skip("AITER is not available on this platform")
     if not rocm_aiter_ops.is_fused_bf16_bmm_cat_quant_pad_mla_tuned(
-        num_heads, kv_lora_rank, qk_nope_head_dim
+        _KIMI_TP8_MLA_DIMS["num_heads"],
+        _KIMI_TP8_MLA_DIMS["kv_lora_rank"],
+        _KIMI_TP8_MLA_DIMS["qk_nope_head_dim"],
     ):
         pytest.skip("installed AITER has no tuned fused MLA decode query kernel")
 
     set_random_seed(0)
-    q = torch.randn(
-        num_tokens,
-        num_heads,
-        qk_nope_head_dim + qk_rope_head_dim,
-        dtype=torch.bfloat16,
-        device="cuda",
-    )
-    q_nope, q_pe = q.split([qk_nope_head_dim, qk_rope_head_dim], dim=-1)
-    q_nope = q_nope.transpose(0, 1)
-    # W_UK^T as split_kv_b_proj + process_weights_after_loading lay it out.
-    kv_b_weight = 0.05 * torch.randn(
-        num_heads * 2 * qk_nope_head_dim,
-        kv_lora_rank,
-        dtype=torch.bfloat16,
-        device="cuda",
-    )
-    w_uk, _ = kv_b_weight.T.view(kv_lora_rank, num_heads, -1).split(
-        [qk_nope_head_dim, qk_nope_head_dim], dim=-1
-    )
-    w_uk_t = w_uk.permute(1, 2, 0)
+    q_nope, q_pe, w_uk_t = _kimi_decode_query_inputs(num_tokens)
     scale = torch.tensor(q_scale, dtype=torch.float32, device="cuda")
-    padded_heads = AiterMLAHelper.get_actual_mla_num_heads(num_heads)
+    padded_heads = AiterMLAHelper.get_actual_mla_num_heads(q_nope.shape[0])
 
-    ql_nope = q_nope.new_empty(num_tokens, num_heads, kv_lora_rank)
-    torch.bmm(q_nope, w_uk_t, out=ql_nope.transpose(0, 1))
-    with set_current_vllm_config(VllmConfig()):
-        concat_quant = _DecodeConcatQuantFP8(
-            static=True, group_shape=GroupShape.PER_TENSOR, compile_native=True
-        )
-    ref = AiterMLAHelper.get_mla_padded_q(
-        num_heads, concat_quant.forward_native(ql_nope, q_pe, scale)
-    )
+    ref = _unfused_padded_decode_query(q_nope, w_uk_t, q_pe, scale)
     out = rocm_aiter_ops.fused_bf16_bmm_cat_quant_pad_mla(
         q_nope, w_uk_t, q_pe, scale, padded_heads
     )
+    _assert_fused_decode_query_close(out, ref)
 
-    assert out.shape == ref.shape and out.dtype == ref.dtype
-    # A different accumulation order can flip a bf16 rounding of the BMM
-    # result, which moves the fp8 value by at most one step.
-    torch.testing.assert_close(out.float(), ref.float(), atol=2**-9, rtol=2**-3)
-    mismatch = (out.view(torch.uint8) != ref.view(torch.uint8)).float().mean()
-    assert mismatch.item() < 0.01
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="AITER is ROCm-only")
+@pytest.mark.parametrize("num_tokens", [1, 64, 300])
+@pytest.mark.parametrize("is_neox", [False, True])
+# k_scale = 0.004 saturates the fp8 cache.
+@pytest.mark.parametrize("k_scale", [1.0, 0.004])
+def test_aiter_fused_rope_kv_cache_decode_query_matches_unfused_ops(
+    num_tokens, is_neox, k_scale
+):
+    """With the RoPE and the fp8 KV-cache write folded in, the fused AITER decode
+    query writes the same cache bytes as concat_and_cache_mla_rope_fused and
+    builds the query the unfused ops build from its roped q_pe."""
+    from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAHelper
+
+    if not is_aiter_found_and_supported():
+        pytest.skip("AITER is not available on this platform")
+    kv_lora_rank = _KIMI_TP8_MLA_DIMS["kv_lora_rank"]
+    rope = _KIMI_TP8_MLA_DIMS["qk_rope_head_dim"]
+    if not rocm_aiter_ops.is_fused_bf16_bmm_rope_cat_quant_pad_cache_mla_tuned(
+        _KIMI_TP8_MLA_DIMS["num_heads"],
+        kv_lora_rank,
+        _KIMI_TP8_MLA_DIMS["qk_nope_head_dim"],
+    ):
+        pytest.skip("installed AITER has no tuned fused RoPE + KV-cache kernel")
+
+    set_random_seed(0)
+    q_nope, q_pe, w_uk_t = _kimi_decode_query_inputs(num_tokens)
+    kv_lora = torch.randn(
+        num_tokens, kv_lora_rank + rope, dtype=torch.bfloat16, device="cuda"
+    )
+    kv_c, k_pe = kv_lora.split([kv_lora_rank, rope], dim=-1)
+    max_position = 4096
+    angles = torch.rand(max_position, rope // 2, dtype=torch.float32, device="cuda")
+    cos_sin_cache = torch.cat([angles.cos(), angles.sin()], dim=-1).to(torch.bfloat16)
+    positions = torch.randint(0, max_position, (num_tokens,), device="cuda")
+    block_size = 16
+    num_blocks = cdiv(num_tokens, block_size) + 2
+    slot_mapping = torch.randperm(num_blocks * block_size, device="cuda")[:num_tokens]
+    slot_mapping[1::5] = -1  # CUDA-graph padding tokens
+    kv_cache = torch.randint(
+        0,
+        256,
+        (num_blocks, block_size, kv_lora_rank + rope),
+        dtype=torch.uint8,
+        device="cuda",
+    )
+    q_scale = torch.tensor(0.37, dtype=torch.float32, device="cuda")
+    k_scale_t = torch.tensor([k_scale], dtype=torch.float32, device="cuda")
+    padded_heads = AiterMLAHelper.get_actual_mla_num_heads(q_nope.shape[0])
+
+    ref_cache = kv_cache.clone()
+    ref_q_pe = q_pe.clone()
+    ops.concat_and_cache_mla_rope_fused(
+        positions,
+        ref_q_pe,
+        k_pe.clone(),
+        kv_c.contiguous(),
+        cos_sin_cache,
+        is_neox,
+        slot_mapping,
+        ref_cache,
+        "fp8",
+        k_scale_t,
+    )
+    ref = _unfused_padded_decode_query(q_nope, w_uk_t, ref_q_pe, q_scale)
+    out = rocm_aiter_ops.fused_bf16_bmm_rope_cat_quant_pad_cache_mla(
+        q_nope,
+        w_uk_t,
+        q_pe,
+        q_scale,
+        kv_c,
+        k_pe,
+        kv_cache.view(current_platform.fp8_dtype()),
+        slot_mapping,
+        k_scale_t,
+        positions,
+        cos_sin_cache,
+        is_neox,
+        padded_heads,
+    )
+
+    _assert_fused_decode_query_close(out, ref)
+    # The roped q_pe and the cache are pure data movement: bit-exact.
+    assert torch.equal(
+        out[..., kv_lora_rank:].view(torch.uint8),
+        ref[..., kv_lora_rank:].view(torch.uint8),
+    )
+    assert torch.equal(kv_cache, ref_cache)
 
 
 # Validate parameter combinations during collection, before GPU fixtures run.
