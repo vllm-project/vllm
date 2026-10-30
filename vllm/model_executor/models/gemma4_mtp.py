@@ -545,10 +545,13 @@ class Gemma4MTP(nn.Module):
         )
 
     def _get_full_lm_head_weight(self) -> torch.Tensor:
-        # built by process_weights_after_loading (TP > 1)
         if self._stable_full_lm_head_weight is not None:
             return self._stable_full_lm_head_weight
-        return self._gather_full_lm_head_weight()
+        lm_head_weight = self._gather_full_lm_head_weight()
+        if get_tensor_model_parallel_world_size() > 1:
+            # only when post-load processing never ran
+            self._stable_full_lm_head_weight = lm_head_weight
+        return lm_head_weight
 
     def _gather_full_lm_head_weight(self) -> torch.Tensor:
         assert self.masked_embedding is not None

@@ -16,6 +16,10 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsConfig,
 )
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+from vllm.model_executor.layers.quantization.humming import (
+    HummingConfig,
+    HummingMoEMethod,
+)
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptFp8Config,
     ModelOptMxFp8Config,
@@ -48,9 +52,11 @@ pytestmark = pytest.mark.skipif(
 SIZE = 512
 
 
-def _load(layer: torch.nn.Module) -> None:
+def _load(layer: torch.nn.Module, names: list[str] | None = None) -> None:
     """Stand in for the weight loader: materialize and fill with finite values."""
     for name, param in list(layer.named_parameters(recurse=False)):
+        if names is not None and name not in names:
+            continue
         if param.is_meta:
             param = materialize_meta_tensor(param)
             setattr(layer, name, param)
@@ -131,14 +137,21 @@ def _online_moe():
     return layer, method
 
 
-def _ct(fmt: str, group: str, group_size: int, input_activations: bool):
+def _ct_dict(fmt: str, group: str, group_size: int, input_activations: bool):
     args = dict(num_bits=4, type="float", strategy=group, group_size=group_size)
     args |= dict(symmetric=True, dynamic=False)
     acts = args | dict(dynamic="local") if input_activations else None
     group_0 = dict(targets=["Linear"], weights=args, input_activations=acts)
-    return CompressedTensorsConfig.from_config(
-        dict(format=fmt, config_groups=dict(group_0=group_0), ignore=[])
+    return dict(
+        quant_method="compressed-tensors",
+        format=fmt,
+        config_groups=dict(group_0=group_0),
+        ignore=[],
     )
+
+
+def _ct(*args):
+    return CompressedTensorsConfig.from_config(_ct_dict(*args))
 
 
 NVFP4 = dict(is_checkpoint_nvfp4_serialized=True, kv_cache_quant_algo=None)
@@ -257,21 +270,40 @@ def test_forced_backend_keeps_param_objects(
     _check_keeps_param_objects(build, default_vllm_config)
 
 
-def _kernel_tensor_ptrs(layer: torch.nn.Module, method) -> dict[str, int]:
-    """Addresses of the tensors the MoE kernel reads: the layer's, the experts
-    object's and the quant config's."""
+def _kernel_tensors(layer: torch.nn.Module, method) -> dict[str, torch.Tensor]:
+    """The tensors the MoE kernel reads: the layer's, the experts object's and
+    the quant config's."""
     config = method.moe_quant_config
     holders = {
         "layer": layer,
         "experts": method.moe_kernel.fused_experts,
         **{f"config.{q}": getattr(config, q) for q in ("_a1", "_a2", "_w1", "_w2")},
     }
-    ptrs = {f"layer.{n}": p.data_ptr() for n, p in layer.named_parameters()}
+    tensors = {f"layer.{n}": p for n, p in layer.named_parameters()}
     for holder_name, holder in holders.items():
         for attr, value in vars(holder).items():
             if isinstance(value, torch.Tensor) and value.numel():
-                ptrs[f"{holder_name}.{attr}"] = value.data_ptr()
-    return ptrs
+                tensors[f"{holder_name}.{attr}"] = value
+    return tensors
+
+
+def _same_bytes(a: torch.Tensor, b: torch.Tensor) -> bool:
+    return a.shape == b.shape and torch.equal(
+        a.reshape(-1).contiguous().view(torch.uint8),
+        b.reshape(-1).contiguous().view(torch.uint8),
+    )
+
+
+def _cold_start(build: Callable, vllm_config, seed: int):
+    # a second layer under the same name replaces the first one's registration
+    vllm_config.compilation_config.static_forward_context.clear()
+    with torch.device("cuda"):
+        layer, method = build()
+    names = [n for n, _ in layer.named_parameters(recurse=False)]
+    torch.manual_seed(seed)
+    _load(layer)
+    process_weights_after_loading(layer, vllm_config.model_config, torch.device("cuda"))
+    return layer, method, names
 
 
 GPT_OSS_SWIGLU = dict(
@@ -314,30 +346,53 @@ def test_direct_reload_keeps_kernel_tensor_addresses(
     build: Callable, backend: str, default_vllm_config, dist_init, monkeypatch
 ) -> None:
     """Post-load processing reruns on every reload and rebuilds the experts
-    object; every tensor its kernel reads keeps the cold-start address."""
+    object; every tensor its kernel reads keeps the cold-start address and
+    holds what a cold start on the new weights computes."""
     monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
     default_vllm_config.model_config = ModelConfig()
     default_vllm_config.kernel_config.moe_backend = backend
-    model_config, device = default_vllm_config.model_config, torch.device("cuda")
-    with device:
-        layer, method = build()
-    _load(layer)
-    process_weights_after_loading(layer, model_config, device)
-    cold = _kernel_tensor_ptrs(layer, method)
+    layer, method, names = _cold_start(build, default_vllm_config, seed=0)
+    cold = _kernel_tensors(layer, method)  # kept alive: no address reuse
 
     begin_direct_reload(layer)
+    torch.manual_seed(1)
+    _load(layer, names)
+    finish_direct_reload(layer, default_vllm_config.model_config, torch.device("cuda"))
+    reloaded = _kernel_tensors(layer, method)
+    assert {n: t.data_ptr() for n, t in reloaded.items()} == {
+        n: t.data_ptr() for n, t in cold.items()
+    }
+
+    fresh = _kernel_tensors(*_cold_start(build, default_vllm_config, seed=1)[:2])
+    # bytes: random FP8/E8M0 payloads include NaN encodings
+    assert [n for n in reloaded if not _same_bytes(reloaded[n], fresh[n])] == []
+
+
+def test_direct_reload_refuses_humming_moe(
+    default_vllm_config, dist_init, monkeypatch
+) -> None:
+    """Humming MoE post-processes once per quant method: direct reload refuses
+    it at cold start."""
+    if not has_humming():
+        pytest.skip("humming is not installed")
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
+    default_vllm_config.model_config = ModelConfig()
+    with torch.device("cuda"):
+        layer, method = _moe(HummingConfig(full_config=_ct_dict(*CT_NVFP4)))
+    assert isinstance(method, HummingMoEMethod)
     _load(layer)
-    finish_direct_reload(layer, model_config, device)
-    assert _kernel_tensor_ptrs(layer, method) == cold
+    with pytest.raises(RuntimeError, match="humming MoE"):
+        process_weights_after_loading(
+            layer, default_vllm_config.model_config, torch.device("cuda")
+        )
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA mem pools")
 def test_localized_nvfp4_shards_refilled_in_place():
     """CuteDSL NVFP4 per-locality-domain shards: a rerun refills the registered
     shard parameters, and so the MMA views of their scales, in place."""
     res = LocalizedResources(
         num_split=2,
-        contexts=[],
+        contexts=[None, None],
         streams=[torch.cuda.Stream(), torch.cuda.Stream()],
         pools=[torch.cuda.MemPool(), torch.cuda.MemPool()],
     )

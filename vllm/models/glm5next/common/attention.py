@@ -315,7 +315,8 @@ class Indexer(nn.Module):
         # rankings on long-context tasks. Built after weights are loaded.
         kw, _ = self.wk_weights_proj(hidden_states)
         k = kw[:, : self.head_dim]
-        assert self._wp_fp32 is not None, "refresh_post_load_cache() not run"
+        if self._wp_fp32 is None:  # only when post-load processing never ran
+            self.refresh_post_load_cache()
         weights = torch.mm(hidden_states.float(), self._wp_fp32)
 
         k = _fused_indexer_k_norm(
