@@ -5,6 +5,7 @@ import hashlib
 from pathlib import Path
 from typing import Any, Literal, Self
 
+import regex as re
 from pydantic import ConfigDict, Field, model_validator
 from pydantic_core import ArgsKwargs
 
@@ -25,28 +26,22 @@ def derive_watermark_key(key: int, domain: bytes) -> int:
     return int.from_bytes(digest[:8], "big")
 
 
-def _read_key_file(path: str) -> int:
-    """Read a watermark key from a file.
+_DECIMAL_KEY = re.compile(r"[0-9]{1,20}")
 
-    Errors never quote the file content, because a malformed key is still
-    close to the real one and validation errors end up in logs.
-    """
+
+def _read_key_file(path: str) -> int:
     try:
-        text = Path(path).read_text()
+        text = Path(path).read_text().strip()
     except OSError as error:
         raise ValueError(
             f"Cannot read watermark key file {path!r}: {error.strerror}"
         ) from None
-    try:
-        key = int(text.strip())
-    except ValueError:
-        key = -1
-    if not 0 <= key <= 2**64 - 1:
+    if not _DECIMAL_KEY.fullmatch(text) or int(text) > 2**64 - 1:
         raise ValueError(
             f"Watermark key file {path!r} must contain a decimal integer "
             "between 0 and 2**64 - 1."
         )
-    return key
+    return int(text)
 
 
 @config(config=ConfigDict(hide_input_in_errors=True))

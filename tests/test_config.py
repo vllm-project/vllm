@@ -4299,7 +4299,7 @@ def test_watermark_key_and_key_file_are_exclusive(tmp_path):
         WatermarkConfig(key=42, key_file=str(key_file))
 
 
-@pytest.mark.parametrize("content", ["not-a-key", "-5", str(2**64)])
+@pytest.mark.parametrize("content", ["not-a-key", "-5", "+1000", "1_000", str(2**64)])
 def test_invalid_watermark_key_file_is_rejected_without_quoting_it(tmp_path, content):
     key_file = tmp_path / "watermark_key"
     key_file.write_text(content)
