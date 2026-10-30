@@ -4,7 +4,7 @@ meta:
   provider: "Qwen"
   description: "Qwen3 4B dense model with hybrid thinking/non-thinking modes — fits on a single TPU v6e chip, one GPU or one Xeon 6 NUMA node."
   date_added: 2025-10-15
-  date_updated: 2026-09-12
+  date_updated: 2026-10-30
   tasks:
     - text
   performance_headline: "Verified on TPU v6e (Trillium) with BF16 on a single chip"
@@ -13,10 +13,11 @@ meta:
   hardware:
     trillium: verified
     xeon6: verified
+    h100: supported
 
 model:
   model_id: "Qwen/Qwen3-4B"
-  min_vllm_version: "0.8.5"
+  min_vllm_version: "0.28.0"
   architecture: dense
   parameter_count: "4B"
   active_parameters: "4B"
@@ -36,6 +37,22 @@ features:
     args:
       - "--reasoning-parser"
       - "qwen3"
+  spec_decoding:
+    description: "Use a RedHatAI draft model for speculative decoding"
+    default_mode: dflash2
+    modes:
+      dflash2:
+        label: "DFlash2 (RedHatAI)"
+        description: "RedHatAI DFlash2 draft model; vLLM selects DFlash2 from the draft architecture using the dflash method."
+        args:
+          - "--speculative-config"
+          - '{"model":"RedHatAI/Qwen3-4B-speculator.dflash2","num_speculative_tokens":8,"method":"dflash"}'
+      dspark:
+        label: "DSpark (RedHatAI)"
+        description: "RedHatAI DSpark draft model with 8 draft tokens."
+        args:
+          - "--speculative-config"
+          - '{"model":"RedHatAI/Qwen3-4B-speculator.dspark","num_speculative_tokens":8,"method":"dspark"}'
   long_context:
     description: "YaRN RoPE scaling to the model card's validated 131,072-token context. Static YaRN holds the scaling factor constant regardless of input length, so leave this off unless you actually serve long prompts — it can cost quality below 32K."
     args:
@@ -45,6 +62,7 @@ features:
       - "131072"
 
 opt_in_features:
+  - spec_decoding
   - long_context
 
 variants:
@@ -52,7 +70,7 @@ variants:
     precision: bf16
     vram_minimum_gb: 10
     description: "Full precision BF16 — fits on a single TPU v6e chip or one 16GB+ GPU or one Xeon 6 NUMA node"
-    supported_hardware: [trillium, xeon6]
+    supported_hardware: [trillium, xeon6, h100]
   fp8:
     model_id: "Qwen/Qwen3-4B-FP8"
     precision: fp8
@@ -173,4 +191,6 @@ guide: |
   ## References
 
   - [Model card](https://huggingface.co/Qwen/Qwen3-4B)
+  - [RedHatAI DFlash2 speculator](https://huggingface.co/RedHatAI/Qwen3-4B-speculator.dflash2)
+  - [RedHatAI DSpark speculator](https://huggingface.co/RedHatAI/Qwen3-4B-speculator.dspark)
   - [Qwen3 on Trillium (v6e)](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM/Qwen3)
