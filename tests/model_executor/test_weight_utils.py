@@ -466,5 +466,158 @@ def test_dummy_norm_weights_are_neutral(default_vllm_config):
             assert torch.all(param == values[name]), (type(norm).__name__, name)
 
 
+def test_np_cache_weights_iterator_rebuilds_on_update(tmp_path):
+    """Updating a .bin checkpoint must invalidate and rebuild npcache."""
+    import json
+    import time
+
+    from vllm.model_executor.model_loader.weight_utils import (
+        np_cache_weights_iterator,
+    )
+
+    bin_file = tmp_path / "pytorch_model.bin"
+    torch.save({"embed.weight": torch.ones(4)}, bin_file)
+
+    # First load builds the cache
+    weights1 = dict(
+        np_cache_weights_iterator(
+            str(tmp_path), None, str(tmp_path), [str(bin_file)], False
+        )
+    )
+    assert torch.equal(weights1["embed.weight"], torch.ones(4))
+
+    # Update the source checkpoint
+    time.sleep(1.1)  # ensure mtime delta > 1.0s
+    torch.save({"embed.weight": torch.ones(4) * 5.0}, bin_file)
+
+    # Second load must detect source change and rebuild, returning new tensor
+    weights2 = dict(
+        np_cache_weights_iterator(
+            str(tmp_path), None, str(tmp_path), [str(bin_file)], False
+        )
+    )
+    assert torch.equal(weights2["embed.weight"], torch.ones(4) * 5.0)
+
+    # Verify manifest exists and is updated
+    manifest_file = tmp_path / "np" / "weight_names.json"
+    cache_meta = json.loads(manifest_file.read_text())
+    assert isinstance(cache_meta, dict)
+    assert "source_manifest" in cache_meta
+    assert cache_meta["weight_names"] == ["embed.weight"]
+
+
+def test_np_cache_weights_iterator_legacy_format_upgrade(tmp_path):
+    """Legacy caches stored as plain list[str] are gracefully upgraded."""
+    import json
+
+    from vllm.model_executor.model_loader.weight_utils import (
+        np_cache_weights_iterator,
+    )
+
+    bin_file = tmp_path / "pytorch_model.bin"
+    torch.save({"embed.weight": torch.ones(4)}, bin_file)
+
+    np_folder = tmp_path / "np"
+    np_folder.mkdir()
+    (np_folder / "weight_names.json").write_text(json.dumps(["embed.weight"]))
+
+    weights = dict(
+        np_cache_weights_iterator(
+            str(tmp_path), None, str(tmp_path), [str(bin_file)], False
+        )
+    )
+    assert torch.equal(weights["embed.weight"], torch.ones(4))
+
+    cache_meta = json.loads((np_folder / "weight_names.json").read_text())
+    assert isinstance(cache_meta, dict)
+    assert "source_manifest" in cache_meta
+
+
+def test_np_cache_weights_iterator_subsecond_update(tmp_path):
+    """Sub-second mtime changes with identical size trigger cache rebuild."""
+    import os
+
+    from vllm.model_executor.model_loader.weight_utils import (
+        np_cache_weights_iterator,
+    )
+
+    bin_file = tmp_path / "pytorch_model.bin"
+    torch.save({"embed.weight": torch.ones(4)}, bin_file)
+    t = 1_790_000_000_000_000_000
+    os.utime(bin_file, ns=(t, t))
+
+    weights1 = dict(
+        np_cache_weights_iterator(
+            str(tmp_path), None, str(tmp_path), [str(bin_file)], False
+        )
+    )
+    assert torch.equal(weights1["embed.weight"], torch.ones(4))
+
+    # Same size, 0.5s subsecond change
+    torch.save({"embed.weight": torch.full((4,), 5.0)}, bin_file)
+    os.utime(bin_file, ns=(t + 500_000_000, t + 500_000_000))
+
+    weights2 = dict(
+        np_cache_weights_iterator(
+            str(tmp_path), None, str(tmp_path), [str(bin_file)], False
+        )
+    )
+    assert torch.equal(weights2["embed.weight"], torch.full((4,), 5.0))
+
+
+def test_np_cache_weights_iterator_concurrent_rebuild_isolation(tmp_path):
+    """A rebuild during an active iteration must not yield mixed weights to
+    in-flight readers."""
+    import time
+
+    from vllm.model_executor.model_loader.weight_utils import (
+        np_cache_weights_iterator,
+    )
+
+    bin_file = tmp_path / "pytorch_model.bin"
+    # Initial weights: weight_a=1.0, weight_b=1.0
+    torch.save(
+        {
+            "weight_a": torch.full((4,), 1.0),
+            "weight_b": torch.full((4,), 1.0),
+        },
+        bin_file,
+    )
+
+    # Reader 1 begins reading from V1
+    it1 = np_cache_weights_iterator(
+        str(tmp_path), None, str(tmp_path), [str(bin_file)], False
+    )
+    name1, val1 = next(it1)
+    assert name1 == "weight_a"
+    assert torch.equal(val1, torch.full((4,), 1.0))
+
+    # Mid-flight update: checkpoint is modified to V2 (weight_a=2.0, weight_b=2.0)
+    time.sleep(1.1)
+    torch.save(
+        {
+            "weight_a": torch.full((4,), 2.0),
+            "weight_b": torch.full((4,), 2.0),
+        },
+        bin_file,
+    )
+
+    # Reader 2 triggers rebuild and reads all weights from V2
+    weights2 = dict(
+        np_cache_weights_iterator(
+            str(tmp_path), None, str(tmp_path), [str(bin_file)], False
+        )
+    )
+    assert torch.equal(weights2["weight_a"], torch.full((4,), 2.0))
+    assert torch.equal(weights2["weight_b"], torch.full((4,), 2.0))
+
+    # Reader 1 resumes: must still see V1 (1.0), never V2 (2.0)
+    remaining1 = dict(it1)
+    assert "weight_b" in remaining1
+    assert torch.equal(
+        remaining1["weight_b"], torch.full((4,), 1.0)
+    ), "In-flight reader read mixed weights after concurrent rebuild!"
+
+
 if __name__ == "__main__":
     test_download_weights_from_hf()
