@@ -29,9 +29,10 @@ def _platform(monkeypatch, *, rocm=False, gfx950=True, fnuz=False):
         ),
     )
     rocm_module = ModuleType("vllm.platforms.rocm")
-    rocm_module.on_gfx950 = Mock(return_value=gfx950)
+    gfx_probe = Mock(return_value=gfx950)
+    monkeypatch.setattr(rocm_module, "on_gfx950", gfx_probe, raising=False)
     monkeypatch.setitem(sys.modules, "vllm.platforms.rocm", rocm_module)
-    return rocm_module.on_gfx950
+    return gfx_probe
 
 
 def _inputs(*, heads=64, head_dim=128):
@@ -145,8 +146,18 @@ def test_cuda_q_retains_triton_and_cutedsl_dispatch(
         unused_kernel if use_fp4 else triton_kernel,
     )
     cutedsl = ModuleType(CUTEDSL_MODULE)
-    cutedsl._INDEXER_Q_MXFP4_KERNEL = cutedsl_kernel if use_fp4 else unused_kernel
-    cutedsl._INDEXER_Q_FP8_KERNEL = unused_kernel if use_fp4 else cutedsl_kernel
+    monkeypatch.setattr(
+        cutedsl,
+        "_INDEXER_Q_MXFP4_KERNEL",
+        cutedsl_kernel if use_fp4 else unused_kernel,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        cutedsl,
+        "_INDEXER_Q_FP8_KERNEL",
+        unused_kernel if use_fp4 else cutedsl_kernel,
+        raising=False,
+    )
     monkeypatch.setitem(sys.modules, CUTEDSL_MODULE, cutedsl)
     inputs = _inputs(heads=heads)
 
