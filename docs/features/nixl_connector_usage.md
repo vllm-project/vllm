@@ -479,12 +479,37 @@ generated tokens matched decode-only output.
 | Same forced alignment, `UCX_CUDA_COPY_DMABUF=no` on both engines | 6/6 requests and all 36 layers matched. | A workaround on the reported stack, not a driver fix. |
 | CPU staging, or GPU buffers with UCX TCP | Short-prompt P/D output matched decode-only. | Separate diagnostic controls; performance can differ. |
 
-The [upstream follow-up](https://github.com/ai-dynamo/nixl/issues/2512#issuecomment-6467855165)
-did not reproduce corruption on B300/x86 with similar virtual-address
-alignment. Alignment alone is therefore not a general diagnostic rule. The
-underlying cause and the minimum hardware configuration needed to reproduce
-the failure remain unresolved; these reports do not establish which other
-hardware or software versions are affected.
+The reporter [identified the root cause](https://github.com/vllm-project/vllm/issues/64048#issuecomment-6506101537)
+in the RDMA core DMA block iterator, below vLLM, NIXL, and UCX. For contiguous
+DMA blocks of 4 GiB or more, 32-bit `block_offset` and `delta` values in
+`__rdma_block_iter_next()` can truncate, producing incorrect DMA addresses
+and a wrapping memory registration. The upstream Linux fix,
+[15fe76e23615](https://github.com/torvalds/linux/commit/15fe76e23615)
+("RDMA/umem: Fix truncation for block sizes >= 4G"), changes these values to
+`dma_addr_t` and is marked for stable backporting.
+
+The [B300/x86 follow-up](https://github.com/ai-dynamo/nixl/issues/2512#issuecomment-6467855165)
+did not reproduce corruption with similar virtual-address alignment. The
+DMA block size also depends on the DMA addresses in the exported scatterlist,
+so virtual-address alignment alone does not diagnose the failure. These
+reports do not establish all affected hardware or software versions.
+
+#### Upgrade the active RDMA stack
+
+The affected GH200 hosts ran Linux 6.8.0-136-generic with DOCA-OFED
+26.01-1.0.0 DKMS modules; their `ib_core` still contained the truncating
+implementation. Those modules replace the kernel-provided RDMA modules, so
+**upgrading the kernel alone may leave the bug in place**.
+
+Use an RDMA stack containing the upstream fix or an equivalent backport:
+a DOCA-OFED release that includes it, or a fixed kernel with its in-tree
+RDMA drivers. Confirm that the `ib_core` and RDMA drivers actually loaded on
+both hosts include the fix; the running kernel version alone is insufficient
+when external DKMS modules are installed. After upgrading, repeat the KV
+content comparisons before removing the workaround.
+
+Until the active RDMA stack is fixed, the reported workaround below remains
+an option, subject to its alternative-registration prerequisites.
 
 #### Test the reported workaround
 
@@ -525,7 +550,7 @@ registered addresses and lengths, affected layers/offsets, content comparison
 results, and protocol logs. Follow
 [NIXL #2512](https://github.com/ai-dynamo/nixl/issues/2512) for the investigation;
 the related [warning proposal](https://github.com/ai-dynamo/nixl/pull/2536)
-adds diagnostics rather than changing transfer behavior.
+proposes diagnostics; it does not fix the underlying RDMA stack.
 
 ## Experimental Feature
 
