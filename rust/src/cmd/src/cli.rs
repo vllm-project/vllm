@@ -589,6 +589,14 @@ pub struct SharedRuntimeArgs {
     #[serde(default, flatten)]
     pub ssl: SslArgs,
 
+    /// Path prefix for a server behind a path-based routing proxy.
+    ///
+    /// Every route is served both under this prefix and at its bare path:
+    /// with `/llm`, `/llm/v1/models` and `/v1/models` reach the same route.
+    #[arg(long)]
+    #[serde(default)]
+    pub root_path: Option<String>,
+
     /// Profiler configuration forwarded by the Python supervisor.
     ///
     /// When set with a non-null `profiler` type, the Rust frontend registers
@@ -779,6 +787,7 @@ impl SharedRuntimeArgs {
             api_server_options,
             cors,
             tls,
+            root_path: self.root_path.filter(|root_path| !root_path.is_empty()),
             api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
             custom_histogram_buckets: self.custom_histogram_buckets,
@@ -860,6 +869,7 @@ impl SharedRuntimeArgs {
             api_server_options,
             cors,
             tls,
+            root_path: self.root_path.filter(|root_path| !root_path.is_empty()),
             api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
             custom_histogram_buckets: self.custom_histogram_buckets,
