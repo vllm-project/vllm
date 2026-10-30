@@ -1,0 +1,154 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+syntax = "proto3";
+package vllm;
+
+import "google/protobuf/struct.proto";
+import "inference.proto";
+
+// Engine-free chat rendering, the gRPC counterpart of the HTTP render API.
+service Render {
+  // Renders a chat conversation into a token-in GenerateRequest that can be
+  // sent to Inference.Generate as is.
+  rpc Tokenize (TokenizeRequest) returns (TokenizeResponse) {}
+  // Parses the output token IDs of Inference.Generate into assistant content,
+  // reasoning and tool calls.
+  rpc Detokenize (DetokenizeRequest) returns (DetokenizeResponse) {}
+}
+
+// ======================================================================================
+// Tokenize
+// ======================================================================================
+
+message TokenizeRequest {
+  ChatRequest chat = 1;
+  // Generation parameters, copied into the returned GenerateRequest. The prompt
+  // must be unset; it is filled with the rendered prompt token IDs.
+  GenerateRequest generate = 2;
+}
+
+message TokenizeResponse {
+  // `generate` from the request with its prompt set to the rendered token IDs,
+  // prompt truncation already applied, and the parser-owned structured output,
+  // `skip_special_tokens` and reasoning gate filled in.
+  GenerateRequest generate_request = 1;
+}
+
+// ======================================================================================
+// Detokenize
+// ======================================================================================
+
+message DetokenizeRequest {
+  // The chat request passed to Tokenize, so that parsers resolve the same way.
+  ChatRequest chat = 1;
+  // The GenerateRequest returned by Tokenize. Supplies the prompt token IDs and
+  // the decoding options, such as stop strings and `skip_special_tokens`.
+  GenerateRequest generate_request = 2;
+  // All output token IDs from Inference.Generate, in order.
+  repeated uint32 token_ids = 3;
+  // Finish info from the final Inference.Generate response. Omitted means the
+  // output did not end with a stop token.
+  FinishInfo finish_info = 4;
+}
+
+message DetokenizeResponse {
+  // Final answer text, with reasoning and tool-call markup removed.
+  string content = 1;
+  // Reasoning text, when a reasoning parser is active.
+  string reasoning = 2;
+  repeated ChatToolCall tool_calls = 3;
+  // Number of output tokens attributed to reasoning.
+  uint32 num_reasoning_tokens = 4;
+}
+
+// ======================================================================================
+// Chat request
+// ======================================================================================
+
+message ChatRequest {
+  repeated ChatMessage messages = 1;
+  // Tools the model may call.
+  repeated ChatTool tools = 2;
+  // Omitted means "auto" when tools are present.
+  ChatToolChoice tool_choice = 3;
+  // Defaults to true when omitted.
+  optional bool parallel_tool_calls = 4;
+  // Omitted means true, unless `continue_final_message` is set.
+  optional bool add_generation_prompt = 5;
+  // Leave the final assistant message open so generation continues it.
+  bool continue_final_message = 6;
+  // Add tokenizer special tokens (e.g. BOS) on top of the chat template.
+  bool add_special_tokens = 7;
+  // Per-request Jinja chat template override.
+  optional string chat_template = 8;
+  // Additional keyword arguments passed to the chat template.
+  google.protobuf.Struct chat_template_kwargs = 9;
+  // Model-specific reasoning effort, such as "low" or "high".
+  optional string reasoning_effort = 10;
+}
+
+message ChatMessage {
+  // "system", "developer", "user", "assistant" or "tool". Other roles are
+  // passed to the chat template unchanged.
+  string role = 1;
+  oneof content {
+    string text = 2;
+    ChatContentParts parts = 3;
+  }
+  // Assistant only: reasoning content of a previous turn.
+  string reasoning = 4;
+  // Assistant only: tool calls of a previous turn.
+  repeated ChatToolCall tool_calls = 5;
+  // Tool only: ID of the tool call this message responds to.
+  string tool_call_id = 6;
+  // Developer only: message-scoped tools.
+  repeated ChatTool tools = 7;
+}
+
+message ChatContentParts {
+  repeated ChatContentPart parts = 1;
+}
+
+message ChatContentPart {
+  // TODO: support multimodal parts.
+  oneof part {
+    string text = 1;
+  }
+}
+
+message ChatTool {
+  // Function name.
+  string name = 1;
+  optional string description = 2;
+  // JSON schema of the function arguments, encoded as a JSON string so that
+  // the rendered prompt keeps the schema's key order.
+  string parameters_json = 3;
+  // Whether to enforce the schema on the generated arguments.
+  optional bool strict = 4;
+  // Whether the schema is loaded on demand via tool search.
+  optional bool defer_loading = 5;
+}
+
+message ChatToolCall {
+  string id = 1;
+  // Function name.
+  string name = 2;
+  // Function arguments as a JSON string.
+  string arguments = 3;
+}
+
+message ChatToolChoice {
+  enum Mode {
+    MODE_UNSPECIFIED = 0;  // Same as AUTO
+    MODE_AUTO = 1;
+    MODE_NONE = 2;
+    MODE_REQUIRED = 3;
+  }
+
+  oneof choice {
+    Mode mode = 1;
+    // Force a call to the named function.
+    string function_name = 2;
+  }
+}

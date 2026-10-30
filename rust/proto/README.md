@@ -12,15 +12,16 @@ the schemas on pull requests, including on forks.
 
 ## Rust crate
 
-`vllm-proto` exposes the Prost message types and Tonic client and server modules for both APIs:
+`vllm-proto` exposes the Prost message types and Tonic client and server modules for all APIs:
 
 ```toml
 [dependencies]
 vllm-proto = "0.6"
 ```
 
-For example, import `vllm_proto::inference_client::InferenceClient` or
-`vllm_proto::control_client::ControlClient`. The vLLM frontend uses this same crate.
+For example, import `vllm_proto::inference_client::InferenceClient`,
+`vllm_proto::control_client::ControlClient`, or
+`vllm_proto::render_client::RenderClient`. The vLLM frontend uses this same crate.
 The package includes the canonical `.proto` files and generates bindings during
 compilation using `protox` and `tonic-prost-build`. Consumers do not need Buf
 credentials, the vLLM checkout, or a separately installed `protoc`.

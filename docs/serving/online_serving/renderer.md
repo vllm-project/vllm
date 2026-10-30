@@ -26,6 +26,24 @@ vllm serve <model> --enable-scale-out
 - [Responses Render API](renderer.md) (`/v1/responses/render`)
     - Render a self-contained Responses request
 
+## gRPC Render Service
+
+The Rust frontend also serves a `vllm.Render` gRPC service, defined in
+[`rust/proto/render.proto`](../../../rust/proto/render.proto). Enable it with
+`--grpc-port` on `vllm-rs render`, or on `vllm serve` with
+`VLLM_USE_RUST_FRONTEND=1`, where it runs next to `vllm.Inference` and
+`vllm.Control`.
+
+- `Render.Tokenize` renders a chat request into a token-in
+  `vllm.GenerateRequest` that can be sent to `Inference.Generate` as is. It
+  copies the generation parameters from the caller's `GenerateRequest` and
+  fills in the prompt token IDs and any tool-call grammar.
+- `Render.Detokenize` takes the same chat request, the `GenerateRequest` from
+  `Tokenize`, and the output token IDs of `Inference.Generate`. It returns the
+  answer text, reasoning, and parsed tool calls.
+
+Both RPCs are unary and accept text content only.
+
 ## Get Responses prompt token IDs
 
 Use `/v1/responses/render` to get prompt token IDs before choosing a model

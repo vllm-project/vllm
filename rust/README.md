@@ -43,8 +43,8 @@ For example:
 VLLM_USE_RUST_FRONTEND=1 vllm serve Qwen/Qwen3-0.6B
 ```
 
-To also expose the Rust frontend's gRPC inference and control services, add
-`--grpc-port`. The HTTP listener remains on `--port`:
+To also expose the Rust frontend's gRPC inference, control, and render services,
+add `--grpc-port`. The HTTP listener remains on `--port`:
 
 ```bash
 VLLM_USE_RUST_FRONTEND=1 vllm serve Qwen/Qwen3-0.6B \
@@ -61,7 +61,7 @@ frontend process and cannot be combined with `--headless` or
 
 The separate `vllm serve MODEL --grpc --port 50051` command launches the Python
 SMG `VllmEngine` gRPC server in place of HTTP. The Rust listener exposes the
-`vllm.Inference` and `vllm.Control` services alongside HTTP. These are different
+`vllm.Inference`, `vllm.Control`, and `vllm.Render` services alongside HTTP. These are different
 gRPC APIs; `--grpc` and `--grpc-port` are mutually exclusive.
 
 ### RL weight synchronization
@@ -163,6 +163,13 @@ curl http://127.0.0.1:8000/v1/chat/completions/render \
     "max_completion_tokens": 16
   }'
 ```
+
+Pass `--grpc-port` to also serve the `vllm.Render` gRPC service on `--host`.
+`Render.Tokenize` renders a chat request into a token-in `vllm.GenerateRequest`
+for `Inference.Generate`. `Render.Detokenize` takes the output token IDs and
+returns the answer text, reasoning, and parsed tool calls. Both RPCs read
+generation parameters from a caller-supplied `GenerateRequest`; see
+[`render.proto`](proto/render.proto).
 
 ### Example Request
 

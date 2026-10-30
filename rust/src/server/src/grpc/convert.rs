@@ -484,7 +484,7 @@ fn positions_to_proto(
 /// expecting ints (e.g. `image_grid_thw`) don't see `16.0`.
 const MAX_SAFE_INTEGER_F64: f64 = ((1u64 << 53) - 1) as f64;
 
-fn proto_struct_to_json(s: &prost_types::Struct) -> serde_json::Value {
+pub(super) fn proto_struct_to_json(s: &prost_types::Struct) -> serde_json::Value {
     serde_json::Value::Object(
         s.fields.iter().map(|(k, v)| (k.clone(), proto_value_to_json(v))).collect(),
     )
