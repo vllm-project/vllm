@@ -1374,13 +1374,13 @@ class MooncakeConnectorWorker:
         logger.info(
             "The Mooncake Transfer Engine is using %s as its protocol.", protocol
         )
-        self.transfer: TransferBackend = ClassicTransferBackend(
+        self.transfer_backend: TransferBackend = ClassicTransferBackend(
             engine_cls=TransferEngine,
             hostname=self.hostname,
             protocol=protocol,
             device_name=device_name,
         )
-        self.rpc_port = self.transfer.rpc_port
+        self.rpc_port = self.transfer_backend.rpc_port
 
         logger.debug(
             "Mooncake Transfer Engine initialized at %s:%d",
@@ -1570,8 +1570,8 @@ class MooncakeConnectorWorker:
         if not self.is_kv_producer and self.receiver_loop.is_running():
             self.receiver_loop.call_soon_threadsafe(self.receiver_loop.stop)
             self._mooncake_receiver_t.join()
-        if hasattr(self, "transfer"):
-            self.transfer.shutdown()
+        if hasattr(self, "transfer_backend"):
+            self.transfer_backend.shutdown()
 
     async def register_worker_with_bootstrap(self):
         host, port = get_mooncake_bootstrap_addr(self.vllm_config)
@@ -2221,9 +2221,15 @@ class MooncakeConnectorWorker:
             for src, dst, length in zip(src_ptrs, dst_ptrs, lengths, strict=True)
         ]
         start_time = time.perf_counter()
-        events = self.transfer.transfer(remote_session, TransferOp.WRITE, ranges)
+        events = self.transfer_backend.transfer(
+            remote_session, TransferOp.WRITE, ranges
+        )
         duration = time.perf_counter() - start_time
-        assert len(events) == len(ranges), "a backend must answer every range"
+        if len(events) != len(ranges):
+            raise RuntimeError(
+                f"The transfer backend returned {len(events)} events for "
+                f"{len(ranges)} ranges."
+            )
         failed_event = next(
             (event for event in events if event.state is TransferState.FAILED), None
         )
@@ -2458,7 +2464,9 @@ class MooncakeConnectorWorker:
                 collapsed_views,
             )
 
-        self.transfer.register_regions(self._memory_regions(kv_data_ptrs, kv_data_lens))
+        self.transfer_backend.register_regions(
+            self._memory_regions(kv_data_ptrs, kv_data_lens)
+        )
 
         self.device_kv_caches = kv_caches
         logger.debug(
@@ -2498,7 +2506,7 @@ class MooncakeConnectorWorker:
     def unregister_kv_caches(self) -> None:
         if self._kv_unregistered or not self.seen_base_addresses:
             return
-        self.transfer.unregister_regions(
+        self.transfer_backend.unregister_regions(
             self._memory_regions(self.seen_base_addresses, self._kv_data_lens)
         )
         self._kv_unregistered = True
@@ -2506,7 +2514,7 @@ class MooncakeConnectorWorker:
     def restore_kv_caches(self) -> None:
         if not self._kv_unregistered:
             return
-        self.transfer.register_regions(
+        self.transfer_backend.register_regions(
             self._memory_regions(self.seen_base_addresses, self._kv_data_lens)
         )
         self._kv_unregistered = False

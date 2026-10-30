@@ -250,7 +250,7 @@ def _bare_worker() -> MooncakeConnectorWorker:
     path a no-op."""
     worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
     worker.xfer_stats = MooncakeKVConnectorStats()
-    worker.transfer = _RecordingBackend()
+    worker.transfer_backend = _RecordingBackend()
     worker.async_zmq_ctx = MagicMock()
     worker.is_kv_consumer = True
     worker.is_kv_producer = True
@@ -261,7 +261,7 @@ def _bare_worker() -> MooncakeConnectorWorker:
 
 def test_send_blocks_records_success():
     worker = _bare_worker()
-    worker.transfer.events = [
+    worker.transfer_backend.events = [
         TransferEvent(state=TransferState.COMPLETED),
         TransferEvent(state=TransferState.COMPLETED),
     ]
@@ -283,7 +283,7 @@ def test_send_blocks_records_success():
 
 def test_send_blocks_records_failure():
     worker = _bare_worker()
-    worker.transfer.events = [
+    worker.transfer_backend.events = [
         TransferEvent(
             state=TransferState.FAILED,
             error="Mooncake transfer engine returned 1",
@@ -299,14 +299,14 @@ def test_send_blocks_records_failure():
 
 def test_send_blocks_submits_one_range_per_descriptor():
     worker = _bare_worker()
-    worker.transfer.events = [
+    worker.transfer_backend.events = [
         TransferEvent(state=TransferState.COMPLETED),
         TransferEvent(state=TransferState.COMPLETED),
     ]
 
     worker._send_blocks("host:1234", [0x1000, 0x2000], [0x3000, 0x4000], [8, 16])
 
-    _, op, ranges = worker.transfer.calls[0]
+    _, op, ranges = worker.transfer_backend.calls[0]
     assert op is TransferOp.WRITE
     assert [
         (request.local_addr, request.remote_addr, request.length) for request in ranges
@@ -324,7 +324,7 @@ def test_get_kv_connector_stats_returns_none_when_empty():
 
 def test_get_kv_connector_stats_returns_and_resets():
     worker = _bare_worker()
-    worker.transfer.events = [TransferEvent(state=TransferState.COMPLETED)]
+    worker.transfer_backend.events = [TransferEvent(state=TransferState.COMPLETED)]
     worker._send_blocks("host:1234", [0x1000], [0x2000], [4096])
 
     snapshot = worker.get_kv_connector_stats()
