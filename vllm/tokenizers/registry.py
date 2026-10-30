@@ -271,14 +271,13 @@ def get_tokenizer(
         tokenizer_cls_ = TokenizersBackend
 
     if config is not None and tokenizer_cls_ is CachedHfTokenizer:
+        if not envs.VLLM_USE_MODELSCOPE and str(tokenizer_name) != requested_name:
+            # AutoTokenizer selects some tokenizer classes by Hub ID
+            config = copy(config)
+            config._name_or_path = requested_name
         # AutoTokenizer otherwise reloads config.json internally. Reuse the
         # config that get_config just loaded successfully so a concurrent Hub
         # cache refresh cannot invalidate the file between the two reads.
-        if not envs.VLLM_USE_MODELSCOPE and str(tokenizer_name) != requested_name:
-            # Preserve the Hub identity for AutoTokenizer's model-specific
-            # routing while loading tokenizer files from the local snapshot.
-            config = copy(config)
-            config._name_or_path = requested_name
         kwargs.setdefault("config", config)
 
     tokenizer = tokenizer_cls_.from_pretrained(tokenizer_name, *args, **kwargs)
