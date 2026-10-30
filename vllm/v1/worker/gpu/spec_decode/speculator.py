@@ -44,6 +44,7 @@ from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 from vllm.v1.worker.utils import AttentionGroup
 
 if TYPE_CHECKING:
+    from vllm.v1.core.sched.output import NewRequestData
     from vllm.v1.worker.gpu.pcp_manager import PCPManager
     from vllm.v1.worker.gpu.sample.sampler import Sampler
 
@@ -106,6 +107,19 @@ class BaseSpeculator(ABC):
         num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
         pass
+
+    def add_request(  # noqa: B027
+        self, req_index: int, new_req_data: "NewRequestData"
+    ) -> None:
+        """Called when a request enters the runner, including resumes after
+        preemption."""
+
+    def remove_request(self, req_id: str) -> None:  # noqa: B027
+        """Called when a request finishes, is aborted, or is preempted, before
+        its slot in the request states is freed."""
+
+    def shutdown(self) -> None:  # noqa: B027
+        """Called when the model runner shuts down."""
 
 
 class DraftModelSpeculator(BaseSpeculator):
