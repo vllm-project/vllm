@@ -140,12 +140,28 @@ def _lay_out_hisparse_groups(
     )
     assert config is not None
     indexer_page_bytes = sum(spec.page_size_bytes for spec in indexer_specs.values())
-    hot_group_page_limit = max(
-        [
-            indexer_page_bytes,
-            *(_group_page_bytes(group) for group in regular_groups),
-        ]
+    pages_per_block = max(
+        max(map(_group_page_bytes, regular_groups), default=0) // indexer_page_bytes,
+        1,
     )
+    indexer_group_spec = UniformTypeKVCacheSpecs.from_specs(
+        {
+            name: replace(
+                spec.copy_with_new_block_size(spec.block_size * pages_per_block),
+                block_stride_alignment=_INDEXER_BLOCK_STRIDE_ALIGNMENT,
+            )
+            for name, spec in indexer_specs.items()
+        }
+    )
+    assert indexer_group_spec is not None
+    indexer_group = KVCacheGroupSpec(
+        list(indexer_specs),
+        indexer_group_spec,
+        enable_kv_transfer=True,
+        role=KVCacheGroupRole.HISPARSE_INDEXER,
+    )
+
+    hot_group_page_limit = max(map(_group_page_bytes, [indexer_group, *regular_groups]))
     hot_blocks_per_request = cdiv(config.device_buffer_size, gpu_block_size)
     hot_units: list[list[tuple[str, MLAAttentionSpec]]] = []
     for layer_name, layer_spec in source_specs.items():
@@ -202,27 +218,6 @@ def _lay_out_hisparse_groups(
         current_page += unit_page
     if current:
         append_hot_group(current)
-
-    pages_per_block = max(
-        max(map(_group_page_bytes, regular_groups), default=0) // indexer_page_bytes,
-        1,
-    )
-    indexer_group_spec = UniformTypeKVCacheSpecs.from_specs(
-        {
-            name: replace(
-                spec.copy_with_new_block_size(spec.block_size * pages_per_block),
-                block_stride_alignment=_INDEXER_BLOCK_STRIDE_ALIGNMENT,
-            )
-            for name, spec in indexer_specs.items()
-        }
-    )
-    assert indexer_group_spec is not None
-    indexer_group = KVCacheGroupSpec(
-        list(indexer_specs),
-        indexer_group_spec,
-        enable_kv_transfer=True,
-        role=KVCacheGroupRole.HISPARSE_INDEXER,
-    )
 
     source_group_spec = UniformTypeKVCacheSpecs.from_specs(
         cast(dict[str, KVCacheSpec], source_specs)

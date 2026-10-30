@@ -405,12 +405,21 @@ class AttentionGroup:
         # Token and pooled caches are written through manager-block slot
         # mappings, so only compressed caches (written from their block table)
         # can be mapped.
+        # Blocks that are not whole pages apart need a spec declaring the byte
+        # block stride its kernels accept.
         page_size = kernel_rows * kv_cache.stride(-2)
         page_stride = math.gcd(kv_cache.stride(0), page_size)
+        stride_alignment = spec.block_stride_alignment
         if (
             spec.tokens_per_state <= 1
             or kv_cache.shape[1] != 1
-            or page_stride * kv_cache.element_size() % 16
+            or (
+                page_stride != page_size
+                and (
+                    not isinstance(stride_alignment, int)
+                    or page_stride * kv_cache.element_size() % stride_alignment
+                )
+            )
         ):
             raise ValueError(
                 f"{self.backend.get_name()} needs {self.kernel_block_size}-token "
