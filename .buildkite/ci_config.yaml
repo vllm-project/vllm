@@ -1,4 +1,7 @@
 name: vllm_ci
+# Shard every eligible step from main's timings. A step opts out with
+# `automatic_shard: false`; an AMD mirror follows its step unless it says otherwise.
+automatic_shard_default: true
 job_dirs:
   - ".buildkite/image_build"
   - ".buildkite/test_areas"

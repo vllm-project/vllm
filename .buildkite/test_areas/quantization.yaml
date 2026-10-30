@@ -6,7 +6,6 @@ steps:
 # - label: ":nvidia: (H200 MIG 35GB) Quantization"
 #   device: h200_35gb
 #   key: quantization
-#   automatic_shard: true
 #   timeout_in_minutes: 40
 #   source_file_dependencies:
 #   - csrc/
@@ -27,7 +26,6 @@ steps:
 #   mirror:
 #     amd:
 #       label: ":amd: (MI300) Quantization"
-#       automatic_shard: true
 #       dind: false
 #       device: mi300_1
 #       timeout_in_minutes: 115
@@ -84,7 +82,6 @@ steps:
 
 - label: ":nvidia: (B200) Quantized MoE"
   key: quantized-moe-test-b200
-  automatic_shard: true
   timeout_in_minutes: 120
   working_dir: "/vllm-workspace/"
   device: b200-k8s
@@ -138,7 +135,6 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Quantized Models"
   device: h200_35gb
   key: quantized-models-test
-  automatic_shard: true
   timeout_in_minutes: 65
   source_file_dependencies:
   - vllm/model_executor/layers/quantization
@@ -149,7 +145,6 @@ steps:
     amd:
       label: ":amd: (MI355 DPX) Quantized Models"
       dind: false
-      automatic_shard: true
       device: mi355_dpx
       timeout_in_minutes: 80
       working_dir: "/vllm-workspace/tests"
