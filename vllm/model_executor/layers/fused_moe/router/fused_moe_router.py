@@ -34,6 +34,23 @@ class FusedMoERouter(ABC):
     def routing_method_type(self) -> RoutingMethodType:
         raise NotImplementedError
 
+    @property
+    def kernel_routing_method_type(self) -> RoutingMethodType:
+        """Routing method executed by kernels, before any router override."""
+        return self.routing_method_type
+
+    @property
+    def supports_monolithic_kernels(self) -> bool:
+        return True
+
+    def prepare_monolithic_logits(self, router_logits: torch.Tensor) -> torch.Tensor:
+        return router_logits
+
+    def prepare_monolithic_bias(
+        self, e_score_correction_bias: torch.Tensor | None
+    ) -> torch.Tensor | None:
+        return e_score_correction_bias
+
     @abstractmethod
     def _select_experts(
         self,

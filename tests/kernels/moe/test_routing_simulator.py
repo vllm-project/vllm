@@ -9,6 +9,8 @@ integration tests with FusedMoEFactory layer.
 """
 
 import tempfile
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -18,9 +20,14 @@ from vllm.distributed import (
     init_distributed_environment,
     initialize_model_parallel,
 )
+from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+from vllm.model_executor.layers.fused_moe.router.router_factory import (
+    create_fused_moe_router,
+)
 from vllm.model_executor.layers.fused_moe.router.routing_simulator_router import (
     DistributionBasedRouting,
     RoutingSimulator,
+    RoutingSimulatorRouter,
 )
 
 
@@ -110,16 +117,6 @@ def test_routing_strategy_integration(monkeypatch, device):
         )
 
         for strategy in strategies:
-            fused_moe = FusedMoEFactory(
-                num_experts=num_experts,
-                top_k=top_k,
-                hidden_size=hidden_size,
-                intermediate_size=0,
-                use_grouped_topk=False,
-                renormalize=True,
-                prefix=strategy,
-            )
-
             # Set environment variable
             env_name = "VLLM_MOE_ROUTING_SIMULATION_STRATEGY"
             monkeypatch.setenv(env_name, strategy)
@@ -132,6 +129,24 @@ def test_routing_strategy_integration(monkeypatch, device):
                 envs.environment_variables,
                 env_name,
                 lambda s=strategy: s,
+            )
+
+            fused_moe = FusedMoEFactory(
+                num_experts=num_experts,
+                top_k=top_k,
+                hidden_size=hidden_size,
+                intermediate_size=0,
+                use_grouped_topk=False,
+                renormalize=True,
+                prefix=strategy,
+            )
+
+            assert (
+                fused_moe.moe_config.routing_method
+                == RoutingMethodType.RenormalizeNaive
+            )
+            assert fused_moe.moe_config.require_decomposed_backend == (
+                not RoutingSimulator.get_strategy(strategy).supports_monolithic_logits
             )
 
             # Test the select_experts method
@@ -153,6 +168,36 @@ def test_routing_strategy_integration(monkeypatch, device):
             assert topk_ids.max() < num_experts, (
                 f"Invalid expert ID (too large) for {strategy}"
             )
+
+
+def test_simulated_bias_is_nonpersistent_buffer(monkeypatch, dist_init):
+    import vllm.envs as envs
+    from vllm.model_executor.layers.fused_moe.layer import FusedMoEFactory
+
+    monkeypatch.setitem(
+        envs.environment_variables,
+        "VLLM_MOE_ROUTING_SIMULATION_STRATEGY",
+        lambda: "uniform_random",
+    )
+    bias = torch.nn.Parameter(torch.ones(4))
+    with set_current_vllm_config(VllmConfig()):
+        moe = FusedMoEFactory(
+            num_experts=4,
+            top_k=2,
+            hidden_size=128,
+            intermediate_size=128,
+            renormalize=True,
+            scoring_func="sigmoid",
+            e_score_correction_bias=bias,
+            prefix="bias_registration",
+        )
+
+    experts = moe.routed_experts
+    name = "e_score_correction_bias"
+    assert dict(experts.named_buffers())[name] is experts.e_score_correction_bias
+    assert name not in experts.state_dict()
+    assert torch.count_nonzero(experts.e_score_correction_bias) == 0
+    assert torch.all(bias == 1)
 
 
 def test_distribution_based_routing_with_custom_strategy():
@@ -207,3 +252,70 @@ def test_instance_compatibility():
 
     assert topk_weights.shape == (10, 2)
     assert topk_ids.shape == (10, 2)
+
+
+@pytest.mark.parametrize(
+    "groups,has_bias,expected_method",
+    [
+        (4, True, RoutingMethodType.DeepSeekV3),
+        (None, True, RoutingMethodType.MiniMax2),
+        (None, False, RoutingMethodType.Default),
+    ],
+)
+def test_simulation_preserves_model_routing_method(
+    monkeypatch, groups, has_bias, expected_method
+):
+    """Biased and non-renormalized models keep their kernel routing semantics."""
+    import vllm.envs as envs
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
+    monkeypatch.setitem(
+        envs.environment_variables,
+        "VLLM_MOE_ROUTING_SIMULATION_STRATEGY",
+        lambda: "uniform_random",
+    )
+    bias = torch.ones(32) if has_bias else None
+    router = create_fused_moe_router(
+        top_k=2,
+        global_num_experts=32,
+        use_grouped_topk=groups is not None,
+        num_expert_group=groups,
+        topk_group=1 if groups is not None else None,
+        scoring_func="sigmoid" if has_bias else "softmax",
+        renormalize=has_bias,
+        e_score_correction_bias=bias,
+    )
+    assert router.routing_method_type == RoutingMethodType.Simulated
+    assert router.kernel_routing_method_type == expected_method
+
+
+def test_runner_prepares_monolithic_logits(monkeypatch, device):
+    """The shared runner must replace planted logits before calling any backend."""
+    import vllm.envs as envs
+    from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
+
+    monkeypatch.setitem(
+        envs.environment_variables,
+        "VLLM_MOE_ROUTING_SIMULATION_STRATEGY",
+        lambda: "uniform_random",
+    )
+    router = RoutingSimulatorRouter(2, 32, RoutingMethodType.RenormalizeNaive)
+    experts = SimpleNamespace(
+        quant_method=SimpleNamespace(is_monolithic=True), forward_monolithic=Mock()
+    )
+    runner = SimpleNamespace(
+        router=router,
+        routed_experts=experts,
+        _maybe_apply_shared_experts=Mock(),
+        _shared_experts=None,
+    )
+    logits = torch.full((16, 32), 7.0, device=device)
+    hidden = torch.zeros((16, 64), device=device)
+    MoERunner._apply_quant_method(runner, hidden, logits, None)
+    passed = experts.forward_monolithic.call_args.kwargs["router_logits"]
+    assert passed.shape == logits.shape
+    assert passed.dtype == logits.dtype
+    assert passed.device == logits.device
+    assert torch.all((passed >= -1) & (passed <= 0))
+    assert torch.all(logits == 7)

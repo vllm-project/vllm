@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import assert_never, cast
 
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 
+from vllm.entrypoints.serve.utils.api_utils import create_json_response
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
@@ -18,7 +19,6 @@ from ..utils import (
     BytesEncodingFormat,
     JsonEncodingFormat,
     build_pooling_bytes_streaming_response,
-    get_json_response_cls,
     get_pooling_output_encoder,
     get_pooling_usage,
 )
@@ -51,7 +51,6 @@ class ServingPooling(PoolingBaseServing):
             renderer=self.renderer,
             chat_template_config=self.chat_template_config,
         )
-        self.json_response_cls = get_json_response_cls()
 
     def get_io_processor(self, request: AnyPoolingRequest) -> PoolingIOProcessor:
         request = cast(PoolingRequest, request)
@@ -105,7 +104,7 @@ class ServingPooling(PoolingBaseServing):
     ) -> Response:
         if ctx.response is not None:
             # for IOProcessorResponse
-            return self.json_response_cls(content=ctx.response.model_dump())
+            return create_json_response(ctx.response)
 
         encoding_format = ctx.request.encoding_format
         embed_dtype = ctx.request.embed_dtype
@@ -144,7 +143,7 @@ class ServingPooling(PoolingBaseServing):
         encoding_format: JsonEncodingFormat,
         embed_dtype: EmbedDType,
         endianness: Endianness,
-    ) -> JSONResponse:
+    ) -> Response:
         encode_fn = get_pooling_output_encoder(
             encoding_format=encoding_format,
             embed_dtype=embed_dtype,
@@ -168,7 +167,7 @@ class ServingPooling(PoolingBaseServing):
             data=items,
             usage=get_pooling_usage(final_res_batch),
         )
-        return self.json_response_cls(content=response.model_dump())
+        return create_json_response(response)
 
     def request_output_to_pooling_bytes_response(
         self,

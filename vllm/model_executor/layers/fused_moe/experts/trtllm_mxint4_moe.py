@@ -92,7 +92,6 @@ class TrtLlmMxint4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             RoutingMethodType.RenormalizeNaive,
             RoutingMethodType.DeepSeekV3,
             RoutingMethodType.Llama4,
-            RoutingMethodType.Simulated,
         ]
 
     @staticmethod
@@ -102,11 +101,7 @@ class TrtLlmMxint4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
     ) -> bool:
         if router_logits_dtype == torch.float32:
             # DeepSeekV3 routing handles float32 logits internally.
-            # Simulated routing generates synthetic decisions.
-            return routing_method in (
-                RoutingMethodType.DeepSeekV3,
-                RoutingMethodType.Simulated,
-            )
+            return routing_method == RoutingMethodType.DeepSeekV3
         return True
 
     @staticmethod

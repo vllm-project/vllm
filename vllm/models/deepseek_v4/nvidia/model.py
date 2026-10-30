@@ -21,6 +21,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.kernels.mhc.tilelang import (
     hc_head_fused_kernel_tilelang,
     mhc_fused_post_pre_tilelang,
+    mhc_fused_post_pre_tilelang_reuse_residual,
     mhc_post_tilelang,
     mhc_pre_broadcast_tilelang,
     mhc_pre_tilelang,
@@ -76,6 +77,7 @@ from vllm.models.common.ops.sequence_parallel import (
 )
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.common.eplb_util import collect_moe_layers
+from vllm.models.deepseek_v4.common.spec_decode import needs_mtp_hidden_buffer
 from vllm.models.deepseek_v4.nvidia.flashinfer_sparse import (
     DeepseekV4FlashInferMLAAttention,
     DeepseekV4FlashInferSM120Attention,
@@ -720,7 +722,16 @@ class DeepseekV4DecoderLayer(nn.Module):
         res_mix: torch.Tensor | None = None,
         residual: torch.Tensor | None = None,
         mega_gate_metadata: MegaGateRoutingMetadata | None = None,
+        reuse_residual: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """With ``reuse_residual``, the caller hands ``residual`` over and the
+        unfused mHC post/pre writes the next residual into its storage. A first
+        layer that starts from ``residual = x`` never overwrites ``x``."""
+        fused_post_pre = (
+            mhc_fused_post_pre_tilelang_reuse_residual
+            if reuse_residual
+            else mhc_fused_post_pre_tilelang
+        )
         attn_norm_weight = self.attn_norm.weight.data
         attn_norm_eps = self.attn_norm.variance_epsilon
         if residual is None:
@@ -743,6 +754,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                 )
             else:
                 residual = x
+                fused_post_pre = mhc_fused_post_pre_tilelang
                 post_mix, res_mix, x = mhc_pre_tilelang(
                     x,
                     self.hc_attn_fn,
@@ -757,7 +769,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                     norm_eps=attn_norm_eps,
                 )
         else:
-            residual, post_mix, res_mix, x = mhc_fused_post_pre_tilelang(
+            residual, post_mix, res_mix, x = fused_post_pre(
                 x,
                 residual,
                 post_mix,
@@ -785,7 +797,7 @@ class DeepseekV4DecoderLayer(nn.Module):
 
         ffn_norm_weight = self.ffn_norm.weight.data
         ffn_norm_eps = self.ffn_norm.variance_epsilon
-        residual, post_mix, res_mix, x = mhc_fused_post_pre_tilelang(
+        residual, post_mix, res_mix, x = fused_post_pre(
             x,
             residual,
             post_mix,
@@ -900,10 +912,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             requires_grad=False,
         )
         spec_config = vllm_config.speculative_config
-        needs_mtp_hidden_states = spec_config is not None and (
-            spec_config.use_eagle() or spec_config.uses_draft_model()
-        )
-        if get_pp_group().is_last_rank and needs_mtp_hidden_states:
+        if get_pp_group().is_last_rank and needs_mtp_hidden_buffer(spec_config):
             self._mtp_hidden_buffer = torch.empty(
                 vllm_config.scheduler_config.max_num_batched_tokens,
                 self.hc_dim,
@@ -1002,6 +1011,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 res_mix,
                 residual,
                 mega_gate_metadata=mega_gate_metadata,
+                reuse_residual=True,
             )
             if idx + 1 in self.aux_hidden_state_layers:
                 # Reconstruct the aux hidden state for draft models
@@ -1204,6 +1214,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             ckpt_down_proj_name="w2",
             ckpt_up_proj_name="w3",
             num_experts=self.config.n_routed_experts,
+            num_redundant_experts=first_layer.ffn.n_redundant_experts,
         )
 
     def finalize_mhc_broadcast_weights(self) -> None:

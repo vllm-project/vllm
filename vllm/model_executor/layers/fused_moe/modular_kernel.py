@@ -491,6 +491,10 @@ class FusedMoEExperts(ABC):
     # the active experts kernel.
     consumes_expert_mask: bool = False
 
+    # Called with the unweighted GEMM2 rows and the output to weight and reduce
+    # into, replacing the experts' own top-k reduction.
+    post_gemm2_hook: Callable[[UnfinalizedMoEOutput, torch.Tensor], None] | None = None
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -526,6 +530,24 @@ class FusedMoEExperts(ABC):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:  # noqa: B027
         pass
+
+    def _uses_post_gemm2_hook(self, num_tokens: int) -> bool:
+        return self.post_gemm2_hook is not None and num_tokens > 0
+
+    def _run_post_gemm2_hook(
+        self,
+        unfinalized: torch.Tensor | UnfinalizedMoEOutput,
+        output: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        assert self.post_gemm2_hook is not None
+        assert isinstance(unfinalized, UnfinalizedMoEOutput)
+        if output is None:
+            rows = unfinalized.gemm2_permuted
+            output = rows.new_empty(
+                (unfinalized.expanded_idx_to_permuted_idx.shape[0], rows.shape[1])
+            )
+        self.post_gemm2_hook(unfinalized, output)
+        return output
 
     @staticmethod
     def is_monolithic() -> bool:
@@ -842,6 +864,11 @@ class FusedMoEExpertsModular(FusedMoEExperts):
     def workspace_dtype(self, act_dtype: torch.dtype) -> torch.dtype:
         """Workspace type: The dtype to use for the workspace tensors."""
         return act_dtype
+
+    def output_hidden_dim(self, hidden_dim: int) -> int:
+        """Hidden size of the finalized output. Experts that drop the hidden
+        padding return the unpadded size."""
+        return hidden_dim
 
     @abstractmethod
     def workspace_shapes(
@@ -1321,7 +1348,8 @@ class FusedMoEKernelModularImpl:
         # low-latency kernels are always batched and can never run into
         # the tensor.numel() == 0 case.
         if M_full == 0:
-            return torch.empty_like(a1q, dtype=in_dtype)
+            out_dim = self.fused_experts.output_hidden_dim(a1q.size(-1))
+            return a1q.new_empty((*a1q.shape[:-1], out_dim), dtype=in_dtype)
 
         workspace13, workspace2, fused_out, fused_out_is_specialized = (
             self._allocate_buffers(
@@ -1505,7 +1533,12 @@ class FusedMoEKernelModularImpl:
             a fused consumer.
 
         """
-        output = torch.empty_like(hidden_states)
+        output = hidden_states.new_empty(
+            (
+                *hidden_states.shape[:-1],
+                self.fused_experts.output_hidden_dim(hidden_states.size(-1)),
+            )
+        )
 
         local_num_experts = w1.shape[0]
         if global_num_experts == -1:
@@ -1627,11 +1660,6 @@ class FusedMoEKernelMonolithicImpl:
                     f"kernel {type(self.fused_experts).__name__}."
                 )
             routing_replay_out = routing_sink.buffer[: len(a1q)]
-        hash_kwargs = (
-            {"input_ids": input_ids, "hash_indices_table": hash_indices_table}
-            if hash_indices_table is not None
-            else {}
-        )
         fused_out = self.fused_experts.apply(
             hidden_states=a1q,
             w1=w1,
