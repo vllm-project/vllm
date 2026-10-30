@@ -105,7 +105,7 @@ def _get_speculative_compatibility_factors(
 ) -> dict[str, Any] | None:
     """Return NIXL compatibility factors for hidden-state-based speculators."""
     speculative_config = vllm_config.speculative_config
-    if speculative_config is None or not speculative_config.use_eagle():
+    if speculative_config is None or not speculative_config.uses_target_hidden_states:
         return None
 
     draft_model_config = speculative_config.draft_model_config

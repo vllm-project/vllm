@@ -10,12 +10,12 @@ use vllm_metrics::{
     Family, HistogramMetric, KvFetchStageLabels, LoraAdapterNames, LoraInfoLabels,
     MooncakeOperationCounterFamily, MooncakeOperationHistogramFamily, MooncakeOperationLabels,
     RequestMetrics, SchedulerLogStatsAccumulator, SchedulerMetrics, U64Counter, U64Gauge,
-    WaitingReasonLabels,
+    UmbpOperationCounterFamily, UmbpOperationLabels, WaitingReasonLabels,
 };
 
 use crate::protocol::stats::{
     CachedTokensBySource, KvConnectorStats, KvFetchReqsByStage, MooncakeStats,
-    MooncakeTransferStats, MultiConnectorStats, NixlStats, SchedulerStats,
+    MooncakeTransferStats, MultiConnectorStats, NixlStats, SchedulerStats, UmbpStats,
 };
 use crate::protocol::utility::SleepLevel;
 use crate::transport::ConnectedEngine;
@@ -129,6 +129,14 @@ struct SchedulerStatsHandles {
     mooncake_num_failed_transfers: U64Counter,
     mooncake_num_failed_recvs: U64Counter,
     mooncake_num_kv_expired_reqs: U64Counter,
+
+    // UMBP store connector telemetry, decoded from `kv_connector_stats`.
+    // Kept as `Family` like the Mooncake store telemetry: an operation's
+    // series appears once the connector first reports it, as in Python.
+    umbp_transfer_submitted_total: UmbpOperationCounterFamily,
+    umbp_transfer_completed_total: UmbpOperationCounterFamily,
+    umbp_transfer_failed_total: UmbpOperationCounterFamily,
+    umbp_transfer_bytes_total: UmbpOperationCounterFamily,
 
     // NIXL connector telemetry, decoded from `kv_connector_stats`.
     nixl_xfer_time_seconds: HistogramMetric,
@@ -285,6 +293,10 @@ fn resolve_scheduler_stats_handles(
         mooncake_num_kv_expired_reqs: metrics
             .mooncake_num_kv_expired_reqs
             .get_or_create_owned(&labels),
+        umbp_transfer_submitted_total: metrics.umbp_transfer_submitted_total.clone(),
+        umbp_transfer_completed_total: metrics.umbp_transfer_completed_total.clone(),
+        umbp_transfer_failed_total: metrics.umbp_transfer_failed_total.clone(),
+        umbp_transfer_bytes_total: metrics.umbp_transfer_bytes_total.clone(),
         nixl_xfer_time_seconds: metrics.nixl_xfer_time_seconds.get_or_create_owned(&labels),
         nixl_post_time_seconds: metrics.nixl_post_time_seconds.get_or_create_owned(&labels),
         nixl_bytes_transferred: metrics.nixl_bytes_transferred.get_or_create_owned(&labels),
@@ -407,6 +419,7 @@ fn record_scheduler_stats_with_handles(handles: &SchedulerStatsHandles, stats: &
                 record_mooncake_transfer_stats(handles, stats)
             }
             KvConnectorStats::Mooncake(stats) => record_mooncake_stats(handles, stats),
+            KvConnectorStats::Umbp(stats) => record_umbp_stats(handles, stats),
             KvConnectorStats::Multi(stats) => record_multi_connector_stats(handles, stats),
             KvConnectorStats::Other(_) => {}
         }
@@ -422,6 +435,9 @@ fn record_multi_connector_stats(handles: &SchedulerStatsHandles, stats: &MultiCo
     }
     if let Some(mooncake) = &stats.mooncake {
         record_mooncake_stats(handles, mooncake);
+    }
+    if let Some(umbp) = &stats.umbp {
+        record_umbp_stats(handles, umbp);
     }
 }
 
@@ -471,6 +487,29 @@ fn record_mooncake_stats(handles: &SchedulerStatsHandles, stats: &MooncakeStats)
                 .get_or_create(&labels)
                 .inc_by(record.num_failed_keys);
         }
+    }
+}
+
+fn record_umbp_stats(handles: &SchedulerStatsHandles, stats: &UmbpStats) {
+    for (operation, counts) in &stats.0 {
+        let labels = UmbpOperationLabels {
+            model_name: handles.labels.model_name.clone(),
+            engine: handles.labels.engine,
+            operation: operation.as_str(),
+        };
+        handles
+            .umbp_transfer_submitted_total
+            .get_or_create(&labels)
+            .inc_by(counts.submitted);
+        handles
+            .umbp_transfer_completed_total
+            .get_or_create(&labels)
+            .inc_by(counts.completed);
+        handles.umbp_transfer_failed_total.get_or_create(&labels).inc_by(counts.failed);
+        handles
+            .umbp_transfer_bytes_total
+            .get_or_create(&labels)
+            .inc_by(counts.num_bytes);
     }
 }
 
@@ -689,6 +728,51 @@ mod tests {
             vllm:mooncake_num_failed_recvs_total{model_name="model",engine="0"} 1
             vllm:mooncake_num_kv_expired_reqs_total{model_name="model",engine="0"} 0"#]]
         .assert_eq(&mooncake_transfer_series);
+    }
+
+    /// Records a bare `UMBPStoreConnector` payload, in the shape Python's
+    /// `UMBPStoreConnectorStats` sends, into the `vllm:umbp_transfer_*`
+    /// counters, one series per reported operation.
+    #[test]
+    fn umbp_stats_are_recorded_into_umbp_transfer_metrics() {
+        let metrics = Metrics::new();
+        let handles = super::resolve_scheduler_stats_handles(&metrics.scheduler, "model", 0);
+        // Series of one family render in hash order, so sort them.
+        let umbp_series = || {
+            metrics
+                .render()
+                .unwrap()
+                .lines()
+                .filter(|line| line.starts_with("vllm:umbp_transfer_"))
+                .sorted()
+                .join("\n")
+        };
+
+        // Like Python, no series before the connector reports an operation.
+        expect![[""]].assert_eq(&umbp_series());
+
+        let kv_connector_stats: KvConnectorStats = serde_json::from_value(serde_json::json!({
+            "load": {"submitted": 3, "completed": 2, "failed": 1, "num_bytes": 8192},
+            "store": {"submitted": 1, "completed": 0, "failed": 0, "num_bytes": 0},
+        }))
+        .unwrap();
+        let stats = SchedulerStats {
+            kv_connector_stats: Some(kv_connector_stats),
+            ..Default::default()
+        };
+        super::record_scheduler_stats_with_handles(&handles, &stats);
+        super::record_scheduler_stats_with_handles(&handles, &stats);
+
+        expect![[r#"
+            vllm:umbp_transfer_bytes_total{model_name="model",engine="0",operation="load"} 16384
+            vllm:umbp_transfer_bytes_total{model_name="model",engine="0",operation="store"} 0
+            vllm:umbp_transfer_completed_total{model_name="model",engine="0",operation="load"} 4
+            vllm:umbp_transfer_completed_total{model_name="model",engine="0",operation="store"} 0
+            vllm:umbp_transfer_failed_total{model_name="model",engine="0",operation="load"} 2
+            vllm:umbp_transfer_failed_total{model_name="model",engine="0",operation="store"} 0
+            vllm:umbp_transfer_submitted_total{model_name="model",engine="0",operation="load"} 6
+            vllm:umbp_transfer_submitted_total{model_name="model",engine="0",operation="store"} 2"#]]
+        .assert_eq(&umbp_series());
     }
 
     /// Exports every engine's KV fetch stage gauges from startup and sets them
