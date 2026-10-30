@@ -435,17 +435,18 @@ async def snapshot_status(raw_request: Request) -> JSONResponse:
 @router.get("/snapshot/ready")
 async def snapshot_ready(raw_request: Request) -> Response:
     client = snapshot_client(raw_request)
-    if client is not None:
-        try:
-            status = await asyncio.to_thread(
-                client.request,
-                "status",
-                timeout=_STATUS_TIMEOUT_SECONDS,
-            )
-        except Exception:
-            return Response(status_code=503)
-        if status["state"] != "READY":
-            return JSONResponse(status_code=503, content=status)
+    if client is None:
+        raise HTTPException(404, "Engine snapshots are not enabled")
+    try:
+        status = await asyncio.to_thread(
+            client.request,
+            "status",
+            timeout=_STATUS_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        return Response(status_code=503)
+    if status["state"] != "READY":
+        return JSONResponse(status_code=503, content=status)
     engine = engine_client(raw_request)
     if engine is None:
         return Response(status_code=200)

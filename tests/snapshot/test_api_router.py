@@ -79,7 +79,7 @@ def test_snapshot_operations_reject_concurrent_sleep_or_wake():
     asyncio.run(run())
 
 
-def test_snapshot_ready_is_healthy_for_render_only_server():
+def test_snapshot_ready_requires_snapshot_feature():
     async def run():
         request = cast(
             Request,
@@ -87,8 +87,9 @@ def test_snapshot_ready_is_healthy_for_render_only_server():
                 app=SimpleNamespace(state=SimpleNamespace(engine_client=None))
             ),
         )
-        response = await snapshot_ready(request)
-        assert response.status_code == 200
+        with pytest.raises(HTTPException) as exc_info:
+            await snapshot_ready(request)
+        assert exc_info.value.status_code == 404
 
     asyncio.run(run())
 

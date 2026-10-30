@@ -5,7 +5,6 @@ import json
 import os
 import threading
 import time
-from typing import Any
 
 import pytest
 
@@ -159,39 +158,6 @@ def test_adopted_process_close_is_idempotent(monkeypatch):
     assert closed == [123]
 
 
-def test_snapshot_stdio_rebinds_to_source_process(monkeypatch):
-    import vllm.snapshot.process as snapshot_process
-
-    opened: list[tuple[str, int]] = []
-    duplicated: list[tuple[int, int, bool]] = []
-    closed: list[int] = []
-    source_fds = iter((101, 102))
-    monkeypatch.setattr(snapshot_process, "process_starttime", lambda pid: 456)
-
-    def open_fd(path, flags):
-        opened.append((path, flags))
-        return next(source_fds)
-
-    monkeypatch.setattr(os, "open", open_fd)
-    monkeypatch.setattr(
-        os,
-        "dup2",
-        lambda source, target, inheritable=True: duplicated.append(
-            (source, target, inheritable)
-        ),
-    )
-    monkeypatch.setattr(os, "close", closed.append)
-
-    snapshot_process.rebind_stdio(123, expected_starttime=456)
-
-    assert [path for path, _ in opened] == [
-        "/proc/123/fd/1",
-        "/proc/123/fd/2",
-    ]
-    assert duplicated == [(101, 1, True), (102, 2, True)]
-    assert closed == [101, 102]
-
-
 def test_snapshot_io_detach_requires_opt_in():
     from vllm.v1.engine.core import EngineCoreProc
 
@@ -200,36 +166,6 @@ def test_snapshot_io_detach_requires_opt_in():
 
     with pytest.raises(RuntimeError, match="snapshots are not enabled"):
         engine.snapshot_detach_io("nonce", 1, "snapshot", "config", "marker", "durable")
-
-
-def test_snapshot_stdio_rejects_reused_source_pid(monkeypatch):
-    import vllm.snapshot.process as snapshot_process
-
-    monkeypatch.setattr(snapshot_process, "process_starttime", lambda pid: 789)
-
-    with pytest.raises(RuntimeError, match="source process identity changed"):
-        snapshot_process.rebind_stdio(123, expected_starttime=456)
-
-
-def test_snapshot_stdio_rejects_source_change_during_open(monkeypatch):
-    import vllm.snapshot.process as snapshot_process
-
-    starttimes = iter((456, 789))
-    duplicated: list[Any] = []
-    closed: list[int] = []
-    monkeypatch.setattr(
-        snapshot_process, "process_starttime", lambda pid: next(starttimes)
-    )
-    source_fds = iter((100, 101))
-    monkeypatch.setattr(os, "open", lambda path, flags: next(source_fds))
-    monkeypatch.setattr(os, "dup2", lambda *args, **kwargs: duplicated.append(args))
-    monkeypatch.setattr(os, "close", closed.append)
-
-    with pytest.raises(RuntimeError, match="source process identity changed"):
-        snapshot_process.rebind_stdio(123)
-
-    assert duplicated == []
-    assert closed == [100, 101]
 
 
 @pytest.mark.parametrize(
@@ -250,7 +186,12 @@ def test_snapshot_detach_marker_honors_persistence(
     engine._snapshot_io_lock = threading.Lock()
     engine._snapshot_io_active = True
     fsync_calls: list[int] = []
+    detached: list[bool] = []
     monkeypatch.setattr(os, "fsync", fsync_calls.append)
+    monkeypatch.setattr(
+        "vllm.v1.engine.core.detach_snapshot_streams",
+        lambda: detached.append(True),
+    )
 
     marker_path = tmp_path / "detached.json"
     engine.snapshot_detach_io(
@@ -265,4 +206,5 @@ def test_snapshot_detach_marker_honors_persistence(
 
     marker = json.loads(marker_path.read_text())
     assert marker["state"] == "detached"
+    assert detached == [True]
     assert len(fsync_calls) == expected_fsync_calls

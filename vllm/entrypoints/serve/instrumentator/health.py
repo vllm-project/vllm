@@ -38,8 +38,8 @@ async def health(raw_request: Request) -> Response:
         except Exception:
             return Response(status_code=503)
         if status["state"] != "READY":
-            # The API server is alive while the engine is draining or
-            # hibernated; /ready is the endpoint that gates serving.
+            # The API server is alive in every non-READY snapshot state;
+            # /snapshot/ready is the endpoint that gates serving.
             return Response(status_code=200)
     if client is None:
         # Render-only servers have no engine; they are always healthy.

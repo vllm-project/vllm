@@ -42,7 +42,7 @@ from vllm.multimodal.cache import (
     engine_receiver_cache_from_config,
 )
 from vllm.outputs import RequestError
-from vllm.snapshot.process import process_starttime, rebind_stdio
+from vllm.snapshot.process import detach_snapshot_streams
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
@@ -1252,13 +1252,6 @@ class EngineCoreProc(EngineCore):
         self._snapshot_io_lock = threading.Lock()
         self._snapshot_io_active = False
         self._snapshot_detach_thread: threading.Thread | None = None
-        self._snapshot_parent_pid: int | None = None
-        self._snapshot_parent_starttime: int | None = None
-        if enable_engine_snapshot:
-            self._snapshot_parent_pid = os.getppid()
-            self._snapshot_parent_starttime = process_starttime(
-                self._snapshot_parent_pid
-            )
 
         # Receiver for tensor IPC
         self.tensor_ipc_receiver: TensorIpcReceiver | None = None
@@ -2024,6 +2017,10 @@ class EngineCoreProc(EngineCore):
             self._snapshot_config_hash = config_hash
             self._snapshot_marker_path = marker_path
             self._snapshot_persistence = persistence
+        # CRIU cannot dump a half of an external stream socket, which is what
+        # a launcher's journald-backed stdout is. Drop it before capture; the
+        # restored engine keeps /dev/null instead of rebinding launcher fds.
+        detach_snapshot_streams()
 
     def _begin_snapshot_io_detach(self) -> None:
         self._snapshot_io_stop.set()
@@ -2085,13 +2082,6 @@ class EngineCoreProc(EngineCore):
             detach_thread = self._snapshot_detach_thread
             if detach_thread is not None:
                 detach_thread.join(timeout=35)
-            try:
-                self._restore_snapshot_stdio()
-            except Exception:
-                logger.warning(
-                    "Failed to rebind EngineCore stdio; continuing reattach",
-                    exc_info=True,
-                )
             logger.info("Reattaching EngineCore business I/O")
             deadline = time.monotonic() + 30
             while True:
@@ -2107,14 +2097,6 @@ class EngineCoreProc(EngineCore):
                         return
                     time.sleep(0.1)
             logger.info("EngineCore business I/O reattached")
-
-    def _restore_snapshot_stdio(self) -> None:
-        if self._snapshot_parent_pid is None or self._snapshot_parent_starttime is None:
-            raise RuntimeError("snapshot parent identity is unavailable")
-        rebind_stdio(
-            self._snapshot_parent_pid,
-            expected_starttime=self._snapshot_parent_starttime,
-        )
 
     def _start_snapshot_io_threads(self) -> None:
         with self._snapshot_io_lock:

@@ -249,7 +249,11 @@ VLLM_SERVER_DEV_MODE=1 vllm serve Qwen/Qwen3-0.6B \
 ```
 
 Level 3 discards weights and KV cache before capture, then reloads weights and
-rebuilds KV cache on wake; there is no resource-policy option.
+rebuilds KV cache on wake; there is no resource-policy option. Before capture
+the engine replaces its stdout/stderr with `/dev/null` so CRIU does not see
+the launcher's log descriptors. The restored EngineCore does not rebind them:
+the frontend keeps its own logs, while EngineCore's post-wake logs are not
+forwarded.
 
 Use `POST /sleep?level=3&mode=wait` to capture the EngineCore and
 `POST /wake_up` to restore it. `GET /snapshot/status` reports the checkpoint
@@ -263,10 +267,13 @@ development endpoints on a production network.
 - `POST /release_kv_cache_memory` — Discard KV cache memory after a completed pause, while all executor memory is resident.
 - `POST /sleep?level=3&mode=wait` — Capture an EngineCore snapshot (experimental).
 - `POST /wake_up` — Wake up the model. Supports optional `tags` query parameters for partial wake-up (e.g., `?tags=weights`).
-- `GET /snapshot/status` — Report the EngineCore snapshot state.
-- `GET /snapshot/ready` — Readiness for the snapshot path: 200 only when the snapshot state is `READY` and the engine is healthy, 503 otherwise.
+- `GET /snapshot/status` — Report the EngineCore snapshot state. Requires `--enable-engine-snapshot`.
+- `GET /snapshot/ready` — Readiness for the snapshot path: 200 only when the snapshot state is `READY` and the engine is healthy, 503 otherwise. Requires `--enable-engine-snapshot`.
 - `POST /collective_rpc` — Perform a collective remote procedure call (RPC).
 - `GET /is_sleeping` — Check if the model is sleeping.
+
+`/health` stays a liveness probe and returns 200 while the server is
+hibernated; use `/snapshot/ready` for readiness.
 
 !!! note
     These endpoints are only available when passing `VLLM_SERVER_DEV_MODE=1`.

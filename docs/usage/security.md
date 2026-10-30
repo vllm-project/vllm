@@ -246,6 +246,7 @@ These endpoints are **only available when the environment variable `VLLM_SERVER_
 - `/wake_up` - Wake engine from sleep
 - `/is_sleeping` - Check if engine is sleeping
 - `/snapshot/status` - Inspect EngineCore snapshot state
+- `/snapshot/ready` - Readiness for the snapshot path
 - `/collective_rpc` - Execute arbitrary RPC methods on the engine (extremely dangerous)
 
 **Profiler endpoints (only when profiling is enabled via `--profiler-config`):**
