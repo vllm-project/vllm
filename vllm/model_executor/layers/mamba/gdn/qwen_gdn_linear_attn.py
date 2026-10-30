@@ -56,7 +56,10 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 from vllm.model_executor.layers.quantization.inc import INCConfig
-from vllm.model_executor.layers.utils import default_unquantized_gemm
+from vllm.model_executor.layers.utils import (
+    default_unquantized_gemm,
+    dispatch_unquantized_gemm,
+)
 from vllm.model_executor.model_loader.weight_utils import (
     sharded_weight_loader,
 )
@@ -655,6 +658,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         ):
             self._ba_stream = aux_stream()
             self._ba_events = (torch.cuda.Event(), torch.cuda.Event())
+        # Set by process_weights_after_loading when in_proj_ba is folded into
+        # the in_proj_qkvz GEMM: (qkvz width, ba width) of the fused output.
+        self.in_proj_fused_split: tuple[int, int] | None = None
+        self._lora_enabled = vllm_config.lora_config is not None
+        self._in_proj_fused_gemm = dispatch_unquantized_gemm(
+            vllm_config.kernel_config.linear_backend
+        )
 
         query_key_settings = (self.key_dim, 0, False)
         value_settings = (self.value_dim, 0, False)
@@ -911,6 +921,86 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             b = b[:, ba_start : ba_start + ba_chunk]
             a = a[:, ba_start : ba_start + ba_chunk]
         return b, a
+
+    def _can_fuse_in_proj(self) -> bool:
+        qkvz, ba = self.in_proj_qkvz, self.in_proj_ba
+        return (
+            current_platform.is_cuda()
+            # The fused GEMM bypasses the linear method's batch-invariant path.
+            and not envs.VLLM_BATCH_INVARIANT
+            and not self._lora_enabled
+            and not self.disable_tp_for_ba_proj
+            and type(qkvz.quant_method) is UnquantizedLinearMethod
+            and type(ba.quant_method) is UnquantizedLinearMethod
+            and qkvz.bias is None
+            and ba.bias is None
+            and qkvz.weight.dim() == 2
+            and ba.weight.dim() == 2
+            and qkvz.weight.shape[1] == ba.weight.shape[1]
+            and qkvz.weight.dtype == ba.weight.dtype
+            and qkvz.weight.device == ba.weight.device
+        )
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+        """Fold in_proj_ba into the in_proj_qkvz GEMM.
+
+        in_proj_ba has only 2 * num_v_heads / tp output features, so as its own
+        GEMM it costs a full launch (often with a split-K reduction) per layer
+        and token. Its rows are stacked under in_proj_qkvz's in one buffer,
+        zero-padded to a multiple of 16 rows, and the forward runs one GEMM on
+        that buffer and slices the qkvz and ba parts out of its output. The
+        padding keeps the fused output's row stride divisible by 16 like an
+        unfused qkvz output, so Triton kernels that read these views (the
+        spec-decode conv, for one) keep the stride specialization that warmup
+        and graph capture compiled. Both layers keep their weights, at their
+        checkpoint shapes, as views of the buffer, so the weight loaders (a
+        later reload included) keep writing to the right rows.
+        """
+        if self.in_proj_fused_split is not None or not self._can_fuse_in_proj():
+            return
+        qkvz_w = self.in_proj_qkvz.weight
+        ba_w = self.in_proj_ba.weight
+        n_qkvz, n_ba = qkvz_w.shape[0], ba_w.shape[0]
+        n_pad = -(n_qkvz + n_ba) % 16
+        fused = torch.cat(
+            [qkvz_w.data, ba_w.data, ba_w.data.new_zeros(n_pad, ba_w.shape[1])]
+        )
+        qkvz_w.data = fused[:n_qkvz]
+        ba_w.data = fused[n_qkvz : n_qkvz + n_ba]
+        # Non-persistent, as it aliases the two weights (cf. Mamba2's
+        # conv_weights): checkpoints and reloads still see only the weights.
+        self.register_buffer("in_proj_fused_weight", fused, persistent=False)
+        self.in_proj_fused_split = (n_qkvz, n_ba)
+
+    def project_input(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the (qkvz, ba) input projections, from one GEMM if fused."""
+        if self.in_proj_fused_split is not None:
+            n_qkvz, n_ba = self.in_proj_fused_split
+            fused = self._in_proj_fused_gemm(
+                self.in_proj_qkvz, hidden_states, self.in_proj_fused_weight
+            )
+            return fused[..., :n_qkvz], fused[..., n_qkvz : n_qkvz + n_ba]
+        if self._ba_stream is None:
+            mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
+            ba, _ = self.in_proj_ba(hidden_states)
+            return mixed_qkvz, ba
+        # Hide the tiny ba GEMM on the aux stream. Only under CUDA graph
+        # capture: eagerly the stream switch costs more host time than it
+        # saves. ba is enqueued first (aux-first order); qkvz-first
+        # regressed block-FP8 qkvz from ~100 tokens.
+        start, done = self._ba_events
+        mixed_qkvz, (ba,) = execute_in_parallel(
+            lambda: self.in_proj_qkvz(hidden_states)[0],
+            [lambda: self.in_proj_ba(hidden_states)[0]],
+            start,
+            [done],
+            [self._ba_stream],
+            enable=hidden_states.size(0) <= _BA_PROJ_OVERLAP_MAX_TOKENS
+            and torch.cuda.is_current_stream_capturing(),
+        )
+        return mixed_qkvz, ba
 
     def fix_query_key_value_ordering(
         self,
@@ -1178,24 +1268,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
-        if self._ba_stream is None:
-            mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
-            ba, _ = self.in_proj_ba(hidden_states)
-        else:
-            # Hide the tiny ba GEMM on the aux stream. Only under CUDA graph
-            # capture: eagerly the stream switch costs more host time than it
-            # saves. ba is enqueued first (aux-first order); qkvz-first
-            # regressed block-FP8 qkvz from ~100 tokens.
-            start, done = self._ba_events
-            mixed_qkvz, (ba,) = execute_in_parallel(
-                lambda: self.in_proj_qkvz(hidden_states)[0],
-                [lambda: self.in_proj_ba(hidden_states)[0]],
-                start,
-                [done],
-                [self._ba_stream],
-                enable=num_tokens <= _BA_PROJ_OVERLAP_MAX_TOKENS
-                and torch.cuda.is_current_stream_capturing(),
-            )
+        mixed_qkvz, ba = self.project_input(hidden_states)
 
         use_fused_gdn_spec_decode = (
             self.enable_fused_gdn_spec_decode
