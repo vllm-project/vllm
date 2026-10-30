@@ -1032,9 +1032,8 @@ void hisparse_resolve_residency(
     std::optional<torch::stable::Tensor> const& resident_block_table,
     int64_t resident_block_size,
     std::optional<torch::stable::Tensor> const& num_valid_rows) {
-  STD_TORCH_CHECK(
-      host_cache.device().is_cpu() && is_pinned_cpu_tensor(host_cache),
-      "host_cache must be pinned CPU memory");
+  STD_TORCH_CHECK(host_cache.device().is_cpu(),
+                  "host_cache must be CPU memory");
   STD_TORCH_CHECK(hot_cache.is_cuda(), "hot_cache must be on CUDA");
   STD_TORCH_CHECK(
       hot_block_table.is_cuda() &&
