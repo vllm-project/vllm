@@ -34,7 +34,7 @@ def test_synthid_config_and_factory():
     assert watermarker.depth == 5
     assert watermarker.prf.key == 42
     assert not config.supports_speculative_decoding
-    assert WatermarkConfig(key=42, algorithm="gumbel").depth == 32
+    assert WatermarkConfig(key=42, algorithm="gumbel").depth == 22
 
 
 @pytest.mark.parametrize(
@@ -361,7 +361,7 @@ def test_synthid_detector_ignores_gumbel_text_with_same_key():
 
 requires_fused = pytest.mark.skipif(
     not torch.cuda.is_available() or not is_supported(torch.device("cuda")),
-    reason="requires the Hopper fused SynthID-Text kernels",
+    reason="requires the fused SynthID-Text kernels (sm80 or newer)",
 )
 
 

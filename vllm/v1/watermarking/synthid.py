@@ -38,7 +38,7 @@ class SynthIDWatermarker(Watermarker):
         self,
         key: int,
         context_width: int = 4,
-        depth: int = 32,
+        depth: int = 22,
         prf: WatermarkPRFName = "philox",
     ) -> None:
         _validate_context_width(context_width)
@@ -49,6 +49,7 @@ class SynthIDWatermarker(Watermarker):
         self.prf = selected_prf
         self._context_width = context_width
         self.depth = depth
+        self._fused_enabled = True
 
     @property
     def context_width(self) -> int:
@@ -81,8 +82,15 @@ class SynthIDWatermarker(Watermarker):
 
         return probs
 
+    def uses_fused_kernels(self, device: torch.device) -> bool:
+        return self._fused_enabled and is_supported(device)
+
+    def disable_fused_kernels(self) -> None:
+        """Route all later sampling to the torch tournament."""
+        self._fused_enabled = False
+
     def _use_fused(self, logits: torch.Tensor) -> bool:
-        return type(self.prf) is PhiloxPRF and is_supported(logits.device)
+        return self.uses_fused_kernels(logits.device)
 
     def watermark_logits(
         self,
@@ -199,7 +207,7 @@ class SynthIDWatermarkDetector(WatermarkDetector):
         self,
         key: int,
         context_width: int = 4,
-        depth: int = 32,
+        depth: int = 22,
         p_value_threshold: float = 0.01,
         prf: WatermarkPRFName = "philox",
         deduplicate_contexts: bool = True,

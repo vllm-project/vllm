@@ -48,7 +48,7 @@ class WatermarkConfig:
     `none`."""
     prf: WatermarkPRFName = "philox"
     """Pseudorandom function used by the watermarking algorithm."""
-    depth: int = Field(default=32, ge=1, le=32, strict=True)
+    depth: int = Field(default=22, ge=1, le=32, strict=True)
     """Number of layers of tournament sampling for SynthID-Text."""
     allow_target_only_watermarking: bool = False
     """Allow speculative decoding without watermarking draft tokens."""

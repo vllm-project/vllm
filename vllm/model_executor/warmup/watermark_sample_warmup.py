@@ -40,6 +40,7 @@ def watermark_sample_warmup(worker: Worker) -> None:
         return
 
     from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
+    from vllm.v1.watermarking.synthid import SynthIDWatermarker
     from vllm.v1.watermarking.watermarker import RandomSampler
 
     # Sample through the sampler the runner built instead of rebuilding it from
@@ -96,16 +97,37 @@ def watermark_sample_warmup(worker: Worker) -> None:
             [str(dtype) for dtype in dtypes],
             list(with_skip_mask),
         )
-        for dtype in dtypes:
-            logits = torch.zeros(
-                (_NUM_WARMUP_TOKENS, vocab_size), dtype=dtype, device=device
-            )
-            for use_skip_mask in with_skip_mask:
-                sampler.watermarker.sample(
-                    logits,
-                    contexts,
-                    random_sampler,
-                    skip_mask=skip_mask if use_skip_mask else None,
+
+        def sample_every_variant() -> None:
+            for dtype in dtypes:
+                logits = torch.zeros(
+                    (_NUM_WARMUP_TOKENS, vocab_size), dtype=dtype, device=device
                 )
+                for use_skip_mask in with_skip_mask:
+                    sampler.watermarker.sample(
+                        logits,
+                        contexts,
+                        random_sampler,
+                        skip_mask=skip_mask if use_skip_mask else None,
+                    )
+
+        try:
+            sample_every_variant()
+        except Exception:
+            # A fused kernel that fails to compile or launch here would fail
+            # every step, and the warmup runs before CUDA graph capture.
+            watermarker = sampler.watermarker
+            if not (
+                isinstance(watermarker, SynthIDWatermarker)
+                and watermarker.uses_fused_kernels(device)
+            ):
+                raise
+            logger.warning(
+                "The fused SynthID-Text kernels failed on this GPU; "
+                "sampling with the torch implementation instead.",
+                exc_info=True,
+            )
+            watermarker.disable_fused_kernels()
+            sample_every_variant()
     except Exception:
         logger.warning("Skipping watermark sampler warmup.", exc_info=True)

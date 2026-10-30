@@ -50,11 +50,11 @@ except ImportError:
 
 @functools.cache
 def is_supported(device: torch.device) -> bool:
-    """The Gluon kernels are validated on Hopper (sm90) only."""
+    """Validated on H100 (sm90); expected to work on sm80 and newer."""
     return (
         HAS_GLUON
         and device.type == "cuda"
-        and torch.cuda.get_device_capability(device) == (9, 0)
+        and torch.cuda.get_device_capability(device) >= (8, 0)
     )
 
 
