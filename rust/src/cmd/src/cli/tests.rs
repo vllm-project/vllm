@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use expect_test::expect;
+use vllm_chat::multimodal::MmModality;
 use vllm_engine_core_client::TransportMode;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
@@ -62,6 +63,8 @@ fn render_args_build_config_without_tls() {
         "deepseek_v32",
         "--max-logprobs",
         "-1",
+        "--limit-mm-per-prompt",
+        r#"{"image": 2, "video": {"count": 1, "num_frames": 32}}"#,
     ])
     .unwrap();
 
@@ -92,6 +95,9 @@ fn render_args_build_config_without_tls() {
     assert_eq!(config.reasoning_parser, ParserSelection::Auto);
     assert_eq!(config.renderer, RendererSelection::DeepSeekV32);
     assert_eq!(config.max_logprobs, Some(-1));
+    let limit = |modality| config.limit_mm_per_prompt[&modality].count();
+    assert_eq!(limit(MmModality::Image), Some(2));
+    assert_eq!(limit(MmModality::Video), Some(1));
     assert!(config.tls.is_none());
 }
 

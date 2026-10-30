@@ -196,6 +196,16 @@ pub struct RenderArgs {
     /// checkpoints in bfloat16 like vLLM.
     #[arg(long, default_value = "auto")]
     dtype: RenderDtype,
+    /// The maximum number of input items allowed per prompt for each
+    /// modality, as a JSON object (e.g. `{"image": 16, "video": 2}`); set it
+    /// to the engine's `--limit-mm-per-prompt`. Unspecified modalities are
+    /// unlimited.
+    ///
+    /// Also accepts the engine's configurable form
+    /// (e.g. `{"video": {"count": 1, "num_frames": 32}}`); only `count`
+    /// applies to rendering.
+    #[arg(long, value_parser = parse_json::<MmLimitPerPrompt>, value_name = "JSON", default_value = "{}")]
+    limit_mm_per_prompt: MmLimitPerPrompt,
     /// TLS options for HTTPS/mTLS.
     #[command(flatten)]
     ssl: SslArgs,
@@ -235,6 +245,7 @@ impl RenderArgs {
             lora_modules: self.lora_modules,
             language_model_only: self.language_model_only,
             dtype: self.dtype,
+            limit_mm_per_prompt: self.limit_mm_per_prompt,
             tls,
         }
     }

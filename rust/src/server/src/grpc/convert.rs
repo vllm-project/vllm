@@ -376,9 +376,27 @@ pub fn to_sequence_output(
 }
 
 fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> Result<pb::FinishInfo, Status> {
+    let (finish_reason, stop_reason) = finish_reason_to_proto(&finished.finish_reason, token_ids)?;
+
+    Ok(pb::FinishInfo {
+        num_output_tokens: finished.usage.output_token_count as u32,
+        finish_reason,
+        stop_reason,
+        kv_transfer_params: finished.kv_transfer_params.as_deref().and_then(json_to_proto_struct),
+        ec_transfer_params: finished.ec_transfer_params.as_deref().and_then(json_to_proto_struct),
+        num_cached_tokens: Some(finished.usage.prompt_cache_usage.cached_token_count as u32),
+    })
+}
+
+/// Map a finish reason to `FinishInfo.finish_reason` and `stop_reason`.
+/// `token_ids` ends with the terminal output tokens.
+pub(super) fn finish_reason_to_proto(
+    reason: &FinishReason,
+    token_ids: &[u32],
+) -> Result<(i32, Option<pb::finish_info::StopReason>), Status> {
     use pb::finish_info::FinishReason as PbFinishReason;
 
-    let (finish_reason, stop_reason) = match &finished.finish_reason {
+    Ok(match reason {
         FinishReason::Stop(reason) => {
             let sr = match reason {
                 Some(StopReason::TokenId(id)) => {
@@ -404,15 +422,6 @@ fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> Result<pb::FinishIn
         }
         FinishReason::Error(_) => return Err(Status::internal("engine failed during generation")),
         FinishReason::Abort | FinishReason::Repetition(_) => (PbFinishReason::Aborted as i32, None),
-    };
-
-    Ok(pb::FinishInfo {
-        num_output_tokens: finished.usage.output_token_count as u32,
-        finish_reason,
-        stop_reason,
-        kv_transfer_params: finished.kv_transfer_params.as_deref().and_then(json_to_proto_struct),
-        ec_transfer_params: finished.ec_transfer_params.as_deref().and_then(json_to_proto_struct),
-        num_cached_tokens: Some(finished.usage.prompt_cache_usage.cached_token_count as u32),
     })
 }
 

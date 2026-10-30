@@ -44,11 +44,23 @@ The Rust frontend also serves a `vllm.Render` gRPC service, defined in
   only media hashes and placeholder ranges, like `"mm_payload": "none"`.
 - `Render.Detokenize` takes the same chat request, the prompt token IDs, and the
   `SequenceOutput` from `Inference.Generate`. It returns the answer text,
-  reasoning, parsed tool calls, and, when the output carries them, decoded
-  logprobs.
+  reasoning, parsed tool calls, the finish info, and, when the output carries
+  them, decoded logprobs.
+- `Render.DetokenizeStream` is the streaming form for `Inference.GenerateStream`.
+  The first message carries the `DetokenizeRequest`, and each later message
+  carries the `SequenceOutput` of one chunk. Each response carries the content,
+  reasoning, tool-call and logprob deltas decoded so far, and the last response
+  carries the finish info.
 
-Both RPCs are unary. LoRA adapter names are accepted as the chat request's
-`model`. Like `/inference/v1/generate`, this flow does not support stop strings.
+Detokenize applies `stop_strings`, `include_stop_strings` and `min_new_tokens`
+like the engine. `Inference.Generate` cannot check stop strings when
+`output_text` is false, so Detokenize cuts the output at the first stop string
+it finds. It also applies a stop string that Generate reported. Unlike Python's
+streaming derender, `DetokenizeStream` supports stop strings, holding back text
+that may still begin one, but only those given in its first message. When a
+stop string ends the output, the server closes the stream, and the client must
+cancel `GenerateStream`. LoRA adapter names are accepted as the chat request's
+`model`.
 
 The Rust `vllm-rs render` server serves the HTTP render endpoints as well. For
 multimodal models it returns the `features` object described in

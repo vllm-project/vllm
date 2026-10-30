@@ -64,6 +64,7 @@ mod stream;
 
 use std::collections::HashMap;
 
+use futures::Stream;
 use tracing::warn;
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
@@ -96,6 +97,17 @@ pub struct ChatRequestProcessor {
 }
 
 static OUTPUT_GRAMMAR_SKIPPED_ONCE: Once = Once::new();
+
+/// One chunk of output generated elsewhere, for
+/// [`ChatRequestProcessor::detokenize_stream`].
+#[derive(Debug, Clone, Default)]
+pub struct DetokenizeChunk {
+    pub token_ids: Vec<u32>,
+    /// Logprobs aligned with `token_ids`, when generated.
+    pub logprobs: Option<Logprobs>,
+    /// Set on the final chunk only.
+    pub finish_reason: Option<FinishReason>,
+}
 
 impl ChatRequestProcessor {
     /// Create a processor with multimodal support using the effective model
@@ -331,51 +343,75 @@ impl ChatRequestProcessor {
     /// initialize the same way as they would during generation.
     pub async fn detokenize(
         &self,
+        request: ChatRequest,
+        text_processor: &TextRequestProcessor,
+        prompt_token_ids: Vec<u32>,
+        output: DetokenizeChunk,
+    ) -> Result<CollectedAssistantMessage> {
+        self.detokenize_stream(
+            request,
+            text_processor,
+            prompt_token_ids,
+            futures::stream::iter([output]),
+        )?
+        .collect_message()
+        .await
+    }
+
+    /// Streaming [`Self::detokenize`]: parse output chunks as they arrive,
+    /// emitting deltas when `request.intermediate` is set.
+    ///
+    /// The stream ends at the first chunk with a finish reason, or earlier when
+    /// a stop string in `request.decode_options` matches, dropping `outputs`.
+    /// It fails if `outputs` ends without a finish reason.
+    pub fn detokenize_stream(
+        &self,
         mut request: ChatRequest,
         text_processor: &TextRequestProcessor,
         prompt_token_ids: Vec<u32>,
-        output_token_ids: Vec<u32>,
-        logprobs: Option<Logprobs>,
-        finish_reason: FinishReason,
-    ) -> Result<CollectedAssistantMessage> {
+        outputs: impl Stream<Item = DetokenizeChunk> + Send + Unpin + 'static,
+    ) -> Result<ChatEventStream> {
         request.validate()?;
 
         let mut output_processor = self.new_output_processor(&mut request)?;
         output_processor.initialize(&prompt_token_ids)?;
 
-        let output = GenerateOutput {
-            request_id: request.request_id.clone(),
-            prompt_info: Some(Box::new(GeneratePromptInfo {
-                prompt_token_ids: prompt_token_ids.into(),
-                prompt_logprobs: None,
-                prompt_token_id_logprobs: None,
-            })),
-            token_ids: output_token_ids,
-            logprobs,
-            finish_reason: Some(finish_reason),
-            prompt_cache_usage: Default::default(),
-            kv_transfer_params: None,
-            ec_transfer_params: None,
-            sampling_mask: None,
-            spec_decode_metrics: None,
-            weight_versions: None,
-            routed_experts: None,
-            timestamps: Default::default(),
-        };
+        let request_id = request.request_id.clone();
+        // The decoder reads the prompt from the first output.
+        let mut prompt_info = Some(Box::new(GeneratePromptInfo {
+            prompt_token_ids: prompt_token_ids.into(),
+            prompt_logprobs: None,
+            prompt_token_id_logprobs: None,
+        }));
+        let outputs = outputs.map(move |chunk| {
+            Ok(GenerateOutput {
+                request_id: request_id.clone(),
+                prompt_info: prompt_info.take(),
+                token_ids: chunk.token_ids,
+                logprobs: chunk.logprobs,
+                finish_reason: chunk.finish_reason,
+                prompt_cache_usage: Default::default(),
+                kv_transfer_params: None,
+                ec_transfer_params: None,
+                sampling_mask: None,
+                spec_decode_metrics: None,
+                weight_versions: None,
+                routed_experts: None,
+                timestamps: Default::default(),
+            })
+        });
         let decoded_stream = vllm_text::output::decoded_text_event_stream(
             request.request_id.clone(),
             text_processor.tokenizer(),
-            futures::stream::iter([Ok(output)]),
+            outputs,
             request.decode_options,
-            /* intermediate */ false,
+            request.intermediate,
         )
         .map_err(Error::from)
         .boxed();
 
         let structured_stream = output_processor.process(decoded_stream)?;
-        ChatEventStream::new(request.request_id, structured_stream)
-            .collect_message()
-            .await
+        Ok(ChatEventStream::new(request.request_id, structured_stream))
     }
 
     fn new_output_processor(&self, request: &mut ChatRequest) -> Result<DynChatOutputProcessor> {

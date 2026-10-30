@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 use tonic::transport::Server as TonicServer;
 use tonic_health::server::health_reporter;
 use tracing::info;
+use vllm_chat::multimodal::MmLimitPerPrompt;
 use vllm_chat::{
     ChatRequestProcessor, ChatTemplateContentFormatOption, LoadModelBackendsOptions,
     ParserSelection, RendererSelection, ToolStrictLevel, load_model_backends,
@@ -60,6 +61,8 @@ pub struct RenderConfig {
     pub language_model_only: bool,
     /// Dtype multimodal tensors are produced in; must match the engine's.
     pub dtype: RenderDtype,
+    /// Maximum multimodal items per prompt for each modality.
+    pub limit_mm_per_prompt: MmLimitPerPrompt,
     pub tls: Option<TlsConfig>,
 }
 
@@ -159,7 +162,7 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
             trust_request_chat_template: config.trust_request_chat_template,
             chat_template_content_format: config.chat_template_content_format,
             default_chat_template_kwargs: config.default_chat_template_kwargs.clone(),
-            limit_mm_per_prompt: Default::default(),
+            limit_mm_per_prompt: config.limit_mm_per_prompt.clone(),
         },
     )
     .await
@@ -360,6 +363,7 @@ mod tests {
                 lora_modules: Vec::new(),
                 language_model_only: false,
                 dtype: RenderDtype::Auto,
+                limit_mm_per_prompt: Default::default(),
                 tls: None,
             },
             shutdown,

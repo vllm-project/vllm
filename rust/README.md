@@ -130,7 +130,8 @@ model config, running float32 checkpoints in bfloat16 like vLLM. Set
 `"mm_payload": "none"` on a render request to get only item hashes and
 placeholder ranges, for example for cache-aware routing; such a response cannot
 be sent to generate. Pass `--language-model-only` to skip multimodal
-processing. Pass `--lora-modules name=path ...` to accept LoRA adapter names as
+processing, and set `--limit-mm-per-prompt` to the engine's limits so that
+render rejects the same requests. Pass `--lora-modules name=path ...` to accept LoRA adapter names as
 the request `model`; rendering does not load the adapter weights, and the
 adapter name is passed through to generate.
 

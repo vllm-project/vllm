@@ -3071,6 +3071,7 @@ async fn render_detokenize_parses_reasoning_and_tool_calls() {
                 finish_info: Some(render_eos_finish_info()),
                 ..Default::default()
             }),
+            ..Default::default()
         }))
         .await
         .expect("detokenize")
@@ -3093,6 +3094,20 @@ async fn render_detokenize_parses_reasoning_and_tool_calls() {
             ],
             num_reasoning_tokens: 10,
             logprobs: [],
+            finish_info: Some(
+                FinishInfo {
+                    num_output_tokens: 90,
+                    finish_reason: Stop,
+                    kv_transfer_params: None,
+                    ec_transfer_params: None,
+                    num_cached_tokens: None,
+                    stop_reason: Some(
+                        EosTokenId(
+                            61456,
+                        ),
+                    ),
+                },
+            ),
         }
     "#]]
     .assert_debug_eq(&response);
@@ -3129,6 +3144,7 @@ async fn render_detokenize_decodes_output_logprobs() {
                 finish_info: Some(render_eos_finish_info()),
                 ..Default::default()
             }),
+            ..Default::default()
         }))
         .await
         .expect("detokenize")
@@ -3346,6 +3362,7 @@ async fn render_detokenize_accepts_multimodal_chat() {
                 token_ids: vec![u32::from(b'o'), u32::from(b'k')],
                 ..Default::default()
             }),
+            ..Default::default()
         }))
         .await
         .expect("detokenize")
@@ -3370,4 +3387,350 @@ async fn render_tokenize_can_omit_media_kwargs() {
     };
     assert_eq!(features.kwargs, None);
     assert!(features.mm_hash.is_some());
+}
+
+fn plain_chat_request() -> pb::ChatRequest {
+    pb::ChatRequest {
+        messages: vec![pb::ChatMessage {
+            role: "user".to_string(),
+            content: Some(pb::chat_message::Content::Text("Hi".to_string())),
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+}
+
+fn plain_output(text: &str, finish_info: Option<pb::FinishInfo>) -> pb::SequenceOutput {
+    pb::SequenceOutput {
+        token_ids: render_token_ids(text),
+        finish_info,
+        ..Default::default()
+    }
+}
+
+fn stop_string_finish_info(stop: &str) -> pb::FinishInfo {
+    pb::FinishInfo {
+        finish_reason: pb::finish_info::FinishReason::Stop as i32,
+        stop_reason: Some(pb::finish_info::StopReason::StopString(stop.to_string())),
+        ..Default::default()
+    }
+}
+
+async fn render_detokenize(request: pb::DetokenizeRequest) -> pb::DetokenizeResponse {
+    let prompt_token_ids =
+        render_tokenize(&render_service(), plain_chat_request()).await.prompt_token_ids;
+    render_service()
+        .detokenize(tonic::Request::new(pb::DetokenizeRequest {
+            chat: Some(plain_chat_request()),
+            prompt_token_ids,
+            ..request
+        }))
+        .await
+        .expect("detokenize")
+        .into_inner()
+}
+
+/// The output is cut where the first requested stop string completes, as when
+/// Generate ran without detokenizing.
+#[tokio::test]
+async fn render_detokenize_cuts_output_at_stop_string() {
+    let response = render_detokenize(pb::DetokenizeRequest {
+        output: Some(plain_output("Sunny. Then rain!", None)),
+        stop_strings: vec!["!".to_string(), ".".to_string()],
+        ..Default::default()
+    })
+    .await;
+
+    assert_eq!(response.content, "Sunny");
+    expect_test::expect![[r#"
+        Some(
+            FinishInfo {
+                num_output_tokens: 6,
+                finish_reason: Stop,
+                kv_transfer_params: None,
+                ec_transfer_params: None,
+                num_cached_tokens: None,
+                stop_reason: Some(
+                    StopString(
+                        ".",
+                    ),
+                ),
+            },
+        )
+    "#]]
+    .assert_debug_eq(&response.finish_info);
+}
+
+/// A stop string reported by Generate cuts the text without being requested
+/// again, and `include_stop_strings` keeps it.
+#[tokio::test]
+async fn render_detokenize_applies_reported_stop_string() {
+    let output = plain_output("Sunny!", Some(stop_string_finish_info("!")));
+
+    let cut = render_detokenize(pb::DetokenizeRequest {
+        output: Some(output.clone()),
+        ..Default::default()
+    })
+    .await;
+    let kept = render_detokenize(pb::DetokenizeRequest {
+        output: Some(output),
+        include_stop_strings: true,
+        ..Default::default()
+    })
+    .await;
+
+    assert_eq!(cut.content, "Sunny");
+    assert_eq!(kept.content, "Sunny!");
+}
+
+#[tokio::test]
+async fn render_detokenize_ignores_stop_strings_within_min_new_tokens() {
+    let response = render_detokenize(pb::DetokenizeRequest {
+        output: Some(plain_output("a.b.c", None)),
+        stop_strings: vec![".".to_string()],
+        min_new_tokens: 3,
+        ..Default::default()
+    })
+    .await;
+
+    assert_eq!(response.content, "a.b");
+}
+
+#[tokio::test]
+async fn render_detokenize_reports_length_without_finish_info() {
+    let response = render_detokenize(pb::DetokenizeRequest {
+        output: Some(plain_output("ok", None)),
+        ..Default::default()
+    })
+    .await;
+
+    let finish_info = response.finish_info.expect("finish_info");
+    assert_eq!(
+        finish_info.finish_reason(),
+        pb::finish_info::FinishReason::Length
+    );
+    assert_eq!(finish_info.num_output_tokens, 2);
+}
+
+#[tokio::test]
+async fn render_detokenize_rejects_empty_stop_string() {
+    let status = render_service()
+        .detokenize(tonic::Request::new(pb::DetokenizeRequest {
+            chat: Some(plain_chat_request()),
+            stop_strings: vec![String::new()],
+            ..Default::default()
+        }))
+        .await
+        .expect_err("empty stop string");
+
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+}
+
+async fn render_grpc_client() -> (
+    pb::render_client::RenderClient<Channel>,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind grpc listener");
+    let addr = listener.local_addr().expect("local addr");
+    let server_task = tokio::spawn(async move {
+        TonicServer::builder()
+            .add_service(super::RenderGrpcService::new(render_service()))
+            .serve_with_incoming(MaybeTlsListener::plain(Listener::Tcp(listener)))
+            .await
+            .expect("grpc server");
+    });
+    let channel = Endpoint::from_shared(format!("http://{addr}"))
+        .expect("grpc endpoint")
+        .connect()
+        .await
+        .expect("connect grpc channel");
+    (pb::render_client::RenderClient::new(channel), server_task)
+}
+
+fn detokenize_stream_start(
+    prompt_token_ids: Vec<u32>,
+    stop_strings: &[&str],
+) -> pb::DetokenizeStreamRequest {
+    pb::DetokenizeStreamRequest {
+        request: Some(pb::detokenize_stream_request::Request::Start(Box::new(
+            pb::DetokenizeRequest {
+                chat: Some(plain_chat_request()),
+                prompt_token_ids,
+                stop_strings: stop_strings.iter().map(ToString::to_string).collect(),
+                ..Default::default()
+            },
+        ))),
+    }
+}
+
+fn detokenize_stream_output(output: pb::SequenceOutput) -> pb::DetokenizeStreamRequest {
+    pb::DetokenizeStreamRequest {
+        request: Some(pb::detokenize_stream_request::Request::Output(Box::new(
+            output,
+        ))),
+    }
+}
+
+async fn collect_detokenize_stream(
+    mut responses: tonic::Streaming<pb::DetokenizeStreamResponse>,
+) -> Result<Vec<pb::DetokenizeStreamResponse>, tonic::Status> {
+    let mut collected = Vec::new();
+    while let Some(response) = tokio::time::timeout(Duration::from_secs(5), responses.message())
+        .await
+        .expect("timed out waiting for a DetokenizeStream response")?
+    {
+        collected.push(response);
+    }
+    Ok(collected)
+}
+
+/// Chunks of GenerateStream decode into deltas as they arrive, ending with
+/// the finish info.
+#[tokio::test]
+async fn render_detokenize_stream_yields_deltas_then_finish() {
+    let (mut client, _server) = render_grpc_client().await;
+    let prompt_token_ids =
+        render_tokenize(&render_service(), plain_chat_request()).await.prompt_token_ids;
+    let (requests, request_stream) = futures::channel::mpsc::unbounded();
+    requests.unbounded_send(detokenize_stream_start(prompt_token_ids, &[])).unwrap();
+    let mut responses = client
+        .detokenize_stream(request_stream)
+        .await
+        .expect("detokenize stream")
+        .into_inner();
+    let mut next_response = async || {
+        tokio::time::timeout(Duration::from_secs(5), responses.message())
+            .await
+            .expect("timed out waiting for a DetokenizeStream response")
+            .expect("response")
+    };
+
+    let mut deltas = Vec::new();
+    for text in ["Hello", " world"] {
+        requests
+            .unbounded_send(detokenize_stream_output(plain_output(text, None)))
+            .unwrap();
+        let response = next_response().await.expect("delta");
+        assert_eq!(response.finish_info, None);
+        deltas.push(response.content);
+    }
+    let mut last = render_token_ids("!");
+    last.push(RENDER_EOS_TOKEN_ID);
+    requests
+        .unbounded_send(detokenize_stream_output(pb::SequenceOutput {
+            token_ids: last,
+            finish_info: Some(render_eos_finish_info()),
+            ..Default::default()
+        }))
+        .unwrap();
+    let response = next_response().await.expect("final response");
+    deltas.push(response.content);
+
+    assert_eq!(deltas.concat(), "Hello world!");
+    assert!(deltas.iter().all(|delta| !delta.is_empty()), "{deltas:?}");
+    let finish_info = response.finish_info.expect("finish_info");
+    assert_eq!(
+        finish_info.stop_reason,
+        Some(pb::finish_info::StopReason::EosTokenId(RENDER_EOS_TOKEN_ID))
+    );
+    assert_eq!(finish_info.num_output_tokens, 13);
+    assert_eq!(next_response().await, None);
+}
+
+/// A stop string spanning chunks is held back and cut, and the server ends
+/// the stream so the client can cancel Generate.
+#[tokio::test]
+async fn render_detokenize_stream_ends_at_stop_string() {
+    let (mut client, _server) = render_grpc_client().await;
+    let prompt_token_ids =
+        render_tokenize(&render_service(), plain_chat_request()).await.prompt_token_ids;
+    let (requests, request_stream) = futures::channel::mpsc::unbounded();
+    requests
+        .unbounded_send(detokenize_stream_start(prompt_token_ids, &["END"]))
+        .unwrap();
+    requests
+        .unbounded_send(detokenize_stream_output(plain_output("Sunny E", None)))
+        .unwrap();
+    requests
+        .unbounded_send(detokenize_stream_output(plain_output("ND and", None)))
+        .unwrap();
+
+    let responses = client.detokenize_stream(request_stream).await.expect("detokenize stream");
+    // The request stream stays open.
+    let responses = collect_detokenize_stream(responses.into_inner()).await.expect("responses");
+    drop(requests);
+
+    let content: String = responses.iter().map(|response| response.content.as_str()).collect();
+    assert_eq!(content, "Sunny ");
+    let finish_info = responses.last().and_then(|response| response.finish_info.as_ref());
+    assert_eq!(
+        finish_info.and_then(|info| info.stop_reason.clone()),
+        Some(pb::finish_info::StopReason::StopString("END".to_string()))
+    );
+}
+
+#[tokio::test]
+async fn render_detokenize_stream_closed_early_finishes_with_length() {
+    let (mut client, _server) = render_grpc_client().await;
+    let prompt_token_ids =
+        render_tokenize(&render_service(), plain_chat_request()).await.prompt_token_ids;
+    let requests = vec![
+        detokenize_stream_start(prompt_token_ids, &[]),
+        detokenize_stream_output(plain_output("ok", None)),
+    ];
+
+    let responses = client
+        .detokenize_stream(futures::stream::iter(requests))
+        .await
+        .expect("detokenize stream");
+    let responses = collect_detokenize_stream(responses.into_inner()).await.expect("responses");
+
+    let content: String = responses.iter().map(|response| response.content.as_str()).collect();
+    assert_eq!(content, "ok");
+    let finish_info = responses.last().and_then(|response| response.finish_info.as_ref());
+    assert_eq!(
+        finish_info.map(pb::FinishInfo::finish_reason),
+        Some(pb::finish_info::FinishReason::Length)
+    );
+}
+
+#[tokio::test]
+async fn render_detokenize_stream_rejects_invalid_messages() {
+    let (mut client, _server) = render_grpc_client().await;
+    let prompt_token_ids =
+        render_tokenize(&render_service(), plain_chat_request()).await.prompt_token_ids;
+    let cases = [
+        (
+            "output before start",
+            vec![detokenize_stream_output(plain_output("ok", None))],
+        ),
+        (
+            "second start",
+            vec![
+                detokenize_stream_start(prompt_token_ids.clone(), &[]),
+                detokenize_stream_start(prompt_token_ids.clone(), &[]),
+            ],
+        ),
+        // The text before a reported stop string may have been sent already.
+        (
+            "unrequested reported stop string",
+            vec![
+                detokenize_stream_start(prompt_token_ids.clone(), &[]),
+                detokenize_stream_output(plain_output("ok!", Some(stop_string_finish_info("!")))),
+            ],
+        ),
+    ];
+
+    for (name, requests) in cases {
+        let result = match client.detokenize_stream(futures::stream::iter(requests)).await {
+            Ok(responses) => collect_detokenize_stream(responses.into_inner()).await,
+            Err(status) => Err(status),
+        };
+        let status = result.expect_err(name);
+        assert_eq!(
+            status.code(),
+            tonic::Code::InvalidArgument,
+            "{name}: {status}"
+        );
+    }
 }

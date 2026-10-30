@@ -4,25 +4,30 @@
 //! gRPC `Render` service: engine-free chat tokenize and detokenize, the gRPC
 //! counterpart of the HTTP render API.
 
+use std::pin::Pin;
 use std::sync::Arc;
 
+use asynk_strim_attr::{TryYielder, try_stream};
+use futures::{Stream, StreamExt as _, TryStreamExt as _, stream};
 use itertools::Itertools as _;
 use thiserror_ext::AsReport as _;
-use tonic::{Request, Response, Status};
+use tokio::sync::oneshot;
+use tonic::{Request, Response, Status, Streaming};
 use tracing::{info_span, warn};
 use tracing_futures::Instrument as _;
 use uuid::Uuid;
 use vllm_chat::{
-    AssistantContentBlock, AssistantMessageExt as _, AssistantToolCall, ChatContent,
-    ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRequestProcessor, ChatTool,
-    ChatToolChoice, ResolvedToolContext, SamplingParams,
+    AssistantBlockKind, AssistantContentBlock, AssistantMessageExt as _, AssistantToolCall,
+    ChatContent, ChatContentPart, ChatEvent, ChatEventStream, ChatMessage, ChatOptions,
+    ChatRequest, ChatRequestProcessor, ChatTool, ChatToolChoice, DetokenizeChunk,
+    ResolvedToolContext, SamplingParams,
 };
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 use vllm_text::{
-    FinishReason, PromptTruncation, PromptTruncationLimit, TextDecodeOptions, TextRequestProcessor,
-    TruncationSide,
+    DecodedLogprobs, FinishReason, PromptTruncation, PromptTruncationLimit, TextDecodeOptions,
+    TextRequestProcessor, TruncationSide,
 };
 
 use super::convert::{self, json_to_proto_struct};
@@ -118,6 +123,24 @@ impl<S: RenderContext> Render for RenderServiceImpl<S> {
         log_failure(&span, &result);
         result.map(Response::new)
     }
+
+    type DetokenizeStreamStream =
+        Pin<Box<dyn Stream<Item = Result<pb::DetokenizeStreamResponse, Status>> + Send>>;
+
+    async fn detokenize_stream(
+        &self,
+        request: Request<Streaming<pb::DetokenizeStreamRequest>>,
+    ) -> Result<Response<Self::DetokenizeStreamStream>, Status> {
+        let span = info_span!("grpc_render", rpc = "DetokenizeStream");
+        let result = detokenize_stream(self.state.as_ref(), request.into_inner())
+            .instrument(span.clone())
+            .await;
+        log_failure(&span, &result);
+        let responses = result?.inspect_err(move |status| {
+            log_failure::<()>(&span, &Err(status.clone()));
+        });
+        Ok(Response::new(Box::pin(responses)))
+    }
 }
 
 fn log_failure<T>(span: &tracing::Span, result: &Result<T, Status>) {
@@ -189,29 +212,33 @@ async fn detokenize(
     state: &impl RenderContext,
     request: pb::DetokenizeRequest,
 ) -> Result<pb::DetokenizeResponse, Status> {
-    let pb::DetokenizeRequest {
-        chat,
-        prompt_token_ids,
-        output,
-    } = request;
-    let output = output.unwrap_or_default();
-    let logprobs = convert::output_logprobs_from_proto(&output)?;
-    let chat = chat.unwrap_or_default();
-    check_model(state, &chat.model).await?;
-    let chat_request = to_chat_request(chat)?;
+    let output = request.output.clone().unwrap_or_default();
+    // A stop string reported by Generate cuts the text as well.
+    let reported_stop_string = match &output.finish_info {
+        Some(pb::FinishInfo {
+            stop_reason: Some(pb::finish_info::StopReason::StopString(stop)),
+            ..
+        }) => Some(stop.clone()),
+        _ => None,
+    };
+    let (chat_request, prompt_token_ids) =
+        prepare_detokenize(state, request, reported_stop_string, false).await?;
+    let mut chunk = chunk_from_proto(output)?;
+    // Unlike in a stream, an omitted `finish_info` ends the output.
+    chunk.finish_reason.get_or_insert(FinishReason::Length);
     let collected = state
         .chat_processor()
         .detokenize(
             chat_request,
             state.text_processor(),
             prompt_token_ids,
-            output.token_ids,
-            logprobs,
-            finish_reason_from_proto(output.finish_info.as_ref()),
+            chunk,
         )
         .await
         .map_err(chat_error_to_status)?;
 
+    let (finish_reason, stop_reason) =
+        convert::finish_reason_to_proto(&collected.finish_reason, &collected.token_ids)?;
     let message = collected.message;
     Ok(pb::DetokenizeResponse {
         content: message.text(),
@@ -225,37 +252,272 @@ async fn detokenize(
             })
             .collect(),
         num_reasoning_tokens: collected.usage.reasoning_tokens as u32,
-        logprobs: collected
-            .logprobs
-            .map(|logprobs| logprobs.positions)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|position| pb::TokenLogprobs {
-                tokens: position
-                    .entries
-                    .into_iter()
-                    .map(|entry| pb::DecodedTokenLogprob {
-                        id: entry.token_id,
-                        token: entry.token,
-                        logprob: entry.logprob,
-                        rank: entry.rank,
-                    })
-                    .collect(),
-            })
-            .collect(),
+        logprobs: logprobs_to_proto(collected.logprobs),
+        finish_info: Some(pb::FinishInfo {
+            num_output_tokens: collected.usage.output_token_count as u32,
+            finish_reason,
+            stop_reason,
+            ..Default::default()
+        }),
     })
 }
 
-/// Map the final Generate finish info to the finish reason that drives
-/// decoding.
+/// Start a DetokenizeStream from its first message. The returned response
+/// stream owns `inbound`.
+async fn detokenize_stream(
+    state: &impl RenderContext,
+    mut inbound: Streaming<pb::DetokenizeStreamRequest>,
+) -> Result<impl Stream<Item = Result<pb::DetokenizeStreamResponse, Status>> + Send + 'static, Status>
+{
+    use pb::detokenize_stream_request::Request as StreamRequest;
+
+    let Some(pb::DetokenizeStreamRequest {
+        request: Some(StreamRequest::Start(mut start)),
+    }) = inbound.message().await?
+    else {
+        return Err(Status::invalid_argument(
+            "the first DetokenizeStream message must be `start`",
+        ));
+    };
+    let first_output = start.output.take();
+    let stop_strings = start.stop_strings.clone();
+    let (chat_request, prompt_token_ids) = prepare_detokenize(state, *start, None, true).await?;
+
+    // An input error ends the chunk stream, and the response stream reports it
+    // in place of the resulting unfinished-output error.
+    let (input_error_tx, input_error_rx) = oneshot::channel();
+    let first = first_output.map(|output| stream_chunk_from_proto(output, &stop_strings));
+    let chunks = stream::unfold(
+        (Some(inbound), first, Some(input_error_tx)),
+        move |(inbound, next, mut input_error_tx)| {
+            let stop_strings = stop_strings.clone();
+            async move {
+                let mut inbound = inbound?;
+                let next = match next {
+                    Some(next) => next,
+                    None => match inbound.message().await {
+                        Ok(Some(pb::DetokenizeStreamRequest {
+                            request: Some(StreamRequest::Output(output)),
+                        })) => stream_chunk_from_proto(*output, &stop_strings),
+                        Ok(Some(_)) => Err(Status::invalid_argument(
+                            "only the first DetokenizeStream message may be `start`",
+                        )),
+                        // Closing early ends the output like an omitted
+                        // `finish_info` in Detokenize.
+                        Ok(None) => Ok(DetokenizeChunk {
+                            finish_reason: Some(FinishReason::Length),
+                            ..Default::default()
+                        }),
+                        Err(status) => Err(status),
+                    },
+                };
+                match next {
+                    Ok(chunk) => {
+                        let inbound = chunk.finish_reason.is_none().then_some(inbound);
+                        Some((chunk, (inbound, None, input_error_tx)))
+                    }
+                    Err(status) => {
+                        if let Some(tx) = input_error_tx.take() {
+                            let _ = tx.send(status);
+                        }
+                        None
+                    }
+                }
+            }
+        },
+    )
+    .boxed();
+
+    let events = state
+        .chat_processor()
+        .detokenize_stream(
+            chat_request,
+            state.text_processor(),
+            prompt_token_ids,
+            chunks,
+        )
+        .map_err(chat_error_to_status)?;
+    Ok(detokenize_stream_responses(events, input_error_rx))
+}
+
+/// Coalesce the chat events available at once into one response, ending with
+/// the response that carries `finish_info`.
+#[try_stream]
+async fn detokenize_stream_responses(
+    events: ChatEventStream,
+    mut input_error_rx: oneshot::Receiver<Status>,
+    mut y: TryYielder<pb::DetokenizeStreamResponse, Status>,
+) -> Result<(), Status> {
+    let mut events = events.ready_chunks(64);
+    let mut last_token_id = None;
+    while let Some(batch) = events.next().await {
+        let mut response = pb::DetokenizeStreamResponse::default();
+        for event in batch {
+            let event = event.map_err(|error| {
+                input_error_rx.try_recv().unwrap_or_else(|_| chat_error_to_status(error))
+            })?;
+            match event {
+                ChatEvent::BlockDelta {
+                    kind: AssistantBlockKind::Text,
+                    delta,
+                    ..
+                } => response.content.push_str(&delta),
+                ChatEvent::BlockDelta {
+                    kind: AssistantBlockKind::Reasoning,
+                    delta,
+                    ..
+                } => response.reasoning.push_str(&delta),
+                ChatEvent::ToolCallStart { index, id, name } => {
+                    response.tool_calls.push(pb::ChatToolCallDelta {
+                        index: index as u32,
+                        id,
+                        name,
+                        arguments: String::new(),
+                    });
+                }
+                ChatEvent::ToolCallArgumentsDelta { index, delta } => {
+                    match response.tool_calls.last_mut() {
+                        Some(call) if call.index == index as u32 => call.arguments.push_str(&delta),
+                        _ => response.tool_calls.push(pb::ChatToolCallDelta {
+                            index: index as u32,
+                            arguments: delta,
+                            ..Default::default()
+                        }),
+                    }
+                }
+                ChatEvent::LogprobsDelta {
+                    logprobs,
+                    token_ids,
+                } => {
+                    last_token_id = token_ids.last().copied().or(last_token_id);
+                    response.logprobs.extend(logprobs_to_proto(logprobs));
+                }
+                ChatEvent::Done {
+                    usage,
+                    finish_reason,
+                    ..
+                } => {
+                    let (finish_reason, stop_reason) =
+                        convert::finish_reason_to_proto(&finish_reason, last_token_id.as_slice())?;
+                    response.finish_info = Some(pb::FinishInfo {
+                        num_output_tokens: usage.output_token_count as u32,
+                        finish_reason,
+                        stop_reason,
+                        ..Default::default()
+                    });
+                    response.num_reasoning_tokens = usage.reasoning_tokens as u32;
+                    y.yield_ok(response).await;
+                    return Ok(());
+                }
+                ChatEvent::Start { .. }
+                | ChatEvent::BlockStart { .. }
+                | ChatEvent::BlockDelta {
+                    kind: AssistantBlockKind::ToolCall,
+                    ..
+                }
+                | ChatEvent::BlockEnd { .. }
+                | ChatEvent::ToolCallEnd { .. } => {}
+            }
+        }
+        if response != pb::DetokenizeStreamResponse::default() {
+            y.yield_ok(response).await;
+        }
+    }
+    Err(input_error_rx
+        .try_recv()
+        .unwrap_or_else(|_| Status::internal("detokenize stream ended without a final output")))
+}
+
+/// Validate the Detokenize inputs shared by both RPCs and build the chat
+/// request. `extra_stop_string` applies on top of the requested stop strings.
+async fn prepare_detokenize(
+    state: &impl RenderContext,
+    request: pb::DetokenizeRequest,
+    extra_stop_string: Option<String>,
+    intermediate: bool,
+) -> Result<(ChatRequest, Vec<u32>), Status> {
+    let pb::DetokenizeRequest {
+        chat,
+        prompt_token_ids,
+        output: _,
+        mut stop_strings,
+        include_stop_strings,
+        min_new_tokens,
+    } = request;
+    if stop_strings.iter().any(String::is_empty) {
+        return Err(Status::invalid_argument("stop strings cannot be empty"));
+    }
+    if let Some(stop) = extra_stop_string
+        && !stop_strings.contains(&stop)
+    {
+        stop_strings.push(stop);
+    }
+    let chat = chat.unwrap_or_default();
+    check_model(state, &chat.model).await?;
+    let mut chat_request = to_chat_request(chat)?;
+    chat_request.intermediate = intermediate;
+    let decode_options = &mut chat_request.decode_options;
+    decode_options.stop_strings = (!stop_strings.is_empty()).then_some(stop_strings);
+    decode_options.include_stop_str_in_output = include_stop_strings;
+    decode_options.min_tokens = min_new_tokens;
+    Ok((chat_request, prompt_token_ids))
+}
+
+fn chunk_from_proto(output: pb::SequenceOutput) -> Result<DetokenizeChunk, Status> {
+    Ok(DetokenizeChunk {
+        logprobs: convert::output_logprobs_from_proto(&output)?,
+        finish_reason: output.finish_info.as_ref().map(finish_reason_from_proto),
+        token_ids: output.token_ids,
+    })
+}
+
+/// [`chunk_from_proto`] for a stream, which only applies the stop strings of
+/// its start message: text before a stop string reported in the final chunk
+/// may have been sent already.
+fn stream_chunk_from_proto(
+    output: pb::SequenceOutput,
+    stop_strings: &[String],
+) -> Result<DetokenizeChunk, Status> {
+    if let Some(pb::FinishInfo {
+        stop_reason: Some(pb::finish_info::StopReason::StopString(stop)),
+        ..
+    }) = &output.finish_info
+        && !stop_strings.contains(stop)
+    {
+        return Err(Status::invalid_argument(format!(
+            "output stopped on stop string {stop:?}, which is not in `start.stop_strings`"
+        )));
+    }
+    chunk_from_proto(output)
+}
+
+fn logprobs_to_proto(logprobs: Option<DecodedLogprobs>) -> Vec<pb::TokenLogprobs> {
+    logprobs
+        .map(|logprobs| logprobs.positions)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|position| pb::TokenLogprobs {
+            tokens: position
+                .entries
+                .into_iter()
+                .map(|entry| pb::DecodedTokenLogprob {
+                    id: entry.token_id,
+                    token: entry.token,
+                    logprob: entry.logprob,
+                    rank: entry.rank,
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+/// Map Generate finish info to the finish reason that drives decoding.
 ///
 /// Only token stops end the output with a token that is hidden from the text.
-fn finish_reason_from_proto(finish_info: Option<&pb::FinishInfo>) -> FinishReason {
+/// A stop string is not a token stop: the decoder cuts the text at it instead.
+fn finish_reason_from_proto(info: &pb::FinishInfo) -> FinishReason {
     use pb::finish_info::{FinishReason as PbFinishReason, StopReason as PbStopReason};
 
-    let Some(info) = finish_info else {
-        return FinishReason::Length;
-    };
     match info.finish_reason() {
         PbFinishReason::Stop => match &info.stop_reason {
             Some(PbStopReason::StopTokenId(id)) => {
