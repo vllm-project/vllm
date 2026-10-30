@@ -30,7 +30,7 @@ pub struct TextDecodeOptions {
     pub min_tokens: u32,
     /// Whether to detokenize the output. When false, the output is never
     /// decoded: text and logprob token strings stay empty.
-    /// `TextRequest::validate` rejects stop strings in that case.
+    /// [`Self::validate`] rejects stop strings in that case.
     pub detokenize: bool,
 }
 
@@ -47,6 +47,25 @@ impl Default for TextDecodeOptions {
 }
 
 impl TextDecodeOptions {
+    /// Validate the stop strings of request `request_id`.
+    pub fn validate(&self, request_id: &str) -> Result<(), Error> {
+        if self
+            .stop_strings
+            .as_ref()
+            .is_some_and(|stops| stops.iter().any(String::is_empty))
+        {
+            return Err(Error::EmptyStopString {
+                request_id: request_id.to_string(),
+            });
+        }
+        if !self.detokenize && self.stop_strings.as_ref().is_some_and(|stops| !stops.is_empty()) {
+            return Err(Error::StopStringsRequireDetokenize {
+                request_id: request_id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
     /// If we are excluding stop strings from output, we need to buffer
     /// the output so that we don't return the beginning of a stop string
     /// when streaming the outputs.

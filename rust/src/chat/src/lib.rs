@@ -343,12 +343,13 @@ impl ChatRequestProcessor {
     /// initialize the same way as they would during generation.
     pub async fn detokenize(
         &self,
-        request: ChatRequest,
+        mut request: ChatRequest,
         text_processor: &TextRequestProcessor,
         prompt_token_ids: Vec<u32>,
         output: DetokenizeChunk,
     ) -> Result<CollectedAssistantMessage> {
-        self.detokenize_stream(
+        request.intermediate = false;
+        self.detokenize_outputs(
             request,
             text_processor,
             prompt_token_ids,
@@ -359,7 +360,7 @@ impl ChatRequestProcessor {
     }
 
     /// Streaming [`Self::detokenize`]: parse output chunks as they arrive,
-    /// emitting deltas when `request.intermediate` is set.
+    /// emitting deltas.
     ///
     /// The stream ends at the first chunk with a finish reason, or earlier when
     /// a stop string in `request.decode_options` matches, dropping `outputs`.
@@ -371,7 +372,20 @@ impl ChatRequestProcessor {
         prompt_token_ids: Vec<u32>,
         outputs: impl Stream<Item = DetokenizeChunk> + Send + Unpin + 'static,
     ) -> Result<ChatEventStream> {
+        request.intermediate = true;
+        self.detokenize_outputs(request, text_processor, prompt_token_ids, outputs)
+    }
+
+    fn detokenize_outputs(
+        &self,
+        mut request: ChatRequest,
+        text_processor: &TextRequestProcessor,
+        prompt_token_ids: Vec<u32>,
+        outputs: impl Stream<Item = DetokenizeChunk> + Send + Unpin + 'static,
+    ) -> Result<ChatEventStream> {
         request.validate()?;
+        // Decoding skips the text request, which validates these in generation.
+        request.decode_options.validate(&request.request_id)?;
 
         let mut output_processor = self.new_output_processor(&mut request)?;
         output_processor.initialize(&prompt_token_ids)?;

@@ -3512,6 +3512,79 @@ async fn render_detokenize_reports_length_without_finish_info() {
     assert_eq!(finish_info.num_output_tokens, 2);
 }
 
+/// Fields that decoding does not change, such as the KV transfer parameters of
+/// a disaggregated prefill, pass through from Generate's finish info.
+#[tokio::test]
+async fn render_detokenize_keeps_generate_finish_info() {
+    let mut token_ids = render_token_ids("ok");
+    token_ids.push(RENDER_EOS_TOKEN_ID);
+    let response = render_detokenize(pb::DetokenizeRequest {
+        output: Some(pb::SequenceOutput {
+            token_ids,
+            finish_info: Some(pb::FinishInfo {
+                num_output_tokens: 3,
+                kv_transfer_params: json_to_proto_struct(
+                    &serde_json::json!({"do_remote_decode": true}),
+                ),
+                num_cached_tokens: Some(16),
+                ..render_eos_finish_info()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+    .await;
+
+    expect_test::expect![[r#"
+        Some(
+            FinishInfo {
+                num_output_tokens: 3,
+                finish_reason: Stop,
+                kv_transfer_params: Some(
+                    Struct {
+                        fields: {
+                            "do_remote_decode": Value {
+                                kind: Some(
+                                    BoolValue(
+                                        true,
+                                    ),
+                                ),
+                            },
+                        },
+                    },
+                ),
+                ec_transfer_params: None,
+                num_cached_tokens: Some(
+                    16,
+                ),
+                stop_reason: Some(
+                    EosTokenId(
+                        61456,
+                    ),
+                ),
+            },
+        )
+    "#]]
+    .assert_debug_eq(&response.finish_info);
+}
+
+/// Generate and Detokenize disagree on where the output stopped, for example
+/// when `min_new_tokens` differs from Generate's `min_tokens`.
+#[tokio::test]
+async fn render_detokenize_rejects_unmatched_reported_stop_string() {
+    let status = render_service()
+        .detokenize(tonic::Request::new(pb::DetokenizeRequest {
+            chat: Some(plain_chat_request()),
+            output: Some(plain_output("a.b", Some(stop_string_finish_info(".")))),
+            min_new_tokens: 3,
+            ..Default::default()
+        }))
+        .await
+        .expect_err("unmatched stop string");
+
+    assert_eq!(status.code(), tonic::Code::InvalidArgument, "{status}");
+}
+
 #[tokio::test]
 async fn render_detokenize_rejects_empty_stop_string() {
     let status = render_service()
@@ -3606,9 +3679,10 @@ async fn render_detokenize_stream_yields_deltas_then_finish() {
     };
 
     let mut deltas = Vec::new();
-    for text in ["Hello", " world"] {
+    // A NOT_FINISHED finish info does not end the output.
+    for (text, finish_info) in [("Hello", Some(pb::FinishInfo::default())), (" world", None)] {
         requests
-            .unbounded_send(detokenize_stream_output(plain_output(text, None)))
+            .unbounded_send(detokenize_stream_output(plain_output(text, finish_info)))
             .unwrap();
         let response = next_response().await.expect("delta");
         assert_eq!(response.finish_info, None);
@@ -3619,7 +3693,10 @@ async fn render_detokenize_stream_yields_deltas_then_finish() {
     requests
         .unbounded_send(detokenize_stream_output(pb::SequenceOutput {
             token_ids: last,
-            finish_info: Some(render_eos_finish_info()),
+            finish_info: Some(pb::FinishInfo {
+                num_cached_tokens: Some(16),
+                ..render_eos_finish_info()
+            }),
             ..Default::default()
         }))
         .unwrap();
@@ -3634,6 +3711,7 @@ async fn render_detokenize_stream_yields_deltas_then_finish() {
         Some(pb::finish_info::StopReason::EosTokenId(RENDER_EOS_TOKEN_ID))
     );
     assert_eq!(finish_info.num_output_tokens, 13);
+    assert_eq!(finish_info.num_cached_tokens, Some(16));
     assert_eq!(next_response().await, None);
 }
 

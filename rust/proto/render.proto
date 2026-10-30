@@ -22,9 +22,10 @@ service Render {
   // Parses the output token IDs of Inference.Generate into assistant content,
   // reasoning and tool calls.
   rpc Detokenize (DetokenizeRequest) returns (DetokenizeResponse) {}
-  // Incremental Detokenize over the chunks of Inference.GenerateStream. Each
-  // request chunk yields at most one response delta; the server ends the
-  // stream after the response carrying `finish_info`.
+  // Incremental Detokenize over the chunks of Inference.GenerateStream. The
+  // responses carry the decoded deltas in order, and one response can cover
+  // several request chunks or part of one; the server ends the stream after
+  // the response carrying `finish_info`.
   rpc DetokenizeStream (stream DetokenizeStreamRequest) returns (stream DetokenizeStreamResponse) {}
 }
 
@@ -69,14 +70,14 @@ message DetokenizeRequest {
   repeated uint32 prompt_token_ids = 2;
   // The complete output from Inference.Generate: `GenerateResponse.outputs` of
   // a unary call, or the streamed chunks concatenated. Reads `token_ids`,
-  // the logprob fields when present, and `finish_info`; an omitted
-  // `finish_info` means the output did not end with a stop token.
+  // the logprob fields when present, and `finish_info`; an omitted or
+  // NOT_FINISHED `finish_info` means the output did not end with a stop token.
   SequenceOutput output = 3;
   // Stop strings that end the output: the output is cut where the first one
   // completes, past the first `min_new_tokens` tokens. A stop string reported
-  // in `output.finish_info` is applied as well, so a client that passed these
-  // to Inference.Generate with `response.output_text = true` gets the same
-  // text either way.
+  // in `output.finish_info` is applied as well and must match, so a client
+  // that passed these to Inference.Generate with `response.output_text = true`
+  // gets the same text either way.
   repeated string stop_strings = 4;
   // Keep the matched stop string, and a terminal stop token, in the output.
   bool include_stop_strings = 5;
@@ -95,8 +96,9 @@ message DetokenizeResponse {
   // Decoded logprobs, one entry per output token, when the output carries
   // logprobs.
   repeated TokenLogprobs logprobs = 5;
-  // How the output ended, after applying stop strings. `num_output_tokens`
-  // counts the tokens kept.
+  // `output.finish_info` after applying stop strings: `finish_reason` and
+  // `stop_reason` say how the returned output ended, `num_output_tokens`
+  // counts the tokens kept, and the other fields are copied.
   FinishInfo finish_info = 6;
 }
 
@@ -109,8 +111,8 @@ message DetokenizeStreamRequest {
     DetokenizeRequest start = 1;
     // Each later message: `GenerateResponse.outputs` of the next
     // GenerateStream chunk of the same sequence. Closing the request stream
-    // before a chunk with `finish_info` ends the output as in Detokenize with
-    // an omitted `finish_info`.
+    // before a finished chunk ends the output as in Detokenize with an
+    // omitted `finish_info`.
     SequenceOutput output = 2;
   }
 }
@@ -122,8 +124,10 @@ message DetokenizeStreamResponse {
   string reasoning = 2;
   repeated ChatToolCallDelta tool_calls = 3;
   repeated TokenLogprobs logprobs = 4;
-  // Set on the last response only. A `stop_string` stop that Inference.Generate
-  // did not report means generation is still running: cancel it.
+  // Set on the last response only, as in `DetokenizeResponse.finish_info`
+  // from the finished request chunk, if any. A `stop_string` stop that
+  // Inference.Generate did not report means generation is still running:
+  // cancel it.
   FinishInfo finish_info = 5;
   // Set on the last response only.
   uint32 num_reasoning_tokens = 6;
