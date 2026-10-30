@@ -1,7 +1,9 @@
-use std::path::Path;
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::time::Duration;
 
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 use zeromq::prelude::{Socket, SocketRecv, SocketSend};
 use zeromq::util::PeerIdentity;
 use zeromq::{DealerSocket, PushSocket, SocketOptions, SubSocket, ZmqMessage};
@@ -26,10 +28,12 @@ pub struct MockEngineConfig {
     pub local: bool,
     /// Whether the engine should advertise itself as headless.
     pub headless: bool,
+    /// `parallel_config_hash` reported in handshake READY.
+    pub parallel_config_hash: Option<String>,
     /// Engine-ready payload reported after INIT, including max model length,
     /// KV block count, and dtype.
     pub ready_response: EngineCoreReadyResponse,
-    /// Maximum time to wait for IPC endpoints to appear before connecting.
+    /// Maximum time to wait for endpoints to accept connections.
     pub connect_timeout: Duration,
 }
 
@@ -38,6 +42,7 @@ impl Default for MockEngineConfig {
         Self {
             local: false,
             headless: true,
+            parallel_config_hash: None,
             ready_response: default_ready_response(),
             connect_timeout: Duration::from_secs(5),
         }
@@ -54,9 +59,24 @@ pub fn default_ready_response() -> EngineCoreReadyResponse {
         dtype: ModelDtype::Float32,
         vllm_version: "test-vllm-version".to_string(),
         world_size: 1,
-        data_parallel_size: 1,
+        effective_data_parallel_size: 1,
+        tensor_parallel_size: 1,
+        pipeline_parallel_size: 1,
+        decode_context_parallel_size: 1,
+        data_parallel_rank: 0,
+        max_num_seqs: 256,
+        max_num_batched_tokens: 8192,
+        instance_id: "test-instance".to_string(),
+        supports_lora: false,
+        max_loras: 0,
         kv_cache_size_tokens: None,
         kv_cache_max_concurrency: None,
+        kv_events_config: None,
+        weight_transfer_backend: None,
+        enable_sleep_mode: false,
+        supports_draft_weight_updates: false,
+        effective_attention_block_size: None,
+        vllm_config: None,
     }
 }
 
@@ -103,7 +123,7 @@ fn ready_message(status: &str, config: &MockEngineConfig) -> ReadyMessage {
         status: Some(status.to_string()),
         local: Some(config.local),
         headless: Some(config.headless),
-        parallel_config_hash: None,
+        parallel_config_hash: config.parallel_config_hash.clone(),
     }
 }
 
@@ -118,22 +138,33 @@ fn peer_identity(engine_id: impl Into<EngineId>) -> Result<PeerIdentity> {
     })
 }
 
-/// Wait for an IPC endpoint path to appear before attempting to connect.
-async fn wait_for_ipc_endpoint(endpoint: &str, connect_timeout: Duration) -> Result<()> {
-    let Some(socket_path) = endpoint.strip_prefix("ipc://") else {
-        return Ok(());
-    };
-
-    timeout(connect_timeout, async {
-        while !Path::new(socket_path).exists() {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .map_err(|_| Error::HandshakeTimeout {
-        stage: "mock engine IPC endpoint",
-        timeout: connect_timeout,
-    })
+/// Wait for an endpoint to accept connections before attempting the ZMQ connect.
+async fn wait_for_endpoint(endpoint: &str, connect_timeout: Duration) -> Result<()> {
+    if let Some(socket_path) = endpoint.strip_prefix("ipc://") {
+        timeout(connect_timeout, async {
+            while tokio::net::UnixStream::connect(socket_path).await.is_err() {
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .map_err(|_| Error::HandshakeTimeout {
+            stage: "mock engine IPC endpoint",
+            timeout: connect_timeout,
+        })
+    } else if let Some(address) = endpoint.strip_prefix("tcp://") {
+        timeout(connect_timeout, async {
+            while tokio::net::TcpStream::connect(address).await.is_err() {
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .map_err(|_| Error::HandshakeTimeout {
+            stage: "mock engine TCP endpoint",
+            timeout: connect_timeout,
+        })
+    } else {
+        Ok(())
+    }
 }
 
 /// Encode the engine-ready response sent on input socket registration.
@@ -147,17 +178,77 @@ pub async fn connect_to_frontend(
     engine_id: impl Into<EngineId>,
     config: MockEngineConfig,
 ) -> Result<MockEngineSockets> {
-    let engine_handshake = engine_handshake.as_ref();
-    wait_for_ipc_endpoint(engine_handshake, config.connect_timeout).await?;
-
     let peer_identity = peer_identity(engine_id)?;
+    let (mut handshake, init) =
+        start_handshake(engine_handshake.as_ref(), &peer_identity, &config).await?;
+    let data_sockets = connect_data_sockets(&init, &peer_identity, &config).await?;
+    let coordinator = connect_coordinator(&init).await?;
+    send_handshake_ready(&mut handshake, &config).await?;
+
+    Ok(MockEngineSockets {
+        init,
+        data_sockets,
+        coordinator,
+    })
+}
+
+/// Join a frontend owning DP rank 0 and this engine's own frontend, as a Python
+/// engine does on a node in hybrid or external DP LB: take the coordinator
+/// addresses and DP rendezvous from the rank-0 INIT and the input/output
+/// addresses from the own frontend's INIT, then send READY to both.
+pub async fn connect_to_hybrid_frontends(
+    head_handshake: impl AsRef<str>,
+    client_handshake: impl AsRef<str>,
+    engine_id: impl Into<EngineId>,
+    mut config: MockEngineConfig,
+) -> Result<MockEngineSockets> {
+    let peer_identity = peer_identity(engine_id)?;
+    // Neither handshake is headless, and only the own frontend sees the engine
+    // as local.
+    let head_config = MockEngineConfig {
+        local: false,
+        headless: false,
+        ..config.clone()
+    };
+    config.local = true;
+    config.headless = false;
+    let (mut head, mut init) =
+        start_handshake(head_handshake.as_ref(), &peer_identity, &head_config).await?;
+    let (mut client, client_init) =
+        start_handshake(client_handshake.as_ref(), &peer_identity, &config).await?;
+    init.addresses.inputs = client_init.addresses.inputs;
+    init.addresses.outputs = client_init.addresses.outputs;
+    // The engine reports the rank-0 coordinator to its own frontend.
+    config.ready_response.dp_stats_address = init.addresses.frontend_stats_publish_address.clone();
+
+    let data_sockets = connect_data_sockets(&init, &peer_identity, &config).await?;
+    let coordinator = connect_coordinator(&init).await?;
+    // The engine sends READY to its own frontend first.
+    send_handshake_ready(&mut client, &config).await?;
+    send_handshake_ready(&mut head, &head_config).await?;
+
+    Ok(MockEngineSockets {
+        init,
+        data_sockets,
+        coordinator,
+    })
+}
+
+/// Send HELLO to one frontend handshake endpoint and receive its INIT.
+async fn start_handshake(
+    engine_handshake: &str,
+    peer_identity: &PeerIdentity,
+    config: &MockEngineConfig,
+) -> Result<(DealerSocket, HandshakeInitMessage)> {
+    wait_for_endpoint(engine_handshake, config.connect_timeout).await?;
+
     let mut options = SocketOptions::default();
     options.peer_identity(peer_identity.clone());
     let mut handshake = DealerSocket::with_options(options);
     handshake.connect(engine_handshake).await?;
     handshake
         .send(ZmqMessage::from(encode_msgpack(&ready_message(
-            "HELLO", &config,
+            "HELLO", config,
         ))?))
         .await?;
 
@@ -169,7 +260,15 @@ pub async fn connect_to_frontend(
         );
     }
     let init: HandshakeInitMessage = decode_msgpack(init_frames[0].as_ref())?;
+    Ok((handshake, init))
+}
 
+/// Register on every input/output socket pair named in INIT.
+async fn connect_data_sockets(
+    init: &HandshakeInitMessage,
+    peer_identity: &PeerIdentity,
+    config: &MockEngineConfig,
+) -> Result<Vec<MockEngineDataSockets>> {
     if init.addresses.inputs.is_empty() {
         return Err(Error::UnexpectedHandshakeMessage {
             message: "frontend INIT did not include an input address".to_string(),
@@ -189,22 +288,28 @@ pub async fn connect_to_frontend(
     for (input_address, output_address) in
         init.addresses.inputs.iter().zip(init.addresses.outputs.iter())
     {
-        wait_for_ipc_endpoint(input_address, config.connect_timeout).await?;
-        wait_for_ipc_endpoint(output_address, config.connect_timeout).await?;
+        wait_for_endpoint(input_address, config.connect_timeout).await?;
+        wait_for_endpoint(output_address, config.connect_timeout).await?;
 
         let mut input_options = SocketOptions::default();
         input_options.peer_identity(peer_identity.clone());
         let mut dealer = DealerSocket::with_options(input_options);
         dealer.connect(input_address).await?;
-        dealer.send(ZmqMessage::from(ready_response_payload(&config)?)).await?;
+        dealer.send(ZmqMessage::from(ready_response_payload(config)?)).await?;
 
         let mut push = PushSocket::new();
         push.connect(output_address).await?;
 
         data_sockets.push(MockEngineDataSockets { dealer, push });
     }
+    Ok(data_sockets)
+}
 
-    let coordinator = match (
+/// Join the coordinator named in INIT, if any, and wait for its READY marker.
+async fn connect_coordinator(
+    init: &HandshakeInitMessage,
+) -> Result<Option<MockCoordinatorSockets>> {
+    match (
         init.addresses.coordinator_input.as_deref(),
         init.addresses.coordinator_output.as_deref(),
     ) {
@@ -224,28 +329,29 @@ pub async fn connect_to_frontend(
                 );
             }
 
-            Some(MockCoordinatorSockets {
+            Ok(Some(MockCoordinatorSockets {
                 input_sub,
                 output_push,
-            })
+            }))
         }
-        (None, None) => None,
+        (None, None) => Ok(None),
         _ => bail_unexpected_handshake_message!(
             "coordinator handshake addresses must be both present or both absent"
         ),
-    };
+    }
+}
 
+/// Send the handshake READY status.
+async fn send_handshake_ready(
+    handshake: &mut DealerSocket,
+    config: &MockEngineConfig,
+) -> Result<()> {
     handshake
         .send(ZmqMessage::from(encode_msgpack(&ready_message(
-            "READY", &config,
+            "READY", config,
         ))?))
         .await?;
-
-    Ok(MockEngineSockets {
-        init,
-        data_sockets,
-        coordinator,
-    })
+    Ok(())
 }
 
 /// Join already-bootstrapped frontend input/output sockets directly.
@@ -257,8 +363,8 @@ pub async fn connect_to_bootstrapped_frontend(
 ) -> Result<(DealerSocket, PushSocket)> {
     let input_address = input_address.as_ref();
     let output_address = output_address.as_ref();
-    wait_for_ipc_endpoint(input_address, config.connect_timeout).await?;
-    wait_for_ipc_endpoint(output_address, config.connect_timeout).await?;
+    wait_for_endpoint(input_address, config.connect_timeout).await?;
+    wait_for_endpoint(output_address, config.connect_timeout).await?;
 
     let peer_identity = peer_identity(engine_id)?;
     let mut input_options = SocketOptions::default();

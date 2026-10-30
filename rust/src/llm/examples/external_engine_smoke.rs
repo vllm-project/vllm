@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -56,7 +59,10 @@ fn build_request(request_id: String, max_tokens: u32) -> GenerateRequest {
         trace_headers: None,
         priority: 0,
         data_parallel_rank: None,
+        session_id: None,
+        kv_hints: None,
         reasoning_parser_kwargs: None,
+        reasoning_ended: None,
         lora_request: None,
     }
 }
@@ -108,7 +114,9 @@ async fn main() -> Result<()> {
         transport_mode: TransportMode::HandshakeOwner {
             handshake_address: args.handshake_address.clone(),
             advertised_host: args.host.clone(),
+            engine_start_index: 0,
             engine_count: args.engine_count,
+            data_parallel_size: args.engine_count,
             ready_timeout,
             local_input_address: None,
             local_output_address: None,
@@ -116,6 +124,7 @@ async fn main() -> Result<()> {
         coordinator_mode: None,
         model_name: args.model.clone(),
         client_index: args.client_index,
+        engine_stats_enabled: true,
     })
     .await
     .context("failed to connect to external vLLM engine")?;

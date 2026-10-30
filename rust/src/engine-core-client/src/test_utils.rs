@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
@@ -10,7 +13,7 @@ use crate::EngineId;
 pub use crate::mock_engine::{MockCoordinatorSockets, MockEngineSockets};
 use crate::mock_engine::{
     MockEngineConfig, MockEngineDataSockets, connect_to_bootstrapped_frontend, connect_to_frontend,
-    default_ready_response,
+    connect_to_hybrid_frontends, default_ready_response,
 };
 use crate::protocol::handshake::{EngineCoreReadyResponse, HandshakeInitMessage};
 
@@ -80,6 +83,23 @@ pub async fn setup_mock_engine_sockets(
     connect_to_frontend(engine_handshake, engine_id, test_mock_engine_config())
         .await
         .expect("connect mock engine")
+}
+
+/// Join a rank-0 frontend and the engine's own frontend like an engine on a
+/// node in hybrid or external DP LB.
+pub async fn setup_hybrid_mock_engine_sockets(
+    head_handshake: String,
+    client_handshake: String,
+    engine_id: impl Into<EngineId>,
+) -> MockEngineSockets {
+    connect_to_hybrid_frontends(
+        head_handshake,
+        client_handshake,
+        engine_id,
+        test_mock_engine_config(),
+    )
+    .await
+    .expect("connect hybrid mock engine")
 }
 
 /// Connect one mock engine directly to already-bootstrapped frontend

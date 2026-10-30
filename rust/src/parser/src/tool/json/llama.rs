@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+use vllm_tokenizer::{DecodedText, DynTokenizer};
 use winnow::ascii::multispace0 as ws0;
 use winnow::combinator::seq;
 use winnow::error::{ModalResult, StrContext};
@@ -9,7 +13,9 @@ use super::{
     argument_delta_event, tool_call_header_event,
 };
 use crate::tool::utils::{JsonObjectScanState, parse_buffered_event};
-use crate::tool::{Result, StructuralTagModel, Tool, ToolCallDelta, ToolParser, ToolParserOutput};
+use crate::tool::{
+    Result, StructuralTagBuilder, Tool, ToolCallDelta, ToolParser, ToolParserOutput,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum LlamaJsonMode {
@@ -126,19 +132,19 @@ impl Llama3JsonToolParser {
 }
 
 impl ToolParser for Llama3JsonToolParser {
-    fn create(tools: &[Tool]) -> Result<Box<dyn ToolParser>>
+    fn create(tools: &[Tool], _tokenizer: DynTokenizer) -> Result<Box<dyn ToolParser>>
     where
         Self: Sized + 'static,
     {
         Ok(Box::new(Self::new(tools)))
     }
 
-    fn structural_tag_model(&self) -> Option<StructuralTagModel> {
-        Some(StructuralTagModel::Llama)
+    fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
+        Some(xgrammar_structural_tag::Model::Llama.builder())
     }
 
-    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
-        self.buffer.push_str(chunk);
+    fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
+        self.buffer.push_str(&chunk.text);
 
         if !self.commit_start() {
             return Ok(());
@@ -203,6 +209,7 @@ fn llama_tool_call_header_event(input: &mut JsonToolInput<'_>) -> ModalResult<Ll
     const CONFIG: JsonToolCallConfig = JsonToolCallConfig {
         parser_name: "Llama JSON",
         start_marker: "",
+        framed_start_marker: None,
         end_marker: "",
         marker_whitespace: JsonToolCallWhitespace::Optional,
         delimiter: Some(";"),
@@ -235,7 +242,9 @@ fn parse_llama_arguments_event(
 
 /// Parse the outer closing brace for one Llama JSON tool call.
 fn tool_call_close_event(input: &mut JsonToolInput<'_>) -> ModalResult<LlamaJsonEvent> {
-    literal("}").value(LlamaJsonEvent::ToolCallClose).parse_next(input)
+    seq!(_: ws0, _: literal("}"))
+        .value(LlamaJsonEvent::ToolCallClose)
+        .parse_next(input)
 }
 
 /// Parse a semicolon separator after one Llama JSON tool call.
@@ -261,6 +270,28 @@ mod tests {
 
     fn build_tool_call(function_name: &str, parameters: &str) -> String {
         format!(r#"{{"name":"{function_name}","parameters":{parameters}}}"#)
+    }
+
+    #[test]
+    fn llama_tolerates_whitespace_before_outer_brace() {
+        // Whitespace between the parameters object's `}` and the outer `}` must
+        // still parse (json.loads / raw_decode parity).
+        let mut whole = Llama3JsonToolParser::new(&test_tools());
+        let whole_output = whole.parse_complete(r#"{"name":"f","parameters":{"x":1} }"#).unwrap();
+        assert_eq!(whole_output.calls().len(), 1);
+        assert_eq!(whole_output.calls()[0].name.as_deref(), Some("f"));
+        assert_eq!(whole_output.calls()[0].arguments, r#"{"x":1}"#);
+
+        // Same input, whitespace before the outer `}` split across a chunk boundary.
+        let mut chunked = Llama3JsonToolParser::new(&test_tools());
+        let mut output = ToolParserOutput::default();
+        for chunk in [r#"{"name":"f","parameters":{"x":1}"#, " ", "}"] {
+            output.append(chunked.parse_chunk(chunk).unwrap());
+        }
+        output.append(chunked.finish().unwrap());
+        let output = output.coalesce();
+        assert_eq!(output.calls().len(), 1);
+        assert_eq!(output.calls()[0].arguments, r#"{"x":1}"#);
     }
 
     #[test]

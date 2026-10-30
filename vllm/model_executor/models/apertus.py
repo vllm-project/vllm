@@ -211,8 +211,8 @@ class ApertusAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q = self.q_norm(q.contiguous().view(-1, self.head_dim)).view_as(q)
-        k = self.k_norm(k.contiguous().view(-1, self.head_dim)).view_as(k)
+        q = self.q_norm(q.view(-1, self.num_heads, self.head_dim)).view_as(q)
+        k = self.k_norm(k.view(-1, self.num_kv_heads, self.head_dim)).view_as(k)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
@@ -255,8 +255,7 @@ class ApertusDecoderLayer(nn.Module):
 
         # Apertus defaults to causal attention as it is a decoder-only model.
         # You can override the HF config with `is_causal=False` to enable
-        # bidirectional attention, which is used in some embedding models
-        # (e.g. parasail-ai/GritLM-7B-vllm)
+        # bidirectional attention, which is used in some embedding models.
         if getattr(config, "is_causal", True):
             attn_type = AttentionType.DECODER
         else:
@@ -491,8 +490,5 @@ class ApertusForCausalLM(
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

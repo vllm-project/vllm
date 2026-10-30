@@ -4,7 +4,7 @@
 import pytest
 
 from tests.utils import create_new_process_for_each_test
-from vllm import LLM, SamplingParams
+from vllm import LLM, EmbeddingRequestOutput, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.multimodal.image import convert_image_mode
 
@@ -50,11 +50,12 @@ def test_oot_registration_embedding(
         m.setenv("VLLM_PLUGINS", "register_dummy_model")
         prompts = ["Hello, my name is", "The text does not matter"]
         llm = LLM(
-            model=dummy_gemma2_embedding_path, load_format="dummy", max_model_len=2048
+            model=dummy_gemma2_embedding_path, load_format="dummy", max_model_len=512
         )
         outputs = llm.embed(prompts)
 
         for output in outputs:
+            assert isinstance(output, EmbeddingRequestOutput)
             assert all(v == 0 for v in output.outputs.embedding)
 
 

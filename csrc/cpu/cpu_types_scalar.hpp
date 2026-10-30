@@ -333,6 +333,13 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
     return FP32Vec16(ret);
   }
 
+  FP32Vec16 operator-() const {
+    f32x16_t ret;
+    unroll_loop<int, VEC_ELEM_NUM>(
+        [&ret, this](int i) { ret.val[i] = -reg.val[i]; });
+    return FP32Vec16(ret);
+  }
+
   FP32Vec16 operator/(const FP32Vec16& b) const {
     f32x16_t ret;
     unroll_loop<int, VEC_ELEM_NUM>(
@@ -356,10 +363,28 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
     return FP32Vec16(ret);
   }
 
+  FP32Vec16 clamp(const FP32Vec16& min_v, const FP32Vec16& max_v) const {
+    return this->max(min_v).min(max_v);
+  }
+
   FP32Vec16 abs() const {
     f32x16_t ret;
     unroll_loop<int, VEC_ELEM_NUM>(
         [&ret, this](int i) { ret.val[i] = std::abs(reg.val[i]); });
+    return FP32Vec16(ret);
+  }
+
+  FP32Vec16 exp() const {
+    f32x16_t ret;
+    unroll_loop<int, VEC_ELEM_NUM>(
+        [&ret, this](int i) { ret.val[i] = std::exp(reg.val[i]); });
+    return FP32Vec16(ret);
+  }
+
+  FP32Vec16 er() const {
+    f32x16_t ret;
+    unroll_loop<int, VEC_ELEM_NUM>(
+        [&ret, this](int i) { ret.val[i] = std::erf(reg.val[i]); });
     return FP32Vec16(ret);
   }
 
@@ -402,6 +427,25 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
   }
 
   void save(void* ptr) const { *reinterpret_cast<f32x16_t*>(ptr) = reg; }
+};
+
+// Reference implementation for vector operations missing from some backends.
+struct INT8Vec64 {
+  constexpr static int VEC_ELEM_NUM = 64;
+
+  explicit INT8Vec64(const int8_t* ptr) {
+    std::memcpy(data_, ptr, sizeof(data_));
+  }
+
+  void save(int8_t* ptr) const { std::memcpy(ptr, data_, sizeof(data_)); }
+
+  void save(int8_t* ptr, const int elem_num) const {
+    TORCH_CHECK(elem_num > 0 && elem_num <= VEC_ELEM_NUM);
+    std::memcpy(ptr, data_, elem_num);
+  }
+
+ private:
+  int8_t data_[VEC_ELEM_NUM];
 };
 
 template <typename T>
@@ -458,7 +502,7 @@ inline FP16Vec16::FP16Vec16(const FP32Vec16& v) {
       [&v, this](int i) { reg.val[i] = float_to_fp16(v.reg.val[i]); });
 }
 
-inline FP16Vec8 ::FP16Vec8(const FP32Vec8& v) {
+inline FP16Vec8::FP16Vec8(const FP32Vec8& v) {
   unroll_loop<int, FP16Vec8::VEC_ELEM_NUM>(
       [&v, this](int i) { reg.val[i] = float_to_fp16(v.reg.val[i]); });
 }

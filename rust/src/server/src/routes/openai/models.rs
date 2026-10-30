@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -28,7 +31,7 @@ pub async fn list_models(State(state): State<Arc<AppState>>) -> Json<ListModelsR
     });
 
     let primary = state.primary_model_name().to_string();
-    let lora_cards = state.served_lora_requests().await.into_iter().map(|lora| ModelObject {
+    let lora_cards = state.served_loras().await.into_iter().map(|lora| ModelObject {
         id: lora.lora_name,
         object: "model".to_string(),
         created,

@@ -22,6 +22,7 @@ import regex as re
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import (
+    ArgValueExtender,
     ParserEngineConfig,
     ParserState,
     Transition,
@@ -57,34 +58,85 @@ _PARTIAL_PARAM_RE = re.compile(
 )
 
 
-def _minimax_m2_arg_converter(raw_args: str, partial: bool) -> str:
+# What ends an open value in ``_PARAM_RE``: a closing tag or the next opener.
+_PARAM_VALUE_END_RE = re.compile(r"<\s*/\s*parameter\s*>|<\s*parameter\s+name\s*=")
+
+
+def _param_name(match: re.Match) -> str:
+    return (
+        match.group("dq_name")
+        or match.group("sq_name")
+        or match.group("bare_name")
+        or ""
+    ).strip()
+
+
+def _minimax_m2_parse_args(
+    raw_args: str, partial: bool
+) -> tuple[dict[str, object], re.Match | None]:
+    """Return the arguments and the match of the open trailing value, if any."""
     params: dict[str, object] = {}
 
     for match in _PARAM_RE.finditer(raw_args):
-        name = (
-            match.group("dq_name")
-            or match.group("sq_name")
-            or match.group("bare_name")
-            or ""
-        ).strip()
+        name = _param_name(match)
         if not name:
             continue
-        params[name] = match.group("value").strip()
+        # Keep the value verbatim (like the glm47 converter): it is inline
+        # between `>` and `</parameter>`, so surrounding whitespace is data.
+        params[name] = match.group("value")
 
+    open_match = None
     if partial:
         remaining = _PARAM_RE.sub("", raw_args)
         match = _PARTIAL_PARAM_RE.search(remaining)
         if match:
-            name = (
-                match.group("dq_name")
-                or match.group("sq_name")
-                or match.group("bare_name")
-                or ""
-            ).strip()
+            name = _param_name(match)
             if name:
-                params[name] = match.group("value").strip()
+                # Verbatim, same as the complete-match loop above.
+                params[name] = match.group("value")
+                open_match = match
 
-    return json.dumps(params, ensure_ascii=False)
+    return params, open_match
+
+
+def _minimax_m2_arg_converter(raw_args: str, partial: bool) -> str:
+    return json.dumps(_minimax_m2_parse_args(raw_args, partial)[0], ensure_ascii=False)
+
+
+def _value_end_window(text: str) -> str:
+    """Return the suffix of *text* that may still grow into a value end."""
+    start = text.rfind("<")
+    if start == -1:
+        return ""
+    tail = text[start:]
+    return tail if _PARAM_VALUE_END_RE.fullmatch(tail, partial=True) else ""
+
+
+def _minimax_m2_arg_value_extender(raw_args: str) -> ArgValueExtender | None:
+    # The open value runs to the end of raw_args and is the last JSON value,
+    # so a delta appends its JSON-escaped text unless it closes the value.
+    params, match = _minimax_m2_parse_args(raw_args, partial=True)
+    if match is None or next(reversed(params)) != _param_name(match):
+        return None
+    # Later text could still re-parse the opener: an earlier unmatched one, or
+    # a bare name that starts a quote, may close into a different name.
+    bare_name = match.group("bare_name")
+    if _PARAM_VALUE_END_RE.search(match.string, 0, match.start()) or (
+        bare_name is not None and bare_name[0] in "\"'"
+    ):
+        return None
+
+    window = _value_end_window(match.group("value"))
+
+    def extend(delta: str) -> str | None:
+        nonlocal window
+        text = window + delta
+        if _PARAM_VALUE_END_RE.search(text):
+            return None
+        window = _value_end_window(text)
+        return json.dumps(delta, ensure_ascii=False)[1:-1]
+
+    return extend
 
 
 @functools.cache
@@ -92,6 +144,7 @@ def minimax_m2_config() -> ParserEngineConfig:
     return ParserEngineConfig(
         name="minimax_m2",
         initial_state=ParserState.REASONING,
+        wait_for_reasoning=True,
         terminals={
             "THINK_START": THINK_START,
             "THINK_END": THINK_END,
@@ -187,6 +240,7 @@ def minimax_m2_config() -> ParserEngineConfig:
             },
         },
         arg_converter=_minimax_m2_arg_converter,
+        arg_value_extender=_minimax_m2_arg_value_extender,
         stream_arg_deltas=True,
         tool_args_json=False,
         validate_tool_names=True,

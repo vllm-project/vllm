@@ -24,6 +24,7 @@ from vllm.config import (
     PassConfig,
     VllmConfig,
 )
+from vllm.config.cache import CacheDType
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.linear import ColumnParallelLinear
@@ -165,29 +166,14 @@ class MLARoPEKVCacheCatTestModel(torch.nn.Module):
         max_blocks = (max(batch_spec.seq_lens) + self.block_size - 1) // self.block_size
         num_blocks = batch_size * max_blocks
 
-        # Fetch the attention backend and kv cache shape and stride order
-        kv_cache_shape = self.attn_backend.get_kv_cache_shape(
-            num_blocks, self.block_size, self.num_kv_heads, self.head_size
-        )
-        try:
-            kv_cache_stride_order = self.attn_backend.get_kv_cache_stride_order()
-        except (AttributeError, NotImplementedError):
-            kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
-
-        kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
-        inv_order = [
-            kv_cache_stride_order.index(i) for i in range(len(kv_cache_stride_order))
-        ]
-
-        raw_tensor = torch.zeros(
-            num_blocks * self.block_size * self.num_kv_heads * self.head_size,
+        # MLA KV cache is 4D: (num_blocks, num_heads=1, block_size, head_size)
+        kv_cache = torch.zeros(
+            (num_blocks, 1, self.block_size, self.head_size),
             dtype=self.kv_cache_dtype,
             device=self.device,
         )
-        raw_tensor = raw_tensor.view(kv_cache_shape)
-        kv_cache = raw_tensor.permute(*inv_order)
 
-        self.mla_attn.kv_cache = kv_cache
+        self.mla_attn.bind_kv_cache(kv_cache)
 
         # Build attn metadata
         attn_metadata = self.builder.build(
@@ -269,7 +255,7 @@ def test_mla_rope_kvcache_cat_fusion(
     block_size: int,
     is_neox: bool,
     dtype: torch.dtype,
-    kv_cache_dtype: str,
+    kv_cache_dtype: CacheDType,
     monkeypatch: pytest.MonkeyPatch,
 ):
     torch.set_default_device("cuda")

@@ -3,7 +3,7 @@
 # Keep this helper best-effort: missing Buildkite metadata should fall back to
 # local/default values instead of blocking the Docker build.
 
-# Variant examples: "", "cu129", "ubuntu2404", "cu129-ubuntu2404".
+# Variant examples: "", "cu134", "ubuntu2404", "xpu".
 variant="${1:-}"
 variant_suffix="${variant:+-${variant}}"
 
@@ -29,7 +29,7 @@ if [[ -n "${BUILDKITE:-}" || -n "${BUILDKITE_COMMIT:-}" ]]; then
       image_tag="${image_name}:nightly-${tag_commit}"
     elif [[ "${variant}" == cu* ]]; then
       cuda_variant="${variant%%-*}"
-      remaining_variant="${variant#${cuda_variant}}"
+      remaining_variant="${variant#"${cuda_variant}"}"
       image_tag="${image_name}:${cuda_variant}-nightly-${tag_commit}${remaining_variant}"
     else
       image_tag="${image_name}:nightly-${tag_commit}${variant_suffix}"

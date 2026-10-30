@@ -8,6 +8,8 @@ from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.ops.triton_decode_attention import decode_attention_fwd
 
+pytestmark = pytest.mark.skip_global_cleanup
+
 DEVICE_TYPE = current_platform.device_type
 
 
@@ -323,3 +325,73 @@ def test_decode_attention_cross_layer_view(H_Q, H_KV, D_QK, D_V, is_mla, PAGE_SI
     # Same data and same compute order; only addressing differs.
     assert torch.equal(o_ref, o_xl)
     assert torch.equal(lse_ref, lse_xl)
+
+
+@pytest.mark.parametrize(
+    "B,H_Q,H_KV,D_QK,D_V,is_mla",
+    [
+        (256, 32, 1, 576, 512, True),  # grouped kernel
+        (1024, 32, 32, 128, 128, False),  # normal kernel
+    ],
+)
+def test_decode_attention_int64_logits_offset(B, H_Q, H_KV, D_QK, D_V, is_mla):
+    """attn_logits offsets must not overflow int32 when B * H_Q * num_kv_splits
+    * (D_V + 1) exceeds 2**31 (long max_model_len, large decode batch)."""
+    PAGE_SIZE = 16
+    seq_len = 33
+    num_kv_splits = 512
+    dtype = torch.bfloat16
+    sm_scale = 1.0 / (D_QK**0.5)
+    assert B * H_Q * num_kv_splits * (D_V + 1) > 2**31
+
+    num_pages_per_batch = cdiv(seq_len, PAGE_SIZE)
+    req_to_page = torch.arange(
+        B * num_pages_per_batch, device=DEVICE_TYPE, dtype=torch.int32
+    ).view(B, num_pages_per_batch)
+    k_buffer = torch.randn(
+        B * num_pages_per_batch, PAGE_SIZE, H_KV, D_QK, dtype=dtype, device=DEVICE_TYPE
+    )
+    v_buffer = (
+        k_buffer[..., :D_V]
+        if is_mla
+        else torch.randn(
+            B * num_pages_per_batch,
+            PAGE_SIZE,
+            H_KV,
+            D_V,
+            dtype=dtype,
+            device=DEVICE_TYPE,
+        )
+    )
+    q = torch.randn(B, H_Q, D_QK, dtype=dtype, device=DEVICE_TYPE)
+    b_seq_len = torch.full((B,), seq_len, device=DEVICE_TYPE)
+
+    def run(rows):
+        n = rows.stop - rows.start
+        o = torch.zeros(n, H_Q, D_V, dtype=dtype, device=DEVICE_TYPE)
+        lse = torch.zeros(n, H_Q, dtype=dtype, device=DEVICE_TYPE)
+        attn_logits = torch.empty(
+            (n, H_Q, num_kv_splits, D_V + 1), dtype=torch.float32, device=DEVICE_TYPE
+        )
+        decode_attention_fwd(
+            q[rows],
+            k_buffer,
+            v_buffer,
+            o,
+            lse,
+            req_to_page[rows],
+            b_seq_len[rows],
+            attn_logits,
+            num_kv_splits,
+            sm_scale,
+            PAGE_SIZE,
+            is_mla=is_mla,
+        )
+        return o, lse
+
+    o, lse = run(slice(0, B))
+    o_last, lse_last = run(slice(B - 1, B))
+
+    # Same compute order; the last request only differs in its logits offset.
+    assert torch.equal(o[-1:], o_last)
+    assert torch.equal(lse[-1:], lse_last)

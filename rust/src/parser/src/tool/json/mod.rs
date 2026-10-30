@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Shared parser core for JSON tool calls wrapped by text markers.
 
 pub use granite4::Granite4ToolParser;
@@ -6,7 +9,7 @@ pub use internlm2::Internlm2ToolParser;
 pub use llama::Llama3JsonToolParser;
 pub use mistral::MistralToolParser;
 pub use phi4mini::Phi4MiniJsonToolParser;
-pub use qwen::Qwen3XmlToolParser;
+pub use qwen::Qwen3JsonToolParser;
 
 mod granite4;
 mod hermes;
@@ -16,6 +19,7 @@ mod mistral;
 mod phi4mini;
 mod qwen;
 
+use vllm_tokenizer::DecodedText;
 use winnow::ascii::multispace0 as ws0;
 use winnow::combinator::{alt, seq};
 use winnow::error::{AddContext, ModalResult, StrContext, StrContextValue};
@@ -24,28 +28,34 @@ use winnow::stream::{Partial, Stream};
 use winnow::token::literal;
 
 use super::utils::{
-    JsonObjectScanState, json_str, parse_buffered_event, safe_text_len, take_json_object,
+    JsonObjectScanState, json_str, parse_buffered_event, safe_text_len, safe_text_len_mul,
+    take_json_object,
 };
 use super::{Result, ToolCallDelta, ToolParserOutput};
 
-type JsonToolInput<'i> = Partial<&'i str>;
+pub(crate) type JsonToolInput<'i> = Partial<&'i str>;
 
 #[derive(Debug, Clone, Copy)]
-struct JsonToolCallConfig {
-    parser_name: &'static str,
-    start_marker: &'static str,
-    end_marker: &'static str,
-    marker_whitespace: JsonToolCallWhitespace,
-    delimiter: Option<&'static str>,
-    name_key: &'static str,
+pub(crate) struct JsonToolCallConfig {
+    pub parser_name: &'static str,
+    pub start_marker: &'static str,
+    /// Start marker with its fixed preceding framing, matched alongside the
+    /// bare start marker.
+    pub framed_start_marker: Option<&'static str>,
+    pub end_marker: &'static str,
+    /// Whitespace inside the tool-call markers: after the start marker and
+    /// before the end marker.
+    pub marker_whitespace: JsonToolCallWhitespace,
+    pub delimiter: Option<&'static str>,
+    pub name_key: &'static str,
     /// Candidate JSON keys naming the arguments payload, tried in order.
     /// Most parsers use a single key like `["arguments"]`, but some accept
     /// multiple (e.g. InternLM2 accepts `parameters` or `arguments`).
-    arguments_key: &'static [&'static str],
+    pub arguments_key: &'static [&'static str],
 }
 
 #[derive(Debug, Clone, Copy)]
-enum JsonToolCallWhitespace {
+pub(crate) enum JsonToolCallWhitespace {
     Optional,
     Exact(&'static str),
 }
@@ -58,7 +68,7 @@ enum JsonToolCallMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum JsonToolCallEvent {
+pub(crate) enum JsonToolCallEvent {
     Text { len: usize },
     ToolCallStart,
     ToolCallHeader { function_name: String },
@@ -89,8 +99,8 @@ impl JsonToolCallParser {
         }
     }
 
-    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
-        self.buffer.push_str(chunk);
+    fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
+        self.buffer.push_str(&chunk.text);
         let config = self.config;
 
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
@@ -208,7 +218,10 @@ fn tool_call_start_event(
     config: JsonToolCallConfig,
 ) -> ModalResult<JsonToolCallEvent> {
     seq!(
-        _: literal(config.start_marker),
+        _: |input: &mut JsonToolInput<'_>| match config.framed_start_marker {
+            Some(marker) => alt((literal(marker), literal(config.start_marker))).void().parse_next(input),
+            None => literal(config.start_marker).void().parse_next(input),
+        },
         _: |input: &mut JsonToolInput<'_>| marker_whitespace(input, config),
     )
     .value(JsonToolCallEvent::ToolCallStart)
@@ -217,7 +230,7 @@ fn tool_call_start_event(
 
 /// Parse a marker-wrapped JSON tool-call header before the raw arguments
 /// payload.
-fn tool_call_header_event(
+pub(crate) fn tool_call_header_event(
     input: &mut JsonToolInput<'_>,
     config: JsonToolCallConfig,
 ) -> ModalResult<JsonToolCallEvent> {
@@ -314,7 +327,7 @@ fn tool_call_close_event(
     input: &mut JsonToolInput<'_>,
     config: JsonToolCallConfig,
 ) -> ModalResult<JsonToolCallEvent> {
-    let _ = literal("}").parse_next(input)?;
+    seq!(_: ws0, _: literal("}")).parse_next(input)?;
 
     match config.delimiter {
         Some(delimiter) => alt((
@@ -366,12 +379,24 @@ fn safe_text_event(
     input: &mut JsonToolInput<'_>,
     config: JsonToolCallConfig,
 ) -> ModalResult<JsonToolCallEvent> {
-    safe_text_len(input, config.start_marker).map(|len| JsonToolCallEvent::Text { len })
+    // Stop only where a tool call can start: with exact whitespace, a bare
+    // start marker without it is text.
+    let with_whitespace = |marker: &str| match config.marker_whitespace {
+        JsonToolCallWhitespace::Optional => marker.to_string(),
+        JsonToolCallWhitespace::Exact(whitespace) => format!("{marker}{whitespace}"),
+    };
+    let start_marker = with_whitespace(config.start_marker);
+    match config.framed_start_marker {
+        Some(marker) => safe_text_len_mul(input, &[with_whitespace(marker), start_marker]),
+        None => safe_text_len(input, start_marker),
+    }
+    .map(|len| JsonToolCallEvent::Text { len })
 }
 
 #[cfg(test)]
 mod tests {
     use expect_test::expect;
+    use vllm_tokenizer::DecodedText;
 
     use super::{JsonToolCallConfig, JsonToolCallParser, JsonToolCallWhitespace};
     use crate::tool::ToolParserOutput;
@@ -379,6 +404,7 @@ mod tests {
     const DELIMITED_CONFIG: JsonToolCallConfig = JsonToolCallConfig {
         parser_name: "Delimited JSON",
         start_marker: "<tool_calls>",
+        framed_start_marker: None,
         end_marker: "</tool_calls>",
         marker_whitespace: JsonToolCallWhitespace::Optional,
         delimiter: Some("<"),
@@ -397,10 +423,38 @@ mod tests {
     fn collect_chunks(parser: &mut JsonToolCallParser, chunks: &[&str]) -> ToolParserOutput {
         let mut output = ToolParserOutput::default();
         for chunk in chunks {
-            parser.parse_into(chunk, &mut output).unwrap();
+            parser.parse_into(DecodedText::unattributed(*chunk), &mut output).unwrap();
         }
         output.append(parser.finish().unwrap());
         output.coalesce()
+    }
+
+    #[test]
+    fn json_tool_call_tolerates_whitespace_before_outer_brace() {
+        // Pretty-printed JSON puts whitespace between the arguments object's `}`
+        // and the outer object's `}`; it must still parse (json.loads parity).
+        let mut whole = JsonToolCallParser::new(DELIMITED_CONFIG);
+        let whole_output = collect_chunks(
+            &mut whole,
+            &[r#"<tool_calls>{"function":"f","parameters":{"x":1} }</tool_calls>"#],
+        );
+        assert_eq!(whole_output.calls().len(), 1);
+        assert_eq!(whole_output.calls()[0].name.as_deref(), Some("f"));
+        assert_eq!(whole_output.calls()[0].arguments, r#"{"x":1}"#);
+
+        // Same input, but the whitespace before the outer `}` is split across a
+        // chunk boundary (exercises `ws0` returning Incomplete on `Partial`).
+        let mut chunked = JsonToolCallParser::new(DELIMITED_CONFIG);
+        let chunked_output = collect_chunks(
+            &mut chunked,
+            &[
+                r#"<tool_calls>{"function":"f","parameters":{"x":1}"#,
+                " ",
+                "}</tool_calls>",
+            ],
+        );
+        assert_eq!(chunked_output.calls().len(), 1);
+        assert_eq!(chunked_output.calls()[0].arguments, r#"{"x":1}"#);
     }
 
     #[test]

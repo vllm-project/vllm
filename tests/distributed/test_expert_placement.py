@@ -49,7 +49,6 @@ def verify_round_robin_pattern(expert_map, ep_rank, ep_size, global_num_experts)
 @pytest.mark.parametrize("world_size", [2, 4])
 def test_expert_placement_various_sizes(expert_placement_strategy, world_size):
     """Test round_robin expert placement with various expert counts."""
-
     # Test with different global_num_experts values
     # Include both divisible and non-divisible cases
     if world_size == 2:
@@ -116,7 +115,6 @@ def test_expert_placement_various_sizes(expert_placement_strategy, world_size):
 @pytest.mark.parametrize("world_size", [2, 4])
 def test_expert_placement_edge_cases(expert_placement_strategy, world_size):
     """Test edge cases for round_robin expert placement."""
-
     # Test case 1: ep_size = 1 (should return None for expert_map)
     local_num_experts, expert_map, _ = determine_expert_map(
         ep_size=1,
@@ -139,7 +137,6 @@ def test_expert_placement_edge_cases(expert_placement_strategy, world_size):
 
 def test_determine_expert_map_comprehensive():
     """Test of determine_expert_map function with various configurations."""
-
     # Test cases: (ep_size, ep_rank, global_num_experts,
     # expert_placement_strategy, expected_local, expected_map_pattern)
     test_cases = [

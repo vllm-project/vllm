@@ -4,6 +4,10 @@ num_questions: 1319
 num_fewshot: 5
 startup_max_wait_seconds: 1200
 use_chat_completions: true
+# Diffusion models use a fixed internal temperature schedule and do not
+# support per-request temperature or seed overrides.
+temperature: 1.0
+seed: null
 server_args: >-
   --enforce-eager
   --max-model-len 4096

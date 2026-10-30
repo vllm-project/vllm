@@ -85,6 +85,7 @@ def _get_expected_values(num_requests: int, prompt_ids: list[int], max_tokens: i
         "vllm:request_inference_time_seconds": [("_count", num_requests)],
         "vllm:request_prefill_time_seconds": [("_count", num_requests)],
         "vllm:request_decode_time_seconds": [("_count", num_requests)],
+        "vllm:request_num_preemptions": [("_count", num_requests)],
         "vllm:request_prompt_tokens": [
             ("_sum", num_requests * num_prompt_tokens),
             ("_count", num_requests),
@@ -187,6 +188,7 @@ EXPECTED_METRICS_V1 = [
     "vllm:prefix_cache_queries",
     "vllm:prefix_cache_hits",
     "vllm:num_preemptions_total",
+    "vllm:admission_rejections_total",
     "vllm:prompt_tokens_total",
     "vllm:generation_tokens_total",
     "vllm:iteration_tokens_total",
@@ -225,6 +227,9 @@ EXPECTED_METRICS_V1 = [
     "vllm:request_decode_time_seconds_sum",
     "vllm:request_decode_time_seconds_bucket",
     "vllm:request_decode_time_seconds_count",
+    "vllm:request_num_preemptions_sum",
+    "vllm:request_num_preemptions_bucket",
+    "vllm:request_num_preemptions_count",
 ]
 
 EXPECTED_METRICS_MM = [
@@ -399,8 +404,7 @@ async def _poll_until(
 
 
 def _get_running_metrics_from_api(server: RemoteOpenAIServer):
-    """Return (running_count, waiting_count, kv_cache_usage)"""
-
+    """Return (running_count, waiting_count, kv_cache_usage)."""
     response = requests.get(server.url_for("metrics"))
     assert response.status_code == HTTPStatus.OK
 
@@ -450,7 +454,7 @@ def test_metrics_exist_run_batch():
             [
                 sys.executable,
                 "-m",
-                "vllm.entrypoints.openai.run_batch",
+                "vllm.entrypoints.launchers.run_batch",
                 "-i",
                 input_file.name,
                 "-o",
