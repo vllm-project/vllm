@@ -4,6 +4,7 @@ depends_on:
 steps:
 - label: ":nvidia: (L4) [Nightly] Qwen4 Exp SP"
   key: qwen4-exp-sp-tests-4-gpus
+  automatic_shard: true
   # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
   optional: true
   timeout_in_minutes: 30
@@ -22,6 +23,7 @@ steps:
   - pytest -v -s models/qwen4_exp/test_tpsp.py
   mirror:
     amd:
+      automatic_shard: true
       # Run on PRs even when the L4 step is optional (nightly only).
       optional: false
       label: ":amd: (MI355) Qwen4 Exp SP"
