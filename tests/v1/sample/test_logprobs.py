@@ -1628,3 +1628,85 @@ def test_token_logprobs_large_batch_int64_row_offset():
     assert torch.allclose(logprobs[last, 0], ref, atol=1e-2), (
         f"logprob {logprobs[last, 0].item()} != ref {ref.item()}"
     )
+
+
+def test_trace_replay_with_spec_decode(monkeypatch):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+
+    prompt = "Hello world " * 50
+    llm_kwargs = dict(
+        max_model_len=512,
+        max_logprobs=5,
+        seed=42,
+        enable_trace_replay=True,
+        enable_chunked_prefill=True,
+        max_num_batched_tokens=32,
+        enable_prefix_caching=False,
+        gpu_memory_utilization=0.25,
+        **GPU_DETERMINISM_KWARGS,
+    )
+
+    def replay(runner, traces):
+        outputs = runner.llm.generate(
+            [prompt] * len(traces),
+            [
+                SamplingParams(
+                    trace_decode_token_ids=trace, max_tokens=len(trace), logprobs=3
+                )
+                for trace in traces
+            ],
+        )
+        results = []
+        for output in outputs:
+            completion = output.outputs[0]
+            assert completion.logprobs is not None
+            results.append((list(completion.token_ids), completion.logprobs))
+        return results
+
+    with VllmRunner("Qwen/Qwen3-0.6B", **llm_kwargs) as ref_runner:
+        sampled = ref_runner.llm.generate(
+            [prompt, prompt],
+            [
+                SamplingParams(temperature=0.0, max_tokens=32, ignore_eos=True),
+                SamplingParams(temperature=1.0, seed=7, max_tokens=32, ignore_eos=True),
+            ],
+        )
+        greedy_trace = list(sampled[0].outputs[0].token_ids)
+        sampled_trace = list(sampled[1].outputs[0].token_ids)
+        diverged_trace = greedy_trace[:10] + sampled_trace[10:20] + greedy_trace[20:]
+        traces = [greedy_trace, sampled_trace, diverged_trace]
+        ref_results = replay(ref_runner, traces)
+
+    with VllmRunner(
+        "Qwen/Qwen3-0.6B",
+        speculative_config={
+            "method": "ngram",
+            "prompt_lookup_max": 5,
+            "prompt_lookup_min": 3,
+            "num_speculative_tokens": 3,
+        },
+        disable_log_stats=False,
+        **llm_kwargs,
+    ) as spec_runner:
+        spec_results = replay(spec_runner, traces)
+        num_accepted = sum(
+            m.value
+            for m in spec_runner.llm.get_metrics()
+            if m.name == "vllm:spec_decode_num_accepted_tokens"
+        )
+    assert num_accepted > 0
+
+    for trace, (ref_ids, ref_lps), (spec_ids, spec_lps) in zip(
+        traces, ref_results, spec_results
+    ):
+        assert ref_ids == trace
+        assert spec_ids == trace
+        assert len(ref_lps) == len(trace)
+        assert len(spec_lps) == len(trace)
+        for token_id, ref_lp, spec_lp in zip(trace, ref_lps, spec_lps):
+            assert math.isclose(
+                ref_lp[token_id].logprob,
+                spec_lp[token_id].logprob,
+                rel_tol=5e-2,
+                abs_tol=2.5e-1,
+            )
