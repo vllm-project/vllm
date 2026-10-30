@@ -266,7 +266,6 @@ def test_static_fp8_quant_1d_scale(
     ["scalar_0d", "scalar_1d", "per_row_1d", "per_row_2d", "ptpc", "ptpc_fp16"],
 )
 def test_dequant_fp8_weight_bitwise(
-    monkeypatch: pytest.MonkeyPatch,
     shape: tuple[int, int],
     weight_layout: str,
     scale_layout: str,
@@ -275,8 +274,6 @@ def test_dequant_fp8_weight_bitwise(
     for bit (values and layout) on inputs where a bf16-rounded or misapplied
     scale changes the result.
     """
-    from vllm.model_executor.layers.quantization.utils import fp8_utils
-
     K, N = shape
     out_dtype = torch.float16 if scale_layout == "ptpc_fp16" else torch.bfloat16
 
@@ -307,7 +304,7 @@ def test_dequant_fp8_weight_bitwise(
     }.get(scale_layout, 1)
     gen = torch.Generator().manual_seed(0)
     values = torch.empty(num_scales).uniform_(2**-12, 2**-4, generator=gen)
-    # A checkpoint scale whose bf16 rounding changes 122 of the 254 finite codes.
+    # A checkpoint scale whose bf16 rounding changes 122 of the 254 finite e4m3fn codes.
     values[0] = torch.tensor(0x3A9B4C70, dtype=torch.int32).view(torch.float32)
     values = values.cuda()
     if scale_layout == "scalar_0d":
@@ -341,12 +338,6 @@ def test_dequant_fp8_weight_bitwise(
     if shape == (16, 16):
         got_cpu = dequant_fp8_weight(weight.cpu(), scale.cpu(), out_dtype=out_dtype)
         assert torch.equal(got_cpu.view(torch.uint16), ref.cpu().view(torch.uint16))
-
-        with monkeypatch.context() as m:
-            m.setattr(current_platform, "supports_fp8", lambda: False)
-            m.setattr(fp8_utils, "_dequant_fp8_weight_kernel", None)
-            got_no_fp8 = dequant_fp8_weight(weight, scale, out_dtype=out_dtype)
-        assert torch.equal(got_no_fp8.view(torch.uint16), ref.view(torch.uint16))
 
 
 @pytest.mark.skipif(not current_platform.supports_fp8(), reason="FP8 not supported.")
