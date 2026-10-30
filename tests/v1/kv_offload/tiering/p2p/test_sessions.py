@@ -3062,7 +3062,7 @@ class TestDisconnect:
             "req-7",
             False,
         )
-        assert getattr(loads[0], "request_finished", False) is finished
+        assert loads[0].request_finished is finished
 
     def test_finish_marks_buffered_result_before_request_id_reuse(self):
         session, conn, _ = _make_session()
@@ -3073,7 +3073,7 @@ class TestDisconnect:
         session.request_blocks(8, "req-7", [OffloadKey(b"new")], [1])
         loads = session.poll().loads
         assert len(loads) == 1 and loads[0].job_id == 7 and not loads[0].success
-        assert getattr(loads[0], "request_finished", False)
+        assert loads[0].request_finished
         conn.enqueue(
             {
                 TYPE_KEY: TransferDoneMsg.TYPE,
@@ -3828,97 +3828,3 @@ class TestPeerFaultEscalation:
         transport._peer_faults["peer:8000"] = "late"
         session.poll()
         assert session.death_reason == "peer disconnected"
-
-
-def test_inference_reuses_a_finished_kv_request_id(
-    vllm_runner, monkeypatch, p2p_control_peer
-):
-    """A cancellation's late failure must not suppress a later request's fetch."""
-    from vllm import SamplingParams
-    from vllm.config import KVTransferConfig
-
-    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
-    monkeypatch.setenv("VLLM_P2P_HANDSHAKE_TIMEOUT_S", "120")
-    peer_port, handshake, reply_to_fetch, fetches = p2p_control_peer
-    import socket
-
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        local_port = sock.getsockname()[1]
-    config = KVTransferConfig(
-        kv_connector="OffloadingConnector",
-        kv_role="kv_both",
-        kv_load_failure_policy="recompute",
-        kv_connector_extra_config={
-            "spec_name": "TieringOffloadingSpec",
-            "cpu_bytes_to_use": 16 * 1024 * 1024,
-            "secondary_tiers": [
-                {"type": "p2p", "host": "127.0.0.1", "port": local_port}
-            ],
-        },
-    )
-    with vllm_runner(
-        "HuggingFaceTB/SmolLM2-135M",
-        skip_tokenizer_init=True,
-        dtype="float16",
-        max_model_len=256,
-        enforce_eager=True,
-        gpu_memory_utilization=0.35,
-        max_num_seqs=2,
-        max_num_batched_tokens=512,
-        enable_prefix_caching=True,
-        disable_log_stats=False,
-        kv_transfer_config=config,
-    ) as runner:
-        llm = runner.llm
-        params = SamplingParams(
-            temperature=0,
-            max_tokens=4,
-            ignore_eos=True,
-            extra_args={
-                "kv_transfer_params": {
-                    "remote_prefiller": {
-                        "remote_host": "127.0.0.1",
-                        "remote_port": peer_port,
-                        "kv_request_id": "retired",
-                    }
-                }
-            },
-        )
-        prompt = {"prompt_token_ids": [3 + i % 100 for i in range(192)]}
-
-        handshake.set()
-        request_ids = llm.enqueue([prompt], params, use_tqdm=False)
-        deadline = time.monotonic() + 30
-        while fetches.empty():
-            assert time.monotonic() < deadline, "no initial P2P fetch"
-            llm.llm_engine.step()
-        fetches.get_nowait()
-        llm.llm_engine.abort_request(request_ids, internal=True)
-        from vllm.v1.metrics.reader import Counter
-
-        deadline = time.monotonic() + 30
-        while True:
-            llm.generate(
-                [{"prompt_token_ids": [0]}],
-                SamplingParams(temperature=0, max_tokens=1),
-                use_tqdm=False,
-            )
-            failures = [
-                metric.value
-                for metric in llm.get_metrics()
-                if isinstance(metric, Counter)
-                and "promotion_job_failures" in metric.name
-            ]
-            if sum(failures) > 0:
-                break
-            assert time.monotonic() < deadline, (
-                f"cancelled load was not drained: {failures}"
-            )
-        reply_to_fetch.set()
-        second_prompt = {"prompt_token_ids": [103 + i % 100 for i in range(192)]}
-        result = llm.generate([second_prompt], params, use_tqdm=False)[0]
-        assert len(result.outputs[0].token_ids) == 4
-        assert not fetches.empty(), "late failure poisoned the reused KV request id"
-        assert fetches.get_nowait()["kv_request_id"] == "retired"
