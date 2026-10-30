@@ -21,6 +21,7 @@ from vllm.config import (
     SchedulerConfig,
     SpeculativeConfig,
     VllmConfig,
+    replace,
 )
 from vllm.config.compilation import CompilationMode, PassConfig
 from vllm.engine.arg_utils import EngineArgs
@@ -280,6 +281,37 @@ def test_enforce_eager_jit_warmup(enable_fault_tolerance):
     )
     assert config.compilation_config.mode == CompilationMode.NONE
     assert config.kernel_config.enable_jit_warmup == enable_fault_tolerance
+
+
+@pytest.mark.parametrize("threshold_mb", [0.0, 1.0])
+def test_config_replace_accepts_disabled_allreduce_fusion(threshold_mb):
+    """Autotune cache normalization must preserve valid compile ranges."""
+    config = VllmConfig(
+        model_config=ModelConfig(model="facebook/opt-125m", dtype="bfloat16"),
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=2, distributed_executor_backend="mp"
+        ),
+        scheduler_config=SchedulerConfig.default_factory(
+            max_model_len=2048, max_num_batched_tokens=2048, max_num_seqs=1
+        ),
+        compilation_config=CompilationConfig(
+            pass_config=PassConfig(
+                fuse_allreduce_rms=True,
+                fi_allreduce_fusion_max_size_mb=threshold_mb,
+            )
+        ),
+    )
+    expected_endpoints = set(config.compilation_config.compile_ranges_endpoints or ())
+    rebuilt = replace(config, cache_config=replace(config.cache_config))
+    endpoints = rebuilt.compilation_config.compile_ranges_endpoints
+    assert endpoints is not None
+    assert all(endpoint > 0 for endpoint in endpoints)
+    assert set(endpoints) == expected_endpoints
+    assert endpoints[-1] == config.scheduler_config.max_num_batched_tokens
+    assert (
+        rebuilt.compilation_config.pass_config.fi_allreduce_fusion_max_size_mb
+        == threshold_mb
+    )
 
 
 @pytest.mark.forked

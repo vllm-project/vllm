@@ -148,7 +148,10 @@ class DeepseekV32Attention(MLAAttention):
         num_local_heads = num_heads // tp_size
         qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
         scaling = qk_head_dim**-0.5
-        max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
+        max_position_embeddings = max(
+            getattr(config, "max_position_embeddings", 8192),
+            vllm_config.model_config.max_model_len,
+        )
 
         # DSA checkpoints may use plain ("default") or yarn-scaled RoPE.
         if config.rope_parameters["rope_type"] != "default":

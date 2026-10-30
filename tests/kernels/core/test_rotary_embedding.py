@@ -9,6 +9,24 @@ from tests.kernels.utils import opcheck
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 
 
+def test_deepseek_yarn_cache_capacity_preserves_existing_positions(default_vllm_config):
+    from vllm.model_executor.layers.rotary_embedding import get_rope
+
+    parameters = {
+        "rope_type": "deepseek_yarn",
+        "factor": 2,
+        "original_max_position_embeddings": 128,
+        "rope_dim": 64,
+    }
+    with torch.device("cpu"):
+        original = get_rope(128, 256, rope_parameters=parameters, dtype=torch.float32)
+        extended = get_rope(128, 512, rope_parameters=parameters, dtype=torch.float32)
+    assert original.cos_sin_cache.shape == (256, 64)
+    assert extended.cos_sin_cache.shape == (512, 64)
+    assert torch.equal(original.cos_sin_cache, extended.cos_sin_cache[:256])
+    assert torch.isfinite(extended.cos_sin_cache[256:]).all()
+
+
 def rotary_embedding_opcheck(
     rot,
     positions: torch.Tensor,

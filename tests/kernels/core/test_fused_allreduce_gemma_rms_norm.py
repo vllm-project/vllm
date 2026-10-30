@@ -24,6 +24,13 @@ from vllm.utils.network_utils import get_open_port
 from vllm.utils.torch_utils import set_random_seed
 
 
+@pytest.mark.parametrize("budget, expected", [(0, None), (8192, 1), (65536, 8)])
+def test_explicit_flashinfer_workspace_budget(budget, expected):
+    from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import _max_token_num
+
+    assert _max_token_num(8, 4096, torch.bfloat16, max_size_bytes=budget) == expected
+
+
 @ensure_current_vllm_config()
 def _worker_fused_ar_norm(
     local_rank,
