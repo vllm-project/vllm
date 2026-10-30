@@ -127,6 +127,35 @@ Get-Content 'D:\Production\Embeddings\logs\liveness-guard.jsonl' -Tail 1
 `LastTaskResult = 0` **et** une ligne datée il y a moins de 10 min = garde vivante. Une tâche
 `Ready` avec `LastTaskResult = 2` est **morte** — c'est exactement le piège ci-dessus.
 
+### ⚠️ `schtasks /create` garde les DÉFAUTS WINDOWS PORTABLE — ils disarmèrent la garde
+
+**Incident du 30/10/2026, 2ᵉ mort silencieuse en une nuit, causes distinctes.** `schtasks
+/create` n'écrit que le déclencheur : il laisse en place les **défauts d'un portable
+Windows**, qui ont désarmé la garde **deux fois** :
+
+| défaut | valeur par défaut | effet mesuré |
+| --- | --- | --- |
+| `DisallowStartIfOnBatteries` / `StopIfGoingOnBatteries` | **True** | passage sur batterie à 04:37Z ⇒ **chaque tir refusé en silence** (`LastTaskResult=0x800710E0`) |
+| `ExecutionTimeLimit` | **PT72H** | une passe bloquée (famine mémoire) reste `State=Running` ; avec `MultipleInstances=IgnoreNew` **tous les tirs suivants sont refusés**, et rien ne tue l'instance |
+
+Le premier correctif (batteries seules) **n'a rien changé au code de retour** — c'est ce code
+inchangé qui a révélé la seconde cause.
+
+**Règle** : après `schtasks /create`, poser et **relire** ces trois réglages, sinon le
+prochain enregistrement les réintroduit silencieusement :
+
+```powershell
+$task = Get-ScheduledTask -TaskName $TaskName
+$task.Settings.DisallowStartIfOnBatteries = $false
+$task.Settings.StopIfGoingOnBatteries     = $false
+$task.Settings.ExecutionTimeLimit         = 'PT10M'
+Set-ScheduledTask -TaskName $TaskName -Settings $task.Settings
+```
+
+`Get-ScheduledTask` affichant `Ready` **ne prouve rien** : les deux pannes ci-dessus sont
+invisibles à qui ne regarde que l'état de la tâche. Vivacité = `LastTaskResult = 0` **et**
+une ligne de journal récente (voir la commande ci-dessus).
+
 ## Mémoire host (SPOF n°4/5, résolu 05/10)
 
 Mécanisme des gels : `vmmemWSL` ballonnait (22,4 Go RAM / 35,3 Go commit) → pagefile-thrash
