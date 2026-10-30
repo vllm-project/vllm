@@ -40,7 +40,6 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker import gpu_ubatch_wrapper as legacy_gpu_ubatch_wrapper
-from vllm.v1.worker import ubatching
 from vllm.v1.worker.gpu import cp_utils as gpu_cp_utils
 from vllm.v1.worker.gpu import cudagraph_utils, dp_utils
 from vllm.v1.worker.gpu.cudagraph_utils import (
@@ -63,7 +62,10 @@ from vllm.v1.worker.ubatch_utils import (
     split_attn_metadata,
 )
 from vllm.v1.worker.ubatching import (
+    _CURRENT_CONTEXTS,
+    _THREAD_ID_TO_CONTEXT,
     dbo_current_ubatch_id,
+    dbo_enabled,
     dbo_register_recv_hook,
     dbo_yield,
 )
@@ -683,8 +685,8 @@ def test_merge_keeps_aux_hidden_states_per_layer():
 
 
 def _assert_ubatch_cleanup():
-    assert not ubatching.dbo_enabled()
-    assert all(context is None for context in ubatching._CURRENT_CONTEXTS)
+    assert not dbo_enabled()
+    assert all(context is None for context in _CURRENT_CONTEXTS)
 
 
 def _run_failing_ubatch(connection, failed_ubatch, yield_before_failure, fail_in_hook):
@@ -831,8 +833,8 @@ def _run_ubatch_entry_failures(connection, failed_ubatch):
                 ):
                     faults.append(
                         (
-                            threading.get_ident() in ubatching._THREAD_ID_TO_CONTEXT,
-                            ubatching._CURRENT_CONTEXTS[context.id] is context,
+                            threading.get_ident() in _THREAD_ID_TO_CONTEXT,
+                            _CURRENT_CONTEXTS[context.id] is context,
                         )
                     )
                     raise ValueError("entry failure")
