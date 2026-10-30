@@ -896,8 +896,9 @@ class _Fp8RowScalesLinearMethod(Fp8LinearMethod):
 def _process_row_scales(layer: nn.Module) -> None:
     """Turn a fused qkv_proj's row scales into block scales in place (see
     `_Fp8RowScalesLinearMethod`)."""
-    # set by the scale's loader; None: no scale was loaded since the last
-    # processing, so the block scales at the start of the storage stay
+    # set by the scale's loader; None: no scale was loaded (dummy weights).
+    # An update has to send qkv_proj: like any block-FP8 linear layer, its
+    # kernel's processing below may rewrite the weight and the scales.
     requantize = layer.__dict__.pop("requantize_rows", None)
     row_scales = layer.weight_scale_inv
     block = layer.weight_block_size[0]

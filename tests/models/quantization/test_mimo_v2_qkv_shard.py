@@ -590,11 +590,9 @@ def test_load_weights_split_fp8_qkv_proj_and_skips_absent_layers(
 
 
 @pytest.mark.parametrize("geometry,tp_size", [("ga", 2), ("ga", 8)])
-@pytest.mark.parametrize("left_out", [False, True])
-def test_direct_reload_equals_cold_start(monkeypatch, geometry, tp_size, left_out):
+def test_direct_reload_equals_cold_start(monkeypatch, geometry, tp_size):
     """A direct reload views the scale back to its row layout; the new rows
-    load in separate calls and processing gives what a cold start gives. A
-    qkv_proj left out of the update keeps its weights."""
+    load in separate calls and processing gives what a cold start gives."""
     from vllm.model_executor.model_loader.reload.direct import (
         begin_direct_reload,
         finish_direct_reload,
@@ -611,11 +609,10 @@ def test_direct_reload_equals_cold_start(monkeypatch, geometry, tp_size, left_ou
     process_weights_after_loading(model, _MODEL_CONFIG, torch.device("cpu"))
     ptrs = {n: p.data_ptr() for n, p in model.named_parameters()}
 
-    new = old if left_out else _fused_qkv_checkpoint(geometry, 2)
+    new = _fused_qkv_checkpoint(geometry, 2)
     begin_direct_reload(model)
-    if not left_out:
-        for kind, tensor in (("weight_scale_inv", new[1]), ("weight", new[0])):
-            mimo_v2.MiMoV2Model.load_weights(model, [(f"{prefix}.{kind}", tensor)])
+    for kind, tensor in (("weight_scale_inv", new[1]), ("weight", new[0])):
+        mimo_v2.MiMoV2Model.load_weights(model, [(f"{prefix}.{kind}", tensor)])
     finish_direct_reload(model, _MODEL_CONFIG, torch.device("cpu"))
 
     _assert_shard(model, _expected_shard(model, new[0], new[1], tp_rank, tp_size))

@@ -19,7 +19,7 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.fp8_dequant import mark_unneeded_scale
+from vllm.model_executor.layers.quantization.fp8_dequant import load_unneeded_scale
 from vllm.model_executor.model_loader.mtp_validation import (
     is_mtp_completeness_check_enabled,
 )
@@ -417,7 +417,7 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
-                mark_unneeded_scale(name, param, loaded_weight, loaded_params)
+                load_unneeded_scale(name, param, loaded_weight, loaded_params, shard_id)
                 break
             else:
                 num_chunks = 1

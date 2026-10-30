@@ -19,7 +19,7 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.quantization.fp8_dequant import mark_unneeded_scale
+from vllm.model_executor.layers.quantization.fp8_dequant import load_unneeded_scale
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
@@ -370,7 +370,7 @@ class DeepseekV32Model(torch.nn.Module):
                     continue
                 param = params_dict[name]
                 param.weight_loader(param, loaded_weight, shard_id)
-                mark_unneeded_scale(name, param, loaded_weight, loaded_params)
+                load_unneeded_scale(name, param, loaded_weight, loaded_params, shard_id)
                 break
             else:
                 is_expert_weight = False

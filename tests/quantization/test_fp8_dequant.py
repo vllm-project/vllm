@@ -19,12 +19,14 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization.fp8_dequant import (
     Fp8DequantConfig,
     Fp8DequantLinearMethod,
+    load_unneeded_scale,
 )
 from vllm.model_executor.model_loader.reload import (
     finalize_layerwise_reload,
     initialize_layerwise_reload,
     record_metadata_for_reloading,
 )
+from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.utils import get_live_param, weights_already_processed
 from vllm.utils.math_utils import cdiv
@@ -78,13 +80,17 @@ class _Model(torch.nn.Module):
             )
 
     def load_weights(self, weights):
+        loaded: set[str] = set()
         for name, tensor in weights:
             layer, shard, param_name = name.split(".")
             param = getattr(getattr(self, layer), param_name)
-            if shard == "-":
-                param.weight_loader(param, tensor)
-            else:
-                param.weight_loader(param, tensor, int(shard))
+            shard_id = None if shard == "-" else int(shard)
+            param.weight_loader(
+                param, tensor, *([] if shard_id is None else [shard_id])
+            )
+            load_unneeded_scale(
+                f"{layer}.{param_name}", param, tensor, loaded, shard_id
+            )
 
 
 def _checkpoint(seed: int, bf16_shard: int | None = None) -> dict[str, torch.Tensor]:
@@ -133,11 +139,58 @@ def _assert_runtime(model: _Model, expected: dict[str, torch.Tensor]) -> None:
 def test_layers_use_the_dequant_method():
     model = _Model()
     assert isinstance(model.qkv_a.quant_method, Fp8DequantLinearMethod)
-    # the FP8 view spans the bytes of the BF16 weight, one row per BF16 row
+    # the weight is the BF16 weight; its FP8 view spans the same bytes, one
+    # row per BF16 row
     weight = model.qkv_a.weight
-    assert weight.dtype == torch.float8_e4m3fn
-    assert weight.stride() == (2 * 256, 1)
+    assert weight.dtype == torch.bfloat16 and weight.is_contiguous()
+    fp8 = weight.fp8_view()
+    assert fp8.dtype == torch.float8_e4m3fn
+    assert fp8.stride() == (2 * 256, 1)
+    assert fp8.data_ptr() == weight.data_ptr()
     assert weight.untyped_storage().nbytes() == sum(_OUT) * 256 * 2
+
+
+def test_dummy_weights_are_runtime_values():
+    """--load-format dummy fills the BF16 weight: no row holds FP8 bytes."""
+    from vllm.model_executor.model_loader.weight_utils import (
+        initialize_single_dummy_weight,
+    )
+
+    model = _Model()
+    model.o.weight.view(torch.int16).fill_(0x7FC0)  # BF16 NaN
+    for module in model.modules():
+        for name, param in module._parameters.items():
+            if param is not None:
+                initialize_single_dummy_weight(param, name=name)
+    process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
+    for layer in (model.qkv_a, model.o):
+        assert layer.weight.dtype == torch.bfloat16
+        assert layer.weight.isfinite().all()
+        assert layer.weight.abs().max() <= 1e-3
+
+
+def test_weight_moved_before_processing():
+    """CPU offloading moves the loaded weight (``.to(device)``) before and
+    after post-load processing; the copy keeps the FP8 rows."""
+    ckpt = _checkpoint(16)
+    model = _Model()
+    model.load_weights(ckpt.items())
+    for layer in (model.qkv_a, model.o):
+        layer.weight.data = layer.weight.data.to("cpu").clone().to(_DEVICE)
+    process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
+    _assert_runtime(model, _expected(ckpt))
+
+
+def test_raw_load_weights_outside_a_reload():
+    """A caller that loads BF16 weights with model.load_weights alone (no
+    reload lifecycle, no post-load processing) gets a runnable layer."""
+    model = _cold_start(_checkpoint(12))
+    new = _expected(_checkpoint(13))
+    model.load_weights([("o.-.weight", new["o"])])
+    assert model.o.weight.dtype == torch.bfloat16
+    torch.testing.assert_close(model.o.weight, new["o"], rtol=0, atol=0)
+    x = torch.randn(2, 256, dtype=torch.bfloat16, device=_DEVICE)
+    torch.testing.assert_close(model.o(x)[0], x @ new["o"].t())
 
 
 def test_cold_start_matches_dequantized_checkpoint():
@@ -249,6 +302,31 @@ def test_layerwise_reload_equals_cold_start(bf16_shard):
     assert {n: p.data_ptr() for n, p in model.named_parameters()} == ptrs
 
 
+@pytest.mark.parametrize("bf16_shard", [None, 0])
+@pytest.mark.parametrize("bf16", [False, True])
+def test_layerwise_reload_completes_while_loading(bf16_shard, bf16):
+    """Every element is loaded, BF16 rows' scales included, so a layerwise
+    reload processes each layer as its last tensor arrives instead of holding
+    it for finalize."""
+    model = _cold_start(_checkpoint(14))
+    new = _checkpoint(15, bf16_shard)
+    if bf16:  # a BF16 trainer: weights only
+        runtime = _expected(new)
+        new = {
+            "qkv_a.0.weight": runtime["qkv_a"][: _OUT[0]],
+            "qkv_a.1.weight": runtime["qkv_a"][_OUT[0] :],
+            "o.-.weight": runtime["o"],
+        }
+    initialize_layerwise_reload(model)
+    for item in new.items():
+        model.load_weights([item])
+    for layer in (model.qkv_a, model.o):
+        assert layer.weight.device.type != "meta"
+        assert get_layerwise_info(layer).load_numel_total is None  # processed
+    finalize_layerwise_reload(model, _MODEL_CONFIG)
+    _assert_runtime(model, runtime if bf16 else _expected(new))
+
+
 # Sparse-attention indexer: `wk` (128 rows) and `weights_proj` (64 rows) fused
 # into one replicated `wk_weights_proj`, whose FP8 checkpoint scale layout
 # varies between models (`Fp8DequantConfig.for_checkpoint(any_scale_layout)`).
@@ -272,9 +350,6 @@ class _IndexerModel(torch.nn.Module):
             )
 
     def load_weights(self, weights) -> set[str]:
-        from vllm.model_executor.layers.quantization.fp8_dequant import (
-            mark_unneeded_scale,
-        )
         from vllm.model_executor.models.deepseek_v2 import _indexer_checkpoint_name
 
         params = dict(self.named_parameters())
@@ -286,7 +361,7 @@ class _IndexerModel(torch.nn.Module):
             shard = {"wk": 0, "weights_proj": 1}[proj]
             param = params[name]
             param.weight_loader(param, tensor, shard)
-            mark_unneeded_scale(name, param, tensor, loaded)
+            load_unneeded_scale(name, param, tensor, loaded, shard)
             loaded.add(name)
         return loaded
 
@@ -411,3 +486,17 @@ def test_indexer_direct_reload_equals_cold_start(monkeypatch, update):
 
     torch.testing.assert_close(model.wk_weights_proj.weight, expected, rtol=0, atol=0)
     assert {n: p.data_ptr() for n, p in model.named_parameters()} == ptrs
+
+
+@pytest.mark.parametrize("layout", ["block", "mx"])
+def test_indexer_layerwise_reload_completes_while_loading(layout):
+    """The BF16 weights_proj rows load ones into their scale rows, so an FP8
+    update completes the layer while loading."""
+    model = _indexer_cold_start(_indexer_checkpoint(26, layout)[0])
+    new, expected = _indexer_checkpoint(27, layout)
+    initialize_layerwise_reload(model)
+    for item in new.items():
+        model.load_weights([item])
+    assert get_layerwise_info(model.wk_weights_proj).load_numel_total is None
+    finalize_layerwise_reload(model, _MODEL_CONFIG)
+    torch.testing.assert_close(model.wk_weights_proj.weight, expected, rtol=0, atol=0)

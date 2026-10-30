@@ -13,7 +13,7 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.fp8_dequant import mark_unneeded_scale
+from vllm.model_executor.layers.quantization.fp8_dequant import load_unneeded_scale
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
@@ -371,7 +371,7 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
-                mark_unneeded_scale(name, param, loaded_weight, loaded_params)
+                load_unneeded_scale(name, param, loaded_weight, loaded_params, shard_id)
                 break
             else:
                 is_expert_weight = False
@@ -414,7 +414,7 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
                         param, "weight_loader", default_weight_loader
                     )
                     weight_loader(param, loaded_weight)
-                    mark_unneeded_scale(name, param, loaded_weight, loaded_params)
+                    load_unneeded_scale(name, param, loaded_weight, loaded_params)
             loaded_params.add(name)
 
         loaded_layers: set[int] = set()

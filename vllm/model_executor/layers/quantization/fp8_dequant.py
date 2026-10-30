@@ -19,6 +19,7 @@ per row and 32 columns, the finest of these layouts, and a coarser checkpoint
 scale is expanded to it when loaded.
 """
 
+import weakref
 from typing import Any
 
 import torch
@@ -66,16 +67,24 @@ def _set_data(param: torch.nn.Parameter, tensor: torch.Tensor) -> None:
     param.data = tensor
 
 
+def _is_sharded_rdt_fake(tensor: torch.Tensor) -> bool:
+    from vllm.distributed.weight_transfer.sharded_rdt_fake import FakeRDTTensor
+
+    return isinstance(tensor, FakeRDTTensor)
+
+
 class Fp8DequantWeightParameter(ModelWeightParameter):
     """A ``[rows, cols]`` BF16 weight loadable from block-FP8 or BF16 rows.
 
-    ``data`` is the FP8 view (row stride ``2 * cols`` bytes) while loading and
-    the BF16 view after post-load processing; both address the same rows of one
-    storage. ``fp8_rows`` marks the rows whose bytes are FP8 and still need
-    dequantizing."""
+    ``data`` is the BF16 weight. An FP8 tensor loads through the FP8 view of
+    the same storage (row stride ``2 * cols`` bytes, row i in the first half of
+    BF16 row i's bytes); ``fp8_rows`` marks the rows whose bytes are FP8 and
+    still need dequantizing. Rows loaded as BF16, or never loaded (dummy
+    weights), hold runtime bytes."""
 
     runtime_dtype: torch.dtype
     fp8_rows: torch.Tensor
+    layer_ref: "weakref.ref[torch.nn.Module]"
 
     @classmethod
     def empty(
@@ -83,41 +92,44 @@ class Fp8DequantWeightParameter(ModelWeightParameter):
     ) -> "Fp8DequantWeightParameter":
         """An uninitialized ``[rows, cols]`` weight running in ``dtype``."""
         assert dtype.itemsize == 2, dtype
-        runtime = torch.empty(rows, cols, dtype=dtype)
-        param = cls(data=_fp8_view_of(runtime, rows, cols), **kwargs)
+        param = cls(data=torch.empty(rows, cols, dtype=dtype), **kwargs)
         param.runtime_dtype = dtype
         param.fp8_rows = torch.zeros(rows, dtype=torch.bool)
         return param
 
     def fp8_view(self) -> torch.Tensor:
-        """The weight's storage in the checkpoint's FP8 layout. Derived from
-        the runtime layout, never from ``data``'s strides: a copy of ``data``
-        may have lost them (moving to the meta device makes it contiguous)."""
+        """The weight's storage in the checkpoint's FP8 layout."""
         return _fp8_view_of(self.runtime_view(), *self.data.shape)
 
     def runtime_view(self) -> torch.Tensor:
         """The weight's storage as the contiguous runtime-dtype weight."""
         data = self.data
-        rows, cols = data.shape
-        storage = data.untyped_storage()
-        offset = data.storage_offset() * data.element_size()
-        if storage.nbytes() < offset + 2 * rows * cols:
-            # the storage only spans the FP8 rows (e.g. materialized from the
-            # FP8 layout for a layerwise reload). Grown in place: a copy would
-            # count as loaded elements in the layerwise reload's accounting.
-            storage.resize_(offset + 2 * rows * cols)
+        if data.dtype == self.runtime_dtype:
+            return data
+        offset = data.storage_offset() * data.element_size()  # the FP8 view
         view = torch.empty(0, dtype=self.runtime_dtype, device=data.device)
-        return view.set_(storage, offset // 2, (rows, cols), (cols, 1))
+        return view.set_(
+            data.untyped_storage(), offset // 2, data.shape, (data.shape[1], 1)
+        )
 
     def _load(self, load, loaded_weight: torch.Tensor, rows: slice, **kwargs):
         fp8 = loaded_weight.dtype == torch.float8_e4m3fn
-        _set_data(self, self.fp8_view())
-        if not fp8:
-            _set_data(self, self.runtime_view())
-        try:
-            load(loaded_weight, **kwargs)
-        finally:
+        if fp8 and _is_sharded_rdt_fake(loaded_weight):
+            # it replays recorded copies into `data`, not into the FP8 view,
+            # and never marks the FP8 rows
+            raise NotImplementedError(
+                "sharded RDT weight transfer cannot load block-FP8 checkpoint "
+                "weights of a BF16 layer (Fp8DequantLinearMethod); send BF16"
+            )
+        if fp8:
+            runtime = self.data
             _set_data(self, self.fp8_view())
+            try:
+                load(loaded_weight, **kwargs)
+            finally:
+                _set_data(self, runtime)
+        else:
+            load(loaded_weight, **kwargs)
         self.fp8_rows[rows] = fp8
 
     def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
@@ -142,7 +154,7 @@ class Fp8DequantWeightParameter(ModelWeightParameter):
         view. Every row then holds runtime bytes, so a later reload that leaves
         this weight out keeps them."""
         runtime = self.runtime_view()
-        fp8 = self.fp8_view()  # after runtime_view, which may move the storage
+        fp8 = self.fp8_view()
         block_n, block_k = block_size
         cols = fp8.shape[1]
         chunk = max(block_n, _DEQUANT_ROWS // block_n * block_n)
@@ -210,16 +222,34 @@ class Fp8DequantScaleParameter(BlockQuantScaleParameter):
         super().load_merged_column_weight(loaded_weight, **kwargs)
 
 
-def mark_unneeded_scale(
-    name: str, param: torch.nn.Parameter, tensor: torch.Tensor, loaded: set[str]
+def load_unneeded_scale(
+    name: str,
+    param: torch.nn.Parameter,
+    tensor: torch.Tensor,
+    loaded: set[str],
+    shard_id: int | str | None = None,
 ) -> None:
-    """A BF16 tensor loaded into a block-FP8 checkpoint weight needs no scale;
-    count the scale as loaded so a BF16 checkpoint passes the load check."""
+    """After ``tensor`` loaded into ``param`` (``name``): a BF16 tensor loaded
+    into a block-FP8 checkpoint weight needs no scale. Load ones into the scale
+    rows it owns, so that every element of the layer counts as loaded (a
+    layerwise reload processes a layer once all of them have arrived) and the
+    default loader's load check passes."""
     if (
-        isinstance(param, Fp8DequantWeightParameter)
-        and tensor.dtype != torch.float8_e4m3fn
+        not isinstance(param, Fp8DequantWeightParameter)
+        or tensor.dtype == torch.float8_e4m3fn
     ):
-        loaded.add(name.removesuffix("weight") + "weight_scale_inv")
+        return
+    layer = param.layer_ref()
+    assert layer is not None
+    scale = layer.weight_scale_inv
+    if isinstance(scale, Fp8DequantScaleParameter):
+        shape: tuple[int, ...] = ()  # per tensor, expanded to its rows
+    else:
+        block_n, block_k = scale.weight_block_size
+        shape = (cdiv(tensor.shape[0], block_n), cdiv(tensor.shape[1], block_k))
+    ones = torch.ones(shape, dtype=torch.float32, device=tensor.device)
+    scale.weight_loader(scale, ones, *(() if shard_id is None else (shard_id,)))
+    loaded.add(name.removesuffix("weight") + "weight_scale_inv")
 
 
 @register_weight_loader_v2_supported_method
@@ -264,6 +294,7 @@ class Fp8DequantLinearMethod(UnquantizedLinearMethod):
         )
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
+        weight.layer_ref = weakref.ref(layer)  # see `load_unneeded_scale`
 
         scale = create_fp8_scale_parameter(
             BlockQuantScaleParameter,

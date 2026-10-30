@@ -75,7 +75,7 @@ from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionW
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.fp8_dequant import (
     Fp8DequantConfig,
-    mark_unneeded_scale,
+    load_unneeded_scale,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
@@ -857,9 +857,11 @@ class Indexer(nn.Module):
 
 def _indexer_checkpoint_name(name: str) -> str:
     """Quark and compressed-tensors name an FP8 indexer scale ``weight_scale``;
-    the fused ``wk_weights_proj`` loads it as ``weight_scale_inv``."""
-    if name.endswith(".weight_scale") and (
-        ".indexer.wk." in name or ".indexer.weights_proj." in name
+    the fused ``wk_weights_proj`` loads it as ``weight_scale_inv``. (HY-V4's
+    weights mapper renames ``weights_proj`` to ``wk_weights_proj`` first.)"""
+    if name.endswith(".weight_scale") and any(
+        f".indexer.{proj}." in name
+        for proj in ("wk", "weights_proj", "wk_weights_proj")
     ):
         return f"{name}_inv"
     return name
@@ -1647,7 +1649,7 @@ class DeepseekV2Model(nn.Module):
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
-                mark_unneeded_scale(name, param, loaded_weight, loaded_params)
+                load_unneeded_scale(name, param, loaded_weight, loaded_params, shard_id)
                 break
             else:
                 is_expert_weight = False

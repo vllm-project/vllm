@@ -41,7 +41,7 @@ from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_ma
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.fp8_dequant import mark_unneeded_scale
+from vllm.model_executor.layers.quantization.fp8_dequant import load_unneeded_scale
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -581,7 +581,9 @@ class HYV4Model(nn.Module):
                     weight_loader(param, loaded_weight)
                 else:
                     weight_loader(param, loaded_weight, stacked_shard_id)
-                    mark_unneeded_scale(name, param, loaded_weight, loaded_params)
+                    load_unneeded_scale(
+                        name, param, loaded_weight, loaded_params, stacked_shard_id
+                    )
             loaded_params.add(name)
 
         return loaded_params
