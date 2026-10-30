@@ -2014,3 +2014,40 @@ def supports_encoder_cudagraph(
     model: type[object] | object,
 ) -> TypeIs[type[SupportsEncoderCudaGraph]] | TypeIs[SupportsEncoderCudaGraph]:
     return isinstance(model, SupportsEncoderCudaGraph)
+
+
+@runtime_checkable
+class SupportsAuxReadout(Protocol):
+    """Models with auxiliary readouts: small float32 outputs, such as an N-way
+    decision head, computed per request from the hidden states that
+    `compute_logits` receives. They are computed only for requests that ask
+    (`SamplingParams.aux_readouts`) and never change the logits."""
+
+    supports_aux_readout: ClassVar[Literal[True]] = True
+
+    aux_readout_dims: ClassVar[dict[str, int]]
+    """Readout name -> width. `compute_aux_readouts` returns the declared
+    readouts concatenated in this order."""
+
+    def compute_aux_readouts(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Map `[num_rows, hidden_size]` rows, as passed to `compute_logits`,
+        to `[num_rows, sum(aux_readout_dims.values())]` float32."""
+        ...
+
+
+@overload
+def supports_aux_readout(
+    model: type[object],
+) -> TypeIs[type[SupportsAuxReadout]]: ...
+
+
+@overload
+def supports_aux_readout(model: object) -> TypeIs[SupportsAuxReadout]: ...
+
+
+def supports_aux_readout(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsAuxReadout]] | TypeIs[SupportsAuxReadout]:
+    return getattr(model, "supports_aux_readout", False) is True and bool(
+        getattr(model, "aux_readout_dims", None)
+    )
