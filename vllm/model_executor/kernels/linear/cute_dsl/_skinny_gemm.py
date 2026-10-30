@@ -226,7 +226,7 @@ class CuteSkinnyGemm:
         )
         smem = cutlass.utils.SmemAllocator()
         partials = smem.allocate_tensor(cutlass.Float32, smem_layout, byte_alignment=16)
-        with cute.arch.elect_one():
+        if cute.arch.lane_idx() == 0:
             for mi in cutlass.range_constexpr(num_rows):
                 for ni in cutlass.range_constexpr(outputs_per_block):
                     partials[mi, ni, warp_idx] = acc[mi, ni]
