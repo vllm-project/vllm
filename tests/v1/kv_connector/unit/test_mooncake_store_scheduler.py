@@ -1733,6 +1733,7 @@ def test_decode_consumer_claims_only_decode_boundary_state():
 
     assert meta.requests[0].boundary_puts == [(1, 9, 16)]
     store_job_id = meta.requests[0].store_job_id
+    assert store_job_id is not None
     assert scheduler._pinned_saves[store_job_id][0] == [9]
 
 

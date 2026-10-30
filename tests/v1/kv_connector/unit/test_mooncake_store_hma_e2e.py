@@ -43,6 +43,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCacheSpec,
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
@@ -400,7 +401,7 @@ _MAMBA = MambaSpec(
     mamba_cache_mode="align",
 )
 # Model shapes as KV cache groups: each group is (layer names, spec).
-_MODELS = {
+_MODELS: dict[str, list[tuple[list[str], KVCacheSpec]]] = {
     "dense": [(["A0", "A1", "A2"], _ATTN)],
     "mla": [
         (
