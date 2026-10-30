@@ -53,6 +53,27 @@ vllm serve Qwen/Qwen3.5-35B-A3B --quantization mxfp4 \
 | `mxfp8` | fp8_e4m3 data, e8m0 per-1x32-block scale | fp8_e4m3 data, e8m0 per-1x32-block scale | Requires SM 100+ (Blackwell or newer) for w8a8, other GPUs use a w8a16 fallback |
 | `mxfp4` | fp4_e2m1 data, e8m0 per-1x32-block scale ([OCP MX specs](https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf)) | - linear: fp4_e2m1 data, e8m0 per-1x32-block scale in some backends, or BF16. <br> - MOE: fp4_e2m1 data, e8m0 per-1x32-block scale. | Linear MXFP4 backend is auto-selected per platform, not enforcing activation dtype. Some use BF16 activation. Use `--linear-backend` to pin one (e.g. `--linear-backend flashinfer`). |
 
+### MXFP8 prefill GEMM on Blackwell
+
+On SM100/SM103, the automatic MXFP8 linear backend uses cuBLASLt through
+`torch._scaled_mm` for at least 128 input rows (`M`) and an output width divisible
+by 16. Smaller inputs retain FlashInfer CuTe-DSL. The activation, weight and
+128x4-swizzled scale formats are unchanged; no requantization or repacking is
+needed. This selection applies with FlashInfer autotune enabled or disabled.
+
+Configure the row threshold with `mxfp8_cublaslt_min_m` in `--kernel-config`:
+
+```bash
+vllm serve <model> --kernel-config '{"mxfp8_cublaslt_min_m":1024}'
+# Disable the shape-based cuBLASLt selection:
+vllm serve <model> --kernel-config '{"mxfp8_cublaslt_min_m":null}'
+```
+
+`M` is the number of rows passed to each GEMM, not the model's context limit.
+Explicit `--linear-backend` choices and `linear_backend_per_quant` overrides take
+precedence. During FlashInfer autotuning, the warmup still profiles CuTe-DSL so
+that the smaller inputs can use tuned configurations.
+
 ## Advanced Configuration
 
 For fine-grained control, use a `quantization_config` dictionary.

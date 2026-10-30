@@ -1118,6 +1118,19 @@ if has_flashinfer():
         backend: str = "cutlass",
         use_8x4_sf_layout: bool = False,
     ) -> torch.Tensor:
+        if backend == "cublaslt":
+            if use_8x4_sf_layout:
+                raise ValueError("cuBLASLt MXFP8 requires the 128x4 scale layout")
+            if not is_flashinfer_autotuning():
+                return torch._scaled_mm(
+                    A,
+                    B,
+                    scale_a=A_scale.view(torch.float8_e8m0fnu),
+                    scale_b=B_scale.view(torch.float8_e8m0fnu),
+                    out_dtype=out_dtype,
+                )
+            # The large dummy run must also tune FI's smaller runtime M buckets.
+            backend = "cute-dsl"
         from flashinfer import mm_mxfp8 as mm_mxfp8_
 
         return mm_mxfp8_(

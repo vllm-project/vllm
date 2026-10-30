@@ -37,6 +37,46 @@ NUM_LOG_PROBS = 8
 
 
 @pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="The CuTe-DSL MXFP8 backend requires SM100-family GPUs.",
+)
+@pytest.mark.quant_model
+def test_mxfp8_cublaslt_prefill_matches_disabled_dispatch(vllm_runner) -> None:
+    """Automatic prefill GEMM selection preserves generated tokens and logprobs."""
+    prompt = "The quick brown fox jumps over the lazy dog. " * 32
+    outputs = []
+    for threshold in (None, 128):
+        with vllm_runner(
+            DENSE_MODEL,
+            quantization="mxfp8",
+            enforce_eager=True,
+            max_model_len=MAX_MODEL_LEN,
+            max_num_batched_tokens=MAX_MODEL_LEN,
+            max_num_seqs=1,
+            gpu_memory_utilization=0.1,
+            enable_prefix_caching=False,
+            seed=42,
+            kernel_config={
+                "linear_backend": "auto",
+                "mxfp8_cublaslt_min_m": threshold,
+                "enable_flashinfer_autotune": False,
+            },
+        ) as model:
+            assert len(model.llm.get_tokenizer().encode(prompt)) >= 128
+            outputs.append(
+                model.generate_greedy_logprobs([prompt], MAX_TOKENS, NUM_LOG_PROBS)
+            )
+    assert outputs[0][0][0] == outputs[1][0][0]
+    check_logprobs_close(
+        outputs_0_lst=outputs[0],
+        outputs_1_lst=outputs[1],
+        name_0="cutedsl",
+        name_1="cublaslt",
+        always_check_logprobs=True,
+    )
+
+
+@pytest.mark.skipif(
     not is_quant_method_supported("mxfp8"),
     reason="mxfp8 is not supported on this GPU type (requires sm_100+).",
 )

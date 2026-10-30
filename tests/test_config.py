@@ -4454,3 +4454,12 @@ def test_hybrid_layer_counts_sparse_attention_as_attention(
             )
             == len(layer_types) - expected_attention
         )
+
+
+def test_mxfp8_cublaslt_threshold_changes_compile_cache():
+    """Compiled dispatch must not be reused across row thresholds or disablement."""
+    configs = [KernelConfig(mxfp8_cublaslt_min_m=m) for m in (None, 128, 1024)]
+    assert len({config.compute_hash() for config in configs}) == len(configs)
+    for value in (0, -1):
+        with pytest.raises(ValidationError, match="mxfp8_cublaslt_min_m"):
+            KernelConfig(mxfp8_cublaslt_min_m=value)
