@@ -110,16 +110,20 @@ def _aiter_sparse_mla_enabled(
 
 
 def _rocm_v41_mxfp8_kv_record(vllm_config: VllmConfig) -> bool:
-    from vllm._aiter_ops import rocm_aiter_ops
-
-    # The gfx950 sparse decode tile reads the 528 B V4.1 record; aiter's sparse
-    # MLA and the mono decode layer read only the 584 B V4 one, so a server that
-    # may run either keeps that. Mono takes no nvfp4_ds_mla layer whole.
+    has_kv_transfer = vllm_config.kv_transfer_config is not None
+    cache_dtype = vllm_config.cache_config.cache_dtype
+    # Transfer peers need one record regardless of decode flags. Legacy Mono
+    # uses its FFN-only path when attention has the V4.1 record.
     mono = (
         vllm_config.kernel_config.monokernel
-        and vllm_config.cache_config.cache_dtype != "nvfp4_ds_mla"
+        and not has_kv_transfer
+        and cache_dtype != "nvfp4_ds_mla"
     )
-    return _ON_GFX950 and not rocm_aiter_ops.is_triton_sparse_mla_enabled() and not mono
+    return (
+        _ON_GFX950
+        and not mono
+        and not _aiter_sparse_mla_enabled(has_kv_transfer, cache_dtype)
+    )
 
 
 def _build_indptr_from_lengths(lengths: torch.Tensor) -> torch.Tensor:
