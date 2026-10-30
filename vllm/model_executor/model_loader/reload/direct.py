@@ -115,6 +115,7 @@ def _loadable_tensors(model: torch.nn.Module) -> Iterator[tuple[str, torch.Tenso
 
 
 def _check_supported(model: torch.nn.Module) -> None:
+    from vllm.model_executor.layers.quantization.humming import HummingMoEMethod
     from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
     from vllm.model_executor.layers.quantization.online.moe_base import (
         OnlineMoEMethodBase,
@@ -149,6 +150,10 @@ def _check_supported(model: torch.nn.Module) -> None:
                 f"direct reload: online quantization is not supported "
                 f"({name}: {type(method).__name__})"
             )
+        if isinstance(method, HummingMoEMethod):
+            # its post-load processing runs once per quant method (a guard on
+            # the method, not the module): a reload would keep checkpoint bytes
+            raise RuntimeError(f"direct reload: humming MoE is not supported ({name})")
 
 
 def record_checkpoint_layout(model: torch.nn.Module) -> None:
