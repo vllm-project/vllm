@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""gfx942 (MI300X, MI325X) decode helpers for DeepSeek-V4.1.
+"""gfx942 (MI300X, MI325X) decode helpers for DeepSeek-V4.1. swa_decode_meta
+also runs on gfx950 (MI355X).
 
 ``topk`` holds the sparse indexer's top-512 hooks, built from
 ``topk512_gfx942.cu``, and ``cand_logits`` the indexer logits of the DSpark
@@ -8,7 +9,8 @@ candidate positions. ``sparse_indexer`` is the indexer layer that runs them on
 decode steps. ``topk_pack`` and ``swa_decode_meta`` build the decode
 attention metadata, ``fused_markov`` is DSpark's Markov sampling in one
 launch, and ``draft_lm_head`` keeps the DSpark draft's 5-row logits GEMM off
-wvSplitK. All of them run only when ``enabled()`` is true.
+wvSplitK. All of them run only when ``enabled()`` is true, except
+``swa_decode_meta``, which runs when ``swa_decode_meta_enabled()`` is true.
 """
 
 import functools
@@ -28,15 +30,29 @@ def record_monokernel(vllm_config) -> None:
     global _monokernel
     _monokernel = bool(vllm_config.kernel_config.monokernel)
     enabled.cache_clear()
+    swa_decode_meta_enabled.cache_clear()
 
 
 @functools.cache
 def enabled() -> bool:
     """True with --monokernel on a gfx942 GPU. Every helper keeps the result
     of vLLM's op it replaces, so each one returns False for a call it cannot
-    take and vLLM then runs its own op. gfx950 always keeps vLLM's ops here."""
+    take and vLLM then runs its own op. gfx950 keeps vLLM's ops here, except
+    for swa_decode_meta (swa_decode_meta_enabled)."""
     if not _monokernel or not current_platform.is_rocm():
         return False
     from vllm.platforms.rocm import on_gfx942
 
     return on_gfx942()
+
+
+@functools.cache
+def swa_decode_meta_enabled() -> bool:
+    """True with --monokernel on a CDNA3 (gfx942) or CDNA4 (gfx950) GPU.
+    swa_decode_meta is plain Triton and writes the buffers that the attention
+    of both reads."""
+    if not _monokernel or not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import get_cdna_version
+
+    return get_cdna_version() in (3, 4)
