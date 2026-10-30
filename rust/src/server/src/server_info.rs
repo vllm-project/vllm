@@ -3,10 +3,11 @@
 
 use std::collections::BTreeMap;
 
+use serde::Serialize;
 use serde_json::{Value, json};
 use vllm_engine_core_client::EngineCoreClient;
 
-use crate::config::Config;
+use crate::config::{EngineCoreConfig, ServerConfig};
 
 const SENSITIVE_VLLM_ENV_PATTERNS: &[&str] =
     &["KEY", "SECRET", "TOKEN", "PASSWORD", "CREDENTIAL", "AUTH"];
@@ -23,18 +24,26 @@ pub(crate) struct ServerInfoSnapshot {
     /// The engine's `VllmConfig` as seen from this frontend, or `None` if the
     /// engine reports none (it was started without `VLLM_SERVER_DEV_MODE`).
     vllm_config: Option<Value>,
-    /// The Rust frontend's own `Config`, which has no Python counterpart.
+    /// The Rust frontend's own `ServerConfig` and `EngineCoreConfig`, which
+    /// have no Python counterpart.
     rust_frontend_config: Value,
     vllm_env: BTreeMap<String, String>,
     system_env: BTreeMap<String, String>,
 }
 
 impl ServerInfoSnapshot {
-    pub(crate) fn new(config: &Config, client: &EngineCoreClient) -> Self {
+    pub(crate) fn new(
+        config: &ServerConfig,
+        engine_core: &EngineCoreConfig,
+        client: &EngineCoreClient,
+    ) -> Self {
         Self {
             vllm_config: engine_vllm_config(client),
-            rust_frontend_config: serde_json::to_value(config)
-                .expect("server info value must serialize"),
+            rust_frontend_config: serde_json::to_value(FrontendConfig {
+                server: config,
+                engine_core,
+            })
+            .expect("server info value must serialize"),
             vllm_env: collect_vllm_env(),
             system_env: collect_system_env(),
         }
@@ -53,6 +62,15 @@ impl ServerInfoSnapshot {
             "system_env": self.system_env.clone(),
         })
     }
+}
+
+/// Both halves of the Rust frontend's configuration, reported as one object.
+#[derive(Serialize)]
+struct FrontendConfig<'a> {
+    #[serde(flatten)]
+    server: &'a ServerConfig,
+    #[serde(flatten)]
+    engine_core: &'a EngineCoreConfig,
 }
 
 /// The `VllmConfig` reported by the first engine, as seen from this frontend.
