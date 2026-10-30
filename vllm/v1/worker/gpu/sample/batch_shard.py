@@ -2,11 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
 import torch.distributed
+import torch.nn as nn
 
+from vllm.config import VllmConfig
 from vllm.distributed.communication_op import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.triton_utils import tl, triton
@@ -14,6 +17,9 @@ from vllm.v1.core.sched.output import GrammarOutput
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 
 
 @dataclass
@@ -48,6 +54,45 @@ class BatchShardMetadata:
     adaptive_verification_enabled: bool
 
 
+def batch_sharded_sampling_enabled(
+    vllm_config: VllmConfig, target_model: nn.Module
+) -> bool:
+    """Whether the target's sampling and verification are batch-sharded."""
+    return bool(
+        vllm_config.parallel_config.enable_batch_sharded_sampling
+        and hasattr(target_model, "compute_logits_local")
+    )
+
+
+@triton.jit
+def shard_owner(req_idx, NUM_SHARDS: tl.constexpr):
+    """TP rank that samples the request at a batch position.
+
+    Mirrored on the host by `shard_owners`.
+    """
+    return req_idx % NUM_SHARDS
+
+
+def shard_owners(num_reqs: int, num_shards: int) -> np.ndarray:
+    """[num_reqs] The `shard_owner` of each batch position."""
+    return np.arange(num_reqs) % num_shards
+
+
+@triton.jit
+def shard_row(req_idx, NUM_SHARDS: tl.constexpr):
+    """Row of the request at a batch position in its `shard_owner`'s sharded
+    draft logits cache.
+
+    Mirrored on the host by `shard_rows`.
+    """
+    return req_idx // NUM_SHARDS
+
+
+def shard_rows(num_reqs: int, num_shards: int) -> np.ndarray:
+    """[num_reqs] The `shard_row` of each batch position."""
+    return np.arange(num_reqs) // num_shards
+
+
 @triton.jit(
     do_not_specialize=["num_reqs", "local_logits_start", "max_num_reqs_per_rank"]
 )
@@ -64,6 +109,7 @@ def _build_shard_plan_kernel(
     local_expanded_idx_mapping_ptr,
     local_expanded_local_pos_ptr,
     local_seq_lens_ptr,
+    owners_ptr,
     num_reqs,
     local_logits_start,
     max_num_reqs_per_rank,
@@ -74,14 +120,22 @@ def _build_shard_plan_kernel(
 ):
     req_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_idx)
-    owner = req_state_idx % TP_SIZE
     num_logits = tl.load(cu_num_logits_ptr + req_idx + 1) - tl.load(
         cu_num_logits_ptr + req_idx
     )
 
     req_block = tl.arange(0, PADDED_NUM_REQS)
     req_mask = req_block < num_reqs
-    owners = tl.load(idx_mapping_ptr + req_block, mask=req_mask, other=0) % TP_SIZE
+    if owners_ptr is None:
+        owner = shard_owner(req_idx, TP_SIZE)
+        owners = shard_owner(req_block, TP_SIZE)
+    else:
+        owner = tl.load(owners_ptr + req_state_idx)
+        owners = tl.load(
+            owners_ptr + tl.load(idx_mapping_ptr + req_block, mask=req_mask, other=0),
+            mask=req_mask,
+            other=0,
+        )
     num_logits_per_req = tl.load(
         cu_num_logits_ptr + req_block + 1, mask=req_mask, other=0
     ) - tl.load(cu_num_logits_ptr + req_block, mask=req_mask, other=0)
@@ -152,12 +206,14 @@ class BatchSharder:
         max_num_logits_per_req: int,
         device: torch.device,
         adaptive_verification_enabled: bool,
+        draft_logits: "DraftLogitsCache | None" = None,
     ):
         tp_group = get_tp_group()
         self.tp_rank = tp_group.rank_in_group
         self.tp_size = tp_group.world_size
         self.device = device
         self.adaptive_verification_enabled = adaptive_verification_enabled
+        self.draft_logits = draft_logits
         self._padded_num_reqs = triton.next_power_of_2(max_num_reqs)
         self._padded_num_logits_per_req = triton.next_power_of_2(max_num_logits_per_req)
         self._num_warps = max(1, min(8, self._padded_num_reqs // 128))
@@ -179,11 +235,15 @@ class BatchSharder:
         tp_size = self.tp_size
         num_reqs = input_batch.idx_mapping_np.shape[0]
 
-        # Deterministically assign requests to ranks, round-robin over slot
-        # indices so ownership stays balanced when the slot allocator fills
-        # low slots first (partial occupancy).
+        # Deterministically assign requests to ranks: to the rank that cached
+        # their draft logits, or else round-robin over batch positions.
         # NOTE: This mirrors the assignment used in _build_shard_plan_kernel.
-        req_owner_np = input_batch.idx_mapping_np % tp_size
+        if self.draft_logits is None:
+            req_owner_np, req_owner = shard_owners(num_reqs, tp_size), None
+        else:
+            req_owner_np, req_owner = self.draft_logits.owners_of(
+                input_batch.idx_mapping_np
+            )
         local_req_indices_np = np.flatnonzero(req_owner_np == tp_rank)
         local_idx_mapping_np = input_batch.idx_mapping_np[local_req_indices_np]
         num_local_reqs = local_req_indices_np.shape[0]
@@ -253,6 +313,7 @@ class BatchSharder:
                 local_expanded_idx_mapping,
                 local_expanded_local_pos,
                 local_seq_lens,
+                req_owner,
                 num_reqs,
                 local_logits_start,
                 max_num_reqs_per_rank,

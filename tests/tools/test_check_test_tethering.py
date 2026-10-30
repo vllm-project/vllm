@@ -173,6 +173,31 @@ def test_ignore_and_deselect(command, test_file, expected):
         ("pytest kernels/test_a.py ; pytest lora/test_b.py", "lora/test_b.py", True),
         # An unresolvable $VAR path yields no coverage rather than a guess.
         ("pytest -v -s $TEST_TARGET", "kernels/test_a.py", False),
+        # `\`-continued lines (one path per line in a yaml `|` block) are one
+        # command: the indented continuation is not a match-everything path and
+        # a continued --ignore still ignores.
+        (
+            "pytest -v -s kernels -m core_model \\\n  --ignore kernels/test_a.py",
+            "lora/test_b.py",
+            False,
+        ),
+        (
+            "pytest -v -s \\\nkernels \\\n--ignore=kernels/test_a.py",
+            "kernels/test_a.py",
+            False,
+        ),
+        (
+            "pytest -v -s \\\nkernels \\\n--ignore=kernels/test_a.py",
+            "kernels/test_b.py",
+            True,
+        ),
+        (
+            'bash run.sh 30m "\npytest -x \\\nkernels \\\n--ignore=kernels/test_a.py"',
+            "kernels/test_a.py",
+            False,
+        ),
+        # An escaped backslash before a newline is not a continuation.
+        ("pytest -v -s kernels/test_a.py \\\\\n", "lora/test_b.py", False),
     ],
 )
 def test_option_and_token_handling(command, test_file, expected):
