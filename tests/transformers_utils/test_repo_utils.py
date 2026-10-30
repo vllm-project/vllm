@@ -8,7 +8,6 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 from huggingface_hub import _CACHED_NO_EXIST
-from huggingface_hub.utils import filter_repo_objects
 
 from vllm.transformers_utils.repo_utils import (
     _WEIGHT_FILE_PATTERNS,
