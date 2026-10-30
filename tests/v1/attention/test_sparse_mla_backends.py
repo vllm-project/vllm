@@ -1448,7 +1448,9 @@ def test_flashmla_forward_bf16_kv_slices_req_id_to_mqa_tokens():
         _convert_logical_to_physical_topk=_convert_topk,
         index_group=None,
         index_group_index=0,
+        dcp_world_size=1,
         pcp_dcp_kv_gather=False,
+        need_to_return_lse_for_decode=False,
     )
 
     out, _ = FlashMLASparseImpl._forward_bf16_kv(
