@@ -148,7 +148,7 @@ def _make_decode_scheduler_output(
     )
 
 
-def _make_new_scheduler_output() -> SimpleNamespace:
+def _make_new_scheduler_output(*, hash_block_size: int = 16) -> SimpleNamespace:
     request = SimpleNamespace(
         req_id="req-0",
         num_computed_tokens=0,
@@ -156,7 +156,7 @@ def _make_new_scheduler_output() -> SimpleNamespace:
         num_prompt_tokens=32,
         prefill_token_ids=None,
         block_ids=([0, 1],),
-        block_hashes=[b"h0", b"h1"],
+        block_hashes=[f"h{i}".encode() for i in range(32 // hash_block_size)],
     )
     return SimpleNamespace(
         request=request,
@@ -202,7 +202,7 @@ def test_scheduler_only_tracks_token_ids_for_kv_events():
 @pytest.mark.parametrize("token_len", [4, 12, 15, 16, 20, 32])
 def test_scheduler_saves_only_at_common_hybrid_boundaries(token_len):
     scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
-    out = _make_new_scheduler_output()
+    out = _make_new_scheduler_output(hash_block_size=4)
     out.num_scheduled_tokens["req-0"] = token_len
     scheduler._unfinished_requests["req-0"] = (out.request, out.request.block_ids)
 
