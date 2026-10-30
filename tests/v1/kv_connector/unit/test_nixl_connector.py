@@ -33,10 +33,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_current_attn_backend,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1 import nixl
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorRole,
-    KVConnectorTransferResults,
-)
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiKVConnectorStats,
@@ -88,6 +85,7 @@ from .utils import (
     create_vllm_config,
     expand_strided_descs,
     make_kv_cache_config,
+    make_nixl_pcp_producer,
     maybe_update_block_size,
 )
 
@@ -682,29 +680,7 @@ class TestNixlHandshake:
         expected_tracked,
     ):
         """Replicated PCP is canonicalized; PCP-DCP publishes every shard."""
-        from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
-
-        block_size = maybe_update_block_size(16)
-        vllm_config = create_vllm_config(kv_role="kv_producer", block_size=block_size)
-        vllm_config.parallel_config.prefill_context_parallel_size = pcp_size
-        vllm_config.parallel_config.decode_context_parallel_size = dcp_size
-        with (
-            patch(
-                "vllm.distributed.kv_transfer.kv_connector.v1.nixl."
-                "base_worker.get_current_attn_backends",
-                return_value=[FlashAttentionBackend],
-            ),
-            patch(
-                "vllm.distributed.kv_transfer.kv_connector.v1.nixl."
-                "base_worker.get_pcp_group"
-            ) as mock_get_pcp_group,
-        ):
-            mock_get_pcp_group.return_value.rank_in_group = pcp_rank
-            connector = NixlConnector(
-                vllm_config,
-                KVConnectorRole.WORKER,
-                make_kv_cache_config(block_size=block_size),
-            )
+        connector = make_nixl_pcp_producer(NixlConnector, pcp_rank, pcp_size, dcp_size)
 
         worker = connector.connector_worker
         assert worker is not None
@@ -736,11 +712,38 @@ class TestNixlHandshake:
         if not expected_tracked:
             assert connector.get_finished(set()) == (set(), set())
 
-        worker.get_transfer_results = MagicMock(
-            return_value=KVConnectorTransferResults(finished_sending={"sent"})
-        )
-        results = connector.get_transfer_results(set())
-        assert results.finished_sending == ({"sent"} if expected_tracked else set())
+    @patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+        FakeNixlWrapper,
+    )
+    def test_replicated_pcp_producer_send_aggregation_completes(
+        self, default_vllm_config, dist_init
+    ):
+        """PCP=2 replicated producer: D notifies only rank 0 and rank 1 reports
+        a synthetic completion, so the world_size=2 aggregation frees the
+        request on P."""
+        req_id = "req"
+        connectors = [make_nixl_pcp_producer(NixlConnector, r) for r in (0, 1)]
+        for connector in connectors:
+            connector.connector_worker.transfer_topo = MagicMock()
+            metadata = NixlConnectorMetadata()
+            metadata.reqs_in_batch.add(req_id)
+            metadata.reqs_to_send[req_id] = time.perf_counter() + 30
+            connector.connector_worker.start_load_kv(metadata)
+        # D reads from rank 0 only, and its one reader notifies rank 0.
+        connectors[0].connector_worker.nixl_wrapper.get_new_notifs = lambda: {
+            "agent": [f"{req_id}:1".encode()]
+        }  # type: ignore[method-assign]
+
+        aggregator = KVOutputAggregator.from_connector(connectors[0], world_size=2)
+        outputs = [
+            create_model_runner_output(
+                [], finished_sending=c.get_transfer_results(set()).finished_sending
+            )
+            for c in connectors
+        ]
+        aggregated = aggregator.aggregate(outputs)
+        assert aggregated.kv_connector_output.finished_sending == {req_id}
 
     @patch(
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",

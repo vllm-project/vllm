@@ -255,14 +255,10 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
         self, finished_req_ids: set[str]
     ) -> KVConnectorTransferResults:
         assert self.connector_worker is not None
-        results = self.connector_worker.get_transfer_results()
-        if (
-            self.kv_transfer_config.kv_role == "kv_producer"
-            and self.connector_worker.pcp_rank > 0
-            and not self.connector_worker.pcp_dcp_sharded
-        ):
-            results.finished_sending.clear()
-        return results
+        # Replicated-KV PCP: D sees and reads from rank 0 only. Ranks > 0 report
+        # each request as sent at once, and the aggregation over all world_size
+        # workers needs those reports, so pass them through.
+        return self.connector_worker.get_transfer_results()
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Get block IDs that failed to load via NIXL."""
