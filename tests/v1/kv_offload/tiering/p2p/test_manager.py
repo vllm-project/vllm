@@ -692,11 +692,17 @@ def test_timed_out_load_holds_chunks_until_abort_ack(monkeypatch):
     assert prepared is not None
     assert isinstance(prepared.store_spec, CPULoadStoreSpec)
     chunk_ids = prepared.store_spec.chunk_ids
+
+    def alloc_fn(keys, _ctx):
+        # The real alloc path (_promotion_allocation) records the allocation.
+        tiering._metrics.on_promotion_allocated(0, len(chunk_ids))
+        return (list(keys), chunk_ids)
+
     job = PromotionTransferJob(
         job_id=7,
         req_context=ctx,
         keys=[key],
-        alloc_fn=lambda k, c: (list(k), chunk_ids),
+        alloc_fn=alloc_fn,
     )
     tiering._register_job(job, tier_idx=0)
     p2p_tier.submit_load(job)
@@ -3054,12 +3060,18 @@ class TestIdleWhileServingPeers:
                 assert tiering._jobs
                 assert tiering.has_pending_work() is False
 
+            def alloc_fn(keys, _ctx):
+                # The real alloc path (_promotion_allocation) records the
+                # allocation.
+                tiering._metrics.on_promotion_allocated(0, 1)
+                return (list(keys), np.array([0], dtype=np.int32))
+
             consumer.submit_load(
                 PromotionTransferJob(
                     job_id=7,
                     req_context=ctx,
                     keys=[key],
-                    alloc_fn=lambda k, c: (list(k), np.array([0], dtype=np.int32)),
+                    alloc_fn=alloc_fn,
                 )
             )
             results: list[JobResult] = []
