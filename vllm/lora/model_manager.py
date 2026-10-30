@@ -827,6 +827,9 @@ class LoRAModelManager:
     ) -> None:
         parts = module_full_name.split(".")
         module_name = parts[-1]
+        # A base layer may set `lora_packed_modules` to override the leaf-name
+        # mapping for that layer only, e.g. Gemma4 k_eq_v layers pack
+        # [q_proj, k_proj, k_proj].
         replacements = getattr(
             module, "lora_packed_modules", None
         ) or self.packed_modules_mapping.get(module_name, [])
