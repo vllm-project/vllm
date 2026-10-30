@@ -20,6 +20,7 @@ from vllm.distributed.kv_transfer import (
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.reload.layerwise import max_layer_reload_bytes
 from vllm.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
+from vllm.platforms import current_platform
 from vllm.utils.extensible_tensor import (
     ExtensibleTensor,
     granule_aligned_blocks,
@@ -53,8 +54,14 @@ logger = init_logger(__name__)
 # while their encoder or sampler transients are not. Measured on GB200: the
 # first prefill of an 8B model needed over 25% beyond its allocated peak before
 # the allocator could serve it, and adversarial workloads reached up to 45%.
-KV_CACHE_MARGIN_FLOOR_BYTES = 1 << 30
+# ROCr also maps kernel scratch outside the allocator when a kernel first needs
+# it, so ROCm keeps a larger floor.
+KV_CACHE_MARGIN_FLOOR_BYTES = (2 if current_platform.is_rocm() else 1) << 30
 KV_CACHE_MARGIN_FRACTION = 0.75
+# Share of the margin kept for allocations outside torch's caching allocator
+# (kernel scratch, NCCL/RCCL buffers, lazily loaded code objects); the
+# allocator is capped to leave it free.
+KV_CACHE_NON_TORCH_MARGIN_FRACTION = 0.5
 # Share of the headroom warmup leaves uncommitted, on top of the profiled
 # activation peak, for transients the profiling run does not exercise.
 KV_CACHE_WARMUP_RESERVE_FRACTION = 0.1
@@ -92,6 +99,9 @@ class ExtensibleKVCache:
         # Blocks warmup may commit: the minimum of `committable_blocks()` over
         # ranks when the cache is created.
         self.warmup_committable_blocks = 0
+        # Bytes torch's caching allocator may reserve, set once the cache is
+        # sized; None leaves it unlimited.
+        self.torch_memory_limit: int | None = None
         self.buffer = ExtensibleTensor(
             self.size,
             device=device,
@@ -320,7 +330,20 @@ class ExtensibleKVCache:
         self.num_committed_blocks = 0
         self.commit(num_blocks)
 
+    def set_torch_memory_limit(self, num_bytes: int | None) -> None:
+        """Cap what torch's caching allocator reserves on this device, or lift
+        the cap (None). At the cap it releases cached segments before growing,
+        rather than taking memory other allocations need."""
+        self.torch_memory_limit = num_bytes
+        total = torch.accelerator.get_memory_info(self.buffer.device)[1]
+        fraction = 1.0 if num_bytes is None else min(num_bytes / total, 1.0)
+        # torch.accelerator has no per-process memory fraction.
+        torch.cuda.set_per_process_memory_fraction(fraction, self.buffer.device)
+
     def free(self) -> None:
+        # The process may start another engine, which must not inherit the cap.
+        if self.torch_memory_limit is not None:
+            self.set_torch_memory_limit(None)
         self.buffer.free()
         self.num_committed_blocks = 0
 
@@ -466,7 +489,9 @@ def measure_kv_cache_blocks(
 
     Keeps free the larger of the profiled peak and warmup's allocated (not
     reserved) transient peak. Torch's cache is emptied first: its blocks may
-    not fit the large workspaces the first real steps allocate.
+    not fit the large workspaces the first real steps allocate. Then caps torch's
+    caching allocator to leave KV_CACHE_NON_TORCH_MARGIN_FRACTION of the margin
+    free for allocations outside it.
     """
     torch.accelerator.synchronize()
     gc.collect()
@@ -484,24 +509,38 @@ def measure_kv_cache_blocks(
         requested_memory=requested_memory,
         transient_peak_bytes=transient_peak,
     )
-    available = reserve_mm_ipc_gpu_memory(
+    kv_cache_bytes = reserve_mm_ipc_gpu_memory(
         available,
         vllm_config.model_config.multimodal_config,
         getattr(vllm_config.parallel_config, "_api_process_count", 1),
     )
     num_blocks = kv_cache.blocks_within(
-        available, aligned=vllm_config.kv_transfer_config is not None
+        kv_cache_bytes, aligned=vllm_config.kv_transfer_config is not None
     )
+    # Torch may grow into what stays free once the cache is extended, less the
+    # memory kept for multimodal IPC and for allocations outside torch.
+    margin = max(
+        KV_CACHE_MARGIN_FLOOR_BYTES, int(transient_peak * KV_CACHE_MARGIN_FRACTION)
+    )
+    left_free = (
+        free_memory
+        - (kv_cache.physical_bytes_for(num_blocks) - kv_cache.physical_bytes)
+        - (available - kv_cache_bytes)
+        - int(margin * KV_CACHE_NON_TORCH_MARGIN_FRACTION)
+    )
+    torch_memory_limit = torch.accelerator.memory_reserved(device) + max(left_free, 0)
+    kv_cache.set_torch_memory_limit(torch_memory_limit)
     logger.info(
         "Memory after warmup: %s GiB free, %s GiB committed to the KV cache, "
         "%s GiB kept for transient activations; %d KV cache blocks (%s GiB) "
-        "fit within the requested %s GiB.",
+        "fit within the requested %s GiB. Torch may reserve up to %s GiB.",
         format_gib(free_memory),
         format_gib(kv_cache.physical_bytes),
         format_gib(transient_peak),
         num_blocks,
         format_gib(num_blocks * kv_cache.bytes_per_block),
         format_gib(requested_memory),
+        format_gib(torch_memory_limit),
     )
     return num_blocks
 
@@ -527,20 +566,30 @@ def kv_cache_lent_for_weight_update(
     measured. When short, release the cache's physical memory for the
     context if it holds nothing to keep (reclaimable); else fail before any
     weight changes, when not even the largest layer fits and fail_if_short,
-    or warn.
+    or warn. Torch's memory cap is lifted for the context.
     """
-    lent = kv_cache is not None and _release_for_weight_update(
+    if kv_cache is None:
+        yield
+        return
+    lent = _release_for_weight_update(
         kv_cache, model, reclaimable=reclaimable, fail_if_short=fail_if_short
     )
+    # Weight processing allocates through torch, beyond the cap sized for
+    # serving.
+    torch_memory_limit = kv_cache.torch_memory_limit
+    if torch_memory_limit is not None:
+        kv_cache.set_torch_memory_limit(None)
     try:
         yield
     finally:
-        if lent:
-            assert kv_cache is not None
+        if lent or torch_memory_limit is not None:
             torch.accelerator.empty_cache()
+        if lent:
             kv_cache.recommit()
             if has_kv_transfer_group():
                 get_kv_transfer_group().restore_kv_caches()
+        if torch_memory_limit is not None:
+            kv_cache.set_torch_memory_limit(torch_memory_limit)
 
 
 def _release_for_weight_update(

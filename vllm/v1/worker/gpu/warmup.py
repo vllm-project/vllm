@@ -31,10 +31,6 @@ from vllm.v1.worker.extensible_kv_cache import (
     num_committable_kv_blocks,
 )
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
-from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
-from vllm.v1.worker.gpu.sample.prompt_logprob import (
-    CHUNK_SIZE as PROMPT_LOGPROBS_CHUNK_SIZE,
-)
 
 logger = init_logger(__name__)
 
@@ -115,8 +111,10 @@ def run_mixed_prefill_decode_warmup(
     *,
     mixed_step_context: AbstractContextManager[object] | None = None,
     req_id_prefix: str = "_v2_mixed_warmup",
+    prompt_logprobs: int | None = None,
 ) -> bool:
-    """Run a V2 mixed prefill+decode step through normal scheduler inputs."""
+    """Run a V2 mixed prefill+decode step through normal scheduler inputs,
+    requesting prompt_logprobs on the prefill request."""
     if model_runner.is_pooling_model or model_runner.max_num_reqs < 2 or num_tokens < 3:
         return False
 
@@ -208,7 +206,12 @@ def run_mixed_prefill_decode_warmup(
             req_id=prefill_req_id,
             prompt_token_ids=prefill_token_ids,
             mm_features=[],
-            sampling_params=sampling_params,
+            sampling_params=SamplingParams(
+                max_tokens=2,
+                temperature=0.0,
+                watermarking=False,
+                prompt_logprobs=prompt_logprobs,
+            ),
             pooling_params=None,
             block_ids=tuple(_alloc_blocks(n) for n in prefill_block_counts),
             num_computed_tokens=0,
@@ -315,34 +318,6 @@ def run_context_prefill_warmup(
     return True
 
 
-def _warmup_prompt_logprobs(model_runner: GPUModelRunner) -> None:
-    """Materialize one prompt-logprobs logits chunk, a shape no step reaches."""
-    model_config = model_runner.model_config
-    if (
-        model_runner.prompt_logprobs_worker is None
-        # The LoRA logits head applies adapters through the per-token mapping
-        # of a scheduled batch, which a standalone chunk does not have.
-        or model_runner.lora_config is not None
-        or model_config.max_logprobs == 0
-        or not hasattr(model_runner.model, "compute_logits")
-    ):
-        return
-    hidden_size = model_config.get_hidden_size()
-    if hidden_size <= 0:
-        # Composite configs (e.g. encoder-decoder ASR) expose no head width.
-        return
-    # A chunk never holds more rows than a prompt can have.
-    num_rows = min(PROMPT_LOGPROBS_CHUNK_SIZE, model_runner.max_model_len)
-    hidden_states = torch.zeros(
-        num_rows, hidden_size, dtype=model_config.dtype, device=model_runner.device
-    )
-    logits = model_runner.model.compute_logits(hidden_states)
-    max_logprobs = model_config.max_logprobs
-    num_logprobs = logits.shape[-1] if max_logprobs == -1 else max_logprobs
-    token_ids = torch.zeros(num_rows, dtype=torch.int64, device=model_runner.device)
-    compute_topk_scores(logits, num_logprobs, token_ids)
-
-
 @torch.inference_mode()
 def run_kv_cache_sizing_warmup(
     model_runner: GPUModelRunner,
@@ -352,16 +327,18 @@ def run_kv_cache_sizing_warmup(
     """Run the steps an extensible KV cache measures its transient reserve on.
     These size rather than compile, so they run without JIT warmup.
     """
-    _warmup_prompt_logprobs(model_runner)
     if model_runner.is_encoder_decoder:
         return
     # Profiling skipped attention; measure it on the largest possible prefill.
+    # Its prompt logprobs materialize full-vocab logits a chunk at a time.
     scheduler_config = model_runner.scheduler_config
+    max_logprobs = model_runner.model_config.max_logprobs
     run_mixed_prefill_decode_warmup(
         model_runner,
         worker_execute_model,
         worker_sample_tokens,
         min(scheduler_config.max_num_batched_tokens, model_runner.max_model_len),
+        prompt_logprobs=max_logprobs if max_logprobs != 0 else None,
     )
     if model_runner.model_config.use_mla:
         from vllm.model_executor.layers.attention.mla_attention import (
