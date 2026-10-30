@@ -204,6 +204,40 @@ To get prompt token IDs before generation, use
 a self-contained Responses request without inference and returns the prompt
 token IDs, so a separate `/tokenize` call is not needed.
 
+#### Client-executed tool search
+
+The Responses API supports client-executed `tool_search` for models using the
+non-Harmony tool-calling path. Enable automatic tool choice and the appropriate
+tool-call parser when starting the server, then include a tool such as:
+
+```json
+{
+  "type": "tool_search",
+  "execution": "client",
+  "description": "Find tools by task",
+  "parameters": {
+    "type": "object",
+    "properties": {"query": {"type": "string"}},
+    "required": ["query"]
+  }
+}
+```
+
+The model sees this as a callable function. Its call is returned as a
+`tool_search_call` output item with `execution: "client"` and parsed `arguments`.
+The client executes the search and includes the call and a `tool_search_output`
+item in the next request's `input`. Set the output's `call_id` to the call's
+`call_id`, and put the discovered function or namespace definitions in `tools`.
+Those tools become available to the model on that turn; namespaces from separate
+searches are merged. Keep the client `tool_search` definition in the request's
+top-level `tools` list.
+
+Streaming emits `response.output_item.added` and `response.output_item.done`
+events for the search call; its arguments are available in the done event.
+Server-executed tool search, the Harmony path, and discovered tools under
+`VLLM_ENFORCE_STRICT_TOOL_CALLING` are not supported. A normal function named
+`tool_search` retains ordinary function-call behavior.
+
 #### Sampling parameters
 
 In addition to the OpenAI request fields, the Responses API forwards vLLM
