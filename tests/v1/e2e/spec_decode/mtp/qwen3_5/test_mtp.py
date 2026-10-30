@@ -58,7 +58,7 @@ def test_mtp_draft_steps_use_their_own_module(
     vllm_runner,
 ):
     """With two MTP modules, draft step 2 must run module 1, also with the
-    default compiled drafter. Module 1 has random weights, so its drafts are
+    default drafter CUDA graphs. Module 1 has random weights, so its drafts are
     rejected while module 0's are still accepted."""
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     model = _add_random_mtp_module("Qwen/Qwen3.5-0.8B-Base", tmp_path)
