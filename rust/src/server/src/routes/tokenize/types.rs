@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use itertools::Itertools as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use serde_json::value::RawValue;
 use serde_with::DefaultOnNull;
 use validator::{Validate, ValidationErrors};
 use vllm_chat::{ChatOptions, ChatRequest, ResolvedToolContext, SamplingParams};
@@ -22,11 +23,27 @@ use crate::routes::openai::utils::types::{
 
 /// `POST /tokenize` body. Untagged: a JSON object with `messages` parses as the
 /// chat variant; one with `prompt` parses as the completion variant.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug, Clone)]
 pub enum TokenizeRequest {
     Chat(TokenizeChatRequest),
     Completion(TokenizeCompletionRequest),
+}
+
+impl<'de> Deserialize<'de> for TokenizeRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = Box::<RawValue>::deserialize(deserializer)?;
+        serde_json::from_str(raw.get())
+            .map(Self::Chat)
+            .or_else(|_| serde_json::from_str(raw.get()).map(Self::Completion))
+            .map_err(|_| {
+                serde::de::Error::custom(
+                    "data did not match any variant of untagged enum TokenizeRequest",
+                )
+            })
+    }
 }
 
 #[serde_with::serde_as]
@@ -105,10 +122,12 @@ impl TokenizeChatRequest {
             &messages,
         )?;
 
-        let tool_context =
-            ResolvedToolContext::new(&messages, convert_tools(self.tools)?, None, true).map_err(
-                |error| crate::error::chat_submit_error("failed to resolve request tools", error),
-            )?;
+        let (tools, tool_parameter_json) = convert_tools(self.tools)?;
+        let mut tool_context =
+            ResolvedToolContext::new(&messages, tools, None, true).map_err(|error| {
+                crate::error::chat_submit_error("failed to resolve request tools", error)
+            })?;
+        tool_context.tool_parameter_json = tool_parameter_json;
 
         Ok(ChatRequest {
             request_id,
@@ -223,6 +242,53 @@ mod tests {
                 defer_loading: None,
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn chat_and_tokenize_render_tool_schema_numbers() {
+        use std::sync::Arc;
+
+        use vllm_chat::{ChatBackend, HfChatBackend, LoadModelBackendsOptions};
+        use vllm_text::backend::hf::ResolvedModelFiles;
+        use vllm_tokenizer::test_utils::TestTokenizer;
+
+        use crate::lora::LoraModelResolution;
+        use crate::routes::openai::lower_chat_request;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("tokenizer.json"), "{}").unwrap();
+        let files = ResolvedModelFiles::new(dir.path().to_str().unwrap(), None).await.unwrap();
+        let renderer = HfChatBackend::from_resolved_model_files(
+            files,
+            "test-model".to_string(),
+            LoadModelBackendsOptions {
+                chat_template: Some("{{ tools[0].function.parameters|tojson }}".to_string()),
+                language_model_only: true,
+                ..Default::default()
+            },
+            Arc::new(TestTokenizer::new()),
+        )
+        .unwrap()
+        .chat_renderer();
+        let body = r#"{"messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"bounded_number","parameters":{"minimum":1e-07,"maximum":123456789012345678901234567890}}}]}"#;
+        let TokenizeRequest::Chat(request) = serde_json::from_str(body).unwrap() else {
+            panic!("messages body should parse as the chat variant");
+        };
+        let tokenize = request.into_chat_request("tokenize-test".to_string()).unwrap();
+        let chat = lower_chat_request(
+            serde_json::from_str(body).unwrap(),
+            &LoraModelResolution {
+                model_names: vec!["test-model".to_string()],
+                lora_request: None,
+            },
+            Default::default(),
+        )
+        .unwrap();
+        let prompts = [chat, tokenize].map(|request| renderer.render(&request).unwrap().prompt);
+        let expected = Prompt::Text(
+            r#"{"minimum": 1e-07, "maximum": 123456789012345678901234567890}"#.to_string(),
+        );
+        assert_eq!(prompts, [expected.clone(), expected]);
     }
 
     /// Python declares `return_token_strs` as `bool | None` on both bodies, so

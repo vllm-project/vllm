@@ -479,6 +479,8 @@ pub struct ResolvedToolContext {
     pub tool_choice: ChatToolChoice,
     /// Whether more than one parsed tool call may be surfaced northbound.
     pub parallel_tool_calls: bool,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub tool_parameter_json: HashMap<String, String>,
 }
 
 impl ResolvedToolContext {
@@ -535,6 +537,7 @@ impl ResolvedToolContext {
             effective_tools,
             tool_choice,
             parallel_tool_calls,
+            tool_parameter_json: HashMap::new(),
         })
     }
 
@@ -562,6 +565,7 @@ impl Default for ResolvedToolContext {
             effective_tools: Vec::new(),
             tool_choice: ChatToolChoice::None,
             parallel_tool_calls: true,
+            tool_parameter_json: HashMap::new(),
         }
     }
 }
