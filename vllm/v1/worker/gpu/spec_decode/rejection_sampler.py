@@ -308,6 +308,7 @@ class RejectionSampler:
         pos: torch.Tensor,
         max_chunk_logits: int,
         max_num_logprobs: int,
+        raw_logits: torch.Tensor | None = None,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
@@ -358,10 +359,16 @@ class RejectionSampler:
                 input_batch.expanded_local_pos[lo:hi],
                 input_batch.seq_lens_cpu_upper_bound.numpy()[start:end],
             )
+            if use_processed_logits:
+                logprobs_logits = processed_logits
+            elif raw_logits is not None:
+                logprobs_logits = raw_logits[lo:hi]
+            else:
+                logprobs_logits = logits[lo:hi]
             chunk_logprobs = self._get_logprobs_tensors(
                 sampled,
                 num_sampled,
-                processed_logits if use_processed_logits else logits[lo:hi],
+                logprobs_logits,
                 chunk_cu_num_logits,
                 chunk_cu_num_logits_np,
                 max_num_logprobs,
@@ -418,6 +425,7 @@ class RejectionSampler:
         logits: torch.Tensor,
         input_batch: InputBatch,
         draft_logits: DraftLogitsCache | None = None,
+        raw_logits: torch.Tensor | None = None,
     ) -> SamplerOutput:
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
         # that num_nans is computed before applying penalties and temperature.
@@ -449,6 +457,7 @@ class RejectionSampler:
             pos,
             chunk_logit_limit,
             max_num_logprobs,
+            raw_logits,
         )
 
         num_sampled, num_rejected = get_num_sampled_and_rejected(
