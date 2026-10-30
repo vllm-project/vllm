@@ -2,12 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import numpy as np
 import pytest
+import transformers
+from packaging.version import Version
 
 from vllm.config import ModelConfig
+from vllm.config.speech_to_text import SpeechToTextParams
+from vllm.model_executor.model_loader import get_model_cls
 from vllm.model_executor.models.transformers.multimodal import (
     MultiModalProcessor as TransformersMultiModalProcessor,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.transformers_utils.processor import cached_processor_from_config
 
 AUDIO_MODEL_SETTINGS = {
     "ibm-granite/granite-speech-3.3-2b": {
@@ -168,3 +173,130 @@ def test_unclaimed_fields_warn_rather_than_raise():
 
     assert owned["audio"] == ["input_features"]
     assert owned["image"] == []
+
+
+@pytest.mark.parametrize(
+    ("model_id", "truncates"),
+    [
+        ("zai-org/GLM-ASR-Nano-2512", True),
+        ("microsoft/VibeVoice-ASR-HF", False),
+    ],
+)
+def test_max_audio_tokens_follow_processor_truncation(model_id, truncates):
+    """Only an audio processor that truncates caps audio below the context length,
+    and profiling should then use one audio that fills the context."""
+    seq_len = 4096
+    mm_processor = MULTIMODAL_REGISTRY.create_processor(
+        ModelConfig(model=model_id, model_impl="transformers")
+    )
+    info = mm_processor.info
+
+    max_tokens_per_item = info.get_mm_max_tokens_per_item(seq_len, {"audio": 1})
+    assert max_tokens_per_item is not None
+    max_tokens = max_tokens_per_item["audio"]
+    result = mm_processor(
+        prompt=mm_processor.dummy_inputs.get_dummy_text({"audio": 1}),
+        mm_items=info.parse_mm_data(
+            mm_processor.dummy_inputs.get_dummy_mm_data(seq_len, {"audio": 1}, {})
+        ),
+        hf_processor_mm_kwargs={},
+    )
+    num_tokens = result["mm_placeholders"]["audio"][0].length
+
+    if truncates:
+        assert max_tokens != seq_len
+        assert num_tokens <= max_tokens
+    else:
+        assert max_tokens == seq_len
+        assert num_tokens == pytest.approx(seq_len, rel=0.01)
+
+
+VIBEVOICE_OUTPUT = (
+    'assistant\n[{"Start":0.0,"End":1.5,"Speaker":0,"Content":"Hello there."},'
+    '{"Start":1.62,"End":3,"Speaker":1,"Content":"Hi!"},'
+    '{"Start":3,"End":4,"Content":" "}]\n'
+)
+
+
+@pytest.fixture
+def vibevoice():
+    if Version(transformers.__version__) < Version("5.23.0.dev0"):
+        pytest.skip("Requires `tokenize` on `apply_transcription_request`")
+    model_config = ModelConfig(
+        model="microsoft/VibeVoice-ASR-HF", model_impl="transformers"
+    )
+    return get_model_cls(model_config), model_config
+
+
+def test_transcription_config_keeps_uncapped_audio_whole(vibevoice):
+    model_cls, model_config = vibevoice
+
+    stt_config = model_cls.get_speech_to_text_config(model_config, "transcribe")
+
+    assert stt_config.sample_rate == 24000
+    assert stt_config.max_audio_clip_s is None
+
+
+@pytest.mark.parametrize("context", ["", "Speakers: Ada"])
+def test_transcription_prompt_matches_hf_processor(vibevoice, context):
+    """VLLM never sees the text the HF processor fills in, so the prompt it builds
+    has to tokenize to what the processor would give."""
+    model_cls, model_config = vibevoice
+    audio = np.zeros(36000, dtype=np.float32)
+    stt_config = model_cls.get_speech_to_text_config(model_config, "transcribe")
+
+    prompt = model_cls.get_generation_prompt(
+        SpeechToTextParams(
+            audio=audio,
+            stt_config=stt_config,
+            model_config=model_config,
+            request_prompt=context,
+        )
+    )
+
+    processor = cached_processor_from_config(model_config)
+    hf_inputs = processor.apply_transcription_request(audio, prompt=context or None)
+    ours = processor.tokenizer.encode(prompt["prompt"], add_special_tokens=False)
+    audio_token_id = processor.audio_token_id
+    hf_ids = hf_inputs["input_ids"][0].tolist()
+    assert ours == [
+        token
+        for i, token in enumerate(hf_ids)
+        if token != audio_token_id or hf_ids[i - 1] != audio_token_id
+    ]
+
+
+def test_transcription_rejects_translation(vibevoice):
+    model_cls, model_config = vibevoice
+
+    with pytest.raises(ValueError, match="translation"):
+        model_cls.get_generation_prompt(
+            SpeechToTextParams(
+                audio=np.zeros(24000, dtype=np.float32),
+                stt_config=model_cls.get_speech_to_text_config(
+                    model_config, "translate"
+                ),
+                model_config=model_config,
+                task_type="translate",
+            )
+        )
+
+
+def test_transcription_output_parsing(vibevoice):
+    model_cls, model_config = vibevoice
+
+    text = model_cls.post_process_output(VIBEVOICE_OUTPUT, model_config)
+    segments = model_cls.parse_diarized_transcript(VIBEVOICE_OUTPUT, model_config)
+
+    assert text == "Hello there. Hi!"
+    assert [(s.start, s.end, s.speaker, s.text) for s in segments] == [
+        (0.0, 1.5, "0", "Hello there."),
+        (1.62, 3.0, "1", "Hi!"),
+    ]
+
+
+def test_transcription_output_parsing_fails_closed(vibevoice):
+    model_cls, model_config = vibevoice
+
+    assert model_cls.post_process_output("Hello.\n", model_config) == "Hello."
+    assert model_cls.parse_diarized_transcript("Hello.", model_config) == []

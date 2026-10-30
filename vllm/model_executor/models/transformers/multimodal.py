@@ -23,6 +23,7 @@ from contextlib import ExitStack, contextmanager
 from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import torch
 import transformers
 
@@ -181,14 +182,44 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         modalities = self._get_supported_modalities()
         max_tokens = {}
         if "audio" in modalities:
-            max_tokens["audio"] = self.get_max_audio_tokens()
+            max_tokens["audio"] = self.get_max_audio_tokens(seq_len)
         if "image" in modalities:
             max_tokens["image"] = self.get_max_image_tokens()
         if "video" in modalities:
             max_tokens["video"] = self.get_max_video_tokens(seq_len, mm_counts)
         return max_tokens
 
-    def get_max_audio_tokens(self) -> int:
+    def _get_max_audio_length(self) -> int | None:
+        """Samples the audio processor truncates audios to, or None if it doesn't."""
+        sub = self._get_audio_processor()
+        # TODO: read only `truncation`/`max_length` once
+        # huggingface/transformers#44394 lands.
+        if hasattr(sub, "truncation"):
+            return sub.max_length if sub.truncation else None
+        return getattr_iter(sub, ("n_samples", "nb_max_samples"))
+
+    @cached_property
+    def _audio_samples_per_token(self) -> float:
+        """Samples behind each audio token, measured on a 60 s audio."""
+        processor = self.get_hf_processor()
+        num_samples = int(60 * self._get_audio_sampling_rate())
+        outputs = self.ctx.call_hf_processor(
+            processor,
+            dict(
+                text=getattr(processor, "audio_token", ""),
+                audio=[np.zeros(num_samples, dtype=np.float32)],
+                return_text_replacement_offsets=True,
+            ),
+            {},
+        )
+        replacement = outputs["text_replacement_offsets"][0][0]["replacement"]
+        tokenizer = self.get_tokenizer()
+        seq = cached_encode(tokenizer, replacement, add_special_tokens=False)
+        return num_samples / int(_count_embed_tokens([seq])[0])
+
+    def get_max_audio_tokens(self, seq_len: int) -> int:
+        if self._get_max_audio_length() is None:
+            return seq_len
         config = self.get_hf_config()
         audio_config_names = ("audio_config", "encoder_config")
         names = ("max_source_positions", "max_position_embeddings", "max_pos_emb")
@@ -347,13 +378,12 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
     ) -> MultiModalDataDict:
         data = MultiModalDataBuiltins()
         if self.info._is_audio_model and (num_audios := mm_counts.get("audio", 0)):
-            sampling_rate = self.info._get_audio_sampling_rate()
-            sub = self.info._get_audio_processor()
-            chunk_length = getattr(sub, "chunk_length", None) if sub else None
-            if chunk_length is None:
-                chunk_length = 30
+            length = self.info._get_max_audio_length()
+            if length is None:
+                max_tokens = seq_len // num_audios
+                length = int(max_tokens * self.info._audio_samples_per_token)
             data["audio"] = self._get_dummy_audios(
-                length=int(chunk_length * sampling_rate),
+                length=length,
                 num_audios=num_audios,
                 overrides=mm_options.get("audio"),
             )
@@ -1077,11 +1107,12 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         # padded to match another.
         embeddings: list[torch.Tensor] = []
         for index, features in enumerate(input_features):
-            audio_output = self.model.get_audio_features(
-                features.unsqueeze(0),
-                return_dict=True,
-                **self._select_item_kwargs(kwargs, index, len(input_features)),
-            )
+            with gpu_sync_allowed():
+                audio_output = self.model.get_audio_features(
+                    features.unsqueeze(0),
+                    return_dict=True,
+                    **self._select_item_kwargs(kwargs, index, len(input_features)),
+                )
             embeddings.extend(
                 self._split_embeddings(audio_output.pooler_output, [split_sizes[index]])
             )
@@ -1157,8 +1188,16 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE, Base):
         """Narrow the entries of `kwargs` that hold one row per item down to the item
         at `index`. Length is all there is to match on, so an unrelated entry of the
         same length is narrowed too."""
+
+        def select(value: torch.Tensor | list) -> torch.Tensor | list:
+            if isinstance(value, torch.Tensor):
+                return value[index : index + 1]
+            # Ragged fields arrive as a list of per-item tensors
+            item = value[index]
+            return item.unsqueeze(0) if isinstance(item, torch.Tensor) else [item]
+
         return {
-            key: value[index : index + 1]
+            key: select(value)
             if isinstance(value, (torch.Tensor, list)) and len(value) == num_items
             else value
             for key, value in kwargs.items()

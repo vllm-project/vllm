@@ -8,7 +8,9 @@ import httpx
 import numpy as np
 import pytest
 import soundfile as sf
+import transformers
 from fastapi import UploadFile
+from packaging.version import Version
 from transformers import WhisperConfig
 
 from tests.utils import ROCM_EXTRA_ARGS, RemoteOpenAIServer
@@ -139,6 +141,44 @@ async def transcribe_and_check(
         )
 
     return out_text
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    Version(transformers.__version__) < Version("5.23.0.dev0"),
+    reason="Requires `tokenize` on `apply_transcription_request`",
+)
+async def test_transformers_backend_audio(mary_had_lamb):
+    """Serve transcription and diarization for a Transformers backend model."""
+    model_name = "microsoft/VibeVoice-ASR-HF"
+    server_args = [
+        "--enforce-eager",
+        "--max-model-len",
+        "2048",
+        "--max-num-batched-tokens",
+        "2048",
+        "--gpu-memory-utilization",
+        "0.85",
+        *ROCM_EXTRA_ARGS,
+    ]
+    with RemoteOpenAIServer(model_name, server_args) as remote_server:
+        client = remote_server.get_async_client()
+        await transcribe_and_check(
+            client,
+            model_name,
+            mary_had_lamb,
+            language="en",
+            expected_text="Mary had a little lamb",
+            expected_seconds=16,
+        )
+
+        mary_had_lamb.seek(0)
+        response = await client.audio.transcriptions.create(
+            model=model_name, file=mary_had_lamb, response_format="diarized_json"
+        )
+        assert "Mary had a little lamb" in response.text
+        assert response.segments
+        assert all(segment.end >= segment.start for segment in response.segments)
 
 
 @pytest.mark.asyncio
