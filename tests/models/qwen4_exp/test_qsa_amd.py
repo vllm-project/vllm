@@ -10,20 +10,20 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
-from vllm.models.qwen4_exp.amd import indexer_qsa
 from vllm.models.qwen4_exp.amd import (
     model as _qwen4_exp_model,  # noqa: F401
 )
 from vllm.models.qwen4_exp.amd import ple_layer as ple_layer_module
-from vllm.models.qwen4_exp.amd.indexer_qsa import (
-    QSAIndexer,
-    apply_qsa_rmsnorm,
-    apply_qsa_rope,
-)
+from vllm.models.qwen4_exp.amd import qsa_indexer
 from vllm.models.qwen4_exp.amd.ops import qsa as qsa_ops
 from vllm.models.qwen4_exp.amd.ops.qsa_prepare import (
     qsa_prepare,
     supports_fused_pre_indexer,
+)
+from vllm.models.qwen4_exp.amd.qsa_indexer import (
+    QSAIndexer,
+    apply_qsa_rmsnorm,
+    apply_qsa_rope,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
@@ -214,7 +214,7 @@ def test_qsa_fused_prepare_replaces_the_unfused_chain(
         calls.append((args, kwargs))
         return main_outputs
 
-    monkeypatch.setattr(indexer_qsa, "qsa_prepare", fake_prepare)
+    monkeypatch.setattr(qsa_indexer, "qsa_prepare", fake_prepare)
     monkeypatch.setattr(
         QSAIndexer,
         "_update_and_compress",
@@ -268,7 +268,7 @@ def test_qsa_unsupported_config_keeps_the_unfused_chain(
 ) -> None:
     indexer = _make_indexer(monkeypatch, use_fused=False)
     monkeypatch.setattr(
-        indexer_qsa,
+        qsa_indexer,
         "qsa_prepare",
         lambda *args, **kwargs: pytest.fail("unfused path ran the fused kernel"),
     )
@@ -515,24 +515,14 @@ def test_qsa_sparse_paged_attention_matches_reference(
 @requires_qsa_kernels
 @pytest.mark.parametrize("kv_cache_dtype", ["fp8", "fp8_e4m3"])
 def test_qsa_impl_constructs_with_fp8_kv(kv_cache_dtype: str) -> None:
-    """The impl constructor must accept an FP8 KV cache dtype.
+    """QSA accepts FP8 KV cache dtypes without probing FlashAttention."""
+    from vllm.models.qwen4_exp.amd.qsa import Qwen4ExpQSAImpl
 
-    The QSA Triton kernel dequantizes fp8 itself and never runs flash-attn
-    over the cache, so the parent constructor's flash-attn quantized-KV
-    probe (which raises on ROCm) must not reject it: the impl hands the
-    parent "auto" for that probe and restores the real dtype afterwards,
-    mirroring the NVIDIA implementation. Guards both the construction
-    succeeding and the dtype surviving the parent round-trip.
-    """
-    from vllm.models.qwen4_exp.amd.qsa import Qwen4ExpQSAFlashAttentionImpl
-
-    impl = Qwen4ExpQSAFlashAttentionImpl(
+    impl = Qwen4ExpQSAImpl(
         num_heads=24,
         head_size=128,
         scale=0.088,
         num_kv_heads=2,
-        alibi_slopes=None,
-        sliding_window=None,
         kv_cache_dtype=kv_cache_dtype,
     )
     assert impl.kv_cache_dtype == kv_cache_dtype
