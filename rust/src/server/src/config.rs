@@ -274,6 +274,8 @@ pub struct Config {
     pub tokenizer: Option<ModelSource>,
     /// Source of `config.json` and `generation_config.json`, or `None` for `model`.
     pub hf_config: Option<ModelSource>,
+    /// Load no tokenizer and serve token IDs only (`--skip-tokenizer-init`).
+    pub skip_tokenizer_init: bool,
     /// JSON Merge Patch applied to the model config before backend initialization.
     pub hf_overrides: HfOverrides,
     /// Which generation-config sampling defaults to inherit.

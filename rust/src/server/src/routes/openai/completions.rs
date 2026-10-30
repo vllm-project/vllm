@@ -89,6 +89,21 @@ pub async fn completions(
     ) {
         return error.into_response();
     }
+    // Without a tokenizer, string-form logprobs would key every candidate by
+    // the same empty token string. The token-ID form needs no tokenizer.
+    if !state.chat.text().has_tokenizer()
+        && prepared.options.requested_logprobs.is_some()
+        && !prepared
+            .options
+            .return_tokens_as_token_ids
+            .unwrap_or(state.api_server_options.default_return_tokens_as_token_ids)
+    {
+        return text_submit_error(
+            "invalid completion request",
+            vllm_text::Error::TokenizerUnavailable,
+        )
+        .into_response();
+    }
     let request_span = tracing::info_span!(
         "completions",
         request_id = %prepared.request_id,

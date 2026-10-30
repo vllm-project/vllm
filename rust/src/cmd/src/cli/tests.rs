@@ -218,6 +218,7 @@ fn serve_args_forward_python_flags_with_separator() {
                             tokenizer: None,
                             tokenizer_revision: None,
                             hf_config_path: None,
+                            skip_tokenizer_init: false,
                         },
                         hf_overrides: HfOverrides(
                             {},
@@ -377,6 +378,51 @@ fn serve_args_forward_shutdown_timeout_to_managed_engine() {
         ]
     "#]]
     .assert_debug_eq(&config.python_args);
+}
+
+#[test]
+fn skip_tokenizer_init_reaches_backends_and_managed_engine() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--skip-tokenizer-init",
+    ])
+    .unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert!(
+        args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args))
+            .skip_tokenizer_init
+    );
+    // The engine must not load a tokenizer for structured outputs either.
+    expect![[r#"
+        [
+            "--skip-tokenizer-init",
+            "--reasoning-parser",
+            "qwen3",
+        ]
+    "#]]
+    .assert_debug_eq(&args.to_managed_engine_config(5555, &topology(&args), None).python_args);
+
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","skip_tokenizer_init":true}"#,
+    ])
+    .unwrap();
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    assert!(args.into_config().skip_tokenizer_init);
 }
 
 #[test]
@@ -1539,6 +1585,7 @@ fn frontend_args_accept_json() {
                             tokenizer: None,
                             tokenizer_revision: None,
                             hf_config_path: None,
+                            skip_tokenizer_init: false,
                         },
                         hf_overrides: HfOverrides(
                             {},
@@ -2461,6 +2508,7 @@ fn serve_args_accept_handshake_aliases() {
                             tokenizer: None,
                             tokenizer_revision: None,
                             hf_config_path: None,
+                            skip_tokenizer_init: false,
                         },
                         hf_overrides: HfOverrides(
                             {},
@@ -2751,6 +2799,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             revision: None,
             tokenizer: None,
             hf_config: None,
+            skip_tokenizer_init: false,
             hf_overrides: HfOverrides(
                 {},
             ),
@@ -2869,6 +2918,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             revision: None,
             tokenizer: None,
             hf_config: None,
+            skip_tokenizer_init: false,
             hf_overrides: HfOverrides(
                 {},
             ),
@@ -3072,6 +3122,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             revision: None,
             tokenizer: None,
             hf_config: None,
+            skip_tokenizer_init: false,
             hf_overrides: HfOverrides(
                 {},
             ),

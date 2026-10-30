@@ -30,6 +30,8 @@ pub struct RenderConfig {
     pub tokenizer: Option<ModelSource>,
     /// Source of `config.json` and `generation_config.json`, or `None` for `model`.
     pub hf_config: Option<ModelSource>,
+    /// Load no tokenizer and serve token IDs only (`--skip-tokenizer-init`).
+    pub skip_tokenizer_init: bool,
     pub hf_overrides: HfOverrides,
     pub served_model_name: Vec<String>,
     pub host: String,
@@ -81,6 +83,7 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
             revision: config.revision.clone(),
             tokenizer: config.tokenizer.clone(),
             hf_config: config.hf_config.clone(),
+            skip_tokenizer_init: config.skip_tokenizer_init,
             hf_overrides: config.hf_overrides.clone(),
             generation_config: Default::default(),
             renderer: config.renderer,
@@ -180,6 +183,7 @@ mod tests {
                 revision: None,
                 tokenizer: None,
                 hf_config: None,
+                skip_tokenizer_init: false,
                 hf_overrides: Default::default(),
                 served_model_name: Vec::new(),
                 host: "127.0.0.1".to_string(),

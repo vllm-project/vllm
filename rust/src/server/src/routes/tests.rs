@@ -53,8 +53,8 @@ use vllm_llm::Llm;
 use vllm_metrics::METRICS;
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{Prompt, TextBackend, TextLlm, TextRequestProcessor};
-use vllm_tokenizer::Tokenizer as _;
 use vllm_tokenizer::test_utils::TestTokenizer;
+use vllm_tokenizer::{Tokenizer as _, UnavailableTokenizer};
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
@@ -449,6 +449,8 @@ async fn recv_engine_message(dealer: &mut DealerSocket) -> Vec<Bytes> {
 struct FakeChatBackend {
     model_id: String,
     multimodal_model_info: Option<vllm_chat::multimodal::MultimodalModelInfo>,
+    /// Serve without a tokenizer, like `--skip-tokenizer-init`.
+    skip_tokenizer_init: bool,
 }
 
 /// Synthetic BOS id used when `add_special_tokens` is true in tests.
@@ -473,6 +475,14 @@ impl FakeChatBackend {
         Self {
             model_id: "test-model".to_string(),
             multimodal_model_info: None,
+            skip_tokenizer_init: false,
+        }
+    }
+
+    fn without_tokenizer() -> Self {
+        Self {
+            skip_tokenizer_init: true,
+            ..Self::new()
         }
     }
 
@@ -480,6 +490,7 @@ impl FakeChatBackend {
         Self {
             model_id: model_id.into(),
             multimodal_model_info: None,
+            skip_tokenizer_init: false,
         }
     }
 
@@ -489,6 +500,7 @@ impl FakeChatBackend {
         Self {
             model_id: "test-model".to_string(),
             multimodal_model_info: Some(multimodal_model_info),
+            skip_tokenizer_init: false,
         }
     }
 }
@@ -503,7 +515,14 @@ impl fmt::Debug for FakeChatBackend {
 
 impl TextBackend for FakeChatBackend {
     fn tokenizer(&self) -> DynTokenizer {
+        if self.skip_tokenizer_init {
+            return Arc::new(UnavailableTokenizer::new(1024));
+        }
         Arc::new(fake_chat_tokenizer())
+    }
+
+    fn has_tokenizer(&self) -> bool {
+        !self.skip_tokenizer_init
     }
 
     fn model_id(&self) -> &str {
@@ -6467,6 +6486,68 @@ async fn completions_echo_stream_emits_separate_prompt_chunk() {
     .expect("usage chunk json");
     assert_eq!(usage_chunk["usage"]["prompt_tokens"], 5);
     assert_eq!(usage_chunk["usage"]["completion_tokens"], 3);
+}
+
+/// Under `--skip-tokenizer-init`, token-ID completions run and return no text,
+/// and everything that needs the tokenizer is a 400. Chat requests are covered
+/// by `vllm-chat`'s tokenizer-less backend.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn skip_tokenizer_init_serves_token_id_completions_only() {
+    let (mut app, engine_task) = test_app_with_backend_and_stream_output_specs(
+        Arc::new(FakeChatBackend::without_tokenizer()),
+        default_stream_output_specs(),
+    )
+    .await;
+    let completion = |extra: serde_json::Value| {
+        let mut body = json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "prompt": [104, 105]});
+        body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        body
+    };
+
+    let (status, json) = post_json(
+        &mut app,
+        "/v1/completions",
+        completion(json!({"return_token_ids": true})),
+    )
+    .await;
+    engine_task.await.expect("mock engine task");
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let choice = &json["choices"][0];
+    assert_eq!(choice["text"], "");
+    assert_eq!(choice["prompt_token_ids"], json!([104, 105]));
+    assert_eq!(choice["token_ids"].as_array().map(Vec::len), Some(3));
+
+    let mut errors = Vec::new();
+    for (uri, body) in [
+        ("/v1/completions", completion(json!({"prompt": "hi"}))),
+        ("/v1/completions", completion(json!({"echo": true}))),
+        (
+            "/v1/completions",
+            completion(json!({"stop": ["x"], "request_id": "stop"})),
+        ),
+        ("/v1/completions", completion(json!({"logprobs": 2}))),
+        (
+            "/v1/completions",
+            completion(json!({"structured_outputs": {"choice": ["a", "b"]}})),
+        ),
+        ("/tokenize", json!({"prompt": "hi"})),
+        ("/detokenize", json!({"tokens": [104]})),
+    ] {
+        let (status, json) = post_json(&mut app, uri, body).await;
+        errors.push(format!("{uri} {status}: {}", json["error"]["message"]));
+    }
+    expect_test::expect![[r#"
+        [
+            "/v1/completions 400 Bad Request: \"this request needs a tokenizer, which is not loaded when `--skip-tokenizer-init` is set\"",
+            "/v1/completions 400 Bad Request: \"Failed to decode token-ID prompt for echo: this request needs a tokenizer, which is not loaded when `--skip-tokenizer-init` is set\"",
+            "/v1/completions 400 Bad Request: \"text request `cmpl-stop` stop strings require detokenization; enable it or use stop token IDs\"",
+            "/v1/completions 400 Bad Request: \"this request needs a tokenizer, which is not loaded when `--skip-tokenizer-init` is set\"",
+            "/v1/completions 400 Bad Request: \"this request needs a tokenizer, which is not loaded when `--skip-tokenizer-init` is set\"",
+            "/tokenize 400 Bad Request: \"this request needs a tokenizer, which is not loaded when `--skip-tokenizer-init` is set\"",
+            "/detokenize 400 Bad Request: \"this request needs a tokenizer, which is not loaded when `--skip-tokenizer-init` is set\"",
+        ]
+    "#]].assert_debug_eq(&errors);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
