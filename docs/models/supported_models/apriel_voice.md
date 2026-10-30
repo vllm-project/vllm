@@ -26,6 +26,7 @@ VLLM_MAX_AUDIO_DECODE_DURATION_S=1800 vllm serve \
     --max-num-batched-tokens 16384 \
     --tensor-parallel-size 4 \
     --gpu-memory-utilization 0.95 \
+    --speculative-config '{"model":"google/gemma-4-26B-A4B-it-assistant","num_speculative_tokens":3}' \
     --default-chat-template-kwargs '{"enable_thinking":true}' \
     --enable-auto-tool-choice \
     --tool-call-parser gemma4 \
@@ -36,15 +37,36 @@ VLLM_MAX_AUDIO_DECODE_DURATION_S=1800 vllm serve \
 model implementation is native to vLLM. Reasoning and tool calling use the
 existing `gemma4` parsers and the checkpoint's chat template.
 
-The model card also enables speculative decoding with the Gemma 4 assistant:
+The speculative decoding option requires access to the Gemma 4 assistant
+checkpoint and additional memory. For a minimal deployment, omit
+`--speculative-config`. GPU memory requirements also depend on context length
+and concurrency.
+
+## Pre-tool speech
+
+When the conversation contains audio and the request supplies tools, the
+checkpoint's chat template enables pre-tool speech by default
+(`enable_pretool_speech=true`). It prompts the model to produce a short
+natural-language sentence before a tool call. The response is text; the
+application handles speech synthesis.
+
+To disable the automatic pre-tool speech instruction for all requests, replace
+the serving command's chat-template defaults with:
 
 ```bash
---speculative-config '{"model":"google/gemma-4-26B-A4B-it-assistant","num_speculative_tokens":3}'
+--default-chat-template-kwargs '{"enable_thinking":true,"enable_pretool_speech":false}'
 ```
 
-This option requires access to the assistant checkpoint and additional memory.
-For a minimal deployment, omit it. GPU memory requirements also depend on
-context length and concurrency.
+For an individual request, pass `chat_template_kwargs` in the OpenAI Python
+client's `extra_body`:
+
+```python
+extra_body={"chat_template_kwargs": {"enable_pretool_speech": False}}
+```
+
+In a raw HTTP request, use `"chat_template_kwargs": {"enable_pretool_speech": false}`
+in the JSON body. Request values override the server defaults. Set the value to
+`true` to enable the instruction for a request when the server default is disabled.
 
 ## Multimodal input
 
