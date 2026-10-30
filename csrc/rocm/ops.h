@@ -95,6 +95,15 @@ void moe_decode_tail_rdna3(torch::Tensor logits, torch::Tensor gate_up,
                            torch::Tensor topk_w, torch::Tensor topk_ids,
                            torch::Tensor zero_buf, bool renormalize);
 
+void topk_topp_candidates(torch::Tensor logits, torch::Tensor ids,
+                          torch::Tensor top_k,
+                          std::optional<torch::Tensor> top_p);
+void topk_local_packed(torch::Tensor logits, int64_t k, int64_t id_offset,
+                       torch::Tensor cand, torch::Tensor counters,
+                       torch::Tensor out);
+void topk_merge_packed(torch::Tensor gathered, int64_t ranks,
+                       torch::Tensor ids, torch::Tensor values);
+
 std::vector<torch::Tensor> qwen4_hc_combine_mix(
     const torch::Tensor& h, const torch::Tensor& block_out,
     const torch::Tensor& inj, const torch::Tensor& norm_w,

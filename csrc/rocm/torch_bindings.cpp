@@ -124,6 +124,20 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.impl("shared_expert_gate_rdna3", torch::kCUDA,
                 &shared_expert_gate_rdna3);
 
+  // Top-k / top-p masking of rows sampled from gathered top-k logits.
+  rocm_ops.def(
+      "topk_topp_candidates(Tensor! logits, Tensor ids, Tensor top_k, "
+      "Tensor? top_p) -> ()");
+  rocm_ops.impl("topk_topp_candidates", torch::kCUDA, &topk_topp_candidates);
+  // Vocab-parallel top-k of fp16 logits as packed (value, id) entries.
+  rocm_ops.def(
+      "topk_local_packed(Tensor logits, int k, int id_offset, Tensor! cand, "
+      "Tensor! counters, Tensor! out) -> ()");
+  rocm_ops.impl("topk_local_packed", torch::kCUDA, &topk_local_packed);
+  rocm_ops.def(
+      "topk_merge_packed(Tensor gathered, int ranks, Tensor! ids, "
+      "Tensor! values) -> ()");
+  rocm_ops.impl("topk_merge_packed", torch::kCUDA, &topk_merge_packed);
   // MoE decode tail: top-k routing, gated shared expert, workspace zeroing.
   rocm_ops.def(
       "moe_decode_tail_rdna3(Tensor logits, Tensor gate_up, Tensor x, "

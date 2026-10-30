@@ -1672,6 +1672,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/rocm/qsa_norm_rope_rdna3.cu"
       "csrc/rocm/shared_expert_gate_rdna3.cu"
       "csrc/rocm/moe_decode_tail_rdna3.cu"
+      "csrc/rocm/topk_topp_candidates.cu"
       "csrc/rocm/skinny_wmma_rdna3.cu"
       "csrc/rocm/jart_ar.cu"
       "csrc/rocm/mxfp4_w4a8_gemv_rdna3.cu")

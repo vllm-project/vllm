@@ -53,6 +53,51 @@ def _topk(scores: torch.Tensor, k: int) -> tuple[torch.Tensor, torch.Tensor]:
     return impl(scores, k, sorted=True, deterministic=True)
 
 
+_PACKED_TOPK_SLICE = 8192
+_PACKED_TOPK_MAX_ENTRIES = 256
+_packed_topk_counters: dict[torch.device, torch.Tensor] = {}
+
+
+def _packed_topk_supported(logits: torch.Tensor, k: int, tp_size: int) -> bool:
+    n = logits.shape[-1]
+    return (
+        current_platform.is_rocm()
+        and hasattr(torch.ops._rocm_C, "topk_local_packed")
+        and logits.dim() == 2
+        and logits.dtype == torch.float16
+        and logits.stride(-1) == 1
+        and n % 8 == 0
+        and logits.stride(0) % 8 == 0
+        and logits.data_ptr() % 16 == 0
+        and 0 < k <= n
+        and -(-n // _PACKED_TOPK_SLICE) * k <= _PACKED_TOPK_MAX_ENTRIES
+        and tp_size * k <= _PACKED_TOPK_MAX_ENTRIES
+    )
+
+
+def _packed_topk(
+    logits: torch.Tensor, k: int, id_offset: int, tp_size: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Vocab-parallel top-k as (global ids, fp32 values), sorted, ties to the
+    lowest id: one local selection launch, one all-gather of packed (fp16
+    value, id) entries and one merge launch."""
+    rows, n = logits.shape
+    device = logits.device
+    counters = _packed_topk_counters.get(device)
+    if counters is None or counters.numel() < rows:
+        counters = torch.zeros(max(64, rows), dtype=torch.int32, device=device)
+        _packed_topk_counters[device] = counters
+    slices = -(-n // _PACKED_TOPK_SLICE)
+    cand = torch.empty(rows * slices * k, dtype=torch.int64, device=device)
+    local = torch.empty(rows, k, dtype=torch.int64, device=device)
+    torch.ops._rocm_C.topk_local_packed(logits, k, id_offset, cand, counters, local)
+    gathered = tensor_model_parallel_all_gather(local, dim=0) if tp_size > 1 else local
+    ids = torch.empty(rows, k, dtype=torch.int64, device=device)
+    values = torch.empty(rows, k, dtype=torch.float32, device=device)
+    torch.ops._rocm_C.topk_merge_packed(gathered, tp_size, ids, values)
+    return ids, values
+
+
 # --8<-- [start:logits_processor]
 @PluggableLayer.register("logits_processor")
 class LogitsProcessor(PluggableLayer):
@@ -298,17 +343,25 @@ class LogitsProcessor(PluggableLayer):
                     keepdim=True,
                 )
 
-        values, ids = _topk(logits, k)
-        # Convert shard-local indices to global vocab indices.
-        ids = ids.to(torch.int64) + lm_head.shard_indices.org_vocab_start_index
+        if not return_log_probs and _packed_topk_supported(logits, k, lm_head.tp_size):
+            ids, values = _packed_topk(
+                logits,
+                k,
+                lm_head.shard_indices.org_vocab_start_index,
+                lm_head.tp_size,
+            )
+        else:
+            values, ids = _topk(logits, k)
+            # Convert shard-local indices to global vocab indices.
+            ids = ids.to(torch.int64) + lm_head.shard_indices.org_vocab_start_index
 
-        if lm_head.tp_size > 1:
-            values = tensor_model_parallel_all_gather(values, dim=-1)
-            ids = tensor_model_parallel_all_gather(ids, dim=-1)
-            values, selected = _topk(values, k)
-            ids = ids.gather(-1, selected)
+            if lm_head.tp_size > 1:
+                values = tensor_model_parallel_all_gather(values, dim=-1)
+                ids = tensor_model_parallel_all_gather(ids, dim=-1)
+                values, selected = _topk(values, k)
+                ids = ids.gather(-1, selected)
 
-        values = values.float()
+            values = values.float()
         if return_log_probs:
             return ids, values - log_partition
         if self.scale != 1.0:

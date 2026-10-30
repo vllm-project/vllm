@@ -125,6 +125,7 @@ class SamplingStates:
         logits: torch.Tensor,
         expanded_idx_mapping: torch.Tensor,
         idx_mapping_np: np.ndarray,
+        candidate_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         top_k, top_p, has_topp_only_rows = self.get_top_k_top_p(
             expanded_idx_mapping, idx_mapping_np, logits.shape[-1]
@@ -132,7 +133,11 @@ class SamplingStates:
         if top_k is None and top_p is None:
             return logits
         return apply_top_k_top_p(
-            logits, top_k, top_p, has_topp_only_rows=has_topp_only_rows
+            logits,
+            top_k,
+            top_p,
+            has_topp_only_rows=has_topp_only_rows,
+            candidate_ids=candidate_ids,
         )
 
     def any_greedy(self, idx_mapping_np: np.ndarray) -> bool:

@@ -87,6 +87,9 @@ class Sampler:
         # the top-k set, so they cannot sample from gathered top-k logits.
         self.needs_full_vocab = np.zeros(max_num_reqs, dtype=bool)
         self.num_speculative_tokens = num_speculative_tokens
+        # Ids of the gathered top-k logits of the batch being sampled, set by
+        # the model runner; the other entries hold a masked fill.
+        self.top_k_candidate_ids: torch.Tensor | None = None
         self.return_sampling_mask = return_sampling_mask
         self.use_flashinfer = (
             not return_sampling_mask and flashinfer_sampler_supported()
@@ -300,7 +303,10 @@ class Sampler:
 
         # Apply top_k and/or top_p. This might or might not return a new tensor.
         return self.sampling_states.apply_top_k_top_p(
-            logits, expanded_idx_mapping, idx_mapping_np
+            logits,
+            expanded_idx_mapping,
+            idx_mapping_np,
+            candidate_ids=self.top_k_candidate_ids,
         )
 
     def sample(
@@ -373,7 +379,11 @@ class Sampler:
                 sampled, _ = xpu_sample(processed_logits, top_k, top_p)
         else:
             processed_logits = apply_top_k_top_p(
-                processed_logits, top_k, top_p, has_topp_only_rows=has_topp_only_rows
+                processed_logits,
+                top_k,
+                top_p,
+                has_topp_only_rows=has_topp_only_rows,
+                candidate_ids=self.top_k_candidate_ids,
             )
             sampled = gumbel_sample(
                 processed_logits,
