@@ -471,6 +471,20 @@ where
 mod tests {
     use super::*;
 
+    /// Run budget tests in a fresh process without mutating other tests' environment.
+    pub(crate) fn image_budget_child(test_name: &str) -> bool {
+        if std::env::var("VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES").as_deref() == Ok("4") {
+            return false;
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([test_name, "--exact", "--nocapture"])
+            .env("VLLM_MAX_MEDIA_REQUEST_DECODE_BYTES", "4")
+            .status()
+            .expect("run isolated image budget test");
+        assert!(status.success());
+        true
+    }
+
     #[test]
     fn effective_served_model_names_falls_back_to_backend_model() {
         assert_eq!(

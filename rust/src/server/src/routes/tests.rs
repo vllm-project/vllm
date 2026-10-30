@@ -3441,6 +3441,59 @@ async fn chat_structured_outputs_use_configured_backend() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn image_budget_rejects_repeated_images_over_http() {
+    if crate::tests::image_budget_child(
+        "routes::tests::image_budget_rejects_repeated_images_over_http",
+    ) {
+        return;
+    }
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-image-budget",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::with_multimodal_model_info(
+            qwen_multimodal_model_info(),
+        )),
+    )
+    .await;
+    let mut app = build_router_with_scale_out_endpoints(
+        Arc::new(AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".into()], chat)),
+        true,
+    );
+    let image = json!({"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="}});
+    for endpoint in [
+        "/v1/chat/completions",
+        "/tokenize",
+        "/inference/v1/generate",
+    ] {
+        for stream in [false, true] {
+            let mut body = json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "stream": stream,
+                "messages": [{"role": "user", "content": vec![image.clone(); 8]}]
+            });
+            if endpoint == "/inference/v1/generate" {
+                body = json!({
+                    "token_ids": [151655],
+                    "sampling_params": {},
+                    "content_parts": vec![json!({"type": "image_url", "url": image["image_url"]["url"]}); 8],
+                    "stream": stream
+                });
+            }
+            let (status, response) = post_json(&mut app, endpoint, body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{endpoint}: {response}");
+            assert!(
+                response["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("decoded image bytes exceed"),
+                "{endpoint}: {response}"
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn non_stream_chat_image_url_reaches_engine_mm_features() {
     let (app, engine_task) = test_app_with_backend_and_engine_request_check(
         Arc::new(FakeChatBackend::with_multimodal_model_info(

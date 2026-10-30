@@ -895,6 +895,55 @@ async fn generate_without_output_text_skips_detokenization() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn image_budget_rejects_repeated_images_over_grpc() {
+    if crate::tests::image_budget_child(
+        "grpc::tests::image_budget_rejects_repeated_images_over_grpc",
+    ) {
+        return;
+    }
+    let (inference, control, health, _engine_task) = setup_grpc_service_with_backend(
+        b"engine-grpc-image-budget",
+        default_stream_output_specs(),
+        multimodal_backend(),
+        |_| {},
+    )
+    .await;
+    let (channel, server_task) = start_grpc_test_server(
+        inference,
+        control,
+        health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    let mut client = InferenceClient::new(channel);
+    for streaming in [false, true] {
+        let request = pb::GenerateRequest {
+            model: "test-model".into(),
+            prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
+                ids: vec![QWEN_IMAGE_TOKEN_ID; 8],
+            })),
+            media: (0..8)
+                .map(|_| pb::MediaItem {
+                    modality: pb::Modality::Image as i32,
+                    source: Some(pb::media_item::Source::DataUri(TINY_PNG_DATA_URI.into())),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let error = if streaming {
+            client.generate_stream(request).await.expect_err("reject image budget")
+        } else {
+            client.generate(request).await.expect_err("reject image budget")
+        };
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert!(error.message().contains("decoded image bytes exceed"));
+    }
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn unary_generate_prepares_multimodal_input_for_engine_core() {
     let (inference_service, control_service, engine_health, engine_task) =
         setup_grpc_service_with_backend(

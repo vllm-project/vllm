@@ -38,6 +38,8 @@ pub enum Error {
     UnsupportedModality { modality: String },
     #[error("At most {limit} {modality}(s) may be provided in one prompt.")]
     MmLimitExceeded { modality: String, limit: usize },
+    #[error("decoded image bytes exceed the per-request limit of {limit} bytes")]
+    ImageDecodeBudgetExceeded { limit: u64 },
     #[error("invalid inline multimodal features: {message}")]
     InvalidPreprocessedMultimodal { message: String },
     #[error("multimodal preprocessing error: {0}")]
@@ -126,7 +128,8 @@ impl Error {
             | Self::UnsupportedMultimodalContent(_)
             | Self::UnsupportedModality { .. }
             | Self::InvalidPreprocessedMultimodal { .. }
-            | Self::MmLimitExceeded { .. } => true,
+            | Self::MmLimitExceeded { .. }
+            | Self::ImageDecodeBudgetExceeded { .. } => true,
 
             _ => false,
         }
