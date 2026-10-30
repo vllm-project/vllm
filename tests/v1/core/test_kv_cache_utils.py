@@ -68,6 +68,7 @@ from vllm.v1.kv_cache_interface import (
     HiSparseHotSpec,
     HiSparseResidentSpec,
     KVCacheConfig,
+    KVCacheGroupRole,
     KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheSpecKind,
@@ -246,6 +247,17 @@ def test_hisparse_packs_hot_layers_up_to_largest_device_page():
     hot_groups = [g for g in groups if isinstance(g.kv_cache_spec, HiSparseHotSpec)]
     assert len(hot_groups) == 1
     assert len(hot_groups[0].layer_names) == 2
+    (indexer_group,) = (
+        g for g in groups if g.role == KVCacheGroupRole.HISPARSE_INDEXER
+    )
+    (full_attn_group,) = (
+        g for g in groups if isinstance(g.kv_cache_spec, FullAttentionSpec)
+    )
+    assert indexer_group.kv_cache_spec.block_size > 64
+    assert (
+        indexer_group.kv_cache_spec.page_size_bytes
+        == full_attn_group.kv_cache_spec.page_size_bytes
+    )
 
 
 def test_hisparse_rejects_deepseek_v4():

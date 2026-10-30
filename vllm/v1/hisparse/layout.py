@@ -204,11 +204,7 @@ def _lay_out_hisparse_groups(
         append_hot_group(current)
 
     pages_per_block = max(
-        max(
-            _group_page_bytes(group)
-            for group in [*resident_groups, *hot_groups, *regular_groups]
-        )
-        // indexer_page_bytes,
+        max(map(_group_page_bytes, regular_groups), default=0) // indexer_page_bytes,
         1,
     )
     indexer_group_spec = UniformTypeKVCacheSpecs.from_specs(
@@ -251,7 +247,7 @@ def _lay_out_hisparse_groups(
 def _group_page_bytes(group: KVCacheGroupSpec) -> int:
     spec = group.kv_cache_spec
     if isinstance(spec, UniformTypeKVCacheSpecs):
-        return sum(s.page_size_bytes for s in spec.kv_cache_specs.values())
+        return spec.page_size_bytes
     return spec.page_size_bytes * len(group.layer_names)
 
 
