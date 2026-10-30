@@ -2426,6 +2426,28 @@ def topk_sigmoid(
     )
 
 
+def muse_spark_routing(
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    logits: torch.Tensor,
+    bias: torch.Tensor,
+    multiplier: float,
+    route_scale: float,
+    division_eps: float,
+    is_padding: torch.Tensor | None = None,
+) -> None:
+    torch.ops._moe_C.muse_spark_routing(
+        topk_weights,
+        topk_ids,
+        logits,
+        bias,
+        multiplier,
+        route_scale,
+        division_eps,
+        is_padding,
+    )
+
+
 def topk_hash_softplus_sqrt(
     topk_weights: torch.Tensor,
     topk_indices: torch.Tensor,
