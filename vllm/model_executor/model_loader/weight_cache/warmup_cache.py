@@ -29,7 +29,7 @@ import torch
 
 from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader.weight_cache.transport import Adoptable
+from vllm.model_executor.model_loader.weight_cache.transport import Seedable
 from vllm.model_executor.model_loader.weight_cache.utils import (
     build_warmup_runner,
     is_draft_model_cacheable,
@@ -58,7 +58,7 @@ logger = init_logger(__name__)
 _CONFIG_HASH_RE = re.compile(r"[0-9a-f]{64}")
 
 
-class WarmupCache(Adoptable, Protocol):
+class WarmupCache(Seedable, Protocol):
     """One daemon warmup cache: its warmup pass and its cache's semantics.
 
     The warmup layer; the D2D exchange lives in transport.py (SeedTransport).

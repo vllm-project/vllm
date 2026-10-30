@@ -91,13 +91,9 @@ class Seedable(Protocol):
         """Target side: validate the fetched payload, or raise ValueError."""
         ...
 
-
-class Adoptable(Seedable, Protocol):
-    """A seedable a target can install in place (the adopt flow)."""
-
     def install(self, ctx: Any, payload: Any) -> None:
-        """Install a validated payload."""
-        ...
+        """Target side: install a validated payload."""
+        return None
 
 
 class SeedConfig(NamedTuple):
@@ -161,7 +157,7 @@ class SeedTransport:
         """The configured source daemon address, if any."""
         return self._seed_config.source
 
-    def adopt(self, seedable: Adoptable, ctx: Any) -> None:
+    def adopt(self, seedable: Seedable, ctx: Any) -> None:
         """Best-effort: fetch and install, or fall back to the local path."""
         try:
             payload = self.fetch(seedable, ctx)
