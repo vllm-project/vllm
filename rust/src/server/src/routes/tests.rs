@@ -64,7 +64,7 @@ use super::{
     strip_root_path, with_root_path,
 };
 use crate::config::{
-    ApiServerOptions, CorsConfig, DEFAULT_REQUEST_BODY_LIMIT_BYTES, LoraModulePath,
+    AccessLogConfig, ApiServerOptions, CorsConfig, DEFAULT_REQUEST_BODY_LIMIT_BYTES, LoraModulePath,
 };
 use crate::lora::LoadLoraError;
 use crate::render::RenderState;
@@ -10030,6 +10030,127 @@ async fn profile_routes_are_hidden_when_profiling_is_disabled() {
     }
 
     engine_task.abort_and_join().await;
+}
+
+/// Captures the access-log events as `LEVEL field=value ...`, with the
+/// nondeterministic `latency` shown only as present.
+#[derive(Clone, Default)]
+struct AccessLogCapture(Arc<std::sync::Mutex<Vec<String>>>);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for AccessLogCapture {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        if event.metadata().target() != "vllm_server::middleware::access_log" {
+            return;
+        }
+        let mut line = event.metadata().level().to_string();
+        event.record(
+            &mut |field: &tracing::field::Field, value: &dyn fmt::Debug| match field.name() {
+                "latency" => line.push_str(" latency=<elapsed>"),
+                name => line.push_str(&format!(" {name}={value:?}")),
+            },
+        );
+        self.0.lock().expect("access log lock").push(line);
+    }
+}
+
+/// Send each request to an app with an API key and `access_log`, and return
+/// the access-log lines. The middleware runs on the test's own task, so a
+/// thread-local subscriber sees its events.
+async fn access_log_lines(
+    access_log: AccessLogConfig,
+    requests: Vec<Request<Body>>,
+) -> Vec<String> {
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    let (chat, engine_task) = test_chat_with_engine_handle().await;
+    let app = build_router(Arc::new(
+        AppState::new(vec!["test-model".to_string()], chat)
+            .with_api_keys(vec!["secret".to_string()])
+            .with_access_log(access_log),
+    ));
+    let capture = AccessLogCapture::default();
+    let _guard =
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(capture.clone()));
+
+    for request in requests {
+        let response = app.clone().oneshot(request).await.expect("call app");
+        to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    }
+
+    engine_task.abort_and_join().await;
+    capture.0.lock().expect("access log lock").clone()
+}
+
+/// One INFO event per response, like Python's uvicorn access log, with the
+/// client address (absent without one), request target including the query
+/// string, status and latency, including rejected and unrouted requests;
+/// excluded paths match without the query string.
+#[tokio::test]
+#[serial]
+async fn access_log_records_each_response() {
+    let get = |uri: &str, authorized: bool| {
+        let mut request = Request::builder().method("GET").uri(uri);
+        if authorized {
+            request = request.header("authorization", "Bearer secret");
+        }
+        request.body(Body::empty()).expect("build request")
+    };
+    let mut with_client = get("/v1/models?limit=1", true);
+    with_client
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            52344,
+        ))));
+    let access_log = AccessLogConfig {
+        enabled: true,
+        excluded_paths: vec!["/version".to_string()],
+    };
+
+    let lines = access_log_lines(
+        access_log,
+        vec![
+            with_client,
+            get("/v1/models", false),
+            get("/missing", true),
+            get("/version?verbose=1", false),
+        ],
+    )
+    .await;
+
+    expect_test::expect![[r#"
+        [
+            "INFO message=HTTP response client=127.0.0.1:52344 method=GET uri=\"/v1/models?limit=1\" version=HTTP/1.1 status=200 latency=<elapsed>",
+            "INFO message=HTTP response method=GET uri=\"/v1/models\" version=HTTP/1.1 status=401 latency=<elapsed>",
+            "INFO message=HTTP response method=GET uri=\"/missing\" version=HTTP/1.1 status=404 latency=<elapsed>",
+        ]
+    "#]].assert_debug_eq(&lines);
+}
+
+/// `--disable-access-log` removes the access log.
+#[tokio::test]
+#[serial]
+async fn access_log_disabled_logs_nothing() {
+    let lines = access_log_lines(
+        AccessLogConfig {
+            enabled: false,
+            excluded_paths: Vec::new(),
+        },
+        vec![
+            Request::builder()
+                .method("GET")
+                .uri("/version")
+                .body(Body::empty())
+                .expect("build request"),
+        ],
+    )
+    .await;
+
+    assert_eq!(lines, Vec::<String>::new());
 }
 
 /// Captures the events `--enable-log-outputs` logs, one `LEVEL field=value ...`
