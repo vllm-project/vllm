@@ -973,7 +973,7 @@ def sparse_attn_indexer(
                     row_repeat,
                     score_dtype=(
                         torch.float32
-                        if topk_backend in ("auto", "persistent")
+                        if topk_backend in ("auto", "cooperative", "persistent")
                         else None
                     ),
                 )
