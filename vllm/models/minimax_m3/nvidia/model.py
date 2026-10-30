@@ -264,6 +264,35 @@ def _mega_moe_expert_weight(
     return name, weight
 
 
+def _consumes_mxfp8_128x4(linear: nn.Module) -> bool:
+    """Whether ``linear`` takes a pre-quantized MXFP8 activation whose UE8M0
+    scales are in FlashInfer's 128x4 swizzled layout (what the MXFP8 norm
+    kernels write)."""
+    if get_input_quant_key(linear) != kMxfp8Dynamic:
+        return False
+    from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
+        FlashInferCutedslMxfp8LinearKernel,
+        FlashInferCutlassMxfp8LinearKernel,
+    )
+
+    kernel = getattr(getattr(linear, "quant_method", None), "kernel", None)
+    return type(kernel) in (
+        FlashInferCutedslMxfp8LinearKernel,
+        FlashInferCutlassMxfp8LinearKernel,
+    )
+
+
+def _norm_mxfp8_inputs_ok(x: torch.Tensor, residual: torch.Tensor | None) -> bool:
+    """The MXFP8 norm kernels take contiguous 2-D BF16 rows (else the BF16 norm
+    + a separate quantize)."""
+    return (
+        x.dim() == 2
+        and x.dtype == torch.bfloat16
+        and x.is_contiguous()
+        and (residual is None or residual.is_contiguous())
+    )
+
+
 class MiniMAXGemmaRMSNorm(nn.Module):
     """Gemma-style RMS normalization backed by FlashInfer kernels.
 
@@ -1189,6 +1218,18 @@ class MiniMaxM3DecoderLayer(nn.Module):
         self.post_attention_layernorm = MiniMAXGemmaRMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
+        # The input norm can write qkv_proj's MXFP8 input directly (TP1: no
+        # all-reduce to fuse; the normed BF16 activation has no other reader).
+        self.input_norm_mxfp8 = (
+            envs.VLLM_M3_NORM_MXFP8
+            and get_tensor_model_parallel_world_size() == 1
+            and _consumes_mxfp8_128x4(self.self_attn.qkv_proj)
+        )
+        if envs.VLLM_M3_NORM_MXFP8:
+            logger.info_once(
+                "MiniMax M3 input norm emits MXFP8 for qkv_proj: %s",
+                self.input_norm_mxfp8,
+            )
 
     def forward(
         self,
@@ -1216,6 +1257,8 @@ class MiniMaxM3DecoderLayer(nn.Module):
                 self.input_layernorm.weight,
                 self.input_layernorm.variance_epsilon,
             )
+        if self.input_norm_mxfp8 and _norm_mxfp8_inputs_ok(hidden_states, residual):
+            return self._input_norm_mxfp8(hidden_states, residual)
         if self.fuse_input_allreduce and residual is not None:
             hidden_states, residual = fused_allreduce_gemma_rms_norm(
                 hidden_states, residual, self.input_layernorm
@@ -1227,6 +1270,35 @@ class MiniMaxM3DecoderLayer(nn.Module):
             else:
                 hidden_states, residual = self.input_layernorm(hidden_states, residual)
         return hidden_states, residual
+
+    def _input_norm_mxfp8(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None
+    ) -> tuple[QuantizedActivation, torch.Tensor]:
+        """forward_input_norm with the normed activation as MXFP8 (bitwise what
+        quantizing the BF16 output gives); ``residual`` is updated in place."""
+        from vllm.models.minimax_m3.nvidia.ops.norm_mxfp8 import (
+            gemma_fused_add_rmsnorm_mxfp8,
+            gemma_rmsnorm_mxfp8,
+        )
+
+        norm = self.input_layernorm
+        if residual is None:
+            residual = hidden_states
+            data, scale = gemma_rmsnorm_mxfp8(
+                hidden_states, norm.weight, norm.variance_epsilon
+            )
+        else:
+            data, scale = gemma_fused_add_rmsnorm_mxfp8(
+                hidden_states, residual, norm.weight, norm.variance_epsilon
+            )
+        qa = QuantizedActivation(
+            data=data,
+            scale=scale,
+            orig_dtype=hidden_states.dtype,
+            orig_shape=hidden_states.shape,
+            quant_key=kMxfp8Dynamic,
+        )
+        return qa, residual
 
     def forward_after_input_norm(
         self,
