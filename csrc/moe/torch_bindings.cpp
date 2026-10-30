@@ -23,6 +23,13 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
       "bias, Tensor? input_ids, Tensor? tid2eid, Tensor? is_padding, "
       "Tensor? bias_vl=None, int image_sentinel_lo=0) -> ()");
 
+#ifdef USE_CUDA
+  m.def(
+      "muse_spark_routing(Tensor! topk_weights, Tensor! topk_ids, "
+      "Tensor logits, Tensor bias, float multiplier, float route_scale, "
+      "float division_eps, Tensor? is_padding) -> ()");
+#endif
+
   // Calculate the result of moe by summing up the partial results
   // from all selected experts. topk_ids/expert_map are optional and, when
   // both given, enable pad-aware reduce that skips (token, expert)
@@ -41,6 +48,18 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
       "                     Tensor! num_tokens_post_pad,"
       "                     Tensor? maybe_expert_map,"
       "                     Tensor(a!)? scatter_idx=None) -> ()");
+
+#ifdef USE_CUDA
+  // Fused globalize + align + sort for the DeepEP-v2 humming INDEXED decode
+  // path (one launch; num_recv read on device from psum[-1], cudagraph-safe).
+  m.def(
+      "fused_globalize_align_block_size(Tensor! topk_idx, Tensor psum,"
+      "                     int rank_expert_offset, int global_num_experts,"
+      "                     int local_num_experts, int block_size,"
+      "                     Tensor! sorted_ids, Tensor! expert_ids,"
+      "                     Tensor! num_tokens_post_pad,"
+      "                     Tensor(a!)? scatter_idx=None) -> ()");
+#endif
 
   // Aligning the number of tokens to be processed by each expert such
   // that it is divisible by the block size, but for the batched case.
@@ -140,9 +159,16 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
 STABLE_TORCH_LIBRARY_IMPL(_moe_C, CUDA, m) {
   m.impl("topk_softmax", TORCH_BOX(&topk_softmax));
   m.impl("topk_sigmoid", TORCH_BOX(&topk_sigmoid));
+#ifdef USE_CUDA
+  m.impl("muse_spark_routing", TORCH_BOX(&muse_spark_routing));
+#endif
   m.impl("topk_softplus_sqrt", TORCH_BOX(&topk_softplus_sqrt));
   m.impl("moe_sum", TORCH_BOX(&moe_sum));
   m.impl("moe_align_block_size", TORCH_BOX(&moe_align_block_size));
+#ifdef USE_CUDA
+  m.impl("fused_globalize_align_block_size",
+         TORCH_BOX(&fused_globalize_align_block_size));
+#endif
   m.impl("batched_moe_align_block_size",
          TORCH_BOX(&batched_moe_align_block_size));
   m.impl("moe_lora_align_block_size", TORCH_BOX(&moe_lora_align_block_size));
