@@ -596,6 +596,13 @@ class GPUModelRunner(
         # the last PP rank. This is not ideal if there are many
         # layers in the draft model.
         if self.speculative_config and get_pp_group().is_last_rank:
+            if self.speculative_config.use_remote_draft():
+                raise NotImplementedError(
+                    "speculative_config.remote_draft is configured but no "
+                    "remote drafter runtime is implemented for this model "
+                    "runner yet; remove remote_draft to use the local "
+                    "drafter."
+                )
             self.drafter: (
                 NgramProposer  # noqa: F823
                 | NgramProposerGPU
