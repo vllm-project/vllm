@@ -14,6 +14,11 @@ What it adds over a plain P/D transfer:
   until the decode instance releases them (or a lease expires), so if the
   decode instance fails mid-generation, the request can be resumed on another
   decode instance that pulls the same KV again instead of re-running prefill.
+  This reuse needs a resume that extends the original prompt token for token:
+  the Connex PD router does that for `/v1/completions` requests (token-ID
+  resume, the default). Chat requests, and completions resumed from text
+  (`--no-token-ids`), are resumed from text and run prefill again once tokens
+  have been emitted, even while the hold exists.
 - **Failure reporting per request.** A prefill instance that dies during a
   transfer fails only the affected requests (load errors, handled by
   `kv_load_failure_policy`), detected within milliseconds by connex-rs.
@@ -31,17 +36,19 @@ pip install "connex-ai[mooncake]"  # Mooncake Transfer Engine data plane
 
 ## Usage
 
-Prefill instance:
+Prefill instance (the two instances must use different GPUs: the decode
+instance refuses to pull from a prefill instance on its own GPU, and two
+instances on one GPU may also run out of memory):
 
 ```bash
-vllm serve meta-llama/Meta-Llama-3-8B --port 8100 \
+CUDA_VISIBLE_DEVICES=0 vllm serve meta-llama/Meta-Llama-3-8B --port 8100 \
     --kv-transfer-config '{"kv_connector":"ConnexConnector","kv_role":"kv_producer","kv_connector_extra_config":{"ctrl_port":17100}}'
 ```
 
 Decode instance:
 
 ```bash
-vllm serve meta-llama/Meta-Llama-3-8B --port 8200 \
+CUDA_VISIBLE_DEVICES=1 vllm serve meta-llama/Meta-Llama-3-8B --port 8200 \
     --kv-transfer-config '{"kv_connector":"ConnexConnector","kv_role":"kv_consumer"}'
 ```
 
@@ -60,7 +67,7 @@ python -m connex.serving.pd_router --port 8000 \
 
 | key | default | meaning |
 | --- | --- | --- |
-| `backend` | `auto` | `connex-rs`, `mooncake` or `auto` |
+| `backend` | unset | `connex-rs` or `mooncake`; leave unset to pick one automatically (connex-rs on RDMA hosts, else Mooncake) |
 | `host` | `VLLM_HOST_IP` | address peers use to reach this instance |
 | `ctrl_port` | `kv_port` | KV control port; TP rank `r` uses `ctrl_port + r` |
 | `retain_s` | `60` | prefill hold lease, renewed by every pull |

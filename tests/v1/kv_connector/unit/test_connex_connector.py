@@ -89,3 +89,45 @@ def test_decode_loads_prompt_asynchronously_then_releases():
     scheduler.finish_requests(req.request_id, RequestStatus.FINISHED_LENGTH_CAPPED)
     out = scheduler.schedule()
     assert out.kv_connector_metadata.releases == [("10.0.0.1:17100", "T", 1)]
+
+
+def test_resume_with_locally_cached_remote_prefix_runs_without_load():
+    """A resumed request whose remote prefix is already in the local prefix
+    cache loads nothing: it is scheduled RUNNING right away, and the pull it
+    still sends (to acquire the prefill hold) is acquire-only, so the worker
+    never reports it in finished_recving (which the scheduler only accepts
+    for waiting or finished requests)."""
+    from connex.adapters.vllm.pd_connector import _Pull
+
+    if "report" not in _Pull.__dataclass_fields__:
+        pytest.skip("connex-ai without acquire-only pulls")
+    scheduler = _scheduler("kv_consumer")
+    prefix = 2 * BLOCK_SIZE
+
+    # Populate the local prefix cache with the prompt's first two blocks.
+    warm = create_request(num_tokens=prefix + 1, common_prefix_len=prefix)
+    scheduler.add_request(warm)
+    out = scheduler.schedule()
+    scheduler.update_from_output(out, create_model_runner_output([warm]))
+    scheduler.finish_requests(warm.request_id, RequestStatus.FINISHED_STOPPED)
+
+    # Resume: prompt + generated tokens, remote KV covers the cached prefix.
+    req = create_request(num_tokens=prefix + 5, common_prefix_len=prefix)
+    req.kv_transfer_params = {
+        "do_remote_prefill": True,
+        "transfer_id": "T",
+        **PARAMS,
+        "remote_num_tokens": prefix,
+    }
+    scheduler.add_request(req)
+    out = scheduler.schedule()
+    assert req.status == RequestStatus.RUNNING
+    assert out.num_scheduled_tokens[req.request_id] == 5  # prefix hit locally
+    (pull,) = out.kv_connector_metadata.pulls
+    assert pull.local_blocks == [] and pull.report is False
+
+    # The step completes with no receive report, and the request keeps running.
+    scheduler.update_from_output(out, create_model_runner_output([req]))
+    out = scheduler.schedule()
+    assert req.status == RequestStatus.RUNNING
+    assert out.kv_connector_metadata.pulls == []
