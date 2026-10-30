@@ -247,14 +247,16 @@ class KVConnectorBase_V1(ABC):
         """Release what a process checkpoint must not contain, such as
         transports and peer state. Called on the scheduler-side instance, then
         on every worker-side instance, once the engine has drained and
-        released its KV cache."""
+        released its KV cache. Prepare and restore may repeat, and an exception
+        leaves the engine in the FAILED checkpoint state."""
         return
 
     def checkpoint_restore(self) -> None:
         """Rebuild what `checkpoint_prepare` released, either in a process
-        restored from the checkpoint or in the process that prepared. Called
-        on every worker-side instance, then on the scheduler-side instance,
-        before the KV cache wakes up."""
+        restored from the checkpoint or in the process that prepared. The
+        engine has already given `kv_transfer_config.engine_id` a new suffix,
+        so re-read it if it was cached. Called on every worker-side instance,
+        then on the scheduler-side instance, before the KV cache wakes up."""
         return
 
     # ==============================

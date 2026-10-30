@@ -2,11 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Base scheduler-side logic for the NIXL connector."""
 
+import ipaddress
 import threading
 import time
 from typing import TYPE_CHECKING, Any
 
 import msgspec
+import psutil
 import zmq
 
 from vllm import envs
@@ -74,6 +76,9 @@ class NixlBaseConnectorScheduler:
         self.engine_id: EngineId = engine_id
         self.kv_cache_config = kv_cache_config
         self.side_channel_host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
+        # (interface, address family) carrying the side-channel host at a
+        # checkpoint prepare, if it is an interface address.
+        self._side_channel_interface: tuple[str, int] | None = None
         self.side_channel_port = (
             envs.VLLM_NIXL_SIDE_CHANNEL_PORT
             + vllm_config.parallel_config.data_parallel_index
@@ -199,6 +204,48 @@ class NixlBaseConnectorScheduler:
             self._nixl_handshake_listener_t.join()
             self._nixl_handshake_listener_t = None
 
+    def checkpoint_prepare(self) -> None:
+        # The listener is bound to this pod's address.
+        self.shutdown()
+        self._side_channel_interface = next(
+            (
+                (name, addr.family)
+                for name, addrs in psutil.net_if_addrs().items()
+                for addr in addrs
+                if addr.address.split("%")[0] == self.side_channel_host
+            ),
+            None,
+        )
+
+    def checkpoint_restore(self) -> None:
+        # The next handshake metadata restarts the listener.
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        assert kv_transfer_config is not None and kv_transfer_config.engine_id
+        self.engine_id = kv_transfer_config.engine_id
+        if self._side_channel_interface is not None:
+            # Names are kept. The restored environment names the source pod's
+            # address, so unless this pod still has it, take a routable address
+            # of the same interface.
+            name, family = self._side_channel_interface
+            addresses = [
+                addr.address.split("%")[0]
+                for addr in psutil.net_if_addrs().get(name, [])
+                if addr.family == family
+            ]
+            if self.side_channel_host not in addresses:
+                routable = [
+                    address
+                    for address in addresses
+                    if not (ip := ipaddress.ip_address(address)).is_link_local
+                    and not ip.is_loopback
+                ]
+                if not routable:
+                    raise RuntimeError(
+                        f"Side-channel interface {name} has no address after restore"
+                    )
+                self.side_channel_host = routable[0]
+        self._stop_event.clear()
+
     def on_new_request(self, request: "Request") -> None:
         """Track a request that may need heartbeats."""
         params = request.kv_transfer_params
@@ -322,7 +369,7 @@ class NixlBaseConnectorScheduler:
             )
 
         # Only start the listener when we have metadata to serve.
-        if self._nixl_handshake_listener_t is None:
+        if self._nixl_handshake_listener_t is None and self._handshake_data:
             ready_event = threading.Event()
             self._nixl_handshake_listener_t = threading.Thread(
                 target=self._nixl_handshake_listener,
@@ -337,7 +384,14 @@ class NixlBaseConnectorScheduler:
                 name="nixl_handshake_listener",
             )
             self._nixl_handshake_listener_t.start()
-            ready_event.wait()  # Wait for listener ZMQ socket to be ready.
+            # Wait for the listener's socket. The thread exits if it cannot
+            # bind, for example to an address this process does not have.
+            while not ready_event.wait(timeout=1):
+                if not self._nixl_handshake_listener_t.is_alive():
+                    raise RuntimeError(
+                        "NIXL handshake listener failed to bind "
+                        f"{self.side_channel_host}:{self.side_channel_port}"
+                    )
 
     @staticmethod
     def _nixl_handshake_listener(

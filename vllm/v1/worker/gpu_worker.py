@@ -378,7 +378,9 @@ class Worker(WorkerBase):
             get_kv_transfer_group().checkpoint_prepare()
         checkpoint_prepare_distributed_state()
 
-    def checkpoint_restore(self) -> None:
+    def checkpoint_restore(self, restore_id: str | None = None) -> None:
+        if restore_id is not None:
+            self.vllm_config.refresh_identity(restore_id)
         checkpoint_restore_distributed_state()
         if has_kv_transfer_group():
             get_kv_transfer_group().checkpoint_restore()

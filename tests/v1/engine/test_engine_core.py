@@ -867,8 +867,9 @@ def _executor_calls(core: EngineCoreProc) -> list[str]:
 
 def test_checkpoint_prepare_then_restore_run_in_order():
     """Preparing drains, then discards the KV cache and releases external
-    state. Restoring brings external state back before the KV cache wakes and
-    scheduling resumes. Repeating either is a no-op."""
+    state. Restoring gives the engine and its workers one new identity, then
+    brings external state back before the KV cache wakes and scheduling
+    resumes. Repeating either is a no-op."""
     core = _pausable_engine_core_proc()
     core.vllm_config = MagicMock()
     core.model_executor.is_sleeping = False
@@ -877,8 +878,9 @@ def test_checkpoint_prepare_then_restore_run_in_order():
     kv_connector = MagicMock()
     kv_connector.supports_checkpoint.return_value = True
     core.scheduler.get_kv_connector.return_value = kv_connector
-    # Record the scheduler-side connector calls among the executor calls.
+    # Record the connector and identity calls among the executor calls.
     core.model_executor.attach_mock(kv_connector, "kv_connector")
+    core.model_executor.attach_mock(core.vllm_config.refresh_identity, "refresh")
     core.model_executor.get_kv_connector_handshake_metadata.return_value = []
 
     assert core.checkpoint_prepare("wait") is None
@@ -899,11 +901,16 @@ def test_checkpoint_prepare_then_restore_run_in_order():
     core.checkpoint_restore()
     assert core.checkpoint_state() == (CheckpointState.RUNNING, None)
     assert _executor_calls(core) == [
+        "refresh",
         "checkpoint_restore",
         "kv_connector.checkpoint_restore",
         "wake_up",
         "get_kv_connector_handshake_metadata",
     ]
+    (restore_id,) = core.vllm_config.refresh_identity.call_args.args
+    core.model_executor.collective_rpc.assert_any_call(
+        "checkpoint_restore", None, (restore_id,), None
+    )
     core.scheduler.set_pause_state.assert_called_with(PauseState.UNPAUSED)
     assert not core.reject_new_requests
 

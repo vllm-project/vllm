@@ -134,6 +134,7 @@ python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py \
     - Default: "localhost"
     - Set when prefiller and decoder are on different machines
     - Connection info is passed via KVTransferParams from prefiller to decoder for handshake
+    - After a [process checkpoint](../serving/online_serving/README.md#process-checkpoint-apis) restore, an interface address becomes the address of the same interface in the restored pod, so it can be set to the pod IP. A NixlConnector engine prepares for a checkpoint only when started with `--checkpoint-prepare-on-startup`, since UCX state created before the capture breaks the restore, and each restore takes a new engine id, so several replicas can restore from one checkpoint.
 
 - `kv_lease_duration` (via `kv_connector_extra_config`): Lease duration (in seconds) for the prefiller's KV cache blocks. (Optional)
     - Default: 30
