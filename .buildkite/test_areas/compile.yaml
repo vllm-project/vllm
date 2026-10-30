@@ -86,7 +86,11 @@ steps:
       commands:
       - amd-smi
       # MLA static FP8 and distributed AR/RMS are owned by the existing ROCm jobs.
-      - pytest -v -s tests/compile/passes/test_fusion_attn.py tests/compile/passes/test_silu_mul_quant_fusion.py tests/compile/passes/test_silu_mul_quant_manual_fusion.py
+      - >-
+        pytest -v -s
+        tests/compile/passes/test_fusion_attn.py
+        tests/compile/passes/test_silu_mul_quant_fusion.py
+        tests/compile/passes/test_silu_mul_quant_manual_fusion.py
       - pytest -v -s tests/compile/correctness_e2e/test_attn_quant.py
 
 - label: ":nvidia: (H100) Fusion E2E Quick"
@@ -171,7 +175,7 @@ steps:
       - rocm-smi
       - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "llama-3"
 
-- label: ":nvidia: (B200) Fusion E2E Config Sweep"
+- label: ":nvidia: (B200) [Nightly] Fusion E2E Config Sweep"
   key: fusion-e2e-config-sweep-b200
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"

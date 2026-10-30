@@ -1,0 +1,190 @@
+meta:
+  title: "GLM-4.5"
+  slug: "glm-4.5"
+  provider: "GLM (Z-AI)"
+  description: "GLM-4.5 MoE language model (~358B total parameters, BF16) with built-in MTP layers for speculative decoding and native tool calling"
+  date_added: 2025-08-12
+  date_updated: 2026-09-14
+  tasks:
+    - text
+  performance_headline: "GLM-4.X series MoE model with native FP8 and BF16 support and MTP speculative decoding"
+  related_recipes: []
+  hardware:
+    h200: verified
+    mi300x: verified
+    mi325x: verified
+    mi355x: verified
+
+model:
+  model_id: "zai-org/GLM-4.5"
+  min_vllm_version: "0.11.0"
+  default_frontend: rust
+  architecture: moe
+  parameter_count: "358B"
+  active_parameters: "32B"
+  context_length: 131072
+  base_args:
+    - "--trust-remote-code"
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "GLM-4.5 tool call parser with automatic tool choice"
+    args:
+      - "--tool-call-parser"
+      - "glm45"
+      - "--enable-auto-tool-choice"
+  reasoning:
+    description: "GLM-4.5 reasoning parser for chain-of-thought extraction"
+    args:
+      - "--reasoning-parser"
+      - "glm45"
+  spec_decoding:
+    description: "Multi-Token Prediction speculative decoding using the model's built-in MTP layers"
+    args:
+      - "--speculative-config.method"
+      - "mtp"
+      - "--speculative-config.num_speculative_tokens"
+      - "1"
+
+opt_in_features:
+  - spec_decoding
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 859
+    description: "Full precision BF16 on 8xH200 or equivalent"
+  fp8:
+    model_id: "zai-org/GLM-4.5-FP8"
+    precision: fp8
+    vram_minimum_gb: 430
+    description: "Native FP8 checkpoint with minimal accuracy loss — recommended for cost-efficient serving"
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+  - multi_node_tp
+  - multi_node_tp_pp
+  - multi_node_dep
+  - multi_node_tep
+  - pd_cluster
+
+kv_offload_support:
+  offloading_cpu: verified
+  offloading_fs: verified
+
+hardware_overrides: {}
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  GLM-4.5 is a Mixture-of-Experts language model from Z-AI with ~358B total parameters.
+  The checkpoint ships in both BF16 and native FP8 formats. FP8 models have minimal
+  accuracy loss, so unless you need strict reproducibility for benchmarking, FP8 is the
+  recommended precision for lower-cost serving. All GLM-4.X models include built-in
+  Multi-Token Prediction (MTP) layers that enable speculative decoding for higher
+  generation throughput.
+
+  ## Prerequisites
+
+  - **vLLM version:** >= 0.11.0 (latest stable recommended)
+  - **Hardware:** 8x H200 (BF16) or 4x-8x H200 (FP8), AMD MI300X / MI325X / MI355X for ROCm
+  - **Python:** 3.10 - 3.13 (3.12 required for ROCm wheels)
+
+  ### Install vLLM (NVIDIA)
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend auto
+  ```
+
+  ### Install vLLM (AMD ROCm)
+
+  ```bash
+  uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm
+  ```
+
+  The vLLM wheel for ROCm requires Python 3.12, ROCm 7.0, and glibc >= 2.35.
+
+  ## Launching the Server
+
+  ### Tensor Parallel (FP8 on 8 GPUs)
+
+  ```bash
+  vllm serve zai-org/GLM-4.5-FP8 \
+      --tensor-parallel-size 8 \
+      --tool-call-parser glm45 \
+      --reasoning-parser glm45 \
+      --enable-auto-tool-choice
+  ```
+
+  ### Enabling MTP Speculative Decoding
+
+  ```bash
+  vllm serve zai-org/GLM-4.5-FP8 \
+      --tensor-parallel-size 4 \
+      --speculative-config.method mtp \
+      --speculative-config.num_speculative_tokens 1 \
+      --tool-call-parser glm45 \
+      --reasoning-parser glm45 \
+      --enable-auto-tool-choice
+  ```
+
+  Use `--speculative-config.num_speculative_tokens 1` for optimal throughput. Higher
+  values increase mean acceptance length but drop acceptance rate significantly.
+
+  ### Tuning Tips
+
+  - `--max-model-len=65536` works well for most scenarios; max is 128K.
+  - `--max-num-batched-tokens=32768` is a good default for prompt-heavy workloads.
+    Reduce to 16K/8K to cut activation memory and latency.
+  - Set `--gpu-memory-utilization=0.95` to maximize KV cache headroom.
+
+  ## Client Usage
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
+  resp = client.chat.completions.create(
+      model="zai-org/GLM-4.5-FP8",
+      messages=[{"role": "user", "content": "Explain MTP speculative decoding."}],
+      max_tokens=512,
+  )
+  print(resp.choices[0].message.content)
+  ```
+
+  ## Benchmarking
+
+  Disable prefix caching with `--no-enable-prefix-caching` on the server command,
+  then:
+
+  ```bash
+  vllm bench serve \
+    --model zai-org/GLM-4.5-FP8 \
+    --dataset-name random \
+    --random-input-len 8000 \
+    --random-output-len 1000 \
+    --request-rate 10000 \
+    --num-prompts 16 \
+    --ignore-eos
+  ```
+
+  ## Troubleshooting
+
+  - **Tool calling not firing:** Ensure `--tool-call-parser glm45 --enable-auto-tool-choice`
+    are both present.
+  - **MTP memory overhead:** MTP adds memory for draft computations. Monitor GPU memory
+    and reduce `--max-model-len` or `--max-num-batched-tokens` if you OOM.
+  - **Low MTP acceptance:** If acceptance rate is below ~90%, drop speculative tokens to 1.
+
+  ## References
+
+  - [Model card](https://huggingface.co/zai-org/GLM-4.5)
+  - [FP8 checkpoint](https://huggingface.co/zai-org/GLM-4.5-FP8)
+  - [vLLM docs](https://docs.vllm.ai/)

@@ -109,9 +109,14 @@ class WorkerBase:
         backends = get_current_attn_backends(self.vllm_config)
         return [layout.name for layout in get_supported_kv_cache_layouts(backends)]
 
-    def set_kv_cache_layout(self, kv_cache_layout: str) -> None:
-        """Adopt the KV cache layout resolved by the engine core."""
+    def set_kv_cache_layout(
+        self, kv_cache_layout: str, cp_kv_cache_interleave_size: int
+    ) -> None:
+        """Assign the KV cache layout and CP interleave size resolved by the core."""
         record_kv_cache_layout(self.vllm_config.cache_config, kv_cache_layout)
+        self.vllm_config.parallel_config.cp_kv_cache_interleave_size = (
+            cp_kv_cache_interleave_size
+        )
 
     def compile_or_warm_up_model(self) -> CompilationTimes:
         """Prepare model for execution through compilation/warmup.
@@ -244,9 +249,17 @@ class WorkerWrapperBase:
         # Initialized after init_worker is called
         self.worker: WorkerBase
         self.vllm_config: VllmConfig
+        self._worker_extension_cls: type | None = None
 
     def shutdown(self) -> None:
         if self.worker is not None:
+            hook = getattr(self._worker_extension_cls, "destroy_worker_extension", None)
+            if callable(hook):
+                try:
+                    hook(self.worker)
+                except Exception:
+                    # Don't raise: callers still need to run their own teardown.
+                    logger.exception("Worker extension destroy hook failed.")
             self.worker.shutdown()
 
     def update_environment_variables(
@@ -293,6 +306,7 @@ class WorkerWrapperBase:
                 "and pass the qualified name of the class as a string."
             )
 
+        worker_extension_cls: type | None = None
         if parallel_config.worker_extension_cls:
             worker_extension_cls = resolve_obj_by_qualname(
                 parallel_config.worker_extension_cls
@@ -336,6 +350,7 @@ class WorkerWrapperBase:
         with set_current_vllm_config(self.vllm_config):
             # To make vLLM config available during worker initialization
             self.worker = worker_class(**kwargs)
+            self._worker_extension_cls = worker_extension_cls
 
     def initialize_from_config(self, kv_cache_configs: list[Any]) -> None:
         kv_cache_config = kv_cache_configs[self.global_rank]
@@ -348,6 +363,9 @@ class WorkerWrapperBase:
         with set_current_vllm_config(self.vllm_config):
             # To make vLLM config available during device initialization
             self.worker.init_device()  # type: ignore
+            hook = getattr(self._worker_extension_cls, "init_worker_extension", None)
+            if callable(hook):
+                hook(self.worker)
 
     def __getattr__(self, attr: str):
         return getattr(self.worker, attr)

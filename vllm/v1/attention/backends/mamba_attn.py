@@ -245,13 +245,10 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
         The code below carefully constructs the chunks such that:
         1. Chunks contain tokens from a *single* sequence only.
-        2. For every sequence, we are guaranteed that we can
-           retrieve the mamba state *every* chunk_size tokens.
+        2. Chunk boundaries fall on multiples of chunk_size in each
+           sequence's absolute token positions, so the chunking does not
+           depend on how chunked prefill split the sequence.
         Constraint (1) dramatically simplifies the mamba kernels.
-        Constraint (2) dramatically simplifies the implementation
-        of prefix caching for mamba (wip). We need to take care
-        of the interaction with chunked prefill in order to
-        satisfy constraint (2).
 
         `checkpoint_offsets_p[i]` forces an extra chunk end that many tokens
         into row i's query (0 = none), because the SSD scan only materializes

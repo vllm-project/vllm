@@ -31,6 +31,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     mxfp4_round_up_hidden_size_and_intermediate_size,
     select_deepseek_v4_mxfp4_moe_backend,
     select_mxfp4_moe_backend,
+    triton_weight,
 )
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -38,7 +39,10 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    is_layer_skipped,
+)
 from vllm.model_executor.utils import (
     is_weights_pre_processed,
     replace_parameter,
@@ -363,8 +367,8 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             replace_parameter(layer, "w13_weight_scale", w13_scale)
             replace_parameter(layer, "w2_weight_scale", w2_scale)
         else:
-            layer.w13_weight = w13
-            layer.w2_weight = w2
+            layer.w13_weight_triton = w13
+            layer.w2_weight_triton = w2
             self.w13_precision_config = w13_scale
             self.w2_precision_config = w2_scale
 
@@ -441,8 +445,8 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
             hidden_states=x,
-            w1=layer.w13_weight,
-            w2=layer.w2_weight,
+            w1=triton_weight(layer, "w13_weight"),
+            w2=triton_weight(layer, "w2_weight"),
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation=layer.activation,
@@ -464,8 +468,8 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
         assert self.moe_kernel is not None
         return self.moe_kernel.apply_monolithic(
             hidden_states=x,
-            w1=layer.w13_weight,
-            w2=layer.w2_weight,
+            w1=triton_weight(layer, "w13_weight"),
+            w2=triton_weight(layer, "w2_weight"),
             router_logits=router_logits,
             activation=layer.activation,
             global_num_experts=layer.global_num_experts,
@@ -476,6 +480,8 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
             routing_sink=layer.routing_sink,
+            input_ids=input_ids,
+            hash_indices_table=layer.hash_indices_table,
         )
 
 
@@ -541,9 +547,12 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
     supports_pre_processed_weights = True
 
-    def __init__(self, moe: FusedMoEConfig):
+    def __init__(self, moe: FusedMoEConfig, activation_key: QuantKey | None = None):
         super().__init__(moe)
         self.weight_dtype = "mxfp4"
+        # Checkpoint-declared activation quantization. Only backends that pick
+        # their activation format from the layer (Humming) consume it.
+        self.activation_key = activation_key
         self.is_k3_situ_aiter = _use_k3_situ_aiter(moe)
         self.is_k3_situ_int4_gfx942 = _use_k3_situ_int4_gfx942(moe)
         self.experts_cls: type[mk.FusedMoEExperts] | None
@@ -822,6 +831,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 _cache_permute_indices=self._cache_permute_indices,
                 activation=self.moe.activation,
                 use_separated_a4w4=self.moe.use_mxfp4_w4a4_dsv4,
+                activation_key=self.activation_key,
             )
         )
 
@@ -842,8 +852,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             replace_parameter(layer, "w13_weight_scale", w13_scale)
             replace_parameter(layer, "w2_weight_scale", w2_scale)
         else:
-            layer.w13_weight = w13
-            layer.w2_weight = w2
+            layer.w13_weight_triton = w13
+            layer.w2_weight_triton = w2
             self.w13_precision_config = w13_scale
             self.w2_precision_config = w2_scale
 
@@ -973,9 +983,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             del w_all, s_all
             assert out_packed is not None
             assert out_scale is not None
-            weight.data = torch.empty(0, dtype=torch.uint8, device=out_packed.device)
-            scale.data = torch.empty(0, dtype=torch.uint8, device=out_packed.device)
-            torch.accelerator.empty_cache()
             return out_packed, out_scale
 
         w13, w13_scale = convert(layer.w13_weight, layer.w13_weight_scale)
@@ -1090,8 +1097,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
             hidden_states=x,
-            w1=layer.w13_weight,
-            w2=layer.w2_weight,
+            w1=triton_weight(layer, "w13_weight"),
+            w2=triton_weight(layer, "w2_weight"),
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation=layer.activation,
@@ -1113,8 +1120,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         assert self.moe_kernel is not None
         return self.moe_kernel.apply_monolithic(
             hidden_states=x,
-            w1=layer.w13_weight,
-            w2=layer.w2_weight,
+            w1=triton_weight(layer, "w13_weight"),
+            w2=triton_weight(layer, "w2_weight"),
             router_logits=router_logits,
             activation=layer.activation,
             global_num_experts=layer.global_num_experts,
@@ -1125,4 +1132,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
             routing_sink=layer.routing_sink,
+            input_ids=input_ids,
+            hash_indices_table=layer.hash_indices_table,
         )

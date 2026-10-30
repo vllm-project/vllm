@@ -12,6 +12,7 @@ import torch
 
 import vllm.model_executor.model_loader.reload.inplace as reload_inplace_module
 import vllm.v1.worker.gpu_model_runner as gpu_model_runner_module
+from tests.v1.core.utils import get_kv_cache_configs
 from vllm.config import (
     AttentionConfig,
     CacheConfig,
@@ -29,6 +30,7 @@ from vllm.distributed.parallel_state import (
 from vllm.lora.layers import LoRAMappingType
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.platforms import current_platform
@@ -42,13 +44,17 @@ from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend
 from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
     ROCMAiterMLASparseBackend,
 )
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.v1.core.kv_cache_utils import estimate_max_model_len, get_kv_cache_configs
+from vllm.v1.attention.backends.registry import (
+    AttentionBackendEnum,
+    MambaAttentionBackendEnum,
+)
+from vllm.v1.core.kv_cache_planning import estimate_max_model_len
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCacheSpec,
     KVCacheTensor,
 )
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
@@ -233,7 +239,6 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
         total_num_scheduled_tokens=total_num_scheduled_tokens,
         scheduled_spec_decode_tokens={},
         scheduled_encoder_inputs={},
-        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
     )
@@ -261,7 +266,6 @@ def _schedule_cached_requests(
         total_num_scheduled_tokens=sum(num_scheduled_tokens.values()),
         scheduled_spec_decode_tokens={},
         scheduled_encoder_inputs={},
-        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
     )
@@ -337,7 +341,7 @@ def test_select_common_block_size_accepts_rocm_sparse_block_size_16(monkeypatch)
 
     selected_size = select_common_block_size(
         16,
-        [DeepseekV32IndexerBackend, ROCMAiterMLASparseBackend],
+        [DeepseekV32IndexerBackend, ROCMAiterMLASparseBackend],  # type: ignore[type-abstract]  # not instantiated
     )
     assert selected_size == 16
 
@@ -388,8 +392,10 @@ def test_sample_tokens_receives_pp_sampled_ids_only_on_non_last_rank(
         nonlocal receive_calls
         receive_calls += 1
 
-    runner._pp_receive_prev_sampled_token_ids_to_input_batch = (
-        receive_prev_sampled_token_ids
+    monkeypatch.setattr(
+        runner,
+        "_pp_receive_prev_sampled_token_ids_to_input_batch",
+        receive_prev_sampled_token_ids,
     )
     monkeypatch.setattr(
         gpu_model_runner_module,
@@ -440,7 +446,9 @@ def _mock_backend(supported: list, *, exact: bool = False):
             return "MOCK_EXACT" if exact else "MOCK"
 
         @staticmethod
-        def get_supported_kernel_block_sizes(kv_cache_spec=None):
+        def get_supported_kernel_block_sizes(
+            kv_cache_spec: KVCacheSpec | None = None,
+        ) -> list[int | MultipleOf]:
             return list(supported)
 
         if exact:
@@ -509,6 +517,53 @@ def test_alignment_rejected_by_a_sibling_backend_raises(monkeypatch, cpu):
     platform = CpuPlatform if cpu else Platform
     with pytest.raises(ValueError, match="MOCK_EXACT"):
         platform.update_block_size_for_backend(vllm_config)
+
+
+class _CheckpointingMambaLayer(MambaBase):
+    mamba_type = MambaAttentionBackendEnum.GDN_ATTN
+
+    def __init__(self, prefill_checkpoint_alignment: int | None):
+        self._prefill_checkpoint_alignment = prefill_checkpoint_alignment
+
+    def get_prefill_checkpoint_alignment(self) -> int | None:
+        return self._prefill_checkpoint_alignment
+
+    def get_state_shape(self):
+        return ()
+
+    def get_state_dtype(self):
+        return ()
+
+
+def _align_qwen3_5_blocks(*prefill_checkpoint_alignments: int | None):
+    from tests.v1.attention.utils import create_vllm_config
+
+    vllm_config = create_vllm_config(model_name="Qwen/Qwen3.5-0.8B")
+    cache_config = vllm_config.cache_config
+    cache_config.mamba_cache_mode = "align"
+    forward_context = vllm_config.compilation_config.static_forward_context
+    for i, alignment in enumerate(prefill_checkpoint_alignments):
+        forward_context[f"mamba.{i}"] = _CheckpointingMambaLayer(alignment)
+    Platform._align_hybrid_block_size(vllm_config, _mock_backend([MultipleOf(16)]))
+    return cache_config
+
+
+@pytest.mark.parametrize(
+    ("prefill_checkpoint_alignments", "block_size"),
+    [((64,), 576), ((None,), 544), ((64, None), 544)],
+)
+def test_blocks_land_on_the_mamba_checkpoint_grid(
+    prefill_checkpoint_alignments, block_size
+):
+    """A layer that checkpoints every 64 tokens needs 64-aligned blocks.
+
+    Unaligned, Qwen3.5-0.8B's block (544) puts every other checkpoint off the
+    grid. A Mamba layer that cannot checkpoint (like Qwen4Exp's PLE short conv)
+    stops the scheduler from taking any, so the block stays.
+    """
+    cache_config = _align_qwen3_5_blocks(*prefill_checkpoint_alignments)
+
+    assert cache_config.block_size == block_size
 
 
 def test_xpu_gdn_rounding_rejected_by_a_sibling_backend_raises(monkeypatch):
@@ -719,7 +774,6 @@ def test_update_states_request_finished(model_runner, dist_init):
         total_num_scheduled_tokens=0,
         scheduled_spec_decode_tokens={},
         scheduled_encoder_inputs={},
-        num_common_prefix_blocks=[],
         finished_req_ids={req_id},
         free_encoder_mm_hashes=[],
     )
@@ -749,7 +803,6 @@ def test_update_states_request_resumed(model_runner, dist_init):
         total_num_scheduled_tokens=0,
         scheduled_spec_decode_tokens={},
         scheduled_encoder_inputs={},
-        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
     )
@@ -776,7 +829,6 @@ def test_update_states_request_resumed(model_runner, dist_init):
         total_num_scheduled_tokens=1,
         scheduled_spec_decode_tokens={},
         scheduled_encoder_inputs={},
-        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
     )
@@ -868,7 +920,6 @@ def test_update_states_no_changes(model_runner, dist_init):
         total_num_scheduled_tokens=1,
         scheduled_spec_decode_tokens={},
         scheduled_encoder_inputs={},
-        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
     )
@@ -903,7 +954,6 @@ def test_update_states_request_unscheduled(model_runner, dist_init):
         total_num_scheduled_tokens=1,
         scheduled_spec_decode_tokens={},
         scheduled_encoder_inputs={},
-        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
     )
@@ -1652,8 +1702,9 @@ def test_input_batch_reinitialized_after_late_interleave_adjustment(monkeypatch)
         logitsprocs=None,
         logitsprocs_need_output_token_ids=False,
     )
-    runner.jit_warmup_registry = Mock()
-    runner.jit_warmup_registry.activate.return_value = nullcontext()
+    jit_warmup_registry = Mock()
+    jit_warmup_registry.activate.return_value = nullcontext()
+    runner.jit_warmup_registry = jit_warmup_registry  # type: ignore[attr-defined]  # set by JitWarmupRegistry.capture
 
     spec = SimpleNamespace(
         block_size=16,
