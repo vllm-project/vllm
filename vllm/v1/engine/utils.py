@@ -54,16 +54,21 @@ def get_engine_process_shutdown_timeout(
     drain. A value of zero therefore tells EngineCore to abort requests as soon
     as it receives SIGTERM. The parent process manager still needs a separate
     window in which the EngineCore can release device resources before it is
-    force-killed. ROCm teardown can take longer than the generic best-effort
-    window, and force-killing during teardown can leave VRAM resident.
+    force-killed. An explicitly set ``VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS``
+    sets that window on every platform. Otherwise ROCm gets a fixed window:
+    its teardown can take longer than the generic best-effort window, and
+    force-killing during teardown can leave VRAM resident.
 
     ``process_timeout`` may be a remaining budget computed by an outer process
     manager. Keep it unchanged unless both values are zero: a zero remaining
     budget for a positive request timeout must not receive a fresh grace period
     because EngineCore relies on that deadline to enforce request draining.
     """
-    if request_timeout == 0 and process_timeout == 0 and current_platform.is_rocm():
-        return ROCM_ENGINE_PROCESS_SHUTDOWN_TIMEOUT_S
+    if request_timeout == 0 and process_timeout == 0:
+        if envs.is_set("VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS"):
+            return float(envs.VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS)
+        if current_platform.is_rocm():
+            return ROCM_ENGINE_PROCESS_SHUTDOWN_TIMEOUT_S
     return process_timeout
 
 
@@ -342,7 +347,7 @@ class CoreEngineProcManager:
             )
             if process_timeout != timeout:
                 logger.info(
-                    "[shutdown] EngineCore process manager: using %ss ROCm "
+                    "[shutdown] EngineCore process manager: using %ss "
                     "cleanup grace after immediate request abort",
                     process_timeout,
                 )
@@ -1279,7 +1284,6 @@ def launch_core_engines(
 
     # Hold a coordination TCPStore (alive for this frame) so engines pick DP
     # master ports at bind time; pre-allocated ports can be taken before use.
-    coord_store = None
     if (
         dp_size > 1
         and not offline_mode
@@ -1391,7 +1395,6 @@ def launch_core_engines(
             engines_to_handshake,
             parallel_config,
             dp_size > 1 and vllm_config.model_config.is_moe,
-            not (local_engines_only and dp_rank > 0),
             vllm_config.cache_config,
             launch,
         )
@@ -1402,7 +1405,6 @@ def wait_for_engine_startup(
     core_engines: list[CoreEngine],
     parallel_config: ParallelConfig,
     coordinated_dp: bool,
-    send_parallel_config: bool,
     cache_config: CacheConfig,
     launch: CoreEngineLaunch,
 ):
@@ -1515,24 +1517,27 @@ def wait_for_engine_startup(
         if status == "HELLO" and engine.state == CoreEngineState.NEW:
             # Send init message with DP config info.
             parallel_config_payload: dict[str, int | str | list[int]] = {}
-            if coordinated_dp and send_parallel_config:
+            if coordinated_dp and not (
+                parallel_config.local_engines_only
+                and parallel_config.data_parallel_rank > 0
+            ):
                 parallel_config_payload = {
                     k: getattr(parallel_config, k)
                     for k in (
                         "data_parallel_master_ip",
                         "data_parallel_master_port",
                         "_data_parallel_master_port_list",
+                        "_coord_store_port",
                         "data_parallel_size",
                     )
                 }
-                if parallel_config.enable_elastic_ep:
-                    if not parallel_config._coord_store_port:
-                        raise RuntimeError(
-                            "Elastic EP startup requires a coordination TCPStore "
-                            "port before engine handshake."
-                        )
-                    parallel_config_payload["_coord_store_port"] = (
-                        parallel_config._coord_store_port
+                if (
+                    parallel_config.enable_elastic_ep
+                    and not parallel_config._coord_store_port
+                ):
+                    raise RuntimeError(
+                        "Elastic EP startup requires a coordination TCPStore "
+                        "port before engine handshake."
                     )
             init_message = msgspec.msgpack.encode(
                 EngineHandshakeMetadata(
@@ -1553,6 +1558,9 @@ def wait_for_engine_startup(
                 parallel_config.eplb_config.num_redundant_experts = (
                     num_redundant_experts
                 )
+            elastic_ep_max_dp_size = msg.get("elastic_ep_max_dp_size")
+            if elastic_ep_max_dp_size is not None and local:
+                parallel_config.elastic_ep_max_dp_size = elastic_ep_max_dp_size
 
             # Validate config hash consistency across DP workers for MoE models.
             if coordinated_dp:

@@ -8,7 +8,9 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import AsyncExitStack
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
+from unittest.mock import AsyncMock
 
+import msgspec
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
@@ -42,6 +44,40 @@ class DictStore:
     def get(self, key: str) -> bytes:
         return self.values[key]
 
+    def set(self, key: str, value: bytes) -> None:
+        self.values[key] = value
+
+
+def test_external_elastic_ep_visible_epoch_has_bootstrap_and_phase(monkeypatch):
+    client = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                data_parallel_master_port=12345,
+                _data_parallel_master_port_list=[12346, 12347],
+            )
+        )
+    )
+    coordinator = ExternalElasticEPScaleCoordinator(cast("DPAsyncMPClient", client))
+    control_store, reconfig_store = DictStore({}), DictStore({})
+    coordinator.reconfig_store_ref = reconfig_store
+    monkeypatch.setattr(
+        coordinator, "_setup_reconfig_bootstrap", lambda: ("127.0.0.1", 12348)
+    )
+    epoch, bootstrap = coordinator._prepare_reconfig_bootstrap(control_store, 2, 3)
+
+    for store in (control_store, reconfig_store):
+        # DictStore preserves insertion order: metadata must precede the epoch.
+        assert list(store.values)[-1] == coordinator.key("current_epoch")
+        assert store.get(coordinator.key(epoch, "bootstrap")) == msgspec.msgpack.encode(
+            bootstrap
+        )
+        assert store.get(coordinator.key(epoch, "phase")) == b"preparing"
+        assert store.get(coordinator.key("current_epoch")) == epoch.encode()
+        monkeypatch.setattr(
+            coordinator, "_get_reconfig_store", lambda store=store: store
+        )
+        assert coordinator.get_status()["requested_data_parallel_size"] == 3
+
 
 def test_external_elastic_ep_calculates_target_expert_redundancy():
     client = SimpleNamespace(
@@ -57,19 +93,33 @@ def test_external_elastic_ep_calculates_target_expert_redundancy():
     assert coordinator._calculate_num_redundant_experts(2, 3) == 64
 
 
-def test_external_elastic_ep_rejects_insufficient_expert_capacity():
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dp_rank", range(4))
+async def test_validate_expert_capacity_on_every_rank(dp_rank, monkeypatch):
+    """Validate expert capacity on every rank before waiting for an epoch."""
     client = SimpleNamespace(
         vllm_config=SimpleNamespace(
             model_config=SimpleNamespace(get_num_experts=lambda: 128),
             parallel_config=SimpleNamespace(
-                eplb_config=SimpleNamespace(num_redundant_experts=0)
+                data_parallel_rank=dp_rank,
+                elastic_ep_max_dp_size=4,
+                data_parallel_master_ip="127.0.0.1",
+                _coord_store_port=12345,
+                eplb_config=SimpleNamespace(num_redundant_experts=0),
             ),
         )
     )
     coordinator = ExternalElasticEPScaleCoordinator(cast("DPAsyncMPClient", client))
+    store = DictStore({})
+    monkeypatch.setattr(
+        "vllm.distributed.utils.get_cached_tcp_store_client", lambda *args: store
+    )
 
     with pytest.raises(ValueError, match="cannot retain all model experts"):
-        coordinator._calculate_num_redundant_experts(3, 2)
+        await asyncio.wait_for(coordinator.prepare(4, 2), timeout=1)
+
+    assert not store.values
+    assert coordinator.prepared_scale is None
 
 
 @pytest.mark.asyncio
@@ -87,6 +137,37 @@ async def test_external_elastic_ep_late_rank_observes_epoch_error():
 
     with pytest.raises(RuntimeError, match="scale failed"):
         await coordinator._wait_for_bootstrap(store, requested_new_dp_size=3)
+
+
+@pytest.mark.asyncio
+async def test_external_elastic_ep_releases_state_when_peer_drain_fails(monkeypatch):
+    client = SimpleNamespace(abort_elastic_ep=AsyncMock())
+    coordinator = ExternalElasticEPScaleCoordinator(cast("DPAsyncMPClient", client))
+    control_store, reconfig_store = DictStore({}), DictStore({})
+    coordinator.prepared_scale = SimpleNamespace(
+        scale_up=True,
+        bootstrap=SimpleNamespace(new_data_parallel_size=3),
+        control_store=control_store,
+        reconfig_store=reconfig_store,
+        epoch="failed-epoch",
+        handshake_server=None,
+    )
+    monkeypatch.setattr(
+        coordinator,
+        "_wait_for_commit_ready",
+        AsyncMock(side_effect=RuntimeError("peer drain failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="peer drain failed"):
+        await coordinator.commit()
+
+    client.abort_elastic_ep.assert_awaited_once_with()
+    assert coordinator.prepared_scale is None
+    for store in (control_store, reconfig_store):
+        assert store.get(coordinator.key("failed-epoch", "phase")) == b"failed"
+        assert (
+            store.get(coordinator.key("failed-epoch", "error")) == b"peer drain failed"
+        )
 
 
 class ExternalLBServerManager:
@@ -258,6 +339,15 @@ def _get_parallel_config(server: RemoteOpenAIServer):
     return vllm_config["parallel_config"]
 
 
+def _assert_expert_parallel_config(
+    servers: list[tuple[RemoteOpenAIServer, list[str]]],
+):
+    for server, server_args in servers:
+        expected = "--enable-expert-parallel" in server_args
+        parallel_config = _get_parallel_config(server)
+        assert parallel_config["enable_expert_parallel"] is expected
+
+
 def _send_scale_command(
     server: RemoteOpenAIServer, new_dp_size: int
 ) -> requests.Response:
@@ -307,6 +397,8 @@ def test_external_lb_elastic_ep_scale_up(default_server_args) -> None:
         "--attention-backend",
         "TRITON_MLA",
         "--enable-elastic-ep",
+        "--elastic-ep-max-dp-size",
+        "3",
         "--enable-eplb",
         "--eplb-config",
         '{"communicator":"pynccl","num_redundant_experts":0,"use_async":false}',
@@ -350,20 +442,9 @@ def test_external_lb_elastic_ep_scale_up(default_server_args) -> None:
             assert completion.choices[0].finish_reason in ("length", "stop")
 
 
-def _assert_expert_parallel_config(
-    servers: list[tuple[RemoteOpenAIServer, list[str]]],
-):
-    for server, server_args in servers:
-        expected = "--enable-expert-parallel" in server_args
-        parallel_config = _get_parallel_config(server)
-        assert parallel_config["enable_expert_parallel"] is expected
-
-
 def test_external_lb_server_info(server_manager):
     servers = server_manager.servers
     api_server_count = server_manager.api_server_count
-
-    _assert_expert_parallel_config(servers)
 
     for i, (server, _) in enumerate(servers):
         print(f"Testing {i=}")

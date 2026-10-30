@@ -54,10 +54,22 @@ def should_do_global_cleanup_after_test() -> bool:
     return False
 
 
+_last_path = None
+
+
 def pytest_runtest_setup(item):
     # Not tryfirst: the skipping plugin evaluates skip marks in a tryfirst
     # hook, so tests about to be skipped never reach this, while fixture setup
     # still runs afterwards.
-    if item.path.name in NEEDS_CLEAN_ENTRY or "dist_init" in item.fixturenames:
+    global _last_path
+    # Runtime sharding reorders files between builds, so every file also
+    # starts clean: no file inherits the GPU memory another file left cached.
+    new_file = item.path != _last_path
+    _last_path = item.path
+    if (
+        new_file
+        or item.path.name in NEEDS_CLEAN_ENTRY
+        or "dist_init" in item.fixturenames
+    ):
         reset_workspace_manager()
         cleanup_dist_env_and_memory()

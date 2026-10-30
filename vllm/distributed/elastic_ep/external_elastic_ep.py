@@ -51,6 +51,7 @@ class ExternalElasticEPScalePhase(str, enum.Enum):
 class ExternalElasticEPScaleUpHandshakeMetadata:
     engine_metadata: EngineHandshakeMetadata
     num_redundant_experts: int
+    elastic_ep_max_dp_size: int
 
 
 class ExternalElasticEPScaleUpHandshakeServer:
@@ -75,12 +76,14 @@ class ExternalElasticEPScaleUpHandshakeServer:
         addresses: EngineZmqAddresses,
         bootstrap: ReconfigureDistributedRequest,
         num_redundant_experts: int,
+        elastic_ep_max_dp_size: int,
     ) -> None:
         self.handshake_address = handshake_address
         self.expected_new_ranks = set(expected_new_ranks)
         self.addresses = addresses
         self.bootstrap = bootstrap
         self.num_redundant_experts = num_redundant_experts
+        self.elastic_ep_max_dp_size = elastic_ep_max_dp_size
         self.started_event = Event()
         self._stop_event = Event()
         self._thread = Thread(
@@ -168,6 +171,7 @@ class ExternalElasticEPScaleUpHandshakeServer:
                                     parallel_config=parallel_config,
                                 ),
                                 num_redundant_experts=self.num_redundant_experts,
+                                elastic_ep_max_dp_size=self.elastic_ep_max_dp_size,
                             )
                         )
                         handshake_socket.send_multipart(
@@ -293,10 +297,15 @@ class ExternalElasticEPScaleCoordinator:
         )
 
     def _setup_reconfig_bootstrap(self) -> tuple[str, int]:
+        from vllm.distributed.utils import create_tcp_store
+
         self.control_store_ref = getattr(self.client, "_coord_store", None)
-        ip, coord_store_port = self.client._setup_elastic_ep_reconfig_bootstrap()
-        self.reconfig_store_ref = getattr(self.client, "_coord_store", None)
-        return ip, coord_store_port
+        ip = self.client.vllm_config.parallel_config.data_parallel_master_ip
+        # Keep the serving configuration on the old store until commit succeeds.
+        self.reconfig_store_ref = create_tcp_store(
+            ip, 0, is_master=True, world_size=-1, wait_for_workers=False
+        )
+        return ip, self.reconfig_store_ref.port
 
     def _get_error(self, store: Any, epoch: str) -> str | None:
         error_key = self.key(epoch, "error")
@@ -304,21 +313,42 @@ class ExternalElasticEPScaleCoordinator:
             return None
         return store.get(error_key).decode()
 
-    def get_phase(self) -> ExternalElasticEPScalePhase:
+    def get_status(self) -> dict[str, str | int | None]:
         store = self._get_reconfig_store()
         current_epoch_key = self.key("current_epoch")
         if not store.check([current_epoch_key]):
-            return ExternalElasticEPScalePhase.IDLE
+            return {
+                "phase": ExternalElasticEPScalePhase.IDLE.value,
+                "epoch": None,
+                "error": None,
+                "requested_data_parallel_size": None,
+            }
 
         epoch = store.get(current_epoch_key).decode()
-        if self._get_error(store, epoch) is not None:
-            return ExternalElasticEPScalePhase.FAILED
-        if store.check([self.key(epoch, "completed")]):
-            return ExternalElasticEPScalePhase.COMPLETED
-        phase_key = self.key(epoch, "phase")
-        if store.check([phase_key]):
-            return ExternalElasticEPScalePhase(store.get(phase_key).decode())
-        return ExternalElasticEPScalePhase.IDLE
+        error = self._get_error(store, epoch)
+        if error is not None:
+            phase = ExternalElasticEPScalePhase.FAILED
+        elif store.check([self.key(epoch, "completed")]):
+            phase = ExternalElasticEPScalePhase.COMPLETED
+        elif store.check([self.key(epoch, "phase")]):
+            phase = ExternalElasticEPScalePhase(
+                store.get(self.key(epoch, "phase")).decode()
+            )
+        else:
+            phase = ExternalElasticEPScalePhase.IDLE
+        requested_dp_size = None
+        bootstrap_key = self.key(epoch, "bootstrap")
+        if store.check([bootstrap_key]):
+            bootstrap = msgspec.msgpack.decode(
+                store.get(bootstrap_key), type=ReconfigureDistributedRequest
+            )
+            requested_dp_size = bootstrap.new_data_parallel_size
+        return {
+            "phase": phase.value,
+            "epoch": epoch,
+            "error": error,
+            "requested_data_parallel_size": requested_dp_size,
+        }
 
     def _set_phase(
         self, store: Any, epoch: str, phase: ExternalElasticEPScalePhase
@@ -348,6 +378,7 @@ class ExternalElasticEPScaleCoordinator:
                 if epoch != previous_epoch:
                     error = self._get_error(store, epoch)
                     if error is not None:
+                        self.active_epoch = epoch
                         raise RuntimeError(error)
 
                     bootstrap_key = self.key(epoch, "bootstrap")
@@ -382,6 +413,8 @@ class ExternalElasticEPScaleCoordinator:
         cur_data_parallel_size: int,
         new_data_parallel_size: int,
     ) -> tuple[str, ReconfigureDistributedRequest]:
+        from vllm.utils.network_utils import get_open_ports_list
+
         current_epoch_key = self.key("current_epoch")
         if store.check([current_epoch_key]):
             current_epoch = store.get(current_epoch_key).decode()
@@ -395,16 +428,14 @@ class ExternalElasticEPScaleCoordinator:
 
         ip, coord_store_port = self._setup_reconfig_bootstrap()
         epoch = uuid.uuid4().hex
-        parallel_config = self.client.vllm_config.parallel_config
+        master_ports = get_open_ports_list(5)
         bootstrap = ReconfigureDistributedRequest(
             new_data_parallel_size=new_data_parallel_size,
             new_data_parallel_rank=ReconfigureRankType.KEEP_CURRENT_RANK,
             new_data_parallel_rank_local=ReconfigureRankType.KEEP_CURRENT_RANK,
             new_data_parallel_master_ip=ip,
-            new_data_parallel_master_port=parallel_config.data_parallel_master_port,
-            new_data_parallel_master_port_list=(
-                parallel_config._data_parallel_master_port_list.copy()
-            ),
+            new_data_parallel_master_port=master_ports.pop(),
+            new_data_parallel_master_port_list=master_ports,
             coord_store_port=coord_store_port,
         )
 
@@ -414,9 +445,10 @@ class ExternalElasticEPScaleCoordinator:
         if self.reconfig_store_ref is not None:
             stores.append(self.reconfig_store_ref)
         for target_store in stores:
-            target_store.set(current_epoch_key, epoch.encode())
             target_store.set(bootstrap_key, bootstrap_payload)
             self._set_phase(target_store, epoch, ExternalElasticEPScalePhase.PREPARING)
+            # Publish the epoch only after its metadata is ready for readers.
+            target_store.set(current_epoch_key, epoch.encode())
         return epoch, bootstrap
 
     def _start_scale_up_handshake_server(
@@ -424,6 +456,7 @@ class ExternalElasticEPScaleCoordinator:
         bootstrap: ReconfigureDistributedRequest,
         cur_data_parallel_size: int,
         num_redundant_experts: int,
+        elastic_ep_max_dp_size: int,
     ) -> ExternalElasticEPScaleUpHandshakeServer:
         handshake_server = ExternalElasticEPScaleUpHandshakeServer(
             handshake_address=get_engine_client_zmq_addr(
@@ -440,6 +473,7 @@ class ExternalElasticEPScaleCoordinator:
             addresses=self._get_existing_engine_zmq_address(),
             bootstrap=bootstrap,
             num_redundant_experts=num_redundant_experts,
+            elastic_ep_max_dp_size=elastic_ep_max_dp_size,
         )
         handshake_server.start()
         return handshake_server
@@ -573,16 +607,52 @@ class ExternalElasticEPScaleCoordinator:
     def _publish_error(
         self,
         prepared: _PreparedExternalElasticEPScale,
-        error: Exception,
+        error: BaseException,
     ) -> None:
         error_key = self.key(prepared.epoch, "error")
-        error_payload = str(error).encode()
+        error_payload = (str(error) or type(error).__name__).encode()
         for store in (prepared.control_store, prepared.reconfig_store):
             with contextlib.suppress(Exception):
                 store.set(error_key, error_payload)
                 self._set_phase(
                     store, prepared.epoch, ExternalElasticEPScalePhase.FAILED
                 )
+
+    def abort(self, error: str) -> None:
+        prepared = self.prepared_scale
+        if prepared is not None:
+            self._publish_error(prepared, RuntimeError(error))
+            self._stop_handshake_server(prepared.handshake_server, suppress_errors=True)
+            self.prepared_scale = None
+
+    async def _wait_for_commit_ready(
+        self, prepared: _PreparedExternalElasticEPScale, timeout_s: float = 600
+    ) -> None:
+        # No engine may enter the collective pause until all old API ranks
+        # have finished draining; a drain failure must reach waiting peers.
+        store = prepared.reconfig_store
+        await asyncio.to_thread(
+            store.set, self.key(prepared.epoch, "commit_ready", prepared.dp_rank), b"1"
+        )
+        keys = [
+            self.key(prepared.epoch, "commit_ready", rank)
+            for rank in range(prepared.cur_data_parallel_size)
+        ]
+
+        def is_ready() -> bool:
+            error = self._get_error(prepared.control_store, prepared.epoch)
+            if error is not None:
+                raise RuntimeError(error)
+            return store.check(keys)
+
+        start = asyncio.get_running_loop().time()
+        backoff_step = 0
+        while True:
+            if await asyncio.to_thread(is_ready):
+                return
+            if asyncio.get_running_loop().time() - start > timeout_s:
+                raise TimeoutError("Timed out waiting for external Elastic EP drains.")
+            backoff_step = await self._sleep_with_backoff(backoff_step)
 
     async def prepare(
         self, cur_data_parallel_size: int, new_data_parallel_size: int
@@ -600,6 +670,18 @@ class ExternalElasticEPScaleCoordinator:
         parallel_config = self.client.vllm_config.parallel_config
         dp_rank = parallel_config.data_parallel_rank
         scale_up = new_data_parallel_size > cur_data_parallel_size
+        if new_data_parallel_size > parallel_config.elastic_ep_max_dp_size:
+            raise ValueError(
+                f"Cannot scale to data_parallel_size {new_data_parallel_size}; "
+                "--elastic-ep-max-dp-size is "
+                f"{parallel_config.elastic_ep_max_dp_size}."
+            )
+        # Validate expert capacity on every rank: rank 0 publishes no epoch
+        # when validation fails, so peers must reject before polling for one.
+        num_redundant_experts = self._calculate_num_redundant_experts(
+            cur_data_parallel_size,
+            new_data_parallel_size,
+        )
         if not parallel_config._coord_store_port:
             raise RuntimeError(
                 "External Elastic EP requires a runtime coordination store port."
@@ -612,14 +694,9 @@ class ExternalElasticEPScaleCoordinator:
         bootstrap: ReconfigureDistributedRequest | None = None
         epoch: str | None = None
         reconfig_store: Any | None = None
-        num_redundant_experts: int | None = None
 
         try:
             if dp_rank == 0:
-                num_redundant_experts = self._calculate_num_redundant_experts(
-                    cur_data_parallel_size,
-                    new_data_parallel_size,
-                )
                 epoch, bootstrap = self._prepare_reconfig_bootstrap(
                     control_store,
                     cur_data_parallel_size,
@@ -634,6 +711,7 @@ class ExternalElasticEPScaleCoordinator:
                         bootstrap,
                         cur_data_parallel_size,
                         num_redundant_experts,
+                        parallel_config.elastic_ep_max_dp_size,
                     )
                 control_store.set(self.key(epoch, "prepared"), b"1")
             else:
@@ -646,7 +724,6 @@ class ExternalElasticEPScaleCoordinator:
 
             assert epoch is not None
             assert bootstrap is not None
-            assert num_redundant_experts is not None
             self.active_epoch = epoch
             self.active_reconfig_store = (
                 bootstrap.new_data_parallel_master_ip,
@@ -659,23 +736,8 @@ class ExternalElasticEPScaleCoordinator:
             )
 
             if scale_up or dp_rank < bootstrap.new_data_parallel_size:
-                reconfig_request = ReconfigureDistributedRequest(
-                    new_data_parallel_size=bootstrap.new_data_parallel_size,
-                    new_data_parallel_rank=ReconfigureRankType.KEEP_CURRENT_RANK,
-                    new_data_parallel_rank_local=(
-                        ReconfigureRankType.KEEP_CURRENT_RANK
-                    ),
-                    new_data_parallel_master_ip=(bootstrap.new_data_parallel_master_ip),
-                    new_data_parallel_master_port=(
-                        bootstrap.new_data_parallel_master_port
-                    ),
-                    new_data_parallel_master_port_list=(
-                        bootstrap.new_data_parallel_master_port_list
-                    ),
-                    coord_store_port=bootstrap.coord_store_port,
-                )
                 await self.client.call_utility_async(
-                    "reinitialize_distributed", reconfig_request
+                    "reinitialize_distributed", bootstrap
                 )
 
             await self._wait_for_ready_ranks(
@@ -696,10 +758,11 @@ class ExternalElasticEPScaleCoordinator:
                 scale_up=scale_up,
                 handshake_server=handshake_server,
             )
-        except Exception as e:
+        except BaseException as e:
             if epoch is not None:
+                self.active_epoch = epoch
                 error_key = self.key(epoch, "error")
-                error_payload = str(e).encode()
+                error_payload = (str(e) or type(e).__name__).encode()
                 with contextlib.suppress(Exception):
                     control_store.set(error_key, error_payload)
                     self._set_phase(
@@ -718,24 +781,9 @@ class ExternalElasticEPScaleCoordinator:
                             epoch,
                             ExternalElasticEPScalePhase.FAILED,
                         )
+            self.active_reconfig_store = None
             self._stop_handshake_server(handshake_server, suppress_errors=True)
             raise
-
-    async def abort(self) -> None:
-        prepared = self.prepared_scale
-        self.prepared_scale = None
-        try:
-            await self.client.call_utility_async("abort_prepared_elastic_ep")
-        except Exception:
-            logger.exception("[Elastic EP] Failed to release the prepared scale")
-        if prepared is None:
-            return
-        self._stop_handshake_server(prepared.handshake_server, suppress_errors=True)
-        for store in (prepared.control_store, prepared.reconfig_store):
-            with contextlib.suppress(Exception):
-                self._set_phase(
-                    store, prepared.epoch, ExternalElasticEPScalePhase.FAILED
-                )
 
     async def commit(self) -> None:
         prepared = self.prepared_scale
@@ -747,31 +795,25 @@ class ExternalElasticEPScaleCoordinator:
             prepared.dp_rank < bootstrap.new_data_parallel_size
         )
         try:
+            try:
+                await self._wait_for_commit_ready(prepared)
+            except BaseException:
+                await self.client.abort_elastic_ep()
+                raise
             for store in (prepared.control_store, prepared.reconfig_store):
                 self._set_phase(
                     store, prepared.epoch, ExternalElasticEPScalePhase.COMMITTING
                 )
             await self.client.pause_scheduler_async(
-                mode="keep" if remaining else "abort",
+                mode=self.client._eep_commit_pause_mode() if remaining else "abort",
                 clear_cache=False,
             )
             if remaining:
                 await self.client.call_utility_async("commit_prepared_elastic_ep")
             else:
-                reconfig_request = ReconfigureDistributedRequest(
-                    new_data_parallel_size=bootstrap.new_data_parallel_size,
-                    new_data_parallel_rank=(ReconfigureRankType.SHUTDOWN_CURRENT_RANK),
-                    new_data_parallel_rank_local=(
-                        ReconfigureRankType.KEEP_CURRENT_RANK
-                    ),
-                    new_data_parallel_master_ip=(bootstrap.new_data_parallel_master_ip),
-                    new_data_parallel_master_port=(
-                        bootstrap.new_data_parallel_master_port
-                    ),
-                    new_data_parallel_master_port_list=(
-                        bootstrap.new_data_parallel_master_port_list
-                    ),
-                    coord_store_port=bootstrap.coord_store_port,
+                reconfig_request = msgspec.structs.replace(
+                    bootstrap,
+                    new_data_parallel_rank=ReconfigureRankType.SHUTDOWN_CURRENT_RANK,
                 )
                 await self.client.call_utility_async(
                     "reinitialize_distributed", reconfig_request
@@ -797,11 +839,19 @@ class ExternalElasticEPScaleCoordinator:
 
             if remaining:
                 self._update_parallel_config(bootstrap, prepared.num_redundant_experts)
+                if prepared.dp_rank == 0:
+                    self.client._coord_store = self.reconfig_store_ref
+                    self.client._ensure_stats_update_task()
+                    await self.client.scale_send_socket.send(
+                        msgspec.msgpack.encode(
+                            ("SCALE_ELASTIC_EP", bootstrap.new_data_parallel_size)
+                        )
+                    )
                 await self.client.resume_scheduler_async()
             self._stop_handshake_server(
                 prepared.handshake_server, suppress_errors=False
             )
-        except Exception as e:
+        except BaseException as e:
             self._publish_error(prepared, e)
             self._stop_handshake_server(prepared.handshake_server, suppress_errors=True)
             raise

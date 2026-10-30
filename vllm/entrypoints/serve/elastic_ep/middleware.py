@@ -33,7 +33,7 @@ def set_elastic_ep_rank_retired(value):
 
 
 class ScalingMiddleware:
-    """Pause serving during scaling or after rank retirement, returning 503.
+    """Pause serving while scaling or after the local rank is retired.
 
     Health and scaling-status requests remain available so an external
     orchestrator can observe the operation and remove a retired process.
