@@ -630,7 +630,7 @@ async def _poll_until_api_server_running(
                     timeout=request_timeout,
                 ):
                     return
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            except (TimeoutError, aiohttp.ClientError) as exc:
                 last_exc = exc
                 print("Test detected not started yet, sleeping for 1s")
                 remaining_s = deadline - time.monotonic()

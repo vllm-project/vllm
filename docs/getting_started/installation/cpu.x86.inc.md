@@ -273,7 +273,9 @@ Otherwise, vLLM falls back to the default `CpuPlatform` (oneDNN / sgl-kernel pat
 
 ### Supported dtypes
 
-`float16` is **not** supported on `ZenCpuPlatform`. `ZenCpuPlatform.supported_dtypes` advertises only `bfloat16` and `float32`, so models declared with `torch_dtype=float16` are auto-downcast to `bfloat16` at load time with the standard `"Your device 'cpu' doesn't support torch.float16. Falling back to torch.bfloat16 for compatibility."` warning emitted from `vllm/config/model.py`.
+`ZenCpuPlatform.supported_dtypes` always advertises `bfloat16` and `float32`, and adds `float16` when `torch.ops.zentorch.zentorch_is_fp16_supported()` reports AVX512-FP16, which AMD ships from Venice (6th Gen EPYC) onwards. On Turin (5th Gen EPYC) and earlier, models declared with `torch_dtype=float16` are auto-downcast to `bfloat16` at load time with the standard `"Your device 'cpu' doesn't support torch.float16. Falling back to torch.bfloat16 for compatibility."` warning emitted from `vllm/config/model.py`.
+
+`bfloat16` is listed first either way, so `--dtype auto` keeps resolving to it.
 
 ### Environment variables
 
