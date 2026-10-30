@@ -12,6 +12,11 @@ sending BF16 weights) is loaded as is and needs no scale.
 Each FP8 row sits in the first half of the bytes of its BF16 row, so the
 weight's storage is the size of the BF16 weight and every row can be loaded as
 either format, even within one fused weight.
+
+A replicated layer may also accept its scale in any layout a checkpoint uses
+(per-tensor, per-channel, blocks, MXFP8): the scale is then kept as one value
+per row and 32 columns, the finest of these layouts, and a coarser checkpoint
+scale is expanded to it when loaded.
 """
 
 from typing import Any
@@ -45,6 +50,8 @@ from vllm.utils.math_utils import cdiv
 
 # Rows dequantized at once; bounds the float32 temporaries of a large weight.
 _DEQUANT_ROWS = 1024
+# Scale blocks of a weight that accepts any checkpoint scale layout.
+_ANY_LAYOUT_BLOCK = [1, 32]
 
 
 def _fp8_view_of(runtime: torch.Tensor, rows: int, cols: int) -> torch.Tensor:
@@ -164,13 +171,68 @@ class Fp8DequantWeightParameter(ModelWeightParameter):
         _set_data(self, runtime)
 
 
+def _scale_groups(scale: torch.Tensor, rows: int, cols: int) -> torch.Tensor:
+    """The checkpoint scale of a ``[rows, cols]`` FP8 weight, in any layout
+    (per-tensor, per-channel, ``[n, k]`` blocks, MXFP8 E8M0), as one float32
+    scale per row and ``_ANY_LAYOUT_BLOCK[1]`` columns."""
+    if scale.dtype in (torch.uint8, torch.float8_e8m0fnu):
+        scale = scale.view(torch.float8_e8m0fnu)
+    scale = scale.to(torch.float32)
+    scale = scale.reshape(scale.shape[0] if scale.ndim else 1, -1)
+    group = _ANY_LAYOUT_BLOCK[1]
+    block_n, block_k = rows // scale.shape[0], cols // scale.shape[1]
+    if (
+        block_n * scale.shape[0] != rows
+        or block_k * scale.shape[1] != cols
+        or (block_k % group and scale.shape[1] > 1)
+    ):
+        raise ValueError(
+            f"unsupported scale shape {tuple(scale.shape)} for a "
+            f"[{rows}, {cols}] FP8 weight"
+        )
+    columns = torch.arange(0, cols, group, device=scale.device) // block_k
+    return scale.repeat_interleave(block_n, dim=0)[:, columns]
+
+
+class Fp8DequantScaleParameter(BlockQuantScaleParameter):
+    """The scale of a replicated weight that accepts any checkpoint scale
+    layout, stored per ``_ANY_LAYOUT_BLOCK`` (see `_scale_groups`)."""
+
+    cols: int
+
+    def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
+        loaded_weight = _scale_groups(loaded_weight, self.data.shape[0], self.cols)
+        super().load_column_parallel_weight(loaded_weight)
+
+    def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
+        rows = kwargs["shard_size"]  # weight rows: one scale row per row
+        loaded_weight = _scale_groups(loaded_weight, rows, self.cols)
+        super().load_merged_column_weight(loaded_weight, **kwargs)
+
+
+def mark_unneeded_scale(
+    name: str, param: torch.nn.Parameter, tensor: torch.Tensor, loaded: set[str]
+) -> None:
+    """A BF16 tensor loaded into a block-FP8 checkpoint weight needs no scale;
+    count the scale as loaded so a BF16 checkpoint passes the load check."""
+    if (
+        isinstance(param, Fp8DequantWeightParameter)
+        and tensor.dtype != torch.float8_e4m3fn
+    ):
+        loaded.add(name.removesuffix("weight") + "weight_scale_inv")
+
+
 @register_weight_loader_v2_supported_method
 class Fp8DequantLinearMethod(UnquantizedLinearMethod):
-    """Loads block-FP8 (or BF16) checkpoint weights; runs in BF16."""
+    """Loads block-FP8 (or BF16) checkpoint weights; runs in BF16.
 
-    def __init__(self, weight_block_size: list[int]):
+    ``weight_block_size`` None: the layer is replicated and accepts the scale
+    in any checkpoint layout (see `_scale_groups`)."""
+
+    def __init__(self, weight_block_size: list[int] | None):
         super().__init__()
-        self.weight_block_size = weight_block_size
+        self.any_scale_layout = weight_block_size is None
+        self.weight_block_size = weight_block_size or _ANY_LAYOUT_BLOCK
 
     def create_weights(
         self,
@@ -210,6 +272,13 @@ class Fp8DequantLinearMethod(UnquantizedLinearMethod):
             self.weight_block_size,
             weight_loader,
         )
+        if self.any_scale_layout:
+            if getattr(layer, "tp_size", 1) > 1:
+                raise ValueError("a scale in any layout needs a replicated layer")
+            scale = Fp8DequantScaleParameter(
+                data=scale.data, input_dim=1, output_dim=0, weight_loader=weight_loader
+            )
+            scale.cols = input_size_per_partition
         scale.weight_block_size = self.weight_block_size
         layer.register_parameter("weight_scale_inv", scale)
 
@@ -226,19 +295,23 @@ class Fp8DequantConfig(QuantizationConfig):
     and run in BF16 (see `Fp8DequantLinearMethod`). Models pass it to the
     layers concerned; it is never read from a checkpoint."""
 
-    def __init__(self, weight_block_size: list[int]):
+    def __init__(self, weight_block_size: list[int] | None):
         super().__init__()
         self.weight_block_size = weight_block_size
 
     @classmethod
     def for_checkpoint(
-        cls, quant_config: QuantizationConfig | None
+        cls, quant_config: QuantizationConfig | None, any_scale_layout: bool = False
     ) -> "Fp8DequantConfig | None":
         """A config for layers of a quantized checkpoint that the model keeps
         in BF16 but the checkpoint may store as block-FP8 (or keep in BF16);
-        None for an unquantized checkpoint."""
+        None for an unquantized checkpoint. With ``any_scale_layout``, for
+        replicated layers whose FP8 scale layout varies between checkpoints,
+        the layers accept a scale in any layout."""
         if quant_config is None:
             return None
+        if any_scale_layout:
+            return cls(None)
         block_size = getattr(quant_config, "weight_block_size", None)
         return cls(list(block_size) if block_size else [128, 128])
 

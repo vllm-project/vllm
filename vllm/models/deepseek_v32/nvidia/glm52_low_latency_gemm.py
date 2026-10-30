@@ -28,6 +28,9 @@ from vllm.model_executor.layers.linear import (
     LinearBase,
     UnquantizedLinearMethod,
 )
+from vllm.model_executor.layers.quantization.fp8_dequant import (
+    Fp8DequantLinearMethod,
+)
 from vllm.platforms import current_platform
 
 Backend = Literal["cute", "dsv3_fused_a"]
@@ -410,9 +413,21 @@ def build_glm52_plan(
 
 
 class GLM52LowLatencyLinearMethod(UnquantizedLinearMethod):
-    def __init__(self, plan: dict[int, ResolvedCall]) -> None:
+    def __init__(
+        self,
+        plan: dict[int, ResolvedCall],
+        base: Fp8DequantLinearMethod | None = None,
+    ) -> None:
         super().__init__()
         self._plan = plan
+        # a layer loaded from block-FP8 keeps its post-load dequantization
+        self._base = base
+
+    def process_weights_after_loading(self, layer: nn.Module) -> None:
+        if self._base is None:
+            super().process_weights_after_loading(layer)
+        else:
+            self._base.process_weights_after_loading(layer)
 
     def apply(
         self,
@@ -439,18 +454,24 @@ def enable_glm52_low_latency_gemm(
 
     warmup_configs: set[SkinnyGemmConfig] = set()
     for child in module.modules():
-        if (
-            not isinstance(child, LinearBase)
-            or type(child.quant_method) is not UnquantizedLinearMethod
+        method = getattr(child, "quant_method", None)
+        if not isinstance(child, LinearBase) or type(method) not in (
+            UnquantizedLinearMethod,
+            Fp8DequantLinearMethod,
         ):
             continue
         weight = getattr(child, "weight", None)
-        if weight is None or weight.dim() != 2 or weight.dtype != torch.bfloat16:
+        if weight is None or weight.dim() != 2:
+            continue
+        if getattr(weight, "runtime_dtype", weight.dtype) != torch.bfloat16:
             continue
         spec = table.get(tuple(weight.shape))
         if spec is None:
             continue
-        child.quant_method = GLM52LowLatencyLinearMethod(spec.build_plan())
+        child.quant_method = GLM52LowLatencyLinearMethod(
+            spec.build_plan(),
+            method if isinstance(method, Fp8DequantLinearMethod) else None,
+        )
         warmup_configs.update(config for _, config in spec.cute_configs)
 
     _request_warmup(dtype, warmup_configs)

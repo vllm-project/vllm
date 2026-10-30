@@ -13,6 +13,7 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.fp8_dequant import mark_unneeded_scale
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
@@ -24,7 +25,10 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.model_executor.models.deepseek_mtp import SharedHead
-from vllm.model_executor.models.deepseek_v2 import DeepseekV2MixtureOfExperts
+from vllm.model_executor.models.deepseek_v2 import (
+    DeepseekV2MixtureOfExperts,
+    _indexer_checkpoint_name,
+)
 from vllm.model_executor.models.utils import (
     extract_layer_index,
     get_fused_shared_expert_layers,
@@ -39,10 +43,8 @@ from .model import (
     Glm5NextMLAAttention,
     Glm5NextMoE,
     _fused_shared_expert_name,
-    _mark_unneeded_scale,
     _mla_proj_checkpoint_tensor,
     _num_fused_shared_experts,
-    _try_load_fp8_indexer_wk,
     get_sparse_topk_buffer_width,
     get_spec_layer_idx_from_weight_name,
 )
@@ -321,7 +323,6 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        _pending_wk_fp8: dict = {}
         # GLM-5.3-Flash NoPE checkpoints omit the RoPE rows from
         # ``kv_a_proj_with_mqa``; pad them with zeros for the model shape.
         kv_a_pad_size = 0
@@ -348,15 +349,7 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             ):
                 name = _fused_shared_expert_name(name, self.config.n_routed_experts)
 
-            if _try_load_fp8_indexer_wk(
-                name,
-                loaded_weight,
-                _pending_wk_fp8,
-                params_dict,
-                loaded_params,
-            ):
-                continue
-
+            name = _indexer_checkpoint_name(name)
             name, loaded_weight = _mla_proj_checkpoint_tensor(
                 name, loaded_weight, params_dict, self.config, kv_a_pad_size
             )
@@ -378,7 +371,7 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
-                _mark_unneeded_scale(name, param, loaded_weight, loaded_params)
+                mark_unneeded_scale(name, param, loaded_weight, loaded_params)
                 break
             else:
                 is_expert_weight = False
@@ -421,7 +414,7 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
                         param, "weight_loader", default_weight_loader
                     )
                     weight_loader(param, loaded_weight)
-                    _mark_unneeded_scale(name, param, loaded_weight, loaded_params)
+                    mark_unneeded_scale(name, param, loaded_weight, loaded_params)
             loaded_params.add(name)
 
         loaded_layers: set[int] = set()

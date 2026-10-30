@@ -1031,6 +1031,51 @@ def test_qwen4_exp_sm121_selected_shapes(
     assert cosine > 0.999
 
 
+def test_glm52_installer_keeps_fp8_dequant_processing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The indexer's wk_weights_proj loads block-FP8 into BF16
+    (Fp8DequantLinearMethod): it gets the low-latency GEMM and keeps its
+    post-load dequantization."""
+    from vllm.model_executor.layers.quantization.fp8_dequant import (
+        Fp8DequantLinearMethod,
+    )
+
+    spec = glm52_gemm._SM107_WK_WEIGHTS_PROJECTION
+
+    class FakeLinearBase(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.weight = nn.Parameter(
+                torch.empty(spec.n, spec.k, dtype=torch.float8_e4m3fn, device="meta"),
+                requires_grad=False,
+            )
+            self.weight.runtime_dtype = torch.bfloat16
+            self.quant_method = Fp8DequantLinearMethod(None)
+
+    root = nn.Module()
+    root.wk_weights_proj = FakeLinearBase()
+    base = root.wk_weights_proj.quant_method
+    monkeypatch.setattr(glm52_gemm, "LinearBase", FakeLinearBase)
+    monkeypatch.setattr(
+        glm52_gemm.current_platform, "is_device_capability", lambda cc: cc == (10, 7)
+    )
+    monkeypatch.setattr(
+        glm52_gemm.shape_dynamic_skinny_gemm, "is_available", lambda: False
+    )
+    processed = []
+    monkeypatch.setattr(
+        base, "process_weights_after_loading", lambda layer: processed.append(layer)
+    )
+
+    glm52_gemm.enable_glm52_low_latency_gemm(root, torch.bfloat16)
+
+    method = root.wk_weights_proj.quant_method
+    assert isinstance(method, glm52_gemm.GLM52LowLatencyLinearMethod)
+    method.process_weights_after_loading(root.wk_weights_proj)
+    assert processed == [root.wk_weights_proj]
+
+
 def test_glm52_q_b_nonpacked_single_row_falls_back() -> None:
     _require_sm103_and_cute()
     spec = glm52_gemm.GLM52_Q_B_PROJECTION

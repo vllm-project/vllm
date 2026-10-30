@@ -48,13 +48,7 @@ from vllm.model_executor.layers.mhc import (
     hc_expand,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.fp8_dequant import (
-    Fp8DequantWeightParameter,
-)
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    GroupShape,
-    scaled_dequantize,
-)
+from vllm.model_executor.layers.quantization.fp8_dequant import mark_unneeded_scale
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -63,7 +57,10 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.model_executor.models.deepseek_v2 import _get_moe_router_dtype
+from vllm.model_executor.models.deepseek_v2 import (
+    _get_moe_router_dtype,
+    _indexer_checkpoint_name,
+)
 from vllm.model_executor.models.glm4_1v import (
     Glm4vDummyInputsBuilder,
     Glm4vForConditionalGeneration,
@@ -924,8 +921,6 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
         if self.config.mla_use_nope and self.config.qk_rope_head_dim > 0:
             kv_a_pad_size = self.config.qk_rope_head_dim
 
-        _pending_wk_fp8: dict = {}
-
         for args in weights:
             name, loaded_weight = args[:2]
             kwargs: dict = args[2] if len(args) > 2 else {}
@@ -947,16 +942,7 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
             ):
                 name = _fused_shared_expert_name(name, self.config.n_routed_experts)
 
-            # Handle FP8 indexer WK: dequantize to BF16 for fusion with
-            # weights_proj into wk_weights_proj.
-            if _try_load_fp8_indexer_wk(
-                name,
-                loaded_weight,
-                _pending_wk_fp8,
-                params_dict,
-                loaded_params,
-            ):
-                continue
+            name = _indexer_checkpoint_name(name)
 
             name, loaded_weight = _mla_proj_checkpoint_tensor(
                 name, loaded_weight, params_dict, self.config, kv_a_pad_size
@@ -986,7 +972,7 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
-                _mark_unneeded_scale(name, param, loaded_weight, loaded_params)
+                mark_unneeded_scale(name, param, loaded_weight, loaded_params)
                 break
             else:
                 is_expert_weight = False
@@ -1041,7 +1027,7 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                         param, "weight_loader", default_weight_loader
                     )
                     weight_loader(param, loaded_weight, **kwargs)
-                    _mark_unneeded_scale(name, param, loaded_weight, loaded_params)
+                    mark_unneeded_scale(name, param, loaded_weight, loaded_params)
             loaded_params.add(name)
         return loaded_params
 
@@ -1355,36 +1341,6 @@ def _fused_shared_expert_name(name: str, n_routed_experts: int) -> str:
     return name.replace("mlp.shared_experts.", f"mlp.experts.{n_routed_experts}.", 1)
 
 
-def _try_load_fp8_indexer_wk(name, tensor, buf, params_dict, loaded_params):
-    if "indexer.wk." not in name or "wk_weights" in name:
-        return False
-    is_weight = name.endswith(".weight") and tensor.dtype == torch.float8_e4m3fn
-    is_scale = "weight_scale_inv" in name
-    if not is_weight and not is_scale:
-        return False
-    layer_prefix = name.rsplit(".wk.", 1)[0]
-    entry = buf.setdefault(layer_prefix, {})
-    entry["weight" if is_weight else "scale"] = tensor
-    if "weight" not in entry or "scale" not in entry:
-        return True
-
-    weight_fp8, scale_inv = entry["weight"], entry["scale"]
-    del buf[layer_prefix]
-    block_size = weight_fp8.shape[1] // scale_inv.shape[1]
-    weight_bf16 = scaled_dequantize(
-        weight_fp8,
-        scale_inv,
-        group_shape=GroupShape(block_size, block_size),
-        out_dtype=torch.bfloat16,
-    )
-
-    fused_name = f"{layer_prefix}.wk_weights_proj.weight"
-    param = params_dict[fused_name]
-    param.weight_loader(param, weight_bf16, 0)
-    loaded_params.add(fused_name)
-    return True
-
-
 # MLA projections the model runs in BF16 that a quantized checkpoint may store
 # as block-FP8: checkpoint suffix -> the parameter the projection loads into.
 _FP8_ATTN_PROJS = {
@@ -1425,15 +1381,3 @@ def _mla_proj_checkpoint_tensor(
             pad = tensor.new_ones(rows - tensor.shape[0], *tensor.shape[1:])
             tensor = torch.cat([tensor, pad])
     return name, tensor
-
-
-def _mark_unneeded_scale(
-    name: str, param: nn.Parameter, tensor: torch.Tensor, loaded_params: set[str]
-) -> None:
-    """A BF16 tensor loaded into a block-FP8 checkpoint weight needs no scale;
-    count the scale as loaded so a BF16 checkpoint passes the load check."""
-    if (
-        isinstance(param, Fp8DequantWeightParameter)
-        and tensor.dtype != torch.float8_e4m3fn
-    ):
-        loaded_params.add(name.removesuffix("weight") + "weight_scale_inv")
