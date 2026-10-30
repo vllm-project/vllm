@@ -1,6 +1,8 @@
 # Runbook embeddings po-2026 (Qwen3-4B AWQ) — leçons, pièges, recovery
 
 Siège : po-2026, service d'embeddings de la flotte (Roo Code indexation + OWUI RAG ×7).
+**Siège migré sur po-2023 le 14/10/2026** (panne matérielle de po-2026) ; le reste de ce
+document vaut pour le siège courant — le profil et les chemins sont inchangés.
 Profil : `myia_vllm/configs/docker/profiles/embeddings-qwen3-4b-awq-po2026.yml`.
 Issue de rattachement : jsboige/vllm#71. Tout chiffre ci-dessous est **mesuré** au siège.
 
@@ -81,6 +83,78 @@ dépend de ce moteur, pas seulement l'indexation Zoo.
   `logs/gpu-governor.log` (silence = tâche morte). Rollback : `schtasks /Delete /TN GPU-Thermal-Governor /F`.
 - Garde RAM anti-freeze incluse : <1,5 Go libres + instance RSM >4 Go → kill (doctrine 09-07 :
   ne jamais proposer la fermeture des fenêtres VS Code).
+
+## Garde de vivacité (livrée 29/10/2026, PR #275)
+
+Un garde-fou **autonome** qui prouve la chaîne par une **vraie requête** et relance le
+seul conteneur impliqué. Ni lui ni le vigie 5 h ne dépendent d'une session ouverte.
+
+| | |
+|---|---|
+| Script | `myia_vllm/scripts/monitoring/embedding_liveness_guard.py` |
+| **Copie d'exécution** | `D:\Production\Embeddings\bin\embedding_liveness_guard.py` — **hors dépôt** |
+| Enregistrement | `myia_vllm/scripts/monitoring/register_liveness_guard.ps1` (tâche utilisateur `/IT`, 5 min, sans élévation, dry-run `-WhatIf` obligatoire) |
+| Journal | `D:\Production\Embeddings\logs\liveness-guard.jsonl` (une ligne par passe) |
+
+**Preuve exigée** : POST réel `:8004` avec la clé → HTTP 200 + `model == qwen3-4b-awq-embedding`
+**+ 2560 dims**. `:8005` en localisation seule. Whisper (`whisper-webui`) **au niveau HTTP
+seulement** — il est épinglé GPU 1, qui est le GPU d'une autre lane : jamais de transcription.
+
+**Rails** : jamais de restart d'un conteneur de moins de 5 min (leçon watchdog v5) ; skip si
+Docker Desktop est arrêté délibérément ; cap 2 restarts/conteneur/h ; **401/403 = alerte, pas
+de restart** (un restart ne répare pas une clé fausse).
+
+### ⚠️ Une tâche planifiée ne s'exécute JAMAIS depuis le worktree git
+
+**Incident du 29/10/2026 : la garde est morte 4 h 17 sans un seul signe.** Elle pointait vers
+`myia_vllm/scripts/monitoring/embedding_liveness_guard.py` **dans le dépôt**, et un simple
+`git checkout main` a retiré le fichier du disque. Chaque passe échouait en
+`LastTaskResult=2` (`ERROR_FILE_NOT_FOUND`) **pendant que `Get-ScheduledTask` affichait
+`Ready`** — la forme la plus mauvaise pour un moniteur : la tâche a l'air armée et ne rend
+que du silence.
+
+**Règle** : un dépôt est une source, pas un emplacement d'exécution. L'enregistrement
+installe une **copie vérifiée par SHA256** hors dépôt et pointe la tâche dessus.
+
+**Vérifier la vivacité de la garde** (et non pas son existence) :
+
+```powershell
+Get-ScheduledTaskInfo -TaskName 'Embeddings Liveness Guard' |
+  Select-Object LastRunTime, LastTaskResult, NextRunTime
+Get-Content 'D:\Production\Embeddings\logs\liveness-guard.jsonl' -Tail 1
+```
+
+`LastTaskResult = 0` **et** une ligne datée il y a moins de 10 min = garde vivante. Une tâche
+`Ready` avec `LastTaskResult = 2` est **morte** — c'est exactement le piège ci-dessus.
+
+### ⚠️ `schtasks /create` garde les DÉFAUTS WINDOWS PORTABLE — ils disarmèrent la garde
+
+**Incident du 30/10/2026, 2ᵉ mort silencieuse en une nuit, causes distinctes.** `schtasks
+/create` n'écrit que le déclencheur : il laisse en place les **défauts d'un portable
+Windows**, qui ont désarmé la garde **deux fois** :
+
+| défaut | valeur par défaut | effet mesuré |
+| --- | --- | --- |
+| `DisallowStartIfOnBatteries` / `StopIfGoingOnBatteries` | **True** | passage sur batterie à 04:37Z ⇒ **chaque tir refusé en silence** (`LastTaskResult=0x800710E0`) |
+| `ExecutionTimeLimit` | **PT72H** | une passe bloquée (famine mémoire) reste `State=Running` ; avec `MultipleInstances=IgnoreNew` **tous les tirs suivants sont refusés**, et rien ne tue l'instance |
+
+Le premier correctif (batteries seules) **n'a rien changé au code de retour** — c'est ce code
+inchangé qui a révélé la seconde cause.
+
+**Règle** : après `schtasks /create`, poser et **relire** ces trois réglages, sinon le
+prochain enregistrement les réintroduit silencieusement :
+
+```powershell
+$task = Get-ScheduledTask -TaskName $TaskName
+$task.Settings.DisallowStartIfOnBatteries = $false
+$task.Settings.StopIfGoingOnBatteries     = $false
+$task.Settings.ExecutionTimeLimit         = 'PT10M'
+Set-ScheduledTask -TaskName $TaskName -Settings $task.Settings
+```
+
+`Get-ScheduledTask` affichant `Ready` **ne prouve rien** : les deux pannes ci-dessus sont
+invisibles à qui ne regarde que l'état de la tâche. Vivacité = `LastTaskResult = 0` **et**
+une ligne de journal récente (voir la commande ci-dessus).
 
 ## Mémoire host (SPOF n°4/5, résolu 05/10)
 
