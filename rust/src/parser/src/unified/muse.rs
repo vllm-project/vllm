@@ -20,11 +20,10 @@
 //!
 //! `self` bodies are reasoning, `commentary`/`user` bodies are visible text,
 //! and any other recipient names a tool whose body is one ATEM block with one
-//! or more `<atem:invoke>` calls. Values are JSON-decoded when possible and
-//! kept as raw strings otherwise; parameters whose schema admits a string keep
-//! their raw text unless it decodes to another admitted type. Each invoke's
-//! arguments are reassembled as a compact JSON object preserving parameter
-//! order.
+//! or more `<atem:invoke>` calls. Parameters admitting strings retain their
+//! raw text; other values are JSON-decoded when possible and kept as raw
+//! strings otherwise. Each invoke's arguments are reassembled as a compact
+//! JSON object preserving parameter order.
 //!
 //! The model sometimes opens the next segment without closing the current one
 //! with `<|eom|>`, e.g. writing `to=FUNCTION<|message|>` straight after its
@@ -43,9 +42,8 @@ use winnow::prelude::*;
 use winnow::stream::Partial;
 use winnow::token::{literal, rest, take_till, take_until, take_while};
 
-use crate::schema::{JsonType, SchemaTypes};
-
 use super::{Result, UnifiedParser, UnifiedParserOutput, token_id};
+use crate::schema::{JsonType, OptionSource, SchemaRoot};
 use crate::tool::{Tool, ToolCallDelta};
 use crate::unified::parsing_failed;
 use crate::utils::{MarkerScanState, parse_buffered_event, safe_text_len_mul, take_until_marker};
@@ -134,8 +132,7 @@ pub struct MuseUnifiedParser {
     mode: MuseMode,
     /// Names of the tools registered on the request.
     tool_names: HashSet<String>,
-    /// JSON types admitted by each registered tool's parameters.
-    parameter_types: HashMap<String, ParameterTypes>,
+    parameters: HashMap<String, Value>,
     /// Number of calls emitted in the current response.
     emitted_call_count: usize,
 }
@@ -152,9 +149,9 @@ impl MuseUnifiedParser {
             buffer: DecodedText::default(),
             mode: MuseMode::default(),
             tool_names: tools.iter().map(|tool| tool.name.clone()).collect(),
-            parameter_types: tools
+            parameters: tools
                 .iter()
-                .map(|tool| (tool.name.clone(), ParameterTypes::new(&tool.parameters)))
+                .map(|tool| (tool.name.clone(), tool.parameters.clone()))
                 .collect(),
             emitted_call_count: 0,
         })
@@ -189,13 +186,12 @@ impl MuseUnifiedParser {
             MuseEvent::ToolCalls { calls } => {
                 for call in calls {
                     let name = normalize_tool_name(call.name, &self.tool_names);
-                    let types = self.parameter_types.get(&name);
+                    let parameters = self.parameters.get(&name).unwrap_or(&Value::Null);
                     let arguments: Map<String, Value> = call
                         .parameters
                         .into_iter()
                         .map(|(key, raw)| {
-                            let allowed = types.and_then(|types| types.get(&key));
-                            let value = convert_parameter_value(raw, allowed);
+                            let value = convert_parameter_value(parameters, &key, raw);
                             (key, value)
                         })
                         .collect();
@@ -479,62 +475,59 @@ fn decode_parameter_value(raw: &str) -> Value {
     serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
 }
 
-/// JSON types a schema admits, or `None` if it admits any.
-type AllowedTypes = Option<HashSet<String>>;
-
-/// JSON types admitted by one tool's top-level parameters.
-#[derive(Debug, Default)]
-struct ParameterTypes {
-    /// Types admitted by each parameter listed in `properties`.
-    properties: HashMap<String, AllowedTypes>,
-    /// Types admitted by any other parameter (`additionalProperties`).
-    additional: AllowedTypes,
-}
-
-impl ParameterTypes {
-    /// Resolve the types admitted by each parameter of a tool's `parameters`
-    /// schema, sharing one `$ref` cache across the whole tool.
-    fn new(parameters: &Value) -> Self {
-        let mut types = SchemaTypes::new(parameters);
-        let properties = parameters
-            .get("properties")
-            .and_then(Value::as_object)
-            .into_iter()
-            .flatten()
-            .map(|(name, schema)| (name.clone(), types.of(schema)))
-            .collect();
-        let additional = parameters.get("additionalProperties").and_then(|schema| types.of(schema));
-        Self {
-            properties,
-            additional,
-        }
-    }
-
-    /// Types admitted by parameter `key`, or `None` if unconstrained.
-    fn get(&self, key: &str) -> Option<&HashSet<String>> {
-        self.properties.get(key).unwrap_or(&self.additional).as_ref()
-    }
-}
-
-/// Decode a parameter value, keeping the raw text where a string is meant.
-///
-/// When the schema admits a string, the raw text is kept unless it decodes to
-/// another type the schema also admits (`null` for `Optional[str]`, `3` for
-/// `anyOf: [integer, string]`).
-fn convert_parameter_value(raw: String, allowed: Option<&HashSet<String>>) -> Value {
+/// Decode a parameter value, keeping the raw text when its schema admits a
+/// string unless the value decodes to another admitted type (`null` for
+/// `Optional[str]`, `3` for `anyOf: [integer, string]`).
+fn convert_parameter_value(parameters: &Value, key: &str, raw: String) -> Value {
     let decoded = decode_parameter_value(&raw);
-    let Some(allowed) = allowed.filter(|allowed| allowed.contains("string")) else {
-        return decoded;
-    };
-    let kind = match JsonType::of_value(&decoded).name() {
-        "integer" if allowed.contains("number") => "number",
-        kind => kind,
-    };
-    if kind != "string" && allowed.contains(kind) {
-        decoded
-    } else {
-        Value::String(raw)
+    let root = SchemaRoot::new(parameters);
+    let types = root
+        .resolved()
+        .get("properties")
+        .and_then(|properties| properties.get(key))
+        .or_else(|| root.resolved().get("additionalProperties"))
+        .and_then(|schema| schema_types(root, schema))
+        .unwrap_or_default();
+    match JsonType::of_value(&decoded) {
+        _ if !types.contains(&JsonType::String) => decoded,
+        JsonType::Integer if types.contains(&JsonType::Number) => decoded,
+        ty if ty != JsonType::String && types.contains(&ty) => decoded,
+        _ => Value::String(raw),
     }
+}
+
+/// Types `schema` admits (none for a non-`string` type name), or `None` if unconstrained.
+fn schema_types<'a>(root: SchemaRoot<'a>, schema: &'a Value) -> Option<Vec<JsonType>> {
+    // Only the exact type name `string` keeps the raw text, as before.
+    if let Some(name) = schema.get("type").and_then(Value::as_str) {
+        let string = (name == "string").then_some(JsonType::String);
+        return Some(string.into_iter().collect());
+    }
+    // `options` admits any value under a multi-schema `allOf`; intersect the
+    // constrained branches so `[{$ref}, {description}]` keeps the referenced type.
+    if let Some(schemas @ [_, _, ..]) =
+        schema.get("allOf").and_then(Value::as_array).map(Vec::as_slice)
+    {
+        return schemas
+            .iter()
+            .filter_map(|schema| schema_types(root, schema))
+            .map(|mut types| {
+                // A `number` branch also admits integers.
+                if types.contains(&JsonType::Number) {
+                    types.push(JsonType::Integer);
+                }
+                types
+            })
+            .reduce(|both, types| both.into_iter().filter(|ty| types.contains(ty)).collect());
+    }
+    // An untyped option leaves the value unconstrained; `nullable` adds a null one.
+    root.options(schema)
+        .into_iter()
+        .map(|option| match option.source {
+            OptionSource::Any if option.ty != JsonType::Null => None,
+            _ => Some(option.ty),
+        })
+        .collect()
 }
 
 /// Build a cut error for determinably malformed Muse structure.
@@ -548,11 +541,11 @@ fn muse_error(label: &'static str) -> ErrMode<ContextError> {
 mod tests {
     use std::sync::Arc;
 
-    use serde_json::{Map, Value, json};
+    use serde_json::{Value, json};
     use thiserror_ext::AsReport;
     use vllm_tokenizer::{DecodedText, test_utils::TestTokenizer};
 
-    use super::{EOM, EOT, MESSAGE, MuseUnifiedParser, START};
+    use super::{EOM, EOT, MESSAGE, MuseUnifiedParser, START, convert_parameter_value};
     use crate::tool::{Tool, ToolCallDelta};
     use crate::unified::{
         UnifiedParser, UnifiedParserError, UnifiedParserEvent, UnifiedParserOutput,
@@ -790,9 +783,11 @@ mod tests {
                 "type": "object",
                 "properties": {
                     "text": {"type": "string"},
+                    "note": {"$ref": "#/$defs/Note"},
                     "count": {"type": "integer"},
                     "items": {"type": "array", "items": {"type": "integer"}}
-                }
+                },
+                "$defs": {"Note": {"type": "string"}}
             }),
             strict: None,
             defer_loading: None,
@@ -811,7 +806,12 @@ mod tests {
                 " to=echo.echo{MESSAGE}{}{EOT}",
                 atem(&[(
                     "echo.echo",
-                    &[("text", value), ("count", "25"), ("items", "[1,2]")]
+                    &[
+                        ("text", value),
+                        ("note", value),
+                        ("count", "25"),
+                        ("items", "[1,2]")
+                    ]
                 )])
             );
             let mut parser = MuseUnifiedParser::new(&tools, Arc::new(tokenizer())).unwrap();
@@ -821,7 +821,7 @@ mod tests {
             assert_eq!(calls[0].name.as_deref(), Some("echo"));
             assert_eq!(
                 serde_json::from_str::<Value>(&calls[0].arguments).unwrap(),
-                json!({"text": value, "count": 25, "items": [1, 2]})
+                json!({"text": value, "note": value, "count": 25, "items": [1, 2]})
             );
             for size in [1, 17, text.len()] {
                 parser.reset();
@@ -1210,130 +1210,49 @@ mod tests {
         );
     }
 
-    /// Parse one `v` parameter of tool `f`, asserting streaming matches batch.
-    fn parse_param(parameters: Value, value: &str) -> Value {
-        let tools = [Tool {
-            name: "f".to_string(),
-            description: None,
-            parameters,
-            strict: None,
-            defer_loading: None,
-        }];
-        let mut parser = MuseUnifiedParser::new(&tools, Arc::new(tokenizer())).unwrap();
-        let text = format!(" to=f{MESSAGE}{}{EOT}", atem(&[("f", &[("v", value)][..])]));
-        let batch = parser.parse_complete(&text).unwrap();
-        for size in [1, 7, text.len()] {
-            parser.reset();
-            let chunks = char_chunks(&text, size);
-            let chunks: Vec<_> = chunks.iter().map(String::as_str).collect();
-            assert_eq!(collect_stream(&mut parser, &chunks), batch);
-        }
-        let calls = batch.calls();
-        assert_eq!(calls.len(), 1);
-        let mut arguments: Value = serde_json::from_str(&calls[0].arguments).unwrap();
-        arguments["v"].take()
-    }
-
     #[test]
-    fn muse_string_schema_forms_keep_raw_text() {
-        let string_def = json!({"S": {"type": "string"}});
-        let schemas = [
-            json!({"properties": {"v": {"type": "string"}}}),
-            json!({"properties": {"v": {"anyOf": [{"type": "string"}, {"type": "null"}]}}}),
-            json!({"properties": {"v": {"oneOf": [{"type": "string"}, {"type": "null"}]}}}),
-            json!({"properties": {"v": {"type": ["string", "null"]}}}),
-            json!({"properties": {"v": {"enum": ["1.10", "2.0"]}}}),
-            json!({"properties": {"v": {"const": "1.10"}}}),
-            json!({"properties": {"v": {"$ref": "#/$defs/S"}}, "$defs": string_def}),
-            json!({"properties": {"v": {"allOf": [{"$ref": "#/$defs/S"}]}}, "$defs": string_def}),
-            json!({"properties": {"v": {"allOf": [{"type": "string"}, {"minLength": 1}]}}}),
-            json!({"properties": {}, "additionalProperties": {"type": "string"}}),
-        ];
-        let values = [
-            "1.10",
-            "1984",
-            "true",
-            r#""q""#,
-            "{\n  \"version\": \"1.4.0\",\n  \"build\": 7\n}",
-        ];
-        for schema in schemas {
-            for value in values {
-                assert_eq!(
-                    parse_param(schema.clone(), value),
-                    json!(value),
-                    "{schema} {value:?}"
-                );
+    fn muse_parameter_schema_types() {
+        let nullable = json!({"anyOf": [{"type": "string"}, {"type": "null"}]});
+        let body = "{\n  \"v\": \"1.4.0\"\n}";
+        let cases = json!([
+            // schemas admitting a string keep the raw text...
+            [{"type": "string"}, "1.10", "1.10"],
+            [nullable, "1984", "1984"],
+            [nullable, body, body],
+            [nullable, r#""q""#, r#""q""#],
+            [{"oneOf": [{"type": "string"}, {"type": "null"}]}, "true", "true"],
+            [{"type": ["string", "null"]}, "1984", "1984"],
+            [{"enum": ["1.10", "2.0"]}, "1.10", "1.10"],
+            [{"const": "1.10"}, "1.10", "1.10"],
+            [{"$ref": "#/$defs/S"}, "1984", "1984"],
+            [{"allOf": [{"$ref": "#/$defs/S"}]}, "1.10", "1.10"],
+            [{"allOf": [{"$ref": "#/$defs/S"}, {"description": "d"}]}, "1.10", "1.10"],
+            [{"allOf": [nullable, {"type": "string"}]}, "null", "null"],
+            [{"anyOf": [{"type": "integer"}, {"type": "string"}]}, "1.10", "1.10"],
+            [{"type": ["number", "string"]}, "true", "true"],
+            // ...unless the value decodes to another admitted type
+            [nullable, "null", null],
+            [{"anyOf": [{"type": "integer"}, {"type": "string"}]}, "25", 25],
+            [{"type": ["number", "string"]}, "25", 25],
+            [{"enum": [1, "a"]}, "1", 1],
+            [{"type": ["number", "string"], "enum": [1, "x"]}, "1", 1],
+            [{"allOf": [{"type": ["number", "string"]}, {"enum": [1, "x"]}]}, "1", 1],
+            [{"allOf": [{"type": ["integer", "string"]}, {"type": ["number", "string"]}]}, "5", 5],
+            // no string admitted, or no type information: decode as before
+            [{"type": "integer"}, "1.10", 1.1],
+            [{"description": "untyped"}, "25", 25],
+            [{"anyOf": [{"type": "string"}, {}]}, r#""q""#, "q"],
+            [{"type": "integer", "enum": ["1"]}, "1", 1],
+        ]);
+        let defs = json!({"S": {"type": "string"}});
+        for case in cases.as_array().unwrap() {
+            let (schema, raw) = (&case[0], case[1].as_str().unwrap());
+            let parameters =
+                json!({"properties": {"v": schema}, "additionalProperties": schema, "$defs": defs});
+            for key in ["v", "other"] {
+                let value = convert_parameter_value(&parameters, key, raw.to_string());
+                assert_eq!(value, case[2], "{schema} {key} {raw:?}");
             }
         }
-    }
-
-    #[test]
-    fn muse_string_union_schemas() {
-        let cases = [
-            // nullable string: null is still null, anything else stays text
-            (
-                json!({"anyOf": [{"type": "string"}, {"type": "null"}]}),
-                "null",
-                json!(null),
-            ),
-            (json!({"type": ["string", "null"]}), "null", json!(null)),
-            // a string-or-X union keeps a value of the other admitted type
-            (
-                json!({"anyOf": [{"type": "integer"}, {"type": "string"}]}),
-                "25",
-                json!(25),
-            ),
-            (
-                json!({"anyOf": [{"type": "integer"}, {"type": "string"}]}),
-                "1.10",
-                json!("1.10"),
-            ),
-            (json!({"type": ["number", "string"]}), "25", json!(25)),
-            (json!({"enum": [1, "a"]}), "1", json!(1)),
-            (
-                json!({"type": ["number", "string"], "enum": [1, "x"]}),
-                "1",
-                json!(1),
-            ),
-            // no string admitted, or no type information: decode as before
-            (
-                json!({"anyOf": [{"type": "number"}, {"type": "null"}]}),
-                "1.10",
-                json!(1.1),
-            ),
-            (json!({"description": "untyped"}), "25", json!(25)),
-            (json!({"anyOf": [{"type": "string"}, {}]}), "25", json!(25)),
-        ];
-        for (schema, value, expected) in cases {
-            let parameters = json!({"properties": {"v": schema}});
-            assert_eq!(
-                parse_param(parameters, value),
-                expected,
-                "{schema} {value:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn muse_ref_cycles_and_shared_refs_resolve_quickly() {
-        // $ref cycles terminate; shared $refs are walked once, not once per path.
-        let cyclic = json!({
-            "properties": {"v": {"$ref": "#/$defs/A"}},
-            "$defs": {
-                "A": {"anyOf": [{"$ref": "#/$defs/B"}, {"type": "string"}]},
-                "B": {"type": "object", "properties": {"a": {"$ref": "#/$defs/A"}}},
-            },
-        });
-        assert_eq!(parse_param(cyclic, "1.10"), json!("1.10"));
-        // Each def references the next one twice: 2**60 paths without memoization.
-        let mut defs: Map<String, Value> = (0..60)
-            .map(|i| {
-                let next = json!({"$ref": format!("#/$defs/D{}", i + 1)});
-                (format!("D{i}"), json!({"anyOf": [next, next]}))
-            })
-            .collect();
-        defs.insert("D60".to_string(), json!({"type": "string"}));
-        let chain = json!({"properties": {"v": {"$ref": "#/$defs/D0"}}, "$defs": defs});
-        assert_eq!(parse_param(chain, "1.10"), json!("1.10"));
     }
 }

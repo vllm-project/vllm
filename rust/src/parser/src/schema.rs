@@ -6,12 +6,9 @@
 //! Tool parsers coerce generated parameter values by their schema, and output
 //! grammars constrain the same values by it. Both read a parameter's schema
 //! through [`SchemaRoot`], so they agree on which JSON types the value may take.
-//!
-//! Parsers instead fold a parameter's schema into one set of admitted type
-//! names with `SchemaTypes`, sharing the root and its `$ref` resolution.
 
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use serde_json::{Map, Value, json};
 
@@ -224,99 +221,6 @@ impl<'a> SchemaRoot<'a> {
             None => Self::any(),
         }
     }
-}
-
-/// Fold one tool's parameter schemas into the JSON type names they admit.
-///
-/// Keeps the Python frontend's coarser semantics: `allOf` intersects, an
-/// unconstrained union branch drops the union, and declared type names are
-/// read verbatim. The tool's `$ref` cache is shared across its parameters.
-#[derive(Debug)]
-pub(crate) struct SchemaTypes<'a> {
-    root: SchemaRoot<'a>,
-    refs: HashMap<String, Option<HashSet<String>>>,
-}
-
-impl<'a> SchemaTypes<'a> {
-    pub(crate) fn new(parameters: &'a Value) -> Self {
-        Self {
-            root: SchemaRoot::new(parameters),
-            refs: HashMap::new(),
-        }
-    }
-
-    /// JSON type names *schema* admits, or `None` if it admits any.
-    pub(crate) fn of(&mut self, schema: &'a Value) -> Option<HashSet<String>> {
-        schema_types(self.root, schema, &mut self.refs)
-    }
-}
-
-/// Fold one schema into the JSON type names it admits, or `None` for any.
-fn schema_types(
-    root: SchemaRoot<'_>,
-    schema: &Value,
-    refs: &mut HashMap<String, Option<HashSet<String>>>,
-) -> Option<HashSet<String>> {
-    let Value::Object(schema) = schema else {
-        return None;
-    };
-    let mut constraints: Vec<Option<HashSet<String>>> = Vec::new();
-    match schema.get("type") {
-        Some(Value::String(declared)) => constraints.push(Some(HashSet::from([declared.clone()]))),
-        Some(Value::Array(declared)) => constraints.push(Some(
-            declared.iter().filter_map(Value::as_str).map(str::to_owned).collect(),
-        )),
-        _ => {}
-    }
-    if let Some(value) = schema.get("const") {
-        let ty = JsonType::of_value(value);
-        constraints.push(Some(HashSet::from([ty.name().into()])));
-    }
-    if let Some(Value::Array(values)) = schema.get("enum") {
-        let names = values.iter().map(|value| JsonType::of_value(value).name().to_owned());
-        constraints.push(Some(names.collect()));
-    }
-    if let Some(Value::String(reference)) = schema.get("$ref") {
-        if !refs.contains_key(reference) {
-            // A reference still being resolved admits any value, which ends
-            // cycles.
-            refs.insert(reference.clone(), None);
-            let types =
-                root.resolve_ref(reference).and_then(|target| schema_types(root, target, refs));
-            refs.insert(reference.clone(), types);
-        }
-        constraints.push(refs[reference].clone());
-    }
-    for key in ["anyOf", "oneOf"] {
-        let Some(Value::Array(branches)) = schema.get(key) else {
-            continue;
-        };
-        if branches.is_empty() {
-            continue;
-        }
-        // A branch without type information makes the whole union
-        // unconstrained; the remaining branches are not walked.
-        let union = branches.iter().try_fold(HashSet::new(), |mut union, branch| {
-            union.extend(schema_types(root, branch, refs)?);
-            Some(union)
-        });
-        if union.is_some() {
-            constraints.push(union);
-        }
-    }
-    if let Some(Value::Array(subschemas)) = schema.get("allOf") {
-        constraints.extend(subschemas.iter().map(|subschema| schema_types(root, subschema, refs)));
-    }
-    // Intersect, treating "integer" as a subset of "number".
-    constraints.into_iter().flatten().reduce(|allowed, types| {
-        let mut both = &allowed & &types;
-        if (allowed.contains("number") && types.contains("integer"))
-            || (allowed.contains("integer") && types.contains("number"))
-        {
-            both.insert("integer".to_string());
-        }
-        both
-    })
 }
 
 impl<'a> SchemaOption<'a> {
