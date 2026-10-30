@@ -16,6 +16,7 @@ from tests.v1.kv_connector.umbp_test_utils import (
     handshake,
     install_memory_runtime,
     make_kv_caches,
+    mori_has_umbp,
 )
 from tests.v1.kv_connector.unit.utils import (
     create_model_runner_output,
@@ -247,7 +248,8 @@ def test_bulk_load_falls_back_for_entire_mixed_batch(bulk_worker, special):
 @pytest.mark.parametrize(
     ("options", "error"),
     [
-        ({"dram_low_watermark": 0.9, "dram_high_watermark": 0.7}, "must not"),
+        ({"dram_low_watermark": 0.9, "dram_high_watermark": 0.7}, "must be below"),
+        ({"dram_low_watermark": 0.8, "dram_high_watermark": 0.8}, "must be below"),
         ({"dram_use_hugepages": 1}, "boolean"),
         ({"dram_numa_node": -2}, ">= -1"),
         ({"dram_hugepage_size": 0}, "positive integer"),
@@ -287,7 +289,9 @@ def test_mori_client_is_created_only_for_worker(monkeypatch, socket_dir):
         "mori.cpp",
         SimpleNamespace(
             UMBPClient=create_client,
-            UMBPConfig=lambda: SimpleNamespace(dram=SimpleNamespace()),
+            UMBPConfig=lambda: SimpleNamespace(
+                dram=SimpleNamespace(high_watermark=0.9, low_watermark=0.7)
+            ),
         ),
     )
     worker = runtime.create_worker_handle("worker-only", topology, layout)
@@ -296,6 +300,21 @@ def test_mori_client_is_created_only_for_worker(monkeypatch, socket_dir):
         assert configs[0].dram.capacity_bytes == 1024
     finally:
         worker.close()
+
+
+@pytest.mark.skipif(not mori_has_umbp(), reason="MORI was built without UMBP")
+def test_high_watermark_alone_below_mori_default_low_is_rejected():
+    """MORI keeps eviction off unless low < high, counting its own defaults."""
+    runtime = EmbeddedRuntime.from_config(
+        UMBPRuntimeConfig(
+            "embedded",
+            {"capacity_bytes": 1 << 20, "dram_high_watermark": 0.6},
+        )
+    )
+    topology = RankTopology()
+    layout = KVLayoutPlanner.from_kv_cache_config(_kv_cache_config()).describe(topology)
+    with pytest.raises(ValueError, match="must be below"):
+        runtime.create_worker_handle("watermark", topology, layout)
 
 
 def test_runtime_config_resolves_total_embedded_capacity_per_rank():
