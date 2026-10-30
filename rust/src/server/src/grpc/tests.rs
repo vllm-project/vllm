@@ -2916,53 +2916,26 @@ fn render_token_ids(text: &str) -> Vec<u32> {
 async fn render_tokenize(
     service: &RenderServiceImpl<RenderState>,
     chat: pb::ChatRequest,
-    generate: pb::GenerateRequest,
-) -> pb::GenerateRequest {
+) -> pb::TokenizeResponse {
     service
         .tokenize(tonic::Request::new(pb::TokenizeRequest {
             chat: Some(chat),
-            generate: Some(generate),
         }))
         .await
         .expect("tokenize")
         .into_inner()
-        .generate_request
-        .expect("generate_request")
 }
 
 #[tokio::test]
-async fn render_tokenize_returns_generate_request_with_rendered_prompt() {
-    let service = render_service();
-    let generate = pb::GenerateRequest {
-        request_id: "render-req".to_string(),
-        model: "render-model".to_string(),
-        temperature: Some(0.5),
-        stopping: Some(pb::StoppingCriteria {
-            max_new_tokens: 16,
-            ..Default::default()
-        }),
-        priority: 3,
-        ..Default::default()
-    };
-
-    let rendered = render_tokenize(&service, weather_chat_request(), generate.clone()).await;
+async fn render_tokenize_returns_rendered_prompt_and_reasoning_gate() {
+    let rendered = render_tokenize(&render_service(), weather_chat_request()).await;
 
     assert_eq!(
-        rendered.prompt,
-        Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
-            ids: render_token_ids("user: Weather in Paris?\nassistant:"),
-        }))
+        rendered.prompt_token_ids,
+        render_token_ids("user: Weather in Paris?\nassistant:")
     );
-    // The caller's generation parameters are passed through unchanged.
-    assert_eq!(rendered.request_id, generate.request_id);
-    assert_eq!(rendered.model, generate.model);
-    assert_eq!(rendered.temperature, generate.temperature);
-    assert_eq!(rendered.stopping, generate.stopping);
-    assert_eq!(rendered.priority, generate.priority);
-    // Generate returns token IDs only, for Detokenize.
-    let response = rendered.response.expect("response options");
-    assert!(response.output_token_ids);
-    assert_eq!(response.output_text, Some(false));
+    assert_eq!(rendered.structural_tag, None);
+    assert!(rendered.skip_special_tokens);
     // The engine's reasoning parser sees the same thinking mode as the template.
     let gate = rendered.engine_reasoning_gate.expect("engine_reasoning_gate");
     assert_eq!(
@@ -2972,29 +2945,24 @@ async fn render_tokenize_returns_generate_request_with_rendered_prompt() {
 }
 
 #[tokio::test]
-async fn render_tokenize_rejects_preset_prompt() {
-    let status = render_service()
-        .tokenize(tonic::Request::new(pb::TokenizeRequest {
-            chat: Some(weather_chat_request()),
-            generate: Some(pb::GenerateRequest {
-                prompt: Some(pb::generate_request::Prompt::Text("hello".to_string())),
-                ..Default::default()
-            }),
-        }))
-        .await
-        .expect_err("prompt must be unset");
+async fn render_tokenize_truncates_prompt() {
+    let chat = pb::ChatRequest {
+        truncate_prompt_tokens: 4,
+        ..weather_chat_request()
+    };
 
-    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    let rendered = render_tokenize(&render_service(), chat).await;
+
+    assert_eq!(rendered.prompt_token_ids, render_token_ids("ant:"));
 }
 
 #[tokio::test]
 async fn render_tokenize_rejects_unknown_model() {
     let status = render_service()
         .tokenize(tonic::Request::new(pb::TokenizeRequest {
-            chat: Some(weather_chat_request()),
-            generate: Some(pb::GenerateRequest {
+            chat: Some(pb::ChatRequest {
                 model: "other-model".to_string(),
-                ..Default::default()
+                ..weather_chat_request()
             }),
         }))
         .await
@@ -3004,11 +2972,48 @@ async fn render_tokenize_rejects_unknown_model() {
 }
 
 #[tokio::test]
+async fn render_tokenize_returns_parser_grammar_for_required_tool_choice() {
+    let chat = pb::ChatRequest {
+        tool_choice: Some(pb::ChatToolChoice {
+            choice: Some(pb::chat_tool_choice::Choice::Mode(
+                pb::chat_tool_choice::Mode::Required as i32,
+            )),
+        }),
+        ..weather_chat_request()
+    };
+
+    let rendered = render_tokenize(&render_service(), chat).await;
+
+    let structural_tag = rendered.structural_tag.expect("structural_tag");
+    assert!(structural_tag.contains("get_weather"), "{structural_tag}");
+    // The grammar covers the output from its first token.
+    let gate = rendered.engine_reasoning_gate.expect("engine_reasoning_gate");
+    assert_eq!(gate.reasoning_ended, Some(true));
+}
+
+#[tokio::test]
+async fn render_tokenize_composes_structured_output_into_parser_grammar() {
+    let chat = pb::ChatRequest {
+        structured_output: Some(pb::chat_request::StructuredOutput::Json(
+            r#"{"type":"object","properties":{"forecast_summary":{"type":"string"}}}"#.to_string(),
+        )),
+        ..weather_chat_request()
+    };
+
+    let rendered = render_tokenize(&render_service(), chat).await;
+
+    let structural_tag = rendered.structural_tag.expect("structural_tag");
+    assert!(
+        structural_tag.contains("forecast_summary"),
+        "{structural_tag}"
+    );
+}
+
+#[tokio::test]
 async fn render_detokenize_parses_reasoning_and_tool_calls() {
     let service = render_service();
     let chat = weather_chat_request();
-    let generate_request =
-        render_tokenize(&service, chat.clone(), pb::GenerateRequest::default()).await;
+    let rendered = render_tokenize(&service, chat.clone()).await;
     let mut token_ids = render_token_ids(
         "<think>Need tool.</think>\
          <tool_call>\n{\"name\":\"get_weather\", \"arguments\":{\"city\":\"Paris\"}}\n</tool_call>",
@@ -3018,7 +3023,7 @@ async fn render_detokenize_parses_reasoning_and_tool_calls() {
     let mut response = service
         .detokenize(tonic::Request::new(pb::DetokenizeRequest {
             chat: Some(chat),
-            generate_request: Some(generate_request),
+            prompt_token_ids: rendered.prompt_token_ids,
             token_ids,
             finish_info: Some(pb::FinishInfo {
                 finish_reason: pb::finish_info::FinishReason::Stop as i32,
@@ -3049,67 +3054,4 @@ async fn render_detokenize_parses_reasoning_and_tool_calls() {
         }
     "#]]
     .assert_debug_eq(&response);
-}
-
-#[tokio::test]
-async fn render_tokenize_rejects_stop_strings() {
-    let status = render_service()
-        .tokenize(tonic::Request::new(pb::TokenizeRequest {
-            chat: Some(weather_chat_request()),
-            generate: Some(pb::GenerateRequest {
-                stopping: Some(pb::StoppingCriteria {
-                    stop_strings: vec!["END".to_string()],
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }),
-        }))
-        .await
-        .expect_err("stop strings need text output");
-
-    assert_eq!(status.code(), tonic::Code::InvalidArgument);
-}
-
-#[tokio::test]
-async fn render_detokenize_requires_token_ids_prompt() {
-    let status = render_service()
-        .detokenize(tonic::Request::new(pb::DetokenizeRequest {
-            chat: Some(weather_chat_request()),
-            generate_request: Some(pb::GenerateRequest {
-                prompt: Some(pb::generate_request::Prompt::Text("hello".to_string())),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }))
-        .await
-        .expect_err("text prompt");
-
-    assert_eq!(status.code(), tonic::Code::InvalidArgument);
-}
-
-#[tokio::test]
-async fn render_tokenize_applies_parser_grammar_for_required_tool_choice() {
-    let service = render_service();
-    let chat = pb::ChatRequest {
-        tool_choice: Some(pb::ChatToolChoice {
-            choice: Some(pb::chat_tool_choice::Choice::Mode(
-                pb::chat_tool_choice::Mode::Required as i32,
-            )),
-        }),
-        ..weather_chat_request()
-    };
-
-    let rendered = render_tokenize(&service, chat, pb::GenerateRequest::default()).await;
-
-    let structured_output = rendered.decoding.and_then(|decoding| decoding.structured_output);
-    assert!(
-        matches!(
-            structured_output,
-            Some(pb::decoding_parameters::StructuredOutput::StructuralTag(_))
-        ),
-        "{structured_output:?}"
-    );
-    // The grammar covers the output from its first token.
-    let gate = rendered.engine_reasoning_gate.expect("engine_reasoning_gate");
-    assert_eq!(gate.reasoning_ended, Some(true));
 }

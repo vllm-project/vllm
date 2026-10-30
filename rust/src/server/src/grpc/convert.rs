@@ -275,7 +275,7 @@ fn candidate_logprob_spec(
     }
 }
 
-fn convert_structured_output(
+pub(super) fn convert_structured_output(
     d: &pb::DecodingParameters,
 ) -> Result<Option<StructuredOutputsParams>, Status> {
     let so = match d.structured_output.as_ref() {

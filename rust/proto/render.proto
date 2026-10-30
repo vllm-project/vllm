@@ -8,9 +8,15 @@ import "google/protobuf/struct.proto";
 import "inference.proto";
 
 // Engine-free chat rendering, the gRPC counterpart of the HTTP render API.
+//
+// A client renders a chat request with Tokenize, builds its own GenerateRequest
+// from the TokenizeResponse fields, runs it with Inference.Generate, and parses
+// the output token IDs with Detokenize. Setting
+// `response.output_token_ids = true` and `response.output_text = false` on the
+// GenerateRequest returns exactly what Detokenize needs.
 service Render {
-  // Renders a chat conversation into a token-in GenerateRequest that can be
-  // sent to Inference.Generate as is.
+  // Renders a chat request into prompt token IDs plus the generation settings
+  // that rendering decides.
   rpc Tokenize (TokenizeRequest) returns (TokenizeResponse) {}
   // Parses the output token IDs of Inference.Generate into assistant content,
   // reasoning and tool calls.
@@ -23,18 +29,21 @@ service Render {
 
 message TokenizeRequest {
   ChatRequest chat = 1;
-  // Generation parameters, copied into the returned GenerateRequest. The prompt
-  // must be unset; it is filled with the rendered prompt token IDs. Stop
-  // strings are not supported.
-  GenerateRequest generate = 2;
 }
 
+// Copy each field into the GenerateRequest sent to Inference.Generate.
 message TokenizeResponse {
-  // `generate` from the request with its prompt set to the rendered token IDs,
-  // prompt truncation already applied, and the parser-owned structured output,
-  // `skip_special_tokens` and reasoning gate filled in. Its response options
-  // request output token IDs without text; pass them to Detokenize.
-  GenerateRequest generate_request = 1;
+  // The rendered prompt, already truncated. Send as `token_ids`.
+  repeated uint32 prompt_token_ids = 1;
+  // Output grammar built by the tool-call parser, which already includes the
+  // chat request's structured output. When set, send it as
+  // `decoding.structural_tag` in place of that structured output.
+  optional string structural_tag = 2;
+  // Send as `response.skip_special_tokens`. False when the parser needs
+  // special tokens in the output.
+  bool skip_special_tokens = 3;
+  // Send as `engine_reasoning_gate`.
+  EngineReasoningGate engine_reasoning_gate = 4;
 }
 
 // ======================================================================================
@@ -44,9 +53,8 @@ message TokenizeResponse {
 message DetokenizeRequest {
   // The chat request passed to Tokenize, so that parsers resolve the same way.
   ChatRequest chat = 1;
-  // The GenerateRequest returned by Tokenize. Supplies the prompt token IDs and
-  // the decoding options, such as stop strings and `skip_special_tokens`.
-  GenerateRequest generate_request = 2;
+  // `TokenizeResponse.prompt_token_ids`, used to initialize the parsers.
+  repeated uint32 prompt_token_ids = 2;
   // All output token IDs from Inference.Generate, in order.
   repeated uint32 token_ids = 3;
   // Finish info from the final Inference.Generate response. Omitted means the
@@ -88,6 +96,24 @@ message ChatRequest {
   google.protobuf.Struct chat_template_kwargs = 9;
   // Model-specific reasoning effort, such as "low" or "high".
   optional string reasoning_effort = 10;
+  // Served model name. Empty means the default model.
+  string model = 11;
+  // Structured-output constraint on the answer, as in
+  // `DecodingParameters.structured_output`. The tool-call parser composes it
+  // into its output grammar; see `TokenizeResponse.structural_tag`.
+  oneof structured_output {
+    string json = 12;
+    string regex = 13;
+    DecodingParameters.StringChoices choice = 14;
+    string grammar = 15;
+    bool json_object = 16;
+    string structural_tag = 17;
+  }
+  // Keep only the last N prompt tokens. Default (0) means no truncation.
+  uint32 truncate_prompt_tokens = 18;
+  // Defaults to true when omitted. Overridden to false when the parser needs
+  // special tokens in the output.
+  optional bool skip_special_tokens = 19;
 }
 
 message ChatMessage {

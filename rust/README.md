@@ -165,12 +165,12 @@ curl http://127.0.0.1:8000/v1/chat/completions/render \
 ```
 
 Pass `--grpc-port` to also serve the `vllm.Render` gRPC service on `--host`.
-`Render.Tokenize` renders a chat request into a tokens-only
-`vllm.GenerateRequest` for `Inference.Generate`. `Render.Detokenize` takes the
-output token IDs and returns the answer text, reasoning, and parsed tool calls.
-Stop strings are not supported. Both RPCs read
-generation parameters from a caller-supplied `GenerateRequest`; see
-[`render.proto`](proto/render.proto).
+`Render.Tokenize` renders a chat request into prompt token IDs plus the
+settings rendering decides (tool-call grammar, `skip_special_tokens`, reasoning
+gate), which the client copies into its `vllm.GenerateRequest` for
+`Inference.Generate`. `Render.Detokenize` takes the output token IDs and returns
+the answer text, reasoning, and parsed tool calls. Stop strings are not
+supported; see [`render.proto`](proto/render.proto).
 
 ### Example Request
 

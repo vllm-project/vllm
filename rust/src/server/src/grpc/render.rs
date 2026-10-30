@@ -11,17 +11,19 @@ use thiserror_ext::AsReport as _;
 use tonic::{Request, Response, Status};
 use tracing::{info_span, warn};
 use tracing_futures::Instrument as _;
+use uuid::Uuid;
 use vllm_chat::{
     AssistantContentBlock, AssistantMessageExt as _, AssistantToolCall, ChatContent,
     ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRequestProcessor, ChatTool,
-    ChatToolChoice, ResolvedToolContext,
+    ChatToolChoice, ResolvedToolContext, SamplingParams,
 };
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
-use vllm_engine_core_client::protocol::structured_outputs::{
-    StructuredOutputConstraint, StructuredOutputsParams,
+use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
+use vllm_text::{
+    FinishReason, PromptTruncation, PromptTruncationLimit, TextDecodeOptions, TextRequestProcessor,
+    TruncationSide,
 };
-use vllm_text::{FinishReason, TextRequestProcessor};
 
 use super::convert::{self, json_to_proto_struct};
 use super::inference::text_error_to_status;
@@ -86,31 +88,21 @@ impl<S: RenderContext> Render for RenderServiceImpl<S> {
         &self,
         request: Request<pb::TokenizeRequest>,
     ) -> Result<Response<pb::TokenizeResponse>, Status> {
-        let pb::TokenizeRequest { chat, generate } = request.into_inner();
-        let generate = generate.unwrap_or_default();
-        let span = info_span!("grpc_render", rpc = "Tokenize", request_id = %generate.request_id);
-        let result = tokenize(self.state.as_ref(), chat.unwrap_or_default(), generate)
-            .instrument(span.clone())
-            .await;
+        let chat = request.into_inner().chat.unwrap_or_default();
+        let span = info_span!("grpc_render", rpc = "Tokenize");
+        let result = tokenize(self.state.as_ref(), chat).instrument(span.clone()).await;
         log_failure(&span, &result);
-        result.map(|generate_request| {
-            Response::new(pb::TokenizeResponse {
-                generate_request: Some(generate_request),
-            })
-        })
+        result.map(Response::new)
     }
 
     async fn detokenize(
         &self,
         request: Request<pb::DetokenizeRequest>,
     ) -> Result<Response<pb::DetokenizeResponse>, Status> {
-        let request = request.into_inner();
-        let span = info_span!(
-            "grpc_render",
-            rpc = "Detokenize",
-            request_id = request.generate_request.as_ref().map_or("", |r| &r.request_id),
-        );
-        let result = detokenize(self.state.as_ref(), request).instrument(span.clone()).await;
+        let span = info_span!("grpc_render", rpc = "Detokenize");
+        let result = detokenize(self.state.as_ref(), request.into_inner())
+            .instrument(span.clone())
+            .await;
         log_failure(&span, &result);
         result.map(Response::new)
     }
@@ -130,37 +122,9 @@ fn log_failure<T>(span: &tracing::Span, result: &Result<T, Status>) {
 async fn tokenize(
     state: &impl RenderContext,
     chat: pb::ChatRequest,
-    mut generate: pb::GenerateRequest,
-) -> Result<pb::GenerateRequest, Status> {
-    if generate.prompt.is_some() {
-        return Err(Status::invalid_argument(
-            "generate.prompt must be unset; Tokenize renders it from the chat request",
-        ));
-    }
-    // TODO: support multimodal inputs.
-    if !generate.media.is_empty() {
-        return Err(Status::invalid_argument(
-            "generate.media is not supported by Tokenize",
-        ));
-    }
-    // TODO: support stop strings, which need text from Generate.
-    if generate
-        .stopping
-        .as_ref()
-        .is_some_and(|stopping| !stopping.stop_strings.is_empty())
-    {
-        return Err(Status::invalid_argument(
-            "generate.stopping.stop_strings is not supported by Tokenize",
-        ));
-    }
-    // Generate returns token IDs only; Detokenize produces the text.
-    let response = generate.response.get_or_insert_default();
-    response.output_token_ids = true;
-    response.output_text = Some(false);
-
-    let chat_request = to_chat_request(state, chat, &generate)?;
+) -> Result<pb::TokenizeResponse, Status> {
+    let chat_request = to_chat_request(state, chat)?;
     let structured_outputs = chat_request.sampling_params.structured_outputs.clone();
-    let skip_special_tokens = chat_request.decode_options.skip_special_tokens;
 
     let (text_request, _) = state
         .chat_processor()
@@ -170,28 +134,23 @@ async fn tokenize(
     let prepared = state.text_processor().prepare(text_request).map_err(text_error_to_status)?;
     let text_request = prepared.text_request;
 
-    // Patch what rendering decided on top of the caller's generation parameters.
-    generate.request_id = text_request.request_id;
-    generate.prompt = Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
-        ids: prepared.generate_request.prompt_token_ids,
-    }));
-    // The returned prompt is already truncated.
-    generate.truncate_prompt_tokens = 0;
-    if text_request.sampling_params.structured_outputs != structured_outputs {
-        generate.decoding.get_or_insert_default().structured_output = text_request
-            .sampling_params
-            .structured_outputs
-            .as_ref()
-            .map(structured_output_to_proto);
-    }
-    if text_request.decode_options.skip_special_tokens != skip_special_tokens {
-        generate.response.get_or_insert_default().skip_special_tokens =
-            Some(text_request.decode_options.skip_special_tokens);
-    }
+    // A parser-built output grammar replaces the request's structured output.
+    let structural_tag = text_request
+        .sampling_params
+        .structured_outputs
+        .filter(|params| Some(params) != structured_outputs.as_ref())
+        .map(|params| {
+            params.constraint.into_structural_tag().map_err(|constraint| {
+                Status::internal(format!(
+                    "parser output grammar is not a structural tag: {constraint:?}"
+                ))
+            })
+        })
+        .transpose()?;
     let ReasoningParserKwargs {
         chat_template_kwargs,
     } = text_request.reasoning_parser_kwargs;
-    generate.engine_reasoning_gate = (text_request.reasoning_ended.is_some()
+    let engine_reasoning_gate = (text_request.reasoning_ended.is_some()
         || !chat_template_kwargs.is_empty())
     .then(|| pb::EngineReasoningGate {
         reasoning_ended: text_request.reasoning_ended,
@@ -199,7 +158,13 @@ async fn tokenize(
             chat_template_kwargs.into_iter().collect(),
         )),
     });
-    Ok(generate)
+
+    Ok(pb::TokenizeResponse {
+        prompt_token_ids: prepared.generate_request.prompt_token_ids,
+        structural_tag,
+        skip_special_tokens: text_request.decode_options.skip_special_tokens,
+        engine_reasoning_gate,
+    })
 }
 
 async fn detokenize(
@@ -208,23 +173,11 @@ async fn detokenize(
 ) -> Result<pb::DetokenizeResponse, Status> {
     let pb::DetokenizeRequest {
         chat,
-        generate_request,
+        prompt_token_ids,
         token_ids,
         finish_info,
     } = request;
-    let generate_request =
-        generate_request.ok_or_else(|| Status::invalid_argument("generate_request is required"))?;
-    let Some(pb::generate_request::Prompt::TokenIds(prompt)) = &generate_request.prompt else {
-        return Err(Status::invalid_argument(
-            "generate_request.prompt must be the token_ids returned by Tokenize",
-        ));
-    };
-    let prompt_token_ids = prompt.ids.clone();
-    let finish_reason = finish_reason_from_proto(finish_info.as_ref());
-
-    let mut chat_request = to_chat_request(state, chat.unwrap_or_default(), &generate_request)?;
-    // Tokenize turns off text output for Generate, not for Detokenize.
-    chat_request.decode_options.detokenize = true;
+    let chat_request = to_chat_request(state, chat.unwrap_or_default())?;
     let collected = state
         .chat_processor()
         .detokenize(
@@ -232,7 +185,7 @@ async fn detokenize(
             state.text_processor(),
             prompt_token_ids,
             token_ids,
-            finish_reason,
+            finish_reason_from_proto(finish_info.as_ref()),
         )
         .await
         .map_err(chat_error_to_status)?;
@@ -257,8 +210,6 @@ async fn detokenize(
 /// decoding.
 ///
 /// Only token stops end the output with a token that is hidden from the text.
-/// Stop strings are matched again while decoding, from the stop strings of the
-/// generate request.
 fn finish_reason_from_proto(finish_info: Option<&pb::FinishInfo>) -> FinishReason {
     use pb::finish_info::{FinishReason as PbFinishReason, StopReason as PbStopReason};
 
@@ -282,22 +233,16 @@ fn finish_reason_from_proto(finish_info: Option<&pb::FinishInfo>) -> FinishReaso
 // Request conversion
 // ========================================================================================
 
-/// Build the chat request from its proto form plus the generation parameters
-/// of `generate`, whose prompt is ignored.
 fn to_chat_request(
     state: &impl RenderContext,
     chat: pb::ChatRequest,
-    generate: &pb::GenerateRequest,
 ) -> Result<ChatRequest, Status> {
-    // Reuse the Generate conversion for the generation parameters only.
-    let text_request = convert::to_text_request(
-        pb::GenerateRequest {
-            prompt: Some(pb::generate_request::Prompt::TokenIds(Default::default())),
-            ..generate.clone()
-        },
-        /* stream */ false,
-        state.served_model_names(),
-    )?;
+    if !chat.model.is_empty() && !state.served_model_names().contains(&chat.model) {
+        return Err(Status::not_found(format!(
+            "model `{}` not found",
+            chat.model
+        )));
+    }
 
     let messages: Vec<_> = chat.messages.into_iter().map(message_from_proto).try_collect()?;
     let generation_prompt_mode = normalize_generation_prompt_mode(
@@ -327,9 +272,12 @@ fn to_chat_request(
     .map_err(chat_error_to_status)?;
 
     Ok(ChatRequest {
-        request_id: text_request.request_id,
+        request_id: Uuid::new_v4().to_string(),
         messages,
-        sampling_params: text_request.sampling_params,
+        sampling_params: SamplingParams {
+            structured_outputs: structured_output_from_proto(chat.structured_output)?,
+            ..Default::default()
+        },
         chat_options: ChatOptions {
             generation_prompt_mode,
             chat_template: chat.chat_template,
@@ -344,15 +292,22 @@ fn to_chat_request(
                 .unwrap_or_default(),
         },
         tool_context,
-        decode_options: text_request.decode_options,
+        decode_options: TextDecodeOptions {
+            skip_special_tokens: chat.skip_special_tokens.unwrap_or(true),
+            ..Default::default()
+        },
         intermediate: false,
-        prompt_truncation: text_request.prompt_truncation,
-        priority: text_request.priority,
+        // Proto3 uses zero as unset, as in `GenerateRequest`.
+        prompt_truncation: (chat.truncate_prompt_tokens != 0).then_some(PromptTruncation {
+            limit: PromptTruncationLimit::Fixed(u64::from(chat.truncate_prompt_tokens)),
+            side: TruncationSide::Left,
+        }),
+        priority: 0,
         documents: None,
-        cache_salt: text_request.cache_salt,
+        cache_salt: None,
         add_special_tokens: chat.add_special_tokens,
         data_parallel_rank: None,
-        session_id: text_request.session_id,
+        session_id: None,
         lora_request: None,
     })
 }
@@ -447,26 +402,24 @@ fn tools_from_proto(tools: Vec<pb::ChatTool>) -> Result<Vec<ChatTool>, Status> {
         .collect()
 }
 
-fn structured_output_to_proto(
-    params: &StructuredOutputsParams,
-) -> pb::decoding_parameters::StructuredOutput {
-    use pb::decoding_parameters::{StringChoices, StructuredOutput};
+fn structured_output_from_proto(
+    structured_output: Option<pb::chat_request::StructuredOutput>,
+) -> Result<Option<StructuredOutputsParams>, Status> {
+    use pb::chat_request::StructuredOutput as Chat;
+    use pb::decoding_parameters::StructuredOutput as Decoding;
 
-    match &params.constraint {
-        StructuredOutputConstraint::Json(serde_json::Value::String(schema)) => {
-            StructuredOutput::Json(schema.clone())
-        }
-        StructuredOutputConstraint::Json(schema) => StructuredOutput::Json(schema.to_string()),
-        StructuredOutputConstraint::Regex(regex) => StructuredOutput::Regex(regex.clone()),
-        StructuredOutputConstraint::Choice(choices) => StructuredOutput::Choice(StringChoices {
-            choices: choices.clone(),
-        }),
-        StructuredOutputConstraint::Grammar(grammar) => StructuredOutput::Grammar(grammar.clone()),
-        StructuredOutputConstraint::JsonObject => StructuredOutput::JsonObject(true),
-        StructuredOutputConstraint::StructuralTag(tag) => {
-            StructuredOutput::StructuralTag(tag.clone())
-        }
-    }
+    let structured_output = structured_output.map(|output| match output {
+        Chat::Json(schema) => Decoding::Json(schema),
+        Chat::Regex(regex) => Decoding::Regex(regex),
+        Chat::Choice(choices) => Decoding::Choice(choices),
+        Chat::Grammar(grammar) => Decoding::Grammar(grammar),
+        Chat::JsonObject(json_object) => Decoding::JsonObject(json_object),
+        Chat::StructuralTag(tag) => Decoding::StructuralTag(tag),
+    });
+    convert::convert_structured_output(&pb::DecodingParameters {
+        structured_output,
+        ..Default::default()
+    })
 }
 
 // ========================================================================================
