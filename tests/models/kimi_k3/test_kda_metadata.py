@@ -215,6 +215,7 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
         speculative_config=SimpleNamespace(
             num_speculative_tokens=2,
             parallel_drafting=False,
+            enable_adaptive_verification=False,
             use_eagle_block_drop=Mock(return_value=False),
         ),
         compilation_config=SimpleNamespace(

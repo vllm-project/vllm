@@ -1326,6 +1326,9 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "NemotronHForCausalLM": NemotronHForCausalLMConfig,
     "NemotronHPuzzleForCausalLM": NemotronHForCausalLMConfig,
     "NemotronH_Nano_VL_V2": NemotronHNanoVLV2Config,
+    "NemotronH_Nano_Omni_Reasoning_V3": NemotronHNanoVLV2Config,
+    "NemotronH_Super_Omni_Reasoning_V3": NemotronHNanoVLV2Config,
+    "NemotronH_Omni_Reasoning_V3": NemotronHNanoVLV2Config,
     "Nemotron3_5TranscribeForConditionalGeneration": (
         Nemotron3_5TranscribeForConditionalGenerationConfig
     ),
