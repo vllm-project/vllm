@@ -175,6 +175,9 @@ class NCCLWeightTransferEngine(
         from vllm.model_executor.model_loader.reload import finish_reload
 
         finish_reload(self.model, self.model_config, self.device)
+        # Release the cached receive buffers and post-load temporaries so memory
+        # allocated outside torch (NCCL, other processes on the GPU) can use it.
+        torch.accelerator.empty_cache()
 
     def receive_weights(self, update_info: NCCLWeightTransferUpdateInfo) -> None:
         """Receive weights from trainer via NCCL broadcast.

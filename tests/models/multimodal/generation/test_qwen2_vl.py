@@ -126,6 +126,7 @@ def batch_make_image_embeddings(
     image_processor = processor.image_processor
 
     mm_config = llm.get_llm().model_config.multimodal_config
+    assert mm_config is not None
     mm_kwargs = mm_config.merge_mm_processor_kwargs({})
     preprocess_result = image_processor.preprocess(
         images=images, return_tensors="pt", **mm_kwargs
@@ -211,6 +212,7 @@ def batch_make_video_embeddings(
     video_processor = processor.video_processor
 
     mm_config = llm.get_llm().model_config.multimodal_config
+    assert mm_config is not None
     mm_kwargs = mm_config.merge_mm_processor_kwargs({})
     preprocess_result = video_processor.preprocess(
         videos=videos, return_tensors="pt", **mm_kwargs
