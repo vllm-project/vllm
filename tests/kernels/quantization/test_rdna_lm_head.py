@@ -26,6 +26,10 @@ from vllm.model_executor.layers.quantization.online.int4_lm_head import (
     quantize_int4_rows,
     quantize_lm_head_int4,
 )
+from vllm.model_executor.layers.quantization.online.int8_lm_head import (
+    Int8LMHeadMethod,
+    quantize_lm_head_int8,
+)
 from vllm.model_executor.layers.quantization.online.rdna_lm_head import (
     RdnaLMHeadMethod,
 )
@@ -59,6 +63,10 @@ def _dequantize_int4(codes, scales, zero_points, group_size=GROUP_SIZE):
     return (codes.float() - zero_point) * scale
 
 
+def _dequantize_int8(codes, scales):
+    return codes.float() * scales.float()[:, None]
+
+
 @dataclass(frozen=True)
 class Scheme:
     method: type[RdnaLMHeadMethod]
@@ -85,6 +93,17 @@ SCHEMES = [
             full_precision_tol=0.12,
         ),
         id="int4_per_group_32",
+    ),
+    pytest.param(
+        Scheme(
+            method=Int8LMHeadMethod,
+            reference=lambda w: _dequantize_int8(*quantize_lm_head_int8(w)),
+            weight_dtype=torch.int8,
+            weight_cols=lambda k: k,
+            # Measured 8.4e-3, against 8.2e-2 for int4_per_group_32.
+            full_precision_tol=0.015,
+        ),
+        id="int8_per_channel",
     ),
 ]
 
@@ -275,3 +294,35 @@ def test_quantize_lm_head_int4_layout():
     assert torch.equal(_unshuffle(w_q), codes)
     assert torch.equal(w_s, scales)
     assert torch.equal(w_zp, pack_zero_points(zero_points))
+
+
+# int8_per_channel quantizer
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_quantize_lm_head_int8_error_bound(dtype):
+    torch.manual_seed(0)
+    weight = (torch.randn(64, 256) * 0.02).to(dtype)
+    weight[-8:] = 0  # vocab padding rows
+    codes, scales = quantize_lm_head_int8(weight)
+
+    assert codes.shape == (64, 256) and codes.dtype == torch.int8
+    assert scales.shape == (64,) and scales.dtype == dtype
+    assert int(codes.min()) >= -127 and int(codes.max()) <= 127
+
+    dequant = _dequantize_int8(codes, scales)
+    error = (dequant - weight.float()).abs()
+    # Rounding the scale to the model dtype can push a row's amax just past
+    # 127 steps, but by less than half a step, so the clamp stays within it.
+    assert (error <= scales.float()[:, None] / 2).all()
+    assert torch.equal(dequant[-8:], torch.zeros(8, 256))
+
+
+def test_quantize_lm_head_int8_chunks_match():
+    torch.manual_seed(0)
+    weight = (torch.randn(96, 128) * 0.02).to(torch.bfloat16)
+    codes, scales = quantize_lm_head_int8(weight, chunk_rows=40)
+    ref_codes, ref_scales = quantize_lm_head_int8(weight, chunk_rows=96)
+
+    assert torch.equal(codes, ref_codes)
+    assert torch.equal(scales, ref_scales)
