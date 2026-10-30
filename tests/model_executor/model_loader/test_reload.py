@@ -1525,3 +1525,75 @@ def test_online_quantize_reload(
         mul_perp = llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0]
         add_perp = llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0]
         assert add_perp < mul_perp
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="The single-call path needs device-resident source tensors.",
+)
+def test_reload_fused_expert_tensors_from_device(
+    monkeypatch, dist_init, workspace_init
+):
+    """Reloading a real MoE model from fused expert tensors on the device loads
+    each shard with one `weight_loader` call and leaves every parameter exactly
+    as the initial load produced it."""
+    from collections import defaultdict
+
+    import regex as re
+    from safetensors.torch import load_file
+
+    from tests.quantization.utils import load_model_without_vllm_runner
+    from vllm.config import KernelConfig
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+    from vllm.model_executor.model_loader.reload.inplace import reload_weights
+    from vllm.model_executor.model_loader.weight_utils import (
+        download_weights_from_hf,
+    )
+
+    fused_loads = 0
+    original_loader = RoutedExperts.weight_loader
+
+    def counting_loader(self, param, loaded_weight, *args, **kwargs):
+        nonlocal fused_loads
+        # Layerwise reload buffers each call on a meta param and replays it.
+        fused_loads += loaded_weight.dim() == 3 and not param.is_meta
+        return original_loader(self, param, loaded_weight, *args, **kwargs)
+
+    monkeypatch.setattr(RoutedExperts, "weight_loader", counting_loader)
+
+    model_name = "tiny-random/qwen3.5-moe"
+    # A backend that accepts this tiny model's 8-wide hidden size.
+    model, vllm_config = load_model_without_vllm_runner(
+        model_name,
+        dtype="bfloat16",
+        vllm_config_kwargs={"kernel_config": KernelConfig(moe_backend="triton")},
+    )
+    loaded = {name: p.detach().clone() for name, p in model.named_parameters()}
+    device = next(model.parameters()).device
+    assert fused_loads == 0  # the checkpoint stores experts one by one
+
+    # Re-pack the checkpoint's per-expert tensors into the fused layout.
+    model_dir = download_weights_from_hf(model_name, None, ["*.safetensors"])
+    checkpoint = load_file(f"{model_dir}/model.safetensors")
+    expert_name = re.compile(r"(.+\.mlp\.experts)\.(\d+)\.(gate|up|down)_proj\.weight")
+    experts: dict[str, dict] = defaultdict(dict)
+    weights = []
+    for name, tensor in checkpoint.items():
+        if name.startswith("mtp."):
+            continue
+        if match := expert_name.fullmatch(name):
+            experts[match[1]][int(match[2]), match[3]] = tensor
+        else:
+            weights.append((name, tensor.to(device)))
+    for prefix, shards in experts.items():
+        ids = range(1 + max(expert for expert, _ in shards))
+        gate_up = [torch.cat([shards[e, "gate"], shards[e, "up"]]) for e in ids]
+        down = [shards[e, "down"] for e in ids]
+        weights.append((f"{prefix}.gate_up_proj", torch.stack(gate_up).to(device)))
+        weights.append((f"{prefix}.down_proj", torch.stack(down).to(device)))
+
+    reload_weights(vllm_config, model, iter(weights), None, True)
+
+    assert fused_loads == 3 * len(experts)  # w1, w3 and w2 per layer
+    for name, param in model.named_parameters():
+        assert torch.equal(param, loaded[name]), name

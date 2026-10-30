@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.model_executor.layers.fused_moe import routed_experts as routed_experts_module
 from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     UnquantizedMoeBackend,
 )
@@ -808,3 +809,192 @@ class TestPerTensorScaleCoercion:
         # numel > 1 must fail loudly instead of silently picking an element.
         with pytest.raises(RuntimeError):
             RoutedExperts._to_scalar(torch.tensor([0.1, 0.2]))
+
+
+ACCELERATOR = (
+    torch.accelerator.current_accelerator()
+    if torch.accelerator.is_available()
+    else None
+)
+
+
+def _make_fused_experts(
+    num_experts: int,
+    hidden: int,
+    intermediate: int,
+    tp_size: int,
+    tp_rank: int,
+    *,
+    dtype: torch.dtype = torch.float32,
+    device: torch.device | str = "cpu",
+    is_gated: bool = True,
+    transposed: bool = False,
+    expert_map: torch.Tensor | None = None,
+) -> RoutedExperts:
+    """A RoutedExperts with real `weight_loader` and fused-checkpoint mapping."""
+    experts = object.__new__(RoutedExperts)
+    torch.nn.Module.__init__(experts)
+    experts.layer_name = "model.layers.0.mlp.experts"
+    experts.moe_config = SimpleNamespace(
+        is_act_and_mul=is_gated,
+        tp_rank=tp_rank,
+        tp_size=tp_size,
+        moe_parallel_config=SimpleNamespace(tp_size=tp_size),
+        tp_shard_with_padding=False,
+        num_experts=num_experts,
+        num_logical_experts=num_experts,
+    )
+    experts.expert_map_manager = SimpleNamespace(
+        expert_map=expert_map,
+        num_fused_shared_experts=0,
+        map_global_to_local=lambda global_id: (
+            global_id if expert_map is None else int(expert_map[global_id])
+        ),
+    )
+    experts.quant_config = None
+    experts.quant_method = SimpleNamespace()
+    experts._fused_shared_expert_quantizer = None
+    experts._loaded_expert_biases = set()
+    experts.is_fused_checkpoint_transposed = transposed
+    mapping = RoutedExperts.build_expert_params_mapping(
+        "gate_proj" if is_gated else "up_proj",
+        "down_proj",
+        "up_proj" if is_gated else None,
+        num_experts=num_experts,
+        routed_experts_prefix="",
+        include_fused=True,
+        is_gated=is_gated,
+    )
+    experts.get_expert_mapping = lambda **_: mapping  # type: ignore[method-assign]
+    per_rank = intermediate // tp_size
+    w13_rows = per_rank * (2 if is_gated else 1)
+    for name, shape in (
+        ("w13_weight", (num_experts, w13_rows, hidden)),
+        ("w2_weight", (num_experts, hidden, per_rank)),
+    ):
+        param = torch.nn.Parameter(
+            torch.zeros(shape, dtype=dtype, device=device), requires_grad=False
+        )
+        param.weight_loader = experts.weight_loader
+        experts.register_parameter(name, param)
+    return experts
+
+
+class TestLoadFusedExpertsAtOnce:
+    """A fused [E, ...] weight already on an accelerator (an online weight
+    update) goes to `weight_loader` in one call when every expert is local,
+    and lands exactly where the per-expert loop puts it."""
+
+    NUM_EXPERTS = 8
+    HIDDEN = 6
+    INTERMEDIATE = 4
+
+    @pytest.fixture
+    def loader_calls(self, monkeypatch):
+        calls = []
+        original = RoutedExperts.weight_loader
+
+        def counting_weight_loader(self, param, loaded_weight, *args, **kwargs):
+            calls.append((kwargs.get("shard_id"), loaded_weight.dim()))
+            return original(self, param, loaded_weight, *args, **kwargs)
+
+        monkeypatch.setattr(RoutedExperts, "weight_loader", counting_weight_loader)
+        return calls
+
+    def _make(self, tp_size, tp_rank, **kwargs) -> RoutedExperts:
+        return _make_fused_experts(
+            self.NUM_EXPERTS, self.HIDDEN, self.INTERMEDIATE, tp_size, tp_rank, **kwargs
+        )
+
+    def _checkpoint(self, is_gated, transposed, dtype, device):
+        num_experts, hidden, inter = self.NUM_EXPERTS, self.HIDDEN, self.INTERMEDIATE
+        w13_rows = inter * (2 if is_gated else 1)
+        # Distinct small integers survive every dtype, including fp8 and uint8.
+        w13 = torch.arange(num_experts * w13_rows * hidden).remainder(97)
+        w13 = w13.reshape(num_experts, w13_rows, hidden).to(dtype).to(device)
+        w2 = torch.arange(num_experts * hidden * inter).remainder(89) + 1
+        w2 = w2.reshape(num_experts, hidden, inter).to(dtype).to(device)
+        names = ("gate_up_proj" if is_gated else "up_proj", "down_proj")
+        if transposed:
+            tensors = (w13.transpose(-1, -2), w2.transpose(-1, -2))
+        else:
+            tensors = (w13, w2)
+        return w13, w2, list(zip(names, tensors))
+
+    def _expected(self, w13, w2, tp_size, tp_rank, is_gated):
+        per_rank = self.INTERMEDIATE // tp_size
+        rows = slice(per_rank * tp_rank, per_rank * (tp_rank + 1))
+        if is_gated:
+            gate, up = w13.chunk(2, dim=1)
+            expected_w13 = torch.cat([gate[:, rows], up[:, rows]], dim=1)
+        else:
+            expected_w13 = w13[:, rows]
+        return expected_w13, w2[:, :, rows]
+
+    @pytest.mark.skipif(ACCELERATOR is None, reason="requires an accelerator")
+    @pytest.mark.parametrize(
+        "dtype", [torch.bfloat16, torch.float8_e4m3fn, torch.uint8]
+    )
+    @pytest.mark.parametrize("tp_size,tp_rank", [(1, 0), (2, 0), (2, 1)])
+    @pytest.mark.parametrize("is_gated", [True, False])
+    @pytest.mark.parametrize("transposed", [False, True])
+    def test_one_call_per_shard_matches_per_expert_load(
+        self, monkeypatch, loader_calls, dtype, tp_size, tp_rank, is_gated, transposed
+    ):
+        assert ACCELERATOR is not None
+        if dtype == torch.float8_e4m3fn and ACCELERATOR.type == "mps":
+            pytest.skip("MPS has no float8")
+        w13, w2, weights = self._checkpoint(is_gated, transposed, dtype, ACCELERATOR)
+        expected_w13, expected_w2 = self._expected(w13, w2, tp_size, tp_rank, is_gated)
+        shards = ("w1", "w3", "w2") if is_gated else ("w1", "w2")
+        kwargs = dict(
+            is_gated=is_gated, transposed=transposed, dtype=dtype, device=ACCELERATOR
+        )
+
+        fast = self._make(tp_size, tp_rank, **kwargs)
+        loaded = list(RoutedExperts.load_weights(fast, iter(weights)))
+        assert sorted(loaded) == sorted(
+            "w2_weight" if shard == "w2" else "w13_weight" for shard in shards
+        )
+        assert loader_calls == [(shard, 3) for shard in shards]
+        assert torch.equal(fast.w13_weight.data.cpu(), expected_w13.cpu())
+        assert torch.equal(fast.w2_weight.data.cpu(), expected_w2.cpu())
+
+        # The per-expert loop must produce the identical parameters.
+        loader_calls.clear()
+        monkeypatch.setattr(
+            routed_experts_module, "_can_load_fused_experts_at_once", lambda *_: False
+        )
+        slow = self._make(tp_size, tp_rank, **kwargs)
+        list(RoutedExperts.load_weights(slow, iter(weights)))
+        assert len(loader_calls) == len(shards) * self.NUM_EXPERTS
+        assert torch.equal(slow.w13_weight.data.cpu(), fast.w13_weight.data.cpu())
+        assert torch.equal(slow.w2_weight.data.cpu(), fast.w2_weight.data.cpu())
+
+    def test_host_source_keeps_per_expert_load(self, loader_calls):
+        # A checkpoint read from host memory keeps per-expert copies, so no
+        # device staging copy of the whole tensor is made.
+        w13, w2, weights = self._checkpoint(True, False, torch.float32, "cpu")
+        experts = self._make(2, 1)
+        list(RoutedExperts.load_weights(experts, iter(weights)))
+        assert len(loader_calls) == 3 * self.NUM_EXPERTS
+        assert all(dim == 2 for _, dim in loader_calls)
+        expected_w13, expected_w2 = self._expected(w13, w2, 2, 1, True)
+        assert torch.equal(experts.w13_weight.data, expected_w13)
+        assert torch.equal(experts.w2_weight.data, expected_w2)
+
+    @staticmethod
+    def _eligible(experts, name="w13_weight", shard=None):
+        param = getattr(experts, name)
+        if shard is None:
+            shard = torch.empty(param.shape, dtype=param.dtype, device="meta")
+        return routed_experts_module._can_load_fused_experts_at_once(
+            experts, param, name, shard
+        )
+
+    def test_custom_quantization_loader_keeps_per_expert_load(self):
+        # e.g. Quark int4 repacks one 2-D expert per call.
+        experts = self._make(1, 0, device="meta")
+        original = experts.w13_weight.weight_loader
+        experts.w13_weight.weight_loader = lambda *a, **k: original(*a, **k)
+        assert not self._eligible(experts)
