@@ -5317,21 +5317,6 @@ class GPUModelRunner(
                 # This is the last chunk of prompt tokens to return.
                 num_logits = num_remaining_tokens
                 completed_prefill_reqs.append(req_id)
-                # Diagnostic: report any prompt row that was never written so a
-                # clean run can prove coverage without relying on a decode
-                # failure (#61490). A row still holding the -1 sentinel was
-                # skipped, e.g. by a prefix-cache hit the redo failed to ignore.
-                unwritten = (logprobs_tensors.logprob_token_ids[:, 0] == -1).nonzero()
-                if unwritten.numel():
-                    positions = unwritten.flatten().tolist()
-                    logger.warning(
-                        "Request %s: %d prompt-logprobs row(s) never written "
-                        "(first uncovered positions %s). These rows cannot be "
-                        "valid; the prefill did not recompute the whole prompt.",
-                        req_id,
-                        len(positions),
-                        positions[:8],
-                    )
                 prompt_logprobs_dict[req_id] = logprobs_tensors
 
             if num_logits <= 0:
@@ -5383,6 +5368,25 @@ class GPUModelRunner(
         # Must synchronize the non-blocking GPU->CPU transfers.
         if prompt_logprobs_dict:
             self._sync_device()
+
+        # Coverage diagnostic, checked only after the D2H sync above so the CPU
+        # tensors reflect this chunk's copies. Running it in the loop flagged
+        # every normal single-chunk prefill as unwritten, because the rows still
+        # held the -1 sentinel until the copy landed. A row still holding the
+        # sentinel after the sync was genuinely skipped, e.g. by a prefix-cache
+        # hit the redo failed to ignore (#61490).
+        for req_id, tensors in prompt_logprobs_dict.items():
+            unwritten = (tensors.logprob_token_ids[:, 0] == -1).nonzero()
+            if unwritten.numel():
+                positions = unwritten.flatten().tolist()
+                logger.warning(
+                    "Request %s: %d prompt-logprobs row(s) never written "
+                    "(first uncovered positions %s). These rows cannot be "
+                    "valid; the prefill did not recompute the whole prompt.",
+                    req_id,
+                    len(positions),
+                    positions[:8],
+                )
 
         return prompt_logprobs_dict
 
