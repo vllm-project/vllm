@@ -391,3 +391,46 @@ def test_fp8_flashinfer_cutlass_scales_refilled_in_place():
     torch.testing.assert_close(layer.g1_alphas, torch.full((4,), 4.0))
     torch.testing.assert_close(layer._a2_gscale, torch.full((1,), 0.5))
     assert sorted(n for n, _ in layer.named_parameters()) == ["g1_alphas", "g2_alphas"]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA mem pools")
+def test_localized_nvfp4_shards_refilled_in_place():
+    """CuteDSL NVFP4 per-locality-domain shards: a post-load rerun refills the
+    registered shard parameters (and so the MMA views of their scales) at their
+    first addresses."""
+    from types import SimpleNamespace
+
+    from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
+        _LOCALIZED_SHARD_PARAMS,
+        _shard_nvfp4_moe_weights_per_die,
+    )
+
+    res = SimpleNamespace(
+        num_split=2, pools=[torch.cuda.MemPool(), torch.cuda.MemPool()]
+    )
+    layer = torch.nn.Module()
+
+    def shard(fill: int) -> list[dict]:
+        def full(shape, dtype):
+            return torch.full(shape, fill, dtype=torch.uint8, device="cuda").view(dtype)
+
+        return _shard_nvfp4_moe_weights_per_die(
+            layer,
+            res,
+            full((2, 256, 32), torch.uint8),
+            full((2, 256, 4), torch.float8_e4m3fn),
+            full((2, 256, 64), torch.uint8),
+            full((2, 256, 8), torch.float8_e4m3fn),
+        )
+
+    first = shard(1)
+    names = [f"localized{i}_{n}" for i in range(2) for n in _LOCALIZED_SHARD_PARAMS]
+    params = {n: getattr(layer, n) for n in names}
+    ptrs = {n: p.data_ptr() for n, p in params.items()}
+    views = [s["w13_weight_scale"].data_ptr() for s in first]
+    second = shard(2)
+    for n in names:
+        assert getattr(layer, n) is params[n]
+        assert getattr(layer, n).data_ptr() == ptrs[n]
+    assert [s["w13_weight_scale"].data_ptr() for s in second] == views
+    assert (layer.localized0_w13_weight == 2).all()
