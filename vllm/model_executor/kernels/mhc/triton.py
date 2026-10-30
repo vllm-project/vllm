@@ -347,3 +347,57 @@ direct_register_custom_op(
     mutates_args=[],
     fake_impl=_mhc_pre_mix_triton_fake,
 )
+
+
+@triton.jit
+def _hc_expand_copy(
+    x,
+    out,
+    elements,
+    H: tl.constexpr,
+    N: tl.constexpr,
+    STRIDE_M: tl.constexpr,
+    STRIDE_H: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    index = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+    row = index // H
+    col = index % H
+    value = tl.load(
+        x + row * STRIDE_M + col * STRIDE_H,
+        mask=index < elements,
+        other=0,
+    )
+    for stream in tl.static_range(N):
+        tl.store(out + (row * N + stream) * H + col, value, mask=index < elements)
+
+
+def hc_expand_triton(x: Tensor, n: int) -> Tensor:
+    """Copy [M, H] activations into contiguous [M, n, H] residual streams."""
+    assert x.ndim == 2 and n > 0
+    m, h = x.shape
+    out = torch.empty((m, n, h), dtype=x.dtype, device=x.device)
+    if m * h:
+        _hc_expand_copy[(triton.cdiv(m * h, 1024),)](
+            x,
+            out,
+            m * h,
+            h,
+            n,
+            *x.stride(),
+            1024,
+            num_warps=4,
+        )
+    return out
+
+
+def _hc_expand_triton_fake(x: Tensor, n: int) -> Tensor:
+    return torch.empty(x.shape[0], n, x.shape[1], dtype=x.dtype, device=x.device)
+
+
+direct_register_custom_op(
+    op_name="hc_expand_triton",
+    op_func=hc_expand_triton,
+    mutates_args=[],
+    fake_impl=_hc_expand_triton_fake,
+)

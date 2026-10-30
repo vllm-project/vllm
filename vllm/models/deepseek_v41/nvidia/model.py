@@ -528,7 +528,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                 # First layer: the stream is the embedding broadcast to hc
                 # copies and the identity pre-mix selects copy 0.
                 assert self.hc_attn_fn_broadcast is not None
-                residual = x.unsqueeze(1).expand(-1, self.hc_mult, -1).contiguous()
+                residual = torch.ops.vllm.hc_expand_triton(x, self.hc_mult)
                 post_mix, res_mix, x, attn_pre = mhc_pre(
                     residual,
                     self.hc_attn_fn_broadcast,
