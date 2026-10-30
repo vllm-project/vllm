@@ -14,7 +14,9 @@ vllm serve MODEL --enforce-eager \
 
 Like `--profiler-config`, `--tensor-dump-config` accepts a JSON object or individual
 keys such as `--tensor-dump-config.max_steps 2`. Setting `output_dir` opts workers
-into dumping. The configuration travels
+into dumping support; capture is disabled by default. Enable it after startup
+through `dumper_control` on the existing `/collective_rpc` endpoint, as shown below.
+The configuration travels
 with `VllmConfig` to workers, including Ray workers; no dumper environment variables
 are required. The directory is local to each worker, so use a shared filesystem
 if dumps from multiple nodes should be collected in one place.
@@ -22,7 +24,7 @@ if dumps from multiple nodes should be collected in one place.
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `output_dir` | `null` | Worker output directory; null disables dumping. Startup only. |
-| `enabled` | `true` | Whether to capture real model forwards. |
+| `enabled` | `false` | Whether to capture real model forwards. Enable after startup to avoid capturing startup requests. |
 | `patterns` | `["*"]` | Shell-style globs matched against dump names, such as `*self_attn*`. |
 | `ranks` | `null` | Distributed ranks to capture; null selects all. |
 | `max_steps` | `1` | Maximum captured forwards per worker between resets; must be positive. |
@@ -38,6 +40,7 @@ llm = LLM(
     enforce_eager=True,
     tensor_dump_config={"output_dir": "/tmp/vllm-dumps", "max_steps": 2},
 )
+llm.collective_rpc("dumper_control", args=("configure", {"enabled": True}))
 ```
 
 Warmup/dummy forwards do not consume steps. Failed forwards can leave partial

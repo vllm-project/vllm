@@ -88,7 +88,9 @@ def test_cli_config_round_trip(tmp_path, style, monkeypatch):
 
 def test_hooks_snapshot_inputs_before_inplace_mutation(tmp_path, batch):
     model = torch.nn.Sequential(torch.nn.ReLU(inplace=True))
-    dumper = TensorDumper(TensorDumpConfig(output_dir=str(tmp_path)), model)
+    dumper = TensorDumper(
+        TensorDumpConfig(enabled=True, output_dir=str(tmp_path)), model
+    )
     inputs = torch.tensor([-2.0, 3.0])
     expected = model(inputs.clone())
     with dumper.capture(batch):
@@ -109,7 +111,7 @@ def test_hooks_snapshot_inputs_before_inplace_mutation(tmp_path, batch):
 
 def test_explicit_dump_preserves_nested_paths_and_detaches(tmp_path, batch):
     dumper = TensorDumper(
-        TensorDumpConfig(output_dir=str(tmp_path)), torch.nn.Identity()
+        TensorDumpConfig(enabled=True, output_dir=str(tmp_path)), torch.nn.Identity()
     )
     value = torch.tensor([3.0], requires_grad=True)
     dump("outside", value)
@@ -126,7 +128,9 @@ def test_explicit_dump_preserves_nested_paths_and_detaches(tmp_path, batch):
     assert saved["inside.items.1"].item() == 3
 
 
-@pytest.mark.parametrize("config", [{"enabled": False}, {"ranks": [999]}])
+@pytest.mark.parametrize(
+    "config", [{}, {"enabled": False}, {"enabled": True, "ranks": [999]}]
+)
 def test_disabled_capture_writes_nothing(tmp_path, batch, config):
     dumper = TensorDumper(
         TensorDumpConfig(output_dir=str(tmp_path), **config), torch.nn.Identity()
@@ -138,7 +142,9 @@ def test_disabled_capture_writes_nothing(tmp_path, batch, config):
 
 def test_filters_step_limit_reset_and_reconfigure(tmp_path, batch):
     dumper = TensorDumper(
-        TensorDumpConfig(output_dir=str(tmp_path), patterns=["selected*"]),
+        TensorDumpConfig(
+            enabled=True, output_dir=str(tmp_path), patterns=["selected*"]
+        ),
         torch.nn.Identity(),
     )
     for _ in range(2):
@@ -148,7 +154,7 @@ def test_filters_step_limit_reset_and_reconfigure(tmp_path, batch):
     before = records(dumper)
     assert [entry["name"] for entry in before] == ["batch", "selected"]
     dumper.control("reset")
-    dumper.control("configure", {"patterns": ["other"]})
+    dumper.control("configure", {"enabled": True, "patterns": ["other"]})
     with dumper.capture(batch):
         dump("selected", torch.ones(1))
         dump("other", torch.zeros(1))
@@ -168,7 +174,7 @@ def test_filters_step_limit_reset_and_reconfigure(tmp_path, batch):
 
 def test_failed_forward_clears_capture_context(tmp_path, batch):
     dumper = TensorDumper(
-        TensorDumpConfig(output_dir=str(tmp_path)), torch.nn.Identity()
+        TensorDumpConfig(enabled=True, output_dir=str(tmp_path)), torch.nn.Identity()
     )
     with pytest.raises(RuntimeError, match="forward failed"), dumper.capture(batch):
         raise RuntimeError("forward failed")
@@ -179,7 +185,9 @@ def test_failed_forward_clears_capture_context(tmp_path, batch):
 
 def test_start_step_counts_filtered_forwards_and_reset_restarts_delay(tmp_path, batch):
     dumper = TensorDumper(
-        TensorDumpConfig(output_dir=str(tmp_path), start_step=2, phase="prefill"),
+        TensorDumpConfig(
+            enabled=True, output_dir=str(tmp_path), start_step=2, phase="prefill"
+        ),
         torch.nn.Identity(),
     )
     for _ in range(3):
@@ -207,7 +215,8 @@ def test_phase_filter_does_not_capture_mixed_as_prefill_or_decode(tmp_path, phas
     batch.is_prefilling_np[:] = [True, False]
     batch.has_prefill = True
     dumper = TensorDumper(
-        TensorDumpConfig(output_dir=str(tmp_path), phase=phase), torch.nn.Identity()
+        TensorDumpConfig(enabled=True, output_dir=str(tmp_path), phase=phase),
+        torch.nn.Identity(),
     )
     with dumper.capture(batch):
         pass
@@ -221,7 +230,9 @@ def test_phase_filter_does_not_capture_mixed_as_prefill_or_decode(tmp_path, phas
 def test_layer_filter_matches_layer_component_not_tensor_suffix(tmp_path, batch):
     model = torch.nn.Module()
     model.layers = torch.nn.ModuleList([torch.nn.Identity(), torch.nn.Identity()])
-    dumper = TensorDumper(TensorDumpConfig(output_dir=str(tmp_path), layers=[1]), model)
+    dumper = TensorDumper(
+        TensorDumpConfig(enabled=True, output_dir=str(tmp_path), layers=[1]), model
+    )
     with dumper.capture(batch):
         model.layers[0](torch.ones(1))
         model.layers[1](torch.ones(1))
@@ -236,7 +247,9 @@ def test_layer_filter_matches_layer_component_not_tensor_suffix(tmp_path, batch)
 
 def test_constructor_registers_hooks_and_close_removes_them(tmp_path, batch):
     model = torch.nn.Identity()
-    dumper = TensorDumper(TensorDumpConfig(output_dir=str(tmp_path)), model)
+    dumper = TensorDumper(
+        TensorDumpConfig(enabled=True, output_dir=str(tmp_path)), model
+    )
     with dumper.capture(batch):
         model(torch.ones(1))
     assert len(records(dumper)) == 3
@@ -247,10 +260,10 @@ def test_constructor_registers_hooks_and_close_removes_them(tmp_path, batch):
 
 def test_workers_do_not_overwrite_each_other(tmp_path, batch):
     first = TensorDumper(
-        TensorDumpConfig(output_dir=str(tmp_path)), torch.nn.Identity()
+        TensorDumpConfig(enabled=True, output_dir=str(tmp_path)), torch.nn.Identity()
     )
     second = TensorDumper(
-        TensorDumpConfig(output_dir=str(tmp_path)), torch.nn.Identity()
+        TensorDumpConfig(enabled=True, output_dir=str(tmp_path)), torch.nn.Identity()
     )
     assert first.directory != second.directory
     for dumper in (first, second):
@@ -261,7 +274,7 @@ def test_workers_do_not_overwrite_each_other(tmp_path, batch):
 
 def test_saving_a_view_does_not_serialize_its_backing_storage(tmp_path, batch):
     dumper = TensorDumper(
-        TensorDumpConfig(output_dir=str(tmp_path)), torch.nn.Identity()
+        TensorDumpConfig(enabled=True, output_dir=str(tmp_path)), torch.nn.Identity()
     )
     value = torch.ones(100_000)
     with dumper.capture(batch):
@@ -272,7 +285,9 @@ def test_saving_a_view_does_not_serialize_its_backing_storage(tmp_path, batch):
 
 def test_filter_can_select_a_nested_tensor(tmp_path, batch):
     dumper = TensorDumper(
-        TensorDumpConfig(output_dir=str(tmp_path), patterns=["capture.items.1"]),
+        TensorDumpConfig(
+            enabled=True, output_dir=str(tmp_path), patterns=["capture.items.1"]
+        ),
         torch.nn.Identity(),
     )
     with dumper.capture(batch):
@@ -288,7 +303,7 @@ def test_unsupported_execution_rejected(tmp_path, use_v2, eager, ubatching):
     from vllm.config import VllmConfig
 
     config = SimpleNamespace(
-        tensor_dump_config=TensorDumpConfig(output_dir=str(tmp_path)),
+        tensor_dump_config=TensorDumpConfig(enabled=True, output_dir=str(tmp_path)),
         use_v2_model_runner=use_v2,
         model_config=SimpleNamespace(enforce_eager=eager),
         parallel_config=SimpleNamespace(use_ubatching=ubatching),
@@ -324,14 +339,14 @@ def test_batch_records_parallel_groups(tmp_path, batch, monkeypatch, expert_para
         monkeypatch.setattr(parallel_state, "get_ep_group", missing_ep)
         del expected["ep"]
     dumper = TensorDumper(
-        TensorDumpConfig(output_dir=str(tmp_path)), torch.nn.Identity()
+        TensorDumpConfig(enabled=True, output_dir=str(tmp_path)), torch.nn.Identity()
     )
     with dumper.capture(batch):
         pass
     assert records(dumper)[0]["value"]["parallel_groups"] == expected
 
 
-def test_runtime_control_uses_existing_rpc(tmp_path):
+def test_runtime_control_uses_existing_rpc(tmp_path, batch):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
@@ -343,6 +358,9 @@ def test_runtime_control_uses_existing_rpc(tmp_path):
     dumper = TensorDumper(
         TensorDumpConfig(output_dir=str(tmp_path)), torch.nn.Identity()
     )
+    with dumper.capture(batch):
+        dump("before_enable", torch.ones(1))
+    assert records(dumper) == []
     app.state.engine_client = SimpleNamespace(
         collective_rpc=AsyncMock(
             side_effect=lambda **kwargs: [dumper.control(*kwargs["args"])]
@@ -354,10 +372,13 @@ def test_runtime_control_uses_existing_rpc(tmp_path):
     assert client.post("/dumper/get_state", headers=headers).status_code == 404
     result = client.post(
         "/collective_rpc",
-        json={"method": "dumper_control", "args": ["configure", {"enabled": False}]},
+        json={"method": "dumper_control", "args": ["configure", {"enabled": True}]},
     )
     assert result.status_code == 200
-    assert result.json()["results"][0]["config"]["enabled"] is False
+    assert result.json()["results"][0]["config"]["enabled"] is True
     args = app.state.engine_client.collective_rpc.call_args
     assert args.kwargs["method"] == "dumper_control"
-    assert args.kwargs["args"][1]["enabled"] is False
+    assert args.kwargs["args"][1]["enabled"] is True
+    with dumper.capture(batch):
+        dump("after_enable", torch.ones(1))
+    assert [entry["name"] for entry in records(dumper)] == ["batch", "after_enable"]

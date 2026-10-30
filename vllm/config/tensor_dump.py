@@ -12,7 +12,7 @@ from vllm.config.utils import config
 class TensorDumpOptions:
     """Tensor capture options that may be changed at runtime."""
 
-    enabled: bool = True
+    enabled: bool = False
     """Capture real model forwards."""
     patterns: list[str] = Field(default_factory=lambda: ["*"])
     """Shell-style globs matched against tensor names."""
