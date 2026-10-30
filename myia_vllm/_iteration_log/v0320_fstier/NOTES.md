@@ -4792,3 +4792,48 @@ La réponse faite à hermes (« famille file d'attente ») est corrigée. La mes
 Tout est en 401, sur `/v1/models` (lecture seule). Q49 est complétée au registre ; la clé reste introuvable dans 183 fichiers de configuration locaux.
 
 **Condensation.** Le statut tombe toujours au repli cloud après 90 s (`LLM status update timeout` à 14:11:49Z, puis `pass deadline reached the cloud reserve`), comme mesuré à 12:4xZ. Suivi : roo-extensions#4434.
+
+## 30/10 16:1xZ — Cycle de surveillance : tier plus sollicité, timeout de condensation sur moteur vide, gel du hub vu depuis `:5002`
+
+**Prod (16:11Z, 4 h 10 après le boot).** Health 200 en 4,0 ms, RC=0, 3/3 Up, OOM 0. VRAM **22 791 / 21 674 / 45 MiB** (GPU 0 +94 MiB depuis 14:11Z, sous 23 000). `/dev/shm` 51 %. Commit hôte **58,8 %**. KV 50,6 %, 6 requêtes en cours, aucune en attente. **4 préemptions** depuis le boot (0 à 14:11Z), non datables : le moteur ne journalise pas les préemptions et la télémétrie n'a pas de champ pour elles. 8 `WEDGE fail 1/2` depuis le boot, dont 3 en 6 min (13:43-13:49Z), jamais 2/2 ; 3 869 sondes OK.
+
+**Hit du cache de préfixes (cumul depuis le boot, en tokens).**
+
+| instant | GPU | tier (sur les miss GPU) | combiné |
+|---|---|---|---|
+| 14:11Z | 87,5 % | 16,0 % | 89,5 % |
+| 16:11Z | **59,1 %** | **76,4 %** | **90,3 %** |
+
+Le combiné tient. Le cache GPU ne couvre plus que 59 % des tokens et le tier en rattrape les trois quarts. Lecture probable : davantage de sessions distinctes que le KV GPU n'en garde, rappelées depuis RAM et fs. Ce sont deux points, pas une tendance.
+
+**Trafic sur 2 h.** 595 requêtes (~5,0/min), dont 267 corps de 100 Ko-1 Mo. Par machine étiquetée : po-2023 89, po-2024 63, po-2027 27, ai-01 10. **Trafic étiqueté par le hub nul de 15:30 à 15:59Z**, reprise à 16:00Z : c'est le gel du hub claudish signalé par po-2024:claudish à partir de 15:19:57Z, vu depuis le moteur.
+
+**400 window+1.** 3 nouveaux, tous de **po-2024** : 14:31:14Z (997 Ko), 15:15:37Z (906 Ko), 16:00:32Z (1 007 Ko). La cadence est d'environ 45 min. Avec celui de 12:55:51Z, cela fait 4 depuis le reboot, tous de po-2024. Relayé à claudish.
+
+**Condensation : timeout de 90 s sur un moteur au repos.** Cas du `[WARN] FALLBACK TRUNCATION` de 15:29:51Z sur `global`. Le message accuse `vLLM 192.168.0.47:5002` (« Endpoint likely hung »). La télémétrie dit le contraire :
+
+| instant | en cours | en attente | KV |
+|---|---|---|---|
+| 15:27:31Z | 1 | 0 | 3,0 % |
+| 15:28:30Z | 1 | 0 | 3,3 % |
+| 15:29:28Z | 0 | 0 | 0,0 % |
+
+Les sondes décodage du watchdog rendent 200 toutes les 30 s pendant la fenêtre. Le budget fixe de 90 s coupe donc même sans file d'attente. Cela complète les cas d'Hermes (KV < 40 %). Le texte « likely hung » envoie l'opérateur vers un moteur sain. Versé sur [roo-extensions#4434 c.6527567695](https://github.com/jsboige/roo-extensions/issues/4434#issuecomment-6527567695).
+
+**Sécurité.**
+- **IP externes avec des 200 :** rien de nouveau. On voit le site, le LAN, web1 `37.187.180.135` et le poste user `82.66.89.184`.
+- **401 :**
+  - `1f7f6080cb65` : 21 refus pour le poller Go `116.202.50.2`, 1 pour ZOLTRAAK `31.77.203.199`.
+  - La clé d'embeddings `50829b227a2a` : 1 refus en `python-requests`.
+- **Deuxième détenteur de la clé périmée `b2082455ef36`.** Elle compte 28 refus en 7 jours. web2 (`51.75.200.22`) en représente 8. Les 20 autres viennent d'un **client Bun/1.3.14 qui passe par l'URL publique en revenant par l'IP du site** :
+  - 13 tentatives avec back-off, de 15:48:44 à 15:53:00Z, **pendant le gel du hub** ;
+  - 6 tentatives le 29/10 de 21:28:05 à 21:28:25Z, plus une à 10:18:47Z.
+  
+  Hypothèse (SUPPOSÉ) : un siège claudish en mode AUTONOMOUS dont la configuration locale garde la clé d'avant le 30/09. Relayé à claudish.
+
+**Coordination.**
+- **CoursIA-2 (po-2024) a soldé son 401.** Deux causes, toutes deux de son côté : une `master.env` périmée, et un `GenAI/.env` absent du disque. `/v1/models` répond 200 avec l'empreinte `db2738ab1328`.
+- **Port `.47:5003` (`api.large`).** po-2023 et Maintenance l'ont signalé « à relancer ». Or **aucun service ai-01 n'écoute 5003** (`netstat` : seul `:5002`), et aucun profil vllm actuel ne l'utilise. C'est un vestige du schéma `api.{mini,medium,large}`. Le vhost relève de po-2023.
+- **Hermes** clôt son fil sur la condensation : le budget est en cause, pas le moteur.
+
+**Producteurs.** nbaudit `ok:true` à 16:05:53Z, vague `Image/` en cours. G: OK (630 Go libres). Prouveur : aucune passe. `gh` avait dérivé sur `jsboigeEpita` ; il est revenu sur `jsboige` avant toute écriture.
