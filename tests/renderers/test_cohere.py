@@ -215,7 +215,7 @@ class TestContentBlocks:
 
     def test_non_string_non_dict_part_rejected(self):
         with pytest.raises(TypeError, match="Unexpected content part"):
-            _content_blocks([42])  # type: ignore[list-item]
+            _content_blocks([42])
 
 
 # ======================================================================
@@ -1048,7 +1048,11 @@ async def test_async_cohere_renderer_does_not_block_event_loop():
         await asyncio.sleep(0.1)
 
     _, prompt = await task
-    assert prompt["prompt"] == expected_prompt, "Mocked blocking render was not called"
+    # ``.get`` because ``prompt`` is typed as any ``DictPrompt``, and the
+    # encoder-decoder member of that union has no top-level ``prompt``.
+    assert prompt.get("prompt") == expected_prompt, (
+        "Mocked blocking render was not called"
+    )
     assert blocked_count == 0, "Event loop blocked during rendering"
 
 

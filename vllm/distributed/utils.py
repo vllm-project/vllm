@@ -55,6 +55,78 @@ def ensure_divisibility(numerator, denominator):
     )
 
 
+# P2P tags [base, base + log2(group size) + 1] are reserved for cpu_all_reduce_.
+_CPU_ALL_REDUCE_TAG_BASE = 27100
+
+
+def cpu_all_reduce_(
+    tensor: torch.Tensor,
+    group: ProcessGroup,
+    timeout: timedelta | None = None,
+) -> torch.Tensor:
+    """Low-latency in-place SUM all-reduce of a small CPU tensor over a gloo group.
+
+    Recursive doubling within power-of-two blocks, then one concurrent exchange
+    between blocks. Results are bitwise identical across ranks. Works with
+    stateless (unregistered) process groups.
+
+    `timeout` bounds each p2p wait; None means no timeout.
+    """
+    world_size = group.size()
+    if world_size == 1:
+        return tensor
+    block_size = world_size & -world_size
+    num_blocks = world_size // block_size
+    if tensor.device.type != "cpu" or not tensor.is_contiguous():
+        torch.distributed.all_reduce(tensor, group=group)
+        return tensor
+
+    timeout = timeout or timedelta(0)
+
+    rank = group.rank()
+    tag = _CPU_ALL_REDUCE_TAG_BASE
+
+    # Recursive doubling within the block (peers stay in the aligned block).
+    if block_size > 1:
+        # This branch applies only to even world sizes.
+        scratch = torch.empty_like(tensor)
+        mask = 1
+        while mask < block_size:
+            peer = rank ^ mask
+            # Wait for both ops before touching either buffer.
+            recv_work = group.recv([scratch], peer, tag)
+            send_work = group.send([tensor], peer, tag)
+            recv_work.wait(timeout)
+            send_work.wait(timeout)
+            tensor.add_(scratch)
+            mask <<= 1
+            tag += 1
+
+    # Exchange block sums with the same lane in every other block at once.
+    if num_blocks > 1:
+        # This branch applies only when world_size is not a power of two.
+        lane, my_block = rank % block_size, rank // block_size
+        block_sums = [
+            tensor if b == my_block else torch.empty_like(tensor)
+            for b in range(num_blocks)
+        ]
+        works = []
+        for b, buf in enumerate(block_sums):
+            if b != my_block:
+                works.append(group.recv([buf], b * block_size + lane, tag))
+        for b in range(num_blocks):
+            if b != my_block:
+                works.append(group.send([tensor], b * block_size + lane, tag))
+        for work in works:
+            work.wait(timeout)
+        # Sum in block order so every rank computes the identical result.
+        total = block_sums[0]
+        for buf in block_sums[1:]:
+            total.add_(buf)
+        tensor.copy_(total)
+    return tensor
+
+
 def divide(numerator, denominator):
     """Ensure that numerator is divisible by the denominator and return
     the division value."""

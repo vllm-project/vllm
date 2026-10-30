@@ -84,6 +84,12 @@ def initialize_model(
     if model_class is None:
         model_class, _ = get_model_architecture(model_config)
 
+    from vllm.model_executor.models.expert_substitution import (
+        as_expert_substitution_model,
+    )
+
+    model_class = as_expert_substitution_model(model_class, model_config)
+
     if vllm_config.quant_config is not None:
         configure_quant_config(vllm_config.quant_config, model_class)
 
@@ -177,6 +183,12 @@ def process_weights_after_loading(
                 else nullcontext()
             )
             with loading_context, timing_context:
+                # Quantize the staged fused shared experts into their slots.
+                shared_expert_loader = getattr(
+                    module, "shared_expert_online_loader", None
+                )
+                if shared_expert_loader is not None:
+                    shared_expert_loader.finalize(module)
                 quant_method.process_weights_after_loading(module)
             # process_weights_after_loading may swap in freshly-created
             # Parameters (e.g. FP8 requantization), which are stamped with the

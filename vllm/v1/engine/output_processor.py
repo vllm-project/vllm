@@ -113,6 +113,53 @@ class RequestOutputCollector:
             self._input_stream_task = None
 
 
+def _is_chunk_boundary(
+    output: RequestOutput | PoolingRequestOutput | Exception | None,
+) -> bool:
+    """Whether the output marks the end of a streaming-input chunk: a
+    finish_reason on a request that has not finished."""
+    return (
+        isinstance(output, RequestOutput)
+        and not output.finished
+        and any(completion.finished() for completion in output.outputs)
+    )
+
+
+class StreamingInputOutputCollector(RequestOutputCollector):
+    """Collector for streaming-input requests. Doesn't merge across input
+    chunk boundaries (a finish_reason on a non-finished output)."""
+
+    def __init__(self, output_kind: RequestOutputKind, request_id: str):
+        super().__init__(output_kind, request_id)
+        self._backlog: deque[RequestOutput] = deque()
+
+    def put(self, output: RequestOutput | PoolingRequestOutput | Exception) -> None:
+        if isinstance(output, Exception):
+            self._backlog.clear()
+        elif self._backlog or _is_chunk_boundary(self.output):
+            assert isinstance(output, RequestOutput)
+            if self._backlog and not _is_chunk_boundary(self._backlog[-1]):
+                self._backlog[-1].add(output, aggregate=self.aggregate)
+            else:
+                self._backlog.append(output)
+            return
+        super().put(output)
+
+    async def get(self) -> RequestOutput | PoolingRequestOutput:
+        output = await super().get()
+        if self._backlog:
+            self.output = self._backlog.popleft()
+            self.ready.set()
+        return output
+
+    def get_nowait(self) -> RequestOutput | PoolingRequestOutput | None:
+        output = super().get_nowait()
+        if self._backlog:
+            self.output = self._backlog.popleft()
+            self.ready.set()
+        return output
+
+
 @dataclass
 class OutputProcessorOutput:
     request_outputs: list[RequestOutput | PoolingRequestOutput]
@@ -276,7 +323,7 @@ class RequestState:
             output_kind = request.pooling_params.output_kind
 
         assert request.external_req_id is not None
-        return cls(
+        state = cls(
             request_id=request.request_id,
             external_req_id=request.external_req_id,
             parent_req=parent_req,
@@ -299,6 +346,10 @@ class RequestState:
             stream_input=request.resumable,
             remote_prefill_cached_tokens=remote_prefill_cached_tokens,
         )
+        if state.stats is not None and sampling_params is not None:
+            state.stats.is_watermarked = bool(sampling_params.watermarking)
+            state.stats.is_watermark_skipped = sampling_params._watermarking_skipped
+        return state
 
     def make_request_output(
         self,
@@ -316,6 +367,14 @@ class RequestState:
         if not finished and final_only:
             # Only the final output is required in FINAL_ONLY mode.
             return None
+
+        if pooling_output is not None:
+            return self._new_request_output(
+                self.external_req_id,
+                [self._new_pooling_output(pooling_output)],
+                finished,
+                error=error,
+            )
 
         if self.stream_interval > 1:
             assert self.detokenizer is not None
@@ -341,14 +400,6 @@ class RequestState:
                 self.sent_tokens_offset = self.detokenizer.num_output_tokens()
 
         external_req_id = self.external_req_id
-
-        if pooling_output is not None:
-            return self._new_request_output(
-                external_req_id,
-                [self._new_pooling_output(pooling_output)],
-                finished,
-                error=error,
-            )
 
         output = self._new_completion_output(new_token_ids, finish_reason, stop_reason)
 
@@ -710,6 +761,16 @@ class OutputProcessor:
                 # Ignore output for already-aborted request.
                 continue
 
+            error = engine_core_output.error
+            if error is not None and req_state.queue is not None:
+                # Rejected on arrival, e.g. by a paused engine; nothing was run.
+                req_state.queue.put(error.to_exception())
+                self._finish_request(req_state)
+                if req_state.streaming_input:
+                    # Input chunks sent since may re-create the session.
+                    reqs_to_abort.append(req_id)
+                continue
+
             # 1) Compute stats for this iteration.
             self._update_stats_from_output(
                 req_state, engine_core_output, engine_core_timestamp, iteration_stats
@@ -780,6 +841,10 @@ class OutputProcessor:
                 # if required.
                 req_state.logprobs_processor.update_from_output(engine_core_output)
 
+            streaming_chunk_boundary = req_state.streaming_input and (
+                finish_reason not in (FinishReason.ABORT, FinishReason.ERROR)
+            )
+
             # 4) Create and handle RequestOutput objects.
             if request_output := req_state.make_request_output(
                 new_token_ids,
@@ -790,7 +855,7 @@ class OutputProcessor:
                 ec_transfer_params,
                 error=request_error,
             ):
-                if req_state.streaming_input:
+                if streaming_chunk_boundary:
                     request_output.finished = False
 
                 if req_state.queue is not None:
@@ -802,7 +867,7 @@ class OutputProcessor:
 
             # Free completed requests.
             if finish_reason is not None:
-                if req_state.streaming_input:
+                if streaming_chunk_boundary:
                     if req_state.input_chunk_queue:
                         update = req_state.input_chunk_queue.popleft()
                         req_state.apply_streaming_update(update)
@@ -810,9 +875,10 @@ class OutputProcessor:
                         req_state.input_chunk_queue = None
                 else:
                     self._finish_request(req_state)
-                    if not engine_core_output.finished:
-                        # If req not finished in EngineCore, but Detokenizer
-                        # detected stop string, abort needed in EngineCore.
+                    if req_state.streaming_input or not engine_core_output.finished:
+                        # EngineCore may still have the request: a stop string
+                        # was detected here, or an in-flight streaming-input
+                        # chunk may re-create the session.
                         reqs_to_abort.append(req_id)
 
                     # Track per-request stats
@@ -859,8 +925,10 @@ class OutputProcessor:
 
         # Remove parent request if applicable.
         parent_req = req_state.parent_req
-        if parent_req and not parent_req.child_requests:
-            self.parent_requests.pop(parent_req.request_id, None)
+        if parent_req:
+            parent_req.child_requests.discard(req_id)
+            if not parent_req.child_requests:
+                self.parent_requests.pop(parent_req.request_id, None)
         self._update_admission_stats()
 
     def _update_admission_stats(self) -> None:
