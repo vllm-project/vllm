@@ -228,11 +228,10 @@ class XPUWorker(Worker):
     @staticmethod
     @torch.inference_mode()
     def _refresh_fused_moe_weights(model: torch.nn.Module) -> None:
-        from vllm.models.qwen3_5.xpu.model import Qwen3_5SparseMoeBlock
-
         for module in model.modules():
-            if isinstance(module, Qwen3_5SparseMoeBlock):
-                module.refresh_fused_weights()
+            refresh = getattr(module, "refresh_fused_weights", None)
+            if callable(refresh):
+                refresh()
 
     def reload_weights(self, *args, **kwargs) -> None:
         super().reload_weights(*args, **kwargs)

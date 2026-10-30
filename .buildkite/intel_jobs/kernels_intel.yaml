@@ -70,6 +70,7 @@ steps:
     - vllm/v1/worker/xpu_worker.py
     - tests/kernels/moe/test_moe.py
     - tests/models/test_qwen3_5.py
+    - tests/v1/worker/test_gpu_worker_weight_transfer.py
     - requirements/xpu.txt
   commands:
     # Build the pinned companion in this disposable test container only.
@@ -94,7 +95,8 @@ steps:
       pytest -v -s
       kernels/moe/test_moe.py
       models/test_qwen3_5.py
-      -k "xpu_qwen3_5 and not missing_provider"'
+      v1/worker/test_gpu_worker_weight_transfer.py
+      -k (xpu_qwen3_5 or xpu_worker_refreshes_model_weight_hooks) and not missing_provider'
 
 - label: ":intel: (BMG) Qwen3.5 Stock-Wheel Fallback"
   key: qwen35-shared-expert-fallback
@@ -118,4 +120,5 @@ steps:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
-      pytest -v -s kernels/moe/test_moe.py -k xpu_qwen3_5_missing_provider'
+      pytest -v -s kernels/moe/test_moe.py
+      -k xpu_qwen3_5_missing_provider or xpu_qwen3_5_provider_import_failure_cached'

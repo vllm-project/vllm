@@ -240,6 +240,7 @@ class _XpuMoESharedFusion:
                 supports,
             )
         except ImportError:
+            self._weights = None
             return None
         if not supports(
             x.dtype,

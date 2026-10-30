@@ -6,6 +6,7 @@ Run `pytest tests/kernels/test_moe.py`.
 """
 
 import functools
+import sys
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -216,6 +217,35 @@ def test_xpu_qwen3_5_missing_provider_fallback(xpu_qwen3_5_moe):
     """Run separately in the stock-wheel CI environment without #670."""
     assert not hasattr(torch.ops._xpu_C, "moe_shared_fused_decode_interface")
     _check_xpu_qwen3_5_decode(xpu_qwen3_5_moe, 2, should_fuse=False)
+
+
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
+@pytest.mark.parametrize("xpu_qwen3_5_moe", [(torch.float16, True)], indirect=True)
+def test_xpu_qwen3_5_provider_import_failure_cached(xpu_qwen3_5_moe, monkeypatch):
+    """Repeated eligible decode falls back without repeated import failures."""
+    from vllm.models.qwen3_5.xpu.model import _XpuMoESharedFusion
+
+    monkeypatch.setitem(
+        sys.modules, "vllm_xpu_kernels.moe_shared_fused_interface", None
+    )
+    failures = 0
+
+    def trace(frame, event, arg):
+        nonlocal failures
+        if frame.f_code is not _XpuMoESharedFusion.get_plan.__code__:
+            return None
+        if event == "exception" and issubclass(arg[0], ImportError):
+            failures += 1
+        return trace
+
+    previous = sys.gettrace()
+    try:
+        sys.settrace(trace)
+        _check_xpu_qwen3_5_decode(xpu_qwen3_5_moe, 1, should_fuse=False)
+        _check_xpu_qwen3_5_decode(xpu_qwen3_5_moe, 2, should_fuse=False)
+    finally:
+        sys.settrace(previous)
+    assert failures == 1
 
 
 @pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
