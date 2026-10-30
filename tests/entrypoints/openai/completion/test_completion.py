@@ -23,6 +23,8 @@ def default_server_args():
     return [
         "--dtype",
         "float32",
+        "--gpu-memory-utilization",
+        "0.6",
         "--max-model-len",
         "2048",
         "--max-num-seqs",
@@ -43,6 +45,11 @@ def server(default_server_args):
 async def client(server):
     async with server.get_async_client() as async_client:
         yield async_client
+
+
+@pytest.fixture(scope="module")
+def tokenizer():
+    return get_tokenizer(MODEL_NAME)
 
 
 @pytest.mark.asyncio
@@ -229,6 +236,133 @@ async def test_logprob_token_ids_stream(client: openai.AsyncOpenAI):
 
     assert len(returned_top_logprobs) == 1
     assert set(returned_top_logprobs[0]) == {"token_id:42", "token_id:5000"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("chat", [False, True], ids=["completion", "chat"])
+@pytest.mark.parametrize("stream", [False, True], ids=["full", "stream"])
+@pytest.mark.parametrize(
+    "stop_kind,include_stop,skip_special_tokens",
+    [
+        ("eos", False, False),
+        ("token", False, False),
+        ("eos", True, False),
+        ("token", True, False),
+        ("eos", True, None),
+        ("length", False, False),
+    ],
+)
+async def test_logprobs_match_visible_output(
+    client: openai.AsyncOpenAI,
+    tokenizer,
+    chat: bool,
+    stream: bool,
+    stop_kind: str,
+    include_stop: bool,
+    skip_special_tokens: bool | None,
+):
+    """Hidden stop tokens must not add logprobs beyond the returned text."""
+    token_id = tokenizer.encode("A", add_special_tokens=False)[0]
+    stop_id = (
+        tokenizer.encode("!", add_special_tokens=False)[0]
+        if stop_kind == "token"
+        else tokenizer.eos_token_id
+    )
+    generated_ids = [token_id] if stop_kind == "length" else [token_id, stop_id]
+    extra_body = {
+        "allowed_token_ids": generated_ids,
+        "min_tokens": 1,
+        "return_token_ids": True,
+    }
+    if skip_special_tokens is not None:
+        extra_body["skip_special_tokens"] = skip_special_tokens
+    if include_stop:
+        extra_body["include_stop_str_in_output"] = True
+    if stop_kind == "token":
+        extra_body["stop_token_ids"] = [stop_id]
+    params = {
+        "model": MODEL_NAME,
+        "max_tokens": len(generated_ids),
+        "temperature": 0.0,
+        "stream": stream,
+        "logit_bias": {str(token_id): -100, str(stop_id): 100},
+        "extra_body": extra_body,
+    }
+    if chat:
+        extra_body["chat_template_kwargs"] = {"enable_thinking": False}
+        response = await client.chat.completions.create(
+            messages=[{"role": "user", "content": "Hello"}],
+            logprobs=True,
+            top_logprobs=1,
+            **params,
+        )
+    else:
+        response = await client.completions.create(prompt="Hello", logprobs=1, **params)
+
+    chunks = [chunk async for chunk in response] if stream else [response]
+    text = ""
+    logprob_tokens: list[str] = []
+    returned_ids: list[int] = []
+    finish_reasons = []
+    for chunk in chunks:
+        choice = chunk.choices[0]
+        if chat:
+            message = choice.delta if stream else choice.message
+            text += message.content or ""
+            if choice.logprobs is not None:
+                logprob_tokens.extend(item.token for item in choice.logprobs.content)
+        else:
+            text += choice.text
+            if choice.logprobs is not None:
+                logprobs = choice.logprobs
+                logprob_tokens.extend(logprobs.tokens)
+                assert len(logprobs.tokens) == len(logprobs.token_logprobs)
+                assert len(logprobs.tokens) == len(logprobs.top_logprobs)
+                assert len(logprobs.tokens) == len(logprobs.text_offset)
+        returned_ids.extend(getattr(choice, "token_ids", None) or [])
+        if choice.finish_reason is not None:
+            finish_reasons.append(choice.finish_reason)
+
+    visible_ids = (
+        generated_ids if include_stop and skip_special_tokens is False else [token_id]
+    )
+    expected_tokens = [
+        tokenizer.decode([token], skip_special_tokens=False) for token in visible_ids
+    ]
+    assert text == "".join(expected_tokens)
+    assert logprob_tokens == expected_tokens
+    assert returned_ids == generated_ids
+    assert finish_reasons == ["length" if stop_kind == "length" else "stop"]
+    if not stream:
+        assert response.usage.completion_tokens == len(generated_ids)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True], ids=["full", "stream"])
+async def test_echo_only_logprobs_keep_last_prompt_token(
+    client: openai.AsyncOpenAI, tokenizer, stream: bool
+):
+    """An unused generated EOS must not remove an echoed prompt logprob."""
+    prompt_ids = tokenizer.encode("Hello there", add_special_tokens=False)
+    response = await client.completions.create(
+        model=MODEL_NAME,
+        prompt=prompt_ids,
+        max_tokens=0,
+        temperature=0.0,
+        echo=True,
+        logprobs=1,
+        stream=stream,
+        extra_body={"allowed_token_ids": [tokenizer.eos_token_id]},
+    )
+    chunks = [chunk async for chunk in response] if stream else [response]
+    assert "".join(chunk.choices[0].text for chunk in chunks) == "Hello there"
+    tokens = [
+        token
+        for chunk in chunks
+        if chunk.choices[0].logprobs is not None
+        for token in chunk.choices[0].logprobs.tokens
+    ]
+    assert tokens == [tokenizer.decode([token]) for token in prompt_ids]
 
 
 @pytest.mark.asyncio

@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 import time
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Sequence
 from dataclasses import dataclass, field
 from http import HTTPStatus
-from typing import ClassVar, Generic, TypeVar
+from typing import Any, ClassVar, Generic, TypeVar
 
 from fastapi import Request
 from pydantic import ConfigDict
@@ -30,6 +30,7 @@ from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.lora.request import LoRARequest
+from vllm.outputs import CompletionOutput
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
 from vllm.v1.metrics.stats import RequestStateStats
@@ -40,6 +41,44 @@ RequestT = TypeVar("RequestT", bound=AnyRequest)
 _T = TypeVar("_T")
 SESSION_ID_HEADER = "X-Session-ID"
 PRIORITY_HEADER = "X-Vllm-Priority"
+
+
+def get_logprob_token_ids(
+    token_ids: Sequence[int],
+    output: CompletionOutput,
+    request: ChatCompletionRequest | CompletionRequest,
+    tokenizer: TokenizerLike | None,
+    default_sampling_params: dict[str, Any],
+) -> Sequence[int]:
+    """Exclude a hidden terminal token from OpenAI response logprobs."""
+    if (
+        not output.token_ids
+        or output.finish_reason != "stop"
+        or isinstance(output.stop_reason, str)
+        or request.use_beam_search
+        or (
+            isinstance(request, CompletionRequest)
+            and request.echo
+            and request.max_tokens == 0
+        )
+    ):
+        return token_ids
+
+    if not request.include_stop_str_in_output:
+        return token_ids[:-1]
+
+    skip_special_tokens = request.skip_special_tokens
+    if skip_special_tokens is None:
+        skip_special_tokens = default_sampling_params.get("skip_special_tokens", True)
+    last_token_id = output.token_ids[-1]
+    if (
+        skip_special_tokens
+        and tokenizer is not None
+        and last_token_id in tokenizer.all_special_ids
+        and not tokenizer.decode([last_token_id], skip_special_tokens=True)
+    ):
+        return token_ids[:-1]
+    return token_ids
 
 
 def build_per_request_timing_metrics(

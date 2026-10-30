@@ -97,10 +97,12 @@ impl StructuredEventState {
         &mut self,
         logprobs: Option<DecodedLogprobs>,
         token_ids: Vec<u32>,
+        finish_reason: Option<FinishReason>,
     ) -> Result<Vec<ChatEvent>> {
         Ok(vec![ChatEvent::LogprobsDelta {
             logprobs,
             token_ids,
+            finish_reason,
         }])
     }
 
@@ -302,8 +304,9 @@ pub(crate) async fn structured_chat_event_stream(
             AssistantEvent::LogprobsDelta {
                 logprobs,
                 token_ids,
+                finish_reason,
             } => {
-                for next in state.process_logprobs_delta(logprobs, token_ids)? {
+                for next in state.process_logprobs_delta(logprobs, token_ids, finish_reason)? {
                     y.yield_ok(next).await;
                 }
             }
