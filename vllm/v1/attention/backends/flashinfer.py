@@ -559,8 +559,16 @@ def _separate_kv_head_slots_enabled() -> bool:
     )
 
 
+class _BypassUnlessSeparateKVHeadSlots:
+    """External KV writers produce the packed page, so the bypass is off while
+    `flashinfer_separate_kv_head_slots` lays pages out as [K heads | V heads]."""
+
+    def __get__(self, obj: object, owner: type | None = None) -> bool:
+        return not _separate_kv_head_slots_enabled()
+
+
 class FlashInferBackend(AttentionBackend):
-    supports_kv_cache_update_bypass: bool = True
+    supports_kv_cache_update_bypass = _BypassUnlessSeparateKVHeadSlots()
 
     @classmethod
     def customize_spec(cls, spec: "AttentionSpec") -> "AttentionSpec":
