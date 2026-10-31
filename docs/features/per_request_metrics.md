@@ -38,6 +38,7 @@ When per-request metrics are enabled, the response includes a `metrics` object:
   },
   "metrics": {
     "time_to_first_token_ms": 85.2,
+    "time_to_first_content_token_ms": 85.2,
     "generation_time_ms": 1240.5,
     "queue_time_ms": 12.3,
     "mean_itl_ms": 9.1,
@@ -49,6 +50,7 @@ When per-request metrics are enabled, the response includes a `metrics` object:
 | Field | Description |
 | --- | --- |
 | `time_to_first_token_ms` | Time from when the request was scheduled until the first output token was generated (TTFT). |
+| `time_to_first_content_token_ms` | Time from request scheduling until the response parser first emits final-answer content. It equals `time_to_first_token_ms` when no response parser is active, and is `null` when the content boundary cannot be determined. |
 | `generation_time_ms` | Decode time: time from the first output token to the last output token. Excludes both queue wait and prefill/TTFT. |
 | `queue_time_ms` | Time the request spent waiting in the scheduler queue before processing began. |
 | `mean_itl_ms` | Mean inter-token latency (average time between successive output tokens) during the decode phase. `null` for single-token responses. |
@@ -56,6 +58,35 @@ When per-request metrics are enabled, the response includes a `metrics` object:
 
 All fields are `null` if the underlying timing data is not available for that
 request.
+
+### Reasoning Models
+
+For models with a response parser, the first generated token may be reasoning
+output rather than final-answer content. In that case,
+`time_to_first_content_token_ms` can be greater than
+`time_to_first_token_ms`.
+
+For example, start Qwen3 with its reasoning parser:
+
+```bash
+vllm serve Qwen/Qwen3-0.6B \
+  --reasoning-parser qwen3 \
+  --enable-per-request-metrics
+```
+
+The relevant response metrics may look like:
+
+```json
+{
+  "metrics": {
+    "time_to_first_token_ms": 108.2,
+    "time_to_first_content_token_ms": 268.2
+  }
+}
+```
+
+Here, the model began generating output after 108.2 ms, while final-answer
+content was first emitted after 268.2 ms.
 
 !!! note
     Timing metrics describe a single generation stream, so they are only

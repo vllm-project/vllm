@@ -254,6 +254,7 @@ def _assert_complete_timing_metrics(metrics: object) -> None:
     assert isinstance(metrics, dict)
     timing_fields = {
         "time_to_first_token_ms",
+        "time_to_first_content_token_ms",
         "generation_time_ms",
         "queue_time_ms",
         "mean_itl_ms",
@@ -261,6 +262,9 @@ def _assert_complete_timing_metrics(metrics: object) -> None:
     }
     assert timing_fields <= metrics.keys()
     assert all(metrics[field] >= 0 for field in timing_fields)
+    assert (
+        metrics["time_to_first_content_token_ms"] == metrics["time_to_first_token_ms"]
+    )
 
 
 @pytest.mark.asyncio
