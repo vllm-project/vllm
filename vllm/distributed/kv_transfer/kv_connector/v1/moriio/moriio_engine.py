@@ -220,10 +220,10 @@ class MoRIIOWriter:
                 self._execute_write_task(task)
             except Exception:
                 logger.exception(
-                    "Write task failed for request %s, marking done",
+                    "Write task failed for request %s",
                     task.request_id,
                 )
-                self._mark_request_done(task.transfer_id)
+                self._fail_allocated_write(task)
 
     def _process_deferred_tasks(self) -> None:
         """Process tasks that were previously deferred."""
@@ -242,17 +242,24 @@ class MoRIIOWriter:
                     self._execute_write_task(task)
                 except Exception:
                     logger.exception(
-                        "Deferred write task failed for request %s, marking done",
+                        "Deferred write task failed for request %s",
                         task.request_id,
                     )
-                    self._mark_request_done(task.transfer_id)
-            elif (
-                now - task.enqueue_time > defer_timeout
-                and self.worker.moriio_wrapper.fail_unallocated_write(task.transfer_id)
-            ):
+                    self._fail_allocated_write(task)
+            elif now - task.enqueue_time <= defer_timeout:
+                still_deferred.append(task)
+            elif self.worker.moriio_wrapper.fail_unallocated_write(task.transfer_id):
                 self._notify_write_failed(task, now - task.enqueue_time)
             else:
-                still_deferred.append(task)
+                # Decode already allocated blocks, so its rank is known, but
+                # the handshake that _get_built_session needs never finished.
+                logger.error(
+                    "Deferred write task for request %s timed out after %.1fs "
+                    "waiting for the handshake with its decode rank",
+                    task.request_id,
+                    now - task.enqueue_time,
+                )
+                self._fail_allocated_write(task)
 
         self._deferred_tasks = still_deferred
 
@@ -304,19 +311,78 @@ class MoRIIOWriter:
             wrapper._mark_transfer_terminal_locked(transfer_id)
         self._clear_transfer_state(transfer_id)
 
-    def _is_remote_ready(self, task: WriteTask) -> bool:
-        """Check if remote blocks are allocated for this task.
+    def _fail_allocated_write(self, task: WriteTask) -> None:
+        """Fail a WRITE whose decode blocks are already allocated.
 
-        Args:
-            task: The write task
-
-        Returns:
-            True if remote blocks are ready
-
+        Free the producer blocks and tell the owning decode rank. Decode is
+        waiting for write_done; dropping the transfer locally leaves it there.
         """
-        return (
-            task.transfer_id in self.worker.moriio_wrapper.done_remote_allocate_req_dict
+        wrapper = self.worker.moriio_wrapper
+        with wrapper.lock:
+            if wrapper._is_transfer_terminal_locked(task.transfer_id):
+                return
+            request_info = wrapper.done_remote_allocate_req_dict.get(task.transfer_id)
+
+        posted: list[Any] = []
+        if request_info is not None:
+            with self._write_state_lock:
+                posted = list(request_info.transfer_statuses)
+                request_info.transfer_statuses.clear()
+        # Decode may reuse its blocks when it sees write_failed. Writes already
+        # posted for earlier layers have to land first.
+        try:
+            wrapper.waiting_for_transfer_complete(posted)
+        except Exception:
+            logger.exception(
+                "Posted writes for failed transfer %s did not complete",
+                task.transfer_id,
+            )
+        self._mark_request_done(task.transfer_id)
+        if request_info is None:
+            return
+        for remote_ip, remote_port in self._resolve_notify_endpoints(
+            task, request_info.decode_dp_rank
+        ):
+            try:
+                wrapper.send_notify(
+                    task.transfer_id,
+                    remote_ip,
+                    remote_port,
+                    message_type="write_failed",
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to notify decode DP rank %d that transfer %s failed",
+                    request_info.decode_dp_rank,
+                    task.transfer_id,
+                )
+
+    def _is_remote_ready(self, task: WriteTask) -> bool:
+        """Return whether this write can run now.
+
+        Decode's block list and the handshake with the rank that owns those
+        blocks are independent. ``remote_moriio_metadata`` is stored after the
+        layer metadata, so its presence is what ``_get_built_session`` requires.
+        """
+        request_info = self.worker.moriio_wrapper.done_remote_allocate_req_dict.get(
+            task.transfer_id
         )
+        if request_info is None:
+            return False
+        # Same ids _execute_write_task passes to _get_built_session. A fan-out
+        # has one session per target TP rank; a single target keeps the DP key.
+        is_mamba = task.tp_mapping is not None and self.worker._is_mamba_layer(
+            task.layer_name
+        )
+        for target in self._write_targets(task):
+            if target is not None and not is_mamba and not target.num_heads:
+                continue
+            engine_id = self._target_engine_id(
+                task, request_info.decode_dp_rank, target
+            )
+            if engine_id not in self.worker.remote_moriio_metadata:
+                return False
+        return True
 
     def _get_remote_alloc_info(self, transfer_id: str) -> RemoteAllocInfo:
         """Get remote allocation info for a request.
