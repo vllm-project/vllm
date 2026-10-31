@@ -28,9 +28,15 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
+from vllm.model_executor.layers.fused_moe.modular_kernel import (
+    FusedMoEPrepareAndFinalizeMonolithic,
+)
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.routed_experts import (
     RoutedExperts,
+)
+from vllm.model_executor.layers.fused_moe.routed_experts_capture_utils import (
+    collect_local_routing_rows,
 )
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
@@ -297,6 +303,21 @@ class MoERunner(MoERunnerInterface):
 
         # For smuggling this layer into the fused moe custom op
         register_layer_for_moe_forward_op(get_current_vllm_config(), self)
+
+    def restore_routed_experts_rows(self, topk_ids: torch.Tensor) -> torch.Tensor:
+        gathered = self.do_naive_dispatch_combine
+        if self._quant_method.is_monolithic:
+            kernel = self._quant_method.moe_kernel
+            assert kernel is not None
+            prepare_finalize = kernel.prepare_finalize
+            assert isinstance(prepare_finalize, FusedMoEPrepareAndFinalizeMonolithic)
+            gathered = gathered or prepare_finalize.routing_capture_is_gathered()
+        return collect_local_routing_rows(
+            topk_ids,
+            dp_rank=self.moe_config.dp_rank,
+            sp_size=self.moe_config.sp_size,
+            is_gathered=gathered,
+        )
 
     def load_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
