@@ -57,6 +57,26 @@ PROMPT_TOKENS = TOKENIZER(PROMPT).input_ids
 _REQUEST_COUNTER = 0
 
 
+@pytest.mark.parametrize("committing", [False, True])
+def test_abort_prepared_elastic_ep_preserves_committing_state(committing):
+    core = object.__new__(DPEngineCoreProc)
+    state = MagicMock()
+    core.eep_scaling_state = state
+    core.process_input_queue_block = True
+    if committing:
+        state.abort.side_effect = RuntimeError("already committing")
+        with pytest.raises(RuntimeError, match="already committing"):
+            core.abort_prepared_elastic_ep()
+        assert core.eep_scaling_state is state
+        assert core.process_input_queue_block
+    else:
+        core.abort_prepared_elastic_ep()
+        assert core.eep_scaling_state is None
+        assert not core.process_input_queue_block
+        core.abort_prepared_elastic_ep()
+    state.abort.assert_called_once_with()
+
+
 def make_request() -> EngineCoreRequest:
     global _REQUEST_COUNTER
     _REQUEST_COUNTER += 1

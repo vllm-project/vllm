@@ -8,6 +8,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import AsyncExitStack
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
+from unittest.mock import AsyncMock
 
 import msgspec
 import openai  # use the official client for correctness check
@@ -136,6 +137,37 @@ async def test_external_elastic_ep_late_rank_observes_epoch_error():
 
     with pytest.raises(RuntimeError, match="scale failed"):
         await coordinator._wait_for_bootstrap(store, requested_new_dp_size=3)
+
+
+@pytest.mark.asyncio
+async def test_external_elastic_ep_releases_state_when_peer_drain_fails(monkeypatch):
+    client = SimpleNamespace(abort_elastic_ep=AsyncMock())
+    coordinator = ExternalElasticEPScaleCoordinator(cast("DPAsyncMPClient", client))
+    control_store, reconfig_store = DictStore({}), DictStore({})
+    coordinator.prepared_scale = SimpleNamespace(
+        scale_up=True,
+        bootstrap=SimpleNamespace(new_data_parallel_size=3),
+        control_store=control_store,
+        reconfig_store=reconfig_store,
+        epoch="failed-epoch",
+        handshake_server=None,
+    )
+    monkeypatch.setattr(
+        coordinator,
+        "_wait_for_commit_ready",
+        AsyncMock(side_effect=RuntimeError("peer drain failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="peer drain failed"):
+        await coordinator.commit()
+
+    client.abort_elastic_ep.assert_awaited_once_with()
+    assert coordinator.prepared_scale is None
+    for store in (control_store, reconfig_store):
+        assert store.get(coordinator.key("failed-epoch", "phase")) == b"failed"
+        assert (
+            store.get(coordinator.key("failed-epoch", "error")) == b"peer drain failed"
+        )
 
 
 class ExternalLBServerManager:
