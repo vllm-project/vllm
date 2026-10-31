@@ -129,6 +129,10 @@ def sample_frames_from_video(frames: npt.NDArray, num_frames: int) -> npt.NDArra
 
 
 class VideoLoader:
+    default_num_frames: ClassVar[int] = 32
+    """``num_frames`` that ``VideoMediaIO`` passes when the user sets none.
+    Loaders that sample by fps use ``-1`` so only an explicit value caps them."""
+
     @classmethod
     def compute_frames_index_to_sample(
         cls,
@@ -364,6 +368,7 @@ class PyNvVideoCodecVideoBackend(VideoBackend):
     video_processor=("Qwen3VLVideoProcessor", "Cosmos3EdgeVideoProcessor"),
 )
 class Qwen3VLVideoBackend(VideoBackend):
+    default_num_frames: ClassVar[int] = -1
     _MAX_FRAMES: ClassVar[int] = 768
     _MAX_FPS: ClassVar[int] = 30
 
@@ -393,8 +398,12 @@ class Qwen3VLVideoBackend(VideoBackend):
 
         # Refer to:
         # https://github.com/huggingface/transformers/blob/v5.9.0/src/transformers/models/qwen3_vl/video_processing_qwen3_vl.py#L119-L125
-        num_frames = int(total_frames_num / original_fps * fps)
-        num_frames = min(max(num_frames, min_frames), max_frames, total_frames_num)
+        # An explicit num_frames takes priority over fps, as in HF.
+        if target.num_frames > 0:
+            num_frames = min(target.num_frames, max_frames, total_frames_num)
+        else:
+            num_frames = int(total_frames_num / original_fps * fps)
+            num_frames = min(max(num_frames, min_frames), max_frames, total_frames_num)
         indices = np.linspace(0, max_frame_idx, num_frames).round().astype(int).tolist()
         return indices
 
@@ -604,20 +613,22 @@ class EmbeddingGemma2VideoBackend(VideoBackend):
     video_processor="Qwen2VLVideoProcessor",
 )
 class Qwen2VLVideoBackend(VideoBackend):
-    """Qwen2-VL / Qwen2.5-VL fps-based video backend.
+    """Qwen2-VL / Qwen2.5-VL video backend.
 
-    Ports transformers' ``Qwen2VLVideoProcessor.sample_frames`` (fps mode),
-    shared by Qwen2-VL and Qwen2.5-VL (the latter has no video processor of its
-    own): sample ``total / original_fps * fps`` frames, clamp to
-    ``[min_frames, max_frames]`` (4 and 768), floor to a multiple of
-    ``temporal_patch_size`` (2), and take indices with the exact
+    Ports transformers' ``Qwen2VLVideoProcessor.sample_frames``, shared by
+    Qwen2-VL and Qwen2.5-VL (the latter has no video processor of its own).
+    An explicit ``num_frames`` is rounded to a multiple of
+    ``temporal_patch_size`` (2); otherwise sample ``total / original_fps * fps``
+    frames, clamp to ``[min_frames, max_frames]`` (4 and 768) and floor to a
+    multiple of ``temporal_patch_size``. Either way the frame count is capped at
+    ``max_frames`` and the clip length, and indices come from the exact
     ``torch.arange(0, total, total / n)`` call so they match HF byte-for-byte.
 
-    ``num_frames`` is ignored (fps-driven, like the Qwen3-VL loader). The
-    float32 step can emit an out-of-range tail index (e.g. 451 for a 451-frame
-    clip); it is clamped to the last valid frame.
+    The float32 step can emit an out-of-range tail index (e.g. 451 for a
+    451-frame clip); it is clamped to the last valid frame.
     """
 
+    default_num_frames: ClassVar[int] = -1
     _MAX_FRAMES: ClassVar[int] = 768
     _MAX_FPS: ClassVar[int] = 30
 
@@ -635,22 +646,26 @@ class Qwen2VLVideoBackend(VideoBackend):
         temporal_patch_size = kwargs.get("temporal_patch_size", 2)
         min_frames = kwargs.get("min_frames", 4)
         max_frames = min(kwargs.get("max_frames", cls._MAX_FRAMES), cls._MAX_FRAMES)
-
-        # vLLM reports original_fps == 0 for clips with unknown/variable fps
-        # (VFR, malformed, streaming); fail loudly instead of dividing by zero.
-        if original_fps <= 0:
-            raise ValueError(
-                "Qwen2-VL video sampling needs a known source fps, but the "
-                "container reported 0 (variable or unknown frame rate)."
-            )
-
         max_frames = (
             math.floor(min(max_frames, total_frames_num) / temporal_patch_size)
             * temporal_patch_size
         )
-        n = total_frames_num / original_fps * min(target.fps, cls._MAX_FPS)
-        n = min(max(n, min_frames), max_frames, total_frames_num)
-        n = math.floor(n / temporal_patch_size) * temporal_patch_size
+
+        # An explicit num_frames takes priority over fps, as in HF.
+        if target.num_frames > 0:
+            n = round(target.num_frames / temporal_patch_size) * temporal_patch_size
+            n = min(max(n, temporal_patch_size), max_frames)
+        else:
+            # vLLM reports original_fps == 0 for clips with unknown/variable fps
+            # (VFR, malformed, streaming); fail loudly instead of dividing by zero.
+            if original_fps <= 0:
+                raise ValueError(
+                    "Qwen2-VL video sampling needs a known source fps, but the "
+                    "container reported 0 (variable or unknown frame rate)."
+                )
+            n = total_frames_num / original_fps * min(target.fps, cls._MAX_FPS)
+            n = min(max(n, min_frames), max_frames, total_frames_num)
+            n = math.floor(n / temporal_patch_size) * temporal_patch_size
 
         # ``torch.arange`` matches transformers' float32 index math exactly
         # (numpy's float64 diverges by a frame on some inputs); clamp the tail
