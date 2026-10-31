@@ -543,7 +543,10 @@ class Worker(WorkerBase):
             del x
 
             # Now take memory snapshot after NCCL is initialized
-            gc.collect()
+            # NOTE: we freeze here to keep heap scans in kv cache setup / profiling
+            # fast. We unfreeze, collect, then refreeze to finalize the heap later in
+            # compile_or_warm_up_model.
+            freeze_gc_heap()
             torch.accelerator.empty_cache()
 
             # Weights from external model loader process
@@ -1119,8 +1122,10 @@ class Worker(WorkerBase):
         # compilations that would cause latency spikes during inference.
         self._maybe_activate_jit_monitor()
 
-        # Freeze the worker heap so the GC won't scan static objects
-        # (model weights, KV caches, CUDA graphs) during inference.
+        # Unfreeze and run GC (also frees cyclic garbage objects since init_device),
+        # then refreeze so that GC won't scan static objects (model weights, KV caches,
+        # CUDA graphs) during inference.
+        gc.unfreeze()
         freeze_gc_heap()
         maybe_attach_gc_debug_callback()
 
