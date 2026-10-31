@@ -397,6 +397,20 @@ steps:
   # PLE and QSA import conflicting HC registrations in a shared process.
   - pytest -v -s models/qwen4_exp/test_ple.py
 
+- label: ":nvidia: (B200) Qwen4 Exp MegaMoE"
+  key: qwen4-exp-mega-moe-b200
+  timeout_in_minutes: 20
+  device: b200-k8s
+  source_file_dependencies:
+  - vllm/models/qwen4_exp/nvidia/mega_moe.py
+  - vllm/model_executor/layers/fused_moe/deep_gemm_mega_moe.py
+  - vllm/model_executor/layers/fused_moe/prepare_megamoe.py
+  - vllm/model_executor/model_loader/reload/
+  - vllm/utils/deep_gemm.py
+  - tests/models/qwen4_exp/test_mega_moe.py
+  commands:
+    - pytest -v -s models/qwen4_exp/test_mega_moe.py
+
 - label: ":computer: (CPU) Qwen4 Exp"
   key: qwen4-exp-unit-tests-cpu
   depends_on:
