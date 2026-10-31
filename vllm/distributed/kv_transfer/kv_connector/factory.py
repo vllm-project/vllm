@@ -257,3 +257,8 @@ KVConnectorFactory.register_connector(
     "vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.hf3fs_connector",
     "HF3FSKVConnector",
 )
+KVConnectorFactory.register_connector(
+    "ConnexConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.connex_connector",
+    "ConnexConnector",
+)
