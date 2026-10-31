@@ -1391,7 +1391,9 @@ class Qwen2_5_VLForConditionalGeneration(
 
             grid_indices = np.indices((llm_grid_t, llm_grid_h, llm_grid_w))
             if t_factor != 1.0:
-                grid_indices[0] = (grid_indices[0] * t_factor).astype(np.int64)
+                t_index = torch.arange(llm_grid_t, dtype=torch.float32) * t_factor
+                t_index = t_index.long().numpy()
+                grid_indices[0] = t_index[:, None, None]
             llm_pos_ids_list.append(grid_indices.reshape(3, -1) + text_len + st_idx)
             st = offset + llm_grid_t * llm_grid_h * llm_grid_w
 
