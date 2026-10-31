@@ -114,7 +114,7 @@ def _in_own_storage(
             and span == new.numel()  # neither overlapping nor with gaps
             # its gaps may hold another tensor's data
             and _extent(old) == old.numel()
-            and new.numel() * size <= _extent(old) * old.element_size()
+            and new.numel() * size <= old.numel() * old.element_size()
         )
     if (
         not fits

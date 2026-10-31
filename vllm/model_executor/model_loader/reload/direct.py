@@ -164,7 +164,7 @@ def _checkpoint_views(
             continue  # no layout: created by post-load processing, derived
         if _layout(t) == ckpt[1]:
             continue
-        if not _owned(model, t):
+        if ckpt[0] is not model._ckpt_owner:
             # shared from another model (a target lm_head in a draft): this
             # finish would reprocess bytes a draft update does not resend
             raise RuntimeError(
