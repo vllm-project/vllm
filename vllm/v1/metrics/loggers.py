@@ -706,6 +706,21 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             counter_connector_prefix_cache_hits, per_engine_labelvalues
         )
 
+        self.kv_load_failure_metrics_enabled = kv_transfer_config is not None
+        if self.kv_load_failure_metrics_enabled:
+            counter_kv_load_failed_tokens = self._counter_cls(
+                name="vllm:kv_load_failed_tokens",
+                documentation=(
+                    "Computed tokens whose KV load from a KV connector failed; "
+                    "they are recomputed or their requests fail, per "
+                    "kv_load_failure_policy."
+                ),
+                labelnames=labelnames,
+            )
+            self.counter_kv_load_failed_tokens = create_metric_per_engine(
+                counter_kv_load_failed_tokens, per_engine_labelvalues
+            )
+
         #
         # Multi-modal cache
         #
@@ -1188,6 +1203,11 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                     self.counter_prompt_tokens_cached_by_source.labels(
                         *labelvalues, tier.value
                     ).inc(num_tokens)
+
+            if self.kv_load_failure_metrics_enabled:
+                self.counter_kv_load_failed_tokens[engine_idx].inc(
+                    scheduler_stats.num_kv_load_failed_tokens
+                )
 
             if scheduler_stats.spec_decoding_stats is not None:
                 self.spec_decoding_prom.observe(
