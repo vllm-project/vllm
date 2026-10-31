@@ -6,7 +6,8 @@ This file owns the ROCm-specific fused-MoE custom-op path:
 - custom-op registration and fake-tensor support
 - enablement gating for ``VLLM_ROCM_USE_AITER_MOE`` and shared experts
 - BF16 accuracy for the fused MoE kernel on representative shapes
-- gfx950-only AITER MXFP4 W4A16 MoE support, accuracy, and determinism
+- AITER MXFP4 MoE support per arch (incl. the MXFP4 experts check), and the
+  gfx950-only W4A16 accuracy and determinism
 - MoE-facing FP8 group-quant activation quality
 - deterministic routing and representative gfx942 / gfx950 coverage
 
@@ -881,6 +882,87 @@ def test_aiter_mxfp4_quant_scheme_support_matches_gfx950():
     )
 
     assert AiterMxfp4Experts._supports_quant_scheme(kMxfp4Static, None) is on_gfx950()
+
+
+def _fake_rocm_arch(monkeypatch: pytest.MonkeyPatch, arch: str) -> None:
+    from vllm.platforms import rocm
+
+    for name in ("gfx942", "gfx950", "gfx1250"):
+        monkeypatch.setattr(rocm, f"on_{name}", lambda name=name: name == arch)
+
+
+@pytest.mark.parametrize(
+    ("arch", "int4", "mxfp4"),
+    [("gfx942", True, False), ("gfx950", False, True), ("gfx1250", False, False)],
+)
+def test_aiter_mxfp4_experts_quant_scheme_support_by_arch(
+    monkeypatch: pytest.MonkeyPatch, arch: str, int4: bool, mxfp4: bool
+):
+    """MXFP4 on gfx950 only; int4 on gfx942 only, for Kimi-K3's int4 requant."""
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterMxfp4Experts,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kInt4Static32,
+        kMxfp4Dynamic,
+        kMxfp4Static,
+    )
+
+    _fake_rocm_arch(monkeypatch, arch)
+    supports = AiterMxfp4Experts._supports_quant_scheme
+    assert supports(kInt4Static32, None) is int4
+    assert supports(kMxfp4Static, None) is mxfp4
+    assert supports(kMxfp4Static, kMxfp4Dynamic) is mxfp4
+
+
+@pytest.mark.parametrize(
+    ("backend", "arch", "activation"),
+    [
+        ("AITER_MXFP4_BF16", "gfx950", "SWIGLUOAI"),
+        # Kimi-K3's MXFP4 experts requantized to int4 at load.
+        ("AITER_MXFP4_BF16", "gfx942", "SITU"),
+        ("AITER_MXFP4_MXFP4", "gfx950", "SILU"),
+        ("AITER_TRITON_MXFP4_BF16", "gfx942", "SWIGLUOAI"),
+        ("AITER_TRITON_MXFP4_BF16", "gfx950", "SWIGLUOAI"),
+        ("AITER_TRITON_MXFP4_BF16", "gfx1250", "SWIGLUOAI"),
+        ("AITER_MXFP4_FP8", "gfx950", "SWIGLUOAI"),
+        ("AITER_MXFP4_FP8", "gfx1250", "SWIGLUOAI"),
+        ("AITER_TRITON_MXFP4_MXFP4", "gfx1250", "SILU"),
+    ],
+)
+def test_mxfp4_experts_check_accepts_aiter_deployments(
+    monkeypatch: pytest.MonkeyPatch, backend: str, arch: str, activation: str
+):
+    """make_mxfp4_moe_kernel's fail-closed experts check must accept every
+    AITER MXFP4 backend on the archs it is deployed on."""
+    from dataclasses import replace
+
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        Mxfp4MoeBackend,
+        _validate_mxfp4_experts_config,
+        backend_to_kernel_cls,
+    )
+
+    _fake_rocm_arch(monkeypatch, arch)
+    monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", True)
+    monkeypatch.setattr(rocm_aiter_ops, "_FMOE_ENABLED", True)
+    moe_config = replace(
+        make_dummy_moe_config(
+            num_experts=128,
+            experts_per_token=4,
+            hidden_dim=2880,
+            intermediate_size=2880,
+            activation=MoEActivation[activation],
+        ),
+        routing_method=RoutingMethodType.Renormalize,
+    )
+    mxfp4_backend = Mxfp4MoeBackend[backend]
+    for experts_cls in backend_to_kernel_cls(mxfp4_backend):
+        _validate_mxfp4_experts_config(experts_cls, moe_config, mxfp4_backend)
 
 
 @pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
