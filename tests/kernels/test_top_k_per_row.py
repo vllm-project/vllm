@@ -2154,6 +2154,32 @@ def test_deep_select_topk_preallocated_output() -> None:
     ), "DeepSelect topk (preallocated output) results don't match torch.topk"
 
 
+def test_batch_invariant_sparse_indexer_reuses_deep_select(monkeypatch) -> None:
+    from vllm import envs
+    from vllm.model_executor.layers import sparse_attn_indexer
+
+    calls: list[int] = []
+    def fake_deep_select(_, top_k, **__):
+        calls.append(top_k)
+
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    monkeypatch.setattr(sparse_attn_indexer, "deep_select_topk", fake_deep_select)
+
+    logits = torch.zeros((2, 16))
+    sparse_attn_indexer._top_k_per_row_prefill(
+        logits,
+        torch.zeros(2, dtype=torch.int32),
+        torch.tensor([8, 12], dtype=torch.int32),
+        torch.empty((2, 4), dtype=torch.int32),
+        2,
+        logits.stride(0),
+        logits.stride(1),
+        4,
+    )
+
+    assert calls == [4]
+
+
 def _has_flashinfer_topk() -> bool:
     if not current_platform.is_cuda():
         return False
