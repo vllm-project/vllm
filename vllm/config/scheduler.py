@@ -213,6 +213,15 @@ class SchedulerConfig:
     avoid gaps in GPU utilization, leading to better latency and throughput.
     """
 
+    async_scheduling_depth: int = Field(default=2, ge=2)
+    """Steps in flight with async scheduling on Model Runner V2: the step on
+    the GPU plus `async_scheduling_depth - 1` steps scheduled ahead of it (per
+    pipeline stage beyond the first). The default 2 overlaps one step's host
+    work (output processing, scheduling, input preparation) with the next
+    step's GPU work. A deeper queue helps when the host round trip is longer
+    than a GPU step, as in low-batch decode across nodes with speculative
+    decoding. Ignored without async scheduling or on Model Runner V1."""
+
     stream_interval: int = Field(default=1, ge=1)
     """The interval (or buffer size) for streaming in terms of token length.
     A smaller value (1) makes streaming smoother by sending each token immediately,
