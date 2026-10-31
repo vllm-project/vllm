@@ -57,8 +57,9 @@ class DecodeConfig:
             reasons.append("does not support a KV connector")
         if not getattr(config, "use_v2_model_runner", False):
             reasons.append("requires Model Runner V2")
-        if config.speculative_config is not None:
-            reasons.append("does not support speculative decoding")
+        speculative = config.speculative_config
+        if speculative is not None and speculative.method != "eagle3":
+            reasons.append("supports only EAGLE3 speculative decoding")
         if config.model_config.enable_sleep_mode:
             reasons.append("does not support sleep mode")
         if config.weight_transfer_config is not None:

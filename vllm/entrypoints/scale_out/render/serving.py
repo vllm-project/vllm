@@ -5,8 +5,14 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi import Request
 
-from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest
-from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
+from vllm.entrypoints.anthropic.protocol import (
+    AnthropicDisabledThinkingEffortOption,
+    AnthropicMessagesRequest,
+)
+from vllm.entrypoints.anthropic.serving import (
+    AnthropicServingMessages,
+    DisabledThinkingEffortResolver,
+)
 from vllm.entrypoints.generate.base.protocol import MMPayload
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
@@ -71,6 +77,8 @@ class ServingRender(BaseServing):
         *,
         request_logger: RequestLogger | None = None,
         tool_server: "ToolServer | None" = None,
+        disabled_thinking_effort: AnthropicDisabledThinkingEffortOption = "auto",
+        disabled_thinking_effort_resolver: DisabledThinkingEffortResolver | None = None,
     ) -> None:
         super().__init__(
             models=models,
@@ -80,6 +88,14 @@ class ServingRender(BaseServing):
 
         self.online_renderer = online_renderer
         self.tool_server = tool_server
+        # A shared resolver takes precedence over disabled_thinking_effort.
+        self._disabled_thinking_effort_resolver = (
+            disabled_thinking_effort_resolver
+            if disabled_thinking_effort_resolver is not None
+            else DisabledThinkingEffortResolver(
+                online_renderer, disabled_thinking_effort
+            )
+        )
 
         self._merge_inline_system = (
             AnthropicServingMessages._should_merge_inline_system(online_renderer)
@@ -236,8 +252,13 @@ class ServingRender(BaseServing):
         conversion as the /v1/messages server path, then delegates to
         render_chat_request so the rendered tokens match the server exactly.
         """
+        disabled_thinking_effort = (
+            await self._disabled_thinking_effort_resolver.resolve_for(request)
+        )
         chat_req = AnthropicServingMessages.to_chat_completion_request(
-            request, merge_inline_system=self._merge_inline_system
+            request,
+            merge_inline_system=self._merge_inline_system,
+            disabled_thinking_effort=disabled_thinking_effort,
         )
         chat_req.mm_payload = request.mm_payload
         return await self.render_chat_request(chat_req, raw_request)

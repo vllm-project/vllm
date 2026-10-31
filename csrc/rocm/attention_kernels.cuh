@@ -344,7 +344,10 @@ typedef union u64_cvt {
   int64_t i64;
 } _T8x8;
 
-__device__ float warpReduceMax(float val) {
+// Marked __forceinline__: this header is included by 13 TUs, and a plain
+// __device__ definition would become a duplicate symbol if the TUs are ever
+// built with RDC or device LTO (today -fno-gpu-rdc internalizes it).
+__device__ __forceinline__ float warpReduceMax(float val) {
   for (int offset = warpSize / 2; offset > 0; offset /= 2) {
     val = max(
         val, __shfl_down(val, offset, WARP_SIZE));  // Using max() for reduction

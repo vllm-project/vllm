@@ -19,7 +19,11 @@ from flashinfer import (
 )
 from flashinfer.decode import fast_decode_plan, trtllm_batch_decode_with_kv_cache
 from flashinfer.prefill import trtllm_batch_context_with_kv_cache
-from flashinfer.utils import FP4Tensor
+from flashinfer.utils import (
+    FP4Tensor,
+    get_device_sm_count,
+    get_trtllm_gen_multi_ctas_kv_counter_bytes,
+)
 from typing_extensions import override
 
 from vllm import _custom_ops as custom_ops
@@ -111,6 +115,11 @@ def _nvfp4_kv_on_fa2() -> bool:
     return any(current_platform.is_device_capability_family(f) for f in (80, 90, 120))
 
 
+def _use_fa2_native_decode() -> bool:
+    # Below SM90, native decode runs fa2, which takes uniform multi-token queries.
+    return not current_platform.has_device_capability(90)
+
+
 _KVPair = tuple[torch.Tensor, torch.Tensor]
 
 
@@ -144,6 +153,24 @@ def _get_trtllm_workspace_buffer():
             envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE, dtype=torch.uint8, device="cuda"
         )
     return trtllm_workspace_buffer
+
+
+_fi_multi_ctas_kv_counter: torch.Tensor | None = None
+
+
+def _get_multi_ctas_kv_counter_buffer(
+    min_bytes: int, device: torch.device
+) -> torch.Tensor:
+    """Shared multi-CTA-KV counter buffer; the kernels re-zero it after each launch."""
+    global _fi_multi_ctas_kv_counter
+    if (
+        _fi_multi_ctas_kv_counter is None
+        or _fi_multi_ctas_kv_counter.numel() < min_bytes
+    ):
+        _fi_multi_ctas_kv_counter = torch.zeros(
+            min_bytes, dtype=torch.uint8, device=device
+        )
+    return _fi_multi_ctas_kv_counter
 
 
 def _pack_draft_block_bool_mask(
@@ -525,6 +552,8 @@ class BatchDCPPrefillWrapper:
 
 
 class FlashInferBackend(AttentionBackend):
+    supports_kv_cache_update_bypass: bool = True
+
     @classmethod
     def customize_spec(cls, spec: "AttentionSpec") -> "AttentionSpec":
         """NVFP4 stores K and V as separate per-head slots of packed fp4 data
@@ -885,9 +914,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         )
         if self.enable_cuda_graph:
             # For full cudagraph capture, one `decode_wrapper` for each batch
-            # size is needed for FlashInfer.
+            # size and query length is needed for FlashInfer.
             self._decode_wrappers_cudagraph: dict[
-                int, BatchDecodeWithPagedKVCacheWrapper
+                tuple[int, int], BatchDecodeWithPagedKVCacheWrapper
             ] = {}
             self._decode_cudagraph_max_bs = (1 + num_spec_tokens) * max_num_reqs
             if self.compilation_config.max_cudagraph_capture_size is not None:
@@ -1021,10 +1050,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             == FlashInferDecodeKernel.TRTLLM_GEN
             and not self.use_dcp
         )
+        self.use_fa2_native_decode = _use_fa2_native_decode()
         self._init_reorder_batch_threshold(
             1,
             supports_spec_as_decode=(
                 self.flashinfer_trtllm_api_decode_kernel is not None
+                or self.use_fa2_native_decode
             ),
             # trtllm-gen decode receives no cp_rank/global-seq-len information,
             # so its end-aligned causal mask is wrong for q_len > 1 over the
@@ -1153,6 +1184,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
         kv_specs = iter_layer_specs(kv_cache_spec)
+        if _use_fa2_native_decode():
+            # fa2 decodes uniform causal spec queries.
+            if kv_specs and not vllm_config.attention_config.use_non_causal:
+                return AttentionCGSupport.UNIFORM_BATCH
+            return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+
         num_qo_heads = vllm_config.model_config.get_num_attention_heads(
             vllm_config.parallel_config
         )
@@ -1197,8 +1234,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     ) -> int | None:
         # The uniform gate already covers DCP, head geometry, the XQA head-dim
         # limit and causality, and yields None for subclasses that force NEVER.
+        # The native fa2 decode wrapper takes only uniform query lengths.
         if (
-            cls.get_cudagraph_support(vllm_config, kv_cache_spec)
+            _use_fa2_native_decode()
+            or cls.get_cudagraph_support(vllm_config, kv_cache_spec)
             != AttentionCGSupport.UNIFORM_BATCH
         ):
             return None
@@ -1417,9 +1456,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         assert self._prefill_wrapper is not None
         return self._prefill_wrapper
 
-    def _get_decode_wrapper(self, batch_size: int, use_cudagraph: bool = False):
+    def _get_decode_wrapper(
+        self, batch_size: int, use_cudagraph: bool = False, q_len_per_req: int = 1
+    ):
         if use_cudagraph:
-            decode_wrapper = self._decode_wrappers_cudagraph.get(batch_size, None)
+            decode_wrapper = self._decode_wrappers_cudagraph.get(
+                (batch_size, q_len_per_req), None
+            )
         else:
             decode_wrapper = self._decode_wrapper
 
@@ -1434,7 +1477,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 paged_kv_last_page_len = None
             # NVFP4 KV cache requires the trtllm-gen backend inside
             # the wrapper on SM100; SM8x, SM90 and SM12x read it with fa2.
-            backend = "trtllm-gen" if self.nvfp4_trtllm else "auto"
+            backend = (
+                "trtllm-gen"
+                if self.nvfp4_trtllm
+                else "fa2"
+                if self.use_fa2_native_decode
+                else "auto"
+            )
             decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
                 self._get_workspace_buffer(),
                 get_flashinfer_layout_string(self.kv_cache_layout),
@@ -1451,7 +1500,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
             # save the decode wrapper
             if use_cudagraph:
-                self._decode_wrappers_cudagraph[batch_size] = decode_wrapper
+                self._decode_wrappers_cudagraph[batch_size, q_len_per_req] = (
+                    decode_wrapper
+                )
             else:
                 self._decode_wrapper = decode_wrapper
 
@@ -1890,10 +1941,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     and pure_decode
                     and num_decode_tokens <= self._decode_cudagraph_max_bs
                 )
-                num_input_tokens = num_decode_tokens
+                num_input_tokens, q_len_per_req = num_decode_tokens, 1
+                if self.use_fa2_native_decode:
+                    # fa2 plans uniform spec decodes per request.
+                    num_input_tokens = num_decodes
+                    q_len_per_req = num_decode_tokens // num_decodes
 
                 decode_wrapper = self._get_decode_wrapper(
-                    num_input_tokens, use_cudagraph
+                    num_input_tokens, use_cudagraph, q_len_per_req
                 )
                 # Use the persistent buffer with padding length,
                 # instead of the same address but chunked version
@@ -1942,6 +1997,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     o_data_type=o_dtype,
                     fixed_split_size=self.decode_fixed_split_size,
                     disable_split_kv=self.disable_split_kv,
+                    q_len_per_req=q_len_per_req,
                 )
                 attn_metadata.decode = FIDecode(wrapper=decode_wrapper)
         return attn_metadata
@@ -2030,6 +2086,20 @@ class FlashInferImpl(AttentionImpl):
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
         self.o_sf_scale: float | None = None
+
+        # Allocated eagerly to stay out of CUDA-graph capture; DCP all-gathers
+        # the decode query over heads.
+        self._multi_ctas_kv_counter_buffer: torch.Tensor | None = None
+        if vllm_config is not None:
+            _sched = vllm_config.scheduler_config
+            self._multi_ctas_kv_counter_buffer = _get_multi_ctas_kv_counter_buffer(
+                get_trtllm_gen_multi_ctas_kv_counter_bytes(
+                    _sched.max_num_batched_tokens or _sched.max_num_seqs,
+                    num_heads * self.dcp_world_size,
+                    get_device_sm_count(torch.device("cuda")),
+                ),
+                torch.device("cuda"),
+            )
 
         # Pre-allocated FP8 output buffer for NVFP4 without fused output quant.
         if self.nvfp4_trtllm and vllm_config is not None:
@@ -2488,6 +2558,7 @@ class FlashInferImpl(AttentionImpl):
                     o_sf_scale=self.o_sf_scale,
                     out=out,
                     kv_cache_sf=prefill_kv_block_scales,
+                    multi_ctas_kv_counter_buffer=self._multi_ctas_kv_counter_buffer,
                 )
 
                 if needs_fp8_out:
@@ -2715,6 +2786,7 @@ class FlashInferImpl(AttentionImpl):
                     ),
                     lse=lse,
                     return_lse=self.need_to_return_lse_for_decode,
+                    multi_ctas_kv_counter_buffer=self._multi_ctas_kv_counter_buffer,
                 )
 
                 if use_dcp:
@@ -2807,6 +2879,7 @@ def fast_plan_decode(
     non_blocking: bool = True,
     fixed_split_size: int = -1,
     disable_split_kv: bool = False,
+    q_len_per_req: int = 1,
 ) -> None:
     """A faster version of BatchDecodeWithPagedKVCacheWrapper::plan used for
     cudagraph capture/replay, while the no cudagraph version turns back
@@ -2851,6 +2924,7 @@ def fast_plan_decode(
             seq_lens=seq_lens_cpu,
             fixed_split_size=fixed_split_size,
             disable_split_kv=disable_split_kv,
+            q_len_per_req=q_len_per_req,
         )
         self.vllm_first_call = False
         return
@@ -2878,6 +2952,7 @@ def fast_plan_decode(
         non_blocking=non_blocking,
         fixed_split_size=fixed_split_size,
         disable_split_kv=disable_split_kv,
+        q_len_per_req=q_len_per_req,
     )
 
 

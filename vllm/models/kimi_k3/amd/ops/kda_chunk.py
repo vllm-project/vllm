@@ -235,7 +235,7 @@ def fused_kda_chunk(
         output_final_state: whether to return the final recurrent state.
         chunk_offsets: int32 per-sequence first chunk index.
         checkpoint_state: destination for the mid-prefill state snapshots,
-            fp32 ``[rows, H, 128, 128]``. Without
+            fp32 or bf16 ``[rows, H, 128, 128]``. Without
             ``checkpoint_state_indices`` it is a staging buffer indexed by
             sequence; with them it can be the paged state cache itself.
         checkpoint_offsets: int32 ``[N]`` token offsets, each relative to its
@@ -246,7 +246,7 @@ def fused_kda_chunk(
             rather than rely on the store happening.
         checkpoint_state_indices: optional int32 ``[N]`` destination row per
             sequence. A negative row disables the export for that sequence.
-        state_cache: the paged recurrent state, fp32
+        state_cache: the paged recurrent state, fp32 or bf16
             ``[slots, H, 128, 128]``. When given, the walk reads sequence
             ``n``'s initial state from row ``state_indices[n]`` and writes its
             final state back to the same row, which removes the gather and the

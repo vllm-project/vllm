@@ -3,21 +3,51 @@
 
 import asyncio
 import functools
+from collections.abc import Sequence
 from http import HTTPStatus
 from typing import Any
 
+import orjson
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from starlette.background import BackgroundTask, BackgroundTasks
 
 from vllm.entrypoints.generate.base.protocol import StreamOptions
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
+
+
+def create_json_response(
+    result: BaseModel | Sequence[BaseModel] | dict[str, Any],
+    *,
+    status_code: int = HTTPStatus.OK,
+) -> Response:
+    """Encode models or JSON dictionaries, including native NumPy values."""
+    if isinstance(result, ErrorResponse):
+        return JSONResponse(content=result.model_dump(), status_code=result.error.code)
+
+    if isinstance(result, BaseModel):
+        content: Any = result.model_dump()
+    elif isinstance(result, dict):
+        content = result
+    else:
+        content = [item.model_dump() for item in result]
+    try:
+        body = orjson.dumps(
+            content, option=orjson.OPT_NON_STR_KEYS | orjson.OPT_SERIALIZE_NUMPY
+        )
+    except TypeError:
+        # Preserve JSONResponse support for integers outside the 64-bit range.
+        return JSONResponse(content=content, status_code=status_code)
+    return Response(
+        content=body, status_code=status_code, media_type="application/json"
+    )
 
 
 async def listen_for_disconnect(request: Request) -> None:
@@ -177,7 +207,7 @@ def load_aware_call(func):
             raw_request.app.state.server_load_metrics -= 1
             raise
 
-        if isinstance(response, (JSONResponse, StreamingResponse)):
+        if isinstance(response, Response):
             if response.background is None:
                 response.background = BackgroundTask(decrement_server_load, raw_request)
             elif isinstance(response.background, BackgroundTasks):

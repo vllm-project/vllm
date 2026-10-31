@@ -9,15 +9,14 @@ use uuid::Uuid;
 use vllm_engine_core_client::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
-use vllm_engine_core_client::protocol::structured_outputs::{
-    StructuredOutputBackend, StructuredOutputsParams,
-};
+use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 use vllm_text::{
     DecodedLogprobs, DecodedPromptLogprobs, FinishReason, Finished, Prompt, PromptTruncation,
     PromptTruncationLimit, SamplingParams, TextDecodeOptions, TextRequest, TruncationSide,
 };
 
 use super::pb;
+use crate::model_names::ServedModelNames;
 
 fn kv_hints_from_proto(hints: pb::KvHintsEnvelope) -> KvHintsEnvelope {
     KvHintsEnvelope {
@@ -51,15 +50,15 @@ fn kv_hints_from_proto(hints: pb::KvHintsEnvelope) -> KvHintsEnvelope {
 
 /// Convert a gRPC `GenerateRequest` into the internal `TextRequest`.
 ///
-/// If `req.model` is non-empty, it must match one of `served_model_names`;
-/// otherwise the request is rejected with `NotFound`. An empty string is
-/// treated as "unset" (proto3 default) and accepted.
+/// `req.model` must be accepted by `served_model_names`; otherwise the request
+/// is rejected with `NotFound`. An empty string is treated as "unset" (proto3
+/// default) and accepted.
 pub fn to_text_request(
     req: pb::GenerateRequest,
     stream: bool,
-    served_model_names: &[String],
+    served_model_names: &ServedModelNames,
 ) -> Result<TextRequest, Status> {
-    if !req.model.is_empty() && !served_model_names.iter().any(|n| n == &req.model) {
+    if !served_model_names.accepts(Some(&req.model)) {
         return Err(Status::not_found(format!(
             "model `{}` not found",
             req.model
@@ -124,6 +123,7 @@ pub fn to_text_request(
         include_stop_str_in_output: stopping.is_some_and(|s| s.include_stop_strings),
         stop_strings: stopping.map(|s| &s.stop_strings).filter(|ss| !ss.is_empty()).cloned(),
         min_tokens: stopping.map_or(0, |s| s.min_new_tokens),
+        detokenize: response.and_then(|options| options.output_text).unwrap_or(true),
     };
 
     Ok(TextRequest {
@@ -276,8 +276,6 @@ fn candidate_logprob_spec(
     }
 }
 
-/// EngineCore compiles every request with the backend of the first one it sees,
-/// so all gRPC constraints use xgrammar.
 fn convert_structured_output(
     d: &pb::DecodingParameters,
 ) -> Result<Option<StructuredOutputsParams>, Status> {
@@ -286,7 +284,7 @@ fn convert_structured_output(
         Some(so) => so,
     };
     use pb::decoding_parameters::StructuredOutput;
-    let mut params = match so {
+    let params = match so {
         StructuredOutput::Json(schema) => {
             let json: serde_json::Value = serde_json::from_str(schema)
                 .map_err(|e| Status::invalid_argument(format!("invalid json schema: {e}")))?;
@@ -303,7 +301,6 @@ fn convert_structured_output(
             StructuredOutputsParams::structural_tag(tag.clone())
         }
     };
-    params.backend = StructuredOutputBackend::Xgrammar;
     Ok(Some(params))
 }
 
@@ -399,6 +396,9 @@ fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> Result<pb::FinishIn
             (PbFinishReason::Stop as i32, sr)
         }
         FinishReason::Length => (PbFinishReason::Length as i32, None),
+        FinishReason::Error(Some(error)) if error.is_validation_error() => {
+            return Err(Status::invalid_argument(error.message.clone()));
+        }
         FinishReason::Error(Some(error)) if error.retryable => {
             return Err(Status::unavailable(error.message.clone()));
         }
@@ -412,7 +412,7 @@ fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> Result<pb::FinishIn
         stop_reason,
         kv_transfer_params: finished.kv_transfer_params.as_deref().and_then(json_to_proto_struct),
         ec_transfer_params: finished.ec_transfer_params.as_deref().and_then(json_to_proto_struct),
-        num_cached_tokens: Some(finished.usage.cached_token_count as u32),
+        num_cached_tokens: Some(finished.usage.prompt_cache_usage.cached_token_count as u32),
     })
 }
 
@@ -571,6 +571,7 @@ mod tests {
     use prost::Message as _;
     use vllm_engine_core_client::protocol::output::{RequestError, StopReason};
     use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
+    use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
     use vllm_text::{
         FinishReason, Finished, Prompt, SamplingHints, SamplingLimits, lower_sampling_params,
     };
@@ -578,9 +579,13 @@ mod tests {
 
     use super::pb::finish_info::{FinishReason as PbFinishReason, StopReason as PbStopReason};
     use super::{
-        ResponseOpts, Status, StructuredOutputBackend, StructuredOutputsParams,
-        json_to_proto_struct, pb, to_finish_info, to_sequence_output, to_text_request,
+        ResponseOpts, json_to_proto_struct, pb, to_finish_info, to_sequence_output, to_text_request,
     };
+    use crate::model_names::ServedModelNames;
+
+    fn served() -> ServedModelNames {
+        ServedModelNames::new(vec!["test-model".to_string()])
+    }
 
     fn base_request() -> pb::GenerateRequest {
         pb::GenerateRequest {
@@ -606,7 +611,7 @@ mod tests {
         let encoded = request.encode_to_vec();
         for stream in [false, true] {
             let decoded = pb::GenerateRequest::decode(encoded.as_slice()).unwrap();
-            let text = to_text_request(decoded, stream, &["test-model".to_string()]).unwrap();
+            let text = to_text_request(decoded, stream, &served()).unwrap();
             let engine = vllm_text::lower_text_request(
                 text,
                 vec![1],
@@ -617,6 +622,7 @@ mod tests {
                     model_vocab_size: 512,
                     tokenizer_vocab_size: 512,
                 },
+                StructuredOutputBackend::Xgrammar,
                 &TestTokenizer::new(),
             )
             .unwrap()
@@ -669,7 +675,7 @@ mod tests {
             let encoded = request.encode_to_vec();
             for stream in [false, true] {
                 let request = pb::GenerateRequest::decode(encoded.as_slice()).unwrap();
-                let text = to_text_request(request, stream, &["test-model".to_string()])
+                let text = to_text_request(request, stream, &served())
                     .expect("reasoning controls accepted");
                 let engine = vllm_text::lower_text_request(
                     text,
@@ -681,6 +687,7 @@ mod tests {
                         model_vocab_size: 512,
                         tokenizer_vocab_size: 512,
                     },
+                    StructuredOutputBackend::Xgrammar,
                     &TestTokenizer::new(),
                 )
                 .expect("reasoning controls lower to engine")
@@ -707,8 +714,7 @@ mod tests {
             let encoded = request.encode_to_vec();
             for stream in [false, true] {
                 let decoded = pb::GenerateRequest::decode(encoded.as_slice()).unwrap();
-                let text = to_text_request(decoded, stream, &["test-model".to_string()])
-                    .expect("convert request");
+                let text = to_text_request(decoded, stream, &served()).expect("convert request");
                 assert_eq!(text.sampling_params.watermarking, watermarking);
             }
         }
@@ -720,7 +726,7 @@ mod tests {
             temperature: Some(0.7),
             ..base_request()
         };
-        let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+        let text = to_text_request(req, false, &served()).expect("convert ok");
         assert_eq!(text.sampling_params.temperature, Some(0.7));
     }
 
@@ -740,7 +746,7 @@ mod tests {
             ..base_request()
         };
 
-        let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+        let text = to_text_request(req, false, &served()).expect("convert ok");
         let hints = text.kv_hints.expect("kv hints");
         assert_eq!(hints.protocol_version, "0.1");
         assert_eq!(hints.message_id, "msg-1");
@@ -755,47 +761,9 @@ mod tests {
 
     #[test]
     fn unset_temperature_defaults_to_greedy() {
-        let text = to_text_request(base_request(), false, &["test-model".to_string()])
-            .expect("convert ok");
+        let text = to_text_request(base_request(), false, &served()).expect("convert ok");
         // The gRPC API defaults to greedy (0.0) when temperature is not specified.
         assert_eq!(text.sampling_params.temperature, Some(0.0));
-    }
-
-    fn lower_structured_output(
-        so: super::pb::decoding_parameters::StructuredOutput,
-    ) -> Result<StructuredOutputsParams, Status> {
-        let req = pb::GenerateRequest {
-            decoding: Some(pb::DecodingParameters {
-                structured_output: Some(so),
-                ..Default::default()
-            }),
-            ..base_request()
-        };
-        Ok(to_text_request(req, false, &["test-model".to_string()])?
-            .sampling_params
-            .structured_outputs
-            .expect("structured outputs set"))
-    }
-
-    #[test]
-    fn grpc_structured_outputs_use_xgrammar() {
-        use super::pb::decoding_parameters::StructuredOutput;
-        for so in [
-            StructuredOutput::Json(r#"{"type": "object"}"#.to_string()),
-            StructuredOutput::JsonObject(true),
-            StructuredOutput::Regex("[a-z]+".to_string()),
-            StructuredOutput::Grammar(r#"root ::= "a""#.to_string()),
-            StructuredOutput::Choice(super::pb::decoding_parameters::StringChoices {
-                choices: vec!["a".to_string()],
-            }),
-            StructuredOutput::StructuralTag(
-                r#"{"type": "structural_tag", "format": {"type": "const_string", "value": "x"}}"#
-                    .to_string(),
-            ),
-        ] {
-            let params = lower_structured_output(so.clone()).expect("convert ok");
-            assert_eq!(params.backend, StructuredOutputBackend::Xgrammar, "{so:?}");
-        }
     }
 
     #[test]
@@ -807,7 +775,7 @@ mod tests {
             }),
             ..base_request()
         };
-        let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+        let text = to_text_request(req, false, &served()).expect("convert ok");
         assert_eq!(text.sampling_params.seed, None);
     }
 
@@ -820,7 +788,7 @@ mod tests {
             }),
             ..base_request()
         };
-        let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+        let text = to_text_request(req, false, &served()).expect("convert ok");
         assert_eq!(text.sampling_params.seed, Some(0));
     }
 
@@ -864,8 +832,7 @@ mod tests {
                 }),
                 ..base_request()
             };
-            let text =
-                to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+            let text = to_text_request(req, false, &served()).expect("convert ok");
             let params = lower_sampling_params(
                 text.sampling_params,
                 SamplingHints::default(),
@@ -875,6 +842,7 @@ mod tests {
                     model_vocab_size: 512,
                     tokenizer_vocab_size: 512,
                 },
+                StructuredOutputBackend::Xgrammar,
                 1,
                 &TestTokenizer::new(),
             )
@@ -907,7 +875,7 @@ mod tests {
             let encoded = request.encode_to_vec();
             for stream in [false, true] {
                 let decoded = pb::GenerateRequest::decode(encoded.as_slice()).unwrap();
-                let text = to_text_request(decoded, stream, &["test-model".to_string()]).unwrap();
+                let text = to_text_request(decoded, stream, &served()).unwrap();
                 let engine = vllm_text::lower_text_request(
                     text,
                     vec![1],
@@ -923,6 +891,7 @@ mod tests {
                         model_vocab_size: 512,
                         tokenizer_vocab_size: 512,
                     },
+                    StructuredOutputBackend::Xgrammar,
                     &TestTokenizer::new(),
                 )
                 .unwrap()
@@ -942,7 +911,7 @@ mod tests {
             }),
             ..base_request()
         };
-        let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+        let text = to_text_request(req, false, &served()).expect("convert ok");
         assert_eq!(text.sampling_params.skip_reading_prefix_cache, Some(true));
     }
 
@@ -955,7 +924,7 @@ mod tests {
             }),
             ..base_request()
         };
-        let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+        let text = to_text_request(req, false, &served()).expect("convert ok");
         assert_eq!(text.sampling_params.skip_reading_prefix_cache, None);
         // Prompt conversion still succeeds and reaches the expected variant.
         assert!(matches!(text.prompt, Prompt::Text(s) if s == "hi"));
@@ -966,12 +935,14 @@ mod tests {
             usage: vllm_llm::TokenUsage {
                 prompt_token_count: 0,
                 output_token_count: 0,
-                cached_token_count: 0,
+                prompt_cache_usage: Default::default(),
             },
             finish_reason: reason,
             kv_transfer_params: None,
             ec_transfer_params: None,
             sampling_mask: None,
+            spec_decode_metrics: None,
+            weight_versions: None,
             timestamps: Default::default(),
         }
     }
@@ -1042,7 +1013,7 @@ mod tests {
     }
 
     #[test]
-    fn retryable_engine_error_maps_to_unavailable() {
+    fn engine_errors_map_to_status_codes() {
         let error = RequestError {
             code: "engine_paused".to_string(),
             message: "Generation is paused.".to_string(),
@@ -1051,6 +1022,19 @@ mod tests {
         let fin = finished(FinishReason::Error(Some(Box::new(error))));
         let status = to_finish_info(&fin, &[]).expect_err("retryable error");
         assert_eq!(status.code(), tonic::Code::Unavailable);
+
+        let error = RequestError {
+            code: RequestError::VALIDATION_ERROR.to_string(),
+            message: "Invalid structured outputs: Grammar error: bad".to_string(),
+            retryable: false,
+        };
+        let fin = finished(FinishReason::Error(Some(Box::new(error))));
+        let status = to_finish_info(&fin, &[]).expect_err("invalid request");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert_eq!(
+            status.message(),
+            "Invalid structured outputs: Grammar error: bad"
+        );
 
         let fin = finished(FinishReason::Error(None));
         let status = to_finish_info(&fin, &[]).expect_err("internal error");
@@ -1061,7 +1045,7 @@ mod tests {
     fn to_sequence_output_threads_token_ids_into_eos_id() {
         let mut fin = finished(FinishReason::Stop(None));
         fin.usage.prompt_token_count = 8;
-        fin.usage.cached_token_count = 5;
+        fin.usage.prompt_cache_usage.cached_token_count = 5;
         let opts = ResponseOpts {
             output_text: true,
             output_token_ids: true,

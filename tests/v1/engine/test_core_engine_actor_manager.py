@@ -15,7 +15,7 @@ import ray
 import zmq
 from torch.distributed import TCPStore
 
-from vllm.utils.network_utils import get_open_port, make_zmq_socket, split_zmq_path
+from vllm.utils.network_utils import make_zmq_socket, split_zmq_path
 from vllm.v1.engine.core import EngineCoreActorMixin
 from vllm.v1.engine.core_client import BackgroundResources
 from vllm.v1.engine.utils import (
@@ -162,8 +162,9 @@ def test_coordination_store_held_only_by_the_online_dp_master(
     parallel_config = vllm_config.parallel_config
     for name, value in overrides.items():
         setattr(parallel_config, name, value)
-    # A fresh port per case so a lingering handshake socket cannot fail the next.
-    parallel_config.data_parallel_rpc_port = get_open_port()
+    # Port 0 makes the handshake socket take a free port at bind time; a port
+    # reserved up front can be handed to the coordination store meanwhile.
+    parallel_config.data_parallel_rpc_port = 0
     parallel_config._coord_store_port = 0
     monkeypatch.setattr("vllm.v1.engine.utils.CoreEngineProcManager", FakeManager)
     monkeypatch.setattr("vllm.v1.engine.utils.CoreEngineActorManager", FakeManager)
