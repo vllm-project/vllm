@@ -315,3 +315,32 @@ def test_aiter_kv_workspace_only_for_cache_readers(
         spec, ["attn"], default_vllm_config, torch.device("cpu")
     )
     assert (builder.kv_sharing_workspace is not None) == (sharing or bypass)
+
+
+@pytest.mark.parametrize(
+    "expert_parallel,reduce_dtype,supported",
+    [(True, "fp32", True), (False, "bf16", True), (False, "fp32", False)],
+)
+def test_token_sharded_stream_needs_ep_or_a_bf16_tp_reduction(
+    monkeypatch, expert_parallel: bool, reduce_dtype: str, supported: bool
+) -> None:
+    from vllm import envs
+
+    monkeypatch.setattr(envs, "VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE", reduce_dtype)
+    monkeypatch.setattr(envs, "VLLM_ROCM_MUSE_SP_MIN_TOKENS", 1024)
+    parallel_config = SimpleNamespace(
+        enable_expert_parallel=expert_parallel,
+        tensor_parallel_size=8,
+        data_parallel_size=1,
+        pipeline_parallel_size=1,
+        prefill_context_parallel_size=1,
+        decode_context_parallel_size=1,
+        use_sequence_parallel_moe=False,
+    )
+    vllm_config = SimpleNamespace(
+        parallel_config=parallel_config,
+        model_config=SimpleNamespace(
+            hf_text_config=SimpleNamespace(mlp_layer_types=["sparse"] * 4)
+        ),
+    )
+    assert amd_model.token_sharded_stream_supported(vllm_config) is supported
