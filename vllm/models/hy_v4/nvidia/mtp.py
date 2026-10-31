@@ -16,6 +16,7 @@ from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_ma
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.fp8_dequant import load_unneeded_scale
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -24,9 +25,8 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.model_executor.models.deepseek_v2 import _try_load_fp8_indexer_wk
+from vllm.model_executor.models.deepseek_v2 import _indexer_checkpoint_name
 from vllm.model_executor.models.utils import (
-    get_pp_missing_layer_names,
     is_pp_missing_parameter,
     maybe_prefix,
 )
@@ -730,7 +730,6 @@ class HYV4MTP(nn.Module):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         params_dict = dict(self.named_parameters())
-        pp_missing_layer_names = get_pp_missing_layer_names(self)
         loaded_params: set[str] = set()
 
         mtp_start = self.config.num_hidden_layers
@@ -773,8 +772,6 @@ class HYV4MTP(nn.Module):
             (".wk_weights_proj", ".wk", 0),
             (".wk_weights_proj", ".weights_proj", 1),
         ]
-        # FP8 indexer wk dequant buffer (weight and scale arrive separately).
-        pending_wk_fp8: dict[str, dict[str, torch.Tensor]] = {}
 
         for name, loaded_weight in weights:
             if name in shared_weights:
@@ -830,19 +827,9 @@ class HYV4MTP(nn.Module):
             if is_loaded:
                 continue
 
-            # FP8 indexer wk: dequantize to BF16 and load into the fused
-            # wk_weights_proj. PP-aware (skips layers not held by this rank).
-            if _try_load_fp8_indexer_wk(
-                name,
-                loaded_weight,
-                pending_wk_fp8,
-                params_dict,
-                loaded_params,
-                pp_missing_layer_names,
-            ):
-                continue
-
-            # BF16 indexer wk / weights_proj: merge into the fused param.
+            # Indexer wk / weights_proj (FP8 + scale, or BF16): merge into the
+            # fused param.
+            name = _indexer_checkpoint_name(name)
             is_loaded = False
             for param_name, weight_name, shard_id in indexer_stacked_mapping:
                 if weight_name not in name or "wk_weights" in name:
@@ -855,6 +842,9 @@ class HYV4MTP(nn.Module):
                 param = params_dict[name_mapped]
                 param.weight_loader(param, loaded_weight, shard_id)
                 loaded_params.add(name_mapped)
+                load_unneeded_scale(
+                    name_mapped, param, loaded_weight, loaded_params, shard_id
+                )
                 is_loaded = True
                 break
             if is_loaded:

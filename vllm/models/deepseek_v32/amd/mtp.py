@@ -16,6 +16,7 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.fp8_dequant import load_unneeded_scale
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
@@ -30,14 +31,13 @@ from vllm.model_executor.models.deepseek_mtp import SharedHead
 from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2MixtureOfExperts,
     DeepseekV2MoE,
-    _try_load_fp8_indexer_wk,
+    _indexer_checkpoint_name,
     get_spec_layer_idx_from_weight_name,
 )
 from vllm.model_executor.models.interfaces import SupportsPP
 from vllm.model_executor.models.utils import (
     extract_layer_index,
     get_fused_shared_expert_layers,
-    get_pp_missing_layer_names,
     make_empty_intermediate_tensors_factory,
     maybe_prefix,
 )
@@ -280,15 +280,8 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
             + (self.config.n_shared_experts if fused_shared_expert_layers else 0),
         )
 
-        pp_missing_layer_names = get_pp_missing_layer_names(self)
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        # Reordering loaders (e.g. runai_streamer) can split an FP8 indexer wk
-        # weight/scale pair across load_weights() calls; keep the pending
-        # buffer on the model so pairs survive the call boundary.
-        _pending_wk_fp8 = getattr(self, "_pending_indexer_wk_fp8", None)
-        if _pending_wk_fp8 is None:
-            self._pending_indexer_wk_fp8 = _pending_wk_fp8 = {}
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name or self.is_unused_checkpoint_weight(name):
                 continue
@@ -312,15 +305,7 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
             )
             name = self._rewrite_spec_layer_name(spec_layer, name)
 
-            if _try_load_fp8_indexer_wk(
-                name,
-                loaded_weight,
-                _pending_wk_fp8,
-                params_dict,
-                loaded_params,
-                pp_missing_layer_names,
-            ):
-                continue
+            name = _indexer_checkpoint_name(name)
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
@@ -341,6 +326,7 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
+                load_unneeded_scale(name, param, loaded_weight, loaded_params, shard_id)
                 break
             else:
                 num_chunks = 1

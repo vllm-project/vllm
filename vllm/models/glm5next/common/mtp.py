@@ -13,6 +13,7 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.fp8_dequant import load_unneeded_scale
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
@@ -24,7 +25,10 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.model_executor.models.deepseek_mtp import SharedHead
-from vllm.model_executor.models.deepseek_v2 import DeepseekV2MixtureOfExperts
+from vllm.model_executor.models.deepseek_v2 import (
+    DeepseekV2MixtureOfExperts,
+    _indexer_checkpoint_name,
+)
 from vllm.model_executor.models.utils import (
     extract_layer_index,
     get_fused_shared_expert_layers,
@@ -39,9 +43,8 @@ from .model import (
     Glm5NextMLAAttention,
     Glm5NextMoE,
     _fused_shared_expert_name,
+    _mla_proj_checkpoint_tensor,
     _num_fused_shared_experts,
-    _try_load_fp8_attn_proj,
-    _try_load_fp8_indexer_wk,
     get_sparse_topk_buffer_width,
     get_spec_layer_idx_from_weight_name,
 )
@@ -320,9 +323,8 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        _pending_wk_fp8: dict = {}
         # GLM-5.3-Flash NoPE checkpoints omit the RoPE rows from
-        # ``kv_a_proj_with_mqa``; the FP8-to-BF16 path pads them for the model.
+        # ``kv_a_proj_with_mqa``; pad them with zeros for the model shape.
         kv_a_pad_size = 0
         if self.config.mla_use_nope and self.config.qk_rope_head_dim > 0:
             kv_a_pad_size = self.config.qk_rope_head_dim
@@ -347,29 +349,10 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             ):
                 name = _fused_shared_expert_name(name, self.config.n_routed_experts)
 
-            if _try_load_fp8_indexer_wk(
-                name,
-                loaded_weight,
-                _pending_wk_fp8,
-                params_dict,
-                loaded_params,
-            ):
-                continue
-
-            # FP8 checkpoint: dequantize the BF16-kept MLA projections
-            # (q_a_proj / kv_a_proj_with_mqa / o_proj) to BF16, mirroring the
-            # target model. The model holds fused_qkv_a_proj / o_proj in BF16,
-            # so the checkpoint's block-FP8 weight + weight_scale_inv for these
-            # has no param home and would KeyError without this dequant.
-            if _try_load_fp8_attn_proj(
-                name,
-                loaded_weight,
-                _pending_wk_fp8,
-                params_dict,
-                loaded_params,
-                kv_a_pad_size,
-            ):
-                continue
+            name = _indexer_checkpoint_name(name)
+            name, loaded_weight = _mla_proj_checkpoint_tensor(
+                name, loaded_weight, params_dict, self.config, kv_a_pad_size
+            )
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
@@ -388,6 +371,7 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
+                load_unneeded_scale(name, param, loaded_weight, loaded_params, shard_id)
                 break
             else:
                 is_expert_weight = False
@@ -430,6 +414,7 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
                         param, "weight_loader", default_weight_loader
                     )
                     weight_loader(param, loaded_weight)
+                    load_unneeded_scale(name, param, loaded_weight, loaded_params)
             loaded_params.add(name)
 
         loaded_layers: set[int] = set()
