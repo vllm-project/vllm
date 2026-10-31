@@ -23,6 +23,7 @@ import ray
 import torch
 
 from tests.v1.attention.utils import dense_kv_cache_views
+from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm import LLM
 from vllm.config import KVTransferConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.utils import (
@@ -4564,14 +4565,13 @@ def _set_test_speculative_config(
         code_revision=code_revision,
         hf_config=SimpleNamespace(eagle_aux_hidden_state_layer_ids=auxiliary_layer_ids),
     )
-    vllm_config.speculative_config = SimpleNamespace(
+    vllm_config.speculative_config = fake_speculative_config(
         method=method,
         draft_model_config=draft_model_config,
         num_speculative_tokens=num_speculative_tokens,
         parallel_drafting=parallel_drafting,
         kv_cache_dtype=kv_cache_dtype,
         attention_backend=attention_backend,
-        use_eagle=lambda: True,
     )
 
 
