@@ -306,6 +306,19 @@ every 5 seconds with some key metrics:
   seconds
 - The prefix cache hit rate over the most recent 1k kv-cache block queries
 
+`--enable-logging-iteration-details` additionally logs per-iteration request and
+token counts. With log statistics enabled, it automatically includes GPU timing
+for CUDA generation with a `uni` or `mp` executor and an out-of-process
+EngineCore; unsupported configurations log counts only. This logging option is
+disabled by default, and there is no separate timing CLI flag.
+
+The `model_step_cuda` duration covers target-model execution, sampling and
+postprocessing, and drafting for the next iteration on the recorded CUDA stream,
+including CPU submission gaps. It excludes independent work on other streams and
+is not end-to-end request latency. With pipeline parallelism, only the output
+worker of the last stage is timed. Its interval may include waiting for input
+from earlier stages; it is not the duration of the whole pipeline.
+
 ### Metrics Publishing - Prometheus
 
 The `PrometheusStatLogger` metrics publisher makes the metrics
