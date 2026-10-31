@@ -237,3 +237,40 @@ def test_auto_awq_config_get_name():
     from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 
     assert AutoAWQConfig.get_name() == "auto_awq"
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
+@pytest.mark.parametrize("aiter_w4a16_enabled", [True, False])
+def test_auto_awq_rocm_routes_to_mp_linear_with_aiter_w4a16(
+    monkeypatch, aiter_w4a16_enabled
+):
+    """On ROCm, AWQ linears use the MPLinearKernel path only when the AITER
+    W4A16 GEMM is enabled; otherwise they keep the Triton AWQ GEMM."""
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.linear import ReplicatedLinear
+    from vllm.model_executor.layers.quantization import auto_awq
+
+    monkeypatch.setattr(
+        rocm_aiter_ops,
+        "is_linear_w4a16_enabled",
+        classmethod(lambda cls: aiter_w4a16_enabled),
+    )
+    config = auto_awq.AutoAWQConfig(
+        weight_bits=4, group_size=128, zero_point=True, lm_head_quantized=False
+    )
+    layer = object.__new__(ReplicatedLinear)
+    method = config.get_quant_method(layer, "model.layers.0.mlp.down_proj")
+    expected = (
+        auto_awq.AutoAWQMarlinLinearMethod
+        if aiter_w4a16_enabled
+        else auto_awq.AutoAWQLinearMethod
+    )
+    assert type(method) is expected
+
+    # Marlin verification is skipped on ROCm only on the AITER W4A16 route.
+    verified = []
+    monkeypatch.setattr(
+        auto_awq, "verify_marlin_supported", lambda **kw: verified.append(kw)
+    )
+    auto_awq.AutoAWQMarlinLinearMethod(config)
+    assert bool(verified) is not aiter_w4a16_enabled
