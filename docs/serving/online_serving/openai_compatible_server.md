@@ -25,7 +25,7 @@ We currently support the following OpenAI APIs:
     - *Note: `user` parameter is ignored.*
     - *Note:* Setting the `parallel_tool_calls` parameter to `false` ensures vLLM only returns zero or one tool call per request. Setting it to `true` (the default) allows returning more than one tool call per request. There is no guarantee more than one tool call will be returned if this is set to `true`, as that behavior is model dependent and not all models are designed to support parallel tool calls.
 - [Chat Completions batch API](#chat-api) (`/v1/chat/completions/batch`)
-- [Responses API](#responses-api) (`/v1/responses`, `/v1/responses/{response_id}`, `/v1/responses/{response_id}/cancel`)
+- [Responses API](#responses-api) (`/v1/responses`, `/v1/responses/input_tokens`, `/v1/responses/{response_id}`, `/v1/responses/{response_id}/cancel`)
     - Only applicable to [text generation models](../../models/generative_models.md).
 - [Embeddings API](../../models/pooling_models/embed.md#openai-compatible-embeddings-api) (`/v1/embeddings`)
     - Only applicable to [embedding models](../../models/pooling_models/embed.md).
@@ -203,6 +203,26 @@ To get prompt token IDs before generation, use
 [`/v1/responses/render`](renderer.md#get-responses-prompt-token-ids). It preprocesses
 a self-contained Responses request without inference and returns the prompt
 token IDs, so a separate `/tokenize` call is not needed.
+
+#### Counting input tokens
+
+Use `POST /v1/responses/input_tokens` to count input tokens without generating a
+response. The count uses the model's chat template and includes instructions,
+tool definitions, and history referenced by `previous_response_id` when response
+storage is enabled.
+
+```bash
+curl http://localhost:8000/v1/responses/input_tokens \
+    -H "Content-Type: application/json" \
+    -d '{"input": "Hello!", "instructions": "Answer briefly."}'
+```
+
+The response has the form
+`{"object": "response.input_tokens", "input_tokens": 42}`. The count depends on
+the served model and request, and equals `usage.input_tokens` of the equivalent
+`/v1/responses` request, including context length validation and `truncation`.
+`chat_template_kwargs`, `media_io_kwargs`, and `mm_processor_kwargs` are honored.
+The `conversation` and `personality` parameters are not supported.
 
 #### Sampling parameters
 

@@ -1,9 +1,178 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+from typing import Any
 
 import openai
 import pytest
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"input": "Hello!"},
+        {"input": "Hello!", "instructions": "Answer briefly."},
+        {
+            "input": "Hello!",
+            "chat_template_kwargs": {"enable_thinking": False},
+        },
+        {
+            "input": "Hello!",
+            "tools": None,
+            "tool_choice": None,
+            "reasoning": None,
+        },
+        {
+            "input": [
+                {"role": "user", "content": "My name is Alice."},
+                {"role": "assistant", "content": "Hello, Alice."},
+                {"role": "user", "content": "What is my name?"},
+            ]
+        },
+        {
+            "input": "What is the weather in Paris?",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "get_weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                    },
+                }
+            ],
+        },
+    ],
+)
+async def test_count_input_tokens_matches_generation(
+    client: openai.AsyncOpenAI, payload: dict[str, Any]
+):
+    count = await client.post("/responses/input_tokens", cast_to=dict, body=payload)
+    response = await client.post(
+        "/responses",
+        cast_to=dict,
+        body={
+            **{key: value for key, value in payload.items() if value is not None},
+            "max_output_tokens": 1,
+            "temperature": 0,
+            "store": False,
+        },
+    )
+    assert count == {
+        "object": "response.input_tokens",
+        "input_tokens": response["usage"]["input_tokens"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_count_input_tokens_truncation_respects_context_length(
+    client: openai.AsyncOpenAI, default_server_args: list[str]
+):
+    max_model_len = int(
+        default_server_args[default_server_args.index("--max-model-len") + 1]
+    )
+    payload = {"input": "hello " * max_model_len}
+    with pytest.raises(openai.BadRequestError):
+        await client.post("/responses/input_tokens", cast_to=dict, body=payload)
+
+    payload["truncation"] = "auto"
+    count = await client.post("/responses/input_tokens", cast_to=dict, body=payload)
+    response = await client.responses.create(
+        **payload, max_output_tokens=1, temperature=0, store=False
+    )
+    assert count["input_tokens"] == response.usage.input_tokens < max_model_len
+
+
+@pytest.mark.asyncio
+async def test_count_input_tokens_rejects_full_context(
+    client: openai.AsyncOpenAI, default_server_args: list[str]
+):
+    max_model_len = int(
+        default_server_args[default_server_args.index("--max-model-len") + 1]
+    )
+    count = await client.post(
+        "/responses/input_tokens", cast_to=dict, body={"input": "hello " * 8}
+    )
+    payload = {"input": "hello " * (8 + max_model_len - count["input_tokens"])}
+    error = f"prompt length {max_model_len} "
+    with pytest.raises(openai.BadRequestError, match=error):
+        await client.responses.create(
+            **payload, max_output_tokens=1, temperature=0, store=False
+        )
+    with pytest.raises(openai.BadRequestError, match=error):
+        await client.post("/responses/input_tokens", cast_to=dict, body=payload)
+
+
+@pytest.mark.asyncio
+async def test_count_input_tokens_ignores_generation_only_fields(
+    client: openai.AsyncOpenAI,
+):
+    payload = {"input": "Hello!"}
+    expected = await client.post("/responses/input_tokens", cast_to=dict, body=payload)
+    count = await client.post(
+        "/responses/input_tokens",
+        cast_to=dict,
+        body={
+            **payload,
+            "include": ["message.output_text.logprobs"],
+            "prompt": {"id": "pmpt_unused"},
+            "max_output_tokens": 0,
+        },
+    )
+    assert count == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "input_payload", [{"input": "What is my name?"}, {"input": None}, {}]
+)
+async def test_count_input_tokens_includes_stored_history(
+    client: openai.AsyncOpenAI, input_payload: dict[str, Any]
+):
+    """Omitted input continues history without adding an empty user turn."""
+    previous = await client.responses.create(
+        input="My name is Alice.", max_output_tokens=1, temperature=0
+    )
+    payload = {**input_payload, "previous_response_id": previous.id}
+    count = await client.post("/responses/input_tokens", cast_to=dict, body=payload)
+    generation_payload = {
+        "input": [],
+        **{key: value for key, value in payload.items() if value is not None},
+    }
+    response = await client.responses.create(
+        **generation_payload, max_output_tokens=1, temperature=0, store=False
+    )
+    assert count["input_tokens"] == response.usage.input_tokens
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"model": "missing-model", "input": "Hi"},
+        {"previous_response_id": "resp_missing", "input": "Hi"},
+    ],
+)
+async def test_count_input_tokens_rejects_unknown_references(
+    client: openai.AsyncOpenAI, payload: dict[str, Any]
+):
+    with pytest.raises(openai.NotFoundError):
+        await client.post("/responses/input_tokens", cast_to=dict, body=payload)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parameter", ["conversation", "personality"])
+async def test_count_input_tokens_rejects_unsupported_context(
+    client: openai.AsyncOpenAI, parameter: str
+):
+    with pytest.raises(openai.BadRequestError, match=parameter):
+        await client.post(
+            "/responses/input_tokens",
+            cast_to=dict,
+            body={"input": "Hi", parameter: "unsupported"},
+        )
 
 
 @pytest.mark.asyncio
