@@ -639,7 +639,11 @@ class MooncakeEPAll2AllManager(All2AllManagerBase):
                     max_tokens, hidden, self.world_size, num_experts
                 )
                 self._buffer = _MooncakeEPBufferState(
-                    buffer=Buffer(self.device_group or self.cpu_group, size_hint),
+                    buffer=Buffer(
+                        self.device_group or self.cpu_group,
+                        size_hint,
+                        disable_p2p=True,
+                    ),
                     max_num_ep_ranks=self.world_size,
                 )
             return self._buffer.buffer
