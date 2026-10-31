@@ -21,8 +21,9 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.oracle.base import MoEKernelOracle
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    align_moe_weights_for_fi,
+    FLASHINFER_CUTLASS_W31_LAYOUT_WRITER,
     convert_moe_weights_to_flashinfer_trtllm_block_layout,
+    flashinfer_trtllm_layout_writer,
     swap_w13_to_w31,
 )
 from vllm.platforms import current_platform
@@ -421,6 +422,8 @@ def convert_to_unquantized_kernel_format(
     w2_weight: torch.Tensor,
     layer: torch.nn.Module | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    # Converted FlashInfer weights carry a writer that refits load through.
+    converted = hasattr(w13_weight, "kernel_layout_writer")
     if unquantized_backend == UnquantizedMoeBackend.MOONEP:
         if layer is None:
             raise ValueError(
@@ -463,29 +466,26 @@ def convert_to_unquantized_kernel_format(
         return w13_weight, w2_weight
 
     elif unquantized_backend == UnquantizedMoeBackend.FLASHINFER_CUTLASS:
-        if moe_config.is_act_and_mul:
+        if moe_config.is_act_and_mul and not converted:
             # Swap halves to arrange as [w3; w1] (kernel expectation)
             # Non-gated MoE: w13 is a single projection, no need to swap.
             w13_weight = swap_w13_to_w31(w13_weight)
+            w13_weight.kernel_layout_writer = FLASHINFER_CUTLASS_W31_LAYOUT_WRITER
 
     elif unquantized_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM:
+        if converted:
+            return w13_weight, w2_weight
         is_act_and_mul = moe_config.is_act_and_mul
-        # Kernel requires intermediate_size_per_partition % 128 == 0 (BlockMajorK
-        # weight layout uses block_k=128). Pad along the intermediate dim when
-        # the model + TP split don't satisfy the constraint.
-        w13_weight, w2_weight, padded_intermediate = align_moe_weights_for_fi(
-            w13_weight, w2_weight, is_act_and_mul, min_alignment=128
-        )
-        moe_config.intermediate_size_per_partition = padded_intermediate
-
+        # The 128-aligned intermediate padding is allocated with the weights.
         _zero_intermediate_padding(moe_config, w13_weight, w2_weight)
-
-        _cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
         convert_moe_weights_to_flashinfer_trtllm_block_layout(
-            _cache_permute_indices,
-            w13_weight,
-            w2_weight,
-            is_gated_act_gemm=is_act_and_mul,
+            {}, w13_weight, w2_weight, is_gated_act_gemm=is_act_and_mul
+        )
+        w13_weight.kernel_layout_writer = flashinfer_trtllm_layout_writer(
+            is_w13=True, is_gated_act_gemm=is_act_and_mul
+        )
+        w2_weight.kernel_layout_writer = flashinfer_trtllm_layout_writer(
+            is_w13=False, is_gated_act_gemm=is_act_and_mul
         )
         # Keep checkpoint-shaped parameters for reload/IPC. The experts create
         # BlockMajorK views at dispatch without changing the underlying storage.

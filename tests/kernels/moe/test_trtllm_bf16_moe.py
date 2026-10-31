@@ -37,7 +37,7 @@ from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
-from vllm.utils.math_utils import next_power_of_2
+from vllm.utils.math_utils import next_power_of_2, round_up
 from vllm.utils.torch_utils import set_random_seed
 
 if pytest and (
@@ -79,10 +79,6 @@ def test_trtllm_bf16_moe_modular_no_graph(
         a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
         w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
         w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
-        # The FlashInfer conversion may rewrite unpadded input storage in place.
-        # Preserve the original layout for the independent torch reference.
-        reference_w1 = w1.clone()
-        reference_w2 = w2.clone()
         score = torch.randn((m, e), device="cuda", dtype=dtype)
         scores = torch.softmax(score, dim=-1, dtype=torch.float32)
         topk_weights, topk_ids = torch.topk(scores, topk)
@@ -104,15 +100,20 @@ def test_trtllm_bf16_moe_modular_no_graph(
             max_num_tokens=next_power_of_2(m),
         )
 
+        # The experts allocate the intermediate dim padded to the 128 block.
+        padded_n = round_up(n, 128)
+        moe_config.intermediate_size_per_partition = padded_n
+        padded_w1 = w1.new_zeros(e, 2 * padded_n, k)
+        padded_w1[:, :n] = w1[:, :n]
+        padded_w1[:, padded_n : padded_n + n] = w1[:, n:]
+        padded_w2 = w2.new_zeros(e, k, padded_n)
+        padded_w2[..., :n] = w2
         trtllm_w1, trtllm_w2 = convert_to_unquantized_kernel_format(
             UnquantizedMoeBackend.FLASHINFER_TRTLLM,
             moe_config,
-            w1,
-            w2,
+            padded_w1,
+            padded_w2,
         )
-        expected_n = (n + 127) // 128 * 128
-        assert moe_config.intermediate_size_per_partition == expected_n
-        assert trtllm_w2.numel() == e * k * expected_n
 
         trtllm_experts = mk.FusedMoEKernel(
             maybe_make_prepare_finalize(
@@ -141,8 +142,8 @@ def test_trtllm_bf16_moe_modular_no_graph(
 
         torch_output = torch_moe(
             a,
-            reference_w1,
-            reference_w2,
+            w1,
+            w2,
             score,
             topk,
             activation=MoEActivation.SILU,

@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from functools import cache, partial
 from typing import TYPE_CHECKING
 
 import torch
@@ -120,6 +123,112 @@ def rotate_weights_for_fi_trtllm_fp8_per_tensor_moe(
     )
 
 
+_FI_TRTLLM_EPILOGUE_TILE_M = 128
+_FI_TRTLLM_BLOCK_BYTES = 128
+
+
+def get_flashinfer_trtllm_block_layout_row_indices(
+    cache_permute_indices: dict[torch.Size, torch.Tensor],
+    expert_weight: torch.Tensor,
+    is_w13: bool,
+    is_gated_act_gemm: bool = True,
+) -> torch.Tensor:
+    """Return the checkpoint row stored at each block-layout row."""
+    from flashinfer.fused_moe.core import (
+        _maybe_get_cached_w3_w1_permute_indices,
+        get_w2_permute_indices_with_cache,
+    )
+
+    expert_uint8 = expert_weight.view(torch.uint8)
+    if not is_w13:
+        return get_w2_permute_indices_with_cache(
+            cache_permute_indices, expert_uint8, _FI_TRTLLM_EPILOGUE_TILE_M
+        )
+    permute_indices = _maybe_get_cached_w3_w1_permute_indices(
+        cache_permute_indices,
+        expert_uint8,
+        _FI_TRTLLM_EPILOGUE_TILE_M,
+        is_gated_act_gemm=is_gated_act_gemm,
+    )
+    if is_gated_act_gemm:
+        # FlashInfer indexes [w3; w1]; vLLM stores [w1; w3].
+        num_rows = expert_uint8.shape[0]
+        permute_indices = (permute_indices + num_rows // 2) % num_rows
+    return permute_indices
+
+
+class FlashInferExpertLayoutWriter:
+    """Loads checkpoint shards into an expert stored in a FlashInfer layout.
+
+    The layouts only reorder each expert's rows (TRT-LLM also tiles K into
+    blocks), so a shard loads into a checkpoint-layout copy of its rows. Each
+    weight shape keeps one expert-sized scratch copy.
+
+    Args:
+        row_indices: maps an expert weight to the checkpoint row at each
+            kernel row.
+        num_shards: checkpoint shards stacked along the rows.
+        block_bytes: bytes per K block if the layout is block-major.
+
+    """
+
+    def __init__(
+        self,
+        row_indices: Callable[[torch.Tensor], torch.Tensor],
+        num_shards: int = 1,
+        block_bytes: int | None = None,
+    ):
+        self.row_indices = row_indices
+        self.num_shards = num_shards
+        self.block_bytes = block_bytes
+        self._buffers: dict[tuple, tuple[torch.Tensor, torch.Tensor]] = {}
+
+    @contextmanager
+    def checkpoint(self, dst: torch.Tensor, shard_id: str) -> Iterator[torch.Tensor]:
+        """Yield expert ``dst`` in checkpoint layout; write the shard back."""
+        assert shard_id in ("w1", "w2", "w3"), shard_id
+        key = (dst.shape, dst.dtype, dst.device)
+        if key not in self._buffers:
+            kernel_rows = torch.argsort(self.row_indices(dst).to(dst.device))
+            self._buffers[key] = (kernel_rows, torch.empty_like(dst))
+        kernel_rows, checkpoint = self._buffers[key]
+        shard_rows = dst.shape[0] // self.num_shards
+        start = shard_rows if shard_id == "w3" else 0
+        rows = slice(start, start + shard_rows)
+        kernel, shard = dst, checkpoint[rows]
+        if self.block_bytes is not None:
+            # [K / b, rows, b] in the kernel, [rows, K / b, b] in the checkpoint.
+            kernel = dst.view(torch.uint8).view(-1, dst.shape[0], self.block_bytes)
+            kernel = kernel.transpose(0, 1)
+            shard = shard.view(torch.uint8).view(shard_rows, -1, self.block_bytes)
+        # Sparse checkpoint patches redefine copy_, so avoid it.
+        torch.index_select(kernel, 0, kernel_rows[rows], out=shard)
+        yield checkpoint
+        kernel.index_copy_(0, kernel_rows[rows], shard)
+
+
+@cache
+def flashinfer_trtllm_layout_writer(
+    is_w13: bool, is_gated_act_gemm: bool
+) -> FlashInferExpertLayoutWriter:
+    return FlashInferExpertLayoutWriter(
+        partial(
+            get_flashinfer_trtllm_block_layout_row_indices,
+            {},
+            is_w13=is_w13,
+            is_gated_act_gemm=is_gated_act_gemm,
+        ),
+        num_shards=2 if is_w13 and is_gated_act_gemm else 1,
+        block_bytes=_FI_TRTLLM_BLOCK_BYTES,
+    )
+
+
+FLASHINFER_CUTLASS_W31_LAYOUT_WRITER = FlashInferExpertLayoutWriter(
+    lambda w: torch.arange(w.shape[0], device=w.device).roll(-(w.shape[0] // 2)),
+    num_shards=2,
+)
+
+
 def convert_moe_weights_to_flashinfer_trtllm_block_layout(
     cache_permute_indices: dict[torch.Size, torch.Tensor],
     w13_weight: torch.Tensor,
@@ -137,13 +246,7 @@ def convert_moe_weights_to_flashinfer_trtllm_block_layout(
             "Unquantized Moe Backend FlashInfer TRTLLM requires bfloat16 weights"
         )
 
-    from flashinfer.fused_moe.core import (
-        _maybe_get_cached_w3_w1_permute_indices,
-        get_w2_permute_indices_with_cache,
-    )
-
-    epilogue_tile_m = 128
-    block_k = 128
+    block_k = _FI_TRTLLM_BLOCK_BYTES
 
     # Reorder rows of W13 and W2 for fused gated activation and convert to the
     # block layout expected by the FlashInfer kernel.
@@ -178,24 +281,12 @@ def convert_moe_weights_to_flashinfer_trtllm_block_layout(
 
         for i in range(num_experts):
             expert_uint8 = weight[i].view(torch.uint8)
-            if is_w13:
-                permute_indices = _maybe_get_cached_w3_w1_permute_indices(
-                    cache_permute_indices,
-                    expert_uint8,
-                    epilogue_tile_m,
-                    is_gated_act_gemm=is_gated_act_gemm,
-                )
-                if is_gated_act_gemm:
-                    permute_indices = (
-                        permute_indices + expert_uint8.shape[0] // 2
-                    ) % expert_uint8.shape[0]
-            else:
-                permute_indices = get_w2_permute_indices_with_cache(
-                    cache_permute_indices,
-                    expert_uint8,
-                    epilogue_tile_m,
-                )
-
+            permute_indices = get_flashinfer_trtllm_block_layout_row_indices(
+                cache_permute_indices,
+                weight[i],
+                is_w13=is_w13,
+                is_gated_act_gemm=is_gated_act_gemm,
+            )
             _copy_permuted_expert_to_block_layout(
                 expert_scratch,
                 expert_uint8,

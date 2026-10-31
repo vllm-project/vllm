@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable, Iterable
+from contextlib import nullcontext
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
@@ -990,13 +991,26 @@ class RoutedExperts(PluggableLayer):
 
         # Case model weights
         if "weight" in weight_name:
-            self._load_model_weight_or_group_weight_scale(
-                shard_id=shard_id,
-                shard_dim=shard_dim,
-                loaded_weight=loaded_weight,
-                expert_data=expert_data,
-                tp_rank=self.moe_config.tp_rank,
-            )
+            # Weights converted to a kernel layout load through a checkpoint copy.
+            writer = getattr(param, "kernel_layout_writer", None)
+            experts = [(expert_data, loaded_weight)]
+            if writer is not None and full_load:
+                experts = list(zip(expert_data, loaded_weight, strict=True))
+                shard_dim -= 1
+            for expert, weight in experts:
+                context = (
+                    nullcontext(expert)
+                    if writer is None
+                    else writer.checkpoint(expert, shard_id)
+                )
+                with context as target:
+                    self._load_model_weight_or_group_weight_scale(
+                        shard_id=shard_id,
+                        shard_dim=shard_dim,
+                        loaded_weight=weight,
+                        expert_data=target,
+                        tp_rank=self.moe_config.tp_rank,
+                    )
             return True if return_success else None
 
         return False if return_success else None
