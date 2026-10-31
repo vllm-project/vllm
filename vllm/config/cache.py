@@ -189,6 +189,10 @@ class CacheConfig:
     Accepts None (meaning "use default"). After construction, always int."""
     user_specified_block_size: bool = field(default=False, init=False)
     """Whether block_size was explicitly provided. Derived automatically."""
+    user_specified_mamba_block_size: bool = field(default=False, init=False)
+    """Whether mamba_block_size was explicitly provided. Derived automatically.
+    Hybrid models overwrite the value in align mode, and the overwrite site
+    warns only for a user-supplied one."""
     kv_cache_layout: str | None = field(default=None, init=False)
     """Resolved physical KV cache layout name (a ``KVCacheLayout`` member).
 
@@ -292,7 +296,11 @@ class CacheConfig:
     page."""
     mamba_block_size: int | None = Field(default=None, gt=0)
     """Size of a contiguous cache block in number of tokens for mamba cache.
-    Can be set only when prefix caching is enabled."""
+    Can be set only when prefix caching is enabled.
+    Applies to models without attention layers. Hybrid attention/mamba models
+    derive this from the attention block size, since cache mode "align"
+    requires the two page sizes to match, and log a warning if a value is
+    supplied."""
     mamba_cache_dtype: MambaDType = "auto"
     """The data type to use for the Mamba cache (both the conv as well as the
     ssm state). If set to 'auto', the data type will be inferred from the model
@@ -417,6 +425,7 @@ class CacheConfig:
             "mamba_page_size_padded",
             "skip_page_size_padded",
             "user_specified_block_size",
+            "user_specified_mamba_block_size",
             "_block_size_resolved",
             # Post-init/derived counters
             "num_gpu_blocks",
@@ -436,6 +445,29 @@ class CacheConfig:
 
         factors = get_hash_factors(self, ignored_factors)
         return hash_factors(factors)
+
+    def apply_align_mode_mamba_block_size(self) -> None:
+        """Derive the mamba block size from the attention block size.
+
+        Cache mode "align" requires the mamba page to equal the attention page,
+        so the mamba block size is not free to differ. Warn before discarding a
+        value the user supplied, rather than overwriting it silently.
+        """
+        if (
+            self.user_specified_mamba_block_size
+            and self.mamba_block_size != self.block_size
+        ):
+            logger.warning(
+                "Ignoring --mamba-block-size=%d: cache mode 'align' requires "
+                "the mamba page to match the attention page, so the mamba "
+                "block size is derived from the attention block size (%d) "
+                "instead. The derived size is fixed by this model's mamba "
+                "state; --mamba-block-size only takes effect on models "
+                "without attention layers.",
+                self.mamba_block_size,
+                self.block_size,
+            )
+        self.mamba_block_size = self.block_size
 
     def metrics_info(self):
         # convert cache_config to dict(key: str, value: str) for prometheus
@@ -463,6 +495,8 @@ class CacheConfig:
             self.block_size = self.DEFAULT_BLOCK_SIZE
         else:
             self.user_specified_block_size = True
+        if self.mamba_block_size is not None:
+            self.user_specified_mamba_block_size = True
         return self
 
     @field_validator("cache_dtype", mode="after")
