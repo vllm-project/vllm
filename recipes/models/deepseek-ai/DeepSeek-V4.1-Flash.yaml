@@ -5,7 +5,7 @@ meta:
   provider: "DeepSeek"
   description: "DeepSeek V4.1 Flash vision-language MoE (552B backbone; 8B active per prompt token, 16B per output token) combining sliding-window plus compressed sparse attention with a two-level indexer, engram n-gram memory, hyper-connections, and a DSpark multi-token draft head."
   date_added: 2026-09-09
-  date_updated: 2026-10-25
+  date_updated: 2026-10-29
   tasks:
     - text
     - multimodal
@@ -1157,18 +1157,13 @@ guide: |
   | key | values |
   |---|---|
   | `thinking` / `enable_thinking` | boolean; if you send both they must agree |
-  | `reasoning_effort` | `low` (25), `high` (50), `xhigh` (75), `max` (100), **or an integer 1-100** |
+  | `reasoning_effort` | `low` (50), `high` (75), `xhigh` (75), `max` (100), **or an integer 1-100** |
 
   The top-level OpenAI `reasoning_effort` field also works, where `"none"` turns
   thinking off. `"minimal"` and `"medium"` are rejected — they are not part of this
   model's set.
 
-  Note that the DeepSeek API maps its `low` / `high` / `max` tiers to 50 / 75 / 100,
-  while the open-source prompt encoder (and therefore vLLM) maps `low` / `high` /
-  `xhigh` / `max` to 25 / 50 / 75 / 100. A request tuned at `high` on the API runs at
-  effort 50 here; pass an integer if you need parity.
-
-  > **With both keys unset, thinking is ON at effort 50.** The do-nothing config is
+  > **With both keys unset, thinking is ON at effort 75.** The do-nothing config is
   > the most verbose one, so a request with a small `max_tokens` spends its budget on
   > the trace and returns empty `content` with `finish_reason=length`. That reads as a
   > broken model and is not. Either pin `thinking: false` or give the budget room.
