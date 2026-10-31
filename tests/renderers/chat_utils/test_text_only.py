@@ -64,6 +64,39 @@ def test_parse_chat_messages_empty_system(
     ]
 
 
+@pytest.mark.parametrize("role", ["system", "developer"])
+def test_parse_chat_messages_preserves_message_level_tools(
+    mistral_model_config,
+    role,
+):
+    # DeepSeek-V3.2/V4 encoders read message-level `tools` on both system and
+    # developer messages, so neither role may drop them.
+    tools = [{"type": "function", "function": {"name": "get_weather"}}]
+    conversation, _, _ = parse_chat_messages(
+        [
+            {"role": role, "content": "you have tools", "tools": tools},
+            {"role": "user", "content": [{"type": "text", "text": "Hi"}]},
+        ],
+        mistral_model_config,
+        content_format="string",
+    )
+    assert conversation[0]["tools"] == tools
+
+
+def test_parse_chat_messages_system_without_tools_has_no_tools_key(
+    mistral_model_config,
+):
+    conversation, _, _ = parse_chat_messages(
+        [
+            {"role": "system", "content": "plain"},
+            {"role": "user", "content": [{"type": "text", "text": "Hi"}]},
+        ],
+        mistral_model_config,
+        content_format="string",
+    )
+    assert "tools" not in conversation[0]
+
+
 @pytest.mark.asyncio
 async def test_text_only_chat_does_not_initialize_media_connector(
     mistral_model_config,
