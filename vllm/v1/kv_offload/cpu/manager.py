@@ -160,6 +160,16 @@ class CPUOffloadingManager(OffloadingManager):
             req_context.set_state(state)
         return state
 
+    def _is_request_cache_access_finished(self, req_context: ReqContext) -> bool:
+        """Return True iff the RequestCacheAccess is marked finished."""
+        state = req_context.get_state(_RequestCacheAccess)
+        return (
+            state is not None
+            and state.owner is self
+            and state.cache_generation == self._cache_generation
+            and state.finished
+        )
+
     def _record_request_cache_access(
         self,
         keys: Iterable[OffloadKey],

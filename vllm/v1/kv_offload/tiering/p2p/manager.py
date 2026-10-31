@@ -593,6 +593,10 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     @override
     def submit_load(self, job_metadata: TransferJob) -> None:
         job_id = job_metadata.job_id
+        if not job_metadata.materialize():
+            # Allocation / Materialization failed.
+            self._finished_jobs.append(JobResult(job_id=job_id, success=True))
+            return
         keys = list(job_metadata.keys)
         block_ids = job_metadata.chunk_ids
 

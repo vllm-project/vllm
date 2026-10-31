@@ -34,7 +34,9 @@ from vllm.v1.kv_offload.tiering.base import (
 )
 from vllm.v1.kv_offload.tiering.example.manager import ExampleSecondaryTierManager
 from vllm.v1.kv_offload.tiering.manager import (
+    CascadeTransferJob,
     CPUPrimaryTierOffloadingManager,
+    PromotionTransferJob,
     TieringOffloadingManager,
 )
 from vllm.v1.kv_offload.tiering.p2p import manager as manager_module
@@ -119,11 +121,10 @@ def _job_metadata(
         keys = [OffloadKey(b"key1")]
     if chunk_ids is None:
         chunk_ids = list(range(len(keys)))
-    return TransferJob(
+    return CascadeTransferJob(
         job_id=job_id,
         keys=keys,
         chunk_ids=np.array(chunk_ids),
-        is_promotion=False,
         req_context=_req_context(kv_params),
     )
 
@@ -132,6 +133,7 @@ def _make_manager() -> P2PSecondaryTierManager:
     """Create a manager with stubbed __init__."""
     mgr = P2PSecondaryTierManager.__new__(P2PSecondaryTierManager)
     mgr.tier_type = "p2p"
+    mgr.manager_lock = None
     mgr._bp_detector = None
     mgr._local_id = "127.0.0.1:7777"
     mgr._hash_seed = "0"
@@ -605,12 +607,16 @@ class TestPromotionLatency:
             secondary_tiers=[p2p_tier],
             tier_poll_interval_s=0.0,
         )
-        job = TransferJob(
+
+        def primary_alloc_fn(keys, ctx):
+            tiering_manager._metrics.on_promotion_allocated(0, 1)
+            return (list(keys), np.array([0]))
+
+        job = PromotionTransferJob(
             job_id=42,
             keys=[OffloadKey(b"key1")],
-            chunk_ids=np.array([0]),
-            is_promotion=True,
             req_context=_req_context(_remote_prefiller_kv_params()),
+            alloc_fn=primary_alloc_fn,
         )
         tiering_manager._register_job(job, tier_idx=0)
 
@@ -685,12 +691,17 @@ def test_timed_out_load_holds_chunks_until_abort_ack(monkeypatch):
     prepared = primary.prepare_write([key], ctx)
     assert prepared is not None
     assert isinstance(prepared.store_spec, CPULoadStoreSpec)
-    job = TransferJob(
+    chunk_ids = prepared.store_spec.chunk_ids
+
+    def alloc_fn(keys, _ctx):
+        tiering._metrics.on_promotion_allocated(0, len(chunk_ids))
+        return (list(keys), chunk_ids)
+
+    job = PromotionTransferJob(
         job_id=7,
-        keys=[key],
-        chunk_ids=prepared.store_spec.chunk_ids,
-        is_promotion=True,
         req_context=ctx,
+        keys=[key],
+        alloc_fn=alloc_fn,
     )
     tiering._register_job(job, tier_idx=0)
     p2p_tier.submit_load(job)
@@ -3048,13 +3059,16 @@ class TestIdleWhileServingPeers:
                 assert tiering._jobs
                 assert tiering.has_pending_work() is False
 
+            def alloc_fn(keys, _ctx):
+                tiering._metrics.on_promotion_allocated(0, 1)
+                return (list(keys), np.array([0], dtype=np.int32))
+
             consumer.submit_load(
-                TransferJob(
+                PromotionTransferJob(
                     job_id=7,
-                    keys=[key],
-                    chunk_ids=np.array([0]),
-                    is_promotion=True,
                     req_context=ctx,
+                    keys=[key],
+                    alloc_fn=alloc_fn,
                 )
             )
             results: list[JobResult] = []
