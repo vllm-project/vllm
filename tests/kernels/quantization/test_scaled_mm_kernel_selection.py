@@ -7,6 +7,7 @@ Run `pytest tests/kernels/quantization/test_scaled_mm_kernel_selection.py`.
 
 import inspect
 from abc import ABC
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -18,6 +19,7 @@ from vllm.model_executor.kernels.linear import (
     _POSSIBLE_NVFP4_KERNELS,
     AiterInt8ScaledMMLinearKernel,
     CPUInt8ScaledMMLinearKernel,
+    DeepGemmFp8BlockScaledMMKernel,
     Fp8BlockScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
     HummingFP8ScaledMMLinearKernel,
@@ -38,6 +40,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.platforms import PlatformEnum
+from vllm.utils.deep_gemm import is_deep_gemm_fp8_linear_requested
 
 pytestmark = pytest.mark.cpu_test
 
@@ -422,3 +425,58 @@ def test_humming_priority_only_reorders_humming_and_marlin(possible_kernels):
     del names[humming]
     assert names == [k.__name__ for k in original if "Humming" not in k.__name__]
     assert kernels == original
+
+
+@pytest.mark.parametrize(
+    "kernel_config,requested",
+    [
+        (KernelConfig(), False),
+        (KernelConfig(linear_backend="cutlass"), False),
+        (KernelConfig(linear_backend="deep_gemm"), True),
+        (
+            KernelConfig(linear_backend_per_quant={"fp8_block_w8a8": "deep_gemm"}),
+            True,
+        ),
+        (KernelConfig(linear_backend_per_quant={"fp8_w8a8": "deep_gemm"}), False),
+        (
+            KernelConfig(
+                linear_backend="deep_gemm",
+                linear_backend_per_quant={"fp8_block_w8a8": "cutlass"},
+            ),
+            False,
+        ),
+    ],
+)
+def test_deep_gemm_fp8_linear_requested(kernel_config, requested):
+    assert is_deep_gemm_fp8_linear_requested(kernel_config) is requested
+
+
+@pytest.mark.parametrize(
+    "linear_backend,can_implement", [("auto", False), ("deep_gemm", True)]
+)
+def test_deep_gemm_linear_backend_overrides_model_auto_disable(
+    linear_backend, can_implement
+):
+    """An explicit --linear-backend deep_gemm keeps DeepGEMM for a model type
+    that is auto-disabled on the current GPU."""
+    config = FP8ScaledMMLinearLayerConfig(
+        weight_quant_key=kFp8Static128BlockSym,
+        activation_quant_key=kFp8Dynamic128Sym,
+        input_dtype=torch.bfloat16,
+        out_dtype=torch.bfloat16,
+        weight_shape=(256, 256),
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_text_config=SimpleNamespace(model_type="qwen3_5_text")
+        ),
+        kernel_config=KernelConfig(linear_backend=linear_backend),
+    )
+    module = "vllm.model_executor.kernels.linear.scaled_mm.deep_gemm"
+    with (
+        patch(f"{module}.get_current_vllm_config", return_value=vllm_config),
+        patch(f"{module}.should_auto_disable_deep_gemm", return_value=True),
+        patch(f"{module}.should_use_deepgemm_for_fp8_linear", return_value=True),
+    ):
+        result, _ = DeepGemmFp8BlockScaledMMKernel.can_implement(config)
+    assert result is can_implement

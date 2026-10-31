@@ -12,7 +12,7 @@ import os
 import shutil
 from collections.abc import Callable
 from enum import Enum
-from typing import Any, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import torch
 
@@ -24,6 +24,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_gemm
 from vllm.utils.math_utils import cdiv
+
+if TYPE_CHECKING:
+    from vllm.config import KernelConfig
 
 # Model type -> Blackwell device capability families to auto-disable DeepGemm on.
 _DEEPGEMM_BLACKWELL_EXCLUDED_MODEL_TYPES: dict[str, tuple[int, ...]] = {
@@ -53,6 +56,18 @@ def should_auto_disable_deep_gemm(model_type: str | None) -> bool:
         current_platform.is_device_capability_family(family)
         for family in _DEEPGEMM_BLACKWELL_EXCLUDED_MODEL_TYPES.get(model_type, ())
     )
+
+
+def is_deep_gemm_fp8_linear_requested(kernel_config: "KernelConfig") -> bool:
+    """Check if the user selected DeepGemm for block-scaled FP8 linear layers.
+
+    An explicit `--linear-backend deep_gemm`, or `deep_gemm` for
+    `fp8_block_w8a8` in `kernel_config.linear_backend_per_quant`, overrides
+    the model auto-disable above.
+    """
+    overrides = kernel_config.linear_backend_per_quant or {}
+    backend = overrides.get("fp8_block_w8a8") or kernel_config.linear_backend
+    return backend == "deep_gemm"
 
 
 class DeepGemmQuantScaleFMT(Enum):
