@@ -105,7 +105,16 @@ cleanup_instances() {
   echo "Cleaning up..."
   # shellcheck disable=SC2046  # word splitting is intentional for multiple PIDs
   kill $(jobs -pr) 2>/dev/null || true
-  sleep 1
+  # CI test-selection traces these jobs with subprocess coverage
+  # (sigterm=true): processes only flush coverage if they handle SIGTERM.
+  # vLLM's own shutdown() terminates workers and joins them with a 5s
+  # timeout before killing the tree, so give TERM a 10s polling window.
+  # Keep the SIGKILL patterns narrow (serve parent / proxy only): they are
+  # the leak backstop, and widening them to workers kills them mid-flush.
+  for _ in $(seq 1 10); do
+    pgrep -f "vllm serve.*${MODEL_NAME}" > /dev/null 2>&1 || break
+    sleep 1
+  done
   # shellcheck disable=SC2046
   kill -9 $(jobs -pr) 2>/dev/null || true
   pkill -9 -f "vllm serve.*${MODEL_NAME}" 2>/dev/null || true
