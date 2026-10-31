@@ -455,7 +455,9 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
 
     If so, a failed `finish_weight_update` ends the session: the worker rolls
     the model back and the trainer resends the update. Otherwise the session
-    stays open, so the trainer can retry `finish_weight_update`.
+    stays open, so the trainer can retry `finish_weight_update`. Under
+    `VLLM_RELOAD_MODE=direct` nothing is rolled back and a failed finish always
+    ends the session.
     """
 
     defers_processing: bool = False
@@ -596,12 +598,13 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         """Undo an update that will not reach `finish_weight_update`.
 
         The worker calls this when `start_weight_update` or `update_weights`
-        raises, and when `finish_weight_update` raises on an engine that sets
-        `rolls_back_failed_updates`, before it drops the session and resets
-        the target model. Checkpoint-format engines put the weights the reload
-        started from back in place here (`abort_layerwise_reload`) so the model
-        keeps serving and the trainer can resend the update; engines that apply
-        weights in place have nothing to undo, which is the default.
+        raises, and when `finish_weight_update` raises in direct reload mode or
+        on an engine that sets `rolls_back_failed_updates`, before it drops the
+        session and resets the target model. Checkpoint-format engines call
+        `abort_reload` here, which in layerwise mode puts the weights the
+        reload started from back in place so the model keeps serving and the
+        trainer can resend the update; engines that apply weights in place have
+        nothing to undo, which is the default.
         """
 
     def update_weights(self, update_info: dict[str, Any]) -> None:

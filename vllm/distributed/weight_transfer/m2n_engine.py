@@ -464,13 +464,13 @@ class M2NWeightTransferEngine(
         finish_reload(self.model, self.model_config, self.device)
 
     def abort_weight_update(self) -> None:
-        """Undo layerwise reloading after a failed update when the plan uses
-        fallback entries. Directly-resharded parameters are not restored."""
+        """Undo reloading after a failed update when the plan uses fallback
+        entries. Directly-resharded parameters are not restored."""
         if not self._uses_load_weights:
             return
-        from vllm.model_executor.model_loader.reload import abort_layerwise_reload
+        from vllm.model_executor.model_loader.reload import abort_reload
 
-        abort_layerwise_reload(self.model)
+        abort_reload(self.model)
 
     def receive_weights(self, update_info: M2NWeightTransferUpdateInfo) -> None:
         """Receive each requested parameter using its initialization-time plan."""
