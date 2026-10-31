@@ -108,11 +108,11 @@ def test_lfm2_bidirectional_embeddings_are_batch_independent(
             marks=[pytest.mark.core_model, pytest.mark.slow_test],
         ),
         pytest.param(
-            "intfloat/e5-mistral-7b-instruct",
+            "vllm-project/e5-mistral-7b-instruct",
             marks=[pytest.mark.core_model, pytest.mark.cpu_model],
         ),
         pytest.param(
-            "ssmits/Qwen2-7B-Instruct-embed-base", marks=[pytest.mark.cpu_model]
+            "vllm-project/Qwen2-7B-Instruct-embed-base", marks=[pytest.mark.cpu_model]
         ),
         # [Encoder-only]
         pytest.param(
@@ -124,7 +124,7 @@ def test_lfm2_bidirectional_embeddings_are_batch_independent(
             ],
         ),
         pytest.param("sentence-transformers/all-MiniLM-L12-v2"),
-        pytest.param("intfloat/multilingual-e5-small"),
+        pytest.param("vllm-project/multilingual-e5-small"),
         # [Cross-Encoder]
         pytest.param(
             "sentence-transformers/stsb-roberta-base-v2",
@@ -139,7 +139,7 @@ def test_models(
     model,
 ) -> None:
     vllm_extra_kwargs = {}
-    if model == "ssmits/Qwen2-7B-Instruct-embed-base":
+    if model == "vllm-project/Qwen2-7B-Instruct-embed-base":
         vllm_extra_kwargs["pooler_config"] = PoolerConfig(
             seq_pooling_type="MEAN", use_activation=False
         )
@@ -160,7 +160,7 @@ def test_models(
     example_prompts = [str(s).strip() for s in example_prompts]
 
     with hf_runner(model, is_sentence_transformer=True) as hf_model:
-        if model == "ssmits/Qwen2-7B-Instruct-embed-base":
+        if model == "vllm-project/Qwen2-7B-Instruct-embed-base":
             # This checkpoint has no sentence-transformers config. Since
             # sentence-transformers 5.6, a causal LM then gets its chat
             # template applied and last-token pooling. Keep the plain text and
@@ -193,7 +193,7 @@ def test_models(
     "model",
     [
         "BAAI/bge-base-en-v1.5",
-        "intfloat/multilingual-e5-small",
+        "vllm-project/multilingual-e5-small",
     ],
 )
 @torch.inference_mode()

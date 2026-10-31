@@ -8,7 +8,7 @@ import pytest_asyncio
 
 from tests.utils import RemoteLaunchRenderServer
 
-MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
 
 
 @pytest.fixture(scope="module")

@@ -69,7 +69,7 @@ from vllm.tokenizers import get_tokenizer
 from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
 from vllm.utils import random_uuid
 
-MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
 
 
 def _merge_fake_deltas(

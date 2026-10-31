@@ -24,8 +24,8 @@ MAX_MODEL_LEN = 1024
 MODELS = [
     ("LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit", "main"),
     # desc_act=True is a no-op for channelwise quantization.
-    ("TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ", "gptq-8bit--1g-actorder_True"),
-    ("TechxGenus/gemma-2b-it-GPTQ", "main"),
+    ("vllm-project/TinyLlama-1.1B-Chat-v1.0-GPTQ", "gptq-8bit--1g-actorder_True"),
+    ("vllm-project/gemma-2b-it-GPTQ", "main"),
 ]
 
 

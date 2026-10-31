@@ -1733,7 +1733,7 @@ def test_nvfp4_one_sided_rejects_unsupported_input_dtype(input_dtype: torch.dtyp
             id="partially_prequantized_checkpoint",
         ),
         pytest.param(
-            "mgoin/Qwen3-0.6B-MXFP8",
+            "vllm-project/Qwen3-0.6B-MXFP8",
             None,
             {"linear": "fp8_per_channel"},
             Fp8PtpcOnlineLinearMethod,
@@ -1845,7 +1845,7 @@ def test_online_quantization(
             assert_source_weights_released,
         )
 
-    if model_name == "mgoin/Qwen3-0.6B-MXFP8":
+    if model_name == "vllm-project/Qwen3-0.6B-MXFP8":
         original_process = Fp8PtpcOnlineLinearMethod.process_weights_after_loading
 
         def assert_source_weights_released(method, layer) -> None:
@@ -1919,7 +1919,7 @@ def test_online_quantization(
     if model_name == PARTIALLY_PREQUANTIZED_MODEL_NAME:
         o_proj = model.model.layers[1].self_attn.o_proj
         moe = model.model.layers[0].mlp.experts
-    elif model_name == "mgoin/Qwen3-0.6B-MXFP8":
+    elif model_name == "vllm-project/Qwen3-0.6B-MXFP8":
         o_proj = model.model.layers[0].self_attn.o_proj
         moe = None
     elif model_name in (NVFP4_MOE_MODEL_NAME, MODELOPT_NVFP4_MOE_MODEL_NAME):

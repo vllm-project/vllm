@@ -1621,7 +1621,7 @@ def test_quark_int8_w8a8_moe(vllm_runner, tp):
 @pytest.mark.parametrize("tp", [1])
 def test_quark_fp8_w8a8_per_block_moe(vllm_runner, tp):
     """Test per-block (128x128) FP8 MoE quantization with a tiny Qwen3 MoE model."""
-    model_path = "Adamji/tiny-qwen3-moe-fp8-per-block"
+    model_path = "vllm-project/tiny-qwen3-moe-fp8-per-block"
     with vllm_runner(
         model_path,
         enforce_eager=True,
@@ -1733,11 +1733,11 @@ class AccuracyTestConfig:
 
 WIKITEXT_ACCURACY_CONFIGS = [
     AccuracyTestConfig(
-        model_name="fxmarty/qwen1.5_moe_a2.7b_chat_w_fp4_a_fp6_e2m3",
+        model_name="vllm-project/qwen1.5_moe_a2.7b_chat_w_fp4_a_fp6_e2m3",
         excepted_value=11.3,
     ),
     AccuracyTestConfig(
-        model_name="fxmarty/qwen1.5_moe_a2.7b_chat_w_fp6_e3m2_a_fp6_e3m2",
+        model_name="vllm-project/qwen1.5_moe_a2.7b_chat_w_fp6_e3m2_a_fp6_e3m2",
         excepted_value=10.6,
     ),
 ]

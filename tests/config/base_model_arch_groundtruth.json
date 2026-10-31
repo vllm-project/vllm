@@ -135,7 +135,7 @@
         "is_multimodal_model": false,
         "dtype": "torch.bfloat16"
     },
-    "luccafong/deepseek_mtp_main_random": {
+    "vllm-project/deepseek_mtp_main_random": {
         "architectures": [
             "DeepseekV3ForCausalLM"
         ],
@@ -152,7 +152,7 @@
         "is_multimodal_model": false,
         "dtype": "torch.bfloat16"
     },
-    "luccafong/deepseek_mtp_draft_random": {
+    "vllm-project/deepseek_mtp_draft_random": {
         "architectures": [
             "DeepseekV3ForCausalLM"
         ],
