@@ -7,11 +7,14 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.config import ParallelConfig
+from vllm.config import CacheConfig, ParallelConfig
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.worker.gpu import model_runner
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
-from vllm.v1.worker.gpu.spec_decode.dspark.utils import _get_dspark_parallel_config
+from vllm.v1.worker.gpu.spec_decode.dspark.utils import (
+    _draft_cache_config,
+    _get_dspark_parallel_config,
+)
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
 
@@ -45,6 +48,36 @@ class _FakeParallelConfig:
             raise ValueError("redundant experts require EPLB")
         if self.enable_elastic_ep and not self.enable_eplb:
             raise ValueError("elastic EP requires EPLB")
+
+
+@pytest.mark.parametrize(
+    ("target_dtype", "draft_dtype", "draft_use_mla", "expected"),
+    [
+        # A dense draft has no attention backend for MLA-only formats.
+        ("fp8_ds_mla", None, False, "auto"),
+        ("nvfp4_ds_mla", None, False, "auto"),
+        # An MLA draft reuses the target's layout.
+        ("fp8_ds_mla", None, True, "fp8_ds_mla"),
+        # Formats a dense backend serves are inherited as before.
+        ("fp8", None, False, "fp8"),
+        ("auto", None, False, "auto"),
+        # An explicit speculative kv_cache_dtype always wins.
+        ("fp8_ds_mla", "bfloat16", False, "bfloat16"),
+    ],
+)
+def test_draft_cache_dtype_avoids_mla_only_formats_for_dense_drafts(
+    target_dtype: str, draft_dtype: str | None, draft_use_mla: bool, expected: str
+) -> None:
+    vllm_config = SimpleNamespace(
+        cache_config=CacheConfig(cache_dtype=target_dtype),
+        speculative_config=SimpleNamespace(
+            kv_cache_dtype=draft_dtype,
+            draft_model_config=SimpleNamespace(use_mla=draft_use_mla),
+        ),
+    )
+
+    assert _draft_cache_config(vllm_config).cache_dtype == expected
+    assert vllm_config.cache_config.cache_dtype == target_dtype
 
 
 @pytest.mark.parametrize(

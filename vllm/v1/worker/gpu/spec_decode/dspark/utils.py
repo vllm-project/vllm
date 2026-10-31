@@ -3,7 +3,7 @@
 
 import torch.nn as nn
 
-from vllm.config import ModelConfig, ParallelConfig, VllmConfig, replace
+from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig, replace
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.utils import get_draft_load_config
 from vllm.models.deepseek_v4.common.eplb_util import dspark_draft_supports_eplb
@@ -69,6 +69,29 @@ def _get_dspark_parallel_config(
     )
 
 
+def _draft_cache_config(vllm_config: VllmConfig) -> CacheConfig:
+    """The draft's KV cache config. An explicit speculative kv_cache_dtype wins;
+    otherwise a non-MLA draft (e.g. Qwen3DSparkModel) does not inherit an
+    MLA-only target format, which no dense attention backend serves, and
+    stores its few layers in the model dtype. An MLA draft (DeepSeek-V4 reuses
+    the target's layers) keeps the target's layout."""
+    from vllm.v1.attention.backends.mla.flashmla_sparse import (
+        QUANTIZED_DS_MLA_CACHE_FORMATS,
+    )
+
+    speculative_config = vllm_config.speculative_config
+    assert speculative_config is not None
+    cache_config = vllm_config.cache_config
+    if speculative_config.kv_cache_dtype is not None:
+        return replace(cache_config, cache_dtype=speculative_config.kv_cache_dtype)
+    if (
+        cache_config.cache_dtype in QUANTIZED_DS_MLA_CACHE_FORMATS
+        and not speculative_config.draft_model_config.use_mla
+    ):
+        return replace(cache_config, cache_dtype="auto")
+    return cache_config
+
+
 def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Module:
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
@@ -102,14 +125,7 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
             use_non_causal=dflash_has_any_non_causal(draft_model_config.hf_config),
             backend=draft_attention_backend,
         ),
-        cache_config=(
-            replace(
-                vllm_config.cache_config,
-                cache_dtype=speculative_config.kv_cache_dtype,
-            )
-            if speculative_config.kv_cache_dtype is not None
-            else vllm_config.cache_config
-        ),
+        cache_config=_draft_cache_config(vllm_config),
         load_config=get_pp_safe_draft_load_config(get_draft_load_config(vllm_config)),
     )
     # VllmConfig post-init restores the target's quant config because the target
