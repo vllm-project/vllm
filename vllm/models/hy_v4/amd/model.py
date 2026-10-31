@@ -32,7 +32,6 @@ import torch
 from torch import nn
 from transformers import PreTrainedConfig
 
-from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
@@ -233,7 +232,6 @@ class HYV4DecoderLayer(nn.Module):
         return hidden_states, None
 
 
-@support_torch_compile
 class HYV4Model(nn.Module):
     """HY V4 backbone."""
 

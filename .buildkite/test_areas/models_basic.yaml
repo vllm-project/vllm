@@ -112,6 +112,8 @@ steps:
       - tests/models/test_deepseek_v4_vl_rocm.py
       - tests/models/test_deepseek_v4_vl.py
       - tests/models/test_hyv4_rocm.py
+      - vllm/models/hy_v4/
+      - vllm/config/
       - tests/models/transformers/test_layer_registry_e2e.py
       - tests/models/test_deepseek_v41_replay_start.py
       - tests/models/test_deepseek_v41_decoder_replay_layers.py
