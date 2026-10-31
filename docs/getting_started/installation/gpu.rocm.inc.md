@@ -335,11 +335,12 @@ You can find more information about vLLM's wheels in
         ```bash
         pip install --upgrade pip
 
-        # Install AMD SMI, which the ROCm SDK ships as sources
+        # Install AMD SMI, which the ROCm SDK ships as sources, packaged and patched as in the vLLM image
         SDK_CORE=$(python3 -c "import _rocm_sdk_core, os; print(os.path.dirname(_rocm_sdk_core.__file__))")
-        pip install ${SDK_CORE}/share/amd_smi
-        # It loads the SDK's libamd_smi relative to its own directory
-        export PYTHONPATH=${SDK_CORE}/share/amd_smi
+        cp -r tools/vllm-rocm/amdsmi /tmp/amd_smi
+        cp -r ${SDK_CORE}/share/amd_smi/amdsmi /tmp/amd_smi/
+        patch -d /tmp/amd_smi -p1 -i amdsmi_wrapper.patch
+        pip install /tmp/amd_smi
 
         # Install dependencies
         pip install -r requirements/rocm.txt
