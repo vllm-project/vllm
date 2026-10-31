@@ -70,6 +70,15 @@ class SenseNovaLoopConfig(VerifyAndUpdateConfig):
         from vllm.config.compilation import CompilationMode, CUDAGraphMode
         from vllm.platforms import current_platform
 
+        Qwen3_5ForConditionalGenerationConfig.verify_and_update_config(vllm_config)
+        if vllm_config.load_config.load_format in (
+            "sharded_state",
+            "runai_streamer_sharded",
+        ):
+            raise NotImplementedError(
+                "SenseNova Loop does not support loading sharded state "
+                "with shared loop weights; load the original checkpoint instead"
+            )
         offload = vllm_config.offload_config
         if offload.uva.cpu_offload_gb > 0 or offload.prefetch.offload_group_size > 0:
             raise NotImplementedError(

@@ -14,6 +14,15 @@ It supports tensor parallelism, but not pipeline parallelism, vision, audio,
 LoRA, speculative decoding, learned loop gates, or layer scaling. CPU weight
 offloading is unsupported with shared loop weights: nonzero `--cpu-offload-gb`
 or `--offload-group-size` is rejected before workers start.
+The `sharded_state` and `runai_streamer_sharded` load formats are also rejected
+before workers start. Sharded-state exports deduplicate shared parameters, but
+this model restores their aliases only after weight processing. Load the original
+checkpoint with `auto` or `safetensors` instead of a `save_sharded_state` export.
+
+SSM cache precision follows the checkpoint's `mamba_ssm_dtype` when
+`--mamba-ssm-cache-dtype` is `auto`. The public checkpoint uses FP32 SSM state
+even with BF16 weights and convolution state. An explicit
+`--mamba-ssm-cache-dtype` setting takes precedence.
 
 ```bash
 vllm serve sensenova/SenseNova-Loop-9B-Preview \

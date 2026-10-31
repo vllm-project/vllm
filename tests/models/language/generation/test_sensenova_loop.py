@@ -28,7 +28,7 @@ def test_public_checkpoint_matches_hf(hf_runner, vllm_runner, example_prompts):
         max_model_len=512,
         max_num_seqs=1,
         gpu_memory_utilization=0.05,
-        kv_cache_memory_bytes=256 * 1024**2,
+        kv_cache_memory_bytes=512 * 1024**2,
         compilation_config={"cudagraph_capture_sizes": [1]},
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(prompts, 16, 5)
@@ -60,6 +60,7 @@ def loop_checkpoint(tmp_path):
             "linear_num_value_heads": 2,
             "linear_key_head_dim": 128,
             "linear_value_head_dim": 128,
+            "mamba_ssm_dtype": "float32",
             "layer_types": ["linear_attention", "full_attention"] * 2,
             "max_position_embeddings": 128,
             "eos_token_id": 255,
@@ -92,6 +93,52 @@ def loop_checkpoint(tmp_path):
     }
     config.save_pretrained(tmp_path)
     return str(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "cache_dtype, expected",
+    [("auto", torch.float32), ("bfloat16", torch.bfloat16)],
+)
+def test_loop_ssm_cache_dtype(
+    loop_checkpoint, vllm_runner, monkeypatch, cache_dtype, expected
+):
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    with vllm_runner(
+        loop_checkpoint,
+        skip_tokenizer_init=True,
+        dtype="bfloat16",
+        mamba_ssm_cache_dtype=cache_dtype,
+        enable_chunked_prefill=True,
+        enforce_eager=True,
+        max_model_len=32,
+        max_num_seqs=1,
+        gpu_memory_utilization=0.05,
+        kv_cache_memory_bytes=16 * 1024**2,
+    ) as runner:
+        dtypes = runner.apply_model(
+            lambda model: [
+                tuple(state.dtype for state in layer.linear_attn.kv_cache)
+                for layer in model.model.layers
+                if layer.layer_type == "linear_attention"
+            ]
+        )
+        assert dtypes == [[(torch.bfloat16, expected)] * 3]
+
+
+@pytest.mark.parametrize("load_format", ["sharded_state", "runai_streamer_sharded"])
+def test_loop_rejects_sharded_state(loop_checkpoint, load_format):
+    with pytest.raises(NotImplementedError, match="SenseNova Loop.*sharded state"):
+        llm = LLM(
+            model=loop_checkpoint,
+            skip_tokenizer_init=True,
+            dtype="bfloat16",
+            load_format=load_format,
+            enforce_eager=True,
+            max_model_len=32,
+            gpu_memory_utilization=0.05,
+            kv_cache_memory_bytes=16 * 1024**2,
+        )
+        llm.llm_engine.engine_core.shutdown()
 
 
 @pytest.mark.parametrize("load_format", ["auto", "dummy"])
