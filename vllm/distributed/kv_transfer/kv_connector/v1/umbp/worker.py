@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import cast
+from typing import TypeVar, cast
 
 import torch
 
@@ -30,6 +30,8 @@ from .runtime import UMBPWorkerHandle
 from .stats import UMBPStoreConnectorStats
 
 logger = init_logger(__name__)
+
+_T = TypeVar("_T")
 
 
 @dataclass
@@ -218,9 +220,41 @@ class UMBPStoreConnectorWorker:
                     )
                 self._pending_stores.remove(batch)
 
+    def _owned_store_plans(
+        self, plans: list[BlockTransferPlan] | BlockStoreBatch
+    ) -> list[BlockTransferPlan] | BlockStoreBatch:
+        """Drop TP-replicated objects that another rank stores for us."""
+        codec = self.codec
+        if codec is None or codec.tp_rank == 0 or not codec.replicated_groups:
+            return plans
+        if isinstance(plans, BlockStoreBatch):
+            keep = [codec.stores_group(group) for group in plans.group_ids]
+            if all(keep):
+                return plans
+
+            def kept(column: list[_T]) -> list[_T]:
+                return [value for value, k in zip(column, keep, strict=True) if k]
+
+            return replace(
+                plans,
+                keys=kept(plans.keys),
+                block_ids=kept(plans.block_ids),
+                group_ids=kept(plans.group_ids),
+                block_hashes=kept(plans.block_hashes),
+                parent_block_hashes=kept(plans.parent_block_hashes),
+                token_ids=kept(plans.token_ids),
+                block_sizes=kept(plans.block_sizes),
+            )
+        return [
+            plan
+            for plan in plans
+            if plan.group_id is None or codec.stores_group(plan.group_id)
+        ]
+
     def _submit_store_plans(
         self, plans: list[BlockTransferPlan] | BlockStoreBatch, request_id: str
     ) -> None:
+        plans = self._owned_store_plans(plans)
         if not plans:
             return
         store_blocks = getattr(self.runtime, "store_blocks", None)
