@@ -124,21 +124,9 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
 
 
 class FlashInferCutedslMxfp8LinearKernel(Mxfp8LinearKernel):
-    """MXFP8 GEMM via CuTe-DSL or cuBLASLt with shared quantized inputs."""
+    """MXFP8 W8A8 GEMM via FlashInfer CuTe-DSL (SM100/SM103)."""
 
     supports_pre_processed_weights = True
-
-    def __init__(self, c: Mxfp8LinearLayerConfig) -> None:
-        super().__init__(c)
-        from vllm.config import get_current_vllm_config_or_none
-
-        config = get_current_vllm_config_or_none()
-        self._cublaslt_min_m = None
-        if config is not None:
-            kc = config.kernel_config
-            overrides = kc.linear_backend_per_quant or {}
-            if overrides.get("mxfp8", kc.linear_backend) == "auto":
-                self._cublaslt_min_m = kc.mxfp8_cublaslt_min_m
 
     @classmethod
     def is_supported(
@@ -200,13 +188,7 @@ class FlashInferCutedslMxfp8LinearKernel(Mxfp8LinearKernel):
             input_scale,
             weight_scale,
             out_dtype=out_dtype,
-            backend="cublaslt"
-            if (
-                self._cublaslt_min_m is not None
-                and input_mxfp8.shape[0] >= self._cublaslt_min_m
-                and N % 16 == 0
-            )
-            else "cute-dsl",
+            backend="cute-dsl",
         )
 
         if bias is not None:

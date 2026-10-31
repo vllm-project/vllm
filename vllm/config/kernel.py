@@ -392,13 +392,6 @@ class KernelConfig:
     - "xpu_woq": Use XPU kernels for weight-only quantization (e.g. W8A16)
     """
 
-    mxfp8_cublaslt_min_m: int | None = Field(default=128, ge=1)
-    """Minimum input rows M for cuBLASLt MXFP8 GEMM on SM100/SM103 when the
-    effective linear backend is ``auto``. Uses the existing 128x4 scale layout;
-    output columns must be divisible by 16. Applies with FlashInfer autotune
-    enabled or disabled. Set to ``None`` to retain FlashInfer for every M.
-    Explicit linear backend selections take precedence."""
-
     linear_backend_per_quant: dict[str, LinearBackend] | None = Field(
         default=None, min_length=1
     )
