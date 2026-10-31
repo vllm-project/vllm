@@ -1175,6 +1175,7 @@ async def test_cache_drift_invalidation_waits_for_render_without_delaying_output
     outputs: asyncio.Queue[EngineCoreOutputs] = asyncio.Queue()
     engine = SimpleNamespace(
         output_handler=None,
+        _shutting_down_ref=[False],
         engine_core=SimpleNamespace(get_output_async=outputs.get),
         output_processor=output_processor,
         log_stats=False,
