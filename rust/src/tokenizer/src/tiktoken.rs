@@ -470,6 +470,16 @@ impl Tokenizer for TiktokenTokenizer {
     }
 
     fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> Result<String> {
+        // Logprobs decode candidates individually, so avoid the general sequence pipeline.
+        if let &[token_id] = token_ids {
+            if skip_special_tokens && self.metadata.is_special_id(token_id) {
+                return Ok(String::new());
+            }
+            if let Some(token) = self.metadata.id_to_token(token_id) {
+                return Ok(token);
+            }
+        }
+
         // Filter passes:
         //
         // 1. The constructor registers every id in `[num_base_tokens, vocab_upper_bound)` as a
@@ -625,8 +635,9 @@ mod tests {
             let text_with_multibyte = "Hello你好World";
             let all_ids = backend.encode(text_with_multibyte, false).unwrap();
             for &id in &all_ids {
-                let result = backend.decode(&[id], false);
-                assert!(result.is_ok(), "decode of token {id} should not error");
+                let bytes = [u8::try_from(id).expect("synthetic token id must fit in one byte")];
+                let expected = String::from_utf8_lossy(&bytes);
+                assert_eq!(backend.decode(&[id], false).unwrap(), expected);
             }
         }
     }
@@ -742,6 +753,14 @@ mod tests {
             let special_id: u32 = 257; // <|im_end|>
             let non_special_id: u32 = 258; // <|tool_call_begin|>
             let reserved_id: u32 = 259; // default <|reserved_token_259|> placeholder
+
+            assert_eq!(backend.decode(&[special_id], false).unwrap(), "<|im_end|>");
+            assert_eq!(backend.decode(&[special_id], true).unwrap(), "");
+            assert_eq!(
+                backend.decode(&[non_special_id], true).unwrap(),
+                "<|tool_call_begin|>"
+            );
+            assert_eq!(backend.decode(&[reserved_id], true).unwrap(), "");
 
             let ids = vec![h, special_id, i, non_special_id, reserved_id];
 
@@ -927,6 +946,7 @@ mod tests {
         let unknown_id: u32 = 999_999;
         let result = backend.decode(&[unknown_id], false);
         assert_eq!(result.unwrap(), "");
+        assert_eq!(backend.decode(&[unknown_id], true).unwrap(), "");
 
         // Mixed: known bytes for "Hi" surrounding an unknown id should yield just "Hi".
         let h = backend.encode("H", false).unwrap()[0];
@@ -943,6 +963,7 @@ mod tests {
 
         let unknown_id: u32 = 999_999;
         assert_eq!(backend.decode(&[unknown_id], false).unwrap(), "");
+        assert_eq!(backend.decode(&[unknown_id], true).unwrap(), "");
 
         let h = backend.encode("H", false).unwrap()[0];
         let i = backend.encode("i", false).unwrap()[0];
