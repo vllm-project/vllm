@@ -60,6 +60,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 from vllm.v1.kv_cache_interface import (
+    DFlashSlidingWindowSpec,
     FullAttentionSpec,
     HiSparseHotSpec,
     HiSparseResidentSpec,
@@ -5003,6 +5004,75 @@ def test_hybrid_cache_blocks_swa_tail_window_only():
             assert cached is None, (
                 f"SWA hash {i} cannot serve any lcm-aligned hit; should not be cached"
             )
+
+
+@pytest.mark.parametrize(("num_shared_tokens", "num_held_blocks"), [(32, 3), (40, 2)])
+def test_dflash_drafter_hit_needs_cached_drafter_kv_only_in_its_window(
+    num_shared_tokens, num_held_blocks
+):
+    """A DFlash drafter group backs only each prefill's tail, and a later
+    request's hit needs cached drafter blocks only in the window before that
+    request's end (here tokens 37..43, block 9), not below the hit like plain
+    SWA."""
+    block_size = 4
+    kv_cache_config = KVCacheConfig(
+        num_blocks=64,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer1"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["draft"],
+                DFlashSlidingWindowSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=8,
+                    num_speculative_tokens=2,
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+
+    req0 = make_request("0", list(range(40)), block_size, sha256)
+    computed_blocks, _, _ = manager.get_computed_blocks(req0)
+    blocks = manager.allocate_slots(req0, 40, 0, computed_blocks)
+    assert blocks is not None
+    _, draft_ids = blocks.get_block_ids()
+    # The 40-token prefill backs drafter blocks from (40 - 10) // 4 = 7 on.
+    assert draft_ids[:7] == [0] * 7 and 0 not in draft_ids[7:]
+    manager.free(req0)
+
+    token_ids = list(range(num_shared_tokens))
+    token_ids += [100 + i for i in range(44 - num_shared_tokens)]
+    req1 = make_request("1", token_ids, block_size, sha256)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
+    assert num_computed_tokens == num_shared_tokens
+    _, draft_hit_ids = computed_blocks.get_block_ids()
+    num_hit_blocks = num_shared_tokens // block_size
+    assert draft_hit_ids == [0] * min(9, num_hit_blocks) + draft_ids[9:num_hit_blocks]
+
+    blocks = manager.allocate_slots(
+        req1, 44 - num_computed_tokens, num_computed_tokens, computed_blocks
+    )
+    assert blocks is not None
+    held = [b for b in manager.coordinator.get_blocks("1")[1] if not b.is_null]
+    # The 44-token request's tail from block 8, except blocks the hit left null.
+    assert len(held) == num_held_blocks
 
 
 def test_hybrid_cache_blocks_clamped_to_lcm():

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import dataclasses
 import random
 
 import pytest
@@ -19,6 +20,7 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
     CircularBufferManager,
+    DFlashSlidingWindowManager,
     FullAttentionManager,
     MambaManager,
     RSWAManager,
@@ -27,6 +29,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     CircularBufferSpec,
+    DFlashSlidingWindowSpec,
     FullAttentionSpec,
     MambaSpec,
     RSWASpec,
@@ -322,6 +325,228 @@ def get_sliding_window_manager(
         needs_kv_cache_zeroing=needs_kv_cache_zeroing,
         max_admission_blocks_per_request=10**9,
     )
+
+
+def new_dflash_window_spec(num_speculative_tokens=2, **kwargs):
+    # A 10-token tail by default: the 8-token window plus 2 drafts.
+    return DFlashSlidingWindowSpec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=8,
+        num_speculative_tokens=num_speculative_tokens,
+        **kwargs,
+    )
+
+
+def test_dflash_window_backs_only_each_chunks_tail():
+    """Each chunk backs only its trailing tail, and freeing reaches the tails
+    that later chunks' null runs sit above."""
+    block_pool = BlockPool(num_gpu_blocks=32, enable_caching=False, hash_block_size=4)
+    manager = DFlashSlidingWindowManager(
+        new_dflash_window_spec(),
+        block_pool=block_pool,
+        enable_caching=False,
+        kv_cache_group_id=0,
+        scheduler_block_size=4,
+        max_admission_blocks_per_request=10**9,
+    )
+    num_free_blocks = block_pool.get_num_free_blocks()
+
+    # Two 40-token chunks plus a lookahead slot: blocks below
+    # (num_target_tokens - tail_tokens) // block_size stay null.
+    for num_computed, num_target_tokens in ((0, 40), (40, 80)):
+        num_tokens = num_target_tokens + 1
+        assert (
+            manager.get_num_blocks_to_allocate(
+                "r", num_tokens, [], num_computed, num_computed, num_target_tokens
+            )
+            == 4
+        )
+        manager.allocate_new_blocks("r", num_tokens, num_target_tokens)
+
+    def resident_blocks() -> list[int]:
+        return [i for i, b in enumerate(manager.req_to_blocks["r"]) if not b.is_null]
+
+    assert resident_blocks() == [7, 8, 9, 10, 17, 18, 19, 20]
+    assert block_pool.get_num_free_blocks() == num_free_blocks - 8
+
+    # Processed tokens have no drafts in flight, so 80 of them keep only the
+    # window from token 73 (block 18), like plain sliding window.
+    manager.remove_skipped_blocks("r", 80)
+    assert resident_blocks() == [18, 19, 20]
+    assert block_pool.get_num_free_blocks() == num_free_blocks - 3
+
+
+@pytest.mark.parametrize("max_in_flight_steps", [1, 2])
+def test_dflash_window_tail_covers_reads_after_rejected_drafts(max_in_flight_steps):
+    """An allocation's target tokens count the drafts of every step in flight.
+    If all of them are rejected, the next draft step reads the window below
+    the accepted tokens, which must still be backed."""
+    num_speculative_tokens = 3
+    spec = new_dflash_window_spec(
+        num_speculative_tokens=num_speculative_tokens,
+        max_in_flight_steps=max_in_flight_steps,
+    )
+    manager = DFlashSlidingWindowManager(
+        spec,
+        block_pool=BlockPool(
+            num_gpu_blocks=128, enable_caching=False, hash_block_size=4
+        ),
+        enable_caching=False,
+        kv_cache_group_id=0,
+        scheduler_block_size=4,
+        max_admission_blocks_per_request=10**9,
+    )
+    # Every alignment of the tail start within a block.
+    for num_target_tokens in range(40, 48):
+        req_id = str(num_target_tokens)
+        manager.allocate_new_blocks(req_id, num_target_tokens, num_target_tokens)
+        num_accepted_tokens = (
+            num_target_tokens - num_speculative_tokens * max_in_flight_steps
+        )
+        first_read = num_accepted_tokens - spec.sliding_window + 1
+        blocks = manager.req_to_blocks[req_id]
+        assert blocks[0].is_null
+        assert not any(block.is_null for block in blocks[first_read // 4 :])
+
+
+def test_dflash_window_admission_cap_counts_in_flight_tails():
+    spec = new_dflash_window_spec(num_speculative_tokens=1, max_in_flight_steps=2)
+    # The processed prefix's window and two in-flight tails, 4 blocks each,
+    # below the plain sliding-window bound for 100 in-flight tokens.
+    assert spec.max_admission_blocks_per_request(100, 1000) == 12
+    # The 7-token window below the processed tokens plus 4 in-flight tokens
+    # spans at most 4 blocks, as for plain sliding window.
+    assert spec.max_admission_blocks_per_request(4, 1000) == 4
+
+
+@pytest.mark.parametrize(
+    ("num_speculative_tokens", "num_lookahead_tokens", "chunks"),
+    [
+        (2, 3, [5] * 20),  # decode-sized steps: the window bound applies
+        (3, 3, [2] + [40] * 8),  # long chunks: the tail bound applies
+    ],
+)
+def test_dflash_window_admission_cap_covers_lookahead_slots(
+    num_speculative_tokens, num_lookahead_tokens, chunks
+):
+    """Each allocation also backs the drafts' lookahead slots past its target
+    tokens, so the cap that sizes the pool and gates admission counts them."""
+    spec = new_dflash_window_spec(
+        num_speculative_tokens=num_speculative_tokens,
+        num_lookahead_tokens=num_lookahead_tokens,
+    )
+    manager = DFlashSlidingWindowManager(
+        spec,
+        block_pool=BlockPool(
+            num_gpu_blocks=64, enable_caching=False, hash_block_size=4
+        ),
+        enable_caching=False,
+        kv_cache_group_id=0,
+        scheduler_block_size=4,
+        max_admission_blocks_per_request=10**9,
+    )
+
+    num_target_tokens = 0
+    max_held = 0
+    for chunk in chunks:
+        num_computed = num_target_tokens
+        manager.remove_skipped_blocks("r", num_computed)
+        num_target_tokens += chunk
+        num_tokens = num_target_tokens + num_lookahead_tokens
+        manager.get_num_blocks_to_allocate(
+            "r", num_tokens, [], num_computed, num_computed, num_target_tokens
+        )
+        manager.allocate_new_blocks("r", num_tokens, num_target_tokens)
+        held = sum(not block.is_null for block in manager.req_to_blocks["r"])
+        max_held = max(max_held, held)
+
+    # One step in flight, so at most one chunk of in-flight tokens.
+    cap = spec.max_admission_blocks_per_request(max(chunks), 1000)
+    cap_without_lookahead = dataclasses.replace(
+        spec, num_lookahead_tokens=0
+    ).max_admission_blocks_per_request(max(chunks), 1000)
+    assert cap_without_lookahead < max_held <= cap
+
+
+@pytest.mark.parametrize(
+    ("cached", "max_length", "num_hit_blocks"),
+    [
+        ({8, 9}, 40, 10),  # the window before the request end is cached
+        ({8}, 40, 9),  # a missing block ends the hit there
+        ({7, 9}, 40, 8),  # the window's first block is missing: no drafter KV
+        (set(), 24, 6),  # the hit ends below the window: no drafter KV needed
+    ],
+)
+def test_dflash_window_hit_needs_only_the_window_before_request_end(
+    cached, max_length, num_hit_blocks
+):
+    block_size = 4
+    block_pool = BlockPool(
+        num_gpu_blocks=32, enable_caching=True, hash_block_size=block_size
+    )
+    block_hashes = [BlockHash(str(i).encode()) for i in range(10)]
+    for i in cached:
+        block_pool.cached_block_hash_to_block.insert(
+            make_block_hash_with_group_id(block_hashes[i], 0), block_pool.blocks[i + 10]
+        )
+
+    # The first draft of a 41-token request reads tokens 34..40, so the hit
+    # needs drafter blocks from block 8 on, not the 10-token tail's block 7.
+    (blocks,), hit_length = DFlashSlidingWindowManager.find_longest_cache_hit(
+        block_hashes=block_hashes,
+        max_length=max_length,
+        kv_cache_group_ids=[0],
+        block_pool=block_pool,
+        kv_cache_spec=new_dflash_window_spec(),
+        drop_eagle_block=False,
+        alignment_tokens=block_size,
+        num_request_tokens=41,
+    )
+
+    assert hit_length == num_hit_blocks * block_size
+    assert [b.block_id for b in blocks] == [
+        i + 10 if i >= 8 else 0 for i in range(num_hit_blocks)
+    ]
+
+
+@pytest.mark.parametrize("num_external_tokens", [40, 41, 43])
+def test_dflash_window_load_holds_only_the_window(num_external_tokens):
+    """A KV-connector load has no drafts in flight, so it holds the same blocks
+    as plain sliding window: a connector moving the window fills all of them."""
+    spec = new_dflash_window_spec()
+
+    def held_after_load(manager_cls, kv_cache_spec) -> list[int]:
+        manager = manager_cls(
+            kv_cache_spec,
+            block_pool=BlockPool(
+                num_gpu_blocks=32, enable_caching=False, hash_block_size=4
+            ),
+            enable_caching=False,
+            kv_cache_group_id=0,
+            scheduler_block_size=4,
+            max_admission_blocks_per_request=10**9,
+        )
+        manager.add_local_computed_blocks("r", [], 0, num_external_tokens)
+        manager.allocate_external_computed_blocks("r", 0, num_external_tokens)
+        manager.allocate_new_blocks("r", num_external_tokens, num_external_tokens)
+        blocks = manager.req_to_blocks["r"]
+        return [i for i, b in enumerate(blocks) if not b.is_null]
+
+    held = held_after_load(DFlashSlidingWindowManager, spec)
+    assert held == held_after_load(
+        SlidingWindowManager,
+        SlidingWindowSpec(
+            **{
+                f.name: getattr(spec, f.name)
+                for f in dataclasses.fields(SlidingWindowSpec)
+                if f.init
+            }
+        ),
+    )
+    assert held[0] == (num_external_tokens - spec.sliding_window + 1) // 4
 
 
 def get_chunked_local_attention_manager(
