@@ -3,6 +3,7 @@
 """Tests online quantization."""
 
 import json
+import math
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -10,6 +11,8 @@ from unittest.mock import Mock
 
 import pytest
 import torch
+from compressed_tensors.quantization import QuantizationArgs
+from compressed_tensors.quantization.lifecycle.forward import dequantize
 from torch.distributed import ProcessGroup
 
 from tests.quantization.utils import (
@@ -162,6 +165,108 @@ PARTIALLY_PREQUANTIZED_MODEL_NAME = (
 )
 NVFP4_MOE_MODEL_NAME = "RedHatAI/Qwen3-30B-A3B-NVFP4"
 MODELOPT_NVFP4_MOE_MODEL_NAME = "nvidia/Qwen3-30B-A3B-NVFP4"
+CT_CHANNEL_FP8_MODEL_NAME = "RedHatAI/Qwen3-0.6B-FP8-dynamic"
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("strategy", ["channel", "tensor"])
+def test_compressed_tensors_fp8_source_dequantization(
+    dtype, strategy, tmp_path, default_vllm_config, dist_init
+) -> None:
+    """Decode loaded fused shards before any kernel layout transformation."""
+    _write_minimal_llama_config(tmp_path)
+    default_vllm_config.model_config = ModelConfig(model=str(tmp_path), dtype=dtype)
+    weight_args = QuantizationArgs(num_bits=8, type="float", strategy=strategy)
+    config = CompressedTensorsConfig(
+        target_scheme_map={
+            "Linear": {
+                "weights": weight_args,
+                "input_activations": QuantizationArgs(
+                    num_bits=8, type="float", strategy="token", dynamic=True
+                ),
+                "format": "float-quantized",
+            }
+        },
+        ignore=[],
+        quant_format="float-quantized",
+    )
+    with torch.device(DEVICE):
+        layer = MergedColumnParallelLinear(
+            input_size=128,
+            output_sizes=[128, 64, 64],
+            bias=False,
+            params_dtype=dtype,
+            quant_config=config,
+            prefix="model.layers.0.self_attn.qkv_proj",
+        )
+    if strategy != "channel":
+        with pytest.raises(NotImplementedError, match="symmetric per-channel"):
+            layer.quant_method.dequantize_weight(layer)
+        return
+
+    expected = []
+    for shard, rows in enumerate([128, 64, 64]):
+        weight = (
+            torch.arange(rows * 128, device=DEVICE).reshape(rows, 128) % 31 - 15
+        ).to(torch.float8_e4m3fn)
+        scale = torch.linspace(0.01, 0.2, rows, device=DEVICE).to(dtype).unsqueeze(1)
+        layer.weight.weight_loader(layer.weight, weight, shard)
+        layer.weight_scale.weight_loader(layer.weight_scale, scale, shard)
+        expected.append(dequantize(weight, scale, args=weight_args, dtype=dtype))
+
+    weight_before = layer.weight.float().clone()
+    scale_before = layer.weight_scale.clone()
+    actual = layer.quant_method.dequantize_weight(layer)
+    assert isinstance(actual, torch.Tensor)
+    torch.testing.assert_close(actual, torch.cat(expected), rtol=0, atol=0)
+    assert actual.dtype == dtype
+    torch.testing.assert_close(layer.weight.float(), weight_before, rtol=0, atol=0)
+    torch.testing.assert_close(layer.weight_scale, scale_before, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("target", ["mxfp4", "fp8_per_block"])
+def test_compressed_tensors_channel_fp8_requantization(
+    target, vllm_runner, monkeypatch
+) -> None:
+    """Serve a real CT FP8 checkpoint through the requested online target."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    expected_cls = (
+        Mxfp4OnlineLinearMethod if target == "mxfp4" else Fp8PerBlockOnlineLinearMethod
+    )
+
+    def check_model(model):
+        for layer in model.model.layers:
+            for linear in (layer.self_attn.qkv_proj, layer.mlp.down_proj):
+                method = linear.quant_method
+                assert isinstance(method, expected_cls)
+                assert isinstance(
+                    method.requantization_source, CompressedTensorsLinearMethod
+                )
+                assert not method.requantization_source_parameters
+
+    with vllm_runner(
+        CT_CHANNEL_FP8_MODEL_NAME,
+        dtype="bfloat16",
+        quantization_config={"linear": target},
+        kernel_config=KernelConfig(linear_backend_per_quant={"mxfp4": "marlin"}),
+        enforce_eager=True,
+        max_model_len=256,
+        max_num_seqs=2,
+        gpu_memory_utilization=0.25,
+    ) as llm:
+        llm.apply_model(check_model)
+        outputs = llm.generate_greedy_logprobs(
+            ["The capital of France is", "One plus one is"],
+            max_tokens=8,
+            num_logprobs=5,
+        )
+        for tokens, _, logprobs in outputs:
+            assert tokens and logprobs
+            assert all(
+                math.isfinite(value.logprob)
+                for step in logprobs
+                for value in step.values()
+            )
 
 
 @pytest.mark.parametrize(
