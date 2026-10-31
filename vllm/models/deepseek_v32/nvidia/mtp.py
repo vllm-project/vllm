@@ -98,6 +98,8 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
             topk_indices_buffer=topk_indices_buffer,
             index_group_builder=index_group_builder,
         )
+        # The block's output feeds the final norm below.
+        self.mtp_block.defer_moe_finalize()
 
     def forward(
         self,
