@@ -122,6 +122,19 @@ __device__ __forceinline__ uint32_t extract_coarse_bin_N(float x) {
   return key >> (16 - kBits);
 }
 
+// Coarse bins of the two BF16 scores in `w` (low half first): the bins
+// extract_coarse_bin_N gives, from one packed FP16 conversion and key flip.
+template <uint32_t kBits>
+__device__ __forceinline__ uint2 extract_coarse_bins_bf16x2(uint32_t w) {
+  const __half2 h = __floats2half2_rn(__uint_as_float(w << 16),
+                                      __uint_as_float(w & 0xFFFF0000u));
+  const uint32_t bits = *reinterpret_cast<const uint32_t*>(&h);
+  const uint32_t sign = bits & 0x80008000u;
+  // Per half: ~bits if negative, else bits | 0x8000.
+  const uint32_t key = bits ^ ((sign - (sign >> 15)) | 0x80008000u);
+  return make_uint2((key & 0xFFFFu) >> (16 - kBits), key >> (32 - kBits));
+}
+
 // running sum within each warp — thread 0 gets its own value, thread 1 gets
 // thread 0 + thread 1, thread 2 gets threads 0+1+2, etc.
 __device__ __forceinline__ uint32_t warp_inclusive_sum(uint32_t lane,

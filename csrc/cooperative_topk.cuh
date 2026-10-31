@@ -12,6 +12,7 @@
 #include <cuda/ptx>
 #include <algorithm>
 #include <cstdint>
+#include <type_traits>
 
 #include "topk_histogram_4096.cuh"
 #include "topk_histogram_4096_overflow.cuh"
@@ -79,6 +80,41 @@ __device__ __forceinline__ uint32_t warp_reduce_sum_subN(uint32_t v) {
 
 __device__ __forceinline__ uint32_t extract_coarse_bin(float x) {
   return hist4096::extract_coarse_bin_N<kHistBits>(x);
+}
+
+// Visit a staged chunk's scores as (index in chunk, coarse bin, score). BF16
+// is read two scores per 32-bit load.
+template <uint32_t kBits, typename InT, typename Visit>
+__device__ __forceinline__ void for_each_staged_score(const InT* buf,
+                                                      uint32_t sz,
+                                                      Visit visit) {
+  const auto tx = threadIdx.x;
+  if constexpr (std::is_same_v<InT, __nv_bfloat16>) {
+    const auto* words = reinterpret_cast<const uint32_t*>(buf);
+#pragma unroll
+    for (uint32_t i = 0; i < kElemPerStage / 2; i++) {
+      const auto li = 2 * (tx + i * hist4096::kBlockSize);
+      if (li >= sz) {
+        break;
+      }
+      const uint32_t w = words[li / 2];
+      const auto bins = hist4096::extract_coarse_bins_bf16x2<kBits>(w);
+      visit(li, bins.x, __uint_as_float(w << 16));
+      if (li + 1 < sz) {
+        visit(li + 1, bins.y, __uint_as_float(w & 0xFFFF0000u));
+      }
+    }
+  } else {
+#pragma unroll
+    for (uint32_t i = 0; i < kElemPerStage; i++) {
+      const auto li = tx + i * hist4096::kBlockSize;
+      if (li >= sz) {
+        break;
+      }
+      const float sc = buf[li];
+      visit(li, hist4096::extract_coarse_bin_N<kBits>(sc), sc);
+    }
+  }
 }
 
 __device__ __forceinline__ void mbarrier_init(uint64_t* a, uint32_t n) {
@@ -200,30 +236,24 @@ __device__ void tma_stream_pass(const InT* scores, uint32_t length,
     phases[b]++;  // advances the phase for next time this slot is reused
     __syncwarp();
 
-#pragma unroll
-    for (uint32_t i = 0; i < kElemPerStage; i++) {
-      const auto li = tx + i * hist4096::kBlockSize;
-      if (li >= sz) {
-        break;
-      }
-      const auto sc = hist4096::to_float(smem->score_buffer[b][li]);
-      const auto bn = hist4096::extract_coarse_bin_N<kBinBits>(sc);
-      if constexpr (kIsScatter) {  // compile-time branch
-        // Scatter pass: place above-threshold and collect ties
-        const auto gi = o + li;
-        if (bn > thr_bin) {
-          indices[atomicAdd(&smem->counter_gt, 1)] = gi;
-        } else if (bn == thr_bin) {
-          const auto p = atomicAdd(&smem->counter_eq, 1);
-          if (p < kCoarseTieCapacity) {
-            smem->tie_buffer[p] = {gi, sc};
+    for_each_staged_score<kBinBits>(
+        smem->score_buffer[b], sz, [&](uint32_t li, uint32_t bn, float sc) {
+          if constexpr (kIsScatter) {  // compile-time branch
+            // Scatter pass: place above-threshold and collect ties
+            const auto gi = o + li;
+            if (bn > thr_bin) {
+              indices[atomicAdd(&smem->counter_gt, 1)] = gi;
+            } else if (bn == thr_bin) {
+              const auto p = atomicAdd(&smem->counter_eq, 1);
+              if (p < kCoarseTieCapacity) {
+                smem->tie_buffer[p] = {gi, sc};
+              }
+            }
+          } else {
+            // Histogram pass: just count
+            atomicAdd(&smem->histogram[bn], 1);
           }
-        }
-      } else {
-        // Histogram pass: just count
-        atomicAdd(&smem->histogram[bn], 1);
-      }
-    }
+        });
     __syncthreads();  // ensures all threads finished processing their buffer
                       // before next TMA load
 
@@ -328,22 +358,27 @@ __device__ void large_topk(const InT* __restrict__ row_input,
       }
       phases[iter]++;
       __syncwarp();
+      if constexpr (std::is_same_v<InT, __nv_bfloat16>) {
+        for_each_staged_score<kHistBits>(smem->score_buffer[iter], sz,
+                                         [&](uint32_t, uint32_t bin, float) {
+                                           atomicAdd(&smem->histogram[bin], 1);
+                                         });
+      } else {
 #pragma unroll
-      for (uint32_t i = 0; i < kElemPerStage; i += 2) {
-        const auto li0 = tx + i * hist4096::kBlockSize;
-        const auto li1 = tx + (i + 1) * hist4096::kBlockSize;
-        if (li0 >= sz) {
-          break;
-        }
-        const auto b0 = extract_coarse_bin(
-            hist4096::to_float(smem->score_buffer[iter][li0]));
-        if (li1 < sz) {
-          const auto b1 = extract_coarse_bin(
-              hist4096::to_float(smem->score_buffer[iter][li1]));
-          atomicAdd(&smem->histogram[b0], 1);
-          atomicAdd(&smem->histogram[b1], 1);
-        } else {
-          atomicAdd(&smem->histogram[b0], 1);
+        for (uint32_t i = 0; i < kElemPerStage; i += 2) {
+          const auto li0 = tx + i * hist4096::kBlockSize;
+          const auto li1 = tx + (i + 1) * hist4096::kBlockSize;
+          if (li0 >= sz) {
+            break;
+          }
+          const auto b0 = extract_coarse_bin(smem->score_buffer[iter][li0]);
+          if (li1 < sz) {
+            const auto b1 = extract_coarse_bin(smem->score_buffer[iter][li1]);
+            atomicAdd(&smem->histogram[b0], 1);
+            atomicAdd(&smem->histogram[b1], 1);
+          } else {
+            atomicAdd(&smem->histogram[b0], 1);
+          }
         }
       }
     }
@@ -381,26 +416,20 @@ __device__ void large_topk(const InT* __restrict__ row_input,
     for (uint32_t iter = 0; iter < num_iters; iter++) {
       const auto off = iter * kSizePerStage;
       const auto sz = min(kSizePerStage, my_len - off);
-#pragma unroll
-      for (uint32_t i = 0; i < kElemPerStage; i++) {
-        const auto li = tx + i * hist4096::kBlockSize;
-        if (li >= sz) {
-          break;
-        }
-        const auto score =
-            hist4096::to_float(smem->score_buffer[iter][li]);  // still in smem
-        const auto bin = extract_coarse_bin(score);
-        const auto gidx = off + li;
-        if (bin > thr) {
-          s_topk[atomicAdd(&smem->counter_gt, 1)] = gidx;  // above -> s_topk
-        } else if (bin == thr) {
-          const auto p = atomicAdd(&smem->counter_eq,
-                                   1);  // equal -> ties (later refinement)
-          if (p < kCoarseTieCapacity) {
-            smem->tie_buffer[p] = {gidx, score};
-          }
-        }
-      }
+      for_each_staged_score<kHistBits>(  // still in smem
+          smem->score_buffer[iter], sz,
+          [&](uint32_t li, uint32_t bin, float score) {
+            const auto gidx = off + li;
+            if (bin > thr) {
+              s_topk[atomicAdd(&smem->counter_gt, 1)] = gidx;  // above
+            } else if (bin == thr) {
+              const auto p = atomicAdd(&smem->counter_eq,
+                                       1);  // equal -> ties (later refinement)
+              if (p < kCoarseTieCapacity) {
+                smem->tie_buffer[p] = {gidx, score};
+              }
+            }
+          });
     }
     __syncthreads();
   } else {
