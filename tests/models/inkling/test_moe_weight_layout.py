@@ -8,9 +8,19 @@ import torch
 
 from vllm.lora.utils import get_supported_lora_modules
 from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
+from vllm.models.inkling.amd import moe as amd_moe
+from vllm.models.inkling.common.weights import write_loader
 from vllm.models.inkling.nvidia import moe
 from vllm.models.inkling.nvidia.model import _TmlForCausalLMBase
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_default_torch_dtype
+
+
+def _expert_param(data: torch.Tensor) -> torch.nn.Parameter:
+    """A routed-experts parameter as ``InklingMoE`` sets it up."""
+    param = torch.nn.Parameter(data)
+    param.weight_loader = write_loader
+    return param
 
 
 def test_gate_loads_directly_into_padded_runtime_weight() -> None:
@@ -136,23 +146,30 @@ def test_inkling_mapper_maps_compressed_tensors_expert_params(
     assert mapped == [f"model.layers.2.mlp.experts.{projection}_{suffix}"]
 
 
+@pytest.mark.parametrize("moe_cls", [moe.InklingMoE, amd_moe.InklingMoE])
 @pytest.mark.parametrize(("projection", "amax"), [("w13", 4.375), ("w2", 2960.0)])
-def test_moe_loads_calibrated_input_scale(projection: str, amax: float) -> None:
+def test_moe_loads_calibrated_input_scale(
+    moe_cls: type[moe.InklingMoE] | type[amd_moe.InklingMoE],
+    projection: str,
+    amax: float,
+) -> None:
     experts = SimpleNamespace(
-        w13_input_scale=torch.nn.Parameter(torch.empty(3, 2)),
-        w2_input_scale=torch.nn.Parameter(torch.empty(3)),
+        w13_input_scale=_expert_param(torch.empty(3, 2)),
+        w2_input_scale=_expert_param(torch.empty(3)),
     )
     layer = SimpleNamespace(experts=SimpleNamespace(routed_experts=experts))
 
-    loaded = moe.InklingMoE.load_expert_weight(
-        layer,
-        f"experts.{projection}_weight.input_amax",
-        torch.tensor([amax]),
-    )
+    # weights load under the model's default dtype; the fp32 scale must not
+    # round through it
+    with set_default_torch_dtype(torch.bfloat16):
+        loaded = moe_cls.load_expert_weight(
+            layer,
+            f"experts.{projection}_weight.input_amax",
+            torch.tensor([amax]),
+        )
 
     scale = getattr(experts, f"{projection}_input_scale")
-    expected = torch.full_like(scale, amax / (448.0 * 6.0))
-    torch.testing.assert_close(scale, expected)
+    assert torch.equal(scale, torch.full_like(scale, amax / (448.0 * 6.0)))
     assert loaded == [f"experts.routed_experts.{projection}_input_scale"]
 
 
@@ -161,9 +178,9 @@ def test_moe_loads_calibrated_input_scale(projection: str, amax: float) -> None:
 def test_moe_loads_compressed_tensors_global_scale(
     projection: str, scale_kind: str
 ) -> None:
-    param = torch.nn.Parameter(torch.empty(3, 2 if projection == "w13" else 1))
+    param = _expert_param(torch.empty(3, 2 if projection == "w13" else 1))
     if projection == "w2":
-        param = torch.nn.Parameter(param.squeeze(1))
+        param = _expert_param(param.squeeze(1))
     experts = SimpleNamespace(
         **{f"{projection}_{scale_kind}_global_scale": param},
         moe_config=SimpleNamespace(moe_parallel_config=SimpleNamespace(tp_rank=0)),
@@ -191,7 +208,7 @@ def test_moe_loads_compressed_tensors_global_scale(
 def test_moe_loads_channelwise_scale_for_tp(
     projection: str, checkpoint_rows: int
 ) -> None:
-    param = torch.nn.Parameter(torch.empty(2, 4, 1))
+    param = _expert_param(torch.empty(2, 4, 1))
     experts = SimpleNamespace(
         **{f"{projection}_weight_scale": param},
         moe_config=SimpleNamespace(moe_parallel_config=SimpleNamespace(tp_rank=1)),

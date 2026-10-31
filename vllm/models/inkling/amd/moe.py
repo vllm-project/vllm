@@ -43,6 +43,12 @@ from vllm.triton_utils import tl, tldevice, triton
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import aux_stream
 
+from ..common.weights import (
+    copy_into_slots,
+    copy_padded,
+    deinterleave_into,
+    write_loader,
+)
 from ..configs import InklingModelConfig
 
 if TYPE_CHECKING:
@@ -306,6 +312,8 @@ class InklingSinkExperts(nn.Module):
             torch.empty(d_model, n_experts * intermediate_pp),
             requires_grad=False,
         )
+        for param in (self.w13_weight, self.w2_weight):
+            param.weight_loader = write_loader
         self._unit: torch.Tensor | None = None
 
     def load_weight(self, key: str, weight: torch.Tensor) -> list[str]:
@@ -314,7 +322,9 @@ class InklingSinkExperts(nn.Module):
             if weight.shape != self.w13_weight.shape:
                 shard = self.w13_weight.shape[1]
                 weight = weight.narrow(1, self.tp_rank * shard, shard)
-            self.w13_weight.data.copy_(weight)
+            self.w13_weight.weight_loader(
+                self.w13_weight, weight, lambda p, w: p.data.copy_(w)
+            )
             return [key]
 
         assert key == "w2_weight"
@@ -323,7 +333,11 @@ class InklingSinkExperts(nn.Module):
         for expert_idx, expert_weight in enumerate(weight):
             local_weight = expert_weight.narrow(1, shard_start, shard)
             start = expert_idx * shard
-            self.w2_weight.data[:, start : start + shard].copy_(local_weight)
+            self.w2_weight.weight_loader(
+                self.w2_weight,
+                local_weight,
+                lambda p, w, s=start: p.data[:, s : s + shard].copy_(w),
+            )
         return [key]
 
     def forward(self, x: torch.Tensor, gammas: torch.Tensor) -> torch.Tensor:
@@ -474,6 +488,8 @@ class InklingMoE(nn.Module):
         # stream itself (RS -> shard sconv -> AG); the runner must return the
         # per-rank partial sum instead of all-reducing.
         self.experts.moe_config.skip_final_all_reduce = True
+        for param in self.experts.routed_experts.parameters(recurse=False):
+            param.weight_loader = write_loader
 
         self._routed_sel: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
         sink_experts_cls = (
@@ -583,7 +599,13 @@ class InklingMoE(nn.Module):
                 f"bad {projection} input_amax: {amax}"
             )
             input_scale = getattr(experts, f"{projection}_input_scale")
-            input_scale.data.fill_(amax / _MXFP4_INPUT_SCALE_DENOMINATOR)
+            input_scale.weight_loader(
+                input_scale,
+                torch.tensor(
+                    amax / _MXFP4_INPUT_SCALE_DENOMINATOR, dtype=torch.float32
+                ),
+                lambda p, w: p.data.copy_(w.expand_as(p.data)),
+            )
             return [f"experts.routed_experts.{projection}_input_scale"]
 
         # Quark's OCP MXFP4 converter stores block scales as a two-dimensional
@@ -609,12 +631,25 @@ class InklingMoE(nn.Module):
         lids = [slots[g] for g in gids]
         tp_rank = experts.moe_config.moe_parallel_config.tp_rank
         tp_size = experts.moe_config.moe_parallel_config.tp_size
+        # AITER pads the intermediate dim; the padding keeps the value the
+        # weights (zero) and scales (one) are created with. A parameter that
+        # declares weight_loader_numel (unquantized AITER) counts only the
+        # checkpoint's elements and its method zeroes the padding itself, so
+        # writing the padding would over-count and finish the layer early.
+        pad = (
+            None
+            if hasattr(param, "weight_loader_numel")
+            else (1.0 if key.endswith("_scale") else 0.0)
+        )
 
         if key.endswith("_scale_2"):
             # Per-expert scalars, vectorized over the local experts. The
             # fused w13 param carries one slot per gate/up half.
-            vals = weight[gids].float().to(param.device)
-            param.data[lids] = vals[:, None] if param.data.ndim == 2 else vals
+            vals = weight[gids].float()
+            vals = (
+                vals[:, None].expand(-1, *param.shape[1:]) if param.ndim == 2 else vals
+            )
+            param.weight_loader(param, vals, copy_into_slots(lids))
         elif key.startswith("w13"):
             # Checkpoint w13 rows are interleaved [g0, u0, g1, u1, ...]; the
             # fused param layout is [w1(gate); w3(up)]. The TP-local rows form
@@ -640,17 +675,12 @@ class InklingMoE(nn.Module):
                     tp_rank * 2 * logical_half,
                     2 * logical_half,
                 )
-                slab = slab.to(param.device)
-                param.data[lid, :logical_half].copy_(slab[0::2])
-                param.data[
-                    lid,
-                    dst_half : dst_half + logical_half,
-                ].copy_(slab[1::2])
+                param.weight_loader(param, slab, deinterleave_into(lid, dst_half, pad))
         else:
             # w2: shard the packed intermediate (last) dim. AITER rounds the
             # destination intermediate width to 256, so derive the logical TP
-            # slice from the checkpoint and leave the destination tail at its
-            # initialized padding value (zero for weights, one for scales).
+            # slice from the checkpoint and set the destination tail to the
+            # padding value.
             if weight.shape[2] % tp_size != 0:
                 raise ValueError(
                     f"cannot TP-shard {name} with shape {tuple(weight.shape)} "
@@ -663,8 +693,10 @@ class InklingMoE(nn.Module):
                     f"destination only has {param.shape[2]}"
                 )
             for gid, lid in slots.items():
-                param.data[lid, :, :shard].copy_(
-                    weight[gid].narrow(1, tp_rank * shard, shard)
+                param.weight_loader(
+                    param,
+                    weight[gid].narrow(1, tp_rank * shard, shard),
+                    copy_padded(lid, shard, pad),
                 )
         return [f"experts.routed_experts.{key}"]
 
