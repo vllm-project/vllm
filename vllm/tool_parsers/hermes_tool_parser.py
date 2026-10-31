@@ -25,7 +25,11 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
-from vllm.tool_parsers.utils import is_complete_json, partial_tag_overlap
+from vllm.tool_parsers.utils import (
+    dump_tool_arguments,
+    is_complete_json,
+    partial_tag_overlap,
+)
 from vllm.utils.mistral import is_mistral_tokenizer
 
 logger = init_logger(__name__)
@@ -98,9 +102,7 @@ class Hermes2ProToolParser(ToolParser):
                         function=FunctionCall(
                             name=function_call["name"],
                             # function call args are JSON but as a string
-                            arguments=json.dumps(
-                                function_call["arguments"], ensure_ascii=False
-                            ),
+                            arguments=dump_tool_arguments(function_call["arguments"]),
                         ),
                     )
                     for function_call in raw_function_calls
@@ -178,6 +180,13 @@ class Hermes2ProToolParser(ToolParser):
         Given {"name": "f", "arguments": {"x": 1}}, returns '{"x": 1}'.
         When is_complete, strips the trailing '}' that closes the outer
         object (not the arguments). For partial JSON, returns as-is.
+
+        When the model serialized `arguments` into a JSON string instead of
+        emitting an object, the slice is a string literal. Nothing is returned
+        for it until the literal closes, because whether it holds serialized
+        arguments depends on its full contents and an unwrap already streamed
+        could not be retracted. Once closed, it goes through the same
+        `dump_tool_arguments` as the non-streaming path, so both agree.
         """
         match = re.search(r'"arguments"\s*:\s*', tc_json)
         if not match:
@@ -187,6 +196,14 @@ class Hermes2ProToolParser(ToolParser):
             raw = raw.rstrip()
             if raw.endswith("}"):
                 raw = raw[:-1].rstrip()
+        if raw.startswith('"'):
+            if not is_complete:
+                return None
+            try:
+                decoded = json.loads(raw)
+            except json.JSONDecodeError:
+                return None
+            return dump_tool_arguments(decoded)
         return raw
 
     def _compute_args_diff(
