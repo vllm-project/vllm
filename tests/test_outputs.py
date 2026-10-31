@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import numpy as np
 import pytest
 import torch
 
+from vllm.logprobs import Logprob
 from vllm.outputs import (
     ClassificationRequestOutput,
     CompletionOutput,
@@ -110,3 +112,38 @@ def test_request_output_add_preserves_terminal_spec_decode_metrics():
     assert output.finish_reason == "length"
     assert accumulated.finished
     assert output.spec_decode_metrics is spec_decode_metrics
+
+
+def test_request_output_add_keeps_prompt_logprobs_from_either_side():
+    prompt_logprobs = [None, {2: Logprob(logprob=-1.0)}]
+    token_id_logprobs = np.array([[0.0], [-1.0]], dtype=np.float32)
+
+    def output(index, prompt_logprobs, token_id_logprobs):
+        return RequestOutput(
+            request_id="request",
+            prompt=None,
+            prompt_token_ids=[1, 2],
+            prompt_logprobs=prompt_logprobs,
+            prompt_token_id_logprobs=token_id_logprobs,
+            outputs=[
+                CompletionOutput(
+                    index=index,
+                    text="",
+                    token_ids=[3],
+                    cumulative_logprob=None,
+                    logprobs=None,
+                )
+            ],
+            finished=False,
+        )
+
+    # A DELTA output whose prompt logprobs were already sent has [] / None.
+    merged = output(0, [], None)
+    merged.add(output(1, prompt_logprobs, token_id_logprobs), aggregate=True)
+    assert merged.prompt_logprobs is prompt_logprobs
+    assert merged.prompt_token_id_logprobs is token_id_logprobs
+
+    merged = output(0, prompt_logprobs, token_id_logprobs)
+    merged.add(output(1, [], None), aggregate=True)
+    assert merged.prompt_logprobs is prompt_logprobs
+    assert merged.prompt_token_id_logprobs is token_id_logprobs

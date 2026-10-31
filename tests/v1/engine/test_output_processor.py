@@ -50,7 +50,7 @@ from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import IterationStats, PrefillStats, SchedulerStats
-from vllm.v1.outputs import SamplingMaskLists
+from vllm.v1.outputs import LogprobsLists, LogprobsTensors, SamplingMaskLists
 
 
 @pytest.mark.parametrize("flat_logprobs", [False, True])
@@ -1921,6 +1921,83 @@ def test_request_output_add_merges_delta_sampling_masks():
 
     assert merged.outputs[0].token_ids == [10, 20]
     assert merged.outputs[0].sampling_mask.token_ids == [[10, 11], [20]]
+
+
+@pytest.mark.parametrize("flat_logprobs", [False, True])
+def test_n_delta_keeps_prompt_logprobs_of_child_prefilled_later(flat_logprobs):
+    """With n > 1 in DELTA mode, each child sends its prompt logprobs with its
+    first output. When one child starts a step after the other, its first
+    output is merged into the other child's output in the shared collector,
+    and the prompt logprobs must survive the merge."""
+    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    prompt_token_ids = [1, 2, 3, 4, 5]
+    num_prompt_logprobs = len(prompt_token_ids) - 1
+    params = SamplingParams(
+        n=2,
+        logprobs=1,
+        prompt_logprobs=1,
+        detokenize=False,
+        flat_logprobs=flat_logprobs,
+        output_kind=RequestOutputKind.DELTA,
+    )
+
+    def make_request(request_id: str, sampling_params: SamplingParams):
+        return EngineCoreRequest(
+            request_id=request_id,
+            external_req_id="parent",
+            prompt_token_ids=prompt_token_ids,
+            mm_features=None,
+            sampling_params=sampling_params,
+            pooling_params=None,
+            arrival_time=0,
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
+        )
+
+    parent_req = ParentRequest(make_request("parent", params))
+    queue = RequestOutputCollector(RequestOutputKind.DELTA, request_id="parent")
+    child_ids = []
+    for idx in range(2):
+        child_id, child_params = parent_req.get_child_info(idx)
+        child_ids.append(child_id)
+        output_processor.add_request(
+            make_request(child_id, child_params), None, parent_req, idx, queue
+        )
+
+    def output(child: int, token: int, first: bool) -> EngineCoreOutput:
+        prompt_logprobs = None
+        if first:
+            prompt_logprobs = LogprobsTensors(
+                torch.tensor([[t, 100] for t in prompt_token_ids[1:]]),
+                torch.full((num_prompt_logprobs, 2), -2.0),
+                torch.ones(num_prompt_logprobs, dtype=torch.long),
+            )
+        return EngineCoreOutput(
+            request_id=child_ids[child],
+            new_token_ids=[token],
+            new_logprobs=LogprobsLists(
+                np.array([[token, 100]]),
+                np.array([[-0.5, -1.5]], dtype=np.float32),
+                np.array([1]),
+            ),
+            new_prompt_logprobs_tensors=prompt_logprobs,
+        )
+
+    # Step 1: only child 0 has finished its prefill.
+    output_processor.process_outputs([output(0, 10, True)], time.monotonic(), None)
+    first = queue.get_nowait()
+    assert [o.index for o in first.outputs] == [0]
+    assert len(first.prompt_logprobs) == len(prompt_token_ids)
+
+    # Step 2: child 0's second token and child 1's first token are merged.
+    output_processor.process_outputs(
+        [output(0, 11, False), output(1, 20, True)], time.monotonic(), None
+    )
+    merged = queue.get_nowait()
+    assert [o.index for o in merged.outputs] == [0, 1]
+    assert merged.prompt_logprobs is not None
+    assert len(merged.prompt_logprobs) == len(prompt_token_ids)
 
 
 @pytest.mark.skip_global_cleanup
