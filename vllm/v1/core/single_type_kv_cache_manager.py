@@ -1117,8 +1117,14 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             if need >= per_segment:
                 # Every block is reachable; cache them all.
                 return None
+            # Under EAGLE, a sibling that diverges at the segment boundary
+            # cannot use the peek block past it (shift=1), so its hit lands
+            # one block lower. Widen the tail by one block to cover that
+            # sibling, mirroring the shared-prefix junction path.
+            tail_margin = need + (1 if use_eagle else 0)
             for i in range(start_block, end_block):
-                if i >= shift and (i - shift) % per_segment >= per_segment - need:
+                aligned_pos = (i - shift) % per_segment
+                if i >= shift and aligned_pos >= per_segment - tail_margin:
                     mask[i - start_block] = True
 
             if final_segment_end_block is not None and not use_eagle:
