@@ -330,17 +330,30 @@ _DCP = 2
 _DCP_TOKENS = 48
 
 
-def _run_dcp_context_loop(monkeypatch, *, q_data_type, fused_mla_kv_concat_fn):
+def _run_dcp_context_loop(
+    monkeypatch,
+    *,
+    q_data_type,
+    fused_mla_kv_concat_fn,
+    workspace_dtype=torch.bfloat16,
+):
     """Drive ``MLACommonImpl._context_parallel_compute_prefill_context`` on one
-    chunk with the collective pieces (gather, allgather, reorg) stubbed out."""
+    chunk with the collective pieces (gather, allgather) stubbed out; the
+    chunk's row indices keep the first ``_DCP_TOKENS`` gathered rows.
+
+    An fp8 workspace holds the rows a bf16 one gets dequantized, and the
+    chunked context then takes the fp8 DCP context path."""
     torch.manual_seed(0)
     device = torch.device("cuda")
     kv_b_proj = _KVBProj(device, weight_dtype=torch.bfloat16)
-    workspace = torch.randn(
-        (_DCP_TOKENS * (_DCP + 1), _ENTRY), dtype=torch.bfloat16, device=device
+    fp8_rows = workspace_dtype == current_platform.fp8_dtype()
+    workspace = (
+        torch.randn((_DCP_TOKENS * (_DCP + 1), _ENTRY), device=device)
+        .to(current_platform.fp8_dtype())
+        .to(workspace_dtype)
     )
     impl = SimpleNamespace(
-        kv_cache_dtype="auto",
+        kv_cache_dtype="fp8" if fp8_rows else "auto",
         kv_lora_rank=_KV_LORA_RANK,
         qk_rope_head_dim=_QK_ROPE,
         qk_nope_head_dim=_QK_NOPE,
@@ -353,11 +366,6 @@ def _run_dcp_context_loop(monkeypatch, *, q_data_type, fused_mla_kv_concat_fn):
 
     monkeypatch.setattr(mla_attention.ops, "cp_gather_cache", lambda **_: None)
     monkeypatch.setattr(mla_attention, "_get_kv_b_proj_input_dtype", lambda *_: None)
-    monkeypatch.setattr(
-        mla_attention,
-        "reorg_kvcache",
-        lambda kv_c, k_pe, **_: (kv_c[:_DCP_TOKENS].squeeze(1), k_pe[:_DCP_TOKENS]),
-    )
     chunk = SimpleNamespace(
         index=0,
         padded_local_seq_lens=[_DCP_TOKENS],
@@ -374,6 +382,7 @@ def _run_dcp_context_loop(monkeypatch, *, q_data_type, fused_mla_kv_concat_fn):
         num_context_tokens=_DCP_TOKENS,
         max_seq_len=_DCP_TOKENS,
         token_slice=slice(0, 4),
+        context_row_indices=torch.arange(_DCP_TOKENS, device=device),
     )
     backend = _RecordingPrefillBackend()
     attn_metadata = SimpleNamespace(
@@ -384,6 +393,7 @@ def _run_dcp_context_loop(monkeypatch, *, q_data_type, fused_mla_kv_concat_fn):
                 chunks=[chunk],
                 empty_token_slices=False,
                 dcp_manager=SimpleNamespace(kv_gather=lambda dst, src: None),
+                fp8_context_dtype=torch.bfloat16 if fp8_rows else None,
             ),
             q_data_type=q_data_type,
             block_table=torch.zeros((1, 1), dtype=torch.int32, device=device),
@@ -397,32 +407,55 @@ def _run_dcp_context_loop(monkeypatch, *, q_data_type, fused_mla_kv_concat_fn):
         q,
         torch.empty(0, device=device),
         attn_metadata,
-        k_scale=torch.ones(1, device=device),
+        k_scale=torch.ones(1, dtype=torch.float32, device=device),
         dcp_world_size=_DCP,
         fused_mla_kv_concat_fn=fused_mla_kv_concat_fn,
     )
     return backend, out, lse
 
 
-@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+@pytest.mark.parametrize(
+    "kv_cache_dtype,fp8_rows,fused",
+    [
+        ("auto", False, True),
+        ("fp8", False, True),
+        ("fp8", True, True),
+        ("fp8", True, False),
+    ],
+)
 @torch.inference_mode()
 def test_dcp_context_fused_pack_matches_generic_tail(
-    monkeypatch, kv_cache_dtype: str
+    monkeypatch, kv_cache_dtype: str, fp8_rows: bool, fused: bool
 ) -> None:
     """Under DCP the layer's fused K/V pack must feed the prefill backend exactly
-    what the generic impl's cast + split + concat tail feeds it."""
+    what the generic impl's cast + split + concat tail feeds it.
+
+    With ``fp8_rows`` the context rows stay fp8 as stored (the test uses
+    k_scale 1), and either pack must match the generic tail over the
+    dequantized rows."""
     q_data_type = (
         current_platform.fp8_dtype() if kv_cache_dtype == "fp8" else torch.bfloat16
     )
     layer = SimpleNamespace(qk_nope_head_dim=_QK_NOPE, v_head_dim=_V_HEAD_DIM)
-    fused_fn = MultiHeadLatentAttention._fused_mla_kv_concat.__get__(layer)
+    pack = MultiHeadLatentAttention._fused_mla_kv_concat.__get__(layer)
+    pack_k_pe_dtypes = []
+
+    def fused_fn(kv_nope, k_pe, use_fp8_prefill):
+        pack_k_pe_dtypes.append(k_pe.dtype)
+        return pack(kv_nope, k_pe, use_fp8_prefill)
 
     backend_ref, ref_out, ref_lse = _run_dcp_context_loop(
         monkeypatch, q_data_type=q_data_type, fused_mla_kv_concat_fn=None
     )
     backend_fused, fused_out, fused_lse = _run_dcp_context_loop(
-        monkeypatch, q_data_type=q_data_type, fused_mla_kv_concat_fn=fused_fn
+        monkeypatch,
+        q_data_type=q_data_type,
+        fused_mla_kv_concat_fn=fused_fn if fused else None,
+        workspace_dtype=current_platform.fp8_dtype() if fp8_rows else torch.bfloat16,
     )
+    # The pack gets the bf16 k_pe of the dequantizing path, so it picks the
+    # same kernel.
+    assert pack_k_pe_dtypes == ([torch.bfloat16] if fused else [])
     assert len(backend_ref.calls) == len(backend_fused.calls) == 1
     for name, fused_t, ref_t in zip(
         ("q", "k", "v"), backend_fused.calls[0], backend_ref.calls[0], strict=True

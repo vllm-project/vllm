@@ -11,31 +11,6 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.attention.mla_attention import MLACommonPrefillMetadata
 
 
-def context_row_indices(
-    chunk: MLACommonPrefillMetadata.ContextChunk, device: torch.device
-) -> torch.Tensor:
-    """Map compact request-major rows to the padded rank-major AllGather."""
-    assert chunk.padded_local_seq_lens is not None
-    assert chunk.local_context_lens_allranks is not None
-    assert chunk.local_starts is not None
-    segments = []
-    offset = 0
-    for padded, lengths, start in zip(
-        chunk.padded_local_seq_lens,
-        chunk.local_context_lens_allranks,
-        chunk.local_starts,
-    ):
-        for rank, length in enumerate(lengths):
-            count = min(max(0, length - start), padded)
-            if count:
-                first = rank * chunk.num_local_context_tokens + offset
-                segments.append(torch.arange(first, first + count, dtype=torch.int32))
-        offset += padded
-    rows = torch.cat(segments) if segments else torch.empty(0, dtype=torch.int32)
-    assert rows.numel() == chunk.num_context_tokens
-    return rows.to(device=device, non_blocking=True)
-
-
 def gather_compressed_context(
     cache: torch.Tensor,
     workspace: torch.Tensor,

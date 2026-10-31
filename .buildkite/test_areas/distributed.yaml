@@ -524,6 +524,8 @@ steps:
     - VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer.py
     - VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer_m2n.py
     - pytest -v -s tests/distributed/test_packed_tensor.py
+    - pytest -v -s tests/v1/attention/test_mla_dcp_context.py -k two_ranks
+    - pytest -v -s tests/v1/attention/test_mla_dcp_fp8_context.py -k matches_dequantizing_path
   mirror:
     amd:
       label: ':amd: (MI355) Distributed Features'
