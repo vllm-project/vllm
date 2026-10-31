@@ -127,6 +127,23 @@ mod tests {
     use super::{StringOrArray, validate_stop};
 
     #[test]
+    fn assistant_reasoning_aliases_normalize_and_serialize_canonically() {
+        for fields in [
+            r#""reasoning":"canonical","reasoning_content":"legacy""#,
+            r#""reasoning_content":"legacy","reasoning":"canonical""#,
+        ] {
+            let message: super::ChatMessage = serde_json::from_str(&format!(
+                r#"{{"role":"assistant","content":"answer",{fields}}}"#
+            ))
+            .expect("distinct reasoning aliases should be accepted");
+            assert_eq!(
+                serde_json::to_value(message).unwrap(),
+                serde_json::json!({"role":"assistant","content":"answer","reasoning":"canonical"})
+            );
+        }
+    }
+
+    #[test]
     fn validate_stop_accepts_four_stop_strings() {
         let stop = StringOrArray::Array(
             ["one", "two", "three", "four"].into_iter().map(str::to_string).collect(),
@@ -523,7 +540,16 @@ impl<'de> Deserialize<'de> for ChatMessage {
     where
         D: Deserializer<'de>,
     {
-        let value = Value::deserialize(deserializer)?;
+        let mut value = Value::deserialize(deserializer)?;
+        if let Some(message) = value.as_object_mut()
+            && message.get("role").and_then(Value::as_str) == Some("assistant")
+            && !message.contains_key("thinking")
+            && let Some(legacy) = message.remove("reasoning_content")
+            && !legacy.is_null()
+            && message.get("reasoning").is_none_or(Value::is_null)
+        {
+            message.insert("reasoning".to_owned(), legacy);
+        }
         let is_custom = value
             .get("role")
             .and_then(Value::as_str)
