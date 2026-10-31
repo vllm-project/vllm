@@ -593,6 +593,7 @@ def test_checkpoint_coverage_rejects_incomplete_or_wrong_heads(
     nn.Module.__init__(wrapper)
     wrapper.model = LiLiCorr.__new__(LiLiCorr)
     nn.Module.__init__(wrapper.model)
+    wrapper.model._context_kv_proj = None  # set by __init__ (no MXFP8 projection)
     wrapper.has_own_lm_head = False
     with set_current_vllm_config(
         VllmConfig(
