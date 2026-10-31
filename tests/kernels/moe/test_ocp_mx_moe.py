@@ -1532,6 +1532,9 @@ class RocmBackendConfig(TypedDict):
     requires_gfx1250: NotRequired[bool]
     interleaved_layout: NotRequired[bool]
     act_type: NotRequired[str]
+    # Mxfp4MoeBackend name, when the config key is an alias (e.g. a SiLU variant).
+    backend: NotRequired[str]
+    sign_percent: NotRequired[float]
 
 
 # TODO: Further tighten the accuracy threshold.
@@ -1552,10 +1555,31 @@ ROCM_BACKEND_CONFIGS: dict[str, RocmBackendConfig] = {
         "requires_aiter": False,
         "requires_gfx950": False,
     },
+    "EMULATION": {
+        "activation": "SWIGLUOAI",
+        "rtol": 0.1,
+        "percent": 0.95,
+        "sign_percent": 0.995,
+        "requires_aiter": False,
+        "requires_gfx950": False,
+    },
     "AITER_MXFP4_BF16": {
         "activation": "SWIGLUOAI",
         "rtol": 0.1,
-        "percent": 0.7,
+        "percent": 0.95,
+        "sign_percent": 0.995,
+        "requires_aiter": True,
+        "requires_gfx950": True,
+    },
+    "AITER_MXFP4_BF16_SILU": {
+        "backend": "AITER_MXFP4_BF16",
+        "activation": "SILU",
+        # TODO: tighten rtol/percent/sign_percent to the AITER_MXFP4_BF16 values
+        # once AITER_BF16_FP8_MOE_BOUND is removed from the mxfp4 oracle (it
+        # forces FP8 activations on this path).
+        "rtol": 0.5,
+        "percent": 0.9,
+        "sign_percent": 0.98,
         "requires_aiter": True,
         "requires_gfx950": True,
     },
@@ -1595,9 +1619,12 @@ ROCM_BACKEND_CONFIGS: dict[str, RocmBackendConfig] = {
 
 
 @pytest.mark.parametrize("backend_name", list(ROCM_BACKEND_CONFIGS.keys()))
+@pytest.mark.parametrize("has_bias", [False, True])
 @pytest.mark.parametrize("topk", [4])
 @pytest.mark.parametrize("num_experts", [8])
-@pytest.mark.parametrize("num_tokens,hidden_size,intermediate_size", [(16, 256, 256)])
+@pytest.mark.parametrize("num_tokens", [16])
+@pytest.mark.parametrize("hidden_size", [256, 384, 512, 768, 1024, 6144])
+@pytest.mark.parametrize("intermediate_size", [256, 768])
 @pytest.mark.skipif(
     not ROCM_AVAILABLE,
     reason="ROCm is required for this test",
@@ -1605,6 +1632,7 @@ ROCM_BACKEND_CONFIGS: dict[str, RocmBackendConfig] = {
 @torch.inference_mode()
 def test_rocm_mxfp4_moe_oracle(
     backend_name: str,
+    has_bias: bool,
     topk: int,
     num_experts: int,
     num_tokens: int,
@@ -1616,7 +1644,7 @@ def test_rocm_mxfp4_moe_oracle(
 
     This test validates that the oracle functions work end-to-end:
     - select_mxfp4_moe_backend() selects a valid backend
-    - convert_gpt_oss_weight_to_mxfp4_moe_kernel_format() converts weights without error
+    - the checkpoint-specific converter prepares weights for the backend
     - make_mxfp4_moe_quant_config() builds a valid quant config
     - make_mxfp4_moe_kernel() creates a kernel that runs without error
     - The kernel output is within accuracy tolerance of reference
@@ -1632,6 +1660,28 @@ def test_rocm_mxfp4_moe_oracle(
         pytest.skip(f"Backend {backend_name} requires GFX950")
     if config.get("requires_gfx1250") and not ROCM_GFX1250:
         pytest.skip(f"Backend {backend_name} requires GFX1250")
+    # TODO: ungate the other backends on the hidden/intermediate size sweep.
+    if (hidden_size, intermediate_size) not in (
+        (256, 256),
+        (6144, 768),
+    ) and backend_name not in (
+        "EMULATION",
+        "AITER_MXFP4_BF16",
+        "AITER_MXFP4_BF16_SILU",
+    ):
+        pytest.skip(f"Shape not yet validated for backend {backend_name}")
+    # TODO: ungate
+    if not has_bias and backend_name in (
+        "TRITON",
+        "TRITON_UNFUSED",
+        "AITER_TRITON_MXFP4_BF16",
+        "AITER_MXFP4_FP8",
+    ):
+        pytest.skip(f"Bias-free weights not yet validated for {backend_name}")
+    if backend_name == "AITER_MXFP4_FP8" and hidden_size == 6144:
+        pytest.skip(f"Shape not yet validated for backend {backend_name}")
+    if has_bias and backend_name == "AITER_MXFP4_BF16_SILU":
+        pytest.skip(f"Weights with bias not yet validated for {backend_name}")
 
     import vllm.distributed.parallel_state as ps
     from vllm.config import VllmConfig, set_current_vllm_config
@@ -1640,8 +1690,10 @@ def test_rocm_mxfp4_moe_oracle(
         Mxfp4MoeBackend,
         backend_to_kernel_cls,
         convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
+        convert_weight_to_mxfp4_moe_kernel_format,
         make_mxfp4_moe_kernel,
         make_mxfp4_moe_quant_config,
+        mxfp4_round_up_hidden_size_and_intermediate_size,
     )
     from vllm.v1.worker.workspace import init_workspace_manager
 
@@ -1653,9 +1705,14 @@ def test_rocm_mxfp4_moe_oracle(
 
     # AITER must be enabled or aiter_mxfp4_w4a8_moe asserts before dispatch.
     monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", True)
+    # Weight conversion sets this process-wide; restore AITER's default after
+    # each case so it does not leak into later cases.
+    # TODO: remove this patch once AITER_BF16_FP8_MOE_BOUND is removed from the
+    # mxfp4 oracle.
+    monkeypatch.setenv("AITER_BF16_FP8_MOE_BOUND", "256")
 
     # Map string to enum
-    backend = Mxfp4MoeBackend[backend_name]
+    backend = Mxfp4MoeBackend[config.get("backend") or backend_name]
 
     # Get experts class from oracle
     experts_cls_list = backend_to_kernel_cls(backend)
@@ -1674,7 +1731,27 @@ def test_rocm_mxfp4_moe_oracle(
     from vllm.model_executor.layers.fused_moe.config import (
         FusedMoEParallelConfig,
         RoutingMethodType,
+        mxfp4_w4a16_moe_quant_config,
     )
+
+    activation = MoEActivation[config["activation"]]
+    if not has_bias and activation == MoEActivation.SWIGLUOAI:
+        activation = MoEActivation.SWIGLUOAI_UNINTERLEAVE
+
+    # Apply the backend's hidden-size round-up, as the MoE layer does at
+    # weight-creation time. Padded weight rows/columns and activations are
+    # zero, so only the first `unpadded_hidden_size` output columns are checked.
+    unpadded_hidden_size = hidden_size
+    hidden_size, rounded_intermediate_size = (
+        mxfp4_round_up_hidden_size_and_intermediate_size(
+            backend,
+            hidden_size,
+            intermediate_size,
+            activation=activation,
+            has_bias=has_bias,
+        )
+    )
+    assert rounded_intermediate_size == intermediate_size
 
     moe_config = FusedMoEConfig(
         num_experts=num_experts,
@@ -1684,11 +1761,16 @@ def test_rocm_mxfp4_moe_oracle(
         num_local_experts=num_experts,
         num_logical_experts=num_experts,
         moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
-        activation=MoEActivation[config["activation"]],
+        activation=activation,
         in_dtype=dtype,
         device="cuda",
         routing_method=RoutingMethodType.Renormalize,
+        hidden_dim_unpadded=unpadded_hidden_size,
     )
+    if activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
+        moe_config.swiglu_limit = 7.0
+        moe_config.swiglu_alpha = 1.702
+        moe_config.swiglu_beta = 1.0
 
     # Create float weights in checkpoint format:
     # w13: [num_experts, 2*intermediate_size, hidden_size]
@@ -1699,6 +1781,9 @@ def test_rocm_mxfp4_moe_oracle(
     w2_float = torch.randn(
         num_experts, hidden_size, intermediate_size, dtype=dtype, device=device
     )
+    if hidden_size != unpadded_hidden_size:
+        w13_float[..., unpadded_hidden_size:] = 0
+        w2_float[:, unpadded_hidden_size:, :] = 0
 
     # dynamic_mxfp4_quant expects 2D input, so reshape 3D weights
     # w13: [E, 2*I, H] -> [E*2*I, H] -> quantize -> [E, 2*I, H//2]
@@ -1706,12 +1791,17 @@ def test_rocm_mxfp4_moe_oracle(
     w13_2d = w13_float.reshape(-1, hidden_size)
     w13_quant_2d, w13_scale_2d = dynamic_mxfp4_quant(w13_2d)
     w13_quant = w13_quant_2d.reshape(num_experts, 2 * intermediate_size, -1)
-    w13_scale = w13_scale_2d.reshape(num_experts, 2 * intermediate_size, -1)
+    # AITER's dynamic quantizer returns transposed-stride scales. The Quark
+    # emulation dequantizer consumes scales as a flat contiguous buffer, as in
+    # the checkpoint, so materialize that layout before backend conversion.
+    w13_scale = w13_scale_2d.reshape(
+        num_experts, 2 * intermediate_size, -1
+    ).contiguous()
 
     w2_2d = w2_float.reshape(-1, intermediate_size)
     w2_quant_2d, w2_scale_2d = dynamic_mxfp4_quant(w2_2d)
     w2_quant = w2_quant_2d.reshape(num_experts, hidden_size, -1)
-    w2_scale = w2_scale_2d.reshape(num_experts, hidden_size, -1)
+    w2_scale = w2_scale_2d.reshape(num_experts, hidden_size, -1).contiguous()
 
     # AITER conversion mutates checkpoint-format weights and scales in place.
     # Preserve their original layout for the reference calculation below.
@@ -1720,10 +1810,26 @@ def test_rocm_mxfp4_moe_oracle(
     w2_quant_ref = w2_quant.clone()
     w2_scale_ref = w2_scale.clone()
 
-    w13_bias = torch.randn(
-        num_experts, 2 * intermediate_size, dtype=dtype, device=device
+    w13_bias = (
+        torch.randn(num_experts, 2 * intermediate_size, dtype=dtype, device=device)
+        if has_bias
+        else None
     )
-    w2_bias = torch.randn(num_experts, hidden_size, dtype=dtype, device=device)
+    w2_bias = (
+        torch.randn(num_experts, hidden_size, dtype=dtype, device=device)
+        if has_bias
+        else None
+    )
+
+    # Generate inputs before backend-specific conversion so both MiniMax-shaped
+    # cases use the same random weights, activations, and routing.
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
+    x[:, unpadded_hidden_size:] = 0
+    router_logits = torch.randn(
+        num_tokens, num_experts, dtype=torch.float32, device=device
+    )
+    topk_weights, topk_ids = torch.topk(router_logits, k=topk, dim=-1, sorted=True)
+    topk_weights = torch.nn.functional.softmax(topk_weights, dim=-1)
 
     # Create static input scales for W4A8 backend (AITER_MXFP4_FP8)
     w13_input_scale: torch.Tensor | None = None
@@ -1750,9 +1856,14 @@ def test_rocm_mxfp4_moe_oracle(
     layer.w13_input_scale = w13_input_scale
     layer.w2_input_scale = w2_input_scale
 
-    # Convert weights using oracle
+    # Convert weights using the layout corresponding to the checkpoint.
+    converter = (
+        convert_gpt_oss_weight_to_mxfp4_moe_kernel_format
+        if has_bias
+        else convert_weight_to_mxfp4_moe_kernel_format
+    )
     w13_conv, w2_conv, w13_scale_conv, w2_scale_conv, w13_bias_conv, w2_bias_conv = (
-        convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
+        converter(
             mxfp4_backend=backend,
             layer=layer,
             w13_weight=w13_quant,
@@ -1761,23 +1872,35 @@ def test_rocm_mxfp4_moe_oracle(
             w2_weight_scale=w2_scale,
             w13_bias=w13_bias,
             w2_bias=w2_bias,
+            **({"activation": activation} if not has_bias else {}),
         )
     )
 
     # Build quant config using oracle
-    quant_config = make_mxfp4_moe_quant_config(
-        mxfp4_backend=backend,
-        w1_scale=w13_scale_conv,
-        w2_scale=w2_scale_conv,
-        w1_bias=w13_bias_conv,
-        w2_bias=w2_bias_conv,
-        a1_scale=w13_input_scale,
-        a2_scale=w2_input_scale,
-    )
-
-    # Select activation based on backend
-    activation_name = str(config["activation"])
-    activation = MoEActivation[activation_name]
+    if backend == Mxfp4MoeBackend.EMULATION:
+        # Quark's weight-only emulation path uses unquantized activations.
+        quant_config = mxfp4_w4a16_moe_quant_config(
+            w1_scale=w13_scale_conv,
+            w2_scale=w2_scale_conv,
+            w1_bias=w13_bias_conv,
+            w2_bias=w2_bias_conv,
+            gemm1_alpha=moe_config.swiglu_alpha,
+            gemm1_beta=moe_config.swiglu_beta,
+            gemm1_clamp_limit=moe_config.swiglu_limit,
+        )
+    else:
+        quant_config = make_mxfp4_moe_quant_config(
+            mxfp4_backend=backend,
+            w1_scale=w13_scale_conv,
+            w2_scale=w2_scale_conv,
+            w1_bias=w13_bias_conv,
+            w2_bias=w2_bias_conv,
+            a1_scale=w13_input_scale,
+            a2_scale=w2_input_scale,
+            gemm1_alpha=moe_config.swiglu_alpha,
+            gemm1_beta=moe_config.swiglu_beta,
+            swiglu_limit=moe_config.swiglu_limit,
+        )
 
     # Build kernel using oracle
     assert quant_config is not None, "Failed to create quant config"
@@ -1790,13 +1913,15 @@ def test_rocm_mxfp4_moe_oracle(
             routing_tables=None,
         )
 
-        # Create inputs
-        x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
-        router_logits = torch.randn(
-            num_tokens, num_experts, dtype=torch.float32, device=device
-        )
-        topk_weights, topk_ids = torch.topk(router_logits, k=topk, dim=-1, sorted=True)
-        topk_weights = torch.nn.functional.softmax(topk_weights, dim=-1)
+        gate_modes = []
+        if backend_name == "AITER_MXFP4_BF16" and not has_bias:
+            original_fused_moe = rocm_aiter_ops.fused_moe
+
+            def record_gate_mode(*args, **kwargs):
+                gate_modes.append(kwargs.get("gate_mode"))
+                return original_fused_moe(*args, **kwargs)
+
+            monkeypatch.setattr(rocm_aiter_ops, "fused_moe", record_gate_mode)
 
         # Run kernel - use appropriate method based on impl type
         if kernel.is_monolithic:
@@ -1827,6 +1952,9 @@ def test_rocm_mxfp4_moe_oracle(
             )
 
     assert isinstance(out, torch.Tensor)
+    if backend_name == "AITER_MXFP4_BF16" and not has_bias:
+        assert gate_modes == ["separated"]
+
     # Verify output is valid (no NaN/Inf) and has expected shape
     assert out.shape == (num_tokens, hidden_size), f"Unexpected shape: {out.shape}"
     assert not torch.any(torch.isnan(out)), "Output contains NaN"
@@ -1840,12 +1968,15 @@ def test_rocm_mxfp4_moe_oracle(
     w2_dq = mxfp4_dequantize(w2_quant_ref.view(torch.uint8), w2_scale_ref)
 
     # Determine activation type and layout
-    # SWIGLUOAI uses interleaved layout (gate/up alternating)
-    # SILU uses chunked layout (first half gate, second half up)
+    # SWIGLUOAI uses interleaved rows; SWIGLUOAI_UNINTERLEAVE uses gate/up halves.
     use_interleaved = bool(
         config.get("interleaved_layout", activation == MoEActivation.SWIGLUOAI)
     )
-    if activation in [MoEActivation.SWIGLUOAI, MoEActivation.SILU]:
+    if activation in (
+        MoEActivation.SWIGLUOAI,
+        MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        MoEActivation.SILU,
+    ):
         act_name = "swiglu"
     else:
         act_name = "relu2"
@@ -1856,16 +1987,26 @@ def test_rocm_mxfp4_moe_oracle(
         num_experts,
         x.to(torch.float32),
         w13_dq.to(torch.float32),
-        w13_bias.to(torch.float32),
+        (
+            w13_bias.to(torch.float32)
+            if w13_bias is not None
+            else torch.zeros_like(w13_dq[..., 0])
+        ),
         w2_dq.to(torch.float32),
-        w2_bias.to(torch.float32),
-        alpha=1.702 if activation == MoEActivation.SWIGLUOAI else 1.0,
-        beta=1.0 if activation == MoEActivation.SWIGLUOAI else 0.0,
-        limit=7.0 if activation == MoEActivation.SWIGLUOAI else None,
+        (
+            w2_bias.to(torch.float32)
+            if w2_bias is not None
+            else torch.zeros_like(w2_dq[..., 0])
+        ),
+        alpha=1.702 if activation != MoEActivation.SILU else 1.0,
+        beta=1.0 if activation != MoEActivation.SILU else 0.0,
+        limit=7.0 if activation != MoEActivation.SILU else None,
         act_type=str(config.get("act_type", "bf16")),
         activation=act_name,
         use_interleaved_layout=use_interleaved,
     )
+    ref = ref[:, :unpadded_hidden_size]
+    out = out[:, :unpadded_hidden_size]
 
     # Compute and print accuracy statistics
     diff = (ref.float() - out.float()).abs()
@@ -1892,8 +2033,20 @@ def test_rocm_mxfp4_moe_oracle(
         within_tol = (diff <= rtol * out.float().abs()).float().mean()
         print(f"  Within rtol={rtol}: {within_tol * 100:.1f}%")
 
+    if "sign_percent" in config:
+        same_sign = (torch.sign(ref.float()) == torch.sign(out.float())).float()
+        sign_percent = same_sign.mean().item()
+        print(f"  Same sign: {sign_percent * 100:.2f}%")
+        assert sign_percent >= config["sign_percent"]
+
     # Check accuracy using per-backend thresholds
-    check_accuracy(ref, out, atol=0.1, rtol=config["rtol"], percent=config["percent"])
+    check_accuracy(
+        ref,
+        out,
+        atol=0.1,
+        rtol=config["rtol"],
+        percent=config["percent"],
+    )
 
 
 @pytest.mark.parametrize("intermediate_size_unpadded", [640, 704])
@@ -2528,7 +2681,7 @@ def test_emulation_a_mxfp6_moe_forward_quantizes_activations():
     )
 
 
-# (backend, activation, hidden_in, inter_in, hidden_out, inter_out)
+# (backend, activation, has_bias, hidden_in, inter_in, hidden_out, inter_out)
 #
 # The AITER_MXFP4_MXFP4 (W4A4) rows are the ones this table exists for: the
 # per-partition intermediate is aligned to 128, not 256, so a model whose native
@@ -2541,37 +2694,56 @@ def test_emulation_a_mxfp6_moe_forward_quantizes_activations():
 ROCM_MXFP4_ROUNDUP_CASES = [
     # W4A4: 3072 / TP8 = 384 stays 384. This is the case the alignment change is
     # for; the generic 256 round-up would allocate 512.
-    ("AITER_MXFP4_MXFP4", "SILU", 6144, 384, 6144, 384),
+    ("AITER_MXFP4_MXFP4", "SILU", None, 6144, 384, 6144, 384),
     # W4A4, already 256-aligned (e.g. moe_intermediate 2048 at TP8): identity in
     # both the old and the new form, so such models are provably untouched.
-    ("AITER_MXFP4_MXFP4", "SILU", 6144, 256, 6144, 256),
+    ("AITER_MXFP4_MXFP4", "SILU", None, 6144, 256, 6144, 256),
     # W4A4, 1024 / TP8 = 128: the most aggressive case, halved rather than trimmed.
-    ("AITER_MXFP4_MXFP4", "SILU", 4096, 128, 4096, 128),
+    ("AITER_MXFP4_MXFP4", "SILU", None, 4096, 128, 4096, 128),
     # W4A4 ignores the activation -- the branch does not read it.
-    ("AITER_MXFP4_MXFP4", None, 6144, 384, 6144, 384),
-    ("AITER_MXFP4_MXFP4", "SWIGLUOAI", 6144, 384, 6144, 384),
+    ("AITER_MXFP4_MXFP4", None, None, 6144, 384, 6144, 384),
+    ("AITER_MXFP4_MXFP4", "SWIGLUOAI", None, 6144, 384, 6144, 384),
     # W4A4 hidden_size is still rounded to 256, unlike the intermediate.
-    ("AITER_MXFP4_MXFP4", "SILU", 384, 384, 512, 384),
-    # W4A16 CK + SiTU/SILU keeps its own 128/128 carve-out.
-    ("AITER_MXFP4_BF16", "SITU", 384, 384, 384, 384),
-    ("AITER_MXFP4_BF16", "SILU", 384, 384, 384, 384),
+    ("AITER_MXFP4_MXFP4", "SILU", None, 384, 384, 512, 384),
+    # W4A16 + SiTU/SILU keeps a 128 intermediate carve-out, but the hidden size
+    # stays 256-aligned (AITER's FlyDSL stage 1 uses tile_k=256 over it, a
+    # 128-aligned hidden size gives wrong outputs), regardless of the bias.
+    *[
+        ("AITER_MXFP4_BF16", act, has_bias, 384, 384, 512, 384)
+        for act in ("SITU", "SILU")
+        for has_bias in (None, True, False)
+    ],
     # ... but only for those activations; anything else takes the generic ROCm arm.
-    ("AITER_MXFP4_BF16", "SWIGLUOAI", 384, 384, 512, 512),
+    ("AITER_MXFP4_BF16", "SWIGLUOAI", None, 384, 384, 512, 512),
+    ("AITER_MXFP4_BF16", "SWIGLUOAI", True, 384, 384, 512, 512),
+    ("AITER_MXFP4_BF16", "SWIGLUOAI", True, 768, 384, 768, 512),
+    ("AITER_MXFP4_BF16", "SWIGLUOAI", None, 768, 384, 768, 512),
+    # TODO: update once https://github.com/ROCm/aiter/pull/6086 is merged and
+    # AITER is bumped. Bias-free SwiGLU pads the hidden size to a multiple of 512
+    # to work around wrong outputs of AITER's separated gate/up split-K path.
+    *[
+        ("AITER_MXFP4_BF16", act, False, hidden_in, 384, hidden_out, 512)
+        for act in ("SWIGLUOAI", "SWIGLUOAI_UNINTERLEAVE")
+        for hidden_in, hidden_out in ((256, 512), (384, 512), (768, 1024), (1024, 1024))
+    ],
+    # The bias-free padding is AITER_MXFP4_BF16-specific.
+    ("AITER_MXFP4_FP8", "SWIGLUOAI", False, 768, 384, 768, 512),
     # Backends that stay on the generic ROCm 256/256 round-up.
-    ("AITER_MXFP4_FP8", "SILU", 384, 384, 512, 512),
-    ("AITER_TRITON_MXFP4_BF16", "SILU", 384, 384, 512, 512),
-    ("TRITON", "SWIGLUOAI", 384, 384, 512, 512),
+    ("AITER_MXFP4_FP8", "SILU", None, 384, 384, 512, 512),
+    ("AITER_TRITON_MXFP4_BF16", "SILU", None, 384, 384, 512, 512),
+    ("TRITON", "SWIGLUOAI", None, 384, 384, 512, 512),
 ]
 
 
 @pytest.mark.parametrize(
-    "backend_name,activation_name,hidden_in,inter_in,hidden_out,inter_out",
+    "backend_name,activation_name,has_bias,hidden_in,inter_in,hidden_out,inter_out",
     ROCM_MXFP4_ROUNDUP_CASES,
 )
 @pytest.mark.skipif(not ROCM_AVAILABLE, reason="ROCm is required for this test")
 def test_rocm_mxfp4_round_up_hidden_and_intermediate(
     backend_name: str,
     activation_name: str | None,
+    has_bias: bool | None,
     hidden_in: int,
     inter_in: int,
     hidden_out: int,
@@ -2594,11 +2766,11 @@ def test_rocm_mxfp4_round_up_hidden_and_intermediate(
     activation = MoEActivation[activation_name] if activation_name else None
 
     hidden, intermediate = mxfp4_round_up_hidden_size_and_intermediate_size(
-        backend, hidden_in, inter_in, activation
+        backend, hidden_in, inter_in, activation, has_bias
     )
 
     assert (hidden, intermediate) == (hidden_out, inter_out), (
-        f"{backend_name} / {activation_name}: "
+        f"{backend_name} / {activation_name} / has_bias={has_bias}: "
         f"hidden {hidden_in}->{hidden} (expected {hidden_out}), "
         f"intermediate {inter_in}->{intermediate} (expected {inter_out})"
     )
