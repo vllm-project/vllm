@@ -773,6 +773,7 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
             "d3-mini": "vllm-sr/d3-mini",
             "d3-nano": "vllm-sr/d3-nano",
             "d3-lite": "vllm-sr/d3-lite",
+            "d3-turbo": "vllm-sr/d3-turbo",
         },
         max_model_len=4096,
     ),
@@ -785,6 +786,12 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
         hf_overrides={"architectures": ["GteNewForSequenceClassification"]},
     ),
     "JambaForSequenceClassification": _HfExamplesInfo("ai21labs/Jamba-tiny-reward-dev"),
+    # Laya ships `rl_agent_config.json` plus a nested `encoder/config.json`
+    # rather than a single HF `config.json`, so the Hub repo cannot be loaded
+    # as-is; decision-head CPU coverage is in `tests/models/test_laya.py`.
+    "LayaForDecision": _HfExamplesInfo(
+        "convaiinnovations/laya", is_available_online=False
+    ),
     "LlamaBidirectionalForSequenceClassification": _HfExamplesInfo(
         "nvidia/llama-nemotron-rerank-1b-v2", trust_remote_code=True
     ),
