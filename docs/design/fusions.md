@@ -102,6 +102,7 @@ Fields set explicitly by the user always take precedence over optimization-level
 RMSNorm, and optionally a quantization step into a single FlashInfer / TRT-LLM communication kernel.
 This fusion is only profitable for small `num_tokens`,
 so the fusion is only performed in the lower compiled range.
+It is off by default with `--disable-custom-all-reduce`, which makes all-reduce fall back to NCCL.
 
 Patterns covered:
 
