@@ -488,6 +488,7 @@ class DefaultModelLoader(BaseModelLoader):
 
     @instrument(span_name="Load weights")
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
+        load_weights_start = time.perf_counter()
         if model_config.quantization == "torchao":
             quant_config = get_quant_config(model_config, self.load_config)
             if (
@@ -503,9 +504,14 @@ class DefaultModelLoader(BaseModelLoader):
         loaded_weights = model.load_weights(self.get_all_weights(model_config, model))
 
         self.counter_after_loading_weights = time.perf_counter()
+        # `counter_before_loading_weights` is only set when the weights iterator
+        # is first pulled from. A model whose `load_weights()` never consumes it,
+        # such as a GGUF path that reads the checkpoint itself, leaves it at 0.0,
+        # which would report the raw monotonic clock as the duration.
+        started_at = self.counter_before_loading_weights or load_weights_start
         logger.info_once(
             "Loading weights took %.2f seconds",
-            self.counter_after_loading_weights - self.counter_before_loading_weights,
+            self.counter_after_loading_weights - started_at,
         )
         # We only enable strict check for non-quantized models
         # that have loaded weights tracking by default.
