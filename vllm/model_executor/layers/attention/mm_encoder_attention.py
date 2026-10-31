@@ -3,6 +3,7 @@
 
 import functools
 import json
+import os
 
 import numpy as np
 import torch
@@ -109,6 +110,9 @@ def _maybe_save_fp8_scales(
 ) -> None:
     """Accumulate a layer's scale tensors; on the first amax buffer wrap,
     dump all accumulated scales to ``mm_encoder_fp8_scale_save_path``.
+    With VLLM_MM_ENCODER_FP8_SCALE_SAVE_EVERY_WRAP=1 the file is rewritten at
+    every wrap, so it ends with the scales of the last amax window (e.g. the
+    real images of an evaluation that runs after warm-up traffic).
 
     No-op unless auto-save is configured. Tensor references are stored on
     every call (no GPU->CPU sync); ``.item()`` is only called at the single
@@ -138,10 +142,15 @@ def _maybe_save_fp8_scales(
         }
         for name, (q, k, v) in _fp8_saved_scale_refs.items()
     }
-    _fp8_scale_save_path = None
-    _fp8_saved_scale_refs.clear()
-    with open(path, "w", encoding="utf-8") as f:
+    if not envs.VLLM_MM_ENCODER_FP8_SCALE_SAVE_EVERY_WRAP:
+        _fp8_scale_save_path = None
+        _fp8_saved_scale_refs.clear()
+    # Write atomically: the ranks of a data-parallel vision encoder share the
+    # path, and a reader must never see a partly written file.
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(scales, f, indent=2)
+    os.replace(tmp, path)
     logger.info("Saved FP8 scales (%d layers) to %s", len(scales), path)
 
 
