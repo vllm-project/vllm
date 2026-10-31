@@ -597,9 +597,8 @@ def stage_split(c, unit):
                         )
                     )
         stamp(c, 6)
-        # partial[t][ch][head][dim] bf16: lane (r16, g) holds C rows 4 g + i ->
-        # dims 64 w + 16 g + 4 i + dt of head ht2 * 16 + r16: 32 contiguous
-        # bytes, two 16 B stores (4 lanes fill a 128 B line)
+        # partial[t][ch][head][dim]: V4.1 retains f32 until the chunk merge.
+        # Lane (r16, g) holds dims 64 w + 16 g + 4 i + dt of head ht2 * 16 + r16.
         for ht2 in range_constexpr(d.head_tiles):
             hh = ht2 * HEAD_TILE + r16
             words = []
@@ -607,12 +606,14 @@ def stage_split(c, unit):
                 v4 = fx.Vector.from_elements(
                     [accs[ht2][dt][i] for dt in range(4)], fx.Float32
                 )
-                w2 = v4.to(fx.BFloat16).bitcast(fx.Int32)
-                words += [w2[0], w2[1]]
-            off = (((t * nchunk + ch) * d.heads + hh) * HEAD_DIM + dbase + 16 * g) // 2
+                w2 = (v4 if v41 else v4.to(fx.BFloat16)).bitcast(fx.Int32)
+                words += [w2[j] for j in range(4 if v41 else 2)]
+            off = (((t * nchunk + ch) * d.heads + hh) * HEAD_DIM + dbase + 16 * g) // (
+                1 if v41 else 2
+            )
 
             def store_part(off=off, words=words):
-                for hlf in range_constexpr(2):
+                for hlf in range_constexpr(4 if v41 else 2):
                     bo.buffer_store(
                         fx.Vector.from_elements(words[4 * hlf : 4 * hlf + 4], fx.Int32),
                         rsrc(c["part"]),
@@ -680,20 +681,27 @@ def stage_combine(c, unit):
                 dtype=T.f32,
             )
         )
-        pv = fx.Vector(
-            bo.buffer_load(
-                rsrc(c["part"]),
-                (((t * nchunk + cc) * d.heads + h) * HEAD_DIM + d0) // 2,
-                vec_width=4,
-                dtype=T.i32,
+        at = ((t * nchunk + cc) * d.heads + h) * HEAD_DIM + d0
+        if const_expr(c["rec"] == V41_REC):
+            pv = [
+                fx.Vector(
+                    bo.buffer_load(
+                        rsrc(c["part"]), at + j * 4, vec_width=4, dtype=T.f32
+                    )
+                )
+                for j in range(2)
+            ]
+            vals = [pv[j // 4][j % 4] for j in range(8)]
+        else:
+            pv = fx.Vector(
+                bo.buffer_load(rsrc(c["part"]), at // 2, vec_width=4, dtype=T.i32)
             )
-        )
+            vals = []
+            for e in range_constexpr(4):
+                vals += [bf_lo(pv[e]), bf_hi(pv[e])]
         mc = fx.Float32(live.select(stv[0], fx.Float32(NEG)))
         ms.append(mc)
         ls.append(fx.Float32(live.select(stv[1], fx.Float32(0.0))))
-        vals = []
-        for e in range_constexpr(4):
-            vals += [bf_lo(pv[e]), bf_hi(pv[e])]
         vs.append([fx.Float32(live.select(v, fx.Float32(0.0))) for v in vals])
         m = fx.max(m, mc)
     m_final = fx.max(m, sink)

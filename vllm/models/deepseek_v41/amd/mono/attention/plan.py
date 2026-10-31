@@ -169,7 +169,8 @@ def back_scratch(s: int, d: Dims, start: int = 0) -> dict:
     nchunk = cdiv(KEYS, ck)
     return byte_layout(
         [
-            ("part", s * nchunk * d.heads * HEAD_DIM * 2),  # bf16 partials
+            # Scratch is shared across formats; V4.1 partials retain f32.
+            ("part", s * nchunk * d.heads * HEAD_DIM * 4),
             ("pstat", s * nchunk * d.heads * 8),  # (max, sum) f32
             ("srdy", s * nchunk * PAIR),
             ("xo", s * d.q_rows),  # e4m3 words
