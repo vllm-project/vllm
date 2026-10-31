@@ -1937,6 +1937,62 @@ def test_sliding_window_backend_correctness(
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific test")
+@pytest.mark.parametrize(
+    "batch_spec",
+    [
+        pytest.param(
+            BatchSpec(seq_lens=[24, 96], query_lens=[24, 40]),
+            id="prefill_before_extend",
+        ),
+        pytest.param(
+            BatchSpec(seq_lens=[32, 24, 96, 40, 80], query_lens=[1, 24, 16, 40, 8]),
+            id="interleaved",
+        ),
+        pytest.param(
+            BatchSpec(seq_lens=[40, 24, 200, 64], query_lens=[1, 24, 16, 8]),
+            id="multi_chunk_context",
+        ),
+    ],
+)
+@pytest.mark.parametrize("model", ["Qwen/Qwen3-0.6B", "HuggingFaceTB/SmolLM2-135M"])
+def test_rocm_aiter_fa_unordered_batch(
+    default_vllm_config,
+    monkeypatch: pytest.MonkeyPatch,
+    batch_spec: BatchSpec,
+    model: str,
+):
+    """After the leading decodes, requests with cached context may follow
+    requests without any (MRV2 does not order them), and must still attend
+    to their context."""
+    from vllm._aiter_ops import is_aiter_found_and_supported
+    from vllm.v1.attention.backends import rocm_aiter_fa
+
+    if not is_aiter_found_and_supported():
+        pytest.skip("AITER is required")
+
+    # Split the context into several chunks so that shorter contexts run out
+    # before the last chunk.
+    monkeypatch.setattr(rocm_aiter_fa, "_CP_TOKENS_PER_ITER_ROCM", 64)
+
+    def causal_mask_mod(
+        b: torch.Tensor,
+        h: torch.Tensor,
+        q_idx: torch.Tensor,
+        kv_idx: torch.Tensor,
+        *,
+        context_len: int,
+    ):
+        return (q_idx + context_len) >= kv_idx
+
+    _test_backend_correctness(
+        batch_spec,
+        model,
+        [AttentionBackendEnum.ROCM_AITER_FA],
+        causal_mask_mod,
+    )
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific test")
 def test_rocm_aiter_fa_unquantized_cache_ignores_kv_scales(
     default_vllm_config,
 ):
