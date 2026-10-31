@@ -28,9 +28,12 @@ either exclude `"render"` from `required_tasks` or check for `None` in
 `init_state`/their route handlers and degrade gracefully.
 """
 
+import asyncio
+import time
 from argparse import Namespace
+from collections.abc import Sequence
 from copy import copy
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from fastapi import FastAPI
 from fastapi.routing import APIRoute
@@ -53,6 +56,26 @@ class EndpointPlugin(Protocol):
     An entry point registered under the `vllm.endpoint_plugins` group must
     resolve to a zero argument callable (a class or factory function) that
     returns an object satisfying this protocol.
+
+    A plugin may also define these optional lifecycle methods. They are looked
+    up with `getattr` and are not protocol members:
+
+    - `async start(state)`: called in load order during lifespan startup. If
+      it raises, the plugin cleans up its own partial resources; plugins that
+      already started are stopped in reverse order and startup is aborted.
+    - `ready(state) -> bool`: a cheap synchronous readiness predicate read by
+      `/health`. `False` or an exception returns 503.
+    - `async drain(state, timeout)`: called concurrently on shutdown, before
+      the engine shuts down, with the remaining `--shutdown-timeout` budget.
+      `state.draining` is already set; stop admitting new work. Overruns are
+      cancelled.
+    - `async stop(state)`: called exactly once per started plugin, in reverse
+      order, after HTTP stops.
+
+    `state.request_shutdown()` starts the same graceful shutdown as SIGTERM.
+    A plugin that serves a non-HTTP listener (e.g. gRPC) must set the class
+    attribute `owns_non_http_listener = True`; such plugins require
+    `--api-server-count 1`.
     """
 
     name: str
@@ -160,5 +183,89 @@ async def init_endpoint_plugins_state(
     engine (see `init_render_app_state`). Plugins must handle a `None`
     `engine_client` themselves (see `EndpointPlugin.init_state`).
     """
-    for plugin in getattr(state, "endpoint_plugins", []):
+    plugins = getattr(state, "endpoint_plugins", [])
+    listeners = [p.name for p in plugins if getattr(p, "owns_non_http_listener", False)]
+    api_server_count = getattr(args, "api_server_count", None)
+    if listeners and api_server_count not in (None, 1):
+        raise ValueError(
+            f"Endpoint plugins {listeners} serve a non-HTTP listener, which "
+            f"requires --api-server-count 1 (got {api_server_count})."
+        )
+    for plugin in plugins:
         await plugin.init_state(engine_client, state, args)
+
+
+async def start_endpoint_plugins(state: State, plugins: Sequence[Any]) -> None:
+    """Start `plugins` in order, stopping the started ones if one fails."""
+    state.started_endpoint_plugins = started = []
+    for plugin in plugins:
+        if (start := getattr(plugin, "start", None)) is not None:
+            try:
+                await start(state)
+            except BaseException:
+                logger.error("Endpoint plugin %s failed to start", plugin.name)
+                await stop_endpoint_plugins(state)
+                raise
+        started.append(plugin)
+
+
+def endpoint_plugins_ready(state: State) -> bool:
+    """Return whether every endpoint plugin reports ready."""
+    for plugin in getattr(state, "endpoint_plugins", []):
+        if (ready := getattr(plugin, "ready", None)) is None:
+            continue
+        try:
+            if not ready(state):
+                return False
+        except Exception:
+            logger.warning(
+                "Endpoint plugin %s readiness failed", plugin.name, exc_info=True
+            )
+            return False
+    return True
+
+
+async def drain_endpoint_plugins(state: State, deadline: float) -> None:
+    """Close admission, then drain started plugins until `deadline`.
+
+    Args:
+        state: The app state.
+        deadline: A `time.monotonic()` deadline. Drains still running when it
+            passes are cancelled. If it has already passed, no drain is called.
+
+    """
+    state.draining = True
+    timeout = deadline - time.monotonic()
+    tasks = {
+        asyncio.create_task(drain(state, timeout)): plugin
+        for plugin in getattr(state, "started_endpoint_plugins", [])
+        if timeout > 0 and (drain := getattr(plugin, "drain", None)) is not None
+    }
+    if not tasks:
+        return
+    done, pending = await asyncio.wait(tasks, timeout=timeout)
+    for task in pending:
+        task.cancel()
+        logger.warning(
+            "Endpoint plugin %s did not drain within %.1fs", tasks[task].name, timeout
+        )
+    for task in done:
+        if not task.cancelled() and (exc := task.exception()) is not None:
+            logger.error(
+                "Endpoint plugin %s failed to drain", tasks[task].name, exc_info=exc
+            )
+
+
+async def stop_endpoint_plugins(state: State) -> None:
+    """Stop started plugins in reverse order, each exactly once."""
+    started = getattr(state, "started_endpoint_plugins", [])
+    while started:
+        plugin = started.pop()
+        if (stop := getattr(plugin, "stop", None)) is None:
+            continue
+        try:
+            await stop(state)
+        except (Exception, asyncio.CancelledError):
+            logger.exception("Endpoint plugin %s failed to stop", plugin.name)
+    if (task := asyncio.current_task()) is not None and task.cancelling():
+        raise asyncio.CancelledError

@@ -18,6 +18,11 @@ steps:
   - vllm/utils/torch_utils.py
   - vllm/utils/torch_version.py
   - tests/plugins_tests/test_platform_plugins.py
+  # Endpoint plugin lifecycle hooks
+  - vllm/entrypoints/launchers/launcher.py
+  - vllm/entrypoints/launchers/utils/server_utils.py
+  - vllm/entrypoints/serve/instrumentator/health.py
+  - tests/plugins_tests/test_endpoint_plugins.py
   commands:
   # begin platform plugin and general plugin tests, all the code in-between runs on dummy platform
   - pip install -e ./plugins/vllm_add_dummy_platform
@@ -75,6 +80,10 @@ steps:
       - vllm/utils/torch_utils.py
       - vllm/utils/torch_version.py
       - tests/plugins_tests/test_platform_plugins.py
+      - vllm/entrypoints/launchers/launcher.py
+      - vllm/entrypoints/launchers/utils/server_utils.py
+      - vllm/entrypoints/serve/instrumentator/health.py
+      - tests/plugins_tests/test_endpoint_plugins.py
 
 
 # Disabled until the GGUF plugin installation is locked.

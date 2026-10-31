@@ -76,6 +76,76 @@ class MyAdminEndpointPlugin:
 
 A complete and tested version of this example is in-repo as `tests/plugins/vllm_add_dummy_endpoint_plugin` and is exercised e2e (including a real HTTP request) in `tests/plugins_tests/test_endpoint_plugins.py`.
 
+## Optional lifecycle methods
+
+A plugin that owns long-lived resources, such as streaming sessions or a listener of its own, can also implement any of these methods. They are optional and are not members of the `EndpointPlugin` protocol, so plugins without them keep working unchanged.
+
+| Method | Called from | Contract |
+| --- | --- | --- |
+| `async start(state)` | Server lifespan startup, before connections are accepted | Called in load order. If it raises, the plugin cleans up its own partial resources; plugins that already started are stopped in reverse order and startup is aborted. |
+| `ready(state) -> bool` | `/health` | Cheap, synchronous and non-blocking. `False` or an exception makes `/health` return 503. Absent means ready. Also used by the render server. |
+| `async drain(state, timeout)` | Graceful shutdown, before the engine shuts down | Receives the remaining `--shutdown-timeout` budget in seconds. Stop admitting new work and finish or abort open work. Errors are logged; a drain still running at the deadline is cancelled. |
+| `async stop(state)` | Server lifespan shutdown, after HTTP stops | Called exactly once per started plugin, in reverse order, including when the server exits without a graceful shutdown (e.g. after engine death). Errors are logged and do not stop other plugins. |
+
+On SIGINT or SIGTERM the API server shuts down in this order, against one deadline set by `--shutdown-timeout`:
+
+1. `app.state.draining` is set, so `/health` returns 503. Plugins should check it before admitting new work.
+2. All plugin `drain` methods run concurrently, bounded by the deadline. With `--shutdown-timeout 0`, no `drain` is called.
+3. The engine shuts down with the time left.
+4. HTTP stops, then plugins `stop`.
+
+A plugin can start the same graceful shutdown on a fatal error (e.g. its listener died) by calling `app.state.request_shutdown()` from the event loop. It only affects the current API server process.
+
+A plugin that serves a non-HTTP listener (e.g. gRPC) must declare it with the class attribute `owns_non_http_listener = True`. The server then refuses to start with `--api-server-count` other than 1, because each API server process would run its own copy of the listener. Such listeners are not protected by `--api-key`; see [Security](../usage/security.md#endpoint-plugins).
+
+This example serves a TCP echo listener next to the HTTP server:
+
+```python
+import asyncio
+
+from fastapi import FastAPI
+
+
+class MyListenerEndpointPlugin:
+    name = "my_listener_endpoint_plugin"
+    required_tasks: tuple[str, ...] | None = None
+    owns_non_http_listener = True
+
+    def attach_router(self, app: FastAPI) -> None:
+        pass
+
+    async def init_state(self, engine_client, state, args) -> None:
+        self.sessions: set[asyncio.Task] = set()
+
+    async def start(self, state) -> None:
+        self.server = await asyncio.start_server(self.handle, "127.0.0.1", 9000)
+
+    def ready(self, state) -> bool:
+        return self.server.is_serving()
+
+    async def drain(self, state, timeout: float) -> None:
+        self.server.close()  # stop accepting connections
+        await asyncio.gather(*self.sessions, return_exceptions=True)
+
+    async def stop(self, state) -> None:
+        for session in self.sessions:
+            session.cancel()
+        self.server.close()
+        await self.server.wait_closed()
+
+    async def handle(self, reader, writer) -> None:
+        self.sessions.add(session := asyncio.current_task())
+        try:
+            while data := await reader.read(1024):
+                writer.write(data)
+                await writer.drain()
+        finally:
+            self.sessions.discard(session)
+            writer.close()
+```
+
+`tests/plugins_tests/test_endpoint_plugins.py` exercises these methods through `serve_http`, including startup failure, drain overruns and `--shutdown-timeout 0`.
+
 ## Registering the entry point
 
 Register a zero argument factory (a class or function) under the `vllm.endpoint_plugins` group. The factory must return an object satisfying `EndpointPlugin`:
