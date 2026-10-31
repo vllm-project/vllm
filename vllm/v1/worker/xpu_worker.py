@@ -225,6 +225,28 @@ class XPUWorker(Worker):
             model_runner = XPUModelRunner  # type: ignore[assignment]
         return model_runner(self.vllm_config, self.device)  # type: ignore
 
+    @staticmethod
+    @torch.inference_mode()
+    def _refresh_fused_moe_weights(model: torch.nn.Module) -> None:
+        for module in model.modules():
+            refresh = getattr(module, "refresh_fused_weights", None)
+            if callable(refresh):
+                refresh()
+
+    def reload_weights(self, *args, **kwargs) -> None:
+        super().reload_weights(*args, **kwargs)
+        self._refresh_fused_moe_weights(self.model_runner.get_model())
+
+    def finish_weight_update(self) -> None:
+        super().finish_weight_update()
+        model = (
+            self.get_draft_model()
+            if self._weight_update_is_draft
+            else self.model_runner.get_model()
+        )
+        if model is not None:
+            self._refresh_fused_moe_weights(model)
+
     def shutdown(self) -> None:
         logger.info(
             "XPUWorker shutdown: cleaning up (rank=%d, local_rank=%d)",
