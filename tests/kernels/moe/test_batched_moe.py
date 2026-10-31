@@ -223,6 +223,7 @@ def test_batched_mm(
             "BLOCK_SIZE_K": 16 if dtype.itemsize > 1 else fp8_block_k,
         },
         per_act_token_quant=per_act_token_quant,
+        per_out_ch_quant=per_act_token_quant,
         block_shape=block_shape,
     )
 
