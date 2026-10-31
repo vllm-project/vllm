@@ -1250,14 +1250,8 @@ def test_combo_kernel_explicit_settings_preserved(deterministic, overrides):
         assert config.inductor_compile_config.get(key) == overrides.get(key)
 
 
-@pytest.mark.parametrize("is_cpu,torch_version", [(True, "2.13.0"), (False, "2.8.0")])
-def test_combo_kernel_defaults_require_supported_platform_and_torch(
-    is_cpu, torch_version
-):
-    with (
-        patch("vllm.config.compilation.current_platform.is_cpu", return_value=is_cpu),
-        patch("torch.__version__", torch_version),
-    ):
+def test_combo_kernel_defaults_require_supported_platform():
+    with patch("vllm.config.compilation.current_platform.is_cpu", return_value=True):
         config = CompilationConfig()
 
     assert "combo_kernels" not in config.inductor_compile_config

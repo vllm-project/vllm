@@ -208,55 +208,11 @@ def is_compile_cache_enabled(
         "force_disable_caches", False
     )
 
-    # TODO(gmagogsfm): Replace torch._inductor.config.force_disable_caches
-    # with torch.compiler.config.force_disable_caches when minimum PyTorch
-    # version reaches 2.10
     return (
         not envs.VLLM_DISABLE_COMPILE_CACHE
-        and not torch._inductor.config.force_disable_caches
+        and not torch.compiler.config.force_disable_caches
         and not vllm_inductor_config_disable_cache
     )
-
-
-def _patch_standalone_compile_atomic_save() -> None:
-    """Backport of pytorch/pytorch#162432 for torch < 2.10.0.
-
-    Patches CompiledArtifact.save() to use write_atomic for binary format,
-    preventing corrupt cache files when multiple processes compile
-    concurrently.
-    """
-    from torch._inductor.codecache import write_atomic
-    from torch._inductor.standalone_compile import CompiledArtifact as cls
-
-    if getattr(cls.save, "_vllm_patched", False):
-        return
-
-    original_save = cls.save
-
-    def _save(
-        self: Any, *, path: str, format: Literal["binary", "unpacked"] = "binary"
-    ) -> None:
-        if format != "binary":
-            return original_save(self, path=path, format=format)
-        from torch._dynamo.utils import dynamo_timed
-        from torch._inductor.codecache import torch_key
-        from torch.utils._appending_byte_serializer import BytesWriter
-
-        with dynamo_timed("CompiledArtifact.save"):
-            assert self._artifacts is not None
-            artifact_bytes, cache_info = self._artifacts
-            assert len(cache_info.aot_autograd_artifacts) == 1, cache_info
-            key = cache_info.aot_autograd_artifacts[0]
-            assert not os.path.isdir(path)
-            writer = BytesWriter()
-            writer.write_bytes(torch_key())
-            writer.write_str(key)
-            writer.write_bytes(artifact_bytes)
-            write_atomic(path, writer.to_bytes())
-
-    _save._vllm_patched = True  # type: ignore[attr-defined]
-    cls.save = _save  # type: ignore[assignment]
-    logger.debug("Patched %s.save for atomic writes (torch < 2.10)", cls.__name__)
 
 
 class InductorStandaloneAdaptor(CompilerInterface):
@@ -273,8 +229,6 @@ class InductorStandaloneAdaptor(CompilerInterface):
     def __init__(
         self, save_format: Literal["binary", "unpacked"], *, use_aot_compile: bool
     ) -> None:
-        if not is_torch_equal_or_newer("2.10.0"):
-            _patch_standalone_compile_atomic_save()
         self.save_format = save_format
         self.use_aot_compile = use_aot_compile
 
@@ -316,20 +270,6 @@ class InductorStandaloneAdaptor(CompilerInterface):
 
         from torch._inductor import standalone_compile
 
-        supports_aot = is_torch_equal_or_newer("2.10.0")
-
-        if (
-            not supports_aot
-            and self.use_aot_compile
-            and envs.VLLM_USE_MEGA_AOT_ARTIFACT
-        ):
-            logger.error(
-                "CRITICAL: VLLM_USE_MEGA_AOT_ARTIFACT "
-                "is enabled but PyTorch version does not support 'aot' "
-                "parameter in standalone_compile. This requires PyTorch "
-                "2.10.0+. Falling back to non-AOT mode."
-            )
-
         compile_kwargs = {
             "dynamic_shapes": dynamic_shapes,
             "options": {
@@ -340,10 +280,8 @@ class InductorStandaloneAdaptor(CompilerInterface):
         if is_torch_equal_or_newer("2.13.0.dev"):
             compile_kwargs["donate_graph_module"] = True  # type: ignore[assignment]
 
-        use_aot: bool = (
-            supports_aot and self.use_aot_compile and envs.VLLM_USE_MEGA_AOT_ARTIFACT
-        )
-        # only add 'aot' parameter if both supported and enabled...
+        use_aot: bool = self.use_aot_compile and envs.VLLM_USE_MEGA_AOT_ARTIFACT
+        # only add 'aot' parameter if enabled...
         # this will set bundled_autograd_cache
         # https://github.com/pytorch/pytorch/blob/9bbc5b2905c260adf41bc866a732f9c121a2828a/torch/_inductor/standalone_compile.py#L359 # noqa
         if use_aot:
@@ -764,12 +702,9 @@ class InductorAdaptor(CompilerInterface):
         manually setting up internal contexts. But we also rely on non-public
         APIs which might not provide these guarantees.
         """
-        if is_torch_equal_or_newer("2.6"):
-            import torch._dynamo.utils
+        import torch._dynamo.utils
 
-            return torch._dynamo.utils.get_metrics_context()  # type: ignore[no-any-return]
-        else:
-            return contextlib.nullcontext()
+        return torch._dynamo.utils.get_metrics_context()  # type: ignore[no-any-return]
 
 
 def set_inductor_config(config: dict[str, Any], compile_range: Range) -> None:
