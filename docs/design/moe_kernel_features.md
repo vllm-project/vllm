@@ -16,6 +16,8 @@ Async backends support the use of DBO (Dual Batch Overlap) and shared expert ove
 
 Certain models require the topk weights to be applied to the input activations rather than the output activations when topk==1, e.g. Llama. For modular kernels, this feature is supported by the `FusedMoEPrepareAndFinalizeModular` subclass. For non-modular kernels, it is up to the experts function to deal with this flag.
 
+For TRTLLM NVFP4 modular experts, input routing weights are applied before activation quantization. When `apply_router_weight_on_input` is enabled, fused output finalization receives unit weights so that the routing weights are applied once. The default output-weighting path is unchanged.
+
 Unless otherwise specified, backends are controlled via the `--all2all-backend` command-line argument (or the `all2all_backend` parameter in `ParallelConfig`). All backends except `flashinfer` only work with EP+DP or EP+TP. `Flashinfer` can work with EP or DP without EP.
 
 <style>

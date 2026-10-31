@@ -432,6 +432,10 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         # Per-token defers input quant to _invoke_kernel, so a1q_scale is None.
         assert a1q_scale is not None or self.expects_unquantized_inputs
 
+        # Prepare has already weighted the inputs before activation/quantization.
+        if apply_router_weight_on_input:
+            topk_weights = torch.ones_like(topk_weights)
+
         # DeepEP produces int64 indexes.
         topk_ids = topk_ids.to(dtype=torch.int32)
 
