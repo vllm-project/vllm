@@ -106,7 +106,7 @@ from .qwen2_5_omni_thinker import (
     Qwen2_5OmniThinkerMultiModalDataParser,
     Qwen2_5OmniThinkerMultiModalProcessor,
     _get_feature_tensor,
-    check_interleaved_audio_video,
+    maybe_contains_interleaved_audio_video,
     merge_interleaved_embeddings,
 )
 from .qwen2_5_vl import (
@@ -1866,7 +1866,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         num_video = is_video.sum().item()
         num_audio = is_audio.sum().item()
 
-        is_interleaved = check_interleaved_audio_video(
+        is_interleaved = maybe_contains_interleaved_audio_video(
             is_video, is_audio, num_video, num_audio
         )
 
