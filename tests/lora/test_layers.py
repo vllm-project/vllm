@@ -1922,6 +1922,7 @@ def test_grouped_o_projection_applies_each_tokens_adapter(
 ):
     """Every DeepSeek-V4 CUDA o_proj must add the matching group's LoRA-B."""
     from vllm.lora.layers import DeepseekV4GroupedWoAWithLoRA
+    from vllm.lora.ops.triton_ops.utils import _LORA_A_PTR_DICT, _LORA_B_PTR_DICT
     from vllm.models.deepseek_v4.common.grouped_wo_a import DeepseekV4GroupedWoA
     from vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant import (
         fused_inv_rope_fp8_quant,
@@ -1945,6 +1946,7 @@ def test_grouped_o_projection_applies_each_tokens_adapter(
         base = DeepseekV4GroupedWoA(
             columns,
             groups * outputs,
+            n_groups=groups,
             bias=False,
             params_dtype=torch.bfloat16,
             return_bias=False,
@@ -2024,6 +2026,16 @@ def test_grouped_o_projection_applies_each_tokens_adapter(
             torch.testing.assert_close(
                 actual[inactive], baseline[inactive], rtol=0, atol=0
             )
+
+        cached = len(_LORA_A_PTR_DICT), len(_LORA_B_PTR_DICT)
+        layer.reset_lora(1)
+        after_reset = o_proj(backends[0], layer)
+        # Adapter buffers keep their addresses, so the pointer cache doesn't grow.
+        assert (len(_LORA_A_PTR_DICT), len(_LORA_B_PTR_DICT)) == cached
+        evicted = torch.tensor([value == 2 for value in ids])
+        torch.testing.assert_close(
+            after_reset[evicted], baseline[evicted], rtol=0, atol=0
+        )
 
 
 def test_dsv4_rope_quant_is_off_with_lora():

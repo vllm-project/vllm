@@ -272,6 +272,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         self.wo_a = DeepseekV4GroupedWoA(
             self.n_heads * self.head_dim // self.n_groups,
             self.n_groups * self.o_lora_rank,
+            n_groups=self.n_groups,
             bias=False,
             quant_config=quant_config,
             return_bias=False,
