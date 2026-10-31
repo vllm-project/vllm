@@ -5,4 +5,5 @@ Qwen1.5-MoE-A2.7B-Chat-INT8.yaml
 DeepSeek-V2-Lite-Instruct-FP8.yaml
 Qwen3-Next-FP8-EP2_MI355.yaml
 Qwen3-30B-A3B-Thinking-2507-FP8.yaml
+Qwen3-30B-A3B-Thinking-2507-FP8-TP2.yaml
 Qwen3-30B-A3B-Thinking-2507-PTPC-FP8.yaml
