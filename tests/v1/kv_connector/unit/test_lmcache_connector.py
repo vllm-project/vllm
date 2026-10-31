@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import threading
 from collections.abc import Iterator
 from unittest.mock import MagicMock
 
 import pytest
 
+from vllm import LLM
+from vllm.config import KVTransferConfig
 from vllm.distributed.kv_events import BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector import (
@@ -816,3 +819,29 @@ def test_legacy_layerwise_engine_does_not_reuse_storers_on_empty_steps():
         connector.clear_connector_metadata()
 
     assert connector._lmcache_engine.layerwise_storers == []
+
+
+def test_engine_shutdown_stops_lmcache_threads(monkeypatch):
+    """LMCache starts non-daemon threads. If engine shutdown does not stop
+    them, the EngineCore process cannot exit and is force-killed."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("LMCACHE_MAX_LOCAL_CPU_SIZE", "1")
+    threads_before = set(threading.enumerate())
+
+    llm = LLM(
+        model="Qwen/Qwen3-0.6B",
+        enforce_eager=True,
+        gpu_memory_utilization=0.3,
+        max_model_len=128,
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="LMCacheConnectorV1", kv_role="kv_both"
+        ),
+    )
+    llm.llm_engine.engine_core.shutdown()
+
+    leftover = [
+        t.name
+        for t in threading.enumerate()
+        if not t.daemon and t not in threads_before
+    ]
+    assert leftover == []
