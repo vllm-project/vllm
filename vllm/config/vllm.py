@@ -651,20 +651,7 @@ class VllmConfig:
         speculative_config = self.speculative_config
         if speculative_config is None:
             return 0
-        dspark_fill_in = speculative_config.use_dspark() and not getattr(
-            speculative_config.draft_model_config.hf_config, "sample_from_anchor", True
-        )
-        if speculative_config.use_dflash() or dspark_fill_in:
-            # Fill-in drafting uses a bonus query plus one query per draft token.
-            # DSpark's anchor-sampling layout does not need the extra slot.
-            return self.num_speculative_tokens + 1
-        if speculative_config.use_eagle() or speculative_config.uses_draft_model():
-            # Anchor-sampling DSpark drafts a block of num_speculative_tokens
-            # query tokens in which the anchor itself is the first prediction
-            # position (no separate bonus query), so it needs exactly
-            # num_speculative_tokens lookahead slots.
-            return self.num_speculative_tokens
-        return 0
+        return speculative_config.speculator_config.num_lookahead_tokens
 
     @property
     def num_prefill_lookahead_tokens(self) -> int:
@@ -679,15 +666,9 @@ class VllmConfig:
         their own per-method lookahead, so those components cannot drift apart.
         """
         speculative_config = self.speculative_config
-        if speculative_config is None or not speculative_config.use_eagle():
+        if speculative_config is None:
             return 0
-        if speculative_config.use_multi_module_mtp():
-            # Each MTP module reads one token further ahead than the one before
-            # it, so the chain needs num_speculative_tokens of runway at a
-            # chunked-prefill boundary.
-            return self.num_speculative_tokens
-        # Eagle-family drafters read only the immediate next token.
-        return 1
+        return speculative_config.speculator_config.num_prefill_lookahead_tokens
 
     @property
     def num_hash_lookahead_tokens(self) -> int:
@@ -752,6 +733,25 @@ class VllmConfig:
                 )
             return True
 
+        speculative_config = getattr(self, "speculative_config", None)
+        custom_method = getattr(speculative_config, "custom_method", None)
+        if custom_method is not None:
+            requires_v2 = f"Custom speculative method '{custom_method}' requires"
+            if envs.VLLM_USE_V2_MODEL_RUNNER is False:
+                raise ValueError(
+                    f"{requires_v2} Model Runner V2; remove VLLM_USE_V2_MODEL_RUNNER=0."
+                )
+            if not HAS_TRITON:
+                raise ValueError(
+                    f"{requires_v2} Model Runner V2, which requires Triton."
+                )
+            if unsupported := self._get_v2_model_runner_unsupported_features():
+                raise ValueError(
+                    f"{requires_v2} Model Runner V2, which does not yet support "
+                    f"{', '.join(unsupported)}."
+                )
+            return True
+
         if getattr(self, "watermark_config", None) is not None:
             if envs.VLLM_USE_V2_MODEL_RUNNER is False:
                 logger.info_once(
@@ -764,13 +764,18 @@ class VllmConfig:
         if use_v2_model_runner is not None:
             return use_v2_model_runner
 
-        if not HAS_TRITON and not current_platform.is_unspecified():
+        unsupported = self._get_v2_model_runner_unsupported_features()
+
+        if current_platform.uses_standalone_cpu_model_runner():
+            unsupported.extend(
+                self._get_standalone_cpu_model_runner_unsupported_features()
+            )
+        elif not HAS_TRITON and not current_platform.is_unspecified():
             logger.warning_once(
                 "Model Runner V2 requires Triton; using the V1 model runner instead."
             )
             return False
 
-        unsupported = self._get_v2_model_runner_unsupported_features()
         if unsupported:
             logger.warning_once(
                 "Model Runner V2 does not yet support %s; using the V1 model "
@@ -1389,20 +1394,10 @@ class VllmConfig:
                 raise ValueError(
                     "Parallel speculative drafting is not supported with watermarking."
                 )
-            if speculative_config.method not in (
-                "dflash",
-                "dspark",
-                "eagle",
-                "eagle3",
-                "mtp",
-            ):
+            if not speculative_config.speculator_config.supports_watermarking:
                 raise ValueError(
                     "Watermarking supports only dflash, dspark, eagle, eagle3 and "
-                    "mtp speculative decoding."
-                )
-            if self._is_dflash_candidate_draft():
-                raise ValueError(
-                    "Watermarking does not support DFlash2 and LiLiCorr "
+                    "mtp speculative decoding, and not DFlash2 and LiLiCorr "
                     "candidate-head drafters yet."
                 )
             if (
@@ -1748,6 +1743,19 @@ class VllmConfig:
                 self.parallel_config.disable_nccl_for_dp_synchronization = False
 
         if (
+            self.parallel_config.enable_fault_tolerance
+            and not self.parallel_config.disable_nccl_for_dp_synchronization
+        ):
+            # FT only supports DP allreduce over the CPU group: recovery
+            # rebuilds only the cpu group, so a device-group (NCCL) sync
+            # would hang after reinit.
+            logger.info_once(
+                "Disabling NCCL for DP synchronization because "
+                "fault tolerance is enabled.",
+            )
+            self.parallel_config.disable_nccl_for_dp_synchronization = True
+
+        if (
             self.observability_config.per_request_spec_decode_metrics != "none"
             and self.speculative_config is None
         ):
@@ -2034,7 +2042,7 @@ class VllmConfig:
         if self.cache_config.kv_sharing_fast_prefill:
             if (
                 self.speculative_config is not None
-                and self.speculative_config.use_eagle()
+                and self.speculative_config.uses_target_hidden_states
             ):
                 raise ValueError(
                     "Fast prefill optimization for KV sharing is not "
@@ -2256,7 +2264,7 @@ class VllmConfig:
         ):
             if (
                 self.speculative_config is not None
-                and self.speculative_config.use_eagle()
+                and self.speculative_config.uses_target_hidden_states
             ):
                 # Hybrid KV cache manager is not yet supported with chunked
                 # local attention + eagle.
@@ -2394,19 +2402,21 @@ class VllmConfig:
                     f" num_lookahead_tokens={self.num_lookahead_tokens}."
                 )
             spec = self.speculative_config
-            if spec.use_dflash() or spec.use_dspark():
+            max_draft_seqs = spec.speculator_config.max_num_draft_seqs(
+                max_num_batched_tokens
+            )
+            if max_draft_seqs is not None:
                 max_num_active_seqs = (
                     self.scheduler_config.max_num_active_seqs
                     or self.scheduler_config.max_num_seqs
                 )
-                max_draft_seqs = max_num_batched_tokens // self.num_lookahead_tokens
                 if max_draft_seqs < max_num_active_seqs:
                     logger.warning_once(
-                        "The %s draft pass needs %d query tokens per request within "
+                        "The %s draft pass fits at most %d requests within "
                         "max_num_batched_tokens=%d. Overriding max_num_active_seqs "
                         "from %d to %d.",
                         spec.method,
-                        self.num_lookahead_tokens,
+                        max_draft_seqs,
                         max_num_batched_tokens,
                         max_num_active_seqs,
                         max_draft_seqs,
@@ -3047,16 +3057,13 @@ class VllmConfig:
         spec_config = self.speculative_config
         if (
             spec_config is None
-            or spec_config.draft_model_config is None
             or self.model_config is None
             or not self.use_v2_model_runner
-            # The draft's positional capacity was raised to match the target.
-            or spec_config.draft_shares_target_positions()
         ):
             return
-        draft_max_model_len = spec_config.draft_model_config.max_model_len
+        draft_max_model_len = spec_config.speculator_config.max_model_len
         target_max_model_len = self.model_config.max_model_len
-        if draft_max_model_len >= target_max_model_len:
+        if draft_max_model_len is None or draft_max_model_len >= target_max_model_len:
             return
         logger.warning(
             "The draft model's max_model_len (%d) is smaller than the target "
@@ -3082,7 +3089,7 @@ class VllmConfig:
             unsupported.append("pipeline parallelism with external_launcher")
 
         if speculative_config is not None:
-            if speculative_config.method in ("suffix", "custom_class"):
+            if speculative_config.speculator_config.speculator_class is None:
                 unsupported.append(f"speculative method '{speculative_config.method}'")
 
             # V2 EagleSpeculator does not support parallel_drafting (for P-Eagle).
@@ -3101,6 +3108,47 @@ class VllmConfig:
 
         if self.parallel_config.use_ubatching:
             unsupported.extend(self._get_dbo_unsupported_features())
+
+        return unsupported
+
+    def _get_standalone_cpu_model_runner_unsupported_features(self) -> list[str]:
+        """Collect features not supported by the standalone CPU model runner."""
+        unsupported: list[str] = []
+
+        if self.is_mm_encoder_only:
+            unsupported.append("multimodal encoder-only instances")
+
+        if self.speculative_config is not None:
+            unsupported.append("speculative decoding")
+
+        if self.model_config is not None:
+            if self.model_config.enable_prompt_embeds:
+                unsupported.append("prompt embeddings")
+            if self.model_config.is_diffusion:
+                unsupported.append("diffusion models")
+            if self.model_config.logits_processors:
+                unsupported.append("custom logits processors")
+
+        if self.parallel_config.decode_context_parallel_size > 1:
+            unsupported.append("decode context parallelism")
+
+        if self.parallel_config.prefill_context_parallel_size > 1:
+            unsupported.append("prefill context parallelism")
+
+        if self.parallel_config.enable_batch_sharded_sampling:
+            unsupported.append("batch-sharded sampling")
+
+        if self.parallel_config.use_ubatching:
+            unsupported.append("microbatching")
+
+        if self.parallel_config.enable_eplb:
+            unsupported.append("expert parallel load balancing")
+
+        if self.aux_output_config.enabled:
+            unsupported.append("routed-expert auxiliary outputs")
+
+        if self.lora_config and self.lora_config.enable_tower_connector_lora:
+            unsupported.append("multimodal tower and connector LoRA")
 
         return unsupported
 
@@ -3127,9 +3175,16 @@ class VllmConfig:
 
         # DSpark is implemented only by the V2 GPU model runner.
         if self.speculative_config:
+            # Imported here since it imports vllm.config.
+            from vllm.v1.worker.gpu.spec_decode.xpress.config import (
+                XPressSpeculatorConfig,
+            )
+
             if self.speculative_config.method == "dspark":
                 unsupported.append("dspark speculative decoding")
-            elif self.speculative_config.is_xpress():
+            elif isinstance(
+                self.speculative_config.speculator_config, XPressSpeculatorConfig
+            ):
                 unsupported.append("xpress speculative decoding")
             if self.speculative_config.enable_adaptive_verification:
                 unsupported.append("adaptive draft verification")
@@ -3364,6 +3419,13 @@ class VllmConfig:
             raise ValueError(
                 f"Model Runner V2 does not yet support: {', '.join(unsupported)}"
             )
+        if current_platform.uses_standalone_cpu_model_runner():
+            unsupported = self._get_standalone_cpu_model_runner_unsupported_features()
+            if unsupported:
+                raise ValueError(
+                    "CPU Model Runner V2 without Triton does not yet support: "
+                    f"{', '.join(unsupported)}"
+                )
 
     def _validate_v1_model_runner(self) -> None:
         unsupported = self._get_v1_model_runner_unsupported_features()

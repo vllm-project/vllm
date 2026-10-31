@@ -4,7 +4,7 @@ meta:
   provider: "MiniMax"
   description: "MiniMax M3.1-Flash vision-language MoE (~428B total / 23B active) with MSA sparse attention throughout and a built-in DSpark draft; quantization-aware trained, MXFP8 dense layers and NVFP4 experts. Served TP4 on NVIDIA Blackwell or AMD MI355X, prefill/decode disaggregated as TP4 + TP4 on MI355X or DEP2 + DEP4 on GB200/GB300, and TP8 on NVIDIA Hopper."
   date_added: 2026-10-23
-  date_updated: 2026-10-27
+  date_updated: 2026-10-30
   tasks:
     - text
     - multimodal
@@ -645,6 +645,351 @@ presets:
       ```
 
       The InferenceX throughput points replaced block verification with synthetic rejection at the committed golden DSpark acceptance length (4.04), so every point is measured at the same acceptance rate. Production serving keeps the default rejection sampler (`rejection_sample_method: block`), as in the command above.
+
+  # GB300 AgentX on one 4-GPU tray without Dynamo: TP4 engines, a DEP4 engine
+  # behind vllm-router, and TP2 engines with host-DRAM KV offload.
+  gb300_agentx_tp4:
+    label: "AgentX TP4"
+    hardware: gb300
+    strategy: single_node_tp
+    variants: [default]
+    workload: "Agentic (InferenceX AgentX)"
+    description: "One TP4 engine on a 4-GPU GB300 tray with the seven-token DSpark draft on FLASHINFER_TS; GPU-resident KV, with per-concurrency scheduling and CUDA graph settings."
+    source: { label: "InferenceX #4662", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4662", key: "minimaxm31flash-fp4-gb300-vllm-agentic-dspark", revision: 85956a00e240c2b7428e1e9406f25c731ddb0470 }
+    image: "vllm/vllm-openai:minimax-m31-flash-arm64-cu134@sha256:5d76347628973fb80519a919a2f2740b6645b62cba3fe2bd87b25f111bd0e948"
+    tp: 4
+    select:
+      features: { text_only: true }
+    args:
+      - "--enable-prefix-caching"
+      - "--max-model-len"
+      - "1048576"
+      - "--max-num-batched-tokens"
+      - "8192"
+    env:
+      VLLM_ENGINE_READY_TIMEOUT_S: "7200"
+      VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT: "600"
+    points:
+      c1: { label: "1", concurrency: 1, args: ["--max-num-seqs", "2"] }
+      c4: { label: "4", concurrency: 4, args: ["--max-num-seqs", "8"] }
+      c8:
+        label: "8"
+        concurrency: 8
+        args: ["--max-num-seqs", "16"]
+        json_args:
+          "--compilation-config": { cudagraph_capture_sizes: [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256, 264, 272, 280, 288, 296, 304, 312, 320, 328, 336, 344, 352, 360, 368, 376, 384, 392, 400, 408, 416, 424, 432, 440, 448, 456, 464, 472, 480, 488, 496, 504, 512, 640, 768, 896, 1024, 1152, 1280, 1408, 1536, 1664, 1792, 1920, 2048, 2304, 2560, 2816, 3072, 3328, 3584, 3840, 4096, 4608, 5120, 5632, 6144, 6656, 7168, 7680, 8192] }
+      c16:
+        label: "16"
+        concurrency: 16
+        args: ["--max-num-seqs", "64"]
+        json_args:
+          "--compilation-config": { cudagraph_capture_sizes: [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256, 264, 272, 280, 288, 296, 304, 312, 320, 328, 336, 344, 352, 360, 368, 376, 384, 392, 400, 408, 416, 424, 432, 440, 448, 456, 464, 472, 480, 488, 496, 504, 512, 640, 768, 896, 1024, 1152, 1280, 1408, 1536, 1664, 1792, 1920, 2048, 2304, 2560, 2816, 3072, 3328, 3584, 3840, 4096, 4608, 5120, 5632, 6144, 6656, 7168, 7680, 8192] }
+      c24:
+        label: "24"
+        concurrency: 24
+        args:
+          - "--max-num-seqs"
+          - "64"
+          - "--max-num-batched-tokens"
+          - "32768"
+          - "--long-prefill-token-threshold"
+          - "8192"
+          - "--prefill-schedule-interval"
+          - "16"
+          - "--cudagraph-capture-sizes"
+          - "1"
+          - "2"
+          - "4"
+          - "8"
+          - "16"
+          - "24"
+          - "32"
+          - "40"
+          - "48"
+          - "56"
+          - "64"
+          - "72"
+          - "80"
+          - "88"
+          - "96"
+          - "104"
+          - "112"
+          - "120"
+          - "128"
+          - "136"
+          - "144"
+          - "152"
+          - "160"
+          - "168"
+          - "176"
+          - "184"
+          - "192"
+          - "200"
+          - "208"
+          - "216"
+          - "224"
+          - "232"
+          - "240"
+          - "248"
+          - "256"
+          - "272"
+          - "288"
+          - "304"
+          - "320"
+          - "336"
+          - "352"
+          - "368"
+          - "384"
+          - "400"
+          - "416"
+          - "432"
+          - "448"
+          - "464"
+          - "480"
+          - "496"
+          - "512"
+          - "528"
+          - "544"
+          - "560"
+          - "576"
+          - "592"
+          - "608"
+          - "624"
+          - "640"
+          - "656"
+          - "672"
+          - "688"
+          - "704"
+          - "720"
+          - "736"
+          - "752"
+          - "768"
+          - "784"
+          - "800"
+          - "816"
+          - "832"
+          - "848"
+          - "864"
+          - "880"
+          - "896"
+          - "912"
+          - "928"
+          - "944"
+          - "960"
+          - "976"
+          - "992"
+          - "1008"
+          - "1024"
+          - "1280"
+          - "1536"
+          - "1792"
+          - "2048"
+          - "2304"
+          - "2560"
+          - "2816"
+          - "3072"
+          - "3328"
+          - "3584"
+          - "3840"
+          - "4096"
+          - "4608"
+          - "5120"
+          - "5632"
+          - "6144"
+          - "6656"
+          - "7168"
+          - "7680"
+          - "8192"
+        env: { VLLM_HTTP_TIMEOUT_KEEP_ALIVE: "600" }
+      c32: { label: "32", concurrency: 32, args: ["--max-num-seqs", "64"] }
+      c40:
+        label: "40"
+        concurrency: 40
+        args:
+          - "--max-num-seqs"
+          - "64"
+          - "--long-prefill-token-threshold"
+          - "8192"
+          - "--gpu-memory-utilization"
+          - "0.95"
+          - "--watermark"
+          - "0.05"
+          - "--cudagraph-capture-sizes"
+          - "1"
+          - "2"
+          - "4"
+          - "8"
+          - "16"
+          - "24"
+          - "32"
+          - "40"
+          - "48"
+          - "56"
+          - "64"
+          - "72"
+          - "80"
+          - "88"
+          - "96"
+          - "104"
+          - "112"
+          - "120"
+          - "128"
+          - "136"
+          - "144"
+          - "152"
+          - "160"
+          - "168"
+          - "176"
+          - "184"
+          - "192"
+          - "200"
+          - "208"
+          - "216"
+          - "224"
+          - "232"
+          - "240"
+          - "248"
+          - "256"
+          - "272"
+          - "288"
+          - "304"
+          - "320"
+          - "336"
+          - "352"
+          - "368"
+          - "384"
+          - "400"
+          - "416"
+          - "432"
+          - "448"
+          - "464"
+          - "480"
+          - "496"
+          - "512"
+          - "528"
+          - "544"
+          - "560"
+          - "576"
+          - "592"
+          - "608"
+          - "624"
+          - "640"
+          - "656"
+          - "672"
+          - "688"
+          - "704"
+          - "720"
+          - "736"
+          - "752"
+          - "768"
+          - "784"
+          - "800"
+          - "816"
+          - "832"
+          - "848"
+          - "864"
+          - "880"
+          - "896"
+          - "912"
+          - "928"
+          - "944"
+          - "960"
+          - "976"
+          - "992"
+          - "1008"
+          - "1024"
+          - "1280"
+          - "1536"
+          - "1792"
+          - "2048"
+          - "2304"
+          - "2560"
+          - "2816"
+          - "3072"
+          - "3328"
+          - "3584"
+          - "3840"
+          - "4096"
+          - "4608"
+          - "5120"
+          - "5632"
+          - "6144"
+          - "6656"
+          - "7168"
+          - "7680"
+          - "8192"
+        env: { VLLM_HTTP_TIMEOUT_KEEP_ALIVE: "600" }
+    runbook: |
+      The GB300 TP4 points of the AgentX lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`minimaxm31flash-fp4-gb300-vllm-agentic-dspark`, [SemiAnalysisAI/InferenceX#4662](https://github.com/SemiAnalysisAI/InferenceX/pull/4662)) serve the default checkpoint text-only on one TP4 engine per 4-GPU tray, with `--max-num-seqs` set per concurrency.
+
+      - **Concurrency 1, 4 and 32** use the default CUDA graph capture sizes.
+      - **Concurrency 8 and 16** capture CUDA graphs for every size up to 8192 tokens.
+      - **Concurrency 24** raises `--max-num-batched-tokens` to 32768 and schedules prefill every 16 steps; **concurrency 40** keeps 8192 and raises `--gpu-memory-utilization` to 0.95. Both cap prefill chunks at 8192 tokens and capture graphs to 8192.
+
+  gb300_agentx_dep4:
+    label: "AgentX DEP4"
+    hardware: gb300
+    strategy: single_node_dep
+    variants: [default]
+    workload: "Agentic (InferenceX AgentX)"
+    description: "One data-parallel, expert-parallel engine across the four GPUs of a GB300 tray behind vllm-router with session affinity. Three-token DSpark draft on FLASHINFER_TS."
+    source: { label: "InferenceX #4662", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4662", key: "minimaxm31flash-fp4-gb300-vllm-agentic-dspark", revision: 85956a00e240c2b7428e1e9406f25c731ddb0470 }
+    image: "vllm/vllm-openai:minimax-m31-flash-arm64-cu134@sha256:5d76347628973fb80519a919a2f2740b6645b62cba3fe2bd87b25f111bd0e948"
+    select:
+      features: { text_only: true }
+    args:
+      - "--enable-prefix-caching"
+      - "--max-model-len"
+      - "1048576"
+      - "--max-num-batched-tokens"
+      - "8192"
+    env:
+      VLLM_ENGINE_READY_TIMEOUT_S: "7200"
+      VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT: "600"
+    json_args:
+      "--speculative-config": { num_speculative_tokens: 3 }
+    points:
+      c64: { label: "64", concurrency: 64, args: ["--max-num-seqs", "32"] }
+      c96: { label: "96", concurrency: 96, args: ["--max-num-seqs", "48"] }
+      c128: { label: "128", concurrency: 128, args: ["--max-num-seqs", "64"] }
+    runbook: |
+      The DEP4 points of the GB300 AgentX lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`minimaxm31flash-fp4-gb300-vllm-agentic-dspark`, [SemiAnalysisAI/InferenceX#4662](https://github.com/SemiAnalysisAI/InferenceX/pull/4662)) run one engine with `--data-parallel-size 4` and `--enable-expert-parallel`; `--max-num-seqs` is the per-rank limit.
+
+      The router uses the `consistent_hash` policy so a conversation stays on the rank that holds its prefix. The lane also runs it with `--request-timeout-secs 14400` and `--disable-retries`.
+
+  gb300_agentx_tp2:
+    label: "AgentX TP2 + KV offload"
+    hardware: gb300
+    strategy: single_node_tp
+    variants: [default]
+    workload: "Agentic (InferenceX AgentX)"
+    description: "One TP2 engine on two of the tray's four GB300 GPUs with the seven-token DSpark draft on FLASHINFER_TS and host-DRAM KV offload (482 GB per engine)."
+    source: { label: "InferenceX #4662", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4662", key: "minimaxm31flash-fp4-gb300-vllm-agentic-dspark", revision: 85956a00e240c2b7428e1e9406f25c731ddb0470 }
+    image: "vllm/vllm-openai:minimax-m31-flash-arm64-cu134@sha256:5d76347628973fb80519a919a2f2740b6645b62cba3fe2bd87b25f111bd0e948"
+    tp: 2
+    select:
+      features: { text_only: true }
+      kv_offload: simple
+    args:
+      - "--enable-prefix-caching"
+      - "--max-model-len"
+      - "1048576"
+      - "--max-num-batched-tokens"
+      - "32768"
+    env:
+      VLLM_ENGINE_READY_TIMEOUT_S: "7200"
+      VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT: "600"
+      VLLM_HTTP_TIMEOUT_KEEP_ALIVE: "600"
+      VLLM_USE_SIMPLE_KV_OFFLOAD: "1"
+    json_args:
+      "--compilation-config": { cudagraph_capture_sizes: [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256, 264, 272, 280, 288, 296, 304, 312, 320, 328, 336, 344, 352, 360, 368, 376, 384, 392, 400, 408, 416, 424, 432, 440, 448, 456, 464, 472, 480, 488, 496, 504, 512, 640, 768, 896, 1024, 1152, 1280, 1408, 1536, 1664, 1792, 1920, 2048, 2304, 2560, 2816, 3072, 3328, 3584, 3840, 4096, 4608, 5120, 5632, 6144, 6656, 7168, 7680, 8192] }
+      "--kv-transfer-config": { kv_connector_extra_config: { cpu_bytes_to_use_per_rank: null, cpu_bytes_to_use: 482000000000, lazy_offload: true } }
+    points:
+      c28: { label: "28", concurrency: 28, args: ["--max-num-seqs", "42"] }
+      c32: { label: "32", concurrency: 32, args: ["--max-num-seqs", "48"] }
+      c36: { label: "36", concurrency: 36, args: ["--max-num-seqs", "54"] }
+    runbook: |
+      The TP2 points of the GB300 AgentX lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`minimaxm31flash-fp4-gb300-vllm-agentic-dspark`, [SemiAnalysisAI/InferenceX#4662](https://github.com/SemiAnalysisAI/InferenceX/pull/4662)) add a host-DRAM KV tier through `SimpleCPUOffloadConnector` with lazy offload. `cpu_bytes_to_use` (482 GB) is the budget for the whole engine, about half of the tray's host DRAM, so the engine needs that much free host RAM. `--max-num-seqs` is 1.5 times the concurrency.
 
   b300_agentx_tp4:
     label: "AgentX TP4"
