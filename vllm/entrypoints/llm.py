@@ -830,10 +830,13 @@ class LLM(
         self.llm_engine.stop_profile()
 
     def reset_prefix_cache(
-        self, reset_running_requests: bool = False, reset_connector: bool = False
+        self,
+        reset_running_requests: bool = False,
+        reset_connector: bool = False,
+        preserve_running_requests: bool = False,
     ) -> bool:
         return self.llm_engine.reset_prefix_cache(
-            reset_running_requests, reset_connector
+            reset_running_requests, reset_connector, preserve_running_requests
         )
 
     def sleep(self, level: int = 1, mode: PauseMode = "abort"):

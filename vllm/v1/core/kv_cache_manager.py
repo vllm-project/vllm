@@ -679,17 +679,21 @@ class KVCacheManager:
         """
         self.block_pool.evict_blocks(block_ids)
 
-    def reset_prefix_cache(self) -> bool:
+    def reset_prefix_cache(self, preserve_running_requests: bool = False) -> bool:
         """Reset prefix cache. This function may be used in RLHF
         flows to invalidate prefix caching after the weights are updated,
         or used for resetting prefix caching status for benchmarking.
+
+        Args:
+            preserve_running_requests: If True, the prefix cache is cleared
+                without requiring all blocks to be free.
 
         Returns:
             bool: True if the prefix cache is successfully reset,
             False otherwise.
 
         """
-        if not self.coordinator.reset_prefix_cache():
+        if not self.coordinator.reset_prefix_cache(preserve_running_requests):
             return False
         if self.log_stats:
             assert self.prefix_cache_stats is not None
