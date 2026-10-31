@@ -720,6 +720,32 @@ def test_eagle_flag_propagates_to_all_merged_swa_groups():
     assert hit == 64
 
 
+@pytest.mark.cpu_test
+def test_lookahead_lookup_and_store_masks_match():
+    groups = [
+        KVCacheGroupSpec(["full"], _full(64)),
+        KVCacheGroupSpec(
+            ["mtp"],
+            _swa(block_size=16, sliding_window=32),
+            is_eagle_group=True,
+        ),
+    ]
+    coord = _make_coord(groups, hash_block_size=16, use_eagle=True)
+
+    coord.num_hash_lookahead_tokens = 2
+    store_masks = coord.store_mask(128)
+    lookup_masks = coord.lookup_mask(128)
+
+    assert (
+        lookup_masks
+        == store_masks
+        == (
+            None,
+            [False, False, True, True] * 2,
+        )
+    )
+
+
 def test_dsv4_five_group_eagle_store_lookup_round_trip():
     """Cover the five KV groups observed with DeepSeek-V4-Flash + MTP.
 

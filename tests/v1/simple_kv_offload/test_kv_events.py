@@ -10,6 +10,8 @@ is unset.
 
 from __future__ import annotations
 
+import pytest
+
 from tests.v1.simple_kv_offload.test_scheduler import (
     _BYTES_PER_BLOCK,
     BLOCK_SIZE,
@@ -22,6 +24,7 @@ from tests.v1.simple_kv_offload.test_scheduler import (
     _allocate_gpu_blocks,
     _make_cp_request,
     _make_kv_cache_config,
+    _make_lookahead_config,
     _make_scratch_kv_cache_config,
     _make_vllm_config,
     make_request,
@@ -148,11 +151,14 @@ def make_events_scheduler(
     dcp_world_size: int = 1,
     kv_cache_config: KVCacheConfig | None = None,
     enable_events: bool = True,
+    num_lookahead: int = 0,
 ) -> SchedulerFixture:
     """Build a SimpleCPUOffloadScheduler with kv cache events enabled."""
     if kv_cache_config is None:
         kv_cache_config = _make_kv_cache_config(num_gpu_blocks, num_groups)
-    vllm_config = _make_vllm_config()
+    vllm_config = (
+        _make_lookahead_config(num_lookahead) if num_lookahead else _make_vllm_config()
+    )
     if enable_events:
         vllm_config.kv_events_config = KVEventsConfig(enable_kv_cache_events=True)
     vllm_config.parallel_config.decode_context_parallel_size = dcp_world_size
@@ -174,6 +180,7 @@ def make_events_scheduler(
         num_gpu_blocks=num_gpu_blocks,
         enable_caching=True,
         hash_block_size=virtual_block_size,
+        num_hash_lookahead_tokens=num_lookahead,
     )
     sched.bind_gpu_block_pool(gpu_block_pool)
     return SchedulerFixture(
@@ -208,8 +215,15 @@ def _do_eager_store(
             block_hasher=get_request_block_hasher(BLOCK_SIZE, sha256),
         )
     else:
-        req = make_request(num_blocks=num_blocks)
+        num_lookahead = fix.vllm_config.num_hash_lookahead_tokens
+        req = make_request(
+            num_blocks=num_blocks,
+            extra_tokens=max(1, num_lookahead),
+            num_lookahead=num_lookahead,
+        )
     kv_blocks = _alloc_and_register(fix, req, num_blocks)
+    # Finish the prompt, including the multi-module MTP re-prefill window.
+    req.num_computed_tokens = req.num_tokens
     sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
     block_ids = kv_blocks.get_block_ids()
     sched_out = make_scheduler_output(
@@ -238,10 +252,12 @@ def test_events_disabled_no_events() -> None:
 # ---------------------------------------------------------------------------
 # eager store emits BlockStored with per-group metadata
 # ---------------------------------------------------------------------------
-def test_block_stored_per_group_metadata_full_attention() -> None:
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("num_lookahead", [0, 1, 5])
+def test_block_stored_per_group_metadata_full_attention(num_lookahead) -> None:
     """BlockStored carries medium, group_idx, kind, sliding_window, block_size,
     and the correct block hash."""
-    fix = make_events_scheduler()
+    fix = make_events_scheduler(num_lookahead=num_lookahead)
     sched = fix.scheduler
     assert sched.kv_event_medium == MEDIUM_CPU
     _, req = _do_eager_store(fix, num_blocks=2)
@@ -271,6 +287,11 @@ def test_block_stored_per_group_metadata_full_attention() -> None:
     assert ev1.block_hashes == [expected_hash_1]
     assert ev1.parent_block_hash == expected_hash_0
     assert ev1.token_ids == req.prompt_token_ids[BLOCK_SIZE : 2 * BLOCK_SIZE]
+    for i, event in enumerate(stored):
+        end = (i + 1) * BLOCK_SIZE
+        assert event.lookahead_token_ids == (
+            [req.prompt_token_ids[end : end + num_lookahead]] if num_lookahead else None
+        )
 
 
 def test_eager_store_lora_metadata() -> None:

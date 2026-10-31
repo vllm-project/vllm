@@ -89,6 +89,7 @@ class MooncakeStoreCoordinator:
         use_eagle: bool = False,
         retention_interval: int | None = None,
         enable_partial_hash_hits: bool = False,
+        num_hash_lookahead_tokens: int = 0,
     ) -> None:
         # Match core's alignment requirements for prefix-cacheable groups.
         assert all(
@@ -116,6 +117,7 @@ class MooncakeStoreCoordinator:
         # Core's decision: whether hits land on the hash unit, below the block.
         self.enable_partial_hash_hits = enable_partial_hash_hits
         self.use_eagle = use_eagle
+        self.num_hash_lookahead_tokens = num_hash_lookahead_tokens
         # Mirror vLLM core's KVCacheCoordinator.retention_interval.
         self.retention_interval = retention_interval
         self._verify_and_split_kv_cache_groups()
@@ -152,6 +154,7 @@ class MooncakeStoreCoordinator:
             scheduler_block_size,
             hash_block_size,
             use_eagle=spec_config is not None and spec_config.use_eagle_block_drop(),
+            num_hash_lookahead_tokens=vllm_config.num_hash_lookahead_tokens,
             retention_interval=kv_cache_config.prefix_cache_retention_interval,
             enable_partial_hash_hits=(
                 alignment is not None and alignment < scheduler_block_size
@@ -307,6 +310,7 @@ class MooncakeStoreCoordinator:
         num_prompt_tokens: int | None,
         exclude_mamba: bool = False,
     ) -> tuple[list[bool] | None, ...]:
+        apply_eagle = not self.num_hash_lookahead_tokens
         mask_alignment = (
             self.hash_block_size
             if self.enable_partial_hash_hits
@@ -322,7 +326,7 @@ class MooncakeStoreCoordinator:
             else replay_boundaries(
                 num_prompt_tokens,
                 self.lcm_block_size,
-                use_eagle=bool(self.eagle_group_ids),
+                use_eagle=apply_eagle and bool(self.eagle_group_ids),
             )
         )
         masks: list[list[bool] | None] = []
@@ -335,7 +339,7 @@ class MooncakeStoreCoordinator:
                 continue
             manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
             assert manager_cls is not None
-            use_eagle = g_idx in self.eagle_group_ids
+            use_eagle = apply_eagle and g_idx in self.eagle_group_ids
             mask = manager_cls.reachable_block_mask(
                 start_block=start_block,
                 end_block=end_block,
@@ -361,6 +365,7 @@ class MooncakeStoreCoordinator:
         apply_eagle: bool = True,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         """Converge registered managers' hits as in HybridKVCacheCoordinator."""
+        apply_eagle = apply_eagle and not self.num_hash_lookahead_tokens
         alignment_tokens = (
             self.hash_block_size
             if self.enable_partial_hash_hits
