@@ -123,6 +123,71 @@ def test_fused_ar_workspace_hidden_dim_spec_without_draft():
     assert _fused_ar_workspace_hidden_dim(config) == 2048
 
 
+@pytest.fixture
+def preinit_env(monkeypatch):
+    """Mocks the parallel state and workspace getters used by the pre-init."""
+    from vllm.compilation.passes.fusion import allreduce_rms_fusion as fusion
+
+    tp_group = SimpleNamespace(cpu_group=object())
+    monkeypatch.setattr(fusion, "flashinfer_comm", object())
+    monkeypatch.setattr(fusion, "get_tensor_model_parallel_world_size", lambda: 4)
+    monkeypatch.setattr(fusion, "get_tensor_model_parallel_rank", lambda: 1)
+    monkeypatch.setattr(fusion, "get_tp_group", lambda: tp_group)
+    monkeypatch.setattr(rocm_aiter_ops, "is_enabled", lambda: False)
+    calls: list[tuple[str, dict]] = []
+
+    def make_getter(name):
+        def getter(**kwargs):
+            calls.append((name, kwargs))
+            return object()
+
+        return getter
+
+    monkeypatch.setattr(fusion, "get_fi_ar_workspace", make_getter("base"), False)
+    monkeypatch.setattr(
+        fusion, "get_fi_ar_quant_workspace", make_getter("quant"), False
+    )
+    return SimpleNamespace(fusion=fusion, calls=calls, group=tp_group)
+
+
+def _make_preinit_config(fuse_allreduce_rms: bool = True) -> SimpleNamespace:
+    return SimpleNamespace(
+        compilation_config=SimpleNamespace(
+            pass_config=SimpleNamespace(
+                fuse_allreduce_rms=fuse_allreduce_rms,
+                flashinfer_max_size=lambda tp_size: 8 * 1024 * 1024,
+            )
+        ),
+        model_config=SimpleNamespace(
+            dtype=torch.bfloat16, get_hidden_size=lambda: 4096
+        ),
+        speculative_config=None,
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=2048),
+    )
+
+
+def test_preinit_fused_ar_workspaces_creates_both_workspaces(preinit_env):
+    preinit_env.fusion.preinit_fused_ar_workspaces(_make_preinit_config())
+
+    # 8 MiB / (4096 hidden * 2 bytes) = 1024 tokens, below max_num_batched_tokens
+    expected = dict(
+        world_size=4,
+        rank=1,
+        max_token_num=1024,
+        hidden_dim=4096,
+        dtype=torch.bfloat16,
+        group=preinit_env.group.cpu_group,
+    )
+    assert preinit_env.calls == [("base", expected), ("quant", expected)]
+
+
+def test_preinit_fused_ar_workspaces_skipped_without_fusion(preinit_env):
+    preinit_env.fusion.preinit_fused_ar_workspaces(
+        _make_preinit_config(fuse_allreduce_rms=False)
+    )
+    assert preinit_env.calls == []
+
+
 class TestAllReduceRMSNormModel(torch.nn.Module):
     def __init__(
         self,
