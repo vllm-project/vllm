@@ -8,6 +8,7 @@ anything imports Triton).
 
 import os
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock
 
 import numpy as np
@@ -49,6 +50,7 @@ from vllm.v1.worker.gpu.spec_decode.round import (
     SpecResources,
     VerifyPlan,
 )
+from vllm.v1.worker.gpu.spec_decode.round_runner import SpecRound, spec_kernel_layers
 from vllm.v1.worker.gpu.spec_decode.speculator_config import SpeculatorConfig
 
 HAS_GPU = current_platform.is_cuda_alike() or current_platform.is_xpu()
@@ -147,7 +149,7 @@ def test_plan_layout_of_a_chain_keeps_todays_positions(seed):
         count=torch.tensor(counts, dtype=torch.int32, device=DEVICE),
         tokens=torch.zeros(num_reqs, max_rows, dtype=torch.int32, device=DEVICE),
     )
-    layout = PlanLayout(num_reqs, num_tokens + 5, max_rows, torch.device(DEVICE))
+    layout = PlanLayout(num_tokens + 5, max_rows, torch.device(DEVICE))
     layout.apply(
         plan,
         plan.count,
@@ -159,53 +161,14 @@ def test_plan_layout_of_a_chain_keeps_todays_positions(seed):
     )
 
     assert torch.equal(positions, today)
-    rows = np.arange(max_rows)
-    for b, count in enumerate(counts):
-        valid = rows < count
-        assert (
-            layout.depth[b].cpu().numpy().tolist() == np.where(valid, rows, 0).tolist()
-        )
-        expected = np.where(valid, (1 << (rows + 1)) - 1, 0)
-        assert layout.ancestors[b].cpu().numpy().tolist() == expected.tolist()
-
-
-@requires_kernels
-@pytest.mark.parametrize("seed", range(6))
-def test_plan_layout_of_a_tree_moves_verify_rows_to_their_depth(seed):
-    gen = np.random.default_rng(100 + seed)
-    max_rows = int(gen.integers(2, 12))
-    idx_mapping, qsl, num_computed, query_lens, counts = _random_batch(gen, max_rows)
-    num_reqs, num_tokens = len(counts), int(qsl[-1])
-    parent = _random_tree(gen, num_reqs, max_rows)
-    chain = _chain_positions(idx_mapping, qsl, num_computed, num_tokens)
-    positions = chain.clone()
-    plan = VerifyPlan(
-        parent=torch.tensor(parent, device=DEVICE),
-        count=torch.tensor(counts, dtype=torch.int32, device=DEVICE),
-        tokens=torch.zeros(num_reqs, max_rows, dtype=torch.int32, device=DEVICE),
-    )
-    layout = PlanLayout(num_reqs, num_tokens + 5, max_rows, torch.device(DEVICE))
-    layout.apply(
-        plan,
-        plan.count,
-        torch.tensor(qsl, device=DEVICE),
-        positions,
-        torch.zeros(num_tokens + 5, dtype=torch.int32, device=DEVICE),
-        num_reqs,
-        num_tokens,
-    )
-
-    depth, ancestors = _reference_layout(parent, counts)
-    expected = chain.cpu().numpy().copy()
+    tree_ancestors = layout.tree_ancestors.cpu().numpy()
     for b, count in enumerate(counts):
         start = qsl[b + 1] - count
-        expected[start : start + count] += depth[b, :count] - np.arange(count)
-    assert positions.cpu().numpy().tolist() == expected.tolist()
-    assert np.array_equal(layout.depth.cpu().numpy(), depth)
-    assert np.array_equal(layout.ancestors.cpu().numpy(), ancestors)
-
-    layout.restore_positions(positions, num_tokens)
-    assert torch.equal(positions, chain)
+        rows = np.arange(count)
+        assert (
+            tree_ancestors[start : start + count].tolist()
+            == ((1 << (rows + 1)) - 1).tolist()
+        )
 
 
 def _runner_and_batch(plan, positions, query_start_loc, max_branching=1):
@@ -227,27 +190,10 @@ def _runner_and_batch(plan, positions, query_start_loc, max_branching=1):
         ),
         req_states=SimpleNamespace(num_computed_tokens=SimpleNamespace(gpu=None)),
         model_state=SimpleNamespace(rope_state=None),
-        plan_layout=None,
-        max_branching=max_branching,
-        num_speculative_steps=max_rows - 1,
-        max_num_reqs=8,
-        max_num_tokens=num_tokens,
-        device=torch.device(DEVICE),
-        chain_plan=None,
-        chain_count=None,
+        spec_round=_spec_round(max_branching, num_tokens, max_rows),
         input_buffers=SimpleNamespace(tree_parents=None, tree_ancestors=None),
     )
-    if max_branching > 1:
-        runner.plan_layout = PlanLayout(8, num_tokens, max_rows, runner.device)
-        runner.chain_plan = VerifyPlan(
-            parent=chain_parents(8, max_rows, runner.device),
-            count=None,
-            is_chain=True,
-        )
-        runner.chain_count = torch.ones(8, dtype=torch.int32, device=DEVICE)
-    runner.lay_out_verify_plan = lambda batch: GPUModelRunner.lay_out_verify_plan(
-        runner, batch
-    )
+    runner.spec_round.init_tree_verify(runner.input_buffers)
     batch = SimpleNamespace(
         verify_plan=plan,
         idx_mapping=None,
@@ -314,7 +260,7 @@ def test_runner_lays_out_a_tree_after_the_chain_slot_mappings():
     # token is in front of its plan and keeps the chain layout (causal, bits 0).
     assert batch.tree_parents.tolist() == [-1, 0, -1, 0, 0, 1]
     assert batch.tree_ancestors.tolist() == [0, 0b1, 0b1, 0b11, 0b101, 0b1011]
-    GPUModelRunner.restore_chain_positions(runner, batch)
+    runner.spec_round.restore(batch)
     assert torch.equal(batch.positions, positions)
 
 
@@ -472,28 +418,31 @@ def test_mrope_tree_positions_shift_every_section_by_the_plan_depth():
         assert rope[j, 5:].tolist() == [25, 26, 26, 27, 48, 49, 50, 50]
 
 
-def _tree_runner(**overrides):
-    runner = SimpleNamespace(
-        max_branching=2,
-        max_num_reqs=4,
-        max_num_tokens=16,
-        num_speculative_steps=3,
-        device=torch.device(DEVICE),
-        input_buffers=SimpleNamespace(tree_parents=None, tree_ancestors=None),
+def _spec_round(max_branching=2, max_num_tokens=16, max_rows=4, max_num_reqs=8):
+    resources = SpecResources(
+        max_candidates=max_rows, capture_shapes=(), max_branching=max_branching
     )
-    for name, value in overrides.items():
-        setattr(runner, name, value)
-    return runner
+    return SpecRound(
+        None,  # type: ignore[arg-type]
+        resources,
+        max_num_reqs,
+        max_num_tokens,
+        max_rows - 1,
+        torch.device(DEVICE),
+    )
 
 
 def test_runner_tree_buffers_back_every_batch_once_the_speculator_branches():
-    runner = _tree_runner()
-    GPUModelRunner._init_tree_verify(runner)
-    assert runner.input_buffers.tree_parents is runner.plan_layout.tree_parents
-    assert runner.input_buffers.tree_ancestors is runner.plan_layout.tree_ancestors
-    chain = _tree_runner(max_branching=1)
-    GPUModelRunner._init_tree_verify(chain)
-    assert chain.input_buffers.tree_parents is None
+    spec_round = _spec_round()
+    buffers = SimpleNamespace(tree_parents=None, tree_ancestors=None)
+    spec_round.init_tree_verify(buffers)
+    assert spec_round.layout is not None
+    assert buffers.tree_parents is spec_round.layout.tree_parents
+    assert buffers.tree_ancestors is spec_round.layout.tree_ancestors
+    chain = _spec_round(max_branching=1)
+    chain_buffers = SimpleNamespace(tree_parents=None, tree_ancestors=None)
+    chain.init_tree_verify(chain_buffers)
+    assert chain.layout is None and chain_buffers.tree_parents is None
 
 
 def _random_paths(
@@ -593,8 +542,7 @@ def test_chain_accept_result_is_a_view_of_the_constant_path():
 
 def _commit_runner(plan, model_state):
     runner = SimpleNamespace(
-        spec_kernels=None,
-        spec_kernel_context=None,
+        spec_round=_spec_round(max_branching=1, max_rows=3, max_num_reqs=2),
         model_state=model_state,
         is_last_pp_rank=False,
         req_states=SimpleNamespace(
@@ -617,7 +565,7 @@ def test_chain_commit_moves_nothing(monkeypatch):
     )
     model_state = SimpleNamespace(postprocess_state=Mock())
     runner, batch = _commit_runner(plan, model_state)
-    runner.spec_kernels = SimpleNamespace(
+    runner.spec_round.kernels = SimpleNamespace(
         commit=Mock(side_effect=AssertionError("no compaction"))
     )
     result = AcceptResult(
@@ -625,8 +573,8 @@ def test_chain_commit_moves_nothing(monkeypatch):
         torch.tensor([3, 1], dtype=torch.int32),
         torch.zeros(2, 3, dtype=torch.int64),
     )
-    assert GPUModelRunner.commit_round(runner, batch, result) is None
-    assert GPUModelRunner.commit_round(runner, batch, None) is None
+    assert runner.spec_round.commit(batch, result) is None
+    assert runner.spec_round.commit(batch, None) is None
 
     monkeypatch.setattr(model_runner_module, "post_update", Mock())
     GPUModelRunner.postprocess_sampled(runner, "idx", "sampled", "n", "r", None)
@@ -651,14 +599,14 @@ def test_tree_commit_compacts_and_resumes_from_the_path(monkeypatch):
     compact = Mock()
     monkeypatch.setattr(kv_commit, "commit", compact)
     registry._commits = [kv_commit, state_commit]
-    runner.spec_kernels = registry
-    runner.spec_kernel_context = object()
+    runner.spec_round.kernels = registry
+    runner.spec_round.kernel_context = object()
     result = AcceptResult(
         torch.tensor([[0, 2, 0], [0, 1, 2]], dtype=torch.int32),
         torch.tensor([2, 3], dtype=torch.int32),
         torch.zeros(2, 3, dtype=torch.int64),
     )
-    row = GPUModelRunner.commit_round(runner, batch, result)
+    row = runner.spec_round.commit(batch, result)
     assert row is not None
     assert row.tolist() == [2, 2]
     compact.assert_called_once_with(
@@ -793,7 +741,7 @@ def test_kv_compaction_of_a_chain_path_changes_nothing():
     assert torch.equal(layers[0], before)
 
 
-def test_kv_compactor_takes_block_sizes_from_the_kv_cache_group(monkeypatch):
+def test_kv_compactor_takes_block_sizes_from_the_kv_cache_group():
     """A hybrid model's attention group blocks are larger than the layer's spec
     says; the cache is allocated, and the block table kept, in the group's."""
     from vllm.v1.kv_cache_interface import FullAttentionSpec
@@ -807,27 +755,22 @@ def test_kv_compactor_takes_block_sizes_from_the_kv_cache_group(monkeypatch):
     kernel_blocks = num_blocks * group_block // kernel_block
     cache = torch.zeros(kernel_blocks, 4, kernel_block, 512, dtype=torch.bfloat16)
     table = torch.zeros(2, 4, dtype=torch.int32)
-    monkeypatch.setattr(
-        model_runner_module, "get_kv_cache_spec", lambda _: {"attn": attention(256)}
-    )
     runner = object.__new__(GPUModelRunner)
-    runner.vllm_config = None
     runner.device = torch.device("cpu")
     runner.compilation_config = SimpleNamespace(
         static_forward_context={"attn": SimpleNamespace(kv_cache=cache)}
     )
-    runner.kv_cache_config = SimpleNamespace(
-        num_blocks=num_blocks,
-        kv_cache_groups=[
-            SimpleNamespace(layer_names=["attn"], kv_cache_spec=attention(group_block))
-        ],
+    runner.kv_cache_config = SimpleNamespace(num_blocks=num_blocks)
+    group: Any = SimpleNamespace(
+        layer_names=["attn"], kv_cache_spec=attention(group_block), kv_cache_group_id=0
     )
+    runner.attn_groups = [[group]]
     runner.kernel_block_sizes = [kernel_block]
     runner.block_tables = SimpleNamespace(input_block_tables=[table])
     runner.cache_config = CacheConfig()
 
     compactor = KvCompactor()
-    compactor.bind(SimpleNamespace(device=runner.device), runner._spec_kernel_layers())
+    compactor.bind(_kernel_context(runner.device), spec_kernel_layers(runner))
 
     [(layout, *_, table_sizes)] = compactor.launches
     assert layout.block_size == kernel_block

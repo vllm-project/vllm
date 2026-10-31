@@ -146,7 +146,7 @@ def test_target_layer_selection_includes_kv_sharing_layers(monkeypatch):
     runner.jit_warmup_registry = JitWarmupRegistry(runner.vllm_config)
     runner.speculator = Mock(spec=DraftModelSpeculator)
     runner.batch_sharder = None
-    runner.max_branching = 1
+    runner.spec_round = None
     runner.speculator.draft_attn_layer_names = {"draft"}
     runner.speculator.enable_adaptive_verification = False
     runner.model_state = SimpleNamespace(
@@ -213,7 +213,7 @@ def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
     )
     runner.speculator = None
     runner.batch_sharder = None
-    runner.max_branching = 1
+    runner.spec_round = None
     runner.req_states = []
     runner.input_buffers = SimpleNamespace(query_start_loc=None)
     runner.vocab_size = 1
@@ -412,8 +412,7 @@ def _make_capture_runner(
     runner.lora_config = None
     monkeypatch.setattr(runner, "maybe_setup_dummy_loras", _no_dummy_loras)
     runner.speculator = None
-    runner.spec_kernels = None
-    runner.spec_kernel_context = None
+    runner.spec_round = None
     runner.adaptive_verification = None
     runner.model = None
     runner.input_buffers = object()
@@ -471,12 +470,12 @@ def test_capture_model_runs_the_spec_kernels(monkeypatch):
         torch.accelerator, "get_memory_info", lambda: (1 << 30, 1 << 30)
     )
     monkeypatch.setattr(model_runner_module, "lock_workspace", lambda: None)
-    runner.spec_kernels = Mock()
-    runner.spec_kernel_context = object()
+    spec_round = Mock()
+    runner.spec_round = spec_round
 
     runner.capture_model()
 
-    runner.spec_kernels.capture.assert_called_once_with(runner.spec_kernel_context)
+    spec_round.capture.assert_called_once_with()
 
 
 def test_capture_model_skips_lock_when_nothing_captured(monkeypatch):

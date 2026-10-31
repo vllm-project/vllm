@@ -182,15 +182,16 @@ class SpeculatorConfig:
         ``caps.plan_kind`` (at least ``"chain"``), at most ``declared``.
 
         The default runs a speculator that branches as a chain of the same
-        length, and drops the variable-length shape from a tree whose
-        attention needs uniform rows. A tree speculator overrides it to pick
-        its chain (a 64-row tree is not a 64-token chain).
+        length, runs a mask speculator's plans as trees (its plans then carry
+        no mask: rows see their ancestors) on a model that verifies trees. A
+        tree speculator overrides it to pick its chain (a 64-row tree is not a
+        64-token chain); a mask speculator whose masks only make sense as
+        masks overrides it to pick its tree.
         """
         if caps.plan_kind == "chain":
-            return replace(declared, max_branching=1)
-        if caps.tree_requires_uniform_rows and declared.plan_kind == "tree":
-            shapes = tuple(s for s in declared.capture_shapes if s.uniform_count)
-            return replace(declared, capture_shapes=shapes)
+            return replace(declared, max_branching=1, custom_mask=False)
+        if caps.plan_kind == "tree":
+            return replace(declared, custom_mask=False)
         return declared
 
     def candidate_budget(self, view: "BudgetView") -> int:

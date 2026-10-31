@@ -336,7 +336,6 @@ class Scheduler(SchedulerInterface):
                     f"({self.num_spec_tokens + 1}): KV slots and the runner's "
                     "buffers are sized from num_speculative_tokens."
                 )
-            self.max_candidates = resources.max_candidates
             # Declared; the engine core lowers it to what the model's layers
             # verify (EngineCore._set_spec_resources). KV slots stay declared.
             self.spec_resources = resources
@@ -551,12 +550,14 @@ class Scheduler(SchedulerInterface):
         budget = self.speculator_config.candidate_budget(
             self._budget_view(num_scheduled_reqs)
         )
-        if not 1 <= budget <= self.max_candidates:
+        if not 1 <= budget <= self.num_spec_tokens + 1:
             raise ValueError(
                 f"candidate_budget returned {budget}, outside "
-                f"[1, max_candidates={self.max_candidates}]."
+                f"[1, num_speculative_tokens + 1 = {self.num_spec_tokens + 1}]."
             )
-        return budget
+        # KV slots are reserved for the declared max_candidates; the rows run
+        # are capped by the effective resources the engine core set.
+        return min(budget, self.spec_resources.max_candidates)
 
     def _admit_limit(self, num_scheduled_reqs: int) -> int:
         """Ask the speculator's config for this step's admission limit."""

@@ -6,7 +6,7 @@ import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import cached_property
-from typing import ClassVar, NamedTuple
+from typing import TYPE_CHECKING, ClassVar, NamedTuple, TypedDict
 
 import torch
 import torch._dynamo.decorators
@@ -48,6 +48,9 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayout,
     is_quantized_kv_cache,
 )
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.spec_decode.capabilities import PlanKind
 
 logger = init_logger(__name__)
 
@@ -357,6 +360,14 @@ def copy_to_persistent(dst, src):
     return sliced
 
 
+class SpecPlanFields(TypedDict):
+    """The ``FlexAttentionMetadata.spec_*`` fields of one batch."""
+
+    spec_rows_seen: torch.Tensor | None
+    spec_row: torch.Tensor | None
+    spec_positions: torch.Tensor | None
+
+
 @dataclass
 class FlexAttentionMetadata:
     causal: bool
@@ -405,6 +416,14 @@ class FlexAttentionMetadata:
     # generated tokens. Both must be set to enable.
     rswa_prefix_lens: torch.Tensor | None = None
     rswa_window: int | None = None
+    # Speculative verify of a plan (tree or custom mask), from
+    # CommonAttentionMetadata. Per token: the rows of its plan it sees
+    # (``tree_ancestors``: bit j = row j), its row in the plan
+    # (-1 for a token outside a plan, which attends causally) and its position.
+    # Full-capacity persistent buffers, read at token index; None without a plan.
+    spec_rows_seen: torch.Tensor | None = None
+    spec_row: torch.Tensor | None = None
+    spec_positions: torch.Tensor | None = None
 
     @cached_property
     def logical_block_ids(self):
@@ -449,6 +468,66 @@ class FlexAttentionMetadata:
 
         return is_valid, logical_q_idx, logical_kv_idx
 
+    def _spec_plan_rows(
+        self,
+        q_idx: torch.Tensor,
+        logical_q_idx: torch.Tensor,
+        logical_kv_idx: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Where ``logical_kv_idx`` sits in the plan of query token ``q_idx``:
+        ``(row, offset, in_rows)``, with ``row`` the query's plan row (-1 outside
+        a plan), ``offset`` the KV slot's row in the same plan, and ``in_rows``
+        whether that slot is one of the plan's rows up to the query's own (rows
+        occupy consecutive KV slots ending at the query's)."""
+        assert self.spec_row is not None
+        row = self.spec_row[q_idx]
+        offset = logical_kv_idx - (logical_q_idx - row)
+        in_rows = (row >= 0) & (offset >= 0) & (offset <= row)
+        return row, offset, in_rows
+
+    def get_spec_plan_mask_mod(self) -> _mask_mod_signature:
+        """The rows a plan row sees: every KV slot before the plan's first row
+        (the committed prefix), and the rows whose bit is set in the token's
+        ``spec_rows_seen``. Tokens outside a plan see everything (the base mask
+        keeps them causal). Over logical indices."""
+        assert self.spec_rows_seen is not None
+        rows_seen = self.spec_rows_seen
+
+        def spec_plan_mask_mod(
+            q_idx: torch.Tensor,
+            logical_q_idx: torch.Tensor,
+            logical_kv_idx: torch.Tensor,
+        ) -> torch.Tensor:
+            row, offset, in_rows = self._spec_plan_rows(
+                q_idx, logical_q_idx, logical_kv_idx
+            )
+            bit = (rows_seen[q_idx] >> offset.clamp(0, 63)) & 1
+            before_rows = logical_kv_idx < logical_q_idx - row
+            return (row < 0) | before_rows | (in_rows & (bit != 0))
+
+        return spec_plan_mask_mod
+
+    def spec_window_positions(
+        self,
+        q_idx: torch.Tensor,
+        logical_q_idx: torch.Tensor,
+        logical_kv_idx: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """The positions a sliding window compares for a query token and a KV
+        slot: a plan row's position is ``spec_positions`` (its depth or the
+        plan's explicit offset), not its KV slot; every other slot is at its
+        index."""
+        if self.spec_row is None or self.spec_positions is None:
+            return logical_q_idx, logical_kv_idx
+        positions = self.spec_positions
+        row, offset, in_rows = self._spec_plan_rows(
+            q_idx, logical_q_idx, logical_kv_idx
+        )
+        q_pos = torch.where(row >= 0, positions[q_idx], logical_q_idx)
+        kv_token = (q_idx - row + offset).clamp(0, positions.shape[0] - 1)
+        kv_pos = torch.where(in_rows, positions[kv_token], logical_kv_idx)
+        return q_pos, kv_pos
+
     def get_paged_mask_mod(self) -> _mask_mod_signature:
         """Creates the mask_mod function for FlexAttention.
 
@@ -462,6 +541,9 @@ class FlexAttentionMetadata:
         layout of the query and key/value tensors.
         """
         assert self.doc_ids is not None
+        spec_plan_mask_mod = (
+            self.get_spec_plan_mask_mod() if self.spec_rows_seen is not None else None
+        )
 
         def final_mask_mod(
             b: torch.Tensor,
@@ -472,7 +554,10 @@ class FlexAttentionMetadata:
             (is_valid, logical_q_idx, logical_kv_idx) = (
                 self._convert_physical_to_logical(self.doc_ids, q_idx, physical_kv_idx)
             )
-            return is_valid & self.logical_mask_mod(b, h, logical_q_idx, logical_kv_idx)
+            mask = is_valid & self.logical_mask_mod(b, h, logical_q_idx, logical_kv_idx)
+            if spec_plan_mask_mod is not None:
+                mask = mask & spec_plan_mask_mod(q_idx, logical_q_idx, logical_kv_idx)
+            return mask
 
         return final_mask_mod
 
@@ -503,6 +588,8 @@ class FlexAttentionMetadata:
 
         Note that the sliding window mask here is bidirectional, we need
         to mask it with the bidirectional/causal mask for encoder/decoder.
+        With a speculative plan in the batch, plan rows are measured by position
+        (``spec_window_positions``), not by KV slot.
         """
         if self.sliding_window is None:
             raise ValueError("sliding_window must be set for sliding window attention")
@@ -521,9 +608,12 @@ class FlexAttentionMetadata:
             (is_valid, logical_q_idx, logical_kv_idx) = (
                 self._convert_physical_to_logical(self.doc_ids, q_idx, physical_kv_idx)
             )
+            q_pos, kv_pos = self.spec_window_positions(
+                q_idx, logical_q_idx, logical_kv_idx
+            )
             return torch.where(
                 is_valid,
-                sliding_window_mask_mod(b, h, logical_q_idx, logical_kv_idx),
+                sliding_window_mask_mod(b, h, q_pos, kv_pos),
                 False,
             )
 
@@ -745,6 +835,20 @@ class FlexAttentionMetadata:
                 min_kv_idx = torch.clamp(
                     logical_q_idx - (self.sliding_window - 1), min=0
                 )
+                if self.spec_row is not None and self.spec_positions is not None:
+                    # A plan row's window starts from its position, and its own
+                    # plan's rows (whose positions are not their slots) stay.
+                    num_tokens = token_indices.shape[0]
+                    row = self.spec_row[:num_tokens]
+                    plan_min_kv_idx = torch.minimum(
+                        torch.clamp(
+                            self.spec_positions[:num_tokens]
+                            - (self.sliding_window - 1),
+                            min=0,
+                        ),
+                        logical_q_idx - row,
+                    )
+                    min_kv_idx = torch.where(row >= 0, plan_min_kv_idx, min_kv_idx)
                 min_block_idx = min_kv_idx // self.block_size
                 sliding_mask = self.logical_block_ids >= min_block_idx[:, None]
                 used_pages.masked_fill_(~sliding_mask, 0)
@@ -914,6 +1018,12 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         self.persistent_doc_ids = torch.empty(
             max_num_batched_tokens, dtype=torch.int32, device=device
         )
+        # Speculative plan buffers (FlexAttentionMetadata.spec_*), allocated on
+        # the first batch laid out as a plan.
+        self.max_num_batched_tokens = max_num_batched_tokens
+        self.persistent_spec_rows_seen: torch.Tensor | None = None
+        self.persistent_spec_row: torch.Tensor | None = None
+        self.persistent_spec_positions: torch.Tensor | None = None
 
         # initialize later when we can access block_table
         self.persistent_physical_to_logical = None
@@ -995,6 +1105,89 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
     def _uses_full_cudagraphs(self) -> bool:
         mode = self.vllm_config.compilation_config.cudagraph_mode
         return mode is not None and mode.has_full_cudagraphs()
+
+    def spec_verify_limit(
+        self,
+        kv_cache_dtype: str = "auto",
+        sliding_window: int | None = None,
+        has_sinks: bool = False,
+        logits_soft_cap: float | None = None,
+        has_alibi: bool = False,
+        chunk_size: int | None = None,
+        rswa_window: int | None = None,
+        kv_sharing_target: str | None = None,
+        **features: object,
+    ) -> tuple["PlanKind", str]:
+        """Masks (and so trees) on full and sliding-window attention: the
+        ``mask_mod`` reads ``tree_ancestors`` and measures the window by
+        position. Chains for every feature it does not apply by
+        position or does not support at all."""
+        name = type(self).__name__
+        lowered_by = [
+            what
+            for what, present in (
+                ("a quantized KV cache", is_quantized_kv_cache(kv_cache_dtype)),
+                ("attention sinks", has_sinks),
+                ("logits soft cap", bool(logits_soft_cap)),
+                ("ALiBi", has_alibi),
+                ("chunked local attention", bool(chunk_size)),
+                ("R-SWA", rswa_window is not None),
+                ("KV sharing", kv_sharing_target is not None),
+            )
+            if present
+        ]
+        if lowered_by:
+            return "chain", (
+                f"{name} verifies trees on full and sliding-window attention "
+                f"only, not with {', '.join(lowered_by)}"
+            )
+        return "mask", f"{name} verifies mask"
+
+    def _spec_plan_fields(
+        self, common_attn_metadata: CommonAttentionMetadata
+    ) -> SpecPlanFields:
+        """``FlexAttentionMetadata.spec_*`` of a batch laid out as a plan
+        (``tree_parents`` set), in persistent buffers; all None otherwise."""
+        rows_seen = common_attn_metadata.tree_ancestors
+        if common_attn_metadata.tree_parents is None or rows_seen is None:
+            return SpecPlanFields(
+                spec_rows_seen=None, spec_row=None, spec_positions=None
+            )
+        if self.persistent_spec_rows_seen is None:
+            size, device = self.max_num_batched_tokens, self.device
+            self.persistent_spec_rows_seen = torch.zeros(
+                size, dtype=torch.int64, device=device
+            )
+            self.persistent_spec_row = torch.full(
+                (size,), -1, dtype=torch.int64, device=device
+            )
+            self.persistent_spec_positions = torch.zeros(
+                size, dtype=torch.int64, device=device
+            )
+            self.spec_bit_ids = torch.arange(64, dtype=torch.int64, device=device)
+        assert self.persistent_spec_row is not None
+        assert self.persistent_spec_positions is not None
+        num_tokens = common_attn_metadata.num_actual_tokens
+        rows_seen = rows_seen[:num_tokens].to(torch.int64)
+        copy_to_persistent(self.persistent_spec_rows_seen, rows_seen)
+        # A row's own bit is its highest (it sees no later row): row = the
+        # number of nonzero right shifts - 1, so -1 for a token outside a plan.
+        # An arithmetic shift keeps bit 63 (row 63) nonzero to the end.
+        row = (rows_seen[:, None] >> self.spec_bit_ids).ne(0).sum(dim=-1) - 1
+        copy_to_persistent(self.persistent_spec_row, row)
+        # A laid-out batch's positions are its plan positions.
+        positions = common_attn_metadata.positions
+        spec_positions = None
+        if positions is not None:
+            copy_to_persistent(
+                self.persistent_spec_positions, positions[:num_tokens].to(torch.int64)
+            )
+            spec_positions = self.persistent_spec_positions
+        return SpecPlanFields(
+            spec_rows_seen=self.persistent_spec_rows_seen,
+            spec_row=self.persistent_spec_row,
+            spec_positions=spec_positions,
+        )
 
     def build(
         self,
@@ -1123,6 +1316,7 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             mm_prefix_range=common_attn_metadata.mm_req_doc_ranges,
             rswa_prefix_lens=rswa_prefix_lens,
             rswa_window=self.rswa_window,
+            **self._spec_plan_fields(common_attn_metadata),
         )
 
         # Pre-build block_mask so it is ready before CUDA graph capture.

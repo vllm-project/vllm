@@ -16,11 +16,13 @@ import pytest
 import torch
 
 import vllm.v1.worker.gpu.model_runner as model_runner_module
+import vllm.v1.worker.gpu.spec_decode.round_runner as round_runner
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.gpu.spec_decode.ngram.speculator import NgramGPUSpeculator
+from vllm.v1.worker.gpu.spec_decode.round import SpecResources
 from vllm.v1.worker.gpu.spec_decode.speculator import BaseSpeculator
 from vllm.v1.worker.gpu.spec_decode.step_observation import StepObservation
 
@@ -140,9 +142,16 @@ def _runner(speculator, monkeypatch) -> GPUModelRunner:
     runner.check_ep_fault = False
     runner.kv_connector = Mock()
     runner.postprocess_sampled = lambda *args, **kw: None  # type: ignore[method-assign]
-    runner.commit_round = lambda *args: None  # type: ignore[method-assign]
-    runner.chain_path = None
-    runner.max_branching = 1
+    runner.spec_round = None
+    if speculator is not None:
+        runner.spec_round = round_runner.SpecRound(
+            None,  # type: ignore[arg-type]
+            SpecResources(max_candidates=4, capture_shapes=()),
+            max_num_reqs=8,
+            max_num_tokens=32,
+            num_speculative_steps=3,
+            device=torch.device("cpu"),
+        )
     runner.sampler = SimpleNamespace(
         sampling_states=SimpleNamespace(
             temperature=SimpleNamespace(gpu=None), seeds=SimpleNamespace(gpu=None)
@@ -301,11 +310,10 @@ def test_step_is_observed_after_the_commit_and_before_propose(monkeypatch):
 
     speculator.propose = record_propose  # type: ignore[method-assign]
     runner = _runner(speculator, monkeypatch)
-    runner.commit_round = lambda *a: order.append("commit")  # type: ignore[method-assign]
-    monkeypatch.setattr(
-        model_runner_module, "accept_result_of", lambda *a: order, raising=False
-    )
-    runner.chain_path = torch.zeros(1)
+    spec_round = runner.spec_round
+    assert spec_round is not None
+    spec_round.commit = lambda *a: order.append("commit")  # type: ignore[method-assign]
+    spec_round.accept_result = lambda *a: order  # type: ignore[method-assign]
     batch = _batch(2, 2, [4, 4], [3, 3], [False, False], [1, 2])
     batch.verify_plan = object()
     desc = BatchExecutionDescriptor(
@@ -325,7 +333,7 @@ def test_no_record_is_built_unless_observe_step_is_overridden(
     def unexpected(*args, **kwargs):
         pytest.fail("built a StepObservation for a speculator that does not observe")
 
-    monkeypatch.setattr(model_runner_module, "StepObservation", unexpected)
+    monkeypatch.setattr(round_runner, "StepObservation", unexpected)
     monkeypatch.setattr(BaseSpeculator, "observe_step", unexpected)
     if not with_speculator:
         runner.num_speculative_steps = 0
@@ -377,8 +385,7 @@ def test_step_start_is_stamped_only_for_an_observer(monkeypatch, observing):
         observability_config=SimpleNamespace(cudagraph_metrics=False),
         prepare_inputs=lambda *a: batch,
         prepare_attn=lambda b: ([], []),
-        restore_chain_positions=lambda b: None,
-        max_branching=1,
+        spec_round=None,
         model_state=SimpleNamespace(
             preprocess_state=lambda *a: None,
             prepare_attn=lambda *a, **kw: {},
@@ -430,15 +437,15 @@ def test_observe_step_cost(monkeypatch):
     )
     sampled = torch.ones(4, dtype=torch.int32)
     rejected = torch.zeros(4, dtype=torch.int32)
+    spec_round = runner.spec_round
+    assert spec_round is not None
     n = 20_000
     off = frozenset({"accept"})
     disabled_s = min(timeit.repeat(lambda: "observe_step" in off, number=n, repeat=5))
     observer.seen = _Discard()  # type: ignore[assignment]
     enabled_s = min(
         timeit.repeat(
-            lambda: GPUModelRunner._observe_step(
-                runner, batch, desc, 0, 3, sampled, rejected
-            ),
+            lambda: spec_round.observe(observer, batch, desc, 0, 3, sampled, rejected),
             number=n,
             repeat=5,
         )

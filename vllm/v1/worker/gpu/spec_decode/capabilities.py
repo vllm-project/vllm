@@ -14,7 +14,7 @@ speculator as a chain; only a layer that cannot verify a chain at all (plan kind
 """
 
 from collections import Counter
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
@@ -28,10 +28,11 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-PlanKind = Literal["none", "chain", "tree"]
+PlanKind = Literal["none", "chain", "tree", "mask"]
 """The plans a model verifies, in increasing order: ``"none"`` (no speculative
 decoding), ``"chain"`` (each row follows the one before it), ``"tree"`` (each
-row names its parent row)."""
+row names its parent row and sees its ancestors), ``"mask"`` (a tree whose rows
+may also carry their own visibility mask, ``VerifyPlan.mask``)."""
 
 PLAN_KINDS: tuple[PlanKind, ...] = get_args(PlanKind)
 
@@ -81,21 +82,14 @@ class SpecCapabilities:
 
     plan_kind: PlanKind
     """The lowest plan kind any layer or setting allows."""
-    tree_requires_uniform_rows: bool
-    """Whether a layer's builder only takes batches whose requests have the same
-    number of query rows. Binds only when the effective plan kind is ``"tree"``
-    or higher: a variable-length chain runs on its prefill path."""
     limits: tuple[SpecLimit, ...] = ()
     """Every cap below the highest plan kind, for the startup log."""
 
     @classmethod
-    def from_limits(
-        cls, limits: Iterable[SpecLimit], tree_requires_uniform_rows: bool
-    ) -> "SpecCapabilities":
+    def from_limits(cls, limits: Iterable[SpecLimit]) -> "SpecCapabilities":
         limits = tuple(dict.fromkeys(limits))
         return cls(
             plan_kind=min_plan_kind(limit.plan_kind for limit in limits),
-            tree_requires_uniform_rows=tree_requires_uniform_rows,
             limits=limits,
         )
 
@@ -106,96 +100,92 @@ def reduce_spec_capabilities(
     """Combine the reports of every rank: pipeline-parallel ranks hold
     different layers, so the model verifies the lowest plan kind of any rank."""
     return SpecCapabilities.from_limits(
-        (limit for caps in capabilities for limit in caps.limits),
-        tree_requires_uniform_rows=any(
-            caps.tree_requires_uniform_rows for caps in capabilities
-        ),
+        limit for caps in capabilities for limit in caps.limits
     )
 
 
-def layer_spec_limits(
-    attn_groups: Iterable[Iterable["AttentionGroup"]],
-    layers: Mapping[str, Any],
-    mamba_state_mode: str,
-    excluded_layer_names: frozenset[str] = frozenset(),
-    kernels: "KernelRegistry | None" = None,
-) -> tuple[list[SpecLimit], bool]:
-    """The plan kind caps of the target's layers, one per (layer kind, reason)
-    with its layer count, and whether a layer's builder needs uniform rows.
-
-    A layer verifies what the spec kernels it needs support for it
-    (``KernelRegistry.plan_kind``; ``kernels`` defaults to the reference
-    kernels). An attention layer is further capped by what its metadata
-    builder's ``spec_verify_plan_kind`` returns for the layer's features. A
-    recurrent layer (``MambaBase``) verifies nothing when its class sets
-    ``spec_chain_supported = False`` and chains when it declares no
-    ``spec_layer_variant``. Draft layers (and ``excluded_layer_names``),
+def spec_layers(
+    attn_groups: Iterable[Iterable["AttentionGroup"]], layers: Mapping[str, Any]
+) -> Iterator[tuple["AttentionGroup", str, Any, Any]]:
+    """``(group, name, spec, layer)`` for each target layer a speculative round
+    verifies: its attention group, KV cache spec and module. Draft layers,
     hidden-state caches and encoder or cross attention (whose rows do not
-    attend to each other) do not count.
+    attend to each other) are not verified.
     """
-    from vllm.model_executor.layers.attention.mla_attention import QueryLenSupport
-    from vllm.model_executor.layers.mamba.abstract import MambaBase
     from vllm.v1.kv_cache_interface import (
         CrossAttentionSpec,
         EncoderOnlyAttentionSpec,
         HiddenStateCacheSpec,
         UniformTypeKVCacheSpecs,
     )
+
+    skipped = (HiddenStateCacheSpec, EncoderOnlyAttentionSpec, CrossAttentionSpec)
+    for groups in attn_groups:
+        for group in groups:
+            for name in group.layer_names:
+                spec = group.kv_cache_spec
+                if isinstance(spec, UniformTypeKVCacheSpecs):
+                    spec = spec.kv_cache_specs[name]
+                layer = layers.get(name)
+                # A group's spec can come from a draft layer or a target layer
+                # alike, so the layer says whether it is a draft layer.
+                if getattr(layer, "is_draft_layer", False) or isinstance(spec, skipped):
+                    continue
+                yield group, name, spec, layer
+
+
+def mamba_state_mode(cache_config: Any) -> str:
+    """How recurrent layers keep the drafts' states."""
+    if cache_config.use_replayssm:
+        return "replay"
+    if cache_config.use_kda_recoverssm:
+        return "recover"
+    return "slots"
+
+
+def layer_spec_limits(
+    attn_groups: Iterable[Iterable["AttentionGroup"]],
+    layers: Mapping[str, Any],
+    mamba_state_mode: str,
+    kernels: "KernelRegistry | None" = None,
+) -> list[SpecLimit]:
+    """The plan kind caps of the target's layers, one per (layer kind, reason)
+    with its layer count.
+
+    A layer verifies what the spec kernels it needs support for it
+    (``KernelRegistry.plan_kind``; ``kernels`` defaults to the reference
+    kernels). An attention layer is further capped by what its metadata
+    builder's ``spec_verify_limit`` returns for the layer's features. A
+    recurrent layer (``MambaBase``) verifies nothing when its class sets
+    ``spec_chain_supported = False`` and chains when it declares no
+    ``spec_layer_variant``. Only the layers of :func:`spec_layers` count.
+    """
+    from vllm.model_executor.layers.mamba.abstract import MambaBase
     from vllm.v1.worker.gpu.spec_decode.kernels import KernelRegistry, SpecLayerSpec
 
     if kernels is None:
         kernels = KernelRegistry()
     # (plan kind, what the layers are, why) -> number of layers
     num_layers: Counter[tuple[PlanKind, str, str]] = Counter()
-    tree_requires_uniform_rows = False
-    for groups in attn_groups:
-        for group in groups:
-            builder = group.metadata_builders[0]
-            for name in group.layer_names:
-                spec = group.kv_cache_spec
-                if isinstance(spec, UniformTypeKVCacheSpecs):
-                    spec = spec.kv_cache_specs[name]
-                if (
-                    name in excluded_layer_names
-                    or getattr(spec, "is_draft", False)
-                    or isinstance(
-                        spec,
-                        (
-                            HiddenStateCacheSpec,
-                            EncoderOnlyAttentionSpec,
-                            CrossAttentionSpec,
-                        ),
-                    )
-                ):
-                    continue
-                layer = layers.get(name)
-                if isinstance(layer, MambaBase):
-                    num_layers[
-                        _mamba_layer_limit(name, layer, kernels, mamba_state_mode)
-                    ] += 1
-                    continue
-                kind = attn_layer_kind(spec)
-                plan_kind = builder.spec_verify_plan_kind(
-                    **attn_layer_features(layer, spec)
-                )
-                why = f"{type(builder).__name__} verifies {plan_kind}"
-                kernel_kind, kernel_why = kernels.plan_kind(
-                    SpecLayerSpec(name, kind, layer, layout=attn_layout(layer, spec))
-                )
-                if plan_kind_rank(kernel_kind) < plan_kind_rank(plan_kind):
-                    plan_kind, why = kernel_kind, kernel_why
-                num_layers[(plan_kind, kind.key(), why)] += 1
-                if (
-                    getattr(builder, "query_len_support", None)
-                    == QueryLenSupport.UNIFORM
-                ):
-                    tree_requires_uniform_rows = True
-    limits = [
+    for group, name, spec, layer in spec_layers(attn_groups, layers):
+        if isinstance(layer, MambaBase):
+            num_layers[_mamba_layer_limit(name, layer, kernels, mamba_state_mode)] += 1
+            continue
+        kind = attn_layer_kind(spec)
+        plan_kind, why = group.metadata_builders[0].spec_verify_limit(
+            **attn_layer_features(layer, spec)
+        )
+        kernel_kind, kernel_why = kernels.plan_kind(
+            SpecLayerSpec(name, kind, layer, layout=attn_layout(layer, spec))
+        )
+        if plan_kind_rank(kernel_kind) < plan_kind_rank(plan_kind):
+            plan_kind, why = kernel_kind, kernel_why
+        num_layers[(plan_kind, kind.key(), why)] += 1
+    return [
         SpecLimit(plan_kind, f"{what}, {n} layer{'s' * (n != 1)}: {why}")
         for (plan_kind, what, why), n in num_layers.items()
         if plan_kind != PLAN_KINDS[-1]
     ]
-    return limits, tree_requires_uniform_rows
 
 
 def _mamba_layer_limit(
@@ -215,6 +205,11 @@ def _mamba_layer_limit(
     plan_kind, why = kernels.plan_kind(
         SpecLayerSpec(name, kind, layer, layout="mamba_state")
     )
+    if plan_kind == "tree":
+        # A row's state folds in every ancestor along parent, so a recurrent
+        # layer cannot hide one: masks lower to trees unless its verify kernel
+        # itself verifies masks.
+        why += " (a recurrent state folds in every ancestor: no masks)"
     return (plan_kind, kind.key(), why)
 
 
@@ -241,7 +236,7 @@ def attn_layout(layer: Any, spec: Any) -> str:
 
 
 def attn_layer_features(layer: Any, spec: Any) -> dict[str, Any]:
-    """The keyword arguments of ``AttentionMetadataBuilder.spec_verify_plan_kind``
+    """The keyword arguments of ``AttentionMetadataBuilder.spec_verify_limit``
     for an attention layer with KV cache spec ``spec``. Features the layer does
     not have are None or False (e.g. a soft cap of 0 is no soft cap)."""
     from vllm.v1.kv_cache_interface import SinkFullAttentionSpec
@@ -319,15 +314,6 @@ def validate_effective_resources(
     extra_shapes = set(effective.capture_shapes) - set(declared.capture_shapes)
     if extra_shapes:
         problems.append(f"capture_shapes {sorted(extra_shapes, key=str)} not declared")
-    if (
-        plan_kind_rank(effective.plan_kind) >= plan_kind_rank("tree")
-        and caps.tree_requires_uniform_rows
-        and effective.varlen
-    ):
-        problems.append(
-            "a variable-length capture shape with trees on a builder that needs "
-            "uniform rows"
-        )
     if problems:
         raise ValueError(
             "SpeculatorConfig.adapt_resources returned resources the model cannot "

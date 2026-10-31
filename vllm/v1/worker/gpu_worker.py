@@ -942,7 +942,8 @@ class Worker(WorkerBase):
 
     def get_spec_capabilities(self) -> "SpecCapabilities | None":
         # None without speculative decoding or on the V1 model runner.
-        return getattr(self.model_runner, "spec_capabilities", None)
+        spec_round = getattr(self.model_runner, "spec_round", None)
+        return spec_round.capabilities if spec_round is not None else None
 
     def set_spec_resources(self, resources: "SpecResources") -> None:
         if self.get_spec_capabilities() is not None:

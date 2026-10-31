@@ -7,8 +7,11 @@ root. The runner computes the batch's positions and slot mappings as for a chain
 (``num_computed_tokens + i``) and keeps the slot mappings: every row writes its KV at
 the chain slot of its row index, and the commit compacts the accepted path afterwards.
 For a plan that is not a chain, :meth:`PlanLayout.apply` then moves each row's
-position to ``num_computed_tokens + depth`` and computes its ancestor set (bit ``j``
-set iff row ``j`` is the row or one of its ancestors), which tree attention reads.
+position to ``num_computed_tokens + depth`` (or ``+ VerifyPlan.positions``) and
+computes its ancestor set (bit ``j`` set iff row ``j`` is the row or one of its
+ancestors), which tree attention reads, and, for a layout with a mask buffer, the
+rows it sees (``VerifyPlan.mask`` in the same bits, else the ancestor set), which
+custom-mask attention reads.
 """
 
 import torch
@@ -44,15 +47,21 @@ def _plan_layout_kernel(
     query_start_loc_ptr,  # [num_reqs + 1] int32
     positions_ptr,  # [num_tokens] int64: chain positions in, plan positions out
     input_ids_ptr,  # [num_tokens] int32: candidate rows take the plan's tokens
-    depth_ptr,  # [R, C] int32 out
-    ancestors_ptr,  # [R, C] int64 out
     tree_parents_ptr,  # [num_tokens] int32 out: parent row within the request
-    tree_ancestors_ptr,  # [num_tokens] int64 out: ancestor bits, 0 = causal
+    tree_ancestors_ptr,  # [num_tokens] int64 out: rows seen, 0 = causal
     pos_delta_ptr,  # [num_tokens] int32 out: plan position - chain position
+    plan_positions_ptr,  # [R, C] int32 position offsets (unused unless POSITIONS)
+    stride_plan_positions,
+    plan_mask_ptr,  # [R, C, C] bool rows seen (unused unless MASK)
+    stride_mask_r,
+    stride_mask_i,
+    stride_mask_j,
     C: tl.constexpr,
     CP: tl.constexpr,
     TOKENS: tl.constexpr,
     CHAIN: tl.constexpr,
+    POSITIONS: tl.constexpr,
+    MASK: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     b = tl.program_id(0)
@@ -84,14 +93,17 @@ def _plan_layout_kernel(
         ancestors = tl.where(
             rows == r, tl.sum(tl.where(at_parent, ancestors, 0)) | own_bit, ancestors
         )
-    depth = tl.where(is_row, depth, 0)
-    ancestors = tl.where(is_row, ancestors, 0)
-    tl.store(depth_ptr + b * C + rows, depth, mask=rows < C)
-    tl.store(ancestors_ptr + b * C + rows, ancestors, mask=rows < C)
-    # Chain position = context + row; plan position = context + depth.
+    # Chain position = context + row; plan position = context + depth, or context
+    # + the plan's own offset.
+    if POSITIONS:
+        offset_pos = tl.load(
+            plan_positions_ptr + b * stride_plan_positions + rows, mask=is_row, other=0
+        )
+    else:
+        offset_pos = depth
     positions = tl.load(positions_ptr + start + rows, mask=is_row, other=0)
-    tl.store(positions_ptr + start + rows, positions - rows + depth, mask=is_row)
-    tl.store(pos_delta_ptr + start + rows, depth - rows, mask=is_row)
+    tl.store(positions_ptr + start + rows, positions - rows + offset_pos, mask=is_row)
+    tl.store(pos_delta_ptr + start + rows, offset_pos - rows, mask=is_row)
     # Parent as a row of the request's query: the root continues the token before
     # it (-1 when the root is the query's first token).
     offset = start - query_start
@@ -100,11 +112,27 @@ def _plan_layout_kernel(
     # A chain attends causally; a branching plan is the whole query (prefills
     # verify chains only), so its bits index the request's query rows.
     if CHAIN:
-        tl.store(
-            tree_ancestors_ptr + start + rows, tl.zeros([CP], tl.int64), mask=is_row
+        seen = tl.zeros([CP], tl.int64)
+    elif MASK:
+        # Row i sees row j <= i where mask[b, i, j]; its own bit is always set
+        # and later rows are never seen.
+        cols = tl.arange(0, CP)
+        lower = (cols[None, :] <= rows[:, None]) & (rows[:, None] < C)
+        lower = lower & (cols[None, :] < C)
+        sees = tl.load(
+            plan_mask_ptr
+            + b * stride_mask_r
+            + rows[:, None] * stride_mask_i
+            + cols[None, :] * stride_mask_j,
+            mask=lower,
+            other=0,
         )
+        bits = tl.where((sees != 0) & lower, tl.cast(1, tl.int64) << cols[None, :], 0)
+        own = tl.cast(1, tl.int64) << rows
+        seen = tl.where(is_row, tl.sum(bits, axis=1) | own, 0)
     else:
-        tl.store(tree_ancestors_ptr + start + rows, ancestors, mask=is_row)
+        seen = ancestors
+    tl.store(tree_ancestors_ptr + start + rows, seen, mask=is_row)
     if TOKENS:
         is_candidate = is_row & (rows > 0)
         tokens = tl.load(tokens_ptr + b * stride_tokens + rows, mask=is_candidate)
@@ -112,22 +140,20 @@ def _plan_layout_kernel(
 
 
 class PlanLayout:
-    """Depths and ancestor sets of the batch's verify rows, in buffers CUDA graphs
+    """The batch's verify rows laid out per query token, in buffers CUDA graphs
     replay, and the chain positions to put back after the forward.
 
-    Per batch row (``[R, C]``): ``depth`` and ``ancestors`` (bit ``j`` set iff plan
-    row ``j`` is the row or one of its ancestors; 0 past the request's ``count``).
     Per query token: ``tree_parents`` (the parent as a row of the request's query,
     -1 for the query's first token; a chain's ``i - 1`` for tokens that are not plan
-    rows), ``tree_ancestors`` (the row's ancestor bits over the query rows for a
-    branching plan, 0 for every token of a chain: attend causally) and
-    ``pos_delta`` (plan position minus chain position). The first two are what
-    ``CommonAttentionMetadata.tree_parents`` / ``tree_ancestors`` point at.
+    rows), ``tree_ancestors`` (the query rows the row sees, as bits: the plan's
+    ``mask`` when it has one, else the row's ancestors; 0 for every token of a
+    chain: attend causally) and ``pos_delta`` (plan position minus chain position).
+    The first two are what ``CommonAttentionMetadata.tree_parents`` /
+    ``tree_ancestors`` point at.
     """
 
     def __init__(
         self,
-        max_num_reqs: int,
         max_num_tokens: int,
         max_rows: int,
         device: torch.device,
@@ -138,12 +164,6 @@ class PlanLayout:
                 f"got {max_rows}"
             )
         self.max_rows = max_rows
-        self.depth = torch.zeros(
-            max_num_reqs, max_rows, dtype=torch.int32, device=device
-        )
-        self.ancestors = torch.zeros(
-            max_num_reqs, max_rows, dtype=torch.int64, device=device
-        )
         self.tree_parents = torch.full(
             (max_num_tokens,), -1, dtype=torch.int32, device=device
         )
@@ -181,6 +201,7 @@ class PlanLayout:
         num_rows = plan.parent.shape[1]
         tokens = plan.tokens if plan.tokens is not None and not plan.is_chain else None
         assert tokens is None or input_ids is not None
+        plan_positions, mask = plan.positions, plan.mask
         _plan_layout_kernel[(num_reqs,)](
             plan.parent,
             plan.parent.stride(0),
@@ -190,15 +211,21 @@ class PlanLayout:
             query_start_loc,
             positions,
             input_ids if input_ids is not None else positions,
-            self.depth,
-            self.ancestors,
             self.tree_parents,
             self.tree_ancestors,
             self.pos_delta,
+            plan_positions if plan_positions is not None else plan.parent,
+            plan_positions.stride(0) if plan_positions is not None else 0,
+            mask if mask is not None else plan.parent,
+            mask.stride(0) if mask is not None else 0,
+            mask.stride(1) if mask is not None else 0,
+            mask.stride(2) if mask is not None else 0,
             C=num_rows,
             CP=triton.next_power_of_2(num_rows),
             TOKENS=tokens is not None,
             CHAIN=plan.is_chain,
+            POSITIONS=plan_positions is not None,
+            MASK=mask is not None,
             BLOCK=256,
             num_warps=1,
         )

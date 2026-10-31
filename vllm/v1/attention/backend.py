@@ -443,7 +443,11 @@ class CommonAttentionMetadata:
     positions: torch.Tensor | None = None
     """(num_actual_tokens,) token positions.  Optional; set when the caller
     has positions available so that builders can pre-compute position-dependent
-    sparse metadata for DeepSeek V4 C128A layers."""
+    sparse metadata for DeepSeek V4 C128A layers. On a batch laid out as a plan
+    (``tree_parents`` set) a plan row's position is ``num_computed_tokens`` plus
+    its depth, or plus its ``VerifyPlan.positions`` offset, not its KV slot index:
+    a backend that verifies trees measures position terms (a sliding window,
+    ALiBi, a chunk) on these."""
 
     is_prefilling: torch.Tensor | None = None
     """(batch_size,) bool tensor: True if request is still in prefill phase
@@ -486,12 +490,13 @@ class CommonAttentionMetadata:
     speculative decodes are read. None means every request is a chain."""
 
     tree_ancestors: torch.Tensor | None = None
-    """(num_tokens,) int64 alongside ``tree_parents``: bit ``j`` is set when row
-    ``j`` of the token's plan is the token's row or one of its ancestors, so a
-    plan row attends to the request's context and to the rows whose bits are
-    set. 0 for a token that is not a plan row (a prompt token in front of the
-    plan), which attends causally. Plan rows are the request's last ``count``
-    query tokens."""
+    """(num_tokens,) int64 alongside ``tree_parents``: bit ``j`` is set when the
+    token sees row ``j`` of its plan, so a plan row attends to the request's
+    context and to the rows whose bits are set. The row's own bit and its
+    ancestors' bits, or the plan's ``VerifyPlan.mask`` when it has one (only on
+    a model whose every layer verifies ``"mask"`` plans). 0 for a token that is
+    not a plan row (a prompt token in front of the plan), which attends
+    causally. Plan rows are the request's last ``count`` query tokens."""
 
     _num_computed_tokens_cache: torch.Tensor | None = None
     _token_to_req_indices_cache: torch.Tensor | None = None
@@ -576,12 +581,6 @@ class CommonAttentionMetadata:
             req_idx=maybe_slice_reqs(self.req_idx),
             rswa_prefix_lens=maybe_slice_reqs(self.rswa_prefix_lens),
             replayssm_decode_base_cpu=maybe_slice_reqs(self.replayssm_decode_base_cpu),
-            tree_parents=self.tree_parents[:num_actual_tokens]
-            if self.tree_parents is not None
-            else None,
-            tree_ancestors=self.tree_ancestors[:num_actual_tokens]
-            if self.tree_ancestors is not None
-            else None,
         )
 
 
@@ -689,7 +688,7 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         """
         return None
 
-    def spec_verify_plan_kind(
+    def spec_verify_limit(
         self,
         *,
         kv_cache_dtype: str,
@@ -700,18 +699,21 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         chunk_size: int | None,
         rswa_window: int | None,
         kv_sharing_target: str | None,
-    ) -> "PlanKind":
+    ) -> tuple["PlanKind", str]:
         """The highest speculative plan kind this builder's backend verifies
-        correctly for a layer with these features.
+        correctly for a layer with these features, and why: the reason the
+        startup log gives when it lowers a speculator's plans.
 
         ``"chain"`` assumes each verify row follows the one before it.
         ``"tree"`` reads ``CommonAttentionMetadata.tree_ancestors`` (attention)
         or ``tree_parents`` (recurrent layers) and applies every feature of the
-        layer (window, sinks, soft cap, ALiBi, chunk) by position. Features the
-        layer does not have are None or False. Read off the built builder, so an
-        instance may answer per layer group.
+        layer (window, sinks, soft cap, ALiBi, chunk) by position
+        (``CommonAttentionMetadata.positions``). ``"mask"`` is a tree backend
+        whose ``tree_ancestors`` may be any mask over earlier rows. Features the
+        layer does not have are None or False. Read off the built builder, so
+        an instance may answer per layer group.
         """
-        return "chain"
+        return "chain", f"{type(self).__name__} verifies chain"
 
     def _init_reorder_batch_threshold(
         self,

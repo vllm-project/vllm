@@ -61,10 +61,16 @@ class SpecResources:
     max_branching: int = 1
     """1 for chains. Above 1 the attention backend and the linear-attention layers must
     take a parent per row."""
+    custom_mask: bool = False
+    """Plans may carry ``VerifyPlan.mask``: the attention layers must take a
+    visibility mask per row. Needs ``max_branching > 1``."""
 
     @property
     def plan_kind(self) -> PlanKind:
-        """The plans the speculator verifies: trees when it branches."""
+        """The plans the speculator verifies: masks when it declares
+        ``custom_mask``, trees when it branches, else chains."""
+        if self.custom_mask:
+            return "mask"
         return "tree" if self.max_branching > 1 else "chain"
 
     def __post_init__(self) -> None:
@@ -84,6 +90,11 @@ class SpecResources:
         if self.max_branching < 1:
             raise ValueError(
                 f"max_branching ({self.max_branching}) must be >= 1: 1 is a chain."
+            )
+        if self.custom_mask and self.max_branching == 1:
+            raise ValueError(
+                "custom_mask needs max_branching > 1: a plan with a mask is laid "
+                "out as a tree"
             )
 
     @property
@@ -132,7 +143,8 @@ class VerifyPlan:
     ``count[r]`` are ignored.
 
     The runner derives from the plan the position of each row (``num_computed_tokens``
-    plus its depth), its ancestor set, and its KV slot: every row writes its KV at the
+    plus its depth, or plus ``positions``), the rows it sees (its ancestors, or
+    ``mask``), and its KV slot: every row writes its KV at the
     chain slot of its row index, and the commit compacts the accepted path afterwards.
 
     Buffers belong to whoever built the plan and stay valid until the commit returns,
@@ -155,10 +167,38 @@ class VerifyPlan:
     construction. The runner then runs the chain-only path: positions stay
     ``num_computed_tokens + i``, no ancestor sets, no KV compaction. Never derived
     from the device tensors."""
+    positions: torch.Tensor | None = None
+    """``[R, C]`` int32 position of each row as an offset from
+    ``num_computed_tokens``, replacing the row's depth; None places each row at its
+    depth. Positions do not enter a recurrence, so any model takes them. A row's KV
+    slot stays its row index."""
+    mask: torch.Tensor | None = None
+    """``[R, C, C]`` bool: ``mask[r, i, j]`` is whether row ``i`` sees row ``j``;
+    None sees the row's ancestors. ``mask[r, i, i]`` is taken as True and entries
+    with ``j > i`` are ignored (a row never sees a later row); the committed prefix
+    is always visible. Needs resources with ``custom_mask`` (plan kind
+    ``"mask"``). ``parent`` still gives the paths the commit accepts along, and the
+    recurrent layers of a hybrid model read ``parent``, not the mask."""
 
     def __post_init__(self) -> None:
         if not self.is_chain and (self.count is None or self.tokens is None):
             raise ValueError("a plan that is not a chain must carry count and tokens")
+        if self.is_chain and (self.positions is not None or self.mask is not None):
+            raise ValueError(
+                "a chain plan has positions num_computed_tokens + i and causal "
+                "attention; a plan with positions or a mask is not a chain"
+            )
+        rows = self.parent.shape
+        if self.positions is not None and tuple(self.positions.shape) != tuple(rows):
+            raise ValueError(
+                f"positions has shape {tuple(self.positions.shape)}, parent "
+                f"{tuple(rows)}"
+            )
+        if self.mask is not None and tuple(self.mask.shape) != (*rows, rows[1]):
+            raise ValueError(
+                f"mask has shape {tuple(self.mask.shape)}, expected "
+                f"{(*rows, rows[1])} for parent {tuple(rows)}"
+            )
 
 
 @dataclass(frozen=True)

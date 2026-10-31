@@ -143,9 +143,10 @@ class InputBatch:
 
     # [num_tokens] views of the plan layout, set when the batch was laid out as a
     # plan (a plan that is not a chain, or any verify batch of a speculator with
-    # max_branching > 1): each token's parent row within its request (int32), its
-    # ancestor set over the plan rows (int64 bits; 0 for tokens that are not plan
-    # rows), and its plan position minus its chain position (int32).
+    # max_branching > 1): each token's parent row within its request (int32), the
+    # plan rows it sees (int64 bits: its ancestors, or the plan's mask; 0 for tokens
+    # that are not plan rows), and its plan position minus its chain position
+    # (int32).
     tree_parents: torch.Tensor | None = None
     tree_ancestors: torch.Tensor | None = None
     tree_pos_delta: torch.Tensor | None = None

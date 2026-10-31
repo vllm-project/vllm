@@ -160,9 +160,9 @@ def test_reference_plan_kinds():
     registry = KernelRegistry()
     assert registry.plan_kind(_mamba("m", "gdn"))[0] == "tree"
     assert registry.plan_kind(_mamba("m", "mamba2"))[0] == "tree"
-    assert registry.plan_kind(_attn("a"))[0] == "tree"
+    assert registry.plan_kind(_attn("a"))[0] == "mask"
     # A cache not paged by slot keeps its own commit: nothing to need.
-    assert registry.plan_kind(_attn("ring", layout=""))[0] == "tree"
+    assert registry.plan_kind(_attn("ring", layout=""))[0] == "mask"
 
 
 @pytest.mark.parametrize(
@@ -223,10 +223,9 @@ def test_the_registry_sets_the_model_plan_kind():
     )
 
     def caps(registry):
-        limits, uniform = layer_spec_limits(
-            [[group]], layers, "slots", kernels=registry
+        return SpecCapabilities.from_limits(
+            layer_spec_limits([[group]], layers, "slots", kernels=registry)
         )
-        return SpecCapabilities.from_limits(limits, uniform)
 
     assert caps(KernelRegistry()).plan_kind == "tree"
     declining = KernelRegistry(
@@ -235,7 +234,9 @@ def test_the_registry_sets_the_model_plan_kind():
     lowered = caps(declining)
     assert lowered.plan_kind == "chain"
     assert [limit.reason for limit in lowered.limits] == [
-        "mamba:gdn@slots, 1 layer: ToyKernel declines the layer"
+        "mamba:gdn@slots, 1 layer: ToyKernel verifies tree"
+        " (a recurrent state folds in every ancestor: no masks)",
+        "mamba:gdn@slots, 1 layer: ToyKernel declines the layer",
     ]
 
 
@@ -316,27 +317,28 @@ def test_capture_runs_every_bound_kernel_for_every_shape():
 def test_the_runner_binds_the_kernels_with_its_resources():
     """set_spec_resources binds every kernel before capture, with the engine
     core's resources; capture_model then runs them for each capture shape."""
-    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
     from vllm.v1.worker.gpu.spec_decode.round import SpecResources
+    from vllm.v1.worker.gpu.spec_decode.round_runner import SpecRound
 
     registry, layers, verify, state, kv = _toy_registry()
-    runner = SimpleNamespace(
-        max_branching=4,
+    declared = SpecResources(max_candidates=4, capture_shapes=(), max_branching=4)
+    spec_round = SpecRound(
+        None,  # type: ignore[arg-type]
+        declared,
         max_num_reqs=3,
+        max_num_tokens=12,
+        num_speculative_steps=3,
         device=torch.device("cpu"),
-        cudagraph_manager=None,
-        speculator=None,
-        spec_kernels=registry,
-        _spec_kernel_layers=lambda: layers,
     )
-    runner._spec_kernel_registry = lambda: GPUModelRunner._spec_kernel_registry(runner)
+    spec_round.kernels = registry
     resources = SpecResources(
         max_candidates=4,
         capture_shapes=(PlanShape(4), PlanShape(None)),
         max_branching=2,
     )
-    GPUModelRunner.set_spec_resources(runner, resources)
-    ctx = runner.spec_kernel_context
+    spec_round.set_resources(resources, SimpleNamespace(), layers)
+    ctx = spec_round.kernel_context
+    assert ctx is not None
     assert (ctx.plan_kind, ctx.max_candidates, ctx.capture_shapes) == (
         "tree",
         4,

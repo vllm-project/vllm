@@ -52,7 +52,6 @@ from vllm.v1.kv_cache_interface import (
     RSWASpec,
     SlidingWindowSpec,
 )
-from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.gpu.spec_decode.capabilities import (
     SpecCapabilities,
     SpecLimit,
@@ -63,6 +62,7 @@ from vllm.v1.worker.gpu.spec_decode.capabilities import (
 from vllm.v1.worker.gpu.spec_decode.commit import KvCompactor
 from vllm.v1.worker.gpu.spec_decode.kernels import KernelContext, KernelRegistry
 from vllm.v1.worker.gpu.spec_decode.round import PlanShape, SpecResources
+from vllm.v1.worker.gpu.spec_decode.round_runner import SpecRound, spec_kernel_layers
 from vllm.v1.worker.gpu.spec_decode.speculator_config import SpeculatorConfig
 
 # --- builders ----------------------------------------------------------------
@@ -81,7 +81,7 @@ class _StockBuilder(AttentionMetadataBuilder):
 class _TreeBuilder(_StockBuilder):
     """A tree attention builder that verifies trees with none of the features."""
 
-    def spec_verify_plan_kind(self, **features):
+    def spec_verify_limit(self, **features):
         plain = not any(
             features[name]
             for name in (
@@ -93,7 +93,8 @@ class _TreeBuilder(_StockBuilder):
                 "rswa_window",
             )
         )
-        return "tree" if plain else "chain"
+        kind = "tree" if plain else "chain"
+        return kind, f"{type(self).__name__} verifies {kind}"
 
 
 class _UniformMLABuilder(_StockBuilder):
@@ -159,12 +160,11 @@ def _model(*groups):
     return attn_groups, layers
 
 
-def _caps(model, state_mode="slots", excluded=frozenset()) -> SpecCapabilities:
+def _caps(model, state_mode="slots") -> SpecCapabilities:
     attn_groups, layers = model
-    limits, uniform = layer_spec_limits(
-        attn_groups, layers, state_mode, excluded_layer_names=excluded
+    return SpecCapabilities.from_limits(
+        layer_spec_limits(attn_groups, layers, state_mode)
     )
-    return SpecCapabilities.from_limits(limits, uniform)
 
 
 def _layers(prefix, n, make):
@@ -227,10 +227,19 @@ def _import_class(qualname):
 # --- per-model plan kinds ----------------------------------------------------
 
 
+def _chain_limits(caps):
+    """The limits that cap a model at chains (or less): tree-capable layers
+    report a "tree" limit too, as masks lower to trees on them."""
+    return [limit for limit in caps.limits if limit.plan_kind != "tree"]
+
+
 def test_llama_verifies_trees_on_a_tree_builder_and_chains_on_the_stock_one():
     tree = _caps(_llama(_TreeBuilder))
     assert tree.plan_kind == "tree"
-    assert tree.limits == ()
+    # A tree is a limit now that plans can carry masks.
+    assert tree.limits == (
+        SpecLimit("tree", "attn:full_attention, 4 layers: _TreeBuilder verifies tree"),
+    )
     stock = _caps(_llama(_StockBuilder))
     assert stock.plan_kind == "chain"
     assert stock.limits == (
@@ -261,9 +270,9 @@ def test_the_builder_sees_each_layers_features():
     seen = []
 
     class Recording(_StockBuilder):
-        def spec_verify_plan_kind(self, **features):
+        def spec_verify_limit(self, **features):
             seen.append(features)
-            return "tree"
+            return "tree", "verifies tree"
 
     sink_swa = _attn(has_sink=True, logits_soft_cap=30.0, alibi_slopes=torch.ones(2))
     rswa = RSWASpec(
@@ -298,11 +307,10 @@ def test_the_builder_sees_each_layers_features():
     ]
 
 
-def test_dsv3_mla_verifies_chains_and_marks_uniform_rows_for_trees_only():
+def test_dsv3_mla_verifies_chains():
     caps = _caps(_dsv3())
     assert caps.plan_kind == "chain"
-    assert caps.tree_requires_uniform_rows
-    # A variable-length chain still runs: the uniform-rows rule binds trees only.
+    # A variable-length chain still runs.
     declared = SpecResources(
         max_candidates=4,
         capture_shapes=(PlanShape(4), PlanShape(None)),
@@ -362,7 +370,7 @@ def test_recurrent_layers_without_tree_kernels_verify_chains(layer, builder):
         builder = _import_class(builder)
     caps = _caps(_hybrid(layer, builder))
     assert caps.plan_kind == "chain"
-    [limit] = caps.limits
+    [limit] = _chain_limits(caps)
     assert limit.reason in (
         f"{layer.__name__}, 3 layers: declares no spec_layer_variant",
         "mamba:short_conv@slots, 3 layers: no mamba:short_conv@slots/verify kernel",
@@ -381,16 +389,14 @@ def test_draft_and_hidden_state_layers_do_not_count():
     hidden = HiddenStateCacheSpec(
         block_size=16, num_kv_heads=1, head_size=64, dtype=torch.bfloat16
     )
-    draft = FullAttentionSpec(
-        block_size=16, num_kv_heads=2, head_size=64, dtype=torch.bfloat16, is_draft=True
-    )
+    draft = _attn()
+    draft.is_draft_layer = True
     model = _model(
         (_TreeBuilder, _FULL, _layers("attn", 2, _attn)),
         (_StockBuilder, hidden, {"hidden": _attn()}),
-        (_StockBuilder, draft, {"draft.marked": _attn()}),
-        (_StockBuilder, _FULL, {"draft.named": _attn()}),
+        (_StockBuilder, _FULL, {"draft": draft}),
     )
-    assert _caps(model, excluded=frozenset({"draft.named"})).plan_kind == "tree"
+    assert _caps(model).plan_kind == "tree"
 
 
 # --- MambaBase class attributes ----------------------------------------------
@@ -440,8 +446,6 @@ class _ChainState:
 def _runner(**overrides):
     attn_groups, layers = _llama(_TreeBuilder)
     runner = SimpleNamespace(
-        speculative_config=object(),
-        _spec_kernel_registry=KernelRegistry,
         cache_config=CacheConfig(),
         attn_groups=attn_groups,
         compilation_config=SimpleNamespace(static_forward_context=layers),
@@ -458,6 +462,12 @@ def _runner(**overrides):
     return runner
 
 
+def _resolve(runner) -> SpecCapabilities:
+    spec_round = object.__new__(SpecRound)
+    spec_round.kernels = KernelRegistry()
+    return spec_round.resolve_capabilities(runner)
+
+
 @pytest.mark.parametrize(
     "override, reason",
     [
@@ -470,20 +480,13 @@ def _runner(**overrides):
     ],
 )
 def test_runner_settings_lower_trees_to_chains(override, reason):
-    default = GPUModelRunner.resolve_spec_capabilities(_runner())
-    assert default is not None and default.plan_kind == "tree"
-    caps = GPUModelRunner.resolve_spec_capabilities(_runner(**override))
-    assert caps is not None and caps.plan_kind == "chain"
-    assert [limit.reason for limit in caps.limits] == [
+    default = _resolve(_runner())
+    assert default.plan_kind == "tree"
+    caps = _resolve(_runner(**override))
+    assert caps.plan_kind == "chain"
+    assert [limit.reason for limit in _chain_limits(caps)] == [
         f"{reason}: keeps verify rows in chain order"
     ]
-
-
-def test_runner_without_spec_decode_reports_nothing():
-    assert (
-        GPUModelRunner.resolve_spec_capabilities(_runner(speculative_config=None))
-        is None
-    )
 
 
 def test_runner_reads_the_mamba_state_mode():
@@ -495,8 +498,8 @@ def test_runner_reads_the_mamba_state_mode():
         compilation_config=SimpleNamespace(static_forward_context=layers),
         cache_config=CacheConfig(use_replayssm=True),
     )
-    caps = GPUModelRunner.resolve_spec_capabilities(runner)
-    assert caps is not None and caps.plan_kind == "chain"
+    caps = _resolve(runner)
+    assert caps.plan_kind == "chain"
     assert caps.limits[0].reason.startswith("mamba:gdn@replay")
 
 
@@ -527,12 +530,12 @@ class _TreeConfig(SpeculatorConfig):
         )
 
 
-def _tree_caps(uniform=False):
-    return SpecCapabilities.from_limits([], uniform)
+def _tree_caps():
+    return SpecCapabilities.from_limits([])
 
 
 def _chain_caps(reason="attn:sliding_window, 2 layers: X verifies chain"):
-    return SpecCapabilities.from_limits([SpecLimit("chain", reason)], False)
+    return SpecCapabilities.from_limits([SpecLimit("chain", reason)])
 
 
 def test_tree_speculator_runs_as_a_chain_with_one_log_line_per_reason(caplog):
@@ -540,7 +543,7 @@ def test_tree_speculator_runs_as_a_chain_with_one_log_line_per_reason(caplog):
     declared = config.resources(8)
     assert declared.plan_kind == "tree"
     caps = SpecCapabilities.from_limits(
-        [SpecLimit("chain", "a: x"), SpecLimit("chain", "b: y")], False
+        [SpecLimit("chain", "a: x"), SpecLimit("chain", "b: y")]
     )
     with caplog.at_level(logging.INFO, logger="vllm"):
         effective = resolve_spec_resources(config, declared, [caps])
@@ -557,15 +560,6 @@ def test_tree_on_a_model_that_verifies_trees_is_kept():
     config = _TreeConfig()
     declared = config.resources(8)
     assert resolve_spec_resources(config, declared, [_tree_caps()]) is declared
-
-
-def test_tree_drops_the_varlen_shape_when_a_builder_needs_uniform_rows():
-    config = _TreeConfig()
-    effective = resolve_spec_resources(
-        config, config.resources(8), [_tree_caps(uniform=True)]
-    )
-    assert effective.plan_kind == "tree"
-    assert effective.capture_shapes == (PlanShape(4),)
 
 
 def test_a_chain_speculator_is_not_lowered_nor_logged(caplog):
@@ -597,9 +591,8 @@ class _Overreach(_TreeConfig):
             _chain_caps(),
             "capture_shapes",
         ),
-        ({}, _tree_caps(uniform=True), "variable-length"),
     ],
-    ids=["plan-kind", "candidates", "shapes", "varlen-tree"],
+    ids=["plan-kind", "candidates", "shapes"],
 )
 def test_adapt_resources_is_validated(changes, caps, problem):
     config = _Overreach(**changes)
@@ -613,8 +606,7 @@ def test_pipeline_ranks_reduce_to_the_lowest_plan_kind():
     rank1 = _caps(_model((_UniformMLABuilder, _SWA, {"swa.9": _attn()})))
     caps = reduce_spec_capabilities([rank0, rank1])
     assert caps.plan_kind == "chain"
-    assert caps.tree_requires_uniform_rows
-    assert caps.limits == rank1.limits
+    assert caps.limits == rank0.limits + rank1.limits
     assert reduce_spec_capabilities([rank0, rank0]).plan_kind == "tree"
     none = _caps(_hybrid(MambaMixer, Mamba1AttentionMetadataBuilder))
     assert reduce_spec_capabilities([rank0, none, rank1]).plan_kind == "none"
@@ -667,10 +659,10 @@ def test_engine_core_sets_the_reduced_resources_on_every_worker():
 # --- compactor ---------------------------------------------------------------
 
 
-def test_compactor_skips_ring_and_hidden_state_caches(monkeypatch):
-    """The DSv4 ring (not paged by slot) keeps its own chain commit, and a
-    hidden-state cache is not a decoder layer: neither is compacted."""
-    from vllm.v1.worker.gpu import model_runner as model_runner_module
+def test_compactor_skips_ring_shared_and_hidden_state_caches():
+    """The DSv4 ring (not paged by slot) keeps its own chain commit, a layer
+    sharing another's KV cache moves with it, and a hidden-state cache is not a
+    decoder layer: none is compacted on its own."""
 
     def spec(cls, **kwargs):
         return cls(
@@ -681,29 +673,34 @@ def test_compactor_skips_ring_and_hidden_state_caches(monkeypatch):
         "attn": spec(FullAttentionSpec),
         "ring": spec(CircularBufferSpec),
         "hidden": spec(HiddenStateCacheSpec),
+        "shared": spec(FullAttentionSpec),
     }
-    monkeypatch.setattr(model_runner_module, "get_kv_cache_spec", lambda _: specs)
-    runner = object.__new__(GPUModelRunner)
-    runner.vllm_config = None
-    runner.device = torch.device("cpu")
+    runner = SimpleNamespace(device=torch.device("cpu"))
     cache = torch.zeros(4, 2, 16, 1, 64, dtype=torch.bfloat16)
     # Only the paged layer has a cache the compactor can read.
     runner.compilation_config = SimpleNamespace(
-        static_forward_context={"attn": SimpleNamespace(kv_cache=cache)}
+        static_forward_context={
+            "attn": SimpleNamespace(kv_cache=cache),
+            "shared": SimpleNamespace(
+                kv_cache=cache, kv_sharing_target_layer_name="attn"
+            ),
+        }
     )
-    runner.kv_cache_config = SimpleNamespace(
-        num_blocks=4,
-        kv_cache_groups=[
-            SimpleNamespace(layer_names=[name], kv_cache_spec=layer_spec)
-            for name, layer_spec in specs.items()
-        ],
-    )
-    runner.kernel_block_sizes = [16, 16, 16]
+    runner.kv_cache_config = SimpleNamespace(num_blocks=4)
+    runner.attn_groups = [
+        [
+            SimpleNamespace(
+                layer_names=[name], kv_cache_spec=group_spec, kv_cache_group_id=gid
+            )
+        ]
+        for gid, (name, group_spec) in enumerate(specs.items())
+    ]
+    runner.kernel_block_sizes = [16] * 4
     runner.block_tables = SimpleNamespace(
-        input_block_tables=[torch.zeros(2, 4, dtype=torch.int32)] * 3
+        input_block_tables=[torch.zeros(2, 4, dtype=torch.int32)] * 4
     )
     runner.cache_config = CacheConfig()
-    layers = GPUModelRunner._spec_kernel_layers(runner)
+    layers = spec_kernel_layers(runner)
     assert [(layer.name, layer.layout) for layer in layers] == [
         ("attn", "paged_token"),
         ("ring", ""),

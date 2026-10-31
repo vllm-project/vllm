@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable, Iterable, Iterator
+from dataclasses import fields, replace
 from typing import Any
 
 import numpy as np
@@ -45,17 +46,14 @@ AcceptFn = Callable[[VerifyPlan, VerifyOutput, Sampler], "AcceptResult | None"]
 
 
 def slice_plan(plan: VerifyPlan, start: int, end: int) -> VerifyPlan:
-    """The plan of batch rows ``[start, end)``."""
-
-    def rows(t: torch.Tensor | None) -> torch.Tensor | None:
-        return None if t is None else t[start:end]
-
-    return VerifyPlan(
-        parent=plan.parent[start:end],
-        count=rows(plan.count),
-        tokens=rows(plan.tokens),
-        draft_probs=rows(plan.draft_probs),
-        is_chain=plan.is_chain,
+    """The plan of batch rows ``[start, end)``: every tensor field is per request."""
+    return replace(
+        plan,
+        **{
+            f.name: value[start:end]
+            for f in fields(plan)
+            if isinstance(value := getattr(plan, f.name), torch.Tensor)
+        },
     )
 
 
