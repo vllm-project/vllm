@@ -81,6 +81,7 @@ def _mxfp8_backend_to_kernel_cls(
 def _select_kernel_cls(
     backend: Fp8MoeBackend,
     config: FusedMoEConfig,
+    use_a16: bool = False,
 ) -> type[mk.FusedMoEExperts]:
     """Select the first supported expert class for the MXFP8 config."""
     activation_format = (
@@ -88,13 +89,14 @@ def _select_kernel_cls(
         if config.moe_parallel_config.use_batched_activation_format
         else mk.FusedMoEActivationFormat.Standard
     )
+    activation_key = None if use_a16 else kMxfp8Dynamic
     last_reason: str | None = None
     for cls in _mxfp8_backend_to_kernel_cls(backend):
         supported, reason = cls.is_supported_config(
             cls,
             config,
             kMxfp8Static,
-            kMxfp8Dynamic,
+            activation_key,
             activation_format,
         )
         if supported:
@@ -107,8 +109,16 @@ def _select_kernel_cls(
 
 def select_mxfp8_moe_backend(
     config: FusedMoEConfig,
+    use_a16: bool = False,
 ) -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts]]:
     """Select the MXFP8 MoE backend and the best expert class.
+
+    Args:
+        config: MoE configuration.
+        use_a16: If True, the checkpoint declares weight-only MXFP8
+            (input_activations: null).  Backends that require activation
+            quantization are skipped and a weight-only backend (e.g.
+            Marlin) is preferred.
 
     Returns:
         A tuple of (fp8_backend, experts_cls).
@@ -127,13 +137,15 @@ def select_mxfp8_moe_backend(
             "Using '%s' MxFp8 MoE backend (user-requested).",
             backend.value,
         )
-        return backend, _select_kernel_cls(backend, config)
+        return backend, _select_kernel_cls(backend, config, use_a16=use_a16)
 
     # Auto-select: pick the first supported backend.
     backends = prioritize_humming(list(_SUPPORTED_BACKENDS))
     for backend in backends:
         try:
-            experts_cls = _select_kernel_cls(backend, config)
+            experts_cls = _select_kernel_cls(
+                backend, config, use_a16=use_a16
+            )
         except ValueError:
             continue
         logger.info_once("Using '%s' MxFp8 MoE backend.", backend.value)

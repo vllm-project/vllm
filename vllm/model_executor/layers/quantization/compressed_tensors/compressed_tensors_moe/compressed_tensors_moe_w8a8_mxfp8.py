@@ -33,17 +33,24 @@ from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 
 
 class CompressedTensorsW8A8Mxfp8MoEMethod(CompressedTensorsMoEMethod):
-    """Compressed-tensors MoE method for pre-quantized MXFP8 (W8A8) checkpoints.
+    """Compressed-tensors MoE method for pre-quantized MXFP8 checkpoints.
 
     Loads FP8 (E4M3) weights with E8M0 uint8 per-group scales (group_size=32)
-    from checkpoint. Activations are dynamically quantized to MXFP8 at runtime.
-    Supports FlashInfer TRT-LLM and Marlin backends (auto-selected).
+    from checkpoint.
+
+    When ``use_a16=False`` (default), activations are dynamically quantized
+    to MXFP8 at runtime (W8A8).  When ``use_a16=True``, the checkpoint
+    declares weight-only quantization and activations stay in BF16 (W8A16).
     """
 
-    def __init__(self, moe: FusedMoEConfig):
+    def __init__(self, moe: FusedMoEConfig, use_a16: bool = False):
         super().__init__(moe)
+        self.use_a16 = use_a16
         self.weight_block_size = [1, MXFP8_BLOCK_SIZE]
-        self.fp8_backend, self.experts_cls = select_mxfp8_moe_backend(config=self.moe)
+        self.fp8_backend, self.experts_cls = select_mxfp8_moe_backend(
+            config=self.moe,
+            use_a16=use_a16,
+        )
 
     def create_weights(
         self,
