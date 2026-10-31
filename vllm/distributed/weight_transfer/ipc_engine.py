@@ -127,6 +127,8 @@ class IPCWeightTransferEngine(
     memory between processes on the same node.
     """
 
+    rolls_back_failed_updates = True
+
     # Define backend-specific dataclass types
     init_info_cls = IPCWeightTransferInitInfo
     update_info_cls = IPCWeightTransferUpdateInfo
@@ -177,6 +179,13 @@ class IPCWeightTransferEngine(
         # export and lets the trainer reclaim its staging buffer. Callers
         # that skip finish are still covered by the replace-on-next-export
         # path inside the importer.
+        self._packed_importer.close()
+
+    def abort_weight_update(self) -> None:
+        """Put the pre-update weights back after a failed update."""
+        from vllm.model_executor.model_loader.reload import abort_layerwise_reload
+
+        abort_layerwise_reload(self.model)
         self._packed_importer.close()
 
     def receive_weights(self, update_info: IPCWeightTransferUpdateInfo) -> None:
