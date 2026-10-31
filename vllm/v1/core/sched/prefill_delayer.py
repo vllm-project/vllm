@@ -9,10 +9,13 @@ with prefill work run it in the next step, HOLD defers all prefill (new requests
 and in-progress chunks) on every rank. The rules follow ATOM's PrefillDelayer.
 """
 
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
+
+from vllm.distributed.utils import cpu_all_reduce_
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.scheduler import Scheduler
@@ -55,10 +58,17 @@ def local_state(scheduler: "Scheduler", token_budget: int) -> list[int]:
 
 
 class PrefillDelayer:
-    def __init__(self, dp_size: int, token_budget: int, protected_steps: int):
+    def __init__(
+        self,
+        dp_size: int,
+        token_budget: int,
+        protected_steps: int,
+        timeout: timedelta | None = None,
+    ):
         self.dp_size = dp_size
         self.token_budget = token_budget
         self.protected_steps = protected_steps
+        self.timeout = timeout
         self._buf = torch.zeros(6, dtype=torch.int64)
         self._first = True
         self.reset()
@@ -75,7 +85,7 @@ class PrefillDelayer:
         self._buf.copy_(
             torch.tensor(local_state(scheduler, self.token_budget), dtype=torch.int64)
         )
-        dist.all_reduce(self._buf, op=dist.ReduceOp.SUM, group=dp_group)
+        cpu_all_reduce_(self._buf, dp_group, timeout=self.timeout)
         fire, _ = self.decide(*self._buf.tolist())
         return fire
 

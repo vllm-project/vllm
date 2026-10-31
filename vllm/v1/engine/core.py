@@ -2415,6 +2415,7 @@ class DPEngineCoreProc(EngineCoreProc):
                 vllm_config.parallel_config.data_parallel_size,
                 scheduler_config.max_num_batched_tokens,
                 scheduler_config.dp_prefill_delayer_protected_steps,
+                vllm_config.parallel_config.cpu_distributed_timeout,
             )
         self.hold_prefills = False
 
