@@ -184,8 +184,14 @@ class ModelState(ABC):
         """Prepare the ``inputs_embeds`` tensor for the current forward pass."""
         raise NotImplementedError
 
-    def dummy_inputs_embeds(self, num_tokens: int) -> torch.Tensor | None:
-        """Pre-allocated inputs_embeds buffer for dummy runs (contents unused)."""
+    def dummy_inputs_embeds(
+        self, num_tokens: int, input_ids: torch.Tensor | None = None
+    ) -> torch.Tensor | None:
+        """Pre-allocated inputs_embeds buffer for dummy runs.
+
+        Holds the embeddings of `input_ids` when given; otherwise the contents
+        are unused.
+        """
         return None
 
     def execute_mm_encoder(
