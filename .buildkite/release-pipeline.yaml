@@ -543,6 +543,24 @@ steps:
           DOCKER_BUILDKIT: "1"
           DOCKERHUB_USERNAME: "vllmbot"
 
+      - label: "Publish nightly multi-arch EFA image to DockerHub - CUDA 13.0"
+        depends_on:
+          - create-multi-arch-manifest-efa
+        if: build.env("NIGHTLY") == "1"
+        agents:
+          queue: small_cpu_queue_release
+        commands:
+          - "bash .buildkite/scripts/push-nightly-builds.sh efa"
+          # Clean up old nightly builds (keep only last 14)
+          - "bash .buildkite/scripts/cleanup-nightly-builds.sh efa-nightly-"
+        plugins:
+          - docker-login#v3.0.0:
+              username: vllmbot
+              password-env: DOCKERHUB_TOKEN
+        env:
+          DOCKER_BUILDKIT: "1"
+          DOCKERHUB_USERNAME: "vllmbot"
+
       - label: "Publish nightly CPU multi-arch image to DockerHub"
         depends_on:
           - build-cpu-release-image-x86
