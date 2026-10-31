@@ -17,6 +17,7 @@ import zmq
 from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
 )
 from vllm.distributed.parallel_state import (
@@ -105,6 +106,7 @@ class RemoteAllocInfo:
     writes_done: int = 0
     writes_expected: int | None = None
     decode_dp_rank: int = 0
+    registration_epoch: int = 0
     completion_request_id: str | None = None
     completion_notify_port: int | None = None
     completion_remote_ip: str | None = None
@@ -146,6 +148,13 @@ class MoRIIOAgentMetadata(
     # Tokens per block of each attention layer. Hybrid models size attention
     # blocks to the recurrent-state page, which depends on the TP size.
     attention_block_sizes: dict[str, int] = {}
+    # Bumped each time the KV cache is registered again after a sleep.
+    registration_epoch: int = 0
+
+
+@dataclass
+class MoRIIOHandshakeMetadata(KVConnectorHandshakeMetadata):
+    registration_epoch: int
 
 
 class RoleManager:
