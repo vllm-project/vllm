@@ -105,6 +105,9 @@ def update_dflash(config_dict: dict, pre_trained_config: dict) -> None:
     - sample_from_anchor: Whether to sample from the anchor position. Default
         False (anchor is a bonus token, only mask tokens predict, yielding
         block_size - 1 speculative tokens).
+    - sliding_window_non_causal: Whether sliding-window layers were trained
+        with bidirectional masking. Speculators always trains full-attention
+        layers bidirectionally.
     """
     pre_trained_config["architectures"] = ["DFlashDraftModel"]
     pre_trained_config["draft_vocab_size"] = config_dict.get("draft_vocab_size")
@@ -120,10 +123,10 @@ def update_dflash(config_dict: dict, pre_trained_config: dict) -> None:
         "target_layer_ids": [i - 1 for i in aux_layer_ids],
         "sample_from_anchor": config_dict.get("sample_from_anchor", False),
     }
-    # Enable causal masking in SWA for vllm-project/speculators models
-    pre_trained_config["dflash_config"]["causal"] = not config_dict.get(
-        "sliding_window_non_causal", True
-    )
+    # Speculators trains full-attention layers bidirectionally, so only override
+    # causality when it is uniform; otherwise sliding layers alone are causal.
+    if config_dict.get("sliding_window_non_causal", True):
+        pre_trained_config["dflash_config"]["causal"] = False
 
 
 @register_speculator("dflash2")
