@@ -17,6 +17,17 @@ vllm serve deepseek-ai/DeepSeek-V3.2 \
     --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' ...
 ```
 
+### MiniMax M3 on ROCm
+
+MiniMax M3 accepts IndexCache settings under `text_config`; sharing is disabled by default:
+
+```bash
+vllm serve MiniMaxAI/MiniMax-M3 \
+    --hf-overrides '{"text_config": {"use_index_cache": true, "index_topk_freq": 4}}'
+```
+
+Layers that reuse top-k indices do not allocate a separate index-key cache, except on the NVFP4 K/V path where fused cache insertion still uses it. Each layer retains its main K/V cache and trained parameters.
+
 ### Configuration Reference
 
 | Parameter            | Type | Default | Description                                                                                                                                      |
