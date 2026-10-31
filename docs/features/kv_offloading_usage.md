@@ -69,6 +69,22 @@ vllm serve <model> \
   }'
 ```
 
+### Packed Mamba state
+
+To offload a packed Mamba1 cache, set `VLLM_KV_CACHE_LAYOUT=BLHNC` and use
+`CPUOffloadingSpec` with `canonical_layout` omitted or `false`. This path
+transfers each complete physical block row, including every layer's
+convolution and SSM state.
+
+The regression covers `state-spaces/mamba-130m-hf` on one CUDA GPU (TP=1),
+with align-mode prefix caching and FP32 model, convolution, and SSM state
+(`dtype="float32"`, `mamba_cache_dtype="float32"`, and
+`mamba_ssm_cache_dtype="float32"`). Enable prefix caching and keep the hybrid
+KV cache manager enabled. This validation does not establish support for
+other Mamba families or layouts, larger TP sizes, canonical offloading, or
+secondary tiers. The selected model and backend must accept the requested
+layout.
+
 ## Multi-Tier Setup
 
 Set `spec_name` to `"TieringOffloadingSpec"` and supply a `secondary_tiers` list. Each entry is a dict with a required `type` key plus tier-specific fields (and an optional `module_path` for out-of-tree tiers). The list is ordered: tier 0 is consulted before tier 1, and so on. See [Secondary Tiers](#secondary-tiers) for tier-specific keys.
