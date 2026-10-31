@@ -35,8 +35,29 @@ def _get_cos_sin(
     return cos, sin
 
 
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import _ON_GFX950
+else:
+    _ON_GFX950 = False
+
+# v_cvt_scalef32_pk_fp4_f32 is a gfx950 instruction, so the branch below is
+# narrower than "is this ROCm".
+_PACK_FP4_ON_GFX950: tl.constexpr = tl.constexpr(_ON_GFX950)
+
+
 @triton.jit
 def _fp32x2_to_fp4x2(x_lo, x_hi):
+    if _PACK_FP4_ON_GFX950:
+        # gfx950 packs the low nibble first and writes only the low byte; its
+        # E8M0 scale operand of 1.0 leaves the value alone.
+        return tl.inline_asm_elementwise(
+            "v_cvt_scalef32_pk_fp4_f32 $0, $1, $2, $3",
+            constraints="=v,v,v,v",
+            args=[x_lo, x_hi, tl.full(x_lo.shape, 1.0, tl.float32)],
+            dtype=tl.uint32,
+            is_pure=True,
+            pack=1,
+        ).to(tl.uint8)
     # NOTE: $1 is high nibble, $2 is low nibble
     return tl.inline_asm_elementwise(
         """

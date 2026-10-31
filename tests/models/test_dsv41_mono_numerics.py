@@ -33,6 +33,7 @@ HIDDEN, Q_RANK, HEAD_DIM, NOPE, ROPE = 5120, 1280, 512, 448, 64
 N_HEADS, O_GROUPS, O_RANK = 64, 8, 1024
 WINDOW, TOPK, SWA_BLOCK, CACHE_BLOCK = 128, 512, 32, 128
 RECORD, DATA, ALIGN = 584, 576, 576
+V41_RECORD, V41_NVFP4_RECORD = 528, 288
 REPLAYS = 300
 HC = 4
 
@@ -68,12 +69,14 @@ def _rel(a: torch.Tensor, b: torch.Tensor) -> float:
 # ---------------------------------------------------------------- caches
 
 
-def _paged_cache(num_blocks: int, block: int, device) -> torch.Tensor:
-    """[blocks, block, 584] u8 over pages of round_up(block * 584, 576) bytes,
-    the way vLLM binds a packed V4 cache."""
-    page = -(-block * RECORD // ALIGN) * ALIGN
+def _paged_cache(
+    num_blocks: int, block: int, device, record: int = RECORD
+) -> torch.Tensor:
+    """[blocks, block, record] u8 over pages of round_up(block * record, 576)
+    bytes, the way vLLM binds a packed V4 cache."""
+    page = -(-block * record // ALIGN) * ALIGN
     raw = torch.zeros(num_blocks * page, dtype=torch.uint8, device=device)
-    return torch.as_strided(raw, (num_blocks, block, RECORD), (page, RECORD, 1))
+    return torch.as_strided(raw, (num_blocks, block, record), (page, record, 1))
 
 
 def _rope(kv: torch.Tensor, positions: torch.Tensor, cos_sin: torch.Tensor):
@@ -87,11 +90,42 @@ def _rope(kv: torch.Tensor, positions: torch.Tensor, cos_sin: torch.Tensor):
     return x.to(torch.bfloat16)
 
 
+def _write_v41_records(cache, block: int, slots, kv):
+    """Independent MXFP8/NVFP4 packing of roped bf16 keys at ``slots``."""
+    record = cache.shape[-1]
+    x = kv.float()
+    if record == V41_NVFP4_RECORD:
+        x = x.view(-1, HEAD_DIM // 16, 16)
+        scale = (x.abs().amax(-1) / 6).clamp(2**-9, 448).to(torch.float8_e4m3fn)
+        y = (x / scale.float()[..., None]).clamp(-6, 6).reshape(-1, HEAD_DIM)
+        grid = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6], device=kv.device)
+        code = (y.abs()[..., None] - grid).abs().argmin(-1)
+        code = (code | (y < 0).long() << 3).to(torch.uint8)
+        data = code[:, 0::2] | code[:, 1::2] << 4
+        scales = scale.view(torch.uint8)
+    else:
+        x = x.view(-1, HEAD_DIM // 32, 32)
+        exp = torch.ceil(torch.log2(x.abs().amax(-1).clamp_min(1e-4) / 448.0))
+        q = (x * torch.exp2(-exp)[..., None]).clamp(-448.0, 448.0)
+        data = q.reshape(-1, HEAD_DIM).to(torch.float8_e4m3fn).view(torch.uint8)
+        scales = (exp + 127).clamp(0, 254).to(torch.uint8)
+    n = cache.untyped_storage().nbytes() - cache.storage_offset()
+    flat = torch.as_strided(cache, (n,), (1,))
+    slots = slots.to(kv.device).long()
+    rows = torch.cat([data, scales], 1)
+    r0 = slots // block * cache.stride(0) + slots % block * record
+    ar = torch.arange(record, device=kv.device)
+    flat[(r0[:, None] + ar).reshape(-1)] = rows.reshape(-1)
+
+
 def _write_records(cache, block: int, slots, kv, fnuz: bool = False):
     """fp8_ds_mla records of roped bf16 kv rows at ``slots``: the 448 nope dims
     in e4m3 with a UE8M0 per 64, the rope dims in bf16, as vLLM's insert.
     ``fnuz``: the e4m3 bytes in FNUZ with a maximum of 224, as vLLM's gfx942
-    window cache holds them. In FNUZ the OCP -0 byte would be NaN."""
+    window cache holds them. In FNUZ the OCP -0 byte would be NaN. A V4.1
+    record's cache takes _write_v41_records."""
+    if cache.shape[-1] != RECORD:
+        return _write_v41_records(cache, block, slots, kv)
     fp8, fp8_max = torch.float8_e4m3fn, 448.0
     if fnuz:
         fp8, fp8_max = torch.float8_e4m3fnuz, 224.0
@@ -127,13 +161,21 @@ def _normed_kv(n: int, kv_norm, g, device):
 
 
 def _decode_step(
-    ratio: int, R: int, T: int, kv_norm, cos_sin, seed: int, fnuz: bool = False
+    ratio: int,
+    R: int,
+    T: int,
+    kv_norm,
+    cos_sin,
+    seed: int,
+    fnuz: bool = False,
+    records: tuple[int, int] = (RECORD, RECORD),
 ):
     """R requests x T tokens past random contexts: the step's metadata as
     vLLM's builders lay it out, its window rows and (ratio > 0) the compressed
     cache filled, a random top-512 a token. ``fnuz``: the window records in
     FNUZ, as on gfx942. The compressed records stay OCP, as vLLM's Triton
-    compressor writes them on gfx942 too."""
+    compressor writes them on gfx942 too. ``records``: the window and
+    compressed caches' records."""
     g = torch.Generator().manual_seed(seed)
     dev = kv_norm.device
     ctx = [int(c) for c in torch.randint(2000, 40000, (R,), generator=g)]
@@ -147,7 +189,7 @@ def _decode_step(
     for r, (lo, hi) in enumerate(spans):
         for lb in range(lo, hi + 1):
             bt[r, lb] = perm.pop()
-    swa = _paged_cache(n_swa, SWA_BLOCK, dev)
+    swa = _paged_cache(n_swa, SWA_BLOCK, dev, records[0])
 
     def slot(r, p):
         return int(bt[r, p // SWA_BLOCK]) * SWA_BLOCK + p % SWA_BLOCK
@@ -193,7 +235,7 @@ def _decode_step(
         for r in range(R):
             for b in range(nblk[r]):
                 cbt[r, b] = perm.pop()
-        comp = _paged_cache(1 + sum(nblk), entries, dev)
+        comp = _paged_cache(1 + sum(nblk), entries, dev, records[1])
         for r in range(R):
             idx = torch.arange(lens[r])
             slots = cbt[r, idx // entries].long() * entries + idx % entries
@@ -274,8 +316,31 @@ def _random_moe(moe, gd, gr, inter: int) -> None:
 # ---------------------------------------------------------------- the worker
 
 
+def _numerics_worker(records: tuple[int, int]):
+    """_mono_numerics on caches of ``records`` (window, compressed)."""
+
+    @ray.remote(num_gpus=1, max_calls=1)
+    def worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
+        _mono_numerics_body(
+            monkeypatch, tp_size, pp_size, rank, distributed_init_port, records
+        )
+
+    return worker
+
+
 @ray.remote(num_gpus=1, max_calls=1)
 def _mono_numerics(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
+    _mono_numerics_body(monkeypatch, tp_size, pp_size, rank, distributed_init_port)
+
+
+def _mono_numerics_body(
+    monkeypatch,
+    tp_size,
+    pp_size,
+    rank,
+    distributed_init_port,
+    records: tuple[int, int] = (RECORD, RECORD),
+):
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.v1.worker.workspace import init_workspace_manager
 
@@ -291,10 +356,14 @@ def _mono_numerics(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
         ensure_model_parallel_initialized(tp_size, pp_size)
         init_workspace_manager(device)
-        _check_layers(rank, tp_size, device)
+        _check_layers(rank, tp_size, device, records)
 
 
-def _check_layers(rank: int, tp: int, device) -> None:
+def _check_layers(
+    rank: int, tp: int, device, records: tuple[int, int] = (RECORD, RECORD)
+) -> None:
+    """``records``: the window and compressed caches' records. V4.1's take
+    vLLM's gfx950 Triton sparse decode as the reference attention."""
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.distributed import get_tp_group, tensor_model_parallel_all_reduce
@@ -322,6 +391,7 @@ def _check_layers(rank: int, tp: int, device) -> None:
     from vllm.models.deepseek_v41.common.rope import build_deepseek_v4_rope
     from vllm.utils.torch_utils import set_default_torch_dtype
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _rocm_sparse_attn_decode_ragged_triton,
         build_ragged_indices_from_dense,
         rocm_inverse_rope_mxfp8_rows,
     )
@@ -407,7 +477,7 @@ def _check_layers(rank: int, tp: int, device) -> None:
                 compress_ratio=ratio,
             )  # fmt: skip
         cos_sin = rope.cos_sin_cache.to(device=device, dtype=torch.float32)
-        s = _decode_step(ratio, R, T, kv_norm, cos_sin, seed=7 + ratio)
+        s = _decode_step(ratio, R, T, kv_norm, cos_sin, seed=7 + ratio, records=records)
         M = s["M"]
         mw = MonoLayerWeights(
             attn=AttnWeights(
@@ -464,14 +534,21 @@ def _check_layers(rank: int, tp: int, device) -> None:
         swa2d = s["swa_cache"].view(s["swa_cache"].shape[0], -1)
         q_roped = torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
             q, kv, swa2d, s["slot_mapping"], s["positions"], cos_sin, H,
-            cfg.rms_norm_eps, SWA_BLOCK, False, False, True, False,
+            cfg.rms_norm_eps, SWA_BLOCK, False, records[0] != RECORD, True, False,
         )  # fmt: skip
         attn = torch.empty(M, H, HEAD_DIM, dtype=bf, device=device)
-        rocm_aiter_ops.triton_sparse_mla_fwd(
-            q_roped, s["swa_cache"], attn, HEAD_DIM**-0.5, swa_ptr, swa_ind,
-            attn_sink=sink, extra_kv_buffer=s["comp_cache"],
-            extra_kv_indptr=top_ptr, extra_kv_indices=top_ind,
-        )  # fmt: skip
+        if records[0] == RECORD:
+            rocm_aiter_ops.triton_sparse_mla_fwd(
+                q_roped, s["swa_cache"], attn, HEAD_DIM**-0.5, swa_ptr, swa_ind,
+                attn_sink=sink, extra_kv_buffer=s["comp_cache"],
+                extra_kv_indptr=top_ptr, extra_kv_indices=top_ind,
+            )  # fmt: skip
+        else:
+            _rocm_sparse_attn_decode_ragged_triton(
+                q_roped, s["swa_cache"], swa_ind, swa_ptr, HEAD_DIM**-0.5, sink,
+                NOPE, ROPE, extra_cache=s["comp_cache"], extra_indices=top_ind,
+                extra_indptr=top_ptr, out=attn,
+            )  # fmt: skip
         a8 = torch.empty(M, H * HEAD_DIM, dtype=torch.float8_e4m3fn, device=device)
         a_s = torch.empty(M, H * HEAD_DIM // 32, dtype=torch.uint8, device=device)
         rocm_inverse_rope_mxfp8_rows(attn, s["positions"], cos_sin, ROPE, a8, a_s)
@@ -568,6 +645,23 @@ def test_mono_decode_layer_matches_vllm(monkeypatch: pytest.MonkeyPatch, tp: int
         pytest.skip(f"needs {tp} GPUs")
     pytest.importorskip("flydsl")
     multi_process_parallel(monkeypatch, tp, 1, _mono_numerics)
+
+
+@pytest.mark.skipif(not _on_cdna4(), reason="the mono kernels target CDNA4")
+@pytest.mark.parametrize(
+    "records",
+    [(V41_RECORD, V41_RECORD), (V41_RECORD, V41_NVFP4_RECORD)],
+    ids=["mxfp8", "nvfp4"],
+)
+def test_mono_decode_layer_matches_vllm_v41_records(
+    monkeypatch: pytest.MonkeyPatch, records: tuple[int, int]
+):
+    """V4.1's records: the MXFP8 window cache with an MXFP8 or NVFP4
+    compressed cache."""
+    if torch.accelerator.device_count() < 2:
+        pytest.skip("needs 2 GPUs")
+    pytest.importorskip("flydsl")
+    multi_process_parallel(monkeypatch, 2, 1, _numerics_worker(records))
 
 
 # ---------------------------------------------------------------- gfx942

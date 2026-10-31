@@ -72,9 +72,13 @@ from .plan import (
     HEAD_DIM,
     HEAD_TILE,
     KEYS,
+    KV_DIM,
     NOPE,
     ROPE,
     ROWS,
+    V4_REC,
+    V41_NVFP4_REC,
+    V41_REC,
     WOA_ROWS,
     Dims,
     back_scratch,
@@ -87,7 +91,7 @@ from .plan import (
 _STREAM = fx.Stream(None)
 NEG = -3.4028234663852886e38
 LOG2E = 1.4426950408889634
-REC = DATA + 8  # a raw record row in LDS: 576 data bytes + 8 scale bytes
+REC = V4_REC  # LDS room for a raw record row: the larger of the two records
 Q_ROW = (
     HEAD_DIM // 2 + 4
 )  # a q row in LDS (i32 words): 512 bf16 + 16 B, no bank aliasing
@@ -104,6 +108,8 @@ class BackBuild:
     tp: int
     ratio: int  # 0: window only; 1 / 2: top-k over a compressed cache
     timeline: bool = False
+    rec: int = V4_REC
+    nvfp4: bool = False
 
 
 def plus(t0, v):
@@ -181,6 +187,15 @@ def key_rec(c, t, k):
     off = slot % blk
     page = base + fx.Int64(b) * stride
     z = a["zrec"]
+    if const_expr(c["nvfp4"]):
+        assert is_c is not None
+        rec = is_c.select(fx.Int32(V41_NVFP4_REC), fx.Int32(V41_REC))
+        data = ok.select(page + fx.Int64(off * rec), z)
+        sc_off = is_c.select(fx.Int32(KV_DIM // 2), fx.Int32(KV_DIM))
+        return data, data + fx.Int64(sc_off), ok
+    if const_expr(c["rec"] == V41_REC):
+        data = ok.select(page + fx.Int64(off * V41_REC), z)
+        return data, data + fx.Int64(KV_DIM), ok
     data = ok.select(page + fx.Int64(off * DATA), z)
     sc = ok.select(page + fx.Int64(blk * DATA + off * 8), z + fx.Int64(DATA))
     if const_expr(GFX942):
@@ -211,6 +226,42 @@ def records_to_fnuz(nope, scw, is_c):
 
 def _scale_byte(scw, blk64):
     return (scw[blk64 // 4] >> (blk64 % 4 * 8)) & 0xFF
+
+
+def _fp4_pair_f32(word, scale, sel):
+    """Decode byte ``sel``'s e2m1 pair, low nibble first."""
+    v = rocdl.cvt_scalef32_pk_f32_fp4(
+        fx.Vector.make_type(2, fx.Float32),
+        as_ir_value(fx.Int32(word)),
+        as_ir_value(fx.Float32(1.0)),
+        sel,
+    )
+    v = fx.Vector(v)
+    return [v[0] * scale, v[1] * scale]
+
+
+def _e4m3_f32(word):
+    """The e4m3 in ``word``'s low byte as f32 (subnormals included)."""
+    return _fp8_pair_f32(word, fx.Float32(1.0), False)[0]
+
+
+def _fp4x8_bf16(word, scale):
+    """Eight scaled e2m1 values as four packed bf16 words."""
+    out = []
+    for sel in range(4):
+        pair = _fp4_pair_f32(word, scale, sel)
+        out.append(
+            fx.Vector.from_elements(pair, fx.Float32)
+            .to(fx.BFloat16)
+            .bitcast(fx.Int32)[0]
+        )
+    return fx.Vector.from_elements(out, fx.Int32)
+
+
+def _select4(cond, a, b):
+    return fx.Vector.from_elements(
+        [cond.select(fx.Int32(a[i]), fx.Int32(b[i])) for i in range(4)], fx.Int32
+    )
 
 
 def _fp8_pair_f32(word, scale, hi):
@@ -286,17 +337,37 @@ def stage_split(c, unit):
                 )
             )
         )
+    v41 = c["rec"] == V41_REC
+    fp8_dims = KV_DIM if v41 else NOPE
+    bf16_dims = 0 if v41 else ROPE
+    nv = c["nvfp4"]
+    # a raw row in LDS, i32 words: NVFP4 rows keep their 32 scale bytes past 512
+    row = (KV_DIM + 32 if nv else c["rec"]) // 4
+    if const_expr(nv):
+        ntopk = ld_i32(a["klen"], s + t, CM_DEV if const_expr("krdy" in c) else 0)
+    else:
+        ntopk = fx.Int32(0)
+    ctile = k0 + kt * 16 < ntopk
     if k0 < kv_len:
-        # a key's 448 e4m3 as 7 x 16 B (lane g: dims 64 c + 16 g ..), its 64
-        # bf16 rope dims as 2 x 16 B (32 c + 8 g ..), its 7 scale bytes
-        scw = gload(sc, words=2)
+        scw = gload(sc, words=4 if v41 else 2)
+        if const_expr(nv):
+            scw2 = gload(ctile.select(sc + fx.Int64(16), sc), words=4)
+        # NVFP4 uses the low half of each 16-byte load.
         nope = [
-            gload(data + fx.Int64(64 * c4 + 16 * g), words=4)
-            for c4 in range(NOPE // 64)
+            gload(
+                data
+                + fx.Int64(
+                    ctile.select(32 * c4 + 8 * g, 64 * c4 + 16 * g)
+                    if nv
+                    else 64 * c4 + 16 * g
+                ),
+                words=4,
+            )
+            for c4 in range(fp8_dims // 64)
         ]
         rope = [
             gload(data + fx.Int64(NOPE + (cc * 32 + 8 * g) * 2), words=4)
-            for cc in range(ROPE // 32)
+            for cc in range(bf16_dims // 32)
         ]
         if const_expr(GFX942):
             nope, scw = records_to_fnuz(nope, scw, is_c)
@@ -312,13 +383,15 @@ def stage_split(c, unit):
                 )
         # the raw rows to LDS for the PV (head group 0's waves)
         if hgi == 0 if owner is None else owner:
-            rawb = sl["raw"] + (kt * 16 + r16) * (REC // 4)
-            for c4 in range_constexpr(NOPE // 64):
+            rawb = sl["raw"] + (kt * 16 + r16) * row
+            for c4 in range_constexpr(fp8_dims // 64):
                 fx.ptr_store(nope[c4], rawb + (64 * c4 + 16 * g) // 4)
-            for cc in range_constexpr(ROPE // 32):
+            for cc in range_constexpr(bf16_dims // 32):
                 fx.ptr_store(rope[cc], rawb + (NOPE + (cc * 32 + 8 * g) * 2) // 4)
             if g == 0:
-                fx.ptr_store(scw, rawb + DATA // 4)
+                fx.ptr_store(scw, rawb + (KV_DIM if v41 else DATA) // 4)
+                if const_expr(nv):
+                    fx.ptr_store(scw2, rawb + (KV_DIM + 16) // 4)
         gpu.barrier()
         stamp(c, 5)
         # QK: A = the keys (dequantized once), B = q of a head tile (LDS); the
@@ -327,12 +400,22 @@ def stage_split(c, unit):
         scale = fx.Int32(a["qk_scale"]).bitcast(fx.Float32)
         st = sl["st"]
         accs = [fx.Vector.filled(4, 0.0, fx.Float32) for _ in range(nht)]
-        for c4 in range_constexpr(NOPE // 64):
-            ksc = pow2(_scale_byte(scw, c4))
-            for h2 in range_constexpr(2):
-                kw = fp8x8_bf16(nope[c4][2 * h2], nope[c4][2 * h2 + 1], ksc).bitcast(
-                    fx.BFloat16
+        for c4 in range_constexpr(fp8_dims // 64):
+            if const_expr(v41):
+                # lane g's 16 dims are in 32-group 2 c + g // 2
+                ksc = pow2(
+                    (scw[c4 // 2] >> (((2 * c4) % 4 + g // 2) * 8)) & fx.Int32(0xFF)
                 )
+            else:
+                ksc = pow2(_scale_byte(scw, c4))
+            if const_expr(nv):
+                # e4m3 scale 4 c + g: byte g of scale word c
+                fsc = _e4m3_f32((scw[c4] if c4 < 4 else scw2[c4 - 4]) >> (8 * g))
+            for h2 in range_constexpr(2):
+                kw = fp8x8_bf16(nope[c4][2 * h2], nope[c4][2 * h2 + 1], ksc)
+                if const_expr(nv):
+                    kw = _select4(ctile, _fp4x8_bf16(nope[c4][h2], fsc), kw)
+                kw = kw.bitcast(fx.BFloat16)
                 for ht in range_constexpr(nht):
                     qb = sl["q"] + ((hgi * nht + ht) * HEAD_TILE + r16) * Q_ROW
                     qw = fx.Vector(
@@ -342,7 +425,7 @@ def stage_split(c, unit):
                         )
                     )
                     accs[ht] = mfma_bf16(kw, qw.bitcast(fx.BFloat16), accs[ht])
-        for cc in range_constexpr(ROPE // 32):
+        for cc in range_constexpr(bf16_dims // 32):
             kw = rope[cc].bitcast(fx.BFloat16)
             for ht in range_constexpr(nht):
                 qb = sl["q"] + ((hgi * nht + ht) * HEAD_TILE + r16) * Q_ROW
@@ -419,40 +502,78 @@ def stage_split(c, unit):
         # (r16, g) takes keys 4 g + j of a 16-key tile: A[dim][key]
         is_rope = wave == WAVES - 1
         dbase = 64 * wave
-        sh = (wave % 4) * 8
+        if const_expr(v41):
+            # dims 64 w + 4 r16 .. are in 32-group 2 w + r16 // 8
+            scb_word = KV_DIM // 4 + wave // 2
+            sh = ((2 * wave) % 4 + r16 // 8) * 8
+        else:
+            scb_word = DATA // 4 + wave // 4
+            sh = (wave % 4) * 8
+
+        def fp4_values(rb0):
+            # dims 64 w + 4 r16 .. are e2m1 bytes 32 w + 2 r16 .., kept in the
+            # low 8 B of lane r16 // 4's 16 B (the QK's raw store); scale byte
+            # 4 w + r16 // 4
+            nv4 = []
+            for j in range_constexpr(4):
+                rb = rb0 + j * row
+                w = fx.Int32(
+                    fx.ptr_load(rb + 16 * wave + 4 * (r16 // 4) + (r16 % 4) // 2)
+                ) >> (16 * (r16 % 2))
+                scb = fx.Int32(fx.ptr_load(rb + KV_DIM // 4 + wave))
+                scl = _e4m3_f32(scb >> ((r16 // 4) * 8))
+                nv4.append(_fp4_pair_f32(w, scl, 0) + _fp4_pair_f32(w, scl, 1))
+            return fx.Vector.from_elements(
+                [nv4[j][dt] for dt in range(4) for j in range(4)], fx.Float32
+            )
+
+        def fp8_values(rb0):
+            nv8 = []
+            for j in range_constexpr(4):
+                rb = rb0 + j * row
+                w = fx.Int32(fx.ptr_load(rb + (dbase + 4 * r16) // 4))
+                scb = fx.Int32(fx.ptr_load(rb + scb_word))
+                scl = pow2((scb >> sh) & 0xFF)
+                nv8.append(_fp8_pair_f32(w, scl, False) + _fp8_pair_f32(w, scl, True))
+            return fx.Vector.from_elements(
+                [nv8[j][dt] for dt in range(4) for j in range(4)], fx.Float32
+            )
+
         accs = [
             [fx.Vector.filled(4, 0.0, fx.Float32) for _ in range(4)]
             for _ in range(d.head_tiles)
         ]
         for kt2 in range_constexpr(nkt):
-            rb0 = sl["raw"] + (kt2 * 16 + 4 * g) * (REC // 4)
+            rb0 = sl["raw"] + (kt2 * 16 + 4 * g) * row
             vv = fx.Vector.filled(16, 0.0, fx.Float32)  # [dt][j]
-            if is_rope:
-                rv = []
-                for j in range_constexpr(4):
-                    rw = fx.Vector(
-                        fx.ptr_load(
-                            rb0 + j * (REC // 4) + (NOPE + 8 * r16) // 4,
-                            result_type=fx.Vector.make_type(2, fx.Int32),
-                        )
-                    )
-                    rv.append([bf_lo(rw[0]), bf_hi(rw[0]), bf_lo(rw[1]), bf_hi(rw[1])])
+            if const_expr(nv):
+                ct2 = k0 + kt2 * 16 < ntopk
+                v8 = fp8_values(rb0)
+                v4 = fp4_values(rb0)
                 vv = fx.Vector.from_elements(
-                    [rv[j][dt] for dt in range(4) for j in range(4)], fx.Float32
+                    [ct2.select(v4[i], v8[i]) for i in range(16)], fx.Float32
                 )
+            elif const_expr(v41):
+                vv = fp8_values(rb0)
             else:
-                nv = []
-                for j in range_constexpr(4):
-                    rb = rb0 + j * (REC // 4)
-                    w = fx.Int32(fx.ptr_load(rb + (dbase + 4 * r16) // 4))
-                    scb = fx.Int32(fx.ptr_load(rb + DATA // 4 + wave // 4))
-                    scl = pow2((scb >> sh) & 0xFF)
-                    nv.append(
-                        _fp8_pair_f32(w, scl, False) + _fp8_pair_f32(w, scl, True)
+                # V4: the rope wave reads bf16 pairs
+                if is_rope:
+                    rv = []
+                    for j in range_constexpr(4):
+                        rw = fx.Vector(
+                            fx.ptr_load(
+                                rb0 + j * row + (NOPE + 8 * r16) // 4,
+                                result_type=fx.Vector.make_type(2, fx.Int32),
+                            )
+                        )
+                        rv.append(
+                            [bf_lo(rw[0]), bf_hi(rw[0]), bf_lo(rw[1]), bf_hi(rw[1])]
+                        )
+                    vv = fx.Vector.from_elements(
+                        [rv[j][dt] for dt in range(4) for j in range(4)], fx.Float32
                     )
-                vv = fx.Vector.from_elements(
-                    [nv[j][dt] for dt in range(4) for j in range(4)], fx.Float32
-                )
+                else:
+                    vv = fp8_values(rb0)
             for ht2 in range_constexpr(d.head_tiles):
                 pb = fx.Vector(
                     fx.ptr_load(
@@ -476,9 +597,8 @@ def stage_split(c, unit):
                         )
                     )
         stamp(c, 6)
-        # partial[t][ch][head][dim] bf16: lane (r16, g) holds C rows 4 g + i ->
-        # dims 64 w + 16 g + 4 i + dt of head ht2 * 16 + r16: 32 contiguous
-        # bytes, two 16 B stores (4 lanes fill a 128 B line)
+        # partial[t][ch][head][dim]: V4.1 retains f32 until the chunk merge.
+        # Lane (r16, g) holds dims 64 w + 16 g + 4 i + dt of head ht2 * 16 + r16.
         for ht2 in range_constexpr(d.head_tiles):
             hh = ht2 * HEAD_TILE + r16
             words = []
@@ -486,12 +606,14 @@ def stage_split(c, unit):
                 v4 = fx.Vector.from_elements(
                     [accs[ht2][dt][i] for dt in range(4)], fx.Float32
                 )
-                w2 = v4.to(fx.BFloat16).bitcast(fx.Int32)
-                words += [w2[0], w2[1]]
-            off = (((t * nchunk + ch) * d.heads + hh) * HEAD_DIM + dbase + 16 * g) // 2
+                w2 = (v4 if v41 else v4.to(fx.BFloat16)).bitcast(fx.Int32)
+                words += [w2[j] for j in range(4 if v41 else 2)]
+            off = (((t * nchunk + ch) * d.heads + hh) * HEAD_DIM + dbase + 16 * g) // (
+                1 if v41 else 2
+            )
 
             def store_part(off=off, words=words):
-                for hlf in range_constexpr(2):
+                for hlf in range_constexpr(4 if v41 else 2):
                     bo.buffer_store(
                         fx.Vector.from_elements(words[4 * hlf : 4 * hlf + 4], fx.Int32),
                         rsrc(c["part"]),
@@ -559,20 +681,27 @@ def stage_combine(c, unit):
                 dtype=T.f32,
             )
         )
-        pv = fx.Vector(
-            bo.buffer_load(
-                rsrc(c["part"]),
-                (((t * nchunk + cc) * d.heads + h) * HEAD_DIM + d0) // 2,
-                vec_width=4,
-                dtype=T.i32,
+        at = ((t * nchunk + cc) * d.heads + h) * HEAD_DIM + d0
+        if const_expr(c["rec"] == V41_REC):
+            pv = [
+                fx.Vector(
+                    bo.buffer_load(
+                        rsrc(c["part"]), at + j * 4, vec_width=4, dtype=T.f32
+                    )
+                )
+                for j in range(2)
+            ]
+            vals = [pv[j // 4][j % 4] for j in range(8)]
+        else:
+            pv = fx.Vector(
+                bo.buffer_load(rsrc(c["part"]), at // 2, vec_width=4, dtype=T.i32)
             )
-        )
+            vals = []
+            for e in range_constexpr(4):
+                vals += [bf_lo(pv[e]), bf_hi(pv[e])]
         mc = fx.Float32(live.select(stv[0], fx.Float32(NEG)))
         ms.append(mc)
         ls.append(fx.Float32(live.select(stv[1], fx.Float32(0.0))))
-        vals = []
-        for e in range_constexpr(4):
-            vals += [bf_lo(pv[e]), bf_hi(pv[e])]
         vs.append([fx.Float32(live.select(v, fx.Float32(0.0))) for v in vals])
         m = fx.max(m, mc)
     m_final = fx.max(m, sink)
@@ -764,6 +893,8 @@ def back_context(key, lds, args: dict, scratch, tag, layout=None) -> dict:
         "xsl": gml.xsl.ptr,
         "d": d,
         "ratio": key.ratio,
+        "rec": key.rec,
+        "nvfp4": key.nvfp4,
         "mb": Mailbox(tag),
         "nchunk": back_plan(key)[0],
         "sl": {"q": spl.q.ptr, "raw": spl.raw.ptr, "p": spl.p.ptr, "st": spl.st.ptr},

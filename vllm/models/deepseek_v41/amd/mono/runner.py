@@ -25,7 +25,17 @@ import torch
 from vllm.v1.attention.ops.flydsl_kernels import _run_compiled
 
 from .attention.front import FRONT_POINTS
-from .attention.plan import HEAD_DIM, HIDDEN, KEYS, Q_RANK, WINDOW, Dims
+from .attention.plan import (
+    HEAD_DIM,
+    HIDDEN,
+    KEYS,
+    Q_RANK,
+    V4_REC,
+    V41_NVFP4_REC,
+    V41_REC,
+    WINDOW,
+    Dims,
+)
 from .common.arch import GFX942
 from .common.plan import BLOCKS
 from .layer import (
@@ -275,8 +285,16 @@ class DSV41MonoLayer:
     def supports(tokens: int) -> bool:
         return 1 <= tokens <= MAX_TOKENS
 
-    def kernels(self, tokens: int, ratio: int, fold: bool = True, index: bool = False):
-        key = (tokens, ratio, fold, index)
+    def kernels(
+        self,
+        tokens: int,
+        ratio: int,
+        fold: bool = True,
+        index: bool = False,
+        rec: int = V4_REC,
+        nvfp4: bool = False,
+    ):
+        key = (tokens, ratio, fold, index, rec, nvfp4)
         if key not in self._kernels:
             b = MonoBuild(
                 tokens,
@@ -289,6 +307,8 @@ class DSV41MonoLayer:
                 topk=self.topk,
                 ug_groups=self.ug_groups,
                 swa_width=self.swa_width,
+                rec=rec,
+                nvfp4=nvfp4,
             )
             # On gfx942, keylist.launch writes an index source's keys between
             # vLLM's indexer and K2 (forward), so its K2 is the one without
@@ -333,7 +353,7 @@ class DSV41MonoLayer:
         pre_mix: torch.Tensor,  # [M, 4] f32
         positions: torch.Tensor,  # [M] int64
         slot_mapping: torch.Tensor,  # [M] int64
-        swa_cache: torch.Tensor,  # [blocks, block, 584] uint8
+        swa_cache: torch.Tensor,  # [blocks, block, 584 or 528] uint8
         swa_indices: torch.Tensor,  # [>= M, 1, 128] int32
         swa_lens: torch.Tensor,  # [>= M] int32
         token_to_req: torch.Tensor,  # [>= M] int32
@@ -355,7 +375,13 @@ class DSV41MonoLayer:
         ratio = a.ratio
         index = select is not None
         assert not index or ratio
-        k1, k2 = self.kernels(M, ratio, fold, index)
+        rec = swa_cache.shape[-1]
+        # V4.1's record is gfx950's; gfx942 keeps V4's
+        assert rec in ((V4_REC,) if GFX942 else (V4_REC, V41_REC)), rec
+        # V4.1's NVFP4 compressed keys sit beside its window record
+        nvfp4 = comp_cache is not None and comp_cache.shape[-1] == V41_NVFP4_REC
+        assert not nvfp4 or rec == V41_REC, rec
+        k1, k2 = self.kernels(M, ratio, fold, index, rec, nvfp4)
         st = torch.cuda.current_stream()
         if outs is None:
             outs = self._outs(M, residual)
@@ -367,13 +393,15 @@ class DSV41MonoLayer:
         assert (
             swa_indices.stride(0) == self.swa_width and swa_cache.dtype == torch.uint8
         )
-        assert swa_cache.shape[-1] == 584 and swa_cache.stride(1) == 584
+        assert swa_cache.stride(1) == rec
         swa_block = swa_cache.shape[1]
         if ratio:
             assert topk_indices is not None and comp_cache is not None
             assert comp_block_table is not None
             assert topk_indices.dtype == torch.int32 and topk_indices.stride(0) == 512
-            assert comp_cache.dtype == torch.uint8 and comp_cache.stride(1) == 584
+            crec = V41_NVFP4_REC if nvfp4 else rec
+            assert comp_cache.dtype == torch.uint8 and comp_cache.shape[-1] == crec
+            assert comp_cache.stride(1) == crec
             assert comp_block_table.dtype == torch.int32
             comp, comp_stride, comp_block = (
                 comp_cache,

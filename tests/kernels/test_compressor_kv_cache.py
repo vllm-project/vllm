@@ -36,6 +36,7 @@ from vllm.v1.attention.backends.mla.compressor_utils import (
     get_dspark_swa_index_width,
 )
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+    _ON_GFX950,
     cp_gather_indexer_k_quant_cache_triton,
     indexer_k_quant_and_cache_triton,
 )
@@ -461,7 +462,9 @@ def _mxfp8_record_reference(
     return quantized.view(torch.uint8), (scales.log2() + 127).to(torch.uint8)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() or _ON_GFX950), reason="CUDA or gfx950 only"
+)
 @pytest.mark.parametrize("compress_ratio", [1, 2])
 def test_v41_rope_insert_mxfp8_record(compress_ratio: int):
     """The 528-byte V4.1 record quantizes the RoPE dims instead of keeping them
@@ -514,14 +517,19 @@ def test_v41_rope_insert_mxfp8_record(compress_ratio: int):
 )
 @pytest.mark.parametrize("gather_len", [None, 70, 200])
 @pytest.mark.parametrize("one_pass", [False, True])
-def test_v41_fp8_gather_is_grid_width_invariant(gather_len, one_pass, monkeypatch):
+@pytest.mark.parametrize("record", [584, 528])
+def test_v41_fp8_gather_is_grid_width_invariant(
+    gather_len, one_pass, record, monkeypatch
+):
     """The gather grid only partitions tokens, so its width cannot move the
     result, and the rows it writes must match a host-side dequantization.
 
-    Covers the fp8_ds_mla record (584 B); the MXFP8 one is covered below.
+    The host reference covers the fp8_ds_mla record (584 B); the MXFP8 one
+    (528 B) is checked for grid invariance here and against its reference below.
     Both dequantization forms are checked against the same host reference on
-    whatever device is present: the wrapper picks the one-pass form on ROCm
-    alone, so otherwise each platform would only ever see one of them.
+    whatever device is present: the wrapper picks the one-pass form, and sizes
+    the MXFP8 grid by length, on ROCm alone, so otherwise each platform would
+    only ever see one of them.
     """
     monkeypatch.setattr(current_platform, "is_rocm", lambda: one_pass)
     from vllm.models.deepseek_v41.common.ops import quantize_and_insert_k_cache
@@ -536,10 +544,14 @@ def test_v41_fp8_gather_is_grid_width_invariant(gather_len, one_pass, monkeypatc
 
     k = torch.randn(num_tokens, 512, dtype=torch.bfloat16, device=device)
     # insert takes [num_blocks, block_bytes]; gather takes the record view.
-    cache = torch.zeros(num_blocks, block_size * 584, dtype=torch.uint8, device=device)
+    cache = torch.zeros(
+        num_blocks, block_size * record, dtype=torch.uint8, device=device
+    )
     slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device)
-    quantize_and_insert_k_cache(k, cache, slot_mapping, block_size=block_size)
-    cache_view = cache.view(num_blocks, block_size, 584)
+    quantize_and_insert_k_cache(
+        k, cache, slot_mapping, block_size=block_size, bytes_per_token=record
+    )
+    cache_view = cache.view(num_blocks, block_size, record)
 
     seq_lens = torch.tensor([num_tokens], dtype=torch.int32, device=device)
     gls = (
@@ -568,6 +580,8 @@ def test_v41_fp8_gather_is_grid_width_invariant(gather_len, one_pass, monkeypatc
     baseline = gather(None)
     for bound in (8, num_tokens, 1 << 20):
         torch.testing.assert_close(gather(bound), baseline, rtol=0, atol=0)
+    if record != 584:
+        return
 
     n = num_tokens if gather_len is None else gather_len
     start = num_tokens - n
@@ -664,7 +678,9 @@ def _decode_nvfp4_row(packed: torch.Tensor, scales: torch.Tensor) -> torch.Tenso
     ).flatten(-2)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() or _ON_GFX950), reason="CUDA or gfx950 only"
+)
 @pytest.mark.parametrize("compress_ratio", [1, 2])
 def test_v41_rope_insert_nvfp4_record(compress_ratio: int):
     """The 288-byte V4.1 NVFP4 record: 256 B of e2m1 pairs then 32 e4m3 scales

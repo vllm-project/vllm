@@ -78,6 +78,8 @@ from .plan import (
     ROWS,
     TILE,
     TOPK,
+    V4_REC,
+    V41_REC,
     WINDOW,
     WQKV_KPARTS,
     WQKV_TASKS,
@@ -108,6 +110,8 @@ class FrontBuild:
     ratio: int  # the layer's compress ratio (0: no top-k keys)
     timeline: bool = False
     swa_width: int = WINDOW  # the SWA index rows' width (the DSpark draft's: wider)
+    rec: int = V4_REC
+    nvfp4: bool = False
 
 
 def plus(t0, v):
@@ -187,7 +191,8 @@ def stage_kt(c, t):
     """Token t's keys for K2: ``KT[t][k] = slot | 1 << 31`` for its top-k compressed
     rows (k < ntopk), the window slot for k in [ntopk, kv_len), -1 for an
     invalid or absent key; KLEN[t] = kv_len (0 for a pad row), KLEN[S + t] =
-    ntopk."""
+    ntopk. With NVFP4 compressed keys ntopk is padded to a 16-key tile with -1,
+    so a tile holds one record."""
     tid = c["tid"]
     a, ratio = c["args"], c["ratio"]
     # device scope where this launch reads the table (K2's)
@@ -201,6 +206,9 @@ def stage_kt(c, t):
         req = ld_i32(a["t2r"], t)
     else:
         ntopk = fx.Int32(0)
+    nreal = ntopk
+    if const_expr(c.get("nvfp4", False)):
+        ntopk = (ntopk + 15) // 16 * 16
     kv_len = ntopk + nswa
     for i in range_constexpr((KEYS + THREADS - 1) // THREADS):
         k = fresh(tid) + THREADS * i
@@ -214,6 +222,7 @@ def stage_kt(c, t):
             blk = ld_i32(a["comp_bt"], req * a["bt_stride"] + lc // e)
             c_slot = (blk * e + lc % e) | fx.Int32(-2147483648)
             c_val = (local >= 0).select(c_slot, fx.Int32(-1))
+            c_val = (k < nreal).select(c_val, fx.Int32(-1))
             val = (k < ntopk).select(c_val, val)
         if k < KEYS:
             bo.buffer_store(val, rsrc(a["kt"]), t * KEYS + k, cache_modifier=cm)
@@ -395,10 +404,14 @@ def stage_qkv(c, t):
     kn = [bf16_round((xk[j] * rk) * kw[j]) for j in range(2)]
     e0 = bf16_round(kn[0] * cs - kn[1] * sn)
     e1 = bf16_round(kn[0] * sn + kn[1] * cs)
-    # record quant of the nope dims: a 64-block = 32 threads (half a wave).
-    # On gfx942 FP8_MAX is 224: vLLM's gfx942 cache writer and reader use
-    # FNUZ records with that maximum.
-    amax = butterfly(fx.max(abs(e0), abs(e1)), (1, 2, 4, 8, 16), fx.max)
+    # V4.1 quantizes RoPE too, with 32-dim groups instead of V4's 64.
+    v41 = c["rec"] == V41_REC
+    group_threads = 16 if v41 else 32
+    amax = butterfly(
+        fx.max(abs(e0), abs(e1)),
+        tuple(1 << i for i in range(group_threads.bit_length() - 1)),
+        fx.max,
+    )
     rcode = ceil_exp(
         div_rn(
             fx.max(amax, fx.Float32(1e-4)),
@@ -421,22 +434,37 @@ def stage_qkv(c, t):
     sblock = slot // blk
     soff = slot % blk
     base = a["swa"] + fx.Int64(sblock) * fx.Int64(a["swa_stride"])
-    rec = base + fx.Int64(soff * DATA)
-    if mine & (tt % 32 == 0) & (tt < NOPE // 2):
-        fx.ptr_store(rcode.bitcast(fx.Float32), red + 8 + tt // 32)
+    quant_dims = KV_DIM if v41 else NOPE
+    rec = base + fx.Int64(soff * (V41_REC if v41 else DATA))
+    if mine & (tt % group_threads == 0) & (tt < quant_dims // 2):
+        fx.ptr_store(rcode.bitcast(fx.Float32), red + 8 + tt // group_threads)
     gpu.barrier()
     if mine & (slot >= 0):
-        if tt < NOPE // 2:
+        if tt < quant_dims // 2:
             if tt % 2 == 0:
                 gstore(rec + fx.Int64(2 * tt), word, words=1)
         else:
             gstore(rec + fx.Int64(NOPE + 4 * (tt - NOPE // 2)), rope_word, words=1)
         if tt == 0:
-            sb = [fx.ptr_load(red + 8 + b).bitcast(fx.Int32) for b in range(7)]
-            w0 = sb[0] | (sb[1] << 8) | (sb[2] << 16) | (sb[3] << 24)
-            w1 = sb[4] | (sb[5] << 8) | (sb[6] << 16)
-            sc = base + fx.Int64(blk * DATA + soff * 8)
-            gstore(sc, fx.Vector.from_elements([w0, w1], fx.Int32), words=2)
+            sb = [
+                fx.ptr_load(red + 8 + b).bitcast(fx.Int32)
+                for b in range(16 if v41 else 7)
+            ]
+            if const_expr(not v41):
+                sb.append(fx.Int32(0))
+            sw = [
+                sb[4 * i]
+                | (sb[4 * i + 1] << 8)
+                | (sb[4 * i + 2] << 16)
+                | (sb[4 * i + 3] << 24)
+                for i in range(4 if v41 else 2)
+            ]
+            sc = (
+                rec + fx.Int64(KV_DIM)
+                if v41
+                else base + fx.Int64(blk * DATA + soff * 8)
+            )
+            gstore(sc, fx.Vector.from_elements(sw, fx.Int32), words=4 if v41 else 2)
     publish(c, c["qrdy"], t)
 
 
@@ -538,6 +566,8 @@ def front_context(key, lds, args: dict, scratch, tag, layout=None) -> dict:
         "d": d,
         "ratio": key.ratio,
         "swa_width": key.swa_width,
+        "rec": key.rec,
+        "nvfp4": key.nvfp4,
         "ldbf": lambda ptr, i: fx.Float32(
             fx.BFloat16(bo.buffer_load(rsrc(ptr), i, vec_width=1, dtype=T.bf16))
         ),
