@@ -65,19 +65,9 @@ it. Measured on an idle unit:
     Ryzen AI MAX 395 (Radeon 8060S), 128 GiB RAM, ROCm 7.2.4, vLLM `0.32.0+rocm723`,
     `Qwen/Qwen3-0.6B`, `--max-model-len 4096`, otherwise idle machine.
 
-The pool is shared with every host process and container, so a utilization that is valid on an idle
-unit can still fail to start when something else holds RAM. Startup compares the request against the
-memory that is free at that moment, not against the GTT limit:
-
-```text
-ValueError: Free memory on device cuda:0 (34.85/108.0 GiB) on startup is less than
-desired GPU memory utilization (0.9, 97.2 GiB).
-```
-
-That failure came from an environment with an unrelated server already holding 73 GiB of GTT, not
-from an APU-specific limit: the same command started normally once it exited. If this happens, use
-`rocm-smi --showpids` to find the holder, and size the request from `free / total` while leaving
-headroom for the host — on an idle unit the default `0.9` would claim almost the whole shared pool.
+The pool is shared with every host process and container, so only the memory that is free at
+startup can be committed. Size `--gpu-memory-utilization` from `free / total` and leave headroom for
+the host.
 
 Because the denominator is shared with the host, prefer the byte-based `--kv-cache-memory-bytes` over a
 percentage when the footprint has to be reproducible. On the setup above vLLM reports
