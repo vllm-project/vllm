@@ -292,6 +292,10 @@ def hash_checkpoint(model: str) -> str | None:
         return None
     files = glob.glob(os.path.join(model, "*.safetensors"))
     if os.path.isfile(os.path.join(model, SAFE_WEIGHTS_INDEX_NAME)):
+        # The index may list shards in a subdirectory, like tensors/.
+        files += glob.glob(
+            os.path.join(model, "*", "**", "*.safetensors"), recursive=True
+        )
         files = filter_duplicate_safetensors_files(
             files, model, SAFE_WEIGHTS_INDEX_NAME
         )

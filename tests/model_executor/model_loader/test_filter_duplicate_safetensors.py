@@ -12,6 +12,7 @@ from safetensors.torch import save_file
 
 from vllm.config.load import LoadConfig
 from vllm.model_executor.model_loader import DefaultModelLoader
+from vllm.model_executor.model_loader.weight_cache.protocol import hash_checkpoint
 from vllm.model_executor.model_loader.weight_utils import (
     filter_duplicate_safetensors_files,
     filter_safetensors_files_by_weight_name,
@@ -166,3 +167,51 @@ def test_secondary_source_with_explicit_patterns_skips_backbone_index(tmp_path):
     # The primary source still filters files the backbone index doesn't list.
     primary = DefaultModelLoader.Source(model_or_path=str(tmp_path), revision=None)
     assert [n for n, _ in loader._get_weights_iterator(primary)] == ["backbone.weight"]
+
+
+@pytest.mark.parametrize(
+    "shard_names",
+    [
+        ["tensors/model-00001-of-00001.safetensors"],
+        [
+            "model-00001-of-00002.safetensors",
+            "tensors/model-00002-of-00002.safetensors",
+        ],
+        ["pytorch_model.bin"],
+    ],
+)
+def test_hub_snapshot_finds_shards_listed_by_the_index(
+    tmp_path, monkeypatch, shard_names
+):
+    """Shards under tensors/, alone or next to root shards, are found through
+    the index, also by the IPC weight cache key. The index is fetched once,
+    and never for a .bin-only snapshot."""
+    shards = [tmp_path / name for name in shard_names]
+    for i, shard in enumerate(shards):
+        shard.parent.mkdir(exist_ok=True)
+        save_file({f"w{i}": torch.zeros(1)}, shard)
+    fetched = []
+
+    def fetch_index(model, index_file, **kwargs):
+        fetched.append(index_file)
+        weight_map = {f"w{i}": name for i, name in enumerate(shard_names)}
+        (tmp_path / index_file).write_text(json.dumps({"weight_map": weight_map}))
+
+    loader_module = "vllm.model_executor.model_loader.default_loader"
+    monkeypatch.setattr(
+        f"{loader_module}.download_weights_from_hf", lambda *a, **k: str(tmp_path)
+    )
+    monkeypatch.setattr(
+        f"{loader_module}.download_safetensors_index_file_from_hf", fetch_index
+    )
+
+    _, files, use_safetensors, _ = DefaultModelLoader(
+        LoadConfig(load_format="hf")
+    )._prepare_weights(
+        "org/model", None, None, fall_back_to_pt=False, allow_patterns_overrides=None
+    )
+
+    assert sorted(files) == sorted(map(str, shards))
+    assert use_safetensors == shard_names[0].endswith(".safetensors")
+    assert len(fetched) == use_safetensors
+    assert (hash_checkpoint(str(tmp_path)) is not None) == use_safetensors
