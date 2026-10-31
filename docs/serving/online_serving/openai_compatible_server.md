@@ -192,6 +192,10 @@ The following extra parameters are supported:
     --8<-- "vllm/entrypoints/openai/chat_completion/protocol.py:chat-completion-extra-params"
     ```
 
+When streaming chat completions with the Rust frontend, each choice includes
+`finish_reason: null` until it finishes. The final chunk for that choice
+includes its finish reason, such as `"stop"`, matching the Python frontend.
+
 ### Responses API
 
 Our Responses API is compatible with [OpenAI's Responses API](https://platform.openai.com/docs/api-reference/responses);
