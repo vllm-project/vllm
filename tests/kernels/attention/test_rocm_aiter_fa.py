@@ -1196,3 +1196,202 @@ def test_asm_kv_scale_tables_shared_across_builders():
     assert isinstance(
         AiterFlashAttentionMetadataBuilder.asm_kv_scale_tables, AsmKvScaleTables
     )
+
+
+# FlyDSL paged-attention decode -------------------------------------------
+def _enable_flydsl_pa_decode(monkeypatch) -> None:
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    monkeypatch.setattr(rocm_aiter_ops, "_FLYDSL_PA_DECODE_ENABLED", True)
+    if not rocm_aiter_ops.is_flydsl_pa_decode_enabled():
+        pytest.skip("FlyDSL NHD pa_decode needs gfx950 and ROCm/aiter#5949")
+
+
+def test_aiter_fa_flydsl_pa_decode_requirements(monkeypatch):
+    """Layers the FlyDSL decode kernel cannot serve keep the default path."""
+    from vllm.v1.attention.backends.rocm_aiter_fa import (
+        AiterFlashAttentionBackend,
+        AiterFlashAttentionImpl,
+    )
+
+    _enable_flydsl_pa_decode(monkeypatch)
+    assert 64 in AiterFlashAttentionBackend.get_supported_kernel_block_sizes()
+    assert AiterFlashAttentionBackend.get_preferred_block_size(16) == 64
+
+    def use_flydsl(**overrides) -> bool:
+        kwargs = dict(
+            num_heads=16,
+            head_size=256,
+            scale=256**-0.5,
+            num_kv_heads=2,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="fp8",
+        )
+        kwargs.update(overrides)
+        return AiterFlashAttentionImpl(**kwargs).use_flydsl_pa_decode
+
+    assert use_flydsl()
+    assert not use_flydsl(kv_cache_dtype="auto")
+    assert not use_flydsl(head_size=128)
+    assert not use_flydsl(num_heads=128, num_kv_heads=2)
+    assert not use_flydsl(logits_soft_cap=30.0)
+    assert not use_flydsl(sliding_window=128)
+    assert not use_flydsl(sinks=torch.zeros(16))
+
+
+@pytest.mark.parametrize(
+    "num_heads,query_len",
+    [((8, 1), 1), ((16, 2), 1), ((32, 1), 1), ((8, 1), 2), ((8, 1), 4)],
+)
+def test_aiter_fa_flydsl_pa_decode_matches_reference(monkeypatch, num_heads, query_len):
+    """FP8 decode through the FlyDSL kernel matches the reference on the
+    backend's interleaved NHD cache, across page boundaries. query_len > 1 is a
+    speculative verify step: every sequence has the same number of causally
+    masked query tokens."""
+    from tests.v1.attention.utils import (
+        BatchSpec,
+        create_common_attn_metadata,
+        create_vllm_config,
+    )
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.config import set_current_vllm_config
+    from vllm.model_executor.layers.attention import Attention
+    from vllm.v1.attention.backends.rocm_aiter_fa import (
+        AiterFlashAttentionBackend,
+        AiterFlashAttentionImpl,
+        AiterFlashAttentionMetadataBuilder,
+    )
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+    _assert_aiter_supported()
+    _enable_flydsl_pa_decode(monkeypatch)
+    set_random_seed(0)
+
+    block_size, num_blocks, head_size = 64, 64, 256
+    num_q_heads, num_kv_heads = num_heads
+    scale = head_size**-0.5
+    k_scale, v_scale = 0.5, 0.25
+    cache_dtype = current_platform.fp8_dtype()
+    if query_len > rocm_aiter_ops.flydsl_pa_decode_max_query_len(
+        cache_dtype, head_size, block_size, num_q_heads // num_kv_heads
+    ):
+        pytest.skip(f"installed AITER's FlyDSL decode takes < {query_len} tokens")
+    batch_spec = BatchSpec(
+        seq_lens=[query_len, 63, 64, 257, 1500], query_lens=[query_len] * 5
+    )
+
+    config = create_vllm_config(
+        model_name="Qwen/Qwen3-0.6B",
+        dtype="bfloat16",
+        max_model_len=2048,
+        block_size=block_size,
+    )
+    config.cache_config.cache_dtype = "fp8"
+    with set_current_vllm_config(config):
+        layer = Attention(
+            num_q_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            cache_config=config.cache_config,
+            prefix="layer",
+            attn_backend=AiterFlashAttentionBackend,
+        )
+        impl = layer.impl
+        assert isinstance(impl, AiterFlashAttentionImpl)
+        assert impl.use_flydsl_pa_decode
+        builder = AiterFlashAttentionMetadataBuilder(
+            FullAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=num_kv_heads,
+                head_size=head_size,
+                dtype=cache_dtype,
+            ),
+            ["layer"],
+            config,
+            torch.device("cuda"),
+        )
+        # Verify steps count as decodes once speculative decoding raises the
+        # reorder threshold to 1 + num_speculative_tokens.
+        builder.reorder_batch_threshold = query_len
+        common = create_common_attn_metadata(
+            batch_spec, block_size, torch.device("cuda"), max_block_idx=num_blocks
+        )
+        with torch.device("cpu"):
+            metadata = builder.build(0, common)
+            decode = metadata.decode_metadata
+            assert decode is not None
+            # The next step with the same batch size refreshes the same plan,
+            # so a CUDA graph that captured it keeps reading valid buffers.
+            plan = decode.flydsl_plan
+            assert plan is not None
+            assert decode.flydsl_query_len == query_len
+            metadata = builder.build(0, common)
+            # MTP draft passes of the same shape reuse the target's plan.
+            draft_metadata = builder.build_for_drafting(common, draft_index=0)
+        for m in (metadata, draft_metadata):
+            assert m.decode_metadata is not None
+            assert m.decode_metadata.flydsl_plan is plan
+            assert m.decode_metadata.flydsl_query_len == query_len
+        assert metadata.num_decodes == batch_spec.batch_size
+
+        kv_cache = torch.empty(
+            num_blocks, num_kv_heads, block_size, 2 * head_size, dtype=cache_dtype
+        )
+        layer.kv_cache = kv_cache
+        layer._k_scale.fill_(k_scale)
+        layer._v_scale.fill_(v_scale)
+        key = torch.randn(
+            num_blocks * block_size, num_kv_heads, head_size, dtype=torch.bfloat16
+        )
+        value = torch.randn_like(key)
+        impl.do_kv_cache_update(
+            layer,
+            key,
+            value,
+            kv_cache,
+            torch.arange(num_blocks * block_size, dtype=torch.int64),
+        )
+
+        calls = 0
+        flydsl_pa_decode = rocm_aiter_ops.flydsl_pa_decode
+
+        def counting_flydsl_pa_decode(**kwargs):
+            nonlocal calls
+            calls += 1
+            flydsl_pa_decode(**kwargs)
+
+        monkeypatch.setattr(
+            rocm_aiter_ops, "flydsl_pa_decode", counting_flydsl_pa_decode
+        )
+        query = torch.randn(
+            batch_spec.compute_num_tokens(),
+            num_q_heads,
+            head_size,
+            dtype=torch.bfloat16,
+        )
+        output = torch.empty_like(query)
+        impl.forward(layer, query, None, None, kv_cache, metadata, output)
+        assert calls == 1
+        draft_output = torch.empty_like(query)
+        impl.forward(layer, query, None, None, kv_cache, draft_metadata, draft_output)
+        assert calls == 2
+        torch.testing.assert_close(draft_output, output, atol=0, rtol=0)
+
+    def dequant(x: torch.Tensor, s: float) -> torch.Tensor:
+        return ((x / s).to(cache_dtype).to(x.dtype) * s).reshape(
+            num_blocks, block_size, num_kv_heads, head_size
+        )
+
+    expected = ref_paged_attn(
+        query,
+        dequant(key, k_scale),
+        dequant(value, v_scale),
+        batch_spec.query_lens,
+        batch_spec.seq_lens,
+        common.block_table_tensor,
+        scale,
+    )
+    # The kernel also quantizes Q and P to FP8; use the FP8 decode tolerance.
+    torch.testing.assert_close(output, expected, atol=6e-2, rtol=1e-1)
