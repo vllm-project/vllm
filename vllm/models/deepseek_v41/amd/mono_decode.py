@@ -29,6 +29,7 @@ other's pushes): the conditions read only metadata every rank holds alike.
 """
 
 import functools
+import os
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
@@ -359,27 +360,42 @@ class MonoDecodeLayer:
         else:
             why = _unsupported_moe(layer, vllm_config)
         if why is None:
-            try:
-                from vllm.models.deepseek_v41.amd.mono.runner import BLOCKS
-            except ImportError as err:
-                why = f"needs FlyDSL and AITER's FlyDSL helpers ({err})"
-            else:
-                from vllm.models.deepseek_v41.amd.mono.common.arch import target_arch
+            from vllm.models.deepseek_v41.amd.mono.common.arch import (
+                MONO_BLOCKS_ENV,
+                resolve_tiling,
+                target_arch,
+            )
 
-                # every CTA of a launch stays resident: a partitioned GPU deadlocks
-                cus = _compute_units()
-                target, gpu = target_arch(), _gpu_arch()
-                if cus < BLOCKS:
-                    why = f"needs {BLOCKS} compute units, the GPU has {cus}"
-                elif target != gpu:
-                    # FlyDSL compiles the kernels for the ARCH environment
-                    # variable when it is set, while the choice of the gfx942
-                    # weight copies follows the GPU. A stray ARCH would make
-                    # the two disagree, so it stops the server here.
-                    why = (
-                        f"needs FlyDSL to compile for the GPU's {gpu}, but the "
-                        f"ARCH environment variable makes it compile for {target}"
-                    )
+            # Resolve the grid width from the GPU before importing the runner,
+            # which builds the plan: the device modules read MONO_BLOCKS_ENV to
+            # match the host's choice, and an unvalidated compute-unit count
+            # raises here. Every CTA of a launch stays resident, so a grid wider
+            # than the GPU's compute units deadlocks.
+            cus = _compute_units()
+            target, gpu = target_arch(), _gpu_arch()
+            try:
+                blocks, _, _ = resolve_tiling(gpu, cus)
+            except ValueError as err:
+                why = str(err)
+            else:
+                os.environ[MONO_BLOCKS_ENV] = str(blocks)
+                try:
+                    from vllm.models.deepseek_v41.amd.mono.runner import BLOCKS
+                except ImportError as err:
+                    why = f"needs FlyDSL and AITER's FlyDSL helpers ({err})"
+                else:
+                    assert BLOCKS == blocks
+                    if target != gpu:
+                        # FlyDSL compiles the kernels for the ARCH environment
+                        # variable when it is set, while the choice of the
+                        # gfx942 weight copies follows the GPU. A stray ARCH
+                        # would make the two disagree, so it stops the server
+                        # here.
+                        why = (
+                            f"needs FlyDSL to compile for the GPU's {gpu}, but "
+                            f"the ARCH environment variable makes it compile "
+                            f"for {target}"
+                        )
         if why is not None:
             raise ValueError(f"--monokernel {why}.")
         # the layer: the kernels serve the backbone's seams and MoE
