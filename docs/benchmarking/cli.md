@@ -126,6 +126,13 @@ vllm bench serve \
   --num-prompts 10
 ```
 
+!!! note
+    When targeting a non-default server, `--base-url` should point at the
+    server root (for example `http://localhost:8000`) **without** a `/v1`
+    suffix — the tool appends the API routes itself. A base URL like
+    `http://localhost:8000/v1` resolves to paths such as `/v1/v1/completions`
+    and every request fails with `404 Not Found`.
+
 If successful, you will see the following output:
 
 ```text
