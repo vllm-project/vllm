@@ -145,6 +145,43 @@ def _do_load_kv(connector, metadata):
 # 1. P-node scheduler lifecycle tests
 
 
+@pytest.mark.parametrize("kv_role", ["kv_producer", "kv_consumer", "kv_both"])
+def test_remote_decode_without_bidirectional_transfer_releases_blocks(kv_role):
+    """One-way serving must not wait for a disabled D-to-P receive."""
+    vllm_config = create_vllm_config(kv_role=kv_role)
+    scheduler = create_scheduler(vllm_config, num_blocks=32)
+    block_size = vllm_config.cache_config.block_size
+    pool = scheduler.kv_cache_manager.block_pool
+    free_blocks = pool.get_num_free_blocks()
+    request = _make_p_node_turn2_request(1, block_size, 128)
+    request.kv_transfer_params.update(
+        remote_block_ids=[[1, 2, 3]],
+        remote_engine_id="x",
+        remote_request_id="x",
+        remote_host="127.0.0.1",
+        remote_port=1,
+        remote_num_tokens=4096,
+        tp_size=1,
+    )
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    assert request.status == RequestStatus.RUNNING
+    assert output.num_scheduled_tokens[request.request_id] > 0
+    assert not output.kv_connector_metadata.reqs_to_recv
+
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    scheduler.schedule()
+    assert_scheduler_empty(scheduler)
+    assert pool.get_num_free_blocks() == free_blocks
+
+    ordinary = create_request(request_id=2, num_tokens=4, max_tokens=1)
+    scheduler.add_request(ordinary)
+    output = scheduler.schedule()
+    scheduler.update_from_output(output, create_model_runner_output([ordinary]))
+    scheduler.schedule()
+    assert_scheduler_empty(scheduler)
+
+
 def test_multiturn_lifecycle():
     """Full two-turn lifecycle on the P node:
     Turn 1: P prefills locally (do_remote_prefill=False), sends KV to D
