@@ -2,13 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Dedicated storage for a PP stage's outgoing intermediate tensors.
 
-An NCCL send reads its source until the next stage posts the matching
-receive, which is ordered after that stage's previous forward. Sending the
-model outputs directly would make the next forward wait for the send, since it
-may overwrite them: CUDA graph outputs are static, and relayed aux hidden
-states alias the persistent receive buffer. Sending a snapshot in this buffer
-lets the next forward run while the send is in flight; only the next snapshot
-waits for it.
+An NCCL send completes only when the next stage posts its receive, and the
+sender's next forward would overwrite the outputs being sent (CUDA graph
+outputs are static; relayed aux states alias the receive buffer). Sending this
+snapshot moves the wait to the next copy into the buffer.
 """
 
 from typing import Any
@@ -18,8 +15,6 @@ import torch
 from vllm.distributed.parallel_state import GroupCoordinator, Handle
 from vllm.utils.math_utils import round_up
 
-_ALIGNMENT = 256
-
 
 def _layout(tensors: dict[str, Any]) -> tuple[dict[str, int], int]:
     """Aligned byte offset of each tensor in the buffer, and the bytes used."""
@@ -27,7 +22,7 @@ def _layout(tensors: dict[str, Any]) -> tuple[dict[str, int], int]:
     end = 0
     for key, value in tensors.items():
         if isinstance(value, torch.Tensor):
-            offsets[key] = round_up(end, _ALIGNMENT)
+            offsets[key] = round_up(end, 256)
             end = offsets[key] + value.nbytes
     return offsets, end
 
