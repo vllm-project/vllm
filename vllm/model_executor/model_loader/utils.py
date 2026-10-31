@@ -6,12 +6,15 @@ import inspect
 import time
 import warnings
 from contextlib import contextmanager, nullcontext
-from typing import Any, assert_never
+from typing import TYPE_CHECKING, Any, assert_never
 
 import torch
 from torch import nn
 
 import vllm.envs as envs
+
+if TYPE_CHECKING:
+    from vllm.config.load import LoadConfig
 from vllm.config import (
     LoadConfig,
     ModelConfig,
@@ -29,17 +32,27 @@ from vllm.model_executor.model_loader.reload import (
     record_metadata_for_reloading,
     set_torchao_reload_attrs,
 )
+from vllm.model_executor.model_loader.weight_cache.protocol import (
+    TensorKind,
+    check_ipc_quant_support,
+)
 from vllm.model_executor.model_loader.weight_cache.utils import (
     is_draft_model_cacheable,
 )
 from vllm.model_executor.model_loader.weight_tying import maybe_retie_word_embeddings
 from vllm.model_executor.model_loader.weight_utils import finalize_model_weights
 from vllm.model_executor.models.interfaces import SupportsQuant
-from vllm.model_executor.utils import is_weights_pre_processed
+from vllm.model_executor.utils import (
+    is_weights_pre_processed,
+    weights_already_processed,
+)
 from vllm.tracing import instrument
 from vllm.utils.mem_utils import release_device_memory_under_pressure
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
+from vllm.utils.torch_utils import (
+    get_accelerator_view_from_cpu_tensor,
+    set_default_torch_dtype,
+)
 
 logger = init_logger(__name__)
 
@@ -53,7 +66,10 @@ def get_draft_load_config(vllm_config: VllmConfig) -> LoadConfig:
     ):
         return speculative_config.draft_load_config
     load_config = vllm_config.load_config
-    if load_config is not None and load_config.load_format != "ipc_cache":
+    if load_config is not None and load_config.load_format not in (
+        "ipc_cache",
+        "peer_cache",
+    ):
         return load_config
     kwargs = (
         # Route the draft to the daemon's draft group.
@@ -398,3 +414,145 @@ def configure_quant_config(
             quant_config.apply_vllm_mapper(hf_to_vllm_mapper.get_rename_mapper())
         if packed_mapping is not None:
             quant_config.packed_modules_mapping = packed_mapping
+
+
+def build_model_from_processed_weights(
+    vllm_config: VllmConfig,
+    model_config: ModelConfig,
+    prefix: str,
+    tensors: dict[str, torch.Tensor],
+    kinds: dict[str, TensorKind],
+    aliases: dict[str, str],
+    attrs: dict[str, Any],
+    load_config: LoadConfig,
+) -> nn.Module:
+    """Build a model on meta and install already post-processed weights.
+
+    Shared by :class:`IpcModelLoader`, which maps or clones the tensors from
+    the local weight cache daemon, and by the peer loader, which copies them
+    from a source replica's daemon. Both hold tensors that already went
+    through the source's process_weights_after_loading, so the model is
+    constructed on the meta device, every parameter/buffer is replaced by
+    registration, and process_weights_after_loading re-runs in pre-processed
+    mode so quant methods only rebuild Python-side state (e.g. the MoE
+    kernel). Leftover meta tensors are materialized afterwards so that
+    placeholders the source-side post-processing consumed are dropped rather
+    than filled with uninitialized memory.
+
+    Returns:
+        The model with the weights installed, in eval mode.
+
+    """
+    target_device, device_index = _load_device(load_config, vllm_config)
+    with set_default_torch_dtype(model_config.dtype):
+        with torch.device("meta"):
+            model = initialize_model(
+                vllm_config=vllm_config,
+                model_config=model_config,
+                prefix=prefix,
+            )
+        check_ipc_quant_support(model)
+        _register_processed_tensors(model, tensors, kinds, aliases)
+        # Flags that load_weights would have set (e.g. EAGLE ownership of
+        # embed_tokens / lm_head); the source ran it, this process did not.
+        for name, value in attrs.items():
+            setattr(model, name, value)
+        with weights_already_processed():
+            process_weights_after_loading(model, model_config, target_device)
+        _materialize_remaining_meta_tensors(
+            model, torch.device(target_device.type, device_index)
+        )
+    return model.eval()
+
+
+def _load_device(
+    load_config: LoadConfig, vllm_config: VllmConfig
+) -> tuple[torch.device, int]:
+    device_config = vllm_config.device_config
+    load_device = (
+        device_config.device if load_config.device is None else load_config.device
+    )
+    target_device = torch.device(load_device)
+    device_index = (
+        target_device.index
+        if target_device.index is not None
+        else torch.accelerator.current_device_index()
+    )
+    return target_device, device_index
+
+
+def _register_processed_tensors(
+    model: nn.Module,
+    tensors: dict[str, torch.Tensor],
+    kinds: dict[str, TensorKind],
+    aliases: dict[str, str],
+) -> None:
+    """Replace the meta model's parameters and buffers with ``tensors``.
+
+    Registration is used rather than param.data assignment, which fails for
+    meta tensors; post-quantization tensors absent from the meta model are
+    introduced the same way. Tied-weight aliases re-register the *same*
+    object their canonical name resolved to, so parameter identity (and the
+    tie) is preserved instead of allocating uninitialized memory.
+    """
+    # remove_duplicate=False keeps tied module aliases reachable by name:
+    # a tied lm_head *is* the embedding module, so the deduplicated view
+    # would not contain "lm_head" at all.
+    modules = dict(model.named_modules(remove_duplicate=False))
+    registered: dict[str, torch.Tensor] = {}
+
+    def _register(name: str, tensor: torch.Tensor, is_param: bool) -> None:
+        module_name, _, leaf = name.rpartition(".")
+        module = modules.get(module_name)
+        if module is None:
+            raise RuntimeError(f"Cached tensor {name} has no matching module")
+        module._parameters.pop(leaf, None)
+        module._buffers.pop(leaf, None)
+        if is_param:
+            obj: torch.Tensor = (
+                tensor
+                if isinstance(tensor, nn.Parameter)
+                else nn.Parameter(tensor, requires_grad=False)
+            )
+            module.register_parameter(leaf, obj)
+        else:
+            obj = tensor
+            module.register_buffer(leaf, obj)
+        registered[name] = obj
+
+    for name, tensor in tensors.items():
+        _register(name, tensor, kinds[name] == "param")
+
+    for alias_name, canonical_name in aliases.items():
+        obj = registered.get(canonical_name)
+        if obj is None:
+            logger.warning(
+                "Cached alias %s references missing canonical tensor %s",
+                alias_name,
+                canonical_name,
+            )
+            continue
+        _register(alias_name, obj, isinstance(obj, nn.Parameter))
+
+
+def _materialize_remaining_meta_tensors(model: nn.Module, device: torch.device) -> None:
+    """Allocate any tensors the daemon did not provide.
+
+    These are typically parameters removed on the daemon side by
+    process_weights_after_loading; they are not expected to be read at
+    runtime, so they are left uninitialized.
+    """
+    for module_name, module in model.named_modules():
+        for leaf, param in list(module._parameters.items()):
+            if param is not None and param.device.type == "meta":
+                logger.warning(
+                    "Materializing empty parameter %s.%s missing from the weight cache",
+                    module_name,
+                    leaf,
+                )
+                module._parameters[leaf] = nn.Parameter(
+                    torch.empty_like(param, device=device), requires_grad=False
+                )
+        for leaf, buffer in list(module._buffers.items()):
+            if buffer is not None and buffer.device.type == "meta":
+                module._buffers[leaf] = torch.empty_like(buffer, device=device)
