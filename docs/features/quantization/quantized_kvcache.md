@@ -44,6 +44,8 @@ You can configure how the quantization scales are computed in vLLM using three d
 
 Some attention layer types (e.g. sliding-window) are more sensitive to KV-cache quantization. The `--kv-cache-dtype-skip-layers` flag leaves the specified layers at the model's native dtype while keeping the rest of the layers under the chosen quantized dtype. The flag accepts either layer indices or layer-type names:
 
+Some models carry a large bias on the key projection of their first attention layer (Qwen2, Qwen2.5 and their fine-tuned and distilled derivatives). Under a per-token or per-head quantized KV cache these models can answer at chance while the engine reports success. vLLM logs a warning at startup when it detects such a bias under a quantized cache. The remedy is to keep layer 0 at the model's native dtype with `--kv-cache-dtype-skip-layers 0`, which costs a few percent of throughput.
+
 ```bash
 # Skip every sliding-window attention layer.
 vllm serve <model> \
