@@ -168,7 +168,7 @@ VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_VARIANT=cpu VLLM_TARGET_DEVICE=cpu
 ```bash
 export VLLM_CPU_KVCACHE_SPACE=40
 export VLLM_CPU_OMP_THREADS_BIND=0-30
-vllm serve facebook/opt-125m --dtype=bfloat16
+vllm serve Qwen/Qwen3-0.6B --dtype=bfloat16
 ```
 
  or using default auto thread binding:
@@ -176,7 +176,7 @@ vllm serve facebook/opt-125m --dtype=bfloat16
 ```bash
 export VLLM_CPU_KVCACHE_SPACE=40
 export VLLM_CPU_NUM_OF_RESERVED_CPU=1
-vllm serve facebook/opt-125m --dtype=bfloat16
+vllm serve Qwen/Qwen3-0.6B --dtype=bfloat16
 ```
 
 Note, it is recommended to manually reserve 1 CPU for vLLM front-end process when `world_size == 1`.
