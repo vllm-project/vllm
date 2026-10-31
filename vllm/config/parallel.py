@@ -73,8 +73,13 @@ class EPLBConfig:
     of the last `lb_window_size` steps will be used for rearranging experts.
     """
 
-    num_redundant_experts: int = Field(default=0, ge=0)
-    """Number of redundant experts to use for expert parallelism."""
+    num_redundant_experts: int = Field(default=None, ge=0)  # type: ignore[assignment]
+    """Number of redundant experts to use for expert parallelism.
+    If None (default), the minimum valid value will be computed automatically
+    based on the number of logical experts and the expert parallel size.
+    The value will be rounded up to the nearest multiple of the expert parallel
+    size.
+    """
 
     log_balancedness: bool = False
     """
@@ -603,14 +608,17 @@ class ParallelConfig:
                     f"PCP={self.prefill_context_parallel_size}, "
                     f"DP={self.data_parallel_size}."
                 )
-        else:
-            if self.eplb_config.num_redundant_experts != 0:
+
+        if not self.enable_eplb:
+            if self.eplb_config.num_redundant_experts not in (None, 0):
                 raise ValueError(
                     "num_redundant_experts is set to "
                     f"{self.eplb_config.num_redundant_experts} but EPLB is not "
                     "enabled. Either enable EPLB or unset "
                     "num_redundant_experts."
                 )
+            # Only EPLB needs the model's expert count to pick a default.
+            self.eplb_config.num_redundant_experts = 0
 
         tp = self.tensor_parallel_size
         pcp = self.prefill_context_parallel_size
@@ -628,6 +636,40 @@ class ParallelConfig:
             )
 
         return self
+
+    def compute_eplb_num_redundant_experts(self, num_logical_experts: int) -> None:
+        """Compute and set num_redundant_experts if not explicitly specified.
+
+        This method should be called after ParallelConfig is initialized and
+        when the number of logical experts is known (from ModelConfig).
+
+        Args:
+            num_logical_experts: The number of logical experts from the model.
+
+        """
+        if self.eplb_config.num_redundant_experts is not None:
+            # Already explicitly set, don't override
+            return
+
+        if self.enable_eplb:
+            # The EP group spans the TP x PCP x DP ranks.
+            ep_size = (
+                self.tensor_parallel_size
+                * self.prefill_context_parallel_size
+                * self.data_parallel_size
+            )
+            # Ensure (num_logical_experts + num_redundant_experts) is
+            # divisible by ep_size, supporting non-standard ep_size values
+            min_redundant = (ep_size - num_logical_experts % ep_size) % ep_size
+            self.eplb_config.num_redundant_experts = min_redundant
+            logger.info_once(
+                "EPLB num_redundant_experts not specified, "
+                "defaulting to minimum valid value: %d "
+                "(num_logical_experts=%d, ep_size=%d)",
+                min_redundant,
+                num_logical_experts,
+                ep_size,
+            )
 
     def set_dcp_defaults(
         self,

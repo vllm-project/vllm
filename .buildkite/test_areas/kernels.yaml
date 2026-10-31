@@ -43,6 +43,7 @@ steps:
   - vllm/kernels/triton/
   - tests/kernels/test_concat_mla_q.py
   - tests/kernels/test_fused_qk_norm_rope_gate.py
+  - vllm/model_executor/layers/fused_qk_norm_rope.py
   commands:
     - >-
       pytest -v -s
@@ -73,6 +74,7 @@ steps:
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
       - tests/kernels/test_fused_qk_norm_rope_gate.py
+      - vllm/model_executor/layers/fused_qk_norm_rope.py
       commands:
       - >-
         pytest -v -s
