@@ -625,3 +625,34 @@ class TestVllmMaxNSequences:
 
         with pytest.raises(VLLMValidationError, match="n must be at most 128"):
             SamplingParams(n=129)
+
+
+def test_vllm_use_layername_gated_on_torch_2_11(monkeypatch: pytest.MonkeyPatch):
+    """VLLM_USE_LAYERNAME must default off on torch 2.11.x (pytorch#173863)."""
+    import vllm.utils.torch_version as tv
+
+    disable_envs_cache()
+    monkeypatch.delenv("VLLM_USE_LAYERNAME", raising=False)
+
+    # torch 2.11.x: inductor is_opaque_type bug -> default off
+    monkeypatch.setattr(
+        tv, "is_torch_equal_or_newer", lambda ver: ver == "2.11.0"
+    )
+    assert envs.VLLM_USE_LAYERNAME is False
+
+    # torch >= 2.12: fixed upstream via is_opaque_value -> default on
+    monkeypatch.setattr(
+        tv, "is_torch_equal_or_newer", lambda ver: ver == "2.12.0.dev"
+    )
+    assert envs.VLLM_USE_LAYERNAME is True
+
+    # torch < 2.11: LayerName not consumed, default stays on
+    monkeypatch.setattr(tv, "is_torch_equal_or_newer", lambda ver: False)
+    assert envs.VLLM_USE_LAYERNAME is True
+
+    # explicit user setting wins on 2.11.x
+    monkeypatch.setattr(
+        tv, "is_torch_equal_or_newer", lambda ver: ver == "2.11.0"
+    )
+    monkeypatch.setenv("VLLM_USE_LAYERNAME", "1")
+    assert envs.VLLM_USE_LAYERNAME is True
