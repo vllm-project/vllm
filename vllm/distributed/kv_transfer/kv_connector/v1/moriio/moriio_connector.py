@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+import dataclasses
 import logging
 import math
 import queue
@@ -34,6 +35,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     ROLE,
     EngineId,
     HandshakeError,
+    HandshakeRefusedError,
     MoRIIOAgentMetadata,
     MoRIIOConfig,
     MoRIIOConnectorMetadata,
@@ -77,18 +79,22 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_layout import (
     compute_head_slice_offsets,
     compute_mamba_conv_split_count,
     compute_mamba_slice_offsets,
+    compute_token_run_offsets,
     get_layer_head_layout,
     get_layer_transfer_geometry,
     get_mamba_state_layout,
+    get_token_run_table,
     is_mla_cache_layer,
     iter_layer_registration_regions,
     kda_conv_ssm,
     validate_transfer_block_ids,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_tp_mapping import (
+    DCPWriteRuns,
     MoRIIOWriteTPMapping,
     WriteTarget,
     compute_write_tp_mapping,
+    validate_peer_dcp_layout,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
     MambaConvSplitInfo,
@@ -1614,6 +1620,24 @@ class MoRIIOConnectorScheduler:
             # embedded MoRIIO ZMQ addresses.
             if self.mode == MoRIIOMode.WRITE:
                 self._release_write_prefill_blocks(request.request_id, params)
+            elif get_peer_zmq_from_request_id(
+                request.request_id, is_producer=False
+            ) is None and not all(
+                params.get(key)
+                for key in (
+                    "remote_host",
+                    "remote_handshake_port",
+                    "remote_notify_port",
+                )
+            ):
+                # E.g. the frontend's cleanup copy of a request whose KV load
+                # failed, under an id without the prefill address. The prefill
+                # instance frees the blocks after its defer_timeout.
+                logger.warning(
+                    "Cannot release the prefill blocks of request %s: no prefill "
+                    "address in its request id or kv_transfer_params",
+                    request.request_id,
+                )
             else:
                 # Carry the actually-allocated blocks (incl. the per-request KDA
                 # mamba slot) instead of []: a do_remote_prefill request finishing
@@ -2009,6 +2033,10 @@ class MoRIIOConnectorWorker:
 
         self.block_window_per_layer: list[int | None] = []
         self.use_mla = self.model_config.use_mla
+        self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
+        self.cp_kv_cache_interleave_size = (
+            vllm_config.parallel_config.cp_kv_cache_interleave_size
+        )
         # Hybrid (mamba/KDA) recurrent-state transfer. Populated in
         # register_kv_caches when the model has a MambaSpec kv_cache group.
         self._has_mamba = False
@@ -2281,6 +2309,23 @@ class MoRIIOConnectorWorker:
             metadata_bytes = received_frame[1]
             decoder = msgspec.msgpack.Decoder(MoRIIOAgentMetadata)
             metadata = decoder.decode(metadata_bytes)
+            try:
+                validate_peer_dcp_layout(
+                    self.dcp_size,
+                    self.cp_kv_cache_interleave_size,
+                    metadata.dcp_size,
+                    metadata.cp_kv_cache_interleave_size,
+                    writes_into_peer=self.is_producer and self.mode == MoRIIOMode.WRITE,
+                    block_size=self.block_size,
+                    non_mla_layer=self._non_mla_dcp_layer(),
+                    whole_block_layer=self._whole_block_dcp_layer(
+                        metadata.cp_kv_cache_interleave_size
+                    ),
+                )
+            except ValueError as e:
+                raise HandshakeRefusedError(
+                    f"Cannot transfer KV with {expected_engine_id}: {e}"
+                ) from e
             got_metadata_time = time.perf_counter()
             logger.info(
                 "MoRIIO handshake: get metadata took: %s",
@@ -2355,8 +2400,12 @@ class MoRIIOConnectorWorker:
             pod_hosts = list(meta.multi_pod_hosts) if meta.multi_pod_hosts else [host]
             remote_dp_size_local = int(meta.remote_dp_size_local) or remote_dp_size
 
-        def request_ready(_f: Future[Any], entry=(req_id, meta)):
-            logger.info("MoRIIO handshake done for request %s", req_id)
+        def request_ready(f: Future[Any], entry=(req_id, meta)):
+            if f.exception() is None:
+                logger.info("MoRIIO handshake done for request %s", req_id)
+            elif self.is_producer and self.mode == MoRIIOMode.WRITE:
+                logger.error("MoRIIO handshake failed for request %s", req_id)
+                self._writer.mark_unconnected(entry[1].transfer_id)
             self._ready_requests.put(entry)
             self.load_ready_flag[remote_engine_id] = True
             self.write_ready_flags[remote_engine_id] = True
@@ -2816,6 +2865,8 @@ class MoRIIOConnectorWorker:
                 for name, layout in self.mamba_state_layouts.items()
             },
             attention_block_sizes=self.attention_block_sizes,
+            dcp_size=self.dcp_size,
+            cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
         )
         ready_event = threading.Event()
         self._moriio_handshake_listener_t = threading.Thread(
@@ -3134,7 +3185,11 @@ class MoRIIOConnectorWorker:
                 if is_fanout
                 else not write_targets or dp0_remote_engine_id in self._remote_agents
             )
-            if not handshake_ready:
+            # A request whose handshake failed is not retried; its writes
+            # reach the decode ranks that are connected or fail the request.
+            if not handshake_ready and not self._writer.is_unconnected(
+                meta.transfer_id
+            ):
                 # Initiate handshake with remote engine to exchange metadata.
                 with self._handshake_lock:
                     if remote_engine_id not in self._remote_agents:
@@ -3181,7 +3236,9 @@ class MoRIIOConnectorWorker:
         # rank and spread reads across them; other configs keep the DP-only key.
         return f"{engine_name}_dp{dp_rank}_tp{tp_rank}"
 
-    def _eager_handshake_all_dp_ranks(self, metadata: MoRIIOConnectorMetadata) -> None:
+    def _eager_handshake_all_dp_ranks(
+        self, metadata: MoRIIOConnectorMetadata
+    ) -> set[str]:
         """Handshake EVERY remote prefill DP rank BEFORE the decode forward pass,
         identically across all local TP workers.
 
@@ -3209,12 +3266,16 @@ class MoRIIOConnectorWorker:
         Every worker reaches the all-reduce(MIN) vote; if ANY worker failed, ALL
         raise the same error AFTER the collective, so the step fails fast and
         uniformly in ~seconds instead of one rank hanging the forward for 600s.
+        When every failure is a refusal of the peer's layout, every worker
+        returns the peer instead and its requests fail; hybrid models still
+        raise, since their load errors cannot be reported.
         """
         import torch.distributed as dist
 
         # Distinct remote engines referenced this step, in metadata (==
         # scheduler) order so every TP worker iterates engines identically.
         engines: dict[str, ReqMeta] = {}
+        refused_engines: set[str] = set()
         for _req_id, meta in metadata.reqs_to_recv.items():
             remote_engine_id = (
                 str(meta.remote_host) + ":" + str(meta.remote_handshake_port)
@@ -3284,13 +3345,15 @@ class MoRIIOConnectorWorker:
             # Join outside the lock. Bounded handshake errors are recorded here
             # and reported after the all-reduce.
             all_ok = True
+            refused = True
             results: dict[str, set[str]] = {}
             for eid, fut in futures:
                 try:
                     results[eid] = fut.result()
-                except Exception:
+                except Exception as e:
                     logger.exception("Eager MoRIIO handshake failed for %s", eid)
                     all_ok = False
+                    refused = refused and isinstance(e, HandshakeRefusedError)
 
             with self._handshake_lock:
                 for eid, agents in results.items():
@@ -3308,9 +3371,16 @@ class MoRIIOConnectorWorker:
             # CPU all-reduce = TP-uniform success vote AND lockstep barrier: it
             # blocks until every TP worker arrives, gives them the same verdict,
             # and stays off the model compute stream.
-            vote = torch.tensor([1 if all_ok else 0], device="cpu", dtype=torch.int32)
+            # 2: connected, 1: only refusals of the peer's layout, 0: failed.
+            vote = torch.tensor(
+                [2 if all_ok else int(refused)], device="cpu", dtype=torch.int32
+            )
             dist.all_reduce(vote, group=self.tp_group.cpu_group, op=dist.ReduceOp.MIN)
-            if int(vote.item()) == 0:
+            verdict = int(vote.item())
+            if verdict == 1 and not self._has_mamba:
+                refused_engines.add(remote_engine_id)
+                continue
+            if verdict < 2:
                 raise HandshakeError(
                     f"Eager MoRIIO handshake failed for {remote_engine_id} on "
                     "at least one TP rank; failing this step fast to avoid a "
@@ -3318,6 +3388,7 @@ class MoRIIOConnectorWorker:
                 )
 
             self._eager_handshaked_engines.add(remote_engine_id)
+        return refused_engines
 
     def start_load_kv(self, metadata: MoRIIOConnectorMetadata):
         """Start loading by triggering non-blocking moriio_xfer.
@@ -3343,7 +3414,7 @@ class MoRIIOConnectorWorker:
         # read enters the forward pass. A lazy per-rank handshake on the read
         # path lets TP workers diverge into a forward collective while a peer is
         # still blocked handshaking -> NCCL hang (see below).
-        self._eager_handshake_all_dp_ranks(metadata)
+        refused_engines = self._eager_handshake_all_dp_ranks(metadata)
 
         wait_handshake_readd_req = False
         remote_engine_id = None
@@ -3353,6 +3424,19 @@ class MoRIIOConnectorWorker:
                 str(meta.remote_host) + ":" + str(meta.remote_handshake_port)
             )
             meta.remote_engine_id = remote_engine_id
+            if remote_engine_id in refused_engines:
+                # Scheduler recovery fails or recomputes the request; reading
+                # into no blocks only releases the prefill instance's blocks.
+                self._invalid_block_ids.update(
+                    block_id for group in meta.local_block_ids for block_id in group
+                )
+                self._read_blocks_for_req(
+                    req_id,
+                    dataclasses.replace(
+                        meta, local_block_ids=[[] for _ in meta.local_block_ids]
+                    ),
+                )
+                continue
             # The eager handshake above already covered every referenced engine
             # (and keys the mirror per (dp, tp), which the DP-only dp0 probe below
             # would miss). Only fall back to the lazy background handshake for an
@@ -3646,6 +3730,75 @@ class MoRIIOConnectorWorker:
         return self._apply_layer_mr_offsets(
             layer_name, (local, remote, sizes), remote_moriio_meta, remote_engine_id
         )
+
+    def _compute_dcp_run_offsets(
+        self,
+        layer_name: str,
+        runs: DCPWriteRuns,
+        run_tokens: int,
+        remote_moriio_meta: MoRIIOAgentMetadata,
+        remote_engine_id: EngineId | None = None,
+    ) -> tuple[list[int], list[int], list[int]]:
+        """Offsets writing runs of ``run_tokens`` tokens into the blocks of
+        one consumer DCP rank."""
+        offsets = compute_token_run_offsets(
+            layer_name,
+            self.kv_caches[layer_name],
+            self.layer_to_spec,
+            runs,
+            run_tokens,
+            remote_moriio_meta.num_blocks,
+            self._mla_latent_size,
+            merge_fn=lambda local, remote, sizes: self.merge_contiguous_blocks(
+                local, remote, sizes, assume_sorted=False
+            ),
+        )
+        return self._apply_layer_mr_offsets(
+            layer_name, offsets, remote_moriio_meta, remote_engine_id
+        )
+
+    def _whole_block_dcp_layer(self, interleave_size: int | None) -> str | None:
+        """A DCP-sharded layer that cannot be written in runs of
+        ``interleave_size`` tokens, only in whole blocks."""
+        if (
+            not interleave_size
+            or interleave_size >= self.block_size
+            or self.block_size % interleave_size
+        ):
+            return None
+        return next(
+            (
+                layer_name
+                for layer_name, kv_cache in self.kv_caches.items()
+                if self.layer_to_spec[layer_name].dcp_sharded
+                and get_token_run_table(
+                    layer_name,
+                    kv_cache,
+                    self.layer_to_spec,
+                    interleave_size,
+                    self._mla_latent_size,
+                )
+                is None
+            ),
+            None,
+        )
+
+    def _non_mla_dcp_layer(self) -> str | None:
+        """A DCP-sharded layer that is not MLA, e.g. of a draft model that the
+        decode instance may run without DCP and so keep unsharded."""
+        return next(
+            (
+                layer_name
+                for layer_name in self.kv_caches
+                if self.layer_to_spec[layer_name].dcp_sharded
+                and not self._is_mla_cache_layer(layer_name)
+            ),
+            None,
+        )
+
+    @property
+    def _mla_latent_size(self) -> int | None:
+        return self.model_config.get_head_size() if self.use_mla else None
 
     def _apply_layer_mr_offsets(
         self,

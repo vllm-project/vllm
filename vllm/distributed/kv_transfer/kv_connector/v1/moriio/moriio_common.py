@@ -114,6 +114,7 @@ class RemoteAllocInfo:
     # producer whose copy another producer writes still has to finish).
     completion_targets_resolved: bool = False
     completion_notified: bool = False
+    bytes_written: int = 0
     transfer_statuses: list[Any] = field(default_factory=list)
     transfer_offsets: dict[
         TransferOffsetsKey,
@@ -146,6 +147,9 @@ class MoRIIOAgentMetadata(
     # Tokens per block of each attention layer. Hybrid models size attention
     # blocks to the recurrent-state page, which depends on the TP size.
     attention_block_sizes: dict[str, int] = {}
+    # None: a peer that does not advertise its DCP layout.
+    dcp_size: int | None = None
+    cp_kv_cache_interleave_size: int | None = None
 
 
 class RoleManager:
@@ -214,6 +218,11 @@ class HandshakeError(MoRIIOError):
     """Exception raised when handshake fails."""
 
     pass
+
+
+class HandshakeRefusedError(HandshakeError):
+    """The peer's KV cache layout cannot be transferred with; a retry fails
+    the same way."""
 
 
 class TransferError(MoRIIOError):

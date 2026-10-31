@@ -89,7 +89,7 @@ def _worker(
 
 
 def _remote_meta(num_blocks: int = 16) -> SimpleNamespace:
-    return SimpleNamespace(num_blocks=num_blocks)
+    return SimpleNamespace(num_blocks=num_blocks, dcp_size=1)
 
 
 def _wrapper_for_messages() -> Any:
