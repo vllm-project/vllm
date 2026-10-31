@@ -5,15 +5,13 @@ import pytest
 import torch
 
 from tests.kernels.quantization.nvfp4_utils import (
-    dequant_nvfp4_kv_cache,
     dequantize_nvfp4_to_dtype,
     get_nvfp4_global_scale,
+    make_nvfp4_kv_cache,
 )
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import (
-    nvfp4_kv_cache_full_dim,
-    nvfp4_split_data_scale,
     set_random_seed,
 )
 
@@ -59,72 +57,6 @@ def build_paged_kv_metadata(
         torch.tensor(kv_indices, dtype=torch.int32),
         torch.tensor(kv_last_page_lens, dtype=torch.int32),
     )
-
-
-def make_nvfp4_kv_cache(
-    kv_bf16_hnd: torch.Tensor, block_size: int, head_size: int
-) -> tuple:
-    """Quantize bf16 KV cache to nvfp4 via reshape_and_cache_flash.
-
-    Returns (k_data, v_data), (k_scales, v_scales), kv_scale, ref_kv_bf16.
-    """
-    num_blocks, _, num_kv_heads, _, _ = kv_bf16_hnd.shape
-    kv_scale_val = (kv_bf16_hnd.abs().amax() / 448.0).item()
-    kv_scale_tensor = torch.tensor(
-        kv_scale_val, dtype=torch.float32, device=kv_bf16_hnd.device
-    )
-
-    # layout: (B, 2*H, N, full_dim)
-    #   where K heads occupy the first H heads and V heads occupy the second H heads.
-    full_dim = nvfp4_kv_cache_full_dim(head_size)
-    kv_cache_hnd = torch.zeros(
-        (num_blocks, 2 * num_kv_heads, block_size, full_dim),
-        dtype=torch.uint8,
-        device=kv_bf16_hnd.device,
-    )
-    kv_cache_nhd = kv_cache_hnd.permute(0, 2, 1, 3)
-    k_view_nhd, v_view_nhd = kv_cache_nhd.split(num_kv_heads, dim=-2)
-
-    # Flatten input KV → token tensors [B*N, H, head_size] for the kernel.
-    num_tokens = num_blocks * block_size
-    k_tokens = (
-        kv_bf16_hnd[:, 0]
-        .permute(0, 2, 1, 3)
-        .reshape(num_tokens, num_kv_heads, head_size)
-    )
-    v_tokens = (
-        kv_bf16_hnd[:, 1]
-        .permute(0, 2, 1, 3)
-        .reshape(num_tokens, num_kv_heads, head_size)
-    )
-    slot_mapping = torch.arange(num_tokens, dtype=torch.long, device=kv_bf16_hnd.device)
-
-    torch.ops._C_cache_ops.reshape_and_cache_flash(
-        k_tokens,
-        v_tokens,
-        k_view_nhd,
-        v_view_nhd,
-        slot_mapping,
-        "nvfp4",
-        kv_scale_tensor,
-        kv_scale_tensor,
-    )
-
-    # Split into data/scale views in HNC order for trtllm kernel.
-    k_cache_hnc, v_cache_hnc = kv_cache_hnd.split(num_kv_heads, dim=1)
-    k_data, k_scales = nvfp4_split_data_scale(k_cache_hnc)
-    v_data, v_scales = nvfp4_split_data_scale(v_cache_hnc)
-
-    # Dequantize for the FA2 reference baseline.
-    ref_k = dequant_nvfp4_kv_cache(
-        k_data, k_scales, kv_scale_val, head_size, block_size, swizzled_scales=False
-    ).to(torch.bfloat16)
-    ref_v = dequant_nvfp4_kv_cache(
-        v_data, v_scales, kv_scale_val, head_size, block_size
-    ).to(torch.bfloat16)
-    ref_kv_bf16 = torch.stack([ref_k, ref_v], dim=1)  # [N, 2, H, T, D]
-
-    return (k_data, v_data), (k_scales, v_scales), kv_scale_val, ref_kv_bf16
 
 
 def make_quantized_kv_cache(
