@@ -971,6 +971,19 @@ class EngineCore:
                 raise
             self._fail_checkpoint(e)
 
+    def _flush_deferred_frees(self) -> None:
+        """Release blocks held behind a write that no step output fences.
+
+        With speculative decoding the draft forward runs after the step's
+        output copy event is recorded, so its KV writes are only fenced by a
+        later step. When the engine drains there is no later step: wait for
+        the device and return the blocks directly.
+        """
+        if not self.scheduler.has_deferred_frees():
+            return
+        self.model_executor.collective_rpc("synchronize_device")
+        self.scheduler.flush_deferred_frees()
+
     def pause_scheduler(
         self, mode: PauseMode = "abort", clear_cache: bool = True
     ) -> Future | None:
@@ -1699,6 +1712,9 @@ class EngineCoreProc(EngineCore):
         while not self.has_work() and self.is_running():
             # Notify callbacks waiting for engine to become idle.
             self._notify_idle_state_callbacks()
+            # The engine is idle, so no further step will advance the fence of
+            # blocks still held behind an unfenced write. Return them now.
+            self._flush_deferred_frees()
             if self.input_queue.empty():
                 # Drain aborts queue; all aborts are also processed via input_queue.
                 with self.aborts_queue.mutex:
@@ -1740,6 +1756,11 @@ class EngineCoreProc(EngineCore):
         # (e.g. WAITING_FOR_REMOTE_KVS or delayed KV connector frees), yield
         # the GIL briefly to allow background transfer threads to make progress.
         if not model_executed and self.scheduler.has_requests():
+            # A stalled engine never advances the deferred-free fences, and
+            # holding those blocks can be what keeps the waiting request from
+            # ever being scheduled. Release them instead of waiting for a step
+            # that may never come; the flush is a no-op once the queue drains.
+            self._flush_deferred_frees()
             time.sleep(0.001)
 
         return model_executed

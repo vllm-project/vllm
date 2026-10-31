@@ -207,6 +207,19 @@ class SchedulerInterface(ABC):
         not yet returned in SchedulerOutputs."""
         return self.has_unfinished_requests() or self.has_finished_requests()
 
+    def has_deferred_frees(self) -> bool:
+        """Returns True if freed blocks are being held back from the block pool
+        because an in-flight step may still write them."""
+        return False
+
+    def flush_deferred_frees(self) -> None:
+        """Release every held block to the block pool.
+
+        The caller must make sure the device is synchronized first: the held
+        blocks may still be written by GPU work that no step's output fences.
+        """
+        return None
+
     @property
     @abstractmethod
     def pause_state(self) -> PauseState:

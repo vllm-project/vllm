@@ -2267,8 +2267,11 @@ class Scheduler(SchedulerInterface):
         ec_connector_output = model_runner_output.ec_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
 
-        # Every GPU write enqueued by this and earlier steps has completed, so it is
-        # safe to return deferred-free blocks to the pool.
+        # Every GPU write enqueued by this and earlier steps has completed, so it
+        # is safe to return deferred-free blocks to the pool. The speculator's
+        # draft forward is the exception: it is enqueued after this step's output
+        # copy event is recorded, which is why fences are shifted by a step when
+        # speculative decoding is enabled (see _block_write_fence_seq()).
         if self.defer_block_free and scheduler_output.total_num_scheduled_tokens > 0:
             self.processed_step_seq += 1
             self._drain_deferred_frees()
@@ -3064,11 +3067,23 @@ class Scheduler(SchedulerInterface):
         logger.info("setting pause state to %s", pause_state.name)
         self._pause_state = pause_state
 
+    def _block_write_fence_seq(self, step_seq: int) -> int:
+        """Return the step by which a write enqueued at ``step_seq`` is done.
+
+        The step's ``AsyncOutput`` copy event is recorded before the
+        speculator's draft forward runs (the D2H copy deliberately overlaps
+        the proposal), so it does not cover the draft model's KV writes. Those
+        writes are only known to have completed once the *next* step's output
+        has been processed, since that step is enqueued after them.
+        """
+        return step_seq + 1 if self.num_spec_tokens else step_seq
+
     def _request_blocks_can_be_freed(self, request: Request) -> bool:
         # We must defer freeing blocks if an async kv connector may
         # write to them immediately (not ordered with GPU stream).
         return not self.defer_block_free or (
-            request.last_sched_seq <= self.processed_step_seq
+            self._block_write_fence_seq(request.last_sched_seq)
+            <= self.processed_step_seq
         )
 
     def _free_request_blocks(self, request: Request):
@@ -3080,7 +3095,9 @@ class Scheduler(SchedulerInterface):
             return
         blocks = self.kv_cache_manager.pop_blocks_for_free(request)
         if blocks:
-            self.deferred_frees.append((self.sched_step_seq, blocks))
+            self.deferred_frees.append(
+                (self._block_write_fence_seq(self.sched_step_seq), blocks)
+            )
 
     def _free_cow_retained_blocks(
         self, blocks: list[KVCacheBlock], fence_seq: int
@@ -3133,6 +3150,14 @@ class Scheduler(SchedulerInterface):
                         else None
                     ),
                 )
+
+    def has_deferred_frees(self) -> bool:
+        return bool(self.deferred_frees)
+
+    def flush_deferred_frees(self) -> None:
+        while self.deferred_frees:
+            _, blocks = self.deferred_frees.popleft()
+            self.kv_cache_manager.block_pool.free_blocks(reversed(blocks))
 
     def get_num_unfinished_requests(self) -> int:
         if self._pause_state == PauseState.PAUSED_ALL:
