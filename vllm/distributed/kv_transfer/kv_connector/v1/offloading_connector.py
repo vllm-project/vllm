@@ -143,6 +143,9 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, OffloadingConnectorMetadata)
+        # MRv1 calls get_transfer_results after forward and before sampling.
+        # MRv2 calls it from post_forward after sampling, preserving its timing.
+        self.connector_worker.submit_deferred_loads()
         return self.connector_worker.get_finished(finished_req_ids)
 
     def get_transfer_results(
