@@ -45,6 +45,12 @@ class AttentionConfig:
     back to Triton where the CUTLASS kernel does not support the platform, KV
     cache dtype, or head layout."""
 
+    minimax_m3_msa_decode_fp16_dot: bool = False
+    """Use FP16 dot operands with FP32 accumulation and tuned splitting for
+    SM100 Triton sparse decode with BF16 queries and FP8 KV. Select this path
+    with `minimax_m3_msa_decode_backend="triton"`. Requires absent or scalar
+    scales and is disabled in batch-invariant mode."""
+
     backend_per_kind: dict[str, AttentionBackendEnum] = field(default_factory=dict)
     """Per-KV-cache-group attention backend overrides, keyed by
     `KVCacheSpecKind` (e.g. `{"mla_attention": "FLASHINFER_MLA",
