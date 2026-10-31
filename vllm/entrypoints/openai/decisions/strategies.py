@@ -373,6 +373,7 @@ class NextTokenStrategy(ReadStrategy):
         prompts: Sequence[Sequence[int]],
         request_id: str,
         *,
+        engine_input: EngineInput,
         lora_request: LoRARequest | None,
         priority: int,
         cache_salt: str | None,
@@ -395,8 +396,19 @@ class NextTokenStrategy(ReadStrategy):
         shared = common_prefix_len(prompts)
         if shared < MIN_WARM_PREFIX_TOKENS:
             return
+        prefix_ids = list(prompts[0][:shared])
+        prefix_input: EngineInput = tokens_input(prefix_ids, cache_salt=cache_salt)
+        if engine_input["type"] == "multimodal":
+            if any(
+                position.offset + position.length > shared
+                for positions in engine_input["mm_placeholders"].values()
+                for position in positions
+            ):
+                return
+            prefix_input = {**engine_input, "prompt_token_ids": prefix_ids}
+            prefix_input.pop("prompt", None)
         generator = engine_client.generate(
-            tokens_input(list(prompts[0][:shared]), cache_salt=cache_salt),
+            prefix_input,
             SamplingParams(max_tokens=1, temperature=0.0),
             f"{request_id}-prefix",
             lora_request=lora_request,
@@ -489,6 +501,7 @@ class NextTokenStrategy(ReadStrategy):
         await self._warm_shared_prefix(
             [prompt_ids for _, prompt_ids in rendered],
             request_id,
+            engine_input=rendered[0][0],
             lora_request=lora_request,
             priority=priority,
             cache_salt=cache_salt,
