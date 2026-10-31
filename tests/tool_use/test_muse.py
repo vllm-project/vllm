@@ -173,6 +173,65 @@ def test_json_object_array_and_bool_params_decode():
     }
 
 
+def test_unclosed_last_parameter_ends_at_invoke_close():
+    """The model sometimes omits the final </atem:parameter>."""
+    raw = (
+        "<|start|>assistant to=cite<|message|>"
+        '<atem:function_calls>\n<atem:invoke name="cite">\n'
+        '<atem:parameter name="chunk_ids">["07657059-389d-4601"]</atem:invoke>\n'
+        "</atem:function_calls><|eot|>"
+    )
+    out = MuseToolParser.extract_tool_calls(T, raw, _NO_REQ)
+    assert out.tools_called and len(out.tool_calls) == 1
+    assert json.loads(out.tool_calls[0].function.arguments) == {
+        "chunk_ids": ["07657059-389d-4601"]
+    }
+
+
+def test_unclosed_last_parameter_after_closed_one():
+    raw = (
+        "<|start|>assistant to=search<|message|>"
+        '<atem:function_calls>\n<atem:invoke name="search">\n'
+        '<atem:parameter name="query">foosball bracket</atem:parameter>\n'
+        '<atem:parameter name="limit">10\n'
+        "</atem:invoke>\n</atem:function_calls><|eot|>"
+    )
+    out = MuseToolParser.extract_tool_calls(T, raw, _NO_REQ)
+    assert json.loads(out.tool_calls[0].function.arguments) == {
+        "query": "foosball bracket",
+        "limit": 10,
+    }
+
+
+def test_unclosed_last_parameter_stays_inside_its_invoke():
+    raw = (
+        "<|start|>assistant to=cite<|message|>"
+        '<atem:function_calls>\n<atem:invoke name="cite">\n'
+        '<atem:parameter name="chunk_ids">["07657059-389d-4601"]</atem:invoke>\n'
+        '<atem:invoke name="search">\n'
+        '<atem:parameter name="query">foosball bracket</atem:parameter>\n'
+        "</atem:invoke>\n</atem:function_calls><|eot|>"
+    )
+    out = MuseToolParser.extract_tool_calls(T, raw, _NO_REQ)
+    assert [json.loads(c.function.arguments) for c in out.tool_calls] == [
+        {"chunk_ids": ["07657059-389d-4601"]},
+        {"query": "foosball bracket"},
+    ]
+
+
+def test_unclosed_last_string_parameter_drops_separator_newline():
+    raw = (
+        "<|start|>assistant to=search<|message|>"
+        '<atem:function_calls>\n<atem:invoke name="search">\n'
+        '<atem:parameter name="query">foosball bracket\n'
+        "</atem:invoke>\n</atem:function_calls><|eot|>"
+    )
+    out = MuseToolParser.extract_tool_calls(T, raw, _NO_REQ)
+    assert json.loads(out.tool_calls[0].function.arguments) == {
+        "query": "foosball bracket"
+    }
+
+
 # ------------------------------------------------- reasoning -> tool handoff
 
 
