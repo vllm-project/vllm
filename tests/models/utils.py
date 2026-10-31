@@ -414,6 +414,9 @@ class RerankModelInfo(ModelInfo):
 class GenerateModelInfo(ModelInfo):
     hf_dtype: str = "auto"
     hf_ppl: float | None = None
+    pixel_factor: int = 0
+    extra_kwargs: dict | None = None
+    image_token_id: int | None = None
 
 
 def get_vllm_extra_kwargs(model_info: ModelInfo, vllm_extra_kwargs):

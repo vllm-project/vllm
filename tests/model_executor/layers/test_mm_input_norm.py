@@ -3,6 +3,7 @@
 
 """Tests for FusedMMInputNorm and the fused affine transform kernel."""
 
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -19,6 +20,7 @@ from vllm.config.load import LoadConfig
 from vllm.model_executor.layers.fusion.mm_input_norm import (
     FusedMMInputNorm,
     IdentityInputNorm,
+    InputLayout,
     NormParams,
     fused_mm_input_norm_triton,
 )
@@ -48,7 +50,7 @@ def _reference_input_norm(
     channel: int,
     out_dtype: torch.dtype,
 ) -> torch.Tensor:
-    """Straightforward per-channel affine: (x * rescale - mean) / std."""
+    """Straightforward per-channel affine for (patches, C*L)."""
     patches, size = pixel_values.shape
     patch_size = size // channel
     mean = torch.tensor(
@@ -60,6 +62,28 @@ def _reference_input_norm(
     x = pixel_values.to(torch.float32).reshape(patches, channel, patch_size)
     x = (x * rescale_factor - mean) / std
     return x.view(patches, size).to(out_dtype)
+
+
+def _reference_input_norm_nchw(
+    pixel_values: torch.Tensor,
+    image_mean: list[float],
+    image_std: list[float],
+    rescale_factor: float,
+    channel: int,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    """Straightforward per-channel affine for (B, C, H, W)."""
+    B, C, H, W = pixel_values.shape
+    assert channel == C, f"reference got C={C}, expected channel={channel}"
+    mean = torch.tensor(
+        image_mean, dtype=torch.float32, device=pixel_values.device
+    ).view(1, C, 1, 1)
+    std = torch.tensor(image_std, dtype=torch.float32, device=pixel_values.device).view(
+        1, C, 1, 1
+    )
+    x = pixel_values.to(torch.float32)
+    x = (x * rescale_factor - mean) / std
+    return x.to(out_dtype)
 
 
 # CLIP-style RGB normalization constants reused across tests.
@@ -75,6 +99,7 @@ def _check_against_reference(
     image_mean: list[float] | None = None,
     image_std: list[float] | None = None,
     rescale_factor: float = _RGB_RESCALE,
+    layout: InputLayout | str = InputLayout.PCL,
     **close_kwargs,
 ):
     """Run ``FusedMMInputNorm`` on ``pixel_values`` and compare against the
@@ -83,15 +108,25 @@ def _check_against_reference(
         image_mean = list(_RGB_MEAN)
     if image_std is None:
         image_std = list(_RGB_STD)
+    layout = InputLayout(layout)
+
     norm = FusedMMInputNorm(
         image_mean=image_mean,
         image_std=image_std,
         rescale_factor=rescale_factor,
         channel=channel,
+        layout=layout,
     ).to(_DEVICE)
-    expected = _reference_input_norm(
-        pixel_values, image_mean, image_std, rescale_factor, channel, out_dtype
-    )
+
+    if layout is InputLayout.BCHW:
+        expected = _reference_input_norm_nchw(
+            pixel_values, image_mean, image_std, rescale_factor, channel, out_dtype
+        )
+    else:
+        expected = _reference_input_norm(
+            pixel_values, image_mean, image_std, rescale_factor, channel, out_dtype
+        )
+
     torch.testing.assert_close(
         norm(pixel_values, visual_dtype=out_dtype), expected, **close_kwargs
     )
@@ -204,6 +239,12 @@ class TestFusedMMInputNormShapes:
         )
         _check_against_reference(pixel_values, torch.float32)
 
+    def test_rejects_indivisible_pcl_size(self):
+        """Size % channel != 0 must fail loudly, not silently truncate."""
+        norm = FusedMMInputNorm(_RGB_MEAN, _RGB_STD, _RGB_RESCALE).to(_DEVICE)
+        with pytest.raises(AssertionError):
+            norm(torch.randn(2, 3 * 10 + 1, device=_DEVICE), torch.float32)
+
 
 # ===========================================================================
 # Input handling: non-contiguous inputs
@@ -222,13 +263,209 @@ class TestFusedMMInputNormInputHandling:
 
 
 # ===========================================================================
+# BCHW layout
+# ===========================================================================
+@requires_vllm_config
+class TestFusedMMInputNormBCHWLayout:
+    @pytest.mark.parametrize(
+        "in_dtype,out_dtype",
+        [
+            (torch.float32, torch.float32),
+            (torch.float32, torch.bfloat16),
+            (torch.float32, torch.float16),
+            (torch.bfloat16, torch.bfloat16),
+            (torch.bfloat16, torch.float32),
+            (torch.float16, torch.float16),
+            (torch.uint8, torch.bfloat16),
+            (torch.uint8, torch.float32),
+        ],
+    )
+    def test_dtype_combinations_bchw(
+        self, in_dtype: torch.dtype, out_dtype: torch.dtype
+    ):
+        set_random_seed(0)
+        shape = (4, 3, 8, 16)
+        if in_dtype == torch.uint8:
+            pixel_values = torch.randint(
+                0, 256, shape, dtype=torch.uint8, device=_DEVICE
+            )
+        else:
+            pixel_values = torch.rand(shape, dtype=torch.float32, device=_DEVICE).to(
+                in_dtype
+            )
+
+        _check_against_reference(
+            pixel_values,
+            out_dtype,
+            layout="bchw",
+            image_mean=[0.5, 0.5, 0.5],
+            image_std=[0.5, 0.5, 0.5],
+            atol=1e-2,
+            rtol=1e-2,
+        )
+
+    @pytest.mark.parametrize("channel", [1, 3, 4])
+    def test_channel_variants_bchw(self, channel: int):
+        set_random_seed(0)
+        pixel_values = torch.randint(
+            0, 256, (4, channel, 16, 16), dtype=torch.float32, device=_DEVICE
+        )
+        _check_against_reference(
+            pixel_values,
+            torch.float32,
+            channel=channel,
+            layout="bchw",
+            image_mean=[0.5] * channel,
+            image_std=[0.25] * channel,
+        )
+
+    @pytest.mark.parametrize("hw", [(1, 1), (2, 8), (32, 64)])
+    def test_spatial_shapes_bchw(self, hw: tuple[int, int]):
+        """H*W=1 exercises L=1; 32*64=2048 is exactly two blocks."""
+        H, W = hw
+        set_random_seed(0)
+        pixel_values = torch.randint(
+            0, 256, (4, 3, H, W), dtype=torch.float32, device=_DEVICE
+        )
+        _check_against_reference(pixel_values, torch.float32, layout="bchw")
+
+    def test_bchw_matches_pcl_equivalent(self):
+        """The same bytes viewed as (P, C, H*W) and (B, C, H, W) must
+        produce numerically identical outputs."""
+        set_random_seed(0)
+        B, C, H, W = 4, 3, 16, 32
+        x_bchw = torch.randint(
+            0, 256, (B, C, H, W), dtype=torch.float32, device=_DEVICE
+        )
+        x_pcl = x_bchw.reshape(B, C * H * W)
+
+        norm_bchw = FusedMMInputNorm(
+            _RGB_MEAN, _RGB_STD, _RGB_RESCALE, layout="bchw"
+        ).to(_DEVICE)
+        norm_pcl = FusedMMInputNorm(_RGB_MEAN, _RGB_STD, _RGB_RESCALE, layout="pcl").to(
+            _DEVICE
+        )
+
+        y_bchw = norm_bchw(x_bchw, torch.float32)
+        y_pcl = norm_pcl(x_pcl, torch.float32)
+
+        assert y_bchw.shape == (B, C, H, W)
+        torch.testing.assert_close(y_bchw.reshape(B, C * H * W), y_pcl)
+
+    def test_large_batch_bchw(self):
+        """Regression guard for the cuDNN grid-limit size, now in BCHW."""
+        set_random_seed(0)
+        pixel_values = torch.randint(
+            0, 256, (70000, 3, 1, 1), dtype=torch.float32, device=_DEVICE
+        )
+        _check_against_reference(pixel_values, torch.float32, layout="bchw")
+
+
+# ===========================================================================
+# BCHW validation / non-contiguous
+# ===========================================================================
+@requires_vllm_config
+class TestFusedMMInputNormBCHWValidation:
+    def _norm(self, channel: int = 3) -> FusedMMInputNorm:
+        return FusedMMInputNorm(
+            _RGB_MEAN, _RGB_STD, _RGB_RESCALE, channel=channel, layout="bchw"
+        ).to(_DEVICE)
+
+    def test_rejects_2d_input(self):
+        norm = self._norm()
+        with pytest.raises(AssertionError):
+            norm(torch.randn(4, 3 * 64, device=_DEVICE), torch.float32)
+
+    def test_rejects_5d_input(self):
+        norm = self._norm()
+        with pytest.raises(AssertionError):
+            norm(torch.randn(2, 3, 4, 4, 4, device=_DEVICE), torch.float32)
+
+    def test_rejects_channel_mismatch(self):
+        norm = self._norm(channel=3)
+        with pytest.raises(AssertionError):
+            norm(torch.randn(2, 4, 8, 8, device=_DEVICE), torch.float32)
+
+    def test_non_contiguous_bchw_matches_reference(self):
+        """A permuted (still 4D) tensor must be materialized correctly."""
+        set_random_seed(0)
+        base = torch.randint(
+            0, 256, (4, 3, 16, 32), dtype=torch.float32, device=_DEVICE
+        )
+        # Transpose to (4, 3, 32, 16), make contiguous, transpose back so
+        # the resulting (4, 3, 16, 32) view is non-contiguous.
+        non_contig = base.transpose(2, 3).contiguous().transpose(2, 3)
+        assert not non_contig.is_contiguous()
+
+        _check_against_reference(non_contig, torch.float32, layout="bchw")
+
+
+# ===========================================================================
+# layout constructor semantics
+# ===========================================================================
+@requires_vllm_config
+class TestFusedMMInputInputLayoutConfig:
+    def test_default_is_pcl(self):
+        norm = FusedMMInputNorm(_RGB_MEAN, _RGB_STD, _RGB_RESCALE)
+        assert norm.layout is InputLayout.PCL
+
+    @pytest.mark.parametrize("layout", ["bchw", InputLayout.BCHW])
+    def test_accepts_string_and_enum(self, layout):
+        norm = FusedMMInputNorm(_RGB_MEAN, _RGB_STD, _RGB_RESCALE, layout=layout)
+        assert norm.layout is InputLayout.BCHW
+
+    def test_invalid_layout_raises(self):
+        with pytest.raises(ValueError):
+            FusedMMInputNorm(_RGB_MEAN, _RGB_STD, _RGB_RESCALE, layout="nchw")
+
+    def test_enum_is_str_compatible(self):
+        # InputLayout(str, Enum) must compare equal to its string form so
+        # callers can keep layout="bchw" in configs.
+        assert InputLayout.BCHW == "bchw"
+        assert InputLayout.PCL == "pcl"
+
+    def test_input_dtype_and_enabled(self):
+        # Sanity check for the CustomOp contract used by the processor.
+        norm = FusedMMInputNorm(_RGB_MEAN, _RGB_STD, _RGB_RESCALE)
+        assert norm.input_dtype is torch.uint8
+        assert FusedMMInputNorm.enabled() is True
+
+
+# ===========================================================================
+# forward_oot / IdentityInputNorm 4D passthrough
+# ===========================================================================
+@requires_vllm_config
+class TestFusedMMInputNormOOTAndIdentity:
+    @pytest.mark.parametrize("layout", ["pcl", "bchw"])
+    def test_forward_oot_matches_native(self, layout):
+        set_random_seed(0)
+        shape = (4, 3, 8, 8) if layout == "bchw" else (4, 3 * 64)
+        pixel_values = torch.randn(shape, dtype=torch.float32, device=_DEVICE)
+
+        norm = FusedMMInputNorm(_RGB_MEAN, _RGB_STD, _RGB_RESCALE, layout=layout).to(
+            _DEVICE
+        )
+        torch.testing.assert_close(
+            norm.forward_oot(pixel_values, torch.bfloat16),
+            norm.forward_native(pixel_values, torch.bfloat16),
+        )
+
+    def test_identity_passthrough_bchw(self):
+        norm = IdentityInputNorm()
+        x = torch.randn(2, 3, 8, 8, dtype=torch.float32, device=_DEVICE)
+        out = norm(x, visual_dtype=torch.bfloat16)
+        assert out.shape == x.shape
+        torch.testing.assert_close(out, x.to(torch.bfloat16))
+
+
+# ===========================================================================
 # Raw kernel entry point
 # ===========================================================================
 @requires_accelerator
 @requires_triton
 class TestFusedMMInputNormKernel:
     @pytest.mark.parametrize(
-        "N, C, L",
+        "P, C, L",
         [
             (1, 1, 1),
             (1, 3, 1),
@@ -237,12 +474,12 @@ class TestFusedMMInputNormKernel:
             (4, 3, 1000),
         ],
     )
-    def test_channel_boundary_crossing(self, N: int, C: int, L: int):
+    def test_channel_boundary_crossing(self, P: int, C: int, L: int):
         """The 1D kernel recovers ``c = (offs // L) % C`` per lane, so a tile
         can straddle a channel boundary and gather weight/bias per lane.
         These shapes force that path by keeping ``L`` well below the block."""
         set_random_seed(0)
-        x = torch.randn(N, C, L, dtype=torch.float32, device=_DEVICE)
+        x = torch.randn(P, C, L, dtype=torch.float32, device=_DEVICE)
         w = torch.randn(C, dtype=torch.float32, device=_DEVICE)
         b = torch.randn(C, dtype=torch.float32, device=_DEVICE)
 
@@ -254,15 +491,15 @@ class TestFusedMMInputNormKernel:
 
     def test_non_contiguous_inputs_materialized(self):
         """Read-only tensors are made contiguous internally."""
-        N, C, L = 3, 3, 100
+        P, C, L = 3, 3, 100
         set_random_seed(0)
-        base = torch.randn(N, C, L, 2, dtype=torch.float32, device=_DEVICE)
+        base = torch.randn(P, C, L, 2, dtype=torch.float32, device=_DEVICE)
         x = base[..., 0]
         assert not x.is_contiguous()
         w = torch.randn(C, dtype=torch.float32, device=_DEVICE)
         b = torch.randn(C, dtype=torch.float32, device=_DEVICE)
 
-        out = torch.empty(N, C, L, dtype=torch.float32, device=_DEVICE)
+        out = torch.empty(P, C, L, dtype=torch.float32, device=_DEVICE)
         fused_mm_input_norm_triton(x, out, w, b)
 
         expected = x * w.view(1, C, 1) + b.view(1, C, 1)
@@ -270,12 +507,12 @@ class TestFusedMMInputNormKernel:
 
     def test_rejects_mismatched_output_shape(self):
         """``outputs`` must be shaped exactly like ``inputs``."""
-        N, C, L = 3, 3, 100
-        x = torch.randn(N, C, L, dtype=torch.float32, device=_DEVICE)
+        P, C, L = 3, 3, 100
+        x = torch.randn(P, C, L, dtype=torch.float32, device=_DEVICE)
         w = torch.randn(C, dtype=torch.float32, device=_DEVICE)
         b = torch.randn(C, dtype=torch.float32, device=_DEVICE)
 
-        for out_shape in ((N, C + 1, L), (N, C, L + 1), (N + 2, C, L)):
+        for out_shape in ((P, C + 1, L), (P, C, L + 1), (P + 2, C, L)):
             with pytest.raises(AssertionError):
                 fused_mm_input_norm_triton(
                     x,
@@ -364,3 +601,66 @@ class TestFusedMMInputNormConstruction:
 
         assert norm.weight.device.type == default_device
         assert norm.bias.device.type == default_device
+
+
+# ===========================================================================
+# Factory: build_mm_input_norm
+# ===========================================================================
+@requires_vllm_config
+class TestBuildMMInputNorm:
+    """``build_mm_input_norm`` picks IdentityInputNorm vs FusedMMInputNorm
+    and forwards ``layout`` to the constructed module."""
+
+    @staticmethod
+    def _patch_processor(monkeypatch, cfg: dict):
+        from vllm.model_executor.layers.fusion import mm_input_norm as mod
+
+        monkeypatch.setattr(mod, "get_processor_config", lambda *a, **k: dict(cfg))
+        return mod
+
+    @staticmethod
+    def _model_config(do_normalize: bool = True) -> SimpleNamespace:
+        return SimpleNamespace(
+            multimodal_config=SimpleNamespace(mm_device_do_normalize=do_normalize),
+            model="dummy",
+            revision=None,
+        )
+
+    _NON_IDENTITY_CFG = {
+        "do_normalize": True,
+        "do_rescale": True,
+        "image_mean": _RGB_MEAN,
+        "image_std": _RGB_STD,
+        "rescale_factor": _RGB_RESCALE,
+    }
+
+    _IDENTITY_CFG = {
+        "do_normalize": True,
+        "do_rescale": True,
+        "image_mean": [0.0, 0.0, 0.0],
+        "image_std": [1.0, 1.0, 1.0],
+        "rescale_factor": 1.0,
+    }
+
+    @pytest.mark.parametrize("layout", ["pcl", "bchw"])
+    def test_layout_passthrough(self, monkeypatch, layout):
+        mod = self._patch_processor(monkeypatch, self._NON_IDENTITY_CFG)
+        norm = mod.build_mm_input_norm(self._model_config(), layout=layout)
+        assert isinstance(norm, FusedMMInputNorm)
+        assert norm.layout is InputLayout(layout)
+
+    def test_default_layout_is_pcl(self, monkeypatch):
+        mod = self._patch_processor(monkeypatch, self._NON_IDENTITY_CFG)
+        norm = mod.build_mm_input_norm(self._model_config())
+        assert isinstance(norm, FusedMMInputNorm)
+        assert norm.layout is InputLayout.PCL
+
+    def test_identity_params_return_identity_norm(self, monkeypatch):
+        mod = self._patch_processor(monkeypatch, self._IDENTITY_CFG)
+        norm = mod.build_mm_input_norm(self._model_config(), layout="bchw")
+        assert isinstance(norm, IdentityInputNorm)
+
+    def test_normalize_disabled_returns_identity_norm(self, monkeypatch):
+        mod = self._patch_processor(monkeypatch, {})
+        norm = mod.build_mm_input_norm(self._model_config(do_normalize=False))
+        assert isinstance(norm, IdentityInputNorm)
