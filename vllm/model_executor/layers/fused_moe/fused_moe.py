@@ -1632,10 +1632,13 @@ def _prepare_expert_assignment(
     # path of the fused_moe_kernel kernel, which reads an expert's weights once
     # per (token, expert) pair. Not for weights in host memory: there every
     # repeated read crosses PCIe, so group each expert's tokens instead.
+    # Only use naive assignment when num_tokens == 1 to avoid repeated reads
+    # of shared expert weights when multiple tokens route to the same expert.
+    # See https://github.com/vllm-project/vllm/issues/63943
     naive_block_assignment = (
         expert_map is None
         and not weights_host_resident
-        and num_tokens * top_k_num * 4 <= global_num_experts
+        and num_tokens == 1
         and not (
             (use_int8_w8a16 or use_int4_w4a16)
             and block_shape is not None
