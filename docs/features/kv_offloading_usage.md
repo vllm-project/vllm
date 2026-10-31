@@ -460,6 +460,36 @@ Example (OpenAI-compatible completions request):
 }
 ```
 
+## Huge pages for `SimpleCPUOffloadConnector`
+
+`SimpleCPUOffloadConnector` uses one host mapping per worker rank for its CPU
+KV caches. By default it uses ordinary pages. Set `cpu_hugepage_block_size` to
+`"2MB"` or `"1GB"` in `kv_connector_extra_config` to use explicit Linux HugeTLB
+pages:
+
+```json
+{
+  "kv_connector": "SimpleCPUOffloadConnector",
+  "kv_role": "kv_both",
+  "kv_connector_extra_config": {
+    "cpu_bytes_to_use_per_rank": 137438953472,
+    "cpu_hugepage_block_size": "1GB"
+  }
+}
+```
+
+Reserve enough HugeTLB pages on the host for every rank, rounding each rank's
+capacity up to a whole page. Containers also need a matching hugetlb allowance
+(for example, Kubernetes `hugepages-1Gi` resources). Allocation fails at startup
+if the pool or container limit is too small; it does not fall back to ordinary
+pages. Populating HugeTLB pages requires Linux 5.14 or newer.
+
+The mapping prefers the GPU's NUMA node when placement is available. It is
+excluded from forked child processes and pinned in chunks of at most 1 GiB.
+When explicit HugeTLB pages are disabled, `THP_MEM_ALLOC_ENABLE=1` requests
+transparent huge pages with `MADV_HUGEPAGE`; the kernel decides whether to
+provide them. These settings apply to the CPU backend.
+
 ## Explicit pool sizing for `SimpleCPUOffloadConnector`
 
 `SimpleCPUOffloadConnector` accepts an optional `num_cpu_blocks` in
