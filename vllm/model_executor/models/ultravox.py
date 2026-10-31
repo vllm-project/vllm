@@ -6,9 +6,8 @@
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Any, Literal, TypeAlias
+from typing import Annotated, Any, Literal, NamedTuple, TypeAlias
 
-import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -21,11 +20,16 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import MulAndSilu, get_act_fn
 from vllm.model_executor.layers.attention import MMEncoderAttention
+from vllm.model_executor.layers.attention.mm_encoder_attention import (
+    FLASHINFER_BATCH_BUCKETS,
+    bucket_flashinfer_max_seqlen,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader import DefaultModelLoader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.models.vision import get_fp8_padded_hidden_size
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -47,7 +51,10 @@ from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.math_utils import round_up
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -329,52 +336,334 @@ class StackAudioFrames(nn.Module):
         return audio_embeds
 
 
-def _build_chunk_attn_metadata(
+class _ChunkPackPlan(NamedTuple):
+    """Host-side gather plan for one rectangular mel batch.
+
+    `pack_index` selects conv frames `t < feat_len[b]` from row-major
+    `[B, T_conv]`. Zero-length rows are omitted. `cu_seqlens` has one
+    segment per kept row.
+    """
+
+    pack_index: torch.Tensor
+    feat_lens: list[int]
+    positive_feat_lens: list[int]
+    cu_seqlens: torch.Tensor
+    max_seqlen: int
+    t_conv: int
+
+
+def _feat_len(mel_len: int) -> int:
+    """Conv2 frames for a mel length. Matches `(L - 1) // 2 + 1`."""
+    return (int(mel_len) - 1) // 2 + 1
+
+
+def _connector_tokens(feat_len: int, stack_factor: int) -> int:
+    if feat_len <= 0:
+        return 0
+    return (feat_len + stack_factor - 1) // stack_factor
+
+
+def _upper_bound_mm_lora_counts(
+    num_mm_embeds: int,
+    max_source_positions: int,
+    stack_factor: int,
+) -> tuple[int, int]:
+    """Init-time punica budget. `num_mm_embeds` is the encoder token budget.
+
+    Both tower terms are required. Full 1500-frame chunks can exceed
+    `num_mm_embeds * stack_factor` (`8192` -> `66000`), and short chunks can
+    exceed `num_chunks * max_source_positions` (`3008` -> `24064`).
+    """
+    if num_mm_embeds <= 0 or max_source_positions <= 0 or stack_factor <= 0:
+        return 0, 0
+    max_tokens_per_chunk = math.ceil(max_source_positions / stack_factor)
+    num_chunks = math.ceil(num_mm_embeds / max_tokens_per_chunk)
+    tower = max(num_chunks * max_source_positions, num_mm_embeds * stack_factor)
+    connector = num_chunks * max_tokens_per_chunk
+    return tower, connector
+
+
+def _audio_lens_tensor(mm_kwargs: Mapping[str, Any]) -> torch.Tensor | None:
+    elem = mm_kwargs.get("audio_lens")
+    if elem is None:
+        return None
+    # Field elements store the tensor on `.data`. A bare tensor's `.data`
+    # is a storage alias, so only unwrap real field objects.
+    data = elem.data if hasattr(elem, "field") else elem
+    if isinstance(elem, torch.Tensor):
+        data = elem
+    if not isinstance(data, torch.Tensor) or data.numel() == 0:
+        return None
+    return data
+
+
+def _counts_from_audio_lens(
+    audio_lens: torch.Tensor, stack_factor: int
+) -> tuple[int, int]:
+    """Per-item tower and connector rows from host mel lengths.
+
+    Tower is `sum((L - 1) // 2 + 1)`. Connector is `sum(ceil(feat / stack))`.
+    A device tensor is not copied back; callers keep `audio_lens` on the host.
+    """
+    if audio_lens.device.type != "cpu":
+        raise RuntimeError(
+            "Ultravox LoRA token counts need host audio_lens. "
+            "Refusing to copy a device length tensor back to the host."
+        )
+    tower = 0
+    connector = 0
+    for mel_len in audio_lens.reshape(-1).to(dtype=torch.int64).tolist():
+        feat = _feat_len(mel_len)
+        if feat <= 0:
+            continue
+        tower += feat
+        connector += _connector_tokens(feat, stack_factor)
+    return tower, connector
+
+
+def _build_cpu_pack_plan(audio_lens: torch.Tensor, mel_t: int) -> _ChunkPackPlan:
+    """Gather index for valid conv frames. `audio_lens` must already be on CPU."""
+    if audio_lens.device.type != "cpu":
+        raise RuntimeError(
+            "The Ultravox pack index is built from host audio_lens "
+            "before the tower runs."
+        )
+    mel_lengths = audio_lens.reshape(-1).to(dtype=torch.int64).tolist()
+    t_conv = (mel_t - 1) // 2 + 1
+    feat_lens: list[int] = []
+    positive: list[int] = []
+    parts: list[torch.Tensor] = []
+    for row, mel_len in enumerate(mel_lengths):
+        feat = _feat_len(mel_len)
+        if feat < 0:
+            feat = 0
+        feat_lens.append(feat)
+        if feat <= 0:
+            continue
+        if feat > t_conv:
+            raise ValueError(
+                f"Mel length {mel_len} expands to {feat} frames, but the "
+                f"padded mel width {mel_t} only has {t_conv} conv frames."
+            )
+        base = row * t_conv
+        parts.append(torch.arange(base, base + feat, dtype=torch.int64))
+        positive.append(feat)
+    pack_index = torch.cat(parts) if parts else torch.empty(0, dtype=torch.int64)
+    cu_seqlens = torch.zeros(len(positive) + 1, dtype=torch.int32)
+    running = 0
+    for i, feat in enumerate(positive, start=1):
+        running += feat
+        cu_seqlens[i] = running
+    max_seqlen = max(positive) if positive else 0
+    return _ChunkPackPlan(
+        pack_index=pack_index,
+        feat_lens=feat_lens,
+        positive_feat_lens=positive,
+        cu_seqlens=cu_seqlens,
+        max_seqlen=max_seqlen,
+        t_conv=t_conv,
+    )
+
+
+def _zero_padded_conv1_tail(
+    conv1_out: torch.Tensor, audio_lens: torch.Tensor
+) -> torch.Tensor:
+    """Zero conv1 time `t >= audio_lens` before conv2.
+
+    That axis is still the mel length. Odd `L` makes conv2 read one past `L`;
+    a later right-pad is nonzero there unless this tap is cleared. Zeroing
+    `t > L`, or zeroing conv2-time, leaves the odd-length frame wrong.
+    Host lengths are copied up with `async_tensor_h2d`. A device length tensor
+    stays on device.
+    """
+    time = conv1_out.shape[-1]
+    positions = torch.arange(time, device=conv1_out.device)
+    flat_lens = audio_lens.reshape(-1)
+    if flat_lens.device.type == "cpu":
+        lens = async_tensor_h2d(
+            flat_lens.to(dtype=torch.int64),
+            device=conv1_out.device,
+            dtype=torch.int64,
+        )
+    elif flat_lens.dtype == torch.int64:
+        lens = flat_lens
+    else:
+        lens = flat_lens.to(dtype=torch.int64)
+    mask = positions.unsqueeze(0) >= lens.unsqueeze(1)
+    return conv1_out.masked_fill(mask.unsqueeze(1), 0)
+
+
+def _flashinfer_batch_bucket(batch_size: int) -> int:
+    for bucket in FLASHINFER_BATCH_BUCKETS:
+        if bucket >= batch_size:
+            return bucket
+    return round_up(batch_size, FLASHINFER_BATCH_BUCKETS[0])
+
+
+def _prepare_flashinfer_cu_seqlens(
+    cu_seqlens_cpu: torch.Tensor,
+    *,
+    hidden_size: int,
+    tp_size: int,
+    fp8_padded_hidden_size: int | None,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Scale and batch-bucket pad FlashInfer offsets with tensor ops.
+
+    `sequence_lengths` is padded with 0 out to the `add_padding_to_seqlens`
+    bucket. Each cumulative vector (length `batch + 1`) is padded to
+    `bucket + 1` by repeating its last value. The BF16 path concatenates the
+    Q/K section with a `* 3` V section. FP8 uses
+    `fp8_padded_hidden_size // tp_size` for both sections and does not
+    multiply by 3. Bucketing does not change which frames attend.
+    """
+    batch_size = int(cu_seqlens_cpu.shape[0] - 1)
+    cu = async_tensor_h2d(cu_seqlens_cpu, device=device, dtype=torch.int32)
+    seq_lens = cu[1:] - cu[:-1]
+    bucket = _flashinfer_batch_bucket(batch_size)
+    extra = bucket - batch_size
+    if extra > 0:
+        seq_lens = torch.cat(
+            [
+                seq_lens,
+                torch.zeros(extra, dtype=seq_lens.dtype, device=seq_lens.device),
+            ]
+        )
+
+    def _pad_cumulative(cum: torch.Tensor) -> torch.Tensor:
+        if extra <= 0:
+            return cum
+        return torch.cat([cum, cum[-1:].expand(extra)])
+
+    if fp8_padded_hidden_size is not None:
+        scale = fp8_padded_hidden_size // tp_size
+        scaled = _pad_cumulative(cu * scale)
+        return torch.cat([scaled, scaled]), seq_lens
+
+    scale = hidden_size // tp_size
+    scaled = cu * scale
+    return torch.cat([_pad_cumulative(scaled), _pad_cumulative(scaled * 3)]), seq_lens
+
+
+_DEVICE_CU_BACKENDS = {
+    AttentionBackendEnum.FLASH_ATTN,
+    AttentionBackendEnum.ROCM_AITER_FA,
+    AttentionBackendEnum.TRITON_ATTN,
+    AttentionBackendEnum.FLASHINFER,
+}
+
+
+def _build_packed_attn_metadata(
     attn: MMEncoderAttention,
-    feature_lens: torch.Tensor,
-    seq_len: int,
+    cu_seqlens_cpu: torch.Tensor,
+    max_seqlen: int,
     hidden_size: int,
     device: torch.device,
 ) -> dict[str, torch.Tensor | None]:
-    """Segmented varlen attention metadata for a padded batch of audio chunks.
+    """Attention metadata for one packed segment per positive chunk.
 
-    Each padded row contributes up to two sequences to `cu_seqlens`: its valid
-    frames and its padding tail. Attention therefore never crosses a
-    valid/padding boundary (equivalent to the key-padding mask the HF
-    implementation uses), while every row still flows through the
-    (potentially LoRA-wrapped) linears, keeping the per-chunk token counts
-    constant as required by `get_mm_lora_token_counts`. Queries at padding
-    positions produce (garbage) outputs, which are trimmed by `audio_token_len`
-    downstream.
+    `max_seqlen` is wrapped as a 0-dim CPU tensor so the flash wrapper's
+    `.item()` does not touch CUDA. FlashInfer buckets that integer on the
+    host first. SDPA keeps the unscaled `cu_seqlens` on CPU; its wrapper
+    `.tolist()` is not done here.
     """
-    batch_size = feature_lens.shape[0]
-    starts = np.arange(batch_size, dtype=np.int64) * seq_len
-    lens_np = feature_lens.cpu().numpy().astype(np.int64)
-    bounds = np.stack([starts + lens_np, starts + seq_len], axis=1).reshape(-1)
-    cu_seqlens_np = np.concatenate(([0], bounds))
-    # Fully-valid rows produce empty padding segments; drop the duplicates.
-    cu_seqlens_np = np.unique(cu_seqlens_np).astype(np.int32)
+    if cu_seqlens_cpu.device.type != "cpu":
+        raise RuntimeError("packed cu_seqlens must be built on the host")
+    cu_seqlens_cpu = cu_seqlens_cpu.to(dtype=torch.int32)
+    backend = attn.attn_backend
+    if backend == AttentionBackendEnum.FLASHINFER:
+        max_seqlen = bucket_flashinfer_max_seqlen(max_seqlen)
+    max_seqlen_t = torch.tensor(max_seqlen, dtype=torch.int32)
 
-    attn_backend = attn.attn_backend
-    sequence_lengths = MMEncoderAttention.maybe_compute_seq_lens(
-        attn_backend, cu_seqlens_np, device
-    )
-    max_seqlen = torch.tensor(
-        MMEncoderAttention.compute_max_seqlen(attn_backend, cu_seqlens_np),
-        dtype=torch.int32,
-    )
-    cu_seqlens = MMEncoderAttention.maybe_recompute_cu_seqlens(
-        attn_backend,
-        cu_seqlens_np,
-        hidden_size,
-        get_tensor_model_parallel_world_size(),
-        device,
+    if backend not in _DEVICE_CU_BACKENDS:
+        return {
+            "cu_seqlens": cu_seqlens_cpu,
+            "max_seqlen": max_seqlen_t,
+            "sequence_lengths": None,
+        }
+
+    if backend != AttentionBackendEnum.FLASHINFER:
+        return {
+            "cu_seqlens": async_tensor_h2d(
+                cu_seqlens_cpu, device=device, dtype=torch.int32
+            ),
+            "max_seqlen": max_seqlen_t,
+            "sequence_lengths": None,
+        }
+
+    tp_size = get_tensor_model_parallel_world_size()
+    fp8_padded_hidden_size = None
+    if getattr(attn, "fp8_enabled", False):
+        fp8_padded_hidden_size = get_fp8_padded_hidden_size(
+            attn.num_heads * tp_size,
+            attn.head_size,
+        )
+    cu_seqlens, sequence_lengths = _prepare_flashinfer_cu_seqlens(
+        cu_seqlens_cpu,
+        hidden_size=hidden_size,
+        tp_size=tp_size,
+        fp8_padded_hidden_size=fp8_padded_hidden_size,
+        device=device,
     )
     return {
         "cu_seqlens": cu_seqlens,
-        "max_seqlen": max_seqlen,
+        "max_seqlen": max_seqlen_t,
         "sequence_lengths": sequence_lengths,
     }
+
+
+def _positive_feat_lens(feat_lens: Sequence[int] | torch.Tensor) -> list[int]:
+    if isinstance(feat_lens, torch.Tensor):
+        if feat_lens.device.type != "cpu":
+            raise RuntimeError("feat_lens must stay on the host")
+        values = feat_lens.reshape(-1).to(dtype=torch.int64).tolist()
+    else:
+        values = [int(v) for v in feat_lens]
+    return [v for v in values if v > 0]
+
+
+def _stack_packed_frames(
+    stack: StackAudioFrames,
+    packed_frames: torch.Tensor,
+    feat_lens: Sequence[int] | torch.Tensor,
+) -> tuple[torch.Tensor, list[int]]:
+    """Stack each chunk on its own, then concatenate connector tokens.
+
+    The stack is not applied to the concatenated pack, so a short chunk cannot
+    absorb the next chunk's frames. The last token is zero-filled when
+    `feat_len % stack_factor != 0` (at most `stack_factor - 1` frames).
+    """
+    lengths = _positive_feat_lens(feat_lens)
+    stacked_dim = packed_frames.shape[-1] * stack.stack_factor
+    if not lengths:
+        return packed_frames.new_empty((0, stacked_dim)), []
+    tokens: list[torch.Tensor] = []
+    conn_lens: list[int] = []
+    for chunk in packed_frames.split(lengths, dim=0):
+        stacked = stack(chunk.unsqueeze(0)).squeeze(0)
+        tokens.append(stacked)
+        conn_lens.append(int(stacked.shape[0]))
+    return torch.cat(tokens, dim=0), conn_lens
+
+
+def _chunk_position_ids(conn_lens: Sequence[int]) -> torch.Tensor:
+    total = sum(conn_lens)
+    pos = torch.empty(total, dtype=torch.long)
+    offset = 0
+    for length in conn_lens:
+        pos[offset : offset + length] = torch.arange(length, dtype=torch.long)
+        offset += length
+    return pos
+
+
+def _cu_from_lengths(lengths: Sequence[int]) -> tuple[torch.Tensor, int]:
+    cu = torch.zeros(len(lengths) + 1, dtype=torch.int32)
+    running = 0
+    for i, length in enumerate(lengths, start=1):
+        running += int(length)
+        cu[i] = running
+    max_seqlen = max(lengths) if lengths else 0
+    return cu, int(max_seqlen)
 
 
 # Maps HF whisper encoder layer names to vLLM's fused qkv_proj and nested
@@ -446,17 +735,30 @@ class UltravoxFeedForwardProjector(nn.Module):
             self.ln_mid = nn.Identity()
             self.ln_post = RMSNorm(dim_out)
 
+    def _project_hidden(self, hidden: torch.Tensor) -> torch.Tensor:
+        hidden = self.ln_pre(hidden)
+        hidden, _ = self.linear_1(hidden)
+        hidden = self.act(hidden)
+        hidden = self.ln_mid(hidden)
+        hidden, _ = self.linear_2(hidden)
+        hidden = self.ln_post(hidden)
+        return hidden
+
     def forward(
-        self, audio_features: torch.Tensor, audio_token_len: torch.Tensor
+        self,
+        audio_features: torch.Tensor,
+        audio_token_len: torch.Tensor,
+        feat_lens: Sequence[int] | torch.Tensor | None = None,
     ) -> torch.Tensor:
-        audio_features = self._pad_and_stack(audio_features)
-        audio_features = self.ln_pre(audio_features)
-        hidden_states, _ = self.linear_1(audio_features)
-        hidden_states = self.act(hidden_states)
-        hidden_states = self.ln_mid(hidden_states)
-        hidden_states, _ = self.linear_2(hidden_states)
-        hidden_states = self.ln_post(hidden_states)
-        return hidden_states
+        # `audio_token_len` is not read back. Packed rows come from host
+        # `feat_lens`. A device length falls through to the rectangle path.
+        del audio_token_len
+        if feat_lens is not None and audio_features.dim() == 2:
+            tokens, _ = _stack_packed_frames(
+                self._pad_and_stack, audio_features, feat_lens
+            )
+            return self._project_hidden(tokens)
+        return self._project_hidden(self._pad_and_stack(audio_features))
 
 
 class UltravoxTransformerProjector(nn.Module):
@@ -511,31 +813,84 @@ class UltravoxTransformerProjector(nn.Module):
             prefix=f"{prefix}.linear_out",
         )
 
-    def forward(
-        self, audio_features: torch.Tensor, audio_token_len: torch.Tensor
+    def _run_layers(
+        self,
+        hidden_states: torch.Tensor,
+        conn_lens: Sequence[int],
+        *,
+        per_chunk_positions: bool,
     ) -> torch.Tensor:
-        audio_features = self._pad_and_stack(audio_features)
+        if per_chunk_positions:
+            pos_ids = async_tensor_h2d(
+                _chunk_position_ids(conn_lens),
+                device=hidden_states.device,
+                dtype=torch.long,
+            )
+            hidden_states = hidden_states + self.embed_positions(pos_ids)
+            cu_seqlens, max_seqlen = _cu_from_lengths(conn_lens)
+        else:
+            # Device lengths are not read. `max_seqlen` is this tensor's time
+            # axis, not the flattened row count.
+            seq_len = hidden_states.shape[-2]
+            positions = self.embed_positions(
+                torch.arange(seq_len, device=hidden_states.device)
+            )
+            hidden_states = hidden_states + positions
+            batch_size = hidden_states.shape[0]
+            cu_seqlens = torch.arange(
+                0,
+                (batch_size + 1) * seq_len,
+                step=max(seq_len, 1),
+                dtype=torch.int32,
+            )
+            if seq_len == 0:
+                cu_seqlens = torch.zeros(batch_size + 1, dtype=torch.int32)
+            max_seqlen = seq_len
+            hidden_states = hidden_states.reshape(
+                batch_size * seq_len, hidden_states.shape[-1]
+            )
 
-        hidden_states = self.ln_pre(audio_features)
-        hidden_states, _ = self.linear_in(hidden_states)
+        if hidden_states.shape[0] == 0 or len(self.layers) == 0:
+            return hidden_states
 
-        positions = self.embed_positions(
-            torch.arange(hidden_states.size(1), device=hidden_states.device)
-        )
-        hidden_states = hidden_states + positions
-
-        batch_size, seq_len, d_model = hidden_states.shape
-        attn_metadata = _build_chunk_attn_metadata(
+        attn_metadata = _build_packed_attn_metadata(
             self.layers[0].self_attn.attn,
-            audio_token_len,
-            seq_len,
-            d_model,
+            cu_seqlens,
+            max_seqlen,
+            hidden_states.shape[-1],
             hidden_states.device,
         )
-        hidden_states = hidden_states.reshape(batch_size * seq_len, d_model)
         for layer in self.layers:
             hidden_states = layer(hidden_states, **attn_metadata)
-        hidden_states = hidden_states.reshape(batch_size, seq_len, d_model)
+        return hidden_states
+
+    def forward(
+        self,
+        audio_features: torch.Tensor,
+        audio_token_len: torch.Tensor,
+        feat_lens: Sequence[int] | torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        del audio_token_len
+        if feat_lens is not None and audio_features.dim() == 2:
+            tokens, conn_lens = _stack_packed_frames(
+                self._pad_and_stack, audio_features, feat_lens
+            )
+            hidden_states = self.ln_pre(tokens)
+            hidden_states, _ = self.linear_in(hidden_states)
+            hidden_states = self._run_layers(
+                hidden_states, conn_lens, per_chunk_positions=True
+            )
+        else:
+            audio_features = self._pad_and_stack(audio_features)
+            hidden_states = self.ln_pre(audio_features)
+            hidden_states, _ = self.linear_in(hidden_states)
+            batch_size, seq_len, _ = hidden_states.shape
+            hidden_states = self._run_layers(
+                hidden_states,
+                [seq_len] * batch_size,
+                per_chunk_positions=False,
+            )
+            hidden_states = hidden_states.reshape(batch_size, seq_len, -1)
 
         hidden_states = self.ln_post(hidden_states)
         hidden_states, _ = self.linear_out(hidden_states)
@@ -550,11 +905,11 @@ class UltravoxWhisperEncoder(WhisperEncoder):
 
     Like the original (a modified HF whisper encoder,
     see https://github.com/huggingface/transformers/issues/25744), it accepts
-    mel inputs shorter than 30s (positions are sliced to the input length) and
-    confines attention to each chunk's valid frames based on `audio_lens`
-    (via segmented `cu_seqlens` instead of a dense key-padding mask), so its
-    outputs match the HF implementation for valid positions. The linears are
-    vLLM-native so the tower can be wrapped for LoRA.
+    mel inputs shorter than 30s. Valid conv frames are packed from a host
+    index built before this tower runs, and attention is one segment per
+    positive chunk. The linears are vLLM-native so the tower can be wrapped
+    for LoRA. Packed length varies with `audio_lens`, so this tower does not
+    use the Whisper encoder CUDA-graph protocol.
     """
 
     @property
@@ -575,39 +930,94 @@ class UltravoxWhisperEncoder(WhisperEncoder):
         self,
         input_features: torch.Tensor,
         audio_lens: torch.Tensor,
+        pack: _ChunkPackPlan | None = None,
     ) -> torch.Tensor:
         expected_seq_length = self.max_context_length
-        if input_features.shape[-1] > expected_seq_length:
+        mel_t = input_features.shape[-1]
+        if mel_t > expected_seq_length:
             raise ValueError(
                 f"Whisper expects the mel input features to be of length "
                 f"{expected_seq_length} or less, but found "
-                f"{input_features.shape[-1]}. Make sure to pad the input mel "
+                f"{mel_t}. Make sure to pad the input mel "
                 f"features to {expected_seq_length}."
             )
 
+        # Host lengths are already on CPU (`keep_on_cpu`). Build the gather
+        # index before any conv so this forward does not read them back.
+        if pack is None and audio_lens.device.type == "cpu":
+            pack = _build_cpu_pack_plan(audio_lens, mel_t)
+
         inputs_embeds = nn.functional.gelu(self.conv1(input_features))
+        inputs_embeds = _zero_padded_conv1_tail(inputs_embeds, audio_lens)
         inputs_embeds = nn.functional.gelu(self.conv2(inputs_embeds))
 
         inputs_embeds = inputs_embeds.permute(0, 2, 1)
-        embed_pos = self.embed_positions.weight[: inputs_embeds.size(-2)]
+        # Python int. A device-length fallback uses this, not `flat.shape[0]`.
+        t_conv = inputs_embeds.shape[-2]
+        embed_pos = self.embed_positions.weight[:t_conv]
 
         hidden_states = (inputs_embeds + embed_pos).to(inputs_embeds.dtype)
 
         batch_size, seq_len, d_model = hidden_states.shape
-        attn_metadata = _build_chunk_attn_metadata(
-            self.layers[0].self_attn.attn,
-            self._get_feat_extract_output_lengths(audio_lens),
-            seq_len,
-            d_model,
-            hidden_states.device,
-        )
-        hidden_states = hidden_states.reshape(batch_size * seq_len, d_model)
-        for encoder_layer in self.layers:
-            hidden_states = encoder_layer(hidden_states, **attn_metadata)
-        hidden_states = hidden_states.reshape(batch_size, seq_len, d_model)
+        flat = hidden_states.reshape(batch_size * seq_len, d_model)
+        if pack is None:
+            return self._forward_full_rows(flat, batch_size, t_conv, d_model)
 
-        hidden_states = self.layer_norm(hidden_states)
-        return hidden_states
+        if t_conv != pack.t_conv:
+            raise RuntimeError(
+                f"conv2 time {t_conv} does not match the host pack plan "
+                f"({pack.t_conv})."
+            )
+        if pack.pack_index.numel() == 0:
+            return flat.new_empty((0, d_model))
+
+        index = async_tensor_h2d(pack.pack_index, device=flat.device, dtype=torch.long)
+        packed = flat.index_select(0, index)
+        packed = self._run_packed_layers(
+            packed, pack.cu_seqlens, pack.max_seqlen, d_model
+        )
+        return self.layer_norm(packed)
+
+    def _run_packed_layers(
+        self,
+        hidden: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
+        hidden_size: int,
+    ) -> torch.Tensor:
+        if hidden.shape[0] == 0 or len(self.layers) == 0:
+            return hidden
+        attn_metadata = _build_packed_attn_metadata(
+            self.layers[0].self_attn.attn,
+            cu_seqlens,
+            max_seqlen,
+            hidden_size,
+            hidden.device,
+        )
+        for encoder_layer in self.layers:
+            hidden = encoder_layer(hidden, **attn_metadata)
+        return hidden
+
+    def _forward_full_rows(
+        self,
+        flat: torch.Tensor,
+        batch_size: int,
+        t_conv: int,
+        d_model: int,
+    ) -> torch.Tensor:
+        """Device `audio_lens` stayed on device, so the rows are not packed.
+
+        `max_seqlen` is the conv2 time axis (`[B, T, D]`), not `flat.shape[0]`.
+        """
+        if t_conv == 0:
+            cu_seqlens = torch.zeros(batch_size + 1, dtype=torch.int32)
+        else:
+            cu_seqlens = torch.arange(
+                0, (batch_size + 1) * t_conv, step=t_conv, dtype=torch.int32
+            )
+        flat = self._run_packed_layers(flat, cu_seqlens, t_conv, d_model)
+        flat = self.layer_norm(flat)
+        return flat.reshape(batch_size, t_conv, d_model)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         return _load_whisper_layer_weights(self, weights)
@@ -653,11 +1063,11 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         self.multi_modal_config = multimodal_config
         assert self.multi_modal_config
 
-        # LoRA on the tower/connector requires per-item token counts that are
-        # predictable from the placeholder count alone (see
-        # `get_mm_lora_token_counts`), so pad every audio chunk's mel input
-        # to the tower's full context instead of the batch's max length.
-        self.pad_audio_to_max_context = bool(
+        # Tower/connector LoRA installs one punica map for the whole scheduled
+        # encoder batch. Splitting that batch would apply the wrong ids, so
+        # the tower and projector each run once. Lengths stay the real mel
+        # lengths; chunks are not padded to 3000.
+        self.tower_connector_lora = bool(
             lora_config is not None and lora_config.enable_tower_connector_lora
         )
 
@@ -745,19 +1155,21 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         mm_kwargs: MultiModalKwargsItem | None,
         num_mm_embeds: int,
     ) -> tuple[int, int | None]:
-        del modality, mm_kwargs
-        # With `pad_audio_to_max_context` (enforced when tower/connector LoRA
-        # is enabled), the tower's LoRA-wrapped linears always run on
-        # `max_source_positions` conv-downsampled tokens per chunk, regardless
-        # of the valid frame count.
-        num_chunks = math.ceil(num_mm_embeds / self._get_max_tokens_per_chunk())
-        tower_tokens = num_chunks * self.config.audio_config.max_source_positions
-        # The connector runs on the frame-stacked tower output. Stacking pads
-        # each chunk to a multiple of `stack_factor`, so this is
-        # ceil(max_source_positions / stack_factor) tokens per chunk (188 for
-        # whisper's 1500), not `tower_tokens // stack_factor` (187).
-        connector_tokens = num_chunks * self._get_max_tokens_per_chunk()
-        return tower_tokens, connector_tokens
+        del modality
+        if mm_kwargs is None:
+            # Init sizing. `num_mm_embeds` is the encoder budget. Do not read
+            # `audio_lens` and do not return a packed sum or `(0, 0)`.
+            return _upper_bound_mm_lora_counts(
+                num_mm_embeds,
+                self.config.audio_config.max_source_positions,
+                self.config.stack_factor,
+            )
+        audio_lens = _audio_lens_tensor(mm_kwargs)
+        if audio_lens is None:
+            # `(0, None)` would make `set_active_mm_loras` return before the
+            # connector map is installed for a later audio item.
+            return 0, 0
+        return _counts_from_audio_lens(audio_lens, self.config.stack_factor)
 
     def _audio_features_to_embeddings(
         self,
@@ -769,34 +1181,36 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         batch_size = audio_features.size(0)
         audio_embeddings = []
 
-        # Process audio features in batches to keep memory usage predictable.
-        # With tower/connector LoRA, the punica kernels always map the first
-        # `x.size(0)` entries of the token-LoRA mapping (set once for the whole
-        # scheduled encoder batch) to the rows of each linear's input, so
-        # splitting the batch would apply the wrong LoRA ids to every chunk
-        # after the first sub-batch; process all chunks in a single pass.
+        # With tower/connector LoRA, punica maps the first `x.size(0)` entries
+        # of the token-LoRA mapping onto each linear. One pass keeps those
+        # rows in scheduler order. Otherwise cap the batch for memory.
         encoder_batch_size = (
-            max(batch_size, 1)
-            if self.pad_audio_to_max_context
-            else _MAX_ENCODER_BATCH_SIZE
+            max(batch_size, 1) if self.tower_connector_lora else _MAX_ENCODER_BATCH_SIZE
         )
         for start in range(0, batch_size, encoder_batch_size):
             end = min(start + encoder_batch_size, batch_size)
-            # Process through audio tower
-            batch_features = self.audio_tower(
-                audio_features[start:end], audio_lens[start:end]
-            )
-            batch_features = batch_features.to(self.audio_tower.dtype)
-
-            # Process through projector
-            batch_embeddings = self.multi_modal_projector(
-                batch_features, audio_token_len[start:end]
-            )
+            batch_features = audio_features[start:end]
+            batch_lens = audio_lens[start:end]
+            pack = None
+            if batch_lens.device.type == "cpu":
+                pack = _build_cpu_pack_plan(batch_lens, batch_features.shape[-1])
+            batch_hidden = self.audio_tower(batch_features, batch_lens, pack)
+            batch_hidden = batch_hidden.to(self.audio_tower.dtype)
+            if pack is None:
+                batch_embeddings = self.multi_modal_projector(
+                    batch_hidden, audio_token_len[start:end]
+                )
+            else:
+                batch_embeddings = self.multi_modal_projector(
+                    batch_hidden,
+                    audio_token_len[start:end],
+                    feat_lens=pack.positive_feat_lens,
+                )
             audio_embeddings.append(batch_embeddings)
 
-        # Concatenate results
-        audio_embeddings = torch.cat(audio_embeddings, dim=0)
-        return audio_embeddings
+        if not audio_embeddings:
+            return audio_features.new_empty((0, 0))
+        return torch.cat(audio_embeddings, dim=0)
 
     def _parse_and_validate_audio_input(
         self, **kwargs: object
@@ -831,20 +1245,10 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         if audio_input["type"] == "audio_embeds":
             return audio_input["data"]
 
-        # Pad and concatenate audio features
+        # Pad and concatenate audio features to the batch max only.
         # [[B1, 80, M1], [B2, 80, M2]] -> [B1+B2, 80, max(M1, M2)]
+        # Over-long mels are not trimmed; the tower raises on them.
         audio_features = pad_and_concat_to_dim3(audio_input["data"])
-
-        if self.pad_audio_to_max_context:
-            # Pad every chunk to the tower's full context so the number of
-            # tokens processed by the tower/connector per chunk is constant,
-            # keeping the LoRA token mappings computed by
-            # `get_mm_lora_token_counts` exact.
-            # Attention to the extra padding is masked via `audio_lens`.
-            # Over-long inputs are not trimmed here; the tower raises on them.
-            pad_len = self.audio_tower.max_context_length - audio_features.shape[-1]
-            if pad_len > 0:
-                audio_features = F.pad(audio_features, (0, pad_len))
 
         audio_lens = audio_input["lens"]
         audio_token_len = audio_input["token_len"]
@@ -853,28 +1257,25 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
             audio_features, audio_lens, audio_token_len
         )
 
-        # We should flatten and concatenate embeddings based on token lengths
-        # For example, with token_len = [4, 2, 3], flattened_embeddings will be
-        # concat(embeddings[0][:4], embeddings[1][:2], embeddings[2][:3])
-
-        # Create a mask of valid indices based on token lengths
-        max_len = embeddings.shape[1]
-        indices = torch.arange(max_len, device=embeddings.device).expand(
-            embeddings.shape[0], -1
-        )
-        mask = indices < audio_token_len[:, None]
-
+        # Packed connector rows are already the valid tokens, including a
+        # zero-filled tail when `feat_len % stack_factor != 0`. A device-length
+        # fallback is still a rectangle and is trimmed here.
         with gpu_sync_allowed():
-            # Apply mask and flatten
-            flattened_embeddings = embeddings[mask]
-
-            # Return one tensor per input audio
             embed_lens = [
                 chunk_lens.sum().item()
                 for chunk_lens in audio_token_len.split(
                     audio_input["num_chunks"].tolist()
                 )
             ]
+            if embeddings.dim() == 2:
+                return embeddings.split(embed_lens)
+
+            max_len = embeddings.shape[1]
+            indices = torch.arange(max_len, device=embeddings.device).expand(
+                embeddings.shape[0], -1
+            )
+            mask = indices < audio_token_len[:, None]
+            flattened_embeddings = embeddings[mask]
             return flattened_embeddings.split(embed_lens)
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
