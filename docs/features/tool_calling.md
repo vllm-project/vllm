@@ -154,7 +154,7 @@ Most OpenAI-compatible clients and agent frameworks never set `strict` on their 
 vllm serve ... --tool-strict-level function
 ```
 
-When the option is unset, the tool parser's default level applies: `function` for `glm47`, `auto` for the other parsers. Passing `--tool-strict-level auto` overrides a parser default.
+When the option is unset, the tool parser's default level applies: `function` for `glm47`, `auto` for the other parsers. When `tool_choice="auto"` is combined with a `response_format` or `structured_outputs` constraint, a parser default does not activate structural tags unless at least one tool sets `strict: true` (or `--tool-strict-level` is set explicitly); once a `strict: true` tool activates the tag, the parser default still constrains the tool calls. Passing `--tool-strict-level auto` overrides a parser default.
 
 The floor never relaxes a constraint the request would already receive: tools the client marked `strict: true` keep their schemas at every level. With `tool_choice="auto"`, the grammar does not force a tool call; a plain text response stays valid. `VLLM_ENFORCE_STRICT_TOOL_CALLING=false` disables structural tags entirely and takes precedence over this option.
 
