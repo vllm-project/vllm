@@ -1435,12 +1435,14 @@ steps:
   - tests/models/minimax_m3/amd_specialized_decode/
   - tests/models/minimax_m3/test_index_cache_overrides.py
   - tests/models/minimax_m3/test_dspark_drafter.py
+  - tests/models/minimax_m3/test_xlayer_allreduce_fusion.py
   - vllm/model_executor/models/config.py
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s models/minimax_m3/amd_specialized_decode
   - pytest -v -s models/minimax_m3/test_index_cache_overrides.py
   - pytest -v -s models/minimax_m3/test_dspark_drafter.py
+  - pytest -v -s models/minimax_m3/test_xlayer_allreduce_fusion.py
   # the long TP4 hand-off stress
   - pytest -v -s --optional -m optional models/minimax_m3/amd_specialized_decode
 
