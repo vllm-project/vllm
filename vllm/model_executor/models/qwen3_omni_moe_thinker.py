@@ -83,7 +83,11 @@ from vllm.multimodal.processing.processor import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.utils import copy_mm_embedding_modality
+from vllm.multimodal.utils import (
+    copy_mm_embedding_modality,
+    get_use_audio_in_video,
+    resolve_mm_processor_kwarg,
+)
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -1424,10 +1428,16 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
-        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        # Engine-level `--mm-processor-kwargs` are merged with the request-level
+        # ones here, matching what `InputProcessingContext.call_hf_processor`
+        # passes to HuggingFace. Without this, `use_audio_in_video` set at the
+        # engine level would reach the HF processor but not the prompt updates,
+        # which expect a paired audio placeholder that was never extracted.
+        merged_kwargs = self.info.ctx.get_merged_mm_kwargs(hf_processor_mm_kwargs)
+        processor = self.info.get_hf_processor(**merged_kwargs)
         tokenizer = self.info.get_tokenizer()
         assert isinstance(self.info, Qwen2_5_VLProcessingInfo)
-        image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
+        image_processor = self.info.get_image_processor(**merged_kwargs)
         vocab = tokenizer.get_vocab()
 
         audio_token = processor.audio_token
@@ -1482,7 +1492,7 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
             token_id = image_token_id if modality == "image" else video_token_id
             return [token_id] * (int(grid_thw.prod()) // merge_length)
 
-        use_audio_in_video = hf_processor_mm_kwargs.get("use_audio_in_video", False)
+        use_audio_in_video = get_use_audio_in_video(merged_kwargs)
         thinker_config = self.info.get_hf_config()
 
         def get_replacement_qwen2_use_audio_in_video(item_idx: int):
@@ -1494,10 +1504,11 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
 
             # Match the fps the processor used, as HF and the mrope positions do.
             processed_second_per_grid_ts = out_mm_data.get("second_per_grid_ts")
-            second_per_grid_ts = hf_processor_mm_kwargs.get("second_per_grid_ts", None)
             if isinstance(processed_second_per_grid_ts, torch.Tensor):
                 video_second_per_grid_t = processed_second_per_grid_ts[item_idx].item()
-            elif second_per_grid_ts:
+            elif second_per_grid_ts := resolve_mm_processor_kwarg(
+                merged_kwargs, "second_per_grid_ts"
+            ):
                 video_second_per_grid_t = second_per_grid_ts[item_idx]
             else:
                 video_second_per_grid_t = 2.0
