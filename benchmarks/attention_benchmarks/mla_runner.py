@@ -466,6 +466,15 @@ def _build_attention_metadata(
     return metadata, current_block
 
 
+def _aiter_prefill_path(metadata) -> str | None:
+    """The prefill path a ROCM_AITER_MLA metadata build took."""
+    if metadata.prefill is None:
+        return None
+    if metadata.prefill.chunked_context is not None:
+        return "fused" if metadata.fused_prefill is not None else "unfused"
+    return "fp8" if metadata.fp8_prefill_qo_indptr is not None else "bf16"
+
+
 def _create_input_tensors(
     total_q: int,
     mla_dims: dict,
@@ -664,6 +673,14 @@ def _create_backend_impl(
 
     # Create mock layer
     layer = MockLayer(device, impl=impl, kv_cache_spec=kv_cache_spec)
+    for name in (
+        "q_lora_rank",
+        "kv_lora_rank",
+        "qk_nope_head_dim",
+        "qk_rope_head_dim",
+        "v_head_dim",
+    ):
+        setattr(layer, name, impl_kwargs[name])
 
     # Attach a prefill backend (MLAAttention does this in __init__; the metadata
     # builder reads layer.prefill_backend from static_forward_context).
@@ -763,6 +780,7 @@ def _run_single_benchmark(
     kv_cache_dtype: str | None = None,
     output_scale: float | None = None,
     fuse_quant_op: bool = False,
+    prefill_path: str | None = None,
 ) -> BenchmarkResult:
     """Run a single benchmark iteration.
 
@@ -781,6 +799,7 @@ def _run_single_benchmark(
         fuse_quant_op: With output_scale set, True lets the prefill kernel write
             FP8 directly; False runs bf16 attention then a standalone static-FP8
             quant. The delta isolates the saved post-quant kernel.
+        prefill_path: Pinned ROCM_AITER_MLA prefill path.
 
     Returns:
         BenchmarkResult with timing statistics
@@ -800,6 +819,11 @@ def _run_single_benchmark(
     metadata, num_blocks = _build_attention_metadata(
         requests, block_size, device, builder_instance
     )
+    if prefill_path is not None and _aiter_prefill_path(metadata) != prefill_path:
+        raise RuntimeError(
+            f"ROCM_AITER_MLA cannot take the {prefill_path} prefill on "
+            f"{config.batch_spec} with this layer"
+        )
 
     # Create KV cache
     if kv_cache_dtype is None:
@@ -820,15 +844,15 @@ def _run_single_benchmark(
     elif kv_cache_dtype == "fp8":
         from vllm.platforms import current_platform
 
-        kv_cache = torch.zeros(
+        kv_cache = torch.randn(
             num_blocks,
             block_size,
             head_size,
             device=device,
-            dtype=torch.uint8,
-        ).view(current_platform.fp8_dtype())
+            dtype=torch.bfloat16,
+        ).to(current_platform.fp8_dtype())
     else:
-        kv_cache = torch.zeros(
+        kv_cache = torch.randn(
             num_blocks,
             block_size,
             head_size,
@@ -1046,6 +1070,7 @@ def _run_mla_benchmark_batched(
     sparse_mla_force_mqa: bool = False,
     output_scale: float | None = None,
     fuse_quant_op: bool = False,
+    prefill_path: str | None = None,
 ) -> list[BenchmarkResult]:
     """Unified batched MLA benchmark runner for all backends.
 
@@ -1069,6 +1094,8 @@ def _run_mla_benchmark_batched(
             FP8 directly; False runs bf16 attention then a standalone quant.
         sparse_mla_force_mqa: If True, forces all sparse MLA tokens through
             forward_mqa (even prefill tokens).
+        prefill_path: ROCM_AITER_MLA prefill path: "unfused" or "fused" with
+            context, "bf16" or "fp8" without.
 
     Returns:
         List of BenchmarkResult objects
@@ -1186,6 +1213,10 @@ def _run_mla_benchmark_batched(
                         f"version {fa_version}, got "
                         f"{actual_fa_version} on {actual_class}."
                     )
+        if prefill_path is not None:
+            builder_instance._use_fused_prefill = lambda *args: prefill_path == "fused"
+            builder_instance._use_fp8_prefill = lambda *args: prefill_path == "fp8"
+
         # Run each benchmark with the shared impl
         for config, threshold, num_splits in configs_with_params:
             force_masked_mha = (
@@ -1253,6 +1284,7 @@ def _run_mla_benchmark_batched(
                     kv_cache_dtype=kv_cache_dtype,
                     output_scale=output_scale,
                     fuse_quant_op=fuse_quant_op,
+                    prefill_path=prefill_path,
                 )
                 results.append(result)
 
@@ -1283,6 +1315,7 @@ def run_mla_benchmark(
     sparse_mla_force_mqa: bool = False,
     output_scale: float | None = None,
     fuse_quant_op: bool = False,
+    prefill_path: str | None = None,
 ) -> BenchmarkResult | list[BenchmarkResult]:
     """Unified MLA benchmark runner for all backends.
 
@@ -1306,6 +1339,7 @@ def run_mla_benchmark(
         output_scale: Static per-tensor FP8 scale for prefill output (None = bf16).
         fuse_quant_op: With output_scale set, fuse the FP8 write into the prefill
             kernel vs a standalone post-quant kernel. See _run_single_benchmark.
+        prefill_path: See _run_mla_benchmark_batched.
 
     Returns:
         BenchmarkResult (single mode) or list of BenchmarkResult (batched mode)
@@ -1338,6 +1372,7 @@ def run_mla_benchmark(
         sparse_mla_force_mqa=sparse_mla_force_mqa,
         output_scale=output_scale,
         fuse_quant_op=fuse_quant_op,
+        prefill_path=prefill_path,
     )
 
     # Return single result or list based on input
