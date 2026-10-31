@@ -268,7 +268,8 @@ def test_prompt_logprobs_requests_keep_their_rows(state):
                 hidden = torch.arange(
                     1, batch.num_tokens * 2 + 1, device=DEVICE
                 ).reshape(-1, 2)
-                (actual,) = layers._run(hidden)
+                with override_forward_context(replay.forward_context):
+                    (actual,) = layers._run(hidden)
                 expected = torch.zeros_like(hidden)
                 expected[rows] = hidden[rows] + 1
                 torch.testing.assert_close(actual, expected)
