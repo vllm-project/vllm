@@ -6,6 +6,7 @@ import json
 from abc import abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING
 
 from openai.types.responses import ToolChoiceCustom, ToolChoiceFunction
 from pydantic import TypeAdapter, ValidationError
@@ -59,6 +60,9 @@ from vllm.tool_parsers.structural_tag_registry import (
     resolve_tool_strictness,
 )
 from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
+
+if TYPE_CHECKING:
+    from vllm.v1.engine.detokenizer import ContentFilter
 
 logger = init_logger(__name__)
 
@@ -272,6 +276,25 @@ class Parser:
         """Parse a single streaming delta, orchestrating reasoning then
         tool call extraction via internal stream state.
         """
+
+    def stop_string_content_filter(
+        self,
+        request: ChatCompletionRequest | ResponsesRequest,
+        prompt_token_ids: list[int] | None,
+    ) -> "ContentFilter":
+        def content_of(
+            delta_text: str, delta_token_ids: list[int], finished: bool
+        ) -> str | None:
+            delta = self.parse_delta(
+                delta_text,
+                delta_token_ids,
+                request,
+                prompt_token_ids,
+                finished=finished,
+            )
+            return None if delta is None else delta.content
+
+        return content_of
 
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
         """Return the number of reasoning tokens in generated token IDs."""

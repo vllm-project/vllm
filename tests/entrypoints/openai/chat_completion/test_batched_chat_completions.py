@@ -526,6 +526,7 @@ async def test_batched_reasoning_wiring_matches_single_chat() -> None:
             model=MOCK_MODEL_NAME,
             messages=conversation,
             chat_template_kwargs=chat_template_kwargs,
+            stop=["</block>"],
         )
     )
     single_call = single_engine.generate.call_args_list[-1]
@@ -536,6 +537,7 @@ async def test_batched_reasoning_wiring_matches_single_chat() -> None:
             model=MOCK_MODEL_NAME,
             messages=[conversation],
             chat_template_kwargs=chat_template_kwargs,
+            stop=["</block>"],
         )
     )
     batch_call = batch_engine.generate.call_args_list[-1]
@@ -560,3 +562,10 @@ async def test_batched_reasoning_wiring_matches_single_chat() -> None:
         chat_template_kwargs=engine_chat_template_kwargs,
     )
     assert reasoner.is_reasoning_end([]) is True
+
+    # Stop strings skip the reasoning: each output sequence gets its own
+    # parser-backed content filter.
+    for call in (single_call, batch_call):
+        make_filter = call.kwargs["content_filter_factory"]
+        assert make_filter is not None
+        assert make_filter() is not make_filter()
