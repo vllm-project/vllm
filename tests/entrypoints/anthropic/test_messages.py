@@ -19,6 +19,7 @@ def server():
         "2048",
         "--enforce-eager",
         "--enable-prompt-tokens-details",
+        "--enable-per-request-metrics",
         "--enable-auto-tool-choice",
         "--tool-call-parser",
         "hermes",
@@ -260,3 +261,34 @@ async def test_anthropic_server_tool_is_rejected(client: anthropic.AsyncAnthropi
     message = exc_info.value.body["error"]["message"]
     assert "'web_search_20250305' is not supported" in message
     assert "Field required" not in message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_per_request_metrics(client: anthropic.AsyncAnthropic, stream: bool):
+    """The metrics flag reaches the Anthropic endpoint and survives conversion."""
+    response = await client.messages.create(
+        model="claude-3-7-sonnet-latest",
+        max_tokens=8,
+        temperature=0,
+        messages=[{"role": "user", "content": "Count from one to ten."}],
+        stream=stream,
+    )
+    if stream:
+        metrics_events = []
+        async for event in response:
+            metrics = event.model_extra.get("metrics")
+            if metrics is not None:
+                assert event.type == "message_delta"
+                assert event.usage.output_tokens > 0
+                metrics_events.append(metrics)
+        assert len(metrics_events) == 1
+        metrics = metrics_events[0]
+    else:
+        assert response.usage.output_tokens > 0
+        metrics = response.model_extra.get("metrics")
+    assert metrics is not None
+    assert metrics["time_to_first_token_ms"] >= 0
+    assert metrics["generation_time_ms"] >= 0
+    assert metrics["queue_time_ms"] >= 0
+    assert metrics["tokens_per_second"] > 0

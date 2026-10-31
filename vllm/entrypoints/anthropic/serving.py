@@ -240,6 +240,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         tool_strict_level: str | None = None,
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
+        enable_per_request_metrics: bool = False,
         enable_log_outputs: bool = False,
         enable_log_deltas: bool = True,
         default_chat_template_kwargs: dict[str, Any] | None = None,
@@ -260,6 +261,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             tool_parser=tool_parser,
             enable_prompt_tokens_details=enable_prompt_tokens_details,
             enable_force_include_usage=enable_force_include_usage,
+            enable_per_request_metrics=enable_per_request_metrics,
             enable_log_outputs=enable_log_outputs,
             enable_log_deltas=enable_log_deltas,
             default_chat_template_kwargs=default_chat_template_kwargs,
@@ -929,6 +931,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             content=[],
             model=generator.model,
             usage=_build_anthropic_usage(generator.usage),
+            metrics=generator.metrics,
             kv_transfer_params=generator.kv_transfer_params,
             ec_transfer_params=generator.ec_transfer_params,
         )
@@ -1140,6 +1143,8 @@ class AnthropicServingMessages(OpenAIServingChat):
                         delta=stop_delta,
                         usage=_build_anthropic_usage(origin_chunk.usage),
                     )
+                    if origin_chunk.metrics is not None:
+                        chunk.metrics = origin_chunk.metrics
                     data = chunk.model_dump_json(exclude_unset=True)
                     yield wrap_data_with_event(data, "message_delta")
                     continue
