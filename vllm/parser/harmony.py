@@ -9,7 +9,7 @@ from dataclasses import dataclass, replace
 from enum import Enum, auto
 from typing import TYPE_CHECKING, NamedTuple
 
-from openai_harmony import HarmonyError, Message, Role
+from openai_harmony import HarmonyError, Message, Role, StreamState
 from xgrammar import StructuralTag
 from xgrammar.openai_tool_call_schema import BuiltinToolParam, FunctionToolParam
 from xgrammar.structural_tag import (
@@ -81,6 +81,7 @@ class Segment(NamedTuple):
     recipient: str | None
     delta: str
     completed_message: Message | None = None
+    token_index: int | None = None
 
 
 @dataclass
@@ -116,6 +117,7 @@ class HarmonyParser(DelegatingParser):
 
         # For error recovery
         self._current_message_tokens: list[int] = []
+        self._current_message_text_len = 0
 
     @property
     def _harmony_parser(self) -> StreamableParser:
@@ -138,6 +140,16 @@ class HarmonyParser(DelegatingParser):
         try:
             self._harmony_parser.process_eos()
             msg = self._poll_completed_message()
+            if msg is not None:
+                text = "".join(getattr(content, "text", "") for content in msg.content)
+                # EOS can replace an unfinished UTF-8 sequence without emitting
+                # last_content_delta. Preserve that tail for streaming callers.
+                if delta := text[self._current_message_text_len :]:
+                    segments.append(
+                        Segment(
+                            msg.channel, self._normalize_recipient(msg.recipient), delta
+                        )
+                    )
         except HarmonyError:
             logger.warning(
                 "Harmony parser ended in a non-terminal state; returning the "
@@ -162,6 +174,7 @@ class HarmonyParser(DelegatingParser):
         self._parser = None
         self._num_processed_messages = 0
         self._current_message_tokens.clear()
+        self._current_message_text_len = 0
 
         if msg is None:
             return segments
@@ -328,13 +341,15 @@ class HarmonyParser(DelegatingParser):
 
         return delta_message
 
-    def process_chunk(self, token_ids: Sequence[int]) -> ChunkResult:
+    def process_chunk(
+        self, token_ids: Sequence[int], *, track_token_positions: bool = False
+    ) -> ChunkResult:
         if not token_ids:
             return ChunkResult(segments=[], reasoning_token_count=0)
 
         segments: list[Segment] = []
         reasoning_token_count = 0
-        for token_id in token_ids:
+        for token_index, token_id in enumerate(token_ids):
             try:
                 self._harmony_parser.process(token_id)
             except HarmonyError:
@@ -347,9 +362,24 @@ class HarmonyParser(DelegatingParser):
             completed_message = self._poll_completed_message()
 
             if completed_message is not None:
+                text = "".join(
+                    getattr(content, "text", "")
+                    for content in completed_message.content
+                )
+                if tail := text[self._current_message_text_len :]:
+                    segments.append(
+                        Segment(
+                            completed_message.channel,
+                            self._normalize_recipient(completed_message.recipient),
+                            tail,
+                        )
+                    )
+                delta = ""
                 self._current_message_tokens.clear()
+                self._current_message_text_len = 0
             else:
                 self._current_message_tokens.append(token_id)
+                self._current_message_text_len += len(delta)
 
             if self._is_reasoning_token(token_id, channel, recipient):
                 reasoning_token_count += 1
@@ -360,6 +390,13 @@ class HarmonyParser(DelegatingParser):
                     recipient=recipient,
                     delta=delta,
                     completed_message=completed_message,
+                    token_index=(
+                        token_index
+                        if track_token_positions
+                        and self._harmony_parser.state == StreamState.CONTENT
+                        and not get_encoding().is_special_token(token_id)
+                        else None
+                    ),
                 )
             )
 

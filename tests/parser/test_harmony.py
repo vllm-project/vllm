@@ -177,6 +177,27 @@ def assert_parser_is_reset(harmony_parser: HarmonyParser):
 
 
 class TestFlush:
+    @pytest.mark.parametrize("channel", ["final", "analysis", "commentary"])
+    @pytest.mark.parametrize("chunk_size", [1, 100])
+    @pytest.mark.parametrize("ending", ["", "<|end|>"])
+    def test_flush_incomplete_utf8(self, harmony_parser, channel, chunk_size, ending):
+        """EOS must stream the replacement character for an unfinished token."""
+        tokens = encode_output(f"<|channel|>{channel}<|message|>Hello 🌍")[:-1]
+        tokens.extend(encode_output(ending))
+        deltas: list[str] = []
+        completed: list[Message] = []
+        for start in range(0, len(tokens), chunk_size):
+            result = harmony_parser.process_chunk(tokens[start : start + chunk_size])
+            deltas.extend(segment.delta for segment in result.segments)
+            completed.extend(
+                s.completed_message for s in result.segments if s.completed_message
+            )
+        flushed = harmony_parser.flush()
+        completed.extend(s.completed_message for s in flushed if s.completed_message)
+        assert get_text(completed[-1]) == "Hello �"
+        deltas.extend(segment.delta for segment in flushed)
+        assert "".join(deltas) == "Hello �"
+
     def test_flush(self, harmony_parser):
         harmony_parser.process_chunk(
             encode_output("<|channel|>analysis<|message|>Think")
@@ -464,8 +485,11 @@ class TestParse:
                 "I'll search for that",
             ),
             (
-                "<|channel|>commentary<|message|>Let me look that up.<|end|>"
-                "<|start|>assistant<|channel|>final<|message|>The answer is 42.<|end|>",
+                (
+                    "<|channel|>commentary<|message|>Let me look that up.<|end|>"
+                    "<|start|>assistant<|channel|>final<|message|>"
+                    "The answer is 42.<|end|>"
+                ),
                 "Let me look that up.\nThe answer is 42.",
             ),
         ],

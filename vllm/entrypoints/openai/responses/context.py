@@ -6,6 +6,7 @@ import copy
 import json
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Sequence
 from contextlib import AsyncExitStack
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Final, Union
@@ -16,6 +17,7 @@ from openai.types.responses.response_function_tool_call_output_item import (
 )
 from openai.types.responses.response_output_item import McpCall
 from openai.types.responses.response_output_message import ResponseOutputMessage
+from openai.types.responses.response_output_text import Logprob as ResponseLogprob
 from openai.types.responses.response_output_text import ResponseOutputText
 from openai.types.responses.tool import Mcp
 from openai_harmony import Author, Message, Role, TextContent
@@ -37,6 +39,7 @@ from vllm.entrypoints.openai.responses.utils import (
 from vllm.entrypoints.serve.utils.tool_calls_utils import (
     maybe_filter_parallel_tool_calls,
 )
+from vllm.logprobs import SampleLogprobs
 from vllm.outputs import RequestOutput
 from vllm.parser.abstract_parser import Parser
 from vllm.renderers.chat_utils import (
@@ -637,6 +640,10 @@ class HarmonyContext(ConversationContext):
         function_tool_names: frozenset[str],
         response_parser: Parser | None = None,
         request: ResponsesRequest | None = None,
+        logprobs_processor: Callable[
+            [Sequence[int], SampleLogprobs | None], list[ResponseLogprob]
+        ]
+        | None = None,
     ):
         from vllm.parser.harmony import HarmonyParser, Segment
 
@@ -660,6 +667,10 @@ class HarmonyContext(ConversationContext):
         self.num_tool_output_tokens = 0
 
         self.last_append_segments: list[Segment] = []
+        self.last_append_logprobs: list[list[ResponseLogprob]] = []
+        self.message_logprobs: dict[int, list[ResponseLogprob]] = {}
+        self._current_message_logprobs: list[ResponseLogprob] = []
+        self._logprobs_processor = logprobs_processor
         self.last_append_flush_status: bool = False
         # Each completed message with the items sent for it in
         # output_item.done events, so the final response can reuse their ids.
@@ -682,7 +693,16 @@ class HarmonyContext(ConversationContext):
             self._update_prefill_token_usage(output)
 
         output_token_ids = output.outputs[0].token_ids
-        result = self.response_parser.process_chunk(output_token_ids)
+        if self._logprobs_processor is not None:
+            logprobs = self._logprobs_processor(
+                output_token_ids, output.outputs[0].logprobs
+            )
+            result = self.response_parser.process_chunk(
+                output_token_ids, track_token_positions=True
+            )
+        else:
+            logprobs = []
+            result = self.response_parser.process_chunk(output_token_ids)
         segments = result.segments
         self.num_reasoning_tokens += result.reasoning_token_count
 
@@ -703,6 +723,24 @@ class HarmonyContext(ConversationContext):
             self.current_turn_metrics.reset()
 
         self.last_append_segments = segments
+        self.last_append_logprobs = []
+        for segment in segments:
+            segment_logprobs = []
+            if (
+                logprobs
+                and segment.token_index is not None
+                and segment.channel in ("final", "commentary")
+                and segment.recipient is None
+            ):
+                segment_logprobs = [logprobs[segment.token_index]]
+                self._current_message_logprobs.extend(segment_logprobs)
+            self.last_append_logprobs.append(segment_logprobs)
+            if segment.completed_message is not None:
+                if self._logprobs_processor is not None:
+                    self.message_logprobs[id(segment.completed_message)] = (
+                        self._current_message_logprobs
+                    )
+                self._current_message_logprobs = []
         self._messages.extend(
             segment.completed_message
             for segment in segments
