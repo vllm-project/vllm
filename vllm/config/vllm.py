@@ -1674,8 +1674,9 @@ class VllmConfig:
                     self.quant_config.use_deep_gemm = False
                     logger.warning_once(
                         "Auto-disabled DeepGemm for model_type=%s on Blackwell. "
-                        "To use it anyway, pass --linear-backend deep_gemm. "
-                        "To disable DeepGemm globally, set VLLM_USE_DEEP_GEMM=0.",
+                        "To use it anyway, pass --linear-backend deep_gemm for "
+                        "the FP8 linear layers. To disable DeepGemm globally, "
+                        "set VLLM_USE_DEEP_GEMM=0.",
                         model_type,
                     )
 
