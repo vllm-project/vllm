@@ -293,7 +293,7 @@ def test_sparse_mla_backend_reports_sink_support_for_current_hardware() -> None:
     assert ROCMAiterMLASparseBackend.supports_sink() == (get_cdna_version() in (3, 4))
 
 
-def test_sparse_mla_backend_rejects_dcp() -> None:
+def test_sparse_mla_backend_rejects_dcp_with_sinks() -> None:
     from vllm.platforms.rocm import RocmPlatform
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
     from vllm.v1.attention.selector import AttentionSelectorConfig
@@ -312,7 +312,7 @@ def test_sparse_mla_backend_rejects_dcp() -> None:
         use_dcp=True,
     )
 
-    with pytest.raises(ValueError, match="DCP not supported"):
+    with pytest.raises(ValueError, match="DCP with attention sinks not supported"):
         RocmPlatform.get_attn_backend_cls(
             selected_backend=AttentionBackendEnum.ROCM_AITER_MLA_SPARSE,
             attn_selector_config=selector_config,
