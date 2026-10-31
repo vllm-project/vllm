@@ -4,7 +4,6 @@
 import argparse
 import asyncio
 import json
-import os
 import stat
 import sys
 from dataclasses import dataclass
@@ -14,6 +13,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from vllm.snapshot.manifest import ReleaseMarker, _validation_path, _write_json_atomic
+from vllm.snapshot.process import detach_snapshot_streams
 from vllm.snapshot.types import Oracle, oracles_match
 
 _CANARY_PROMPT = "The capital of France is"
@@ -141,18 +141,6 @@ async def run_engine_canary(engine: Any) -> Oracle:
     if final_output is None:
         raise SnapshotCanaryError("canary generation returned no output")
     return oracle_from_request_output(final_output)
-
-
-def detach_snapshot_streams() -> None:
-    """Remove launch-log descriptors from the reusable process image."""
-    sys.stdout.flush()
-    sys.stderr.flush()
-    sink = os.open(os.devnull, os.O_WRONLY)
-    try:
-        os.dup2(sink, sys.stdout.fileno())
-        os.dup2(sink, sys.stderr.fileno())
-    finally:
-        os.close(sink)
 
 
 async def wait_for_release_marker(

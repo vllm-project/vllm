@@ -235,6 +235,45 @@ class EngineClient(ABC):
         """Return the checkpoint lifecycle state and the error that failed it."""
         ...
 
+    async def is_idle(self) -> bool:
+        """Return whether frontend and EngineCore have no active requests."""
+        raise NotImplementedError
+
+    async def snapshot_prepare(self) -> list[dict[str, float]]:
+        """Release what the engine snapshot must not contain."""
+        raise NotImplementedError
+
+    async def snapshot_restore(self) -> list[dict[str, float]]:
+        """Bring back what snapshot preparation released."""
+        raise NotImplementedError
+
+    async def snapshot_abort(self) -> list[dict[str, float]]:
+        """Undo snapshot preparation."""
+        raise NotImplementedError
+
+    async def snapshot_detach_io(
+        self,
+        nonce: str,
+        generation: int,
+        snapshot_id: str,
+        config_hash: str,
+        marker_path: str,
+        persistence: str,
+    ) -> None:
+        """Detach EngineCore business sockets before checkpoint."""
+        raise NotImplementedError
+
+    async def snapshot_wait_for_attach(
+        self,
+        nonce: str,
+        generation: int,
+        snapshot_id: str,
+        config_hash: str,
+        root_pid: int,
+    ) -> None:
+        """Wait for and verify restored EngineCore socket attachment."""
+        raise NotImplementedError
+
     @abstractmethod
     async def add_lora(self, lora_request: LoRARequest) -> bool:
         """Load a new LoRA adapter into the engine for future requests."""

@@ -182,6 +182,7 @@ class APIServerProcessManager:
         target_server_fn: Callable | None = None,
         stats_update_address: str | None = None,
         tensor_queue: Queue | None = None,
+        snapshot_control_path: str | None = None,
     ):
         """Initialize and start API server worker processes.
 
@@ -195,6 +196,7 @@ class APIServerProcessManager:
             output_listeners: Output listeners for each API server
             stats_update_address: Optional stats update address
             tensor_queue: Optional tensor IPC queue for sharing MM tensors
+            snapshot_control_path: Optional Engine snapshot control socket path
 
         """
         self.listen_address = listen_address
@@ -244,6 +246,8 @@ class APIServerProcessManager:
                     client_config["stats_update_address"] = stats_update_address
                 if tensor_queue is not None:
                     client_config["tensor_queue"] = tensor_queue
+                if snapshot_control_path is not None:
+                    client_config["snapshot_control_path"] = snapshot_control_path
 
                 proc = spawn_context.Process(
                     target=target_server_fn or run_api_server_worker_proc,

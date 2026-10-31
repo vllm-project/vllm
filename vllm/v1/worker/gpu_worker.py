@@ -7,6 +7,7 @@ import os
 import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
+from dataclasses import dataclass
 from datetime import timedelta
 from fnmatch import filter as fnmatch_filter
 from types import NoneType
@@ -197,6 +198,17 @@ class AsyncIntermediateTensors(IntermediateTensors):
         return object.__getattribute__(self, name)
 
 
+@dataclass
+class _SnapshotPrepareState:
+    buffers_saved: bool = False
+    communicator_prepared: bool = False
+    allocator_discarded: bool = False
+    allocator_restored: bool = False
+    weights_reloaded: bool = False
+    buffers_restored: bool = False
+    communicator_restored: bool = False
+
+
 class Worker(WorkerBase):
     def __init__(
         self,
@@ -236,6 +248,7 @@ class Worker(WorkerBase):
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
         self._sleep_saved_parameters: dict[str, torch.Tensor] = {}
         self._sleep_saved_draft_buffers: dict[str, torch.Tensor] = {}
+        self._snapshot_prepare_state: _SnapshotPrepareState | None = None
 
         # Weight transfer engine is created in `load_model` once the model
         # is available, since the engine needs a reference to the model.
@@ -383,6 +396,126 @@ class Worker(WorkerBase):
 
     def checkpoint_restore(self) -> None:
         checkpoint_restore_distributed_state()
+
+    def _save_snapshot_buffers(self) -> None:
+        model = self.model_runner.model
+        self._sleep_saved_buffers = {
+            name: buffer.cpu().clone() for name, buffer in model.named_buffers()
+        }
+        draft = self.get_draft_model()
+        if draft is not None:
+            self._sleep_saved_draft_buffers = {
+                name: buffer.cpu().clone() for name, buffer in draft.named_buffers()
+            }
+
+    def _restore_snapshot_buffers(self) -> None:
+        model = self.model_runner.model
+        for name, buffer in model.named_buffers():
+            if name in self._sleep_saved_buffers:
+                buffer.data.copy_(self._sleep_saved_buffers[name].data)
+        self._sleep_saved_buffers = {}
+        draft = self.get_draft_model()
+        if draft is not None:
+            for name, buffer in draft.named_buffers():
+                if name in self._sleep_saved_draft_buffers:
+                    buffer.data.copy_(self._sleep_saved_draft_buffers[name].data)
+        self._sleep_saved_draft_buffers = {}
+
+    def snapshot_prepare(self) -> dict[str, float]:
+        if self._snapshot_prepare_state is not None:
+            raise RuntimeError("snapshot resources are already prepared")
+        state = _SnapshotPrepareState()
+        self._snapshot_prepare_state = state
+        started = time.monotonic()
+        timings: dict[str, float] = {}
+        try:
+            phase_started = time.monotonic()
+            self._save_snapshot_buffers()
+            state.buffers_saved = True
+            timings["buffer_save_seconds"] = time.monotonic() - phase_started
+            phase_started = time.monotonic()
+            checkpoint_prepare_distributed_state()
+            state.communicator_prepared = True
+            timings["communicator_prepare_seconds"] = time.monotonic() - phase_started
+            phase_started = time.monotonic()
+            get_mem_allocator_instance().discard(("weights", "kv_cache"))
+            state.allocator_discarded = True
+            timings["discard_seconds"] = time.monotonic() - phase_started
+        except BaseException as exc:
+            errors = self._rollback_snapshot_prepare(state)
+            if errors:
+                raise RuntimeError(
+                    f"{exc}; snapshot prepare rollback failed: " + "; ".join(errors)
+                ) from exc
+            raise
+        timings["total_seconds"] = time.monotonic() - started
+        return timings
+
+    def snapshot_restore(self) -> dict[str, float]:
+        state = self._snapshot_prepare_state
+        if state is None:
+            raise RuntimeError("snapshot resources were not prepared")
+        started = time.monotonic()
+        timings: dict[str, float] = {}
+        phase_started = time.monotonic()
+        get_mem_allocator_instance().wake_up(("weights", "kv_cache"))
+        state.allocator_restored = True
+        timings["va_remap_seconds"] = time.monotonic() - phase_started
+        phase_started = time.monotonic()
+        self.reload_weights()
+        state.weights_reloaded = True
+        timings["reload_weights_seconds"] = time.monotonic() - phase_started
+        phase_started = time.monotonic()
+        self._restore_snapshot_buffers()
+        state.buffers_restored = True
+        timings["buffer_restore_seconds"] = time.monotonic() - phase_started
+        phase_started = time.monotonic()
+        checkpoint_restore_distributed_state()
+        state.communicator_restored = True
+        timings["communicator_restore_seconds"] = time.monotonic() - phase_started
+        self._snapshot_prepare_state = None
+        timings["total_seconds"] = time.monotonic() - started
+        return timings
+
+    def snapshot_abort(self) -> dict[str, float]:
+        started = time.monotonic()
+        state = self._snapshot_prepare_state
+        if state is None:
+            return {"total_seconds": time.monotonic() - started}
+        errors = self._rollback_snapshot_prepare(state)
+        if errors:
+            raise RuntimeError("; ".join(errors))
+        return {"total_seconds": time.monotonic() - started}
+
+    def _rollback_snapshot_prepare(self, state: _SnapshotPrepareState) -> list[str]:
+        errors: list[str] = []
+        if state.allocator_discarded and not state.allocator_restored:
+            try:
+                get_mem_allocator_instance().wake_up(("weights", "kv_cache"))
+                state.allocator_restored = True
+            except BaseException as exc:
+                errors.append(f"allocator restore: {exc}")
+        if state.allocator_restored and not state.weights_reloaded:
+            try:
+                self.reload_weights()
+                state.weights_reloaded = True
+            except BaseException as exc:
+                errors.append(f"weight reload: {exc}")
+        if state.buffers_saved and not state.buffers_restored:
+            try:
+                self._restore_snapshot_buffers()
+                state.buffers_restored = True
+            except BaseException as exc:
+                errors.append(f"buffer restore: {exc}")
+        if state.communicator_prepared and not state.communicator_restored:
+            try:
+                checkpoint_restore_distributed_state()
+                state.communicator_restored = True
+            except BaseException as exc:
+                errors.append(f"communicator restore: {exc}")
+        if not errors:
+            self._snapshot_prepare_state = None
+        return errors
 
     def _weight_checksum_prefix(self) -> str:
         # data_parallel_rank is 0 in dense workers; only the index is unique.
