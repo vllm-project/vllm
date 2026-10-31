@@ -29,7 +29,7 @@ from vllm.compilation.codegen import (
 )
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.config.compilation import DynamicShapesType
-from vllm.config.utils import Range, hash_factors
+from vllm.config.utils import Range
 from vllm.logger import init_logger
 from vllm.logging_utils import lazy
 from vllm.platforms import current_platform
@@ -1048,39 +1048,17 @@ class VllmBackend:
     def __call__(self, graph: fx.GraphModule, example_inputs: Sequence[Any]) -> Any:
         from .caching import (
             VllmSerializableFunction,
+            _compute_code_hash,
+            env_and_config_hash_factors,
         )
 
         vllm_config = self.vllm_config
 
         self._log_compilation_config()
 
-        # Minimal hashing here with existing utilities, reused below.
-
-        env_factors = envs.compile_factors()
-        env_hash = hash_factors(env_factors)
-        # Compute config/compiler/code hashes once and reuse
-        config_hash = vllm_config.compute_hash()
+        env_factors, env_hash, config_hash = env_and_config_hash_factors(vllm_config)
         compiler_hash = self.compiler_manager.compute_hash(vllm_config)
-        forward_code_files = list(sorted(self.compilation_config.traced_files))
-
-        logger.debug(
-            "Traced files (to be considered for compilation cache):\n%s",
-            lazy(lambda: "\n".join(forward_code_files)),
-        )
-        hash_content = []
-        for filepath in forward_code_files:
-            if filepath == "<string>":
-                # This means the function was dynamically generated, with
-                # e.g. exec(). We can't actually check these.
-                continue
-            hash_content.append(filepath)
-            try:
-                with open(filepath) as f:
-                    hash_content.append(f.read())
-            except (OSError, UnicodeDecodeError):
-                logger.warning("Failed to read file %s", filepath)
-                continue
-        code_hash = hashlib.sha256("\n".join(hash_content).encode()).hexdigest()
+        code_hash = _compute_code_hash(self.compilation_config.traced_files)
         # Clear after consumption
         self.compilation_config.traced_files.clear()
         if not self.compilation_config.cache_dir:

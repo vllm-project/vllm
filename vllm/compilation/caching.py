@@ -569,17 +569,25 @@ def reconstruct_serializable_fn_from_mega_artifact(
     return fn
 
 
-def aot_compile_hash_factors(vllm_config: VllmConfig) -> list[str]:
-    factors = []
+def env_and_config_hash_factors(
+    vllm_config: VllmConfig,
+) -> tuple[dict[str, object], str, str]:
+    """Return the raw env factors, the env hash and the config hash shared by
+    the JIT and AOT compile cache keys."""
     # 0. factors come from the env, for example, The values of
     # VLLM_PP_LAYER_PARTITION will affect the computation graph.
-    env_hash = hash_factors(envs.compile_factors())
-    factors.append(env_hash)
+    env_factors = envs.compile_factors()
+    env_hash = hash_factors(env_factors)
 
     # 1. factors come from the vllm_config (it mainly summarizes how the
     #    model is created)
     config_hash = vllm_config.compute_hash()
-    factors.append(config_hash)
+    return env_factors, env_hash, config_hash
+
+
+def aot_compile_hash_factors(vllm_config: VllmConfig) -> list[str]:
+    _, env_hash, config_hash = env_and_config_hash_factors(vllm_config)
+    factors = [env_hash, config_hash]
 
     # 2. inductor factors if applicable
     if envs.VLLM_USE_MEGA_AOT_ARTIFACT:
@@ -611,9 +619,11 @@ def _compute_code_hash(files: set[str]) -> str:
     file_contents = {}
     for filepath in files:
         # Skip files that don't exist (e.g., <string>, <frozen modules>, etc.)
-        if not os.path.isfile(filepath):
-            file_contents[filepath] = ""
-        else:
-            with open(filepath) as f:
-                file_contents[filepath] = f.read()
+        file_contents[filepath] = ""
+        if os.path.isfile(filepath):
+            try:
+                with open(filepath) as f:
+                    file_contents[filepath] = f.read()
+            except (OSError, UnicodeDecodeError):
+                logger.warning("Failed to read file %s", filepath)
     return _compute_code_hash_with_content(file_contents)
