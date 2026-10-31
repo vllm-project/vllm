@@ -1656,10 +1656,14 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             step_next_n_ok = max_decode_len <= 1 or _supports_native_decode(
                 max_decode_len
             )
+            ragged = max_decode_len > 1 and bool(
+                ((decode_lens_cpu > 0) & (decode_lens_cpu < max_decode_len)).any()
+            )
             use_native = (
                 not (self.use_flattening or self.supports_varlen)
                 and max_decode_len <= next_n
                 and step_next_n_ok
+                and not ragged
             )
 
             if not self.supports_varlen:
