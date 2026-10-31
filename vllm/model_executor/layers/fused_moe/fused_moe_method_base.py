@@ -128,6 +128,13 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         return False
 
     @property
+    def ignored_weight_suffixes(self) -> tuple[str, ...]:
+        """Checkpoint weights with these suffixes are skipped when the layer has
+        no matching parameter, e.g. scales this method drops after processing
+        that a layerwise reload sends again."""
+        return ()
+
+    @property
     def method_name(self) -> str:
         return self.__class__.__name__
 
