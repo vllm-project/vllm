@@ -1969,7 +1969,14 @@ class TestToolDefinitions:
         "tool",
         [
             {"type": "web_search_20250305", "name": "web_search", "max_uses": 8},
-            {"type": "bash_20250124", "name": "bash"},
+            {"type": "code_execution_20250825", "name": "code_execution"},
+            {
+                "type": "computer_20250124",
+                "name": "computer",
+                "display_width_px": 1024,
+                "display_height_px": 768,
+            },
+            {"type": "bash_20990101", "name": "bash"},
         ],
     )
     def test_anthropic_defined_tool_is_rejected_by_type(self, tool):
@@ -1988,6 +1995,112 @@ class TestToolDefinitions:
         )
         assert request.tools is not None
         assert request.tools[0].input_schema == {"type": "object"}
+
+    @pytest.mark.parametrize(
+        ("tool_type", "name", "commands"),
+        [
+            ("bash_20241022", "bash", None),
+            ("bash_20250124", "bash", None),
+            (
+                "text_editor_20241022",
+                "str_replace_editor",
+                ["view", "create", "str_replace", "insert", "undo_edit"],
+            ),
+            (
+                "text_editor_20250124",
+                "str_replace_editor",
+                ["view", "create", "str_replace", "insert", "undo_edit"],
+            ),
+            (
+                "text_editor_20250429",
+                "str_replace_based_edit_tool",
+                ["view", "create", "str_replace", "insert"],
+            ),
+            (
+                "text_editor_20250728",
+                "str_replace_based_edit_tool",
+                ["view", "create", "str_replace", "insert"],
+            ),
+            (
+                "memory_20250818",
+                "memory",
+                ["view", "create", "str_replace", "insert", "delete", "rename"],
+            ),
+        ],
+    )
+    def test_anthropic_defined_client_tool_gets_builtin_schema(
+        self, tool_type, name, commands
+    ):
+        anthropic_request = _make_request(
+            [{"role": "user", "content": "Hi"}],
+            tools=[{"type": tool_type, "name": name, "cache_control": None}],
+        )
+        assert anthropic_request.tools is not None
+        assert anthropic_request.tools[0].type == tool_type
+
+        chat_request = _convert(anthropic_request)
+        assert chat_request.tools is not None
+        function = chat_request.tools[0].function
+        assert function.name == name
+        assert function.description
+        params = function.parameters
+        assert params["type"] == "object"
+        if commands is None:
+            assert set(params["properties"]) == {"command", "restart"}
+        else:
+            assert params["properties"]["command"]["enum"] == commands
+        assert chat_request.tool_choice == "auto"
+
+    @pytest.mark.parametrize(
+        ("tool_type", "insert_field"),
+        [
+            ("text_editor_20250124", "new_str"),
+            ("text_editor_20250728", "insert_text"),
+        ],
+    )
+    def test_text_editor_insert_field_follows_version(self, tool_type, insert_field):
+        name = (
+            "str_replace_editor"
+            if tool_type == "text_editor_20250124"
+            else "str_replace_based_edit_tool"
+        )
+        request = _make_request(
+            [{"role": "user", "content": "Hi"}],
+            tools=[{"type": tool_type, "name": name}],
+        )
+        props = request.tools[0].input_schema["properties"]
+        assert insert_field in props
+        assert ("insert_text" in props) == (insert_field == "insert_text")
+
+    def test_client_tool_tool_level_options_are_accepted(self):
+        request = _make_request(
+            [{"role": "user", "content": "Hi"}],
+            tools=[
+                {
+                    "type": "text_editor_20250728",
+                    "name": "str_replace_based_edit_tool",
+                    "max_characters": 10000,
+                }
+            ],
+        )
+        assert request.tools[0].name == "str_replace_based_edit_tool"
+
+    def test_client_tool_with_wrong_name_is_rejected(self):
+        with pytest.raises(ValidationError) as exc_info:
+            _make_request(
+                [{"role": "user", "content": "Hi"}],
+                tools=[{"type": "text_editor_20250728", "name": "str_replace_editor"}],
+            )
+        errors = exc_info.value.errors()
+        assert len(errors) == 1
+        assert "must be named 'str_replace_based_edit_tool'" in errors[0]["msg"]
+
+    def test_client_tool_schema_is_not_shared_between_requests(self):
+        tool = {"type": "bash_20250124", "name": "bash"}
+        first = _make_request([{"role": "user", "content": "Hi"}], tools=[tool])
+        first.tools[0].input_schema["properties"]["command"]["x"] = 1
+        second = _make_request([{"role": "user", "content": "Hi"}], tools=[tool])
+        assert "x" not in second.tools[0].input_schema["properties"]["command"]
 
     def test_custom_tool_still_requires_input_schema(self):
         with pytest.raises(ValidationError, match="input_schema"):
