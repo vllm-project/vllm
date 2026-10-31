@@ -275,8 +275,89 @@ __launch_bounds__(TPB) __global__ void moeTopK(
   2) This implementation assumes k is small, but will work for any k.
 */
 
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800 && !defined(USE_ROCM)
+  #define VLLM_TOPK_HAS_WARP_REDUX 1
+#else
+  #define VLLM_TOPK_HAS_WARP_REDUX 0
+#endif
+
+#if VLLM_TOPK_HAS_WARP_REDUX
+// The selections of one row that one full warp owns. Lane i holds selection i.
+struct FullWarpTopk
+{
+    float score;        // Score of selection `lane`; 0 for lanes >= k.
+    int expert;         // Expert of selection `lane`; 0 for lanes >= k.
+    float selected_sum; // Sum of the k selected scores in selection order; the same on all lanes.
+};
+
+/*
+  Top-k selection for a row that one full warp owns, without a correction bias. The result is bitwise identical
+  to the shuffle butterfly in topkGating: scores are >= +0 after the NaN/Inf clamp, so their bits order like the
+  values, and ties go to the lowest expert. Each round is two redux.sync ops (max key, then min expert among the
+  lanes that hold it), and only the lane that owned the winner rescans its slots. The selections stay in
+  registers, so the caller writes the row once. Needs k <= WARP_SIZE_PARAM and all lanes of the warp active.
+*/
+template <int VPT, int ELTS_PER_LDG, int WARP_SIZE_PARAM>
+__device__ __forceinline__ FullWarpTopk selectTopkFullWarp(
+    const float (&scores)[VPT], const int lane, const int first_col, const int k)
+{
+    static_assert(WARP_SIZE_PARAM == 32, "redux.sync reduces a 32-lane warp");
+    constexpr uint32_t kFullWarpMask = 0xffffffffu;
+    constexpr uint32_t kSelectedKey = 0u;
+    constexpr uint32_t kNoCandidate = 0xffffffffu;
+    constexpr int COLS_PER_GROUP_LDG = ELTS_PER_LDG * WARP_SIZE_PARAM;
+
+    // A finite score >= +0 has bits <= 0x7f7fffff, so the +1 cannot overflow and keeps a +0 score above
+    // kSelectedKey.
+    uint32_t keys[VPT];
+#pragma unroll
+    for (int slot = 0; slot < VPT; ++slot) {
+        keys[slot] = __float_as_uint(scores[slot]) + 1u;
+    }
+
+    // Slots are scanned in increasing expert order and only a larger key replaces, so ties keep the lowest expert.
+    uint32_t best_key;
+    int best_slot;
+    uint32_t best_expert;
+    const auto scan_lane = [&]() {
+        best_key = keys[0];
+        best_slot = 0;
+#pragma unroll
+        for (int slot = 1; slot < VPT; ++slot) {
+            if (keys[slot] > best_key) {
+                best_key = keys[slot];
+                best_slot = slot;
+            }
+        }
+        best_expert = first_col + (best_slot / ELTS_PER_LDG) * COLS_PER_GROUP_LDG + best_slot % ELTS_PER_LDG;
+    };
+    scan_lane();
+
+    FullWarpTopk result{0.f, 0, 0.f};
+    for (int k_idx = 0; k_idx < k; ++k_idx) {
+        const uint32_t max_key = __reduce_max_sync(kFullWarpMask, best_key);
+        const uint32_t expert = __reduce_min_sync(kFullWarpMask, best_key == max_key ? best_expert : kNoCandidate);
+        const float score = __uint_as_float(max_key - 1u);
+        result.selected_sum += score;
+        if (lane == k_idx) {
+            result.score = score;
+            result.expert = static_cast<int>(expert);
+        }
+        // Each expert belongs to one lane, so only the owner of the winner matches.
+        if (best_expert == expert) {
+#pragma unroll
+            for (int slot = 0; slot < VPT; ++slot) {
+                keys[slot] = slot == best_slot ? kSelectedKey : keys[slot];
+            }
+            scan_lane();
+        }
+    }
+    return result;
+}
+#endif
+
 template <int VPT, int NUM_EXPERTS, int WARPS_PER_CTA, int BYTES_PER_LDG, int WARP_SIZE_PARAM, typename IndType,
-          typename InputType = float, ScoringFunc SF>
+          typename InputType = float, ScoringFunc SF, bool FULL_WARP_SELECT = false>
 __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
     void topkGating(const InputType* input, const bool* finished, float* output, const int num_rows, IndType* indices,
         int* source_rows, const int k, const int start_expert, const int end_expert, const bool renormalize,
@@ -478,6 +559,33 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
 
     static constexpr int COLS_PER_GROUP_LDG = ELTS_PER_LDG * THREADS_PER_ROW;
 
+#if VLLM_TOPK_HAS_WARP_REDUX
+    // The launcher sets FULL_WARP_SELECT only for full-warp rows without a bias and with k <= WARP_SIZE_PARAM.
+    if constexpr (FULL_WARP_SELECT) {
+      static_assert(THREADS_PER_ROW == WARP_SIZE_PARAM, "FULL_WARP_SELECT needs one row per warp");
+      const FullWarpTopk selection = selectTopkFullWarp<VPT, ELTS_PER_LDG, WARP_SIZE_PARAM>(
+          row_chunk, thread_group_idx, first_elt_read_by_thread, k);
+      if (thread_group_idx < k) {
+        // Same weight arithmetic as the loop below: score * (routed_scaling_factor / renormalization sum).
+        float scale = static_cast<float>(routed_scaling_factor);
+        if (renormalize) {
+          const float denom = selection.selected_sum > 0.f ? selection.selected_sum : 1.f;
+          scale /= denom;
+        }
+        const bool node_uses_expert = selection.expert >= start_expert && selection.expert < end_expert;
+        const bool should_process_row = row_is_active && node_uses_expert;
+        const bool is_pad_row = is_padding != nullptr && is_padding[thread_row];
+        // Lane i writes selection i, so the k results of the row are one coalesced store.
+        const int idx = k * thread_row + thread_group_idx;
+        output[idx] = selection.score * scale;
+        indices[idx] = is_pad_row ? static_cast<IndType>(-1)
+                                   : (should_process_row ? (selection.expert - start_expert) : NUM_EXPERTS);
+        source_rows[idx] = thread_group_idx * num_rows + thread_row;
+      }
+      return;
+    }
+#endif
+
     // If bias is not null, use biased value for selection
     float row_chunk_for_choice[VPT];
     // Apply correction bias
@@ -636,9 +744,18 @@ void topkGatingLauncherHelper(const InputType* input, const bool* finished, floa
     attr.val.programmaticStreamSerializationAllowed = 1;
     config.attrs = &attr;
     config.numAttrs = 1;
+    // A separate instantiation for the full-warp redux.sync selection leaves the code generation of the existing
+    // loop (used with a bias, k > WARP_SIZE_PARAM or sub-warp rows) unchanged. Before SM80 the device code of
+    // this instantiation is the existing loop.
+    auto kernel = topkGating<VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG, WARP_SIZE_PARAM, IndType, InputType, SF, false>;
+    if constexpr (Constants::THREADS_PER_ROW == WARP_SIZE_PARAM) {
+        if (bias == nullptr && k <= WARP_SIZE_PARAM) {
+            kernel = topkGating<VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG, WARP_SIZE_PARAM, IndType, InputType, SF, true>;
+        }
+    }
     auto err = cudaLaunchKernelEx(
         &config,
-        topkGating<VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG, WARP_SIZE_PARAM, IndType, InputType, SF>,
+        kernel,
         input, finished, output, num_rows, indices, source_row, k, start_expert,
         end_expert, renormalize, bias, routed_scaling_factor, is_padding);
     STD_TORCH_CHECK(err == cudaSuccess, "PDL topkGating launch failed: ", cudaGetErrorString(err));
