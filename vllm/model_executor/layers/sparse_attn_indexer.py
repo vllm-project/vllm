@@ -948,7 +948,9 @@ def sparse_attn_indexer(
             )
             # Keeping bf16 halves top-k/candidate reads. SM100 decode is varlen:
             # one context length per row.
-            if fp32_decode_logits:
+            if dcp_world_size != 1 or not get_indexer_topk(
+                topk_backend
+            ).takes_bf16_logits(logits, topk_tokens, logits.shape[0]):
                 logits = as_fp32_logits(logits, seq_lens.view(-1))
         num_rows = logits.shape[0]
         if candidate_blocks is not None:
@@ -969,6 +971,11 @@ def sparse_attn_indexer(
                     candidate_block_size,
                     decode_candidates,
                     row_repeat,
+                    score_dtype=(
+                        torch.float32
+                        if topk_backend in ("auto", "persistent")
+                        else None
+                    ),
                 )
             else:
                 _apply_candidate_mask(

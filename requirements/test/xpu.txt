@@ -147,7 +147,7 @@ dataproperty==1.1.1
     # via
     #   pytablewriter
     #   tabledata
-datasets==5.0.1
+datasets==5.1.0
     # via
     #   evaluate
     #   lm-eval
@@ -302,17 +302,16 @@ httpx==0.28.1
     # via
     #   anthropic
     #   cohere
-    #   datasets
     #   fastapi
     #   fastapi-cloud-cli
-    #   huggingface-hub
     #   model-hosting-container-standards
 httpx2==2.13.1
     # via
     #   -r requirements/test/xpu.in
+    #   huggingface-hub
     #   mcp
     #   openai
-huggingface-hub==1.31.0
+huggingface-hub==2.4.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -930,7 +929,6 @@ requests==2.34.2
     #   -r requirements/test/../common.txt
     #   azure-core
     #   cohere
-    #   datasets
     #   docker
     #   evaluate
     #   google-api-core
@@ -1105,11 +1103,11 @@ tiktoken==0.14.0
     #   gpt-oss
     #   lm-eval
     #   mistral-common
-timm==1.0.28
+timm==1.0.30
     # via
     #   -r requirements/test/xpu.in
     #   open-clip-torch
-tokenizers==0.23.2
+tokenizers==0.23.3
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
