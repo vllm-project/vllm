@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import importlib.metadata
+import mmap
 import os
 import platform
+import stat
 from datetime import timedelta
 from functools import cache, lru_cache, wraps
 from typing import TYPE_CHECKING
@@ -15,6 +17,7 @@ from torch.distributed.distributed_c10d import is_nccl_available
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum, in_wsl
@@ -650,6 +653,79 @@ def _get_invalid_reasons(
     return invalid_reasons
 
 
+# Per-process VRAM from DRM fdinfo of the GPU's render node (DRM major 226):
+# exact, includes HIP's allocations, and readable in any container via
+# /proc/self (KFD's per-process files are keyed by host PID).
+_KFD_TOPOLOGY_NODES = "/sys/class/kfd/kfd/topology/nodes"
+_DRM_MAJOR = 226
+# VRAM including evicted buffers (drm-usage-stats.rst): the DRM key (Linux
+# 6.13+), else amdgpu's. Not drm-resident-vram, which leaves evicted ones out.
+_FDINFO_VRAM_KEYS = ("drm-total-vram", "amd-requested-vram")
+_FDINFO_UNITS = {"": 1, "KiB": 1 << 10, "MiB": 1 << 20, "GiB": 1 << 30}
+
+
+def _queue_save_area_bytes(props: dict[str, str]) -> int:
+    """KFD's context save area per hardware queue: ``cwsr_size`` per XCC, page
+    aligned (KFD's small per-queue debugger area is not exported)."""
+    total = int(props["cwsr_size"]) * max(int(props.get("num_xcc", 1)), 1)
+    return round_up(total, mmap.PAGESIZE)
+
+
+@cache
+def _kfd_gpu_node_props(uuid: str, pci: tuple[int, int, int]) -> dict[str, str] | None:
+    """KFD topology properties of the GPU with this torch UUID / PCI address,
+    or ``None`` if no single GPU node matches."""
+    try:
+        # torch's ROCm UUID is the KFD unique_id written as ASCII hex digits.
+        unique_id = int(bytes.fromhex(uuid.replace("-", "")).decode(), 16)
+    except ValueError:
+        unique_id = None
+    by_uid, by_pci = [], []
+    for node in os.listdir(_KFD_TOPOLOGY_NODES):
+        try:
+            # One "name value" pair per line; a malformed node is skipped.
+            with open(f"{_KFD_TOPOLOGY_NODES}/{node}/properties") as f:
+                props = dict(line.split() for line in f if line.strip())
+            if int(props.get("simd_count", 0)) == 0 or "drm_render_minor" not in props:
+                continue  # a CPU node
+            # location_id is (bus << 8) | (dev << 3) | fn; fn is dropped
+            # because torch reports only domain, bus and device.
+            loc = int(props["location_id"])
+            node_pci = (int(props.get("domain", 0)), loc >> 8, (loc >> 3) & 0x1F)
+        except (OSError, KeyError, ValueError):
+            continue
+        if unique_id is not None and int(props.get("unique_id", -1)) == unique_id:
+            by_uid.append(props)
+        if node_pci == pci:
+            by_pci.append(props)
+    # The UUID is unique per partition; GPU partitions share bus and device,
+    # so a PCI match is used only when exactly one node has it.
+    for matches in (by_uid, by_pci):
+        if len(matches) == 1:
+            return matches[0]
+    return None
+
+
+def _sum_fdinfo_vram(fdinfos: list[str]) -> int | None:
+    """Total VRAM in the fdinfo texts, counting each drm-client-id once
+    (duplicated fds), or ``None`` if no text has a VRAM key."""
+    total, seen, found = 0, set(), False
+    for text in fdinfos:
+        pairs = (line.split(":", 1) for line in text.splitlines() if ":" in line)
+        info = {key.strip(): value.strip() for key, value in pairs}
+        client = info.get("drm-client-id")
+        if client is not None and client in seen:
+            continue
+        seen.add(client)
+        key = next((k for k in _FDINFO_VRAM_KEYS if k in info), None)
+        if key is not None:
+            # Sizes are printed exactly, e.g. "1052672 KiB" or "4096".
+            number, _, unit = info[key].partition(" ")
+            total += int(number) * _FDINFO_UNITS[unit.strip()]
+            found = True
+    return total if found else None
+
+
 class RocmPlatform(Platform):
     _enum = PlatformEnum.ROCM
     device_name: str = "rocm"
@@ -1255,6 +1331,46 @@ class RocmPlatform(Platform):
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats(device)
         return torch.cuda.max_memory_allocated(device)
+
+    @classmethod
+    def get_process_device_memory_bytes(cls, device: torch.device) -> int | None:
+        # fdinfo VRAM, not hipMemGetInfo (which rounds each allocation up to
+        # 2 MB), plus the KFD queue save areas fdinfo can't see. HIP creates
+        # queues on demand, so its default-priority limit is charged:
+        # GPU_MAX_HW_QUEUES + 2 runtime queues. A constant, so differences
+        # stay exact. ``None`` (caller falls back) if any reading is missing.
+        try:
+            props = torch.cuda.get_device_properties(device)
+            node = _kfd_gpu_node_props(
+                str(props.uuid),
+                (props.pci_domain_id, props.pci_bus_id, props.pci_device_id),
+            )
+            if node is None or "cwsr_size" not in node:
+                return None
+            minor = int(node["drm_render_minor"])
+            # Wait for queued work so the reading includes its allocations.
+            torch.cuda.synchronize(device)
+            fdinfos = []
+            for fd in os.listdir("/proc/self/fd"):
+                try:
+                    st = os.stat(f"/proc/self/fd/{fd}")
+                    if (os.major(st.st_rdev), os.minor(st.st_rdev)) != (
+                        _DRM_MAJOR,
+                        minor,
+                    ) or not stat.S_ISCHR(st.st_mode):
+                        continue
+                    with open(f"/proc/self/fdinfo/{fd}") as f:
+                        fdinfos.append(f.read())
+                except OSError:
+                    continue  # the fd was closed while we were scanning
+            vram = _sum_fdinfo_vram(fdinfos)
+            if vram is None:
+                return None
+            queues = int(os.environ.get("GPU_MAX_HW_QUEUES", "4")) + 2
+            return vram + queues * _queue_save_area_bytes(node)
+        except (OSError, AttributeError, KeyError, ValueError, RuntimeError) as e:
+            logger.debug("Per-process VRAM from DRM fdinfo unavailable: %s", e)
+            return None
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:

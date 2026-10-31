@@ -553,6 +553,11 @@ class Worker(WorkerBase):
 
             # take current memory snapshot after external weights are ready
             self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)
+            # Already held by this process (counted in the KV budget, not in
+            # the free memory above).
+            self.init_process_memory = current_platform.get_process_device_memory_bytes(
+                self.device
+            )
             self.requested_memory = request_memory(
                 init_snapshot, self.cache_config, external_weight_memory
             )
@@ -725,6 +730,15 @@ class Worker(WorkerBase):
             or self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
         ):
             cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
+            after_cudagraph_profile = MemorySnapshot(device=self.device)
+            retained_memory = max(
+                profile_result.after_profile.free_memory
+                - after_cudagraph_profile.free_memory,
+                0,
+            )
+            profile_result.total_consumed += retained_memory
+            profile_result.non_kv_cache_memory += retained_memory
+            profile_result.after_profile = after_cudagraph_profile
 
         # Respect the opt-in flag as originally designed.
         cudagraph_memory_estimate_applied = (
@@ -735,8 +749,17 @@ class Worker(WorkerBase):
 
         init_free_memory = self.init_snapshot.free_memory
         free_gpu_memory = profile_result.after_profile.free_memory
-        rocm_fallback = maybe_rocm_profiling_fallback(profile_result)
-        if rocm_fallback is None:
+        # Where counted (ROCm), size from this process's memory: unlike the
+        # free-memory delta it includes what was held before the startup
+        # snapshot and ignores other processes. It covers graph setup too.
+        process_memory = current_platform.get_process_device_memory_bytes(self.device)
+        self.kv_budget_from_process_memory = process_memory is not None
+        if process_memory is not None:
+            profile_result.total_consumed = process_memory
+            profile_result.non_kv_cache_memory = (
+                process_memory + profile_result.transient_peak_headroom
+            )
+        elif (rocm_fallback := maybe_rocm_profiling_fallback(profile_result)) is None:
             # NOTE(woosuk): Here we assume that the other processes using the same
             # GPU did not change their memory usage during the profiling.
             assert init_free_memory >= free_gpu_memory, (
@@ -1040,8 +1063,15 @@ class Worker(WorkerBase):
                 + self.peak_activation_memory
                 + cuda_graph_memory_bytes
             )
+            # total_consumed then includes memory held at the snapshot.
+            held_at_snapshot = (
+                (self.init_process_memory or 0)
+                if getattr(self, "kv_budget_from_process_memory", False)
+                else 0
+            )
             kv_cache_memory_bytes_to_gpu_limit = (
                 self.init_snapshot.free_memory
+                + held_at_snapshot
                 - non_kv_cache_memory
                 - redundancy_buffer_memory
             )

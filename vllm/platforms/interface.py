@@ -1209,6 +1209,16 @@ class Platform:
         raise NotImplementedError
 
     @classmethod
+    def get_process_device_memory_bytes(cls, device: torch.device) -> int | None:
+        """All memory this process holds on ``device`` per the kernel driver,
+        including allocations outside torch and driver memory such as ROCm
+        queue save areas; not other processes' memory.
+
+        ``None`` (the default) keeps the free-memory based accounting.
+        """
+        return None
+
+    @classmethod
     def get_punica_wrapper(cls) -> str:
         """Return the punica wrapper for current platform."""
         raise NotImplementedError
