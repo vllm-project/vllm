@@ -324,6 +324,11 @@ RELOAD_CASES = [
         id="fp8-static-cutlass",
     ),
     pytest.param(
+        lambda: _moe(Fp8Config(activation_scheme="static")),
+        "flashinfer_trtllm",
+        id="fp8-static-trtllm",
+    ),
+    pytest.param(
         lambda: _moe(Fp8Config(weight_block_size=[128, 128])),
         "flashinfer_trtllm",
         id="fp8-block-trtllm",
@@ -342,7 +347,8 @@ def test_direct_reload_keeps_kernel_tensor_addresses(
     default_vllm_config.model_config = ModelConfig()
     default_vllm_config.kernel_config.moe_backend = backend
     layer, method, names = _cold_start(build, default_vllm_config, seed=0)
-    cold = _kernel_tensors(layer, method)  # kept alive: no address reuse
+    # detached: a parameter rebound to new storage must not follow it
+    cold = {n: t.detach() for n, t in _kernel_tensors(layer, method).items()}
 
     begin_direct_reload(layer)
     torch.manual_seed(1)
