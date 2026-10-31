@@ -39,7 +39,7 @@ from tests.v1.attention.utils import (  # noqa: E402
     create_common_attn_metadata,
     create_vllm_config,
 )
-from vllm.config import set_current_vllm_config  # noqa: E402
+from vllm.config import SpeculativeConfig, set_current_vllm_config  # noqa: E402
 from vllm.model_executor.layers.mamba.checkpoint import (  # noqa: E402
     MambaPrefillCheckpointExporter,
     MambaPrefillCheckpointMetadata,
@@ -68,16 +68,23 @@ PREFIX = "model.layers.0.linear_attn"
 PAD = 16  # CUDA graph padding rows behind num_actual_tokens
 
 
-def _builder(backend: str):
+def _builder(backend: str, num_spec: int = 0):
     cfg = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B",
         block_size=BLOCK_SIZE,
         hf_config_override={"linear_key_head_dim": K},
     )
     cfg.additional_config = {"gdn_prefill_backend": backend}
+    if num_spec:
+        cfg.speculative_config = SpeculativeConfig(
+            method="ngram", num_speculative_tokens=num_spec
+        )
     builder = GDNAttentionMetadataBuilder(
         kv_cache_spec=MambaSpec(
-            block_size=BLOCK_SIZE, shapes=((16, 64),), dtypes=(torch.float16,)
+            block_size=BLOCK_SIZE,
+            shapes=((16, 64),),
+            dtypes=(torch.float16,),
+            num_speculative_blocks=num_spec,
         ),
         layer_names=[PREFIX],
         vllm_config=cfg,
@@ -235,6 +242,41 @@ def test_flashinfer_prefill_routes_match(case, state_dtype):
     )
     torch.testing.assert_close(conv_state, ref_conv, atol=0, rtol=0)
     torch.testing.assert_close(ssm_state, ref_ssm, atol=tol, rtol=tol)
+
+
+@pytest.mark.parametrize("state_dtype", [torch.float32, torch.bfloat16])
+def test_pool_route_with_spec_decode_configured(state_dtype):
+    """With spec decode configured, block table rows hold 1 + num_spec state
+    slots, so a prefill-only batch (no drafted rows, non-spec branch) gets a
+    strided column-0 view as its state indices; the pool route must make them
+    contiguous before FlashInfer's kernels (which reject strided indices)."""
+    gen = torch.Generator(device="cuda").manual_seed(0)
+    seq_lens = query_lens = [200, 64, 5]
+    common, weights, inputs, conv_state0, ssm_state0 = _setup(
+        seq_lens, query_lens, state_dtype, gen
+    )
+    num_actual = sum(query_lens)
+    fi_cfg, fi_builder = _builder("flashinfer", num_spec=1)
+    with set_current_vllm_config(fi_cfg):
+        meta = fi_builder.build(common_prefix_len=0, common_attn_metadata=common)
+    assert meta.prefill_initial_state_mode == "none"
+    assert meta.prefill_state_indices.is_contiguous()
+
+    ref_cfg, ref_builder = _builder("cutedsl", num_spec=1)
+    with set_current_vllm_config(ref_cfg):
+        meta_ref = ref_builder.build(common_prefix_len=0, common_attn_metadata=common)
+
+    out, conv, ssm = _run(fi_cfg, meta, weights, inputs, conv_state0, ssm_state0)
+    assert not out[:num_actual].isnan().any(), "unwritten output rows"
+    ref_out, ref_conv, ref_ssm = _run(
+        ref_cfg, meta_ref, weights, inputs, conv_state0, ssm_state0
+    )
+    tol = 2e-2 if state_dtype == torch.float32 else 6e-2
+    torch.testing.assert_close(
+        out[:num_actual], ref_out[:num_actual], atol=tol, rtol=tol
+    )
+    torch.testing.assert_close(conv, ref_conv, atol=0, rtol=0)
+    torch.testing.assert_close(ssm, ref_ssm, atol=tol, rtol=tol)
 
 
 @pytest.mark.parametrize("use_cp", ["auto", False])
