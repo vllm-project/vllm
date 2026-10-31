@@ -211,6 +211,7 @@ def refill_derived(
     device is refilled in place, so captured CUDA graphs keep its address.
     The held tensor must own its storage (not be a view of a weight), since
     it is written in place. Returns the tensor now held under ``name``."""
+    assert not isinstance(new, torch.nn.Parameter), name
     old = getattr(obj, name, None)
     if (
         isinstance(old, torch.Tensor)

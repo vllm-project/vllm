@@ -45,11 +45,11 @@ def test_draft_weight_update_keeps_draft_tensor_addresses(
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     with vllm_runner(
-        "Qwen/Qwen3-8B",
+        "Qwen/Qwen3-4B",
         speculative_config={
             "method": "dflash",
-            "model": "z-lab/Qwen3-8B-DFlash-b16",
-            "num_speculative_tokens": 16,
+            "model": "z-lab/Qwen3-4B-DFlash-b16",
+            "num_speculative_tokens": 15,
         },
         max_model_len=1024,
         max_num_seqs=4,

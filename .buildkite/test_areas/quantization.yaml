@@ -108,12 +108,7 @@ steps:
   - vllm/model_executor/layers/quantization/utils/flashinfer_fp4_moe.py
   - vllm/model_executor/utils.py
   - vllm/model_executor/model_loader/reload/
-  - vllm/model_executor/model_loader/utils.py
-  - vllm/model_executor/model_loader/weight_utils.py
-  - vllm/model_executor/models/qwen3_moe.py
   - vllm/distributed/localization.py
-  - vllm/v1/worker/gpu_worker.py
-  - vllm/v1/worker/gpu_model_runner.py
   - vllm/v1/attention/backends/flashinfer.py
   commands:
     - >-
