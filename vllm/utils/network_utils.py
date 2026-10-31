@@ -361,47 +361,52 @@ def make_zmq_socket(
     When supplied, ``listener`` is detached and its fd moves to libzmq.
     """
     socket = ctx.socket(socket_type)
-    buf_size = _get_zmq_socket_buffer_size()
+    try:
+        buf_size = _get_zmq_socket_buffer_size()
 
-    if bind is None:
-        bind = socket_type not in (zmq.PUSH, zmq.SUB, zmq.XSUB)
-    if listener is not None and not bind:
-        raise ValueError("An inherited ZMQ listener requires bind=True")
+        if bind is None:
+            bind = socket_type not in (zmq.PUSH, zmq.SUB, zmq.XSUB)
+        if listener is not None and not bind:
+            raise ValueError("An inherited ZMQ listener requires bind=True")
 
-    if socket_type in (zmq.PULL, zmq.DEALER, zmq.ROUTER):
-        socket.setsockopt(zmq.RCVHWM, 0)
-        socket.setsockopt(zmq.RCVBUF, buf_size)
+        if socket_type in (zmq.PULL, zmq.DEALER, zmq.ROUTER):
+            socket.setsockopt(zmq.RCVHWM, 0)
+            socket.setsockopt(zmq.RCVBUF, buf_size)
 
-    if socket_type in (zmq.PUSH, zmq.DEALER, zmq.ROUTER):
-        socket.setsockopt(zmq.SNDHWM, 0)
-        socket.setsockopt(zmq.SNDBUF, buf_size)
+        if socket_type in (zmq.PUSH, zmq.DEALER, zmq.ROUTER):
+            socket.setsockopt(zmq.SNDHWM, 0)
+            socket.setsockopt(zmq.SNDBUF, buf_size)
 
-    if socket_type == zmq.ROUTER and router_handover:
-        # Let a new connection take over an identity left behind by a dead one.
-        socket.setsockopt(zmq.ROUTER_HANDOVER, 1)
+        if socket_type == zmq.ROUTER and router_handover:
+            # Let a new connection take over an identity left behind by a dead one.
+            socket.setsockopt(zmq.ROUTER_HANDOVER, 1)
 
-    if identity is not None:
-        socket.setsockopt(zmq.IDENTITY, identity)
+        if identity is not None:
+            socket.setsockopt(zmq.IDENTITY, identity)
 
-    if linger is not None:
-        socket.setsockopt(zmq.LINGER, linger)
+        if linger is not None:
+            socket.setsockopt(zmq.LINGER, linger)
 
-    if socket_type == zmq.XPUB:
-        socket.setsockopt(zmq.XPUB_VERBOSE, True)
+        if socket_type == zmq.XPUB:
+            socket.setsockopt(zmq.XPUB_VERBOSE, True)
 
-    if listener is not None:
-        socket.setsockopt(zmq.USE_FD, listener.detach())
+        if listener is not None:
+            socket.setsockopt(zmq.USE_FD, listener.detach())
 
-    # Determine if the path is a TCP socket with an IPv6 address.
-    # Enable IPv6 on the zmq socket if so.
-    scheme, host, _ = split_zmq_path(path)
-    if scheme == "tcp" and is_valid_ipv6_address(host):
-        socket.setsockopt(zmq.IPV6, 1)
+        # Determine if the path is a TCP socket with an IPv6 address.
+        # Enable IPv6 on the zmq socket if so.
+        scheme, host, _ = split_zmq_path(path)
+        if scheme == "tcp" and is_valid_ipv6_address(host):
+            socket.setsockopt(zmq.IPV6, 1)
 
-    if bind:
-        socket.bind(path)
-    else:
-        socket.connect(path)
+        if bind:
+            socket.bind(path)
+        else:
+            socket.connect(path)
+
+    except BaseException:
+        socket.close(linger=0)
+        raise
 
     return socket
 
