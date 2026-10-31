@@ -67,6 +67,59 @@ vllm serve XiaomiMiMo/MiMo-7B-Base \
     --speculative-config '{"method":"mtp","num_speculative_tokens":1}'
 ```
 
+## Reduced draft vocabulary
+
+MTP heads usually share the target model's lm_head, so every draft token pays
+for a projection onto the full vocabulary. For large vocabularies on
+bandwidth-bound GPUs this can be a large share of the drafting cost. The
+`draft_token_map` key restricts the drafter's head to a list of frequent token
+ids (the [FR-Spec](https://arxiv.org/abs/2502.14856) idea):
+
+```bash
+vllm serve <mtp-model> \
+    --speculative-config '{"method": "mtp", "num_speculative_tokens": 3,
+                           "draft_token_map": "draft_vocab.pt"}'
+```
+
+- Requires Model Runner V2 (the default on CUDA).
+- Only drafting changes. The target still verifies with its full lm_head, so a
+  token outside the list costs a rejected draft, never a different output
+  distribution. With probabilistic drafting
+  (`draft_sample_method: "probabilistic"`), the proposal is a distribution over
+  the full vocabulary with zero mass outside the list, so rejection sampling
+  stays exact.
+- The file is SGLang's `--speculative-token-map` format (a `.pt` list of ids)
+  or a JSON list. EOS ids are always added.
+- The drafter must share the target's unquantized lm_head, at tensor parallel
+  size 1. Drafters whose model code builds a `DraftVocab` support it (Qwen3.5,
+  Qwen4Exp and NemotronH MTP); others raise an error.
+- Acceptance drops when the list misses tokens your traffic uses, so build it
+  from representative text, ideally the model's own outputs, and include all
+  special tokens. [`build_draft_token_map.py`](../../../examples/features/speculative_decoding/build_draft_token_map.py)
+  ranks token ids by frequency over a corpus.
+  Measure the real acceptance length (see
+  [acceptance metrics](acceptance_metrics.md)) with and without the list.
+
+A static list loses acceptance on traffic it was not built from (for example
+other languages). `draft_token_map_dynamic_rows` adds that many tokens per
+draft step on top of the list: the rows outside the list are scored with a
+rank-256 projection of the lm_head, built from its weights at load time, and
+the best ones get exact logits.
+
+```bash
+vllm serve <mtp-model> \
+    --speculative-config '{"method": "mtp", "num_speculative_tokens": 3,
+                           "draft_token_map": "draft_vocab_32k.pt",
+                           "draft_token_map_dynamic_rows": 16384}'
+```
+
+It costs more per draft token than the list alone, and that cost grows with
+batch size, so measure decode speed at your concurrency.
+
+With `draft_lm_head_quantization` (see the notes below) only the listed and
+dynamic rows are quantized (weight-only), not a full copy of the head; the
+dynamic rows' scorer is then stored in FP8.
+
 ## Notes
 
 - MTP only works for model families that support MTP in vLLM.

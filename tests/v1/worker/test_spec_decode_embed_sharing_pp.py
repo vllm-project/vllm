@@ -367,3 +367,17 @@ def test_nemotron_shares_target_embedding_and_refit(
         nemotron_draft.get_input_embeddings(torch.tensor([1])),
         torch.full((1, HIDDEN), 3.0),
     )
+
+
+def test_nemotron_drafts_over_draft_token_map(nemotron_draft, dist_init):
+    from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+
+    nemotron_draft.lm_head = ParallelLMHead(VOCAB, HIDDEN, disable_tp=True)
+    nn.init.normal_(nemotron_draft.lm_head.weight)
+    listed = torch.tensor([1, 4, 9, 30])
+    nemotron_draft.draft_vocab.load_token_map(nemotron_draft.lm_head, listed)
+    hidden = torch.randn(5, HIDDEN)
+    logits = nemotron_draft.compute_logits(hidden)
+    assert logits.shape == (5, VOCAB)
+    assert torch.equal(logits.isfinite().nonzero()[:, 1].unique(), listed)
+    assert torch.equal(nemotron_draft.get_top_tokens(hidden), logits.argmax(-1))

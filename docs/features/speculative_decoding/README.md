@@ -165,6 +165,7 @@ only apply to model-based methods such as `draft_model`, `mtp`, `eagle3`, and
 | `fly_entropy_threshold` | `float >= 0` | `0.3` | Minimum target top-k entropy required for FLy to defer a native rejection. |
 | `fly_entropy_top_k` | `integer >= 1` | `3` | Number of largest processed target probabilities used by FLy's entropy gate, capped at the vocabulary size. |
 | `use_heterogeneous_vocab` | `boolean` | `false` | Allow draft and target models with different vocabularies. Builds a token-level intersection at initialisation and constrains draft logits to shared tokens only. Only compatible with `method=draft_model`. Probabilistic draft sampling (`draft_sample_method='probabilistic'`) and `use_local_argmax_reduction` are not supported when this option is enabled. |
+| `draft_token_map` | `string` | `None` | Path to a list of target token ids the drafter may propose (`.pt` in SGLang's `--speculative-token-map` format, or a JSON list). Restricts a shared lm_head to those rows to cut drafting cost; verification is unchanged. Only for `mtp` drafters with an unquantized lm_head, on Model Runner V2. See [Reduced draft vocabulary](mtp.md#reduced-draft-vocabulary). |
 
 !!! note
     Gemma 4 assistant checkpoints are handled as Gemma 4 MTP speculators, not

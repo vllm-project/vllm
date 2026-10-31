@@ -116,7 +116,12 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
         eagle_model, "has_own_lm_head", draft_lm_head, target_lm_head
     ):
         draft_head = target_lm_head
-        if speculative_config.draft_lm_head_quantization is not None:
+        # With a draft token map only its rows are quantized, in
+        # load_draft_token_map below.
+        if (
+            speculative_config.draft_lm_head_quantization is not None
+            and speculative_config.draft_token_map is None
+        ):
             draft_head = quantized_lm_head_copy(
                 target_lm_head, speculative_config.draft_lm_head_quantization
             )
@@ -138,6 +143,12 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
         raise ValueError(
             "draft_lm_head_quantization needs a drafter that shares the target lm_head."
         )
+
+    # Only now does the drafter hold the lm_head it drafts with.
+    if speculative_config.draft_token_map is not None:
+        from vllm.model_executor.layers.draft_vocab import load_draft_token_map
+
+        load_draft_token_map(eagle_model, vllm_config)
 
     # MTP shares topk_indices_buffer with the target model. We update
     # every module in the draft that holds a buffer reference so that
