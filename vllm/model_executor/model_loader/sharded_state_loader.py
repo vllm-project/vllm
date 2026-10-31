@@ -215,6 +215,8 @@ class ShardedStateLoader(BaseModelLoader):
                 f"only pre-sharded checkpoints are currently supported!"
             )
         state_dict = self._filter_subtensors(model.state_dict())
+        modules = dict(model.named_modules())
+        loaded_keys: set[str] = set()
         counter_before_loading_weights = time.perf_counter()
         for key, tensor in self.iterate_over_files(filepaths):
             # If loading with LoRA enabled, additional padding may
@@ -231,6 +233,19 @@ class ShardedStateLoader(BaseModelLoader):
                 )
             param_data = param.data
             param_shape = param.shape
+            module_name, _, attr_name = key.rpartition(".")
+            module = modules.get(module_name)
+            if (
+                module is not None
+                and attr_name in module._buffers
+                and tensor.shape != param_shape
+            ):
+                module.register_buffer(
+                    attr_name,
+                    torch.empty(tensor.shape, dtype=param.dtype, device=param.device),
+                )
+                param_data = module._buffers[attr_name].data
+                param_shape = param_data.shape
             for dim, size in enumerate(tensor.shape):
                 if size < param_shape[dim]:
                     param_data = param_data.narrow(dim, 0, size)
@@ -243,11 +258,40 @@ class ShardedStateLoader(BaseModelLoader):
                 )
             param_data.copy_(tensor)
             state_dict.pop(key)
+            loaded_keys.add(key)
         counter_after_loading_weights = time.perf_counter()
         logger.info_once(
             "Loading weights took %.2f seconds",
             counter_after_loading_weights - counter_before_loading_weights,
         )
+        # Drop transient KV-cache scale/zero-point parameters that are consumed
+        # by process_weights_after_loading before save_model writes the shard.
+        from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+
+        _KV_TRANSIENT_TO_BUFFER = {
+            "k_scale": "_k_scale",
+            "v_scale": "_v_scale",
+            "q_scale": "_q_scale",
+            "prob_scale": "_prob_scale",
+            "k_zero_point": "_k_scale",
+            "v_zero_point": "_v_scale",
+            "q_zero_point": "_q_scale",
+        }
+        for key in list(state_dict):
+            module_name, _, attr_name = key.rpartition(".")
+            buf_name = _KV_TRANSIENT_TO_BUFFER.get(attr_name)
+            if buf_name is None:
+                continue
+            module = modules.get(module_name)
+            if module is None or not isinstance(
+                getattr(module, "quant_method", None), BaseKVCacheMethod
+            ):
+                continue
+            buf_key = f"{module_name}.{buf_name}" if module_name else buf_name
+            if buf_key in loaded_keys:
+                if hasattr(module, attr_name):
+                    delattr(module, attr_name)
+                state_dict.pop(key)
         if state_dict:
             raise ValueError(f"Missing keys {tuple(state_dict)} in loaded state!")
 
