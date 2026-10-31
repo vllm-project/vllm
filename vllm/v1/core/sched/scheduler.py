@@ -368,13 +368,13 @@ class Scheduler(SchedulerInterface):
             ),
         )
         # Mamba managers already account for their speculative state blocks.
-        num_spec_decode_tokens = (
+        self._num_spec_decode_tokens = (
             1 + self.num_spec_tokens + self.num_lookahead_tokens
             if self.num_spec_tokens
             else 0
         )
         self._spec_decode_step_blocks = sum(
-            cdiv(num_spec_decode_tokens, manager.block_size)
+            cdiv(self._num_spec_decode_tokens, manager.block_size)
             for manager in self.kv_cache_manager.coordinator.single_type_managers
             if not isinstance(manager.kv_cache_spec, MambaSpec)
         )
@@ -1425,7 +1425,7 @@ class Scheduler(SchedulerInterface):
                     # predictable preemptions.
                     reserved_blocks = (
                         self._inflight_prefill_reserved_blocks()
-                        + self._spec_decode_step_blocks
+                        + self._spec_decode_step_margin(num_computed_tokens)
                     )
 
                 # Replayed tokens are already counted in the adopted hit; a
@@ -3418,6 +3418,24 @@ class Scheduler(SchedulerInterface):
             if stage is not None:
                 kv_fetch_stages[request] = stage
                 self._kv_fetch_counts[stage] += 1
+
+    def _spec_decode_step_margin(self, num_computed_tokens: int) -> int:
+        """`_spec_decode_step_blocks` for a request with `num_computed_tokens`
+        computed tokens, capped by the blocks left before max_model_len."""
+        if not self._spec_decode_step_blocks:
+            return 0
+        return sum(
+            min(
+                cdiv(self._num_spec_decode_tokens, manager.block_size),
+                max(
+                    0,
+                    cdiv(self.max_model_len, manager.block_size)
+                    - cdiv(num_computed_tokens, manager.block_size),
+                ),
+            )
+            for manager in self.kv_cache_manager.coordinator.single_type_managers
+            if not isinstance(manager.kv_cache_spec, MambaSpec)
+        )
 
     def _inflight_prefill_reserved_blocks(self) -> int:
         """Num blocks in-flight prefills still need to finish (their reservation)."""
