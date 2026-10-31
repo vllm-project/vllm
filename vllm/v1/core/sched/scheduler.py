@@ -640,6 +640,19 @@ class Scheduler(SchedulerInterface):
             and junction <= request.num_prompt_tokens
             else block_floored
         )
+        # Appending an MM item must preserve the shared prefix's prefill splits.
+        mm_boundary_stop = 0
+        for feature in request.mm_features:
+            position = feature.mm_position
+            boundary = (position.offset + position.length) // block_size * block_size
+            # Leave proof space for every group, including DCP's larger blocks.
+            if (
+                self.use_eagle_block_drop or self.num_hash_lookahead_tokens
+            ) and start < boundary - self.block_size:
+                boundary -= self.block_size
+            if start < boundary < end:
+                mm_boundary_stop = boundary
+                break
         stops = (
             # Same invariant: a chunk starting mid-block stops at the boundary
             # rather than running past it.
@@ -655,6 +668,7 @@ class Scheduler(SchedulerInterface):
             # Marconi shared-prefix junction: cache its state so sibling
             # requests sharing the prefix can reuse it.
             junction_stop if start < junction < end else 0,
+            mm_boundary_stop,
         )
         # Stop at the earliest mandatory position strictly inside the chunk.
         end = min((s for s in stops if start < s < end), default=end)
