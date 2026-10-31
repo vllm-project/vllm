@@ -796,8 +796,9 @@ class DerenderStreamState(BaseModel):
     `detokenize_incrementally` only ever reads the trailing token window
     from `prefix_offset`, so we carry just that tail, as ids because pieces may
     be raw bytes, plus the two offsets. Each chunk resumes exactly where the
-    last one stopped, including any partially processed multi-byte character (tracked by `read_offset`),
-    then trims and rebases the window so it never grows with generation length.
+    last one stopped, including any partially processed multi-byte character
+    (tracked by `read_offset`), then trims and rebases the window so it never
+    grows with generation length.
 
     Performance:
     - Compute per chunk is O(delta). One `detokenize_incrementally` call per
