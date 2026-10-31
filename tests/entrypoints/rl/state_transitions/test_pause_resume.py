@@ -95,6 +95,7 @@ class TestPauseResume:
             pytest.param("abort", 256, "abort", id="abort"),
             pytest.param("wait", 256, "length", id="wait"),
             pytest.param("keep", 256, "length", id="keep"),
+            pytest.param("migrate", 256, "abort", id="migrate"),
         ],
     )
     def test_mode_request_lifecycle(
@@ -117,7 +118,7 @@ class TestPauseResume:
             assert pause(server_url, mode=mode) == 200
             assert is_paused(server_url)
 
-            if mode in ("abort", "wait"):
+            if mode in ("abort", "wait", "migrate"):
                 assert inflight.done.is_set()
             else:
                 chunks_after_pause = len(inflight.chunks)

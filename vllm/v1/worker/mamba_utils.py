@@ -631,6 +631,62 @@ def precopy_mamba_align_fused_kernel(
 
 
 @triton.jit
+def materialize_mamba_fused_kernel(
+    num_accepted_tokens_ptr,
+    idx_mapping_ptr,
+    state_cols_ptr,
+    block_table_ptrs_ptr,
+    block_table_stride_req: tl.int64,
+    state_base_addrs_ptr,
+    state_block_strides_ptr,
+    state_elem_sizes_ptr,
+    state_inner_sizes_ptr,
+    state_conv_widths_ptr,
+    state_group_indices_ptr,
+    state_dim_row_count_ptr,
+    state_dim_row_stride_ptr,
+    HAS_STATE_COLS: tl.constexpr,
+    COPY_BLOCK_SIZE: tl.constexpr,
+    CONV_STATE_DIM_FIRST: tl.constexpr,
+    TEMPORAL_TILES: tl.constexpr,
+):
+    """Consolidate accepted speculative state into each request's running slot.
+
+    Grid: (selected request slots, layer/state tensors, temporal copy tiles).
+    The caller resets acceptance in a separate launch after all copies finish.
+    """
+    req_idx = tl.load(idx_mapping_ptr + tl.program_id(0))
+    token_bias = tl.load(num_accepted_tokens_ptr + req_idx) - 1
+    if token_bias <= 0:
+        return
+    if HAS_STATE_COLS:  # noqa: SIM108
+        col = tl.load(state_cols_ptr + req_idx)
+    else:
+        col = 0
+    _copy_mamba_state_block(
+        tl.program_id(1),
+        req_idx,
+        col,
+        col,
+        token_bias,
+        block_table_ptrs_ptr,
+        block_table_stride_req,
+        state_base_addrs_ptr,
+        state_block_strides_ptr,
+        state_elem_sizes_ptr,
+        state_inner_sizes_ptr,
+        state_conv_widths_ptr,
+        state_group_indices_ptr,
+        state_dim_row_count_ptr,
+        state_dim_row_stride_ptr,
+        tl.program_id(2),
+        COPY_BLOCK_SIZE,
+        CONV_STATE_DIM_FIRST,
+        TEMPORAL_TILES,
+    )
+
+
+@triton.jit
 def batch_memcpy_kernel(src_ptrs, dst_ptrs, sizes, BLOCK_SIZE: tl.constexpr):
     pid = tl.program_id(0)
 
@@ -770,8 +826,8 @@ class MambaSpecDecodeGPUContext:
     """Context for GPU-side Mamba state copy operations during the
     fused postprocess path.
 
-    Only used when speculative decoding is enabled on a hybrid model
-    (and the mamba_cache_config is in align mode).
+    Used for align-mode state copies and speculative-state materialization
+    before migration.
 
     Precomputes memory layout metadata (base addresses, strides, element sizes)
     so the GPU kernel can perform state copies without CPU-GPU sync.
@@ -1198,6 +1254,39 @@ class MambaSpecDecodeGPUContext:
             CONV_STATE_DIM_FIRST=is_conv_state_dim_first(),
             TEMPORAL_TILES=_TEMPORAL_TILES,
         )
+
+    def materialize_requests(
+        self,
+        num_accepted_tokens: torch.Tensor,
+        req_indices: torch.Tensor,
+        state_cols: torch.Tensor | None = None,
+    ) -> None:
+        """Commit the final accepted temporal state and convolution window."""
+        if req_indices.numel() == 0:
+            return
+        assert self.is_initialized
+        materialize_mamba_fused_kernel[
+            (req_indices.numel(), self.num_states, _TEMPORAL_TILES)
+        ](
+            num_accepted_tokens,
+            req_indices,
+            state_cols,
+            self.block_table_ptrs,
+            self.block_table_stride_req,
+            self.state_base_addrs,
+            self.state_block_strides,
+            self.state_elem_sizes,
+            self.state_inner_sizes,
+            self.state_conv_widths,
+            self.state_group_indices,
+            self.state_dim_row_count,
+            self.state_dim_row_stride,
+            HAS_STATE_COLS=state_cols is not None,
+            COPY_BLOCK_SIZE=1024,
+            CONV_STATE_DIM_FIRST=is_conv_state_dim_first(),
+            TEMPORAL_TILES=_TEMPORAL_TILES,
+        )
+        num_accepted_tokens.index_fill_(0, req_indices, 1)
 
     def run_fused_precopy(
         self,

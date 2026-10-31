@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -479,6 +480,72 @@ def _make_gpu_ctx(
     )
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+@pytest.mark.parametrize("layout", ["SD", "DS"])
+@pytest.mark.parametrize("running_col", [0, 2])
+def test_materialize_accepted_mamba_state_for_migration(
+    monkeypatch, layout, running_col
+):
+    from vllm.model_executor.layers.mamba import mamba_utils as model_mamba_utils
+
+    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", layout)
+    model_mamba_utils.get_conv_state_layout.cache_clear()
+    try:
+        device = torch.device("cuda")
+        cfg = _TestConfig(num_layers=1, max_num_reqs=5, num_blocks=64, conv_width=8)
+        cache = _make_kv_cache_config(cfg, ["layer_0"])
+        spec = cache.kv_cache_groups[0].kv_cache_spec
+        assert isinstance(spec, MambaSpec)
+        cache.kv_cache_groups[0].kv_cache_spec = replace(
+            spec,
+            mamba_cache_mode="none" if running_col == 0 else "align",
+            num_speculative_blocks=3,
+        )
+        conv = torch.randn(64, 8, cfg.conv_inner_dim, dtype=cfg.dtype, device=device)
+        if layout == "DS":
+            conv = conv.transpose(1, 2).contiguous()
+        temporal = torch.randn(
+            64, cfg.temporal_state_dim, dtype=cfg.dtype, device=device
+        )
+        conv_before, temporal_before = conv.clone(), temporal.clone()
+        # Request-slot order differs from migration batch order. Slot four is
+        # stale worker state whose blocks must remain untouched.
+        tables = torch.arange(1, 41, dtype=torch.int32, device=device).reshape(5, 8)
+        tables = tables.flip(1).contiguous()
+        accepted = torch.tensor([1, 2, 3, 4, 3], dtype=torch.int32, device=device)
+        indices = torch.tensor([3, 0, 2, 1], dtype=torch.int64, device=device)
+        state_cols = torch.full((5,), running_col, dtype=torch.int32, device=device)
+        ctx = _make_gpu_ctx(cfg, cache, device)
+        ctx.initialize_from_forward_context(
+            cache,
+            {"layer_0": SimpleNamespace(kv_cache=(conv, temporal))},
+            _COPY_FUNCS,
+            [tables],
+        )
+        expected_conv, expected_temporal = conv.clone(), temporal.clone()
+        for slot in range(4):
+            bias = slot
+            dst = int(tables[slot, running_col])
+            src = int(tables[slot, running_col + bias])
+            expected_temporal[dst].copy_(temporal_before[src])
+            if layout == "DS":
+                expected_conv[dst, :, : 8 - bias].copy_(conv_before[dst, :, bias:])
+            else:
+                expected_conv[dst, : 8 - bias].copy_(conv_before[dst, bias:])
+
+        for _ in range(2):
+            ctx.materialize_requests(
+                accepted,
+                indices,
+                state_cols if running_col else None,
+            )
+            torch.testing.assert_close(conv, expected_conv, rtol=0, atol=0)
+            torch.testing.assert_close(temporal, expected_temporal, rtol=0, atol=0)
+            assert accepted.tolist() == [1, 1, 1, 1, 3]
+    finally:
+        model_mamba_utils.get_conv_state_layout.cache_clear()
+
+
 def test_mamba_groups_support_different_state_specs():
     gdn_spec = MambaSpec(
         block_size=16,
@@ -664,6 +731,7 @@ def test_v2_align_ctx_binds_request_slot_tables_for_state_copies():
     state._mamba_group_ids = []
     state._mamba_spec = None
     state._mamba_state_copy_funcs = _COPY_FUNCS
+    state._mamba_ctx = None
     state.max_num_reqs = cfg.max_num_reqs
     state.device = device
     state.vllm_config = MagicMock()

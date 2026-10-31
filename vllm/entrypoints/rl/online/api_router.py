@@ -36,8 +36,8 @@ async def pause_generation(
 ) -> JSONResponse:
     """Pause generation requests to allow weight updates.
 
-    In ``abort`` and ``wait`` modes new requests are rejected with HTTP 503
-    until /resume; ``keep`` continues to accept and queue them.
+    In ``abort``, ``wait`` and ``migrate`` modes new requests are rejected with
+    HTTP 503 until /resume; ``keep`` continues to accept and queue them.
 
     Args:
         raw_request: The incoming FastAPI request, used to reach the engine
@@ -46,6 +46,10 @@ async def pause_generation(
             - ``"abort"``: Abort all in-flight requests immediately (default).
             - ``"wait"``: Wait for in-flight requests to complete.
             - ``"keep"``: Freeze requests in queue; they resume on /resume.
+            - ``"migrate"``: Finish in-flight requests with their KV cache kept
+              readable by the KV connector, whose ``kv_transfer_params`` are
+              returned with each response so that another engine can continue
+              it. Returns once the exported KV blocks have been released.
         clear_cache: DEPRECATED. Whether to clear KV/prefix caches after
             draining. Ignored when mode="keep".
 

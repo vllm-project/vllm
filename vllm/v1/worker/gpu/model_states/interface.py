@@ -133,6 +133,15 @@ class ModelState(ABC):
         """Hook run after the KV cache tensors are allocated and bound."""
         return None
 
+    def prepare_migration(
+        self,
+        req_indices: list[int],
+        kv_cache_config: KVCacheConfig,
+        block_tables: BlockTables,
+    ) -> None:
+        """Materialize accepted state before exporting a quiesced request."""
+        return None
+
     def capture_inner_cudagraphs(
         self,
         input_buffers: InputBuffers,

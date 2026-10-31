@@ -60,6 +60,10 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             # Remote prefill: get all prompt blocks from remote.
             token_ids = request.prompt_token_ids or []
             actual = self._get_remote_prefill_token_count(len(token_ids))
+            # A migrated request's producer computed all but the last token of
+            # what is now the prompt; never load past what it computed.
+            if remote_num_tokens := params.get("remote_num_tokens"):
+                actual = min(actual, remote_num_tokens)
             count = actual - num_computed_tokens
             if count > 0:
                 return count, True
@@ -206,8 +210,10 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             request.status,
             params,
         )
-        if not params:
+        migrated = request.status == RequestStatus.FINISHED_MIGRATED
+        if not params and not migrated:
             return False, None
+        params = params or {}
 
         is_p_node = bool(params.get("do_remote_decode"))
         is_d_node = not is_p_node
@@ -228,6 +234,9 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             self._reqs_need_recv[request.request_id] = (request, [], (), False)
             params["do_remote_prefill"] = False
             return False, None
+
+        if migrated:
+            return self._export_migrated_request(request, block_ids)
 
         if is_d_node and not self.is_bidirectional_kv_xfer_enabled:
             return False, None
@@ -275,9 +284,52 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
 
             remote_num_tokens = request.num_computed_tokens
 
-        return delay_free_blocks, dict(
+        return delay_free_blocks, self._transfer_params(
+            request,
+            block_ids,
+            is_p_node=is_p_node,
+            remote_num_tokens=remote_num_tokens,
+            blocks_expiry_time=blocks_expiry_time,
+        )
+
+    def _export_migrated_request(
+        self, request: "Request", block_ids: "BlockIds"
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """Keep a migrated request's computed KV cache readable, like a finished
+        remote prefill, so that the engine continuing it can pull the blocks."""
+        if (
+            request.num_computed_tokens == 0
+            or not any(len(group) > 0 for group in block_ids)
+            or self.use_host_buffer
+            or self._prefill_backoff() > 1
+        ):
+            self._reqs_not_processed.add(request.request_id)
+            self._reqs_need_save.pop(request.request_id, None)
+            return False, None
+        self._reqs_in_batch.add(request.request_id)
+        self._reqs_need_send[request.request_id] = (
+            time.perf_counter() + self._kv_lease_duration
+        )
+        return True, self._transfer_params(
+            request,
+            self.get_exchange_clipped_blocks(block_ids),
+            is_p_node=True,
+            remote_num_tokens=request.num_computed_tokens,
+            blocks_expiry_time=None,
+        )
+
+    def _transfer_params(
+        self,
+        request: "Request",
+        block_ids: "BlockIds",
+        *,
+        is_p_node: bool,
+        remote_num_tokens: int,
+        blocks_expiry_time: float | None,
+    ) -> dict[str, Any]:
+        return dict(
             do_remote_prefill=is_p_node,
-            do_remote_decode=is_d_node,
+            do_remote_decode=not is_p_node,
             remote_block_ids=block_ids,
             remote_engine_id=self.engine_id,
             remote_request_id=request.request_id,
