@@ -1548,9 +1548,8 @@ class KimiLinearForCausalLM(
         return loader.load_weights(weights)
 
     def process_weights_after_loading(self) -> None:
-        """Model-level post-load hook (after a full load or reload). The specialized
-        decode is built after the first load and keeps copies derived from the
-        weights; refresh them after a reload."""
+        """The specialized decode is built after the first load and keeps copies
+        derived from the weights; refresh them after a reload."""
         if self.specialized_decode is not None:
             self.specialized_decode.refresh_weights()
 

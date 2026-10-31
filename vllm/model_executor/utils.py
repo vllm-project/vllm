@@ -250,11 +250,9 @@ def refill_derived(
     obj: object, name: str, new: torch.Tensor | None
 ) -> torch.Tensor | None:
     """Set ``obj.name`` (a buffer or plain attribute, never a parameter) to a
-    tensor derived from the weights that kernels read. Post-load processing
-    reruns on every weight reload: a held tensor of the same shape, dtype and
-    device is refilled in place, so captured CUDA graphs keep its address.
-    The held tensor must own its storage (not be a view of a weight), since
-    it is written in place. Returns the tensor now held under ``name``."""
+    tensor derived from the weights. A held tensor of the same shape, dtype and
+    device is refilled in place, so captured CUDA graphs keep its address; it
+    must own its storage. Returns the tensor now held under ``name``."""
     assert not isinstance(new, torch.nn.Parameter), name
     old = getattr(obj, name, None)
     if (

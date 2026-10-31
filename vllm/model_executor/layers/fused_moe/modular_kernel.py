@@ -536,11 +536,9 @@ class FusedMoEExperts(ABC):
     kept_constants: tuple[str, ...] = ()
 
     def keep_constants(self, layer: torch.nn.Module, prefix: str = "_experts_") -> None:
-        """Point this object's ``kept_constants`` at tensors kept on ``layer``
-        (as ``prefix + name.lstrip("_")``), refilled in place with this object's
-        fresh values. Quant methods build a new experts object on every
-        post-load rerun; captured CUDA graphs keep reading the first object's
-        tensors."""
+        """Point ``kept_constants`` at tensors kept on ``layer`` (as ``prefix +
+        name.lstrip("_")``), refilled in place: every post-load rerun builds a
+        new experts object, and captured CUDA graphs read the first one's."""
         for name in self.kept_constants:
             value = getattr(self, name, None)
             if isinstance(value, torch.Tensor):

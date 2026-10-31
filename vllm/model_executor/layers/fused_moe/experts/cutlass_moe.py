@@ -280,7 +280,6 @@ def run_cutlass_moe_fp8(
 
 
 class CutlassExpertsFp8Base(mk.FusedMoEExpertsModular):
-    # the grouped GEMMs read these; a post-load rerun rebuilds this object
     kept_constants: tuple[str, ...] = (
         "ab_strides1",
         "ab_strides2",
@@ -1317,7 +1316,6 @@ def run_cutlass_moe_w4a8_fp8(
 
 
 class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
-    # the grouped GEMMs read these; a post-load rerun rebuilds this object
     kept_constants: tuple[str, ...] = (
         "a_strides1",
         "a_strides2",

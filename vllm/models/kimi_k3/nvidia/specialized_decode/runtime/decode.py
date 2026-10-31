@@ -188,10 +188,9 @@ class SpecializedDecode:
                 self.packed[layer.layer_idx].copy_(fresh)
             else:
                 self.feed_forward[layer.layer_idx].refresh_weights(layer.mlp)
-            core = getattr(self.attention[layer.layer_idx], "core", None)
-            refresh = getattr(core, "refresh_weights", None)
-            if refresh is not None:
-                refresh(layer.self_attn)
+            core = self.attention[layer.layer_idx].core
+            if hasattr(core, "refresh_weights"):  # KDA; MLA reads the backbone's
+                core.refresh_weights(layer.self_attn)
 
     def prepare_kv(self):
         """Compile each layer's cores for its bound KV cache layout (the profiling
