@@ -22,6 +22,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
+    flashinfer_jit_unsupported_reason,
     flashinfer_prepare_bf16_fp4_weights,
     flashinfer_scaled_fp4_mm,
     has_flashinfer,
@@ -199,13 +200,15 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
             cutlass_fp4_supported,
         )
 
-        if (
+        if not (
             cutlass_fp4_supported()
             and current_platform.has_device_capability(100)
             and has_flashinfer()
         ):
-            return True, None
-        return False, "FlashInfer + >=sm_100 required"
+            return False, "FlashInfer + >=sm_100 required"
+        if (reason := flashinfer_jit_unsupported_reason()) is not None:
+            return False, f"cannot JIT-compile FlashInfer for this GPU: {reason}"
+        return True, None
 
     @classmethod
     def can_implement(cls, config: NvFp4LinearLayerConfig) -> tuple[bool, str | None]:
