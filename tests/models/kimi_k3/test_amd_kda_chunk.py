@@ -537,6 +537,46 @@ def test_checkpoint_leaves_the_output_and_final_state_alone() -> None:
     torch.testing.assert_close(state_got, state_ref, rtol=0, atol=0)
 
 
+def _slice_inputs(inp: dict, start: int, end: int, h0: torch.Tensor) -> dict:
+    """Tokens ``[start, end)`` of a one-sequence fixture, resumed from ``h0``."""
+    part = dict(inp)
+    for key in ("q", "k", "v", "raw_g", "raw_beta"):
+        part[key] = inp[key][:, start:end].contiguous()
+    part["h0"] = h0
+    part["cu"] = torch.tensor([0, end - start], device="cuda", dtype=torch.int32)
+    return part
+
+
+def test_gluon_hands_checkpoint_steps_to_fused() -> None:
+    """A chunked prefill can switch backends on the step that checkpoints.
+
+    The layer runs Gluon by default and the fused kernel only on the steps that
+    carry a checkpoint, since AITER's chunk_kda cannot export one. Each backend
+    resumes from the state the other left, so the output, the final state and
+    the checkpoint must all match a Triton prefill of the whole prompt.
+    """
+    _requires_kernel()
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    if not rocm_aiter_ops.is_kda_gluon_prefill_available():
+        pytest.skip("AITER Gluon chunk_kda is not available here")
+
+    inp = _inputs([1024], seed=31)
+    o_ref, state_ref = _run(inp, use_fused=False)
+    _, ckpt_ref = _run(_prefix_inputs(inp, 0, 512), use_fused=False)
+
+    # Three steps of one prompt: Gluon, fused with a checkpoint at token 512,
+    # then Gluon again.
+    o1, s1 = _run(_slice_inputs(inp, 0, 256, inp["h0"]), False, backend="gluon")
+    ckpt, (o2, s2) = _run_with_checkpoints(_slice_inputs(inp, 256, 768, s1), [256])
+    o3, s3 = _run(_slice_inputs(inp, 768, 1024, s2), False, backend="gluon")
+
+    o = torch.cat([o1, o2, o3], dim=1)
+    torch.testing.assert_close(o.float(), o_ref.float(), rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(s3, state_ref, rtol=5e-3, atol=5e-3)
+    torch.testing.assert_close(ckpt[0], ckpt_ref[0], rtol=5e-3, atol=5e-3)
+
+
 @pytest.mark.parametrize("offset", [100, 63, 65, 1024])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_unusable_checkpoint_offsets_write_nothing(
