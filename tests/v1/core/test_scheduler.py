@@ -806,6 +806,29 @@ def test_max_loras_counts_running_request_skipped_for_encoder_budget():
     assert req_c.status == RequestStatus.WAITING
 
 
+def test_max_loras_counts_pinned_adapters():
+    """A pinned adapter keeps its GPU slot, so it counts against max_loras
+    even when no request uses it."""
+    scheduler = create_scheduler(lora_config=LoRAConfig(max_loras=2))
+    scheduler.set_lora_pinned(1, pinned=True)
+    req_a, req_b, req_c = create_requests(
+        num_requests=3, num_tokens=8, req_ids=["a", "b", "c"]
+    )
+    req_a.lora_request = LoRARequest("lora-a", 1, "/path/a")
+    req_b.lora_request = LoRARequest("lora-b", 2, "/path/b")
+    req_c.lora_request = LoRARequest("lora-c", 3, "/path/c")
+    for req in (req_b, req_c, req_a):
+        scheduler.add_request(req)
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"b": 8, "a": 8}
+    assert req_c.status == RequestStatus.WAITING
+
+    scheduler.set_lora_pinned(1, pinned=False)
+    scheduler.finish_requests("a", RequestStatus.FINISHED_ABORTED)
+    assert scheduler.schedule().num_scheduled_tokens == {"c": 8}
+
+
 def test_cached_request_data_resumed_all_token_ids_mrv1_only():
     """all_token_ids carries a resumed request's token ids to the connector
     for the V1 model runner, but is skipped entirely for the V2 model runner.
