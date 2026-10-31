@@ -7,6 +7,7 @@ warm restarts (weights mapped from the daemon via CUDA IPC) must both serve
 identical outputs.
 """
 
+import json
 import os
 import shutil
 import signal
@@ -121,7 +122,9 @@ class WeightCacheDaemon:
                 if time.monotonic() > deadline:
                     raise
                 if self._proc is not None and self._proc.poll() is not None:
-                    raise AssertionError("vllm preload exited before ready") from None
+                    raise AssertionError(
+                        f"vllm preload exited before ready: {self.logs}"
+                    ) from None
                 time.sleep(2)
 
     def _stop(self) -> None:
@@ -200,6 +203,7 @@ def generate(
     case: ModelCase,
     socket_dir: str | None,
     fallback: bool,
+    num_logprobs: int | None = None,
 ):
     extra_config = (
         {} if socket_dir is None else {"socket_dir": socket_dir, "fallback": fallback}
@@ -213,7 +217,15 @@ def generate(
         max_num_seqs=1,
         **case.llm_kwargs,
     ) as llm:
-        sampling_params = SamplingParams(temperature=0, max_tokens=16, ignore_eos=True)
+        sampling_params = SamplingParams(
+            temperature=0,
+            max_tokens=16,
+            ignore_eos=True,
+            logprobs=num_logprobs,
+            prompt_logprobs=num_logprobs,
+        )
+        if num_logprobs is not None:
+            return llm.generate_w_logprobs(case.prompts, sampling_params)
         return llm.generate(case.prompts, sampling_params, images=case.images)
 
 
@@ -230,6 +242,32 @@ QWEN_CASE = ModelCase(
         enforce_eager=True,
         enable_chunked_prefill=True,
     ),
+)
+
+# Online FP8 exercises the runtime weight transpose and kernel state that
+# must survive mapping the daemon's processed tensors into a fresh engine.
+FP8_CASE = ModelCase(
+    model="facebook/opt-125m",
+    prompts=["Hello, my name is", "The capital of France is"],
+    llm_kwargs=dict(
+        quantization="fp8_per_tensor",
+        kernel_config={"linear_backend": "cutlass"},
+        attention_config={"backend": "TRITON_ATTN"},
+        dtype="bfloat16",
+        gpu_memory_utilization=0.2,
+        enforce_eager=True,
+        max_model_len=512,
+    ),
+    daemon_args=[
+        "--quantization",
+        "fp8_per_tensor",
+        "--dtype",
+        "bfloat16",
+        "--attention-backend",
+        "TRITON_ATTN",
+        "--kernel-config",
+        '{"linear_backend": "cutlass"}',
+    ],
 )
 
 # Kimi K3 adds the mxfp4-pack MoE path (post-load kernel setup runs in
@@ -333,6 +371,134 @@ def test_ipc_cache_cold_start_and_warm_restart(
     run_cold_start_and_warm_restart(vllm_runner, case, tmp_path, capfd)
 
 
+@pytest.mark.parametrize("quantization", ["fp8_per_tensor", "fp8_per_channel"])
+def test_ipc_cache_online_fp8(vllm_runner, quantization, tmp_path, monkeypatch):
+    """Online FP8 weights are shared without requantizing on warm restarts."""
+    _run_online_quantization(
+        vllm_runner, quantization, "cutlass", tmp_path, monkeypatch
+    )
+
+
+@pytest.mark.parametrize(
+    "quantization,linear_backend",
+    [("fp8_per_block", "cutlass"), ("mxfp8", "flashinfer_cutlass")],
+)
+def test_ipc_cache_online_blackwell(
+    vllm_runner, quantization, linear_backend, tmp_path, monkeypatch
+):
+    """Reuse packed block scales with the same backend on each restart."""
+    _run_online_quantization(
+        vllm_runner, quantization, linear_backend, tmp_path, monkeypatch
+    )
+
+
+def _run_online_quantization(
+    vllm_runner, quantization, linear_backend, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    kernel_config = {"linear_backend": linear_backend}
+    daemon_args = list(FP8_CASE.daemon_args)
+    daemon_args[daemon_args.index("--quantization") + 1] = quantization
+    daemon_args[daemon_args.index("--kernel-config") + 1] = json.dumps(kernel_config)
+    case = ModelCase(
+        model=FP8_CASE.model,
+        prompts=FP8_CASE.prompts,
+        llm_kwargs={
+            **FP8_CASE.llm_kwargs,
+            "quantization": quantization,
+            "kernel_config": kernel_config,
+        },
+        daemon_args=daemon_args,
+    )
+    run_cold_start_and_warm_restart(vllm_runner, case, tmp_path)
+
+
+COMPRESSED_FP8_CASE = ModelCase(
+    model="neuralmagic/Meta-Llama-3.1-8B-FP8",
+    prompts=["The capital of France is", "Hello, my name is"],
+    llm_kwargs=dict(
+        dtype="bfloat16",
+        gpu_memory_utilization=0.3,
+        enforce_eager=True,
+        max_model_len=512,
+        attention_config={"backend": "TRITON_ATTN"},
+        kernel_config={"linear_backend": "cutlass"},
+    ),
+    daemon_args=[
+        "--dtype",
+        "bfloat16",
+        "--attention-backend",
+        "TRITON_ATTN",
+        "--kernel-config",
+        '{"linear_backend": "cutlass"}',
+    ],
+)
+
+
+def test_ipc_cache_compressed_fp8(vllm_runner, tmp_path, monkeypatch):
+    """Reuse serialized FP8 weights without transposing or scaling them again."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    run_cold_start_and_warm_restart(vllm_runner, COMPRESSED_FP8_CASE, tmp_path)
+
+
+COMPRESSED_FP8_MARLIN_CASE = replace(
+    COMPRESSED_FP8_CASE,
+    model="RedHatAI/Meta-Llama-3.1-8B-FP8",
+    llm_kwargs={
+        **COMPRESSED_FP8_CASE.llm_kwargs,
+        "revision": "881d74b74ad8ebe8775fb178b1fd0c935477f1bc",
+        "kernel_config": {"linear_backend": "marlin"},
+        "gpu_memory_utilization": 0.12,
+    },
+    daemon_args=[
+        "--revision",
+        "881d74b74ad8ebe8775fb178b1fd0c935477f1bc",
+        "--dtype",
+        "bfloat16",
+        "--attention-backend",
+        "TRITON_ATTN",
+        "--kernel-config",
+        '{"linear_backend": "marlin"}',
+    ],
+)
+
+
+def test_ipc_cache_compressed_fp8_marlin(vllm_runner, tmp_path, monkeypatch):
+    """Reuse Marlin's packed FP8 weights and scales across engine lifetimes."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
+    run_cold_start_and_warm_restart(
+        vllm_runner, COMPRESSED_FP8_MARLIN_CASE, tmp_path, num_logprobs=5
+    )
+
+
+NVFP4_CASE = ModelCase(
+    model="nvidia/Qwen3-30B-A3B-NVFP4",
+    prompts=["The capital of France is", "Hello, my name is"],
+    llm_kwargs=dict(
+        dtype="bfloat16",
+        gpu_memory_utilization=0.3,
+        enforce_eager=True,
+        max_model_len=512,
+        attention_config={"backend": "TRITON_ATTN"},
+        kernel_config={"moe_backend": "cutlass", "linear_backend": "cutlass"},
+    ),
+    daemon_args=[
+        "--dtype",
+        "bfloat16",
+        "--attention-backend",
+        "TRITON_ATTN",
+        "--kernel-config",
+        '{"moe_backend": "cutlass", "linear_backend": "cutlass"}',
+    ],
+)
+
+
+def test_ipc_cache_nvfp4_cutlass(vllm_runner, tmp_path, monkeypatch):
+    """Repeated IPC attachment must not fuse the shared MoE scales again."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    run_cold_start_and_warm_restart(vllm_runner, NVFP4_CASE, tmp_path)
+
+
 @create_new_process_for_each_test()
 @pytest.mark.distributed(num_gpus=2)
 def test_ipc_cache_cold_start_and_warm_restart_tp2_ep(vllm_runner, tmp_path):
@@ -421,19 +587,31 @@ def test_d2d_warmup_cache_seeding(vllm_runner, tmp_path):
     assert mirror_outputs == baseline_outputs
 
 
-def run_cold_start_and_warm_restart(vllm_runner, case: ModelCase, tmp_path, capfd=None):
+def run_cold_start_and_warm_restart(
+    vllm_runner, case: ModelCase, tmp_path, capfd=None, *, num_logprobs=None
+):
     # Baseline: plain disk loading with the default loader.
     baseline_outputs = generate(
         vllm_runner,
         case,
         None,
         fallback=True,
+        num_logprobs=num_logprobs,
     )
-    assert all(text for _, texts in baseline_outputs for text in texts)
+    if num_logprobs is None:
+        assert all(text for _, texts in baseline_outputs for text in texts)
+    else:
+        assert all(len(output[0]) == 16 for output in baseline_outputs)
 
     # Cold start: no daemon is serving, so the loader falls back to disk.
     with tempfile.TemporaryDirectory(prefix="vllm_ipc_empty_") as empty_socket_dir:
-        cold_outputs = generate(vllm_runner, case, empty_socket_dir, fallback=True)
+        cold_outputs = generate(
+            vllm_runner,
+            case,
+            empty_socket_dir,
+            fallback=True,
+            num_logprobs=num_logprobs,
+        )
 
     if case.check_flashinfer_cache:
         # The baseline engine already wrote its own (LLM_CLASS-keyed) table.
@@ -444,8 +622,10 @@ def run_cold_start_and_warm_restart(vllm_runner, case: ModelCase, tmp_path, capf
         tp_size=case.llm_kwargs.get("tensor_parallel_size", 1),
         extra_args=case.daemon_args,
     ) as d:
-        warm_outputs = generate(vllm_runner, case, d.socket_dir, fallback=False)
         d.wait_until_ready()
+        warm_outputs = generate(
+            vllm_runner, case, d.socket_dir, fallback=False, num_logprobs=num_logprobs
+        )
         if case.check_flashinfer_cache:
             # Each daemon tunes before its ready report; exactly one new file
             # (their OPENAI_API_SERVER-keyed table) must appear.
@@ -457,7 +637,9 @@ def run_cold_start_and_warm_restart(vllm_runner, case: ModelCase, tmp_path, capf
         # Warm restart: a second engine lifetime against the same daemon.
         if case.check_flashinfer_cache:
             capfd.readouterr()  # drain: the assertion reads the increment
-        restart_outputs = generate(vllm_runner, case, d.socket_dir, fallback=False)
+        restart_outputs = generate(
+            vllm_runner, case, d.socket_dir, fallback=False, num_logprobs=num_logprobs
+        )
         if case.check_flashinfer_cache:
             # The restart's EngineCore subprocess inherits pytest's fds; the
             # flashinfer autotuner logs "[Autotuner]: Loaded N configs from
@@ -470,9 +652,25 @@ def run_cold_start_and_warm_restart(vllm_runner, case: ModelCase, tmp_path, capf
                 "restart engine did not load the on-disk autotune cache"
             )
 
-    assert cold_outputs == baseline_outputs
-    assert warm_outputs == baseline_outputs
-    assert restart_outputs == baseline_outputs
+    if num_logprobs is None:
+        assert cold_outputs == baseline_outputs
+        assert warm_outputs == baseline_outputs
+        assert restart_outputs == baseline_outputs
+    else:
+        from tests.models.utils import check_logprobs_close
+
+        for name, outputs in (
+            ("disk fallback", cold_outputs),
+            ("IPC attach", warm_outputs),
+            ("IPC restart", restart_outputs),
+        ):
+            assert all(len(output[0]) == 16 for output in outputs)
+            check_logprobs_close(
+                outputs_0_lst=baseline_outputs,
+                outputs_1_lst=outputs,
+                name_0="ordinary loading",
+                name_1=name,
+            )
 
 
 def _parallel(**kw):
