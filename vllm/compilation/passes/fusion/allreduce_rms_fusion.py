@@ -225,6 +225,8 @@ if flashinfer_comm is not None:
         is_quant_pattern = pattern_code in (
             ar_fusion_patterns.kARResidualRMSNormFP8Quant,
             ar_fusion_patterns.kARResidualRMSNormFP4Quant,
+            ar_fusion_patterns.kARResidualRMSNormOutFP8Quant,
+            ar_fusion_patterns.kARResidualRMSNormOutFP4Quant,
         )
         get_workspace_fn = (
             get_fi_ar_quant_workspace if is_quant_pattern else get_fi_ar_workspace
