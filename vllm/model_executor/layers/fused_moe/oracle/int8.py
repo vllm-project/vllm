@@ -18,6 +18,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     int8_w8a8_moe_quant_config,
     int8_w8a16_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.oracle.base import make_fused_moe_experts
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kInt8DynamicTokenSym,
@@ -300,21 +301,12 @@ def make_int8_moe_kernel(
 
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
 
-    # Create Experts.
-    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
-        max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
-        assert max_num_tokens is not None
-        experts = experts_cls(
-            moe_config=moe_config,
-            quant_config=moe_quant_config,
-            max_num_tokens=max_num_tokens,
-            num_dispatchers=prepare_finalize.num_dispatchers(),
-        )
-    else:
-        experts = experts_cls(
-            moe_config=moe_config,
-            quant_config=moe_quant_config,
-        )
+    experts = make_fused_moe_experts(
+        prepare_finalize,
+        experts_cls,
+        moe_config,
+        moe_quant_config,
+    )
 
     kernel = mk.FusedMoEKernel(
         prepare_finalize,
