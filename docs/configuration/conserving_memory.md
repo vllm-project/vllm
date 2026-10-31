@@ -45,6 +45,57 @@ from vllm import LLM
 llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct", max_model_len=2048, max_num_seqs=2)
 ```
 
+## Unified-memory APUs (Ryzen AI MAX / gfx1151)
+
+APUs such as AMD Ryzen AI MAX (`gfx1151`) have no dedicated VRAM: the runtime exposes a GTT window
+over system RAM as device memory. `torch.cuda.get_device_properties(0).total_memory` therefore
+reports the GTT limit (108 GiB on the system below), while `rocm-smi` reports only the small
+dedicated carve-out (512 MiB).
+
+`--gpu-memory-utilization` is resolved against that GTT limit, but what can actually be committed is
+the memory that is free on the host. If other processes hold RAM, startup fails even though the
+requested fraction looks conservative:
+
+```text
+ValueError: Free memory on device cuda:0 (34.85/108.0 GiB) on startup is less than
+desired GPU memory utilization (0.9, 97.2 GiB).
+```
+
+Nothing is misconfigured in that case: the APU shares one pool with every host process and
+container. Locate the holder with `rocm-smi --showpids` and pick a utilization below
+`free / total`.
+
+The KV cache scales linearly with the requested utilization, using the GTT limit as the denominator:
+
+| `--gpu-memory-utilization` | Available KV cache | KV cache tokens (4096-token context) |
+| -------------------------- | ------------------ | ------------------------------------ |
+| `0.15` | 14.17 GiB | 132,704 |
+| `0.35` | 35.77 GiB | 334,928 |
+| `0.50` | 51.97 GiB | 486,592 |
+
+??? note "Measurement setup"
+    Ryzen AI MAX 395 (Radeon 8060S), 128 GiB RAM, ROCm 7.2.4, vLLM `0.32.0+rocm723`,
+    `Qwen/Qwen3-0.6B`, `--max-model-len 4096`, otherwise idle machine.
+
+Because the denominator is shared with the host, prefer the byte-based `--kv-cache-memory-bytes` over a
+percentage when the footprint has to be reproducible. On the setup above vLLM reports
+`--kv-cache-memory-bytes=113296359936` (105.52 GiB) as the value that fills the pool, i.e. the GTT
+limit minus weights, activations and graph memory.
+
+!!! note "CUDA graph memory profiling"
+    Since v0.21.0 vLLM profiles CUDA graph memory and subtracts it from the requested utilization.
+    On the setup above `--gpu-memory-utilization=0.15` behaves like `0.1467` without profiling, and
+    `0.1533` is needed to obtain the same KV cache size as before. Set
+    `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0` to restore the old accounting.
+
+Two device-specific behaviors on `gfx1151`:
+
+- The ROCm custom paged attention kernel is not available, and vLLM logs
+  `Cannot use ROCm custom paged attention kernel, falling back to Triton implementation`.
+  This is expected and needs no flag.
+- Graph capture works. `--enforce-eager` is not required for small models at short context lengths;
+  enable it only when capture fails or stalls.
+
 ## Reduce CUDA Graphs
 
 By default, we optimize model inference using CUDA graphs which take up extra memory in the GPU.
