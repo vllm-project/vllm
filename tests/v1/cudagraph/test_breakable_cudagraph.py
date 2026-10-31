@@ -849,6 +849,25 @@ def test_capture_attn_flag_allows_sparse_impl(attn_capture_flag, monkeypatch):
     assert attn_capture_flag.eager_calls == []
 
 
+def test_capture_attn_flag_refuses_dense_impl(attn_capture_flag, monkeypatch):
+    """A resolvable dense-MLA layer (is_sparse=False) must raise at capture."""
+    import vllm.model_executor.layers.attention.attention as attn_mod
+    from vllm.compilation import breakable_cudagraph as bc
+
+    layer = type("Layer", (), {})()
+    layer.impl = type("Impl", (), {"is_sparse": False})()
+    monkeypatch.setattr(
+        attn_mod,
+        "get_attention_context",
+        lambda name: (None, layer, None, None),
+    )
+
+    wrapped = bc.eager_break_during_capture(_mla_fn())
+    with pytest.raises(RuntimeError, match="only supports sparse MLA"):
+        wrapped(object(), object(), object(), object(), "model.layers.3.mla")
+    assert attn_capture_flag.eager_calls == []
+
+
 def test_capture_attn_flag_off_takes_eager_path(monkeypatch):
     """Flag off keeps the eager-break behavior (no gate, no raise)."""
     import vllm.envs as envs
