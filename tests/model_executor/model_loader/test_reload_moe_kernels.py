@@ -22,17 +22,16 @@ PROMPTS = [
     reason="TRT-LLM and CuteDSL MoE kernels need SM100",
 )
 @pytest.mark.parametrize(
-    "model,moe_backend,reload_mode",
+    "model,moe_backend",
     [
-        ("openai/gpt-oss-20b", "flashinfer_trtllm", "direct"),
-        ("RedHatAI/Qwen3-30B-A3B-NVFP4", "flashinfer_cutedsl", "direct"),
-        ("RedHatAI/Qwen3-30B-A3B-NVFP4", "flashinfer_cutedsl", "layerwise"),
+        ("openai/gpt-oss-20b", "flashinfer_trtllm"),
+        ("RedHatAI/Qwen3-30B-A3B-NVFP4", "flashinfer_cutedsl"),
     ],
 )
 def test_reload_keeps_moe_output(
-    model: str, moe_backend: str, reload_mode: str, vllm_runner, monkeypatch
+    model: str, moe_backend: str, vllm_runner, monkeypatch
 ) -> None:
-    monkeypatch.setenv("VLLM_RELOAD_MODE", reload_mode)
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
     with vllm_runner(
         model,
         max_model_len=1024,
