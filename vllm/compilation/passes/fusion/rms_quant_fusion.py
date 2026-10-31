@@ -163,6 +163,14 @@ QUANT_OPS: dict[QuantKey, OpOverload] = {
 if hasattr(torch.ops._C, "per_token_group_fp8_quant"):
     QUANT_OPS[kFp8Dynamic128Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
     QUANT_OPS[kFp8Dynamic64Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
+if current_platform.is_cuda():
+    # On CUDA the eager path emits the size-dispatching row-quant wrapper op
+    # instead of the _C op (see matcher_utils.QUANT_OPS); match that op.
+    # Importing fp8_utils registers torch.ops.vllm.per_token_group_fp8_quant_row.
+    from vllm.model_executor.layers.quantization.utils import fp8_utils  # noqa: F401
+
+    QUANT_OPS[kFp8Dynamic128Sym] = torch.ops.vllm.per_token_group_fp8_quant_row.default
+    QUANT_OPS[kFp8Dynamic64Sym] = torch.ops.vllm.per_token_group_fp8_quant_row.default
 if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
     QUANT_OPS[kNvfp4Dynamic] = torch.ops._C.scaled_fp4_quant.out
 
