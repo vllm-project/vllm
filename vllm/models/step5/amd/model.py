@@ -48,7 +48,7 @@ from vllm.model_executor.models.utils import (
     skip_spec_layers,
 )
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx1250
+from vllm.platforms.rocm import get_cdna_version, on_gfx1250
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.step5 import Step5Config
 from vllm.utils.math_utils import cdiv, round_up
@@ -438,6 +438,10 @@ class Step5Attention(nn.Module):
         static_context[self.csa_layer_name] = self
 
     def _validate_sparse(self, vllm_config: VllmConfig) -> None:
+        if get_cdna_version() < 3:
+            raise NotImplementedError(
+                "Step-5 sparse attention on ROCm requires CDNA3 or newer."
+            )
         cache_dtype = vllm_config.cache_config.cache_dtype
         if (
             cache_dtype not in ("fp8", "fp8_e4m3")
