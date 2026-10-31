@@ -98,23 +98,29 @@ def _in_own_storage(
 
     With ``whole_storage`` (direct reload), ``new`` may use the rest of
     ``old``'s storage, so a weight that post-load processing grew keeps its
-    address on a reload too."""
+    address on a reload too, as do a padded view with gaps (ROCm FP8 padding)
+    and an emptied weight (the checkpoint bytes stay for the next reload)."""
     storage = old.untyped_storage()
     offset, size = old.storage_offset() * old.element_size(), new.element_size()
-    room = (
-        storage.nbytes() - offset
-        if whole_storage
-        else storage_extent(old) * old.element_size()
-    )
+    span = storage_extent(new)
+    if whole_storage:
+        fits = (
+            span >= new.numel()  # not overlapping
+            and offset + span * size <= storage.nbytes()
+        )
+    else:
+        fits = (
+            new.numel() > 0
+            and span == new.numel()  # neither overlapping nor with gaps
+            # its gaps may hold another tensor's data
+            and storage_extent(old) == old.numel()
+            and new.numel() * size <= storage_extent(old) * old.element_size()
+        )
     if (
-        new.numel() == 0
+        not fits
         or old.device != new.device
         or new.untyped_storage().data_ptr() == storage.data_ptr()
-        or storage_extent(new) != new.numel()  # overlapping or with gaps
-        # its gaps may hold another tensor's data
-        or (not whole_storage and storage_extent(old) != old.numel())
         or offset % size
-        or new.numel() * size > room
     ):
         return new
     view = storage_view(storage, offset // size, new.shape, new.stride(), new.dtype)
@@ -176,6 +182,7 @@ def replace_parameter(
     # overwrite it.
     new_tensor_attrs.pop("_ckpt_layout", None)
     new_tensor_attrs.pop("_ckpt_loader_attrs", None)
+    new_tensor_attrs.pop("_ckpt_owner", None)
 
     if isinstance(new_tensor, torch.nn.Parameter):
         new_tensor = new_tensor.data

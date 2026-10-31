@@ -391,11 +391,12 @@ class TestRefusals:
         with pytest.raises(RuntimeError, match="online quantization"):
             _cold_start(_checkpoint())
 
-    def test_humming_moe_refused(self, monkeypatch):
+    @pytest.mark.parametrize("method_cls", ["HummingLinearMethod", "HummingMoEMethod"])
+    def test_humming_refused(self, monkeypatch, method_cls):
         # its post-load processing runs only once per quant method
-        from vllm.model_executor.layers.quantization.humming import HummingMoEMethod
+        from vllm.model_executor.layers.quantization import humming as humming_mod
 
-        humming = object.__new__(HummingMoEMethod)
+        humming = object.__new__(getattr(humming_mod, method_cls))
         init = _ToyModel.__init__
 
         def with_humming_layer(self):
@@ -403,7 +404,7 @@ class TestRefusals:
             self.proj.quant_method = humming
 
         monkeypatch.setattr(_ToyModel, "__init__", with_humming_layer)
-        with pytest.raises(RuntimeError, match="humming MoE"):
+        with pytest.raises(RuntimeError, match="humming"):
             _cold_start(_checkpoint())
 
     def test_replaced_param_refused(self):
@@ -513,6 +514,33 @@ def test_draft_leaves_tensors_shared_from_the_target_to_it():
     assert _ptrs(_state(target)) == target_ptrs
     own = [n for n in _state(draft) if not n.startswith("proj.")]
     _assert_same(_state(draft), _state(_cold_start(new_draft)), names=own)
+
+
+@pytest.mark.parametrize(
+    "fn",
+    [
+        # ROCm FP8 padding: a view with gaps, padded rows apart
+        lambda w: torch.nn.functional.pad(w, (0, 4))[..., :-4],
+        # a released weight: its checkpoint bytes stay for the next reload
+        lambda w: w.new_empty(0),
+    ],
+    ids=["padded-view", "emptied"],
+)
+def test_reload_keeps_address_of_padded_or_emptied_weight(monkeypatch, fn):
+    init = _ToyModel.__init__
+
+    def with_fn(self):
+        init(self)
+        self.proj.quant_method = _Method(
+            lambda layer: replace_parameter(layer, "weight", fn(layer.weight))
+        )
+
+    monkeypatch.setattr(_ToyModel, "__init__", with_fn)
+    model = _cold_start(_checkpoint())
+    ptrs = _ptrs(_state(model))
+    _reload(model, _checkpoint(1.01))
+    _assert_same(_state(model), _state(_cold_start(_checkpoint(1.01))))
+    assert _ptrs(_state(model)) == ptrs
 
 
 def test_replace_parameter_keeps_the_target_checkpoint_layout():

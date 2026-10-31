@@ -90,7 +90,10 @@ def _loadable_tensors(model: torch.nn.Module) -> Iterator[tuple[str, torch.Tenso
 
 
 def _check_supported(model: torch.nn.Module) -> None:
-    from vllm.model_executor.layers.quantization.humming import HummingMoEMethod
+    from vllm.model_executor.layers.quantization.humming import (
+        HummingLinearMethod,
+        HummingMoEMethod,
+    )
     from vllm.model_executor.layers.quantization.online.base import (
         OnlineQuantizationConfig,
     )
@@ -141,10 +144,10 @@ def _check_supported(model: torch.nn.Module) -> None:
                 f"direct reload: online quantization is not supported "
                 f"({name}: {type(method).__name__})"
             )
-        if isinstance(method, HummingMoEMethod):
+        if isinstance(method, (HummingLinearMethod, HummingMoEMethod)):
             # its post-load processing runs once per quant method (a guard on
             # the method, not the module): a reload would keep checkpoint bytes
-            raise RuntimeError(f"direct reload: humming MoE is not supported ({name})")
+            raise RuntimeError(f"direct reload: humming is not supported ({name})")
 
 
 def record_checkpoint_layout(model: torch.nn.Module) -> None:
@@ -158,10 +161,10 @@ def record_checkpoint_layout(model: torch.nn.Module) -> None:
     _check_supported(model)
     # a model owns the tensors it records; another model's (already recorded)
     # are refreshed by that model's updates
-    model._ckpt_tensor_ids = set()
+    model._ckpt_owner = object()  # tags owned tensors (ids of freed ones recur)
     for _, t in _loadable_tensors(model):
         if not t.is_meta and not hasattr(t, "_ckpt_layout"):
-            model._ckpt_tensor_ids.add(id(t))
+            t._ckpt_owner = model._ckpt_owner
             t._ckpt_layout = _layout(t)
             t._ckpt_loader_attrs = {
                 k: t.__dict__[k] for k in _LOADER_ATTRS if k in t.__dict__
@@ -192,14 +195,18 @@ def _check_params_kept(model: torch.nn.Module) -> None:
         )
 
 
+def _owned(model: torch.nn.Module, t: torch.Tensor) -> bool:
+    return getattr(t, "_ckpt_owner", None) is model._ckpt_owner
+
+
 def _foreign_modules(model: torch.nn.Module) -> set[torch.nn.Module]:
     """Modules all of whose own tensors another model owns: that model's
     updates refresh them, so this model's finish must not process them."""
-    owned = model._ckpt_tensor_ids
     return {
         module
         for module in model.modules()
-        if (ids := {id(t) for _, t in _own_tensors(module)}) and not ids & owned
+        if (tensors := [t for _, t in _own_tensors(module)])
+        and not any(_owned(model, t) for t in tensors)
     }
 
 
@@ -214,7 +221,7 @@ def _checkpoint_views(
         layout = getattr(t, "_ckpt_layout", None)
         if layout is None:
             continue  # no layout: created by post-load processing, derived
-        if id(t) not in model._ckpt_tensor_ids:
+        if not _owned(model, t):
             continue  # another model's (a target lm_head shared into a draft)
         if _layout(t) == layout:
             continue
@@ -250,7 +257,7 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
         t.data = view  # no zeroing: the full sync rewrites the checkpoint region
     for _, t in _loadable_tensors(model):
         attrs = getattr(t, "_ckpt_loader_attrs", None)
-        if attrs is None or id(t) not in model._ckpt_tensor_ids:
+        if attrs is None or not _owned(model, t):
             continue
         for k in _LOADER_ATTRS:
             if k in attrs:
