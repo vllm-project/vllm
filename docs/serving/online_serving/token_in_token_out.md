@@ -131,13 +131,30 @@ The final output of every choice carries `weight_versions`, the label of the wei
 
 `POST /inference/v1/abort_requests` aborts in-flight requests. It is registered wherever `/inference/v1/generate` is and requires the API key when `--api-key` is set, like `/inference/v1/generate`.
 
+The Rust frontend also exposes it with `--enable-scale-out`:
+
+```bash
+VLLM_USE_RUST_FRONTEND=1 vllm serve Qwen/Qwen3-0.6B --enable-scale-out
+```
+
+Replace `request-id-from-generate` below with the exact `request_id` from the generate response or stream:
+
 ```bash
 curl -X POST http://localhost:8000/inference/v1/abort_requests \
   -H "Authorization: Bearer $VLLM_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"request_ids": ["generate-tokens-42"]}'
+  -d '{"request_ids": ["request-id-from-generate"]}'
 ```
 
-The request ID is the `request_id` the server returned: the `X-Request-Id` header or body `request_id` you sent, prefixed with `generate-tokens-`. A missing `request_ids` returns a 400. The response is empty and the abort finishes in the background.
+The Python frontend prefixes the selected base request ID with `generate-tokens-`; the Rust frontend uses the base request ID unchanged. Use the returned public ID, not the internal engine ID. The abort endpoint does not add or remove a prefix.
 
-With `--tokens-only`, the same handler is also served at `POST /abort_requests` for existing deployments. That path doesn't require the API key, even when `--api-key` is set. See [Security](../../usage/security.md#unprotected-endpoints-no-api-key-required).
+- `request_ids` accepts a single string or a list of strings. IDs are used verbatim; unknown or already-finished IDs are a no-op.
+- Missing or `null` `request_ids` returns 400. An empty list returns 200 without cancelling any request.
+- The body must contain valid JSON, including when `Content-Type` is not `application/json`.
+- The Rust frontend returns 400 for a non-object JSON body or IDs other than a string or a list of strings. This stricter validation intentionally differs from the Python frontend's handling of these invalid inputs.
+
+The 200 response has an empty body and means cancellation was accepted for background processing. It does not confirm that frontend cleanup has finished or that the engine has stopped computing. A cancelled stream reports `finish_reason: "abort"` before `[DONE]`, even when the final chunk has no new token IDs.
+
+On the Python frontend, `--tokens-only` also serves the same handler at `POST /abort_requests` for existing deployments. That path doesn't require the API key, even when `--api-key` is set. See [Security](../../usage/security.md#unprotected-endpoints-no-api-key-required).
+
+The dev-mode `/abort_requests` API is separate: missing or empty IDs there cancel all in-flight requests. The scale-out endpoint never treats an empty list as cancel-all.
