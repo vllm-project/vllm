@@ -521,3 +521,97 @@ def test_sparse_mla_sink_forward_mqa_preserves_split_query(dtype):
         dtype,
         native=dtype == torch.bfloat16,
     )
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@torch.inference_mode()
+def test_sparse_mla_fp8_kv_sink_keeps_model_dtype_query(monkeypatch, dtype):
+    """FP8 KV with sinks (HY V4): Q stays unquantized and RoPE rows avoid split-K."""
+    _require_aiter()
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+        ROCMAiterMLASparseImpl,
+    )
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        rocm_sparse_decode_bf16_num_splits,
+    )
+
+    def fail(*args, **kwargs):
+        raise AssertionError("FP8 KV sink layers must not quantize Q for AITER")
+
+    monkeypatch.setattr(rocm_aiter_ops, "mla_decode_fwd_lse", fail)
+    set_random_seed(4096)
+    fp8_dtype = current_platform.fp8_dtype()
+    # HY V4 at TP8: 8 local heads; the long row would select split-K decode.
+    num_heads, block_size, num_blocks, topk = 8, 16, 48, 1024
+    lengths = [3, 600]
+    assert rocm_sparse_decode_bf16_num_splits(len(lengths), 16, max(lengths)) > 1
+    num_tokens = len(lengths)
+    kv_scale = 0.25
+    q = (torch.randn(num_tokens, num_heads, Q_HEAD_DIM, device="cuda") * 0.5).to(dtype)
+    kv = (torch.randn(num_blocks, block_size, Q_HEAD_DIM, device="cuda") / kv_scale).to(
+        fp8_dtype
+    )
+    kv_ref = kv.float().flatten(0, 1) * kv_scale
+    num_slots = num_blocks * block_size
+    selected = [torch.randperm(num_slots, device="cuda")[:n] for n in lengths]
+    sinks = torch.linspace(-3.0, 5.0, num_heads, device="cuda")
+    impl = object.__new__(ROCMAiterMLASparseImpl)
+    impl.num_heads = num_heads
+    impl.kv_lora_rank = V_HEAD_DIM
+    impl.kv_cache_dtype = "fp8"
+    impl.scale = SM_SCALE
+    impl.sinks = sinks
+    impl.topk_indices_buffer = torch.full(
+        (num_tokens, topk), -1, dtype=torch.int32, device="cuda"
+    )
+    for i, rows in enumerate(selected):
+        impl.topk_indices_buffer[i, : rows.numel()] = rows.to(torch.int32)
+    impl.owns_indexer = True
+    impl.index_epoch = 0
+    impl.q_concat_buffer = torch.empty_like(q)
+    metadata = SimpleNamespace(
+        attn_out_dtype=dtype,
+        num_actual_tokens=num_tokens,
+        num_prefills=0,
+        num_decodes=num_tokens,
+        num_decode_tokens=num_tokens,
+        max_query_len=1,
+        max_seq_len=max(lengths),
+        block_size=block_size,
+        topk_tokens=topk,
+        req_id_per_token=torch.zeros(num_tokens, dtype=torch.int32, device="cuda"),
+        block_table=torch.arange(num_blocks, dtype=torch.int32, device="cuda")[None],
+        qo_indptr=torch.arange(num_tokens + 1, dtype=torch.int32, device="cuda"),
+        paged_kv_indptr=torch.tensor(
+            [0, *torch.tensor(lengths).cumsum(0).tolist()],
+            dtype=torch.int32,
+            device="cuda",
+        ),
+        paged_kv_indices=torch.empty(sum(lengths), dtype=torch.int32, device="cuda"),
+        paged_kv_last_page_len=torch.ones(num_tokens, dtype=torch.int32, device="cuda"),
+        work_meta_data=None,
+    )
+    layer = SimpleNamespace(
+        _q_scale=torch.tensor(1.0, device="cuda"),
+        _k_scale=torch.tensor(kv_scale, device="cuda"),
+        _k_scale_float=kv_scale,
+        _decode_concat_quant_fp8_op=fail,
+    )
+    actual, _ = impl.forward_mqa(
+        (q[..., :V_HEAD_DIM], q[..., V_HEAD_DIM:]),
+        kv.view(torch.uint8),
+        metadata,
+        layer,
+    )
+    references = [
+        _sink_reference(q[i], kv_ref[selected[i]], sinks, SM_SCALE)
+        for i in range(num_tokens)
+    ]
+    expected, _, value_scale, score_error = (
+        torch.stack(values) for values in zip(*references)
+    )
+    assert actual.dtype == dtype
+    _assert_sink_output_close(
+        actual, expected, value_scale, score_error, dtype, native=False
+    )
