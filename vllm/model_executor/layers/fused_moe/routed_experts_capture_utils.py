@@ -17,7 +17,7 @@ def collect_local_routing_rows(
     """Collect this DP rank's rows from evenly padded SP shards.
 
     is_gathered selects a DP-major concatenation instead of local SP input.
-    Row counts validate this choice; they never select the communication path.
+    Only TP0 publishes rows; its zero/one-token SP shard is already complete.
     """
     ctx = get_forward_context()
     if ctx.dp_metadata is not None:
@@ -30,12 +30,12 @@ def collect_local_routing_rows(
         raise ValueError("Routed-experts restoration requires forward token counts")
 
     num_local_tokens = counts[dp_rank]
-    rows_per_shard = [(n + sp_size - 1) // sp_size for n in counts]
     if is_gathered:
+        rows_per_shard = [(n + sp_size - 1) // sp_size for n in counts]
         expected_rows = sum(rows_per_shard) * sp_size
         start = sum(rows_per_shard[:dp_rank]) * sp_size
     else:
-        expected_rows = rows_per_shard[dp_rank]
+        expected_rows = (num_local_tokens + sp_size - 1) // sp_size
         start = 0
     if topk_ids.shape[0] != expected_rows:
         raise ValueError(
@@ -43,9 +43,6 @@ def collect_local_routing_rows(
             f"got {topk_ids.shape[0]} (sp_size={sp_size}, gathered={is_gathered})"
         )
 
-    if not is_gathered and sp_size > 1:
-        group = get_tp_group()
-        if group.world_size != sp_size:
-            raise ValueError("Routed-experts SP size must match the TP group")
-        topk_ids = group.all_gather(topk_ids.contiguous(), dim=0)
+    if not is_gathered and expected_rows != num_local_tokens:
+        topk_ids = get_tp_group().all_gather(topk_ids.contiguous(), dim=0)
     return topk_ids[start : start + num_local_tokens]

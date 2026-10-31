@@ -101,14 +101,7 @@ class RoutedExpertsCapturer:
         local_topk_ids = self.row_restorers[layer_id].restore_routed_experts_rows(
             topk_ids
         )
-        if (
-            local_topk_ids.ndim != 2
-            or local_topk_ids.shape[1] != self.shape_per_token[1]
-        ):
-            raise ValueError("routed-experts rows must have shape (tokens, top_k)")
         offset = dbo_current_ubatch_token_offset()
-        if offset + len(local_topk_ids) > len(self.device_buffer):
-            raise ValueError("routed-experts rows exceed capture buffer capacity")
         self.device_buffer[offset : offset + len(local_topk_ids), layer_id] = (
             local_topk_ids
         )

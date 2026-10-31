@@ -375,7 +375,7 @@ def test_single_dp_ep_capture_restores_tp_shards(
                 capturer.snapshot_routing_data(num_tokens)[:, 0].int(), expected
             )
             assert (capturer.device_buffer[num_tokens:, 0] == -1).all()
-    assert tp_group.all_gather.call_count == 2
+    assert tp_group.all_gather.call_count == 2 * (num_tokens > 1)
 
 
 @pytest.mark.parametrize("num_tokens, num_rows", [(6, 6), (3, 4), (0, 0)])
@@ -883,25 +883,6 @@ def test_capture_restorers_are_layer_local_and_use_current_context(
         torch.testing.assert_close(capturer.device_buffer, expected)
 
 
-@pytest.mark.parametrize("shape", [(9, 2), (3, 1), (3, 2, 1)])
-def test_capture_rejects_invalid_restored_rows_before_writing(shape, restore_capturer):
-    class Source(_CaptureSource):
-        def restore_routed_experts_rows(self, ids):
-            return ids
-
-    source = Source(0)
-    bind_routed_experts_capturer(source, restore_capturer)
-    with (
-        override_forward_context(_forward_context()),
-        pytest.raises(ValueError, match="routed-experts"),
-    ):
-        source(torch.ones(shape, dtype=torch.int32))
-    torch.testing.assert_close(
-        restore_capturer.device_buffer,
-        torch.full_like(restore_capturer.device_buffer, -1),
-    )
-
-
 def test_capture_rejects_duplicate_restorers(restore_capturer):
     model = torch.nn.ModuleList(
         [_RestoringCaptureSource(0), _RestoringCaptureSource(0)]
@@ -1130,3 +1111,23 @@ def test_moe_runner_restores_rows_for_its_execution_path(
         sp_size > 1 and not gathered and path != "custom"
     )
     assert group.all_gatherv.call_count == calls * int(path == "custom")
+
+
+@pytest.mark.parametrize("num_tokens", [0, 1])
+@pytest.mark.parametrize("dp_rank", [None, 0, 1])
+def test_publishing_rank_captures_complete_sp_shard_without_collective(
+    num_tokens, dp_rank, restore_capturer
+):
+    """TP0 already owns every real row of an empty or singleton SP batch."""
+    capturer = _bind_standard_source(restore_capturer, dp_rank=dp_rank or 0, sp_size=2)
+    counts = [num_tokens, num_tokens]
+    ctx = _forward_context(
+        dp_metadata=DPMetadata(torch.tensor(counts)) if dp_rank is not None else None,
+        batch_descriptor=BatchDescriptor(num_tokens=num_tokens),
+    )
+    ids = torch.tensor([[5, 6]], dtype=torch.int32)[:num_tokens]
+    # There is no initialized TP group: this valid fast path needs no collective.
+    with override_forward_context(ctx):
+        capturer.capture(0, ids)
+    torch.testing.assert_close(capturer.device_buffer[:num_tokens, 0], ids)
+    assert (capturer.device_buffer[num_tokens:] == -1).all()

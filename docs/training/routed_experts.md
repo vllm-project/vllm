@@ -72,6 +72,10 @@ containing this DP rank's token rows in local order, without padding. Do not
 modify the input or apply EPLB mapping. Empty tensors are valid; there is no
 `None` fallback. A direct capture source without this method fails at binding.
 
+Only TP0 publishes the restored rows. For local SP input with zero or one
+token, TP0 already owns every valid row, so the built-in restorer skips the
+collective. Non-publishing TP ranks may retain padding in this case.
+
 Read current forward/microbatch metadata at invocation. Any collective must
 include every peer, including ranks with no local output rows, and use
 rank-consistent communication decisions. Device work must use the current stream
