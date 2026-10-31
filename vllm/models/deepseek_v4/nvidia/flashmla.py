@@ -5,12 +5,15 @@ from typing import TYPE_CHECKING, ClassVar, cast
 
 import torch
 
+from vllm import envs
 from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.common.ops import (
     combine_topk_swa_indices,
+    compute_gather_lens,
     compute_global_topk_indices_and_lens,
     dequantize_and_gather_k_cache,
+    fill_c128_topk,
 )
 from vllm.models.deepseek_v4.nvidia.ops.o_proj import (
     compute_fp8_einsum_recipe,
@@ -56,6 +59,12 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        if self.max_image_tokens and (
+            envs.VLLM_BATCH_INVARIANT or envs.VLLM_DS4_DECODE_KERNEL == "sparse"
+        ):
+            raise NotImplementedError(
+                "The aligned sparse attention path supports text-only DeepSeek V4."
+            )
         self._einsum_recipe, self._tma_aligned_scales = compute_fp8_einsum_recipe()
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
@@ -122,10 +131,17 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             combined_topk = round_up(
                 top_k + self.window_size + self.max_image_tokens, 128
             )
-            current_workspace_manager().get_simultaneous(
+            warmup_specs: list[tuple[tuple[int, ...], torch.dtype]] = [
                 ((self.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
                 ((self.max_num_batched_tokens, combined_topk), torch.int32),
                 ((self.max_num_batched_tokens,), torch.int32),
+            ]
+            if not swa_only and self.compress_ratio == 128:
+                # Reserve the same C128 decode buffer used by the real path so
+                # workspace locking cannot be tripped by the first replay.
+                warmup_specs.append(((self.max_num_batched_tokens, top_k), torch.int32))
+            current_workspace_manager().get_simultaneous(
+                *warmup_specs,
             )
             output.zero_()
             return
@@ -180,6 +196,26 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         swa_only: bool,
         output: torch.Tensor,
     ) -> None:
+        decode_kernel = envs.VLLM_DS4_DECODE_KERNEL.lower()
+        if decode_kernel == "sparse":
+            self._forward_decode_sparse(
+                q=q,
+                compressed_k_cache=kv_cache,
+                swa_k_cache=self.swa_cache_layer.kv_cache,
+                swa_metadata=swa_metadata,
+                attn_metadata=attn_metadata,
+                swa_only=swa_only,
+                output=output,
+            )
+            return
+        if decode_kernel != "paged":
+            # envs validates this eagerly; keep the dispatch fail-closed if a
+            # test or embedding overrides the value after initialization.
+            raise ValueError(
+                "VLLM_DS4_DECODE_KERNEL must be 'paged' or 'sparse', "
+                f"got {decode_kernel!r}"
+            )
+
         num_decodes = swa_metadata.num_decodes
         num_decode_tokens = swa_metadata.num_decode_tokens
 
@@ -261,6 +297,228 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             extra_indices_in_kvcache=topk_indices,
             extra_topk_length=topk_lens,
             out=output.unsqueeze(1),
+        )
+
+    def _forward_decode_sparse(
+        self,
+        q: torch.Tensor,
+        compressed_k_cache: torch.Tensor | None,
+        swa_k_cache: torch.Tensor,
+        swa_metadata: "DeepseekSparseSWAMetadata",
+        attn_metadata: DeepseekV4FlashMLAMetadata | None,
+        swa_only: bool,
+        output: torch.Tensor,
+        *,
+        request_start: int = 0,
+        token_start: int = 0,
+        request_count: int | None = None,
+    ) -> None:
+        """Run real decode requests through the prefill sparse FlashMLA kernel."""
+        num_decodes = (
+            swa_metadata.num_decodes if request_count is None else request_count
+        )
+        num_decode_tokens = q.shape[0]
+        if num_decodes <= 0 or num_decode_tokens <= 0:
+            raise RuntimeError("decode-sparse requires at least one decode request")
+        if swa_metadata.decode_swa_indices is None:
+            raise RuntimeError("decode-sparse requires decode SWA indices")
+        if swa_metadata.decode_swa_indices.shape[-1] != self.window_size:
+            raise RuntimeError(
+                "decode-sparse only supports causal SWA metadata with width "
+                f"{self.window_size}, got {swa_metadata.decode_swa_indices.shape[-1]}"
+            )
+        if (
+            swa_metadata.seq_lens is None
+            or swa_metadata.seq_lens_cpu is None
+            or swa_metadata.query_start_loc is None
+            or swa_metadata.query_start_loc_cpu is None
+            or swa_metadata.is_valid_token is None
+        ):
+            raise RuntimeError("decode-sparse requires finalized scheduler metadata")
+
+        request_end = request_start + num_decodes
+        token_end = token_start + num_decode_tokens
+        seq_lens = swa_metadata.seq_lens[request_start:request_end]
+        seq_lens_cpu = swa_metadata.seq_lens_cpu[request_start:request_end]
+        query_start_loc = (
+            swa_metadata.query_start_loc[request_start : request_end + 1] - token_start
+        )
+        query_start_loc_cpu = (
+            swa_metadata.query_start_loc_cpu[request_start : request_end + 1]
+            - token_start
+        )
+        query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+        prefix_lens_cpu = seq_lens_cpu - query_lens_cpu
+        gather_lens_cpu = query_lens_cpu + torch.clamp(
+            prefix_lens_cpu, min=0, max=self.window_size - 1
+        )
+        # Fuse query-length subtraction, prefix clamp, and addition into one
+        # graph-safe kernel; the CPU copy above remains the source for sizing.
+        gather_lens = torch.empty_like(seq_lens)
+        compute_gather_lens(
+            seq_lens,
+            query_start_loc,
+            gather_lens,
+            self.window_size,
+        )
+
+        query_lens_values = query_lens_cpu.numpy()
+        if int(query_lens_values.sum()) != num_decode_tokens:
+            raise RuntimeError(
+                "decode-sparse query metadata does not match decode token count"
+            )
+
+        if swa_only:
+            assert self.topk_indices_buffer is not None
+            local_topk = self.topk_indices_buffer[token_start:token_end]
+            top_k = 0
+            max_compressed = 0
+        else:
+            if attn_metadata is None or compressed_k_cache is None:
+                raise RuntimeError(
+                    "compressed decode-sparse requires attention metadata and KV cache"
+                )
+            if self.compress_ratio == 4:
+                assert self.topk_indices_buffer is not None
+                local_topk = self.topk_indices_buffer[token_start:token_end]
+                top_k = local_topk.shape[-1]
+            elif self.compress_ratio == 128:
+                if attn_metadata.c128a_global_decode_topk_indices is None:
+                    raise RuntimeError(
+                        "C128 decode-sparse requires finalized top-k metadata"
+                    )
+                top_k = attn_metadata.c128a_global_decode_topk_indices.shape[-1]
+                local_topk = None
+            else:
+                raise ValueError(
+                    f"Unsupported compress_ratio={self.compress_ratio}; "
+                    "expected 1, 4, or 128."
+                )
+            if envs.VLLM_BATCH_INVARIANT:
+                # A batch-local maximum makes the flattened KV stride and all
+                # request base indices depend on neighboring sequence lengths.
+                # Use the model capacity so a request keeps the same address
+                # mapping in singleton and packed decode.
+                max_compressed = (
+                    self.max_model_len + self.compress_ratio - 1
+                ) // self.compress_ratio
+            else:
+                max_compressed = int(
+                    (seq_lens_cpu.numpy() // self.compress_ratio).max()
+                )
+
+        if envs.VLLM_BATCH_INVARIANT:
+            if int(query_lens_values.max()) != 1:
+                raise RuntimeError(
+                    "batched BI sparse decode requires one token per request"
+                )
+            max_gather = self.window_size
+        else:
+            max_gather = int(gather_lens_cpu.numpy().max())
+        workspace_width = max_compressed + max_gather
+        use_fused_c128_decode = (
+            envs.VLLM_BATCH_INVARIANT
+            and not swa_only
+            and self.compress_ratio == 128
+            and hasattr(
+                torch.ops._C,
+                "combine_c128_swa_decode",
+            )
+        )
+        use_fused_topk_decode = (
+            envs.VLLM_BATCH_INVARIANT
+            and top_k <= 512
+            and hasattr(
+                torch.ops._C,
+                "combine_topk_swa_decode",
+            )
+        )
+        if use_fused_c128_decode:
+            top_k = min(top_k, round_up(max_compressed, 128))
+        combined_topk = round_up(top_k + self.window_size, 128)
+        specs: list[tuple[tuple[int, ...], torch.dtype]] = [
+            ((num_decodes, workspace_width, q.shape[-1]), torch.bfloat16),
+            ((num_decode_tokens, combined_topk), torch.int32),
+            ((num_decode_tokens,), torch.int32),
+        ]
+        if not swa_only and self.compress_ratio == 128 and not use_fused_c128_decode:
+            specs.append(((num_decode_tokens, top_k), torch.int32))
+        workspace = current_workspace_manager().get_simultaneous(*specs)
+        kv, combined_indices_out, combined_lens_out = workspace[:3]
+        if not (use_fused_topk_decode or use_fused_c128_decode):
+            combined_indices_out.fill_(-1)
+
+        if not swa_only:
+            assert attn_metadata is not None
+            assert compressed_k_cache is not None
+            dequantize_and_gather_k_cache(
+                kv,
+                compressed_k_cache,
+                seq_lens=torch.div(
+                    seq_lens, self.compress_ratio, rounding_mode="floor"
+                ),
+                gather_lens=None,
+                block_table=attn_metadata.block_table[request_start:request_end],
+                block_size=attn_metadata.block_size // self.compress_ratio,
+                offset=0,
+            )
+        dequantize_and_gather_k_cache(
+            kv,
+            swa_k_cache,
+            seq_lens=seq_lens,
+            gather_lens=gather_lens,
+            block_table=swa_metadata.block_table[request_start:request_end],
+            block_size=swa_metadata.block_size,
+            offset=max_compressed,
+        )
+
+        if use_fused_c128_decode:
+            torch.ops._C.combine_c128_swa_decode(
+                combined_indices_out,
+                combined_lens_out,
+                seq_lens,
+                swa_metadata.is_valid_token[token_start:token_end],
+                workspace_width,
+                max_compressed,
+                top_k,
+                self.compress_ratio,
+                self.window_size,
+            )
+            combined_indices, combined_lens = (
+                combined_indices_out,
+                combined_lens_out,
+            )
+        elif not swa_only and self.compress_ratio == 128:
+            local_topk = workspace[3]
+            assert attn_metadata is not None
+            assert attn_metadata.c128a_decode_topk_lens is not None
+            fill_c128_topk(
+                local_topk,
+                attn_metadata.c128a_decode_topk_lens[token_start:token_end],
+            )
+        if not use_fused_c128_decode:
+            assert local_topk is not None
+            combined_indices, combined_lens = combine_topk_swa_indices(
+                local_topk,
+                query_start_loc,
+                seq_lens,
+                gather_lens,
+                self.window_size,
+                self.compress_ratio,
+                top_k,
+                workspace_width,
+                max_compressed,
+                out=(combined_indices_out, combined_lens_out),
+                decode_is_valid=swa_metadata.is_valid_token[token_start:token_end],
+            )
+        flash_mla_sparse_fwd(
+            q=q,
+            kv=kv.view(-1, 1, q.shape[-1]),
+            indices=combined_indices.unsqueeze(1),
+            sm_scale=self.scale,
+            attn_sink=self.attn_sink,
+            topk_length=combined_lens,
+            out=output,
         )
 
     def _forward_prefill(
