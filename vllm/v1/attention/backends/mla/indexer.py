@@ -7,7 +7,7 @@ import numpy as np
 import torch
 
 import vllm.envs as envs
-from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.jit_warmup import kernel_launcher, zip_inputs
@@ -42,6 +42,12 @@ from vllm.v1.attention.backends.mla.sparse_utils import request_row_bounds
 from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
     split_decodes_and_prefills,
+)
+from vllm.v1.attention.ops.shardq import (
+    ShardQIndexerRows,
+    build_shardq_split,
+    chunk_indexer_rows,
+    indexer_rows,
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -206,61 +212,6 @@ class PrepareUniformDecodeKernel(
             expanded_bt_stride=expanded_block_table.stride(0),
             BLOCK_SIZE=self.BLOCK_SIZE,
         )
-
-
-def balanced_prefill_row_shard(
-    seq_lens_cpu: torch.Tensor,
-    query_lens_cpu: torch.Tensor,
-    compress_ratio: int,
-    tp_size: int,
-    min_rows: int,
-) -> list[int] | None:
-    """Return contiguous TP row counts balanced by indexer MQA work."""
-    num_rows = int(query_lens_cpu.sum())
-    if tp_size < 2 or num_rows < max(min_rows, tp_size):
-        return None
-
-    query_lens = query_lens_cpu.to(torch.int64)
-    first_key = torch.repeat_interleave(
-        seq_lens_cpu.to(torch.int64) - query_lens + 1, query_lens
-    )
-    row_in_request = torch.arange(num_rows) - torch.repeat_interleave(
-        torch.cumsum(query_lens, 0) - query_lens, query_lens
-    )
-    cost = torch.cumsum((first_key + row_in_request) // compress_ratio, 0)
-    total = int(cost[-1]) if cost.numel() else 0
-    if total <= 0:
-        return None
-
-    targets = torch.arange(1, tp_size) * total // tp_size
-    bounds = [0, *torch.searchsorted(cost, targets).tolist(), num_rows]
-    # Keep >= 1 row per rank (the floor above leaves ample room); this also
-    # handles repeated costs from pool compression.
-    for i in range(1, tp_size):
-        bounds[i] = max(bounds[i], bounds[i - 1] + 1)
-    for i in range(tp_size - 1, 0, -1):
-        bounds[i] = min(bounds[i], bounds[i + 1] - 1)
-    return [bounds[i + 1] - bounds[i] for i in range(tp_size)]
-
-
-def tp_prefill_row_sharding_supported(
-    vllm_config: VllmConfig,
-    dcp_world_size: int,
-    use_pcp: bool,
-    tp_size: int,
-) -> bool:
-    """Whether replicated prefill rows may be sharded across TP ranks."""
-    cudagraph_mode = vllm_config.compilation_config.cudagraph_mode or CUDAGraphMode.NONE
-    return (
-        current_platform.is_cuda()
-        and dcp_world_size == 1
-        and not use_pcp
-        and tp_size > 1
-        and not envs.VLLM_DISABLE_PYNCCL
-        and not envs.VLLM_USE_NCCL_SYMM_MEM
-        and not envs.VLLM_BATCH_INVARIANT
-        and cudagraph_mode.mixed_mode() != CUDAGraphMode.FULL
-    )
 
 
 class DeepseekV32IndexerBackend(AttentionBackend):
@@ -474,6 +425,7 @@ class DeepseekV32IndexerPrefillChunkMetadata:
     max_local_total_seq_lens: int = 0
 
     pcp_deinterleave_idx: torch.Tensor | None = None
+    shardq: ShardQIndexerRows | None = None
 
 
 class BuildPrefillChunkMetadataKernel(
@@ -710,8 +662,9 @@ class BuildPrefillChunkMetadataKernel(
 class DeepseekV32IndexerPrefillMetadata:
     chunks: list[DeepseekV32IndexerPrefillChunkMetadata]
     max_prefill_seq_len: int = -1
-    # Per-TP-rank contiguous row counts, or None for the replicated path.
-    row_shard_sizes: list[int] | None = None
+    # The head-sharded leading tokens of this step's ShardQ split, which every
+    # chunk's ``shardq`` rows follow; None without a split.
+    shardq_num_decode_tokens: int | None = None
 
 
 @dataclass
@@ -1003,12 +956,18 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         scheduler_config = self.vllm_config.scheduler_config
         parallel_config = self.vllm_config.parallel_config
         self.dcp_world_size = parallel_config.decode_context_parallel_size
-        self.tp_size = parallel_config.tensor_parallel_size
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
         self.pcp_world_size = parallel_config.prefill_context_parallel_size
         self.use_pcp = self.pcp_world_size > 1
         self.pcp_rank = get_pcp_group().rank_in_group if self.use_pcp else 0
         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
+        # Narrow prefill chunks to ShardQ rows only when a main MLA layer reads
+        # these indexers' top-k token-sharded.
+        layers = self.vllm_config.compilation_config.static_forward_context
+        self.use_shardq = any(
+            getattr(layers.get(name), "shardq_layer_name", "")
+            for name in self.layer_names
+        )
         # KV compression (DeepseekV4). Default to 1 for no compression.
         self.compress_ratio = 1
         if isinstance(self.kv_cache_spec, MLAAttentionSpec):
@@ -1585,17 +1544,26 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 # Skip when total_seq_lens is 0 (i.e., no compressed token).
                 if metadata is not None:
                     chunks.append(metadata)
-            row_shard_sizes = None
-            if tp_prefill_row_sharding_supported(
-                self.vllm_config, self.dcp_world_size, self.use_pcp, self.tp_size
-            ):
-                row_shard_sizes = balanced_prefill_row_shard(
-                    seq_lens_cpu[num_decodes:],
-                    prefill_query_lens_cpu,
-                    self.compress_ratio,
-                    self.tp_size,
-                    self.vllm_config.attention_config.indexer_tp_shard_min_rows,
-                )
+            shardq_num_decode_tokens = None
+            built = (
+                build_shardq_split(common_attn_metadata, self.vllm_config, self.device)
+                if self.use_shardq
+                else None
+            )
+            if built is not None:
+                shardq_num_decode_tokens, split = built
+                # Rows this builder counts as decodes stay in place there.
+                assert num_decode_tokens <= shardq_num_decode_tokens
+                rows_cpu, rows = indexer_rows(split, shardq_num_decode_tokens)
+                for chunk in chunks:
+                    chunk.shardq = chunk_indexer_rows(
+                        rows_cpu,
+                        rows,
+                        chunk.token_start,
+                        chunk.token_end,
+                        chunk.cu_seqlen_ks,
+                        chunk.cu_seqlen_ke,
+                    )
             prefill_metadata = DeepseekV32IndexerPrefillMetadata(
                 chunks,
                 max_prefill_seq_len=(
@@ -1603,7 +1571,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     if num_prefills > 0
                     else 0
                 ),
-                row_shard_sizes=row_shard_sizes,
+                shardq_num_decode_tokens=shardq_num_decode_tokens,
             )
 
         decode_metadata = None

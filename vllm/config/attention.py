@@ -7,8 +7,11 @@ from typing import Any, Literal
 from pydantic import Field, field_validator
 
 from vllm.config.utils import config
+from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+logger = init_logger(__name__)
 
 IndexerKVDType = Literal["auto", "bf16", "fp8", "mxfp4", "nvfp4"]
 MiniMaxM3MSADecodeBackend = Literal["triton", "cutlass"]
@@ -126,9 +129,25 @@ class AttentionConfig:
     for steps whose contexts are too short for the pool to pay; it is not
     enabled by default there."""
 
-    indexer_tp_shard_min_rows: int = Field(default=65536, ge=1)
-    """Minimum total prefill rows for the sparse-attention indexer to split
-    them across TP ranks instead of scoring every row on each rank."""
+    indexer_tp_shard_min_rows: int | None = None
+    """Deprecated and has no effect: TP row sharding of the sparse-attention
+    indexer was replaced by `sparse_mla_shard_q`. It will be removed in
+    v0.34.0."""
+
+    sparse_mla_shard_q: bool = True
+    """Under tensor parallelism, shard sparse-MLA (DSA) prefill by token
+    instead of by head: each TP rank runs the indexer and the sparse attention
+    for its slice of the tokens with all heads, and all-to-all exchanges move
+    the query and the attention output between the layouts. Applies to steps
+    with at least `sparse_mla_shard_q_min_tokens` prefill tokens on the
+    FlashInfer sparse MLA backend, or on FlashMLA sparse with an FP8 DeepSeek
+    KV cache, without DCP, PCP or HiSparse. A mixed step's decode tokens stay
+    sharded by head."""
+
+    sparse_mla_shard_q_min_tokens: int = Field(default=1024, ge=1)
+    """Minimum number of tokens after a step's decodes (requests of at most
+    1 + num_speculative_tokens tokens) for `sparse_mla_shard_q` to apply. Below
+    it the all-to-all exchanges can cost more than they save."""
 
     minimax_m3_indexer_cp: bool = False
     """MiniMax M3 on ROCm with tensor_parallel_size > 1: score the sparse
@@ -187,6 +206,12 @@ class AttentionConfig:
     versions."""
 
     def __post_init__(self) -> None:
+        if self.indexer_tp_shard_min_rows is not None:
+            logger.warning(
+                "indexer_tp_shard_min_rows is deprecated and has no effect "
+                "since sparse_mla_shard_q replaced indexer TP row sharding. "
+                "It will be removed in v0.34.0."
+            )
         msa_aliases: dict[AttentionBackendEnum, MiniMaxM3MSADecodeBackend] = {
             AttentionBackendEnum.CUTLASS_MSA: "cutlass",
             AttentionBackendEnum.TRITON_MSA: "triton",
