@@ -17,6 +17,7 @@ from vllm.sampling_params import (
     STRUCTURAL_TAG_WRAPPER_NESTING,
     SamplingParams,
     StructuredOutputsParams,
+    check_json_ref_cycle,
 )
 from vllm.tokenizers import mistral as mistral_tokenizers
 from vllm.v1.structured_output import StructuredOutputManager, backend_guidance
@@ -229,6 +230,167 @@ def test_schema_at_nesting_limit_accepted(field):
         tokenizer=object(),
     )
     assert structured_outputs._backend == "xgrammar"
+
+
+# A `$ref` cycle with no base case compiles, then matches no token (#57725).
+_REF_CYCLES = {
+    "direct": {"$ref": "#/$defs/n", "$defs": {"n": {"$ref": "#/$defs/n"}}},
+    "mutual": {
+        "$ref": "#/$defs/a",
+        "$defs": {"a": {"$ref": "#/$defs/b"}, "b": {"$ref": "#/$defs/a"}},
+    },
+    "three_way": {
+        "$ref": "#/$defs/a",
+        "$defs": {
+            "a": {"$ref": "#/$defs/b"},
+            "b": {"$ref": "#/$defs/c"},
+            "c": {"$ref": "#/$defs/a"},
+        },
+    },
+    "anyof": {
+        "$ref": "#/$defs/n",
+        "$defs": {"n": {"anyOf": [{"$ref": "#/$defs/n"}, {"$ref": "#/$defs/n"}]}},
+    },
+    "oneof": {
+        "$ref": "#/$defs/n",
+        "$defs": {"n": {"oneOf": [{"$ref": "#/$defs/n"}]}},
+    },
+    "legacy_definitions": {
+        "$ref": "#/definitions/n",
+        "definitions": {"n": {"$ref": "#/definitions/n"}},
+    },
+    "root": {"$ref": "#"},
+    "ref_ignores_enum_sibling": {
+        "$ref": "#/$defs/n",
+        "enum": ["a"],
+        "$defs": {"n": {"$ref": "#/$defs/n"}},
+    },
+}
+
+_REFS_WITH_BASE = {
+    "optional_property": {
+        "$ref": "#/$defs/n",
+        "$defs": {"n": {"type": "object", "properties": {"c": {"$ref": "#/$defs/n"}}}},
+    },
+    "anyof_base": {
+        "$ref": "#/$defs/n",
+        "$defs": {"n": {"anyOf": [{"type": "string"}, {"$ref": "#/$defs/n"}]}},
+    },
+    "required_property": {
+        "$ref": "#/$defs/n",
+        "$defs": {
+            "n": {
+                "type": "object",
+                "properties": {"c": {"$ref": "#/$defs/n"}},
+                "required": ["c"],
+            }
+        },
+    },
+    "array": {
+        "$ref": "#/$defs/n",
+        "$defs": {"n": {"type": "array", "items": {"$ref": "#/$defs/n"}}},
+    },
+    "enum_beside_cyclic_anyof": {
+        "enum": ["a"],
+        "anyOf": [{"$ref": "#/$defs/n"}],
+        "$defs": {"n": {"$ref": "#/$defs/n"}},
+    },
+    "const_beside_cyclic_anyof": {
+        "const": "a",
+        "anyOf": [{"$ref": "#/$defs/n"}],
+        "$defs": {"n": {"$ref": "#/$defs/n"}},
+    },
+    "unused_cycle": {"type": "string", "$defs": {"n": {"$ref": "#/$defs/n"}}},
+    "ref_chain": {
+        "$ref": "#/$defs/a",
+        "$defs": {"a": {"$ref": "#/$defs/b"}, "b": {"type": "integer"}},
+    },
+    "no_refs": {"type": "object", "properties": {"a": {"type": "string"}}},
+    "remote_ref": {"$ref": "https://example.com/schema.json"},
+}
+
+
+@pytest.mark.parametrize("schema", _REF_CYCLES.values(), ids=list(_REF_CYCLES))
+def test_ref_cycle_without_base_case_is_rejected(schema):
+    """The schema matches no finite JSON value, so it is a client error."""
+    with pytest.raises(VLLMValidationError, match="no base case"):
+        check_json_ref_cycle(schema)
+    with pytest.raises(VLLMValidationError, match="no base case"):
+        check_json_ref_cycle(json.dumps(schema))
+
+
+@pytest.mark.parametrize("schema", _REFS_WITH_BASE.values(), ids=list(_REFS_WITH_BASE))
+def test_ref_with_a_base_case_is_not_a_cycle(schema):
+    """Ordinary recursion, and a ref the backend should report itself, stay."""
+    check_json_ref_cycle(schema)
+
+
+@pytest.mark.parametrize(
+    "backend", ["auto", "xgrammar", "guidance", "outlines", "lm-format-enforcer"]
+)
+@pytest.mark.parametrize("as_string", [False, True], ids=["dict", "json_string"])
+def test_ref_cycle_rejected_before_backend_selection(backend, as_string):
+    """`auto` must not treat the cycle as an unsupported xgrammar feature.
+
+    That fallback accepts the schema on guidance, which then has no legal
+    token other than EOS.
+    """
+    schema = _REF_CYCLES["direct"]
+    params = SamplingParams(
+        structured_outputs=StructuredOutputsParams(
+            json=json.dumps(schema) if as_string else schema
+        )
+    )
+    with pytest.raises(VLLMValidationError, match="no base case"):
+        params._validate_structured_outputs(
+            _StubModelConfig(is_diffusion=False),
+            StructuredOutputsConfig(backend=backend),
+            tokenizer=object(),
+        )
+
+
+def test_xgrammar_validator_rejects_ref_cycle():
+    """Tool parsers call validate_xgrammar_grammar directly."""
+    params = SamplingParams(
+        structured_outputs=StructuredOutputsParams(
+            json=json.dumps(_REF_CYCLES["mutual"])
+        )
+    )
+    with pytest.raises(VLLMValidationError, match="no base case"):
+        validate_xgrammar_grammar(params)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "optional_property",
+        "anyof_base",
+        "required_property",
+        "enum_beside_cyclic_anyof",
+    ],
+)
+def test_satisfiable_recursive_schema_stays_on_xgrammar(name):
+    """A recursive schema that can emit a token keeps validating on xgrammar."""
+    params = SamplingParams(
+        structured_outputs=StructuredOutputsParams(json=_REFS_WITH_BASE[name])
+    )
+    params._validate_structured_outputs(
+        _StubModelConfig(is_diffusion=False),
+        StructuredOutputsConfig(backend="auto"),
+        tokenizer=object(),
+    )
+    assert params.structured_outputs is not None
+    assert params.structured_outputs._backend == "xgrammar"
+
+
+def test_dangling_ref_keeps_the_backend_error():
+    """A missing pointer is xgrammar's error, not a cycle."""
+    params = SamplingParams(
+        structured_outputs=StructuredOutputsParams(json={"$ref": "#/$defs/missing"})
+    )
+    with pytest.raises(VLLMValidationError, match="Failed to transform") as exc_info:
+        validate_xgrammar_grammar(params)
+    assert "no base case" not in str(exc_info.value)
 
 
 INVALID_JSON_SCHEMA = {"type": "object", "properties": {"name": {"type": "str"}}}
