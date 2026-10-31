@@ -177,6 +177,147 @@ vllm serve deepseek-ai/DeepSeek-V3-0324 \
     ```
     This ensures torch distributed group discovery uses Ethernet instead of InfiniBand for initial setup.
 
+## Automatic External Elastic EP Bootstrap
+
+With external load balancing, `--elastic-ep-auto-bootstrap` lets initial
+participants and later append joiners use the same launch arguments. Only the
+native DP rank varies between processes; vLLM does not interpret Kubernetes
+labels or create capacity. Automatic bootstrap is disabled by default.
+
+For an initial DP2 world that can grow to DP4, run this command for ranks 0 and 1,
+with a separate GPU allocation and API endpoint for each process. On one host,
+assign disjoint devices and distinct HTTP ports as described in
+[External Load Balancing](data_parallel_deployment.md#external-load-balancing).
+
+```bash
+vllm serve Qwen/Qwen3-30B-A3B \
+    --enable-expert-parallel \
+    --enable-eplb \
+    --eplb-config '{"communicator":"pynccl","use_async":false}' \
+    --enable-elastic-ep \
+    --elastic-ep-auto-bootstrap \
+    --elastic-ep-initial-dp-size 2 \
+    --elastic-ep-max-dp-size 4 \
+    --data-parallel-size-local 1 \
+    --data-parallel-rank "${DP_RANK}" \
+    --data-parallel-address "${DP_MASTER_ADDRESS}" \
+    --data-parallel-rpc-port 29550 \
+    --tensor-parallel-size 1
+```
+
+To grow to DP4, send `POST /scale_elastic_ep` with
+`{"new_data_parallel_size": 4}` concurrently to both existing API servers.
+These requests wait for the resize: launch ranks 2 and 3 with the same command
+while the requests are pending, rather than waiting for their responses first.
+Leave `--elastic-ep-initial-dp-size 2` unchanged. It declares only the initial
+world size, not the current topology. Both joiners discover target size 4
+through rank zero's existing scale handshake before constructing their engine
+configuration.
+
+Automatic bootstrap requires `--elastic-ep-initial-dp-size` and rejects an
+explicit `--data-parallel-size` (including `-dp` or a configuration-file value).
+The initial-size option requires `--elastic-ep-auto-bootstrap`; it is not used
+by manual launches. Do not set `VLLM_ELASTIC_EP_SCALE_UP_LAUNCH`; automatic
+bootstrap selects the launch path.
+
+Initial ranks form the complete initial world without synthetic resize requests.
+Discovery reserves a rank or local rank range for one client and one handshake;
+each subsequent engine handshake checks that reservation before initialization. Discovery is
+not membership commit or serving readiness, and does not trigger a resize. The
+external load balancer must still follow each endpoint's serving health.
+
+This mode supports external MP DP with one API server/core client per process.
+The default local rank count is one and is retained through engine configuration,
+including with `--nnodes`; node geometry does not infer a different local range
+after bootstrap. See [Local Rank Ranges](#local-rank-ranges)
+for multi-rank startup. Local routing is inferred automatically for multi-rank
+clients; do not add explicit hybrid-LB or start-rank options. Headless startup
+does not use this discovery path. Fault tolerance may be enabled with an FT-capable all-to-all backend, as
+required by vLLM (`nixl_ep` or `deepep_low_latency`); automatic bootstrap does not perform
+failure recovery or fill inactive slots in a committed topology. A rank removed
+by a completed shrink may join a later expansion when the engine's handshake
+expects it. Existing executor launch and
+geometry validation remain unchanged. This option does not configure headless
+TP workers or implement a new multi-node executor lifecycle.
+
+Rank zero always starts a new world; replacing it requires external whole-world
+lifecycle management. A replacement for an existing member cannot silently join:
+without a matching initial or append handshake, startup fails or times out according to
+`VLLM_ENGINE_READY_TIMEOUT_S`.
+
+Manual external Elastic EP launch arguments remain supported without this flag.
+
+### Local Rank Ranges
+
+One client can bootstrap several local engines together. Set
+`--data-parallel-size-local` to its local count. For uniform fixed-width
+allocations, use `--elastic-ep-allocation-index` instead of an explicit first
+rank: `first_rank = allocation_index × local_count`. The index is zero-based;
+with four local engines, indices 0, 1 and 2 start at ranks 0, 4 and 8.
+
+This option is unset by default and requires automatic bootstrap. Use a
+nonnegative index and `1 < initial DP size <= maximum DP size`. Local count
+defaults to one; keep it fixed across allocations. The initial and maximum DP
+sizes still count native ranks and must be multiples of the local count. Do not
+combine the index with explicit rank, start-rank or load-balancer flags. It does
+not create capacity or specify the live target; native discovery resolves that
+target before engine configuration.
+
+Explicit `--data-parallel-rank` remains supported as the alternative first-rank
+input, with its existing behavior. Do not enable
+`--data-parallel-multi-port-external-lb`: that option starts separate clients.
+
+For an initial DP8 world with four local ranks per client and a maximum of DP12,
+use the same template for each client, varying only `ALLOCATION_INDEX` (0 or 1
+initially, then 2 for an append joiner):
+
+This illustrates the startup contract, not a complete resize workflow: the
+packed clients starting at 0 and 4 cannot initiate DP8→DP12 with the current
+resize coordinator (see the warning below).
+
+```bash
+vllm serve Qwen/Qwen3-30B-A3B \
+    --enable-expert-parallel --enable-eplb \
+    --eplb-config '{"communicator":"pynccl","use_async":false}' \
+    --enable-elastic-ep --elastic-ep-auto-bootstrap \
+    --elastic-ep-initial-dp-size 8 --elastic-ep-max-dp-size 12 \
+    --elastic-ep-allocation-index "${ALLOCATION_INDEX}" \
+    --data-parallel-size-local 4 \
+    --data-parallel-address "${DP_MASTER_ADDRESS}" \
+    --data-parallel-rpc-port 29550 --tensor-parallel-size 1
+```
+
+The client starting at rank 8 sends one discovery request for ranks 8–11. An
+active native DP12 append handshake reserves the complete range atomically;
+overlaps, ranges outside its expected participants and invalid counts are
+rejected without partially reserving ranks. The client resolves DP12 before
+constructing its engine configuration. Its existing process manager starts all
+four engines, which share the reservation and receive the same native
+rendezvous information. No client guesses the target from its last local rank.
+The initial seed remains 8 and `--data-parallel-size` stays omitted.
+
+Each process needs enough visible GPUs for its local engines; colocated clients
+need disjoint devices and distinct HTTP endpoints. Multi-rank clients use the
+existing local load-balancing client (`DPLBAsyncMPClient`), including its
+request-to-engine tracking for cancellation. Runtime load balancing is hybrid
+when the client owns only part of the world, or internal when it owns the
+whole world; it is not single-rank external LB.
+
+Without a rank hint, the client balances requests among its local engines.
+To target one explicitly through the OpenAI HTTP API, set
+`X-data-parallel-rank` to a **local** index from 0 through local count minus 1.
+For a client whose first global rank is 8, a header value of 2 selects global
+rank 10, not global rank 2. The original one-rank path stays direct and does
+not acquire a supervisor or a local load balancer.
+
+!!! warning "Bootstrap is not multi-rank resize coordination"
+    This extension provides range startup only. The current external resize
+    coordinator still requires one existing rank per client; resize requests
+    from clients owning multiple ranks fail explicitly. Coordinating prepare,
+    commit, per-rank control and completion for those clients requires a
+    separate coordinator extension. The range template alone is not an
+    end-to-end packed-client resize recipe.
+
 ## Expert Parallel Load Balancer (EPLB)
 
 While MoE models are typically trained so that each expert receives a similar number of tokens, in practice the distribution of tokens across experts can be highly skewed. vLLM provides an Expert Parallel Load Balancer (EPLB) to redistribute expert mappings across EP ranks, evening the load across experts.

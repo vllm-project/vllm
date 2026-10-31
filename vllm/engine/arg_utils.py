@@ -575,6 +575,9 @@ class EngineArgs:
     all2all_backend: All2AllBackend = ParallelConfig.all2all_backend
     enable_elastic_ep: bool = ParallelConfig.enable_elastic_ep
     elastic_ep_max_dp_size: int = ParallelConfig.elastic_ep_max_dp_size
+    elastic_ep_auto_bootstrap: bool = False
+    elastic_ep_initial_dp_size: int | None = None
+    elastic_ep_allocation_index: int | None = None
     enable_dbo: bool = ParallelConfig.enable_dbo
     ubatch_size: int = ParallelConfig.ubatch_size
     dbo_decode_token_threshold: int = ParallelConfig.dbo_decode_token_threshold
@@ -878,6 +881,41 @@ class EngineArgs:
     kda_decode_backend: Literal["auto", "native", "flashinfer", "triton"] | None = None
 
     def __post_init__(self):
+        if self.elastic_ep_allocation_index is not None:
+            if (
+                type(self.elastic_ep_allocation_index) is not int
+                or self.elastic_ep_allocation_index < 0
+            ):
+                raise ValueError(
+                    "--elastic-ep-allocation-index must be a nonnegative integer."
+                )
+            if (
+                not self.elastic_ep_auto_bootstrap
+                or self.data_parallel_rank is not None
+                or self.data_parallel_start_rank is not None
+                or self.data_parallel_external_lb
+                or self.data_parallel_hybrid_lb
+                or self.data_parallel_multi_port_external_lb
+            ):
+                raise ValueError(
+                    "--elastic-ep-allocation-index requires automatic bootstrap "
+                    "and cannot be combined with rank or load-balancer flags."
+                )
+        if self.elastic_ep_auto_bootstrap:
+            if self.elastic_ep_initial_dp_size is None:
+                raise ValueError(
+                    "--elastic-ep-auto-bootstrap requires --elastic-ep-initial-dp-size."
+                )
+            if self.data_parallel_size != ParallelConfig.data_parallel_size:
+                raise ValueError(
+                    "--data-parallel-size cannot be used with "
+                    "--elastic-ep-auto-bootstrap; use --elastic-ep-initial-dp-size."
+                )
+        elif self.elastic_ep_initial_dp_size is not None:
+            raise ValueError(
+                "--elastic-ep-initial-dp-size requires --elastic-ep-auto-bootstrap."
+            )
+
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
         # CompilationConfig object
@@ -1241,15 +1279,32 @@ class EngineArgs:
             "-pcp",
             **parallel_kwargs["prefill_context_parallel_size"],
         )
-        parallel_group.add_argument(
-            "--data-parallel-size", "-dp", **parallel_kwargs["data_parallel_size"]
+        dp_size_group = parallel_group.add_mutually_exclusive_group()
+        # A typed string default distinguishes an explicit size of 1 from omission.
+        dp_size_group.add_argument(
+            "--data-parallel-size",
+            "-dp",
+            **{
+                **parallel_kwargs["data_parallel_size"],
+                "default": str(ParallelConfig.data_parallel_size),
+            },
+        )
+        dp_size_group.add_argument(
+            "--elastic-ep-initial-dp-size",
+            type=int,
+            default=None,
+            help="Initial DP world size for --elastic-ep-auto-bootstrap. "
+            "Leave unchanged for append joiners; their actual DP size is resolved "
+            "through rank zero's handshake. Cannot be used with --data-parallel-size.",
         )
         parallel_group.add_argument(
             "--data-parallel-rank",
             "-dpn",
             type=int,
-            help="Data parallel rank of this instance. "
-            "When set, enables external load balancer mode for MoE "
+            help="Data parallel rank of this instance. With automatic Elastic EP "
+            "bootstrap, this is the first of --data-parallel-size-local ranks; "
+            "multi-rank clients use local load balancing. Otherwise, setting "
+            "this enables external load balancer mode for MoE "
             "data-parallel deployments. Unsupported for non-MoE models; "
             "launch independent vLLM instances instead.",
         )
@@ -1336,6 +1391,24 @@ class EngineArgs:
         parallel_group.add_argument(
             "--elastic-ep-max-dp-size",
             **parallel_kwargs["elastic_ep_max_dp_size"],
+        )
+        parallel_group.add_argument(
+            "--elastic-ep-allocation-index",
+            type=int,
+            default=None,
+            help="Zero-based allocation index for automatic Elastic EP bootstrap. "
+            "The first DP rank is this index times --data-parallel-size-local "
+            "(default local size: 1). Initial and maximum DP sizes must be "
+            "multiples of the local size. Cannot be combined with explicit "
+            "rank or load-balancer flags. Unset by default.",
+        )
+        parallel_group.add_argument(
+            "--elastic-ep-auto-bootstrap",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help="Resolve initial or joining external EP startup from the DP rank "
+            "and rank zero's handshake. Requires --elastic-ep-initial-dp-size "
+            "instead of --data-parallel-size.",
         )
         parallel_group.add_argument(
             "--dbo-decode-token-threshold",
@@ -2265,6 +2338,24 @@ class EngineArgs:
 
         current_platform.validate_environ(self.fail_on_environ_validation)
 
+        bootstrap_identity = None
+        if self.elastic_ep_auto_bootstrap:
+            if headless:
+                raise ValueError(
+                    "Automatic Elastic EP bootstrap requires an API server"
+                )
+            from vllm.distributed.elastic_ep.bootstrap import (
+                prepare_external_elastic_ep_launch,
+            )
+
+            launch = prepare_external_elastic_ep_launch(self)
+            self.data_parallel_size = launch.data_parallel_size
+            self.data_parallel_size_local = launch.local_size
+            if launch.first_rank is not None:
+                self.data_parallel_rank = launch.first_rank
+            bootstrap_identity = launch.identity
+            os.environ["VLLM_ELASTIC_EP_SCALE_UP_LAUNCH"] = str(int(launch.scale_up))
+
         # Check if the model is a speculator and override model/tokenizer/config
         # BEFORE creating ModelConfig, so the config is created with the target model
         # Skip speculator detection for cloud storage models (eg: S3, GCS) since
@@ -2449,10 +2540,17 @@ class EngineArgs:
                 self.data_parallel_size_local = max(
                     local_world_size // world_size_within_dp, 1
                 )
+        automatic_local_lb = (
+            self.elastic_ep_auto_bootstrap
+            and self.data_parallel_size_local is not None
+            and self.data_parallel_size_local > 1
+        )
         data_parallel_external_lb = (
             self.data_parallel_external_lb or self.data_parallel_rank is not None
-        )
-        if self.enable_fault_tolerance and not data_parallel_external_lb:
+        ) and not automatic_local_lb
+        if self.enable_fault_tolerance and not (
+            data_parallel_external_lb or automatic_local_lb
+        ):
             raise ValueError(
                 "Fault tolerance requires external load balancer mode "
                 "(--data-parallel-external-lb or --data-parallel-rank). "
@@ -2460,7 +2558,7 @@ class EngineArgs:
             )
         if (
             self.data_parallel_size > 1
-            and data_parallel_external_lb
+            and (data_parallel_external_lb or automatic_local_lb)
             and not model_config.is_moe
         ):
             raise ValueError(
@@ -2468,8 +2566,12 @@ class EngineArgs:
                 "For external load balancing, launch independent vLLM "
                 "instances without --data-parallel-* arguments."
             )
-        # Local DP rank = 1, use pure-external LB.
-        if data_parallel_external_lb:
+        if automatic_local_lb:
+            data_parallel_size_local = self.data_parallel_size_local or 1
+            self.data_parallel_hybrid_lb = (
+                data_parallel_size_local < self.data_parallel_size
+            )
+        elif data_parallel_external_lb:
             if self.data_parallel_rank is None:
                 raise ValueError(
                     "Invalid data-parallel launch options: "
@@ -2486,7 +2588,6 @@ class EngineArgs:
                     "omit it."
                 )
             data_parallel_size_local = 1
-            # Use full external lb if we have local_size of 1.
             self.data_parallel_hybrid_lb = False
         elif self.data_parallel_size_local is not None:
             data_parallel_size_local = self.data_parallel_size_local
@@ -2596,7 +2697,9 @@ class EngineArgs:
             enable_ep_weight_filter=self.enable_ep_weight_filter,
             all2all_backend=self.all2all_backend,
             enable_elastic_ep=self.enable_elastic_ep,
+            elastic_ep_auto_bootstrap=self.elastic_ep_auto_bootstrap,
             elastic_ep_max_dp_size=self.elastic_ep_max_dp_size,
+            _external_elastic_ep_bootstrap=bootstrap_identity,
             enable_dbo=self.enable_dbo,
             enable_shm_tensor_arena=self.enable_shm_tensor_arena,
             ubatch_size=self.ubatch_size,
