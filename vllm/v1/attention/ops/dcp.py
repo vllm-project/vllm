@@ -15,6 +15,7 @@ import torch.distributed as dist
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import get_dcp_group
+from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.jit_warmup import (
     WarmupIntRange,
@@ -26,6 +27,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     VllmTritonJitKernel,
     triton_scalar_specialization_rep,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import max_decode_query_len
 from vllm.v1.attention.ops.cp_common import (
@@ -1010,16 +1012,19 @@ def dcp_a2a_lse_reduce(
     )
 
 
-def get_dcp_workspace_max_num_tokens(vllm_config: VllmConfig) -> int:
-    scheduler_config = vllm_config.scheduler_config
+def get_dcp_decode_max_num_tokens(vllm_config: VllmConfig) -> int:
     # num_speculative_tokens also counts a diffusion canvas.
     tokens_per_seq = max(
         1 + vllm_config.num_speculative_tokens, max_decode_query_len(vllm_config)
     )
+    return vllm_config.scheduler_config.max_num_seqs * tokens_per_seq
+
+
+def get_dcp_workspace_max_num_tokens(vllm_config: VllmConfig) -> int:
     return min(
-        scheduler_config.max_num_batched_tokens,
+        vllm_config.scheduler_config.max_num_batched_tokens,
         max(
-            scheduler_config.max_num_seqs * tokens_per_seq,
+            get_dcp_decode_max_num_tokens(vllm_config),
             vllm_config.compilation_config.max_cudagraph_capture_size or 0,
         ),
     )
@@ -1125,6 +1130,118 @@ class DirectDCPA2AWorkspace(DirectCPWorkspace):
         return output
 
 
+class RocmDirectDCPA2AWorkspace:
+    """Uncached IPC staging buffers for the ROCm direct DCP output exchange.
+
+    Each rank publishes its partial output here and peers read it directly, so
+    the buffers come from the uncached allocator the ROCm custom all-reduce
+    uses.
+    """
+
+    def __init__(
+        self,
+        group: ProcessGroup,
+        device: torch.device,
+        max_num_tokens: int,
+        heads_per_rank: int,
+        head_dim: int,
+        dtype: torch.dtype = torch.bfloat16,
+        num_ubatches: int = 1,
+    ) -> None:
+        from vllm.distributed.device_communicators.custom_all_reduce import (
+            CustomAllreduce,
+        )
+
+        if dtype not in _A2A_SUPPORTED_DTYPES:
+            raise ValueError(f"Direct DCP A2A does not support {dtype}")
+        if num_ubatches < 1:
+            raise ValueError(
+                f"Direct DCP A2A requires at least one ubatch slot, got {num_ubatches}"
+            )
+        if not hasattr(torch.ops._C, "direct_dcp_a2a_lse_reduce_rocm"):
+            raise RuntimeError(
+                "Direct DCP A2A on ROCm needs a build that includes gfx942 or gfx950."
+            )
+        if not all(in_the_same_node_as(group, source_rank=0)):
+            raise ValueError("Direct DCP A2A on ROCm needs all DCP ranks on one node.")
+        self.world_size = dist.get_world_size(group=group)
+        self.rank = dist.get_rank(group=group)
+        self.max_num_tokens = max_num_tokens
+        self.heads_per_rank = heads_per_rank
+        self.head_dim = head_dim
+        self.device = torch.device(device)
+
+        items = 2 * self.world_size * max_num_tokens * heads_per_rank
+        slot_bytes = (
+            items * head_dim * dtype.itemsize,
+            items * 4,
+            2 * self.world_size * 4,
+        )
+        self.peer_ptrs: list[torch.Tensor] = []
+        self.local_ptrs: list[list[int]] = []
+        for nbytes in slot_bytes:
+            bases = CustomAllreduce.create_shared_buffer(nbytes * num_ubatches, group)
+            ptrs = [[base + u * nbytes for base in bases] for u in range(num_ubatches)]
+            self.peer_ptrs.append(
+                torch.tensor(ptrs, dtype=torch.int64, device=self.device)
+            )
+            self.local_ptrs.append([row[self.rank] for row in ptrs])
+        self.epoch = torch.zeros(num_ubatches, dtype=torch.int64, device=self.device)
+        self.completion = torch.zeros(
+            num_ubatches, dtype=torch.int32, device=self.device
+        )
+
+    def lse_reduce(
+        self,
+        partial_output: torch.Tensor,
+        partial_lse: torch.Tensor,
+        is_lse_base_on_e: bool,
+        seq_lens: torch.Tensor | None = None,
+        query_start_loc: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        ubatch = dbo_current_ubatch_id()
+        num_tokens = partial_output.shape[0]
+        output = partial_output.new_empty(
+            (num_tokens, self.heads_per_rank, self.head_dim)
+        )
+        output_ptrs, lse_ptrs, signal_ptrs = self.peer_ptrs
+        output_local, lse_local, signal_local = self.local_ptrs
+        torch.ops._C.direct_dcp_a2a_lse_reduce_rocm(
+            partial_output,
+            partial_lse,
+            seq_lens,
+            query_start_loc,
+            output_ptrs[ubatch],
+            lse_ptrs[ubatch],
+            signal_ptrs[ubatch],
+            output_local[ubatch],
+            lse_local[ubatch],
+            signal_local[ubatch],
+            self.epoch[ubatch : ubatch + 1],
+            self.completion[ubatch : ubatch + 1],
+            output,
+            self.world_size,
+            self.rank,
+            self.max_num_tokens,
+            is_lse_base_on_e,
+        )
+        return output
+
+
+def _rocm_direct_a2a_enabled(group: GroupCoordinator, dtype: torch.dtype) -> bool:
+    from vllm.platforms.rocm import on_gfx950
+
+    if envs.VLLM_USE_DIRECT_DCP_A2A is not None:
+        return envs.VLLM_USE_DIRECT_DCP_A2A
+    # TODO: only verified on gfx950 for now, add support for other archs
+    return (
+        on_gfx950()
+        and dtype in _A2A_SUPPORTED_DTYPES
+        and hasattr(torch.ops._C, "direct_dcp_a2a_lse_reduce_rocm")
+        and all(in_the_same_node_as(group.cpu_group, source_rank=0))
+    )
+
+
 @functools.cache
 def get_direct_dcp_a2a_workspace(
     group: GroupCoordinator,
@@ -1134,7 +1251,19 @@ def get_direct_dcp_a2a_workspace(
     head_dim: int,
     dtype: torch.dtype,
     num_ubatches: int,
-) -> DirectDCPA2AWorkspace | None:
+) -> DirectDCPA2AWorkspace | RocmDirectDCPA2AWorkspace | None:
+    if current_platform.is_rocm():
+        if not _rocm_direct_a2a_enabled(group, dtype):
+            return None
+        return RocmDirectDCPA2AWorkspace(
+            group.cpu_group,
+            device,
+            max_num_tokens,
+            heads_per_rank,
+            head_dim,
+            dtype,
+            num_ubatches,
+        )
     if not direct_cp_enabled(
         group, dtype, envs.VLLM_USE_DIRECT_DCP_A2A, _A2A_SUPPORTED_DTYPES
     ):
@@ -1468,6 +1597,18 @@ class MLADCPManager:
         self.device = torch.device(device)
         self.num_ubatches = max(parallel_config.num_ubatches, 1)
         self.max_num_tokens = get_dcp_workspace_max_num_tokens(vllm_config)
+        self.max_direct_combine_tokens = self.max_num_tokens
+        if current_platform.is_rocm():
+            # The staging area for ROCm combine comes from uncached IPC memory that
+            # would otherwise become KV cache, so size it for a decode batch rounded
+            # up to a captured graph, anything larger falls back to RCCL.
+            decode_tokens = get_dcp_decode_max_num_tokens(vllm_config)
+            capture_sizes = vllm_config.compilation_config.cudagraph_capture_sizes
+            decode_tokens = next(
+                (size for size in capture_sizes or () if size >= decode_tokens),
+                decode_tokens,
+            )
+            self.max_direct_combine_tokens = min(self.max_num_tokens, decode_tokens)
         self.use_a2a = parallel_config.dcp_comm_backend == "a2a"
         self.padded_num_heads = padded_num_heads
 
@@ -1509,12 +1650,15 @@ class MLADCPManager:
             direct_workspace = get_direct_dcp_a2a_workspace(
                 self.group,
                 self.device,
-                self.max_num_tokens,
+                self.max_direct_combine_tokens,
                 num_heads,
                 head_dim,
                 dtype,
                 self.num_ubatches,
             )
+        self.rocm_direct_combine = (
+            direct_workspace is not None and current_platform.is_rocm()
+        )
         if direct_workspace is not None:
             logger.info_once("Using direct symmetric-memory DCP A2A for MLA.")
             return functools.partial(
@@ -1538,7 +1682,7 @@ class MLADCPManager:
 
     def _direct_workspace_combine(
         self,
-        direct_workspace: DirectDCPA2AWorkspace,
+        direct_workspace: DirectDCPA2AWorkspace | RocmDirectDCPA2AWorkspace,
         partial_output: torch.Tensor,
         partial_lse: torch.Tensor,
         is_lse_base_on_e: bool,
@@ -1640,6 +1784,13 @@ class MLADCPManager:
                 torch.distributed.all_gather_into_tensor,
                 group=self.group.device_group,
             )
+            if self.rocm_direct_combine:
+                # RCCL connects peeers of the group on first use, so do it here or
+                # otherwise if no decode collective of the group uses RCCL, the
+                # first use happens at the hot path and can stall for seconds.
+                self._kv_gather(
+                    workspace[:max_gathered_tokens], workspace[max_gathered_tokens:]
+                )
 
     def kv_gather(
         self,
