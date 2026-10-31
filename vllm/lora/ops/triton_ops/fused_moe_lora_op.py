@@ -240,16 +240,13 @@ def _fused_moe_lora_one_shot_kernel(
     # SHRINK: tmp[BLOCK_M, BLOCK_R] = x @ A^T, accumulated in fp32 registers.
     offs_r = tl.arange(0, BLOCK_R)
     rank_mask = offs_r < actual_rank
-    # Clamp rank offsets so OOB rows of A / B map to address 0; the mask
-    # zeros the loaded values. Required when BLOCK_R > actual_rank
-    # (e.g. rank=4 padded to 16) -- without clamping, tl.load would address
-    # the next expert's memory.
-    safe_offs_r = tl.where(rank_mask, offs_r, 0)
+    # Keep rank offsets contiguous for coalesced loads. The A/B load masks
+    # prevent accesses beyond actual_rank when BLOCK_R is padded.
     offs_k = tl.arange(0, BLOCK_K)
 
     offs_x_row = offs_token // token_mapping_factor
     x_ptrs = x_ptr + offs_x_row[:, None] * stride_xm + offs_k[None, :] * stride_xk
-    a_ptrs = A_base + offs_k[:, None] * stride_A_k + safe_offs_r[None, :] * stride_A_r
+    a_ptrs = A_base + offs_k[:, None] * stride_A_k + offs_r[None, :] * stride_A_r
 
     tmp = tl.zeros((BLOCK_M, BLOCK_R), dtype=tl.float32)
     if EVEN_K:
@@ -286,9 +283,7 @@ def _fused_moe_lora_one_shot_kernel(
         offs_n = n_start + tl.arange(0, BLOCK_N)
         n_mask = (offs_n < N) & (offs_n < n_hi)
 
-        b_ptrs = (
-            B_base + safe_offs_r[:, None] * stride_B_r + offs_n[None, :] * stride_B_n
-        )
+        b_ptrs = B_base + offs_r[:, None] * stride_B_r + offs_n[None, :] * stride_B_n
         b = tl.load(b_ptrs, mask=rank_mask[:, None] & n_mask[None, :], other=0.0)
 
         acc = tl.dot(tmp_typed, b)  # (BLOCK_M, BLOCK_N) fp32
