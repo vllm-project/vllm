@@ -20,6 +20,7 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.torchao import torchao_version_at_least
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.ep_weight_filter import (
+    compute_eplb_local_expert_ids,
     compute_local_expert_ids,
 )
 from vllm.model_executor.model_loader.weight_utils import (
@@ -423,7 +424,9 @@ class DefaultModelLoader(BaseModelLoader):
             weights_mapper if self._encoder_only_lm_prefixes is not None else None
         )
 
-    def _init_ep_weight_filter(self, model_config: ModelConfig) -> None:
+    def _init_ep_weight_filter(
+        self, model: nn.Module, model_config: ModelConfig
+    ) -> None:
         """Compute local expert ids for EP weight filtering.
 
         When expert parallelism is active, each rank only needs a subset of
@@ -440,13 +443,6 @@ class DefaultModelLoader(BaseModelLoader):
             and parallel_config.enable_expert_parallel
             and parallel_config.enable_ep_weight_filter
         ):
-            return
-
-        # When EPLB is enabled, redundant physical expert slots may map to
-        # logical experts that belong to other ranks in the default partition.
-        # The weight loader needs to see ALL logical expert weights so it can
-        # populate these redundant slots.  Skip the filter entirely.
-        if parallel_config.enable_eplb:
             return
 
         num_experts = model_config.get_num_experts()
@@ -471,12 +467,46 @@ class DefaultModelLoader(BaseModelLoader):
         ep_size = dp_size * pcp_size * tp_size
         ep_rank = dp_rank * pcp_size * tp_size + pcp_rank * tp_size + tp_rank
 
-        self.local_expert_ids = compute_local_expert_ids(
-            num_experts,
-            ep_size,
-            ep_rank,
-            placement=parallel_config.expert_placement_strategy,
-        )
+        if parallel_config.enable_eplb:
+            # Redundant slots replicate experts from other ranks' shards, so
+            # filter by the initial EPLB placement instead of the EP shard.
+            if parallel_config.enable_elastic_ep:
+                # Padded capacity and a placement that evolves at runtime.
+                return
+            num_redundant_experts = parallel_config.eplb_config.num_redundant_experts
+            # The set comes from the config; skipping is only safe when the
+            # model allocated exactly that layout.
+            from vllm.model_executor.models.interfaces import (
+                get_mixture_of_experts_model,
+            )
+
+            moe_model = get_mixture_of_experts_model(model)
+            layout = (
+                getattr(moe_model, "num_logical_experts", None),
+                getattr(moe_model, "num_physical_experts", None),
+            )
+            expected_layout = (num_experts, num_experts + num_redundant_experts)
+            if layout != expected_layout:
+                logger.warning_once(
+                    "EP weight filter disabled: EPLB expert layout "
+                    "(logical, physical)=%s does not match the expected %s.",
+                    layout,
+                    expected_layout,
+                )
+                return
+            self.local_expert_ids = compute_eplb_local_expert_ids(
+                num_experts,
+                num_redundant_experts,
+                ep_size,
+                ep_rank,
+            )
+        else:
+            self.local_expert_ids = compute_local_expert_ids(
+                num_experts,
+                ep_size,
+                ep_rank,
+                placement=parallel_config.expert_placement_strategy,
+            )
         if self.local_expert_ids is not None:
             logger.info_once(
                 "EP weight filter: ep_size=%d, ep_rank=%d, loading %d/%d experts",
@@ -497,7 +527,7 @@ class DefaultModelLoader(BaseModelLoader):
             ):
                 self.load_config.safetensors_load_strategy = "torchao"
 
-        self._init_ep_weight_filter(model_config)
+        self._init_ep_weight_filter(model, model_config)
         self._init_mm_encoder_only_weight_filter(model, model_config)
 
         loaded_weights = model.load_weights(self.get_all_weights(model_config, model))
