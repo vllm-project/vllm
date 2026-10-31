@@ -69,7 +69,7 @@ def _infer_gpu_count(
     run_data: dict[str, object],
     gpu_count_var: str | None,
 ) -> float:
-    direct_candidates = [gpu_count_var] if gpu_count_var else []
+    direct_candidates = [gpu_count_var] if gpu_count_var else ["num_gpus", "gpu_count"]
     direct_gpu_count = _get_numeric(run_data, direct_candidates, allow_zero=False)
     if direct_gpu_count:
         return direct_gpu_count
