@@ -24,6 +24,7 @@ from vllm.models.glm5next.common.sparse_indexer import (
     _decode_topk_seq_lens,
     _fill_causal_indices,
     _fill_short_decode_causal_indices,
+    _gather_kpool_prefill,
     _gather_workspace_shapes,
     _scatter_decode_tokens_by_request,
     kv_cache_as_quant_view,
@@ -67,6 +68,9 @@ def _kpool_compress_insert(
     kpool: int,
     head_dim: int,
     round_scale: bool,
+    positions: torch.Tensor | None = None,
+    tail_kv_cache: torch.Tensor | None = None,
+    tail_slot_mapping: torch.Tensor | None = None,
 ) -> None:
     """Pool ``kpool`` consecutive tokens into one fp8 K and write at pool slots.
 
@@ -75,24 +79,24 @@ def _kpool_compress_insert(
     intra-pool tokens are -1. Every position is treated as a pool-completion
     candidate and non-completions are masked off inside the kernel. Compacting
     the valid rows first costs two device syncs on the eager prefill path and
-    buys nothing numerically. Assumes pool-aligned chunk starts.
+    buys nothing numerically. Pools crossing a chunk boundary use the tail.
     """
     n = slot_mapping.shape[0]
-    # No pool can complete in a batch smaller than one pool; also keeps the
-    # clamped gather indices below in bounds.
-    if n < kpool:
+    if n == 0:
         return
-    pos = torch.arange(n, device=k.device)
-    valid = slot_mapping >= 0
-    # Drop pools whose start falls before the batch (leading padding); their
-    # gate/k data is undefined anyway.
-    write_mask = valid & (pos >= kpool - 1)
-    offs = torch.arange(kpool, device=k.device)
-    idx = (pos - (kpool - 1)).clamp_min(0)[:, None] + offs[None, :]
+    keys, scores, write_mask = _gather_kpool_prefill(
+        k,
+        gate_score,
+        slot_mapping,
+        kpool,
+        positions,
+        tail_kv_cache,
+        tail_slot_mapping,
+    )
     kpool_ops.kpool_compress_and_write_cache(
         kv_cache,
-        k[idx],  # [n, kpool, head_dim]
-        gate_score[idx],
+        keys,
+        scores,
         ape,
         slot_mapping.to(torch.int64),
         pool_size=kpool,
@@ -225,6 +229,11 @@ def sparse_attn_indexer_kpool(
             if n_prefill > 0:
                 # decode tokens are batched first; prefill tokens follow.
                 prefill_slice = slice(num_decode_tokens, num_tokens)
+                tail_meta = None
+                if tail_kv_cache is not None and tail_prefix is not None:
+                    tail_meta = attn_metadata.get(_resolve_layer_name(tail_prefix))
+                if tail_meta is not None:
+                    assert isinstance(tail_meta, DeepseekV32IndexerMetadata)
                 _kpool_compress_insert(
                     k[prefill_slice],
                     gate_score[prefill_slice],
@@ -234,24 +243,28 @@ def sparse_attn_indexer_kpool(
                     index_kpool,
                     head_dim,
                     round_scale=(scale_fmt is not None),
+                    positions=positions[prefill_slice]
+                    if positions is not None
+                    else None,
+                    tail_kv_cache=tail_kv_cache,
+                    tail_slot_mapping=(
+                        tail_meta.slot_mapping[prefill_slice]
+                        if tail_meta is not None
+                        else None
+                    ),
                 )
-                # Persist each request's incomplete prefill pool so decode can
-                # finish it, including after PD transfer. Tail slots use
-                # ``pos % kpool`` within the request's tail block. Processing
-                # only the batch's trailing tokens would miss all but the last
-                # request in a multi-request prefill.
-                if tail_kv_cache is not None and tail_prefix is not None:
-                    tail_meta = attn_metadata.get(_resolve_layer_name(tail_prefix))
-                    if tail_meta is not None:
-                        assert isinstance(tail_meta, DeepseekV32IndexerMetadata)
-                        kpool_ops.kpool_seed_tail_cache(
-                            tail_kv_cache,
-                            k[prefill_slice],
-                            gate_score[prefill_slice],
-                            tail_meta.slot_mapping[prefill_slice],
-                            index_kpool,
-                            head_dim,
-                        )
+                # Seed only after compression has consumed the previous tail.
+                # Persist each request's incomplete pool for decode, including
+                # after PD transfer. Tail slots use positions modulo ring size.
+                if tail_meta is not None:
+                    kpool_ops.kpool_seed_tail_cache(
+                        tail_kv_cache,
+                        k[prefill_slice],
+                        gate_score[prefill_slice],
+                        tail_meta.slot_mapping[prefill_slice],
+                        index_kpool,
+                        head_dim,
+                    )
         else:
             # standard: per-token fp8 quant + scatter (all tokens).
             assert scale_fmt is not None
