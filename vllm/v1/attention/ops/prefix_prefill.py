@@ -4,6 +4,7 @@
 # The kernels in this file are adapted from LightLLM's context_attention_fwd:
 # https://github.com/ModelTC/lightllm/blob/main/lightllm/models/llama/triton_kernel/context_flashattention_nopad.py
 
+import math
 from typing import Any
 
 import torch
@@ -169,6 +170,7 @@ def _fwd_kernel(
     PHYSICAL_BLOCK_SIZE: tl.constexpr,
     BLOCK_N: tl.constexpr,
     SLIDING_WINDOW: tl.constexpr,
+    CTX_SKIP_ALIGN: tl.constexpr,
     num_unroll_cache: tl.constexpr,
     num_unroll_request: tl.constexpr,
     SKIP_DECODE: tl.constexpr,
@@ -245,10 +247,24 @@ def _fwd_kernel(
 
     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL_PADDED], dtype=tl.float32)  # [M,D]
 
+    ctx_loop_start = 0
+    if SLIDING_WINDOW > 0:
+        ctx_loop_start = tl.maximum(
+            0, cur_batch_ctx_len + block_start_loc - SLIDING_WINDOW + 1
+        )
+        ctx_loop_start = tl.minimum(ctx_loop_start, cur_batch_ctx_len)
+        ctx_loop_start = (ctx_loop_start // CTX_SKIP_ALIGN) * CTX_SKIP_ALIGN
+
     # compute query against context (no causal mask here)
-    for start_n in tl.range(
-        0, cur_batch_ctx_len, BLOCK_SIZE, loop_unroll_factor=num_unroll_cache
+    # Counting from 0 keeps V-cache loads vectorized for caches over 2 GB.
+    B_Loc_ctx = B_Loc + (ctx_loop_start // PHYSICAL_BLOCK_SIZE) * stride_b_loc_s
+    for rel_start_n in tl.range(
+        0,
+        cur_batch_ctx_len - ctx_loop_start,
+        BLOCK_SIZE,
+        loop_unroll_factor=num_unroll_cache,
     ):
+        start_n = ctx_loop_start + rel_start_n
         # Under a block size of 544 (Qwen/Qwen3-Next-80B-A3B-Thinking),
         # replace one physical block every 17 32-Tile blocks
         # Calculate the logical block index of each of the 32 tokens
@@ -256,13 +272,13 @@ def _fwd_kernel(
         # Physical-block K/V cache offsets for the context tokens in this tile
         # (handles cross-block tiles via B_Loc). Same addressing is reused for
         # the current-chunk cache read below.
-        token_indices = start_n + offs_bs_n
+        token_indices = rel_start_n + offs_bs_n
         # Context tokens are always followed by the current chunk, so the tile
         # never steps past this batch's block-table row; the block-table load
         # stays unmasked (MASK_BLOCK_TABLE=False) and offs_bs_n is an unused
         # placeholder for token_valid.
         off_k, off_v = _paged_kv_cache_offsets(
-            B_Loc,
+            B_Loc_ctx,
             cur_batch,
             token_indices,
             offs_bs_n,
@@ -1038,11 +1054,12 @@ def context_attention_fwd(
         BLOCK_DMODEL=Lk,
         BLOCK_DMODEL_PADDED=Lk_padded,
         SLIDING_WINDOW=sliding_window,
+        CTX_SKIP_ALIGN=math.lcm(TRITON_BLOCK_SIZE, real_block_size),
         SKIP_DECODE=skip_decode,
         USE_FP8=fp8_out_scale is not None,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
-        num_unroll_cache=4,
+        num_unroll_cache=1 if sliding_window > 0 and Lk_padded > 128 else 4,
         num_unroll_request=1,
         num_warps=4,
         num_stages=1,

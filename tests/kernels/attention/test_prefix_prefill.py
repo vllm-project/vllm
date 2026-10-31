@@ -122,6 +122,11 @@ def test_contexted_kv_attention(
     op: Callable,
     interleave_v: bool,
     block_size: int = 32,
+    max_query_len: int = 1024,
+    max_ctx_len: int = 1024,
+    num_seqs: int = 10,
+    cache_fill: float = 0.0,
+    kv_range: float = 1e-3,
 ) -> None:
     if "fp8" in kv_cache_dtype and not current_platform.has_device_capability(89):
         pytest.skip(
@@ -144,11 +149,11 @@ def test_contexted_kv_attention(
     # see also similar issue: https://github.com/Dao-AILab/flash-attention/issues/523
     torch.accelerator.set_device_index(device)
 
-    MAX_SEQ_LEN = 1024
-    MAX_CTX_LEN = 1024
-    BS = 10
-    cache_size = 640
-    max_block_per_request = 64
+    MAX_SEQ_LEN = max_query_len
+    MAX_CTX_LEN = max_ctx_len
+    BS = num_seqs
+    max_block_per_request = (MAX_SEQ_LEN + MAX_CTX_LEN) // block_size
+    cache_size = BS * max_block_per_request
     query_lens = [random.randint(16, MAX_SEQ_LEN) for _ in range(BS)]
     # ensure one sequence in batch is a decode
     query_lens[-1] = 1
@@ -165,18 +170,18 @@ def test_contexted_kv_attention(
     output = torch.full((num_tokens, num_heads, head_size), float("nan"), dtype=dtype)
 
     kv = torch.empty(sum(seq_lens), 2, num_kv_heads, head_size, dtype=dtype)
-    kv.uniform_(-1e-3, 1e-3)
+    kv.uniform_(-kv_range, kv_range)
     key, value = kv.unbind(dim=1)
 
     if kv_cache_dtype == "auto":
         cache_dtype = dtype
     else:
         cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype]
-    k_cache = torch.zeros(
-        cache_size, block_size, num_kv_heads, head_size, dtype=cache_dtype
+    k_cache = torch.full(
+        (cache_size, block_size, num_kv_heads, head_size), cache_fill, dtype=cache_dtype
     )
-    v_cache = torch.zeros(
-        cache_size, block_size, num_kv_heads, head_size, dtype=cache_dtype
+    v_cache = torch.full(
+        (cache_size, block_size, num_kv_heads, head_size), cache_fill, dtype=cache_dtype
     )
     k = torch.zeros(sum(query_lens), num_kv_heads, head_size, dtype=dtype)
     v = torch.zeros(sum(query_lens), num_kv_heads, head_size, dtype=dtype)
@@ -345,6 +350,42 @@ def test_contexted_kv_attention(
     output_ref = output_ref.permute(1, 0, 2).contiguous()
     atol = 1e-3 if "fp8" in kv_cache_dtype else 1e-4
     torch.testing.assert_close(output, output_ref, atol=atol, rtol=0)
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("interleave_v", [False, True])
+@pytest.mark.parametrize("block_size", [16, 32, 48])
+@pytest.mark.parametrize(
+    "sliding_window,max_query_len,max_ctx_len,num_seqs",
+    [(256, 256, 4096, 4), (40, 1024, 64, 10)],
+)
+@torch.inference_mode()
+def test_contexted_kv_attention_window_shorter_than_context(
+    device: str,
+    interleave_v: bool,
+    block_size: int,
+    sliding_window: int,
+    max_query_len: int,
+    max_ctx_len: int,
+    num_seqs: int,
+) -> None:
+    test_contexted_kv_attention(
+        num_heads=8,
+        num_queries_per_kv=1,
+        head_size=128,
+        sliding_window=sliding_window,
+        dtype=torch.float16,
+        kv_cache_dtype="auto",
+        device=device,
+        op=context_attention_fwd,
+        interleave_v=interleave_v,
+        block_size=block_size,
+        max_query_len=max_query_len,
+        max_ctx_len=max_ctx_len,
+        num_seqs=num_seqs,
+        cache_fill=float("nan"),
+        kv_range=0.1,
+    )
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm backend")
