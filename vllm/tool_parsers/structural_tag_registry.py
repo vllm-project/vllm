@@ -537,8 +537,9 @@ def get_lfm2_structural_tag(
     LFM2 calls tools as ``<|tool_call_start|>[name(k=v), ...]<|tool_call_end|>``.
     The grammar forces the start sentinel and a known name for the first call,
     then leaves the pythonic arguments (and any further calls) free up to the
-    end sentinel, for the lfm2 tool parser to read back. One block can hold
-    several calls, so ``parallel_tool_calls=false`` is enforced after parsing.
+    closing ``)]`` and end sentinel, for the lfm2 tool parser to read back. One
+    block can hold several calls, so ``parallel_tool_calls=false`` is enforced
+    after parsing.
 
     The sentinels are strings, not ``TokenFormat``: request validation compiles
     the tag without a tokenizer, which cannot resolve token names. The content
@@ -557,10 +558,10 @@ def get_lfm2_structural_tag(
                         for tool in tools
                     ]
                 ),
-                AnyTextFormat(),
+                AnyTextFormat(excludes=[_LFM2_TOOL_CALL_START, _LFM2_TOOL_CALL_END]),
             ]
         ),
-        end=_LFM2_TOOL_CALL_END,
+        end=")]" + _LFM2_TOOL_CALL_END,
     )
 
     if tool_choice == "auto":

@@ -132,7 +132,8 @@ class Lfm2ToolParser(ToolParser):
             name = getattr(function, "name", None) or getattr(tool, "name", None)
             if not name or all(part.isidentifier() for part in name.split(".")):
                 continue
-            alias = f"_lfm2_tool_alias_{len(aliases)}"
+            # Terminated so that no alias is a prefix of another (_1_, _10_).
+            alias = f"_lfm2_tool_alias_{len(aliases)}_"
             renamed = re.sub(
                 r"(?<=(?:^|[\[,])\s*)" + re.escape(name) + r"(?=\s*\()",
                 alias,
