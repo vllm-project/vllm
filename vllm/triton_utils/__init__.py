@@ -2,7 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import TYPE_CHECKING
 
+import torch
+
 import vllm.envs as envs
+from vllm.platforms import current_platform
 from vllm.triton_utils.importing import (
     HAS_TRITON,
     TritonLanguagePlaceholder,
@@ -40,6 +43,18 @@ if envs.VLLM_TRITON_FORCE_FIRST_CONFIG:
 LOG2E = 1.4426950408889634
 LOGE2 = 0.6931471805599453
 
+
+def fp32_dot_precision(dtype: torch.dtype) -> str | None:
+    """``tl.dot`` ``input_precision`` for ``dtype`` operands. Float32 dots get
+    float32 accuracy unless TF32 is allowed by ``torch.set_float32_matmul_precision``
+    (``VLLM_FLOAT32_MATMUL_PRECISION``): 3xTF32 on CUDA, which matches IEEE
+    accuracy on tensor cores, and IEEE elsewhere. Other dtypes keep Triton's
+    default."""
+    if dtype != torch.float32 or torch.get_float32_matmul_precision() != "highest":
+        return None
+    return "tf32x3" if current_platform.is_cuda() else "ieee"
+
+
 __all__ = [
     "HAS_TRITON",
     "triton",
@@ -50,5 +65,6 @@ __all__ = [
     "gluon",
     "gl",
     "aggregate",
+    "fp32_dot_precision",
     "use_tensor_descriptor",
 ]
