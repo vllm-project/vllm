@@ -178,9 +178,11 @@ def compute_tile_loop_bounds(
        sequence.
     2. Sliding-window pruning: narrows ``[tile_start, tile_end)`` to
        only tiles that can contain an allowed key under SWA. For non-causal
-       sequences, the window extends in both directions. For Gemma4's
-       window-clamped multimodal prefix mask, the bounds include the union of
-       the base mask and each image range intersecting the query block.
+       sequences, the window extends in both directions. With multimodal
+       prefix ranges (clamped to the window for Gemma4 or not), the bounds
+       cover the union of the base mask and each image range intersecting
+       the query block; full-attention layers then stop at the causal bound
+       extended by those ranges instead of ``seq_len``.
     3. 3D scoping: when ``IS_3D`` is True, further narrows to the
        segment's slice via ``(segm_idx * tiles_per_segment,
        (segm_idx + 1) * tiles_per_segment)``.
@@ -209,12 +211,18 @@ def compute_tile_loop_bounds(
     # Default: keep previous global behavior
     tile_start = 0
     tile_end = num_tiles
-    # Prefix ranges normally override the sliding window, so they require the
-    # complete sequence. Gemma4 instead clamps prefix attention to the left
-    # edge of the sliding window. In that case, the union of possible keys is
-    # bounded by the normal left window and the end of any multimodal range
-    # intersecting this query block.
-    can_prune_sliding = (not USE_R_SWA) and ((not USE_MM_PREFIX) or MM_PREFIX_CLAMP_SW)
+    # Multimodal prefix ranges widen the key set only for query rows that lie
+    # inside a range (compute_kv_seq_mask requires the query AND the key to be
+    # in the same range), so the union of possible keys for this Q-block is the
+    # sliding window plus every range intersecting the block. Gemma4 clamps a
+    # range to the left edge of the window (MM_PREFIX_CLAMP_SW); other
+    # prefix-LM models may reach back to the first token of the range, so the
+    # range start itself is the lower bound. Ranges that do not intersect the
+    # block cannot unmask anything for it. Callers that mask with ranges they
+    # do not pass here (MAX_MM_RANGES == 0) keep the full scan.
+    can_prune_sliding = (not USE_R_SWA) and (
+        (not USE_MM_PREFIX) or MM_PREFIX_CLAMP_SW or MAX_MM_RANGES > 0
+    )
     if SLIDING_WINDOW > 0 and can_prune_sliding:
         # Query rows covered by this Q-block
         qpos_lo = q_block_local_idx * BLOCK_Q
@@ -237,7 +245,7 @@ def compute_tile_loop_bounds(
             last_allowed_key = context_len + qpos_hi + SLIDING_WINDOW - 1
         else:
             last_allowed_key = context_len + qpos_hi
-        if USE_MM_PREFIX and MM_PREFIX_CLAMP_SW:
+        if USE_MM_PREFIX and MAX_MM_RANGES > 0:
             query_abs_lo = context_len + qpos_lo
             query_abs_hi = context_len + qpos_hi
             for i in range(MAX_MM_RANGES):
@@ -252,9 +260,12 @@ def compute_tile_loop_bounds(
                     & (range_start <= query_abs_hi)
                     & (range_end >= query_abs_lo)
                 )
-                mm_first_allowed_key = tl.maximum(
-                    range_start, query_abs_lo - SLIDING_WINDOW + 1
-                )
+                if MM_PREFIX_CLAMP_SW:
+                    mm_first_allowed_key = tl.maximum(
+                        range_start, query_abs_lo - SLIDING_WINDOW + 1
+                    )
+                else:
+                    mm_first_allowed_key = range_start
                 first_allowed_key = tl.minimum(
                     first_allowed_key,
                     tl.where(
@@ -270,6 +281,46 @@ def compute_tile_loop_bounds(
         last_allowed_key = tl.minimum(last_allowed_key, seq_len - 1)
         # Convert to tile indices and clamp
         tile_start = tl.maximum(0, first_allowed_key // TILE_SIZE)
+        tile_end = tl.minimum((last_allowed_key // TILE_SIZE) + 1, num_tiles)
+
+    # Full-attention layer with multimodal prefix ranges: keys past the causal
+    # bound are reachable only through a range containing the query, so the
+    # loop can stop at the farthest intersecting range end instead of seq_len.
+    # Keep the condition inline: Triton turns a constexpr assigned to a local
+    # into a runtime value, which would compile the range loads unconditionally.
+    if (
+        SLIDING_WINDOW <= 0
+        and USE_MM_PREFIX
+        and MAX_MM_RANGES > 0
+        and USE_CAUSAL
+        and (not USE_PER_SEQ_CAUSAL)
+        and (not USE_R_SWA)
+    ):
+        qpos_lo = q_block_local_idx * BLOCK_Q
+        qpos_hi = tl.minimum(
+            qpos_lo + (BLOCK_M - 1) // num_queries_per_kv,
+            cur_batch_query_len - 1,
+        )
+        query_abs_lo = context_len + qpos_lo
+        query_abs_hi = context_len + qpos_hi
+        last_allowed_key = query_abs_hi
+        for i in range(MAX_MM_RANGES):
+            range_start = tl.load(
+                mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2
+            )
+            range_end = tl.load(
+                mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2 + 1
+            )
+            intersects_query_block = (
+                (range_start < range_end)
+                & (range_start <= query_abs_hi)
+                & (range_end >= query_abs_lo)
+            )
+            last_allowed_key = tl.maximum(
+                last_allowed_key,
+                tl.where(intersects_query_block, range_end, last_allowed_key),
+            )
+        last_allowed_key = tl.minimum(last_allowed_key, seq_len - 1)
         tile_end = tl.minimum((last_allowed_key // TILE_SIZE) + 1, num_tiles)
 
     if IS_3D:
