@@ -1124,6 +1124,19 @@ class EngineCore:
     def execute_dummy_batch(self):
         self.model_executor.execute_dummy_batch()
 
+    def check_ready(self) -> bool:
+        """Check readiness, running a dummy batch if no request is in flight.
+
+        Returns:
+            False if the engine is sleeping or paused, True otherwise.
+
+        """
+        if self.is_sleeping():
+            return False
+        if not (self.scheduler.has_requests() or self.batch_queue):
+            self.execute_dummy_batch()
+        return True
+
     def compute_weight_checksums(self) -> list[dict[str, str]]:
         return self.collective_rpc("compute_weight_checksums")
 
@@ -2471,6 +2484,11 @@ class DPEngineCoreProc(EngineCoreProc):
         self.engines_running = True
 
         return False
+
+    def check_ready(self) -> bool:
+        # A dummy batch outside the DP wave would enter the DP all-reduce
+        # without the peer ranks.
+        return not self.is_sleeping()
 
     def add_request(self, request: Request, request_wave: int = 0):
         super().add_request(request, request_wave)
