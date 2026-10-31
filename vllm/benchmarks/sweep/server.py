@@ -52,15 +52,18 @@ class ServerProcess:
             # Need `VLLM_SERVER_DEV_MODE=1` for `_reset_caches`
             env=os.environ | {"VLLM_SERVER_DEV_MODE": "1"},
         )
+        self._stopped = False
 
     def stop(self):
-        server_process = self._server_process
+        if self._stopped:
+            return
 
-        if server_process.poll() is None:
-            # In case only some processes have been terminated
-            with contextlib.suppress(ProcessLookupError):
-                # We need to kill both API Server and Engine processes
-                os.killpg(os.getpgid(server_process.pid), signal.SIGKILL)
+        server_process = self._server_process
+        # start_new_session makes the server PID the PGID, even after it exits.
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(server_process.pid, signal.SIGKILL)
+        server_process.wait()
+        self._stopped = True
 
     def run_subcommand(self, cmd: list[str]):
         return subprocess.run(
