@@ -92,6 +92,51 @@ def decode_custom_tool_input_prefix(arguments: str) -> str:
     return payload
 
 
+_CUSTOM_TOOL_INPUT_HEAD = encode_custom_tool_input("")[:-2]
+
+
+def extend_custom_tool_input_prefix(
+    arguments: str, payload: str, end: int
+) -> tuple[str, int] | None:
+    """:func:`decode_custom_tool_input_prefix` of *arguments*, decoding only
+    ``arguments[end:]``. *payload* and *end* come from the previous call on a
+    prefix of *arguments* (``""`` and 0 at first). Returns None when the
+    arguments do not start as :func:`encode_custom_tool_input` writes them,
+    or once the payload string closes; only a full decode is exact then."""
+    if not end:
+        if not arguments.startswith(_CUSTOM_TOOL_INPUT_HEAD):
+            return ("", 0) if _CUSTOM_TOOL_INPUT_HEAD.startswith(arguments) else None
+        end = len(_CUSTOM_TOOL_INPUT_HEAD)
+    # partial_json_parser strips trailing whitespace before it completes the
+    # string. Decode up to the last complete escape, holding back a high
+    # surrogate so that a pair is never split between calls.
+    tail = arguments[end:].rstrip()
+    i = cut = 0
+    high_end = -1
+    while i < len(tail):
+        if tail[i] == "\\":
+            if tail[i + 1 : i + 2] == "u":
+                if "d800" <= tail[i + 2 : i + 6].lower() <= "dbff":
+                    high_end = i + 6
+                i += 6
+            else:
+                i += 2
+            if i > len(tail):
+                break
+        else:
+            i += 1
+        cut = i
+    if cut == high_end:
+        cut -= 6
+    try:
+        chunk = json.loads(f'"{tail[:cut]}"')
+    except ValueError:
+        return None
+    if chunk and "\ud800" <= chunk[-1] <= "\udbff":
+        return None
+    return payload + chunk, end + cut
+
+
 def _item_type(item: ResponseInputOutputItem) -> str | None:
     return item.get("type") if isinstance(item, dict) else getattr(item, "type", None)
 
