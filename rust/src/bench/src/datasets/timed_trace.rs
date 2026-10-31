@@ -15,10 +15,10 @@
 //! are remappable via `--timed-trace-label-*`; timestamps are scaled by
 //! `--timed-trace-sec-multiplier`.
 //!
-//! Deviation from Python: chunk contents are seeded from (hash_id, size) with a
-//! fixed mixing function, so they are bit-reproducible across runs. Python
-//! seeds via `hash(f"{h}:{size}")`, which is randomized per process unless
-//! PYTHONHASHSEED is pinned.
+//! Deviation from Python: Rust seeds chunk contents from (hash_id, size) with a
+//! fixed mixing function; Python seeds from SHA-256 of hash_id alone. Both are
+//! reproducible across runs, but their token sequences differ. Python also
+//! preserves the prefix between partial and full expansions of a chunk.
 
 use std::collections::HashMap;
 use std::sync::Arc;
