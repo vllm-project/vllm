@@ -526,10 +526,19 @@ def _check_layers(rank: int, tp: int, device) -> None:
         assert tok[same].min() > 0.99, tag
 
         # ---- the FFN launch, from the same unreduced wo_b output
-        f = runner.ffn(mw, part, res, post, comb, attn_pre)
-        torch.testing.assert_close(f[1], res2, rtol=2**-8, atol=1e-6)
+        # (its seam tuned at TP4 / TP8: bit for bit the generic build's; both
+        # write the generic scratch)
         off = scratch_layout(M, tp)["normed"][0]
-        normed = runner.scratch(M)[off : off + M * HIDDEN * 2].view(bf).view(M, HIDDEN)
+        ffn_of = {}
+        seam_tuned = runner.build_key(M, 0).tuned_seam  # the FFN launch: ratio 0
+        for r in (generic, runner) if seam_tuned else (runner,):
+            f = r.ffn(mw, part, res, post, comb, attn_pre)
+            normed = r.scratch(M)[off : off + M * HIDDEN * 2]
+            ffn_of[r] = [t.clone() for t in (*f, normed)]
+        if generic in ffn_of:
+            assert all(map(torch.equal, ffn_of[runner], ffn_of[generic])), tag
+        torch.testing.assert_close(f[1], res2, rtol=2**-8, atol=1e-6)
+        normed = normed.view(bf).view(M, HIDDEN)
         torch.testing.assert_close(normed, xf, rtol=2**-7, atol=1e-6)
         # TODO: back to 0.9999 / 0.015 with the one above (ROCm/aiter#6548)
         assert _cos(f[0], out) > 0.9998 and _rel(f[0], out) < 0.02, tag

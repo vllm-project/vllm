@@ -321,6 +321,7 @@ class DSV41MonoLayer:
                     timeline=self.timeline,
                     experts=experts,
                     topk=topk,
+                    generic=self.generic,
                 )
             )
         return self._kernels[key]

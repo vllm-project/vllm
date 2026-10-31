@@ -431,9 +431,12 @@ def stage_route(c, t):
     lane, wave = c["lane"], c["wave"]
     experts, topk = c["rs"].experts, c["rs"].topk
     a = c["args"]
+    # a Python bool: assigned inside the traced ``if`` below it would be
+    # carried as one of the branch's results, which a bool cannot be
+    early_bias = c["rs"].tuned or c.get("early_bias", False)
     if wave == 0:
         ept = experts // 64
-        if const_expr(c["rs"].tuned):
+        if const_expr(early_bias):
             bias = [ld_f32(a["bias"], lane + 64 * i) for i in range(ept)]
         # each logit's router part sums, added in part order (vLLM's gate: f32 out)
         assert ROUTER_PARTS == 4
@@ -458,7 +461,7 @@ def stage_route(c, t):
             sc = _score(logits[i])
             # aiter's NaN guards: a NaN score weighs 0 and never wins
             orig.append(fx.Float32(fx.isnan(sc).select(fx.Float32(0.0), sc)))
-            b = bias[i] if c["rs"].tuned else ld_f32(a["bias"], e)
+            b = bias[i] if early_bias else ld_f32(a["bias"], e)
             val = fx.max(sc + b, neg)
             vals.append(fx.isnan(val).select(neg, val))
             idxs.append(fx.Int32(e))

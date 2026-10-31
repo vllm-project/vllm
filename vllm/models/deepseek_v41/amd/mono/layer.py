@@ -70,8 +70,9 @@ EPOCH_COUNTERS = -(-(mb_back.EPOCH_MARKS + BLOCKS) // 64) * 64
 EPOCH_WORDS = EPOCH_COUNTERS + COUNTER_WORDS
 # A timeline build of K2 stamps the clock into one record of K2_POINTS i64 a
 # CTA. The attention back uses points 0 .. BACK_POINTS - 1. The FFN seam's
-# three task loops (push, reduce and slice, then gate, then norm) end at the
-# next three points, and the MoE's seven stages (moe.TL_STAGES) at the seven
+# three task loops (push, reduce and slice, then gate, then norm; a tuned seam
+# runs the norms before the gates) end at the next three points, and the MoE's
+# seven stages (moe.TL_STAGES) at the seven
 # after those. The last points (moe.TL_UG_POINTS) split the ug stage of a
 # step with one token tile.
 K2_SEAM_POINT = mb_back.BACK_POINTS
@@ -114,6 +115,12 @@ class MonoBuild:
     @property
     def tuned_front(self) -> bool:
         return self.tuned or (not GFX942 and not self.generic and self.tp in (4, 8))
+
+    @property
+    def tuned_seam(self) -> bool:
+        """K2's and the FFN launch's FFN seam: tuned wherever K1 is (on the
+        generic scratch layout at TP4 / TP8)."""
+        return self.tuned_front
 
 
 def _moe_key(key: MonoBuild) -> MoeBuild:
@@ -661,7 +668,7 @@ def run_ffn(
         "fl": sl.fl.ptr,
         "red": sl.red.ptr,
         "pend_lds": sl.pl.ptr,
-        "tuned": key.tuned,
+        "tuned": key.tuned_seam,
         "put": amb.put,
         "put_bf": amb.put_bf,
         "put_words": amb.put_words,
@@ -703,6 +710,7 @@ def run_ffn(
         s, rs, lds.moe.peek(), amb, bases, mlayout, scratch, margs, rank, own
     )
     cb["x_cm"], cb["x_ready"] = CM_DEV, True
+    cb["early_bias"] = key.tuned_seam
     cb["tag"] = ep & 255
     for i, region in enumerate(COUNTERS):
         cb[region] = sreg(a["epoch"], 4 * (EPOCH_COUNTERS + i * moe.TAGS), region)
@@ -710,7 +718,7 @@ def run_ffn(
     # attention, so it stamps its own start here.
     if const_expr(part is not None):
         mark(0)
-    if const_expr(key.tuned):
+    if const_expr(key.tuned_seam):
         for task in range(first_task(bid, 0), SLICES, BLOCKS):
             if const_expr(part is not None):
                 seam.stage_push(ca, task, part)
@@ -774,7 +782,7 @@ def build_mono_k2(key: MonoBuild):
     MoeLds = moe.moe_smem(s, rs, False)
     half = peer_half_bytes(tp)
     assert SLICES + 2 * s <= BLOCKS
-    SeamLds = _seam_lds(s, key.tuned)
+    SeamLds = _seam_lds(s, key.tuned_seam)
 
     @fx.union
     class K2Lds:
@@ -1092,7 +1100,7 @@ def build_mono_ffn(key: MonoBuild):
     MoeLds = moe.moe_smem(s, rs, False)
     half = peer_half_bytes(tp)
     assert SLICES + 2 * s <= BLOCKS
-    SeamLds = _seam_lds(s)
+    SeamLds = _seam_lds(s, key.tuned_seam)
 
     @fx.union
     class FfnLds:
