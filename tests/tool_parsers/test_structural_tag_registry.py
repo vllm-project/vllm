@@ -965,6 +965,9 @@ def test_lfm2_required_accepts_native_tool_call_blocks(body: str):
         "<|tool_call_start|>[get_time(zone='UTC')]<|tool_call_end|>",
         '[{"name": "get_weather", "parameters": {"city": "Paris"}}]',
         "<|tool_call_start|>[get_weather(city='Paris')]",
+        # the call must be closed before the end sentinel
+        "<|tool_call_start|>[get_weather(<|tool_call_end|>",
+        "<|tool_call_start|>[get_weather(city='x')<|tool_call_start|>]<|tool_call_end|>",
     ],
 )
 def test_lfm2_required_rejects_invalid_tool_call_blocks(body: str):
