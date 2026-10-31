@@ -698,6 +698,7 @@ class TestClientFlows:
         session.finish_request("req-1")
         (failure,) = session.poll().loads
         assert (failure.job_id, failure.success) == (8, False)
+        assert failure.request_finished
         assert not _released(failure)
         assert session._client.has_active_loads is True
 
@@ -750,6 +751,7 @@ class TestClientFlows:
         )
         (failure,) = session.poll().loads
         assert (failure.job_id, failure.success) == (10, False)
+        assert failure.request_finished
         assert _released(failure)
 
         conn.enqueue(
@@ -3017,6 +3019,71 @@ class TestPendingSession:
 
 
 class TestDisconnect:
+    @pytest.mark.parametrize(
+        "completion", ["abort_ack", "transfer_done", "timeout", "close"]
+    )
+    @pytest.mark.parametrize("finished", [False, True])
+    def test_late_failure_preserves_request_finish(
+        self, lookup_clock, completion, finished
+    ):
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.request_blocks(7, "req-7", [OffloadKey(b"key")], [0])
+        if finished:
+            session.finish_request("req-7")
+        if completion == "close":
+            result = session.close()
+            assert result.failed_jobs == [7]
+            assert result.failed_req_ids == ([] if finished else ["req-7"])
+            return
+        loads = []
+        if not finished and completion in ("timeout", "abort_ack"):
+            lookup_clock.now = _PD_LOAD_TIMEOUT_S + 1
+            loads.extend(session.poll().loads)
+        if completion == "timeout":
+            if finished:
+                lookup_clock.now = _ABORT_ACK_TIMEOUT_S + 1
+            else:
+                lookup_clock.now += _ABORT_ACK_TIMEOUT_S + 1
+        else:
+            terminal = AbortAckMsg if completion == "abort_ack" else TransferDoneMsg
+            msg = {
+                TYPE_KEY: terminal.TYPE,
+                TransferDoneMsg.KV_REQUEST_ID: "req-7",
+                TransferDoneMsg.ROUND_SEQ: 0,
+            }
+            if terminal is TransferDoneMsg:
+                msg[TransferDoneMsg.SUCCESS] = False
+            conn.enqueue(msg)
+        loads.extend(session.poll().loads)
+        assert len(loads) == 1
+        assert (loads[0].job_id, loads[0].kv_request_id, loads[0].success) == (
+            7,
+            "req-7",
+            False,
+        )
+        assert loads[0].request_finished is finished
+
+    def test_finish_marks_buffered_result_before_request_id_reuse(self):
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.request_blocks(7, "req-7", [OffloadKey(b"old")], [0])
+        session._client.on_transfer_done("req-7", success=False, round_seq=0)
+        session.finish_request("req-7")
+        session.request_blocks(8, "req-7", [OffloadKey(b"new")], [1])
+        loads = session.poll().loads
+        assert len(loads) == 1 and loads[0].job_id == 7 and not loads[0].success
+        assert loads[0].request_finished
+        conn.enqueue(
+            {
+                TYPE_KEY: TransferDoneMsg.TYPE,
+                TransferDoneMsg.KV_REQUEST_ID: "req-7",
+                TransferDoneMsg.ROUND_SEQ: 0,
+                TransferDoneMsg.SUCCESS: False,
+            }
+        )
+        assert session.poll().loads == [LoadResult(8, "req-7", success=False)]
+
     def test_disconnect_marks_session_dead(self):
         session, conn, _ = _make_session()
         _activate(session, conn)
