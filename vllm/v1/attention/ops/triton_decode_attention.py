@@ -34,7 +34,7 @@ import torch
 from packaging import version
 
 from vllm.platforms import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import tl, triton, use_tensor_descriptor
 
 is_hip_ = current_platform.is_rocm()
 
@@ -310,6 +310,7 @@ def _fwd_grouped_kernel_stage1(
     Lk: tl.constexpr,
     Lv: tl.constexpr,
     IS_MLA: tl.constexpr = False,
+    USE_TD: tl.constexpr = False,
 ):
     cur_batch = tl.program_id(0)
     cur_head_id = tl.program_id(1)
@@ -328,26 +329,49 @@ def _fwd_grouped_kernel_stage1(
     cur_batch_seq_len = tl.load(B_Seqlen + cur_batch)
     cur_batch_req_idx = cur_batch
 
-    offs_q = cur_batch * stride_qbs + cur_head[:, None] * stride_qh + offs_d[None, :]
-    q = tl.load(
-        Q + offs_q,
-        mask=(mask_h[:, None]) & (mask_d[None, :]),
-        other=0.0,
-        cache_modifier=".ca",
-    )
+    if USE_TD:
+        # One KV head: the descriptor bounds are exactly mask_h and mask_d.
+        q_desc = tl.make_tensor_descriptor(
+            Q + cur_batch * stride_qbs,
+            shape=[q_head_num, Lk],
+            strides=[stride_qh, 1],
+            block_shape=[BLOCK_H, BLOCK_DMODEL],
+        )
+        q = q_desc.load([cur_head_id * VALID_BLOCK_H, 0])
+    else:
+        offs_q = (
+            cur_batch * stride_qbs + cur_head[:, None] * stride_qh + offs_d[None, :]
+        )
+        q = tl.load(
+            Q + offs_q,
+            mask=(mask_h[:, None]) & (mask_d[None, :]),
+            other=0.0,
+            cache_modifier=".ca",
+        )
 
     if BLOCK_DPE > 0:
         offs_dpe = BLOCK_DMODEL + tl.arange(0, BLOCK_DPE)
         mask_dpe = offs_dpe < Lk
-        off_qpe = (
-            cur_batch * stride_qbs + cur_head[:, None] * stride_qh + offs_dpe[None, :]
-        )
-        qpe = tl.load(
-            Q + off_qpe,
-            mask=(mask_h[:, None]) & (mask_dpe[None, :]),
-            other=0.0,
-            cache_modifier=".ca",
-        )
+        if USE_TD:
+            qpe_desc = tl.make_tensor_descriptor(
+                Q + cur_batch * stride_qbs,
+                shape=[q_head_num, Lk],
+                strides=[stride_qh, 1],
+                block_shape=[BLOCK_H, BLOCK_DPE],
+            )
+            qpe = qpe_desc.load([cur_head_id * VALID_BLOCK_H, BLOCK_DMODEL])
+        else:
+            off_qpe = (
+                cur_batch * stride_qbs
+                + cur_head[:, None] * stride_qh
+                + offs_dpe[None, :]
+            )
+            qpe = tl.load(
+                Q + off_qpe,
+                mask=(mask_h[:, None]) & (mask_dpe[None, :]),
+                other=0.0,
+                cache_modifier=".ca",
+            )
 
     kv_len_per_split = tl.cdiv(cur_batch_seq_len, NUM_KV_SPLITS)
     split_kv_start = kv_len_per_split * split_kv_id
@@ -530,6 +554,20 @@ def _decode_grouped_att_m_fwd(
         # exceeds 101376 bytes limit
         num_stages = 1
 
+    # 2D block reads for the Q tile on XPU, for the MLA tiles (one KV head).
+    q_elem = q.element_size()
+    use_td = (
+        current_platform.is_xpu()
+        and is_mla
+        and Lk in (576, 288)
+        and kv_group_num == head_num
+        and use_tensor_descriptor()
+        and q.stride(-1) == 1
+        and q.data_ptr() % 16 == 0
+        and (q.stride(0) * q_elem) % 16 == 0
+        and (q.stride(1) * q_elem) % 16 == 0
+    )
+
     _fwd_grouped_kernel_stage1[grid](
         q,
         k_buffer,
@@ -567,6 +605,7 @@ def _decode_grouped_att_m_fwd(
         Lk=Lk,
         Lv=Lv,
         IS_MLA=is_mla,
+        USE_TD=use_td,
         **extra_kargs,
     )
 
