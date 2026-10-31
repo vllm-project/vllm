@@ -22,6 +22,7 @@ from pydantic import ValidationError
 
 import vllm.config.vllm as vllm_config_module
 import vllm.envs as envs
+from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm.compilation.backends import VllmBackend
 from vllm.config import (
     AttentionConfig,
@@ -50,7 +51,7 @@ from vllm.config.mamba import MambaBackendEnum
 from vllm.config.speculative import _validate_qwen3_omni_dspark
 from vllm.config.utils import get_field
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
-from vllm.platforms import Platform, PlatformEnum, current_platform
+from vllm.platforms import CpuArchEnum, Platform, PlatformEnum, current_platform
 from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.config import (
     _patch_hf_transformers_nested_rope_validation,
@@ -58,6 +59,8 @@ from vllm.transformers_utils.config import (
     try_get_dense_modules,
 )
 from vllm.v1.attention.backend import AttentionCGSupport
+from vllm.v1.worker.gpu.spec_decode.dflash2.config import DFlash2SpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.lilicorr.config import LiLiCorrSpeculatorConfig
 
 DEVICE_TYPE = current_platform.device_type
 
@@ -578,7 +581,13 @@ def test_model_runner_default_preserves_backend_fallback(
     monkeypatch.setattr(vllm_config_module, "HAS_TRITON", has_triton)
 
     config = VllmConfig()
-    assert config.use_v2_model_runner == (has_triton or platform.is_unspecified())
+    # non-x86 CPUs support MRv2 without Triton
+    supports_v2_without_triton = (
+        platform.is_cpu() and platform.get_cpu_architecture() != CpuArchEnum.X86
+    )
+    assert config.use_v2_model_runner == (
+        has_triton or platform.is_unspecified() or supports_v2_without_triton
+    )
 
 
 def test_v2_frontend_config_can_be_created_without_triton():
@@ -608,17 +617,32 @@ def test_v2_frontend_config_can_be_created_without_triton():
     )
 
 
-def test_hisparse_requires_v2_model_runner():
-    config = object.__new__(VllmConfig)
-    config.attention_config = AttentionConfig(hisparse_config=HiSparseConfig())
+@pytest.mark.parametrize(
+    ("overrides", "feature"),
+    [
+        (
+            {"attention_config": AttentionConfig(hisparse_config=HiSparseConfig())},
+            "HiSparse",
+        ),
+        ({"watermark_config": WatermarkConfig(key=42)}, "watermarking"),
+    ],
+)
+def test_v1_model_runner_rejects_v2_only_config(overrides, feature):
+    config = SimpleNamespace(
+        parallel_config=ParallelConfig(distributed_executor_backend="mp"),
+        scheduler_config=SchedulerConfig.default_factory(async_scheduling=False),
+        attention_config=AttentionConfig(),
+        watermark_config=None,
+        speculative_config=None,
+        model_config=None,
+    )
+    config._dflash_needs_multi_kv_group = lambda: False
+    config._is_dflash_candidate_draft = lambda: False
+    assert VllmConfig._get_v1_model_runner_unsupported_features(config) == []
 
-    with patch.object(envs, "VLLM_USE_V2_MODEL_RUNNER", None):
-        assert config.use_v2_model_runner
-    with (
-        patch.object(envs, "VLLM_USE_V2_MODEL_RUNNER", False),
-        pytest.raises(ValueError, match="requires Model Runner V2"),
-    ):
-        _ = config.use_v2_model_runner
+    for name, value in overrides.items():
+        setattr(config, name, value)
+    assert VllmConfig._get_v1_model_runner_unsupported_features(config) == [feature]
 
 
 def test_hisparse_rejects_decode_context_parallelism(monkeypatch):
@@ -876,7 +900,7 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
     config = SimpleNamespace(
         model_config=model_config,
         attention_config=AttentionConfig(),
-        speculative_config=SimpleNamespace(method="mtp") if with_mtp else None,
+        speculative_config=fake_speculative_config(method="mtp") if with_mtp else None,
         parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
         compilation_config=CompilationConfig(
             cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
@@ -1028,7 +1052,7 @@ def test_v2_model_runner_supports_speculative_method(method):
     config = VllmConfig()
     config.speculative_config = cast(
         SpeculativeConfig,
-        SimpleNamespace(
+        fake_speculative_config(
             method=method,
             parallel_drafting=False,
             enable_adaptive_verification=False,
@@ -1048,7 +1072,7 @@ def test_v2_model_runner_heterogeneous_vocab_draft_falls_back_to_v1(
     config = VllmConfig()
     config.speculative_config = cast(
         SpeculativeConfig,
-        SimpleNamespace(
+        fake_speculative_config(
             method="draft_model",
             parallel_drafting=False,
             enable_adaptive_verification=False,
@@ -1504,6 +1528,8 @@ def test_v1_model_runner_rejects_v2_only_features():
             distributed_executor_backend="mp",
         ),
         scheduler_config=SchedulerConfig.default_factory(async_scheduling=False),
+        attention_config=AttentionConfig(),
+        watermark_config=None,
         speculative_config=None,
         model_config=None,
     )
@@ -1691,6 +1717,8 @@ def test_v1_model_runner_rejects_pipeline_parallelism_with_async_scheduling():
             distributed_executor_backend="mp",
         ),
         scheduler_config=SchedulerConfig.default_factory(async_scheduling=False),
+        attention_config=AttentionConfig(),
+        watermark_config=None,
         speculative_config=None,
         model_config=None,
     )
@@ -1740,7 +1768,9 @@ def test_engram_tensor_parallel_size(dp_size: int, across_dp: bool, expected: in
     assert config.get_parallel_size(parallel) == expected
 
 
-@pytest.mark.parametrize("option", ["embedding_across_dp", "dp_shared_memory"])
+@pytest.mark.parametrize(
+    "option", ["embedding_across_dp", "dp_shared_memory", "disk_offload"]
+)
 def test_engram_rejects_elastic_cross_dp(option):
     parallel = ParallelConfig(
         tensor_parallel_size=4,
@@ -1981,12 +2011,46 @@ def test_engram_draft_config_validates_target(monkeypatch, target_has_ple, expli
             assert config.engram_config.cpu_offload is True
 
 
+@pytest.mark.parametrize(
+    ("architecture", "layer_field", "rocm", "expect_error"),
+    [
+        pytest.param(
+            "DeepseekV41ForCausalLM", "engram_layer_ids", False, True, id="deepseek"
+        ),
+        pytest.param(
+            "Qwen4ExpForCausalLM", "ple_layer_ids", True, True, id="qwen4exp_rocm"
+        ),
+        pytest.param(
+            "Qwen4ExpForCausalLM", "ple_layer_ids", False, False, id="qwen4exp_cuda"
+        ),
+    ],
+)
+def test_engram_disk_offload_requires_cuda_qwen4exp(
+    monkeypatch, architecture, layer_field, rocm, expect_error
+):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: not rocm)
+    model = cast(
+        ModelConfig,
+        SimpleNamespace(
+            architecture=architecture,
+            hf_text_config=SimpleNamespace(**{layer_field: [1]}),
+        ),
+    )
+    config = EngramConfig(disk_offload=True)
+    if expect_error:
+        with pytest.raises(ValueError, match="disk_offload"):
+            config.verify_model_config(model)
+    else:
+        config.verify_model_config(model)
+
+
 def test_engram_hash_tracks_execution_options():
     configs = [
         EngramConfig(cpu_offload=True),
         EngramConfig(cpu_offload=False),
         EngramConfig(cpu_offload=True, embedding_across_dp=True),
         EngramConfig(cpu_offload=True, dp_shared_memory=True),
+        EngramConfig(disk_offload=True),
     ]
     assert len({config.compute_hash() for config in configs}) == len(configs)
 
@@ -3610,6 +3674,138 @@ def test_scheduler_config_init():
         print(SchedulerConfig.default_factory().max_model_len)
 
 
+def test_eplb_num_redundant_experts_default():
+    """Test that num_redundant_experts defaults to None and can be set."""
+    from vllm.config.parallel import EPLBConfig, ParallelConfig
+
+    # Test default is None
+    eplb_config = EPLBConfig()
+    assert eplb_config.num_redundant_experts is None
+
+    # Test explicit value
+    eplb_config_explicit = EPLBConfig(num_redundant_experts=4)
+    assert eplb_config_explicit.num_redundant_experts == 4
+
+    # Models read num_redundant_experts without a ModelConfig, so the
+    # disabled case must resolve to 0 at ParallelConfig construction.
+    parallel_config = ParallelConfig(
+        enable_eplb=False,
+        enable_expert_parallel=False,
+    )
+    assert parallel_config.eplb_config.num_redundant_experts == 0
+
+    # Test ParallelConfig validation - EPLB disabled with non-zero value
+    with pytest.raises(ValidationError, match="EPLB is not enabled"):
+        ParallelConfig(
+            enable_eplb=False,
+            enable_expert_parallel=False,
+            eplb_config=EPLBConfig(num_redundant_experts=4),
+        )
+
+    # Test validation for negative value (validated in ParallelConfig)
+    with pytest.raises(ValidationError, match="greater than or equal to"):
+        ParallelConfig(
+            enable_eplb=False,
+            enable_expert_parallel=False,
+            eplb_config=EPLBConfig(num_redundant_experts=-1),
+        )
+
+
+@pytest.mark.parametrize(
+    "num_experts,tp_size,pcp_size,dp_size,expected",
+    [
+        (8, 8, 1, 1, 0),  # ep_size=8, divisible: 8 % 8 = 0
+        (8, 8, 1, 2, 8),  # ep_size=16, ep_size > experts: need 8 redundant
+        (8, 2, 1, 3, 4),  # ep_size=6, non-divisible: need 4 redundant
+        (16, 4, 1, 2, 0),  # ep_size=8, divisible: 16 % 8 = 0
+        (10, 4, 1, 2, 6),  # ep_size=8, non-divisible: need 6 redundant
+        (7, 2, 1, 2, 1),  # ep_size=4, non-divisible: need 1 redundant
+        (1, 2, 1, 2, 3),  # ep_size=4, single expert: need 3 redundant
+        # The EP group spans TP x PCP x DP, so PCP must be accounted for.
+        (8, 2, 2, 1, 0),  # ep_size=4, divisible: 8 % 4 = 0
+        (10, 2, 2, 1, 2),  # ep_size=4, non-divisible: need 2 redundant
+        (8, 2, 3, 1, 4),  # ep_size=6, non-divisible: need 4 redundant
+    ],
+)
+def test_eplb_num_redundant_experts_auto_computation(
+    num_experts, tp_size, pcp_size, dp_size, expected
+):
+    """Test that num_redundant_experts is correctly computed by ParallelConfig.
+
+    The computation ensures (num_logical_experts + num_redundant_experts)
+    is divisible by ep_size (= tp_size * pcp_size * dp_size).
+    """
+    from vllm.config.parallel import ParallelConfig
+
+    with (
+        patch(
+            "vllm.config.parallel.current_platform.is_cuda_alike",
+            return_value=True,
+        ),
+        patch(
+            "vllm.config.parallel.current_platform.device_count",
+            return_value=tp_size * pcp_size * dp_size,
+        ),
+    ):
+        parallel_config = ParallelConfig(
+            tensor_parallel_size=tp_size,
+            prefill_context_parallel_size=pcp_size,
+            data_parallel_size=dp_size,
+            enable_expert_parallel=True,
+            enable_eplb=True,
+        )
+    # num_redundant_experts should be None before computation
+    assert parallel_config.eplb_config.num_redundant_experts is None
+
+    # Call the computation method
+    parallel_config.compute_eplb_num_redundant_experts(num_experts)
+
+    # Verify the computed value matches expected
+    assert parallel_config.eplb_config.num_redundant_experts == expected, (
+        f"Expected num_redundant_experts={expected} for "
+        f"num_experts={num_experts}, ep_size={tp_size * pcp_size * dp_size}, "
+        f"got {parallel_config.eplb_config.num_redundant_experts}"
+    )
+    # Verify divisibility constraint
+    ep_size = tp_size * pcp_size * dp_size
+    total = num_experts + parallel_config.eplb_config.num_redundant_experts
+    assert total % ep_size == 0, (
+        f"Divisibility check failed: ({num_experts} + "
+        f"{parallel_config.eplb_config.num_redundant_experts}) % {ep_size} != 0"
+    )
+
+
+def test_eplb_num_redundant_experts_explicit_value_preserved():
+    """Test that explicitly set num_redundant_experts is not overwritten."""
+    from vllm.config.parallel import EPLBConfig, ParallelConfig
+
+    with (
+        patch(
+            "vllm.config.parallel.current_platform.is_cuda_alike",
+            return_value=True,
+        ),
+        patch(
+            "vllm.config.parallel.current_platform.device_count",
+            return_value=8,
+        ),
+    ):
+        parallel_config = ParallelConfig(
+            tensor_parallel_size=4,
+            data_parallel_size=2,
+            enable_expert_parallel=True,
+            enable_eplb=True,
+            eplb_config=EPLBConfig(num_redundant_experts=10),
+        )
+    # num_redundant_experts is explicitly set
+    assert parallel_config.eplb_config.num_redundant_experts == 10
+
+    # Call the computation method - should not override
+    parallel_config.compute_eplb_num_redundant_experts(num_logical_experts=8)
+
+    # Should still be the explicit value
+    assert parallel_config.eplb_config.num_redundant_experts == 10
+
+
 def test_scheduler_config_rejects_zero_max_num_scheduled_tokens():
     """A zero token budget never schedules anything, so generation would hang."""
     with pytest.raises(ValidationError, match="max_num_scheduled_tokens"):
@@ -3776,7 +3972,7 @@ def test_target_only_gumbel_allows_speculative_decoding(caplog_vllm, disable_log
     config.watermark_config = WatermarkConfig(
         key=42, allow_target_only_watermarking=True
     )
-    config.speculative_config = SimpleNamespace(
+    config.speculative_config = fake_speculative_config(
         method="mtp",
         draft_sample_method="probabilistic",
         rejection_sample_method="standard",
@@ -3796,7 +3992,7 @@ def test_speculative_watermarking_without_context_dedup_does_not_warn(
     config.watermark_config = WatermarkConfig(
         algorithm="dual_key_gumbel", key=42, deduplicate_contexts="none"
     )
-    config.speculative_config = SimpleNamespace(
+    config.speculative_config = fake_speculative_config(
         method="mtp",
         draft_sample_method="probabilistic",
         rejection_sample_method="standard",
@@ -3817,7 +4013,7 @@ def test_speculative_context_dedup_logs_no_unsupported_warning(
     config.watermark_config = WatermarkConfig(
         algorithm="dual_key_gumbel", key=42, deduplicate_contexts="single_turn"
     )
-    config.speculative_config = SimpleNamespace(
+    config.speculative_config = fake_speculative_config(
         method="mtp",
         draft_sample_method="probabilistic",
         rejection_sample_method="standard",
@@ -3836,7 +4032,7 @@ def test_gumbel_rejects_speculative_decoding_without_target_only():
     config.watermark_config = WatermarkConfig(
         algorithm="gumbel", key=42, allow_target_only_watermarking=False
     )
-    config.speculative_config = SimpleNamespace(
+    config.speculative_config = fake_speculative_config(
         method="mtp",
         draft_sample_method="probabilistic",
         rejection_sample_method="standard",
@@ -3854,7 +4050,7 @@ def test_dual_key_gumbel_warns_that_configured_alpha_is_unused(
     config.watermark_config = WatermarkConfig(
         algorithm="dual_key_gumbel", key=42, alpha=0.25
     )
-    config.speculative_config = SimpleNamespace(
+    config.speculative_config = fake_speculative_config(
         method="mtp",
         draft_sample_method="probabilistic",
         rejection_sample_method="standard",
@@ -3880,7 +4076,7 @@ def test_dual_key_gumbel_alpha_warning_is_not_emitted(
         algorithm="dual_key_gumbel", key=42, alpha=alpha
     )
     if speculative:
-        config.speculative_config = SimpleNamespace(
+        config.speculative_config = fake_speculative_config(
             method="mtp",
             draft_sample_method="probabilistic",
             rejection_sample_method="standard",
@@ -3896,7 +4092,7 @@ def test_dual_key_gumbel_alpha_warning_is_not_emitted(
 def test_dual_key_gumbel_requires_probabilistic_drafting():
     config = _watermarked_vllm_config()
     config.watermark_config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
-    config.speculative_config = SimpleNamespace(
+    config.speculative_config = fake_speculative_config(
         method="mtp",
         draft_sample_method="greedy",
         rejection_sample_method="standard",
@@ -3922,7 +4118,7 @@ def test_dual_key_gumbel_supports_probabilistic_speculative_decoding(
 ):
     config = _watermarked_vllm_config()
     config.watermark_config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
-    config.speculative_config = SimpleNamespace(
+    config.speculative_config = fake_speculative_config(
         method=method,
         draft_sample_method="probabilistic",
         rejection_sample_method="standard",
@@ -3932,11 +4128,18 @@ def test_dual_key_gumbel_supports_probabilistic_speculative_decoding(
     config._check_supports_watermarking()
 
 
+_DFLASH_CANDIDATE_SPECULATOR_CONFIGS = {
+    "DFlash2DraftModel": DFlash2SpeculatorConfig,
+    "LiLiCorrDraftModel": LiLiCorrSpeculatorConfig,
+}
+
+
 @pytest.mark.parametrize("architecture", ["DFlash2DraftModel", "LiLiCorrDraftModel"])
 def test_dual_key_gumbel_rejects_dflash_candidate_drafts(architecture):
     config = _watermarked_vllm_config()
     config.watermark_config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
-    config.speculative_config = SimpleNamespace(
+    config.speculative_config = fake_speculative_config(
+        _DFLASH_CANDIDATE_SPECULATOR_CONFIGS[architecture],
         method="dflash",
         draft_sample_method="probabilistic",
         rejection_sample_method="standard",
@@ -3951,7 +4154,7 @@ def test_dual_key_gumbel_rejects_dflash_candidate_drafts(architecture):
 def test_dual_key_gumbel_rejects_unsupported_speculative_method():
     config = _watermarked_vllm_config()
     config.watermark_config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
-    config.speculative_config = SimpleNamespace(
+    config.speculative_config = fake_speculative_config(
         method="ngram",
         draft_sample_method="probabilistic",
         rejection_sample_method="standard",
@@ -3980,7 +4183,7 @@ def test_dual_key_gumbel_rejects_incompatible_speculative_modes(overrides, match
         "parallel_drafting": False,
         **overrides,
     }
-    config.speculative_config = SimpleNamespace(**values)
+    config.speculative_config = fake_speculative_config(**values)
 
     with pytest.raises(ValueError, match=match):
         config._check_supports_watermarking()
@@ -4045,19 +4248,7 @@ def test_watermark_key_is_excluded_from_serialization():
     assert "key" not in serialized
 
 
-def test_watermarking_forces_model_runner_v2(monkeypatch):
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
-
-    with patch("vllm.config.vllm.logger.info_once") as info_once:
-        assert _watermarked_vllm_config().use_v2_model_runner
-
-    info_once.assert_called_once_with(
-        "Watermarking requires Model Runner V2 and overrides "
-        "VLLM_USE_V2_MODEL_RUNNER=0."
-    )
-
-
-@patch("vllm.config.speculative.ModelConfig")
+@patch("vllm.config.ModelConfig")
 def test_mtp_draft_uses_model_weights_not_local_cache(mock_model_config_cls):
     """Regression test: MTP + runai_streamer should use model_weights (original
     S3 URL) for the draft model, not model (local cache dir set by
@@ -4071,7 +4262,9 @@ def test_mtp_draft_uses_model_weights_not_local_cache(mock_model_config_cls):
     mock_draft.model = local_cache
     mock_draft.hf_config.model_type = "deepseek_mtp"
     mock_draft.hf_config.n_predict = None
+    mock_draft.hf_config.num_nextn_predict_layers = 1
     mock_draft.hf_config.max_position_embeddings = 4096
+    mock_draft.speculator_config_class = None
     mock_draft.max_model_len = 4096
     mock_model_config_cls.return_value = mock_draft
 
