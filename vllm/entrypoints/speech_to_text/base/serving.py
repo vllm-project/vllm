@@ -604,6 +604,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 [] for _ in list_result_generator
             ]
             chunk_text_parts: list[list[str]] = [[] for _ in list_result_generator]
+            chunk_raw_text_parts: list[list[str]] = [[] for _ in list_result_generator]
             segments_types: dict[str, type[SpeechToTextSegment]] = {
                 "transcribe": TranscriptionSegment,
                 "translate": TranslationSegment,
@@ -632,6 +633,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                     chunk_text_parts[idx].extend([seg.text for seg in segments])
                 else:
                     raw_text = op.outputs[0].text
+                    chunk_raw_text_parts[idx].append(raw_text)
                     chunk_text_parts[idx].append(
                         self.model_cls.post_process_output(raw_text)
                     )
@@ -651,7 +653,12 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                     "seconds": int(math.ceil(duration_s)),
                 }
                 if request.response_format == "diarized_json":
-                    diarized_segments = self.model_cls.parse_diarized_transcript(text)
+                    raw_text = separator.join(
+                        part for parts in chunk_raw_text_parts for part in parts
+                    )
+                    diarized_segments = self.model_cls.parse_diarized_transcript(
+                        raw_text
+                    )
                     if not diarized_segments:
                         return self.create_error_response(
                             "Model output did not contain a valid diarized transcript"
