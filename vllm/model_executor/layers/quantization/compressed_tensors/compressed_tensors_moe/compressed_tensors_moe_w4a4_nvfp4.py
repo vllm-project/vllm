@@ -222,6 +222,12 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             invert_global_scales=True,
         )
 
+    def get_post_load_parameter_name(self, name: str) -> str:
+        return {
+            "w13_weight_packed": "w13_weight",
+            "w2_weight_packed": "w2_weight",
+        }.get(name, name)
+
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         """Convert NVFP4 MoE weights into kernel format and setup the kernel."""
         # MKM requires wN_weight; the loaded wN_weight_packed params stay registered.
