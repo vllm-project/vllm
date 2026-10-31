@@ -1762,6 +1762,7 @@ def test_grouped_o_projection_applies_each_tokens_adapter(
     default_vllm_config, dist_init, groups, fp8
 ):
     """The fused base path must include the matching group's nonzero LoRA-B."""
+    from vllm.lora.ops.triton_ops.utils import _LORA_A_PTR_DICT, _LORA_B_PTR_DICT
     from vllm.models.deepseek_v4.nvidia.ops.o_proj import deep_gemm_fp8_o_proj
     from vllm.models.deepseek_v41.common.grouped_wo_a import DeepseekV4GroupedWoA
     from vllm.models.deepseek_v41.common.ops import fused_inv_rope_fp8_quant
@@ -1773,6 +1774,7 @@ def test_grouped_o_projection_applies_each_tokens_adapter(
         base = DeepseekV4GroupedWoA(
             columns,
             groups * outputs,
+            n_groups=groups,
             bias=False,
             params_dtype=torch.bfloat16,
             return_bias=False,
@@ -1834,6 +1836,16 @@ def test_grouped_o_projection_applies_each_tokens_adapter(
         torch.testing.assert_close(actual, expected, rtol=0.02, atol=0.02)
         inactive = torch.tensor([value == 0 for value in ids])
         torch.testing.assert_close(actual[inactive], baseline[inactive], rtol=0, atol=0)
+
+        cached = len(_LORA_A_PTR_DICT), len(_LORA_B_PTR_DICT)
+        layer.reset_lora(1)
+        after_reset = layer.grouped_forward(o, positions, cache, **kwargs)
+        # Adapter buffers keep their addresses, so the pointer cache doesn't grow.
+        assert (len(_LORA_A_PTR_DICT), len(_LORA_B_PTR_DICT)) == cached
+        evicted = torch.tensor([value == 2 for value in ids])
+        torch.testing.assert_close(
+            after_reset[evicted], baseline[evicted], rtol=0, atol=0
+        )
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA compressor projection")

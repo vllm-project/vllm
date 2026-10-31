@@ -4,6 +4,7 @@
 
 import torch
 
+from vllm.distributed.utils import divide
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.models.deepseek_v41.common.ops import fused_inv_rope_fp8_quant
@@ -15,6 +16,12 @@ class DeepseekV4GroupedWoA(ColumnParallelLinear):
     Group ``g`` of the inverse-rotated attention output only meets output rows
     ``g * o_lora_rank : (g + 1) * o_lora_rank``.
     """
+
+    def __init__(
+        self, input_size: int, output_size: int, *, n_groups: int, **kwargs
+    ) -> None:
+        super().__init__(input_size, output_size, **kwargs)
+        self.n_local_groups = divide(n_groups, self.tp_size)
 
     def grouped_input(
         self,
