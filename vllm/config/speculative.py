@@ -448,7 +448,7 @@ class SpeculativeConfig:
     enforce_eager: bool | None = None
     """Override the default enforce_eager from model_config"""
     # General speculative decoding control
-    num_speculative_tokens: int = Field(default=None, gt=0)  # type: ignore[assignment]
+    num_speculative_tokens: int | None = Field(default=None, gt=0)
     """The number of speculative tokens, if provided. It will default to the
     number in the draft model config if present, otherwise, it is required."""
     model: str | None = None
@@ -1324,6 +1324,7 @@ class SpeculativeConfig:
         return len(parts) >= 2 and all(part.isidentifier() for part in parts)
 
     def __post_init__(self):
+        """Initialize and validate the speculative configuration."""
         # Note: "method" is a new parameter that helps to extend the
         # configuration of non-model-based proposers, and the "model" parameter
         # will be used to set the draft model, eagle head, or additional weight
@@ -1363,10 +1364,12 @@ class SpeculativeConfig:
             self.method = "ngram"
 
         config_cls = get_method_config_class(self)
-        # DSpark drafts carry their own width (block size), so the default
-        # draft is resolved even without num_speculative_tokens.
+        # MTP and DSpark drafts carry their own width (n_predict / block size),
+        # so the default draft is resolved even without num_speculative_tokens.
         if self.model is None and (
-            self.num_speculative_tokens is not None or self.use_dspark()
+            self.num_speculative_tokens is not None
+            or self.method in ("mtp", "dspark")
+            or self.use_dspark()
         ):
             self.model = config_cls.default_model(self)
         config_cls.configure(self)
