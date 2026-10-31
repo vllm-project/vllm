@@ -58,7 +58,7 @@ Fusions:
 - `-cc.pass_config.fuse_act_padding=True`†
 - `-cc.pass_config.fuse_mla_dual_rms_norm=True`†
 
-\* These fusions are only enabled when either op is using a custom kernel, otherwise Inductor fusion is better.</br>
+\* These fusions are only enabled when either op is using a custom kernel or the model is NVFP4-quantized (FP4 quant is always a custom op), otherwise Inductor fusion is better.</br>
 † These fusions are ROCm-only and require AITER.
 
 ### `-O2`: Full Optimization (Default)
