@@ -50,6 +50,9 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
 DEVICE = current_platform.device_type
+HAS_MHC_OVERLAP_ARCH = current_platform.is_device_capability_family(
+    100
+) or current_platform.is_device_capability(90)
 
 
 @pytest.mark.parametrize(
@@ -303,8 +306,8 @@ def test_deepseek_v41_mhc_pre_delayed(
 
 
 @pytest.mark.skipif(
-    not HAS_TILELANG_MHC or not current_platform.is_device_capability_family(100),
-    reason="SM100 TileLang mHC required",
+    not HAS_TILELANG_MHC or not HAS_MHC_OVERLAP_ARCH,
+    reason="SM90 or SM100 TileLang mHC required",
 )
 @pytest.mark.parametrize("num_tokens", [0, 1, 8, 9, 32, 128, 256])
 @pytest.mark.parametrize("entry", ["broadcast", "identity", "carried"])
@@ -552,9 +555,9 @@ def test_deepseek_v41_decoder_mixes_match_torch(
     entry, mhc_mode, monkeypatch, default_vllm_config
 ):
     """Preserve carried pre-mixes and Engram ordering at every decoder entry."""
-    from vllm.models.deepseek_v41.nvidia.ops.mhc import MHC_OVERLAP_MAX_TOKENS
+    from vllm.models.deepseek_v41.nvidia.ops.mhc import mhc_overlap_max_tokens
 
-    num_tokens = MHC_OVERLAP_MAX_TOKENS + 1 if mhc_mode == "large_batch" else 3
+    num_tokens = mhc_overlap_max_tokens() + 1 if mhc_mode == "large_batch" else 3
     set_random_seed(0)
     decoder = DeepseekV41DecoderLayer.__new__(DeepseekV41DecoderLayer)
     nn.Module.__init__(decoder)
@@ -569,11 +572,8 @@ def test_deepseek_v41_decoder_mixes_match_torch(
     if mhc_mode != "disabled":
         from vllm.utils.deep_gemm import is_deep_gemm_supported
 
-        if (
-            not current_platform.is_device_capability_family(100)
-            or not is_deep_gemm_supported()
-        ):
-            pytest.skip("SM100 DeepGEMM required for overlap")
+        if not HAS_MHC_OVERLAP_ARCH or not is_deep_gemm_supported():
+            pytest.skip("SM90 or SM100 DeepGEMM required for overlap")
         decoder.mhc_stream = torch.cuda.Stream()
     if mhc_mode in ("eager", "piecewise", "large_batch"):
 
