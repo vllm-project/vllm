@@ -25,7 +25,7 @@ logger = init_logger(__name__)
 class GateLinear(ReplicatedLinear):
     """MoE gate linear layer with multi-tier GEMM dispatch:
 
-    1. cuteDSL ll_bf16_gemm (SM90+, M<=16, bf16 in, fp32 out,
+    1. cuteDSL ll_bf16_gemm (SM90+, M<=16, bf16 in, fp32 or bf16 out,
        any shape w/ K divisible by 8)
     2. fp32 specialized kernel (bf16/fp32 in, fp32 out; SM90+
        model-specific shapes and batch limits, gfx950 any shape with M<=32)
@@ -61,6 +61,10 @@ class GateLinear(ReplicatedLinear):
     # Largest batch for which tier 1 beats the cuBLAS epilogue. Subclasses
     # whose router shape stays ahead further up the range may raise it.
     LL_BF16_MAX_TOKENS = 16
+    # Output dtypes tier 1 can produce from its fp32 accumulator. A router
+    # without an explicit ``out_dtype`` emits the (bf16) activation dtype,
+    # see ``ll_bf16_out_dtype``.
+    LL_BF16_OUT_DTYPES = (torch.float32, torch.bfloat16)
 
     def __init__(
         self,
@@ -106,6 +110,11 @@ class GateLinear(ReplicatedLinear):
             return_bias=return_bias,
         )
         self.out_dtype = out_dtype
+        # The dtype tier 1 writes: the requested one, or the bf16 activation
+        # dtype when none was requested. Kernel warmup compiles for it.
+        self.ll_bf16_out_dtype: torch.dtype = (
+            out_dtype if out_dtype is not None else torch.bfloat16
+        )
         self.is_gfx950 = is_gfx950
         self.is_hopper = is_hopper
 
@@ -205,7 +214,7 @@ class GateLinear(ReplicatedLinear):
             self.allow_ll_bf16_gemm = (
                 is_ll_bf16_gemm_available()
                 and self.weight.dtype == torch.bfloat16
-                and self.out_dtype == torch.float32
+                and self.ll_bf16_out_dtype in self.LL_BF16_OUT_DTYPES
             )
             self.allow_ll_fp32w_gemm = (
                 is_ll_fp32w_gemm_available()
@@ -283,8 +292,9 @@ class GateLinear(ReplicatedLinear):
             self.allow_ll_bf16_gemm = (
                 is_ll_bf16_gemm_available()
                 and self.weight.dtype == torch.bfloat16
-                and out_dtype == torch.float32
+                and out_dtype in self.LL_BF16_OUT_DTYPES
             )
+            self.ll_bf16_out_dtype = out_dtype
             self.allow_ll_fp32w_gemm = (
                 is_ll_fp32w_gemm_available()
                 and self.weight.dtype == torch.float32
@@ -300,7 +310,7 @@ class GateLinear(ReplicatedLinear):
     def forward(
         self, x: torch.Tensor
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
-        # Tier 1: cuteDSL ll_bf16_gemm (SM90+, bf16 in, fp32 out,
+        # Tier 1: cuteDSL ll_bf16_gemm (SM90+, bf16 in, fp32 or bf16 out,
         # any dims w/ K divisible by 8)
         if (
             self.allow_ll_bf16_gemm
@@ -311,7 +321,7 @@ class GateLinear(ReplicatedLinear):
                 ll_bf16_gemm,
             )
 
-            output = ll_bf16_gemm(x, self.weight)
+            output = ll_bf16_gemm(x, self.weight, output_dtype=self.ll_bf16_out_dtype)
             return self._return(output)
 
         # Tier 5: ROCm bf16x3 router GEMM. Checked before tier 2 because both
