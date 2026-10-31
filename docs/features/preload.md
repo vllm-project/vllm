@@ -71,6 +71,11 @@ loading and before binding its socket, then writes the cache:
 vllm preload --model /path/to/model --tensor-parallel-size 4
 ```
 
+After warmup, the daemon releases its communication resources and, on CUDA,
+cached cuBLAS workspaces before accepting engine connections. The model weights
+remain resident for CUDA IPC sharing. This reduces the daemon's GPU memory
+overhead; the amount reclaimed depends on the model and allocator state.
+
 ### Seeding warmup caches between daemons (D2D)
 
 A fresh daemon replica — a new node joining a fleet, a restarted preload
@@ -379,10 +384,18 @@ threat model.
 
 - Each GPU's socket path is guarded by an exclusive lock file, so a second
   daemon for the same GPU fails fast instead of clobbering the live socket.
-- `vllm preload` reports readiness once every rank is serving; if any rank
-  dies during startup, the remaining ranks are terminated and the command
-  exits with that rank's exit code.
+- `vllm preload` reports readiness once every rank is serving. If any rank
+  exits during startup or serving, the launcher terminates and reaps the
+  remaining ranks, stops its health endpoint, and exits with a nonzero status.
+  The failing rank's nonzero exit code is preserved. Signal failures use
+  `128 + signal number` (for example, 137 for `SIGKILL`); an unexpected clean
+  rank exit is reported as status 1. Restart the entire preload group before
+  attaching new engines.
 - `SIGINT`/`SIGTERM` to the `vllm preload` process terminates all daemon
-  ranks, which unlinks their sockets and releases the GPU memory.
+  ranks and exits with status 130/143.
+- In either shutdown path, ranks that do not stop within ten seconds are
+  killed and reaped, releasing their GPU memory. A forcibly
+  terminated rank may leave a stale socket; the next daemon replaces it
+  after acquiring the per-GPU lock.
 
 See [vllm preload](../cli/preload.md) for the full CLI reference.

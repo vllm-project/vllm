@@ -28,7 +28,7 @@ from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 import vllm.version
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import CacheConfig, KernelConfig, ModelConfig, VllmConfig
 from vllm.config.utils import normalize_value
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.weight_cache.utils import (
@@ -361,6 +361,11 @@ class WeightCacheKey:
     dp_rank: int = 0
     enable_expert_parallel: bool = False
     expert_placement_strategy: str = "linear"
+    moe_backend: str = "auto"
+    """Kernel backends pick the processed weight layout (e.g. shuffled or
+    repacked), so weights processed for one backend are wrong for another."""
+    linear_backend: str = "auto"
+    linear_backend_per_quant: tuple[tuple[str, str], ...] = ()
 
     @classmethod
     def from_model_config(
@@ -377,6 +382,7 @@ class WeightCacheKey:
         dp_rank: int = 0,
         enable_expert_parallel: bool = False,
         expert_placement_strategy: str = "linear",
+        kernel_config: KernelConfig | None = None,
     ) -> "WeightCacheKey":
         """Build the fingerprint for a model configuration.
 
@@ -393,6 +399,7 @@ class WeightCacheKey:
         arch = ",".join(getattr(hf_config, "architectures", None) or [])
         quant_config = getattr(hf_config, "quantization_config", None)
         checkpoint = hash_checkpoint(model_config.model) or model_config.model
+        kernel_config = kernel_config or KernelConfig()
         return cls(
             checkpoint=checkpoint,
             model_arch=arch,
@@ -418,6 +425,11 @@ class WeightCacheKey:
             dp_rank=dp_rank,
             enable_expert_parallel=enable_expert_parallel,
             expert_placement_strategy=expert_placement_strategy,
+            moe_backend=kernel_config.moe_backend,
+            linear_backend=kernel_config.linear_backend,
+            linear_backend_per_quant=tuple(
+                sorted((kernel_config.linear_backend_per_quant or {}).items())
+            ),
         )
 
     def mismatched_fields(self, other: "WeightCacheKey") -> list[str]:
