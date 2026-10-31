@@ -18,14 +18,18 @@ Currently monitors:
 - Triton ``@triton.jit`` first-time compilations
   (via ``knobs.runtime.jit_post_compile_hook``)
 - TileLang ``@tilelang.jit`` first-time compilations
+- DeepGEMM nvcc JIT compilations (via cache directory monitoring)
 """
 
 import contextlib
 import functools
 import importlib
 import os
+import threading
+import time
 from collections.abc import Iterator, Mapping
 from contextlib import suppress
+from pathlib import Path
 from typing import Any, Literal, cast
 
 from vllm.logger import init_logger
@@ -41,6 +45,12 @@ _verbose: bool = False
 _cutedsl_hook_installed: bool = False
 _tilelang_hook_installed: bool = False
 _tilelang_jitimpl_compile_depth: int = 0
+
+# DeepGEMM JIT monitor state
+_deep_gemm_cache_dir: Path | None = None
+_deep_gemm_cache_state: dict[str, float] = {}
+_deep_gemm_monitor_thread: threading.Thread | None = None
+_deep_gemm_monitor_stop: threading.Event | None = None
 
 
 def is_active() -> bool:
@@ -80,6 +90,8 @@ def activate(*, mode: JitMonitorMode = "warn", verbose: bool = False) -> None:
     # TODO: Remove the guard once tilelang upstream is fixed.
     if not current_platform.is_rocm():
         _setup_tilelang_jit_hook()
+
+    _setup_deep_gemm_jit_monitor()
 
     logger.info(
         "Kernel JIT monitor activated; monitored JIT compilations during "
@@ -554,3 +566,128 @@ def numba_workqueue_threading_layer() -> Iterator[None]:
         else:
             os.environ[key] = previous_env
         numba.config.THREADING_LAYER = previous_config
+
+
+# ------------------------------------------------------------------
+# DeepGEMM JIT compilation monitor
+# ------------------------------------------------------------------
+
+
+def _get_deep_gemm_cache_dir() -> Path | None:
+    """Get the DeepGEMM JIT cache directory."""
+    import vllm.envs as envs
+
+    cache_dir = os.environ.get("DG_JIT_CACHE_DIR")
+    if cache_dir:
+        return Path(cache_dir)
+
+    # Default cache location from deep_gemm.py
+    default_cache = Path(envs.VLLM_CACHE_ROOT) / "deep_gemm"
+    if default_cache.exists():
+        return default_cache
+
+    return None
+
+
+def _scan_deep_gemm_cache(cache_dir: Path) -> dict[str, float]:
+    """Scan DeepGEMM cache directory and return mapping of kernel files to mtime."""
+    state = {}
+    try:
+        for entry in cache_dir.rglob("*.so"):
+            if entry.is_file():
+                rel_path = entry.relative_to(cache_dir)
+                state[str(rel_path)] = entry.stat().st_mtime
+    except Exception:
+        pass
+    return state
+
+
+def _deep_gemm_monitor_loop() -> None:
+    """Background thread that monitors DeepGEMM cache for new compilations."""
+    global _deep_gemm_cache_dir, _deep_gemm_cache_state
+    global _deep_gemm_monitor_stop
+
+    if _deep_gemm_cache_dir is None:
+        return
+
+    # Initial scan
+    _deep_gemm_cache_state = _scan_deep_gemm_cache(_deep_gemm_cache_dir)
+
+    while _deep_gemm_monitor_stop is not None and not _deep_gemm_monitor_stop.is_set():
+        time.sleep(0.5)  # Check every 500ms
+
+        if _deep_gemm_monitor_stop is not None and _deep_gemm_monitor_stop.is_set():
+            break
+
+        current_state = _scan_deep_gemm_cache(_deep_gemm_cache_dir)
+
+        # Detect new or modified kernel files
+        for rel_path, mtime in current_state.items():
+            prev_mtime = _deep_gemm_cache_state.get(rel_path)
+            if prev_mtime is None or mtime > prev_mtime:
+                # New compilation detected
+                kernel_name = rel_path.replace(".so", "").replace("/", ".")
+                _handle_jit_event(
+                    backend="DeepGEMM",
+                    event="nvcc JIT compilation",
+                    fn_name=kernel_name,
+                    detail=f"cache_file={rel_path}" if _verbose else None,
+                )
+
+        _deep_gemm_cache_state = current_state
+
+
+def _setup_deep_gemm_jit_monitor() -> None:
+    """Set up DeepGEMM JIT compilation monitoring via cache directory watching."""
+    global _deep_gemm_cache_dir, _deep_gemm_monitor_thread, _deep_gemm_monitor_stop
+
+    cache_dir = _get_deep_gemm_cache_dir()
+    if cache_dir is None:
+        logger.debug("DeepGEMM cache directory not found; skipping DeepGEMM JIT monitor.")
+        return
+
+    _deep_gemm_cache_dir = cache_dir
+    _deep_gemm_monitor_stop = threading.Event()
+    _deep_gemm_monitor_thread = threading.Thread(
+        target=_deep_gemm_monitor_loop,
+        name="deep_gemm_jit_monitor",
+        daemon=True,
+    )
+    _deep_gemm_monitor_thread.start()
+
+    logger.info(
+        "DeepGEMM JIT monitor activated; watching cache directory: %s",
+        cache_dir,
+    )
+
+
+def deactivate() -> None:
+    """Deactivate JIT compilation monitoring.
+
+    Stops the DeepGEMM cache monitor thread and resets all monitoring state.
+    Safe to call multiple times.
+    """
+    global _active, _mode, _verbose
+    global _cutedsl_hook_installed, _tilelang_hook_installed
+    global _deep_gemm_monitor_thread, _deep_gemm_monitor_stop
+
+    if not _active:
+        return
+
+    _active = False
+    _mode = "warn"
+    _verbose = False
+
+    # Stop DeepGEMM monitor thread
+    if _deep_gemm_monitor_stop is not None:
+        _deep_gemm_monitor_stop.set()
+        if _deep_gemm_monitor_thread is not None:
+            _deep_gemm_monitor_thread.join(timeout=2.0)
+        _deep_gemm_monitor_thread = None
+        _deep_gemm_monitor_stop = None
+
+    # Note: Triton/CuTeDSL/TileLang hooks are not removed as they're
+    # process-global and removing them could break subsequent activations.
+    # This is acceptable since deactivate() is typically called only in tests.
+
+    logger.info("Kernel JIT monitor deactivated.")

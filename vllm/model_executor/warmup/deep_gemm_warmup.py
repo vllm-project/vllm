@@ -429,6 +429,334 @@ def _deepgemm_fp8_fp4_mega_moe_warmup(
     FP8_FP4_MEGA_MOE_WARMUP_CACHE.add(key)
 
 
+# ======================================================================
+# New warmup functions for uncovered DeepGEMM entry points
+# ======================================================================
+
+FP8_EINSUM_WARMUP_CACHE: set[tuple[int, int]] = set()
+
+
+def _get_fp8_einsum_m_values(max_tokens: int, n: int, k: int, device: torch.device) -> list[int]:
+    """Get M values to warmup for fp8_einsum (used in DSv4 o_proj, MXFP8 linear)."""
+    if envs.VLLM_DEEP_GEMM_WARMUP == "relax":
+        return _generate_optimal_warmup_m_values(max_tokens, n, device)
+    else:
+        assert envs.VLLM_DEEP_GEMM_WARMUP == "full"
+        return list(range(1, max_tokens + 1))
+
+
+def _deepgemm_fp8_einsum_warmup(
+    w: torch.Tensor,
+    ws: torch.Tensor,
+    max_tokens: int,
+    pbar: tqdm | None = None,
+):
+    """Warmup fp8_einsum used in DSv4 o_proj, MXFP8 models."""
+    key = (w.size(0), w.size(1))  # (N, K)
+    if key in FP8_EINSUM_WARMUP_CACHE:
+        return
+
+    n, k = w.size()
+    block_m = get_mk_alignment_for_contiguous_layout()[0]
+
+    device = w.device
+    # fp8_einsum expects A: [M, K], W: [N, K], out: [M, N]
+    a = torch.empty((max_tokens, k), device=device, dtype=torch.float8_e4m3fn)
+    a_scales = torch.zeros(
+        (max_tokens, k // block_m), device=device, dtype=torch.float32
+    )
+    out = torch.empty((max_tokens, n), device=device, dtype=torch.bfloat16)
+
+    m_values = _get_fp8_einsum_m_values(max_tokens, n, k, device)
+
+    for num_tokens in m_values:
+        from vllm.utils.deep_gemm import fp8_einsum
+        fp8_einsum(
+            (a[:num_tokens], a_scales[:num_tokens]),
+            (w, ws),
+            out[:num_tokens],
+        )
+        if pbar is not None:
+            pbar.update(1)
+
+    FP8_EINSUM_WARMUP_CACHE.add(key)
+
+
+FP8_FP4_MQA_LOGITS_WARMUP_CACHE: set[tuple] = set()
+
+
+def _get_mqa_logits_configs(max_tokens: int) -> list[dict]:
+    """Get configurations to warmup for MQA logits kernels."""
+    configs = []
+    # Test different head counts and sequence lengths
+    for num_heads in [1, 2, 4, 8, 16, 32]:
+        for head_dim in [64, 128, 256]:
+            for num_tokens in [1, 2, 4, 8, 16, 32, 64, 128, 256]:
+                if num_tokens <= max_tokens:
+                    configs.append({
+                        "num_tokens": num_tokens,
+                        "num_heads": num_heads,
+                        "head_dim": head_dim,
+                    })
+    return configs
+
+
+def _deepgemm_fp8_fp4_mqa_logits_warmup(
+    max_tokens: int,
+    pbar: tqdm | None = None,
+):
+    """Warmup fp8_fp4_mqa_logits and fp8_fp4_paged_mqa_logits for sparse attention indexers."""
+    from vllm.utils.deep_gemm import (
+        fp8_fp4_mqa_logits,
+        fp8_fp4_paged_mqa_logits,
+        get_paged_mqa_logits_metadata,
+    )
+
+    configs = _get_mqa_logits_configs(max_tokens)
+
+    for cfg in configs:
+        key = (cfg["num_tokens"], cfg["num_heads"], cfg["head_dim"])
+        if key in FP8_FP4_MQA_LOGITS_WARMUP_CACHE:
+            continue
+
+        num_tokens = cfg["num_tokens"]
+        num_heads = cfg["num_heads"]
+        head_dim = cfg["head_dim"]
+        device = torch.cuda.current_device()
+
+        # Dense MQA logits
+        q_vals = torch.empty(
+            (num_tokens, num_heads, head_dim),
+            device=device,
+            dtype=torch.float8_e4m3fn,
+        )
+        q_scale = None  # FP8 Q folds scale into weights on SM90/SM120
+        k_vals = torch.empty(
+            (num_tokens * 4, head_dim),  # 4x context
+            device=device,
+            dtype=torch.float8_e4m3fn,
+        )
+        k_scales = torch.empty(
+            num_tokens * 4, device=device, dtype=torch.int32
+        )
+        weights = torch.empty(
+            (num_tokens, num_heads), device=device, dtype=torch.bfloat16
+        )
+        cu_seqlen_ks = torch.arange(0, num_tokens * 4 + 1, 4, device=device, dtype=torch.int32)
+        cu_seqlen_ke = torch.arange(4, num_tokens * 4 + 1, 4, device=device, dtype=torch.int32)
+        max_seqlen_k = 4
+
+        try:
+            fp8_fp4_mqa_logits(
+                (q_vals, q_scale),
+                (k_vals, k_scales),
+                weights,
+                cu_seqlen_ks,
+                cu_seqlen_ke,
+                max_seqlen_k,
+            )
+        except Exception:
+            pass
+
+        # Paged MQA logits
+        block_size = 64
+        max_blocks = 16
+        kv_cache = torch.empty(
+            (max_blocks, block_size, 1, head_dim + 4),
+            device=device,
+            dtype=torch.uint8,
+        )
+        context_lens = torch.full((num_tokens,), num_tokens * 4, device=device, dtype=torch.int32)
+        block_tables = torch.arange(max_blocks, device=device, dtype=torch.int32).unsqueeze(0).expand(num_tokens, -1)
+
+        try:
+            metadata = get_paged_mqa_logits_metadata(
+                context_lens.unsqueeze(1), block_size, 132
+            )
+            fp8_fp4_paged_mqa_logits(
+                (q_vals, q_scale),
+                kv_cache,
+                weights,
+                context_lens,
+                block_tables,
+                metadata,
+                num_tokens * 4,
+            )
+        except Exception:
+            pass
+
+        if pbar is not None:
+            pbar.update(1)
+
+        FP8_FP4_MQA_LOGITS_WARMUP_CACHE.add(key)
+
+
+BATCHED_DEEP_GEMM_WARMUP_CACHE: set[tuple] = set()
+
+
+def _deepgemm_batched_masked_gemm_warmup(
+    max_tokens: int,
+    pbar: tqdm | None = None,
+):
+    """Warmup fp8_m_grouped_gemm_nt_masked for BatchedDeepGemmExperts."""
+    from vllm.utils.deep_gemm import fp8_m_grouped_gemm_nt_masked
+
+    # Test configurations for masked grouped GEMM
+    for num_experts in [8, 16, 32, 64, 128]:
+        for num_topk in [1, 2, 4, 6, 8]:
+            for block_m in [64, 128]:
+                key = (num_experts, num_topk, block_m)
+                if key in BATCHED_DEEP_GEMM_WARMUP_CACHE:
+                    continue
+
+                device = torch.cuda.current_device()
+                # Create expert tokens meta for masking
+                max_m = max_tokens * num_topk
+                a = torch.empty(
+                    (max_m, 4096), device=device, dtype=torch.float8_e4m3fn
+                )
+                a_scales = torch.zeros(
+                    (max_m, 4096 // block_m), device=device, dtype=torch.float32
+                )
+                w = torch.empty(
+                    (num_experts, 4096, 4096), device=device, dtype=torch.float8_e4m3fn
+                )
+                w_scales = torch.empty(
+                    (num_experts, 4096 // block_m, 4096 // 128),
+                    device=device,
+                    dtype=torch.float32,
+                )
+                out = torch.empty(
+                    (max_m, 4096), device=device, dtype=torch.bfloat16
+                )
+                expert_ids = torch.randint(
+                    0, num_experts, (max_m,), device=device, dtype=torch.int32
+                )
+
+                # Create a simple mask (all valid)
+                mask = torch.ones(
+                    (num_experts, max_tokens), device=device, dtype=torch.bool
+                )
+
+                try:
+                    with mk_alignment_scope(block_m):
+                        fp8_m_grouped_gemm_nt_masked(
+                            (a, a_scales),
+                            (w, w_scales),
+                            out,
+                            expert_ids,
+                            mask,
+                        )
+                except Exception:
+                    pass
+
+                if pbar is not None:
+                    pbar.update(1)
+
+                BATCHED_DEEP_GEMM_WARMUP_CACHE.add(key)
+
+
+FP4_EXPERTS_WARMUP_CACHE: set[tuple] = set()
+
+
+def _deepgemm_fp4_experts_warmup(
+    max_tokens: int,
+    pbar: tqdm | None = None,
+):
+    """Warmup m_grouped_fp8_fp4_gemm_nt_contiguous for FP4 experts."""
+    from vllm.utils.deep_gemm import m_grouped_fp8_fp4_gemm_nt_contiguous
+
+    for num_experts in [8, 16, 32, 64]:
+        for topk in [1, 2, 4]:
+            for block_m in [64, 128]:
+                key = (num_experts, topk, block_m)
+                if key in FP4_EXPERTS_WARMUP_CACHE:
+                    continue
+
+                device = torch.cuda.current_device()
+                max_m = max_tokens * topk
+                a = torch.empty(
+                    (max_m, 4096), device=device, dtype=torch.float8_e4m3fn
+                )
+                a_scales = torch.zeros(
+                    (max_m, 4096 // block_m), device=device, dtype=torch.float32
+                )
+                w = torch.empty(
+                    (num_experts, 4096, 4096), device=device, dtype=torch.float8_e4m3fn
+                )
+                w_scales = torch.empty(
+                    (num_experts, 4096 // block_m, 4096 // 128),
+                    device=device,
+                    dtype=torch.float32,
+                )
+                out = torch.empty(
+                    (max_m, 4096), device=device, dtype=torch.bfloat16
+                )
+                expert_ids = torch.randint(
+                    0, num_experts, (max_m,), device=device, dtype=torch.int32
+                )
+
+                try:
+                    with mk_alignment_scope(block_m):
+                        m_grouped_fp8_fp4_gemm_nt_contiguous(
+                            (a, a_scales),
+                            (w, w_scales),
+                            out,
+                            expert_ids,
+                        )
+                except Exception:
+                    pass
+
+                if pbar is not None:
+                    pbar.update(1)
+
+                FP4_EXPERTS_WARMUP_CACHE.add(key)
+
+
+def deepgemm_fp8_einsum_warmup(
+    model: torch.nn.Module, max_tokens: int, pbar: tqdm | None = None
+):
+    """Warmup fp8_einsum for layers using it (DSv4 o_proj, MXFP8)."""
+    from vllm.model_executor.kernels.linear.mxfp8.deep_gemm import (
+        DeepGemmMxFp8Kernel,
+    )
+    from vllm.model_executor.kernels.linear.scaled_mm.deep_gemm import (
+        DeepGemmFp8BlockScaledMMKernel,
+    )
+
+    for m in model.modules():
+        # Check for DSv4 o_proj (uses DeepGemmFp8BlockScaledMMKernel with specific weight shape)
+        # or MXFP8 layers (DeepGemmMxFp8Kernel)
+        if isinstance(m, torch.nn.Linear):
+            provider = getattr(m, "deep_gemm_warmup_provider", None)
+            if isinstance(provider, (DeepGemmFp8BlockScaledMMKernel, DeepGemmMxFp8Kernel)):
+                weight = m.weight
+                weight_scale = getattr(m, "weight_scale", None) or getattr(m, "weight_scale_inv", None)
+                if weight_scale is not None:
+                    _deepgemm_fp8_einsum_warmup(weight, weight_scale, max_tokens, pbar)
+
+
+def deepgemm_fp8_fp4_mqa_logits_warmup(
+    max_tokens: int, pbar: tqdm | None = None
+):
+    """Warmup fp8_fp4_mqa_logits and fp8_fp4_paged_mqa_logits."""
+    _deepgemm_fp8_fp4_mqa_logits_warmup(max_tokens, pbar)
+
+
+def deepgemm_batched_masked_gemm_warmup(
+    max_tokens: int, pbar: tqdm | None = None
+):
+    """Warmup fp8_m_grouped_gemm_nt_masked for BatchedDeepGemmExperts."""
+    _deepgemm_batched_masked_gemm_warmup(max_tokens, pbar)
+
+
+def deepgemm_fp4_experts_warmup(
+    max_tokens: int, pbar: tqdm | None = None
+):
+    """Warmup m_grouped_fp8_fp4_gemm_nt_contiguous for FP4 experts."""
+    _deepgemm_fp4_experts_warmup(max_tokens, pbar)
+
+
 def deepgemm_fp8_gemm_nt_warmup(
     model: torch.nn.Module, max_tokens: int, pbar: tqdm | None = None
 ):
@@ -469,6 +797,7 @@ def _count_warmup_iterations(model: torch.nn.Module, max_tokens: int) -> int:
         GROUPED_FP8_GEMM_NT_CONTIGUOUS_WARMUP_CACHE
     )
     seen_mega_moe_keys: set[tuple] = set(FP8_FP4_MEGA_MOE_WARMUP_CACHE)
+    seen_einsum_sizes: set[tuple] = set(FP8_EINSUM_WARMUP_CACHE)
 
     total = 0
     for m in model.modules():
@@ -494,6 +823,39 @@ def _count_warmup_iterations(model: torch.nn.Module, max_tokens: int) -> int:
             if key not in seen_mega_moe_keys:
                 total += len(_get_fp8_fp4_mega_moe_m_values(m, max_tokens))
                 seen_mega_moe_keys.add(key)
+
+    # Count fp8_einsum warmups (DSv4 o_proj, MXFP8)
+    from vllm.model_executor.kernels.linear.mxfp8.deep_gemm import (
+        DeepGemmMxFp8Kernel,
+    )
+    from vllm.model_executor.kernels.linear.scaled_mm.deep_gemm import (
+        DeepGemmFp8BlockScaledMMKernel,
+    )
+    for m in model.modules():
+        if isinstance(m, torch.nn.Linear):
+            provider = getattr(m, "deep_gemm_warmup_provider", None)
+            if isinstance(provider, (DeepGemmFp8BlockScaledMMKernel, DeepGemmMxFp8Kernel)):
+                weight = m.weight
+                key = (weight.size(0), weight.size(1))
+                if key not in seen_einsum_sizes:
+                    total += len(_get_fp8_einsum_m_values(max_tokens, weight.size(0), weight.size(1), weight.device))
+                    seen_einsum_sizes.add(key)
+
+    # MQA logits warmup (independent of model, based on max_tokens)
+    total += len(_get_mqa_logits_configs(max_tokens))
+
+    # Batched masked GEMM warmup
+    for num_experts in [8, 16, 32, 64, 128]:
+        for num_topk in [1, 2, 4, 6, 8]:
+            for block_m in [64, 128]:
+                total += 1
+
+    # FP4 experts warmup
+    for num_experts in [8, 16, 32, 64]:
+        for topk in [1, 2, 4]:
+            for block_m in [64, 128]:
+                total += 1
+
     return total
 
 
@@ -509,7 +871,15 @@ def deep_gemm_warmup(model: torch.nn.Module, max_tokens: int):
             deepgemm_fp8_gemm_nt_warmup(model, max_tokens, pbar)
             deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(model, max_tokens, pbar)
             deepgemm_fp8_fp4_mega_moe_warmup(model, max_tokens, pbar)
+            deepgemm_fp8_einsum_warmup(model, max_tokens, pbar)
+            deepgemm_fp8_fp4_mqa_logits_warmup(max_tokens, pbar)
+            deepgemm_batched_masked_gemm_warmup(max_tokens, pbar)
+            deepgemm_fp4_experts_warmup(max_tokens, pbar)
     else:
         deepgemm_fp8_gemm_nt_warmup(model, max_tokens, None)
         deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(model, max_tokens, None)
         deepgemm_fp8_fp4_mega_moe_warmup(model, max_tokens, None)
+        deepgemm_fp8_einsum_warmup(model, max_tokens, None)
+        deepgemm_fp8_fp4_mqa_logits_warmup(max_tokens, None)
+        deepgemm_batched_masked_gemm_warmup(max_tokens, None)
+        deepgemm_fp4_experts_warmup(max_tokens, None)
