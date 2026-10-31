@@ -9,6 +9,7 @@ This endpoint is automatically available when the server is started with a gener
 - The `label_token_ids` parameter is **required** and must contain **at least 1 token ID**.
 - When 2 label tokens are provided, the score equals `P(label_token_ids[0]) / (P(label_token_ids[0]) + P(label_token_ids[1]))` (softmax over the two labels).
 - When more labels are provided, the score is the softmax-normalized probability of the first label token across all label tokens.
+- `apply_softmax=false` returns the first label's probability over the full vocabulary instead. This needs `--logprobs-mode raw_logprobs` (the default) or `processed_logprobs`; with `raw_logits` or `processed_logits` the request is rejected with HTTP 400. `apply_softmax=true` works in every logprobs mode.
 
 ## How it works
 
