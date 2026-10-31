@@ -244,8 +244,11 @@ class FusedMMInputNorm(CustomOp):
         mean = torch.tensor(image_mean, dtype=torch.float32, device="cpu")
         std = torch.tensor(image_std, dtype=torch.float32, device="cpu")
         device = torch.get_default_device()
-        self.register_buffer("weight", (rescale_factor / std).to(device))
-        self.register_buffer("bias", (-mean / std).to(device))
+        # Processor-derived constants must survive dummy weight initialization.
+        self.register_buffer(
+            "weight", (rescale_factor / std).to(device), persistent=False
+        )
+        self.register_buffer("bias", (-mean / std).to(device), persistent=False)
 
     @classmethod
     def enabled(cls) -> bool:
