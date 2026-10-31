@@ -6,12 +6,17 @@ from typing import Any
 import torch
 import torch.distributed
 
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+
 from .parallel_state import get_tp_group
 
 
+@eager_break_during_capture
 def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
     """All-reduce the input tensor across model parallel group."""
-    return get_tp_group().all_reduce(input_)
+    result = get_tp_group().all_reduce(input_)
+    input_.copy_(result)
+    return input_
 
 
 def tensor_model_parallel_all_gather(
