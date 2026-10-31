@@ -6,12 +6,16 @@ from unittest.mock import patch
 import pytest
 import torch
 
+import vllm.model_executor.layers.fused_moe.layer as moe_layer
+import vllm.model_executor.layers.fused_moe.router.router_factory as router_factory
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.router.base_router import (
     eplb_map_to_physical_and_record,
 )
+from vllm.model_executor.layers.fused_moe.router.cpu_router import CPURouter
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     FusedTopKBiasRouter,
 )
@@ -24,8 +28,14 @@ from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,
 )
+from vllm.model_executor.layers.fused_moe.router.routing_simulator_router import (
+    RoutingSimulatorRouter,
+)
+from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
+from vllm.model_executor.models.gpt_oss import GptOssRoutedExperts
 from vllm.model_executor.models.llama4 import Llama4MoE
 from vllm.platforms import current_platform
+from vllm.platforms.interface import Platform
 
 DEVICE = current_platform.device_type
 
@@ -75,6 +85,179 @@ def test_degenerate_grouped_config_uses_standard_topk() -> None:
         baseline_weights,
         baseline_ids,
     )
+
+
+def test_platform_router_constructor_accepts_compatible_sibling() -> None:
+    def choose_constructor(selected_cls):
+        if selected_cls is FusedTopKRouter:
+            return lambda **kwargs: FusedTopKBiasRouter(**kwargs)
+        return selected_cls
+
+    with (
+        patch.object(current_platform, "is_cpu", return_value=False),
+        patch.object(
+            current_platform,
+            "get_fused_moe_router_constructor",
+            side_effect=choose_constructor,
+        ),
+    ):
+        router = create_fused_moe_router(top_k=2, global_num_experts=8)
+    assert isinstance(router, FusedTopKBiasRouter)
+
+
+def test_platform_router_constructor_rejects_non_router() -> None:
+    with (
+        patch.object(current_platform, "is_cpu", return_value=False),
+        patch.object(
+            current_platform,
+            "get_fused_moe_router_constructor",
+            return_value=lambda **kwargs: object(),
+        ),
+        pytest.raises(TypeError, match="must return FusedMoERouter"),
+    ):
+        create_fused_moe_router(top_k=2, global_num_experts=8)
+
+
+@pytest.mark.parametrize("enable_eplb", [False, True])
+def test_platform_adapts_selected_fused_moe_components(monkeypatch, enable_eplb):
+    """Factory adaptation preserves model loading and the router's EPLB state."""
+
+    class PlatformRoutedExperts(GptOssRoutedExperts):
+        pass
+
+    class ModelRunner(MoERunner):
+        pass
+
+    class PlatformRunner(ModelRunner):
+        pass
+
+    class PlatformRouter(CPURouter):
+        pass
+
+    class TestPlatform(Platform):
+        _enum = current_platform._enum
+
+        @classmethod
+        def get_fused_moe_router_constructor(cls, selected_cls):
+            if selected_cls in (CPURouter, FusedTopKRouter):
+                return PlatformRouter
+            return selected_cls
+
+        @classmethod
+        def get_fused_moe_routed_experts_cls(cls, selected_cls):
+            return (
+                PlatformRoutedExperts
+                if selected_cls is GptOssRoutedExperts
+                else selected_cls
+            )
+
+        @classmethod
+        def get_fused_moe_runner_cls(cls, selected_cls):
+            return PlatformRunner if selected_cls is ModelRunner else selected_cls
+
+    platform = TestPlatform()
+    monkeypatch.setattr(moe_layer, "current_platform", platform, raising=False)
+    monkeypatch.setattr(router_factory, "current_platform", platform)
+    with set_current_vllm_config(VllmConfig()), torch.device(DEVICE):
+        runner = moe_layer.FusedMoEFactory(
+            num_experts=4,
+            top_k=2,
+            hidden_size=128,
+            intermediate_size=128,
+            params_dtype=torch.bfloat16,
+            tp_size=1,
+            dp_size=1,
+            pcp_size=1,
+            routed_experts_cls=GptOssRoutedExperts,
+            runner_cls=ModelRunner,
+            enable_eplb=enable_eplb,
+            prefix="platform_components",
+        )
+    assert isinstance(runner, PlatformRunner)
+    assert isinstance(runner.router, PlatformRouter)
+    assert isinstance(runner.routed_experts, PlatformRoutedExperts)
+    assert (runner.eplb_state is not None) == enable_eplb
+
+    experts = runner.routed_experts
+    weight = experts.w13_weight
+    checkpoint_weight = torch.arange(
+        weight[0].numel(), dtype=weight.dtype, device=weight.device
+    ).reshape(weight.shape[2], weight.shape[1])
+    experts.weight_loader(
+        weight, checkpoint_weight, "w13_weight", "gpt_oss_w13", 0, return_success=False
+    )
+    torch.testing.assert_close(weight[0], checkpoint_weight.t(), rtol=0, atol=0)
+
+
+def test_platform_simulator_preserves_selected_routing_method(monkeypatch):
+    class PlatformSimulator(RoutingSimulatorRouter):
+        pass
+
+    class TestPlatform(Platform):
+        _enum = current_platform._enum
+
+        @classmethod
+        def get_fused_moe_router_constructor(cls, selected_cls):
+            if selected_cls is RoutingSimulatorRouter:
+                return PlatformSimulator
+            return selected_cls
+
+    monkeypatch.setattr(router_factory, "current_platform", TestPlatform())
+    monkeypatch.setenv("VLLM_MOE_ROUTING_SIMULATION_STRATEGY", "uniform_random")
+    state = EplbLayerState()
+    router = create_fused_moe_router(
+        top_k=4,
+        global_num_experts=128,
+        use_grouped_topk=True,
+        num_expert_group=8,
+        topk_group=4,
+        scoring_func="sigmoid",
+        e_score_correction_bias=torch.zeros(128),
+        eplb_state=state,
+    )
+    assert isinstance(router, PlatformSimulator)
+    assert router.kernel_routing_method_type == RoutingMethodType.DeepSeekV3
+    assert router.eplb_state is state
+
+
+@pytest.mark.parametrize(
+    ("hook_name", "message"),
+    [
+        (
+            "get_fused_moe_routed_experts_cls",
+            "must return a RoutedExperts class",
+        ),
+        (
+            "get_fused_moe_runner_cls",
+            "must return a MoERunner class",
+        ),
+    ],
+)
+def test_platform_rejects_invalid_fused_moe_component_class(
+    monkeypatch, hook_name, message
+) -> None:
+    platform = type(
+        "InvalidPlatform",
+        (Platform,),
+        {hook_name: classmethod(lambda cls, selected_cls: object)},
+    )()
+    monkeypatch.setattr(moe_layer, "current_platform", platform)
+    with (
+        set_current_vllm_config(VllmConfig()),
+        torch.device(DEVICE),
+        pytest.raises(TypeError, match=message),
+    ):
+        moe_layer.FusedMoEFactory(
+            num_experts=4,
+            top_k=2,
+            hidden_size=128,
+            intermediate_size=128,
+            params_dtype=torch.bfloat16,
+            tp_size=1,
+            dp_size=1,
+            pcp_size=1,
+            prefix="invalid_platform_component",
+        )
 
 
 def test_multiple_expert_groups_use_grouped_topk() -> None:
