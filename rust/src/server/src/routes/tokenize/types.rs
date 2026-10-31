@@ -47,6 +47,7 @@ impl TokenizeCompletionRequest {
         TextRequest {
             request_id,
             prompt: Prompt::Text(self.prompt),
+            prompt_token_offsets: None,
             mm_features: None,
             sampling_params: SamplingParams::default(),
             decode_options: TextDecodeOptions::default(),
@@ -55,6 +56,7 @@ impl TokenizeCompletionRequest {
             cache_salt: None,
             prompt_truncation: None,
             add_special_tokens: self.add_special_tokens,
+            return_token_offsets: false,
             data_parallel_rank: None,
             session_id: None,
             kv_hints: None,
@@ -129,6 +131,7 @@ impl TokenizeChatRequest {
             documents: None,
             cache_salt: None,
             add_special_tokens: self.add_special_tokens,
+            return_token_offsets: false,
             data_parallel_rank: None,
             session_id: None,
             lora_request: None,
