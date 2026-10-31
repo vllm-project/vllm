@@ -1239,11 +1239,15 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
                                        CuCount);                              \
   }
 
+// On wave64, N == 5 stays at YTILE 2: larger tiles exceed the 128-VGPR
+// budget of a 16-wave block and spill.
 #define WVSPLIT_TILE_CFG(_THRDS, _WVPRGRP, _sYT, __N)     \
   {                                                       \
     bool fit_lds = (Kbp_in * N_in <= max_lds_len);        \
     if (_sYT <= 1)                                        \
       WVSPLITK_CFG(_THRDS, _WVPRGRP, 1, 4, __N)           \
+    else if (_THRDS == 64 && __N == 5)                    \
+      WVSPLITK_CFG(_THRDS, _WVPRGRP, 2, 2, __N)           \
     else if ((__N == 1) || (!fit_lds) || (_sYT <= 4 * 2)) \
       WVSPLITK_CFG(_THRDS, _WVPRGRP, 2, 2, __N)           \
     else if (_sYT <= 4 * 3)                               \
