@@ -884,6 +884,13 @@ def _draft_step_kernel(
         req_idx = tl.load(next_req_indices_ptr + row).to(tl.int64)
         temperature = tl.load(temp_ptr + req_idx, mask=req_idx >= 0, other=0.0)
         active = tl.load(enabled_ptr + row) & (temperature != 0)
+        context_offsets = tl.arange(0, BLOCKS_POW2)
+        context = tl.load(
+            contexts_row_ptr + context_offsets,
+            mask=context_offsets < CONTEXT_WIDTH,
+            other=0,
+        )
+        active &= tl.min(context, axis=0) >= 0
         if DEDUPLICATE:
             # The dedup kernel body runs in place on the skip mask buffer.
             tl.store(skip_mask_ptr + row, active)
