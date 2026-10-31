@@ -53,7 +53,7 @@ OPTIONS_WVSPLITK_FP8 = [
 
 DTYPES = [torch.bfloat16, torch.float16]
 
-# kWvSlots in csrc/rocm/skinny_gemms.cu; beyond it streams take overflow
+# kWvSlots in csrc/rocm/skinny_gemms_wvsplitkrc.cu; beyond it streams take overflow
 # workspaces.
 WVSPLITKRC_SLOTS = 8
 

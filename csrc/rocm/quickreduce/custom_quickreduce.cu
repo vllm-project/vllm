@@ -1,7 +1,7 @@
 #include <ATen/cuda/Exceptions.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAStream.h>
-#include <torch/all.h>
+#include <torch/types.h>
 
 #ifdef USE_ROCM
 

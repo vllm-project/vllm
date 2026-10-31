@@ -579,8 +579,9 @@ def allocate_kv_cache(
     sizes = {tensor.size for tensor in kv_cache_config.kv_cache_tensors}
     assert len(sizes) == 1, "KV cache tensors must share one backing allocation."
     raw_size = sizes.pop()
-    # wvSplitKrc's process-lifetime static workspaces (csrc/rocm/skinny_gemms.cu)
-    # are created lazily on the first qualifying GEMM. Force that now, before
+    # wvSplitKrc's process-lifetime static workspaces
+    # (csrc/rocm/skinny_gemms_wvsplitkrc.cu) are created lazily on the first
+    # qualifying GEMM. Force that now, before
     # the giant backing allocation below: if one landed in this segment's
     # rounding tail it would pin the whole segment at engine shutdown.
     if current_platform.is_rocm():
