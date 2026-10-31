@@ -9,6 +9,12 @@ from typing import TYPE_CHECKING, Any, Literal
 import torch
 import zmq
 from lmcache.integration.vllm.utils import mla_enabled
+from lmcache.integration.vllm.vllm_multi_process_adapter import (
+    LMCacheMPSchedulerAdapter,
+    LMCacheMPWorkerAdapter,
+    LoadStoreOp,
+    ParallelStrategy,
+)
 from lmcache.utils import init_logger as lmcache_init_logger
 
 from vllm.config import VllmConfig
@@ -24,29 +30,10 @@ from vllm.v1.request import RequestStatus
 from vllm.v1.utils import ConstantList
 
 try:
-    from lmcache.integration.vllm.vllm_multi_process_adapter import (
-        LMCacheMPSchedulerAdapter,
-        LMCacheMPWorkerAdapter,
-        LoadStoreOp,
-        ParallelStrategy,
-    )
-
-    try:
-        from lmcache.v1.multiprocess.custom_types import RequestAllocationRecord
-    except ImportError:
-        from lmcache.v1.multiprocess.custom_types import (
-            BlockAllocationRecord as RequestAllocationRecord,
-        )
+    from lmcache.v1.multiprocess.custom_types import RequestAllocationRecord
 except ImportError:
     from lmcache.v1.multiprocess.custom_types import (
         BlockAllocationRecord as RequestAllocationRecord,
-    )
-
-    from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration import (
-        LMCacheMPSchedulerAdapter,
-        LMCacheMPWorkerAdapter,
-        LoadStoreOp,
-        ParallelStrategy,
     )
 
 if TYPE_CHECKING:
