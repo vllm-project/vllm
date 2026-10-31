@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
+from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
     calc_rows_per_block,
 )
@@ -26,6 +27,7 @@ def _fused_gdn_gated_rms_norm_kernel(
     NORM_BEFORE_GATE: tl.constexpr,
     ACTIVATION: tl.constexpr,
     QUANT_FP8: tl.constexpr,
+    launch_pdl: tl.constexpr = False,
 ):
     """FLA-equivalent per-head gated RMS norm with token-strided z."""
     row_start = tl.program_id(0) * ROWS_PER_BLOCK
@@ -40,6 +42,10 @@ def _fused_gdn_gated_rms_norm_kernel(
     x_ptrs = x_ptr + rows[:, None] * stride_x_tok + head * N + cols[None, :]
     z_ptrs = z_ptr + rows[:, None] * stride_z_tok + head * N + cols[None, :]
 
+    if launch_pdl:
+        # PDL: this grid may start before the preceding kernel has finished;
+        # wait for it before the first load.
+        tl.extra.cuda.gdc_wait()
     x = tl.load(x_ptrs, mask=mask, other=0.0).to(tl.float32)
 
     if not NORM_BEFORE_GATE:
@@ -135,4 +141,5 @@ def fused_gdn_gated_rms_norm(
         ACTIVATION=activation,
         QUANT_FP8=quant_fp8,
         num_warps=min(max(block_n // 256, 1), 8),
+        launch_pdl=current_platform.is_arch_support_pdl(),
     )
