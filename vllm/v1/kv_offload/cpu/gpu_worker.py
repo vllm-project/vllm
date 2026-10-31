@@ -51,6 +51,7 @@ def _select_swap_blocks_fn(
     layer_refs_per_group: list[list[CanonicalKVCacheRef]],
     gpu_to_cpu: bool,
     host_memory_is_pinned: bool = True,
+    canonical_layout: bool = False,
 ):
     """Resolve the swap_blocks function for a handler at init time."""
     # GPU->CPU is bandwidth-bound; the dedicated copy engine beats Triton.
@@ -64,14 +65,26 @@ def _select_swap_blocks_fn(
     # so the Triton kernel's tl.load(cpu_ptr) is invalid on XPU).
     if not HAS_TRITON or current_platform.is_xpu() or current_platform.is_rocm():
         return ops.swap_blocks_batch
-    page_sizes = [r.page_size_bytes for g in layer_refs_per_group for r in g]
+    copy_sizes = [
+        size
+        for group in layer_refs_per_group
+        for ref in group
+        for size in (
+            [run.fragment_size for run in ref.mapping.runs]
+            if canonical_layout and ref.mapping is not None
+            else [ref.page_size_bytes]
+        )
+    ]
     # Triton wins only on small, 8-byte-aligned payloads.
     if (
-        not page_sizes
-        or max(page_sizes) >= THRESHOLD_BYTES
-        or any(s % 8 for s in page_sizes)
+        not copy_sizes
+        or max(copy_sizes) >= THRESHOLD_BYTES
+        or any(size % 8 for size in copy_sizes)
     ):
         return ops.swap_blocks_batch
+    # The chunk still follows the page: sizing it to 512-byte fragments was
+    # slower than the page-sized chunk.
+    page_sizes = [r.page_size_bytes for g in layer_refs_per_group for r in g]
     chunk = min(triton.next_power_of_2(max(page_sizes)), 8192)
     return functools.partial(swap_blocks_batch, bytes_per_chunk=chunk)
 
@@ -362,7 +375,10 @@ class SingleDirectionOffloadingHandler:
         self.gpu_to_cpu: bool = gpu_to_cpu
         self.layer_refs_per_group = layer_refs_per_group
         self._swap_blocks_batch = _select_swap_blocks_fn(
-            layer_refs_per_group, gpu_to_cpu, host_memory_is_pinned
+            layer_refs_per_group,
+            gpu_to_cpu,
+            host_memory_is_pinned,
+            canonical_layout=canonical_layout,
         )
 
         # GPU blocks may be smaller
