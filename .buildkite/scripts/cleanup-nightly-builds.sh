@@ -51,22 +51,30 @@ fi
 get_all_tags() {
     local page=1
     local all_tags=""
+    local response tags
     
     while true; do
         set +x
-        local response=$(curl -s -H "Authorization: Bearer $BEARER_TOKEN" \
-            "$REPO_API_URL?page=$page&page_size=100")
+        response=$(curl -fsS -H "Authorization: Bearer $BEARER_TOKEN" \
+            "$REPO_API_URL?page=$page&page_size=100") || return 1
         set -x
+
+        echo "$response" | jq -e \
+            '(.results | type == "array") and (.next == null or (.next | type == "string"))' \
+            > /dev/null || return 1
         
         # Get both last_updated timestamp and tag name, separated by |
         # Exclude mutable architecture tags and nightly-dev tags from cleanup
-        local tags=$(echo "$response" | jq -r --arg prefix "$TAG_PREFIX" --arg exclude "$EXCLUDE_PREFIX" '.results[] | select(.name | startswith($prefix)) | select($exclude == "" or (.name | startswith($exclude) | not)) | select(.name != ($prefix + "x86_64") and .name != ($prefix + "aarch64")) | select(.name | startswith("nightly-dev") | not) | "\(.last_updated)|\(.name)"')
+        tags=$(echo "$response" | jq -r --arg prefix "$TAG_PREFIX" --arg exclude "$EXCLUDE_PREFIX" '.results[] | select(.name | startswith($prefix)) | select($exclude == "" or (.name | startswith($exclude) | not)) | select(.name != ($prefix + "x86_64") and .name != ($prefix + "aarch64")) | select(.name | startswith("nightly-dev") | not) | "\(.last_updated)|\(.name)"') || return 1
         
-        if [ -z "$tags" ]; then
+        if [ -n "$tags" ]; then
+            all_tags="$all_tags$tags"$'\n'
+        fi
+
+        if [ -z "$(echo "$response" | jq -r '.next // empty')" ]; then
             break
         fi
         
-        all_tags="$all_tags$tags"$'\n'
         page=$((page + 1))
     done
     
