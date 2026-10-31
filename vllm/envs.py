@@ -139,6 +139,7 @@ if TYPE_CHECKING:
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_CUSTOM_AR: bool = True
+    VLLM_ROCM_USE_AITER_QUICK_REDUCE: bool = True
     VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE: str = "fp32"
     VLLM_ROCM_MUSE_MOE_ONLINE_QUANT: str = ""
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
@@ -1308,6 +1309,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # CudaCommunicator on ROCm. Also enables AITER AG/RS for DP communication.
     "VLLM_ROCM_USE_AITER_CUSTOM_AR": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_CUSTOM_AR", "True").lower() in ("true", "1")
+    ),
+    # Whether INT4 QuickReduce runs BF16 payloads on AITER's FlyDSL kernel
+    # (VLLM_ROCM_USE_AITER must be on too). Off keeps INT4 QuickReduce on
+    # vLLM's HIP kernels.
+    "VLLM_ROCM_USE_AITER_QUICK_REDUCE": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_QUICK_REDUCE", "True").lower() in ("true", "1")
     ),
     # Muse Spark on ROCm: dtype of the TP reduction before the post-expert norm.
     "VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE": lambda: os.getenv(
