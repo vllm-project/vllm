@@ -3700,43 +3700,84 @@ class Scheduler(SchedulerInterface):
         return set() if self.recompute_kv_load_failures else affected_req_ids
 
     def _handle_lost_kv(self, lost_req_ids: set[str], lost_all: bool) -> set[str]:
-        """Handle running requests whose KV cache was lost on some worker.
+        """Handle requests whose KV cache was lost on some worker.
 
-        Their blocks (with lost_all: all blocks) are evicted from the prefix
-        cache, since what they hold is no longer valid everywhere. With the
-        recompute policy the requests are preempted, so they resume with a
-        prefill of all their tokens and their in-flight outputs are dropped.
+        Affected are running requests and waiting requests that hold KV
+        blocks (paused streaming sessions, requests resuming with their KV,
+        async KV loads); with lost_all, all of them. Their blocks are evicted
+        from the prefix cache in every pool, since what they hold is no longer
+        valid everywhere. If a reported request no longer holds its blocks
+        (e.g. it was aborted before the report arrived), the blocks it left in
+        the prefix cache cannot be identified, so the whole prefix cache is
+        invalidated, as with lost_all.
+
+        With the recompute policy, running requests are preempted (their
+        in-flight outputs are dropped and they resume with a prefill of all
+        their tokens); waiting requests keep their state (e.g. a paused
+        session keeps waiting for its next input) but drop their blocks and
+        computed tokens, and async loads are retried once they complete.
         Returns the IDs of the requests to fail (fail policy).
         """
-        lost_reqs = [
-            req for req in self.running if lost_all or req.request_id in lost_req_ids
-        ]
-        if lost_all:
-            blocks_to_evict = set(
-                range(self.kv_cache_manager.block_pool.num_gpu_blocks)
-            )
+
+        def is_lost(req: Request) -> bool:
+            return lost_all or req.request_id in lost_req_ids
+
+        lost_running = [req for req in self.running if is_lost(req)]
+        lost_loading: list[Request] = []
+        lost_waiting: list[Request] = []
+        for req in self.kv_holding_waiting:
+            if not is_lost(req):
+                continue
+            if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+                lost_loading.append(req)
+            elif req.num_computed_tokens > 0:
+                lost_waiting.append(req)
+        lost_reqs = lost_running + lost_loading + lost_waiting
+
+        holders = {req.request_id for req in lost_reqs}
+        if lost_all or not lost_req_ids <= holders:
+            if not lost_all:
+                logger.warning(
+                    "KV cache lost for request(s) that no longer hold their "
+                    "blocks (%s); invalidating the whole prefix cache.",
+                    lost_req_ids - holders,
+                )
+            self.kv_cache_manager.evict_all_cached_blocks()
         else:
-            blocks_to_evict = {
-                block_id
-                for req in lost_reqs
-                for group in self.kv_cache_manager.get_block_ids(req.request_id)
-                for block_id in group
-            }
-        self.kv_cache_manager.evict_blocks(blocks_to_evict)
+            for req in lost_reqs:
+                self.kv_cache_manager.evict_request_blocks(req.request_id)
         if not lost_reqs:
             return set()
         if not self.recompute_kv_load_failures:
-            return {req.request_id for req in lost_reqs}
+            return holders
 
         timestamp = time.monotonic()
-        self.running = remove_all(self.running, set(lost_reqs))
-        # Preempt in reverse order so the requests are resumed in FIFO order.
-        for request in reversed(lost_reqs):
-            self._preempt_request(request, timestamp, drop_stale_output=True)
-            self.prev_step_scheduled_req_ids.discard(request.request_id)
+        if lost_running:
+            self.running = remove_all(self.running, set(lost_running))
+            # Preempt in reverse order so the requests are resumed in FIFO order.
+            for request in reversed(lost_running):
+                self._preempt_request(request, timestamp, drop_stale_output=True)
+                self.prev_step_scheduled_req_ids.discard(request.request_id)
+        for request in lost_loading:
+            # Retry the load (or recompute) once it reports completion.
+            request.num_computed_tokens = 0
+            self.failed_recving_kv_req_ids.add(request.request_id)
+        if lost_waiting:
+            # They no longer hold KV: move them to the waiting queue, in order,
+            # keeping their status (a paused session stays paused).
+            self.kv_holding_waiting.remove_requests(lost_waiting)
+            for request in lost_waiting:
+                self._free_request_blocks(request)
+                request.num_computed_tokens = 0
+                request.spec_token_ids = []
+            self.waiting.prepend_requests(reversed(lost_waiting))
         logger.warning(
-            "KV cache lost for %d running request(s); recomputing them.",
+            "KV cache lost for %d request(s) (%d running, %d waiting, "
+            "%d loading); recomputing them.",
             len(lost_reqs),
+            len(lost_running),
+            len(lost_waiting),
+            len(lost_loading),
         )
         return set()
 
