@@ -16,6 +16,7 @@ from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     fused_topk_bias,
 )
 from vllm.platforms import current_platform
+from vllm.platforms.rocm import on_gfx950
 
 
 def _torch_topk_softplus_sqrt(
@@ -551,6 +552,85 @@ def test_fused_topk_softplus_sqrt_padding(
     sorted_w_ref = topk_weights_ref[rows_to_compare].gather(1, idx_ref)
     sorted_w = topk_weights[rows_to_compare].gather(1, idx_ops)
     torch.testing.assert_close(sorted_w_ref, sorted_w, atol=2e-2, rtol=1e-2)
+
+
+def _run_topk_hash_softplus_sqrt(gating_output, renormalize, **kwargs):
+    num_tokens = gating_output.shape[0]
+    device = gating_output.device
+    topk_weights = torch.empty(num_tokens, 6, dtype=torch.float32, device=device)
+    topk_ids = torch.empty(num_tokens, 6, dtype=torch.int32, device=device)
+    token_expert_indices = torch.empty_like(topk_ids)
+    ops.topk_hash_softplus_sqrt(
+        topk_weights,
+        topk_ids,
+        token_expert_indices,
+        gating_output,
+        renormalize=renormalize,
+        routed_scaling_factor=2.5,
+        **kwargs,
+    )
+    return topk_weights, topk_ids
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_rocm() and on_gfx950()),
+    reason="The wave64 top-6 path runs only on gfx950.",
+)
+@pytest.mark.parametrize("num_tokens", [1, 33, 256])
+@pytest.mark.parametrize("num_experts", [256, 384, 512])
+@pytest.mark.parametrize("use_hash", [False, True])
+@pytest.mark.parametrize("use_bias", [False, True])
+@pytest.mark.parametrize("renormalize", [False, True])
+@pytest.mark.parametrize("use_padding", [False, True])
+def test_wave64_top6_matches_generic_kernel_bitwise(
+    num_tokens: int,
+    num_experts: int,
+    use_hash: bool,
+    use_bias: bool,
+    renormalize: bool,
+    use_padding: bool,
+):
+    """fp32 top-6 at 256/384/512 experts takes the wave64 kernel on gfx950;
+    bf16 takes the generic one. bf16 -> fp32 is exact, so both see the same
+    scores and must agree bit for bit."""
+    if use_hash and renormalize and num_experts != 384:
+        # The generic bf16 launch has a different thread layout than its fp32
+        # launch here, so its hash-path sum runs in a different order.
+        pytest.skip("generic bf16 and fp32 hash sums differ in order")
+    torch.manual_seed(0)
+    gating_bf16 = torch.randn(
+        (num_tokens, num_experts), dtype=torch.bfloat16, device="cuda"
+    )
+    gating_bf16[0] = 0
+    kwargs = {}
+    if use_bias:
+        kwargs["e_score_correction_bias"] = torch.randn(
+            num_experts, dtype=torch.float32, device="cuda"
+        )
+    if use_hash:
+        vocab_size = 64
+        kwargs["hash_indices_table"] = torch.stack(
+            [torch.randperm(num_experts)[:6] for _ in range(vocab_size)]
+        ).to(device="cuda", dtype=torch.int32)
+        kwargs["input_tokens"] = torch.randint(
+            0, vocab_size, (num_tokens,), dtype=torch.int32, device="cuda"
+        )
+    if use_padding:
+        is_padding = torch.zeros(num_tokens, dtype=torch.bool, device="cuda")
+        is_padding[1::2] = True
+        gating_bf16[is_padding] = float("nan")
+        kwargs["is_padding"] = is_padding
+
+    generic_w, generic_ids = _run_topk_hash_softplus_sqrt(
+        gating_bf16, renormalize, **kwargs
+    )
+    wave64_w, wave64_ids = _run_topk_hash_softplus_sqrt(
+        gating_bf16.float(), renormalize, **kwargs
+    )
+    assert torch.equal(wave64_ids, generic_ids)
+    assert torch.equal(wave64_w.view(torch.int32), generic_w.view(torch.int32)), (
+        (wave64_w - generic_w).abs().max().item()
+    )
 
 
 def _make_mixed_input_ids(
