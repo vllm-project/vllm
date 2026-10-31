@@ -389,6 +389,7 @@ class ServingRender(BaseServing):
             ),
             sampling_params=params,
             model=request.model,
+            reasoning_ended=True if request._grammar_from_parser else None,
             reasoning_parser_kwargs=self._reasoning_parser_kwargs(
                 self.online_renderer.effective_chat_template_kwargs(request)
             ),
