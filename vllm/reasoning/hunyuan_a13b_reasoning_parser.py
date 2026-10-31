@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING
 
 import regex as re
@@ -77,8 +77,31 @@ class HunyuanA13BReasoningParser(ReasoningParser):
         self.token_buffer: list[int] = []
         self.text_buffer = ""
 
+    # Detect the end from token ids rather than `current_state`: the
+    # structured-output manager never calls `extract_reasoning_streaming`.
+    # `response_start_ids_fast` is the suffix of every think-end variant.
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
-        return self.current_state == "response"
+        end_ids = self.response_start_ids_fast
+        # Prompts carry earlier turns' `<think>...</answer>`; the newest wins.
+        reopen_ids = (self.think_start_ids[:2], self.response_end_ids[1:3])
+        for i in range(len(input_ids) - 1, -1, -1):
+            if input_ids[i] not in (end_ids[0], reopen_ids[0][0]):
+                continue
+            if list(input_ids[i : i + len(end_ids)]) == end_ids:
+                return True
+            if list(input_ids[i : i + 2]) in reopen_ids:
+                return False
+        return False
+
+    def is_reasoning_end_streaming(
+        self, input_ids: Sequence[int], delta_ids: Iterable[int]
+    ) -> bool:
+        end_ids = self.response_start_ids_fast
+        tail = list(input_ids[-(len(list(delta_ids)) + len(end_ids) - 1) :])
+        return any(
+            tail[i : i + len(end_ids)] == end_ids
+            for i in range(len(tail) - len(end_ids) + 1)
+        )
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         # for hunyuan streaming reason parsing, the stream parse
