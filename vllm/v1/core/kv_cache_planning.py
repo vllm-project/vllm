@@ -6,6 +6,7 @@ import math
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import replace
+from fractions import Fraction
 from functools import partial, reduce
 from typing import Any
 
@@ -343,6 +344,126 @@ def _get_kv_cache_groups_uniform_type(
     return [KVCacheGroupSpec(list(spec.kv_cache_specs.keys()), spec)]
 
 
+def _grown_block_sizes(
+    kv_cache_spec: dict[str, KVCacheSpec],
+    padded_layer_names: set[str],
+    max_page_size: int,
+) -> dict[str, int]:
+    """Grown block sizes for the padded full attention layers of
+    ``kv_cache_spec``, whose pages are already unified to ``max_page_size``.
+
+    Each takes the largest multiple of its block whose page still fits and
+    that fits one kernel block, since padded pages are never split; other
+    layers keep their block. The scheduler block (lcm of all block sizes) may
+    grow up to the larger of the largest chosen block and the lcm without
+    growth, but not further, so block sizes that are not multiples of each other
+    cannot inflate it. The result depends only on the specs.
+    """
+    if not padded_layer_names:
+        return {}
+    # Keyed by padding too: only padded layers grow.
+    layer_names_by_key: dict[tuple[KVCacheSpec, bool], list[str]] = defaultdict(list)
+    for layer_name, spec in kv_cache_spec.items():
+        # Mamba block sizes never change and can equal max_model_len, so
+        # Mamba stays out of the lcm below.
+        if not isinstance(spec, MambaSpec):
+            key = (spec, layer_name in padded_layer_names)
+            layer_names_by_key[key].append(layer_name)
+
+    # Candidate block sizes per key, largest first; the last is the block size
+    # without growth.
+    candidates: dict[tuple[KVCacheSpec, bool], list[int]] = {}
+    for spec, padded in layer_names_by_key:
+        grown: list[int] = []
+        # Only plain full attention grows; other specs, including full attention
+        # subclasses, may tie their block size to a model constant (e.g.
+        # Inkling's conv state, static sinks).
+        if padded and type(spec) is FullAttentionSpec:
+            # A padded page cannot be split into kernel blocks, so the block
+            # must divide alignment.base (see get_block_stride_alignment); an
+            # int alignment is in bytes.
+            alignment = spec.block_stride_alignment
+            max_kernel_block = (
+                None
+                if alignment is None or isinstance(alignment, int)
+                else alignment.base
+            )
+            block_size = 2 * spec.block_size
+            while (max_kernel_block is None or block_size <= max_kernel_block) and (
+                spec.copy_with_new_block_size(block_size).unpadded_page_size_bytes
+                <= max_page_size
+            ):
+                if max_kernel_block is None or max_kernel_block % block_size == 0:
+                    grown.append(block_size)
+                block_size += spec.block_size
+        candidates[spec, padded] = [*reversed(grown), spec.block_size]
+    if all(len(block_sizes) == 1 for block_sizes in candidates.values()):
+        return {}
+
+    def largest_dividing(bound: int) -> list[int] | None:
+        """Each key's largest candidate dividing ``bound``, if all have one."""
+        chosen: list[int] = []
+        for block_sizes in candidates.values():
+            fitting = [b for b in block_sizes if bound % b == 0]
+            if not fitting:
+                return None
+            chosen.append(fitting[0])
+        return chosen
+
+    base_lcm = math.lcm(*(block_sizes[-1] for block_sizes in candidates.values()))
+    all_block_sizes = {b for block_sizes in candidates.values() for b in block_sizes}
+    best_rank: tuple[Fraction, int] | None = None
+    best_block_sizes: list[int] = []
+    # Candidates are multiples of the block without growth, so lcm(chosen) >=
+    # base_lcm, and lcm(chosen) <= max(base_lcm, *chosen) holds exactly when
+    # every chosen block divides a bound in {base_lcm} | candidates. Try only
+    # those, each key taking its largest candidate that divides the bound.
+    for bound in sorted(all_block_sizes | {base_lcm}):
+        chosen = largest_dividing(bound)
+        if chosen is None:
+            continue
+        scheduler_block_size = math.lcm(*chosen)
+        if scheduler_block_size > max(base_lcm, *chosen):
+            continue
+        # Fewest blocks per token of context, then the finer scheduler block.
+        # Approximate: weights by layer count, not by the padded groups the
+        # pool charges.
+        blocks_per_token = sum(
+            (
+                Fraction(len(layer_names_by_key[key]), b)
+                for key, b in zip(candidates, chosen, strict=True)
+            ),
+            start=Fraction(0),
+        )
+        rank = (blocks_per_token, scheduler_block_size)
+        if best_rank is None or rank < best_rank:
+            best_rank, best_block_sizes = rank, chosen
+    assert best_rank is not None, "the block sizes without growth always qualify"
+
+    grown_block_sizes: dict[str, int] = {}
+    for (spec, padded), block_size in zip(candidates, best_block_sizes, strict=True):
+        if block_size == spec.block_size:
+            continue
+        assert isinstance(spec, AttentionSpec)
+        layer_names = layer_names_by_key[spec, padded]
+        natural_page_size = spec.copy_with_new_block_size(
+            block_size
+        ).unpadded_page_size_bytes
+        wasted_bytes = max_page_size - natural_page_size
+        logger.info_once(
+            "Using block size %d instead of %d for %d full attention layers "
+            "(e.g. %s); page padding wastes %d bytes (%.2f%%) per block",
+            block_size,
+            spec.block_size,
+            len(layer_names),
+            layer_names[0],
+            wasted_bytes,
+            wasted_bytes / max_page_size * 100,
+        )
+        grown_block_sizes.update(dict.fromkeys(layer_names, block_size))
+    return grown_block_sizes
+
+
 def unify_kv_cache_spec_page_size(
     kv_cache_spec: dict[str, KVCacheSpec],
 ) -> dict[str, KVCacheSpec]:
@@ -356,9 +477,11 @@ def unify_kv_cache_spec_page_size(
     strided view). MLA is excluded because sparse MLA indexes the cache in
     whole token rows (see ``flat_kv_row_view``), so its block stride can only
     be padded by its own row-aligned ``alignment``, not to an arbitrary page
-    size. Raise NotImplementedError if failed to unify the page size;
-    ``get_kv_cache_groups`` catches it to try the full-allocation fallback
-    (e.g. MLA next to an incompatible sliding-window draft).
+    size. Padded full attention layers then grow their block as far as it
+    fits; see ``_grown_block_sizes``. Raise NotImplementedError if failed to
+    unify the page size; ``get_kv_cache_groups`` catches it to try the
+    full-allocation fallback (e.g. MLA next to an incompatible sliding-window
+    draft).
 
     Args:
         kv_cache_spec: The KVCacheSpec of each attention layer in the model
@@ -374,6 +497,7 @@ def unify_kv_cache_spec_page_size(
 
     max_page_size = max(page_sizes)
     new_kv_cache_spec = {}
+    padded_layer_names: set[str] = set()
     for layer_name, layer_spec in kv_cache_spec.items():
         if layer_spec.page_size_bytes == max_page_size:
             new_kv_cache_spec[layer_name] = layer_spec
@@ -397,6 +521,7 @@ def unify_kv_cache_spec_page_size(
                 layer_spec, MLAAttentionSpec
             ):
                 new_spec = replace(layer_spec, page_size_padded=max_page_size)
+                padded_layer_names.add(layer_name)
             else:
                 raise NotImplementedError(
                     f"Layer {layer_name}: page size is not divisible by the "
@@ -405,6 +530,12 @@ def unify_kv_cache_spec_page_size(
                 )
             assert new_spec.page_size_bytes == max_page_size
             new_kv_cache_spec[layer_name] = new_spec
+    for layer_name, block_size in _grown_block_sizes(
+        new_kv_cache_spec, padded_layer_names, max_page_size
+    ).items():
+        new_kv_cache_spec[layer_name] = replace(
+            new_kv_cache_spec[layer_name], block_size=block_size
+        )
     return new_kv_cache_spec
 
 
