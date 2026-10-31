@@ -4,7 +4,7 @@ meta:
   provider: "Qwen"
   description: "27B-parameter dense hybrid-attention model with linear attention on 48 of 64 layers, a vision tower, a built-in MTP draft head, 262K native context window and extensible to 1M context"
   date_added: 2026-08-14
-  date_updated: 2026-10-15
+  date_updated: 2026-10-30
   tasks:
     - multimodal
     - text
@@ -102,7 +102,7 @@ features:
         # off the TOP-level config (config/speculative.py), but this checkpoint carries it only
         # under `text_config`, so the depth cannot be inferred here — omit it and startup fails.
         description: "Native MTP head, 3 draft tokens."
-        variants: [default, fp8, nvfp4, nvfp4_nvidia, int4, mxfp4]
+        variants: [default, fp8, nvfp4, nvfp4_nvidia, int4, mxfp4, redhat_nvfp4]
         args:
           - "--speculative-config"
           - '{"method":"mtp","num_speculative_tokens":3}'
@@ -128,7 +128,7 @@ features:
       dflash:
         label: "DFlash2"
         description: "External DFlash2 drafter (incoai/Qwen3.8-27B-DFlash2). method is dflash; DFlash2 is selected by the draft architecture. Needs vLLM >=0.28.0, which shipped vllm-project/vllm#52816. num_speculative_tokens must be 7 (block_size 8 minus one)."
-        variants: [default]
+        variants: [default, redhat_nvfp4]
         args:
           - "--speculative-config"
           - '{"method":"dflash","model":"incoai/Qwen3.8-27B-DFlash2","num_speculative_tokens":7}'
@@ -275,6 +275,15 @@ variants:
     vram_minimum_gb: 24
     supported_hardware: [h100, h200, b200, b300, gb200, gb300, rtx_5090, rtx_5090_2x]
     description: "Red Hat AI compressed-tensors MXFP4 build — 19.8 GB: 1 GPU. True W4A4 on Blackwell (SM100+); W4A16 via Marlin on Hopper and elsewhere."
+
+  redhat_nvfp4:
+    model_id: "RedHatAI/Qwen3.8-27B-NVFP4"
+    precision: nvfp4
+    label: "NVFP4 (RedHatAI)"
+    # The model card reports a 24.7 GB checkpoint; 1.2x load headroom rounds to 30 GB.
+    vram_minimum_gb: 30
+    supported_hardware: [b200, b300, gb200, gb300]
+    description: "RedHatAI mixed FP4/FP8 checkpoint: FP4 MLP projections, FP8 attention and final MLP layers, FP8 KV cache, and BF16 LM head."
 
   ascend_w8a8:
     model_id: "Eco-Tech/Qwen3.8-27B-w8a8"
@@ -596,6 +605,8 @@ guide: |
   Nvidia; pick the **MXFP4** variant (or NVFP4) when you want the 4-bit build.
 
   ## References
+
+  - [RedHatAI Qwen3.8-27B NVFP4 checkpoint](https://huggingface.co/RedHatAI/Qwen3.8-27B-NVFP4)
 
   - Model card: https://huggingface.co/Qwen/Qwen3.8-27B
   - FP8 checkpoint: https://huggingface.co/Qwen/Qwen3.8-27B-FP8
