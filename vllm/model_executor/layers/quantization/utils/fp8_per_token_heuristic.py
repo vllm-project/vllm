@@ -1,0 +1,536 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Per-token FP8 launch heuristics and specialized contiguous kernels."""
+
+from functools import cache, lru_cache
+from typing import Any
+
+import torch
+
+from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.compressed_tensors import (
+    triton_scaled_mm as shared_mm,
+)
+from vllm.triton_utils import tl, triton
+
+knobs = triton.knobs
+logger = init_logger(__name__)
+_LAUNCH_CACHE: dict[tuple, Any] = {}
+
+
+_KEYS = (
+    "engine",
+    "block_size_m",
+    "block_size_n",
+    "block_size_k",
+    "num_warps",
+    "num_stages",
+    "group_m",
+    "n_stripe",
+    "unmasked_loads",
+    "variant",
+    "split_k",
+    "programs",
+)
+_PALETTE = (
+    ("contiguous", 128, 128, 128, 8, 2, 4, 0, False, "persistent", 1, 64),
+    ("shared", 128, 128, 128, 4, 2, 1, 0, False, "gemm", 1, 32),
+    ("shared", 128, 128, 128, 4, 2, 1, 0, True, "gemm", 1, 32),
+    ("shared", 128, 128, 128, 8, 1, 1, 8, False, "gemm", 1, 32),
+    ("shared", 128, 128, 128, 4, 2, 1, 8, False, "gemm", 1, 32),
+    ("shared", 128, 128, 128, 8, 3, 1, 8, False, "gemm", 1, 32),
+    ("shared", 128, 128, 128, 8, 1, 2, 0, False, "gemm", 1, 32),
+    ("shared", 128, 32, 128, 4, 1, 1, 8, False, "gemm", 1, 32),
+    ("shared", 128, 64, 128, 4, 3, 1, 0, False, "gemm", 1, 32),
+    ("contiguous", 16, 32, 128, 4, 2, 1, 0, False, "gemm", 4, 32),
+    ("contiguous", 16, 32, 128, 4, 2, 1, 0, False, "gemm", 8, 32),
+    ("contiguous", 16, 64, 128, 4, 2, 1, 0, False, "gemm", 1, 32),
+    ("contiguous", 32, 128, 128, 4, 2, 1, 0, False, "gemm", 1, 32),
+    ("contiguous", 32, 32, 128, 4, 2, 1, 0, False, "gemm", 1, 32),
+    ("shared", 32, 32, 128, 4, 2, 1, 0, False, "gemm", 1, 32),
+    ("shared", 32, 64, 128, 4, 2, 1, 0, False, "gemm", 1, 32),
+    ("contiguous", 64, 128, 128, 4, 2, 1, 0, False, "gemm", 1, 32),
+    ("contiguous", 64, 128, 128, 4, 2, 4, 0, False, "persistent", 1, 64),
+    ("shared", 64, 128, 128, 8, 2, 1, 0, False, "gemm", 1, 32),
+    ("contiguous", 64, 32, 128, 4, 2, 1, 0, False, "gemm", 1, 32),
+    ("shared", 64, 32, 128, 8, 3, 1, 0, False, "gemm", 1, 32),
+    ("contiguous", 64, 64, 128, 4, 2, 1, 0, False, "gemm", 1, 32),
+    ("shared", 16, 128, 256, 8, 1, 1, 0, False, "gemm", 1, 32),
+    ("contiguous", 16, 64, 256, 4, 2, 1, 0, False, "gemm", 1, 32),
+    ("shared", 16, 64, 256, 4, 1, 1, 0, False, "gemm", 1, 32),
+    ("shared", 16, 64, 256, 4, 2, 1, 0, False, "gemm", 1, 32),
+    ("contiguous", 32, 64, 256, 4, 2, 1, 0, False, "gemm", 1, 32),
+    ("shared", 32, 64, 256, 4, 3, 1, 0, False, "gemm", 1, 32),
+    ("shared", 64, 64, 256, 4, 2, 1, 0, False, "gemm", 1, 32),
+    ("shared", 64, 64, 256, 8, 3, 1, 2, False, "gemm", 1, 32),
+    ("shared", 64, 64, 256, 8, 3, 2, 0, False, "gemm", 1, 32),
+    ("contiguous", 128, 64, 64, 8, 2, 1, 0, False, "gemm", 1, 32),
+    ("contiguous", 256, 64, 64, 4, 2, 1, 0, False, "gemm", 1, 32),
+    ("shared", 128, 128, 128, 8, 1, 1, 0, False, "gemm", 1, 32),
+    ("shared", 256, 64, 64, 4, 1, 4, 0, False, "gemm", 1, 32),
+    ("shared", 128, 128, 128, 8, 1, 4, 0, False, "gemm", 1, 32),
+    ("contiguous", 32, 64, 256, 8, 2, 1, 0, False, "gemm", 1, 32),
+    ("contiguous", 64, 64, 256, 4, 2, 1, 0, False, "gemm", 1, 32),
+    ("shared", 128, 128, 64, 8, 1, 4, 0, False, "gemm", 1, 32),
+    ("shared", 128, 64, 128, 4, 2, 4, 0, False, "gemm", 1, 32),
+)
+_CHOICES = tuple(dict(zip(_KEYS, row)) for row in _PALETTE)
+
+
+def _legacy_config(m: int, n: int) -> dict:
+    tile = (
+        (64, 64 if n < 8192 else 128, 256)
+        if m <= 32
+        else (64, 64, 256)
+        if m <= 64
+        else (64, 128, 128)
+        if m <= 128
+        else (128, 128, 128)
+    )
+    return dict(
+        engine="shared",
+        block_size_m=tile[0],
+        block_size_n=tile[1],
+        block_size_k=tile[2],
+        num_warps=4,
+        num_stages=2,
+    )
+
+
+def _shape_config(
+    m: int, n: int, k: int, num_processors: int, cache_size_bytes: int
+) -> dict:
+    output_elements = m * n
+    tile_waves = ((m + 63) // 64) * ((n + 63) // 64) / num_processors
+    if tile_waves <= 7.5:
+        if output_elements <= 131072:
+            if n / k <= 0.0625:
+                if m <= 16:
+                    tiles = ((m + 15) // 16) * ((n + 31) // 32)
+                    if k >= 4096 and tiles < 4 * num_processors:
+                        return _CHOICES[10 if n <= 256 else 9]
+                    return _CHOICES[13]
+                return _CHOICES[23 if m <= 64 else 13]
+            if n <= 1024:
+                if output_elements <= 8192:
+                    return _CHOICES[26]
+                return _CHOICES[23 if output_elements <= 32768 else 11]
+            if output_elements <= 4096:
+                return _CHOICES[25 if k <= 3840 else 24]
+            return _CHOICES[14 if m <= 32 else 19]
+        if output_elements <= 327680:
+            if n / k > 1.3333333333333333:
+                return _CHOICES[13]
+            return _CHOICES[15 if n / k <= 0.0625 else 12]
+        if n <= 4096:
+            if output_elements <= 786432:
+                return _CHOICES[16 if m <= 128 else 17]
+            return _CHOICES[6 if k <= 4096 else 1]
+        return _CHOICES[21 if output_elements <= 655360 else 18]
+
+    if m <= 64:
+        if n <= 30720:
+            if output_elements <= 262144:
+                return _CHOICES[27 if n <= 16384 else 22]
+            return _CHOICES[28] if m <= 48 else _legacy_config(m, n)
+        if m <= 16:
+            return _CHOICES[20]
+        return _CHOICES[30 if m <= 32 else 29]
+    if n <= 24576:
+        if cache_size_bytes > 0 and n * k * 64 <= cache_size_bytes * 15:
+            if n / k <= 32.0:
+                return _CHOICES[16] if n <= 512 else _legacy_config(m, n)
+            return _CHOICES[31 if m <= 128 else 32]
+        if output_elements <= 8388608:
+            return _CHOICES[1]
+        if output_elements <= 33554432:
+            return _CHOICES[6]
+        return _CHOICES[3 if m <= 4096 else 2]
+    if m <= 128:
+        return _CHOICES[8]
+    if n <= 30720:
+        return _CHOICES[5 if m <= 1024 else 0]
+    return _CHOICES[7 if m <= 1024 else 4]
+
+
+@lru_cache(maxsize=2048)
+def get_heuristic_config(
+    m: int,
+    n: int,
+    k: int,
+    num_processors: int = 32,
+    cache_size_bytes: int = 64 * 1024**2,
+) -> dict:
+    """Select by shape, processor count and last-level data-cache capacity."""
+    if num_processors <= 0:
+        raise ValueError("num_processors must be positive")
+    if cache_size_bytes < 0:
+        raise ValueError("cache_size_bytes must be nonnegative")
+    choice = _shape_config(m, n, k, num_processors, cache_size_bytes)
+    if m >= 128 and n >= 24576 and k <= 1024:
+        if k <= 512:
+            return _CHOICES[32] if 192 < m <= 1024 else _CHOICES[21]
+        return _CHOICES[33]
+    if cache_size_bytes > 0 and n >= 16384 and n * k >= cache_size_bytes:
+        if n <= 24576 and 64 < m <= 128:
+            return _CHOICES[38 if n * k * 8 <= cache_size_bytes * 9 else 39]
+        if 128 < m <= 512:
+            if n < 20480 or (n <= 24576 and 256 < m <= 384):
+                return _CHOICES[35]
+            if n <= 24576 or m <= 256:
+                return _CHOICES[34]
+        if (
+            m > 4096
+            and k <= 8192
+            and not choice.get("n_stripe", 0)
+            and choice.get("variant") != "persistent"
+        ):
+            return _CHOICES[34]
+    if (
+        cache_size_bytes > 0
+        and 8 < m <= 64
+        and k >= 8192
+        and n <= k // 2
+        and n * k * 16 >= cache_size_bytes * 15
+    ):
+        return _CHOICES[23 if m <= 16 else 36 if m <= 32 else 37]
+    if choice.get("variant") == "persistent":
+        return dict(choice, programs=2 * num_processors)
+    return choice
+
+
+@cache
+def get_device_cache_size(device: int) -> int:
+    """Return the GPU's last-level data cache in bytes, falling back to L2."""
+    from vllm.platforms import current_platform
+    from vllm.utils.platform_utils import cuda_get_device_properties
+
+    try:
+        from amdsmi import amdsmi_get_gpu_cache_info, amdsmi_get_processor_handles
+
+        from vllm.platforms.rocm import with_amdsmi_context
+
+        @with_amdsmi_context
+        def query():
+            physical = current_platform.visible_device_id_to_physical_device_id(device)
+            handle = amdsmi_get_processor_handles()[physical]
+            entries = [
+                entry
+                for entry in amdsmi_get_gpu_cache_info(handle)["cache"]
+                if "DATA_CACHE" in entry["cache_properties"]
+                and "CPU_CACHE" not in entry["cache_properties"]
+                and 2 <= entry["cache_level"] < 2**32 - 1
+                and 0 < entry["cache_size"] < 2**32 - 1
+                and 0 < entry["num_cache_instance"] < 2**32 - 1
+            ]
+            level = max((entry["cache_level"] for entry in entries), default=0)
+            # AMD SMI reports KiB per cache instance.
+            return sum(
+                entry["cache_size"] * entry["num_cache_instance"] * 1024
+                for entry in entries
+                if entry["cache_level"] == level
+            )
+
+        size = query()
+        if size > 0:
+            return size
+    except Exception as error:
+        logger.debug("GPU last-level cache query failed; using L2: %s", error)
+    try:
+        (l2_size,) = cuda_get_device_properties(
+            device, ("L2_cache_size",), init_cuda=True
+        )
+        return max(0, int(l2_size))
+    except (AttributeError, RuntimeError):
+        return 0
+
+
+def can_use_fp8_per_token_heuristic(a, b, sa, sb, out_dtype, bias) -> bool:
+    from vllm import envs
+
+    m, k = a.shape
+    n = b.shape[1]
+    return (
+        m > 0
+        and n > 0
+        and k > 0
+        and m * n < 2**31
+        and k % 16 == n % 16 == 0
+        and a.dtype == b.dtype == torch.float8_e4m3fn
+        and out_dtype in (torch.bfloat16, torch.float16)
+        and a.stride() == (k, 1)
+        and b.stride() == (1, k)
+        and sa.dtype == sb.dtype == torch.float32
+        and sa.numel() == m
+        and sb.numel() == n
+        and sa.is_contiguous()
+        and sb.is_contiguous()
+        and (
+            bias is None
+            or (bias.dtype == out_dtype and bias.is_contiguous() and bias.numel() == n)
+        )
+        and not envs.VLLM_TRITON_USE_TD
+    )
+
+
+def _launch(kernel, grid, args, options, key, tensors):
+    """Reuse specialization after checking its pointer attributes and options."""
+    enter = knobs.runtime.launch_enter_hook
+    exit_hook = knobs.runtime.launch_exit_hook
+    if (
+        kernel.debug
+        or kernel.pre_run_hooks
+        or knobs.runtime.debug
+        or knobs.compilation.instrumentation_mode
+        or getattr(enter, "calls", enter)
+        or getattr(exit_hook, "calls", exit_hook)
+        or knobs.runtime.add_stages_inspection_hook
+    ):
+        return kernel[grid](*args, **options)
+    specialized = tensors[:2] if kernel is _fp8_per_token_gemm else tensors
+    attrs = tuple(
+        (t.dtype, t.data_ptr() % 16, t.untyped_storage().size() <= 2**31 - 1)
+        for t in specialized
+        if t is not None
+    )
+    dtypes = tuple(t.dtype if t is not None else None for t in tensors)
+    key = (
+        kernel,
+        tensors[0].device.index,
+        knobs.amd.use_buffer_ops,
+        key,
+        attrs,
+        dtypes,
+    )
+    compiled = _LAUNCH_CACHE.get(key)
+    if compiled is None:
+        compiled = kernel[grid](*args, **options)
+        if len(_LAUNCH_CACHE) >= 4096:
+            _LAUNCH_CACHE.clear()
+        _LAUNCH_CACHE[key] = compiled
+    else:
+        stream = triton.runtime.driver.active.get_current_stream(
+            tensors[0].device.index
+        )
+        compiled.run(
+            grid[0],
+            grid[1] if len(grid) > 1 else 1,
+            1,
+            stream,
+            compiled.function,
+            compiled.packed_metadata,
+            None,
+            None,
+            None,
+            *args,
+        )
+    return compiled
+
+
+@triton.jit(do_not_specialize=["SA", "SB", "C", "Bias"])
+def _fp8_per_token_gemm(
+    A,
+    W,
+    SA,
+    SB,
+    C,
+    Bias,
+    M,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    BM: tl.constexpr,
+    BN: tl.constexpr,
+    BK: tl.constexpr,
+    GROUP: tl.constexpr,
+    STRIPE: tl.constexpr,
+    UNMASKED: tl.constexpr,
+    SPLIT_K: tl.constexpr,
+    PERSISTENT: tl.constexpr,
+):
+    C = tl.multiple_of(C, 16)
+    pid = tl.program_id(0)
+    split = tl.program_id(1)
+    tiles = tl.cdiv(M, BM) * tl.cdiv(N, BN)
+    step = tl.num_programs(0) if PERSISTENT else tiles
+    for tile in tl.range(pid, tiles, step, num_stages=1):
+        mi, ni = shared_mm._scaled_mm_tile_coords(tile, M, N, BM, BN, GROUP, STRIPE)
+        rows = mi * BM + tl.arange(0, BM)
+        cols = ni * BN + tl.arange(0, BN)
+        kk = tl.arange(0, BK)
+        acc = tl.zeros((BM, BN), tl.float32)
+        for block in range(split, tl.cdiv(K, BK), SPLIT_K):
+            ki = block * BK + kk
+            ap = A + rows[:, None].to(tl.int64) * K + ki[None, :]
+            wp = W + cols[None, :].to(tl.int64) * K + ki[:, None]
+            if UNMASKED:
+                a = tl.load(ap)
+                b = tl.load(wp)
+            else:
+                a = tl.load(ap, (rows[:, None] < M) & (ki[None, :] < K), 0.0)
+                b = tl.load(wp, (cols[None, :] < N) & (ki[:, None] < K), 0.0)
+            acc = tl.dot(a, b, acc)
+        offsets = rows[:, None].to(tl.int64) * N + cols[None, :]
+        mask = (rows[:, None] < M) & (cols[None, :] < N)
+        if SPLIT_K > 1:
+            tl.store(C + split.to(tl.int64) * M * N + offsets, acc, mask)
+        else:
+            sa = tl.load(SA + rows, rows < M, 0)
+            sb = tl.load(SB + cols, cols < N, 0)
+            out = (acc * sa[:, None] * sb[None, :]).to(C.dtype.element_ty)
+            if Bias is not None:
+                bias = tl.load(Bias + cols, cols < N, 0)
+                out = out + bias[None, :]
+            tl.store(C + offsets, out, mask)
+        if PERSISTENT:
+            tl.debug_barrier()
+
+
+@triton.jit
+def _fp8_split_epilogue(
+    P, SA, SB, C, Bias, M, N: tl.constexpr, SPLIT_K: tl.constexpr, BLOCK: tl.constexpr
+):
+    ids = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    rows, cols = ids // N, ids % N
+    acc = tl.full((BLOCK,), 0, tl.float32)
+    for split in range(SPLIT_K):
+        acc += tl.load(P + tl.cast(split, tl.int64) * M * N + ids, rows < M, 0)
+    sa = tl.load(SA + rows, rows < M, 0)
+    sb = tl.load(SB + cols, rows < M, 0)
+    out = (acc * sa * sb).to(C.dtype.element_ty)
+    if Bias is not None:
+        out += tl.load(Bias + cols, rows < M, 0)
+    tl.store(C + ids, out, rows < M)
+
+
+def launch_fp8_per_token(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    sa: torch.Tensor,
+    sb: torch.Tensor,
+    out_dtype: torch.dtype,
+    bias: torch.Tensor | None,
+    config: dict,
+) -> torch.Tensor:
+    """Launch already-validated contiguous FP8 inputs with an explicit choice."""
+    m, k = a.shape
+    n = b.shape[1]
+    result = torch.empty((m, n), device=a.device, dtype=out_dtype)
+    bm, bn, bk = (
+        config[key] for key in ("block_size_m", "block_size_n", "block_size_k")
+    )
+    warps, stages = config.get("num_warps", 4), config.get("num_stages", 2)
+    unmasked = (
+        config.get("unmasked_loads", False)
+        and m % bm == n % bn == k % bk == 0
+        and a.data_ptr() % 16 == b.data_ptr() % 16 == 0
+    )
+    group, stripe = config.get("group_m", 1), config.get("n_stripe", 0)
+    if group != 1 or stripe:
+        nm, nn = (m + bm - 1) // bm, (n + bn - 1) // bn
+        if group * nn > 2**31 - 1:
+            group = 1
+        if stripe and nm * max(nn, stripe) > 2**31 - 1:
+            stripe = 0
+        if stripe:
+            group = 1
+    key = (
+        m,
+        n,
+        k,
+        out_dtype,
+        bias is not None,
+        bm,
+        bn,
+        bk,
+        warps,
+        stages,
+        group,
+        stripe,
+        unmasked,
+    )
+    options = dict(num_warps=warps, num_stages=stages)
+    args: tuple
+    if config.get("engine") == "shared":
+        grid = (((m + bm - 1) // bm) * ((n + bn - 1) // bn),)
+        args = (
+            a,
+            b,
+            sa,
+            sb,
+            result,
+            bias,
+            m,
+            n,
+            k,
+            k,
+            1,
+            1,
+            k,
+            n,
+            1,
+            tl.float32,
+            bm,
+            bn,
+            bk,
+            1 if m == 1 else bm,
+            1 if n == 1 else bn,
+            False,
+            True,
+            group,
+            stripe,
+            unmasked,
+        )
+        _launch(
+            shared_mm.scaled_mm_kernel,
+            grid,
+            args,
+            options,
+            key,
+            (a, b, sa, sb, result, bias),
+        )
+        return result
+    split = config.get("split_k", 1)
+    persistent = config.get("variant") == "persistent"
+    grid = ((m + bm - 1) // bm) * ((n + bn - 1) // bn)
+    if persistent:
+        grid = min(grid, config.get("programs", 32))
+    target = result
+    if split > 1:
+        target = torch.empty((split, m, n), device=a.device, dtype=torch.float32)
+    args = (
+        a,
+        b,
+        sa,
+        sb,
+        target,
+        bias,
+        m,
+        n,
+        k,
+        bm,
+        bn,
+        bk,
+        group,
+        stripe,
+        unmasked,
+        split,
+        persistent,
+    )
+    _launch(
+        _fp8_per_token_gemm,
+        (grid, split),
+        args,
+        options,
+        key + (split, persistent),
+        (a, b, sa, sb, target, bias),
+    )
+    if split > 1:
+        _launch(
+            _fp8_split_epilogue,
+            ((m * n + 255) // 256,),
+            (target, sa, sb, result, bias, m, n, split, 256),
+            {"num_warps": 4, "num_stages": 2},
+            (m, n, split, out_dtype, bias is not None, 256, 4, 2),
+            (target, sa, sb, result, bias),
+        )
+    return result

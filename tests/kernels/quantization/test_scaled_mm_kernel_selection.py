@@ -24,6 +24,7 @@ from vllm.model_executor.kernels.linear import (
     Int8ScaledMMLinearKernel,
     Int8ScaledMMLinearLayerConfig,
     ScaledMMLinearKernel,
+    TritonFp8PerTokenScaledMMKernel,
     TritonInt8ScaledMMLinearKernel,
     _get_linear_backend,
     _resolve_backend_kernels,
@@ -34,7 +35,9 @@ from vllm.model_executor.kernels.linear import (
 from vllm.model_executor.layers.quantization.utils.humming import prioritize_humming
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
+    kFp8DynamicTokenSym,
     kFp8Static128BlockSym,
+    kFp8StaticChannelSym,
     kFp8StaticTensorSym,
 )
 from vllm.platforms import PlatformEnum
@@ -102,6 +105,42 @@ def test_fp8_linear_backend_override(platform_mock, _):
         )
 
     assert type(kernel) is HummingFP8ScaledMMLinearKernel
+
+
+@pytest.mark.parametrize("supports_fp8", [False, True])
+@patch("vllm.model_executor.kernels.linear.scaled_mm.triton.current_platform")
+@patch("vllm.model_executor.kernels.linear.current_platform")
+def test_triton_fp8_backend_requires_fp8(
+    platform_mock, triton_platform_mock, supports_fp8, monkeypatch
+):
+    """The registered ROCm Triton backend requires FP8-capable hardware."""
+    platform_mock._enum = PlatformEnum.ROCM
+    platform_mock.get_device_capability.return_value = (12, 0)
+    triton_platform_mock.supports_fp8.return_value = supports_fp8
+    monkeypatch.setattr(
+        "vllm.utils.platform_utils.num_compute_units", lambda *_args: 32
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.utils.fp8_per_token_heuristic.get_device_cache_size",
+        lambda *_args: 64 * 1024**2,
+    )
+    monkeypatch.setenv("VLLM_DISABLED_KERNELS", "")
+    config = VllmConfig(kernel_config=KernelConfig(linear_backend="triton"))
+    kwargs = dict(
+        activation_quant_key=kFp8DynamicTokenSym,
+        weight_quant_key=kFp8StaticChannelSym,
+        input_dtype=torch.bfloat16,
+        out_dtype=torch.bfloat16,
+        weight_shape=(256, 128),
+    )
+    with set_current_vllm_config(config):
+        if supports_fp8:
+            assert isinstance(
+                init_fp8_linear_kernel(**kwargs), TritonFp8PerTokenScaledMMKernel
+            )
+        else:
+            with pytest.raises(ValueError, match="requires FP8 support"):
+                init_fp8_linear_kernel(**kwargs)
 
 
 def test_is_supported_is_abstract():
