@@ -643,6 +643,7 @@ def sparse_attn_indexer(
         prefill_metadata = attn_metadata_narrowed.prefill
         assert prefill_metadata is not None
 
+    if has_prefill and prefill_metadata is not None and prefill_metadata.chunks:
         # Get the shared workspace buffers once, sized for this batch's largest
         # chunk rather than the profiled bound (total_seq_lens), so the scratch
         # stays at the workspace head and leaves retained tail spans intact.
