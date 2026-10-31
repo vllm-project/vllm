@@ -559,6 +559,50 @@ def test_aiter_all_gather_precedes_pynccl(monkeypatch: pytest.MonkeyPatch) -> No
     assert communicator.all_gatherv(torch.empty(1)) is output
 
 
+@pytest.mark.parametrize(
+    ("world_size", "shape", "dim", "aiter_shape", "aiter_dim"),
+    [
+        (4, (7, 1296), 0, (7, 1296), 0),
+        (4, (7, 6, 256), 1, (7, 1536), -1),
+        (4, (7, 6400), -1, (7, 6400), -1),
+        (6, (7, 6400), -1, None, None),
+        (4, (8, 12), 1, None, None),
+        (4, (0, 1536), 1, None, None),
+        (4, ((1 << 19) + 8,), 0, None, None),
+    ],
+)
+def test_rocm_tp_all_gather_uses_aiter(
+    monkeypatch: pytest.MonkeyPatch, world_size, shape, dim, aiter_shape, aiter_dim
+) -> None:
+    def gather(inp: torch.Tensor, dim: int) -> torch.Tensor:
+        return torch.cat([inp + rank for rank in range(world_size)], dim=dim)
+
+    aiter_comm = Mock()
+    aiter_comm.should_custom_ag.side_effect = lambda inp: inp.nbytes <= 1 << 20
+    aiter_comm.all_gather_unreg.side_effect = gather
+    communicator = CudaCommunicator.__new__(CudaCommunicator)
+    communicator.world_size = world_size
+    communicator.use_aiter_tp_all_gather = True
+    communicator.aiter_ar_comm = aiter_comm
+    communicator.pynccl_comm = Mock(disabled=False)
+    module = "vllm.distributed.device_communicators"
+    monkeypatch.setattr(
+        f"{module}.cuda_communicator.current_platform.is_rocm", lambda: True
+    )
+    monkeypatch.setattr(
+        f"{module}.base_device_communicator.DeviceCommunicatorBase.all_gather",
+        Mock(side_effect=gather),
+    )
+
+    inp = torch.randn(shape, dtype=torch.bfloat16)
+    assert torch.equal(communicator.all_gather(inp, dim), gather(inp, dim))
+    if aiter_shape is None:
+        aiter_comm.all_gather_unreg.assert_not_called()
+    else:
+        (aiter_inp,), kwargs = aiter_comm.all_gather_unreg.call_args
+        assert aiter_inp.shape == aiter_shape and kwargs == {"dim": aiter_dim}
+
+
 def test_isend_object_posts_size_then_object_and_releases_on_wait(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
