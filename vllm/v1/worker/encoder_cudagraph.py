@@ -245,6 +245,10 @@ class EncoderCudaGraphManager:
 
     def capture(self, graph_pool: Any):
         """Capture CUDA graphs for every configured path and token budget."""
+        if not self.config.modalities:
+            logger.info("Encoder CUDA graph capture skipped: no supported modalities.")
+            return
+
         self.graph_pool = graph_pool
 
         num_graphs = self.get_num_graphs_to_capture()
@@ -277,6 +281,8 @@ class EncoderCudaGraphManager:
         return num_budgets * math.prod(len(axis) for axis in self._capture_axes)
 
     def get_num_graphs_to_capture(self) -> int:
+        if not self.config.modalities:
+            return 0
         return sum(
             self._num_graphs_for_budgets(budgets)
             for budgets in self.path_token_budgets.values()
