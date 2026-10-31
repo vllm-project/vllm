@@ -24,10 +24,9 @@ pub use output::{
 };
 pub use request::{Prompt, SamplingParams, TextRequest, normalize_top_k};
 use trait_set::trait_set;
-use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 pub use vllm_llm::FinishReason;
-use vllm_llm::{GenerateOutputStream, Llm};
+use vllm_llm::{BoxGenerateOutputStream, Llm};
 use vllm_tokenizer::DynTokenizer;
 
 pub mod backend;
@@ -180,24 +179,29 @@ impl TextRequestProcessor {
     }
 }
 
-/// Raw text facade above [`Llm`].
+/// Raw text facade above an [`Llm`].
 ///
 /// This layer stays below chat semantics: prompt text or prompt token IDs flow
 /// in, decoded text deltas and terminal metadata flow out.
 pub struct TextLlm {
     /// Generate-only client owned by this text facade.
-    llm: Llm,
+    llm: Box<dyn Llm>,
     /// Shared engine-free request preparation.
     processor: TextRequestProcessor,
 }
 
 impl TextLlm {
-    /// Create a new text-generation facade from a shared LLM client plus a text
-    /// backend.
-    pub fn new(llm: Llm, backend: DynTextBackend) -> Self {
+    /// Create a new text-generation facade from an [`Llm`], such as a
+    /// [`vllm_llm::EngineCoreLlm`], plus a text backend.
+    pub fn new(llm: impl Llm, backend: DynTextBackend) -> Self {
+        Self::from_boxed(Box::new(llm), backend)
+    }
+
+    /// Create a new text-generation facade from an already boxed [`Llm`].
+    pub fn from_boxed(llm: Box<dyn Llm>, backend: DynTextBackend) -> Self {
         // The engine-reported value reflects the post-profiling, auto-fitted
         // KV cache limit used at runtime.
-        let max_model_len = llm.engine_core_client().max_model_len();
+        let max_model_len = llm.info().max_model_len;
 
         Self {
             llm,
@@ -222,10 +226,9 @@ impl TextLlm {
         self.processor.backend.model_id()
     }
 
-    /// Expose the underlying engine-core client for low-level utility/admin
-    /// calls.
-    pub fn engine_core_client(&self) -> &EngineCoreClient {
-        self.llm.engine_core_client()
+    /// Expose the underlying [`Llm`].
+    pub fn llm(&self) -> &dyn Llm {
+        self.llm.as_ref()
     }
 
     /// Return the text request processor.
@@ -252,7 +255,7 @@ impl TextLlm {
 
     /// Tokenize if needed, lower to a generate request, and return the raw
     /// token stream.
-    pub async fn generate_raw(&self, request: TextRequest) -> Result<GenerateOutputStream> {
+    pub async fn generate_raw(&self, request: TextRequest) -> Result<BoxGenerateOutputStream> {
         let (_, raw_stream) = self.generate_inner(request).await?;
         Ok(raw_stream)
     }
@@ -276,7 +279,7 @@ impl TextLlm {
     async fn generate_inner(
         &self,
         request: TextRequest,
-    ) -> Result<(TextRequest, GenerateOutputStream)> {
+    ) -> Result<(TextRequest, BoxGenerateOutputStream)> {
         let PreparedTextRequest {
             text_request,
             generate_request,

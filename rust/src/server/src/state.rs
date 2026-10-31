@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::any::Any;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -12,6 +13,7 @@ use tracing::warn;
 use vllm_chat::ChatLlm;
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::runtime::BackgroundShutdownRuntime;
+use vllm_llm::{EngineCoreLlm, Llm};
 
 use crate::config::{AccessLogConfig, ApiServerOptions, CorsConfig, LoraModulePath};
 use crate::lora::{
@@ -240,17 +242,35 @@ impl AppState {
     }
 
     fn ensure_lora_enabled(&self) -> Result<(), LoraDisabledError> {
-        self.engine_core_client()
-            .ready_response()
-            .supports_lora
-            .then_some(())
-            .ok_or(LoraDisabledError)
+        self.llm().info().supports_lora.then_some(()).ok_or(LoraDisabledError)
+    }
+
+    /// The [`Llm`] under the chat facade.
+    pub(crate) fn llm(&self) -> &dyn Llm {
+        self.chat.text().llm()
+    }
+
+    /// The [`EngineCoreLlm`] under the chat facade, if that is what it runs.
+    fn engine_core_llm(&self) -> Option<&EngineCoreLlm> {
+        (self.llm() as &dyn Any).downcast_ref()
+    }
+
+    /// Whether the server runs an [`EngineCoreLlm`], so routes and services
+    /// that need its engine-core client can be served.
+    pub(crate) fn has_engine_core_client(&self) -> bool {
+        self.engine_core_llm().is_some()
     }
 
     /// Return a reference to the underlying engine core client for utility
     /// calls.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the server does not run an [`EngineCoreLlm`]. Routes and
+    /// services that call this are only built when
+    /// [`Self::has_engine_core_client`] holds.
     pub(crate) fn engine_core_client(&self) -> &EngineCoreClient {
-        self.chat.engine_core_client()
+        (self.engine_core_llm().expect("route requires an `EngineCoreLlm`")).engine_core_client()
     }
 
     /// Runtime used by middleware to isolate heavyweight request handlers from

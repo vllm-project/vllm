@@ -50,7 +50,7 @@ use vllm_engine_core_client::protocol::tensor::WireTensor;
 use vllm_engine_core_client::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
 use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task_with_ready};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId, TransportMode};
-use vllm_llm::Llm;
+use vllm_llm::EngineCoreLlm;
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{Prompt, TextBackend};
 use vllm_tokenizer::test_utils::{PanickingTokenizer, TestTokenizer};
@@ -439,7 +439,7 @@ where
     .expect("connect client");
     let engine_health = client.subscribe_health();
 
-    let chat = ChatLlm::from_shared_backend(Llm::new(client), backend);
+    let chat = ChatLlm::from_shared_backend(EngineCoreLlm::new(client), backend);
     let state = Arc::new(AppState::new(vec!["test-model".to_string()], chat));
     (
         InferenceServer::new(InferenceServiceImpl::new(state.clone()))
@@ -481,6 +481,10 @@ async fn start_grpc_test_server(
     let (health_reporter, health_service) = health_reporter();
     health_reporter.set_serving::<InferenceServer<InferenceServiceImpl>>().await;
     health_reporter.set_serving::<ControlServer<ControlServiceImpl>>().await;
+    let services = vec![
+        <InferenceServer<InferenceServiceImpl> as tonic::server::NamedService>::NAME,
+        <ControlServer<ControlServiceImpl> as tonic::server::NamedService>::NAME,
+    ];
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind grpc listener");
     let addr = listener.local_addr().expect("local addr");
@@ -493,7 +497,7 @@ async fn start_grpc_test_server(
             .add_service(inference_service)
             .serve_with_incoming_shutdown(incoming, shutdown.clone().cancelled_owned());
         let health_monitor =
-            super::monitor_health(health_reporter, engine_health, shutdown.clone());
+            super::monitor_health(health_reporter, services, engine_health, shutdown.clone());
         let server = async move {
             let result = server.await;
             shutdown.cancel();
@@ -2561,7 +2565,7 @@ async fn control_aggregates_multi_engine_capacity() {
         }
         let client = client_task.await.unwrap().expect("connect multi-engine client");
         let chat = ChatLlm::from_shared_backend(
-            Llm::new(client),
+            EngineCoreLlm::new(client),
             Arc::new(FakeTextBackend::default()) as Arc<dyn ChatTextBackend>,
         );
         let state = AppState::new(vec!["test-model".to_string()], chat);

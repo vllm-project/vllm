@@ -1,13 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::any::Any;
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::StreamExt as _;
+use futures::stream::BoxStream;
+use tokio::sync::watch;
 use tracing::Span;
 use vllm_engine_core_client::EngineCoreClient;
+use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_metrics::METRICS;
 
 mod error;
@@ -32,6 +37,60 @@ use crate::request_metrics::{
     RequestMetricHandles, RequestMetricsTracker, resolve_request_metric_handles,
 };
 
+/// Boxed output stream returned by [`Llm::generate`].
+pub type BoxGenerateOutputStream = BoxStream<'static, Result<GenerateOutput>>;
+
+/// Facts about the model and engine fixed when an [`Llm`] is created.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LlmInfo {
+    /// Effective context length, after the engine auto-fitted its KV cache.
+    pub max_model_len: u32,
+    /// Effective model dtype, used to encode multimodal tensors. `None` when
+    /// it is not reported, which disables multimodal inputs.
+    pub model_dtype: Option<ModelDtype>,
+    /// Whether the engine was started with LoRA support.
+    pub supports_lora: bool,
+    /// vLLM version of the engine.
+    pub vllm_version: String,
+}
+
+/// Token-level generation: a [`GenerateRequest`] in, a [`GenerateOutput`]
+/// stream out.
+///
+/// This is the Rust counterpart of Python's `EngineClient` generate/abort
+/// surface, and the layer below `TextLlm`. [`EngineCoreLlm`] implements it
+/// over an engine-core client; other implementations reach a model over the
+/// network or route among several. Requests arrive fully lowered (sampling
+/// defaults resolved, stop tokens set), and outputs carry raw tokens, so
+/// detokenization and stop strings stay with the caller.
+///
+/// Callers that need engine-core specifics, such as admin routes, downcast to
+/// [`EngineCoreLlm`] through [`Any`].
+#[async_trait::async_trait]
+pub trait Llm: Any + Send + Sync {
+    /// Facts fixed when this `Llm` was created.
+    fn info(&self) -> &LlmInfo;
+
+    /// Subscribe to health; `true` means requests can be served.
+    fn subscribe_health(&self) -> watch::Receiver<bool>;
+
+    /// Whether requests can currently be served.
+    fn is_healthy(&self) -> bool {
+        *self.subscribe_health().borrow()
+    }
+
+    /// Submit one tokenized request and stream its outputs. Dropping the
+    /// stream before the terminal output aborts the request.
+    async fn generate(&self, request: GenerateRequest) -> Result<BoxGenerateOutputStream>;
+
+    /// Abort in-flight requests by their external (user-supplied) request ids.
+    /// An empty slice aborts every in-flight request.
+    async fn abort(&self, external_ids: &[String]) -> Result<()>;
+
+    /// Shut down and stop background tasks.
+    async fn shutdown(self: Box<Self>) -> Result<()>;
+}
+
 /// Thin generate-and-abort facade over [`EngineCoreClient`].
 ///
 /// This mirrors the narrow public shape of Python `AsyncLLM.generate()` and
@@ -39,8 +98,10 @@ use crate::request_metrics::{
 /// outputs. It tracks an in-flight external→internal request-id index (see
 /// [`InflightRequests`]) so that aborts issued against external (user-supplied)
 /// ids can be resolved to the internal engine ids that engine-core understands.
-pub struct Llm {
+pub struct EngineCoreLlm {
     client: EngineCoreClient,
+    /// Facts from the engine-core startup handshake.
+    info: LlmInfo,
     randomize_request_id: bool,
     stream_interval: NonZeroU32,
     stats_logger: Option<StatsLogger>,
@@ -51,7 +112,7 @@ pub struct Llm {
     request_metric_handles: BTreeMap<u32, Arc<RequestMetricHandles>>,
 }
 
-impl Llm {
+impl EngineCoreLlm {
     /// Create a new minimal LLM facade from an already connected engine-core
     /// client.
     pub fn new(client: EngineCoreClient) -> Self {
@@ -66,8 +127,17 @@ impl Llm {
                 (engine, Arc::new(handles))
             })
             .collect();
+        // The engine-reported value reflects the post-profiling, auto-fitted
+        // KV cache limit used at runtime.
+        let info = LlmInfo {
+            max_model_len: client.max_model_len(),
+            model_dtype: Some(client.model_dtype()),
+            supports_lora: client.ready_response().supports_lora,
+            vllm_version: client.vllm_version().to_string(),
+        };
         Self {
             client,
+            info,
             randomize_request_id: true,
             stream_interval: NonZeroU32::MIN,
             stats_logger: None,
@@ -183,5 +253,28 @@ impl Llm {
     pub async fn shutdown(self) -> Result<()> {
         self.client.shutdown().await?;
         Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl Llm for EngineCoreLlm {
+    fn info(&self) -> &LlmInfo {
+        &self.info
+    }
+
+    fn subscribe_health(&self) -> watch::Receiver<bool> {
+        self.client.subscribe_health()
+    }
+
+    async fn generate(&self, request: GenerateRequest) -> Result<BoxGenerateOutputStream> {
+        Ok(EngineCoreLlm::generate(self, request).await?.boxed())
+    }
+
+    async fn abort(&self, external_ids: &[String]) -> Result<()> {
+        EngineCoreLlm::abort(self, external_ids).await
+    }
+
+    async fn shutdown(self: Box<Self>) -> Result<()> {
+        EngineCoreLlm::shutdown(*self).await
     }
 }

@@ -139,7 +139,7 @@ impl InferenceServiceImpl {
             text_request.data_parallel_rank = data_parallel_rank;
 
             if !lora_name.is_empty() {
-                if !self.state.engine_core_client().ready_response().supports_lora {
+                if !self.state.llm().info().supports_lora {
                     return Err(Status::failed_precondition(
                         "engine was not started with LoRA enabled",
                     ));
@@ -380,6 +380,8 @@ fn text_error_to_status(error: vllm_text::Error) -> Status {
     let message = error.to_report_string();
     if error.is_request_validation_error() {
         Status::invalid_argument(message)
+    } else if error.is_unavailable() {
+        Status::unavailable(message)
     } else {
         Status::internal(message)
     }
