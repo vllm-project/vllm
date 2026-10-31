@@ -326,11 +326,22 @@ If you are running vLLM outside of Docker, the solution is to install the `cuda-
 
 On Conda, you can install the `conda-forge::cuda-compat` package (e.g., `conda install -c conda-forge cuda-compat=12.9`), then after activating the environment, set `export VLLM_ENABLE_CUDA_COMPATIBILITY=1` and `export VLLM_CUDA_COMPATIBILITY_PATH="${CONDA_PREFIX}/cuda-compat"`.
 
-You can verify the configuration works by running a minimal Python script that initializes CUDA via vLLM:
+Set these variables before importing vLLM. On CUDA platforms, enabling compatibility
+selects the `spawn` multiprocessing method, overriding `VLLM_WORKER_MULTIPROC_METHOD`
+if necessary. New workers read the compatibility directory from `LD_LIBRARY_PATH`
+when they start. Guard Python scripts that create an `LLM` with
+`if __name__ == "__main__":`, as described in [Python multiprocessing](#python-multiprocessing).
+
+The compatibility switch does not change the libraries used by the current Python
+process. For in-process inference (`VLLM_ENABLE_V1_MULTIPROCESSING=0`) or direct
+PyTorch CUDA calls, put the compatibility directory first in `LD_LIBRARY_PATH`
+**before starting Python**. For example, this checks CUDA initialization in the
+current process:
 
 ```bash
 export VLLM_ENABLE_CUDA_COMPATIBILITY=1
 export VLLM_CUDA_COMPATIBILITY_PATH="/usr/local/cuda-12.9/compat"
+export LD_LIBRARY_PATH="$VLLM_CUDA_COMPATIBILITY_PATH${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 python3 - << 'EOF'
 import vllm

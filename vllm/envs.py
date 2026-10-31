@@ -2275,6 +2275,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LORA_DISABLE_PDL": lambda: bool(int(os.getenv("VLLM_LORA_DISABLE_PDL", "0"))),
     # Enable CUDA compatibility mode for datacenter GPUs with older
     # driver versions than the CUDA toolkit major version of vLLM.
+    # Uses spawned workers so the dynamic linker reads the compatibility path.
+    # In-process inference requires setting LD_LIBRARY_PATH before Python starts.
     "VLLM_ENABLE_CUDA_COMPATIBILITY": lambda: (
         os.environ.get("VLLM_ENABLE_CUDA_COMPATIBILITY", "0").strip().lower()
         in ("1", "true")
