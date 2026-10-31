@@ -270,6 +270,7 @@ if TYPE_CHECKING:
     ] = "NONE"
     VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16: bool = True
     VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: int | None = None
+    VLLM_ROCM_VIT_FP8_PAD_HEAD_DIM: int = 16
     VLLM_ROCM_QUICK_REDUCE_MIN_SIZE_BYTES_MB: int | None = None
     VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB: int | None = None
     VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT: int = 480
@@ -1476,6 +1477,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # QuickReduce. This does not affect QuickReduce eligibility.
     "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB": lambda: maybe_convert_int(
         os.environ.get("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB", None)
+    ),
+    # Multiple the FP8 ViT attention Q/K/V head_dim is zero-padded to on ROCm
+    # with the AITER backend (--mm-encoder-attn-dtype fp8). 128 runs AITER's
+    # FP8 varlen flash attention kernel for head_dims below 128 (e.g. 80).
+    "VLLM_ROCM_VIT_FP8_PAD_HEAD_DIM": lambda: int(
+        os.getenv("VLLM_ROCM_VIT_FP8_PAD_HEAD_DIM", "16")
     ),
     # If set, enable multiprocessing in LLM for the V1 code path.
     "VLLM_ENABLE_V1_MULTIPROCESSING": lambda: bool(

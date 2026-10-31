@@ -91,8 +91,10 @@ def quantize_fp8_pad_head_dim_triton(
     block_m: int | None = None,
     block_n: int | None = None,
     num_warps: int | None = None,
+    pad_to: int = 16,
 ) -> torch.Tensor:
-    """Quantize a 3D/4D tensor to FP8, padding head_dim to a multiple of 16.
+    """Quantize a 3D/4D tensor to FP8, padding head_dim to a multiple of
+    ``pad_to`` (16 by default, for cuDNN).
 
     Reads directly from the input using its 3D strides, so non-contiguous
     views (e.g. Q/K/V slices from an interleaved QKV buffer) are handled
@@ -107,7 +109,7 @@ def quantize_fp8_pad_head_dim_triton(
         tensor = tensor.view(-1, tensor.shape[-2], tensor.shape[-1])
     assert tensor.dim() == 3, f"Expected 3D input (S, H, D), got {tensor.dim()}D"
     S, H, D = tensor.shape
-    padded_head_dim = round_up(D, 16)
+    padded_head_dim = round_up(D, pad_to)
     out_dtype = current_platform.fp8_dtype()
     output = torch.empty(
         (S, H, padded_head_dim),
@@ -156,9 +158,10 @@ def quantize_fp8_maybe_pad_head_dim(
     scale: torch.Tensor,
     fp8_quant: QuantFP8,
     skip_scale: bool = False,
+    pad_to: int = 16,
 ) -> torch.Tensor:
-    """Quantize a 3D/4D tensor to FP8, padding head_dim to a multiple of 16
-    only when needed.
+    """Quantize a 3D/4D tensor to FP8, padding head_dim to a multiple of
+    ``pad_to`` (16 by default) only when needed.
 
     Accepts (S, H, D) or (B, S, H, D) input. Uses ``fp8_quant`` (a
     :class:`QuantFP8` CustomOp) when head_dim is already aligned to 16
@@ -166,8 +169,10 @@ def quantize_fp8_maybe_pad_head_dim(
     that pads head_dim to a multiple of 16.
     """
     head_dim = tensor.shape[-1]
-    if head_dim % 16 != 0:
-        return quantize_fp8_pad_head_dim_triton(tensor, scale, skip_scale=skip_scale)
+    if head_dim % pad_to != 0:
+        return quantize_fp8_pad_head_dim_triton(
+            tensor, scale, skip_scale=skip_scale, pad_to=pad_to
+        )
 
     if skip_scale:
         return tensor.to(current_platform.fp8_dtype())

@@ -7,6 +7,7 @@ import json
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm.config import MultiModalConfig
 from vllm.kernels.triton.qkv_padded_fp8_quant import (
     quantize_fp8_maybe_pad_head_dim,
@@ -387,6 +388,12 @@ class MMEncoderAttention(CustomOp):
         self.skip_scale_q = False
         self.skip_scale_k = False
         self.skip_scale_v = False
+        # Head-dim multiple the FP8 Q/K/V are zero-padded to (16 for cuDNN).
+        # AITER's FP8 varlen flash attention runs about 2x faster at head_dim
+        # 128 than at a smaller unaligned head_dim (e.g. 80), so ROCm can pad
+        # further with VLLM_ROCM_VIT_FP8_PAD_HEAD_DIM=128: scores are unchanged
+        # and the padded output columns are sliced off.
+        self._fp8_pad_to = 16
 
         mm_cfg = get_multimodal_config()
         if mm_cfg is None or mm_cfg.mm_encoder_attn_dtype != "fp8":
@@ -411,6 +418,7 @@ class MMEncoderAttention(CustomOp):
                     "an AITER build that provides "
                     "flash_attn_varlen_fp8_pertensor_func."
                 ) from exc
+            self._fp8_pad_to = envs.VLLM_ROCM_VIT_FP8_PAD_HEAD_DIM
         elif self.attn_backend == AttentionBackendEnum.FLASHINFER:
             if not is_flashinfer_cudnn_fp8_prefill_attn_supported():
                 raise ValueError(
@@ -681,18 +689,21 @@ class MMEncoderAttention(CustomOp):
             self._fp8_q_scale,
             skip_scale=self.skip_scale_q,
             fp8_quant=self.fp8_quant,
+            pad_to=self._fp8_pad_to,
         )
         key = quantize_fp8_maybe_pad_head_dim(
             key,
             self._fp8_k_scale,
             skip_scale=self.skip_scale_k,
             fp8_quant=self.fp8_quant,
+            pad_to=self._fp8_pad_to,
         )
         value = quantize_fp8_maybe_pad_head_dim(
             value,
             self._fp8_v_scale,
             skip_scale=self.skip_scale_v,
             fp8_quant=self.fp8_quant,
+            pad_to=self._fp8_pad_to,
         )
         return query, key, value
 
