@@ -24,6 +24,7 @@ CLOSE = "<|close|>"
 SEP = "<|sep|>"
 THINK_OPEN = f"{OPEN}think{SEP}"
 THINK_CLOSE = f"{CLOSE}think{SEP}"
+RESPONSE_OPEN = f"{OPEN}response{SEP}"
 RESPONSE_CLOSE = f"{CLOSE}response{SEP}"
 
 
@@ -36,7 +37,20 @@ class DummyTokenizer:
             return [1, 2, 3]
         if text == THINK_CLOSE:
             return [4, 2, 3]
+        if text == RESPONSE_OPEN:
+            return [1, 5, 3]
         return [ord(ch) for ch in text]
+
+    def decode(self, token_ids, **kwargs) -> str:
+        tokens = {
+            1: OPEN,
+            2: "think",
+            3: SEP,
+            4: CLOSE,
+            5: "response",
+            6: "<|end_of_msg|>",
+        }
+        return "".join(tokens.get(token_id, chr(token_id)) for token_id in token_ids)
 
 
 def _dummy_tokenizer() -> TokenizerLike:
@@ -175,6 +189,55 @@ def test_delegating_parser_preserves_tool_calls_after_reasoning():
     assert len(tool_calls) == 1
     assert tool_calls[0].name == "calc"
     assert json.loads(tool_calls[0].arguments) == {"x": 1}
+
+
+@pytest.mark.parametrize("mode", ["response_only", "closed_think", "unclosed_think"])
+def test_quoted_think_marker_preserves_tool_calls(mode):
+    tokenizer = _dummy_tokenizer()
+    parser = KimiK3DelegatingParser(tokenizer)
+    expected_reasoning = None if mode == "response_only" else "step"
+    marker = THINK_CLOSE if mode == "response_only" else THINK_OPEN
+    body = f'{{"marker":"{marker}"}}'
+    prefix_ids = list(map(ord, expected_reasoning or ""))
+    if mode == "closed_think":
+        prefix_ids += tokenizer.encode(THINK_CLOSE)
+    elif mode == "unclosed_think":
+        prefix_ids = tokenizer.encode(THINK_OPEN) + prefix_ids
+    tools = _tools(_call("calc", 1, _arg("x", "number", "1")))
+    output = tokenizer.decode(prefix_ids) + _response(body) + tools
+
+    reasoning, content, tool_calls = parser.parse(
+        output,
+        _request(),
+        enable_auto_tools=True,
+        model_output_token_ids=[
+            *prefix_ids,
+            *tokenizer.encode(RESPONSE_OPEN),
+            *map(ord, body),
+            *tokenizer.encode(RESPONSE_CLOSE + tools),
+        ],
+    )
+
+    assert reasoning == expected_reasoning
+    assert content == body
+    assert tool_calls is not None
+    assert len(tool_calls) == 1
+    assert tool_calls[0].name == "calc"
+    assert json.loads(tool_calls[0].arguments) == {"x": 1}
+
+
+def test_tool_parser_does_not_receive_omitted_eos_text():
+    parser = KimiK3DelegatingParser(_dummy_tokenizer())
+    reasoning, content, tool_calls = parser.parse(
+        RESPONSE_OPEN + '{"a":1}',
+        _request(),
+        enable_auto_tools=True,
+        model_output_token_ids=[1, 5, 3, *map(ord, '{"a":1}'), 6],
+    )
+
+    assert reasoning is None
+    assert content == '{"a":1}'
+    assert not tool_calls
 
 
 def test_delegating_parser_required_tool_choice_uses_xtml_parser():
