@@ -341,7 +341,8 @@ class KernelConfig:
       (moe_gemm_a4w4) MoE kernel (ROCm gfx1250)
     - "flydsl": Use AMD FlyDSL kernels (ROCm only)
     - "rdna3": Use the fused RDNA3 W4A16 HIP kernel (ROCm gfx1100 only)
-    - "hpc": Use HPC kernels (FP8 and Hopper only)
+    - "hpc": Use HPC-Ops kernels (FP8 on Hopper; 128-block FP8 and
+      MXFP4 x MXFP8 on SM120)
     - "emulation": use BF16/FP16 GEMM, dequantizing weights and
                    running QDQ on activations.
     """
