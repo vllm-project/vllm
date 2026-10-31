@@ -1410,6 +1410,13 @@ def rocm_aiter_sparse_attn_indexer(
         )
 
     if has_prefill:
+        # AITER's gather takes the layout as `preshuffle`, which matches the Triton
+        # default (SHUFFLE when block_size > 1) but cannot express the C4A
+        # block-flat override, so that case stays on Triton.
+        use_aiter_gather = _ON_GFX950 and not _indexer_k_is_c4a_block_flat(
+            compress_ratio
+        )
+        preshuffle = kv_cache.shape[1] > 1
         prefill_metadata = layer_attn_metadata.prefill
         assert prefill_metadata is not None
 
@@ -1421,17 +1428,31 @@ def rocm_aiter_sparse_attn_indexer(
         for chunk in prefill_metadata.chunks:
             k_fp8 = k_fp8_full[: chunk.total_seq_lens]
             k_scale = k_scale_full[: chunk.total_seq_lens]
-            cp_gather_indexer_k_quant_cache_triton(
-                kv_cache,
-                k_fp8,
-                k_scale,
-                chunk.block_table,
-                chunk.cu_seq_lens,
-                token_to_seq=chunk.token_to_seq,
-                cache_layout=(
-                    "NORMAL" if _indexer_k_is_c4a_block_flat(compress_ratio) else None
-                ),
-            )
+            if use_aiter_gather:
+                from aiter import cp_gather_indexer_k_quant_cache
+
+                cp_gather_indexer_k_quant_cache(
+                    kv_cache,
+                    k_fp8,
+                    k_scale,
+                    chunk.block_table,
+                    chunk.cu_seq_lens,
+                    preshuffle=preshuffle,
+                )
+            else:
+                cp_gather_indexer_k_quant_cache_triton(
+                    kv_cache,
+                    k_fp8,
+                    k_scale,
+                    chunk.block_table,
+                    chunk.cu_seq_lens,
+                    token_to_seq=chunk.token_to_seq,
+                    cache_layout=(
+                        "NORMAL"
+                        if _indexer_k_is_c4a_block_flat(compress_ratio)
+                        else None
+                    ),
+                )
             logits = rocm_fp8_mqa_logits(
                 q_fp8[chunk.token_start : chunk.token_end],
                 (k_fp8, k_scale.view(torch.float32)),
