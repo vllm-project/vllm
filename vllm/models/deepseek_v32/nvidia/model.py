@@ -18,6 +18,7 @@ from vllm.model_executor.layers.fused_embed_norm import (
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
+from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
@@ -52,6 +53,23 @@ from vllm.v1.attention.backends.mla.index_group import (
 )
 
 from .glm52_low_latency_gemm import enable_glm52_low_latency_gemm
+
+
+def _defer_moe_allreduce(moe_cfg: FusedMoEConfig) -> None:
+    """Honor this decoder's deferred MoE all-reduce where FusedMoE's
+    build-time formula doesn't.
+
+    The decode chain fuses the all-reduce of the un-reduced MoE output into
+    the next layer's fused_allreduce_rms_norm (see forward()). On the naive
+    all-gather/reduce-scatter all2all path the prepare/finalize pair returns
+    the output un-reduced, so the runner must skip its own late all-reduce or
+    the fused all-reduce sums the same tensor twice. Self-reducing all2all
+    combines (DeepEP, MoRI, NIXL-EP, MoonEP, NVLink, passthrough) and the
+    sequence-parallel layout keep the default FusedMoE behavior.
+    """
+    moe_pc = moe_cfg.moe_parallel_config
+    if moe_pc.use_ag_rs_all2all_kernels and not moe_pc.is_sequence_parallel:
+        moe_cfg.skip_final_all_reduce = True
 
 
 class DeepseekV32DecoderLayer(torch.nn.Module):
@@ -103,6 +121,9 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
                 prefix=f"{prefix}.mlp",
                 apply_routed_scale_to_output=False,
             )
+            # Keep the runner from all-reducing what forward() below fuses
+            # into the next layer norm; see _defer_moe_allreduce.
+            _defer_moe_allreduce(self.mlp.experts.moe_config)
         else:
             self.mlp = DeepseekV2MLP(
                 hidden_size=config.hidden_size,
