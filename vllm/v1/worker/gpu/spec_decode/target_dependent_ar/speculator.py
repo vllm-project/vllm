@@ -51,6 +51,9 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
 
     def load_model(self, target_model: nn.Module) -> None:
         super().load_model(target_model)
+        self._combine_aux_hidden_states = getattr(
+            self.model, "combine_aux_hidden_states", None
+        )
         if not self.supports_mm_inputs:
             return
 
@@ -217,9 +220,12 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         # seq_lens) of the target model.
         if aux_hidden_states:
             assert self.method == "eagle3"
-            hidden_states = self.model.combine_hidden_states(
-                torch.cat(aux_hidden_states, dim=-1)
-            )
+            if self._combine_aux_hidden_states is not None:
+                hidden_states = self._combine_aux_hidden_states(aux_hidden_states)
+            else:
+                hidden_states = self.model.combine_hidden_states(
+                    torch.cat(aux_hidden_states, dim=-1)
+                )
         else:
             hidden_states = last_hidden_states
         self._copy_request_inputs(
