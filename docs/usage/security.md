@@ -333,6 +333,20 @@ Connections that fail (ZMQ socket errors, handshake failures) are handled gracef
 - **Public-facing deployments with P2P enabled:** Lower `VLLM_P2P_MAX_PEERS` to the expected number of legitimate peers (e.g., `16` or `32`).
 - **Sensitive deployments:** Consider deploying behind a reverse proxy that strips or validates `kv_transfer_params` from API requests to prevent client-supplied peer addresses entirely.
 
+## Remote Prefill Cache Accounting
+
+`kv_transfer_params.remote_prefill_cached_tokens` is accounting metadata from a
+trusted prefill/decode (P/D) proxy, not a client-selected usage value. Python and
+Rust frontends reject requests containing this field by default, including
+plausible counts within the prompt length.
+
+P/D deployments that forward the prefiller's measured cache hits must set
+`VLLM_TRUST_REMOTE_PREFILL_CACHED_TOKENS=1` on their decoder frontend. Only enable
+this option when the backend is reachable exclusively through a trusted proxy
+that removes client-supplied accounting metadata and supplies the prefiller's
+measured value. Enabling it on a backend reachable by untrusted clients allows
+those clients to falsify the cached-token usage used by downstream billing.
+
 ## Tool Server and MCP Security
 
 vLLM supports connecting to external tool servers via the `--tool-server` argument. This enables models to call tools through the Responses API (`/v1/responses`). Tool server support works with all models — it is not limited to specific model architectures.
