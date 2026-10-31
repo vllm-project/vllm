@@ -1008,6 +1008,10 @@ class EngineCore:
                 f"Cannot resume scheduling while the checkpoint state is "
                 f"{self._checkpoint_state}"
             )
+        if self.model_executor.is_sleeping:
+            raise RuntimeError(
+                "Cannot resume with sleeping memory; wake all tags first"
+            )
         self.scheduler.set_pause_state(PauseState.UNPAUSED)
         if self._checkpoint_state == CheckpointState.RESTORING:
             self._checkpoint_state = CheckpointState.RUNNING
