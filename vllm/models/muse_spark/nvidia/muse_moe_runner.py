@@ -485,10 +485,8 @@ class _MuseSparkNvFp4Scales:
             and self.gemm1_alpha is None
             and self.gemm1_beta is None
         ), "MuseSpark NVFP4 MoE does not support SwiGLU clamp/alpha/beta"
-        # a weight reload refills it in place: captured graphs read it
-        self.g1_scale_c = replace_parameter(
-            layer, "g1_scale_c", self._compute_g1_scale_c()
-        )
+        replace_parameter(layer, "g1_scale_c", self._compute_g1_scale_c())
+        self.g1_scale_c = layer.g1_scale_c
 
 
 class MuseSparkTrtLlmNvFp4Experts(_MuseSparkNvFp4Scales, TrtLlmNvFp4ExpertsMonolithic):
@@ -644,7 +642,6 @@ class MuseSparkModelOptNvFp4FusedMoE(ModelOptNvFp4FusedMoE):
         # Collapsed to the global max and repeated per expert.
         a13 = a13_scale[0:1]
         a2 = a2_scale[0:1]
-        # Kernels read these: a weight reload refills them in place.
         g1_alphas = refill_derived(
             layer, "_g1_alphas", (a13 * w13_weight_scale_2[:, 0]).contiguous()
         )

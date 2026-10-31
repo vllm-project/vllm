@@ -164,10 +164,9 @@ class TrtLlmNvFp4ExpertsBase:
             layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
         # Recompute g1_scale_c since g1_alphas was just fused in-place.
         # Register as a layer parameter so EPLB rearranges it alongside
-        # other expert weights; reloads refill it in place.
-        self.g1_scale_c = replace_parameter(
-            layer, "g1_scale_c", self._compute_g1_scale_c()
-        )
+        # other expert weights.
+        replace_parameter(layer, "g1_scale_c", self._compute_g1_scale_c())
+        self.g1_scale_c = layer.g1_scale_c
 
         # Pre-fold the per-expert g1_alphas (= output1_scale_gate_scalar)
         # division so the TRTLLM kernel receives the raw-GEMM-space clamp
@@ -179,9 +178,9 @@ class TrtLlmNvFp4ExpertsBase:
         # g1_alphas fold used by the SwiGLU-OAI clamp/beta below.
         clamp_limit = self._gemm1_clamp_limit_unfolded
         if clamp_limit is not None and not self.is_situ:
-            self.gemm1_clamp_limit = replace_parameter(
-                layer, "gemm1_clamp_limit", clamp_limit / self.quant_config.g1_alphas
-            )
+            gemm1_clamp_limit = clamp_limit / self.quant_config.g1_alphas
+            replace_parameter(layer, "gemm1_clamp_limit", gemm1_clamp_limit)
+            self.gemm1_clamp_limit = layer.gemm1_clamp_limit
 
         # beta shifts the raw GEMM1 accumulator, so fold by g1_alphas like the
         # clamp limit. alpha is applied to the dequantized gate, so it stays
@@ -190,10 +189,12 @@ class TrtLlmNvFp4ExpertsBase:
         beta = self._gemm1_beta_unfolded
         if beta is not None:
             gemm1_beta = beta if self.is_situ else beta / self.quant_config.g1_alphas
-            self.gemm1_beta = replace_parameter(layer, "gemm1_beta", gemm1_beta)
+            replace_parameter(layer, "gemm1_beta", gemm1_beta)
+            self.gemm1_beta = layer.gemm1_beta
 
         if self.gemm1_alpha is not None:
-            self.gemm1_alpha = replace_parameter(layer, "gemm1_alpha", self.gemm1_alpha)
+            replace_parameter(layer, "gemm1_alpha", self.gemm1_alpha)
+            self.gemm1_alpha = layer.gemm1_alpha
 
     @staticmethod
     def _supports_current_device() -> bool:

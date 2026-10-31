@@ -282,7 +282,6 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         replace_parameter(layer, "w2_weight_scale", w2_scale)
         replace_parameter(layer, "w13_weight_scale_2", w13_scale_2)
         replace_parameter(layer, "w2_weight_scale_2", w2_scale_2)
-        # kernels read them: a weight reload refills them in place
         refill_derived(layer, "w13_input_scale", a13_scale)
         refill_derived(layer, "w2_input_scale", a2_scale)
 

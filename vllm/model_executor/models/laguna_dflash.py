@@ -64,7 +64,6 @@ def _get_dflash_layer_types(config) -> tuple[str, ...]:
 
 @support_torch_compile
 class DFlashLagunaModel(DFlashQwen3Model, EagleModelMixin):
-    # weight-derived, refilled in place on every reload
     _kv_weights: torch.Tensor
     _kv_biases: torch.Tensor | None = None
     _input_layernorm_weights: torch.Tensor

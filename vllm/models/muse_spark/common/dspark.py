@@ -87,7 +87,6 @@ class MuseSparkDSparkDecoderLayer(MuseSpark1xDecoderLayer):
 class MuseSparkDSparkModel(DFlashQwen3Model):
     """Muse draft backbone with independently cached context K/V."""
 
-    # weight-derived, refilled in place on every reload
     _stacked_kv_weight: torch.Tensor
 
     def __init__(

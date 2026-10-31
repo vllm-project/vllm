@@ -165,9 +165,10 @@ def _shard_nvfp4_moe_weights_per_die(layer, res, w13, w13_scale, w2, w2_scale):
             torch.cuda.current_stream(w2_scale.device).synchronize()
 
         # Register shards for EPLB; Parameter wrapping preserves their pool storage.
-        # Reloads refill the registered shards in place.
         for name in _LOCALIZED_SHARD_PARAMS:
-            shard[name] = replace_parameter(layer, f"localized{i}_{name}", shard[name])
+            n = f"localized{i}_{name}"
+            replace_parameter(layer, n, shard[name])
+            shard[name] = getattr(layer, n)
 
         # Views preserve visibility of EPLB's in-place updates.
         shard["w13_weight_scale"] = nvfp4_swizzled_scale_to_cutedsl_mma_view(

@@ -147,7 +147,6 @@ class Gemma4DSparkDecoderLayer(Gemma4MTPDecoderLayer):
 class Gemma4DSparkModel(DFlashQwen3Model):
     """Gemma4 DSpark draft backbone (Gemma4 layers + DSpark Markov head)."""
 
-    # weight-derived, refilled in place on every reload
     _fused_k_weight: torch.Tensor | None = None
     _fused_k_bias: torch.Tensor | None = None
 
@@ -250,7 +249,16 @@ class Gemma4DSparkModel(DFlashQwen3Model):
         k_norm = torch.stack([a.k_norm.weight.data for a in layers_attn], dim=0)
         refill_derived(self, "_k_norm_weights", k_norm.contiguous())
         # v_norm has no learnable scale; ones matching the K-norm call shape.
-        refill_derived(self, "_v_norm_weights", torch.ones_like(self._k_norm_weights))
+        refill_derived(
+            self,
+            "_v_norm_weights",
+            torch.ones(
+                len(layers_attn),
+                layers_attn[0].head_dim,
+                dtype=self._k_norm_weights.dtype,
+                device=self._k_norm_weights.device,
+            ),
+        )
 
     def _project_context_kv(
         self,

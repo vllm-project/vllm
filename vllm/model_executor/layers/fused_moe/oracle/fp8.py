@@ -804,9 +804,11 @@ def make_fp8_moe_quant_config(
         g2_alphas = w2_scale * a2_scale
         a1_gscale = 1.0 / a1_scale
         a2_gscale = 1.0 / a2_scale
-        if layer is not None:  # kernels read these: a weight reload refills them
-            g1_alphas = replace_parameter(layer, "g1_alphas", g1_alphas)
-            g2_alphas = replace_parameter(layer, "g2_alphas", g2_alphas)
+        if layer is not None:
+            replace_parameter(layer, "g1_alphas", g1_alphas)
+            replace_parameter(layer, "g2_alphas", g2_alphas)
+            g1_alphas = layer.g1_alphas
+            g2_alphas = layer.g2_alphas
             a1_gscale = refill_derived(layer, "_a1_gscale", a1_gscale)
             a2_gscale = refill_derived(layer, "_a2_gscale", a2_gscale)
         return fp8_w8a8_moe_quant_config(

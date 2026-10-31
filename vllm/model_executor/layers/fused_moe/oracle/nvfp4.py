@@ -605,7 +605,7 @@ def make_nvfp4_moe_quant_config(
 
     a1_gscale = 1.0 / a13_scale
     a2_gscale = 1.0 / a2_scale
-    if layer is not None:  # kernels read these: a weight reload refills them
+    if layer is not None:
         a1_gscale = refill_derived(layer, "_a1_gscale", a1_gscale)
         a2_gscale = refill_derived(layer, "_a2_gscale", a2_gscale)
 
