@@ -207,6 +207,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 FROM vllm-base AS vllm-openai
 ENV UV_COMPILE_BYTECODE=1
 
+ARG PYTORCH_NIGHTLY=0
+
 # Must match the ucx-nixl-build stage above: ARG does not cross stages, so a stale
 # value here installs a meta package that disagrees with the wheel built there.
 ARG NIXL_VERSION=v1.5.0
@@ -237,13 +239,41 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     && uv pip install --no-deps nixl==${NIXL_VERSION} \
     && rm -rf /tmp/nixl_wheels
 
+COPY requirements requirements
+COPY tools/use_existing_torch.py tools/use_existing_torch.py
+COPY pyproject.toml pyproject.toml
+
 RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,src=requirements/common.txt,target=/workspace/vllm/requirements/common.txt \
-    --mount=type=bind,src=requirements/xpu.txt,target=/workspace/vllm/requirements/xpu.txt \
-    --mount=type=bind,src=requirements/test/xpu.txt,target=/workspace/vllm/requirements/test/xpu.txt \
     uv pip install grpcio-tools protobuf nanobind && \
+    if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
+        export UV_EXTRA_INDEX_URL=https://download.pytorch.org/whl/nightly/xpu && \
+        uv pip install --pre --index-strategy first-index \
+            --index-url https://pypi.org/simple \
+            torch torchvision torchaudio && \
+        python -c "import torch; assert '.dev' in torch.__version__, torch.__version__; print('Selected PyTorch nightly:', torch.__version__)" && \
+        uv pip freeze | grep -E '^(torch|torchvision|torchaudio|triton-xpu)==' > /tmp/torch-nightly-constraints.txt && \
+        export UV_CONSTRAINT=/tmp/torch-nightly-constraints.txt && \
+        python tools/use_existing_torch.py --prefix && \
+        sed -i '/^triton==/d' requirements/xpu.txt && \
+        cat /tmp/torch-nightly-constraints.txt >> requirements/test/xpu.in && \
+        uv pip compile requirements/test/xpu.in -c requirements/xpu.txt \
+            -o requirements/test/xpu.txt --prerelease=allow \
+            --index-strategy unsafe-best-match \
+            --extra-index-url https://download.pytorch.org/whl/nightly/xpu; \
+    fi && \
     uv pip install -r /workspace/vllm/requirements/xpu.txt && \
-    uv pip install --no-build-isolation -r /workspace/vllm/requirements/test/xpu.txt
+    uv pip install --no-build-isolation -r /workspace/vllm/requirements/test/xpu.txt && \
+    if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
+        TRITON_XPU_VERSION="$(sed -n 's/^triton-xpu==//p' /tmp/torch-nightly-constraints.txt)" && \
+        test -n "${TRITON_XPU_VERSION}" && \
+        uv pip uninstall triton triton-xpu && \
+        UV_EXTRA_INDEX_URL=https://download.pytorch.org/whl/nightly/xpu \
+            uv pip install --no-deps --reinstall --index-strategy first-index \
+                --index-url https://download.pytorch.org/whl/nightly/xpu \
+                "triton-xpu==${TRITON_XPU_VERSION}" && \
+        python -c "from importlib.metadata import distributions, version; assert version('triton-xpu') == '${TRITON_XPU_VERSION}'; assert all(d.metadata['Name'].lower() != 'triton' for d in distributions()), 'generic triton remains installed'" && \
+        python -c "import torch; assert '.dev' in torch.__version__, torch.__version__; print('PyTorch nightly:', torch.__version__)"; \
+    fi
 
 # Keep source-dependent layers near the end so frequent code-only changes
 # don't invalidate heavy dependency and UCX/NIXL layers.
@@ -263,6 +293,10 @@ ENV VLLM_WORKER_MULTIPROC_METHOD=spawn
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=.git,target=.git \
+    if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
+        python tools/use_existing_torch.py --prefix && \
+        sed -i '/^triton==/d' requirements/xpu.txt; \
+    fi && \
     uv pip install --no-build-isolation --no-deps .
 
 RUN --mount=type=cache,target=/root/.cache/uv \
