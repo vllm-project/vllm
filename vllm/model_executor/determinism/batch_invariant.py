@@ -19,7 +19,6 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.mem_utils import get_max_shared_memory_bytes
 from vllm.utils.nccl import pin_nccl_env
 from vllm.utils.platform_utils import num_compute_units
-from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 
 def _matmul_launch_metadata(
@@ -1375,9 +1374,7 @@ def enable_batch_invariant_mode():
             "aten::bmm.out", bmm_out_batch_invariant, key, allow_override=True
         )
 
-    reduced_precision_val = (
-        (False, False) if is_torch_equal_or_newer("2.10.0") else False
-    )
+    reduced_precision_val = (False, False)
     torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = (
         reduced_precision_val
     )

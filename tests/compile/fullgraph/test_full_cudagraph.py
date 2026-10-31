@@ -12,7 +12,6 @@ from vllm import LLM, SamplingParams
 from vllm.config import CompilationConfig, CUDAGraphMode
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import is_torch_equal_or_newer
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
@@ -54,9 +53,6 @@ for backend_config in other_backend_configs:
 @pytest.fixture(scope="class")
 def llm_pair(request):
     model, backend_config, use_inductor_graph_partition = request.param
-    if use_inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
-        pytest.skip("Inductor graph partition only supported in torch>=2.9")
-
     backend = AttentionBackendEnum[backend_config.attention_config["backend"]]
     if current_platform.is_rocm() and backend not in (
         AttentionBackendEnum.TRITON_ATTN,

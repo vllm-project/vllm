@@ -985,8 +985,7 @@ class CompilationConfig:
             self.custom_ops.append("+rotary_embedding")
 
         if (
-            is_torch_equal_or_newer("2.9.0.dev")
-            and "combo_kernels" not in self.inductor_compile_config
+            "combo_kernels" not in self.inductor_compile_config
             and "benchmark_combo_kernel" not in self.inductor_compile_config
             # (fixme @boyuan) combo kernel does not support cpu yet.
             and not current_platform.is_cpu()
@@ -1001,15 +1000,6 @@ class CompilationConfig:
                 "deterministic", getattr(inductor_config, "deterministic", False)
             )
             self.inductor_compile_config["benchmark_combo_kernel"] = not deterministic
-
-        if self.use_inductor_graph_partition and not is_torch_equal_or_newer(
-            "2.9.0.dev"
-        ):
-            raise ValueError(
-                "use_inductor_graph_partition is only "
-                "supported with torch>=2.9.0.dev. Set "
-                "use_inductor_graph_partition=False instead."
-            )
 
         for op in self.custom_ops:
             if op not in {"all", "none"} and (len(op) < 2 or op[0] not in {"+", "-"}):

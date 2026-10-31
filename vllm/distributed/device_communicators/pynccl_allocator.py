@@ -7,7 +7,6 @@ import tempfile
 from typing import Any
 
 import torch
-from packaging import version
 from torch.cuda.memory import CUDAPluggableAllocator
 from torch.utils.cpp_extension import load_inline
 
@@ -143,7 +142,6 @@ class nccl_symm_mem_context:
             or pynccl_comm.world_size == 1
             or not current_platform.is_cuda()
             or get_nccl_mem_pool() is None
-            or version.parse(torch.__version__) < version.parse("2.8.0.a0")
         )
         if self.disabled:
             self.pynccl_comm: PyNcclCommunicator | None = None

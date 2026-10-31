@@ -15,7 +15,6 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.forward_context import BatchDescriptor, set_forward_context
-from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 # This import automatically registers `torch.ops.silly.attention`
 from . import silly_attention  # noqa: F401
@@ -72,9 +71,6 @@ def test_ignore_torch_compile_decorator(use_inductor_graph_partition, monkeypatc
     # disable compile cache so that we can count the number of compilations
     # appropriately
     monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
-
-    if use_inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
-        pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
 
     # piecewise
     vllm_config = VllmConfig(
@@ -204,9 +200,6 @@ def test_conditional_compile_enable_if(use_inductor_graph_partition, monkeypatch
     # disable compile cache so that we can count the number of compilations
     # appropriately
     monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
-
-    if use_inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
-        pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
 
     vllm_config = VllmConfig(
         cache_config=CacheConfig(

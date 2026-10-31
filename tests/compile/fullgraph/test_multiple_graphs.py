@@ -19,7 +19,6 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.forward_context import BatchDescriptor, set_forward_context
-from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from ...utils import create_new_process_for_each_test
 
@@ -201,9 +200,6 @@ def test_multi_graph_piecewise_compile(
 ):
     # Set the environment variable for this test
     monkeypatch.setenv("VLLM_USE_BYTECODE_HOOK", "1" if use_bytecode_hook else "0")
-
-    if use_inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
-        pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
 
     outputs = []
 

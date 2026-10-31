@@ -162,7 +162,6 @@ tests/test_connections.py  # CI jobs disabled pending locked cmake installation
 tests/test_embedded_commit.py  # CI jobs disabled pending locked cmake installation
 tests/test_envs.py  # CI jobs disabled pending locked cmake installation
 tests/test_force_first_config.py  # CI jobs disabled pending locked cmake installation
-tests/test_fxgraphcache_pickle_patch.py  # CI jobs disabled pending locked cmake installation
 tests/test_logprobs.py  # CI jobs disabled pending locked cmake installation
 tests/test_outputs.py  # CI jobs disabled pending locked cmake installation
 tests/test_pcp_dp.py  # CI jobs disabled pending locked cmake installation
