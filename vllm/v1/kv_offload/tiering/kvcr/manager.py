@@ -89,6 +89,7 @@ if TYPE_CHECKING:
 _REQUIRED_ROUTER_CAPABILITIES = ROUTER_HINT_CAPABILITIES
 
 logger = init_logger(__name__)
+_KVCR_SHUTDOWN = False
 
 _BUILTIN_POLICIES: dict[str, type[KVCachePolicy]] = {
     "fifo": FIFOPolicy,
@@ -603,8 +604,8 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
 
     @override
     def has_pending_work(self) -> bool:
-        # Keep scheduler polling: control messages may arrive without a load job.
-        return True
+        # Keep peer polling until shutdown; then drain actual transfer jobs.
+        return not _KVCR_SHUTDOWN or bool(self._jobs_by_op)
 
     @override
     def take_events(self) -> Iterable[OffloadingEvent]:
