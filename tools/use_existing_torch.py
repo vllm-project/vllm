@@ -40,9 +40,14 @@ def main(argv):
             lines = f.readlines()
         if "torch" in "".join(lines).lower():
             with open(file, "w") as f:
+                section = None
                 for line in lines:
+                    if line.startswith("["):
+                        section = line.strip()
+                    # Extras are opt-in, so keep them (e.g. zentorch in `zen`).
                     if (
-                        args.prefix
+                        section == "[project.optional-dependencies]"
+                        or args.prefix
                         and not line.lower().strip().startswith(TORCH_LIB_PREFIXES)
                         or not args.prefix
                         and "torch" not in line.lower()
