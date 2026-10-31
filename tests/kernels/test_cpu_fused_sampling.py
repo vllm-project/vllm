@@ -11,7 +11,7 @@ from vllm.platforms import current_platform
 if not current_platform.is_cpu():
     pytest.skip("skipping CPU-only tests", allow_module_level=True)
 
-import vllm._C  # noqa: F401, E402
+current_platform.import_kernels()
 
 VOCAB_SIZES = [32000, 49152, 128256]
 BATCH_SIZES = [1, 4, 16]
