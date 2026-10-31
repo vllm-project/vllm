@@ -983,6 +983,10 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         """
         return False
 
+    def fused_rope_kvcache_q_out_supported(self) -> bool:
+        """Whether `do_rope_and_kv_cache_update_q_out` supports this layer."""
+        return False
+
     def do_qk_norm_rope_kvcache_update(
         self,
         layer: AttentionLayer,
@@ -1040,6 +1044,27 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         """If `fused_rope_kvcache_supported` returns True, this method will be called
         by torch.ops.vllm.fused_rope_and_unified_kv_cache_update
         to perform the inplace RoPE and KV cache update.
+        """
+        raise NotImplementedError
+
+    def do_rope_and_kv_cache_update_q_out(
+        self,
+        layer: AttentionLayer,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        query_out: torch.Tensor,
+        positions: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        is_neox: bool,
+        kv_cache: torch.Tensor,
+        layer_slot_mapping: torch.Tensor,
+    ) -> None:
+        """Write rotated `query` to `query_out`, and rotated `key` plus `value`
+        directly to the KV cache, without modifying the inputs.
+
+        Inputs are [num_tokens, num_heads, head_size]; `query_out` is a
+        contiguous buffer of the same shape.
         """
         raise NotImplementedError
 

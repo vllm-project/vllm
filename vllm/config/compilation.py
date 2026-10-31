@@ -140,7 +140,7 @@ class PassConfig:
     fuse_rope_kvcache_cat_mla: bool = None  # type: ignore[assignment]
     """Enable fused MLA KV cache update with RoPE."""
 
-    # ROCm/AITER specific fusions
+    # Backend-specific fusions
     fuse_act_padding: bool = None  # type: ignore[assignment]
     """Fuse the custom RMSNorm + padding ops."""
     fuse_mla_dual_rms_norm: bool = None  # type: ignore[assignment]
@@ -154,7 +154,7 @@ class PassConfig:
     with QK-norm (e.g. Qwen3-MoE and Qwen3-VL-class architectures)."""
 
     rope_kvcache_fusion_max_token_num: int = 256
-    """The threshold for ROCm AITER RoPE+KVCache fusion e.g. for small batch decode.
+    """The threshold for RoPE+KVCache fusion e.g. for small batch decode.
     Larger batch sizes e.g. during prefill will use the unfused kernels.
     Also applies to the fused QK-Norm+RoPE/MRoPE+KVCache pass.
     """
@@ -279,9 +279,9 @@ class PassConfig:
                 "The fusion will be disabled."
             )
             self.fuse_mla_dual_rms_norm = False
-        if self.fuse_rope_kvcache and not current_platform.is_rocm():
+        if self.fuse_rope_kvcache and not current_platform.is_cuda_alike():
             logger.warning_once(
-                "KV cache fusion currently only enabled on ROCm. "
+                "KV cache fusion is currently only supported on CUDA and ROCm. "
                 "The fusion will be disabled."
             )
             self.fuse_rope_kvcache = False
@@ -972,6 +972,7 @@ class CompilationConfig:
 
         if (
             self.pass_config.fuse_rope_kvcache
+            and current_platform.is_rocm()
             and "+rotary_embedding" not in self.custom_ops
         ):
             # TODO(Rohan138): support rope native forward match and remove this.
@@ -1190,7 +1191,12 @@ class CompilationConfig:
                 # that doesn't seem to affect performance.
                 # https://github.com/vllm-project/vllm/issues/33267
                 if not self.use_inductor_graph_partition:
-                    if self.pass_config.fuse_rope_kvcache:
+                    # Only the ROCm graph pass needs RoPE and the KV cache
+                    # update in the same graph; CUDA fuses at the call site.
+                    if (
+                        self.pass_config.fuse_rope_kvcache
+                        and current_platform.is_rocm()
+                    ):
                         logger.warning_once(
                             "fuse_rope_kvcache is enabled, but splitting_ops is None "
                             "and Inductor graph partition is not enabled."
