@@ -116,6 +116,9 @@ def _loadable_tensors(model: torch.nn.Module) -> Iterator[tuple[str, torch.Tenso
 
 def _check_supported(model: torch.nn.Module) -> None:
     from vllm.model_executor.layers.quantization.humming import HummingMoEMethod
+    from vllm.model_executor.layers.quantization.online.base import (
+        OnlineQuantizationConfig,
+    )
     from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
     from vllm.model_executor.layers.quantization.online.moe_base import (
         OnlineMoEMethodBase,
@@ -136,6 +139,13 @@ def _check_supported(model: torch.nn.Module) -> None:
         # its load_weights runs a layerwise reload, and its post-load
         # processing replaces the weight parameter
         raise RuntimeError("direct reload: torchao quantization is not supported")
+    quant_config = config.quant_config if config is not None else None
+    if isinstance(quant_config, OnlineQuantizationConfig) or (
+        getattr(quant_config, "online_quantization_config", None) is not None
+    ):
+        # `finish` clears the guard that keeps online quantization from
+        # quantizing its already-quantized bytes again
+        raise RuntimeError("direct reload: online quantization is not supported")
     if config is not None and config.lora_config is not None:
         # LoRA wraps layers after cold start; their wrappers forward
         # `quant_method`, so a rerun would process each base layer twice
@@ -147,9 +157,11 @@ def _check_supported(model: torch.nn.Module) -> None:
         raise RuntimeError("direct reload: draft_lm_head_quantization is not supported")
     for name, module in model.named_modules():
         method = getattr(module, "quant_method", None)
-        if isinstance(method, (OnlineLinearBase, OnlineMoEMethodBase)):
-            # `finish` clears the guard that keeps online quantization from
-            # quantizing its already-quantized bytes again
+        # also without an online config (experts_int8); fused shared experts
+        # quantize staging parameters that post-load processing deletes
+        if isinstance(method, (OnlineLinearBase, OnlineMoEMethodBase)) or (
+            getattr(module, "shared_expert_online_loader", None) is not None
+        ):
             raise RuntimeError(
                 f"direct reload: online quantization is not supported "
                 f"({name}: {type(method).__name__})"

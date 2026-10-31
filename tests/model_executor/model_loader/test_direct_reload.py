@@ -23,6 +23,7 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerTensorOnlineLinearMethod,
 )
@@ -305,7 +306,10 @@ class TestRefusals:
         # the quantized draft lm_head would be written into the target's
         spec = SimpleNamespace(draft_lm_head_quantization="fp8")
         config = SimpleNamespace(
-            model_config=None, speculative_config=spec, lora_config=None
+            model_config=None,
+            speculative_config=spec,
+            lora_config=None,
+            quant_config=None,
         )
         monkeypatch.setattr(direct, "get_current_vllm_config_or_none", lambda: config)
         with pytest.raises(RuntimeError, match="draft_lm_head_quantization"):
@@ -315,7 +319,10 @@ class TestRefusals:
         # its load_weights runs a layerwise reload
         model_config = SimpleNamespace(quantization="torchao")
         config = SimpleNamespace(
-            model_config=model_config, speculative_config=None, lora_config=None
+            model_config=model_config,
+            speculative_config=None,
+            lora_config=None,
+            quant_config=None,
         )
         monkeypatch.setattr(direct, "get_current_vllm_config_or_none", lambda: config)
         with pytest.raises(RuntimeError, match="torchao"):
@@ -324,7 +331,10 @@ class TestRefusals:
     def test_lora_refused(self, monkeypatch):
         # LoRA wrappers forward `quant_method`: a rerun would process twice
         config = SimpleNamespace(
-            model_config=None, speculative_config=None, lora_config=object()
+            model_config=None,
+            speculative_config=None,
+            lora_config=object(),
+            quant_config=None,
         )
         monkeypatch.setattr(direct, "get_current_vllm_config_or_none", lambda: config)
         with pytest.raises(RuntimeError, match="LoRA"):
@@ -350,6 +360,35 @@ class TestRefusals:
             self.proj.quant_method = online
 
         monkeypatch.setattr(_ToyModel, "__init__", with_online_layer)
+        with pytest.raises(RuntimeError, match="online quantization"):
+            _cold_start(_checkpoint())
+
+    @pytest.mark.parametrize("composed", [False, True])
+    def test_online_quantization_config_refused(self, monkeypatch, composed):
+        # an online config, alone or on top of a checkpoint config
+        online = object.__new__(OnlineQuantizationConfig)
+        quant_config = (
+            SimpleNamespace(online_quantization_config=online) if composed else online
+        )
+        config = SimpleNamespace(
+            model_config=None,
+            speculative_config=None,
+            lora_config=None,
+            quant_config=quant_config,
+        )
+        monkeypatch.setattr(direct, "get_current_vllm_config_or_none", lambda: config)
+        with pytest.raises(RuntimeError, match="online quantization"):
+            _cold_start(_checkpoint())
+
+    def test_online_shared_experts_refused(self, monkeypatch):
+        # post-load processing deletes the staging parameters a reload loads
+        init = _ToyModel.__init__
+
+        def with_online_shared_experts(self):
+            init(self)
+            self.proj.shared_expert_online_loader = object()
+
+        monkeypatch.setattr(_ToyModel, "__init__", with_online_shared_experts)
         with pytest.raises(RuntimeError, match="online quantization"):
             _cold_start(_checkpoint())
 
