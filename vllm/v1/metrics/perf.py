@@ -1706,6 +1706,7 @@ class PerfMetricsLogging:
             or self.total_read_bytes_per_gpu
             or self.total_write_bytes_per_gpu
         ):
+            self.reset()
             return
 
         now = time.monotonic()
