@@ -35,18 +35,24 @@ def get_deepseek_v4_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
             conversation = kwargs.get("conversation", messages)
             messages = conversation.copy()
             if tools is not None and len(tools) > 0:
-                # Match the Rust renderer: request tools attach to the first
-                # system message; synthesize one only when none exists.
-                system_idx = next(
-                    (i for i, m in enumerate(messages) if m.get("role") == "system"),
+                # Request tools attach to the first system/developer message so
+                # the prompt is `{content}\n\n## Tools ...`, matching the
+                # reference encoder. Insert a synthetic system message only
+                # when neither role is present.
+                tools_idx = next(
+                    (
+                        i
+                        for i, m in enumerate(messages)
+                        if m.get("role") in ("system", "developer")
+                    ),
                     None,
                 )
-                if system_idx is None:
+                if tools_idx is None:
                     messages.insert(0, {"role": "system"})
-                    system_idx = 0
+                    tools_idx = 0
                 else:
-                    messages[system_idx] = copy.copy(messages[system_idx])
-                messages[system_idx]["tools"] = tools  # type: ignore[typeddict-unknown-key]
+                    messages[tools_idx] = copy.copy(messages[tools_idx])
+                messages[tools_idx]["tools"] = tools  # type: ignore[typeddict-unknown-key]
 
             reasoning_effort = kwargs.get("reasoning_effort")
             if not isinstance(reasoning_effort, str):
