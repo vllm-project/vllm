@@ -53,6 +53,20 @@ vllm serve <model> --ec-transfer-config '{
 }'
 ```
 
+### Usage With P2P MoRI-IO
+
+On AMD GPUs the data plane can run over MoRI-IO instead of NIXL, so a deployment whose KV hop already uses `MoRIIOConnector` needs no NIXL/UCX at all. Add `"ec_transport": "moriio"` to `ec_connector_extra_config` on both the producer and the consumer, and set `VLLM_EC_SIDE_CHANNEL_HOST` to a routable address on both (the consumer's MoRI-IO engine binds to it too):
+
+```bash
+vllm serve <model> --ec-transfer-config '{
+  "ec_connector": "ECCPUConnector",
+  "ec_role": "ec_consumer",
+  "ec_connector_extra_config": {"ec_enable_nixl": true, "ec_transport": "moriio", "ec_cpu_bytes": 1073741824}
+}'
+```
+
+`ec_enable_nixl` still turns P2P on; `ec_transport` picks its data plane. The control plane, protocol and fallback behaviour are the same for both transports.
+
 ### Orchestration flow
 
 1. A request finishes on the producer. `ECCPUConnector.request_finished()` returns, for each `mm_hash` still resident in its CPU tier:
@@ -74,7 +88,7 @@ vllm serve <model> --ec-transfer-config '{
 - **Control plane**: ZMQ. The producer binds a `ROUTER` socket on `VLLM_EC_SIDE_CHANNEL_HOST:VLLM_EC_SIDE_CHANNEL_PORT`; each consumer opens one `DEALER` connection per producer peer, with ZMQ heartbeating (2s interval, 4s timeout, 8s TTL) to detect a dead peer. `XferReq`/`XferAck` are `msgspec` msgpack structs, versioned by `EC_CONNECTOR_VERSION` (currently `1`) — a version mismatch is NACKed.
 - **Compatibility check**: every `XferReq` carries a SHA-256 hash over `(vllm_version, model, dtype, block_size_bytes)`; the producer NACKs (`NACK_INCOMPAT`) any peer whose hash differs.
 - **Ack statuses**: `OK`, `NACK_MISSING` (the producer no longer holds the encoding), `NACK_NOT_READY` (held, but its save has not landed), `NACK_INCOMPAT`, `NACK_VERSION`, `NACK_INTERNAL`. Only `NACK_NOT_READY` is retryable — `RETRYABLE_NACKS` in `cpu/protocol.py` is what both ends consult, so the classification lives with the wire vocabulary rather than at each call site.
-- **Data plane**: NIXL, `UCX` backend, consumer-initiated `READ` — the consumer pulls bytes directly out of the producer's registered mmap region; the producer never pushes.
+- **Data plane**: NIXL (`UCX` backend) or MoRI-IO (RDMA backend), chosen by `ec_transport`; consumer-initiated `READ` either way — the consumer pulls bytes directly out of the producer's registered mmap region; the producer never pushes. MoRI-IO has no per-transfer notification equivalent to NIXL's, so the MoRI-IO transport tells the producer a READ finished over a ZMQ `PUSH`→`PULL` pair (the producer binds the `PULL` socket on `moriio_notify_port`).
 - **Producer restart recovery**: the `XferAck` carries the producer's NIXL agent metadata, so a consumer can recover a READ against a restarted producer without a fresh handshake round-trip.
 - **Timeouts**: consumer XferAck wait 2s; NIXL read 20s (then quarantined — not evicted — for up to 60s to let an unabortable DMA settle); the producer releases an unclaimed pinned grant after a 30s pin lease.
 
@@ -94,7 +108,11 @@ EC transfer is configured via `--ec-transfer-config` (CLI) or the `ec_transfer_c
 
 | Key | Type | Required | Description |
 | --- | --- | --- | --- |
-| `ec_enable_nixl` | `bool` | No (default `false`) | Enables NIXL P2P transfer in addition to local CPU offload. Omitted or `false` imports no NIXL/ZMQ. Extra config is not type coerced, so a string value is parsed: `"true"`, `"1"`, `"yes"` enable it, anything else does not. |
+| `ec_enable_nixl` | `bool` | No (default `false`) | Enables P2P transfer in addition to local CPU offload. Omitted or `false` imports no NIXL/ZMQ. Extra config is not type coerced, so a string value is parsed: `"true"`, `"1"`, `"yes"` enable it, anything else does not. |
+| `ec_transport` | `"nixl" \| "moriio"` | No (default `"nixl"`) | P2P data plane. `"moriio"` needs the `mori` package (AMD MoRI-IO) and RDMA devices in the container. |
+| `moriio_host` | `str` | No (default `VLLM_EC_SIDE_CHANNEL_HOST`) | Address the MoRI-IO engine and the producer's completion socket bind to; must be reachable by peers. |
+| `moriio_port`, `moriio_notify_port` | `int` | No (default side-channel port + 1, + 2) | MoRI-IO engine control port and the producer's completion-notification port. |
+| `moriio_qp_per_transfer`, `moriio_num_workers` | `int` | No (default `1`) | MoRI-IO RDMA queue pairs per transfer and posting threads. MoRI-IO recommends more than one QP on ionic NICs. |
 | `consumer_ack_timeout_s` | `float` | No (default `2.0`) | How long a consumer waits for an `XferAck` before giving up on a read. The producer answers `XferReq`s from its own scheduler step, so its reply latency scales with the encoder's `--max-num-batched-tokens`: a loaded encoder whose steps run longer than this makes consumers abandon reads the producer is about to grant. Raise it for large encoder batches. |
 | `ec_cpu_bytes` | `int` | Yes | Total size, in bytes, of the shared CPU mmap region. `ECCPUConnector` raises `ValueError` if unset. Block count = `ec_cpu_bytes // block_size_bytes`, where each block holds one LLM input-embedding vector. Entries allocate enough blocks for their modality-specific output shape, including visual DeepStack features. |
 
@@ -111,6 +129,7 @@ Both are read only when `ec_enable_nixl=True` on a producer (`ec_role="ec_produc
 
 - No mechanism to notify an orchestrator or peer instance when an encoding is evicted from the CPU tier before it's consumed. A consumer only discovers a miss when its `XferReq` is NACKed (`NACK_MISSING`) and falls back to local recompute.
 - At the moment, Mmap cleanup on process shutdown is best-effort: if the creating process is `SIGKILL`ed before `ECSharedRegion.cleanup()` runs, the `/dev/shm/vllm_ec_*.mmap` file leaks and must be removed manually.
-- `NixlDataTransport` hardcodes the `UCX` backend.
+- `NixlDataTransport` hardcodes the `UCX` backend; `MoRIIODataTransport` uses only the MoRI-IO RDMA backend.
+- MoRI-IO registers the producer's region with the NIC on a consumer's first READ, and aborts the process if the NIC rejects the registration; keep `ec_cpu_bytes` within the NIC's per-region host-memory limit.
 - A retried read releases its destination blocks and re-allocates them on the next step, so a producer whose save is slow to land makes the consumer evict ready entries to win the same blocks back, once per engine step.
 - Falling back to local encoding requires the media to still be on the request. Announcing an encoding only when it can be served keeps an orchestrator from rewriting the media away for one that cannot, but an encoding lost *after* it was announced — evicted between the announcement and the consumer's read — leaves a rewritten request with nothing to embed, and it fails in the worker's `sanity_check_mm_encoder_outputs`. `ensure_cache_available()` can only defer a request, not fail it, so reporting this cleanly needs a scheduler-side failure path.
