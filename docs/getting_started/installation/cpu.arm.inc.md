@@ -16,16 +16,16 @@ vLLM offers basic model inferencing and serving on Arm CPU platform, with suppor
 --8<-- [end:set-up-using-python]
 --8<-- [start:pre-built-wheels]
 
-Pre-built vLLM wheels for Arm are available since version 0.11.2. These wheels contain pre-compiled C++ binaries.
+Pre-built vLLM wheels for Arm are available since version 0.11.2. These wheels contain pre-compiled C++ binaries. Since version 0.30.0 they are `manylinux_2_39` builds, which need glibc 2.39 or newer (e.g. Ubuntu 24.04); for 0.29.0 and earlier, replace `manylinux_2_39` with `manylinux_2_34` below.
 
 ```bash
 export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/releases/latest | jq -r .tag_name | sed 's/^v//')
-uv pip install "https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cpu-cp38-abi3-manylinux_2_34_aarch64.whl" --torch-backend cpu
+uv pip install "https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cpu-cp38-abi3-manylinux_2_39_aarch64.whl" --torch-backend cpu
 ```
 
 ??? console "pip"
     ```bash
-    pip install "https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cpu-cp38-abi3-manylinux_2_34_aarch64.whl" --extra-index-url https://download.pytorch.org/whl/cpu
+    pip install "https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cpu-cp38-abi3-manylinux_2_39_aarch64.whl" --extra-index-url https://download.pytorch.org/whl/cpu
     ```
 
 The `uv` approach works for vLLM `v0.6.6` and later. A unique feature of `uv` is that packages in `--extra-index-url` have [higher priority than the default index](https://docs.astral.sh/uv/pip/compatibility/#packages-that-exist-on-multiple-indexes). If the latest public release is `v0.6.6.post1`, `uv`'s behavior allows installing a commit before `v0.6.6.post1` by specifying the `--extra-index-url`. In contrast, `pip` combines packages from `--extra-index-url` and the default index, choosing only the latest version, which makes it difficult to install a development version prior to the released version.
