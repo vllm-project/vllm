@@ -56,12 +56,18 @@ from vllm.utils.func_utils import supports_kw
 
 from .base import BaseRenderer
 from .inputs.preprocess import parse_dec_only_prompt
+from .inputs.tokenize import get_truncation_indices
 
 if TYPE_CHECKING:
     from collections.abc import Set
 
     from vllm.config import ModelConfig, VllmConfig
-    from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict, TokensPrompt
+    from vllm.inputs import (
+        MultiModalDataDict,
+        MultiModalUUIDDict,
+        TextPrompt,
+        TokensPrompt,
+    )
     from vllm.inputs.engine import TokensInput
     from vllm.multimodal.processing.processor import (
         MultiModalPromptUpdates,
@@ -75,7 +81,7 @@ if TYPE_CHECKING:
     )
 
     from .inputs import DictPrompt
-    from .params import ChatParams
+    from .params import ChatParams, TokenizeParams
 
 logger = init_logger(__name__)
 
@@ -1100,6 +1106,48 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
     def _can_produce_offsets(self) -> bool:
         # Only fast tokenizers expose offset_mapping.
         return self.tokenizer is not None and self.tokenizer.is_fast
+
+    @override
+    def _tokenize_prompt(
+        self,
+        prompt: TextPrompt,
+        params: TokenizeParams,
+    ) -> TokensPrompt:
+        # With an explicit side, the tokenizer does not truncate the prompt (see
+        # `TokenizeParams.get_encode_kwargs`), so truncate it here and keep the
+        # tokens that the tokenizer added, as its own truncation does. Multimodal
+        # prompts are sliced again after placeholder expansion (see
+        # `_truncate_expanded_prompt`), which would cut these tokens anyway.
+        if (
+            params.truncation_side is None
+            or not params.add_special_tokens
+            or prompt.get("multi_modal_data")
+            or prompt.get("multi_modal_uuids")
+        ):
+            return super()._tokenize_prompt(prompt, params)
+
+        tokenizer = self.get_tokenizer()
+        want_offsets = self._wants_offsets(prompt, params)
+        encoding = tokenizer(
+            prompt["prompt"],
+            **params.get_encode_kwargs(),
+            return_offsets_mapping=want_offsets,
+            return_special_tokens_mask=True,
+        )
+
+        token_ids = encoding["input_ids"]
+        offset_mapping = encoding["offset_mapping"] if want_offsets else None
+        truncation = params._truncation_slice(tokenizer, len(token_ids))
+        if truncation is not None:
+            kept = get_truncation_indices(truncation, encoding["special_tokens_mask"])
+            if kept is not None:
+                token_ids = [token_ids[i] for i in kept]
+                if offset_mapping is not None:
+                    offset_mapping = [offset_mapping[i] for i in kept]
+
+        return self._build_tokens_prompt(
+            token_ids, prompt, offset_mapping=offset_mapping
+        )
 
     def render_messages(
         self,
