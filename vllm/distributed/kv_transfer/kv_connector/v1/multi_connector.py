@@ -180,12 +180,12 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         )
 
         self._connectors: list[KVConnectorBase_V1] = []
-        self._ktc_kv_transfer_config = []
+        self._configs: list[VllmConfig] = []
         for connector_cls, temp_config in self._get_connector_classes_and_configs(
             vllm_config
         ):
             self._connectors.append(connector_cls(temp_config, role, kv_cache_config))
-            self._ktc_kv_transfer_config.append(temp_config.kv_transfer_config)
+            self._configs.append(temp_config)
 
         assert vllm_config.kv_transfer_config is not None
         self._all_support_hma = MultiConnector.all_children_support_hma(
@@ -232,6 +232,13 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         )
 
     @classmethod
+    def supports_checkpoint(cls, vllm_config: "VllmConfig") -> bool:
+        children = cls._get_connector_classes_and_configs(vllm_config)
+        return bool(children) and all(
+            child.supports_checkpoint(config) for child, config in children
+        )
+
+    @classmethod
     def _get_connector_classes_and_configs(
         cls, vllm_config: "VllmConfig"
     ) -> list[tuple[type[KVConnectorBaseType], "VllmConfig"]]:
@@ -268,6 +275,18 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     def restore_kv_caches(self) -> None:
         for c in self._connectors:
             c.restore_kv_caches()
+
+    def checkpoint_prepare(self) -> None:
+        for c in self._connectors:
+            c.checkpoint_prepare()
+
+    def checkpoint_restore(self) -> None:
+        restore_id = self._vllm_config.restore_id
+        for config, c in zip(self._configs, self._connectors):
+            if restore_id:
+                # Each connector has its own copy of the KV transfer config.
+                config.refresh_identity(restore_id)
+            c.checkpoint_restore()
 
     def bind_kv_cache_manager(self, kv_cache_manager: "KVCacheManager") -> None:
         for connector in self._connectors:

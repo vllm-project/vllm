@@ -447,6 +447,9 @@ class VllmConfig:
     you are using. Contents must be hashable."""
     instance_id: str = ""
     """The ID of the vLLM instance."""
+    restore_id: str = ""
+    """The ID of the latest process checkpoint restore, or empty if the
+    instance was never restored. Set by `refresh_identity`."""
     optimization_level: OptimizationLevel = OptimizationLevel.O2
     """The optimization level. These levels trade startup time cost for
     performance, with -O0 having the best startup time and -O3 having the best
@@ -896,6 +899,18 @@ class VllmConfig:
             )
             os.makedirs(os.path.dirname(log_path), exist_ok=True)
             enable_trace_function_call(log_path)
+
+    def refresh_identity(self, restore_id: str) -> None:
+        """Give this instance identities distinct from other restores of the
+        same process checkpoint. Peers cache what they learn by these
+        identities."""
+        if self.kv_transfer_config is not None:
+            engine_id = self.kv_transfer_config.engine_id
+            assert engine_id is not None
+            if self.restore_id:
+                engine_id = engine_id.removesuffix(f"_{self.restore_id}")
+            self.kv_transfer_config.engine_id = f"{engine_id}_{restore_id}"
+        self.restore_id = restore_id
 
     @staticmethod
     def _get_quantization_config(
