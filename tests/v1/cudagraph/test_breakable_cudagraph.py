@@ -772,3 +772,115 @@ def test_unwrap_recurses_through_nested_wrappers():
 
     assert inner.unwrap() is model
     assert outer.unwrap() is model
+
+
+# --- VLLM_BREAKABLE_CAPTURE_ATTN guard tests ---------------------------------
+
+
+class _StubCapture:
+    """Minimal stand-in for the active BreakableCUDAGraphCapture."""
+
+    def __init__(self, capturing: bool = True):
+        self._capturing = capturing
+        self.eager_calls = []
+
+    def add_eager(self, runnable):
+        self.eager_calls.append(runnable)
+        return runnable()
+
+
+@pytest.fixture
+def attn_capture_flag(monkeypatch: pytest.MonkeyPatch):
+    """Point VLLM_BREAKABLE_CAPTURE_ATTN at a fresh stub capture context."""
+    import vllm.envs as envs
+    from vllm.compilation import breakable_cudagraph as bc
+
+    stub = _StubCapture(capturing=True)
+    monkeypatch.setattr(
+        bc.BreakableCUDAGraphCapture, "current", classmethod(lambda cls: stub)
+    )
+    monkeypatch.setenv("VLLM_BREAKABLE_CAPTURE_ATTN", "1")
+    envs.disable_envs_cache()
+    yield stub
+    envs.disable_envs_cache()
+
+
+def _mla_fn():
+    def unified_mla_attention_with_output(*args, **kwargs):  # noqa: ANN002
+        return "captured"
+
+    return unified_mla_attention_with_output
+
+
+def test_capture_attn_flag_refuses_unresolvable_layer(attn_capture_flag):
+    """Dense/unknown MLA must raise at capture, not be silently recorded."""
+    from vllm.compilation import breakable_cudagraph as bc
+
+    wrapped = bc.eager_break_during_capture(_mla_fn())
+    with pytest.raises(RuntimeError, match="only supports sparse MLA"):
+        wrapped(object(), object(), object(), object(), "no_such_layer")
+
+
+def test_capture_attn_flag_refuses_non_string_layer(attn_capture_flag):
+    """A drifted signature (non-str layer_name) must refuse too."""
+    from vllm.compilation import breakable_cudagraph as bc
+
+    wrapped = bc.eager_break_during_capture(_mla_fn())
+    with pytest.raises(RuntimeError, match="only supports sparse MLA"):
+        wrapped(object(), object(), object(), object(), object())
+
+
+def test_capture_attn_flag_allows_sparse_impl(attn_capture_flag, monkeypatch):
+    """A sparse impl is captured into the segment (fn runs inline)."""
+    import vllm.model_executor.layers.attention.attention as attn_mod
+    from vllm.compilation import breakable_cudagraph as bc
+
+    layer = type("Layer", (), {})()
+    layer.impl = type("Impl", (), {"is_sparse": True})()
+    monkeypatch.setattr(
+        attn_mod,
+        "get_attention_context",
+        lambda name: (None, layer, None, None),
+    )
+
+    wrapped = bc.eager_break_during_capture(_mla_fn())
+    out = wrapped(object(), object(), object(), object(), "model.layers.3.mla")
+    assert out == "captured"
+    assert attn_capture_flag.eager_calls == []
+
+
+def test_capture_attn_flag_refuses_dense_impl(attn_capture_flag, monkeypatch):
+    """A resolvable dense-MLA layer (is_sparse=False) must raise at capture."""
+    import vllm.model_executor.layers.attention.attention as attn_mod
+    from vllm.compilation import breakable_cudagraph as bc
+
+    layer = type("Layer", (), {})()
+    layer.impl = type("Impl", (), {"is_sparse": False})()
+    monkeypatch.setattr(
+        attn_mod,
+        "get_attention_context",
+        lambda name: (None, layer, None, None),
+    )
+
+    wrapped = bc.eager_break_during_capture(_mla_fn())
+    with pytest.raises(RuntimeError, match="only supports sparse MLA"):
+        wrapped(object(), object(), object(), object(), "model.layers.3.mla")
+    assert attn_capture_flag.eager_calls == []
+
+
+def test_capture_attn_flag_off_takes_eager_path(monkeypatch):
+    """Flag off keeps the eager-break behavior (no gate, no raise)."""
+    import vllm.envs as envs
+    from vllm.compilation import breakable_cudagraph as bc
+
+    stub = _StubCapture(capturing=True)
+    monkeypatch.setattr(
+        bc.BreakableCUDAGraphCapture, "current", classmethod(lambda cls: stub)
+    )
+    monkeypatch.delenv("VLLM_BREAKABLE_CAPTURE_ATTN", raising=False)
+    envs.disable_envs_cache()
+
+    wrapped = bc.eager_break_during_capture(_mla_fn())
+    out = wrapped(object(), object(), object(), object(), "layer")
+    assert out == "captured"
+    assert len(stub.eager_calls) == 1
