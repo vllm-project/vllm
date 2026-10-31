@@ -4,7 +4,6 @@ depends_on:
 steps:
 - label: ":nvidia: (L4) Plugin Integration"
   key: plugin-tests-2-gpus
-  automatic_shard: true
   timeout_in_minutes: 35
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -62,7 +61,6 @@ steps:
     amd:
       label: ":amd: (MI250) Plugin Integration"
       dind: false
-      automatic_shard: true
       device: mi250_2
       timeout_in_minutes: 50
       depends_on:
