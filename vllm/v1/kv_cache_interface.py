@@ -325,6 +325,26 @@ class KVCacheSpec:
             isinstance(spec, uniform_type_base_spec) for spec in kv_cache_specs.values()
         )
 
+    def get_kv_cache_transfer_regions(
+        self, kv_cache: torch.Tensor
+    ) -> dict[str, torch.Tensor] | None:
+        """Expose named storage-sharing regions in logical ``[B, H, N, C]`` order.
+
+        Backends with custom storage may override this before connector-specific
+        transfer planning. Preserve strides and storage offsets; content encoding
+        remains spec-owned. Dense attention exports ``"key"`` and ``"value"``.
+        Returning ``None`` preserves existing registration behavior.
+
+        Args:
+            kv_cache: The actual per-layer cache view being registered.
+
+        Returns:
+            Named region views aliasing ``kv_cache``, or ``None`` when this spec
+            does not export a region representation.
+
+        """
+        return None
+
     @property
     def has_layer_views(self) -> bool:
         """Whether generic allocation creates per-layer cache views.
