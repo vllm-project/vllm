@@ -423,7 +423,12 @@ _FAIL_CLOSED_EVERYWHERE = [
     (_moe_config(parallel_config=_parallel_config(sp_size=2)), "sequence"),
     (_moe_config(parallel_config=_parallel_config(enable_eplb=True)), "EPLB"),
     (_moe_config(is_lora_enabled=True), "LoRA"),
-    (_moe_config(skip_final_all_reduce=True), "unreduced"),
+    (
+        _moe_config(
+            parallel_config=_parallel_config(tp_size=8), skip_final_all_reduce=True
+        ),
+        "unreduced",
+    ),
 ]
 
 
@@ -442,6 +447,21 @@ def test_unsupported_deployments_fail_closed(
 ) -> None:
     with pytest.raises(NotImplementedError, match=reason):
         validate(config)
+
+
+@pytest.mark.parametrize(
+    "validate",
+    [validate_bf16_deployment, validate_fp8_deployment, validate_mxfp4_deployment],
+)
+def test_expert_parallel_allows_unreduced_output(
+    validate: Callable[[FusedMoEConfig], None],
+) -> None:
+    """EP ranks have no pre-norm TP reduction, so the caller may reduce later."""
+    validate(
+        _moe_config(
+            parallel_config=_parallel_config(ep_size=8), skip_final_all_reduce=True
+        )
+    )
 
 
 @pytest.mark.parametrize(

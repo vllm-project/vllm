@@ -17,6 +17,8 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
+    tensor_model_parallel_all_reduce,
+    tensor_model_parallel_reduce_scatter,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
@@ -70,6 +72,7 @@ from vllm.transformers_utils.configs.muse_spark import (
 )
 
 from .muse_moe_runner import (
+    _TOKEN_SHARDED_MIN_TOKENS,
     MuseMoERunner,
     MuseSparkQuarkOCPMXFusedMoE,
     MuseSparkRoutedExperts,
@@ -172,6 +175,17 @@ class MuseSpark1xMoE(nn.Module):
         )
 
         self.ep_size = get_ep_group().device_group.size()
+        # With EP over the whole TP group and DP1, the router, pooler, pre-expert
+        # norm and unpooler would run on every token on every rank. Each rank runs
+        # them on its slice of the tokens instead, and the block reduces the expert
+        # output itself (reduce-scatter for large batches, all-reduce otherwise).
+        self.shard_tokens = (
+            vllm_config.parallel_config.enable_expert_parallel
+            and self.ep_size > 1
+            and self.ep_size == self.tp_size
+            and vllm_config.parallel_config.data_parallel_size == 1
+            and not self.is_sequence_parallel
+        )
         self.n_routed_experts = config.num_local_experts
         self.n_logical_experts = config.num_local_experts
         self.n_redundant_experts = 0
@@ -268,6 +282,7 @@ class MuseSpark1xMoE(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
             is_sequence_parallel=self.is_sequence_parallel,
+            reduce_results=not self.shard_tokens,
             router_logits_dtype=self.router_dtype,
             scoring_func="sigmoid",
             e_score_correction_bias=self.expert_bias,
@@ -335,6 +350,9 @@ class MuseSpark1xMoE(nn.Module):
         if self.pooler is None:
             return hidden_states
         hidden_states, _ = self.pooler(hidden_states)
+        return self._pre_expert_norm(hidden_states)
+
+    def _pre_expert_norm(self, hidden_states: torch.Tensor) -> torch.Tensor:
         norm = self.pre_expert_norm
         if norm is None:
             return hidden_states
@@ -349,8 +367,37 @@ class MuseSpark1xMoE(nn.Module):
             )
         return norm(hidden_states)
 
+    def _unpool(self, experts_out: torch.Tensor) -> torch.Tensor:
+        if self.unpooler is None:
+            return experts_out
+        experts_out, _ = self.unpooler(experts_out)
+        return experts_out
+
+    def _forward_token_sharded(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        num_tokens = hidden_states.shape[0]
+        local = sequence_parallel_chunk(hidden_states)
+        router_logits = tensor_model_parallel_all_gather(self._router_logits(local), 0)
+        pooled = local if self.pooler is None else self.pooler(local)[0]
+        if self._experts_take_expanded_input:
+            # The expanded layout is per route, so expand after the gather.
+            pooled = self._pre_expert_norm(tensor_model_parallel_all_gather(pooled, 0))
+        else:
+            pooled = tensor_model_parallel_all_gather(self._pre_expert_norm(pooled), 0)
+        experts_out = self.experts(hidden_states=pooled, router_logits=router_logits)
+        experts_out = tensor_model_parallel_reduce_scatter(experts_out, 0)
+        experts_out = self._unpool(experts_out)
+        return tensor_model_parallel_all_gather(experts_out, 0)[:num_tokens]
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens = hidden_states.shape[0]
+        if self.shard_tokens:
+            if num_tokens >= _TOKEN_SHARDED_MIN_TOKENS:
+                return self._forward_token_sharded(hidden_states)
+            experts_out = self.experts(
+                hidden_states=self._pool(hidden_states),
+                router_logits=self._router_logits(hidden_states),
+            )
+            return self._unpool(tensor_model_parallel_all_reduce(experts_out))
         if self.is_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
 
