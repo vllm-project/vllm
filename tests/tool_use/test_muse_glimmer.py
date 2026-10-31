@@ -168,6 +168,32 @@ def test_json_object_array_and_bool_params_decode():
     }
 
 
+@pytest.mark.parametrize("token", ["1e999", "Infinity", "-Infinity", "NaN", "[1e999]"])
+def test_non_finite_tool_args_are_kept_as_valid_json_strings(token):
+    """Non-finite numbers must not be emitted as bare NaN/Infinity tokens.
+
+    ``json.loads`` accepts them, but they are not valid JSON (RFC 8259), so a
+    strict client cannot parse ``arguments``. The value is kept as its raw
+    string, including when it is nested inside an array.
+    """
+    raw = (
+        "<|start|>assistant to=api.call<|message|>"
+        '<atem:function_calls>\n<atem:invoke name="api.call">\n'
+        f'<atem:parameter name="value">{token}</atem:parameter>\n'
+        "</atem:invoke>\n</atem:function_calls><|eot|>"
+    )
+    out = MuseGlimmerToolParser.extract_tool_calls(T, raw, _NO_REQ)
+    arguments = out.tool_calls[0].function.arguments
+
+    # A parser that rejects NaN/Infinity constants must still parse the whole
+    # arguments, proving no bare non-finite token is emitted; the value is kept
+    # verbatim as a string (the parametrized array case is nested).
+    def _reject_constants(value):
+        raise ValueError(value)
+
+    assert json.loads(arguments, parse_constant=_reject_constants) == {"value": token}
+
+
 # ------------------------------------------------- reasoning -> tool handoff
 
 
