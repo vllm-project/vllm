@@ -17,6 +17,9 @@ For further details on generative models, please refer to [this page](../models/
 - `LLM.generate` - Generates completions for the given input prompts.
 - `LLM.chat` - Generates responses for a chat conversation.
 
+To combine independently loaded LoRA adapters with fixed weights, see
+[Fixed-Weight Adapter Composition](../features/lora.md#fixed-weight-adapter-composition).
+
 ## Asynchronous Queue APIs
 
 - `LLM.enqueue` - Enqueues prompts for generation without waiting for completion.
