@@ -19,6 +19,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     KVQuantMode,
     MLAAttentionSpec,
+    SlidingWindowSpec,
 )
 from vllm.v1.kv_offload.base import CanonicalPageMapping, CopyRun
 
@@ -335,6 +336,100 @@ def test_cross_tp_store_load(form):
         assert all(m is not None for m in mappings)
         pages = [_load_one(m, reference) for m in mappings]
         assert _store_all(mappings, pages, canonical_size) == reference
+
+
+def _sliding_window_mappings(
+    tp: int, rank: int, total_heads: int, hybrid: bool
+) -> dict[str, CanonicalPageMapping]:
+    local_heads = total_heads // tp
+    specs: dict[str, KVCacheSpec] = {
+        "swa_layer": SlidingWindowSpec(
+            block_size=4,
+            num_kv_heads=local_heads,
+            head_size=64,
+            dtype=torch.int8,
+            sliding_window=16,
+        ),
+    }
+    if hybrid:
+        specs["full_layer"] = _full_spec(num_kv_heads=local_heads)
+    groups = [
+        KVCacheGroupSpec(layer_names=[name], kv_cache_spec=spec)
+        for name, spec in specs.items()
+    ]
+    config = _vllm_config(tp=tp, total_kv_heads=total_heads)
+    config.parallel_config.rank = rank
+    caches = {name: _split_nhd_cache(spec) for name, spec in specs.items()}
+    mappings = derive_canonical_mappings(config, _kv_cache_config(groups), caches)
+    assert set(mappings) == set(specs)
+    assert all(mapping.parallelism_agnostic for mapping in mappings.values())
+    return mappings
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "writer_tp,reader_tp", [(1, 2), (2, 1)], ids=["tp1-to-tp2", "tp2-to-tp1"]
+)
+@pytest.mark.parametrize("hybrid", [False, True], ids=["swa-only", "full+swa"])
+def test_sliding_window_cross_tp_store_load(
+    writer_tp: int, reader_tp: int, hybrid: bool
+) -> None:
+    """Reconstruct SWA KV across TP sizes against independent head slices."""
+    total_heads = 8
+    layer_names = ["full_layer", "swa_layer"] if hybrid else ["swa_layer"]
+    generator = torch.Generator().manual_seed(0)
+    references = {
+        name: torch.randint(
+            -128,
+            128,
+            (NUM_BLOCKS, 2, 4, total_heads, 64),
+            dtype=torch.int8,
+            device="cpu",
+            generator=generator,
+        )
+        for name in layer_names
+    }
+    writer_mappings = [
+        _sliding_window_mappings(writer_tp, rank, total_heads, hybrid)
+        for rank in range(writer_tp)
+    ]
+    reader_mappings = [
+        _sliding_window_mappings(reader_tp, rank, total_heads, hybrid)
+        for rank in range(reader_tp)
+    ]
+    writer_heads = total_heads // writer_tp
+    reader_heads = total_heads // reader_tp
+
+    for layer_name, reference in references.items():
+        for block_id in range(NUM_BLOCKS):
+            expected_full = reference[block_id].numpy().tobytes()
+            pages = []
+            for rank in range(writer_tp):
+                start = rank * writer_heads
+                end = start + writer_heads
+                page = reference[block_id, :, :, start:end, :]
+                pages.append(page.numpy().tobytes())
+
+            stored = _store_all(
+                mappings=[m[layer_name] for m in writer_mappings],
+                pages=pages,
+                size=len(expected_full),
+                block_id=block_id,
+            )
+            assert stored == expected_full, (
+                f"Store mismatch: layer={layer_name}, block={block_id}, "
+                f"TP{writer_tp}->TP{reader_tp}"
+            )
+
+            for rank, mappings in enumerate(reader_mappings):
+                loaded = _load_one(mappings[layer_name], stored)
+                start = rank * reader_heads
+                end = start + reader_heads
+                expected = reference[block_id, :, :, start:end, :].numpy().tobytes()
+                assert loaded == expected, (
+                    f"Load mismatch: layer={layer_name}, block={block_id}, "
+                    f"rank={rank}, TP{writer_tp}->TP{reader_tp}"
+                )
 
 
 def test_cp_round_trip():
