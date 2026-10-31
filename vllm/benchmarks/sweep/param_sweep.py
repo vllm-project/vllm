@@ -39,7 +39,7 @@ class ParameterSweep(list["ParameterSweepItem"]):
             )
 
         # Validate that all _benchmark_name values are unique if provided
-        names = [r["_benchmark_name"] for r in records if "_benchmark_name" in r]
+        names = [str(r["_benchmark_name"]) for r in records if "_benchmark_name" in r]
         if names and len(names) != len(set(names)):
             duplicates = [name for name in names if names.count(name) > 1]
             raise ValueError(
