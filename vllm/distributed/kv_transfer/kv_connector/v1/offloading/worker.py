@@ -248,7 +248,6 @@ class OffloadingConnectorWorker:
 
     def start_kv_transfers(self, metadata: OffloadingConnectorMetadata):
         assert self.worker is not None
-        assert not self._unsubmitted_load_jobs
         for job_id, src_spec, dst_spec in self._unsubmitted_store_jobs:
             success = self.worker.submit_store(job_id, src_spec, dst_spec)
             assert success
@@ -283,6 +282,17 @@ class OffloadingConnectorWorker:
                 (job_id, entry.src_spec, entry.dst_spec)
             )
 
+    def submit_deferred_loads(self) -> None:
+        """Submit staged async loads without waiting for transfer completion."""
+        assert self.worker is not None
+        while self._unsubmitted_load_jobs:
+            job_id, entry = next(iter(self._unsubmitted_load_jobs.items()))
+            assert isinstance(entry.dst_spec, GPULoadStoreSpec)
+            success = self.worker.submit_load(job_id, entry.src_spec, entry.dst_spec)
+            assert success
+            self._load_jobs[job_id] = entry.req_id
+            del self._unsubmitted_load_jobs[job_id]
+
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Returns:
         tuple of (finished_sending, finished_recving). Stores never
@@ -294,12 +304,6 @@ class OffloadingConnectorWorker:
 
         """
         assert self.worker is not None
-        for job_id, entry in self._unsubmitted_load_jobs.items():
-            assert isinstance(entry.dst_spec, GPULoadStoreSpec)
-            self._load_jobs[job_id] = entry.req_id
-            success = self.worker.submit_load(job_id, entry.src_spec, entry.dst_spec)
-            assert success
-        self._unsubmitted_load_jobs.clear()
         finished_recving: set[str] = set()
         for transfer_result in self.worker.get_finished():
             job_id = transfer_result.job_id
