@@ -18,6 +18,7 @@ from openai.types.responses.response_reasoning_item import (
 )
 
 from vllm.entrypoints.generate.base.protocol import FunctionCall
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.openai.responses.utils import (
     _construct_message_from_response_item,
     build_response_output_items,
@@ -25,7 +26,9 @@ from vllm.entrypoints.openai.responses.utils import (
     construct_input_messages,
     decode_custom_tool_input,
     decode_custom_tool_input_prefix,
+    fill_reasoning_summary,
     should_continue_final_message,
+    wants_reasoning_summary,
 )
 from vllm.exceptions import VLLMValidationError
 
@@ -1018,3 +1021,34 @@ class TestBuildResponseOutputItemsStatus:
         assert message.status == "completed"
         assert first.status == "completed"
         assert last.status == "incomplete"
+
+
+@pytest.mark.parametrize(
+    ("reasoning", "expected"),
+    [
+        (None, False),
+        ({"effort": "low"}, False),
+        ({"summary": "auto"}, True),
+        ({"generate_summary": "concise"}, True),
+    ],
+)
+def test_wants_reasoning_summary(reasoning, expected):
+    request = ResponsesRequest(input="hi", reasoning=reasoning)
+    assert wants_reasoning_summary(request) is expected
+
+
+def test_fill_reasoning_summary():
+    item = make_reasoning_item(
+        content=[
+            Content(text="a", type="reasoning_text"),
+            Content(text="b", type="reasoning_text"),
+        ]
+    )
+    assert fill_reasoning_summary(item)
+    assert item.summary == [Summary(text="ab", type="summary_text")]
+    # An existing summary is kept.
+    assert not fill_reasoning_summary(item)
+
+    empty = make_reasoning_item()
+    assert not fill_reasoning_summary(empty)
+    assert empty.summary == []
