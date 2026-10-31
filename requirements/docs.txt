@@ -28,8 +28,10 @@ ghp-import==2.1.0
     #   properdocs
 gitdb==4.0.12
     # via gitpython
-gitpython==3.1.62
-    # via mkdocs-git-revision-date-localized-plugin
+gitpython==3.2.1
+    # via
+    #   -r requirements/docs.in
+    #   mkdocs-git-revision-date-localized-plugin
 griffelib==2.3.0
     # via mkdocstrings-python
 idna==3.20

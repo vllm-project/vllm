@@ -31,7 +31,7 @@ outlines_core == 0.2.14
 lark == 1.2.2
 xgrammar == 0.2.8; platform_machine == "x86_64" or platform_machine == "aarch64" or platform_machine == "arm64" or platform_machine == "s390x" or platform_machine == "ppc64le"
 typing_extensions >= 4.10
-filelock >= 3.20.3 # need to contain https://github.com/tox-dev/filelock/pull/317; GHSA floor
+filelock >= 4.2.4 # need to contain https://github.com/tox-dev/filelock/pull/317; GHSA floor
 partial-json-parser # used for parsing partial JSON outputs
 jsonschema >= 4.23.0 # required for MiniMax M3 tool schema validation
 pyzmq >= 25.0.0
@@ -56,7 +56,7 @@ oss-harmony >= 0.0.11  # Required for gpt-oss; includes embedded vocabularies
 anthropic >= 0.71.0
 model-hosting-container-standards >= 0.1.14, < 1.0.0
 mcp >= 2.2.0, < 3.0.0
-opentelemetry-sdk >= 1.27.0
-opentelemetry-api >= 1.27.0
-opentelemetry-exporter-otlp >= 1.27.0
+opentelemetry-sdk >= 1.45.1
+opentelemetry-api >= 1.45.1
+opentelemetry-exporter-otlp >= 1.45.1
 opentelemetry-semantic-conventions-ai >= 0.4.1
