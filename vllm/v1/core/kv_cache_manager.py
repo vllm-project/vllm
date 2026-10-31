@@ -679,17 +679,22 @@ class KVCacheManager:
         """
         self.block_pool.evict_blocks(block_ids)
 
-    def reset_prefix_cache(self) -> bool:
+    def reset_prefix_cache(self, allow_used_blocks: bool = False) -> bool:
         """Reset prefix cache. This function may be used in RLHF
         flows to invalidate prefix caching after the weights are updated,
         or used for resetting prefix caching status for benchmarking.
+
+        Args:
+            allow_used_blocks: If True, also reset when blocks are still in
+                use. Those blocks stay allocated but lose their hashes, so
+                this is not enough to invalidate KV after a weight update.
 
         Returns:
             bool: True if the prefix cache is successfully reset,
             False otherwise.
 
         """
-        if not self.coordinator.reset_prefix_cache():
+        if not self.coordinator.reset_prefix_cache(allow_used_blocks):
             return False
         if self.log_stats:
             assert self.prefix_cache_stats is not None

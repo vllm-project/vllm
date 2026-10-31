@@ -3172,15 +3172,25 @@ class Scheduler(SchedulerInterface):
         )
 
     def reset_prefix_cache(
-        self, reset_running_requests: bool = False, reset_connector: bool = False
+        self,
+        reset_running_requests: bool = False,
+        reset_connector: bool = False,
+        keep_running_requests: bool = False,
     ) -> bool:
         """Reset the KV prefix cache.
 
         If reset_running_requests is True, all the running requests will be
         preempted and moved to the waiting queue.
+        If keep_running_requests is True, the running requests keep their
+        blocks; those blocks are only removed from the prefix cache.
         Otherwise, this method will only reset the KV prefix cache when there
         is no running requests taking KV cache.
         """
+        if reset_running_requests and keep_running_requests:
+            raise ValueError(
+                "reset_running_requests and keep_running_requests cannot both be True."
+            )
+
         if reset_running_requests:
             # For logging.
             timestamp = time.monotonic()
@@ -3199,7 +3209,9 @@ class Scheduler(SchedulerInterface):
             # persistent batch in the model runner.
             self.prev_step_scheduled_req_ids.clear()
 
-        reset_successful = self.kv_cache_manager.reset_prefix_cache()
+        reset_successful = self.kv_cache_manager.reset_prefix_cache(
+            allow_used_blocks=keep_running_requests
+        )
         if reset_running_requests and not reset_successful:
             raise RuntimeError(
                 "Failed to reset KV cache even when all the running requests are "
@@ -3211,7 +3223,13 @@ class Scheduler(SchedulerInterface):
         if reset_connector:
             reset_successful = self.reset_connector_cache() and reset_successful
 
-        if reset_successful and self.aux_output_connector is not None:
+        # A new aux output generation requires no output in flight, which
+        # running requests may still have.
+        if (
+            reset_successful
+            and not keep_running_requests
+            and self.aux_output_connector is not None
+        ):
             self.aux_output_connector.reset()
 
         return reset_successful

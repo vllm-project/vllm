@@ -2118,6 +2118,34 @@ def test_reset_pending_eager_stores() -> None:
     assert sched.reset() is True
 
 
+def test_store_completion_after_gpu_reset_with_used_blocks() -> None:
+    """A GPU prefix-cache reset that keeps in-use blocks unhashes blocks with
+    stores in flight; their completion must not cache them on CPU."""
+    fix = make_scheduler(num_cpu_blocks=8, num_gpu_blocks=16, lazy=False)
+    sched = fix.scheduler
+    gpu_pool = fix.gpu_block_pool
+
+    num_blocks = 2
+    req = make_request(num_blocks=num_blocks)
+    kv_blocks = _alloc_and_register(fix, req, num_blocks)
+    sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
+    block_ids = kv_blocks.get_block_ids()
+    sched_out = make_scheduler_output(
+        {req.request_id: num_blocks * BLOCK_SIZE},
+        new_reqs={req.request_id: block_ids},
+    )
+    meta = sched.build_connector_meta(sched_out)
+    assert meta.store_event >= 0
+
+    assert gpu_pool.reset_prefix_cache(allow_used_blocks=True)
+    simulate_store_completion(sched, meta.store_event)
+
+    assert len(sched.cpu_block_pool.cached_block_hash_to_block) == 0
+    assert get_cpu_free_blocks(sched) == sched.cpu_block_pool.num_gpu_blocks - 1
+    gpu_pool.free_blocks(gpu_pool.blocks[bid] for bid in block_ids[0])
+    assert gpu_pool.get_num_free_blocks() == gpu_pool.num_gpu_blocks - 1
+
+
 # ---------------------------------------------------------------------------
 # Test 13: Reset with pending lazy stores waits for completion
 # ---------------------------------------------------------------------------

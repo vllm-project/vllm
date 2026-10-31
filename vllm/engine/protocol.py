@@ -194,7 +194,10 @@ class EngineClient(ABC):
 
     @abstractmethod
     async def reset_prefix_cache(
-        self, reset_running_requests: bool = False, reset_connector: bool = False
+        self,
+        reset_running_requests: bool = False,
+        reset_connector: bool = False,
+        keep_running_requests: bool = False,
     ) -> bool:
         """Reset the prefix cache and optionally any configured connector cache."""
         ...
