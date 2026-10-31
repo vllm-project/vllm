@@ -153,6 +153,7 @@ steps:
 
 - label: ":amd: (MI355) MiniMax M3 MonoKernel"
   key: minimax-m3-monokernel-mi355
+  automatic_shard: true
   dind: false
   timeout_in_minutes: 45
   device: mi355_4

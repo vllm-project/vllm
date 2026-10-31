@@ -374,6 +374,7 @@ steps:
 
 - label: ':amd: (MI355) Fusion E2E TP2 AR-RMS (Inductor Partition)'
   key: fusion-e2e-tp2-ar-rms-inductor-partition-amd
+  automatic_shard: true
   dind: false
   device: mi355_2
   num_devices: 2
@@ -395,6 +396,7 @@ steps:
 
 - label: ':amd: (MI355) Fusion E2E TP2 AR-RMS (Dynamo Partition)'
   key: fusion-e2e-tp2-ar-rms-dynamo-partition-amd
+  automatic_shard: true
   dind: false
   device: mi355_2
   num_devices: 2
