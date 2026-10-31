@@ -9,18 +9,19 @@ from typing import Any
 
 import torch
 
-from vllm.models.kimi_k3.amd.specialized_decode.runtime import WHOLE, layer_kinds
+from vllm.models.kimi_k3.amd.specialized_decode.runtime import (
+    DCP,
+    DCP_SIZES,
+    FFN,
+    layer_kinds,
+)
+
+MLA_HEADS, MLA_Q, MLA_KV, MLA_NOPE, MLA_ROPE, MLA_V = 12, 1536, 512, 128, 64, 128
 
 
-def weight_reasons(model) -> list[str]:
-    """``model``: the loaded ``KimiLinearModel``; every kernel layer's weights as
-    the kernels read them, and the MoE backend that lays them out."""
-    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
-    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import back, kda
-    from vllm.models.kimi_k3.amd.specialized_decode.mono.stages import moe
-
-    reasons: list[str] = []
-    bf, f32 = torch.bfloat16, torch.float32
+def _need(reasons: list[str]):
+    """``need(name, t, shape, dtype)``: appends to ``reasons`` unless ``t`` is
+    a contiguous ``shape`` ``dtype`` tensor."""
 
     def need(name, t, shape, dtype):
         if t is None:
@@ -32,6 +33,20 @@ def weight_reasons(model) -> list[str]:
                 f" kernel reads contiguous {shape} {dtype}"
             )
 
+    return need
+
+
+def weight_reasons(model) -> list[str]:
+    """``model``: the loaded ``KimiLinearModel``; every kernel layer's weights as
+    K1 and K2 read them, and the MoE backend that lays them out. The MLA layers'
+    attention is ``mla_weight_reasons``'."""
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import back, kda
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.stages import moe
+
+    reasons: list[str] = []
+    bf, f32 = torch.bfloat16, torch.float32
+    need = _need(reasons)
     kinds = layer_kinds(model.config)
     if not kinds:
         return ["no layer has an AttnRes latent MoE"]
@@ -74,7 +89,12 @@ def weight_reasons(model) -> list[str]:
         need(f"{p} post_attention_layernorm", layer.post_attention_layernorm.weight,
              (H,), bf)  # fmt: skip
         need(f"{p} o_proj", layer.self_attn.o_proj.weight, (H, back.OK), bf)
-        if kind != WHOLE:
+        need(f"{p} input_layernorm", layer.input_layernorm.weight, (H,), bf)
+        need(f"{p} self_attention_res_norm", layer.self_attention_res_norm.weight,
+             (H,), bf)  # fmt: skip
+        need(f"{p} self_attention_res_proj", layer.self_attention_res_proj.weight,
+             (1, H), bf)  # fmt: skip
+        if kind == FFN:
             continue
         a = layer.self_attn
         if a.local_num_heads != kda.NH or a.head_dim != kda.HD or a.conv_size != 4:
@@ -86,20 +106,99 @@ def weight_reasons(model) -> list[str]:
         need(f"{p} conv1d", a.conv1d.weight.view(-1, 4), (kda.QKV, 4), f32)
         need(f"{p} A_log", a.A_log.view(-1), (kda.NH,), f32)
         need(f"{p} dt_bias", a.dt_bias.view(-1), (kda.PROJ,), f32)
-        need(f"{p} input_layernorm", layer.input_layernorm.weight, (H,), bf)
-        need(f"{p} self_attention_res_norm", layer.self_attention_res_norm.weight,
-             (H,), bf)  # fmt: skip
-        need(f"{p} self_attention_res_proj", layer.self_attention_res_proj.weight,
-             (1, H), bf)  # fmt: skip
+    return reasons
+
+
+def mla_weight_reasons(model) -> list[str]:
+    """Why the loaded MLA layers cannot run M1 (empty: they can). Not a refusal:
+    those layers run vLLM's attention ops instead, then K2."""
+    reasons: list[str] = []
+    for i, kind in layer_kinds(model.config).items():
+        if kind == FFN and model.start_layer <= i < model.end_layer:
+            w = model.layers[i].self_attn.mla_attn
+            reasons += _mla_reasons(f"layer {i}", w, _need(reasons))
+    return reasons
+
+
+def _mla_reasons(p: str, w, need) -> list[str]:
+    """An MLA layer as M1a / M1b (and ``runtime/mla.py``) run it: NoPE, gated,
+    DCP1 or DCP8, an fp8 cache, W_UK / W_UV as MXFP4 bmms."""
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import (
+        HIDDEN as H,
+    )
+    from vllm.models.kimi_k3.amd.specialized_decode.runtime.mla import (
+        qkv_gate_weights,
+    )
+
+    reasons = []
+    a = w.mla_attn
+    dims = (w.num_heads, w.q_lora_rank, a.kv_lora_rank, w.qk_nope_head_dim,
+            w.qk_rope_head_dim, w.v_head_dim)  # fmt: skip
+    if dims != (MLA_HEADS, MLA_Q, MLA_KV, MLA_NOPE, MLA_ROPE, MLA_V):
+        return [f"{p}: MLA heads/q_lora/kv_lora/nope/rope/v {dims}"]
+    if w.rotary_emb is not None or w.indexer is not None or w.dcp_q_replicate:
+        reasons.append(f"{p}: needs NoPE, dense, unreplicated-query MLA")
+    w_qkv, w_g = qkv_gate_weights(w)
+    if w_g is None:
+        reasons.append(f"{p}: needs the output gate (g_proj)")
+    dcp = a.impl.dcp_world_size
+    if dcp not in DCP_SIZES or a.use_pcp or a.hisparse_cache is not None:
+        reasons.append(f"{p}: needs DCP1 or DCP{DCP}, no PCP / HiSparse")
+    elif dcp > 1 and (a.dcp_manager is None or a.dcp_manager.query_gather is None):
+        reasons.append(f"{p}: no DCP query gather")
+    if not a.kv_cache_dtype.startswith("fp8"):
+        reasons.append(f"{p}: KV cache {a.kv_cache_dtype}, needs fp8")
+    if not a.is_aiter_triton_fp4_bmm_enabled:
+        reasons.append(
+            f"{p}: W_UK / W_UV must be AITER MXFP4 bmms (VLLM_ROCM_USE_AITER_FP4BMM=1)"
+        )
+    if float(a._q_scale_float) != 1.0 or float(a._k_scale_float) != 1.0:
+        reasons.append(f"{p}: q / k scales must be 1.0")
+    bf = torch.bfloat16
+    need(f"{p} fused_qkv_a_proj", w_qkv,
+         (MLA_Q + MLA_KV + MLA_ROPE, H), bf)  # fmt: skip
+    need(f"{p} q_a_layernorm", w.q_a_layernorm.weight, (MLA_Q,), bf)
+    need(f"{p} kv_a_layernorm", w.kv_a_layernorm.weight, (MLA_KV,), bf)
+    need(f"{p} q_b_proj", w.q_b_proj.weight,
+         (MLA_HEADS * (MLA_NOPE + MLA_ROPE), MLA_Q), bf)  # fmt: skip
+    if w_g is not None:
+        need(f"{p} g_proj", w_g, (MLA_HEADS * MLA_V, H), bf)
+    if a.is_aiter_triton_fp4_bmm_enabled:
+        # the bmm weights are transposed views (rows strided, K dense); the
+        # e8m0 scales are aiter's column-major blocks, any strides
+        for name, t, shape, dense in (
+            ("W_K", a.W_K, (MLA_HEADS, MLA_KV, MLA_NOPE // 2), True),
+            ("W_K_scale", a.W_K_scale, (MLA_HEADS, MLA_KV, MLA_NOPE // 32), False),
+            ("W_V", a.W_V, (MLA_HEADS, MLA_V, MLA_KV // 2), True),
+            ("W_V_scale", a.W_V_scale, (MLA_HEADS, MLA_V, MLA_KV // 32), False),
+        ):
+            if t is None or tuple(t.shape) != shape:
+                reasons.append(f"{p} {name}: needs {shape}")
+            elif dense and t.stride(-1) != 1:
+                reasons.append(f"{p} {name}: needs the last dim dense")
+            elif t.element_size() != 1:
+                reasons.append(f"{p} {name}: {t.dtype}, needs bytes (torch.uint8)")
     return reasons
 
 
 def cache_reasons(caches: Mapping[str, Any]) -> list[str]:
-    """Every KDA layer's (conv, recurrent) state as K1 reads them."""
+    """Every KDA layer's (conv, recurrent) state as K1 reads them; every MLA
+    layer's fp8 cache, rows of 576 bytes (the blocks may be strided)."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import kda
 
     reasons = []
-    for name, (conv_state, rstate) in caches.items():
+    for name, c in caches.items():
+        if isinstance(c, torch.Tensor):
+            row = MLA_KV + MLA_ROPE
+            if c.ndim != 3 or c.size(-1) != row or c.element_size() != 1:
+                reasons.append(
+                    f"{name}: MLA cache {tuple(c.shape)} {c.dtype}, needs fp8 "
+                    f"[blocks, block_size, {row}]"
+                )
+            elif c.stride(-1) != 1 or c.stride(1) != row:
+                reasons.append(f"{name}: MLA cache rows must be dense")
+            continue
+        conv_state, rstate = c
         if conv_state.dtype != torch.bfloat16:
             reasons.append(f"{name}: conv state {conv_state.dtype}, needs bf16")
         if rstate.dtype != torch.float32:
