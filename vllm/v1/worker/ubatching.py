@@ -4,6 +4,7 @@ import threading
 
 import torch
 
+import vllm.envs as envs
 from vllm import forward_context
 from vllm.distributed import parallel_state
 from vllm.forward_context import ForwardContext
@@ -320,10 +321,35 @@ def _dbo_tp_all_reduce(group, input_: torch.Tensor) -> torch.Tensor | None:
     assert _TP_UBATCH_COMMS is not None
     ctx = _CURRENT_CONTEXTS[ctx_idx]
     logger.info_once("DBO: TP all-reduces of a microbatch go to the comm stream")
+    qr = _dbo_tp_quick_reduce(group, input_)
     # No record_stream: the stream waits already order the buffers, and it would
     # pin every block until the GPU catches up (out of memory at a 32k step).
     out = torch.empty_like(input_)
     ctx.yield_and_switch_from_compute_to_comm()
-    _TP_UBATCH_COMMS[ctx_idx].all_reduce(input_, out_tensor=out, stream=ctx.comm_stream)
+    if qr is not None:
+        qr.quick_all_reduce(input_, out=out)
+    else:
+        _TP_UBATCH_COMMS[ctx_idx].all_reduce(
+            input_, out_tensor=out, stream=ctx.comm_stream
+        )
     ctx.switch_to_compute_sync()
     return out
+
+
+def _dbo_tp_quick_reduce(group, input_: torch.Tensor):
+    """The TP group's QuickReduce communicator if VLLM_DBO_TP_QUICK_REDUCE is
+    set and ``input_`` is in its window, else None.
+
+    Both microbatches share one comm stream and only one microbatch thread runs
+    at a time, so the calls are issued in the same order on every rank and never
+    overlap: QuickReduce's single buffer is enough.
+    """
+    if not envs.VLLM_DBO_TP_QUICK_REDUCE:
+        return None
+    qr = getattr(group.device_communicator, "qr_comm", None)
+    if qr is None or qr.disabled or not qr.should_quick_allreduce(input_):
+        return None
+    logger.info_once(
+        "DBO: microbatch all-reduces in the QuickReduce window run QuickReduce"
+    )
+    return qr
