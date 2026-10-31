@@ -248,6 +248,7 @@ class OffloadingConnectorWorker:
 
     def start_kv_transfers(self, metadata: OffloadingConnectorMetadata):
         assert self.worker is not None
+        assert not self._unsubmitted_load_jobs
         for job_id, src_spec, dst_spec in self._unsubmitted_store_jobs:
             success = self.worker.submit_store(job_id, src_spec, dst_spec)
             assert success

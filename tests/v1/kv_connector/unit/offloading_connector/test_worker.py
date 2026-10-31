@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from types import SimpleNamespace
 from typing import cast
 from unittest.mock import MagicMock
 
@@ -415,14 +414,13 @@ def test_mixed_loads_submit_async_after_sync():
     assert worker.worker.submit_load.call_count == 2
 
 
-def _connector_with_worker(worker, use_v2_model_runner=True):
+def _connector_with_worker(worker):
     connector = OffloadingConnector.__new__(OffloadingConnector)
     connector.connector_worker = worker
-    connector._vllm_config = SimpleNamespace(use_v2_model_runner=use_v2_model_runner)
     return connector
 
 
-def test_finish_forward_starts_pure_async_load_once():
+def test_get_finished_submits_pure_async_load_once():
     worker, _ = _make_worker(
         KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
     )
@@ -431,8 +429,8 @@ def test_finish_forward_starts_pure_async_load_once():
     metadata = _load_metadata(21)
     connector.bind_connector_metadata(metadata)
 
-    # MRv2 skips start_load_kv in pre_forward when the step has only async jobs.
-    connector.finish_forward()
+    # MRv2 reaches start_load_kv from post_forward after sampling. MRv1 calls
+    # start_load_kv after forward. In both cases get_finished submits the job.
     connector.start_load_kv(None)
     connector.get_finished(set())
 
@@ -442,7 +440,7 @@ def test_finish_forward_starts_pure_async_load_once():
     worker.worker.wait.assert_not_called()
 
 
-def test_finish_forward_submits_only_deferred_mixed_loads():
+def test_get_finished_submits_only_deferred_mixed_loads():
     worker, _ = _make_worker(
         KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
     )
@@ -450,14 +448,13 @@ def test_finish_forward_submits_only_deferred_mixed_loads():
     connector = _connector_with_worker(worker)
     connector.bind_connector_metadata(_mixed_load_metadata())
 
-    # MRv2's pre_forward starts and waits for the sync load.
+    # pre_forward starts and waits for the sync load, while staging the async
+    # load. get_finished submits the staged load at each runner's existing hook.
     connector.start_load_kv(None)
     assert worker.worker.submit_load.call_count == 1
     assert worker.worker.submit_load.call_args.args[0] == 11
     worker.worker.wait.assert_called_once_with({11})
 
-    # The forward is now submitted; finish_forward starts the regular async load.
-    connector.finish_forward()
     connector.get_finished(set())
 
     assert worker.worker.submit_load.call_count == 2
@@ -466,7 +463,7 @@ def test_finish_forward_submits_only_deferred_mixed_loads():
     worker.worker.wait.assert_called_once_with({11})
 
 
-def test_v2_no_forward_sync_load_is_not_submitted_twice():
+def test_no_forward_sync_load_is_not_submitted_twice():
     worker, _ = _make_worker(
         KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
     )
@@ -475,19 +472,19 @@ def test_v2_no_forward_sync_load_is_not_submitted_twice():
 
     # A no-forward step can enter start_load_kv without scheduler kwargs.
     connector.start_load_kv(None)
-    connector.finish_forward()
+    connector.get_finished(set())
 
     worker.worker.submit_load.assert_called_once()
     assert worker.worker.submit_load.call_args.kwargs["expedited"] is True
     worker.worker.wait.assert_called_once_with({23})
 
 
-def test_v1_get_finished_submits_deferred_async_load():
+def test_get_finished_submits_deferred_async_load():
     worker, _ = _make_worker(
         KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
     )
     worker.worker.get_finished.return_value = []
-    connector = _connector_with_worker(worker, use_v2_model_runner=False)
+    connector = _connector_with_worker(worker)
     connector.bind_connector_metadata(_load_metadata(22))
 
     connector.start_load_kv(None)

@@ -118,32 +118,9 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         self.connector_worker.handle_preemptions(kv_connector_metadata)
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
-        # MRv2 calls this before forward only when sync loads are present. For
-        # async-only steps, it calls here from post_forward after finish_forward
-        # has already submitted the jobs.
-        if self._vllm_config.use_v2_model_runner:
-            assert isinstance(self._connector_metadata, OffloadingConnectorMetadata)
-            if not any(job.sync for job in self._connector_metadata.load_jobs.values()):
-                return
-        self._start_load_transfers()
-
-    def _start_load_transfers(self) -> None:
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, OffloadingConnectorMetadata)
         self.connector_worker.start_kv_transfers(self._connector_metadata)
-
-    def finish_forward(self) -> None:
-        if self.connector_worker is None or not self._vllm_config.use_v2_model_runner:
-            return
-        # MRv2 calls finish_forward immediately after the target forward is
-        # submitted. Start ordinary async loads here so their host submission
-        # can overlap that GPU work. Sync loads were already handled by the
-        # pre_forward start_load_kv call, so only start transfers on async-only
-        # steps here.
-        assert isinstance(self._connector_metadata, OffloadingConnectorMetadata)
-        if not any(job.sync for job in self._connector_metadata.load_jobs.values()):
-            self._start_load_transfers()
-        self.connector_worker.submit_deferred_loads()
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         pass
@@ -166,9 +143,9 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, OffloadingConnectorMetadata)
-        # MRv1 has no finish_forward hook, so submit its deferred loads here.
-        if not self._vllm_config.use_v2_model_runner:
-            self.connector_worker.submit_deferred_loads()
+        # MRv1 calls get_transfer_results after forward and before sampling.
+        # MRv2 calls it from post_forward after sampling, preserving its timing.
+        self.connector_worker.submit_deferred_loads()
         return self.connector_worker.get_finished(finished_req_ids)
 
     def get_transfer_results(
