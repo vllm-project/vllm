@@ -243,9 +243,8 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         ret: list[tuple[type[KVConnectorBaseType], VllmConfig]] = []
         for ktc in ktcs:
             temp_config = copy.copy(vllm_config)
-            engine_id = ktc.get("engine_id", vllm_config.kv_transfer_config.engine_id)
             temp_config.kv_transfer_config = KVTransferConfig(
-                **ktc, engine_id=engine_id
+                **{"engine_id": vllm_config.kv_transfer_config.engine_id, **ktc}
             )
             ret.append(
                 (

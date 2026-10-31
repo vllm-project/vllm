@@ -35,6 +35,9 @@ Now supports 9 types of connectors:
   --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_both"},{"kv_connector":"ExampleConnector","kv_role":"kv_both","kv_connector_extra_config":{"shared_storage_path":"local_storage"}}]}}'
   ```
 
+  Each child connector inherits the parent `engine_id` unless its configuration
+  explicitly sets `engine_id`.
+
 - **OffloadingConnector**: enable offloading of KV data to CPU memory, customizing the CPU block size (in tokens) and total CPU memory bytes to allocate:
 
   ```bash
