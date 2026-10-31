@@ -100,8 +100,9 @@ def get_deepseek_v41_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
                 or (isinstance(effort, str) and effort in REASONING_EFFORT_MAPPINGS)
             ):
                 raise ValueError(
-                    "DeepSeek V4.1 reasoning_effort must be low, high, xhigh, max, "
-                    "or an integer within [1, 100] in chat_template_kwargs"
+                    "DeepSeek V4.1 reasoning_effort must be minimal, low, medium, "
+                    "high, xhigh, max, or an integer within [1, 100] in "
+                    "chat_template_kwargs"
                 )
 
             prompt = encode_messages(
