@@ -256,9 +256,30 @@ def _pool_bytes_per_block(
     `available_memory` into `num_blocks`. Used to compute the effective KV cache
     capacity once `num_gpu_blocks_override` is applied.
     """
+    layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
+    groups = [g for g in kv_cache_groups if not g.host_resident]
+    if not groups:
+        groups = list(kv_cache_groups)
+    per_group_bytes = [_get_group_bytes_per_block(g, layout) for g in groups]
+    packed_eligible = layout.is_block_outermost and len(groups) > 0
+    block_sizes = {g.kv_cache_spec.block_size for g in groups}
+    if len(block_sizes) != 1:
+        packed_eligible = False
+    for g in groups:
+        spec = g.kv_cache_spec
+        specs_to_check = [spec]
+        if hasattr(spec, "kv_cache_specs") and isinstance(spec.kv_cache_specs, dict):
+            specs_to_check = list(spec.kv_cache_specs.values())
+        for sc in specs_to_check:
+            if isinstance(sc, SlidingWindowSpec) or isinstance(sc, ChunkedLocalAttentionSpec):
+                packed_eligible = False
+            if isinstance(sc, MambaSpec) and getattr(sc, "tokens_per_state", 1) not in (1, -1):
+                packed_eligible = False
+    if packed_eligible and per_group_bytes:
+        return sum(per_group_bytes)
     return _get_kv_cache_bytes_per_block(
         [group for group in kv_cache_groups if not group.host_resident],
-        vllm_config.cache_config.get_resolved_kv_cache_layout(),
+        layout,
     )
 
 
@@ -571,6 +592,31 @@ def _get_layer_block_stride(spec: KVCacheSpec) -> int:
     return round_up(spec.page_size_bytes, spec.get_block_stride_alignment())
 
 
+def _get_group_bytes_per_block(
+    group: KVCacheGroupSpec, layout: KVCacheLayout
+) -> int:
+    """Bytes per block priced for a single group (its own padded page)."""
+    if not layout.is_block_outermost:
+        return sum(
+            _get_layer_block_stride(_get_per_layer_spec(group, layer_name))
+            for layer_name in group.layer_names
+        )
+    bytes_per_block = sum(
+        _get_per_layer_spec(group, layer_name).page_size_bytes
+        for layer_name in group.layer_names
+    )
+    alignments = []
+    if isinstance(group.kv_cache_spec, HiSparseHotSpec):
+        alignments.append(group.kv_cache_spec.page_size_bytes)
+    alignments.extend(
+        _get_per_layer_spec(group, layer_name).get_block_stride_alignment()
+        for layer_name in group.layer_names
+    )
+    if alignments:
+        return round_up(bytes_per_block, math.lcm(*alignments))
+    return bytes_per_block
+
+
 def _get_kv_cache_bytes_per_block(
     kv_cache_groups: list[KVCacheGroupSpec], layout: KVCacheLayout
 ) -> int:
@@ -675,7 +721,32 @@ def get_kv_cache_config_from_groups(
 
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
     validate_kv_cache_layout(layout, kv_cache_groups)
-    bytes_per_block = _get_kv_cache_bytes_per_block(kv_cache_groups, layout)
+    per_group_bytes = [_get_group_bytes_per_block(g, layout) for g in kv_cache_groups]
+
+    # Guard: packed stride only when all groups share one block index space.
+    packed_eligible = layout.is_block_outermost and len(kv_cache_groups) > 0
+    block_sizes = {g.kv_cache_spec.block_size for g in kv_cache_groups}
+    if len(block_sizes) != 1:
+        packed_eligible = False
+    for g in kv_cache_groups:
+        spec = g.kv_cache_spec
+        specs_to_check = [spec]
+        if hasattr(spec, "kv_cache_specs") and isinstance(spec.kv_cache_specs, dict):
+            specs_to_check = list(spec.kv_cache_specs.values())
+        for sc in specs_to_check:
+            if isinstance(sc, SlidingWindowSpec) or isinstance(sc, ChunkedLocalAttentionSpec):
+                packed_eligible = False
+            if isinstance(sc, MambaSpec) and getattr(sc, "tokens_per_state", 1) not in (1, -1):
+                packed_eligible = False
+
+    if packed_eligible:
+        bytes_per_block = sum(per_group_bytes) if per_group_bytes else 1
+    else:
+        logger.warning(
+            "Packed block stride disabled; falling back to max-priced layout "
+            "(groups do not share one block index space)."
+        )
+        bytes_per_block = _get_kv_cache_bytes_per_block(kv_cache_groups, layout)
     interleaved_block_stride = bytes_per_block if layout.is_block_outermost else None
 
     num_blocks = available_memory // bytes_per_block
@@ -694,12 +765,14 @@ def get_kv_cache_config_from_groups(
     # group 1: | C [ blk 0 | blk 1 | ... ] | D [ blk 0 | blk 1 | ... ] |
 
     kv_cache_tensors = []
+    byte_offset = 0
     for group in kv_cache_groups:
         layers_by_spec: defaultdict[KVCacheSpec, list[str]] = defaultdict(list)
         for layer_name in group.layer_names:
             layers_by_spec[_get_per_layer_spec(group, layer_name)].append(layer_name)
 
-        byte_offset = 0
+        if not packed_eligible:
+            byte_offset = 0
         for spec, layer_names in layers_by_spec.items():
             block_stride = interleaved_block_stride
             padded_page = _get_layer_block_stride(spec)
@@ -734,6 +807,7 @@ def get_kv_cache_config_from_groups(
         prefix_cache_retention_interval=(
             vllm_config.cache_config.prefix_cache_retention_interval
         ),
+        use_packed_stride=packed_eligible,
     )
 
 
