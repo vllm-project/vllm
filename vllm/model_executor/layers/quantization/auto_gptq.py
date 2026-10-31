@@ -436,6 +436,10 @@ class AutoGPTQLinearMethod(LinearMethodBase):
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if not self.kernel.config.zero_points:
+            zp_name = self.kernel.w_zp_name
+            if zp_name is not None and hasattr(layer, zp_name):
+                delattr(layer, zp_name)
         self.kernel.process_weights_after_loading(layer)
 
     def apply(
