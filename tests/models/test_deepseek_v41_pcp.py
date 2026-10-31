@@ -94,7 +94,7 @@ def test_replay_kv_publishes_all_pcp_owners(pcp_size, monkeypatch):
     layer = SimpleNamespace(
         use_pcp=pcp_size > 1,
         _run_parallel_input_projections=lambda hidden: (hidden, None, None),
-        _split_qkv_and_norm=lambda projected: (None, None, kv),
+        _split_qkv_and_norm=lambda projected, positions=None: (None, None, kv),
         swa_cache_layer=SimpleNamespace(
             prefix="swa", kv_cache=torch.empty(0), block_size=64
         ),

@@ -3037,7 +3037,7 @@ def test_v41_rocm_csa2_full_pipeline(monkeypatch):
         n_local_heads=1,
         head_dim=512,
         _fused_wqa_wkv_gemm=lambda hidden_states_: qr_kv,
-        _split_qkv_and_norm=lambda qr_kv_: (qr, None, kv),
+        _split_qkv_and_norm=lambda qr_kv_, positions=None: (qr, None, kv),
         _wq_b_proj=wq_b,
         _fused_qnorm_rope_kv_insert=qnorm_insert,
     )
@@ -3130,7 +3130,7 @@ def test_v41_rocm_csa2_reindex_pipeline():
             None,
             indexer_weights,
         ),
-        _split_qkv_and_norm=lambda qr_kv_: (qr, None, kv),
+        _split_qkv_and_norm=lambda qr_kv_, positions=None: (qr, None, kv),
         _wq_b_proj=wq_b,
         _fused_qnorm_rope_kv_insert=qnorm_insert,
     )

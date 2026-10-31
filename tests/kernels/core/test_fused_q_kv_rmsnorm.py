@@ -146,7 +146,7 @@ def test_fused_q_kv_rmsnorm_quant_matches_separate(num_tokens, q_size, dtype):
     if not num_tokens:
         assert result[0].data.shape == qr.shape
         assert result[0].scale.numel() == 0
-        assert result[1].shape == kv.shape
+        assert result[1] is not None and result[1].shape == kv.shape
         return
     qr_ref, kv_ref = fused_q_kv_rmsnorm(qr, kv, qw, kvw, eps)
     q_ref, scale_ref = mxfp8_e4m3_quantize(qr_ref, is_sf_swizzled_layout=True)
@@ -156,11 +156,53 @@ def test_fused_q_kv_rmsnorm_quant_matches_separate(num_tokens, q_size, dtype):
             with torch.cuda.graph(graph):
                 result = fused_q_kv_rmsnorm_quant(qr, kv, qw, kvw, eps)
             graph.replay()
+        # Multi-row programs reduce in another order: values may differ by 1 ulp.
         torch.testing.assert_close(
-            result[0].data.view(torch.uint8), q_ref.view(torch.uint8), rtol=0, atol=0
+            result[0].data.float(), q_ref.float(), rtol=2**-3, atol=2**-9
         )
         torch.testing.assert_close(result[0].scale, scale_ref, rtol=0, atol=0)
-        torch.testing.assert_close(result[1], kv_ref, rtol=0, atol=0)
+        torch.testing.assert_close(result[1], kv_ref, rtol=2**-7, atol=1e-6)
+
+
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(100), reason="MXFP8 needs Blackwell"
+)
+@pytest.mark.parametrize("num_tokens", [1, 17, 1024, 1030])
+def test_fused_q_kv_rmsnorm_quant_kv_insert_matches_insert_op(num_tokens):
+    """The fused SWA KV insert writes the CUDA insert op's bytes."""
+    import vllm._custom_ops  # noqa: F401
+    from vllm.models.deepseek_v41.common.ops.query_quant import (
+        Mxfp8KVInsert,
+        fused_q_kv_rmsnorm_quant,
+    )
+
+    torch.manual_seed(0)
+    x = torch.randn(num_tokens, 1280 + 512, device=DEVICE, dtype=torch.bfloat16)
+    qr, kv = x.split([1280, 512], -1)
+    qw = torch.randn(1280, device=DEVICE, dtype=x.dtype)
+    kvw = torch.randn(512, device=DEVICE, dtype=x.dtype)
+    block, num_blocks = 64, num_tokens // 32 + 2
+    # Padded tokens past the slot mapping and -1 slots insert nothing.
+    slots = torch.randperm(num_blocks * block, device=DEVICE)[: num_tokens - 1]
+    slots[::7] = -1
+    positions = torch.randint(0, 4096, (num_tokens,), device=DEVICE)
+    cos_sin = torch.randn(4096, 64, device=DEVICE)
+    caches = torch.zeros(2, num_blocks, block * 528, device=DEVICE, dtype=torch.uint8)
+    _, kvo = fused_q_kv_rmsnorm_quant(qr, kv, qw, kvw, 1e-6)
+    torch.ops._C.fused_deepseek_v4_kv_rope_insert(
+        kvo,
+        caches[0].view(num_blocks, block, 528),
+        slots,
+        positions,
+        cos_sin,
+        block,
+        None,
+        True,
+    )
+    insert = Mxfp8KVInsert(caches[1], slots, positions, cos_sin, block)
+    q, no_kv = fused_q_kv_rmsnorm_quant(qr, kv, qw, kvw, 1e-6, kv_insert=insert)
+    assert no_kv is None
+    torch.testing.assert_close(caches[1], caches[0], rtol=0, atol=0)
 
 
 @pytest.mark.skipif(

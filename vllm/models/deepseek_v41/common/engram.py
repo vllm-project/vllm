@@ -89,6 +89,10 @@ ENGRAM_A2A_MIN_SLOT = 128
 # Cache value for tokens that take no part in an n-gram (image spans).
 DEAD_ID = -1
 
+# Sorted host lookups are prefill sized and latency bound: wide tiles keep more
+# reads in flight per program (GB200: 10-23% faster from 1536 tokens).
+_SORTED_LOOKUP_BLOCK_R = 128
+
 
 def _engram_lookup_thresholds(device: torch.device) -> tuple[int | None, int | None]:
     """Host lookup thresholds on `device`: the rows from which to sort, and the
@@ -1285,7 +1289,8 @@ class ParallelEngramEmbedding(nn.Module):
             dst = dst.int()
         # The table dwarfs TLB reach, so a persistent grid near the SM count
         # beats one program per row; halve it to leave SMs for the main stream.
-        tiles = triton.cdiv(rows, 16)
+        block_r = _SORTED_LOOKUP_BLOCK_R if sort else 16
+        tiles = triton.cdiv(rows, block_r)
         grid = min(tiles, self._num_sms // 2 if background else self._num_sms)
         _engram_lookup_kernel[(grid,)](
             self.peer_ptrs if self.peer_rows else weight,
@@ -1303,12 +1308,13 @@ class ParallelEngramEmbedding(nn.Module):
             TOTAL_HEADS=self.n_hash_cols,
             DIM=self.dim,
             QUANT_BLOCK=self.block_size,
-            BLOCK_R=16,
+            BLOCK_R=block_r,
             GRID=grid,
             SORTED=sort,
             PACKED=out.dtype == torch.uint8,
             OUT_STRIDE=out.stride(0),
             PEER_ROWS=self.peer_rows,
+            num_warps=8 if block_r >= 128 else 4,
         )
 
     def forward(self, indices: torch.Tensor) -> torch.Tensor:
