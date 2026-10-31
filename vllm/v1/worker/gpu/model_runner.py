@@ -1013,14 +1013,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.model_state.dummy_sampler_run(self.sampler, hidden_states):
             return
         num_reqs = hidden_states.shape[0]
-        logits = self.model.compute_logits(hidden_states)
         dummy_input_batch = InputBatch.make_dummy(
             num_reqs, num_reqs, self.input_buffers
         )
 
         # Default pass: compiles the kernels the first real step uses (logits in
-        # the model dtype, no per-request processing).
-        self.sampler(logits, dummy_input_batch)
+        # the model dtype, no per-request processing) and, under batch-sharded
+        # sampling, allocates the all-to-all buffers.
+        self.sample(hidden_states, dummy_input_batch, None)
         if current_platform.is_cpu():
             # The CPU worker sizes the KV cache from process RSS, which would
             # keep the extra pass's buffers, and has no warmup OOM to prevent.
@@ -1031,7 +1031,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         for req_idx in range(num_reqs):
             self.sampler.add_request(req_idx, warmup_params)
         self.sampler.apply_staged_writes()
-        self.sampler(logits, dummy_input_batch)
+        self.sample(hidden_states, dummy_input_batch, None)
+        if (
+            self.batch_sharder is not None
+            and self.batch_sharder.num_local_reqs(dummy_input_batch.idx_mapping_np) == 0
+        ):
+            # sample() skipped the sampler on this rank, which owns no dummy
+            # request. Profile it on one local row; this adds no collective.
+            one_row_batch = InputBatch.make_dummy(1, 1, self.input_buffers)
+            self.sampler(hidden_states.new_zeros(1, self.vocab_size), one_row_batch)
 
     @torch.inference_mode()
     def _dummy_pooler_run(self, hidden_states: torch.Tensor) -> None:

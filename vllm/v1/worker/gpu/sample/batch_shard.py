@@ -227,6 +227,23 @@ class BatchSharder:
         self._padded_num_logits_per_req = triton.next_power_of_2(max_num_logits_per_req)
         self._num_warps = max(1, min(8, self._padded_num_reqs // 128))
 
+    def _req_owners(
+        self, idx_mapping_np: np.ndarray
+    ) -> tuple[np.ndarray, torch.Tensor | None]:
+        """Deterministically assign requests to ranks: to the rank that cached
+        their draft logits, or else round-robin over batch positions.
+
+        NOTE: This mirrors the assignment used in _build_shard_plan_kernel.
+        """
+        if self.draft_logits is None:
+            return shard_owners(idx_mapping_np.shape[0], self.tp_size), None
+        return self.draft_logits.owners_of(idx_mapping_np)
+
+    def num_local_reqs(self, idx_mapping_np: np.ndarray) -> int:
+        """The number of a batch's requests that this rank samples."""
+        req_owner_np, _ = self._req_owners(idx_mapping_np)
+        return int(np.count_nonzero(req_owner_np == self.tp_rank))
+
     def shard_sampler_inputs(
         self,
         input_batch: InputBatch,
@@ -244,15 +261,7 @@ class BatchSharder:
         tp_size = self.tp_size
         num_reqs = input_batch.idx_mapping_np.shape[0]
 
-        # Deterministically assign requests to ranks: to the rank that cached
-        # their draft logits, or else round-robin over batch positions.
-        # NOTE: This mirrors the assignment used in _build_shard_plan_kernel.
-        if self.draft_logits is None:
-            req_owner_np, req_owner = shard_owners(num_reqs, tp_size), None
-        else:
-            req_owner_np, req_owner = self.draft_logits.owners_of(
-                input_batch.idx_mapping_np
-            )
+        req_owner_np, req_owner = self._req_owners(input_batch.idx_mapping_np)
         local_req_indices_np = np.flatnonzero(req_owner_np == tp_rank)
         local_idx_mapping_np = input_batch.idx_mapping_np[local_req_indices_np]
         num_local_reqs = local_req_indices_np.shape[0]
