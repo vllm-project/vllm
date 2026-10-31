@@ -498,7 +498,9 @@ class KananaVMultiModalProcessor(BaseMultiModalProcessor[KananaVProcessingInfo])
         pixel_values = torch.concat(pixel_values, dim=0)
 
         tokenizer = self.info.get_tokenizer()
-        media_token = tokenizer.convert_ids_to_tokens([self.media_token_id])[0]
+        media_token = cast(
+            str, tokenizer.convert_ids_to_tokens([self.media_token_id])[0]
+        )
         prompt_replaced = prompt_text.replace("<image>", media_token)
         input_ids = tokenizer.encode(prompt_replaced)
         input_ids = torch.tensor(input_ids)
