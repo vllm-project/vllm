@@ -81,13 +81,29 @@ _MSG_END_RE = re.compile(r"<\|eom\|>|<\|eot\|>")
 
 # Structural markers that must never reach the client. A streamed body is held
 # back by up to len(marker)-1 characters so a marker split across two chunks is
-# not emitted as content.
-_STRUCTURAL_MARKERS = ("<|eom|>", "<|eot|>", "<|start|>", "<|message|>")
+# not emitted as content. The ATEM tags around tool-call arguments count too:
+# a trailing "<atem:func" or "<atem:invoke name=\"ge" is protocol data, not
+# content, and a turn truncated there must not show the fragment (#55395).
+_STRUCTURAL_MARKERS = (
+    "<|eom|>",
+    "<|eot|>",
+    "<|start|>",
+    "<|message|>",
+    "<atem:function_calls>",
+    "</atem:function_calls>",
+    "<atem:invoke",
+    "</atem:invoke>",
+    "<atem:parameter",
+    "</atem:parameter>",
+)
 _MAX_MARKER_LEN = max(len(m) for m in _STRUCTURAL_MARKERS)
 # A trailing " to=NAME" that could still grow into a bare message header (the
 # first message of a turn has no <|start|> prefix -- the prompt ends with
 # "<|start|>assistant", so the model's first emitted text is " to=self<|message|>").
 _OPEN_TAIL_TO_RE = re.compile(r"[^\S\n]+to=[A-Za-z0-9_.\-]*$")
+# Same duty for ATEM: an opener stem with no closing ">" yet, attributes or
+# not. A space after "atem:" fails the letter class, so prose mentions pass.
+_ATEM_OPEN_TAIL_RE = re.compile(r"</?atem:[A-Za-z_][^>\n]*$")
 
 # --- Tool-call extraction (unchanged from MUSE_GLIMMER_RESPONSE_SCHEMA) -------------
 _INVOKE_RE = re.compile(r"(<atem:invoke\b.*?</atem:invoke>)", re.DOTALL)
@@ -160,6 +176,12 @@ def _trailing_partial_marker_len(text: str) -> int:
         suffix = text[-overlap:]
         if any(marker.startswith(suffix) for marker in _STRUCTURAL_MARKERS):
             return overlap
+    # Attribute-carrying ATEM openers grow past their marker stems
+    # ("<atem:invoke name=\"ge..."), so prefix-matching the markers cannot see
+    # them; an unclosed ATEM stem at the tail is caught by shape instead.
+    atem_tail = _ATEM_OPEN_TAIL_RE.search(text)
+    if atem_tail is not None:
+        return len(text) - atem_tail.start()
     return 0
 
 
