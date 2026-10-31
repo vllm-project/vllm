@@ -2012,6 +2012,50 @@ def test_async_pooling_cache_miss_does_not_fail_output_processor():
     assert not output_processor.has_unfinished_requests()
 
 
+@pytest.mark.skip_global_cleanup
+def test_sync_pooling_validation_error_with_mm_invalidation_hashes():
+    """Offline pooling requests carrying both a validation RequestError and
+    mm_cache_miss_hashes must preserve validation_error without asserting on
+    detokenizer."""
+    from vllm.outputs import RequestError
+
+    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    request = EngineCoreRequest(
+        request_id="request-pool-val-err",
+        external_req_id="request-pool-val-err",
+        prompt_token_ids=[1, 2],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=None,
+        pooling_params=PoolingParams(task="embed"),
+    )
+    output_processor.add_request(request, prompt=None)
+
+    mismatch_msg = "Attempted to assign 138 = 138 multimodal tokens to 638 placeholders"
+    processed = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id=request.request_id,
+                new_token_ids=[],
+                finish_reason=FinishReason.ERROR,
+                mm_cache_miss_hashes=["poisoned-hash"],
+                error=RequestError(code="validation_error", message=mismatch_msg),
+            )
+        ]
+    )
+
+    assert len(processed.request_outputs) == 1
+    out = processed.request_outputs[0]
+    assert isinstance(out, PoolingRequestOutput)
+    assert out.error is not None
+    assert out.error.code == "validation_error"
+    assert out.error.message == mismatch_msg
+    assert not out.error.retryable
+
+
 @pytest.mark.parametrize(
     "output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY]
 )

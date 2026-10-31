@@ -178,6 +178,11 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
         self._shm_cache.release_touches()
 
     @override
+    def invalidate(self, mm_hash: str) -> None:
+        self._shm_cache.invalidate(mm_hash)
+        self._p0_cache.pop(mm_hash, None)
+
+    @override
     def validate_input_item(
         self,
         mm_item: MultiModalKwargsItem,

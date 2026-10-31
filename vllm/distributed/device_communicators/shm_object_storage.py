@@ -655,10 +655,18 @@ class SingleWriterShmObjectStorage:
         )
         # update the metadata after freeing up space
         for freed_id in freed_ids:
-            key_to_free = self.id_index[freed_id]
-            del self.key_index[key_to_free]
-            del self.id_index[freed_id]
+            key_to_free = self.id_index.pop(freed_id)
+            if (entry := self.key_index.get(key_to_free)) is not None and entry[
+                1
+            ] == freed_id:
+                del self.key_index[key_to_free]
             del self.writer_flag[freed_id]
+
+    def invalidate(self, key: str) -> None:
+        """Drop ``key`` from the writer lookup index."""
+        entry = self.key_index.pop(key, None)
+        if entry is not None:
+            self._touched.discard(entry[1])
 
     def is_cached(self, key: str) -> bool:
         """Check if the object with the given key is cached."""

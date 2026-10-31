@@ -310,6 +310,21 @@ class EncoderCacheManager:
         for input_id in list(self.get_cached_input_ids(request)):
             self.free_encoder_input(request, input_id)
 
+    def evict_mm_hash(self, mm_hash: str) -> None:
+        """Immediately evict `mm_hash` and queue it for worker cache removal."""
+        if mm_hash not in self.cached:
+            return
+        if mm_hash in self.freeable:
+            num_embeds = self.freeable.pop(mm_hash)
+            self.num_free_slots += num_embeds
+        else:
+            num_embeds = self.num_embeds_by_hash[mm_hash]
+            self.num_free_slots += num_embeds
+            self.num_freeable_slots += num_embeds
+        del self.cached[mm_hash]
+        del self.num_embeds_by_hash[mm_hash]
+        self.freed.append(mm_hash)
+
     def get_freed_mm_hashes(self) -> list[str]:
         """Get and clear the list of recently freed encoder cache entries.
 
@@ -443,3 +458,6 @@ class EncoderDecoderCacheManager(EncoderCacheManager):
     def free_encoder_input(self, request: Request, input_id: int) -> None:
         num_encoder_embeds = request.get_num_encoder_embeds(input_id)
         self.num_free_slots += num_encoder_embeds
+
+    def evict_mm_hash(self, mm_hash: str) -> None:
+        pass

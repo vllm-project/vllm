@@ -29,6 +29,7 @@ else:
     KVConnectorWorkerMetadata = object
     KVConnectorKVEvents = object
     ECConnectorWorkerMetadata = object
+    ECConnectorStats = object
 
 
 class LogprobsLists(NamedTuple):
@@ -309,6 +310,27 @@ class ModelRunnerOutput:
 
     # ``None`` when ``return_sampling_mask`` is off.
     sampling_masks: SamplingMaskLists | None = None
+
+    # req_id -> (mismatched_identifiers, error_message)
+    mm_embed_mismatches: dict[str, tuple[list[str], str]] | None = None
+
+    @staticmethod
+    def with_mm_embed_mismatches(
+        output: "ModelRunnerOutput",
+        mm_embed_mismatches: dict[str, tuple[list[str], str]] | None,
+    ) -> "ModelRunnerOutput":
+        """Return `output` carrying `mm_embed_mismatches`."""
+        if not mm_embed_mismatches:
+            return output
+        if output is EMPTY_MODEL_RUNNER_OUTPUT:
+            output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
+        if output.mm_embed_mismatches:
+            merged = dict(output.mm_embed_mismatches)
+            merged.update(mm_embed_mismatches)
+            output.mm_embed_mismatches = merged
+        else:
+            output.mm_embed_mismatches = mm_embed_mismatches
+        return output
 
     @staticmethod
     def with_kv_conn_output_only(

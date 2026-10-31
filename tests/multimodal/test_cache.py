@@ -1303,6 +1303,187 @@ async def test_failed_cache_invalidation_preserves_pending_and_concurrent_misses
     assert all(not cache.is_cached_item(mm_hash) for mm_hash in hashes)
 
 
+def test_invalidate_evicts_across_processor_receiver_and_shm_caches(monkeypatch):
+    """All multimodal processor/receiver caches must support targeted eviction
+    when a poisoned entry is detected (#55546), including DP
+    MultiModalProcessorOnlyCache and SHM ring-buffer re-insertion."""
+    model_config = _StubModelConfig(mm_processor_cache_gb=4 * MiB_bytes / GiB_bytes)
+    item_a = MultiModalKwargsItem.dummy(nbytes=512)
+    item_b = MultiModalKwargsItem.dummy(nbytes=512)
+
+    proc_only = MultiModalProcessorOnlyCache(model_config)
+    proc_only.get_and_update_item((item_a, []), "bad")
+    proc_only.get_and_update_item((item_b, []), "good")
+    assert proc_only.is_cached_item("bad")
+    proc_only.invalidate("bad")
+    assert not proc_only.is_cached_item("bad")
+    assert proc_only.is_cached_item("good")
+
+    recv_lru = LruKeyReplicatedReceiverCache(model_config)
+    recv_lru.get_and_update_item(item_a, "bad")
+    recv_lru.get_and_update_item(item_b, "good")
+    from vllm.v1.engine.core import EngineCore
+
+    EngineCore._invalidate_mm_receiver_cache(
+        SimpleNamespace(mm_receiver_cache=recv_lru),
+        {
+            0: EngineCoreOutputs(
+                outputs=[
+                    EngineCoreOutput(
+                        request_id="0",
+                        new_token_ids=[],
+                        finish_reason=FinishReason.ERROR,
+                        mm_cache_miss_hashes=["bad"],
+                    )
+                ]
+            )
+        },
+    )
+    with pytest.raises(MultiModalCacheMissError):
+        recv_lru.get_and_update_item(None, "bad")
+    assert recv_lru.get_and_update_item(None, "good") is item_b
+
+    monkeypatch.setenv(
+        "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME", "test_shm_targeted_invalidate"
+    )
+    vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(world_size=1),
+        model_config=model_config,
+    )
+    p0 = ShmObjectStoreSenderCache(vllm_config)
+    p1 = ShmObjectStoreReceiverCache(vllm_config, mp.Lock())
+    try:
+        p0.touch_sender_cache_item("bad")
+        addr1, _ = p0.get_and_update_item((item_a, []), "bad")
+        feat1 = MultiModalFeatureSpec(
+            data=addr1,
+            modality="image",
+            identifier="bad",
+            mm_position=PlaceholderRange(offset=0, length=4),
+            mm_hash="bad",
+        )
+        p1.get_and_update_features([feat1])
+        assert p0.is_cached_item("bad")
+
+        p0.invalidate("bad")
+        assert not p0.is_cached_item("bad")
+
+        # Re-inserting the same key after invalidation must succeed cleanly,
+        # and freeing the old ring-buffer slot must not delete the new entry.
+        p0.touch_sender_cache_item("bad")
+        addr2, _ = p0.get_and_update_item((item_b, []), "bad")
+        assert p0.is_cached_item("bad")
+        p0._shm_cache.free_unused()
+        assert p0.is_cached_item("bad")
+        feat2 = MultiModalFeatureSpec(
+            data=addr2,
+            modality="image",
+            identifier="bad",
+            mm_position=PlaceholderRange(offset=0, length=4),
+            mm_hash="bad",
+        )
+        p1.get_and_update_features([feat2])
+    finally:
+        p1._shm_cache.close()
+        p0.close()
+
+
+@pytest.mark.asyncio
+async def test_mismatch_validation_error_invalidates_dp_processor_cache():
+    """In DP internal-LB mode (MultiModalProcessorOnlyCache), a worker mismatch
+    must invalidate the cached entry AND surface VLLMValidationError (HTTP 400)
+    on only the bad request without overwriting error.code with cache_miss."""
+    from vllm.exceptions import VLLMValidationError
+    from vllm.outputs import RequestError
+
+    model_config = ModelConfig(
+        model="hf-internal-testing/tiny-random-Qwen2VLForConditionalGeneration",
+        max_model_len=2048,
+        mm_processor_cache_gb=1,
+        mm_processor_cache_type="lru",
+    )
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        parallel_config=ParallelConfig(data_parallel_size=2),
+    )
+    renderer = renderer_from_config(vllm_config)
+    assert isinstance(renderer.mm_processor_cache, MultiModalProcessorOnlyCache)
+
+    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    collectors = []
+    for idx in range(2):
+        req = EngineCoreRequest(
+            request_id=str(idx),
+            external_req_id=str(idx),
+            prompt_token_ids=[1, 2],
+            mm_features=None,
+            sampling_params=None,
+            pooling_params=PoolingParams(task="embed"),
+            arrival_time=0,
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
+        )
+        collector = RequestOutputCollector(RequestOutputKind.FINAL_ONLY, str(idx))
+        output_processor.add_request(req, prompt=None, queue=collector)
+        collectors.append(collector)
+
+    bad_hash = "poisoned-dp-hash"
+    renderer.mm_processor_cache.get_and_update_item(
+        (_dummy_item({"x": 16}), []), bad_hash
+    )
+    assert renderer.mm_processor_cache.is_cached_item(bad_hash)
+
+    mismatch_msg = "Attempted to assign 138 = 138 multimodal tokens to 638 placeholders"
+    outputs: asyncio.Queue[EngineCoreOutputs] = asyncio.Queue()
+    engine = SimpleNamespace(
+        output_handler=None,
+        engine_core=SimpleNamespace(get_output_async=outputs.get),
+        output_processor=output_processor,
+        log_stats=False,
+        logger_manager=None,
+        renderer=renderer,
+    )
+    AsyncLLM._run_output_handler(engine)
+    try:
+        outputs.put_nowait(
+            EngineCoreOutputs(
+                outputs=[
+                    EngineCoreOutput(
+                        request_id="0",
+                        new_token_ids=[],
+                        finish_reason=FinishReason.ERROR,
+                        mm_cache_miss_hashes=[bad_hash],
+                        error=RequestError(
+                            code="validation_error", message=mismatch_msg
+                        ),
+                    ),
+                    EngineCoreOutput(
+                        request_id="1",
+                        new_token_ids=[],
+                        finish_reason=FinishReason.STOP,
+                        pooling_output=torch.tensor([3.0, 4.0]),
+                    ),
+                ]
+            )
+        )
+        with pytest.raises(VLLMValidationError, match=mismatch_msg):
+            await asyncio.wait_for(collectors[0].get(), timeout=5)
+
+        succeeded = await asyncio.wait_for(collectors[1].get(), timeout=5)
+        assert isinstance(succeeded, PoolingRequestOutput)
+        assert succeeded.error is None
+        assert torch.equal(succeeded.outputs.data, torch.tensor([3.0, 4.0]))
+
+        renderer._drain_mm_cache_invalidations()
+        assert not renderer.mm_processor_cache.is_cached_item(bad_hash)
+    finally:
+        engine.output_handler.cancel()
+        with suppress(asyncio.CancelledError):
+            await engine.output_handler
+        renderer.shutdown()
+
+
 _SLEEP_VISION_PROMPT = (
     "<|im_start|>system\nYou are a helpful assistant.<|im_end|>"
     "\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>"

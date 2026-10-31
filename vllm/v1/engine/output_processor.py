@@ -802,8 +802,10 @@ class OutputProcessor:
             if engine_core_output.spec_decode_metrics is not None:
                 req_state.spec_decode_metrics = engine_core_output.spec_decode_metrics
 
-            request_error = None
-            if (
+            request_error = error
+            if request_error is not None and req_state.detokenizer is None:
+                pooling_output = EMPTY_CPU_TENSOR
+            elif (
                 req_state.detokenizer is None
                 and engine_core_output.mm_cache_miss_hashes
                 and finish_reason == FinishReason.ERROR
