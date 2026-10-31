@@ -551,6 +551,15 @@ class InputProcessor:
                     )
                 )
 
+        if sampling_params is not None and sampling_params.extra_args:
+            from vllm.distributed.aux_output_connector.hidden_states import (
+                validate_capture_request,
+            )
+
+            validate_capture_request(
+                sampling_params, prompt_len, self.vllm_config, resumable
+            )
+
         return EngineCoreRequest(
             request_id=request_id,
             prompt_token_ids=prompt_token_ids,

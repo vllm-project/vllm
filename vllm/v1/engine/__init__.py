@@ -12,6 +12,7 @@ import numpy as np
 import torch
 
 from vllm.config.kv_events import KVEventsConfig
+from vllm.distributed.aux_output_connector.hidden_states import HiddenStateCaptureResult
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.outputs import RequestError
@@ -269,6 +270,8 @@ class EngineCoreOutput(
 
     # Sent with FinishReason.ERROR, e.g. when a paused engine rejects a request.
     error: RequestError | None = None
+    hidden_state_capture: HiddenStateCaptureResult | None = None
+    hidden_capture_skip_reason: str | None = None
 
     @property
     def finished(self) -> bool:

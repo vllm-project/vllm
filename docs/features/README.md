@@ -6,6 +6,9 @@
 
 ## Compatibility Matrix
 
+See [windowed hidden-state capture](speculative_decoding/windowed_hidden_states.md)
+for request-local training features returned through the Python generation API.
+
 The tables below show mutually exclusive features and the support on some hardware.
 
 The symbols used have the following meanings:

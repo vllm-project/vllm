@@ -33,6 +33,7 @@ from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.tracing import init_tracer
 from vllm.usage.usage_lib import UsageContext
+from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.engine import EngineCoreRequest, PauseMode
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.input_processor import InputProcessor
@@ -262,6 +263,18 @@ class LLMEngine:
                 )
             request_params = request.params
             if isinstance(request_params, SamplingParams):
+                from vllm.distributed.aux_output_connector.hidden_states import (
+                    validate_capture_request,
+                )
+
+                validate_capture_request(
+                    request_params,
+                    length_from_prompt_token_ids_or_embeds(
+                        request.prompt_token_ids, request.prompt_embeds
+                    ),
+                    self.vllm_config,
+                    request.resumable,
+                )
                 # This request object is owned by the engine from here on.
                 self.input_processor.apply_watermarking(
                     request_params,

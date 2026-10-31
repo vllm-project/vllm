@@ -8,8 +8,11 @@ from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
 from typing import cast
 
+import pybase64 as base64
+import torch
 from fastapi import Request
 
+from vllm.distributed.aux_output_connector.hidden_states import HiddenStateCaptureResult
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.base.protocol import (
     PerRequestMetrics,
@@ -24,12 +27,14 @@ from vllm.entrypoints.generate.base.serving import (
     format_token_id_placeholder,
 )
 from vllm.entrypoints.openai.completion.protocol import (
+    CaptureTensor,
     CompletionLogProbs,
     CompletionRequest,
     CompletionResponse,
     CompletionResponseChoice,
     CompletionResponseStreamChoice,
     CompletionStreamResponse,
+    HiddenStateCaptureResponse,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import (
@@ -52,6 +57,43 @@ from vllm.utils.collection_utils import as_list
 from vllm.utils.serial_utils import numpy2base64
 
 logger = init_logger(__name__)
+
+
+def _capture_tensor(tensor: torch.Tensor) -> CaptureTensor:
+    tensor = tensor.contiguous()
+    return CaptureTensor(
+        data=base64.b64encode(tensor.view(torch.uint8).numpy().tobytes()).decode(
+            "ascii"
+        ),
+        dtype=str(tensor.dtype).removeprefix("torch."),
+        shape=list(tensor.shape),
+    )
+
+
+def _capture_response(result: HiddenStateCaptureResult) -> HiddenStateCaptureResponse:
+    return HiddenStateCaptureResponse(
+        hidden_states=_capture_tensor(result.hidden_states),
+        hidden_positions=result.hidden_positions.tolist(),
+        hidden_position_start=result.hidden_position_start,
+        hidden_position_end=result.hidden_position_end,
+        hidden_window_start=result.hidden_window_start,
+        hidden_window_end=result.hidden_window_end,
+        hidden_layout=result.hidden_layout,
+        layer_ids=list(result.layer_ids),
+        includes_final_layer=result.includes_final_layer,
+        request_id=result.request_id,
+        collection_id=result.collection_id,
+        copied_bytes=result.copied_bytes,
+        copy_ms=result.copy_ms,
+        logprobs=_capture_tensor(result.logprobs)
+        if result.logprobs is not None
+        else None,
+        logprob_token_ids=(
+            _capture_tensor(result.logprob_token_ids)
+            if result.logprob_token_ids is not None
+            else None
+        ),
+    )
 
 
 class OpenAIServingCompletion(GenerateBaseServing):
@@ -634,6 +676,12 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 )
 
                 choice_data = CompletionResponseChoice(
+                    hidden_state_capture=(
+                        _capture_response(final_res.hidden_state_capture)
+                        if final_res.hidden_state_capture is not None
+                        else None
+                    ),
+                    hidden_capture_skip_reason=final_res.hidden_capture_skip_reason,
                     index=len(choices),
                     text=output_text,
                     logprobs=logprobs,
