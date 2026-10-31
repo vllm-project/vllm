@@ -14,6 +14,7 @@ use vllm_metrics::{
 };
 
 use crate::FinishReason;
+use crate::observer::{FinishedRequestEvents, FinishedRequestStats};
 
 const PROMPT_TOKEN_SOURCE_LOCAL_COMPUTE: &str = "local_compute";
 const PROMPT_TOKEN_SOURCE_LOCAL_CACHE_HIT: &str = "local_cache_hit";
@@ -223,19 +224,33 @@ impl RequestMetricsTracker {
     ///
     /// Original Python finished-request stats:
     /// <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/v1/metrics/stats.py#L222-L237>
-    pub(crate) fn record_finished(&self, received_at: f64, finish_reason: FinishReason) {
-        let prefill_kv_computed_tokens =
-            self.prompt_len.saturating_sub(self.latest_num_cached_tokens);
-        let e2e_latency_seconds = received_at - self.arrival_time;
-        let decode_time_seconds = diff_or_zero(self.last_token_ts, self.first_token_ts);
-        let time_per_output_token_seconds = if self.num_generation_tokens > 1 {
-            diff_or_zero(self.last_token_ts, self.first_token_ts)
-                / (self.num_generation_tokens - 1) as f64
-        } else {
-            0.0
+    pub(crate) fn record_finished(
+        &self,
+        received_at: f64,
+        finish_reason: &FinishReason,
+    ) -> FinishedRequestStats {
+        let stats = FinishedRequestStats {
+            prompt_tokens: self.prompt_len,
+            cached_prompt_tokens: self.latest_num_cached_tokens,
+            generation_tokens: self.num_generation_tokens,
+            max_tokens_param: self.max_tokens_param,
+            is_corrupted: self.is_corrupted,
+            arrival_ts: self.arrival_time,
+            first_token_ts: self.first_token_ts,
+            last_token_ts: self.last_token_ts,
+            finished_ts: received_at,
+            events: self.handles.events.is_some().then_some(FinishedRequestEvents {
+                num_preemptions: self.num_preemptions,
+                queued_ts: self.queued_ts,
+                scheduled_ts: self.scheduled_ts,
+            }),
         };
+        let prefill_kv_computed_tokens = stats.prefill_kv_computed_tokens();
+        let e2e_latency_seconds = stats.e2e_latency_seconds();
+        let decode_time_seconds = stats.decode_time_seconds();
+        let time_per_output_token_seconds = stats.time_per_output_token_seconds();
 
-        self.handles.request_success.get(&finish_reason).inc();
+        self.handles.request_success.get(finish_reason).inc();
         if self.is_corrupted {
             self.handles.corrupted_requests.inc();
         }
@@ -260,16 +275,19 @@ impl RequestMetricsTracker {
             .request_time_per_output_token_seconds
             .observe(time_per_output_token_seconds);
 
-        if let Some(events) = &self.handles.events {
-            let queue_time_seconds = diff_or_zero(self.scheduled_ts, self.queued_ts);
-            let prefill_time_seconds = diff_or_zero(self.first_token_ts, self.scheduled_ts);
-            let inference_time_seconds = diff_or_zero(self.last_token_ts, self.scheduled_ts);
-
+        if let (Some(events), Some(queue), Some(prefill), Some(inference)) = (
+            &self.handles.events,
+            stats.queue_time_seconds(),
+            stats.prefill_time_seconds(),
+            stats.inference_time_seconds(),
+        ) {
             events.request_num_preemptions.observe(self.num_preemptions as f64);
-            events.request_queue_time_seconds.observe(queue_time_seconds);
-            events.request_prefill_time_seconds.observe(prefill_time_seconds);
-            events.request_inference_time_seconds.observe(inference_time_seconds);
+            events.request_queue_time_seconds.observe(queue);
+            events.request_prefill_time_seconds.observe(prefill);
+            events.request_inference_time_seconds.observe(inference);
         }
+
+        stats
     }
 
     /// Engine lifecycle timestamps recorded so far.
@@ -403,14 +421,6 @@ fn prompt_token_source_labels(
     }
 }
 
-fn diff_or_zero(end: f64, start: f64) -> f64 {
-    if end > 0.0 && start > 0.0 && end >= start {
-        end - start
-    } else {
-        0.0
-    }
-}
-
 /// Return the current wall-clock time in seconds since the Unix epoch.
 ///
 /// This is used for frontend-side latency measurements such as TTFT and E2E,
@@ -434,9 +444,8 @@ mod tests {
 
     use std::sync::Arc;
 
-    use super::{
-        RequestMetricsTracker, RequestTimestamps, diff_or_zero, resolve_request_metric_handles,
-    };
+    use super::{RequestMetricsTracker, RequestTimestamps, resolve_request_metric_handles};
+    use crate::FinishReason;
 
     #[test]
     fn tracker_updates_timing_state_across_prefill_decode_and_finish() {
@@ -503,9 +512,24 @@ mod tests {
             }
         );
         assert!((tracker.first_token_latency - 0.2).abs() < 1e-9);
-        assert_eq!(
-            diff_or_zero(tracker.last_token_ts, tracker.first_token_ts),
-            1.5
-        );
+        assert_eq!(tracker.last_token_ts - tracker.first_token_ts, 1.5);
+    }
+
+    /// Observers must be able to tell engines that do not record stats apart
+    /// from a zero queue time.
+    #[test]
+    fn finished_stats_carry_engine_events_only_when_engines_record_stats() {
+        METRICS.request.set_max_model_len(4096);
+        for engine_stats_enabled in [true, false] {
+            let handles = Arc::new(resolve_request_metric_handles(
+                "model",
+                3,
+                engine_stats_enabled,
+            ));
+            let tracker = RequestMetricsTracker::new(handles, 100.0, 64, None, 1);
+            let stats = tracker.record_finished(101.0, &FinishReason::Length);
+            assert_eq!(stats.events.is_some(), engine_stats_enabled);
+            assert_eq!(stats.queue_time_seconds().is_some(), engine_stats_enabled);
+        }
     }
 }

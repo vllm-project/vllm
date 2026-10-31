@@ -7,7 +7,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use async_openai::Client;
@@ -27,13 +27,14 @@ use vllm_engine_core_client::protocol::output::{
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId};
-use vllm_llm::Llm;
+use vllm_llm::{FinishReason, FinishedRequest, Llm, RequestObserver, RequestObservers};
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{Prompt, TextBackend};
 use vllm_tokenizer::test_utils::TestTokenizer;
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
+use crate::extensions::ServeExtensions;
 use crate::routes::build_router;
 use crate::state::AppState;
 
@@ -135,8 +136,10 @@ async fn recv_engine_message(dealer: &mut DealerSocket) -> Vec<bytes::Bytes> {
     dealer.recv().await.expect("recv engine message").into_vec()
 }
 
-fn test_llm(client: EngineCoreClient) -> Llm {
-    Llm::new(client).with_request_id_randomization(false)
+fn test_llm(client: EngineCoreClient, observers: RequestObservers) -> Llm {
+    Llm::new(client)
+        .with_request_id_randomization(false)
+        .with_request_observers(observers)
 }
 
 #[derive(Clone, Debug)]
@@ -204,6 +207,18 @@ async fn http_test_server(
     tokio::task::JoinHandle<()>,
     MockEngineTask,
 ) {
+    http_test_server_with_observers(engine_id, output_specs, RequestObservers::default()).await
+}
+
+async fn http_test_server_with_observers(
+    engine_id: impl Into<EngineId>,
+    output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
+    observers: RequestObservers,
+) -> (
+    Client<OpenAIConfig>,
+    tokio::task::JoinHandle<()>,
+    MockEngineTask,
+) {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
     let engine_id = engine_id.into();
@@ -237,7 +252,7 @@ async fn http_test_server(
     .expect("connect client");
 
     let chat = ChatLlm::from_shared_backend(
-        test_llm(client),
+        test_llm(client, observers),
         Arc::new(FakeChatBackend) as Arc<dyn ChatTextBackend>,
     );
     let state = Arc::new(AppState::new(vec!["test-model".to_string()], chat));
@@ -352,6 +367,50 @@ async fn streaming_chat_via_http_client() {
     assert!(saw_role, "expected an assistant role chunk");
     assert!(saw_finish_reason, "expected a terminal finish reason");
     assert_eq!(full_text, "hi");
+
+    engine_task.await.expect("mock engine task");
+    server_task.abort();
+}
+
+#[derive(Default)]
+struct CollectFinished(Mutex<Vec<FinishedRequest>>);
+
+impl RequestObserver for CollectFinished {
+    fn on_finished(&self, request: &Arc<FinishedRequest>) {
+        self.0.lock().unwrap().push(request.as_ref().clone());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn request_observer_registered_through_extensions_sees_finished_chat() {
+    let collector = Arc::new(CollectFinished::default());
+    let (_, extensions) = ServeExtensions::new().request_observer(collector.clone()).into_parts();
+    let (client, server_task, engine_task) = http_test_server_with_observers(
+        b"engine-http-observer",
+        default_stream_output_specs(),
+        extensions.request_observers,
+    )
+    .await;
+
+    let request = CreateChatCompletionRequestArgs::default()
+        .model("test-model")
+        .stream(false)
+        .max_completion_tokens(10u32)
+        .messages([ChatCompletionRequestUserMessageArgs::default()
+            .content("hello")
+            .build()
+            .expect("build user message")
+            .into()])
+        .build()
+        .expect("build request");
+    client.chat().create(request).await.expect("chat completion");
+
+    let finished = std::mem::take(&mut *collector.0.lock().unwrap());
+    assert_eq!(finished.len(), 1);
+    assert_eq!(finished[0].model_name, "test-model");
+    assert_eq!(finished[0].finish_reason, FinishReason::Stop(None));
+    assert_eq!(finished[0].stats.generation_tokens, 3);
 
     engine_task.await.expect("mock engine task");
     server_task.abort();
