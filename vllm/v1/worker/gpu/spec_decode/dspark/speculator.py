@@ -173,6 +173,26 @@ class DSparkSpeculator(DFlashSpeculator):
             self.use_acceptance_estimator = False
         return model
 
+    def load_model(self, target_model: torch.nn.Module) -> None:
+        super().load_model(target_model)
+        # A draft model can set up its own Markov sampling kernels
+        # (``sample_sequential``) once the draft logits cache exists. Every TP
+        # rank calls it at the same point, before CUDA graph capture.
+        setup = getattr(self.model, "setup_sample_sequential", None)
+        if setup is not None:
+            setup(self)
+
+    def propose(self, *args, **kwargs) -> torch.Tensor:
+        draft_tokens = super().propose(*args, **kwargs)
+        # A model's own sample_sequential kernels can check their health once a
+        # step, on every TP rank (outside the draft's CUDA graph).
+        after_step = getattr(
+            getattr(self.model, "sample_sequential", None), "after_step", None
+        )
+        if after_step is not None:
+            after_step()
+        return draft_tokens
+
     def supports_batch_sharded_draft_logits(self) -> bool:
         # A model's own sample_sequential kernels write the full-size cache.
         return not hasattr(self.model, "sample_sequential")

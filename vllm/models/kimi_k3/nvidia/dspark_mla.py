@@ -537,5 +537,19 @@ class K3DSparkForCausalLM(nn.Module):
         weights = _duplicate_context_kv_weights(weights, len(self.model.layers))
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
+    def setup_sample_sequential(self, speculator) -> None:
+        """Called by DSparkSpeculator.load_model on every TP rank, before graph
+        capture. ROCm: install the vocabulary-sharded Markov sampler
+        (amd/ops/dspark_markov.py) as ``sample_sequential`` when it applies."""
+        from vllm.platforms import current_platform
+
+        if not current_platform.is_rocm():
+            return
+        from vllm.models.kimi_k3.amd.ops.dspark_markov import ShardedMarkovSampler
+
+        sampler = ShardedMarkovSampler.create(speculator)
+        if sampler is not None:
+            self.sample_sequential = sampler
+
     def process_weights_after_loading(self) -> None:
         self.model._build_fused_context_kv_metadata()

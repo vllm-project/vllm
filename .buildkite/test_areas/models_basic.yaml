@@ -592,5 +592,9 @@ steps:
   source_file_dependencies:
   - vllm/models/kimi_k3/amd/
   - tests/models/kimi_k3/amd_specialized_decode/
+  # the DSpark sharded Markov sampler (amd/ops/dspark_markov.py) test
+  - vllm/models/kimi_k3/nvidia/dspark_mla.py
+  - vllm/v1/worker/gpu/spec_decode/dspark/
+  - vllm/v1/worker/gpu/sample/gumbel.py
   commands:
   - pytest -v -s tests/models/kimi_k3/amd_specialized_decode
