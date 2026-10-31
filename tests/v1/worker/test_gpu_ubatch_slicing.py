@@ -47,6 +47,7 @@ from vllm.v1.worker.gpu.ubatch_utils import (
     UBatchRunner,
     UBatchState,
     _slice_input_batch,
+    _slice_query_and_seq_lens_kernel,
     create_ubatch_slices,
     merge_ubatch_outputs,
     slice_model_inputs,
@@ -66,20 +67,26 @@ MAX_NUM_REQS = 32
 MAX_NUM_TOKENS = 128
 
 
-def _make_buffers() -> InputBuffers:
+def _make_buffers(
+    device: str = "cuda",
+    max_num_reqs: int = MAX_NUM_REQS,
+    max_num_tokens: int = MAX_NUM_TOKENS,
+) -> InputBuffers:
     return InputBuffers(
-        max_num_reqs=MAX_NUM_REQS,
-        max_num_tokens=MAX_NUM_TOKENS,
-        device=torch.device("cpu"),
+        max_num_reqs=max_num_reqs,
+        max_num_tokens=max_num_tokens,
+        device=torch.device(device),
     )
 
 
-def _make_ubatch_buffers(num_ubatches: int = 2) -> list[tuple[torch.Tensor, ...]]:
+def _make_ubatch_buffers(
+    num_ubatches: int = 2, device: str = "cuda", max_num_reqs: int = MAX_NUM_REQS
+) -> list[tuple[torch.Tensor, ...]]:
     """The per-microbatch (query_start_loc, seq_lens) buffers UBatchRunner owns."""
     return [
         (
-            torch.zeros(MAX_NUM_REQS + 1, dtype=torch.int32),
-            torch.zeros(MAX_NUM_REQS, dtype=torch.int32),
+            torch.zeros(max_num_reqs + 1, dtype=torch.int32, device=device),
+            torch.zeros(max_num_reqs, dtype=torch.int32, device=device),
         )
         for _ in range(num_ubatches)
     ]
@@ -153,6 +160,7 @@ BATCHES = {
 }
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
 @pytest.mark.parametrize("batch_name", list(BATCHES))
 def test_slicing_matches_v1_split_attn_metadata(batch_name: str):
     """V2's pre-sliced inputs describe the same microbatches as V1's."""
@@ -182,8 +190,10 @@ def test_slicing_matches_v1_split_attn_metadata(batch_name: str):
         assert v2_ubatch.num_reqs == v1_ubatch.num_reqs
         assert v2_ubatch.num_tokens == v1_ubatch.num_actual_tokens
         assert int(v2_ubatch.num_scheduled_tokens.max()) == v1_ubatch.max_query_len
-        torch.testing.assert_close(v2_ubatch.query_start_loc, v1_ubatch.query_start_loc)
-        torch.testing.assert_close(v2_ubatch.seq_lens, v1_ubatch.seq_lens)
+        torch.testing.assert_close(
+            v2_ubatch.query_start_loc.cpu(), v1_ubatch.query_start_loc
+        )
+        torch.testing.assert_close(v2_ubatch.seq_lens.cpu(), v1_ubatch.seq_lens)
         torch.testing.assert_close(
             torch.from_numpy(v2_ubatch.query_start_loc_np),
             v1_ubatch.query_start_loc_cpu,
@@ -197,6 +207,104 @@ def test_slicing_matches_v1_split_attn_metadata(batch_name: str):
         )
 
 
+def _reference_slice(
+    input_batch: InputBatch, ubatch_slice: UBatchSlice
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """The PyTorch ops the fused kernel replaced."""
+    req_start = ubatch_slice.request_slice.start
+    req_stop = ubatch_slice.request_slice.stop
+    tok_start = ubatch_slice.token_slice.start
+    tok_stop = ubatch_slice.token_slice.stop
+    query_start_loc = input_batch.query_start_loc[req_start : req_stop + 1] - tok_start
+    query_start_loc.clamp_(0, tok_stop - tok_start)
+    seq_lens = input_batch.seq_lens[req_start:req_stop].clone()
+    seq_lens[-1] -= (input_batch.query_start_loc[req_stop] - tok_stop).clamp_(min=0)
+    return query_start_loc, seq_lens
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
+@pytest.mark.parametrize(
+    "query_lens,padded",
+    [(query_lens, None) for query_lens, _ in BATCHES.values()]
+    + [([1] * 6, 8), ([1] * 7, None), ([1] * 6, 32), ([1] * 258, None)],
+)
+@pytest.mark.parametrize("num_ubatches", [2, 3])
+def test_fused_metadata_matches_torch_after_graph_replay(
+    query_lens: list[int], padded: int | None, num_ubatches: int
+):
+    """Replay must read current device lengths and preserve each slice's storage."""
+    capacity = max(MAX_NUM_TOKENS, sum(query_lens), padded or 0)
+    buffers = _make_buffers("cuda", capacity, capacity)
+    input_batch = _make_input_batch(
+        query_lens,
+        [q + 100 for q in query_lens],
+        buffers,
+        num_reqs_padded=padded,
+        num_tokens_padded=padded,
+    )
+    # Async execution can make actual device lengths differ from the CPU bound.
+    input_batch.seq_lens[: len(query_lens)].sub_(11)
+    slices = create_ubatch_slices(input_batch, num_ubatches)
+    outputs = _make_ubatch_buffers(num_ubatches, "cuda", capacity)
+
+    def prepare():
+        return [
+            _slice_input_batch(input_batch, sl, *out)
+            for sl, out in zip(slices, outputs)
+        ]
+
+    # Warm Triton before capture, then capture the actual production entry point.
+    prepare()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        ubatches = prepare()
+    addresses = [(out[0].data_ptr(), out[1].data_ptr()) for out in outputs]
+    for delta in (1, 11, -5):
+        input_batch.seq_lens[: len(query_lens)].add_(delta)
+        input_batch.query_start_loc[1].add_(1 if delta != 11 else -1)
+        graph.replay()
+        for i, (sl, ubatch) in enumerate(zip(slices, ubatches)):
+            q_ref, s_ref = _reference_slice(input_batch, sl)
+            torch.testing.assert_close(ubatch.query_start_loc, q_ref)
+            torch.testing.assert_close(ubatch.seq_lens, s_ref)
+            assert (ubatch.query_start_loc.data_ptr(), ubatch.seq_lens.data_ptr()) == (
+                addresses[i]
+            )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
+def test_new_slice_bounds_do_not_recompile_metadata_kernel():
+    """Bounds change every step; a new value must not JIT a new kernel variant."""
+    query_lens = [1] * MAX_NUM_REQS
+    buffers = _make_buffers()
+    input_batch = _make_input_batch(query_lens, [64] * len(query_lens), buffers)
+    out = _make_ubatch_buffers(1)[0]
+
+    def compiled_variants() -> set:
+        return {
+            key
+            for caches in _slice_query_and_seq_lens_kernel.device_caches.values()
+            for key in caches[0]
+        }
+
+    _slice_input_batch(input_batch, UBatchSlice(slice(3, 10), slice(3, 10)), *out)
+    torch.accelerator.synchronize()
+    warmed = compiled_variants()
+    assert warmed
+
+    # Starts and stops of 0, 1, multiples of 16 and odd values.
+    for start, stop in [(0, 1), (1, 16), (16, 32), (7, 31), (0, 32)]:
+        sl = UBatchSlice(slice(start, stop), slice(start, stop))
+        ubatch = _slice_input_batch(input_batch, sl, *out)
+        q_ref, s_ref = _reference_slice(input_batch, sl)
+        torch.testing.assert_close(ubatch.query_start_loc, q_ref)
+        torch.testing.assert_close(ubatch.seq_lens, s_ref)
+    torch.accelerator.synchronize()
+
+    assert compiled_variants() == warmed
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
 def test_microbatches_do_not_share_buffers():
     """Both microbatches are live at once, so their buffers must be distinct."""
     query_lens, seq_lens = BATCHES["split_request"]
@@ -223,6 +331,7 @@ def test_microbatches_do_not_share_buffers():
     torch.testing.assert_close(first.seq_lens, first_seq_lens)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
 def test_trailing_microbatch_absorbs_cudagraph_padding():
     """The padded microbatch keeps padded rows empty and query_start_loc flat."""
     query_lens, seq_lens = [1] * 6, [64] * 6
@@ -248,10 +357,10 @@ def test_trailing_microbatch_absorbs_cudagraph_padding():
     assert last.num_reqs_after_padding == 4
     assert last.num_tokens_after_padding == 4
     torch.testing.assert_close(
-        last.query_start_loc, torch.tensor([0, 1, 2, 2, 2], dtype=torch.int32)
+        last.query_start_loc.cpu(), torch.tensor([0, 1, 2, 2, 2], dtype=torch.int32)
     )
     torch.testing.assert_close(
-        last.seq_lens, torch.tensor([64, 64, 0, 0], dtype=torch.int32)
+        last.seq_lens.cpu(), torch.tensor([64, 64, 0, 0], dtype=torch.int32)
     )
 
 
@@ -260,6 +369,7 @@ PREFILL_THRESHOLD = 128
 DECODE_QUERY_LEN = 1
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
 def test_dummy_batch_can_be_microbatched():
     """A DP rank with no work still has to split, so its dummy batch must slice.
 
@@ -283,7 +393,7 @@ def test_dummy_batch_can_be_microbatched():
     assert all(u.num_reqs == 1 for u in ubatches)
     for ubatch in ubatches:
         torch.testing.assert_close(
-            ubatch.query_start_loc, torch.tensor([0, 16], dtype=torch.int32)
+            ubatch.query_start_loc.cpu(), torch.tensor([0, 16], dtype=torch.int32)
         )
 
 
@@ -375,6 +485,7 @@ def test_microbatching_survives_a_rank_that_cannot_fill_it():
     assert desc.num_ubatches == 2
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
 def test_all_padding_microbatch_has_no_work_to_do():
     """The microbatch past the last real token is well-formed and empty.
 
@@ -404,12 +515,14 @@ def test_all_padding_microbatch_has_no_work_to_do():
 
     # Zero query tokens for the one request it holds, so no attention work.
     torch.testing.assert_close(
-        last.query_start_loc, torch.tensor([0, 0], dtype=torch.int32)
+        last.query_start_loc.cpu(), torch.tensor([0, 0], dtype=torch.int32)
     )
     assert last.num_scheduled_tokens.tolist() == [0]
     # ...and its sequence still ends where its tokens do: they all live in the
     # first microbatch, which computes them before this one runs.
-    torch.testing.assert_close(last.seq_lens, torch.tensor([64], dtype=torch.int32))
+    torch.testing.assert_close(
+        last.seq_lens.cpu(), torch.tensor([64], dtype=torch.int32)
+    )
     torch.testing.assert_close(
         last.seq_lens_cpu_upper_bound, torch.tensor([64], dtype=torch.int32)
     )
@@ -853,6 +966,7 @@ def test_each_microbatch_owns_its_dcp_buffer():
     assert dcp_buffers[0].data_ptr() != dcp_buffers[1].data_ptr()
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
 def test_slicing_drops_stale_dcp_metadata_when_dcp_is_off():
     """dcp_size == 1 yields None even when the parent carries a value, so a
     microbatch can never consume DCP metadata this deployment did not
@@ -927,7 +1041,7 @@ def _request_slices(input_batch: InputBatch) -> list[slice]:
 
 def test_captured_split_survives_a_replay_with_enough_requests():
     """Replay preserves the captured split only if real requests reach it."""
-    buffers = _make_buffers()
+    buffers = _make_buffers("cpu")
     captured = _request_slices(InputBatch.make_dummy(16, 16, buffers))
 
     def replay(num_reqs: int) -> list[slice]:
