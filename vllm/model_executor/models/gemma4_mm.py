@@ -1056,6 +1056,11 @@ class Gemma4ForConditionalGeneration(
             "k_proj",
             "v_proj",
         ],
+        "qkk_proj": [
+            "q_proj",
+            "k_proj",
+            "k_proj",
+        ],
         "gate_up_proj": [
             "gate_proj",
             "up_proj",
