@@ -153,6 +153,7 @@ def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
     )
     runner.speculator = None
     runner.batch_sharder = None
+    runner.dspark_prefill_only = False
     runner.req_states = []
     runner.input_buffers = SimpleNamespace(query_start_loc=None)
     runner.vocab_size = 1

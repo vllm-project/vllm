@@ -629,6 +629,8 @@ class VllmConfig:
             self.speculative_config is not None
             and self.speculative_config.num_speculative_tokens is not None
         ):
+            if self.speculative_config.is_dspark_prefill_only():
+                return 0
             return self.speculative_config.num_speculative_tokens
         if (
             self.diffusion_config is not None
@@ -649,7 +651,9 @@ class VllmConfig:
         scheduler and warmup cannot drift apart.
         """
         speculative_config = self.speculative_config
-        if speculative_config is None:
+        # A DSpark prefill-only PD producer stores draft context KV for the
+        # prompt but never drafts, so it reserves no draft lookahead slots.
+        if speculative_config is None or speculative_config.is_dspark_prefill_only():
             return 0
         return speculative_config.speculator_config.num_lookahead_tokens
 
@@ -666,7 +670,7 @@ class VllmConfig:
         their own per-method lookahead, so those components cannot drift apart.
         """
         speculative_config = self.speculative_config
-        if speculative_config is None:
+        if speculative_config is None or speculative_config.is_dspark_prefill_only():
             return 0
         return speculative_config.speculator_config.num_prefill_lookahead_tokens
 
