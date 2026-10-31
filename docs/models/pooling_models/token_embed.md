@@ -11,7 +11,7 @@
 
 The difference between the (sequence) embedding task and the token embedding task is that (sequence) embedding outputs one embedding for each sequence, while token embedding outputs an embedding for each token.
 
-With chunked prefill, preempted requests recompute their prompt without duplicating token embedding vectors. Ordinary scheduling pauses retain the accumulated vectors.
+With Model Runner V1 (`VLLM_USE_V2_MODEL_RUNNER=0`) and chunked prefill, preemption discards partial token embedding results before recomputing the prompt. A scheduling pause that does not preempt the request retains those results.
 
 Many embedding models support both (sequence) embedding and token embedding. For further details on (sequence) embedding, please refer to [this page](embed.md).
 
