@@ -392,6 +392,22 @@ def test_causal_conv1d_update_ragged_varlen(
         assert torch.equal(state[entry], ref_state[entry])
 
 
+@pytest.mark.parametrize("active_width", [1, 2, 4])
+def test_causal_conv1d_update_runtime_width_preserves_accepted_state(active_width):
+    """A smaller launch bound still reads the previous larger-K state offset."""
+    args = ([active_width] * 3, 128, 4, True, True, torch.bfloat16)
+    inputs, state = _create_ragged_varlen_inputs(*args)
+    ref_inputs, ref_state = _create_ragged_varlen_inputs(*args)
+    accepted = torch.tensor([5, 3, 1], dtype=torch.int32, device=DEVICE)
+    inputs["num_accepted_tokens"] = accepted
+    ref_inputs["num_accepted_tokens"] = accepted
+    inputs["max_query_len"] = active_width
+    actual = causal_conv1d_update(conv_state=state, **inputs)
+    expected = causal_conv1d_update(conv_state=ref_state, **ref_inputs)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    torch.testing.assert_close(state, ref_state, rtol=0, atol=0)
+
+
 def _create_ragged_varlen_inputs(
     q_lens_cfg, dim, width, has_bias, silu_activation, itype
 ):

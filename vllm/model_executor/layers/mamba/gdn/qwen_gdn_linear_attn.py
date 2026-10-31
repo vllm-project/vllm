@@ -1742,7 +1742,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 ],
                 num_accepted_tokens=num_accepted_tokens,
                 query_start_loc=spec_query_start_loc,
-                max_query_len=spec_state_indices_tensor.size(-1),
+                max_query_len=(
+                    attn_metadata.uniform_spec_sequence_length
+                    or spec_state_indices_tensor.size(-1)
+                ),
                 validate_data=False,
             )
 
