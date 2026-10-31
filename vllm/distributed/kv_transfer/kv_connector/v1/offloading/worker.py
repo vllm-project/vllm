@@ -21,6 +21,8 @@ from vllm.logger import init_logger
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
+    KVCacheGroupSpec,
+    KVCacheSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
     group_kernel_blocks,
@@ -36,6 +38,55 @@ from vllm.v1.kv_offload.base import (
 )
 
 logger = init_logger(__name__)
+
+
+def _layer_kv_caches(
+    kv_cache_groups: tuple[KVCacheGroupSpec, ...],
+    kv_caches: dict[str, torch.Tensor],
+    num_blocks: int,
+) -> dict[str, tuple[KVCacheSpec, torch.Tensor]]:
+    """Each layer's spec and KV cache, with manager blocks as dim 0."""
+    layers: dict[str, tuple[KVCacheSpec, torch.Tensor]] = {}
+    for kv_cache_group in kv_cache_groups:
+        assert not kv_cache_group.host_resident
+        group_kv_cache_spec = kv_cache_group.kv_cache_spec
+        if isinstance(group_kv_cache_spec, UniformTypeKVCacheSpecs):
+            per_layer_specs = group_kv_cache_spec.kv_cache_specs
+        else:
+            per_layer_specs = {}
+        for layer_name in kv_cache_group.layer_names:
+            layers[layer_name] = (
+                per_layer_specs.get(layer_name, group_kv_cache_spec),
+                group_kernel_blocks(kv_caches[layer_name], num_blocks),
+            )
+    return layers
+
+
+def _block_stride_bytes(spec: KVCacheSpec, kv_cache: torch.Tensor) -> int:
+    """Bytes from one manager block of a layer's KV cache to the next.
+
+    Packed layouts (e.g. DSv4) interleave layers per block, so this exceeds
+    page_size_bytes; LHBNC puts a block's heads a whole layer of blocks apart,
+    so it falls short. Other layouts match page_size_bytes."""
+    if not isinstance(spec, AttentionSpec):
+        return spec.page_size_bytes
+    return kv_cache.stride(0) * kv_cache.element_size()
+
+
+def _check_offloadable(layers: dict[str, tuple[KVCacheSpec, torch.Tensor]]) -> None:
+    """Fail closed on KV caches the transfers cannot copy whole: a block copied
+    in part still counts as stored, so a later hit would load wrong KV."""
+    for layer_name, (spec, kv_cache) in layers.items():
+        page = spec.page_size_bytes
+        block_stride_bytes = _block_stride_bytes(spec, kv_cache)
+        if block_stride_bytes < page:
+            raise ValueError(
+                f"OffloadingConnector cannot offload layer {layer_name}: "
+                f"its KV cache page is not contiguous within a block "
+                f"(block stride {block_stride_bytes} B < page {page} B), "
+                f"as with the LHBNC KV cache layout. Use a layout whose "
+                f"pages are contiguous, e.g. VLLM_KV_CACHE_LAYOUT=LBHNC."
+            )
 
 
 class OffloadingConnectorWorker:
@@ -75,6 +126,9 @@ class OffloadingConnectorWorker:
         selected_groups = tuple(
             kv_cache_config.kv_cache_groups[group_id] for group_id in selected_group_ids
         )
+        num_blocks = kv_cache_config.num_blocks
+        layers = _layer_kv_caches(selected_groups, kv_caches, num_blocks)
+        _check_offloadable(layers)
         mappings = derive_canonical_mappings(
             self.vllm_config, kv_cache_config, kv_caches
         )
@@ -85,51 +139,30 @@ class OffloadingConnectorWorker:
         unpadded_page_size_bytes: dict[str, int] = {}
         # layer_name -> size of page in bytes
         page_size_bytes: dict[str, int] = {}
-        for kv_cache_group in selected_groups:
-            assert not kv_cache_group.host_resident
-            num_blocks = kv_cache_config.num_blocks
-            group_layer_names = kv_cache_group.layer_names
-            group_kv_cache_spec = kv_cache_group.kv_cache_spec
-            if isinstance(group_kv_cache_spec, UniformTypeKVCacheSpecs):
-                per_layer_specs = group_kv_cache_spec.kv_cache_specs
-            else:
-                per_layer_specs = {}
-            for layer_name in group_layer_names:
-                layer_kv_cache_spec = per_layer_specs.get(
-                    layer_name, group_kv_cache_spec
-                )
-                ref = group_kernel_blocks(kv_caches[layer_name], num_blocks)
-                page = layer_kv_cache_spec.page_size_bytes
-                elem_size = ref.element_size()
-                byte_offset = ref.storage_offset() * elem_size
-                # Packed layouts (e.g. DSv4) interleave layers per block, so the
-                # attention tensor's stride(0) (the manager-block stride) exceeds
-                # page_size_bytes; other layouts have stride(0) == page_size_bytes.
-                block_stride_bytes = (
-                    ref.stride(0) * elem_size
-                    if isinstance(layer_kv_cache_spec, AttentionSpec)
-                    else page
-                )
-                tensors_per_block[layer_name] = (
-                    torch.tensor([], dtype=torch.int8, device=ref.device).set_(
-                        ref.untyped_storage(),
-                        byte_offset,
-                        (num_blocks, page),
-                        (block_stride_bytes, 1),
-                    ),
-                )
-                page_size_bytes[layer_name] = page
+        for layer_name, (layer_kv_cache_spec, ref) in layers.items():
+            page = layer_kv_cache_spec.page_size_bytes
+            byte_offset = ref.storage_offset() * ref.element_size()
+            block_stride_bytes = _block_stride_bytes(layer_kv_cache_spec, ref)
+            tensors_per_block[layer_name] = (
+                torch.tensor([], dtype=torch.int8, device=ref.device).set_(
+                    ref.untyped_storage(),
+                    byte_offset,
+                    (num_blocks, page),
+                    (block_stride_bytes, 1),
+                ),
+            )
+            page_size_bytes[layer_name] = page
 
-                if isinstance(layer_kv_cache_spec, AttentionSpec):
-                    unpadded_page_size_bytes[layer_name] = (
-                        layer_kv_cache_spec.unpadded_page_size_bytes
-                    )
-                elif isinstance(layer_kv_cache_spec, MambaSpec):
-                    unpadded_page_size_bytes[layer_name] = replace(
-                        layer_kv_cache_spec, page_size_padded=None
-                    ).page_size_bytes
-                else:
-                    raise NotImplementedError
+            if isinstance(layer_kv_cache_spec, AttentionSpec):
+                unpadded_page_size_bytes[layer_name] = (
+                    layer_kv_cache_spec.unpadded_page_size_bytes
+                )
+            elif isinstance(layer_kv_cache_spec, MambaSpec):
+                unpadded_page_size_bytes[layer_name] = replace(
+                    layer_kv_cache_spec, page_size_padded=None
+                ).page_size_bytes
+            else:
+                raise NotImplementedError
 
         # Packed layouts (e.g. DSv4) interleave all layers within each manager
         # block: a layer view's block stride exceeds its page size. Offload the
