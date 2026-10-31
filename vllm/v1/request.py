@@ -19,6 +19,7 @@ from vllm.v1.engine import (
     EngineCoreEventType,
     EngineCoreRequest,
     FinishReason,
+    StreamAdmissionContext,
 )
 from vllm.v1.kv_hints import KvHintsEnvelope
 from vllm.v1.metrics.stats import PrefillStats, RequestSpecDecodeMetrics
@@ -81,6 +82,7 @@ class Request:
         abort_immediately: bool = False,
         kv_hints: KvHintsEnvelope | None = None,
         block_hashes: list["BlockHash"] | None = None,
+        stream_admission: StreamAdmissionContext | None = None,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -236,6 +238,7 @@ class Request:
 
         # Used for streaming
         self.resumable = resumable
+        self.stream_admission = stream_admission
         # None entry in the queue means finished.
         self.streaming_queue: deque[StreamingUpdate | None] | None = None
 
@@ -272,6 +275,7 @@ class Request:
             reasoning_parser_kwargs=request.reasoning_parser_kwargs,
             abort_immediately=request.abort_immediately,
             block_hashes=block_hashes,
+            stream_admission=request.stream_admission,
         )
 
     def append_output_token_ids(

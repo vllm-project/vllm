@@ -14,6 +14,7 @@ import torch
 import vllm.v1.core.kv_cache_planning as kv_cache_planning
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from tests.v1.core.utils import (
+    get_kv_cache_configs,
     new_kv_cache_spec,
     new_mamba_spec,
     new_mla_spec,
@@ -2364,3 +2365,131 @@ def test_null_head_len():
         assert null_head_len(table) == expected
     blocks = KVCacheBlocks(([null] * 4 + real, [null] + real[:1] + [null]))
     assert blocks.get_unhashed_block_ids_all_groups() == [[1, 2, 3], [1]]
+
+
+def test_persistent_state_layout_and_capacity():
+    from tests.v1.core.utils import create_scheduler, create_state_spec
+    from vllm.v1.core.kv_cache_manager import KVCacheManager
+    from vllm.v1.worker.utils import allocate_kv_cache
+
+    config = create_scheduler(max_num_seqs=4, max_model_len=32).vllm_config
+    config.cache_config.kv_cache_layout = "LBNHC"
+    spec = create_state_spec()
+    planned = get_kv_cache_configs(
+        config, [{"state": spec}], [3 * spec.page_size_bytes]
+    )[0]
+    assert planned.num_blocks == 3
+    raw = allocate_kv_cache(
+        planned, torch.device("cpu"), config.cache_config.get_resolved_kv_cache_layout()
+    )["state"]
+    assert raw.numel() == 3 * spec.page_size_bytes
+    manager = KVCacheManager(
+        kv_cache_config=planned,
+        max_model_len=32,
+        enable_caching=False,
+        scheduler_block_size=1,
+        hash_block_size=1,
+    ).coordinator.state_managers["state"]
+    a = manager.allocate("a")
+    b = manager.allocate("b")
+    assert a is not None and b is not None
+    assert manager.allocate("c") is None
+    assert manager.get("a") == a and manager.get("b") == b
+    assert manager.num_free_slots == 0
+    assert manager.allocate_new_blocks("a", 1_000_000, 1_000_000) == []
+    assert manager.get("a") == a
+    manager.retire("a", 1)
+    assert not manager.release(a, 1)
+    assert manager.allocate("c") is None
+    manager.complete(a, 1)
+    assert manager.release(a, 1)
+    c = manager.allocate("c")
+    assert c.slot == a.slot and c.generation == a.generation + 1
+    with pytest.raises(ValueError, match="Stale"):
+        manager.complete(a, 2)
+
+
+@pytest.mark.parametrize("kind", ["attention", "mamba"])
+def test_persistent_state_mixed_layout_refused(kind):
+    from tests.v1.core.utils import create_scheduler, create_state_spec
+
+    config = create_scheduler(max_num_seqs=2, max_model_len=32).vllm_config
+    other = (
+        FullAttentionSpec(
+            block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32
+        )
+        if kind == "attention"
+        else MambaSpec(block_size=16, shapes=((4,),), dtypes=(torch.float32,))
+    )
+    with pytest.raises(ValueError, match="state-only cache layout"):
+        get_kv_cache_configs(
+            config, [{"state": create_state_spec(), "other": other}], [4096]
+        )
+
+
+@pytest.mark.parametrize(
+    "owner,option,value",
+    [
+        ("scheduler_config", "async_scheduling", True),
+        ("parallel_config", "tensor_parallel_size", 2),
+        ("parallel_config", "pipeline_parallel_size", 2),
+        ("parallel_config", "data_parallel_size", 2),
+        ("parallel_config", "decode_context_parallel_size", 2),
+        ("parallel_config", "prefill_context_parallel_size", 2),
+        ("parallel_config", "enable_dbo", True),
+        (None, "speculative_config", object()),
+        (None, "kv_transfer_config", object()),
+        ("cache_config", "enable_prefix_caching", True),
+        ("model_config", "enable_sleep_mode", True),
+        ("model_config", "enable_cumem_allocator", True),
+    ],
+)
+def test_persistent_state_unsupported_config_refused(owner, option, value):
+    from tests.v1.core.utils import create_scheduler, create_state_spec
+
+    config = create_scheduler(max_num_seqs=2, max_model_len=32).vllm_config
+    setattr(getattr(config, owner) if owner else config, option, value)
+    with pytest.raises(ValueError, match="Persistent state does not support"):
+        get_kv_cache_configs(config, [{"state": create_state_spec()}], [4096])
+
+
+def test_persistent_state_budget_override_cannot_manufacture_capacity():
+    from tests.v1.core.utils import create_scheduler, create_state_spec
+
+    config = create_scheduler(max_num_seqs=2, max_model_len=32).vllm_config
+    config.cache_config.kv_cache_layout = "LBNHC"
+    config.cache_config.num_gpu_blocks_override = 4
+    with pytest.raises(ValueError, match="KV budget"):
+        get_kv_cache_configs(config, [{"state": create_state_spec()}], [96])
+
+
+@pytest.mark.parametrize(
+    "change", ["overlap", "extent", "page_alignment", "dtype_alignment"]
+)
+def test_persistent_state_layout_rejects_invalid_components(change):
+    from tests.v1.core.utils import create_state_spec
+    from vllm.v1.kv_cache_interface import (
+        PersistentStateDescriptor,
+        PersistentStateSpec,
+    )
+
+    spec = create_state_spec()
+    descriptors = spec.descriptors
+    size = spec.page_size_bytes
+    if change == "overlap":
+        descriptors = (
+            descriptors[0],
+            PersistentStateDescriptor("other", (4,), torch.float32, 0, 16, torch.zeros),
+        )
+    elif change == "extent":
+        size = 16
+    elif change == "page_alignment":
+        size = 33
+    else:
+        with pytest.raises(ValueError, match="dtype-misaligned"):
+            PersistentStateDescriptor("bad", (1,), torch.int64, 4, 4, torch.zeros)
+        return
+    with pytest.raises(ValueError):
+        PersistentStateSpec(
+            descriptors=descriptors, page_size_bytes=size, state_name="bad"
+        )

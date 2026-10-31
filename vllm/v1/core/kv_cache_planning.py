@@ -1493,6 +1493,29 @@ def get_kv_cache_configs(
     """
     from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
 
+    state = _get_state_only_spec(vllm_config, kv_cache_specs)
+    if state is not None:
+        if len(available_memory) != 1:
+            raise ValueError("Persistent state requires one engine worker")
+        name, spec = state
+        budget = available_memory[0]
+        count = min(
+            budget // spec.page_size_bytes,
+            vllm_config.scheduler_config.max_num_seqs + 1,
+        )
+        override = vllm_config.cache_config.num_gpu_blocks_override
+        if override is not None:
+            count = override
+        if count < 2 or count * spec.page_size_bytes > budget:
+            raise ValueError("Insufficient KV budget for persistent state slots")
+        return [
+            get_kv_cache_config_from_groups(
+                vllm_config,
+                [KVCacheGroupSpec([name], spec)],
+                count * spec.page_size_bytes,
+            )
+        ]
+
     builder = get_kv_cache_config_builder(vllm_config)
 
     # If original_max_model_len was -1, automatically
@@ -1600,12 +1623,45 @@ def get_kv_cache_configs(
     return kv_cache_configs
 
 
+def _get_state_only_spec(
+    vllm_config: VllmConfig,
+    kv_cache_specs: list[dict[str, KVCacheSpec]],
+) -> tuple[str, KVCacheSpec] | None:
+    """Validate a persistent-state layout; None when the model has no state."""
+    from vllm.v1.kv_cache_interface import PersistentStateSpec
+
+    if not any(
+        isinstance(spec, PersistentStateSpec)
+        for worker in kv_cache_specs
+        for spec in worker.values()
+    ):
+        return None
+    from vllm.v1.core.state_slot_manager import validate_state_config
+
+    validate_state_config(vllm_config)
+    if len(kv_cache_specs) != 1:
+        raise ValueError("Persistent state requires one engine worker")
+    specs = kv_cache_specs[0]
+    if any(not isinstance(spec, PersistentStateSpec) for spec in specs.values()):
+        raise ValueError("Persistent state requires a state-only cache layout")
+    if len(specs) != 1:
+        raise ValueError("Persistent state requires one aggregate state spec")
+    KVCacheSpecRegistry.check_kv_cache_spec_registry(specs)
+    return next(iter(specs.items()))
+
+
 def get_global_kv_cache_groups(
     vllm_config: VllmConfig,
     kv_cache_specs: list[dict[str, KVCacheSpec]],
 ) -> list[KVCacheGroupSpec]:
     """Group the layers of the whole model (all workers' specs merged)."""
     from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
+
+    # Persistent state bypasses token-block grouping: one slot group, refused
+    # before any grouping for unsupported layouts or configurations.
+    state = _get_state_only_spec(vllm_config, kv_cache_specs)
+    if state is not None:
+        return [KVCacheGroupSpec([state[0]], state[1])]
 
     builder = get_kv_cache_config_builder(vllm_config)
 

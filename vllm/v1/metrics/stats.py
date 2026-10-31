@@ -254,6 +254,10 @@ class SchedulerStats:
 
     perf_stats: PerfStats | None = None
 
+    stream_occupied: dict[str, int] | None = None
+    stream_refusals: dict[str, int] | None = None
+    stream_expiries: dict[str, int] | None = None
+
 
 @dataclass
 class RequestStateStats:

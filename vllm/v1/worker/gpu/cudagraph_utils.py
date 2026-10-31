@@ -5,6 +5,7 @@ import itertools
 from collections import defaultdict
 from collections.abc import Callable, Hashable, Iterable, Sequence
 from contextlib import ExitStack
+from copy import copy
 from dataclasses import dataclass, replace
 from itertools import groupby, product
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
@@ -1051,6 +1052,30 @@ def _init_minimal_kv_cache_for_profiling(runner: "GPUModelRunner") -> None:
     from vllm.v1.core.kv_cache_planning import get_kv_cache_groups_from_builder
 
     kv_cache_spec = runner.get_kv_cache_spec()
+    from vllm.v1.kv_cache_interface import PersistentStateSpec
+
+    if any(isinstance(spec, PersistentStateSpec) for spec in kv_cache_spec.values()):
+        from vllm.v1.core.kv_cache_planning import (
+            get_global_kv_cache_groups,
+            get_kv_cache_configs,
+        )
+
+        budget = sum(spec.page_size_bytes for spec in kv_cache_spec.values()) * (
+            runner.max_num_reqs + 1
+        )
+        profiling_config = copy(runner.vllm_config)
+        profiling_config.cache_config = copy(runner.cache_config)
+        profiling_config.cache_config.num_gpu_blocks_override = None
+        minimal_config = get_kv_cache_configs(
+            profiling_config,
+            [kv_cache_spec],
+            [budget],
+            get_global_kv_cache_groups(profiling_config, [kv_cache_spec]),
+        )[0]
+        runner.initialize_kv_cache(minimal_config, is_profiling=True)
+        runner.cache_config.num_gpu_blocks = minimal_config.num_blocks
+        return
+
     builder = get_kv_cache_config_builder(runner.vllm_config)
     kv_cache_groups = get_kv_cache_groups_from_builder(
         builder, runner.vllm_config, kv_cache_spec
@@ -1082,6 +1107,9 @@ def _teardown_profiling_state(runner: "GPUModelRunner") -> None:
         runner.model_state._mamba_group_ids = []
     if hasattr(runner.model_state, "_mamba_spec"):
         runner.model_state._mamba_spec = None
+    if getattr(runner, "state_slots", None) is not None:
+        runner.state_slots = None
+        runner.model_state.state_slots = None
     if hasattr(runner, "kv_caches"):
         runner.kv_caches.clear()
     if hasattr(runner, "attn_groups"):

@@ -4,6 +4,7 @@ import itertools
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
+from contextlib import suppress
 from dataclasses import replace
 from typing import Any
 
@@ -40,7 +41,11 @@ from vllm.v1.core.encoder_cache_manager import (
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
-from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
+from vllm.v1.core.sched.interface import (
+    AddRequestDisposition,
+    PauseState,
+    SchedulerInterface,
+)
 from vllm.v1.core.sched.output import (
     CachedRequestData,
     GrammarOutput,
@@ -55,10 +60,21 @@ from vllm.v1.core.sched.request_queue import (
     create_request_queue,
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
-from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.core.state_slot_manager import StateSlotRetirement, validate_state_config
+from vllm.v1.core.stream_admission import StreamAdmissionConfig, StreamAdmissions
+from vllm.v1.engine import (
+    EngineCoreEventType,
+    EngineCoreOutput,
+    EngineCoreOutputs,
+    FinishReason,
+    StreamOutput,
+    StreamUpdateRejection,
+)
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
+    PersistentStateSpec,
+    StateSlotHandle,
     get_mamba_prefill_checkpoint_position,
     is_mamba_prefill_checkpoint_valid,
 )
@@ -165,6 +181,12 @@ class Scheduler(SchedulerInterface):
         self.connector = None
         self.connector_prefix_cache_stats: PrefixCacheStats | None = None
         self.recompute_kv_load_failures = True
+        self.has_state_slots = any(
+            isinstance(g.kv_cache_spec, PersistentStateSpec)
+            for g in kv_cache_config.kv_cache_groups
+        )
+        if self.has_state_slots:
+            validate_state_config(vllm_config)
         self.defer_block_free = False
         self.defer_async_loads = False
         # Whether a preempted request's in-flight output must be dropped; see
@@ -473,6 +495,10 @@ class Scheduler(SchedulerInterface):
         # queries, hits): async KV loads started once processed_step_seq >=
         # fence_seq.
         self.deferred_loads: dict[str, tuple[int, int, int, int]] = {}
+        self.state_retirements: list[StateSlotRetirement] = []
+        self.state_cleanup_misses: dict[StateSlotHandle, int] = {}
+        self.state_step_seq = 0
+        self.state_error_outputs: list[tuple[int, EngineCoreOutput]] = []
 
         self.perf_metrics: ModelMetrics | None = None
         if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
@@ -484,6 +510,20 @@ class Scheduler(SchedulerInterface):
             else None
         )
         self.return_sampling_mask = vllm_config.model_config.return_sampling_mask
+        self.stream_admissions = (
+            StreamAdmissions(
+                self,
+                StreamAdmissionConfig(
+                    **(
+                        vllm_config.additional_config.get("stream_admission", {})
+                        if isinstance(vllm_config.additional_config, dict)
+                        else {}
+                    )
+                ),
+            )
+            if self.has_state_slots
+            else None
+        )
 
         self._pause_state: PauseState = PauseState.UNPAUSED
 
@@ -696,6 +736,8 @@ class Scheduler(SchedulerInterface):
         return max(num_new_tokens, 0)
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
+        if self.stream_admissions is not None:
+            self.stream_admissions.expire()
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -1074,6 +1116,12 @@ class Scheduler(SchedulerInterface):
 
                 request = request_queue.peek_request()
                 request_id = request.request_id
+
+                if self.has_state_slots and any(
+                    entry.request_id == request_id for entry in self.state_retirements
+                ):
+                    skip_request(request_queue)
+                    continue
 
                 ready_to_schedule = self._handle_blocked_waiting_request(request)
                 if not ready_to_schedule:
@@ -1778,6 +1826,27 @@ class Scheduler(SchedulerInterface):
         if self.defer_block_free and total_num_scheduled_tokens > 0:
             self.sched_step_seq += 1
 
+        if self.has_state_slots:
+            self.state_step_seq += 1
+            scheduler_output.state_step_seq = self.state_step_seq
+            # Retry unacknowledged cleanup without repeating removal callbacks.
+            # Sync execution and the worker's stream joins fence earlier writes.
+            cleanup: dict[str, dict[str, StateSlotHandle]] = {}
+            for entry in self.state_retirements:
+                cleanup.setdefault(entry.request_id, {})[entry.layer_name] = (
+                    entry.handle
+                )
+            scheduler_output.state_cleanup_handles = cleanup
+            managers = self.kv_cache_manager.coordinator.state_managers
+            scheduler_output.state_slot_handles = {
+                req_id: {
+                    name: handle
+                    for name, manager in managers.items()
+                    if (handle := manager.get(req_id)) is not None
+                }
+                for req_id in scheduler_output.num_scheduled_tokens
+            }
+
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
         return scheduler_output
@@ -1811,6 +1880,11 @@ class Scheduler(SchedulerInterface):
         assert request.status == RequestStatus.RUNNING, (
             "Only running requests can be preempted"
         )
+        if self.has_state_slots:
+            request.status = RequestStatus.FINISHED_ERROR
+            self._free_request(request)
+            self._queue_state_error(request)
+            return
         if self.aux_output_connector is not None:
             self.aux_output_connector.request_finished(request)
         self._free_request_blocks(request)
@@ -1856,6 +1930,10 @@ class Scheduler(SchedulerInterface):
             request = self.requests[req_id]
             request.num_computed_tokens += num_scheduled_token
             request.num_in_flight_tokens += num_scheduled_token
+            if self.has_state_slots:
+                state_managers = self.kv_cache_manager.coordinator.state_managers
+                for manager in state_managers.values():
+                    manager.last_scheduled[req_id] = scheduler_output.state_step_seq
             if self.defer_block_free:
                 # Record the in-flight step, to fence deferred block freeing.
                 request.last_sched_seq = self.sched_step_seq
@@ -1882,8 +1960,41 @@ class Scheduler(SchedulerInterface):
 
         Discards the last sampled output token from the prior input chunk.
         """
+        if self.has_state_slots:
+            if session.status not in (
+                RequestStatus.WAITING_FOR_STREAMING_REQ,
+                RequestStatus.FINISHED_STOPPED,
+            ):
+                raise ValueError("state stream replacement requires a legal park")
+            prompt = list(update.prompt_token_ids or ())
+            for feature in update.mm_features or ():
+                if not 0 <= feature.mm_position.offset < len(prompt):
+                    raise ValueError(
+                        "multimodal position is outside replacement prompt"
+                    )
+            self.encoder_cache_manager.free(session)
+            session.prompt_token_ids = prompt
+            session._all_token_ids[:] = prompt
+            session._output_token_ids.clear()
+            session.num_computed_tokens = 0
+            session.num_prompt_tokens = len(prompt)
+            session.prompt_embeds = None
+            session.prompt_is_token_ids = None
+            session.mm_features = list(update.mm_features or ())
+            session.block_hashes.clear()
+            session.update_block_hashes()
+            session.stop_reason = None
+            session.arrival_time = update.arrival_time
+            session.sampling_params = update.sampling_params
+            session.max_tokens = update.max_tokens
+            if session.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
+                self.num_waiting_for_streaming_input -= 1
+            session.status = RequestStatus.WAITING
+            if self.log_stats:
+                session.record_event(EngineCoreEventType.QUEUED)
+            return
         # Keep all output tokens but the final sampled one.
-        keep_end = session.num_tokens - 1
+        keep_end = session.num_tokens - 1 if session.num_tokens else 0
         assert keep_end >= session.num_computed_tokens
         kept_output_tokens = session._all_token_ids[
             session.num_prompt_tokens : keep_end
@@ -1942,12 +2053,15 @@ class Scheduler(SchedulerInterface):
             # NOTE: In PP+async scheduling, we consume token ids via a direct GPU
             # broadcast path (`input_batch.prev_sampled_token_ids`), so we can
             # omit this payload.
-            if self.use_pp and not self.scheduler_config.async_scheduling:
+            if self.has_state_slots or (
+                self.use_pp and not self.scheduler_config.async_scheduling
+            ):
                 # When using PP, the scheduler sends the sampled tokens back,
                 # because there's no direct communication between the first-
                 # stage worker and the last-stage worker. Otherwise, we don't
                 # need to send the sampled tokens back because the model runner
-                # will cache them.
+                # will cache them. State consumers also need the host slice
+                # for row planning without reading device input buffers.
                 num_tokens = num_scheduled_tokens[req_id] - len(
                     spec_decode_tokens.get(req_id, ())
                 )
@@ -2254,6 +2368,8 @@ class Scheduler(SchedulerInterface):
         scheduler_output: SchedulerOutput,
         model_runner_output: ModelRunnerOutput,
     ) -> dict[int, EngineCoreOutputs]:
+        if self.has_state_slots:
+            self._complete_state_slots(scheduler_output, model_runner_output)
         sampled_token_ids = model_runner_output.sampled_token_ids
         logprobs = model_runner_output.logprobs
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
@@ -2279,6 +2395,10 @@ class Scheduler(SchedulerInterface):
             perf_stats = self.perf_metrics.get_step_perf_stats_per_gpu(scheduler_output)
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
+        if self.state_error_outputs:
+            for client_index, error_output in self.state_error_outputs:
+                outputs[client_index].append(error_output)
+            self.state_error_outputs.clear()
         spec_decoding_stats: SpecDecodingStats | None = None
 
         failed_kv_load_req_ids: set[str] = set()
@@ -2304,6 +2424,14 @@ class Scheduler(SchedulerInterface):
         # Stopped resumable requests to re-enqueue, in output order.
         continuing_reqs: list[Request] = []
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
+            if self.has_state_slots and any(
+                self.kv_cache_manager.coordinator.state_managers[name].get(req_id)
+                != handle
+                for name, handle in (scheduler_output.state_slot_handles or {})
+                .get(req_id, {})
+                .items()
+            ):
+                continue
             assert num_tokens_scheduled > 0
             request = self.requests.get(req_id)
             output_is_stale = False
@@ -2504,6 +2632,11 @@ class Scheduler(SchedulerInterface):
                 outputs[request.client_index].append(
                     EngineCoreOutput(
                         request_id=req_id,
+                        stream_output=(
+                            StreamOutput(request.stream_admission)
+                            if request.stream_admission is not None
+                            else None
+                        ),
                         new_token_ids=new_token_ids,
                         finish_reason=finish_reason,
                         new_logprobs=new_logprobs,
@@ -2564,6 +2697,11 @@ class Scheduler(SchedulerInterface):
                         request_id=request.request_id,
                         new_token_ids=[],
                         finish_reason=request.get_finished_reason(),
+                        stream_output=(
+                            StreamOutput(request.stream_admission)
+                            if request.stream_admission is not None
+                            else None
+                        ),
                         events=request.take_events(),
                         trace_headers=request.trace_headers,
                         error=request_errors.get(request.request_id),
@@ -2709,6 +2847,13 @@ class Scheduler(SchedulerInterface):
 
     def _handle_stopped_request(self, request: Request) -> bool:
         """Return True if finished (can be False for resumable requests)."""
+        # A state stream parks only at EOS; any other stop leaves model state
+        # mid-turn, so the stream ends instead of resuming.
+        if self.has_state_slots and (
+            request.status != RequestStatus.FINISHED_STOPPED
+            or request.stop_reason is not None
+        ):
+            request.resumable = False
         if not request.resumable:
             return True
 
@@ -2731,6 +2876,8 @@ class Scheduler(SchedulerInterface):
         else:
             request.status = RequestStatus.WAITING_FOR_STREAMING_REQ
             self.num_waiting_for_streaming_input += 1
+            if self.stream_admissions is not None:
+                self.stream_admissions.park(request.request_id)
 
         return False
 
@@ -2918,7 +3065,16 @@ class Scheduler(SchedulerInterface):
     def has_request(self, request_id: str) -> bool:
         return request_id in self.requests
 
-    def add_request(self, request: Request) -> None:
+    def add_request(self, request: Request) -> AddRequestDisposition:
+        rejection: StreamUpdateRejection | None = None
+        if self.stream_admissions is not None:
+            self.stream_admissions.expire()
+            rejection = self.stream_admissions.accept_update(request)
+        elif request.stream_admission is not None:
+            rejection = "unsupported_admission"
+        if rejection is not None:
+            self._queue_state_error(request, rejection)
+            return AddRequestDisposition.REJECTED
         existing = self.requests.get(request.request_id)
         if existing is not None:
             update = StreamingUpdate.from_request(request)
@@ -2950,6 +3106,8 @@ class Scheduler(SchedulerInterface):
                     self._set_kv_fetch_stage(request, KV_FETCH_WAITING_TO_START)
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
+
+        return AddRequestDisposition.ACCEPTED
 
     def finish_requests(
         self, request_ids: str | Iterable[str] | None, finished_status: RequestStatus
@@ -3054,6 +3212,8 @@ class Scheduler(SchedulerInterface):
     def _free_blocks(self, request: Request):
         assert request.is_finished()
         self._free_request_blocks(request)
+        if self.stream_admissions is not None:
+            self.stream_admissions.finish(request.request_id)
         del self.requests[request.request_id]
 
     @property
@@ -3075,6 +3235,19 @@ class Scheduler(SchedulerInterface):
         """Free the request's KV blocks, deferring the return to the block
         pool when an in-flight GPU step may still write them.
         """
+        if self.has_state_slots:
+            managers = self.kv_cache_manager.coordinator.state_managers
+            for name, manager in managers.items():
+                last_step = manager.last_scheduled.pop(request.request_id, 0)
+                fence = self.state_step_seq + 1 if last_step else 0
+                handle = manager.retire(request.request_id, fence)
+                if handle is not None:
+                    self.state_retirements.append(
+                        StateSlotRetirement(
+                            manager, handle, fence, request.request_id, name
+                        )
+                    )
+            self._drain_state_retirements()
         if self._request_blocks_can_be_freed(request):
             self.kv_cache_manager.free(request)
             return
@@ -3134,6 +3307,92 @@ class Scheduler(SchedulerInterface):
                     ),
                 )
 
+    def _drain_state_retirements(self) -> None:
+        self.state_retirements = [
+            entry
+            for entry in self.state_retirements
+            if not entry.allocator.release(entry.handle, entry.fence_step)
+        ]
+
+    def _complete_state_slots(
+        self, scheduled: SchedulerOutput, output: ModelRunnerOutput
+    ) -> None:
+        completion = output.state_completion
+        failed = set()
+        for req_id, handles in (scheduled.state_slot_handles or {}).items():
+            for name, handle in handles.items():
+                manager = self.kv_cache_manager.coordinator.state_managers[name]
+                if (
+                    completion is not None
+                    and completion.step_seq == scheduled.state_step_seq
+                    and completion.handles.get(req_id, {}).get(name) == handle
+                ):
+                    with suppress(ValueError):
+                        manager.complete(handle, completion.step_seq)
+                    if (
+                        req_id in completion.failed_req_ids
+                        and manager.get(req_id) == handle
+                    ):
+                        failed.add(req_id)
+                else:
+                    with suppress(ValueError):
+                        manager.quarantine(handle, scheduled.state_step_seq)
+                    if manager.get(req_id) == handle:
+                        failed.add(req_id)
+        for req_id, handles in (scheduled.state_cleanup_handles or {}).items():
+            for name, handle in handles.items():
+                manager = self.kv_cache_manager.coordinator.state_managers[name]
+                if (
+                    completion is not None
+                    and completion.step_seq == scheduled.state_step_seq
+                    and completion.cleanup_handles.get(req_id, {}).get(name) == handle
+                ):
+                    self.state_cleanup_misses.pop(handle, None)
+                    with suppress(ValueError):
+                        manager.complete(handle, completion.step_seq)
+                    continue
+                with suppress(ValueError):
+                    manager.quarantine(handle, scheduled.state_step_seq)
+                # The initial cleanup step and one retry both missed: the worker
+                # broke the state completion contract, so stop rather than poll.
+                misses = self.state_cleanup_misses.get(handle, 0) + 1
+                if misses > 1:
+                    raise RuntimeError(
+                        f"State slot {handle} of request {req_id!r} was not "
+                        f"acknowledged after cleanup step "
+                        f"{scheduled.state_step_seq}; its writes are unfenced"
+                    )
+                self.state_cleanup_misses[handle] = misses
+        self._drain_state_retirements()
+        if failed:
+            for request in self.finish_requests(failed, RequestStatus.FINISHED_ERROR):
+                self._queue_state_error(request)
+
+    def _queue_state_error(
+        self, request: Request, rejection: StreamUpdateRejection | None = None
+    ) -> None:
+        self.state_error_outputs.append(
+            (
+                request.client_index,
+                EngineCoreOutput(
+                    request_id=request.request_id,
+                    new_token_ids=[],
+                    finish_reason=(
+                        FinishReason.ERROR
+                        if rejection
+                        else request.get_finished_reason()
+                    ),
+                    stream_output=(
+                        StreamOutput(request.stream_admission, rejection)
+                        if request.stream_admission is not None or rejection is not None
+                        else None
+                    ),
+                    events=request.take_events(),
+                    trace_headers=request.trace_headers,
+                ),
+            )
+        )
+
     def get_num_unfinished_requests(self) -> int:
         if self._pause_state == PauseState.PAUSED_ALL:
             return 0
@@ -3145,6 +3404,10 @@ class Scheduler(SchedulerInterface):
         return num_waiting + num_running
 
     def has_finished_requests(self) -> bool:
+        if self.state_error_outputs:
+            return True
+        if self.has_state_slots and self.state_retirements:
+            return True
         if self.finished_req_ids:
             return True
         if self.connector is None:
@@ -3290,6 +3553,19 @@ class Scheduler(SchedulerInterface):
             cudagraph_stats=cudagraph_stats,
             perf_stats=perf_stats,
             ec_connector_stats=ec_connector_stats_payload,
+            stream_occupied=(
+                self.stream_admissions.occupied() if self.stream_admissions else None
+            ),
+            stream_refusals=(
+                dict(self.stream_admissions.refusals)
+                if self.stream_admissions
+                else None
+            ),
+            stream_expiries=(
+                dict(self.stream_admissions.expiries)
+                if self.stream_admissions
+                else None
+            ),
         )
 
     def make_spec_decoding_stats(

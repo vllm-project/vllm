@@ -13,12 +13,18 @@ if TYPE_CHECKING:
     from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorBase
     from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+    from vllm.v1.core.stream_admission import StreamAdmissions
     from vllm.v1.engine import EngineCoreOutputs
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.metrics.stats import SchedulerStats
     from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
     from vllm.v1.request import Request, RequestStatus
     from vllm.v1.structured_output import StructuredOutputManager
+
+
+class AddRequestDisposition(enum.Enum):
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
 
 
 class PauseState(enum.IntEnum):
@@ -36,6 +42,8 @@ class PauseState(enum.IntEnum):
 
 
 class SchedulerInterface(ABC):
+    stream_admissions: "StreamAdmissions | None" = None
+
     @abstractmethod
     def __init__(
         self,
@@ -137,8 +145,10 @@ class SchedulerInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def add_request(self, request: "Request") -> None:
-        """Add a new request to the scheduler's internal queue.
+    def add_request(self, request: "Request") -> AddRequestDisposition | None:
+        """Add a request; REJECTED forbids engine ADD follow-on effects.
+
+        Legacy schedulers may return None for accepted requests.
 
         Args:
             request: The new request being added.
