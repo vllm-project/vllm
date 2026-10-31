@@ -1558,13 +1558,28 @@ def checkpoint_has_lm_head(model: str, *, revision: str | None = None) -> bool |
 
     Returns:
         `None` if the checkpoint contents could not be determined, for example
-        because it is not stored as safetensors.
+        because it is not stored as safetensors or PyTorch bin.
 
     """
     metadata = get_safetensors_params_metadata(model, revision=revision)
-    if not metadata:
-        return None
-    return any(name.endswith("lm_head.weight") for name in metadata)
+    if metadata:
+        return any(name.endswith("lm_head.weight") for name in metadata)
+
+    index_dict = get_hf_file_to_dict(
+        "pytorch_model.bin.index.json", model, revision=revision
+    )
+    if index_dict is not None and "weight_map" in index_dict:
+        return any(name.endswith("lm_head.weight") for name in index_dict["weight_map"])
+
+    bin_file = try_get_local_file(model, "pytorch_model.bin", revision=revision)
+    if isinstance(bin_file, (Path, str)) and Path(bin_file).is_file():
+        try:
+            state_dict = torch.load(bin_file, map_location="meta", weights_only=True)
+            return any(name.endswith("lm_head.weight") for name in state_dict)
+        except Exception as e:
+            logger.debug("Could not read state dict keys from %s: %s", bin_file, e)
+
+    return None
 
 
 def _download_mistral_config_file(model, revision) -> dict:

@@ -18,6 +18,7 @@ from vllm.config.model import ModelConfig
 from vllm.tokenizers import get_tokenizer
 from vllm.transformers_utils import config as config_module
 from vllm.transformers_utils.config import (
+    checkpoint_has_lm_head,
     get_safetensors_params_metadata,
     mrope_num_dims,
     patch_legacy_rope_type,
@@ -323,3 +324,45 @@ def test_mrope_num_dims_from_nested_rope_parameters():
 
 def test_mrope_num_dims_without_mrope():
     assert mrope_num_dims(PreTrainedConfig()) == 0
+
+
+def test_checkpoint_has_lm_head_pytorch_bin(tmp_path):
+    import torch
+
+    checkpoint_has_lm_head.cache_clear()
+
+    # Case 1: Sharded PyTorch index with lm_head
+    sharded_dir = tmp_path / "sharded"
+    sharded_dir.mkdir()
+    (sharded_dir / "pytorch_model.bin.index.json").write_text(
+        json.dumps({"weight_map": {"lm_head.weight": "model-00001.bin"}})
+    )
+    assert checkpoint_has_lm_head(str(sharded_dir)) is True
+
+    # Case 2: Sharded PyTorch index without lm_head
+    sharded_no_head_dir = tmp_path / "sharded_no_head"
+    sharded_no_head_dir.mkdir()
+    (sharded_no_head_dir / "pytorch_model.bin.index.json").write_text(
+        json.dumps({"weight_map": {"model.embed_tokens.weight": "model-00001.bin"}})
+    )
+    assert checkpoint_has_lm_head(str(sharded_no_head_dir)) is False
+
+    # Case 3: Single .bin file with lm_head
+    single_dir = tmp_path / "single"
+    single_dir.mkdir()
+    torch.save({"lm_head.weight": torch.ones(2, 2)}, single_dir / "pytorch_model.bin")
+    assert checkpoint_has_lm_head(str(single_dir)) is True
+
+    # Case 4: Single .bin file without lm_head
+    single_no_head_dir = tmp_path / "single_no_head"
+    single_no_head_dir.mkdir()
+    torch.save(
+        {"model.embed_tokens.weight": torch.ones(2, 2)},
+        single_no_head_dir / "pytorch_model.bin",
+    )
+    assert checkpoint_has_lm_head(str(single_no_head_dir)) is False
+
+    # Case 5: Empty directory -> returns None
+    empty_dir = tmp_path / "empty"
+    empty_dir.mkdir()
+    assert checkpoint_has_lm_head(str(empty_dir)) is None
