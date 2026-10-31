@@ -842,6 +842,25 @@ Full example: [examples/generate/multimodal/openai_chat_completion_client_for_mu
     export VLLM_VIDEO_FETCH_TIMEOUT=<timeout>
     ```
 
+#### Video Frame Sampling
+
+By default, vLLM samples 32 frames evenly across each video. Models with their
+own video loader sample the way their Hugging Face processor does instead: the
+Qwen2-VL, Qwen2.5-VL and Qwen3-VL loaders sample 2 frames per second. Setting
+`num_frames` overrides this for those loaders too:
+
+```bash
+vllm serve Qwen/Qwen2.5-VL-3B-Instruct \
+  --media-io-kwargs '{"video": {"num_frames": 8}}'
+```
+
+If both `num_frames` and `fps` are set, `num_frames` takes priority for these
+loaders, capped at 768 frames and the clip length. Qwen2-VL and Qwen2.5-VL
+round it to an even count, since they encode frames in pairs.
+
+Other model-specific loaders, such as the ones for GLM-4V, follow their own
+sampling rules.
+
 #### Video Decoding Backend
 
 vLLM decodes video bytes into frames using a selectable decoding backend. Four
