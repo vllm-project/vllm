@@ -1,13 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy as copy_module
 import pickle
+import queue
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+from types import SimpleNamespace
 
 import pytest
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
+from tokenizers.pre_tokenizers import Whitespace
 from transformers import AutoTokenizer, TokenizersBackend
 
+import vllm.tokenizers.hf as hf_module
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.hf import (
     CachedHfTokenizer,
@@ -41,6 +48,27 @@ def test_cached_tokenizer_preserves_standard_chat_template(local_tokenizer_dir):
 
     tokenizer = CachedHfTokenizer.from_pretrained(local_tokenizer_dir)
     assert tokenizer.chat_template == "standard"
+
+
+def _make_local_tokenizer() -> TokenizersBackend:
+    backend = Tokenizer(WordLevel({"[UNK]": 0, "hello": 1}, unk_token="[UNK]"))
+    backend.pre_tokenizer = Whitespace()
+    return TokenizersBackend(tokenizer_object=backend, unk_token="[UNK]")
+
+
+def _make_pooled_tokenizer(monkeypatch, encode, copies: int = 1):
+    deepcopy_calls: list[None] = []
+
+    def counted_deepcopy(_):
+        deepcopy_calls.append(None)
+        return SimpleNamespace(encode=encode)
+
+    monkeypatch.setattr(
+        hf_module,
+        "copy",
+        SimpleNamespace(copy=copy_module.copy, deepcopy=counted_deepcopy),
+    )
+    return maybe_make_thread_pool(_make_local_tokenizer(), copies), deepcopy_calls
 
 
 @pytest.mark.parametrize("model_id", ["openai-community/gpt2", "zai-org/chatglm3-6b"])
@@ -110,3 +138,52 @@ def test_cached_tokenizer_max_token_id_is_a_valid_id(model_id: str):
     assert cached_tokenizer.max_token_id == max(
         reference_tokenizer.get_vocab().values()
     )
+
+
+def test_thread_pool_discards_overflow_copies(monkeypatch: pytest.MonkeyPatch):
+    active_barrier = [threading.Barrier(1)]
+
+    def blocking_encode(_):
+        active_barrier[0].wait(timeout=10)
+        return [1]
+
+    pooled_tokenizer, deepcopy_calls = _make_pooled_tokenizer(
+        monkeypatch, blocking_encode
+    )
+    assert len(deepcopy_calls) == 1
+
+    def run_burst(workers: int):
+        active_barrier[0] = threading.Barrier(workers)
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            outputs = list(
+                executor.map(lambda _: pooled_tokenizer.encode("hello"), range(workers))
+            )
+        assert outputs == [[1]] * workers
+
+    run_burst(3)
+    assert len(deepcopy_calls) == 3
+
+    run_burst(3)
+    assert len(deepcopy_calls) == 5
+
+
+def test_thread_pool_returns_copy_when_call_raises_queue_empty(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    should_raise = True
+
+    def encode_that_raises_once(_):
+        nonlocal should_raise
+        if should_raise:
+            should_raise = False
+            raise queue.Empty("raised by tokenizer")
+        return [1]
+
+    pooled_tokenizer, deepcopy_calls = _make_pooled_tokenizer(
+        monkeypatch, encode_that_raises_once
+    )
+    with pytest.raises(queue.Empty, match="raised by tokenizer"):
+        pooled_tokenizer.encode("hello")
+
+    assert pooled_tokenizer.encode("hello") == [1]
+    assert len(deepcopy_calls) == 1
