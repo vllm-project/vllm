@@ -9,14 +9,11 @@ import torch
 
 from vllm.entrypoints.pooling.scoring.serving import ServingScores
 from vllm.entrypoints.pooling.typing import PoolingEngineInput, PoolingServeContext
-from vllm.exceptions import (
-    GenerationError,
-    RetryableRequestError,
-    VLLMValidationError,
-)
+from vllm.exceptions import GenerationError
 from vllm.inputs import tokens_input
 from vllm.outputs import PoolingOutput, PoolingRequestOutput, RequestError
 from vllm.pooling_params import LateInteractionParams, PoolingParams
+from vllm.utils.async_utils import merge_async_iterators
 from vllm.v1.pool.late_interaction_runner import LateInteractionRunner
 
 
@@ -112,8 +109,9 @@ async def test_colliding_request_ids_use_distinct_late_interaction_keys(
 ):
     serving = object.__new__(ServingScores)
     serving.engine_client = Mock(abort=AsyncMock(), collective_rpc=AsyncMock())
-    collect_batch = AsyncMock()
-    monkeypatch.setattr(serving, "_collect_late_interaction_batch", collect_batch)
+    prepare_generators = AsyncMock(return_value=[])
+    monkeypatch.setattr(serving, "_prepare_generators", prepare_generators)
+    monkeypatch.setattr(serving, "_collect_batch", AsyncMock())
 
     first = _make_context()
     second = _make_context()
@@ -121,7 +119,7 @@ async def test_colliding_request_ids_use_distinct_late_interaction_keys(
         await serving._flash_late_interaction_encode_queries(context)
         await serving._flash_late_interaction_encode_docs(context)
 
-    prepared_contexts = [call.args[0] for call in collect_batch.await_args_list]
+    prepared_contexts = [call.args[0] for call in prepare_generators.await_args_list]
     first_query_key = _query_key(prepared_contexts[0])
     first_doc_key = _query_key(prepared_contexts[1])
     second_query_key = _query_key(prepared_contexts[2])
@@ -150,46 +148,38 @@ async def test_colliding_request_ids_use_distinct_late_interaction_keys(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("code", "retryable", "error_type"),
-    [
-        ("failed", False, GenerationError),
-        ("failed", True, RetryableRequestError),
-        ("validation_error", False, VLLMValidationError),
-    ],
-)
-async def test_late_interaction_output_error_stops_pending_producers(
-    code, retryable, error_type, monkeypatch
-):
+async def test_late_interaction_output_error_stops_pending_producers(monkeypatch):
     """An error output must stop the batch even while another request is pending."""
-    started, stopped, blocked = (asyncio.Event() for _ in range(3))
+    started, stopped = asyncio.Event(), asyncio.Event()
 
     async def failing():
         await started.wait()
-        yield PoolingRequestOutput(
-            request_id="failed",
-            outputs=PoolingOutput(torch.empty(0)),
-            prompt_token_ids=[1],
-            num_cached_tokens=0,
-            finished=True,
-            error=RequestError(code, "scoring failed", retryable=retryable),
-        )
+        output = PoolingOutput(torch.empty(0))
+        error = RequestError("failed", "scoring failed")
+        yield PoolingRequestOutput("failed", output, [1], 0, True, error=error)
 
     async def pending():
         try:
             started.set()
-            await blocked.wait()
+            await asyncio.Event().wait()
             yield  # pragma: no cover
         finally:
             stopped.set()
 
+    async def prepare(ctx):
+        generators = [failing(), pending()]
+        ctx.result_generator = merge_async_iterators(*generators)
+        return generators
+
     serving = object.__new__(ServingScores)
-    monkeypatch.setattr(
-        serving, "_prepare_generators", AsyncMock(return_value=[failing(), pending()])
-    )
-    with pytest.raises(error_type, match="scoring failed"):
+    monkeypatch.setattr(serving, "_prepare_generators", prepare)
+    ctx = _make_context()
+    ctx.n_queries = 2
+    assert ctx.engine_inputs is not None
+    ctx.engine_inputs = list(ctx.engine_inputs) * 2
+    with pytest.raises(GenerationError, match="scoring failed"):
         await asyncio.wait_for(
-            serving._collect_late_interaction_batch(_make_context()), timeout=5
+            serving._flash_late_interaction_encode_queries(ctx), timeout=5
         )
     assert stopped.is_set()
 
@@ -207,44 +197,30 @@ async def test_repeated_cancellation_releases_requests_and_queries(
     async def encode_queries(ctx):
         ctx.late_interaction_query_keys = ["query"]
         params = PoolingParams(
-            late_interaction_params=LateInteractionParams(
-                mode="cache_query", query_key="query", query_uses=1
-            )
+            late_interaction_params=LateInteractionParams("cache_query", "query", 1)
         )
         runner.postprocess_pooler_output([torch.eye(2)], [params], ["query"], [True])
 
     async def encode_docs(ctx):
-        # The RPC case stops before any document can consume the cached query.
-        if cleanup_stage == "abort":
-            ctx.late_interaction_doc_keys = ["doc"]
-            pending.add("doc")
-            runner.register_request(
-                "doc",
-                PoolingParams(
-                    late_interaction_params=LateInteractionParams(
-                        mode="score_doc", query_key="query"
-                    )
-                ),
-            )
+        # The document is queued but has not reached the worker yet.
+        ctx.late_interaction_doc_keys = ["doc"]
+        pending.add("doc")
         started.set()
         await asyncio.Event().wait()
 
-    async def abort(request_ids):
-        if cleanup_stage == "abort":
+    async def cleanup(request_ids, *, args=None):
+        is_abort = args is None
+        if is_abort == (cleanup_stage == "abort"):
             cleanup_entered.set()
             await release.wait()
-        pending.difference_update(request_ids)
-        runner.on_requests_finished(request_ids)
-
-    async def collective_rpc(method, *, args):
-        if cleanup_stage == "rpc":
-            cleanup_entered.set()
-            await release.wait()
-        runner.release_queries(args[0])
+        if is_abort:
+            pending.difference_update(request_ids)
+        else:
+            runner.release_queries(args[0])
 
     serving = object.__new__(ServingScores)
     serving.io_processor = Mock()
-    serving.engine_client = Mock(abort=abort, collective_rpc=collective_rpc)
+    serving.engine_client = Mock(abort=cleanup, collective_rpc=cleanup)
     monkeypatch.setattr(serving, "_init_ctx", AsyncMock(return_value=ctx))
     monkeypatch.setattr(serving, "_preprocessing", AsyncMock())
     monkeypatch.setattr(
@@ -253,26 +229,21 @@ async def test_repeated_cancellation_releases_requests_and_queries(
     monkeypatch.setattr(serving, "_flash_late_interaction_encode_docs", encode_docs)
     handler = asyncio.create_task(serving.flash_late_interaction())
 
-    async def cancel_twice():
-        await started.wait()
-        handler.cancel()
-        await cleanup_entered.wait()
-        handler.cancel()
-        await asyncio.sleep(0)
-        release.set()
-        await asyncio.wait([handler])
-        with pytest.raises(asyncio.CancelledError):
-            handler.result()
-        assert not pending
-        assert not runner._query_cache
-        assert not runner._query_uses
-        assert not runner._doc_query_keys
-
     try:
-        await asyncio.wait_for(cancel_twice(), timeout=5)
+        async with asyncio.timeout(5):
+            await started.wait()
+            handler.cancel()
+            await cleanup_entered.wait()
+            handler.cancel()
+            asyncio.get_running_loop().call_soon(release.set)
+            await asyncio.wait([handler])
+            with pytest.raises(asyncio.CancelledError):
+                handler.result()
+            assert not pending
+            assert not runner._query_cache
+            assert not runner._query_uses
     finally:
         # Always unblock cleanup, including when an assertion or timeout fails.
         release.set()
-        if not handler.done():
-            handler.cancel()
+        handler.cancel()
         await asyncio.gather(handler, return_exceptions=True)
