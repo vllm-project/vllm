@@ -24,6 +24,7 @@ if rocm_aiter_ops.is_enabled() or rocm_aiter_ops.is_rdna_aiter_enabled():
     )
     from .fusion.rocm_aiter_fusion import (
         MLADualRMSNormFusionPass,
+        RocmAiterGemmAddRMSNormFusionPass,
         RocmAiterRMSNormQuantFusionPass,
         RocmAiterSiluMulFp8GroupQuantFusionPass,
         RocmAiterTritonAddRMSNormPadFusionPass,
@@ -163,6 +164,10 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                 # Run the more specific RMSNorm+router-pad fusion before
                 # AR+RMS, since both consume fused_add_rms_norm.
                 self.passes += [RocmAiterTritonAddRMSNormPadFusionPass(config)]
+
+            if self.pass_config.fuse_gemm_add_rms and rocm_aiter_ops.is_enabled():
+                # Before RMSNorm + quant fusion, which also consumes fused_add_rms_norm.
+                self.passes += [RocmAiterGemmAddRMSNormFusionPass(config)]
 
             if self.pass_config.fuse_allreduce_rms:
                 if rocm_aiter_ops.is_enabled():
