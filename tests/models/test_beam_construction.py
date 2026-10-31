@@ -28,7 +28,6 @@ TINY_CONFIG = {
     "architectures": ["BeamForCausalLM"],
     "model_type": "beam",
     "vocab_size": 1024,
-    # Keep a supported attention head size on both NVIDIA and AMD backends.
     "hidden_size": 512,
     "intermediate_size": 256,
     "num_hidden_layers": 2,

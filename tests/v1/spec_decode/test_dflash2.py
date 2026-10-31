@@ -39,9 +39,7 @@ def test_grouped_conv_matches_reference(block_size: int):
     torch.testing.assert_close(actual, expected.flatten(0, 1).flatten(-2))
 
 
-@pytest.mark.skipif(
-    not torch.accelerator.is_available(), reason="This test requires an accelerator"
-)
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA required")
 @pytest.mark.parametrize(
     "rows,width,query,group,taps",
     [
@@ -58,7 +56,7 @@ def test_grouped_conv_matches_reference(block_size: int):
 def test_beam_conv_residual_norm(rows, width, query, group, taps, warps, dtype):
     """Dtype rounding and request boundaries survive residual/norm fusion."""
     from vllm import _custom_ops as ops
-    from vllm.models.beam import dflash2_conv_ops
+    from vllm.models.beam import conv_residual_norm
 
     torch.manual_seed(42)
     hidden = torch.randn(rows, width, device="cuda", dtype=dtype)
@@ -71,7 +69,7 @@ def test_beam_conv_residual_norm(rows, width, query, group, taps, warps, dtype):
     expected = _grouped_conv(hidden, delta, base, query, width // group, group, taps)
     expected_residual = residual.clone()
     ops.fused_add_rms_norm(expected, expected_residual, weight, 1e-6)
-    actual, actual_residual = dflash2_conv_ops.conv_residual_norm(
+    actual, actual_residual = conv_residual_norm(
         hidden, delta, base, residual, weight, 1e-6, query, group, num_warps=warps
     )
     tolerance = {torch.bfloat16: 0.015625, torch.float16: 0.002, torch.float32: 3e-6}[
@@ -87,9 +85,7 @@ def test_beam_conv_residual_norm(rows, width, query, group, taps, warps, dtype):
     torch.testing.assert_close(actual, expected, rtol=tolerance, atol=tolerance)
 
 
-@pytest.mark.skipif(
-    not torch.accelerator.is_available(), reason="This test requires an accelerator"
-)
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA required")
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize(
     "batch,num_groups,group_size,block_size,taps",
@@ -289,9 +285,7 @@ def test_selector_edges_match_sequential_reference():
     torch.testing.assert_close(actual, expected)
 
 
-@pytest.mark.skipif(
-    not torch.accelerator.is_available(), reason="This test requires an accelerator"
-)
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA required")
 @pytest.mark.parametrize(
     "batch,steps,top_k,rank",
     [(1, 1, 3, 5), (1, 7, 16, 256), (8, 7, 16, 256), (32, 7, 16, 256), (3, 5, 17, 65)],
@@ -302,7 +296,7 @@ def test_beam_fused_candidate_edges(
     batch, steps, top_k, rank, unary_dtype, anchor_dtype
 ):
     """Keep the anchor, predecessor mapping, and BF16 intermediate rounding."""
-    from vllm.models.beam import dflash2_ops
+    from vllm.models.beam import candidate_edges
 
     torch.manual_seed(1)
     vocab = 257
@@ -315,7 +309,7 @@ def test_beam_fused_candidate_edges(
     anchors = torch.randint(vocab, (batch * 8,), device="cuda", dtype=anchor_dtype)[::8]
     args = (predecessors, successors, candidates, unary, hidden, anchors, top_k)
     expected = _score_edges(*args)
-    actual = dflash2_ops.candidate_edges(*args)
+    actual = candidate_edges(*args)
     torch.testing.assert_close(actual, expected, rtol=0.01, atol=0.015625)
 
 
