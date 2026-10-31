@@ -135,6 +135,12 @@ class ProfilerConfig:
     """If `True`, enables memory profiling in the torch profiler.
     Disabled by default."""
 
+    torch_profiler_detailed_iterations: int = Field(default=0, ge=0)
+    """Number of profiled iterations to record with stacks and input shapes
+    before the torch profiler restarts with the settings above. The detailed
+    iterations are saved as a separate trace whose worker name ends in
+    `_detailed`. Defaults to 0 (a single session)."""
+
     capture_torch_profiler: bool = False
     """If `True`, enables a torch profiler during CUDA graph capture on rank 0.
     Traces are saved to a `capture_traces` subdirectory under `torch_profiler_dir`.
@@ -303,5 +309,17 @@ class ProfilerConfig:
                 "capture_torch_profiler is only applicable when profiler is "
                 "set to 'torch'"
             )
+
+        if self.torch_profiler_detailed_iterations > 0:
+            if self.profiler != "torch":
+                raise ValueError(
+                    "torch_profiler_detailed_iterations is only applicable when "
+                    "profiler is set to 'torch'"
+                )
+            if self.warmup_iterations > 0 or self.wait_iterations > 0:
+                raise ValueError(
+                    "torch_profiler_detailed_iterations cannot be combined with "
+                    "warmup_iterations or wait_iterations"
+                )
 
         return self
