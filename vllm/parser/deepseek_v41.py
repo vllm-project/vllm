@@ -43,8 +43,8 @@ def deepseek_v41_config(thinking: bool = False) -> ParserEngineConfig:
         terminals={
             **config.terminals,
             **terminal_overrides,
-            # Set here, not in terminal_overrides: token_id_terminals below
-            # reuses those and takes a single spelling per terminal.
+            # terminal_overrides keeps a single TOOL_START spelling because
+            # token_id_terminals below reuses it; add the variants only here.
             "TOOL_START": (DSML_TOOL_START, *DSML_TOOL_START_VARIANTS),
         },
         token_id_terminals={
