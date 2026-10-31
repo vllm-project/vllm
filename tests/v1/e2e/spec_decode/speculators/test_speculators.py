@@ -7,20 +7,20 @@ from tests.utils import single_gpu_only
 from vllm import SamplingParams
 from vllm.config import CompilationConfig
 
-from ..utils import (
-    assert_request_outputs_match,
-    evaluate_llm_for_gsm8k,
-    get_test_prompts,
-)
+from ..utils import check_spec_decode_matches_reference, get_test_prompts
 
 
 @pytest.mark.parametrize(
-    ["model_path", "expected_accuracy_threshold"],
+    ["model_path", "expected_target_model", "expected_accuracy_threshold"],
     [
         # Measured reference: 75%-80%.
-        ("RedHatAI/Llama-3.1-8B-Instruct-speculator.eagle3", 0.72),
+        (
+            "RedHatAI/Llama-3.1-8B-Instruct-speculator.eagle3",
+            "meta-llama/Llama-3.1-8B-Instruct",
+            0.72,
+        ),
         # Measured reference: 87%-92%.
-        ("RedHatAI/Qwen3-8B-speculator.eagle3", 0.84),
+        ("RedHatAI/Qwen3-8B-speculator.eagle3", "Qwen/Qwen3-8B", 0.84),
     ],
     ids=["llama3_eagle3_speculator", "qwen3_eagle3_speculator"],
 )
@@ -29,6 +29,7 @@ def test_speculators_model_integration(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
     model_path: str,
+    expected_target_model: str,
     expected_accuracy_threshold: float,
     vllm_runner,
 ):
@@ -48,59 +49,25 @@ def test_speculators_model_integration(
     """
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
-    # Generate test prompts
     test_prompts = get_test_prompts(mm_enabled=False)
-
-    # First run: Direct speculator model (simplified integration)
-    with vllm_runner(
-        model_path,
+    engine_kwargs = dict(
         block_size=None,
         trust_remote_code=False,
         enable_chunked_prefill=None,
         compilation_config=CompilationConfig(),
         max_model_len=4096,
         gpu_memory_utilization=0.92,
-    ) as spec_runner:
-        evaluate_llm_for_gsm8k(
-            spec_runner.llm, expected_accuracy_threshold=expected_accuracy_threshold
-        )
-        spec_outputs = spec_runner.llm.chat(test_prompts, sampling_config)
-
-        # Verify speculative config was auto-detected
-        assert spec_runner.llm.llm_engine.vllm_config.speculative_config is not None, (
-            f"Speculative config should be auto-detected for {model_path}"
-        )
-
-        spec_config = spec_runner.llm.llm_engine.vllm_config.speculative_config
-        assert spec_config.num_speculative_tokens > 0, (
-            f"Expected positive speculative tokens, "
-            f"got {spec_config.num_speculative_tokens}"
-        )
-
-        # Verify draft model is set to the speculator model
-        assert spec_config.model == model_path, (
-            f"Draft model should be {model_path}, got {spec_config.model}"
-        )
-
-        # Extract verifier model for reference run
-        verifier_model = spec_runner.llm.llm_engine.vllm_config.model_config.model
-
-    # Second run: Reference without speculative decoding
-    with vllm_runner(
-        verifier_model,
-        block_size=None,
-        trust_remote_code=False,
-        enable_chunked_prefill=None,
-        compilation_config=CompilationConfig(),
-        max_model_len=4096,
-        gpu_memory_utilization=0.92,
-    ) as ref_runner:
-        ref_outputs = ref_runner.llm.chat(test_prompts, sampling_config)
-
-    # Heuristic: expect at least 66% of prompts to match exactly
-    assert_request_outputs_match(
-        ref_outputs,
-        spec_outputs,
-        required_matches=int(0.66 * len(ref_outputs)),
-        context=f"speculator={model_path}, verifier={verifier_model}",
+    )
+    check_spec_decode_matches_reference(
+        vllm_runner,
+        sampling_config,
+        test_prompts,
+        target_model=None,
+        target_engine_kwargs=engine_kwargs,
+        spec_model=model_path,
+        spec_engine_kwargs=engine_kwargs,
+        # Heuristic: expect at least 66% of prompts to match exactly
+        prompts_required_matches=int(0.66 * len(test_prompts)),
+        gsm8k_spec_accuracy_threshold=expected_accuracy_threshold,
+        expected_target_model=expected_target_model,
     )
