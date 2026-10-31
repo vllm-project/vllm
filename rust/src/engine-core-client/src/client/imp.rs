@@ -8,6 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwapOption;
 use bytes::Bytes;
+use futures::future::join_all;
 use parking_lot::Mutex;
 use thiserror_ext::AsReport as _;
 use tokio::runtime::Handle;
@@ -29,7 +30,7 @@ use crate::protocol::encode_msgpack;
 use crate::protocol::output::{EngineCoreOutput, EngineCoreOutputs};
 use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::stats::SchedulerStats;
-use crate::protocol::utility::UtilityOutput;
+use crate::protocol::utility::{EngineCoreUtilityRequest, UtilityOutput};
 use crate::transport::{ConnectedEngine, EngineId};
 use crate::{Error, Result, transport};
 
@@ -48,6 +49,9 @@ pub(crate) struct ClientInner {
     /// The runtime handle used for sending messages to the engine.
     handle: Handle,
     model_name: String,
+    /// Engines that utility calls go to, and this client's index on them.
+    engine_ids: Vec<EngineId>,
+    client_index: u32,
     /// Per-tensor byte threshold loaded from env variable
     /// `VLLM_MSGPACK_ZERO_COPY_THRESHOLD` when this inner client is created.
     msgpack_zero_copy_threshold: usize,
@@ -71,6 +75,7 @@ impl ClientInner {
         input_send: RouterSendHalf,
         handle: Handle,
         model_name: String,
+        client_index: u32,
         engine_stats_enabled: bool,
         engines: &[ConnectedEngine],
     ) -> Self {
@@ -88,6 +93,8 @@ impl ClientInner {
             input_send,
             handle,
             model_name,
+            engine_ids: engines.iter().map(|engine| engine.engine_id.clone()).collect(),
+            client_index,
             msgpack_zero_copy_threshold: msgpack_zero_copy_threshold(),
             engine_stats_enabled,
             scheduler_stats_recorder,
@@ -251,6 +258,76 @@ impl ClientInner {
     /// the client is healthy and changes permanently to `false` on failure.
     pub fn subscribe_health(&self) -> watch::Receiver<bool> {
         self.health_tx.subscribe()
+    }
+
+    /// Call a typed utility method on every engine. See
+    /// [`crate::EngineCoreClient::call_utility`].
+    pub async fn call_utility<T, A>(self: &Arc<Self>, method: &str, args: A) -> Result<Vec<T>>
+    where
+        T: serde::de::DeserializeOwned,
+        A: serde::Serialize + std::fmt::Debug,
+    {
+        trace!(
+            method,
+            client_index = self.client_index,
+            engine_count = self.engine_ids.len(),
+            "sending utility request"
+        );
+
+        let mut call_ids = Vec::with_capacity(self.engine_ids.len());
+        let mut calls = Vec::with_capacity(self.engine_ids.len());
+        let prepared = self.engine_ids.iter().try_for_each(|engine_id| {
+            let (call_id, rx) = self.allocate_and_register_utility_call()?;
+            call_ids.push(call_id);
+            let request = EngineCoreUtilityRequest::new(self.client_index, call_id, method, &args)?;
+            let payload = Bytes::from(encode_msgpack(&request)?);
+            calls.push((engine_id.clone(), call_id, rx, payload));
+            Ok(())
+        });
+        if let Err(error) = prepared {
+            self.unregister_utility_calls(call_ids);
+            return Err(error);
+        }
+
+        // The engines execute a sent request whatever happens to the caller,
+        // so the call runs to completion in a task of its own on this client's
+        // runtime, and dropping this future only stops waiting for it.
+        let inner = self.clone();
+        let method_name = method.to_string();
+        let call = self.handle.spawn(async move {
+            let outputs = join_all(calls.into_iter().map(|(engine_id, call_id, rx, payload)| {
+                let mut input_send = inner.input_send.clone();
+                let method_name = &method_name;
+                async move {
+                    transport::send_message(
+                        &mut input_send,
+                        &engine_id,
+                        EngineCoreRequestType::Utility.to_frame(),
+                        payload,
+                        Vec::new(),
+                    )
+                    .await?;
+                    rx.await.map_err(|_| Error::UtilityCallClosed {
+                        method: method_name.clone(),
+                        call_id,
+                    })?
+                }
+            }))
+            .await;
+            // A request that failed to send leaves its waiter without a reply.
+            inner.unregister_utility_calls(call_ids);
+            outputs
+        });
+        let outputs = match call.await {
+            Ok(outputs) => outputs,
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            Err(_) => {
+                return Err(client_closed!(
+                    "engine-core client shut down during utility call `{method}`"
+                ));
+            }
+        };
+        outputs.into_iter().map(|output| output?.into_typed_result(method)).collect()
     }
 
     /// Resolve one utility output to the waiting caller. Returns `true` if a
@@ -562,6 +639,7 @@ mod tests {
             send,
             Handle::current(),
             "test-model".to_string(),
+            0,
             true,
             &[ConnectedEngine {
                 engine_id: EngineId::from(b"engine-0"),
