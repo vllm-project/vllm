@@ -210,36 +210,6 @@ def test_longer_corpus_match_wins_over_local():
     assert drafts[0].tolist() == [70, 71, 72]
 
 
-def test_seeded_requests_skip_the_corpus():
-    """Seeded sampled requests must not depend on other requests' outputs;
-    seeded greedy requests keep the corpus."""
-    k, depth, max_reqs, max_len = 5, 8, 2, 128
-    spec, rs = _make(k, depth, max_reqs, max_len, corpus_tokens=1024)
-    _set(rs, 0, [1, 2, 3], [7, 8, 9, 10, 11, 12, 13, 14])
-    _finish(spec, rs, {"done": 0})
-    _set(rs, 1, [50, 51], [7, 8, 9])
-    seeds_set = np.zeros(max_reqs, dtype=bool)
-    temperature = np.ones(max_reqs, dtype=np.float32)
-    spec.set_sampling_states(
-        SimpleNamespace(
-            seeds_set=seeds_set,
-            temperature=SimpleNamespace(np=temperature),
-            any_explicit_seed=lambda idx: bool(seeds_set[idx].any()),
-        )
-    )
-    _, num_valid = _propose(spec, rs, [1])
-    assert num_valid[0] == 5
-    assert spec.seeded_requests(np.array([1])) is None
-    seeds_set[1] = True
-    _, num_valid = _propose(spec, rs, [1])
-    assert num_valid[0] == 0
-    assert spec.seeded_requests(np.array([0, 1])).tolist() == [False, True]
-    temperature[1] = 0.0
-    _, num_valid = _propose(spec, rs, [1])
-    assert num_valid[0] == 5
-    assert spec.seeded_requests(np.array([1])) is None
-
-
 def test_draft_stops_at_document_end():
     k, depth, max_reqs, max_len = 6, 8, 2, 128
     spec, rs = _make(k, depth, max_reqs, max_len, corpus_tokens=1024)

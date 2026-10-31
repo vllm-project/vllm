@@ -536,9 +536,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         self.vllm_config.watermark_config
                     ),
                 )
-            set_sampling_states = getattr(self.speculator, "set_sampling_states", None)
-            if set_sampling_states is not None:
-                set_sampling_states(self.sampler.sampling_states)
             self.prompt_logprobs_worker = PromptLogprobsWorker(
                 self.max_num_reqs,
                 self.device,
@@ -733,11 +730,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             additional_attn_cg_support=additional_attn_cg_support,
             copy_admitted_drafts_to_host=self.batch_sharder is not None,
         )
-        if self.adaptive_verification is not None:
-            # Requests whose drafts must all be verified to stay reproducible.
-            self.adaptive_verification.pinned_requests = getattr(
-                self.speculator, "seeded_requests", None
-            )
 
         self.block_tables = BlockTables(
             block_sizes=block_sizes,

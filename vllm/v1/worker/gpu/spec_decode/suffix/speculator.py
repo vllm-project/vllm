@@ -24,7 +24,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-import numpy as np
 import torch
 
 from vllm.config import VllmConfig
@@ -39,7 +38,6 @@ if TYPE_CHECKING:
 
     from vllm.config.compilation import CUDAGraphMode
     from vllm.v1.worker.gpu.dp_utils import DPSyncState
-    from vllm.v1.worker.gpu.sample.states import SamplingStates
     from vllm.v1.worker.gpu.states import RequestState
 
 logger = init_logger(__name__)
@@ -273,7 +271,6 @@ def _suffix_finalize_kernel(
     last_bucket_ptr,  # *int32  [max_num_reqs]  (output)
     last_valid_ptr,  # *int32  [max_num_reqs]  (output)
     conf_ptr,  # *fp32  [B, K]  (output)
-    seeded_ptr,  # *bool  [B]  seeded request sampled at temperature > 0
     HAS_CORPUS: tl.constexpr,
     ADAPTIVE: tl.constexpr,
     HASH_MUL: tl.constexpr,
@@ -323,11 +320,7 @@ def _suffix_finalize_kernel(
             K_PO2,
         )
         # The longer match wins; ties go to the request's own history.
-        # Corpus drafts change as other requests finish, and the rejection
-        # sampler's draws depend on the drafts, so seeded sampled requests
-        # draft only from their own history to stay reproducible.
-        seeded = tl.load(seeded_ptr + b).to(tl.int32)
-        use_corpus = (g_len > l_len) & (seeded == 0)
+        use_corpus = g_len > l_len
         draft = tl.where(use_corpus, g_draft, draft)
         draft_ok = tl.where(use_corpus, k_iota < g_n, draft_ok)
         match_len = tl.where(use_corpus, g_len, l_len)
@@ -606,26 +599,6 @@ class SuffixSpeculator(BaseSpeculator):
         # Slots reassigned since the last propose; their stats bookkeeping
         # still belongs to the previous request.
         self.new_slots: list[int] = []
-        self.sampling_states: SamplingStates | None = None
-        self.not_seeded = torch.zeros(
-            self.max_num_reqs, dtype=torch.bool, device=device
-        )
-
-    def set_sampling_states(self, sampling_states: SamplingStates) -> None:
-        self.sampling_states = sampling_states
-
-    def seeded_requests(self, req_indices: np.ndarray) -> np.ndarray | None:
-        """Mask of requests with an explicit seed that sample (temperature >
-        0), or None if there are none. Their drafts depend only on their own
-        history, so verifying all of their slots keeps them reproducible.
-        Greedy outputs don't depend on the drafts, so they keep the corpus."""
-        states = self.sampling_states
-        if states is None or not states.any_explicit_seed(req_indices):
-            return None
-        seeded = states.seeds_set[req_indices] & (
-            states.temperature.np[req_indices] != 0.0
-        )
-        return seeded if seeded.any() else None
 
     def add_request(self, req_index: int) -> None:
         if self.enable_adaptive_verification:
@@ -734,11 +707,6 @@ class SuffixSpeculator(BaseSpeculator):
         total_len = self.req_states.total_len.gpu
         idx_mapping = input_batch.idx_mapping
         k_po2 = max(1, triton.next_power_of_2(self.num_speculative_steps))
-        seeded = self.not_seeded
-        if self.has_corpus:
-            mask = self.seeded_requests(input_batch.idx_mapping_np)
-            if mask is not None:
-                seeded = async_tensor_h2d(mask, self.device, torch.bool)
 
         if self.enable_adaptive_verification:
             if self.new_slots:
@@ -793,7 +761,6 @@ class SuffixSpeculator(BaseSpeculator):
             self.last_bucket,
             self.last_valid,
             self.draft_token_confidence_probs,
-            seeded,
             HAS_CORPUS=self.has_corpus,
             ADAPTIVE=self.enable_adaptive_verification,
             HASH_MUL=_HASH_MUL,

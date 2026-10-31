@@ -43,8 +43,6 @@ On Model Runner V2, `method: "suffix"` runs on the GPU, works with async schedul
 
 The longer match wins. The draft always has `num_speculative_tokens` tokens; slots without a match are filled with the last sampled token, and `suffix_decoding_max_spec_factor` and `suffix_decoding_min_token_prob` are not used. Without adaptive verification (below), Model Runner V2 verifies every slot, so keep `num_speculative_tokens` moderate (the default is `8`).
 
-Requests with an explicit `seed` that sample (`temperature > 0`) draft only from their own history, and adaptive verification verifies all of their draft slots: with sampling, the drafts and the number of verified slots affect which tokens are drawn, so this keeps their outputs independent of other requests. Greedy requests keep using the corpus.
-
 !!! warning "The corpus is shared"
     Like the global suffix tree on V1, the corpus holds responses from all requests, whatever their `cache_salt` or LoRA adapter, and any request can draft from it. Drafts never change the output distribution, but how many are accepted shows in decode speed. Where requests must not influence each other, set `suffix_decoding_corpus_tokens: 0`.
 

@@ -185,41 +185,6 @@ def test_budget_stops_where_marginal_drafts_stop_paying_for_themselves():
     assert num_non_draft_tokens == {"low": 1, "high": 1}
 
 
-def test_pinned_requests_keep_all_their_drafts():
-    # Same costs as above, where only one draft is worth verifying; a pinned
-    # request (e.g. seeded, so its output must not depend on the batch) keeps
-    # both of its drafts and the rest of the budget is chosen around them.
-    manager = make_manager(
-        np.array([[0.1, 0.1], [0.9, 0.9]], dtype=np.float32),
-        np.array([1.0, 1.0, 1.0, 1.0, 100.0, 100.0, 100.0]),
-    )
-    manager.pinned_requests = lambda slots: slots == 0
-
-    manager.get_num_tokens(
-        {"low": 3, "high": 3},
-        {"low": [1, 2], "high": [3, 4]},
-    )
-    assert manager._batch_budget is not None
-    _, _, draft_budget = manager._batch_budget
-
-    assert draft_budget == 4
-    assert manager._pinned_req_ids == {"low"}
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_pinned_rows_are_admitted_first():
-    capacities = torch.tensor([2, 2], dtype=torch.int32, device="cuda")
-    assign_draft_token_budget(
-        torch.tensor([[0.1, 0.1], [0.9, 0.9]], device="cuda"),
-        torch.tensor([0, 1], device="cuda"),
-        capacities,
-        3,
-        torch.tensor([True, False], device="cuda"),
-        torch.empty(4, dtype=torch.int32, device="cuda"),
-    )
-    assert capacities.tolist() == [2, 1]
-
-
 def test_profiled_batches_seed_cost_curves_via_consumer(monkeypatch):
     manager = AdaptiveVerificationManager.__new__(AdaptiveVerificationManager)
     manager.req_states = SimpleNamespace(max_num_batched_tokens=4096, max_num_reqs=64)
@@ -374,14 +339,13 @@ def test_draft_budget_kernel_matches_global_topk(num_steps, num_reqs):
     )
     scheduled[0] = num_steps
     survival = torch.empty(max_num_reqs * num_steps, dtype=torch.int32, device="cuda")
-    pinned = torch.zeros(num_reqs, dtype=torch.bool, device="cuda")
     num_scheduled = int(scheduled.sum())
     # The caller only invokes the kernel when the budget binds.
     budgets = {1, num_scheduled // 2, num_scheduled - 1}
     for draft_budget in sorted(b for b in budgets if 0 < b < num_scheduled):
         capacities = scheduled.clone()
         assign_draft_token_budget(
-            confidence_probs, idx_mapping, capacities, draft_budget, pinned, survival
+            confidence_probs, idx_mapping, capacities, draft_budget, survival
         )
         expected = global_topk_budget(
             confidence_probs, idx_mapping, scheduled, draft_budget
@@ -397,8 +361,5 @@ def test_draft_budget_kernel_admits_exact_budget_on_ties():
     idx_mapping = torch.arange(num_reqs, device="cuda")
     capacities = torch.full((num_reqs,), num_steps, dtype=torch.int32, device="cuda")
     survival = torch.empty(num_reqs * num_steps, dtype=torch.int32, device="cuda")
-    pinned = torch.zeros(num_reqs, dtype=torch.bool, device="cuda")
-    assign_draft_token_budget(
-        confidence_probs, idx_mapping, capacities, 800, pinned, survival
-    )
+    assign_draft_token_budget(confidence_probs, idx_mapping, capacities, 800, survival)
     assert capacities.tolist() == [3] * 266 + [2] + [0] * 33
