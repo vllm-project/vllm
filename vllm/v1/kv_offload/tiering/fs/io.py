@@ -96,7 +96,9 @@ def _store_block(
 ) -> bool:
     """Write to a temp file then atomically replace the target.
 
-    Returns False, publishing nothing, if the target already exists.
+    Returns False, writing nothing, if the target already exists. A block
+    another writer publishes during the rename still returns True: its bytes
+    were written, so it counts for bandwidth accounting.
     """
     # Check if block already exists to avoid redundant writes
     if os.path.exists(dest_path):
@@ -133,7 +135,6 @@ def _store_block(
             # place holds this block and the store is done.
             with contextlib.suppress(OSError):
                 os.remove(tmp_path)
-            return False
         return True
     except Exception:
         try:
@@ -186,12 +187,12 @@ def batch_store_block(
     """Store a batch of KV blocks from a shared buffer to disk in one call.
 
     Each block buffer[offsets[i] : offsets[i]+block_size] is written atomically
-    to paths[i] via a temp-file rename. Blocks whose file already exists, or
-    is published by another writer during the call, are skipped. Raises on
-    first error.
+    to paths[i] via a temp-file rename. Blocks whose file already exists are
+    skipped. Raises on first error.
 
     Returns:
-        The number of blocks written.
+        The number of blocks transferred, including blocks another writer
+        published during the call (written, then dropped).
 
     """
     _validate_offsets(view, offsets, block_size)

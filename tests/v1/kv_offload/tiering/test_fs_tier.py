@@ -272,7 +272,8 @@ def test_store_accepts_block_published_by_another_writer(fs_tier, monkeypatch):
     results = drain(tier)
     assert len(results) == 1
     assert results[0].success
-    assert results[0].transfer_bytes == 0
+    # The bytes were written before the rename lost, so they count.
+    assert results[0].transfer_bytes == tier._block_size
     assert os.listdir(os.path.dirname(dest)) == [os.path.basename(dest)]
     with open(dest, "rb") as f:
         assert f.read() == published

@@ -78,8 +78,9 @@ inline int _store_block(const char* tmp_path, const char* dest_path,
     // Another writer published this block after the access() above; some
     // shared filesystems fail rename(2) with EEXIST instead of replacing.
     // File names are content hashes, so the file already in place holds this
-    // block and the store is done.
-    return err == EEXIST ? kAlreadyPresent : err;
+    // block and the store is done. The bytes were written, so for bandwidth
+    // accounting the block still counts as transferred.
+    return err == EEXIST ? 0 : err;
   }
 
   return 0;
@@ -207,7 +208,8 @@ static PyObject* batch_lookup(PyObject* /*self*/, PyObject* args) {
 /// @param use_o_direct bool – whether to open files with O_DIRECT
 ///                     (default True). Ignored where O_DIRECT is unsupported
 ///                     by the platform.
-/// @return int – number of blocks written; blocks already on disk are skipped.
+/// @return int – number of blocks transferred; blocks already on disk at the
+///                pre-check are skipped.
 /// @note Releases the GIL for the entire batch. Raises on first error.
 static PyObject* batch_store_block(PyObject* /*self*/, PyObject* args) {
   PyObject* tmp_paths_obj = nullptr;
@@ -362,7 +364,7 @@ static PyMethodDef fs_io_C_methods[] = {
      "                  use_o_direct: bool = True) -> int\n"
      "\n"
      "Store a batch of blocks, each from its own buffer, to disk. Returns the "
-     "number written; blocks already on disk are skipped. Raises on first "
+     "number transferred; blocks already on disk are skipped. Raises on first "
      "error."},
     {"batch_load_block", batch_load_block, METH_VARARGS,
      "batch_load_block(source_paths: list[str],\n"
