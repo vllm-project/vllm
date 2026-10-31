@@ -131,7 +131,7 @@ pub struct CompletionRequest {
     pub stream_interval: Option<NonZeroU32>,
 
     /// Length penalty for beam search
-    pub length_penalty: Option<f32>,
+    pub length_penalty: Option<f64>,
 
     /// Specific token IDs to use as stop conditions
     pub stop_token_ids: Option<Vec<u32>>,

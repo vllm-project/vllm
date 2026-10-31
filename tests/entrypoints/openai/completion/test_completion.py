@@ -661,6 +661,28 @@ async def test_batch_completions(client: openai.AsyncOpenAI, model_name: str):
 
 
 @pytest.mark.asyncio
+async def test_beam_search_completion(client: openai.AsyncOpenAI):
+    """Beam search returns `n` distinct beams; usage counts the prompt once."""
+    completion = await client.completions.create(
+        model=MODEL_NAME,
+        prompt="The capital of France is",
+        n=3,
+        max_tokens=8,
+        temperature=0.0,
+        extra_body={"use_beam_search": True, "return_token_ids": True},
+    )
+    choices = completion.model_dump()["choices"]
+    assert [choice["index"] for choice in choices] == [0, 1, 2]
+    beams = [tuple(choice["token_ids"]) for choice in choices]
+    assert len(set(beams)) == 3
+
+    usage = completion.usage
+    assert usage.prompt_tokens == len(choices[0]["prompt_token_ids"])
+    assert usage.completion_tokens == sum(map(len, beams))
+    assert usage.total_tokens == usage.prompt_tokens + usage.completion_tokens
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
     [MODEL_NAME],

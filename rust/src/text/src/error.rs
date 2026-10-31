@@ -63,6 +63,10 @@ pub enum Error {
     TruncateUnsupportedWithMultimodal,
     #[error("invalid repetition detection params: {message}")]
     InvalidRepetitionDetection { message: String },
+    #[error("`{param}` is not supported with beam search.")]
+    UnsupportedWithBeamSearch { param: &'static str },
+    #[error("beam_width must be at most {max}, got {beam_width}.")]
+    BeamWidthTooLarge { beam_width: u32, max: u32 },
     #[error("text request stream `{request_id}` closed before terminal output")]
     StreamClosedBeforeTerminalOutput { request_id: String },
     #[error(transparent)]
@@ -92,6 +96,8 @@ impl Error {
             | Self::InvalidTruncatePromptTokens { .. }
             | Self::TruncateUnsupportedWithMultimodal
             | Self::InvalidRepetitionDetection { .. }
+            | Self::UnsupportedWithBeamSearch { .. }
+            | Self::BeamWidthTooLarge { .. }
             // An empty tokenized prompt detected later, at request prepare
             // time, surfaces through the transparent Llm wrapper.
             | Self::Llm(LlmError::EmptyPromptTokenIds { .. })
@@ -108,6 +114,7 @@ impl Error {
     pub fn param(&self) -> Option<&'static str> {
         match self {
             Self::PromptTooLong { .. } | Self::PromptFillsContext { .. } => Some("input_tokens"),
+            Self::UnsupportedWithBeamSearch { param } => Some(param),
             _ => None,
         }
     }

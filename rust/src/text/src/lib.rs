@@ -12,6 +12,7 @@ use std::mem::take;
 pub use backend::{
     DynTextBackend, GenerationConfigMode, SamplingHints, SamplingLimits, TextBackend,
 };
+pub use beam_search::BeamSearchParams;
 pub use error::{Error, LogprobsError, Result, SamplingParamsError, TokenIdsError};
 use futures::Stream;
 pub use lower::{
@@ -31,6 +32,7 @@ use vllm_llm::{GenerateOutputStream, Llm};
 use vllm_tokenizer::DynTokenizer;
 
 pub mod backend;
+mod beam_search;
 mod error;
 mod lower;
 pub mod output;
