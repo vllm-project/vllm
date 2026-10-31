@@ -69,8 +69,6 @@ def test_mla_absorbed_projection_applies_updated_adapters(
     default_vllm_config, dist_init, is_query, num_tokens
 ):
     """Cached MLA projections must track adapters, including a decode prefix."""
-    from vllm.model_executor.layers.attention.mla_attention import MLAAttention
-
     torch.manual_seed(53)
     heads, latent, key_dim, value_dim, rank = 2, 32, 16, 16, 8
     config = LoRAConfig(max_loras=2, max_lora_rank=rank, lora_dtype=torch.bfloat16)
@@ -87,29 +85,20 @@ def test_mla_absorbed_projection_applies_updated_adapters(
         layer.set_mapping(punica)
         ids = [2, 0, 1, 2, 1, 0, 2]
         punica.update_metadata(LoRAMapping(ids, [1], is_prefill=True), [1, 2], 3, 128)
-        mla = MLAAttention.__new__(MLAAttention)
-        torch.nn.Module.__init__(mla)
-        mla.kv_b_proj = layer
-        mla.num_heads, mla.kv_lora_rank = heads, latent
-        mla.qk_nope_head_dim, mla.v_head_dim = key_dim, value_dim
-        mla.dcp_q_replicate = False
-        mla.is_aiter_triton_fp4_bmm_enabled = False
-        mla.is_aiter_triton_fp8_bmm_enabled = False
-        mla.is_amx_bmm_enabled = False
         w = base.weight.view(heads, key_dim + value_dim, latent)
-        mla.W_UV = w[:, key_dim:].transpose(1, 2)
         x = torch.randn(
             heads, num_tokens, key_dim if is_query else latent, dtype=torch.bfloat16
         )
-        baseline = torch.bmm(x, w[:, :key_dim] if is_query else mla.W_UV)
+        baseline = torch.bmm(
+            x, w[:, :key_dim] if is_query else w[:, key_dim:].transpose(1, 2)
+        )
         active_ids = torch.tensor(ids[:num_tokens])
 
         def project():
             actual = baseline.transpose(0, 1).clone()
-            if is_query:
-                mla._apply_lora_projection(x, actual, is_query=True)
-            else:
-                mla._v_up_proj(x.transpose(0, 1), actual)
+            layer.apply_mla_absorbed_kv_b_lora(
+                x, actual, qk_nope_head_dim=key_dim, is_query=is_query
+            )
             return actual
 
         project()
@@ -148,14 +137,16 @@ def test_mla_absorbed_projection_applies_updated_adapters(
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA LoRA projection")
 def test_indexer_gate_applies_lora_with_fp32_base(default_vllm_config, dist_init):
-    """A gate adapter must reach the indexer without rounding its base to BF16."""
-    from vllm.models.glm5next.common import attention
+    """Indexer ``k`` and gate adapters must apply without rounding the gate's
+    base to BF16."""
+    from vllm.lora.layers import Glm5NextIndexerWkWeightsWithLoRA
+    from vllm.models.glm5next.common.attention import Glm5NextIndexerWkWeightsLinear
 
     torch.manual_seed(53)
     tokens, columns, heads, dim, rank = 7, 32, 32, 128, 8
     config = LoRAConfig(max_loras=2, max_lora_rank=rank, lora_dtype=torch.bfloat16)
     with torch.device("cuda"), torch.inference_mode():
-        base = MergedColumnParallelLinear(
+        base = Glm5NextIndexerWkWeightsLinear(
             columns,
             [dim, heads],
             bias=False,
@@ -163,55 +154,44 @@ def test_indexer_gate_applies_lora_with_fp32_base(default_vllm_config, dist_init
             params_dtype=torch.bfloat16,
         )
         base.weight.copy_(torch.randn_like(base.weight) / columns**0.5)
+        x = torch.randn(tokens, columns, dtype=torch.bfloat16)
+        base_k, base_gate = base(x)
+        assert base_gate.dtype == torch.float32
+        torch.testing.assert_close(
+            base_gate, F.linear(x.float(), base.weight[dim:].float()), rtol=0, atol=0
+        )
+
         layer = from_layer(base, 2, config, ["wk", "weights_proj"])
+        assert isinstance(layer, Glm5NextIndexerWkWeightsWithLoRA)
         punica = get_punica_wrapper(
             tokens, tokens, base.weight.device, lora_config=config
         )
         layer.set_mapping(punica)
         ids = [2, 0, 1, 2, 1, 0, 2]
         punica.update_metadata(LoRAMapping(ids, [1], is_prefill=True), [1, 2], 3, 128)
-        indexer = attention.Indexer.__new__(attention.Indexer)
-        torch.nn.Module.__init__(indexer)
-        indexer.wk_weights_proj = layer
-        indexer.wq_b = lambda x: (x.new_zeros((tokens, heads * dim)), None)
-        indexer.n_head, indexer.head_dim, indexer.rope_dim = heads, dim, 0
-        indexer.quant_block_size, indexer.scale_fmt = 128, "ue8m0"
-        indexer.softmax_scale, indexer.index_kpool = dim**-0.5, 4
-        indexer._wp_fp32 = None
-        indexer.k_norm = torch.nn.LayerNorm(dim)
-        indexer.index_kpool_compress_gate = torch.nn.Parameter(
-            torch.zeros(dim, columns, dtype=torch.bfloat16)
-        )
-        indexer.index_kpool_compress_ape = torch.nn.Parameter(torch.zeros(4, dim))
-        indexer.indexer_op = lambda hidden, q, k, weights, **kwargs: weights
-        x = torch.randn(tokens, columns, dtype=torch.bfloat16)
-        baseline = F.linear(x.float(), base.weight[dim:].float())
+        inactive = torch.tensor(ids) == 0
         for _ in range(2):
-            expected = baseline.clone()
+            expected_k, expected_gate = base_k.clone(), base_gate.clone()
             for slot in range(2):
-                a = torch.randn(rank, columns, dtype=torch.bfloat16) / 8
-                b = torch.randn(heads, rank, dtype=torch.bfloat16) / 8
-                layer.set_lora(slot, [None, a], [None, b])
-                delta = F.linear(F.linear(x, a), b).float()
+                a = [
+                    torch.randn(rank, columns, dtype=torch.bfloat16) / 8
+                    for _ in range(2)
+                ]
+                b = [
+                    torch.randn(size, rank, dtype=torch.bfloat16) / 8
+                    for size in (dim, heads)
+                ]
+                layer.set_lora(slot, a, b)
                 mask = torch.tensor(ids) == slot + 1
-                expected[mask] += delta[mask]
-            with (
-                patch.object(attention, "_fused_indexer_k_norm", lambda k, *args: k),
-                patch.object(
-                    attention,
-                    "fwht128_quant_fp8",
-                    lambda q: (q, q.new_ones((tokens * heads, 1))),
-                ),
-                patch.object(
-                    attention, "_fused_indexer_weight_scale", lambda w, *args: w
-                ),
-            ):
-                actual = indexer(x, x, None, None)
-            assert actual.dtype == torch.float32
-            torch.testing.assert_close(actual, expected, rtol=0.02, atol=0.002)
-            inactive = torch.tensor(ids) == 0
+                expected_k[mask] += F.linear(F.linear(x, a[0]), b[0])[mask]
+                expected_gate[mask] += F.linear(F.linear(x, a[1]), b[1]).float()[mask]
+            k, gate = layer(x)
+            assert gate.dtype == torch.float32
+            torch.testing.assert_close(k, expected_k, rtol=0.02, atol=0.02)
+            torch.testing.assert_close(gate, expected_gate, rtol=0.02, atol=0.002)
+            torch.testing.assert_close(k[inactive], base_k[inactive], rtol=0, atol=0)
             torch.testing.assert_close(
-                actual[inactive], baseline[inactive], rtol=0, atol=0
+                gate[inactive], base_gate[inactive], rtol=0, atol=0
             )
 
 

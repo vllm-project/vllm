@@ -1407,32 +1407,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self, x: torch.Tensor, out: torch.Tensor, *, is_query: bool
     ) -> None:
         """Add kv_b_proj adapters to the absorbed, head-major MLA projection."""
-        from vllm.lora.layers.column_parallel_linear import ColumnParallelLinearWithLoRA
-
-        layer = self.kv_b_proj
-        if not isinstance(layer, ColumnParallelLinearWithLoRA):
-            return
-        lora_a = layer.lora_a_stacked[0]
-        lora_b = layer.lora_b_stacked[0]
-        if layer.lora_config.fully_sharded_loras and layer.tp_size > 1:
-            lora_a = get_tp_group().all_gather(lora_a, dim=2)
-        if is_query and self.dcp_q_replicate:
-            lora_b = get_dcp_group().all_gather(lora_b, dim=2)
-        # MQA may consume only the decode prefix of the mapped batch.
-        indices = layer.punica_wrapper.token_lora_indices[: x.shape[1]]
-        for slot in range(lora_a.shape[0]):
-            a = lora_a[slot, 0]
-            b = lora_b[slot, 0].view(
-                x.shape[0], self.qk_nope_head_dim + self.v_head_dim, -1
-            )
-            if is_query:
-                delta = torch.matmul(x, b[:, : self.qk_nope_head_dim]) @ a
-            else:
-                delta = torch.matmul(
-                    x @ a.T, b[:, self.qk_nope_head_dim :].transpose(1, 2)
-                )
-            out.add_(
-                torch.where((indices == slot)[:, None, None], delta.transpose(0, 1), 0)
+        apply_lora = getattr(self.kv_b_proj, "apply_mla_absorbed_kv_b_lora", None)
+        if apply_lora is not None:
+            apply_lora(
+                x,
+                out,
+                qk_nope_head_dim=self.qk_nope_head_dim,
+                is_query=is_query,
+                gather_dcp=is_query and self.dcp_q_replicate,
             )
 
     def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):

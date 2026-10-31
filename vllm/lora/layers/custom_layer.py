@@ -80,3 +80,30 @@ class Step5SparseIndexerWWithLoRA(ColumnParallelLinearWithLoRA):
             type(source_layer).__name__ == "Step5SparseIndexerIndexTPLinear"
             and not lora_config.fully_sharded_loras
         )
+
+
+class Glm5NextIndexerWkWeightsWithLoRA(MergedColumnParallelLinearWithLoRA):
+    """Adds the adapter delta to the GLM-5.3-Flash indexer's ``k`` and FP32
+    head gate."""
+
+    def forward(self, input_):
+        k, weights = self.base_layer(input_)
+        head_dim = k.shape[1]
+        delta = self._apply_lora_to_output(
+            input_, k.new_zeros((k.shape[0], head_dim + weights.shape[1]))
+        )
+        return k + delta[:, :head_dim], weights + delta[:, head_dim:].float()
+
+    @classmethod
+    def can_replace_layer(
+        cls,
+        source_layer,
+        lora_config,
+        packed_modules_list,
+        model_config=None,
+        decorate: bool = True,
+    ) -> bool:
+        return (
+            type(source_layer).__name__ == "Glm5NextIndexerWkWeightsLinear"
+            and len(packed_modules_list) == 2
+        )
