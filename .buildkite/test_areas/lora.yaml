@@ -9,6 +9,7 @@ steps:
   timeout_in_minutes: 40
   source_file_dependencies:
   - vllm/lora
+  - vllm/model_executor/layers/mamba/mamba_mixer.py
   - tests/lora
   commands:
     # Which tests share a shard varies, and forking an engine is unsafe once an
