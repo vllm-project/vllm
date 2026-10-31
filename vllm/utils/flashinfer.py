@@ -1186,11 +1186,6 @@ def flashinfer_scaled_fp4_mm(
     )
 
 
-def _bmm_fp8_backend() -> str:
-    # Autotuned "auto" can switch backends between M buckets and change row results.
-    return "cutlass" if envs.VLLM_BATCH_INVARIANT else "auto"
-
-
 def flashinfer_scaled_fp8_mm(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -1213,7 +1208,8 @@ def flashinfer_scaled_fp8_mm(
         scale_a,
         scale_b,
         out_dtype,
-        _bmm_fp8_backend(),
+        # Autotuned "auto" can switch backends between M buckets.
+        "cutlass" if envs.VLLM_BATCH_INVARIANT else "auto",
     ).view(a.shape[0], b.shape[1])
 
     if bias is not None:
