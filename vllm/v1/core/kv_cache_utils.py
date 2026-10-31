@@ -664,9 +664,22 @@ def generate_block_hash_extra_keys(
     prompt_embeds_keys = _gen_prompt_embeds_extra_hash_keys(
         request, start_token_idx, end_token_idx
     )
+    # Blocks of requests that skip routed experts have no stored routing, so
+    # they must never serve a request that records it.
+    routing_keys: list[tuple[str, bool]] = (
+        [("routed_experts", False)]
+        if start_token_idx == 0
+        and request.sampling_params is not None
+        and not request.sampling_params.return_routed_experts
+        else []
+    )
 
     extra_keys: list[Any] = (
-        lora_extra_keys + mm_extra_keys + cache_salt_keys + prompt_embeds_keys
+        lora_extra_keys
+        + mm_extra_keys
+        + cache_salt_keys
+        + prompt_embeds_keys
+        + routing_keys
     )
 
     if not extra_keys:

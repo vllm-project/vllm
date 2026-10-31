@@ -212,6 +212,10 @@ pub struct CompletionRequest {
     /// tokens.
     pub return_weight_versions: Option<bool>,
 
+    /// When the server records routed experts, `false` skips this request:
+    /// its routing is neither recorded nor returned.
+    pub return_routed_experts: Option<bool>,
+
     /// Salt for prefix cache isolation in multi-user environments
     #[validate(length(min = 1))]
     pub cache_salt: Option<String>,

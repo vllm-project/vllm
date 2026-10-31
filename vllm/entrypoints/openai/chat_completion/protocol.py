@@ -136,7 +136,8 @@ class ChatCompletionResponseChoice(OpenAIBaseModel):
     # Decode:
     #   np.load(io.BytesIO(base64.b64decode(s)))
     # ``None`` if (a) the request was aborted before any forward pass,
-    # or (b) ``enable_return_routed_experts`` is off server-side.
+    # (b) ``enable_return_routed_experts`` is off server-side, or (c) the
+    # request set ``return_routed_experts=False``.
     routed_experts: str | None = None
     # Contiguous weight version spans over output-token indexes.
     weight_versions: list[WeightVersionSpan] | None = None
@@ -458,6 +459,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
         default=0,
         ge=0,
         description="Skip the first N prompt tokens from returned routed-expert data.",
+    )
+    return_routed_experts: bool = Field(
+        default=True,
+        description=(
+            "If false, do not record or return routed experts for this request "
+            "when the server records them."
+        ),
     )
     return_token_offsets: bool | None = Field(
         default=False,
@@ -822,6 +830,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             skip_clone=True,  # Created fresh per request, safe to skip clone
             repetition_detection=self.repetition_detection,
             routed_experts_prompt_start=self.routed_experts_prompt_start,
+            return_routed_experts=self.return_routed_experts,
         )
 
     @model_validator(mode="before")

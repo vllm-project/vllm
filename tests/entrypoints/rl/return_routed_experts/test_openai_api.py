@@ -71,3 +71,31 @@ async def test_routed_experts(server):
         assert len(routed_experts) == (
             result.usage.prompt_tokens + len(choice["token_ids"]) - 1
         )
+
+
+@pytest.mark.asyncio
+async def test_return_routed_experts_opt_out(server):
+    """An opted-out request returns no routed_experts, and its prefix-cache
+    blocks are not reused by a later request that records routing."""
+    # Several full KV blocks, so the second request would hit the prefix cache.
+    prompt = list(range(100, 180))
+    async with server.get_async_client() as client:
+        skipped = await client.completions.create(
+            model=MODEL_NAME,
+            prompt=prompt,
+            max_tokens=8,
+            temperature=0,
+            extra_body={"return_token_ids": True, "return_routed_experts": False},
+        )
+        assert skipped.model_dump()["choices"][0].get("routed_experts") is None
+
+        recorded = await client.completions.create(
+            model=MODEL_NAME,
+            prompt=prompt,
+            max_tokens=8,
+            temperature=0,
+            extra_body={"return_token_ids": True},
+        )
+        choice = recorded.model_dump()["choices"][0]
+        routed_experts = decode_routed_experts(choice["routed_experts"])
+        assert len(routed_experts) == len(prompt) + len(choice["token_ids"]) - 1

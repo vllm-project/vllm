@@ -30,6 +30,10 @@ fn default_max_tokens() -> u32 {
     16
 }
 
+fn default_return_routed_experts() -> bool {
+    true
+}
+
 ///
 /// Parameters for detecting repetitive N-gram patterns in output tokens.
 ///
@@ -162,6 +166,10 @@ pub struct EngineCoreSamplingParams {
     /// Number of prompt tokens to skip from returned routed-expert data.
     /// A value of zero returns routing data for the entire prompt.
     pub routed_experts_prompt_start: u32,
+    /// When the server records routed experts, `false` skips this request:
+    /// its routing is neither recorded nor returned.
+    #[serde(default = "default_return_routed_experts")]
+    pub return_routed_experts: bool,
     /// Number of newly generated tokens to batch into each streamed output.
     /// The first and final outputs are always emitted immediately. Engine-core
     /// ignores it; [`EngineCoreClient::call`](crate::EngineCoreClient::call)
@@ -201,6 +209,7 @@ impl EngineCoreSamplingParams {
             skip_reading_prefix_cache: None,
             extra_args: None,
             routed_experts_prompt_start: 0,
+            return_routed_experts: true,
             stream_interval: None,
         }
     }
