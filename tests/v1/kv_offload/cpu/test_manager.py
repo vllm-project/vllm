@@ -1166,6 +1166,64 @@ def test_store_threshold_does_not_hide_ready_reuse():
     assert output.evicted_keys == [head]
 
 
+@pytest.mark.parametrize("store_threshold", [2, 3])
+def test_store_threshold_does_not_count_retries_of_a_failed_offer(
+    store_threshold: int,
+):
+    """After prepare_store() returns None, the scheduler offers the same keys
+    again. A retry must not admit a key that only one request offered, nor
+    count that key's skip again."""
+    manager = make_cpu_manager(num_chunks=2, store_threshold=store_threshold)
+    pinned = to_keys([100, 101])
+    warm, cold = to_keys([1, 2])
+
+    # Other requests offer `pinned` and `warm`, so one more offer admits them.
+    for i in range(store_threshold - 1):
+        manager.prepare_store([*pinned, warm], make_req_context(f"warmup-{i}"))
+    # Fill both chunks with stores that stay in flight.
+    pin_ctx = make_req_context("pin")
+    output = manager.prepare_store(pinned, pin_ctx)
+    assert output is not None
+    assert output.keys_to_store == pinned
+    manager.get_stats()  # drop the warm-up skips
+
+    ctx = make_req_context("req")
+    assert manager.prepare_store([warm, cold], ctx) is None
+    assert manager.prepare_store([warm, cold], ctx) is None
+    # The stores complete, so both chunks become evictable.
+    manager.complete_store(pinned, pin_ctx)
+    output = manager.prepare_store([warm, cold], ctx)
+    assert output is not None
+    assert output.keys_to_store == [warm]
+    assert manager.counts is not None
+    assert manager.counts[cold] == 1
+    stats = manager.get_stats()
+    assert stats is not None
+    assert stats.reduce()[CPUOffloadingMetrics.STORES_SKIPPED] == 1
+
+
+def test_store_threshold_counts_offers_after_a_retry_succeeds():
+    """Once a retry succeeds, a later offer by the same request (for example
+    after preemption, which restarts its stores) counts as before."""
+    manager = make_cpu_manager(num_chunks=2, store_threshold=2)
+    pinned = to_keys([100, 101])
+    warm, cold = to_keys([1, 2])
+    manager.prepare_store([*pinned, warm], make_req_context("warmup"))
+    pin_ctx = make_req_context("pin")
+    assert manager.prepare_store(pinned, pin_ctx) is not None
+
+    ctx = make_req_context("req")
+    assert manager.prepare_store([warm, cold], ctx) is None
+    manager.complete_store(pinned, pin_ctx)
+    output = manager.prepare_store([warm, cold], ctx)
+    assert output is not None
+    assert output.keys_to_store == [warm]
+
+    output = manager.prepare_store([cold], ctx)
+    assert output is not None
+    assert output.keys_to_store == [cold]
+
+
 def test_evictable_cache_chunk_count(monkeypatch):
     """Verifies _num_evictable_cache_chunks is maintained correctly through the
     full store/load lifecycle, eviction, failed stores, concurrent loads,
