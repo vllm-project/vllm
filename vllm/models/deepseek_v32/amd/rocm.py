@@ -9,7 +9,10 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
-from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
+from vllm.model_executor.layers.sparse_attn_indexer import (
+    SparseAttnIndexer,
+    should_skip_indexer_scoring,
+)
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.models.deepseek_v32.attention import DeepseekV32Attention, DeepseekV32Indexer
 from vllm.models.deepseek_v32.common.kernels import fused_norm_rope, fused_q
@@ -219,6 +222,15 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             mla_k_scale = self._k_scale
 
         use_mha = attn_metadata is not None and self._use_sparse_mha(attn_metadata)
+        # The indexer K cache is still written by fused_norm_rope below.
+        skip_scoring = (
+            has_indexer
+            and use_mha
+            and bool(self._dense_mha_metadata_layer_name)
+            and should_skip_indexer_scoring(
+                attn_metadata, forward_context.cudagraph_runtime_mode
+            )
+        )
         kv_c_out = torch.empty_like(kv_c) if use_mha else None
         k_pe_out = torch.empty_like(k_pe) if use_mha else None
 
@@ -260,7 +272,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         else:
             ql_nope, q_pe = self._compute_ql_nope(q_c)
 
-        if self.indexer is not None and not self.skip_topk:
+        if self.indexer is not None and not self.skip_topk and not skip_scoring:
             index_q = self.indexer.wq_b(q_c)[0]
             index_q = index_q.view(-1, self.indexer.n_head, self.indexer.head_dim)
         else:
@@ -271,18 +283,18 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             q_pe,
             self.rotary_emb.cos_sin_cache,
             index_q,
-            self.indexer_rope_emb.cos_sin_cache if has_indexer else None,
+            self.indexer_rope_emb.cos_sin_cache if index_q is not None else None,
             ql_nope,
             self._q_scale,
             index_weights,
             indexer_softmax_scale,
             indexer_n_head_scale,
-            has_indexer=has_indexer,
+            has_indexer=index_q is not None,
             index_rope_interleave=self._index_rope_interleave,
             quantize_mqa=self._fp8_kv and not use_mha,
         )
 
-        if self.indexer is not None and not self.skip_topk:
+        if index_q is not None:
             self._run_indexer(q_c, index_q_fp8, index_weights_out)
 
         if attn_metadata is None:
