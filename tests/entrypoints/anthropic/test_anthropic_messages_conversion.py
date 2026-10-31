@@ -479,6 +479,142 @@ class TestAttributionHeaderStripping:
         assert system_msg["content"] == "You are a helpful assistant."
 
 
+@pytest.mark.usefixtures("disable_log_dedup")
+class TestUnsupportedSystemContentWarning:
+    """Unsupported (non-text) Anthropic system content blocks are dropped
+    for backward compatibility, but must not be dropped silently."""
+
+    _WARNING = "should only contain text content"
+
+    @staticmethod
+    def _tool_change_request(*extra_blocks: dict) -> AnthropicMessagesRequest:
+        return _make_request(
+            [
+                {"role": "user", "content": "Hello"},
+                {
+                    "role": "system",
+                    "content": [
+                        {"type": "text", "text": "Tools changed."},
+                        {
+                            "type": "tool_addition",
+                            "tool": {"type": "tool_reference", "name": "search"},
+                        },
+                        {
+                            "type": "tool_addition",
+                            "tool": {
+                                "type": "tool_definition",
+                                "definition": {"name": "db_query", "input_schema": {}},
+                            },
+                        },
+                        {
+                            "type": "tool_removal",
+                            "tool": {"type": "tool_reference", "name": "bash"},
+                        },
+                        *extra_blocks,
+                    ],
+                },
+            ],
+            tools=[
+                {"name": "bash", "input_schema": {}},
+                {"name": "search", "input_schema": {}, "defer_loading": True},
+            ],
+        )
+
+    @staticmethod
+    def _assert_tool_changes_applied(result) -> None:
+        assert {t.function.name: t.function.defer_loading for t in result.tools} == {
+            "search": None,
+            "db_query": None,
+        }
+
+    @pytest.mark.parametrize("merge_inline_system", [False, True])
+    def test_tool_change_blocks_do_not_warn(self, caplog, merge_inline_system):
+        """tool_addition/tool_removal are applied by _resolve_tools, not
+        ignored, so they must not trigger the unsupported-content warning."""
+        result = _convert(
+            self._tool_change_request(), merge_inline_system=merge_inline_system
+        )
+        self._assert_tool_changes_applied(result)
+        system_msgs = [m for m in result.messages if m["role"] == "system"]
+        assert [m["content"] for m in system_msgs] == ["Tools changed."]
+        assert not any(self._WARNING in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.parametrize("merge_inline_system", [False, True])
+    def test_only_ignored_block_warns_next_to_tool_changes(
+        self, caplog, merge_inline_system
+    ):
+        image = {
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/png", "data": "aGk="},
+        }
+        result = _convert(
+            self._tool_change_request(image), merge_inline_system=merge_inline_system
+        )
+        self._assert_tool_changes_applied(result)
+        warnings = [
+            r.getMessage() for r in caplog.records if self._WARNING in r.getMessage()
+        ]
+        assert len(warnings) == 1
+        assert "'image'" in warnings[0]
+
+    def test_top_level_image_block_warns_and_ignored(self, caplog):
+        """An image block in the top-level system field is ignored with a
+        warning, while text blocks are preserved."""
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            system=[
+                {"type": "text", "text": "You are a helpful assistant."},
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/jpeg",
+                        "data": "iVBORw0KGgo=",
+                    },
+                },
+            ],
+        )
+        result = _convert(request)
+        system_msg = result.messages[0]
+        assert system_msg["role"] == "system"
+        assert system_msg["content"] == "You are a helpful assistant."
+        assert any(
+            "should only contain text content" in r.message and "image" in r.message
+            for r in caplog.records
+        )
+
+    def test_inline_system_image_block_warns_and_ignored(self, caplog):
+        """An image block in an inline system message is ignored with a
+        warning instead of being silently dropped."""
+        request = _make_request(
+            [
+                {
+                    "role": "system",
+                    "content": [
+                        {"type": "text", "text": "Be concise."},
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": "aGVsbG8=",
+                            },
+                        },
+                    ],
+                },
+                {"role": "user", "content": "Hello"},
+            ],
+        )
+        result = _convert(request)
+        system_msgs = [m for m in result.messages if m["role"] == "system"]
+        assert system_msgs
+        assert all(m["content"] == "Be concise." for m in system_msgs)
+        assert any(
+            "should only contain text content" in r.message and "image" in r.message
+            for r in caplog.records
+        )
+
+
 # ======================================================================
 # Thinking block conversion (Anthropic → OpenAI)
 # ======================================================================
