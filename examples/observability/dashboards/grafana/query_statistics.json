@@ -686,7 +686,7 @@
   "templating": {
     "list": [
       {
-        "current": { "text": "Prometheus", "value": "4184fc20-68a7-483a-8d9b-7caa59c680dd" },
+        "current": {},
         "label": "datasource",
         "name": "DS_PROMETHEUS",
         "options": [],
@@ -702,6 +702,10 @@
         "multi": true,
         "name": "Deployment_id",
         "options": [],
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
         "query": {
           "qryType": 1,
           "query": "label_values(vllm:request_success_total,model_name)",
