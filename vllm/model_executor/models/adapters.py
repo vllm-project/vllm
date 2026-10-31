@@ -14,6 +14,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.models.config import VerifyAndUpdateConfig
 from vllm.transformers_utils.config import (
+    InvalidSentenceTransformersModulePath,
+    get_sentence_transformers_module_file,
     try_get_dense_modules,
 )
 from vllm.transformers_utils.repo_utils import get_hf_file_bytes
@@ -62,6 +64,8 @@ def _load_st_projector(model_config: "ModelConfig") -> nn.Module | None:
             if act_name := layer_config.get("activation_function"):
                 layers.append(get_act_fn(act_name))
         return nn.Sequential(*layers).to(dtype=model_config.head_dtype)
+    except InvalidSentenceTransformersModulePath:
+        raise
     except Exception:
         logger.exception("ST projector loading failed")
 
@@ -75,7 +79,9 @@ def _load_dense_weights(
     from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
     for filename in ["model.safetensors", "pytorch_model.bin"]:
-        file_path = f"{folder}/{filename}" if folder else filename
+        file_path = get_sentence_transformers_module_file(
+            model_config.model, folder, filename
+        )
 
         try:
             file_bytes = get_hf_file_bytes(
