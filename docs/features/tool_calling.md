@@ -85,10 +85,10 @@ For more advanced usage, including parallel tool calls and different model-speci
 
 ## Named Function Calling
 
-vLLM supports named function calling in the chat completion API by default. This should work with most structured outputs backends supported by vLLM. You are guaranteed a validly-parsable function call - not a
-high-quality one. On recent Mistral models in the official Mistral format, a call is not guaranteed; see [Mistral Models](#mistral-models-mistral).
+vLLM supports named function calling in the chat completion API when the server runs a tool parser. Start the server with both `--enable-auto-tool-choice` and `--tool-call-parser`. vLLM loads the parser named by `--tool-call-parser` only when `--enable-auto-tool-choice` is also set. Without a loaded parser, a request with a named `tool_choice` returns HTTP 400. Requests to models in the official Mistral format and to gpt-oss models are not rejected by this check.
 
-vLLM will use structured outputs to ensure the response matches the tool parameter object defined by the JSON schema in the `tools` parameter.
+The function call is constrained with structured outputs. This should work with most structured outputs backends supported by vLLM. You are guaranteed a validly-parsable function call - not a high-quality one. How far the arguments are held to the tool's parameter schema depends on the parser and on the tool's `strict` field; see [Constrained Decoding Behavior](#constrained-decoding-behavior). On recent Mistral models in the official Mistral format, a call is not guaranteed; see [Mistral Models](#mistral-models-mistral).
+
 For best results, we recommend ensuring that the expected output format / schema is specified in the prompt to ensure that the model's intended generation is aligned with the schema that it's being forced to generate by the structured outputs backend.
 
 To use a named function, you need to define the functions in the `tools` parameter of the chat completion request, and
@@ -98,9 +98,9 @@ In the Responses API, `tool_choice={"type": "function", "name": "..."}` can sele
 
 ## Required Function Calling
 
-vLLM supports the `tool_choice='required'` option in the chat completion API. Similar to the named function calling, it also uses structured outputs, so this is enabled by default and will work with any supported model. However, support for alternative decoding backends are on the [roadmap](../usage/v1_guide.md#features) for the V1 engine.
+vLLM supports the `tool_choice='required'` option in the chat completion API. Like named function calling, it uses structured outputs and needs a tool parser, with the same server flags and the same exceptions. Without a loaded parser, a request with `tool_choice='required'` returns HTTP 400.
 
-When tool_choice='required' is set, the model is guaranteed to generate one or more tool calls based on the specified tool list in the `tools` parameter. The number of tool calls depends on the user's query. The output format strictly follows the schema defined in the `tools` parameter. On recent Mistral models in the official Mistral format, a call is not guaranteed; see [Mistral Models](#mistral-models-mistral).
+When tool_choice='required' is set, the model is guaranteed to generate one or more tool calls based on the specified tool list in the `tools` parameter. The number of tool calls depends on the user's query. The output follows the schema defined in the `tools` parameter as described in [Constrained Decoding Behavior](#constrained-decoding-behavior). On recent Mistral models in the official Mistral format, a call is not guaranteed; see [Mistral Models](#mistral-models-mistral).
 
 ## None Function Calling
 
@@ -163,7 +163,7 @@ The floor never relaxes a constraint the request would already receive: tools th
 To enable this feature, you should set the following flags:
 
 * `--enable-auto-tool-choice` -- **mandatory** Auto tool choice. It tells vLLM that you want to enable the model to generate its own tool calls when it
-deems appropriate.
+deems appropriate. vLLM loads the tool parser selected by `--tool-call-parser` only when this flag is set, so [named](#named-function-calling) and [required](#required-function-calling) function calling also need it.
 * `--tool-call-parser` -- select the tool parser to use (listed below). Additional tool parsers
 will continue to be added in the future. You can also register your own tool parsers in the `--tool-parser-plugin`.
 * `--tool-parser-plugin` -- **optional** tool parser plugin used to register user defined tool parsers into vllm, the registered tool parser name can be specified in `--tool-call-parser`.
