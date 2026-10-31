@@ -143,12 +143,10 @@ def verify_events(
     assert tuple(stores) == to_key_sets(expected_stores)
 
 
-@pytest.mark.parametrize("self_describing", [False, True])
-def test_cpu_stored_event_carries_request_context(self_describing: bool):
+def test_cpu_stored_event_carries_request_context():
     manager = CPUOffloadingManager(
         num_chunks=1,
         enable_events=True,
-        self_describing_kv_events=self_describing,
     )
     req_context = make_req_context("writer")
     keys = to_keys([1])
@@ -156,7 +154,7 @@ def test_cpu_stored_event_carries_request_context(self_describing: bool):
     manager.complete_store(keys, req_context)
 
     [event] = manager.take_events()
-    assert event.req_context is (req_context if self_describing else None)
+    assert event.req_context is req_context
 
 
 def test_cpu_eviction_removed_precedes_stored():
