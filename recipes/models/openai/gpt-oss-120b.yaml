@@ -1,0 +1,300 @@
+meta:
+  title: "GPT-OSS"
+  slug: "gpt-oss"
+  provider: "OpenAI"
+  description: "OpenAI's gpt-oss family (20B / 120B) with MXFP4 MoE, attention-sinks, built-in tools via Responses API"
+  date_added: 2025-08-05
+  date_updated: 2026-09-22
+  tasks:
+    - text
+  related_recipes: []
+  hardware:
+    h100: verified
+    h200: verified
+    b200: verified
+    mi300x: verified
+    mi325x: verified
+    mi355x: verified
+    ironwood: verified
+    arc_pro_b70: verified
+
+model:
+  model_id: "openai/gpt-oss-120b"
+  min_vllm_version: "0.10.1"
+  architecture: moe
+  parameter_count: "120B"
+  active_parameters: "5.1B"
+  context_length: 131072
+  base_args: []
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "OpenAI harmony tool-call parser with automatic tool choice"
+    args:
+      - "--tool-call-parser"
+      - "openai"
+      - "--enable-auto-tool-choice"
+  spec_decoding:
+    description: "EAGLE3 speculative decoding for accelerated inference"
+    args:
+      - "--speculative-config"
+      - '{"model":"nvidia/gpt-oss-120b-Eagle3-v3","num_speculative_tokens":7,"method":"eagle3","draft_tensor_parallel_size":1}'
+
+opt_in_features:
+  - spec_decoding
+
+variants:
+  default:
+    precision: mxfp4
+    vram_minimum_gb: 96
+    description: "gpt-oss-120b with MXFP4 MoE; fits on 1xA100 80GB, scales to TP 2/4/8"
+
+  amd_fp8:
+    model_id: "amd/gpt-oss-120b-w-mxfp4-a-fp8"
+    precision: mxfp4
+    vram_minimum_gb: 80
+    description: "Quark-quantized MXFP4 weights with FP8 activations for MI355X (gfx950)"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+  - multi_node_tp_pp
+  - multi_node_tep
+  - multi_node_dep
+
+hardware_overrides:
+  blackwell:
+    # vLLM 0.24+ defaults to FLASHINFER_TRTLLM_MXFP4_BF16. Use
+    # --quantization-config.moe.activation mxfp8 to restore optimal
+    # performance on Blackwell.
+    extra_args:
+      - "--quantization-config.moe.activation"
+      - "mxfp8"
+  amd:
+    # vLLM 0.17.0+ replaces the old VLLM_ROCM_USE_AITER_* env knobs with
+    # --attention-backend ROCM_AITER_UNIFIED_ATTN. HSA_NO_SCRATCH_RECLAIM is
+    # required on GPUs with firmware MEC < 177; harmless to keep set.
+    extra_args:
+      - "--attention-backend"
+      - "ROCM_AITER_UNIFIED_ATTN"
+      - "-cc.pass_config.fuse_rope_kvcache=True"
+      - "-cc.use_inductor_graph_partition=True"
+      - "--gpu-memory-utilization"
+      - "0.95"
+      - "--block-size=64"
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+      VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
+      HSA_NO_SCRATCH_RECLAIM: "1"
+      AMDGCN_USE_BUFFER_OPS: "0"
+  xpu:
+    extra_args:
+      - "--block-size"
+      - "64"
+      - "--enforce-eager"
+      - "--disable-sliding-window"
+      - "--no-enable-prefix-caching"
+      - "--max-model-len"
+      - "9216"
+      - "--max-num-batched-tokens"
+      - "9216"
+      - "--gpu-memory-utilization"
+      - "0.9"
+    extra_env:
+      TORCH_LLM_ALLREDUCE: "1"
+      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+      VLLM_WORKER_MULTIPROC_METHOD: "spawn"
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  `gpt-oss-20b` and `gpt-oss-120b` are open-weight reasoning models from OpenAI. vLLM
+  supports NVIDIA H100/H200/B200, AMD MI300X/MI325X/MI355X, and Radeon AI PRO R9700,
+  with ongoing work for Ampere/Ada/RTX 5090.
+
+  Optimizations:
+  - Flexible parallelism (TP 2/4/8)
+  - Attention kernels for attention-sinks and sliding-window shapes
+  - Asynchronous scheduling for CPU/GPU overlap
+
+  ## Prerequisites
+
+  - Hardware: NVIDIA H100/H200/B200 (or A100 80GB for single-GPU), AMD MI300+
+  - vLLM >= 0.10.1
+  - CUDA >= 12.8 if building from source (must match between install and serving)
+
+  ### Install vLLM
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install vllm --torch-backend=auto
+  ```
+
+  Docker quickstart:
+
+  ```bash
+  docker run --gpus all -p 8000:8000 --ipc=host vllm/vllm-openai --model openai/gpt-oss-20b
+  ```
+
+  AMD ROCm wheels:
+
+  ```bash
+  uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm
+  ```
+
+  Intel XPU (Arc Pro B70):
+
+  ```bash
+  docker pull vllm/vllm-openai-xpu:latest
+  ```
+
+  ## Launch commands
+
+  A100 (single card, default TRITON_ATTN + Marlin MXFP4 MoE):
+
+  ```bash
+  vllm serve openai/gpt-oss-120b
+  vllm serve openai/gpt-oss-120b --tensor-parallel-size 4
+  ```
+
+  Blackwell (B200) with FlashInfer MXFP4+MXFP8 MoE:
+
+  ```bash
+  vllm serve openai/gpt-oss-120b --config GPT-OSS_Blackwell.yaml --tensor-parallel-size 1
+  ```
+
+  On vLLM v0.28.0+ the FlashInfer TRTLLM MXFP4 MoE path is selected automatically on Blackwell; it can be pinned explicitly with `--moe-backend flashinfer_trtllm --quantization-config.moe.activation mxfp8`.
+
+  Hopper (H100/H200): same as Blackwell without `kv-cache-dtype` and without the FlashInfer MoE flags.
+
+  TPU v7 (Ironwood), verified on a `tpu7x-standard-4t` host (topology `2x2x1`, TP=2 × DP=4). Served via the OpenAI API-server entrypoint from the nightly TPU image (e.g. `vllm/vllm-tpu:nightly-20260316-e778980-57a314d`):
+
+  ```bash
+  export TPU_BACKEND_TYPE=jax
+  export MODEL_IMPL_TYPE=vllm
+  export HF_HOME=/data
+  export HUGGING_FACE_HUB_TOKEN=<your HF token>
+  vllm serve openai/gpt-oss-120b \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --seed 42 \
+    --tensor-parallel-size 2 \
+    --data-parallel-size 4 \
+    --max-model-len 9216 \
+    --max-num-batched-tokens 16384 \
+    --max-num-seqs 2048 \
+    --gpu-memory-utilization 0.86 \
+    --kv-cache-dtype fp8 \
+    --load-format runai_streamer \
+    --no-enable-prefix-caching \
+    --async-scheduling
+  ```
+
+  AMD MI300X/MI325X:
+
+  ```bash
+  export HSA_NO_SCRATCH_RECLAIM=1
+  export AMDGCN_USE_BUFFER_OPS=0
+  export VLLM_ROCM_USE_AITER=1
+  export VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4
+
+  vllm serve openai/gpt-oss-120b \
+    --tensor-parallel-size 8 \
+    --attention-backend ROCM_AITER_UNIFIED_ATTN \
+    -cc.pass_config.fuse_rope_kvcache=True \
+    -cc.use_inductor_graph_partition=True \
+    --gpu-memory-utilization 0.95 \
+    --block-size 64
+  ```
+
+  Intel Arc Pro B70 (4x 32 GB, TP=4), MXFP4 weights via the official XPU image:
+
+  ```bash
+  docker run --device /dev/dri \
+    -v /dev/dri/by-path:/dev/dri/by-path --shm-size=16g \
+    --privileged --ipc=host -p 8000:8000 \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    -e TORCH_LLM_ALLREDUCE=1 \
+    -e VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
+    -e VLLM_WORKER_MULTIPROC_METHOD=spawn \
+    vllm/vllm-openai-xpu:latest \
+    openai/gpt-oss-120b \
+    --tensor-parallel-size 4 \
+    --block-size 64 \
+    --enforce-eager \
+    --disable-sliding-window \
+    --no-enable-prefix-caching \
+    --max-model-len 9216 \
+    --max-num-batched-tokens 9216 \
+    --gpu-memory-utilization 0.9
+  ```
+
+  ## Tool Use
+
+  `/v1/responses` endpoint supports built-in tools (browsing, python, MCP). Setup
+  requires `uv pip install gpt-oss` and either docker (for Python sandbox) or
+  `PYTHON_EXECUTION_BACKEND=dangerously_use_uv`. For demo tools:
+
+  ```bash
+  vllm serve ... --tool-server demo
+  ```
+
+  For user-defined function calling:
+
+  ```bash
+  vllm serve ... --tool-call-parser openai --enable-auto-tool-choice
+  ```
+
+  ## Client Usage
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
+  response = client.chat.completions.create(
+      model="openai/gpt-oss-120b",
+      messages=[{"role": "user", "content": "Explain sinks attention."}],
+  )
+  print(response.choices[0].message.content)
+  ```
+
+  ## Accuracy Evaluation
+
+  OpenAI recommends evaluating with the gpt-oss reference library:
+
+  ```bash
+  vllm serve openai/gpt-oss-120b \
+    --tensor_parallel_size 8 --max-model-len 131072 \
+    --max-num-batched-tokens 10240 --max-num-seqs 128 \
+    --gpu-memory-utilization 0.85 --no-enable-prefix-caching
+
+  mkdir -p /tmp/gpqa_openai
+  OPENAI_API_KEY=empty python -m gpt_oss.evals \
+    --model openai/gpt-oss-120b --eval gpqa --n-threads 128
+  ```
+
+  Reproduced scores (120B): Low 65.3 / 51.2; Mid 72.4 / 79.6; High 79.4 / 93.0 (GPQA / AIME25).
+
+  ## Troubleshooting
+
+  - **Attention sinks dtype error on Blackwell:** pass `--quantization-config.moe.activation mxfp8` and `--kv-cache-dtype fp8`.
+  - **`tl.language not defined`:** make sure no extra Triton (e.g., pytorch-triton) is installed.
+  - **H100 TP1 OOM:** `--gpu-memory-utilization 0.95 --max-num-batched-tokens 1024`.
+  - **Harmony vocab download failure:** pre-download tiktoken files and set `TIKTOKEN_ENCODINGS_BASE`.
+
+  ## Known Limitations
+
+  - Responses API: streaming is basic, annotations/citations unsupported, usage accounting returns zeros.
+  - Function calling currently supports only `tool_choice="auto"`.
+
+  ## References
+
+  - [gpt-oss-120b](https://huggingface.co/openai/gpt-oss-120b)
+  - [gpt-oss-20b](https://huggingface.co/openai/gpt-oss-20b)
+  - [amd/gpt-oss-120b-w-mxfp4-a-fp8](https://huggingface.co/amd/gpt-oss-120b-w-mxfp4-a-fp8)
+  - [Eagle3 draft model](https://huggingface.co/nvidia/gpt-oss-120b-Eagle3-v3)
+  - [gpt-oss-120b on Ironwood (TPU v7)](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/ironwood/vLLM/GPT-OSS)

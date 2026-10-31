@@ -68,6 +68,7 @@ def test_worker_meta_is_reported_on_context_exit():
     connector, fake = _connector()
 
     with connector.maybe_get_output(_scheduler_output()) as output:
+        assert output is not None
         assert output.ec_connector_worker_meta is None
 
     assert output.ec_connector_worker_meta is WORKER_META
@@ -79,6 +80,7 @@ def test_connector_stats_are_reported_on_context_exit():
     connector, fake = _connector()
 
     with connector.maybe_get_output(_scheduler_output()) as output:
+        assert output is not None
         assert output.ec_connector_stats is None
 
     assert output.ec_connector_stats is CONNECTOR_STATS
@@ -109,6 +111,7 @@ def test_no_forward_reports_without_running_the_model():
 
     output = connector.no_forward(_scheduler_output())
 
+    assert output.ec_connector_output is not None
     assert output.ec_connector_output.ec_connector_worker_meta is WORKER_META
 
     empty = NO_OP_EC_CONNECTOR.no_forward(_scheduler_output())

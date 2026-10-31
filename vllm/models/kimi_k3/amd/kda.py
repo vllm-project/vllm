@@ -45,7 +45,10 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import is_weights_pre_processed, set_weight_attrs
-from vllm.models.kimi_k3.amd.kda_metadata import KimiK3ROCmKDABackend
+from vllm.models.kimi_k3.amd.kda_metadata import (
+    PREFILL_CONV_BLOCK_M,
+    KimiK3ROCmKDABackend,
+)
 from vllm.models.kimi_k3.amd.ops.kda_checkpoint import (
     KimiK3ROCmKDAPrefillCheckpointExporter,
 )
@@ -78,7 +81,9 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         if self.model_config is None or self.cache_config is None:
             raise ValueError("model_config and cache_config must be set")
         return MambaStateDtypeCalculator.kda_state_dtype(
-            self.model_config.dtype, self.cache_config.mamba_cache_dtype
+            self.model_config.dtype,
+            self.cache_config.mamba_cache_dtype,
+            self.cache_config.mamba_ssm_cache_dtype,
         )
 
     def get_state_shape(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
@@ -93,10 +98,18 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MambaSpec:
         spec = super().get_kv_cache_spec(vllm_config)
         assert isinstance(spec, MambaSpec)
-        # Only the fused path exports the checkpoint snapshots
+        # Only the fused path exports the checkpoint snapshots. AITER's
+        # chunk_kda cannot, so the gluon backend hands the steps that carry a
+        # checkpoint to the fused kernel when the build has it.
         can_checkpoint = (
             self.use_prefill_checkpoint
-            and self.kda_prefill_backend == "fused"
+            and (
+                self.kda_prefill_backend == "fused"
+                or (
+                    self.kda_prefill_backend == "gluon"
+                    and is_fused_kda_chunk_supported()
+                )
+            )
             and self.use_safe_gate
         )
         if can_checkpoint and vllm_config.cache_config.mamba_cache_mode == "align":
@@ -192,8 +205,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         # ROCm can fuse the whole decode step (conv + recurrence + gated norm)
         # into one kernel, which wants a width-major fp32 conv weight staged at
         # load time. Everything else keeps the [channel, width] layout.
-        conv_state_dtype, _ = self.get_state_dtype()
-        self.use_aiter_decode = bool(rocm_aiter_ops.is_kda_gluon_decode_available())
+        conv_state_dtype, recurrent_state_dtype = self.get_state_dtype()
+        # AITER's Gluon kernels currently require FP32 recurrent states.
+        self.use_aiter_decode = recurrent_state_dtype == torch.float32 and bool(
+            rocm_aiter_ops.is_kda_gluon_decode_available()
+        )
         use_hip_decode = not self.use_aiter_decode and is_fused_kda_decode_supported(
             self.local_num_heads,
             self.head_dim,
@@ -201,6 +217,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             self.num_spec,
             vllm_config.model_config.dtype,
             conv_state_dtype,
+            recurrent_state_dtype,
         )
         if use_hip_decode:
             logger.info_once("Fused KDA decode kernel (conv+KDA+norm) is enabled.")
@@ -254,7 +271,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             )
         self.kda_prefill_backend = backend
         if backend == "auto":
-            if self.use_safe_gate and rocm_aiter_ops.is_kda_gluon_prefill_available():
+            if (
+                recurrent_state_dtype == torch.float32
+                and self.use_safe_gate
+                and rocm_aiter_ops.is_kda_gluon_prefill_available()
+            ):
                 self.kda_prefill_backend = "gluon"
             elif is_fused_kda_chunk_supported():
                 self.kda_prefill_backend = "fused"
@@ -601,7 +622,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                         cache_indices=non_spec_state_indices_tensor,
                         has_initial_state=has_initial_state,
                         activation="silu",
-                        block_m=8,
+                        block_m=PREFILL_CONV_BLOCK_M,
                         metadata=m,
                         preserve_input_dtype=True,
                     )
@@ -719,7 +740,12 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     cu_seqlens=prefill_query_start_loc,
                     chunk_indices=m.chunk_indices,
                     chunk_offsets=m.chunk_offsets,
-                    backend=self.kda_prefill_backend,
+                    # Checkpoint metadata exists only when get_kv_cache_spec
+                    # reserved the block, which it does only with the fused
+                    # kernel available.
+                    backend=(
+                        "fused" if checkpoint is not None else self.kda_prefill_backend
+                    ),
                     out=core_attn_out[:, nd_tok:num_actual_tokens] if direct else None,
                     checkpoint_state=checkpoint_state,
                     checkpoint_offsets=checkpoint_offsets,
