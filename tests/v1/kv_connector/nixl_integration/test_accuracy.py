@@ -32,6 +32,8 @@ EXPECTED_VALUES = {
     "google/gemma-4-E2B-it": 0.485,
     "ai21labs/AI21-Jamba2-3B": 0.74,
     "deepseek-ai/DeepSeek-V4-Flash": 0.95,
+    "meta-llama/Llama-3.2-1B-Instruct": 0.33,
+    "google/gemma-3-1b-it": 0.25,
 }
 
 SIMPLE_PROMPT = (
