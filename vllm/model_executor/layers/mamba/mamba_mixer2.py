@@ -1105,6 +1105,9 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     is_blackwell=self.is_blackwell,
                 )
 
+    def get_prefill_checkpoint_alignment(self) -> int | None:
+        return 1
+
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
         spec = super().get_kv_cache_spec(vllm_config)
         if not isinstance(spec, MambaSpec):
