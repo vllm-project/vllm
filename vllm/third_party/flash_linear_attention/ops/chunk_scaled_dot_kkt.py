@@ -58,6 +58,7 @@ def chunk_scaled_dot_kkt_fwd_kernel(
     BT: tl.constexpr,
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_GRAPH: tl.constexpr,
     USE_G: tl.constexpr,
     CAST_DOT_TO_K_DTYPE: tl.constexpr,
 ):
@@ -68,6 +69,8 @@ def chunk_scaled_dot_kkt_fwd_kernel(
             tl.load(chunk_indices + i_t * 2).to(tl.int32),
             tl.load(chunk_indices + i_t * 2 + 1).to(tl.int64),
         )
+        if USE_GRAPH and i_n < 0:
+            return
         bos, eos = (
             tl.load(cu_seqlens + i_n).to(tl.int32),
             tl.load(cu_seqlens + i_n + 1).to(tl.int32),
@@ -119,6 +122,7 @@ def chunk_scaled_dot_kkt_fwd(
     chunk_indices: torch.Tensor | None = None,
     chunk_size: int = FLA_CHUNK_SIZE,
     output_dtype: torch.dtype = torch.float32,
+    use_graph: bool = False,
 ) -> torch.Tensor:
     r"""
     Compute beta * K * K^T.
@@ -167,5 +171,6 @@ def chunk_scaled_dot_kkt_fwd(
         K=K,
         BT=BT,
         CAST_DOT_TO_K_DTYPE=_CAST_DOT_TO_K_DTYPE,
+        USE_GRAPH=use_graph,
     )
     return A

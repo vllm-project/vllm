@@ -33,9 +33,14 @@ def chunk_gated_delta_rule_fwd(
     chunk_indices: torch.Tensor | None = None,
     chunk_offsets: torch.Tensor | None = None,
     core_attn_out: torch.Tensor | None = None,
+    use_graph: bool = False,
 ):
     g = chunk_local_cumsum(
-        g, chunk_size=FLA_CHUNK_SIZE, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices
+        g,
+        chunk_size=FLA_CHUNK_SIZE,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        use_graph=use_graph,
     )
     # obtain WY representation. u is actually the new v.
     A = chunk_scaled_dot_kkt_fwd(
@@ -45,9 +50,14 @@ def chunk_gated_delta_rule_fwd(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         output_dtype=torch.float32,
+        use_graph=use_graph,
     )
     A = solve_tril(
-        A=A, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices, output_dtype=k.dtype
+        A=A,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        output_dtype=k.dtype,
+        use_graph=use_graph,
     )
     w, u = recompute_w_u_fwd(
         k=k,
@@ -57,6 +67,7 @@ def chunk_gated_delta_rule_fwd(
         g_cumsum=g,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        use_graph=use_graph,
     )
     h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
         k=k,
@@ -79,6 +90,7 @@ def chunk_gated_delta_rule_fwd(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         core_attn_out=core_attn_out,
+        use_graph=use_graph,
     )
     if SUPPRESS_LEVEL < 3:
         return g, o, A, final_state, None, None, None
@@ -105,6 +117,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         chunk_offsets: torch.Tensor | None = None,
         use_qk_l2norm_in_kernel: bool = False,
         core_attn_out: torch.Tensor | None = None,
+        use_graph: bool = False,
     ):
         if use_qk_l2norm_in_kernel:
             q = l2norm_fwd(q)
@@ -123,6 +136,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             chunk_indices=chunk_indices,
             chunk_offsets=chunk_offsets,
             core_attn_out=core_attn_out,
+            use_graph=use_graph,
         )
         ctx.scale = scale
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
@@ -149,6 +163,7 @@ def chunk_gated_delta_rule(
     chunk_offsets: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
     core_attn_out: torch.Tensor | None = None,
+    use_graph: bool = False,
 ):
     r"""
     Args:
@@ -174,6 +189,12 @@ def chunk_gated_delta_rule(
         cu_seqlens (torch.Tensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
+        use_graph (bool):
+            Launch fixed-capacity grids for CUDA graph capture, as in FLA #1212.
+            `cu_seqlens` may end with zero-length sequences (repeated final offset), so
+            `N` is the static sequence capacity, and `chunk_indices` may end with
+            `[-1, 0]` rows that the chunk kernels skip. Output rows that no sequence
+            covers are left undefined. Default: `False`.
     Returns:
         o (torch.Tensor):
             Outputs of shape `[B, T, H, V]`.
@@ -241,5 +262,6 @@ def chunk_gated_delta_rule(
         chunk_offsets,
         use_qk_l2norm_in_kernel,
         core_attn_out,
+        use_graph,
     )
     return o, final_state
