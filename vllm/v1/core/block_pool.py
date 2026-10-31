@@ -868,10 +868,14 @@ class BlockPool:
             block = self.blocks[block_id]
             self._maybe_evict_cached_block(block)
 
-    def reset_prefix_cache(self) -> bool:
+    def reset_prefix_cache(self, allow_used_blocks: bool = False) -> bool:
         """Reset prefix cache. This function may be used in RLHF
         flows to invalidate prefix caching after the weights are updated,
         or used for resetting prefix caching status for benchmarking.
+
+        Args:
+            allow_used_blocks: If True, also reset when blocks are still in
+                use. Those blocks stay allocated but lose their hashes.
 
         Returns:
             bool: True if the prefix cache is successfully reset,
@@ -879,7 +883,8 @@ class BlockPool:
 
         """
         num_used_blocks = self.num_gpu_blocks - self.get_num_free_blocks()
-        if num_used_blocks != 1:  # The null block is always marked as used
+        # The null block is always marked as used
+        if num_used_blocks != 1 and not allow_used_blocks:
             logger.warning(
                 "Failed to reset prefix cache because some "
                 "blocks (%d) are not freed yet",

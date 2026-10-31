@@ -1200,10 +1200,13 @@ class AsyncLLM(EngineClient):
         await self.engine_core.reset_mm_cache_async()
 
     async def reset_prefix_cache(
-        self, reset_running_requests: bool = False, reset_connector: bool = False
+        self,
+        reset_running_requests: bool = False,
+        reset_connector: bool = False,
+        keep_running_requests: bool = False,
     ) -> bool:
         return await self.engine_core.reset_prefix_cache_async(
-            reset_running_requests, reset_connector
+            reset_running_requests, reset_connector, keep_running_requests
         )
 
     async def reset_encoder_cache(self) -> None:
