@@ -105,6 +105,29 @@ vllm serve google/gemma-4-31B-it \
     --attention-backend TRITON_FLASHINFER
 ```
 
+### ROCm Segmented Attention
+
+`ROCM_SEGMENTED_ATTN` is an opt-in backend for supported AMD RDNA GPUs. It
+supports Gemma 4 image-prefix attention with BF16 or FP8 KV cache, including
+multiple image ranges and the model's sliding-window clamping. FP8 KV cache
+requires gfx12 hardware.
+
+For example, serve an FP8 Gemma 4 checkpoint with image inputs enabled:
+
+```bash
+vllm serve RedHatAI/gemma-4-12B-it-FP8-Dynamic \
+    --dtype bfloat16 \
+    --kv-cache-dtype fp8 \
+    --max-model-len 8192 \
+    --max-num-batched-tokens 4096 \
+    --attention-backend ROCM_SEGMENTED_ATTN
+```
+
+Startup tuning can be enabled with
+`--kernel-config '{"enable_rocm_segmented_attn_autotune":true}'`. Image-prefix
+profiles are keyed separately from causal text profiles. Omitting the attention
+backend option keeps automatic backend selection.
+
 ### Manual Selection
 
 When you explicitly set a backend via `--attention-backend` or `AttentionConfig`:
