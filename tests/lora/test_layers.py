@@ -1821,3 +1821,202 @@ def test_replicated_lora_preserves_base_forward_for_subclasses(
     merged_result = merged_layer(torch.cat(inputs))[0]
 
     torch.testing.assert_close(lora_result, merged_result, rtol=rtol, atol=atol)
+
+
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="XPU active-rank kernel")
+@pytest.mark.parametrize("packed", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    "execution_mode", ["eager", "graph", "compile", "fully_sharded"]
+)
+@torch.inference_mode()
+def test_xpu_active_rank_reload(
+    default_vllm_config, dist_init, packed, dtype, execution_mode
+):
+    """Reloaded and removed slots must preserve mixed-rank LoRA contributions."""
+    from torch.utils._python_dispatch import TorchDispatchMode
+
+    from vllm.config.compilation import CompilationMode, CUDAGraphMode
+    from vllm.lora.punica_wrapper.punica_xpu import PunicaWrapperXPU
+
+    native_ranks = []
+    projections = []
+
+    class ObserveActiveRank(TorchDispatchMode):
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            if func._schema.name == "_xpu_C::lora_linear":
+                native_ranks.append(args[6])
+            if func._schema.name.startswith("vllm::xpu_bgmv_"):
+                projections.append(func._schema.name)
+            return func(*args, **(kwargs or {}))
+
+    torch.set_default_device("xpu")
+    torch.manual_seed(42)
+    default_vllm_config.compilation_config.mode = (
+        CompilationMode.VLLM_COMPILE
+        if execution_mode == "compile"
+        else CompilationMode.NONE
+    )
+    default_vllm_config.compilation_config.cudagraph_mode = (
+        CUDAGraphMode.FULL if execution_mode == "graph" else CUDAGraphMode.NONE
+    )
+    config = LoRAConfig(
+        max_loras=2,
+        max_lora_rank=32,
+        lora_dtype=dtype,
+        fully_sharded_loras=execution_mode == "fully_sharded",
+    )
+    wrapper = PunicaWrapperXPU(32, 8, "xpu", lora_config=config)
+    if packed:
+        base = MergedColumnParallelLinear(128, [64, 64], bias=False, params_dtype=dtype)
+        layer = MergedColumnParallelLinearWithLoRA(base)
+    else:
+        base = ReplicatedLinear(128, 128, bias=False, params_dtype=dtype)
+        layer = ReplicatedLinearWithLoRA(base)
+    base.weight.data.normal_(std=0.02)
+    layer.create_lora_weights(2, config)
+    layer.set_mapping(wrapper)
+    x = torch.randn(4, 128, dtype=dtype) * 0.1
+    mapping = (1, 2, 0, 1)
+    wrapper.update_metadata(LoRAMapping(mapping, mapping), [1, 2, None], 3, 128)
+    for active_rank in [32, 16, 8]:
+        weights = []
+        for slot, rank in enumerate([8, active_rank]):
+            a = torch.randn(rank, 128, dtype=dtype) * 0.1
+            b = torch.randn(64 if packed else 128, rank, dtype=dtype) * 0.1
+            layer.set_lora(slot, [a, None] if packed else a, [b, None] if packed else b)
+            weights.append((a, b))
+        single_mapping = (2, 0, 0, 2)
+        wrapper.update_metadata(
+            LoRAMapping(single_mapping, single_mapping), [2, 1, None], 3, 128
+        )
+        expected_single = base(x)[0].clone()
+        a, b = weights[0]
+        for row in [0, 3]:
+            expected_single[row, : b.shape[0]] += (
+                (x[row].float() @ a.float().T).to(dtype).float() @ b.float().T
+            ).to(dtype)
+        with ObserveActiveRank():
+            actual_single = layer(x)[0]
+        torch.testing.assert_close(actual_single, expected_single, atol=2e-3, rtol=2e-2)
+        native_available = hasattr(torch.ops._xpu_C, "lora_linear")
+        assert native_ranks == (
+            [8] if execution_mode == "eager" and native_available else []
+        )
+        native_ranks.clear()
+        base_mapping = (0,) * len(mapping)
+        wrapper.update_metadata(
+            LoRAMapping(base_mapping, base_mapping), [1, 2, None], 3, 128
+        )
+        projections.clear()
+        with ObserveActiveRank():
+            actual_base = layer(x)[0]
+        torch.testing.assert_close(actual_base, base(x)[0], atol=2e-3, rtol=2e-2)
+        assert not native_ranks
+        assert bool(projections) == (execution_mode != "eager" or not native_available)
+        wrapper.update_metadata(LoRAMapping(mapping, mapping), [1, 2, None], 3, 128)
+        expected = base(x)[0].clone()
+        for row, adapter in enumerate(mapping):
+            if adapter:
+                a, b = weights[adapter - 1]
+                delta = (
+                    (x[row].float() @ a.float().T).to(dtype).float() @ b.float().T
+                ).to(dtype)
+                expected[row, : b.shape[0]] += delta
+        with ObserveActiveRank():
+            actual = layer(x)[0]
+        torch.testing.assert_close(actual, expected, atol=2e-3, rtol=2e-2)
+        use_active_rank = (
+            execution_mode == "eager"
+            and active_rank < 32
+            and hasattr(torch.ops._xpu_C, "lora_linear")
+        )
+        assert native_ranks == ([active_rank] if use_active_rank else [])
+        native_ranks.clear()
+        without_ranks = base(x)[0].clone()
+        with ObserveActiveRank():
+            wrapper.add_lora_linear(
+                without_ranks,
+                x,
+                layer.lora_a_stacked,
+                layer.lora_b_stacked,
+                1.0,
+                layer.output_slices,
+            )
+        torch.testing.assert_close(without_ranks, expected, atol=2e-3, rtol=2e-2)
+        assert not native_ranks
+        layer.reset_lora(1)
+        expected_reset = base(x)[0].clone()
+        for row in [0, 3]:
+            a, b = weights[0]
+            expected_reset[row, : b.shape[0]] += (
+                (x[row].float() @ a.float().T).to(dtype).float() @ b.float().T
+            ).to(dtype)
+        torch.testing.assert_close(layer(x)[0], expected_reset, atol=2e-3, rtol=2e-2)
+
+
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="XPU active-rank kernel")
+@pytest.mark.parametrize("num_slices", [8, 9])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@torch.inference_mode()
+def test_xpu_active_rank_slice_limit(default_vllm_config, dist_init, num_slices, dtype):
+    """Variable-slice layers exceeding native capacity retain legacy results."""
+    from torch.utils._python_dispatch import TorchDispatchMode
+
+    from vllm.config.compilation import CompilationMode, CUDAGraphMode
+    from vllm.lora.punica_wrapper.punica_xpu import PunicaWrapperXPU
+
+    calls = []
+
+    class ObserveLoRA(TorchDispatchMode):
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            if func._schema.name == "_xpu_C::lora_linear":
+                calls.append(("native", args[6]))
+            elif func._schema.name.startswith("vllm::xpu_bgmv_"):
+                calls.append(("legacy", None))
+            return func(*args, **(kwargs or {}))
+
+    torch.set_default_device("xpu")
+    torch.manual_seed(42)
+    default_vllm_config.compilation_config.mode = CompilationMode.NONE
+    default_vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+    config = LoRAConfig(max_loras=2, max_lora_rank=32, lora_dtype=dtype)
+    wrapper = PunicaWrapperXPU(32, 8, "xpu", lora_config=config)
+    output_sizes = [32 * (i + 1) for i in range(num_slices)]
+    base = MergedColumnParallelLinear(128, output_sizes, bias=False, params_dtype=dtype)
+    base.weight.data.normal_(std=0.02)
+    layer = MergedColumnParallelLinearVariableSliceWithLoRA(base)
+    layer.create_lora_weights(2, config)
+    layer.set_mapping(wrapper)
+    a = torch.randn(8, 128, dtype=dtype) * 0.1
+    b = torch.randn(sum(output_sizes), 8, dtype=dtype) * 0.1
+    layer.set_lora(0, a, b)
+    assert all(w.shape[-1] == 32 for w in layer.lora_b_stacked)
+    mapping = (1, 0, 1, 0)
+    wrapper.update_metadata(LoRAMapping(mapping, mapping), [1, None, None], 3, 128)
+    x = torch.randn(4, 128, dtype=dtype) * 0.1
+    expected = base(x)[0].clone()
+    for row in [0, 2]:
+        expected[row] += (
+            (x[row].float() @ a.float().T).to(dtype).float() @ b.float().T
+        ).to(dtype)
+    with ObserveLoRA():
+        actual = layer(x)[0]
+    native = num_slices <= 8 and hasattr(torch.ops._xpu_C, "lora_linear")
+    if native:
+        assert calls == [("native", 8)]
+    else:
+        assert calls and all(kind == "legacy" for kind, _ in calls)
+    legacy = base(x)[0].clone()
+    wrapper.add_lora_linear(
+        legacy,
+        x,
+        layer.lora_a_stacked,
+        layer.lora_b_stacked,
+        1.0,
+        layer.output_slices,
+    )
+    torch.testing.assert_close(actual, expected, atol=2e-3, rtol=2e-2)
+    torch.testing.assert_close(
+        actual, legacy, atol=2e-3 if native else 0, rtol=2e-2 if native else 0
+    )
