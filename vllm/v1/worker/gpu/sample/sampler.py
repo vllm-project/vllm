@@ -135,6 +135,7 @@ class Sampler:
         self,
         logits: torch.Tensor,
         input_batch: InputBatch,
+        raw_logits: torch.Tensor | None = None,
     ) -> SamplerOutput:
         expanded_idx_mapping = input_batch.expanded_idx_mapping
         idx_mapping = input_batch.idx_mapping
@@ -172,6 +173,8 @@ class Sampler:
             num_logprobs, max_per_req_token_ids = logprobs_dims
             if self.logprobs_mode in PROCESSED_LOGPROBS_MODES:
                 logits = processed_logits
+            elif raw_logits is not None:
+                logits = raw_logits
             expanded_logits = logits.shape[0] != idx_mapping_np.shape[0]
             cu_num_logits = cu_num_logits_np.tolist() if expanded_logits else None
             logprobs_tensors = compute_topk_scores(

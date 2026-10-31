@@ -132,6 +132,7 @@ class Sampler(nn.Module):
         sampling_metadata: SamplingMetadata,
         predict_bonus_token: bool = False,
         logprobs_mode_override: LogprobsMode | None = None,
+        raw_logits: torch.Tensor | None = None,
     ) -> SamplerOutput:
         if mixed_sample_eligible(sampling_metadata, predict_bonus_token):
             return SamplerOutput(
@@ -146,13 +147,14 @@ class Sampler(nn.Module):
         num_logprobs = sampling_metadata.max_num_logprobs
         raw_logprobs: torch.Tensor | None = None
         if num_logprobs is not None or sampling_metadata.logprob_token_ids:
+            score_logits = logits if raw_logits is None else raw_logits
             if logprobs_mode == "raw_logprobs":
-                raw_logprobs = self.compute_logprobs(logits)
+                raw_logprobs = self.compute_logprobs(score_logits)
             elif logprobs_mode == "raw_logits":
-                if logits.dtype == torch.float32:
-                    raw_logprobs = logits.clone()
+                if score_logits.dtype == torch.float32:
+                    raw_logprobs = score_logits.clone()
                 else:
-                    raw_logprobs = logits.to(torch.float32)
+                    raw_logprobs = score_logits.to(torch.float32)
 
         # Use float32 for the logits.
         logits = logits.to(torch.float32)
