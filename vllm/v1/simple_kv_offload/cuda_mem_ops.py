@@ -122,9 +122,22 @@ def _resolve_batch_memcpy() -> tuple[Any, int]:
 
     from cuda.bindings import driver as drv
 
-    err, ptr, _ = drv.cuGetProcAddress(b"cuMemcpyBatchAsync", 12080, 0)
+    err, ptr, status = drv.cuGetProcAddress(b"cuMemcpyBatchAsync", 12080, 0)
     if err != drv.CUresult.CUDA_SUCCESS:
         raise RuntimeError(f"cuGetProcAddress(cuMemcpyBatchAsync) failed: {err}")
+    # Drivers older than CUDA 12.8 return CUDA_SUCCESS with a NULL pointer and
+    # the reason in the symbol status.
+    if (
+        status != drv.CUdriverProcAddressQueryResult.CU_GET_PROC_ADDRESS_SUCCESS
+        or not ptr
+    ):
+        _, driver_version = drv.cuDriverGetVersion()
+        raise RuntimeError(
+            "cuMemcpyBatchAsync is not available from the installed CUDA driver "
+            f"(driver API version {driver_version}, "
+            f"symbol status {getattr(status, 'name', status)}); "
+            "SimpleCPUOffloadConnector requires a driver supporting CUDA 12.8+."
+        )
     return _BATCH_MEMCPY_FUNC_TYPE(ptr), 1
 
 
