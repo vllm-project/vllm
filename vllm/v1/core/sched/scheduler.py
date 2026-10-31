@@ -3276,12 +3276,25 @@ class Scheduler(SchedulerInterface):
         )
         num_running, num_waiting = self.get_request_counts()
         num_deferred = len(self.deferred_waiting)
+        # The reserves admissions face right now, as allocate_slots applies
+        # them: the watermark only while requests are running, and the
+        # in-flight prefill reserve only to async KV loads (KV connector).
+        num_watermark_blocks = (
+            self.kv_cache_manager.watermark_blocks if self.running else 0
+        )
+        num_inflight_load_reserved_blocks = (
+            self._inflight_prefill_reserved_blocks() + self._spec_decode_step_blocks
+            if self.connector is not None
+            else 0
+        )
         return SchedulerStats(
             num_running_reqs=num_running,
             num_waiting_reqs=num_waiting - num_deferred,
             num_skipped_waiting_reqs=num_deferred,
             num_kv_fetch_reqs_by_stage=self._kv_fetch_counts.copy(),
             kv_cache_usage=self.kv_cache_manager.usage,
+            num_watermark_blocks=num_watermark_blocks,
+            num_inflight_load_reserved_blocks=num_inflight_load_reserved_blocks,
             prefix_cache_stats=prefix_cache_stats,
             connector_prefix_cache_stats=connector_prefix_cache_stats,
             kv_cache_eviction_events=eviction_events,
