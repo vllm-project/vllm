@@ -3,7 +3,7 @@
 
 import torch
 
-import vllm._custom_ops as ops
+from vllm import _cpu_ops as cpu_ops
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 
@@ -61,7 +61,7 @@ def _mamba_chunk_scan_combined_fwd_cpu(
             d = d.squeeze(-1)
         D_1d = d.contiguous()
 
-    ops.mamba_chunk_scan_fwd_cpu(
+    cpu_ops.mamba_chunk_scan_fwd_cpu(
         out,
         all_states,
         x,
@@ -123,7 +123,7 @@ def selective_state_update(
 
     _sbi = state_batch_indices
     _dsbi = dst_state_batch_indices
-    ops.selective_state_update_cpu(
+    cpu_ops.selective_state_update_cpu(
         _state,
         _x,
         _dt,

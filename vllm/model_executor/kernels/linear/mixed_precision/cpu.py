@@ -3,7 +3,7 @@
 
 import torch
 
-from vllm import _custom_ops as ops
+from vllm import _cpu_ops as cpu_ops
 from vllm import envs
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_quantized_values_into_int32,
@@ -128,11 +128,11 @@ class CPUWNA16LinearKernel(MPLinearKernel):
             zp, self.config.weight_type, 1
         ).contiguous()
 
-        blocked_w, blocked_zp, blocked_s = ops.convert_weight_packed_scale_zp(
+        blocked_w, blocked_zp, blocked_s = cpu_ops.convert_weight_packed_scale_zp(
             weight,
             zp,
             scales.data,
-            ops.CPUQuantAlgo.AWQ,
+            cpu_ops.CPUQuantAlgo.AWQ,
         )
 
         if layer.bias is not None:
@@ -189,7 +189,7 @@ class CPUWNA16LinearKernel(MPLinearKernel):
     ) -> torch.Tensor:
         w_q, w_s, w_zp = self._get_weight_params(layer)
         if layer.use_w4a8:
-            x = ops.int4_scaled_mm_cpu(
+            x = cpu_ops.int4_scaled_mm_cpu(
                 x=x,
                 w=w_q,
                 w_zeros=w_zp,
@@ -197,7 +197,7 @@ class CPUWNA16LinearKernel(MPLinearKernel):
                 bias=bias,
             )
         else:
-            x = ops.cpu_gemm_wna16(
+            x = cpu_ops.cpu_gemm_wna16(
                 input=x,
                 q_weight=w_q,
                 scales=w_s,

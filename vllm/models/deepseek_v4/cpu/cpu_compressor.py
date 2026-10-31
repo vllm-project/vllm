@@ -15,7 +15,7 @@ from typing import Any, cast
 
 import torch
 
-from vllm._custom_ops import (
+from vllm._cpu_ops import (
     compress_norm_rope_store_cpu,
     compress_norm_rope_store_indexer_cpu,
     save_partial_states_cpu,

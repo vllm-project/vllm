@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from vllm import _custom_ops as ops
+from vllm import _cpu_ops as cpu_ops
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.utils import replace_parameter, retire_parameter
 from vllm.models.deepseek_v4.attention import (
@@ -162,7 +162,7 @@ def _fused_indexer_q_rope_quant_cpu(
 
     index_weights_out = torch.empty_like(index_weights, dtype=torch.float32)
     index_q_fp8 = torch.empty_like(index_q, dtype=current_platform.fp8_dtype())
-    ops.fused_indexer_q_rope_quant_cpu(
+    cpu_ops.fused_indexer_q_rope_quant_cpu(
         positions,
         index_q.to(torch.float32),
         index_q_cos_sin_cache,
@@ -420,7 +420,7 @@ class DeepseekV4CPUAttention(DeepseekV4Attention):
         # (zero-filling padded head slots); KV side does GPT-J RoPE + UE8M0
         # FP8 quant + paged insert.
         swa_kv_cache_2d = swa_kv_cache.view(swa_kv_cache.shape[0], -1)
-        return ops.fused_qnorm_rope_kv_insert_cpu(
+        return cpu_ops.fused_qnorm_rope_kv_insert_cpu(
             q,
             kv,
             positions,
@@ -530,7 +530,7 @@ class DeepseekV4CPUAttention(DeepseekV4Attention):
         # Undo the query's own GPT-J RoPE rotation: the attention output is
         # a weighted sum of KV rows at different positions, so R(-pos_q)
         # recovers the translation-invariant quantity wo_a/wo_b expect.
-        o_derot = ops.inverse_gptj_rope_o_proj_cpu(
+        o_derot = cpu_ops.inverse_gptj_rope_o_proj_cpu(
             o, positions, cos_sin_cache, _ROPE_DIM
         )
 
@@ -540,7 +540,7 @@ class DeepseekV4CPUAttention(DeepseekV4Attention):
         ).to(torch.bfloat16)
         assert self._wo_a_packed is not None
         z = o_grouped.new_empty((self.n_local_groups, num_tokens, self.o_lora_rank))
-        ops.bmm_cpu(
+        cpu_ops.bmm_cpu(
             z,
             o_grouped.transpose(0, 1).contiguous(),
             self._wo_a_packed,

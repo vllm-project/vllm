@@ -9,7 +9,7 @@ from typing import cast
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm._custom_ops import (
+from vllm._cpu_ops import (
     CPUActMethod,
     CPUQuantAlgo,
     CPUQuantMethod,

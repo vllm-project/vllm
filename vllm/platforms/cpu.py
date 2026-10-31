@@ -762,7 +762,7 @@ class CpuPlatform(Platform):
         """Rewrite the kv cache shape for the current platform."""
         # Import lazily: cpu_attn pulls in _custom_ops, which needs a fully
         # initialized vllm.platforms (avoid circular import while CpuPlatform loads).
-        from vllm._custom_ops import cpu_attn_reshape_and_cache
+        from vllm._cpu_ops import cpu_attn_reshape_and_cache
         from vllm.v1.attention.backends.cpu_attn import _get_attn_isa
 
         # MLA uses a single latent cache of shape [N, block_size, head_size],
