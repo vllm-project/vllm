@@ -914,9 +914,7 @@ class BlockPool:
             self.metrics_collector.reset()
 
         if preserve_running_requests:
-            logger.info(
-                "Successfully reset prefix cache (preserving running requests)"
-            )
+            logger.info("Successfully reset prefix cache (preserving running requests)")
         else:
             logger.info("Successfully reset prefix cache")
 

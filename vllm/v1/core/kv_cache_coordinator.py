@@ -400,10 +400,7 @@ class KVCacheCoordinator(ABC):
             manager.block_pool for manager in self.single_type_managers
         )
         return all(
-            [
-                pool.reset_prefix_cache(preserve_running_requests)
-                for pool in pools
-            ]
+            [pool.reset_prefix_cache(preserve_running_requests) for pool in pools]
         )
 
     def free(self, request_id: str) -> None:

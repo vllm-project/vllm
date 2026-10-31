@@ -3198,6 +3198,7 @@ class Scheduler(SchedulerInterface):
         Raises:
             ValueError: If both ``reset_running_requests`` and
                 ``preserve_running_requests`` are True.
+
         """
         if reset_running_requests and preserve_running_requests:
             raise ValueError(
