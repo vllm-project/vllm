@@ -229,6 +229,35 @@ The daemon's `--weight-cache-socket-dir` and the loader's `socket_dir` /
 Socket paths are derived from the GPU UUID, so they are stable regardless of
 `CUDA_VISIBLE_DEVICES` index remapping.
 
+## AWQ and GPTQ with Marlin
+
+The weight-cache daemon can reuse processed AWQ INT4 and symmetric GPTQ
+INT4/INT8 linear weights with the Marlin backend and FP16 or BF16 activations.
+It preserves repacked weights, scales, zero points and padded bias tensors
+across engine restarts, without repeating AWQ conversion or Marlin repacking.
+Normal Marlin checkpoint and hardware requirements still apply.
+
+Select the same Marlin backend and dtype for both processes. For example:
+
+```bash
+vllm preload --model Qwen/Qwen2.5-0.5B-Instruct-AWQ \
+    --dtype float16 --kernel-config '{"linear_backend":"marlin"}'
+
+vllm serve Qwen/Qwen2.5-0.5B-Instruct-AWQ \
+    --dtype float16 --kernel-config '{"linear_backend":"marlin"}' \
+    --load-format ipc_cache
+```
+
+For GPTQ, replace the model in both commands with a compatible GPTQ checkpoint,
+such as `Qwen/Qwen2.5-0.5B-Instruct-GPTQ-Int4`. The default IPC mode is
+`zero_copy`, with disk fallback enabled. See [loader configuration](#loader-configuration)
+for changing these defaults.
+
+This support does not include AWQ/GPTQ MoE, other linear backends, or Marlin
+INT8/FP8 activation overrides (`VLLM_MARLIN_INPUT_DTYPE`). Do not enable
+`VLLM_BATCH_INVARIANT` for the AWQ Marlin path: AWQ selects a different method
+in that mode. Marlin does not guarantee batch-invariant outputs.
+
 ## Limitations
 
 - **Platform**: CUDA and ROCm only; other platforms raise

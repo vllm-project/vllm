@@ -97,3 +97,10 @@ GPTQModel quantized models are also supported directly through the LLM entrypoin
         print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
         print("-"*50)
     ```
+
+## Weight cache daemon
+
+For repeated engine starts, symmetric GPTQ INT4/INT8 linear layers can reuse processed GPU
+weights with Marlin and FP16/BF16 activations. See
+[AWQ and GPTQ with Marlin](../preload.md#awq-and-gptq-with-marlin) for daemon and
+engine commands, defaults, supported paths and exclusions.
