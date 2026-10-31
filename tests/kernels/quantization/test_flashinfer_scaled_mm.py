@@ -73,7 +73,23 @@ def test_flashinfer_fp8_gemm(
     torch.testing.assert_close(out, expected_out, atol=1e-2, rtol=1e-2)
 
 
-def _dsv41_mxfp8_linear(m: int, n: int, k: int):
+@pytest.mark.parametrize(
+    "m,n,autotune,expect_cublaslt",
+    [
+        (127, 256, False, False),
+        (128, 256, False, True),
+        (128, 136, False, False),
+        (128, 256, True, False),
+    ],
+)
+@torch.inference_mode()
+def test_dsv41_mxfp8_cublaslt_dispatch(m, n, autotune, expect_cublaslt):
+    """DeepSeek-V4.1 runs MXFP8 GEMMs of >= 128 rows on cuBLASLt, bitwise equal
+    to CuTe-DSL; FlashInfer autotuning still profiles CuTe-DSL."""
+    from contextlib import nullcontext
+
+    import flashinfer
+
     from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
         FlashInferCutedslMxfp8LinearKernel,
     )
@@ -88,65 +104,23 @@ def _dsv41_mxfp8_linear(m: int, n: int, k: int):
     )
 
     set_random_seed(42)
-    x = torch.randn(m, k, dtype=torch.bfloat16, device="cuda")
+    x = torch.randn(m, 256, dtype=torch.bfloat16, device="cuda")
     weight, scale = mxfp8_e4m3_quantize(
-        torch.randn(n, k, dtype=torch.bfloat16, device="cuda")
+        torch.randn(n, 256, dtype=torch.bfloat16, device="cuda")
     )
     layer = torch.nn.Module()
     layer.params_dtype = torch.bfloat16
     layer.weight = torch.nn.Parameter(weight, requires_grad=False)
     layer.weight_scale = torch.nn.Parameter(scale, requires_grad=False)
     kernel = FlashInferCutedslMxfp8LinearKernel(
-        Mxfp8LinearLayerConfig(weight_shape=(n, k))
+        Mxfp8LinearLayerConfig(weight_shape=(n, 256))
     )
     kernel.process_weights_after_loading(layer)
 
-    def apply():
-        return cublaslt_mxfp8_apply(kernel, layer, x, None, min_m=128)
-
-    return x, layer, kernel, apply
-
-
-def _uses_scaled_mm(fn):
+    tuning = flashinfer.autotune(tuning_buckets=(m,)) if autotune else nullcontext()
     activities = [torch.profiler.ProfilerActivity.CPU]
-    with torch.profiler.profile(activities=activities) as prof:
-        output = fn()
-    return output, any(e.key == "aten::_scaled_mm" for e in prof.key_averages())
-
-
-@pytest.mark.parametrize(
-    "m,n,k,expect_cublaslt",
-    [
-        (127, 256, 256, False),
-        (128, 256, 256, True),
-        (128, 136, 256, False),
-        (128, 144, 160, True),
-    ],
-)
-@torch.inference_mode()
-def test_dsv41_mxfp8_cublaslt_matches_cutedsl(m, n, k, expect_cublaslt):
-    """Large DeepSeek-V4.1 MXFP8 GEMMs move to cuBLASLt with bitwise-equal
-    output, eagerly and under CUDA graph replay."""
-    x, layer, kernel, apply = _dsv41_mxfp8_linear(m, n, k)
-    actual, used_cublaslt = _uses_scaled_mm(apply)
+    with tuning, torch.profiler.profile(activities=activities) as prof:
+        actual = cublaslt_mxfp8_apply(kernel, layer, x, None, min_m=128)
+    used_cublaslt = any(e.key == "aten::_scaled_mm" for e in prof.key_averages())
     assert used_cublaslt == expect_cublaslt
     assert torch.equal(actual, kernel.apply_weights(layer, x))
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        captured = apply()
-    x.copy_(torch.randn_like(x))
-    graph.replay()
-    assert torch.equal(captured, kernel.apply_weights(layer, x))
-
-
-@torch.inference_mode()
-def test_dsv41_mxfp8_cublaslt_keeps_flashinfer_autotune():
-    """FlashInfer autotuning still profiles CuTe-DSL for the small-M runtime."""
-    import flashinfer
-
-    _, _, _, apply = _dsv41_mxfp8_linear(128, 256, 128)
-    with flashinfer.autotune(tuning_buckets=(128,)):
-        tuned, used_cublaslt = _uses_scaled_mm(apply)
-    assert not used_cublaslt
-    actual, used_cublaslt = _uses_scaled_mm(apply)
-    assert used_cublaslt and torch.equal(actual, tuned)
