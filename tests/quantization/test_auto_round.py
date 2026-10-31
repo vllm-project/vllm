@@ -1076,7 +1076,8 @@ def test_inc_mxfp4_moe_method_preserves_checkpoint_packing(
         fused_experts=SimpleNamespace(
             process_weights_after_loading=lambda layer: captured.update(
                 {"processed_layer": layer}
-            )
+            ),
+            keep_constants=lambda layer: None,
         )
     )
     expected_experts_cls = object()
