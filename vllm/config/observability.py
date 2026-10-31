@@ -69,7 +69,7 @@ class ObservabilityConfig:
 
     custom_histogram_buckets: dict[str, list[float]] | None = None
     """Custom Prometheus histogram bucket boundaries, as a JSON mapping from
-    bucket-family key to a list of strictly increasing, positive, finite
+    bucket-family key to a list of strictly increasing, non-negative, finite
     upper bounds. When a family key is present, its list replaces the default
     buckets for every histogram in that family; families not listed keep
     their defaults. Known families: `request_latency`, `time_to_first_token`,
@@ -201,15 +201,20 @@ class ObservabilityConfig:
                     "must not be empty"
                 )
             for bound in buckets:
-                if not math.isfinite(bound) or bound <= 0:
+                if not math.isfinite(bound) or bound < 0:
                     raise ValueError(
                         f"custom_histogram_buckets[{family!r}]: bound "
-                        f"{bound!r} must be finite and greater than 0"
+                        f"{bound!r} must be finite and non-negative"
                     )
             if any(a >= b for a, b in pairwise(buckets)):
                 raise ValueError(
                     f"custom_histogram_buckets[{family!r}]: bounds {buckets} "
                     "must be strictly increasing"
+                )
+            if buckets[-1] <= 0:
+                raise ValueError(
+                    f"custom_histogram_buckets[{family!r}]: bounds {buckets} "
+                    "must include a bound greater than 0"
                 )
         return value
 
