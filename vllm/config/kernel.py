@@ -362,9 +362,9 @@ class KernelConfig:
 
     Explicit values raise RuntimeError when their constraints are not met.
 
-    On SM100 decode without DCP, persistent (including auto selecting it)
-    reads BF16 logits directly and widens scores inside the kernel, avoiding
-    a full FP32 logits copy. Cooperative still requires FP32 logits.
+    On SM100 decode without DCP, cooperative and persistent (including auto
+    selecting them) read BF16 logits directly and widen scores inside the
+    kernel, avoiding a full FP32 logits copy.
     """
 
     linear_backend: LinearBackend = "auto"
