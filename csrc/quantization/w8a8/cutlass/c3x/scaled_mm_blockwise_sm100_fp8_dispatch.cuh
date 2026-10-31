@@ -292,15 +292,23 @@ void cutlass_gemm_blockwise_sm100_fp8_dispatch(torch::stable::Tensor& out,
       }
     }
   } else {
-    // TODO: Test more tile N configs
     constexpr int TILE_M = 128;
-    constexpr int TILE_N = 16;
     // TMA epilogue isn't compatible with Swap A/B
-    cutlass_gemm_caller_blockwise<cutlass_3x_gemm_fp8_blockwise<
-        OutType, TILE_M, 1, TILE_K, Shape<Int<TILE_M>, Int<TILE_N>, Int<TILE_K>>,
-        Shape<_1, _1, _1>, cutlass::epilogue::BlockwiseNoSmemWarpSpecialized1Sm,
-        cutlass::gemm::KernelTmaWarpSpecializedBlockwise1SmSm100, true>>(
-        out, a, b, a_scales, b_scales);
+    if (m <= 32) {
+      cutlass_gemm_caller_blockwise<cutlass_3x_gemm_fp8_blockwise<
+          OutType, TILE_M, 1, TILE_K, Shape<Int<TILE_M>, _16, Int<TILE_K>>,
+          Shape<_1, _1, _1>, cutlass::epilogue::BlockwiseNoSmemWarpSpecialized1Sm,
+          cutlass::gemm::KernelTmaWarpSpecializedBlockwise1SmSm100, true>>(
+          out, a, b, a_scales, b_scales);
+    } else {
+      // A 16-wide token tile streams the weights once per 16 tokens; above
+      // 32 tokens a 32-wide tile is faster (measured on B200).
+      cutlass_gemm_caller_blockwise<cutlass_3x_gemm_fp8_blockwise<
+          OutType, TILE_M, 1, TILE_K, Shape<Int<TILE_M>, _32, Int<TILE_K>>,
+          Shape<_1, _1, _1>, cutlass::epilogue::BlockwiseNoSmemWarpSpecialized1Sm,
+          cutlass::gemm::KernelTmaWarpSpecializedBlockwise1SmSm100, true>>(
+          out, a, b, a_scales, b_scales);
+    }
   }
 }
 
