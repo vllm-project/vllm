@@ -257,8 +257,11 @@ steps:
   agents:
     queue: amd-cpu
   source_file_dependencies:
+    - setup.py
     - .buildkite/hardware_tests/cpu.yaml
+    - .buildkite/hardware_tests/zen.yaml
     - .buildkite/image_build/image_build_zen_cpu.sh
+    - .buildkite/scripts/hardware_ci/run-zen-cpu-test.sh
     - docker/Dockerfile.zen
     - docker/Dockerfile.cpu
     - requirements/cpu.txt
