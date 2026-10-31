@@ -1005,8 +1005,11 @@ class MoRIIOConnectorScheduler:
                 return
 
         remote_notify_port = int(remote_notify_port)
-        for tp_index in range(get_moriio_peer_tp_size(params, self.tp_size)):
-            target_port = remote_notify_port + get_port_offset(remote_dp_rank, tp_index)
+        peer_tp_size = get_moriio_peer_tp_size(params, self.tp_size)
+        for tp_index in range(peer_tp_size):
+            target_port = remote_notify_port + get_port_offset(
+                remote_dp_rank, tp_index, peer_tp_size
+            )
             self._send_transfer_release(transfer_id, remote_host, target_port)
 
     def update_state_after_alloc(
@@ -1314,9 +1317,10 @@ class MoRIIOConnectorScheduler:
                             _notify_host = _remote_hosts[_pod_idx]
                     # Every prefill TP rank needs the allocation; ports past
                     # the prefill TP size are not bound.
-                    for tp_index in range(get_moriio_peer_tp_size(_kvp, self.tp_size)):
+                    peer_tp_size = get_moriio_peer_tp_size(_kvp, self.tp_size)
+                    for tp_index in range(peer_tp_size):
                         target_port = remote_notify_port + get_port_offset(
-                            _remote_dp_rank_for_port, tp_index
+                            _remote_dp_rank_for_port, tp_index, peer_tp_size
                         )
 
                         self.send_notify_block(
@@ -1940,13 +1944,12 @@ class MoRIIOConnectorWorker:
         # Map of engine_id -> {agent_name0, agent_name1..}.
         self._remote_agents: dict[EngineId, set[str]] = {}
 
-        self.side_channel_port: int = (
-            self.moriio_config.handshake_port
-            + get_port_offset(self.dp_rank, self.tp_rank)
+        self.world_size = get_tensor_model_parallel_world_size()
+        self.side_channel_port: int = self.moriio_config.handshake_port + (
+            get_port_offset(self.dp_rank, self.tp_rank, self.world_size)
         )
         self.engine_id: EngineId = engine_id
 
-        self.world_size = get_tensor_model_parallel_world_size()
         self.tp_group = get_tp_group()
 
         # KV Caches and moriio tracking data.
