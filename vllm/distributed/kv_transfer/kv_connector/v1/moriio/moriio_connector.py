@@ -1990,6 +1990,7 @@ class MoRIIOConnectorWorker:
 
         # Background thread for handling new handshake requests.
         self._moriio_handshake_listener_t: threading.Thread | None = None
+        self._stop_event = threading.Event()
         # Background thread for initializing new MoRIIO handshakes.
         self._handshake_initiation_executor = ThreadPoolExecutor(
             # MoRIIO is not guaranteed to be thread-safe, limit 1 worker.
@@ -2177,11 +2178,11 @@ class MoRIIOConnectorWorker:
         if hasattr(self, "_handshake_initiation_executor"):
             self._handshake_initiation_executor.shutdown(wait=False)
 
-        if (
-            hasattr(self, "_moriio_handshake_listener_t")
-            and self._moriio_handshake_listener_t
-        ):
-            self._moriio_handshake_listener_t.join(timeout=0)
+        listener = getattr(self, "_moriio_handshake_listener_t", None)
+        if listener is not None:
+            self._stop_event.set()
+            listener.join()
+            self._moriio_handshake_listener_t = None
 
         if hasattr(self, "zmq_context") and self.zmq_context:
             self.zmq_context.destroy(linger=0)
@@ -2194,18 +2195,25 @@ class MoRIIOConnectorWorker:
     def _moriio_handshake_listener(
         metadata: MoRIIOAgentMetadata,
         ready_event: threading.Event,
+        stop_event: threading.Event,
         base_port: int,
         tp_rank: int,
         dp_rank: int,
         layer_name_to_local_kv_cache_metadata: dict,
     ):
-        """Background thread for getting new MoRIIO handshakes."""
+        """Background thread for getting new MoRIIO handshakes.
+
+        Runs until ``stop_event`` is set. A malformed or unexpected message is
+        logged and dropped; it must not stop the listener, or this worker
+        accepts no new handshakes until it restarts.
+        """
         encoder = msgspec.msgpack.Encoder()
         encoded_data = encoder.encode(metadata)
         size_in_bytes = len(encoded_data)
         logger.debug(
             "Size of encoded MoRIIOAgentMetadata: %s bytes", str(size_in_bytes)
         )
+        tensor_metadata = msgpack.dumps(layer_name_to_local_kv_cache_metadata)
 
         # Listen for new requests for metadata.
         host = "*"
@@ -2214,29 +2222,50 @@ class MoRIIOConnectorWorker:
         logger.debug("mori handshake starting listening on path: %s", path)
 
         with zmq_ctx(zmq.ROUTER, path) as sock:
+            sock.setsockopt(zmq.RCVTIMEO, 1000)
             ready_event.set()
-            while True:
-                identity, msg = sock.recv_multipart()
-                if (
-                    msg != MoRIIOConstants.GET_META_MSG
-                    and msg != MoRIIOConstants.POP_DONE_RECV
-                ):
-                    logger.error("Connection listener got unexpected message")
-                    raise HandshakeError("handshake failed, unexpected msg type")
-                elif msg == MoRIIOConstants.GET_META_MSG:
-                    sock.send_multipart(
-                        (identity, b"", encoded_data)
-                    )  # send local mori io engine meta data
-                    logger.debug("MoRIIO handshake listener sent metadata")
-                    # now we send tensor meta data for each block
-                    buf = msgpack.dumps(layer_name_to_local_kv_cache_metadata)
-                    sock.send_multipart((identity, b"", buf))
-                elif msg == MoRIIOConstants.POP_DONE_RECV:
-                    _, req_id = sock.recv_multipart()
-                    logger.debug(
-                        "MoRIIO handshake listener received done recv for req",
-                        req_id.decode(),
+            while not stop_event.is_set():
+                try:
+                    frames = sock.recv_multipart()
+                except zmq.Again:
+                    continue
+                try:
+                    MoRIIOConnectorWorker._handle_handshake_msg(
+                        sock, frames, encoded_data, tensor_metadata
                     )
+                except Exception as e:
+                    logger.warning(
+                        "MoRIIO handshake listener on %s dropped a message "
+                        "(tp_rank=%d, dp_rank=%d): %s",
+                        path,
+                        tp_rank,
+                        dp_rank,
+                        e,
+                    )
+
+    @staticmethod
+    def _handle_handshake_msg(
+        sock: zmq.Socket,
+        frames: list[bytes],
+        encoded_data: bytes,
+        tensor_metadata: bytes,
+    ) -> None:
+        if len(frames) != 2:
+            raise HandshakeError(f"expected 2 frames, got {len(frames)}")
+        identity, msg = frames
+        if msg == MoRIIOConstants.GET_META_MSG:
+            # Engine metadata first, then the per-layer tensor metadata.
+            sock.send_multipart((identity, b"", encoded_data))
+            logger.debug("MoRIIO handshake listener sent metadata")
+            sock.send_multipart((identity, b"", tensor_metadata))
+        elif msg == MoRIIOConstants.POP_DONE_RECV:
+            _, req_id = sock.recv_multipart()
+            logger.debug(
+                "MoRIIO handshake listener received done recv for req %s",
+                req_id.decode(),
+            )
+        else:
+            raise HandshakeError(f"unexpected message type {msg[:64]!r}")
 
     def _moriio_handshake(
         self,
@@ -2823,6 +2852,7 @@ class MoRIIOConnectorWorker:
             args=(
                 metadata,
                 ready_event,
+                self._stop_event,
                 self.side_channel_port,
                 self.tp_rank,
                 self.dp_rank,
