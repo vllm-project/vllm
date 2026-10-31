@@ -713,6 +713,27 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "gptq_gemm_rdna3
         )
 
 
+def mxfp4_gemm_rdna3(
+    a: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_scales_e8m0: torch.Tensor,
+) -> torch.Tensor:
+    return torch.ops._rocm_C.mxfp4_gemm_rdna3(a, b_q_weight, b_scales_e8m0)
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "mxfp4_gemm_rdna3"):
+
+    @register_fake("_rocm_C::mxfp4_gemm_rdna3")
+    def _mxfp4_gemm_rdna3_fake(
+        a: torch.Tensor,
+        b_q_weight: torch.Tensor,
+        b_scales_e8m0: torch.Tensor,
+    ) -> torch.Tensor:
+        return torch.empty(
+            (a.size(0), b_q_weight.size(1)), dtype=a.dtype, device=a.device
+        )
+
+
 def moe_gptq_gemm_rdna3(
     a: torch.Tensor,
     c: torch.Tensor,
@@ -743,6 +764,56 @@ def moe_gptq_gemm_rdna3(
         mul_topk_weight,
         output_topk,
     )
+
+
+def moe_mxfp4_gemm_rdna3(
+    a: torch.Tensor,
+    c: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_scales_e8m0: torch.Tensor,
+    topk_weights: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    top_k: int,
+    block_size_m: int,
+    mul_topk_weight: bool,
+    output_topk: int = 0,
+) -> None:
+    torch.ops._rocm_C.moe_mxfp4_gemm_rdna3(
+        a,
+        c,
+        b_q_weight,
+        b_scales_e8m0,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        top_k,
+        block_size_m,
+        mul_topk_weight,
+        output_topk,
+    )
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "moe_mxfp4_gemm_rdna3"):
+
+    @register_fake("_rocm_C::moe_mxfp4_gemm_rdna3")
+    def _moe_mxfp4_gemm_rdna3_fake(
+        a: torch.Tensor,
+        c: torch.Tensor,
+        b_q_weight: torch.Tensor,
+        b_scales_e8m0: torch.Tensor,
+        topk_weights: torch.Tensor,
+        sorted_token_ids: torch.Tensor,
+        expert_ids: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor,
+        top_k: int,
+        block_size_m: int,
+        mul_topk_weight: bool,
+        output_topk: int = 0,
+    ) -> None:
+        return
 
 
 # cutlass
