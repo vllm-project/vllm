@@ -79,11 +79,12 @@ def fused_q_cutedsl(
     if has_indexer:
         idx_rope_type = _TORCH_TO_CUTE_DTYPE[idx_rope_cache.dtype]
         idx_weights_type = _TORCH_TO_CUTE_DTYPE[idx_weights.dtype]
+        idx_weights_out_type = _TORCH_TO_CUTE_DTYPE[idx_weights_out.dtype]
     else:
         idx_dim = num_idx_heads = 0
         idx_q = idx_rope_cache = idx_q_fp8 = None
         idx_weights = idx_weights_out = None
-        idx_rope_type = idx_weights_type = None
+        idx_rope_type = idx_weights_type = idx_weights_out_type = None
 
     rope_type = _TORCH_TO_CUTE_DTYPE[rope_cache.dtype]
     compiled = FusedQKernel.compile(
@@ -95,6 +96,7 @@ def fused_q_cutedsl(
         num_idx_heads,
         idx_rope_type,
         idx_weights_type,
+        idx_weights_out_type,
         index_rope_interleave,
     )
     compiled(
@@ -470,7 +472,9 @@ class FusedQKernel:
         # scale indexer weights
         if sublane_id == 0:
             w = idx_weights[token_id, head_id].to(Float32)
-            idx_weights_out[token_id, head_id] = w * scale * weight_scale
+            idx_weights_out[token_id, head_id] = (w * scale * weight_scale).to(
+                idx_weights_out.element_type
+            )
 
     @staticmethod
     @cache
@@ -483,6 +487,7 @@ class FusedQKernel:
         num_idx_heads: int,
         idx_rope_type: type[cutlass.Numeric] | None,
         idx_weights_type: type[cutlass.Numeric] | None,
+        idx_weights_out_type: type[cutlass.Numeric] | None,
         index_rope_interleave: bool,
     ):
         num_tokens = cute.sym_int()
@@ -521,7 +526,9 @@ class FusedQKernel:
                 Float8E4M3FN, (num_tokens, num_idx_heads, idx_dim), divisibility=16
             )
             index_weights_out = _make_fake_tensor(
-                Float32, (num_tokens, num_idx_heads), divisibility=4
+                idx_weights_out_type,
+                (num_tokens, num_idx_heads),
+                divisibility=4 if idx_weights_out_type is Float32 else 8,
             )
         else:
             index_q = index_rope_cache = index_q_fp8 = None
