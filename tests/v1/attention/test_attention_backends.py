@@ -865,6 +865,45 @@ def test_causal_backend_correctness(
 
 
 @pytest.mark.skipif(
+    not current_platform.is_device_capability(90), reason="FA3 requires SM90."
+)
+@pytest.mark.parametrize("tensor_parallel_size", [1, 4])
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+def test_flash_attn_fa3_splits_mixed_batch(
+    default_vllm_config, tensor_parallel_size: int, kv_cache_dtype: str
+):
+    """FA3 runs the decodes of a mixed batch as their own max_seqlen_q=1 call."""
+    import unittest.mock
+
+    from vllm.v1.attention.backends import flash_attn as flash_attn_backend
+
+    def causal_mask_mod(b, h, q_idx, kv_idx, *, context_len):
+        return (q_idx + context_len) >= kv_idx
+
+    # A long decode next to prefill chunks too large for a CUDA graph.
+    batch_spec = BatchSpec(
+        seq_lens=[16384, 1024, 2048, 3072, 2048],
+        query_lens=[1, 1, 1, 1024, 2048],
+    )
+    with unittest.mock.patch.object(
+        flash_attn_backend,
+        "_FA4_DENSE_ATTENTION_KERNEL",
+        wraps=flash_attn_backend._FA4_DENSE_ATTENTION_KERNEL,
+    ) as kernel:
+        _test_backend_correctness(
+            batch_spec,
+            "Qwen/Qwen3-0.6B",
+            [AttentionBackendEnum.FLASH_ATTN],
+            causal_mask_mod,
+            tensor_parallel_size=tensor_parallel_size,
+            kv_cache_dtype=kv_cache_dtype,
+        )
+    calls = [c.kwargs for c in kernel.call_args_list]
+    assert [c["max_seqlen_q"] for c in calls] == [1, 2048]
+    assert [c["q"].shape[0] for c in calls] == [3, 3072]
+
+
+@pytest.mark.skipif(
     AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
     reason="FlashInfer is not available.",
 )
