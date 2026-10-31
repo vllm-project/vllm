@@ -325,6 +325,12 @@ class LLMEngine:
         # 1) Get EngineCoreOutput from the EngineCore.
         with record_function_or_nullcontext("llm_engine step: get_output"):
             outputs = self.engine_core.get_output()
+            if self.dp_group is not None and not getattr(
+                self.engine_core, "last_step_model_executed", True
+            ):
+                # Each DP rank joins one forward's DP sync per step; a step that
+                # ran no forward joins with a dummy batch, as DPEngineCoreProc.
+                self.engine_core.execute_dummy_batch()
 
         # 2) Process EngineCoreOutputs.
         with record_function_or_nullcontext("llm_engine step: process_outputs"):
