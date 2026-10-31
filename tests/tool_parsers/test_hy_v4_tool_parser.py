@@ -89,6 +89,7 @@ def _assert_streaming_matches(properties, calls, expected, suffix, chunking):
         tag = get_model_structural_tag(
             "hy_v4", request.tools, "required", False, token_suffix=suffix
         )
+        assert tag is not None
         request.structured_outputs = StructuredOutputsParams(
             structural_tag=tag.model_dump_json()
         )
@@ -116,6 +117,7 @@ def _assert_streaming_matches(properties, calls, expected, suffix, chunking):
             continue
         assert not delta.content
         for tc in delta.tool_calls or []:
+            assert tc.function is not None
             if tc.function.name is not None:
                 names.append((tc.index, tc.function.name))
             arguments[tc.index] += tc.function.arguments or ""
