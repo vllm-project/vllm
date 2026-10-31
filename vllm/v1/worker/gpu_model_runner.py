@@ -5914,6 +5914,22 @@ class GPUModelRunner(
                         },
                     ),
                 )
+            # Compile the token-rank op of logprobs now (one compile covers
+            # all batch sizes) instead of on the first request with logprobs.
+            # It also counts the logprobs buffer in the memory profile.
+            raw_logprobs = self.sampler.compute_logprobs(logits)
+            self.sampler.gather_logprobs(
+                raw_logprobs, 1, token_ids=raw_logprobs.argmax(dim=-1)
+            )
+            del raw_logprobs
+            if self.sampler.logprobs_mode in ("raw_logits", "processed_logits"):
+                # Prompt scores in these modes are the logits themselves
+                # (see _get_prompt_logprobs_dict). With an fp32 LM head they
+                # keep the logits' layout, e.g. the row stride of a padded
+                # vocab, which compiles a separate graph of the rank op.
+                scores = logits.to(torch.float32)
+                self.sampler.gather_logprobs(scores, 1, token_ids=scores.argmax(dim=-1))
+                del scores
         except RuntimeError as e:
             if "out of memory" in str(e):
                 raise RuntimeError(
