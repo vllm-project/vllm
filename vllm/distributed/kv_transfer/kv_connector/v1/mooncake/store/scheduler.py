@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
+    connector_kv_events_enabled,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (
     MooncakeStoreCoordinator,
@@ -148,10 +149,7 @@ class MooncakeStoreScheduler:
         # Skips lookup CPU cost on instances that never load KV from the store.
         self.enable_lookup = kvc_extra_config.get("enable_lookup", True)
         self.save_decode_cache = kvc_extra_config.get("save_decode_cache", False)
-        kv_event_config = vllm_config.kv_events_config
-        self.enable_kv_events = bool(
-            kv_event_config and kv_event_config.enable_kv_cache_events
-        )
+        self.enable_kv_events = connector_kv_events_enabled(vllm_config)
         self.client = LookupKeyClient(vllm_config)
         self.kv_cache_config = kv_cache_config
         self._store_group_ids = kv_cache_config.prefix_cacheable_group_ids

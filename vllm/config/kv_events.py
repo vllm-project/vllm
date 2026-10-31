@@ -14,6 +14,8 @@ class KVEventsConfig:
     enable_kv_cache_events: bool = False
     """If True, enable KV cache events for tracking block storage and removal.
     Events can be published externally by zmq using the event publisher config.
+    KV connectors publish their own events as well, unless a connector sets
+    `"enable_kv_events": false` in its `kv_connector_extra_config`.
     """
 
     publisher: Literal["null", "zmq"] = None  # type: ignore[assignment]

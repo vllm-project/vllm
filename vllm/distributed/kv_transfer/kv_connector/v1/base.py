@@ -41,6 +41,7 @@ The class provides the following primitives:
 
 import enum
 from abc import ABC, abstractmethod
+from collections import deque
 from collections.abc import Callable, Iterable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
@@ -176,6 +177,34 @@ class KVConnectorWorkerMetadata(ABC):
     ) -> "KVConnectorWorkerMetadata":
         """Aggregate metadata with another `KVConnectorWorkerMetadata` object."""
         pass
+
+
+def connector_kv_events_enabled(vllm_config: "VllmConfig") -> bool:
+    """Whether the KV connector configured in ``vllm_config`` publishes KV cache
+    events: they are enabled in ``kv_events_config`` and the connector does not
+    set ``"enable_kv_events": false`` in its ``kv_connector_extra_config``.
+    """
+    kv_events_config = vllm_config.kv_events_config
+    kv_transfer_config = vllm_config.kv_transfer_config
+    return bool(
+        kv_events_config is not None
+        and kv_events_config.enable_kv_cache_events
+        and kv_transfer_config is not None
+        and kv_transfer_config.get_from_extra_config("enable_kv_events", True)
+    )
+
+
+def take_connector_kv_events(
+    connector: "KVConnectorBase_V1", publish: bool
+) -> Iterable["KVCacheEvent"]:
+    """Take ``connector``'s KV cache events, discarding them unless ``publish``.
+    The connector is drained either way so that its events do not accumulate.
+    """
+    events = connector.take_events()
+    if publish or not events:
+        return events
+    deque(events, maxlen=0)
+    return ()
 
 
 class KVConnectorBase_V1(ABC):
