@@ -12,6 +12,7 @@ import torch
 
 import vllm.model_executor.model_loader.reload.inplace as reload_inplace_module
 import vllm.v1.worker.gpu_model_runner as gpu_model_runner_module
+from tests.v1.core.utils import get_kv_cache_configs
 from vllm.config import (
     AttentionConfig,
     CacheConfig,
@@ -47,15 +48,13 @@ from vllm.v1.attention.backends.registry import (
     AttentionBackendEnum,
     MambaAttentionBackendEnum,
 )
-from vllm.v1.core.kv_cache_planning import (
-    estimate_max_model_len,
-    get_kv_cache_configs,
-)
+from vllm.v1.core.kv_cache_planning import estimate_max_model_len
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCacheSpec,
     KVCacheTensor,
 )
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
@@ -342,7 +341,7 @@ def test_select_common_block_size_accepts_rocm_sparse_block_size_16(monkeypatch)
 
     selected_size = select_common_block_size(
         16,
-        [DeepseekV32IndexerBackend, ROCMAiterMLASparseBackend],
+        [DeepseekV32IndexerBackend, ROCMAiterMLASparseBackend],  # type: ignore[type-abstract]  # not instantiated
     )
     assert selected_size == 16
 
@@ -393,8 +392,10 @@ def test_sample_tokens_receives_pp_sampled_ids_only_on_non_last_rank(
         nonlocal receive_calls
         receive_calls += 1
 
-    runner._pp_receive_prev_sampled_token_ids_to_input_batch = (
-        receive_prev_sampled_token_ids
+    monkeypatch.setattr(
+        runner,
+        "_pp_receive_prev_sampled_token_ids_to_input_batch",
+        receive_prev_sampled_token_ids,
     )
     monkeypatch.setattr(
         gpu_model_runner_module,
@@ -445,7 +446,9 @@ def _mock_backend(supported: list, *, exact: bool = False):
             return "MOCK_EXACT" if exact else "MOCK"
 
         @staticmethod
-        def get_supported_kernel_block_sizes(kv_cache_spec=None):
+        def get_supported_kernel_block_sizes(
+            kv_cache_spec: KVCacheSpec | None = None,
+        ) -> list[int | MultipleOf]:
             return list(supported)
 
         if exact:
@@ -1699,8 +1702,9 @@ def test_input_batch_reinitialized_after_late_interleave_adjustment(monkeypatch)
         logitsprocs=None,
         logitsprocs_need_output_token_ids=False,
     )
-    runner.jit_warmup_registry = Mock()
-    runner.jit_warmup_registry.activate.return_value = nullcontext()
+    jit_warmup_registry = Mock()
+    jit_warmup_registry.activate.return_value = nullcontext()
+    runner.jit_warmup_registry = jit_warmup_registry  # type: ignore[attr-defined]  # set by JitWarmupRegistry.capture
 
     spec = SimpleNamespace(
         block_size=16,

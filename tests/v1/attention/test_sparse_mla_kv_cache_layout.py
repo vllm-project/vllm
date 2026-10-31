@@ -80,8 +80,10 @@ def test_allocation_and_warmup_follow_addressing_mode(
     layer = SimpleNamespace(
         _vllm_config=config,
         attn_backend=backend,
+        impl=object.__new__(backend.get_impl_cls()),
         kv_cache_dtype=cache_dtype,
         head_size=576,
+        topk_buffer_width=None,
         sliding_window=None,
         indexer=None,
         non_causal_multi_token_decode=False,
@@ -97,7 +99,8 @@ def test_allocation_and_warmup_follow_addressing_mode(
     assert spec.block_stride_alignment == stride_alignment
     assert index_spec.block_stride_alignment is None
     assert layout in get_supported_kv_cache_layouts(
-        [backend, DeepseekV32IndexerBackend]
+        # indexer backend has no impl class
+        [backend, DeepseekV32IndexerBackend]  # type: ignore[type-abstract]
     )
     specs = {"mla": spec, "indexer": index_spec}
     group = KVCacheGroupSpec(

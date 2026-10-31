@@ -238,7 +238,8 @@ def warmup_kernels(
         rejection_sampler.enable_adaptive_verification = False
     try:
         _warmup_kernels(model_runner, worker_execute_model, worker_sample_tokens)
-        if rejection_sampler is not None:
+        # All PP ranks must run the same forwards to match sends and receives.
+        if model_runner.speculative_config is not None:
             # Greedy batches skip logits processing, so rejection kernels
             # also see model-dtype logits instead of FP32.
             _warmup_kernels(
@@ -249,6 +250,13 @@ def warmup_kernels(
         if adaptive_sampling:
             assert rejection_sampler is not None
             rejection_sampler.enable_adaptive_verification = True
+    if adaptive_verification is not None:
+        adaptive_verification.warmup_budget_kernel()
+    acceptance_estimator = getattr(
+        model_runner.speculator, "acceptance_estimator", None
+    )
+    if acceptance_estimator is not None:
+        acceptance_estimator.warmup()
 
 
 def _warmup_kernels(
@@ -383,7 +391,9 @@ def _warmup_kernels(
             vocab_size = model_runner.model_config.get_vocab_size()
             bitmask_width = (vocab_size + 31) // 32
             grammar_bitmask = np.full(
-                (len(req_ids), bitmask_width), fill_value=-1, dtype=np.int32
+                (len(req_ids) * model_runner.decode_query_len, bitmask_width),
+                fill_value=-1,
+                dtype=np.int32,
             )
             grammar_output = GrammarOutput(
                 structured_output_request_ids=req_ids, grammar_bitmask=grammar_bitmask

@@ -507,9 +507,6 @@ def _suffix_ingest_kernel(
 class SuffixSpeculator(BaseSpeculator):
     """V2-compatible GPU suffix decoding speculator."""
 
-    supports_mm_inputs = False
-    draft_logits = None
-
     def __init__(
         self,
         vllm_config: VllmConfig,

@@ -8,7 +8,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
-from vllm.distributed import get_pp_group
+from vllm.distributed import get_pp_group, tensor_model_parallel_all_reduce
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_embed_norm import (
     fused_embed_norm,
@@ -229,7 +229,7 @@ class DeepseekV32Model(torch.nn.Module):
         else:
             self.norm = PPMissingLayer()
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size
+            ["hidden_states"], config.hidden_size
         )
 
         self.aux_hidden_state_layers = tuple[int, ...]()
@@ -263,11 +263,11 @@ class DeepseekV32Model(torch.nn.Module):
             else:
                 assert input_ids is not None
                 hidden_states = self.embed_input_ids(input_ids)
-            residual = None
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
-            residual = intermediate_tensors["residual"]
+        # Later PP stages receive the TP-reduced residual stream, like an embedding.
+        residual = None
 
         full_num_tokens = positions.shape[0]
         if self.use_sequence_parallel:
@@ -279,7 +279,6 @@ class DeepseekV32Model(torch.nn.Module):
             hidden_states = sp_shard(hidden_states)
             if attn_in is not None:
                 attn_in = sp_shard(attn_in)
-            assert residual is None, "Currently, SP is not supported with PP"
 
         aux_hidden_states = []
         for idx, layer in enumerate(
@@ -297,9 +296,9 @@ class DeepseekV32Model(torch.nn.Module):
             assert not self.use_sequence_parallel, (
                 "Currently, SP is not supported with PP"
             )
-            return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
-            )
+            # PP send/recv needs TP-replicated tensors; reduce the partial sum.
+            hidden_states = residual + tensor_model_parallel_all_reduce(hidden_states)
+            return IntermediateTensors({"hidden_states": hidden_states})
 
         if self.use_sequence_parallel:
             hidden_states, _ = self.norm(hidden_states, residual)
@@ -346,7 +345,12 @@ class DeepseekV32Model(torch.nn.Module):
         pp_missing_layer_names = get_pp_missing_layer_names(self)
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        _pending_wk_fp8: dict = {}
+        # Reordering loaders (e.g. runai_streamer) can split an FP8 indexer wk
+        # weight/scale pair across load_weights() calls; keep the pending
+        # buffer on the model so pairs survive the call boundary.
+        _pending_wk_fp8 = getattr(self, "_pending_indexer_wk_fp8", None)
+        if _pending_wk_fp8 is None:
+            self._pending_indexer_wk_fp8 = _pending_wk_fp8 = {}
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue

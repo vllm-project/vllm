@@ -20,6 +20,15 @@ void topk_sigmoid(torch::stable::Tensor& topk_weights,
                   double routed_scaling_factor,
                   std::optional<torch::stable::Tensor> is_padding);
 
+#ifdef USE_CUDA
+void muse_spark_routing(torch::stable::Tensor& topk_weights,
+                        torch::stable::Tensor& topk_ids,
+                        const torch::stable::Tensor& logits,
+                        const torch::stable::Tensor& bias, double multiplier,
+                        double route_scale, double division_eps,
+                        const std::optional<torch::stable::Tensor>& is_padding);
+#endif
+
 void topk_softplus_sqrt(
     torch::stable::Tensor& topk_weights, torch::stable::Tensor& topk_indices,
     torch::stable::Tensor& token_expert_indices,

@@ -9,6 +9,7 @@ from torch import nn
 
 from vllm.models.deepseek_v32.nvidia import model as deepseek_v32_model
 from vllm.models.deepseek_v32.nvidia import mtp as deepseek_v32_mtp
+from vllm.sequence import IntermediateTensors
 
 
 class _IdentityNorm(nn.Module):
@@ -146,3 +147,39 @@ def test_mtp_projects_sequence_shard_and_restores_full_output(monkeypatch):
     torch.testing.assert_close(hidden_states, expected)
     torch.testing.assert_close(recycled_hidden_states, expected)
     norm.assert_called_once()
+
+
+class _PartialSumLayer(nn.Module):
+    """Returns a per-TP-rank partial MLP output, like DeepseekV32DecoderLayer."""
+
+    def forward(self, positions, hidden_states, residual, attn_in=None):
+        assert residual is None
+        return torch.ones_like(hidden_states), hidden_states + 1
+
+
+def test_pp_stage_sends_tp_reduced_residual_stream(monkeypatch):
+    """PP send/recv needs TP-replicated tensors, so a middle stage must reduce
+    its partial hidden_states and send the full residual stream only."""
+    model = object.__new__(deepseek_v32_model.DeepseekV32Model)
+    nn.Module.__init__(model)
+    model.layers = nn.ModuleList([_PartialSumLayer()])
+    model.start_layer, model.end_layer = 0, 1
+    model.use_sequence_parallel = False
+    model.aux_hidden_state_layers = ()
+
+    pp_group = SimpleNamespace(is_first_rank=False, is_last_rank=False)
+    monkeypatch.setattr(deepseek_v32_model, "get_pp_group", lambda: pp_group)
+    monkeypatch.setattr(
+        deepseek_v32_model,
+        "tensor_model_parallel_all_reduce",
+        lambda tensor: tensor * 2,
+    )
+
+    received = torch.full((3, 2), 5.0)
+    output = model(
+        None, torch.arange(3), IntermediateTensors({"hidden_states": received})
+    )
+
+    assert set(output.tensors) == {"hidden_states"}
+    # residual (5 + 1) + partial (1) all-reduced over 2 TP ranks.
+    torch.testing.assert_close(output["hidden_states"], torch.full((3, 2), 8.0))

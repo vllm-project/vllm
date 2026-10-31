@@ -1,0 +1,464 @@
+meta:
+  title: "DeepSeek-V4-Flash-Vision-Exp"
+  slug: "deepseek-v4-flash-vision-exp"
+  provider: "DeepSeek"
+  description: "DeepSeek's first experimental multimodal V4 model — the V4-Flash MoE backbone plus a 32-layer vision tower, 1M context, and a fused DSpark draft module."
+  date_added: 2026-09-01
+  date_updated: 2026-09-14
+  tasks:
+    - text
+    - multimodal
+  performance_headline: "First multimodal V4 — 285B/13B MoE scoring 83.5% on OCRBench from a single GB200 NVL4 tray"
+  related_recipes:
+    - "deepseek-ai/DeepSeek-V4-Flash"
+    - "deepseek-ai/DeepSeek-V4-Pro"
+  # The vision path is unreleased — it lives in the open support PR
+  # vllm-project/vllm#54566 (see model.install below). GB200 is the only
+  # NVIDIA hardware with a published end-to-end run on that branch: TP4 + EP
+  # on one NVL4 tray, FP8 KV cache, block size 256, DSpark k=3, full
+  # 1000-sample OCRBench at 83.5% with zero request errors.
+  # Atlas A5 8-card mixed serving of the native FP4+FP8 Vision-Exp checkpoint
+  # (DP4+EP, TP=1, no speculative decoding). 950PR verified 2026-09-10 on
+  # vLLM Ascend; 950DT uses the same command (4 of 8 NPUs). See the hardware
+  # note for the required hash-router bias fix.
+  # AMD MI350X (gfx950): ROCm vision merged in vllm-project/vllm#55107 (2026-09-11)
+  # on the #54566 base. Verified text+vision on stock ROCm nightly at single-node
+  # TP2 and TP4, with DSpark k=3 (needs VLLM_USE_V2_MODEL_RUNNER=1). See
+  # "Launching on AMD" in the guide.
+  default_hardware: gb200
+  hardware:
+    gb200: verified
+    mi350x: verified
+    ascend_950dt_8x: verified
+    ascend_950pr_8x: verified
+
+model:
+  model_id: "deepseek-ai/DeepSeek-V4-Flash-Vision-Exp"
+  # Support targets the next release; nothing has shipped yet, so the pinned
+  # image below is the only runnable path.
+  min_vllm_version: "0.30.0"
+  nightly_required: true
+  docker_image:
+    nvidia: "vllm/vllm-openai:deepseekv4-flash-vision"
+    amd: "vllm/vllm-openai-rocm:nightly"
+  install:
+    # Docker first so it is the default tab. The official wheel can't run this
+    # checkpoint: released vLLM prior to v0.30.0 routes it to the text-only
+    # DeepseekV4ForCausalLM, which then fails on the vision/aligner tensors.
+    # v0.30.0 already resolves it to DeepseekV4ForConditionalGeneration (verified on the ROCm image, 2026-10-02).
+    docker:
+      note: "NVIDIA: use the dedicated DeepSeek-V4-Flash-Vision image until support lands in the standard vLLM image. AMD: vllm/vllm-openai-rocm:v0.30.0 (ROCm 7.2.3) or a nightly >= 2026-09-11 (includes #55107); on v0.30.0 also pass --compilation-config '{\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}' (see the AMD section). Ascend 950PR/950DT: pin quay.io/ascend/vllm-ascend:v0.23.0-a5 and overlay vllm-project/vllm-ascend#16259."
+    pip: false
+  architecture: moe
+  parameter_count: "285B"
+  active_parameters: "13B"
+  context_length: 1048576
+  flashinfer_autotune: true
+  base_args:
+    - "--kv-cache-dtype"
+    - "fp8"
+    - "--block-size"
+    - "256"
+
+features:
+  tool_calling:
+    description: "DeepSeek V4 tool-call parsing with automatic tool choice."
+    args:
+      - "--tool-call-parser"
+      - "deepseek_v4"
+      - "--enable-auto-tool-choice"
+  reasoning:
+    description: "Enable reasoning/thinking mode with the DeepSeek V4 reasoning parser."
+    args:
+      - "--reasoning-parser"
+      - "deepseek_v4"
+      - "--reasoning-config"
+      - '{"reasoning_parser":"deepseek_v4","reasoning_start_str":"","reasoning_end_str":""}'
+    # Empty start/end strings make the Ascend chat path emit content=null
+    # for a full completion. Keep the parser, drop the override.
+    hardware_overrides:
+      npu:
+        args:
+          - "--reasoning-parser"
+          - "deepseek_v4"
+  # Single method, so the boolean form (not `modes`): the checkpoint's fused
+  # DSpark module is the only drafter with a published run on this branch. Left
+  # OUT of opt_in_features on purpose — the verified GB200 configuration had
+  # DSpark on, and DeepSeek's own model card enables it too, so the default
+  # builder state reproduces the tested command. The checkpoint also carries
+  # 3 MTP layers (`num_nextn_predict_layers: 3`); that path is untested here.
+  spec_decoding:
+    description: "DSpark self-drafting from the checkpoint's fused draft module — 3 draft tokens, probabilistic sampling, adaptive verification. Mean acceptance length 2.99 tokens/forward on mixed text+image traffic."
+    args:
+      - "--speculative-config"
+      - '{"method":"dspark","model":"deepseek-ai/DeepSeek-V4-Flash-Vision-Exp","num_speculative_tokens":3,"draft_sample_method":"probabilistic","enable_adaptive_verification":true}'
+    # 950 has no working MTP or DSpark path yet. Empty args so a toggle-on
+    # still emits no --speculative-config. Default-off via
+    # hardware_opt_in_features below — GB200 keeps DSpark on.
+    hardware_overrides:
+      # ROCm: the DeepseekV4 indexer backend rejects adaptive verification, so it
+      # is forced false (DSpark still drafts k=3). VLLM_USE_V2_MODEL_RUNNER=1
+      # (hardware_overrides.amd.extra_env) is also required.
+      amd:
+        args:
+          - "--speculative-config"
+          - '{"method":"dspark","model":"deepseek-ai/DeepSeek-V4-Flash-Vision-Exp","num_speculative_tokens":3,"draft_sample_method":"probabilistic","enable_adaptive_verification":false}'
+      npu:
+        args: []
+
+# Spec decoding stays default-on everywhere except the A5 8-card pills.
+hardware_opt_in_features:
+  ascend_950pr_8x:
+    - spec_decoding
+  ascend_950dt_8x:
+    - spec_decoding
+
+variants:
+  default:
+    precision: fp8
+    # Mixed FP4 experts + FP8 remainder, so the bytes-per-param table
+    # underestimates: sized from the real checkpoint (167.8 GB x 1.2).
+    vram_minimum_gb: 202
+    description: "Native FP4+FP8 mixed checkpoint (MoE experts FP4, attention/norm/router FP8) with a BF16 vision tower, aligner, and the fused DSpark draft module."
+    hardware_overrides:
+      # Exact-GPU pin: computeDockerMeta has no Huawei brand, so the model-level
+      # docker_image string only affects NVIDIA. Hide pip — official wheels
+      # have no NPU kernels.
+      ascend_950pr_8x:
+        docker_image: "quay.io/ascend/vllm-ascend:v0.23.0-a5"
+        install:
+          pip: false
+      ascend_950dt_8x:
+        docker_image: "quay.io/ascend/vllm-ascend:v0.23.0-a5"
+        install:
+          pip: false
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+  - multi_node_tep
+  - multi_node_dep
+
+# TP + EP is the verified layout (TP4 + EP on one GB200 NVL4 tray).
+default_strategy: single_node_tep
+
+# Atlas A5 mixed serving is DP+EP only. The native checkpoint has 64
+# attention heads; 950's FP8 DSA operator accepts local num_heads_q of
+# 64 or 128, so TP must stay 1. TEP/TP and intra-node PD are not offered.
+strategy_hardware:
+  single_node_tp:
+    npu: unsupported
+  single_node_tep:
+    npu: unsupported
+  multi_node_tep:
+    npu: unsupported
+  multi_node_dep:
+    npu: unsupported
+
+# Shared by 950DT 8x (8×96 GB) and 950PR 8x (8×128 GB). Mixed serving uses
+# 4 of the 8 NPUs (DP4+EP, TP=1). HCCL_BUFFSIZE=1024 is required for MC2
+# dispatch. last-wins shadows the DEP builder's --data-parallel-size 8
+# and the recipe-level --block-size 256 / --kv-cache-dtype fp8.
+hardware_overrides:
+  amd:
+    extra_args:
+      - "--tensor-parallel-size"
+      - "2"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--max-model-len"
+      - "32768"
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+      VLLM_USE_BREAKABLE_CUDAGRAPH: "1"
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+  npu:
+    extra_args:
+      - "--data-parallel-size"
+      - "4"
+      - "--block-size"
+      - "128"
+      - "--kv-cache-dtype"
+      - "auto"
+      - "--tokenizer-mode"
+      - "deepseek_v4"
+      - "--safetensors-load-strategy"
+      - "prefetch"
+      - "--async-scheduling"
+      - "--max-model-len"
+      - "8192"
+      - "--max-num-seqs"
+      - "16"
+      - "--max-num-batched-tokens"
+      - "2048"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--api-server-count"
+      - "1"
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--additional-config"
+      - '{"enable_cpu_binding": true, "multistream_overlap_shared_expert": true, "enable_shared_expert_dp": true}'
+    extra_env:
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      OMP_PROC_BIND: "false"
+      OMP_NUM_THREADS: "10"
+      HCCL_BUFFSIZE: "1024"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      TASK_QUEUE_ENABLE: "1"
+      ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3"
+
+hardware_notes:
+  ascend_950dt_8x:
+    title: "vLLM Ascend A5 image required"
+    body: "Mixed serving on one 8-card 950DT node uses 4 of 8 NPUs (DP4+EP, TP=1). Same command as 950PR. Pin quay.io/ascend/vllm-ascend:v0.23.0-a5 — the NVIDIA pip wheel cannot run here. Set HCCL_BUFFSIZE=1024 before launch. Native Flash-Vision checkpoints need the hash-router bias skip in vllm-project/vllm-ascend#16259 — without it load_weights aborts on model.layers.0.mlp.gate.e_score_correction_bias."
+  ascend_950pr_8x:
+    title: "vLLM Ascend A5 image required"
+    body: "Mixed serving on one 8-card 950PR node uses 4 of 8 NPUs (DP4+EP, TP=1). Same command as 950DT. Pin quay.io/ascend/vllm-ascend:v0.23.0-a5 and set HCCL_BUFFSIZE=1024 before launch. Native Flash-Vision checkpoints need the hash-router bias skip in vllm-project/vllm-ascend#16259 — without it load_weights aborts on model.layers.0.mlp.gate.e_score_correction_bias."
+
+guide: |
+  ## Overview
+
+  DeepSeek-V4-Flash-Vision-Exp is DeepSeek's first multimodal model in the V4 family.
+  It keeps the DeepSeek-V4-Flash language backbone — 43 layers, 256 routed experts with
+  6 active per token, Compressed Sparse Attention plus manifold-constrained
+  hyper-connections, a 1,048,576-token context window — and adds a 32-layer / 1024-dim
+  ViT with a two-layer aligner (~0.5B parameters on top of the 284B backbone). Weights
+  are **FP4+FP8 mixed**: MoE experts in FP4, the remaining attention / norm / router
+  params in FP8, vision tower in BF16. The checkpoint is 48 shards / ~168 GB and carries
+  the fused **DSpark** draft module.
+
+  DeepSeek reports it beats DeepSeek-V4-Flash-0731 on multimodal agent benchmarks
+  (ApexBench 36.5 vs 26.2, Agents' Last Exam 27.3 vs 25.2) while holding text-agent
+  parity (Terminal Bench 2.1 at 83.9, DeepSWE at 59.3).
+
+  ## Prerequisites
+
+  Vision support is not in a stable vLLM release yet — it lives in
+  [vllm-project/vllm#54566](https://github.com/vllm-project/vllm/pull/54566). Until that
+  lands, use the pinned `vllm/vllm-openai:deepseekv4-flash-vision` image; the official
+  wheel routes this checkpoint to the text-only class and fails on the vision tensors.
+
+  - **Weights:** ~168 GB on disk (48 shards). Budget ~202 GB of VRAM before KV cache.
+  - **Hardware:** NVIDIA (verified on GB200) and AMD MI350X (gfx950);
+    XPU still has no vision implementation.
+  - **Tokenizer / chat template:** nothing to pass. The repo ships no Jinja template
+    (prompt encoding lives in `encoding/`); vLLM resolves `--tokenizer-mode` to
+    `deepseek_v4` automatically, which is what turns OpenAI content blocks into
+    `<｜deepseek_image｜>` placeholders.
+
+  ## Launching the server
+
+  ### Verified configuration — one GB200 NVL4 tray (TP4 + EP)
+
+  ```bash
+  export VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS="trtllm_fp4_block_scale_moe,flashinfer::trtllm_fp4_block_scale_moe"
+
+  vllm serve deepseek-ai/DeepSeek-V4-Flash-Vision-Exp \
+    --tensor-parallel-size 4 \
+    --enable-expert-parallel \
+    --kv-cache-dtype fp8 \
+    --block-size 256 \
+    --max-model-len 32768 \
+    --speculative-config '{"method":"dspark","model":"deepseek-ai/DeepSeek-V4-Flash-Vision-Exp","num_speculative_tokens":3,"draft_sample_method":"probabilistic","enable_adaptive_verification":true}' \
+    --allowed-local-media-path /mnt/lustre
+  ```
+
+  Three things there are environment-specific, which is why the builder above leaves
+  them out:
+
+  - `VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS` excludes the FP4 block-scale MoE op from
+    FlashInfer's startup autotuning. Export it if autotuning that op fails or costs more
+    startup time than it earns back on your FlashInfer build; it is a tuning knob, not a
+    requirement. The Advanced row's `--disable-flashinfer-autotune` turns autotuning
+    off wholesale instead.
+  - `--max-model-len 32768` bounds KV cache for the benchmark. The checkpoint advertises
+    1M tokens; that is **not** what was measured, and 1M-token KV needs far more memory
+    than the weights do. Raise it deliberately, or use the Advanced row's
+    `--max-model-len auto`.
+  - `--allowed-local-media-path` is only needed for `file://` image URLs. Drop it if
+    clients send `http(s)://` or base64 data URLs.
+
+  ### 8-GPU nodes (H200 / B200 / B300)
+
+  Same **Tensor + Expert Parallel** strategy; the builder emits
+  `--tensor-parallel-size 8 --enable-expert-parallel`. The language backbone is the one
+  the [DeepSeek-V4-Flash](/deepseek-ai/DeepSeek-V4-Flash) recipe already runs there, but
+  the vision path has no published run on those GPUs — expect to tune
+  `--gpu-memory-utilization` and `--max-num-seqs`. The Blackwell
+  `--attention_config.indexer_kv_dtype mxfp4` / `--moe-backend deep_gemm_mega_moe` tweaks
+  the text recipe applies are deliberately not set here: the verified vision run did not
+  use them.
+
+  ### AMD MI350X (gfx950)
+
+  ROCm vision support is merged (#55107 on the #54566 base); a
+  `vllm/vllm-openai-rocm:nightly` built on/after 2026-09-11 runs the checkpoint
+  natively. Three env vars are required:
+
+  - `VLLM_ROCM_USE_AITER=1` — the sparse-attention indexer's ROCm path runs only on
+    AITER; without it the engine aborts at KV-cache profiling.
+  - `VLLM_USE_BREAKABLE_CUDAGRAPH=1` — the multimodal wrapper is not torch-compiled, so
+    the default `FULL_AND_PIECEWISE` capture cannot attach without breakable graphs.
+  - `VLLM_USE_V2_MODEL_RUNNER=1` — required for DSpark (the V1 ROCm runner refuses it);
+    harmless for plain serving.
+
+  Verified single-node launch:
+
+  ```bash
+  docker run -d --name dsv4-vision \
+    --ipc host --network host --privileged --shm-size 128g \
+    --device /dev/kfd --device /dev/dri --group-add video \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    -e VLLM_ROCM_USE_AITER=1 \
+    -e VLLM_USE_BREAKABLE_CUDAGRAPH=1 \
+    -e VLLM_USE_V2_MODEL_RUNNER=1 \
+    vllm/vllm-openai-rocm:nightly \
+    deepseek-ai/DeepSeek-V4-Flash-Vision-Exp \
+    --tensor-parallel-size 2 \
+    --kv-cache-dtype fp8 --block-size 256 \
+    --gpu-memory-utilization 0.9 \
+    --max-model-len 32768
+  ```
+
+  Observed backends: AITER Flash-Attention for the ViT, DeepSeek `fp8_ds_mla` KV cache,
+  FP8 Lightning-Indexer cache, `DEEPSEEK_SPARSE_SWA` (block 256), and the
+  `ROCM_FLASHMLA_SPARSE_DSV4` MLA backend. TP2 loads 75.2 GiB/card (1.76M-token KV pool
+  at 131K context); TP4 loads 38.8 GiB/card.
+
+  **Stable v0.30.0 and single-card TP1** (verified 2026-10-02 on one MI350X). The stable
+  `vllm/vllm-openai-rocm:v0.30.0` image (ROCm 7.2.3) already contains #54566 and #55107 and
+  runs the checkpoint natively — text, vision and DSpark — with the same three env vars. On
+  v0.30.0 only, also pass `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'`:
+  v0.30.0's ROCm platform still defaults DeepSeek V4 on gfx950 + ModelRunner V2 to eager
+  (the #52644 workaround, removed by #57229 after v0.30.0 was branched), so without it decode
+  runs without CUDA graphs. Batch 1 at TP1: 12 tok/s eager vs 94 tok/s with
+  `FULL_DECODE_ONLY`, and 137–164 tok/s with DSpark (k=3, adaptive verification off per the
+  AMD override). Against eager in the same run, a 25-item known-answer check scored 25/25 and
+  decode-vs-prefill logprobs agreed within eager's range. Nightlies after 2026-09-17 and
+  v0.31+ don't need the override. TP1 fits one 288 GB card (147.9 GiB of weights).
+
+
+  ## Reasoning modes
+
+  Same three-tier control as the rest of the V4 family, driven from
+  `chat_template_kwargs` rather than a flag — `encoding/encoding_dsv4.py` names the
+  effort levels `low` / `high` / `max`. DeepSeek evaluated this model at
+  `reasoning_effort: "max"` with `temperature = 1.0, top_p = 0.95`.
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+  model = "deepseek-ai/DeepSeek-V4-Flash-Vision-Exp"
+
+  resp = client.chat.completions.create(
+      model=model,
+      messages=[{"role": "user", "content": "What is 17*19? Return only the final integer."}],
+      temperature=1.0,
+      top_p=0.95,
+      extra_body={
+          "chat_template_kwargs": {"thinking": True, "reasoning_effort": "max"},
+      },
+  )
+  print(resp.choices[0].message.reasoning)
+  print(resp.choices[0].message.content)
+  ```
+
+  ## Client usage — image input
+
+  Standard OpenAI multi-part content. Multiple images per request are allowed with no
+  cap, so the practical limit is `--max-model-len`.
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+
+  resp = client.chat.completions.create(
+      model="deepseek-ai/DeepSeek-V4-Flash-Vision-Exp",
+      messages=[{
+          "role": "user",
+          "content": [
+              {"type": "image_url", "image_url": {"url": "https://example.com/chart.png"}},
+              {"type": "text", "text": "Read the y-axis label and the highest bar's value."},
+          ],
+      }],
+      max_tokens=512,
+  )
+  print(resp.choices[0].message.content)
+  ```
+
+  ```bash
+  curl http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+      "model": "deepseek-ai/DeepSeek-V4-Flash-Vision-Exp",
+      "messages": [{
+        "role": "user",
+        "content": [
+          {"type": "image_url", "image_url": {"url": "https://example.com/chart.png"}},
+          {"type": "text", "text": "Describe the image."}
+        ]
+      }],
+      "max_tokens": 512
+    }'
+  ```
+
+  Image preprocessing is fixed by the checkpoint config (the processor takes no kwargs):
+  each image costs at most 387 prompt tokens (`vision_max_n_token: 384` plus the
+  compressor-alignment pad), images below `vision_min_pixels: 147456` are upscaled, and
+  aspect ratios beyond 8:1 are cropped. An image's exact token count depends on where it
+  sits in the prompt, since the compressor pads each image to a 4-token block boundary.
+
+  ## Speculative decoding
+
+  DSpark drafts from the module fused into the checkpoint, so `--speculative-config`
+  names the target repo as its own `model` — there is no separate draft repo to download.
+  Measured over the full OCRBench run on GB200 (mixed text+image traffic): **2.99**
+  tokens/forward mean acceptance length, **66.3%** overall acceptance
+  (83.9% / 66.5% / 50.7% by draft position). Image tokens in the prompt do not degrade
+  acceptance — the drafter reads image content through the target's hidden states.
+
+  Stay at `num_speculative_tokens: 3` unless you verify acceptance yourself; the
+  checkpoint's trained DSpark block width is 5, but 3 is the depth with published
+  numbers.
+
+  ## Benchmarking
+
+  OCRBench, full 1000 samples, on the verified GB200 configuration: **835/1000
+  (83.5%)**, 0 request errors, 312.6 s (~3.2 samples/s). Strongest categories are Key
+  Information Extraction (92.5%), Doc-oriented VQA (90.0%) and Scene Text VQA (89.5%);
+  weakest are handwritten math (49.0%) and handwriting recognition (58.0%).
+
+  For throughput:
+
+  ```bash
+  vllm bench serve \
+    --model deepseek-ai/DeepSeek-V4-Flash-Vision-Exp \
+    --dataset-name random \
+    --random-input-len 4096 \
+    --random-output-len 1024 \
+    --num-prompts 200
+  ```
+
+  ## Limitations
+
+  - **Pre-release.** Flags and defaults can change before #54566 lands; re-check before
+    deploying, and keep the image pinned.
+  - **XPU has no vision path** — it raises `NotImplementedError` at model construction.
+  - **GB200 (NVIDIA) and MI350X (AMD) are the hardware with a verified vision run.**
+    Every other pill is the repo's fail-open default, not a tested claim.
+  - **PD disaggregation is not offered**, and the CPU/filesystem KV-offload pills stay
+    off — neither has a verified run to record. The Mooncake KV-store pills follow the
+    repo's fail-open default and are offered, but untested here.
+  - **1M context is advertised, not measured.** The reference run used 32K.
+
+  ## References
+
+  - [Model card](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-Vision-Exp)
+  - [vLLM support PR #54566](https://github.com/vllm-project/vllm/pull/54566)
+  - [vLLM ROCm vision PR #55107](https://github.com/vllm-project/vllm/pull/55107)
+  - [DeepSeek-V4-Flash recipe](/deepseek-ai/DeepSeek-V4-Flash) — the text-only sibling
+  - [DeepSpec (DSpark)](https://github.com/deepseek-ai/DeepSpec)

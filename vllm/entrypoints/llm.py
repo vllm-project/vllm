@@ -29,16 +29,17 @@ from vllm.config.model import (
 from vllm.config.quantization import QuantizationConfigArgs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.common.offline import _O, _R, OfflineInferenceMixin
+from vllm.entrypoints.common.startup import log_non_default_args
 from vllm.entrypoints.generate.beam_search.offline import BeamSearchOfflineMixin
 from vllm.entrypoints.pooling.offline import PoolingOfflineMixin
 from vllm.entrypoints.rl.offline import RLOfflineMixin
-from vllm.entrypoints.serve.utils.api_utils import log_non_default_args
 from vllm.inputs import PromptType
 from vllm.logger import configure_logging_if_needed, init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.platforms import current_platform
+from vllm.renderers import ChatParams
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -51,8 +52,6 @@ from vllm.utils.counter import Counter
 from vllm.v1.engine import PauseMode
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
-
-from ..renderers import ChatParams
 
 if TYPE_CHECKING:
     from vllm.v1.metrics.reader import Metric
@@ -804,6 +803,7 @@ class LLM(
         *,
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
+        profiler_kwargs: dict[str, Any] | None = None,
     ) -> None:
         """Start profiling with optional per-session overrides.
 
@@ -815,12 +815,15 @@ class LLM(
                 profiling starts.
             max_iterations: Optional maximum number of worker iterations to profile.
                 Zero means no limit.
+            profiler_kwargs: Optional dictionary of keyword arguments to pass to
+                the underlying profiler.
 
         """
         self.llm_engine.start_profile(
             profile_prefix,
             delay_iterations=delay_iterations,
             max_iterations=max_iterations,
+            profiler_kwargs=profiler_kwargs,
         )
 
     def stop_profile(self) -> None:
