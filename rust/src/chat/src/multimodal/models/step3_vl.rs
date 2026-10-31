@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use llm_multimodal::registry::{ModelRegistryError, RegistryResult};
 use llm_multimodal::{
@@ -35,7 +35,7 @@ impl Step3VLVisionSpec {
     const PATCH_NEWLINE_TOKEN: &'static str = "<patch_newline>";
 
     // Defaults from Step3VLImageProcessor; the processor reads overrides from
-    // PreProcessorConfig extras, and `processor_kwargs` exposes these knobs.
+    // PreProcessorConfig extras and falls back to these values.
     const NUM_IMAGE_FEATURE_SIZE: usize = 169;
     const NUM_PATCH_FEATURE_SIZE: usize = 81;
 
@@ -95,19 +95,9 @@ impl ModelProcessorSpec for Step3VLVisionSpec {
         Ok(HashMap::from([(Modality::Image, usize::MAX)]))
     }
 
-    fn processor_kwargs(&self, _metadata: &ModelMetadata) -> RegistryResult<Value> {
-        Ok(json!({
-            "image_size": 728,
-            "patch_size": 504,
-            "num_image_feature_size": Self::NUM_IMAGE_FEATURE_SIZE,
-            "num_patch_feature_size": Self::NUM_PATCH_FEATURE_SIZE,
-            "enable_patch": true,
-        }))
-    }
-
     fn vision_processor(
         &self,
-        _metadata: &ModelMetadata,
+        _model_config: &Value,
         config: &PreProcessorConfig,
         modality: Modality,
     ) -> RegistryResult<Box<dyn VisionPreProcessor>> {
@@ -190,8 +180,9 @@ impl ModelProcessorSpec for Step3VLVisionSpec {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Value, json};
 
+    use llm_multimodal::registry::ModelRegistryError;
     use llm_multimodal::{ImageSize, Tokenizer};
 
     use super::*;
@@ -227,7 +218,7 @@ mod tests {
     ) -> PreprocessedEncoderInputs {
         let sizes: Vec<(u32, u32)> = item_sizes.iter().map(|s| (s.height, s.width)).collect();
         PreprocessedEncoderInputs {
-            encoder_input: ndarray::ArrayD::zeros(vec![1, 3, 336, 336]),
+            encoder_input: ndarray::ArrayD::zeros(vec![1, 3, 336, 336]).into(),
             feature_token_counts: feature_token_counts.to_vec(),
             item_sizes: sizes,
             model_specific: HashMap::new(),

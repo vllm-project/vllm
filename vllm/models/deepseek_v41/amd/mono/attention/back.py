@@ -370,7 +370,7 @@ def stage_split(c, unit):
                 fx.ptr_store(mw, st + ((hgi * nht + ht) * nkt + kt) * HEAD_TILE + r16)
             svs.append(sv)
         gpu.barrier()
-        lst = st + d.heads * nkt
+        lst = st + d.heads_pad * nkt
         for ht in range_constexpr(nht):
             hti = hgi * nht + ht
             m = fx.ptr_load(st + (hti * nkt) * HEAD_TILE + r16)
@@ -489,13 +489,22 @@ def stage_split(c, unit):
                 w2 = v4.to(fx.BFloat16).bitcast(fx.Int32)
                 words += [w2[0], w2[1]]
             off = (((t * nchunk + ch) * d.heads + hh) * HEAD_DIM + dbase + 16 * g) // 2
-            for hlf in range_constexpr(2):
-                bo.buffer_store(
-                    fx.Vector.from_elements(words[4 * hlf : 4 * hlf + 4], fx.Int32),
-                    rsrc(c["part"]),
-                    off + 4 * hlf,
-                    cache_modifier=CM_DEV,
-                )
+
+            def store_part(off=off, words=words):
+                for hlf in range_constexpr(2):
+                    bo.buffer_store(
+                        fx.Vector.from_elements(words[4 * hlf : 4 * hlf + 4], fx.Int32),
+                        rsrc(c["part"]),
+                        off + 4 * hlf,
+                        cache_modifier=CM_DEV,
+                    )
+
+            if const_expr(d.heads < d.heads_pad):
+                # TP8: the padded columns of the head tile are not stored
+                if hh < d.heads:
+                    store_part()
+            else:
+                store_part()
         publish(c, c["srdy"], t * nchunk + ch)
         stamp(c, 7)
 
@@ -518,7 +527,9 @@ def stage_combine(c, unit):
     h = hg * COMB_HEADS + wave
     nchunk = c["nchunk"]
     ck = chunk_keys(d, s)
-    kv_len = ld_i32(a["klen"], t)
+    if const_expr("krdy" in c):
+        await_flags(c, c["krdy"], 1, lambda u: t)
+    kv_len = ld_i32(a["klen"], t, CM_DEV if const_expr("krdy" in c) else 0)
     nlive = (kv_len + ck - 1) // ck
     pos = ld_i32(a["pos"], 2 * t)
     sink = ld_f32(a["sink"], h) * fx.Float32(LOG2E)
@@ -644,19 +655,6 @@ def stage_woa(c, task, ops, t0, n):
     gpu.barrier()
 
 
-def woa_loads(c, task):
-    a = c["args"]
-    return gemv_loads(
-        c,
-        a["woa"],
-        a["woa_s"],
-        c["d"].group_k,
-        task * WOA_ROWS,
-        WOA_SPLIT_K,
-        tiled=True,
-    )
-
-
 def wob_loads(c, task, pred=None):
     a = c["args"]
     return gemv_loads(c, a["wob"], a["wob_s"], c["d"].o_rows, task * ROWS, pred=pred)
@@ -731,10 +729,10 @@ def back_lds_members(s: int, d: Dims) -> dict:
 
     @fx.struct
     class SplitLds:
-        q: fx.Array[fx.Int32, d.heads * Q_ROW, 16]
+        q: fx.Array[fx.Int32, d.heads_pad * Q_ROW, 16]
         raw: fx.Array[fx.Int32, ck * REC // 4, 16]
-        p: fx.Array[fx.Int32, d.heads * p_row(d, s), 16]
-        st: fx.Array[fx.Float32, 2 * d.heads * (WAVES // head_groups(d, s)), 16]
+        p: fx.Array[fx.Int32, d.heads_pad * p_row(d, s), 16]
+        st: fx.Array[fx.Float32, 2 * d.heads_pad * (WAVES // head_groups(d, s)), 16]
 
     @fx.struct
     class GemvLds:
@@ -743,19 +741,6 @@ def back_lds_members(s: int, d: Dims) -> dict:
         xsl: fx.Array[fx.Int32, rows * lds_row(d.group_k // 32), 16]
 
     return {"split": SplitLds, "gemv": GemvLds}
-
-
-def back_lds(s: int, d: Dims):
-    """K2's attention LDS: the union of ``back_lds_members``."""
-    m = back_lds_members(s, d)
-    SplitLds, GemvLds = m["split"], m["gemv"]
-
-    @fx.union
-    class BackLds:
-        split: SplitLds  # type: ignore[valid-type]
-        gemv: GemvLds  # type: ignore[valid-type]
-
-    return BackLds
 
 
 def back_context(key, lds, args: dict, scratch, tag, layout=None) -> dict:
