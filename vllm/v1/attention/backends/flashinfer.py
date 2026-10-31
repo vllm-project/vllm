@@ -11,6 +11,7 @@ import numpy as np
 import torch
 from flashinfer import (
     BatchAttentionWithAttentionSinkWrapper,
+    BatchDecodeWithAttentionSinkWrapper,
     BatchDecodeWithPagedKVCacheWrapper,
     BatchPrefillWithPagedKVCacheWrapper,
     BatchPrefillWithRaggedKVCacheWrapper,
@@ -680,11 +681,9 @@ class FlashInferBackend(AttentionBackend):
             kv_cache_dtype is not None
             and kv_cache_dtype.startswith("nvfp4")
             and device_capability.major in (8, 9, 12)
+            and head_size == 64
         ):
-            if head_size == 64:
-                return "fa2 prefill misreads an NVFP4 KV cache at head_size 64"
-            if has_sink:
-                return "the sink prefill wrapper cannot read an NVFP4 KV cache"
+            return "fa2 prefill misreads an NVFP4 KV cache at head_size 64"
         return None
 
     @classmethod
@@ -719,7 +718,7 @@ class FlashInferBackend(AttentionBackend):
             return supports_trtllm_attention(is_prefill=False)
 
         if not current_platform.is_device_capability_family(100):
-            return False
+            return current_platform.is_device_capability_family(80)
 
         return supports_trtllm_attention(
             is_prefill=False
@@ -1090,7 +1089,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if self.use_trtllm_dcp_prefill:
             logger.info_once("Using the trtllm-gen context kernel for DCP prefill.")
         self.has_sinks = self.global_hyperparameters.has_sinks
-        if self.has_sinks and (self.nvfp4_fa2 or not FlashInferBackend.supports_sink()):
+        if self.has_sinks and not FlashInferBackend.supports_sink():
             raise NotImplementedError(
                 "FlashInfer backend currently does not support attention "
                 "sinks, please use trtllm on blackwell or flash attention on "
@@ -1394,10 +1393,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     "NVFP4 KV cache."
                 )
             if self._noncausal_prefill_wrapper is None:
-                if self.has_sinks and (
-                    current_platform.is_device_capability(90)
-                    or current_platform.is_device_capability_family(120)
-                ):
+                if self.has_sinks:
                     self._noncausal_prefill_wrapper = (
                         BatchAttentionWithAttentionSinkWrapper(
                             self._get_workspace_buffer(),
@@ -1429,11 +1425,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     use_trtllm_context=self.use_trtllm_dcp_prefill,
                 )
             else:
-                if self.has_sinks and (
-                    current_platform.is_device_capability(90)
-                    or current_platform.is_device_capability_family(120)
-                ):
-                    assert not self.is_kvcache_nvfp4
+                if self.has_sinks:
                     self._prefill_wrapper = BatchAttentionWithAttentionSinkWrapper(
                         self._get_workspace_buffer(),
                         get_flashinfer_layout_string(self.kv_cache_layout),
@@ -1484,18 +1476,30 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 if self.use_fa2_native_decode
                 else "auto"
             )
-            decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
+            wrapper_cls, wrapper_args = BatchDecodeWithPagedKVCacheWrapper, {}
+            if self.has_sinks:
+                wrapper_cls = BatchDecodeWithAttentionSinkWrapper
+                wrapper_args = dict(
+                    q_data_type=self.q_data_type_decode,
+                    kv_data_type=self.kv_cache_dtype,
+                    head_dim_qk=self.head_dim,
+                    head_dim_vo=self.head_dim,
+                    window_left=self.window_left,
+                )
+            else:
+                # Tensor cores are enabled by default because the perf would be
+                # at least as good as cuda cores for all attention ops in latest
+                # gpus.
+                wrapper_args["use_tensor_cores"] = True
+            decode_wrapper = wrapper_cls(
                 self._get_workspace_buffer(),
                 get_flashinfer_layout_string(self.kv_cache_layout),
                 use_cuda_graph=use_cudagraph,
                 paged_kv_indptr_buffer=paged_kv_indptr,
                 paged_kv_indices_buffer=paged_kv_indices,
                 paged_kv_last_page_len_buffer=paged_kv_last_page_len,
-                # Tensor cores are enabled by default because the perf would be
-                # at least as good as cuda cores for all attention ops in latest
-                # gpus.
-                use_tensor_cores=True,
                 backend=backend,
+                **wrapper_args,
             )
 
             # save the decode wrapper
@@ -2428,6 +2432,8 @@ class FlashInferImpl(AttentionImpl):
                     else:
                         out_prefill = output[num_decode_tokens:]
 
+                    # The fa2 NVFP4 query stays in the model dtype.
+                    q_scale = 1.0 if self.nvfp4_fa2 else layer._q_scale_float
                     if isinstance(
                         prefill_wrapper, BatchAttentionWithAttentionSinkWrapper
                     ):
@@ -2436,16 +2442,16 @@ class FlashInferImpl(AttentionImpl):
                             prefill_query,
                             kv_cache_for_fi,
                             self.sinks,
-                            self.scale * layer._q_scale_float * layer._k_scale_float,
+                            self.scale * q_scale * layer._k_scale_float,
                             v_scale=layer._v_scale_float,
                             out=out_prefill,
+                            kv_cache_sf=kv_cache_sf,
                         )
                     else:
                         prefill_wrapper.run(
                             prefill_query,
                             kv_cache_for_fi,
-                            # The fa2 NVFP4 query stays in the model dtype.
-                            q_scale=1.0 if self.nvfp4_fa2 else layer._q_scale_float,
+                            q_scale=q_scale,
                             k_scale=layer._k_scale_float,
                             v_scale=layer._v_scale_float,
                             out=out_prefill,
@@ -2595,6 +2601,8 @@ class FlashInferImpl(AttentionImpl):
                 else:
                     kv_cache_for_fi = kv_cache_tuple
                 kv_cache_sf = nvfp4_kv_block_scales if self.is_kvcache_nvfp4 else None
+                # The fa2 NVFP4 query stays in the model dtype.
+                q_scale = 1.0 if self.nvfp4_fa2 else layer._q_scale_float
 
                 # NVFP4 kernel only supports FP8 output.
                 # Use a pre-allocated FP8 buffer and dequantize afterwards.
@@ -2631,11 +2639,21 @@ class FlashInferImpl(AttentionImpl):
                         lse,
                         get_dcp_group(),
                     )
+                elif isinstance(decode_wrapper, BatchDecodeWithAttentionSinkWrapper):
+                    decode_wrapper.run(
+                        decode_query,
+                        kv_cache_for_fi,
+                        self.sinks,
+                        self.scale * q_scale * layer._k_scale_float,
+                        v_scale=layer._v_scale_float,
+                        out=out_decode,
+                        kv_cache_sf=kv_cache_sf,
+                    )
                 else:
                     decode_wrapper.run(
                         decode_query,
                         kv_cache_for_fi,
-                        q_scale=1.0 if self.nvfp4_fa2 else layer._q_scale_float,
+                        q_scale=q_scale,
                         k_scale=layer._k_scale_float,
                         v_scale=layer._v_scale_float,
                         out=out_decode,
