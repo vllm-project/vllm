@@ -257,6 +257,9 @@ async def test_anthropic_server_tool_is_rejected(client: anthropic.AsyncAnthropi
             ],
         )
 
-    message = exc_info.value.body["error"]["message"]
+    body = exc_info.value.body
+    assert body["type"] == "error"
+    assert body["error"]["type"] == "invalid_request_error"
+    message = body["error"]["message"]
     assert "'web_search_20250305' is not supported" in message
     assert "Field required" not in message

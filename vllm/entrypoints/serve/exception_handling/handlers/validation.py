@@ -146,7 +146,9 @@ def clean_loc_for_param(loc: tuple) -> str:
     return ".".join(parts)
 
 
-async def validation_exception_handler(req: Request, exc: RequestValidationError):
+def create_validation_error_response(
+    req: Request, exc: RequestValidationError
+) -> ErrorResponse:
     if req.app.state.args.log_error_stack:
         logger.exception(
             "RequestValidationError caught. Request id: %s",
@@ -184,7 +186,7 @@ async def validation_exception_handler(req: Request, exc: RequestValidationError
     else:
         message = "Validation error"
 
-    err = ErrorResponse(
+    return ErrorResponse(
         error=ErrorInfo(
             message=sanitize_message(message),
             type=HTTPStatus.BAD_REQUEST.phrase,
@@ -192,4 +194,8 @@ async def validation_exception_handler(req: Request, exc: RequestValidationError
             param=param,
         )
     )
+
+
+async def validation_exception_handler(req: Request, exc: RequestValidationError):
+    err = create_validation_error_response(req, exc)
     return JSONResponse(err.model_dump(), status_code=HTTPStatus.BAD_REQUEST)

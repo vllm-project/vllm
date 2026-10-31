@@ -1958,6 +1958,35 @@ class TestClientErrorResponses:
         assert response.status_code == HTTPStatus.BAD_REQUEST
         assert response.json()["error"]["type"] == "invalid_request_error"
 
+    @pytest.mark.parametrize("path", ["/v1/messages", "/v1/messages/count_tokens"])
+    @pytest.mark.parametrize(
+        ("body", "headers", "expected"),
+        [
+            ({"model": "test-model", "messages": "not a list"}, None, "messages"),
+            ("{}", {"content-type": "text/plain"}, "Unsupported Media Type"),
+        ],
+        ids=["invalid-body", "wrong-content-type"],
+    )
+    def test_request_validation_error_uses_anthropic_format(
+        self, path, body, headers, expected
+    ):
+        """Errors raised before the endpoint runs, while FastAPI validates the
+        request, still use Anthropic's error format."""
+        handler = MagicMock(spec=AnthropicServingMessages)
+
+        app = self._make_api_app(handler)
+        with TestClient(app, raise_server_exceptions=False) as client:
+            if isinstance(body, str):
+                response = client.post(path, content=body, headers=headers)
+            else:
+                response = client.post(path, json=body)
+
+        assert response.status_code == HTTPStatus.BAD_REQUEST
+        body = response.json()
+        assert body["type"] == "error"
+        assert body["error"]["type"] == "invalid_request_error"
+        assert expected in body["error"]["message"]
+
 
 # ======================================================================
 # tool definitions
