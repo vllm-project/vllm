@@ -287,9 +287,11 @@ def _split_kv_stage2(
             row_sum = row_sum * old_scale + split_scale
             row_max = next_max
 
+    # A padding row (cache_seqlens 0) has no splits; store 0, not 0 / 0.
+    safe_row_sum = tl.where(row_sum > 0.0, row_sum, 1.0)
     tl.store(
         out_ptr + pid_t * stride_o_t + pid_h * stride_o_h + off_d,
-        acc / row_sum,
+        acc / safe_row_sum,
         mask=d_valid,
     )
 
