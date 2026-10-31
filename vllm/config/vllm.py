@@ -3418,7 +3418,7 @@ class VllmConfig:
     def adjust_dcp_kv_cache_interleave_size(
         self, kv_cache_groups: list["KVCacheGroupSpec"]
     ) -> None:
-        """Resolve the NIXL P/D DCP interleave from the global KV cache groups.
+        """Resolve the P/D DCP interleave from the global KV cache groups.
 
         Called once by the engine core before profiling; workers only assign the
         result via ``set_kv_cache_layout``.
@@ -3445,7 +3445,9 @@ class VllmConfig:
                 "deprecated when PCP is fully supported."
             )
 
-        if not self.kv_transfer_config.has_connector("NixlConnector"):
+        if not self.kv_transfer_config.has_connector(
+            "NixlConnector"
+        ) and not self.kv_transfer_config.has_connector("MooncakeConnector"):
             return
         if not self.parallel_config._allow_auto_resolve_cp_interleave_size:
             return
@@ -3474,13 +3476,21 @@ class VllmConfig:
         """
         block_size = self.cache_config.block_size
 
-        # Skip DCP interleave-size compatibility for NIXL P/D: the interleave
+        # Skip DCP interleave-size compatibility for NIXL/Mooncake P/D: the interleave
         # size is finalized from the global KV cache groups.
         nixl_pd_active = (
             self.kv_transfer_config is not None
             and self.kv_transfer_config.has_connector("NixlConnector")
         )
-        if self.parallel_config.decode_context_parallel_size > 1 and not nixl_pd_active:
+        mooncake_pd_active = (
+            self.kv_transfer_config is not None
+            and self.kv_transfer_config.has_connector("MooncakeConnector")
+        )
+        if (
+            self.parallel_config.decode_context_parallel_size > 1
+            and not nixl_pd_active
+            and not mooncake_pd_active
+        ):
             assert (
                 self.parallel_config.cp_kv_cache_interleave_size <= block_size
                 and block_size % self.parallel_config.cp_kv_cache_interleave_size == 0

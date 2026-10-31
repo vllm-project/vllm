@@ -41,6 +41,48 @@ Now you can send requests to the proxy server through port 8000.
 For multimodal Encode-Prefill-Decode (encoder embeddings rather than KV
 cache), see [ECMooncakeConnector Usage Guide](mooncake_ec_connector_usage.md).
 
+## Decode context parallelism (DCP)
+
+`MooncakeConnector` supports block-aligned DCP transfers for single-group,
+uncompressed full-attention GQA and MLA KV caches. DCP is disabled by default
+(`--decode-context-parallel-size 1`). Set `--decode-context-parallel-size` on
+prefill, decode, or both; it uses ranks within each instance's TP group.
+
+For example, an MLA model with TP4 can use DCP4 on either side. For a GQA model
+with four KV heads and TP8, the supported DCP sizes are 1 and 2. On each side,
+DCP must be either 1 or consume all replicated KV ranks:
+
+- MLA: `DCP = TP` when DCP is enabled.
+- GQA: `DCP = TP / min(TP, total KV heads)` when DCP is enabled.
+- P and D may use different TP and DCP sizes, but the larger DCP size must be
+  divisible by the smaller one. The KV-head group count is 1 for MLA and
+  `min(TP, total KV heads)` for GQA; the larger P/D group count must be divisible
+  by the smaller one.
+
+P and D must use equal physical block sizes, with no logical-to-kernel block
+splitting. On a side using DCP, `--cp-kv-cache-interleave-size` must equal that
+physical block size. vLLM resolves the default interleave from the KV cache
+groups when automatic resolution is enabled; an explicit incompatible value
+is rejected. Use an attention backend that supports block-aligned DCP.
+
+Prefix cache hits are supported: the decoder sends its prefix offset so that
+producer and consumer blocks are matched by their positions in the sequence.
+A full local hit still sends release requests to the producer. Data pulls and
+KV lease renewals use the same producer workers, including replicated producers
+that send only completion acknowledgments. `kv_lease_duration` retains the
+configuration requirements described below.
+
+PCP, multiple KV cache groups, Mamba/GDN, sliding-window/chunked attention,
+compressed KV caches, and caches that do not shard under DCP are outside this
+DCP path. These restrictions also apply to a DCP1 peer communicating with a
+DCP-enabled peer. Use the same connector revision on both sides for DCP.
+
+The existing accuracy runner accepts `PREFILLER_DCP_SIZE` and
+`DECODER_DCP_SIZE`, both defaulting to 1, alongside `PREFILLER_TP_SIZE` and
+`DECODER_TP_SIZE`. Select a model and TP sizes satisfying the constraints above
+before running
+[run_accuracy_test.sh](../../tests/v1/kv_connector/mooncake_integration/run_accuracy_test.sh).
+
 ## Environment Variables
 
 - `VLLM_MOONCAKE_BOOTSTRAP_PORT`: Port for Mooncake bootstrap server

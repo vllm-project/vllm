@@ -351,6 +351,7 @@ steps:
     - tests/v1
     - tests/watermarking
     - examples/disaggregated/mooncake_connector/mooncake_connector_proxy.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/mooncake/
   device: cpu-small
   commands:
     # split the test to avoid interference
