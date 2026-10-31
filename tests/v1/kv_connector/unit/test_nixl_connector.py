@@ -5204,7 +5204,10 @@ def test_ucx_backend_params(dist_init, extra_config, agent_backends, created_bac
             num_threads=num_threads,
         )
 
-    vllm_config = create_vllm_config(kv_connector_extra_config=extra_config)
+    block_size = maybe_update_block_size(16)
+    vllm_config = create_vllm_config(
+        block_size=block_size, kv_connector_extra_config=extra_config
+    )
     with (
         patch(
             "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
@@ -5217,7 +5220,9 @@ def test_ucx_backend_params(dist_init, extra_config, agent_backends, created_bac
         set_current_vllm_config(vllm_config),
     ):
         connector = NixlConnector(
-            vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+            vllm_config,
+            KVConnectorRole.WORKER,
+            make_kv_cache_config(block_size=block_size),
         )
     wrapper = connector.connector_worker.nixl_wrapper
     assert wrapper.config.backends == agent_backends
