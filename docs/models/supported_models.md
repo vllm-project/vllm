@@ -542,6 +542,7 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | Architecture | Models | Inputs | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
 | ------------ | ------ | ------ | ----------------- | -------------------- | ------------------------- |
 | `Alpamayo2Super` | Alpamayo 2 Super (reasoning model) | T + I<sup>E+</sup> | `nvidia/Alpamayo2-Super` | | ✅︎ |
+| `AprielVoiceModel` | [Apriel Voice](supported_models/apriel_voice.md) | T + A<sup>E+</sup> + I<sup>+</sup> | `ServiceNow-AI/Apriel-Voice-27B-preview` | | |
 | `AriaForConditionalGeneration` | Aria | T + I<sup>+</sup> | `rhymes-ai/Aria` | | |
 | `AudioFlamingo3ForConditionalGeneration` | AudioFlamingo3 | T + A | `nvidia/audio-flamingo-3-hf`, `nvidia/music-flamingo-hf` | ✅︎ | ✅︎ |
 | `BagelForConditionalGeneration` | BAGEL | T + I<sup>+</sup> | `ByteDance-Seed/BAGEL-7B-MoT` | ✅︎ | ✅︎ |
