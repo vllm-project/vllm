@@ -17,6 +17,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
+    group_kernel_blocks,
 )
 
 
@@ -294,20 +295,31 @@ def get_layer_transfer_geometry(
         isinstance(spec, AttentionSpec)
         and len(shape) == 4
         and shape[1] == spec.num_heads
-        and shape[2] == spec.num_states
+        and (
+            shape[2] == spec.num_states
+            or (shape[1] == 1 and spec.num_states % shape[2] == 0)
+        )
         and shape[3] * element_size == spec.state_content_size_bytes
     ):
         # Standardized per-layer [B, H, N, C] view (MLA is just H == 1).
-        num_blocks, num_heads, num_states, content_dim = shape
+        # Single-head views may be split into kernel blocks (N < num_states):
+        # the allocator only splits dense pages, so a manager block is the same
+        # token rows whatever the kernel block size, and P and D may differ.
+        num_heads, content_dim = shape[1], shape[3]
+        blocks = group_kernel_blocks(
+            kv_cache, shape[0] // (spec.num_states // shape[2])
+        )
         slot_size_bytes = num_heads * content_dim * element_size
-        block_len = 1 + sum((s - 1) * st for s, st in zip(shape[1:], stride[1:]))
+        block_len = 1 + sum(
+            (s - 1) * st for s, st in zip(blocks.shape[1:], blocks.stride()[1:])
+        )
         block_len *= element_size
         return LayerTransferGeometry(
-            num_blocks=num_blocks,
+            num_blocks=blocks.shape[0],
             block_size=spec.block_size,
             block_len=block_len,
             slot_size_bytes=slot_size_bytes,
-            block_stride=stride[0],
+            block_stride=blocks.stride(0),
             local_kv_stride=None,
             remote_kv_stride=None,
             transfers_per_block=1,
