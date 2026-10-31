@@ -84,17 +84,6 @@ SERVER_ARGS = [
     "2",
     "--attention-config",
     json.dumps({"mla_prefill_backend": "ROCM_AITER_FA"}),
-    "--speculative-config",
-    json.dumps(
-        {
-            "method": "dspark",
-            "model": DRAFT,
-            "num_speculative_tokens": 7,
-            "attention_backend": "ROCM_AITER_MLA",
-            "draft_sample_method": "probabilistic",
-            "rejection_sample_method": "block",
-        }
-    ),
     "--compilation-config",
     json.dumps({"cudagraph_mode": "FULL_AND_PIECEWISE"}),
     "--additional-config",
@@ -102,9 +91,31 @@ SERVER_ARGS = [
 ]
 
 
+def _server_args(speculative: bool) -> list[str]:
+    if not speculative:
+        return SERVER_ARGS
+    return [
+        *SERVER_ARGS,
+        "--speculative-config",
+        json.dumps(
+            {
+                "method": "dspark",
+                "model": DRAFT,
+                "num_speculative_tokens": 7,
+                "attention_backend": "ROCM_AITER_MLA",
+                "draft_sample_method": "probabilistic",
+                "rejection_sample_method": "block",
+            }
+        ),
+    ]
+
+
 @needs_gfx950
 @multi_gpu_test(num_gpus=8)
-def test_a_stalled_rank_stops_the_engine(tmp_path):
+@pytest.mark.parametrize(
+    "speculative", [False, True], ids=["regular-decode", "spec-verify"]
+)
+def test_a_stalled_rank_stops_the_engine(tmp_path, speculative: bool):
     from vllm.models.kimi_k3.amd.specialized_decode.mono.common.sync import WAIT_TICKS
 
     site = tmp_path / "mono_fault"
@@ -130,7 +141,10 @@ def test_a_stalled_rank_stops_the_engine(tmp_path):
         "ignore_eos": True,
     }
     with RemoteOpenAIServer(
-        MODEL, SERVER_ARGS, env_dict=env, max_wait_seconds=STARTUP_TIMEOUT
+        MODEL,
+        _server_args(speculative),
+        env_dict=env,
+        max_wait_seconds=STARTUP_TIMEOUT,
     ) as server:
         url = server.url_root
         served = 0
