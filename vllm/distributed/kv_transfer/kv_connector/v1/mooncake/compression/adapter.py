@@ -9,12 +9,18 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import (
-    get_attn_backends_and_specs_for_layers,
     get_current_attn_backends,
+    get_current_attn_backends_and_specs,
 )
 from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.model_executor.models.utils import extract_layer_index
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    KVCacheSpec,
+    MLAAttentionSpec,
+)
 from vllm.v1.worker.utils import select_common_block_size
 
 
@@ -84,8 +90,16 @@ def build_memory_plan(vllm_config: VllmConfig, specs: dict[str, KVCacheSpec]) ->
     block_sizes = {spec.block_size for spec in cache_specs.values()}
     if len(block_sizes) != 1:
         raise ValueError("Mooncake compression requires a common logical block size")
-    backends, attn_specs = get_attn_backends_and_specs_for_layers(
-        vllm_config, specs, get_current_attn_backends(vllm_config)
+    backends, attn_specs = get_current_attn_backends_and_specs(
+        vllm_config,
+        KVCacheConfig(
+            num_blocks=0,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec([name], spec) for name, spec in specs.items()
+            ],
+        ),
+        get_current_attn_backends(vllm_config),
     )
     kernel_block_size = select_common_block_size(
         vllm_config.cache_config.block_size, backends, attn_specs

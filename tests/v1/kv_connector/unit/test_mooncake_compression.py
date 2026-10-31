@@ -72,11 +72,6 @@ def planned_adapter(monkeypatch):
     monkeypatch.setattr(backend, "build_memory_plan", plan)
     monkeypatch.setattr(adapter, "get_tensor_model_parallel_rank", lambda: 1)
     monkeypatch.setattr(adapter, "get_current_attn_backends", lambda config: [])
-    monkeypatch.setattr(
-        adapter,
-        "get_attn_backends_and_specs_for_layers",
-        lambda config, specs, backends: ([], []),
-    )
     monkeypatch.setattr(adapter, "select_common_block_size", lambda *args: 8)
     monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
     config = SimpleNamespace(
@@ -87,6 +82,7 @@ def planned_adapter(monkeypatch):
         ),
         parallel_config=SimpleNamespace(tensor_parallel_size=2),
         cache_config=SimpleNamespace(block_size=16),
+        compilation_config=SimpleNamespace(static_forward_context={}),
         model_config=SimpleNamespace(hf_config=SimpleNamespace(num_hidden_layers=4)),
     )
     spec = FullAttentionSpec(

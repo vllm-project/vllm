@@ -15,6 +15,7 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.yaml
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI300) LM Eval Small Models"
       dind: false
       device: mi300_1
@@ -33,6 +34,7 @@ steps:
 
 - label: ":amd: (MI300) LM Eval Small Models Harness"
   key: amd-lm-eval-small-models-harness
+  automatic_shard: true
   dind: false
   device: mi300_1
   timeout_in_minutes: 35
@@ -55,6 +57,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) LM Eval Watermarking"
   device: h200_35gb
   key: lm-eval-watermarking
+  automatic_shard: true
   # Recorded runs took 80–140 seconds
   timeout_in_minutes: 10
   source_file_dependencies:
@@ -69,6 +72,7 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-watermark.txt
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) LM Eval Watermarking"
       dind: false
       device: mi355_dpx
@@ -89,19 +93,6 @@ steps:
         VLLM_WORKER_MULTIPROC_METHOD: "spawn"
       commands:
       - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-watermark.txt
-
-# - label: LM Eval Large Models (4xA100)
-#   key: lm-eval-large-models-4xa100
-#   device: a100
-#   optional: true
-#   num_devices: 4
-#   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
-#   source_file_dependencies:
-#   - csrc/
-#   - vllm/model_executor/layers/quantization
-#   commands:
-#   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-#   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
 
 - label: ":nvidia: (H100) [Nightly] LM Eval Large Models"
   key: lm-eval-large-models-4xh100
@@ -267,6 +258,7 @@ steps:
 
 - label: ":nvidia: (H100) LM Eval Watermark Feature Combination"
   key: lm-eval-dspark-watermark-2xh100
+  automatic_shard: true
   device: h100
   num_devices: 2
   # Local TP2 runs took 84–379 seconds, including startup.
@@ -296,6 +288,7 @@ steps:
     watermarking/test_parallel_compatibility.py
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) LM Eval Watermark Feature Combination"
       dind: false
       device: mi355_2
@@ -678,6 +671,7 @@ steps:
 
 - label: ":nvidia: (H200) [Nightly] LM Eval Nemotron 3 Super"
   key: lm-eval-nemotron-3-super-8xh200
+  automatic_shard: true
   timeout_in_minutes: 35
   device: h200
   optional: true
@@ -686,6 +680,7 @@ steps:
     - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-h200-nemotron-3-super.txt
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) LM Eval Nemotron 3 Super"
       dind: false
       device: mi355_4
@@ -722,6 +717,7 @@ steps:
 
 - label: ":amd: (MI355) [Nightly] LM Eval Large Models"
   key: amd-lm-eval-large-models
+  automatic_shard: true
   dind: false
   device: mi355_8
   optional: true
@@ -745,6 +741,7 @@ steps:
     - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-h100.txt
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) MoE Refactor Integration"
       dind: false
       device: mi355_2
@@ -774,6 +771,7 @@ steps:
     - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-b200.txt
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) MoE Refactor BF16 Integration"
       dind: false
       device: mi355_2
@@ -808,6 +806,7 @@ steps:
     - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor-dp-ep/config-b200.txt
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) MoE Refactor BF16 DP Integration"
       dind: false
       device: mi355_2
@@ -853,38 +852,6 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-l4.txt
 
-- label: ":nvidia: (A100) [Nightly] LM Eval Humming Default TEMPORARY Shard %N"
-  key: lm-eval-humming-a100-default
-  optional: true
-  timeout_in_minutes: 75
-  device: a100
-  num_devices: 1
-  parallelism: 3
-  source_file_dependencies:
-  - vllm/model_executor/layers/quantization/humming.py
-  - vllm/model_executor/layers/quantization/utils/humming/
-  - vllm/model_executor/layers/fused_moe/experts/fused_humming_moe.py
-  - vllm/model_executor/layers/fused_moe/oracle/
-  - vllm/model_executor/kernels/linear/
-  commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-a100-shard-$$BUILDKITE_PARALLEL_JOB.txt
-
-- label: ":nvidia: (A100) [Nightly] LM Eval Humming Activation INT8 TEMPORARY Shard %N"
-  key: lm-eval-humming-a100-act
-  optional: true
-  timeout_in_minutes: 45
-  device: a100
-  num_devices: 1
-  parallelism: 2
-  source_file_dependencies:
-  - vllm/model_executor/layers/quantization/humming.py
-  - vllm/model_executor/layers/quantization/utils/humming/
-  - vllm/model_executor/layers/fused_moe/experts/fused_humming_moe.py
-  - vllm/model_executor/layers/fused_moe/oracle/
-  - vllm/model_executor/kernels/linear/
-  commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-a100-act-int8-shard-$$BUILDKITE_PARALLEL_JOB.txt
-
 - label: ":nvidia: (H100) [Nightly] LM Eval Humming Default TEMPORARY"
   key: lm-eval-humming-h100-default
   automatic_shard: true
@@ -920,6 +887,7 @@ steps:
 
 - label: ":nvidia: (H100) [Nightly] LM Eval Humming DeepEP TEMPORARY"
   key: lm-eval-humming-h100-deepep
+  automatic_shard: true
   optional: true
   timeout_in_minutes: 60
   device: h100
@@ -972,6 +940,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 18GB) LM Eval TurboQuant k8v4"
   key: lm-eval-turboquant-k8v4
+  automatic_shard: true
   timeout_in_minutes: 30
   device: h200_18gb
   source_file_dependencies:
@@ -983,6 +952,7 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant-k8v4.txt
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) LM Eval TurboQuant k8v4"
       dind: false
       device: mi355_dpx
@@ -1012,6 +982,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 18GB) LM Eval TurboQuant t4nc"
   key: lm-eval-turboquant-t4nc
+  automatic_shard: true
   timeout_in_minutes: 30
   device: h200_18gb
   source_file_dependencies:
@@ -1025,6 +996,7 @@ steps:
     amd:
       label: ":amd: (MI355 DPX) LM Eval TurboQuant t4nc"
       dind: false
+      automatic_shard: true
       device: mi355_dpx
       num_devices: 1
       timeout_in_minutes: 30
@@ -1052,6 +1024,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 18GB) LM Eval TurboQuant k3v4nc"
   key: lm-eval-turboquant-k3v4nc
+  automatic_shard: true
   timeout_in_minutes: 30
   device: h200_18gb
   source_file_dependencies:
@@ -1065,6 +1038,7 @@ steps:
     amd:
       label: ":amd: (MI355 DPX) LM Eval TurboQuant k3v4nc"
       dind: false
+      automatic_shard: true
       device: mi355_dpx
       num_devices: 1
       timeout_in_minutes: 30
@@ -1092,6 +1066,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 18GB) LM Eval TurboQuant t3nc"
   key: lm-eval-turboquant-t3nc
+  automatic_shard: true
   timeout_in_minutes: 30
   device: h200_18gb
   source_file_dependencies:
@@ -1105,6 +1080,7 @@ steps:
     amd:
       label: ":amd: (MI355 DPX) LM Eval TurboQuant t3nc"
       dind: false
+      automatic_shard: true
       device: mi355_dpx
       num_devices: 1
       timeout_in_minutes: 30
@@ -1133,6 +1109,7 @@ steps:
 # Octave kernels are built only for gfx942 and gfx1100, so this runs on MI300.
 - label: ":amd: (MI300) LM Eval Octave KV Cache"
   key: amd-lm-eval-octave-mi300
+  automatic_shard: true
   dind: false
   device: mi300_1
   num_devices: 1
@@ -1189,6 +1166,7 @@ steps:
 
 - label: ":nvidia: (B200) [Nightly] GPQA Eval (GPT-OSS)"
   key: gpqa-eval-gpt-oss-2xb200
+  automatic_shard: true
   timeout_in_minutes: 30
   device: b200-k8s
   optional: true
@@ -1201,6 +1179,7 @@ steps:
     - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-b200.txt
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) GPQA Eval (GPT-OSS)"
       dind: false
       device: mi355_2
@@ -1279,6 +1258,7 @@ steps:
 
 - label: ":nvidia: (DGX Spark) [Nightly] GPQA Eval (GPT-OSS)"
   key: gpqa-eval-gpt-oss-spark
+  automatic_shard: true
   timeout_in_minutes: 35
   device: dgx-spark
   optional: true
@@ -1293,6 +1273,7 @@ steps:
     - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-spark.txt
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) GPQA Eval (GPT-OSS TP1)"
       # The Spark config is a backend-neutral GPT-OSS TP1 baseline.
       dind: false
@@ -1316,6 +1297,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 35GB) LM Eval KV-Offload"
   key: kv-offload-small
+  automatic_shard: true
   timeout_in_minutes: 30
   device: h200_35gb
   source_file_dependencies:
@@ -1328,6 +1310,7 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "nemotron-h-8b or gemma-4-e4b-it"
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) LM Eval KV-Offload"
       dind: false
       device: mi355_dpx
@@ -1341,10 +1324,13 @@ steps:
       - vllm/v1/kv_offload/
       - vllm/v1/simple_kv_offload/
       - tests/evals/gsm8k/test_gsm8k_offloading.py
+      - vllm/distributed/kv_transfer/kv_connector/v1/umbp/
+      - tests/v1/kv_connector/umbp_test_utils.py
       - vllm/platforms/rocm.py
 
 - label: ":nvidia: (H100) LM Eval KV-Offload Medium"
   key: kv-offload-medium
+  automatic_shard: true
   timeout_in_minutes: 45
   device: h100
   num_devices: 2
@@ -1358,6 +1344,7 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "qwen3.5-35b or deepseek-v2-lite"
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) LM Eval KV-Offload Medium"
       dind: false
       device: mi355_2
@@ -1375,6 +1362,7 @@ steps:
 
 - label: ":nvidia: (H100) [Nightly] LM Eval KV-Offload Large"
   key: kv-offload-large
+  automatic_shard: true
   # Nightly only: 4-GPU H100 pods wait behind smaller jobs on per-PR runs.
   optional: true
   timeout_in_minutes: 40
@@ -1390,6 +1378,7 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "deepseek-v4-flash"
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) LM Eval KV-Offload Large"
       dind: false
       device: mi355_4
@@ -1409,6 +1398,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 35GB) MRCR Eval Small Models"
   key: mrcr-eval-small-models
+  automatic_shard: true
   device: h200_35gb
   timeout_in_minutes: 25
   source_file_dependencies:
@@ -1417,6 +1407,7 @@ steps:
     - pytest -s -v evals/mrcr/test_mrcr_correctness.py --config-list-file=evals/mrcr/configs/models-small.txt
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) MRCR Eval Small Models"
       dind: false
       device: mi355_dpx
@@ -1434,6 +1425,7 @@ steps:
 
 - label: ":amd: (MI355) [Nightly] LM Eval Large Models Harness"
   key: amd-lm-eval-large-models-harness
+  automatic_shard: true
   dind: false
   device: mi355_8
   optional: true
@@ -1459,6 +1451,7 @@ steps:
 
 - label: ":amd: (MI355) [Nightly] LM Eval Large Models ROCm Harness"
   key: amd-lm-eval-large-models-rocm-harness
+  automatic_shard: true
   dind: false
   device: mi355_8
   optional: true
