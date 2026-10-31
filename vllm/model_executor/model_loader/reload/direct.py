@@ -9,7 +9,8 @@ post-load processing runs once at the end:
 - cold start records each tensor's checkpoint layout (before post-load
   processing);
 - ``begin`` views tensors whose layout post-load processing changed back to
-  their checkpoint layout, on the same storage;
+  their checkpoint layout, on the same storage, and restores the loader
+  metadata (packed/input/output dims) post-load processing retagged;
 - ``finish`` reruns ``process_weights_after_loading`` for every module, as
   cold start does. Post-load processing has to refill derived tensors in
   place (captured CUDA graphs keep their startup addresses); nothing moves
@@ -61,6 +62,22 @@ __all__ = [
     "keeping_addresses",
     "record_checkpoint_layout",
 ]
+
+
+# Loader metadata post-load processing may retag on a kept parameter (AWQ
+# repacks along another dim); the checkpoint loaders shard with it.
+_LOADER_ATTRS = (
+    "_input_dim",
+    "_output_dim",
+    "_packed_dim",
+    "_packed_factor",
+    "_marlin_tile_size",
+    "input_dim",
+    "output_dim",
+    "packed_dim",
+    "packed_factor",
+    "pack_factor",
+)
 
 
 def direct_reload_enabled() -> bool:
@@ -174,15 +191,21 @@ def _check_supported(model: torch.nn.Module) -> None:
 
 def record_checkpoint_layout(model: torch.nn.Module) -> None:
     """Cold start, before post-load processing: remember each tensor's
-    checkpoint layout, and which parameter names hold checkpoint tensors.
+    checkpoint layout and loader metadata, which tensors this model owns, and
+    which parameter names hold checkpoint tensors.
     Runs once; reloads reuse the cold-start record."""
     if getattr(model, "_direct_layout_recorded", False) or is_weights_pre_processed():
         return  # pre-processed weights are already in runtime layout
     _check_supported(model)
     model._direct_layout_recorded = True
+    model._ckpt_tensor_ids = set()
     for _, t in _loadable_tensors(model):
+        model._ckpt_tensor_ids.add(id(t))
         if not t.is_meta and not hasattr(t, "_ckpt_layout"):
             t._ckpt_layout = (tuple(t.shape), t.stride(), t.dtype, t.storage_offset())
+            t._ckpt_loader_attrs = {
+                k: t.__dict__[k] for k in _LOADER_ATTRS if k in t.__dict__
+            }
     # every name, aliases included: post-load processing may replace either
     model._ckpt_param_names = [
         name
@@ -226,6 +249,14 @@ def _checkpoint_views(
             continue  # no layout: created by post-load processing, derived
         if (tuple(t.shape), t.stride(), t.dtype, t.storage_offset()) == layout:
             continue
+        if id(t) not in model._ckpt_tensor_ids:
+            # shared from another model after this one's cold start (a draft
+            # sharing the target's lm_head): this model's finish would rerun
+            # its post-load processing on bytes this update may not resend
+            raise RuntimeError(
+                f"direct reload: {name} is shared from another model and its "
+                "post-load processing changed its layout"
+            )
         shape, stride, dtype, offset = layout
         storage = t.untyped_storage()
         span = storage_extent(torch.empty_strided(shape, stride, device="meta"))
@@ -257,6 +288,15 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
     model._direct_reload_pending = True
     for t, view in views:
         t.data = view  # no zeroing: the full sync rewrites the checkpoint region
+    for _, t in _loadable_tensors(model):
+        attrs = getattr(t, "_ckpt_loader_attrs", None)
+        if attrs is None or id(t) not in model._ckpt_tensor_ids:
+            continue
+        for k in _LOADER_ATTRS:
+            if k in attrs:
+                t.__dict__[k] = attrs[k]
+            else:
+                t.__dict__.pop(k, None)
     logger.info(
         "direct reload: %d tensors viewed back to checkpoint layout", len(views)
     )

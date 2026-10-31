@@ -487,6 +487,56 @@ def test_finish_retry_after_failed_direct_finish_raises(monkeypatch):
     assert direct_reload_pending(model)
 
 
+def test_begin_restores_loader_metadata(monkeypatch):
+    # AWQ retags the kept parameter's packed/output dims; loaders shard with them
+    init = _ToyModel.__init__
+
+    def retag(layer):
+        new = layer.weight.t().contiguous()
+        new._output_dim, new._packed_dim = 1, 1
+        replace_parameter(layer, "weight", new)
+
+    def with_loader_metadata(self):
+        init(self)
+        self.proj.weight._output_dim = 0
+        self.proj.quant_method = _Method(retag)
+
+    monkeypatch.setattr(_ToyModel, "__init__", with_loader_metadata)
+    model = _cold_start(_checkpoint())
+    weight = model.proj.weight
+    assert (weight._output_dim, weight._packed_dim) == (1, 1)
+    begin_direct_reload(model)
+    assert weight._output_dim == 0 and not hasattr(weight, "_packed_dim")
+    model.load_weights(_checkpoint(1.01).items())
+    finish_direct_reload(model, _MODEL_CONFIG, _DEVICE)
+    assert (weight._output_dim, weight._packed_dim) == (1, 1)
+    _assert_same(_state(model), _state(_cold_start(_checkpoint(1.01))))
+
+
+def test_shared_tensor_with_changed_layout_refused():
+    # a draft sharing the target's lm_head after its cold start: the draft's
+    # finish would reprocess it although a draft update does not resend it
+    target = _cold_start(_checkpoint())
+    draft = _cold_start(_checkpoint())
+    draft.proj = target.proj  # its post-load processing transposes it
+    before = _state(target)
+    with pytest.raises(RuntimeError, match="shared from another model"):
+        begin_direct_reload(draft)
+    assert not direct_reload_pending(draft)
+    _assert_same(_state(target), before, addresses=True)
+
+
+def test_layerwise_start_refused_while_direct_update_pending(monkeypatch):
+    model = _cold_start(_checkpoint())
+    start_reload(model)
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
+    monkeypatch.setattr(
+        lifecycle, "initialize_layerwise_reload", lambda model: pytest.fail("ran")
+    )
+    with pytest.raises(RuntimeError, match="direct update is pending"):
+        start_reload(model)
+
+
 def test_replace_parameter_keeps_the_target_checkpoint_layout():
     # post-load processing may pass another checkpoint parameter as new_tensor
     model = _cold_start(_checkpoint())

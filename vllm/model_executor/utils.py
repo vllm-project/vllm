@@ -181,6 +181,7 @@ def replace_parameter(
     # reload); another checkpoint parameter passed as new_tensor must not
     # overwrite it.
     new_tensor_attrs.pop("_ckpt_layout", None)
+    new_tensor_attrs.pop("_ckpt_loader_attrs", None)
 
     if isinstance(new_tensor, torch.nn.Parameter):
         new_tensor = new_tensor.data

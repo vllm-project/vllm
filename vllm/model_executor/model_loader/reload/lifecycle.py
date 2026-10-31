@@ -24,6 +24,11 @@ _MODE_ATTR = "_reload_mode"
 def start_reload(model: torch.nn.Module) -> None:
     """Begin a weight update; `finish_reload` completes it in the same mode."""
     mode = envs.VLLM_RELOAD_MODE
+    if mode != "direct" and direct_reload_pending(model):
+        # its finish would refuse only after the whole layerwise load
+        raise RuntimeError(
+            "direct reload: a direct update is pending; start a new direct update"
+        )
     if mode == "direct":
         begin_direct_reload(model)
     else:
