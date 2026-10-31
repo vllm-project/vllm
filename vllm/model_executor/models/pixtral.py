@@ -89,6 +89,7 @@ from .utils import StageMissingLayer, init_vllm_registered_model, maybe_prefix
 from .vision import (
     VisionEncoderInfo,
     VisionFeatureSelectStrategy,
+    get_fp8_padded_hidden_size,
     is_vit_use_data_parallel,
     resolve_visual_encoder_outputs,
 )
@@ -137,6 +138,7 @@ def _make_packed_sequence_metadata(
     hidden_size: int,
     tp_size: int,
     device: torch.device,
+    fp8_padded_hidden_size: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     lengths = np.array(sequence_lengths, dtype=np.int32)
     cu_seqlens = np.concatenate(
@@ -155,6 +157,7 @@ def _make_packed_sequence_metadata(
         hidden_size,
         tp_size,
         device,
+        fp8_padded_hidden_size=fp8_padded_hidden_size,
     )
     return cu_seqlens_tensor, max_seqlen, sequence_lengths_tensor
 
@@ -987,6 +990,10 @@ class VisionTransformer(nn.Module):
     ):
         super().__init__()
         self.args = args
+        self.fp8_padded_hidden_size = get_fp8_padded_hidden_size(
+            args.num_attention_heads,
+            args.hidden_size // args.num_attention_heads,
+        )
         disable_tp = is_vit_use_data_parallel()
         self.patch_conv = Conv2dLayer(
             in_channels=args.num_channels,
@@ -1072,6 +1079,7 @@ class VisionTransformer(nn.Module):
             self.args.hidden_size,
             1 if is_vit_use_data_parallel() else get_tensor_model_parallel_world_size(),
             patch_embeds.device,
+            fp8_padded_hidden_size=self.fp8_padded_hidden_size,
         )
         out = self.transformer(
             patch_embeds,
@@ -1545,6 +1553,10 @@ class PixtralHFVisionModel(nn.Module):
         super().__init__()
 
         self.config = config
+        self.fp8_padded_hidden_size = get_fp8_padded_hidden_size(
+            config.num_attention_heads,
+            config.hidden_size // config.num_attention_heads,
+        )
         self.input_norm = input_norm
 
         self.patch_conv = Conv2dLayer(
@@ -1635,6 +1647,7 @@ class PixtralHFVisionModel(nn.Module):
             self.config.hidden_size,
             self.transformer.layers[0].attention.tp_size,
             patch_embeds.device,
+            fp8_padded_hidden_size=self.fp8_padded_hidden_size,
         )
 
         out = self.transformer(
