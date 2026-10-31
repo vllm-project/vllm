@@ -159,6 +159,14 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             self.lora_a_stacked[s_index][index] = 0
             self.lora_b_stacked[s_index][index] = 0
 
+    def slot_weights(
+        self, index: int
+    ) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]:
+        return (
+            tuple(lora_a[index, 0] for lora_a in self.lora_a_stacked),
+            tuple(lora_b[index, 0] for lora_b in self.lora_b_stacked),
+        )
+
     def set_lora(
         self,
         index: int,
