@@ -1,0 +1,7 @@
+# Generated at configure time by generate_paged_attn.py.
+attention_paged_attn_*.cu
+attention_paged_attn_entries.inc
+attention_paged_attn_dispatch.inc
+# Record of what is on disk (the script hash and the list of files written), so a
+# second build directory regenerates instead of silently reusing stale units.
+.paged_attn_generated
