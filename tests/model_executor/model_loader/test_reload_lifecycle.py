@@ -10,6 +10,7 @@ import pytest
 import torch
 
 from vllm.model_executor.model_loader.reload import (
+    abort_reload,
     finish_reload,
     record_metadata_for_reloading,
     start_reload,
@@ -69,6 +70,20 @@ def test_active_only_between_start_and_finish(monkeypatch, mode):
     assert not weight_update_active()
 
     torch.testing.assert_close(model.proj.weight, _checkpoint(1.01)["proj.weight"])
+
+
+@pytest.mark.parametrize("mode", ["direct", "layerwise"], ids=["direct", "layerwise"])
+def test_abort_ends_the_update(monkeypatch, mode):
+    monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
+    model = _TinyModel()
+    record_metadata_for_reloading(model)
+    model.load_weights(_checkpoint().items())
+    process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
+
+    start_reload(model)
+    model.load_weights([("proj.weight", _checkpoint(1.01)["proj.weight"])])
+    abort_reload(model)
+    assert not weight_update_active()
 
 
 class _Outer(torch.nn.Module):
