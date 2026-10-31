@@ -17,6 +17,17 @@ vllm serve MODEL \
   --watermark-config '{"algorithm":"gumbel","key":42}'
 ```
 
+To keep the key off the command line, read it from a file instead, for example
+a mounted Docker or Kubernetes secret:
+
+```bash
+vllm serve MODEL \
+  --watermark-config '{"algorithm":"gumbel","key_file":"/secrets/watermark_key"}'
+```
+
+The file holds the key as a decimal integer; surrounding whitespace is ignored.
+vLLM reads it once at startup. Set either `key` or `key_file`, not both.
+
 Watermarking is disabled when `--watermark-config` is omitted. Gumbel-max (see
 `gumbel`) is the default algorithm within an enabled `WatermarkConfig`.
 
