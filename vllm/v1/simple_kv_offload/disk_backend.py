@@ -13,6 +13,7 @@ import contextlib
 import os
 import queue
 import threading
+import time
 
 import torch
 
@@ -25,12 +26,17 @@ from vllm.v1.simple_kv_offload.cuda_mem_ops import (
     build_params,
     copy_blocks,
     pin_tensor,
+    unpin_tensor,
 )
 
 logger = init_logger(__name__)
 
 O_DIRECT = getattr(os, "O_DIRECT", 0)
 _ALIGNMENT = 4096
+# Total wait for both IO threads at shutdown. The file is unlinked before this
+# wait, so the bound only decides whether the fd can be closed and the staging
+# buffers unregistered safely.
+_SHUTDOWN_JOIN_TIMEOUT_S = 2.0
 
 
 def _alloc_aligned(num_slots: int, bpb: int) -> torch.Tensor:
@@ -70,6 +76,9 @@ class DiskBackend:
         self._shutdown: bool = False
         self._fd: int = -1
         self._disk_path: str = ""
+        # (st_dev, st_ino) of the file this backend created; None once removed.
+        self._file_id: tuple[int, int] | None = None
+        self._pinned_buffers: list[torch.Tensor] = []
         self._total_block_bytes: int = 0
         self._store_buffer_caches: dict[str, torch.Tensor] = {}
         self._load_buffer_caches: dict[str, torch.Tensor] = {}
@@ -112,10 +121,10 @@ class DiskBackend:
         for name, gpu_t in gpu_caches.items():
             bpb = gpu_t.stride(0) * gpu_t.element_size()
             store_buf = _alloc_aligned(num_buffer_slots, bpb)
-            pin_tensor(store_buf)
+            self._pin(store_buf)
             self._store_buffer_caches[name] = store_buf
             load_buf = _alloc_aligned(num_buffer_slots, bpb)
-            pin_tensor(load_buf)
+            self._pin(load_buf)
             self._load_buffer_caches[name] = load_buf
 
         # Pre-built iovec views per slot (avoid per-transfer .numpy() calls)
@@ -160,6 +169,10 @@ class DiskBackend:
             flags |= O_DIRECT
         self._fd = os.open(disk_path, flags, 0o600)
         self._disk_path = disk_path
+        # Remember which inode we created so shutdown() only ever removes this
+        # file, even if another process has since reused the same path.
+        st = os.fstat(self._fd)
+        self._file_id = (st.st_dev, st.st_ino)
         os.ftruncate(self._fd, num_disk_slots * total_block_bytes)
 
         logger.info(
@@ -186,6 +199,11 @@ class DiskBackend:
         self._store_thread.start()
         self._load_thread.start()
 
+    def _pin(self, buf: torch.Tensor) -> None:
+        """Pin (cudaHostRegister) a staging buffer and record it for shutdown()."""
+        pin_tensor(buf)
+        self._pinned_buffers.append(buf)
+
     def launch_copy(
         self,
         src_blocks: list[int],
@@ -199,39 +217,112 @@ class DiskBackend:
         q.put((src_blocks, dst_blocks, event_idx, events_list, wait_event))
 
     def shutdown(self) -> None:
+        """Remove the backing file, stop the IO threads and release the
+        pinned staging buffers.
+
+        Idempotent, and a no-op for the file if init() never created one.
+        Never raises: it runs on the engine teardown path.
+        """
         if self._shutdown:
             return
         self._shutdown = True
-        self._store_queue.put(None)
-        self._load_queue.put(None)
-        if self._store_thread is not None:
-            self._store_thread.join(timeout=10.0)
-        if self._load_thread is not None:
-            self._load_thread.join(timeout=10.0)
-        if self._fd < 0:
-            return
-        # Slot contents can encode user prompts, so drop the name now rather
-        # than leaving them readable until the next run overwrites the file.
+        # Slot contents can encode user prompts, so drop the name first: it is
+        # O(1), and the process may be killed before the joins below return.
         # Unlinking only removes the directory entry: any thread still holding
         # the fd keeps writing to the (now anonymous) inode, which the kernel
         # frees once the last fd goes away.
-        with contextlib.suppress(OSError):
-            os.unlink(self._disk_path)
-        # Closing under a still-running IO thread would let the fd number be
-        # reused by an unrelated open(), turning its next pwritev into a write
-        # into that file. Leaking one fd for the remaining process lifetime is
-        # the cheaper failure.
+        self._unlink_own_file()
+        # The loops check _shutdown, so queued transfers are dropped instead of
+        # drained: their results would only land in the unlinked file.
+        self._store_queue.put(None)
+        self._load_queue.put(None)
+        deadline = time.monotonic() + _SHUTDOWN_JOIN_TIMEOUT_S
+        for t in (self._store_thread, self._load_thread):
+            if t is not None and t.is_alive():
+                t.join(timeout=max(0.0, deadline - time.monotonic()))
+        # A still-running IO thread may yet pwritev/preadv through the fd and
+        # DMA into its staging buffers. Closing the fd would let its number be
+        # reused by an unrelated open(), turning the next pwritev into a write
+        # into that file; unregistering the buffers would let the allocator
+        # hand that memory out again under the DMA. Leaking both for the
+        # remaining process lifetime is the cheaper failure.
         if any(
             t is not None and t.is_alive()
             for t in (self._store_thread, self._load_thread)
         ):
             logger.warning(
-                "IO thread still running after shutdown timeout; leaking fd %d",
+                "DiskBackend: IO thread still running after the %.1f s shutdown "
+                "timeout; leaking fd %d and keeping %d staging buffers registered",
+                _SHUTDOWN_JOIN_TIMEOUT_S,
                 self._fd,
+                len(self._pinned_buffers),
             )
             return
-        os.close(self._fd)
-        self._fd = -1
+        if self._fd >= 0:
+            with contextlib.suppress(OSError):
+                os.close(self._fd)
+            self._fd = -1
+        self._release_staging_buffers()
+
+    def _release_staging_buffers(self) -> None:
+        """Unregister every staging buffer init() pinned, then drop the
+        references so the memory can be freed.
+
+        Only call this once both IO threads have exited. Without it, freed
+        buffers stay registered, and the next cudaHostRegister of a range the
+        allocator hands out again (e.g. another DiskBackend in the same
+        process) fails with cudaErrorHostMemoryAlreadyRegistered.
+        """
+        # The iovecs and DMA params point into the buffers; drop them with the
+        # buffers so nothing can reach the memory once it is freed.
+        self._store_slot_views = []
+        self._load_slot_views = []
+        self._store_params = None
+        self._load_params = None
+        self._store_buffer_caches = {}
+        self._load_buffer_caches = {}
+        still_pinned: list[torch.Tensor] = []
+        error: Exception | None = None
+        for buf in self._pinned_buffers:
+            try:
+                unpin_tensor(buf)
+            except Exception as e:
+                still_pinned.append(buf)
+                error = e
+        # Keep (leak) any buffer that is still registered: freeing it would
+        # recreate the stale registration this method exists to avoid.
+        self._pinned_buffers = still_pinned
+        if still_pinned:
+            logger.warning(
+                "DiskBackend: %d staging buffers could not be unregistered and "
+                "stay allocated: %s",
+                len(still_pinned),
+                error,
+            )
+
+    def _unlink_own_file(self) -> None:
+        """Unlink disk_path only if it is still the inode init() created."""
+        file_id, self._file_id = self._file_id, None
+        if file_id is None:
+            return
+        try:
+            st = os.lstat(self._disk_path)
+            if (st.st_dev, st.st_ino) != file_id:
+                # Another process (e.g. the next start on this node) has
+                # replaced the path with its own file; leave that one alone.
+                logger.info(
+                    "DiskBackend: %s no longer refers to this process's file; "
+                    "not removing it",
+                    self._disk_path,
+                )
+                return
+            os.unlink(self._disk_path)
+        except FileNotFoundError:
+            return
+        except OSError as e:
+            logger.warning("DiskBackend: failed to remove %s: %s", self._disk_path, e)
+            return
+        logger.info("DiskBackend: removed %s", self._disk_path)
 
     def _store_loop(
         self,
@@ -241,7 +332,7 @@ class DiskBackend:
         current_platform.set_device(device)
         while True:
             item = self._store_queue.get()
-            if item is None:
+            if item is None or self._shutdown:
                 return
             (src_blocks, dst_blocks, event_idx, events_list, wait_event) = item
             if wait_event is not None:
@@ -275,7 +366,7 @@ class DiskBackend:
         current_platform.set_device(device)
         while True:
             item = self._load_queue.get()
-            if item is None:
+            if item is None or self._shutdown:
                 return
             (src_blocks, dst_blocks, event_idx, events_list, wait_event) = item
             if wait_event is not None:
@@ -298,6 +389,8 @@ class DiskBackend:
         pending: list[tuple[torch.Event, int] | None] = [None] * n
 
         for i, (gpu_blk, disk_slot) in enumerate(zip(gpu_blocks, disk_slots)):
+            if self._shutdown:
+                break
             buf_slot = i % n
             prev = pending[buf_slot]
             if prev is not None:
@@ -309,10 +402,13 @@ class DiskBackend:
             ev.record(stream)
             pending[buf_slot] = (ev, disk_slot * self._total_block_bytes)
 
+        # Wait for every DMA into the staging buffers even when the writes are
+        # dropped: shutdown() unregisters the buffers once this thread exits.
         for slot, last in enumerate(pending):
             if last is not None:
                 last[0].synchronize()
-                self._writev_slot(slot, last[1])
+                if not self._shutdown:
+                    self._writev_slot(slot, last[1])
 
     def _do_load(
         self,
@@ -326,6 +422,8 @@ class DiskBackend:
         prev_dma_events: list[torch.Event | None] = [None] * n
 
         for i, (disk_slot, gpu_blk) in enumerate(zip(disk_slots, gpu_blocks)):
+            if self._shutdown:
+                break
             buf_slot = i % n
             prev = prev_dma_events[buf_slot]
             if prev is not None:
@@ -338,6 +436,8 @@ class DiskBackend:
             ev.record(stream)
             prev_dma_events[buf_slot] = ev
 
+        # Also on shutdown: the DMAs read the staging buffers, which shutdown()
+        # unregisters once this thread exits.
         for ev in prev_dma_events:
             if ev is not None:
                 ev.synchronize()

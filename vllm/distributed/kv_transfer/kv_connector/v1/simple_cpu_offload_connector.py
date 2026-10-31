@@ -401,6 +401,15 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             return self.scheduler_manager.take_events()
         return []
 
+    def shutdown(self) -> None:
+        """Remove the disk tier's per-rank file on graceful exit.
+
+        Only the worker side opens disk files; the scheduler side just sizes
+        its pool from disk_capacity_bytes, so there is nothing to release.
+        """
+        if self.worker_handler is not None:
+            self.worker_handler.shutdown()
+
     # NOTE: Workers are not contacted. In-flight transfers drain naturally,
     # and stale completions are ignored by the guarded
     # SimpleCPUOffloadScheduler._process_store_event().
