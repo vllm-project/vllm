@@ -565,6 +565,14 @@ def _get_backend_priorities(
         else:
             backends.append(AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
     backends.append(AttentionBackendEnum.TRITON_ATTN)
+
+    # TODO(#62606): remove once the aiter pin includes ROCm/aiter#6661.
+    # ROCM_AITER_UNIFIED_ATTN gives wrong output on gfx950 for some KV cache
+    # sizes, so rank TRITON_ATTN right above it there.
+    unified = AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN
+    if on_gfx950() and unified in backends:
+        backends.remove(AttentionBackendEnum.TRITON_ATTN)
+        backends.insert(backends.index(unified), AttentionBackendEnum.TRITON_ATTN)
     backends.append(AttentionBackendEnum.TURBOQUANT)
     backends.append(AttentionBackendEnum.ROCM_OCTAVE)
     backends.append(AttentionBackendEnum.ULTRAQUANT)
