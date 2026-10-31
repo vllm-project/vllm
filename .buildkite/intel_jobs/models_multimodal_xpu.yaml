@@ -276,6 +276,7 @@ steps:
     label: production
     gpu: 1+
     mem: 24+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
   source_file_dependencies:

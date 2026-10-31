@@ -116,6 +116,7 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s v1/e2e/general/test_async_scheduling_accuracy.py
   source_file_dependencies:
@@ -232,7 +233,7 @@ steps:
     gpu: 2+
     mem: 16+
   _raw_old_commands:
-  - pytest -v -s v1/e2e/spec_decode/draft_model/test_draft_model.py::test_draft_model_tensor_parallelism v1/e2e/spec_decode/draft_model/test_draft_model.py::test_draft_model_engine_args_tensor_parallelism
+  - pytest -v -s v1/e2e/spec_decode/draft_model/test_draft_model.py::test_draft_model_tensor_parallelism v1/e2e/spec_decode/draft_model/test_draft_model.py::test_draft_model_engine_args_tensor_parallelism v1/e2e/spec_decode/draft_model/test_structured_output_pp.py::test_specdec_pp_structured_output
   source_file_dependencies:
   - vllm/compilation/
   - vllm/config/
@@ -257,7 +258,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest --continue-on-collection-errors -v -s v1/e2e/spec_decode/draft_model/test_draft_model.py::test_draft_model_tensor_parallelism v1/e2e/spec_decode/draft_model/test_draft_model.py::test_draft_model_engine_args_tensor_parallelism || true'
+    pytest --continue-on-collection-errors -v -s v1/e2e/spec_decode/draft_model/test_draft_model.py::test_draft_model_tensor_parallelism v1/e2e/spec_decode/draft_model/test_draft_model.py::test_draft_model_engine_args_tensor_parallelism v1/e2e/spec_decode/draft_model/test_structured_output_pp.py::test_specdec_pp_structured_output || true'
 - label: ':nvidia: (B200) [Nightly] V1 E2E Hybrid Chunked Prefill'
   key: v1-e2e-hybrid-chunked-prefill-b200
   device: intel_gpu
