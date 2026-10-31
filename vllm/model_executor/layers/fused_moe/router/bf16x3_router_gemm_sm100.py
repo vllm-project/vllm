@@ -1031,18 +1031,11 @@ _DECOMP_BLOCK = 4096
 
 @cache
 def _decomp_fast_launcher(device: torch.device):
-    """Relaunch handle for the decomp kernel that skips JITFunction.run's
-    per-call binding and specialization-key work (~10us -> ~3us eager CPU).
-    Only valid for the specialization it compiles with: numel divisible by
-    16 (and != 1) and 16B-aligned pointers; anything else takes the normal
-    launch path in _decompose_w. Returns None when launch hooks are active
-    (profilers), so the hooked path stays observable."""
-    from triton import knobs
-
-    enter_hook = knobs.runtime.launch_enter_hook
-    if enter_hook is not None and getattr(enter_hook, "calls", True):
-        # hooks active (profilers): keep the hooked launch path observable
-        return None
+    """Warmed decomp kernel for the fast relaunch in _decompose_w, skipping
+    JITFunction.run's per-call binding and specialization-key work
+    (~10us -> ~3us eager CPU). Only valid for the specialization it compiles
+    with: numel divisible by 16 (and != 1) and 16B-aligned pointers; anything
+    else takes the normal launch path in _decompose_w."""
     w = torch.empty(16, dtype=torch.float32, device=device)
     w3 = torch.empty(3 * 16, dtype=torch.bfloat16, device=device)
     kernel = _bf16x3_decomp_kernel.warmup(
@@ -1052,12 +1045,23 @@ def _decomp_fast_launcher(device: torch.device):
     return kernel
 
 
+def _decomp_hooks_active() -> bool:
+    # Checked per call, outside the cached launcher: a profiler attaching
+    # mid-process must not be bypassed by the hook-free kernel.run path.
+    from triton import knobs
+
+    for hook in (knobs.runtime.launch_enter_hook, knobs.runtime.launch_exit_hook):
+        if hook is not None and getattr(hook, "calls", True):
+            return True
+    return False
+
+
 def _decompose_w(W: torch.Tensor) -> torch.Tensor:
     N, K = W.shape
     numel = N * K
     w3 = W.new_empty(3, N, K, dtype=torch.bfloat16)
-    kernel = _decomp_fast_launcher(W.device)
-    if kernel is not None and numel % 16 == 0 and W.data_ptr() % 16 == 0:
+    if numel % 16 == 0 and W.data_ptr() % 16 == 0 and not _decomp_hooks_active():
+        kernel = _decomp_fast_launcher(W.device)
         stream = torch.cuda.current_stream(W.device).cuda_stream
         kernel.run(
             (numel + _DECOMP_BLOCK - 1) // _DECOMP_BLOCK,
