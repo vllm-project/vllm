@@ -164,6 +164,43 @@ def test_block_ids_are_not_overwritten_while_copy_is_in_flight():
     assert torch.all(storage[3] == 1)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_block_ids_are_zeroed_only_in_their_cache_group():
+    device = torch.device("cuda")
+    spec = SlidingWindowSpec(
+        block_size=2,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.uint8,
+        sliding_window=4,
+    )
+    group_0_storage = torch.ones((4, 1, 2, 2), dtype=torch.uint8, device=device)
+    group_1_storage = torch.ones((4, 1, 2, 2), dtype=torch.uint8, device=device)
+    zeroer = KVBlockZeroer(
+        device,
+        attn_groups_iter=[
+            AttentionGroup(None, ["group_0"], spec, 0),  # type: ignore[arg-type]
+            AttentionGroup(None, ["group_1"], spec, 1),  # type: ignore[arg-type]
+        ],
+        kernel_block_sizes=[2, 2],
+        static_forward_context={
+            "group_0": SimpleNamespace(kv_cache=group_0_storage),
+            "group_1": SimpleNamespace(kv_cache=group_1_storage),
+        },
+        num_blocks=4,
+    )
+
+    zeroer.zero_block_ids_by_group([[1], [2]])
+    torch.accelerator.synchronize()
+
+    expected_group_0 = torch.ones_like(group_0_storage)
+    expected_group_0[1] = 0
+    expected_group_1 = torch.ones_like(group_1_storage)
+    expected_group_1[2] = 0
+    assert torch.equal(group_0_storage, expected_group_0)
+    assert torch.equal(group_1_storage, expected_group_1)
+
+
 @pytest.mark.skipif(
     not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
     reason="CUDA or XPU required",

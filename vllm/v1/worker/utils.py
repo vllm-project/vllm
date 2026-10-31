@@ -106,8 +106,8 @@ class KVBlockZeroer:
     """Manages efficient zeroing of KV cache blocks via a Triton kernel.
 
     Construct once after KV caches are allocated to precompute segment
-    addresses, then call :meth:`zero_block_ids` each step to zero
-    newly-allocated blocks.
+    addresses, then call :meth:`zero_block_ids_by_group` each step to zero
+    newly-allocated blocks in their owning cache groups.
     """
 
     def __init__(
@@ -141,6 +141,9 @@ class KVBlockZeroer:
         self._meta: (
             tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int, int] | None
         ) = None
+        self._meta_by_group: list[
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int, int] | None
+        ] = [None] * len(kernel_block_sizes)
 
         if runner_only_attn_layers is None:
             runner_only_attn_layers = set()
@@ -151,6 +154,12 @@ class KVBlockZeroer:
         seg_addrs: list[int] = []
         seg_block_strides: list[int] = []
         seg_page_sizes: list[int] = []
+        # The same segments, kept per KV cache group so a new block is zeroed
+        # only in the group that owns it.
+        group_seen_ptrs: list[dict[int, int]] = [{} for _ in kernel_block_sizes]
+        group_seg_addrs: list[list[int]] = [[] for _ in kernel_block_sizes]
+        group_seg_block_strides: list[list[int]] = [[] for _ in kernel_block_sizes]
+        group_seg_page_sizes: list[list[int]] = [[] for _ in kernel_block_sizes]
 
         for group in attn_groups_iter:
             spec = group.kv_cache_spec
@@ -158,7 +167,8 @@ class KVBlockZeroer:
                 continue
             if group.kv_cache_group_id >= len(kernel_block_sizes):
                 continue
-            kernel_bs = kernel_block_sizes[group.kv_cache_group_id]
+            group_id = group.kv_cache_group_id
+            kernel_bs = kernel_block_sizes[group_id]
             assert spec.block_size % kernel_bs == 0
             for layer_name in group.layer_names:
                 if layer_name in runner_only_attn_layers:
@@ -200,27 +210,49 @@ class KVBlockZeroer:
                     assert (dp + off_bytes) % 4 == 0
                     for virtual_index in range(ratio):
                         addr = dp + off_bytes + virtual_index * block_stride_bytes
-                        if (idx := seen_ptrs.get(addr)) is not None:
-                            assert (
-                                seg_block_strides[idx]
-                                == logical_block_stride_bytes // 4
-                            )
-                            seg_page_sizes[idx] = max(
-                                seg_page_sizes[idx], kernel_page_bytes // 4
-                            )
-                            continue
-                        seen_ptrs[addr] = len(seg_addrs)
-                        seg_addrs.append(addr)
-                        seg_block_strides.append(logical_block_stride_bytes // 4)
-                        seg_page_sizes.append(kernel_page_bytes // 4)
+                        block_stride = logical_block_stride_bytes // 4
+                        page_size = kernel_page_bytes // 4
+                        for seen, addrs, strides, page_sizes in (
+                            (seen_ptrs, seg_addrs, seg_block_strides, seg_page_sizes),
+                            (
+                                group_seen_ptrs[group_id],
+                                group_seg_addrs[group_id],
+                                group_seg_block_strides[group_id],
+                                group_seg_page_sizes[group_id],
+                            ),
+                        ):
+                            if (idx := seen.get(addr)) is not None:
+                                assert strides[idx] == block_stride
+                                page_sizes[idx] = max(page_sizes[idx], page_size)
+                                continue
+                            seen[addr] = len(addrs)
+                            addrs.append(addr)
+                            strides.append(block_stride)
+                            page_sizes.append(page_size)
 
         if not seg_addrs:
-            self._meta = None
             return
 
+        self._meta = self._make_meta(seg_addrs, seg_block_strides, seg_page_sizes)
+        self._meta_by_group = [
+            self._make_meta(addrs, strides, page_sizes) if addrs else None
+            for addrs, strides, page_sizes in zip(
+                group_seg_addrs,
+                group_seg_block_strides,
+                group_seg_page_sizes,
+                strict=True,
+            )
+        ]
+
+    def _make_meta(
+        self,
+        seg_addrs: list[int],
+        seg_block_strides: list[int],
+        seg_page_sizes: list[int],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int, int]:
         max_page_size_el = max(seg_page_sizes)
         blk_size = min(1 << (max_page_size_el - 1).bit_length(), 1024)
-        self._meta = (
+        return (
             torch.tensor(seg_addrs, dtype=torch.uint64, device=self.device),
             torch.tensor(seg_block_strides, dtype=torch.int64, device=self.device),
             torch.tensor(seg_page_sizes, dtype=torch.int64, device=self.device),
@@ -230,8 +262,28 @@ class KVBlockZeroer:
         )
 
     def zero_block_ids(self, block_ids: list[int]) -> None:
-        """Zero the KV cache memory for the given block IDs."""
-        if not block_ids or self._meta is None:
+        """Zero the given block IDs in every attention cache group."""
+        self._zero_block_ids_with_meta(block_ids, self._meta)
+
+    def zero_block_ids_by_group(self, block_ids_by_group: list[list[int]]) -> None:
+        """Zero block IDs only in their owning KV cache groups."""
+        if len(block_ids_by_group) != len(self._meta_by_group):
+            raise ValueError(
+                "Expected block IDs for "
+                f"{len(self._meta_by_group)} KV cache groups, got "
+                f"{len(block_ids_by_group)}"
+            )
+        for block_ids, meta in zip(
+            block_ids_by_group, self._meta_by_group, strict=True
+        ):
+            self._zero_block_ids_with_meta(block_ids, meta)
+
+    def _zero_block_ids_with_meta(
+        self,
+        block_ids: list[int],
+        meta: tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int, int] | None,
+    ) -> None:
+        if not block_ids or meta is None:
             return
         (
             seg_addrs,
@@ -240,7 +292,7 @@ class KVBlockZeroer:
             max_chunks,
             blk_size,
             n_segs,
-        ) = self._meta
+        ) = meta
         n_blocks = len(block_ids)
         idx = async_tensor_h2d(block_ids, device=self.device, dtype=torch.int64)
         grid = (n_blocks, n_segs, max_chunks)
@@ -254,7 +306,15 @@ class KVBlockZeroer:
 
     def warmup(self, num_kv_blocks: int) -> None:
         """JIT-compile the zeroing kernel before the first real request."""
-        if num_kv_blocks > 0:
+        if num_kv_blocks <= 0:
+            return
+        if hasattr(self, "_meta_by_group"):
+            self.zero_block_ids_by_group(
+                [[0] if meta is not None else [] for meta in self._meta_by_group]
+            )
+        else:
+            # Compatibility for lightweight tests constructing the zeroer with
+            # ``__new__`` and a single aggregate metadata tuple.
             self.zero_block_ids([0])
 
 
