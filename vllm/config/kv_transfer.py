@@ -72,6 +72,10 @@ class KVTransferConfig:
     """Whether this vLLM instance produces, consumes KV cache, or both. Choices
     are 'kv_producer', 'kv_consumer', and 'kv_both'."""
 
+    pd_role: Literal["prefill", "decode"] | None = None
+    """Initial serving role for runtime P/D switching. Requires NixlConnector
+    with kv_role='kv_both'; KV transfer capabilities remain fixed."""
+
     kv_port: int = 14579
     """The KV connector port, used to build distributed connection."""
 
@@ -110,6 +114,16 @@ class KVTransferConfig:
     def __post_init__(self) -> None:
         if self.engine_id is None:
             self.engine_id = str(uuid.uuid4())
+
+        if self.pd_role is not None and (
+            self.kv_connector != "NixlConnector"
+            or self.kv_role != "kv_both"
+            or self.get_from_extra_config("bidirectional_kv_xfer", False)
+        ):
+            raise ValueError(
+                "pd_role requires NixlConnector with kv_role='kv_both' "
+                "and bidirectional_kv_xfer disabled"
+            )
 
         if self.kv_role is not None and self.kv_role not in get_args(KVRole):
             raise ValueError(
