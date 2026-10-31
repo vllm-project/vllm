@@ -66,6 +66,7 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -s -v compile/dynamic_shapes/
   source_file_dependencies: *pytorch-compilation-deps
@@ -89,6 +90,7 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - find compile/h100/ -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'
   source_file_dependencies:
@@ -189,8 +191,9 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
-  - find compile/fullgraph/ -name 'test_*.py' -not -name 'test_full_cudagraph.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'
+  - pytest -v -s compile/fullgraph --ignore=compile/fullgraph/test_full_cudagraph.py
   source_file_dependencies:
   - vllm/__init__.py
   - vllm/_aiter_ops.py
@@ -223,7 +226,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    find compile/fullgraph/ -name '\''test_*.py'\'' -not -name '\''test_full_cudagraph.py'\'' -print0 | xargs -0 -I{} pytest --continue-on-collection-errors -s -v '\''{}'\'' || true'
+    pytest --continue-on-collection-errors -v -s compile/fullgraph --ignore=compile/fullgraph/test_full_cudagraph.py || true'
 - label: ':nvidia: (L4) PyTorch Fullgraph CUDAGraph Compatibility'
   key: pytorch-fullgraph-cudagraph-l4-compatibility
   device: intel_gpu
@@ -240,6 +243,7 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -s -v compile/fullgraph/test_full_cudagraph.py
   source_file_dependencies:
@@ -289,6 +293,7 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - bash standalone_tests/pytorch_nightly_dependency.sh
   source_file_dependencies:

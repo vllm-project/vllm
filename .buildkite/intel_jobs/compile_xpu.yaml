@@ -18,6 +18,7 @@ steps:
     label: production
     gpu: 2+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - export VLLM_TEST_CLEAN_GPU_MEMORY=1
   - pytest -s -v tests/compile/passes/distributed
@@ -45,6 +46,7 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - nvidia-smi
   - pytest -v -s tests/compile/passes/test_fusion_attn.py -k FLASHINFER
@@ -91,6 +93,7 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - nvidia-smi
   - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "inductor_partition and not +rms_norm and not +quant_fp8"
@@ -122,6 +125,7 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - nvidia-smi
   - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "llama-3"
@@ -176,6 +180,7 @@ steps:
     label: production
     gpu: 2+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - nvidia-smi
   - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py -k "inductor_partition and not +rms_norm and (not +quant_fp8 or +quant_fp8 and (qwen3 or deepseek))"
@@ -205,6 +210,7 @@ steps:
     label: production
     gpu: 2+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - nvidia-smi
   - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py -k "llama-3"
@@ -236,6 +242,7 @@ steps:
     label: production
     gpu: 2+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - nvidia-smi
   - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py -k "(FLASHINFER and inductor_partition and not +rms_norm and (not +quant_fp8 or +quant_fp8 and (qwen3 or deepseek))) or Llama-3.1-8B-Instruct-FP4"

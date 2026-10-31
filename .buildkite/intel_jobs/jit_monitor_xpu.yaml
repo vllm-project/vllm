@@ -17,6 +17,7 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - export PYTHONFAULTHANDLER=1
   - pytest -v -s jit_monitor/test_no_runtime_jit.py --timeout=900 --timeout-method=thread
