@@ -18,7 +18,7 @@ from compressed_tensors.quantization import (
 
 from tests.models.utils import check_logprobs_close
 from tests.quantization.utils import load_model_without_vllm_runner
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
 from vllm.config.kernel import KernelConfig
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.kernels.linear import (
@@ -27,9 +27,11 @@ from vllm.model_executor.kernels.linear import (
 from vllm.model_executor.kernels.linear.scaled_mm import (
     MarlinFP8ScaledMMLinearKernel,
 )
+from vllm.model_executor.layers.activation import GeluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
+from vllm.model_executor.layers.fusion import fused_act_quant
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsConfig,
     CompressedTensorsLinearMethod,
@@ -55,6 +57,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     ScaleDesc,
     kFp8Dynamic128Sym,
+    kFp8DynamicTokenSym,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.platforms import current_platform
@@ -83,6 +86,62 @@ ROCM_TRITON_SCALED_MM_SUPPORTED_INT8_MODEL = [
 def enable_pickle(monkeypatch):
     """`LLM.apply_model` requires pickling a function."""
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not current_platform.has_device_capability(89),
+    reason="GELU per-token FP8 fusion requires CUDA SM89+",
+)
+@pytest.mark.parametrize("enforce_eager", [True, False])
+def test_gemma3_dynamic_fp8_gelu_fusion(vllm_runner, monkeypatch, enforce_eager):
+    """The fused GELU + per-token FP8 path matches the unfused CUDA chain."""
+    # In-process engine, so the registry patches below reach the model; no
+    # compile cache, so the unfused run cannot reuse the fused graph.
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+    key = (GeluAndMul, kFp8DynamicTokenSym)
+    fused_producer = fused_act_quant._FUSED_ACT_QUANT[key]
+    calls = 0
+
+    def counted(x, linear):
+        nonlocal calls
+        calls += 1
+        return fused_producer(x, linear)
+
+    model = "RedHatAI/gemma-3-1b-it-FP8-dynamic"
+    prompts = ["The capital of France is", "Explain why the sky is blue."]
+    outputs = []
+    for fused in (True, False):
+        if fused and enforce_eager:
+            # A Python counter cannot run inside a CUDA-graphed compiled forward.
+            monkeypatch.setitem(fused_act_quant._FUSED_ACT_QUANT, key, counted)
+        if not fused:
+            monkeypatch.delitem(fused_act_quant._FUSED_ACT_QUANT, key)
+        with vllm_runner(
+            model,
+            dtype="bfloat16",
+            max_model_len=256,
+            max_num_seqs=2,
+            enforce_eager=enforce_eager,
+            seed=0,
+            kernel_config=KernelConfig(linear_backend="cutlass"),
+            # The CUDA GELU and quantizer, so the unfused run is the exact chain
+            # the fused kernel reproduces.
+            compilation_config=CompilationConfig(
+                custom_ops=["none", "+gelu_and_mul", "+quant_fp8"]
+            ),
+        ) as runner:
+            calls = 0
+            outputs.append(runner.generate_greedy_logprobs(prompts, 16, 5))
+            if fused and enforce_eager:
+                # Gemma3-1B has 26 MLPs; at least one prefill and one decode step.
+                assert calls >= 2 * 26
+    check_logprobs_close(
+        outputs_0_lst=outputs[0],
+        outputs_1_lst=outputs[1],
+        name_0="fused_gelu_fp8",
+        name_1="cuda_gelu_chain",
+    )
 
 
 def _compressed_tensors_actorder_config(actorder):

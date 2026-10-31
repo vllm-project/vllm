@@ -90,6 +90,30 @@ Fields set explicitly by the user always take precedence over optimization-level
 
 ## Fusion Details
 
+### Manual GELU-tanh+Mul + per-token FP8 quantization
+
+When GELU-tanh runs as the CUDA `gelu_and_mul` op (`--enforce-eager`, or
+`gelu_and_mul` in `custom_ops`), Gemma3 MLPs fuse `gelu_tanh(gate) * up` with
+the dynamic per-token FP8 quantization of the down projection's input, for
+linears that consume per-token FP8 (for example
+`RedHatAI/gemma-3-1b-it-FP8-dynamic` with
+`--kernel-config.linear_backend=cutlass`). The producer returns a
+`QuantizedActivation`, so the linear uses its FP8 values and per-token scales
+without quantizing again. This is a manual model fusion through
+`maybe_fused_act_quant`, independent of the `fuse_act_quant` compiler pass. With
+the native GELU under `torch.compile` (the default), Inductor already fuses the
+activation with the quantization, and that path is unchanged.
+
+The kernel (`gelu_tanh_and_mul_per_token_quant`, CUDA SM89+, FP16/BF16 input)
+runs one thread block per token, keeps the activated row in shared memory
+between the absmax and quantization passes, and reads the input once. Its output
+is bit-identical to `gelu_tanh_and_mul` followed by
+`dynamic_per_token_scaled_fp8_quant`, including `scale_ub` and the minimum scale.
+Exact (erf) GELU and other quantization schemes keep their existing paths.
+
+Benchmark: `benchmarks/kernels/benchmark_activation.py --func-name
+gelu_and_mul_tanh --quantize-fp8` compares it with the two CUDA kernels.
+
 ### AllReduce + RMSNorm (`fuse_allreduce_rms`)
 
 !!! warning
