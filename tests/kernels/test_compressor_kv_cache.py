@@ -29,7 +29,10 @@ from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (
     _launch_two_stage_sparse_attn_compressor,
     compress_norm_rope_store_triton,
 )
-from vllm.models.deepseek_v4.compressor import _get_c128_boundary
+from vllm.models.deepseek_v4.compressor import (
+    CompressorBackend,
+    _get_c128_boundary,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.mla.compressor_utils import (
@@ -2420,6 +2423,142 @@ def test_deepseek_v4_quant_magnitude_range():
                 f"Token {t}: rel_err={rel_err:.4f}, abs_diff={abs_diff:.6f}, "
                 f"magnitude={magnitude:.4f}"
             )
+
+
+@pytest.fixture
+def compressor_config(tmp_path):
+    from transformers import DeepseekV4Config
+
+    from vllm.config import CacheConfig, KernelConfig, ModelConfig, VllmConfig
+
+    if not CompressorBackend.supports_batch_invariance():
+        pytest.skip("Batch-invariant compression requires CUDA SM90+")
+
+    DeepseekV4Config(
+        architectures=["DeepseekV4ForCausalLM"],
+        qk_rope_head_dim=64,
+        max_position_embeddings=256,
+    ).save_pretrained(tmp_path)
+    return VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path), tokenizer_mode="skip", max_model_len=256
+        ),
+        cache_config=CacheConfig(cache_dtype="fp8_ds_mla"),
+        kernel_config=KernelConfig(enable_jit_warmup=False),
+    )
+
+
+@pytest.mark.parametrize("use_fp4_cache", [False, True])
+def test_bi_indexer_compressor_validates_selected_cache_layout(
+    compressor_config, use_fp4_cache
+):
+    """BI accepts the selected indexer format, not the other packed layout."""
+    config = compressor_config
+    CompressorBackend.validate_config(config, head_dim=128, use_fp4_cache=use_fp4_cache)
+    width = 68 if use_fp4_cache else 132
+    cache = torch.empty((1, 16, width), dtype=torch.uint8)
+    CompressorBackend.validate_cache(cache, head_dim=128, use_fp4_cache=use_fp4_cache)
+    with pytest.raises(NotImplementedError, match="packed"):
+        CompressorBackend.validate_cache(
+            cache, head_dim=128, use_fp4_cache=not use_fp4_cache
+        )
+    with pytest.raises(NotImplementedError, match="packed"):
+        CompressorBackend.validate_cache(
+            cache.to(torch.bfloat16), head_dim=128, use_fp4_cache=use_fp4_cache
+        )
+    with pytest.raises(NotImplementedError, match="head_dim=512"):
+        CompressorBackend.validate_config(config, head_dim=512, use_fp4_cache=True)
+
+
+@pytest.mark.parametrize(
+    "head_dim,use_fp4_cache", [(512, False), (128, False), (128, True)]
+)
+@pytest.mark.parametrize("compress_ratio", [4, 128])
+def test_compressor_forward_is_batch_invariant(
+    compressor_config, monkeypatch, compress_ratio, head_dim, use_fp4_cache, dist_init
+):
+    """Real forward writes identical states and packed K/scales for any batch."""
+    from vllm.config import set_current_vllm_config
+    from vllm.forward_context import set_forward_context
+    from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
+    from vllm.models.deepseek_v4.attention import DeepseekV4IndexerCache
+    from vllm.models.deepseek_v4.compressor import (
+        CompressorMetadata,
+        DeepseekCompressor,
+    )
+    from vllm.utils.torch_utils import set_default_torch_dtype
+
+    if use_fp4_cache and not current_platform.has_device_capability(100):
+        pytest.skip("MXFP4 Triton packing requires CUDA SM100+")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    config = compressor_config
+    with (
+        set_current_vllm_config(config),
+        set_default_torch_dtype(torch.bfloat16),
+        torch.device("cuda"),
+        torch.no_grad(),
+    ):
+        torch.manual_seed(42)
+        width = 584 if head_dim == 512 else (68 if use_fp4_cache else 132)
+        # The compressor only reads the cache holder's bound tensor.
+        k_cache = DeepseekV4IndexerCache(
+            width, torch.uint8, "k_cache", config.cache_config, compress_ratio
+        )
+        compressor = DeepseekCompressor(
+            config,
+            compress_ratio=compress_ratio,
+            hidden_size=128,
+            head_dim=head_dim,
+            prefix="compressor",
+            k_cache_prefix=k_cache.prefix,
+            use_fp4_cache=use_fp4_cache,
+        )
+        compressor.ape.normal_()
+        compressor.norm.weight.normal_()
+        rotary_emb = RotaryEmbedding(head_dim, 64, 256, 10000, False, torch.float32)
+        block_size = compressor.state_cache.block_size
+        pages_per_req = 2 * compress_ratio // block_size
+        block_table = torch.arange(3 * pages_per_req, dtype=torch.int32).reshape(3, -1)
+        initial_state = torch.randn(
+            3 * pages_per_req,
+            block_size,
+            2 * compressor.coff * head_dim,
+            dtype=torch.float32,
+        )
+        state = initial_state.clone()
+        compressor.state_cache.bind_kv_cache(state.unsqueeze(1))
+        backing = torch.zeros((1, math.ceil(16 * width / 576) * 576), dtype=torch.uint8)
+        cache = backing.as_strided((1, 16, width), (backing.stride(0), width, 1))
+        k_cache.bind_kv_cache(cache.unsqueeze(1))
+        indices = torch.arange(3, dtype=torch.int64)
+        positions = torch.full((3,), 2 * compress_ratio - 1, dtype=torch.int64)
+        state_slots = indices * 2 * compress_ratio + positions
+        kv_score = torch.randn(3, 2 * compressor.coff * head_dim, dtype=torch.float32)
+
+        def run(batches):
+            state.copy_(initial_state)
+            backing.zero_()
+            for batch in batches:
+                metadata = {
+                    compressor.state_cache.prefix: CompressorMetadata(
+                        block_table,
+                        state_slots[batch],
+                        block_size,
+                        token_to_req_indices=batch,
+                    ),
+                    k_cache.prefix: CompressorMetadata(block_table, batch, 16),
+                }
+                with set_forward_context(metadata, config):
+                    compressor(kv_score[batch], positions[batch], rotary_emb)
+            assert not torch.equal(state, initial_state)
+            assert torch.count_nonzero(backing) > 0
+            return state.clone(), backing.clone()
+
+        mixed_state, mixed_cache = run([indices])
+        for batches in (indices.split(1), [indices.flip(0)]):
+            state_out, cache_out = run(batches)
+            assert torch.equal(state_out, mixed_state)
+            assert torch.equal(cache_out, mixed_cache)
 
 
 # ── Test E: Indexer fused K-cache insert (Triton kernels) ────────────────────
