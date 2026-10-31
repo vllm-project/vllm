@@ -1716,8 +1716,8 @@ def test_flashinfer_xqa_decode_correctness(default_vllm_config):
 
 @pytest.mark.skipif(
     AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST
-    or not any(current_platform.is_device_capability_family(f) for f in (80, 120)),
-    reason="FlashInfer decodes an NVFP4 cache with XQA on SM12x and fa2 on SM8x.",
+    or not any(current_platform.is_device_capability_family(f) for f in (80, 90, 120)),
+    reason="FlashInfer decodes an NVFP4 cache with XQA on SM12x and fa2 on SM8x/SM90.",
 )
 @pytest.mark.parametrize("use_cuda_graph", [False, True])
 @pytest.mark.parametrize("q_len", [1, 4])
@@ -1725,7 +1725,7 @@ def test_flashinfer_nvfp4_decode_correctness(
     default_vllm_config, q_len, use_cuda_graph
 ):
     """Single-token and spec-decode queries over an NVFP4 cache decode with
-    XQA on SM12x and fa2 on SM8x, eager and replayed, and match the fa2
+    XQA on SM12x and fa2 on SM8x/SM90, eager and replayed, and match the fa2
     prefill that wrote the cache."""
     import unittest.mock
 
