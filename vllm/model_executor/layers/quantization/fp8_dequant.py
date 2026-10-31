@@ -90,7 +90,8 @@ class Fp8DequantWeightParameter(ModelWeightParameter):
         assert dtype.itemsize == 2, dtype
         param = cls(data=torch.empty(rows, cols, dtype=dtype), **kwargs)
         param.runtime_dtype = dtype
-        param.fp8_rows = torch.zeros(rows, dtype=torch.bool)
+        # host bookkeeping: also when the model is built on meta (weight cache)
+        param.fp8_rows = torch.zeros(rows, dtype=torch.bool, device="cpu")
         return param
 
     def fp8_view(self) -> torch.Tensor:

@@ -12,6 +12,7 @@ import torch
 
 from vllm.config import ModelConfig
 from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
     MergedColumnParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
@@ -271,6 +272,36 @@ def test_replicated_layer(model_config, bf16):
         layer.weight.weight_loader(layer.weight, weight)
     layer.quant_method.process_weights_after_loading(layer)
     torch.testing.assert_close(layer.weight, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("bf16", [False, True])
+@pytest.mark.parametrize("tp_rank", [0, 1])
+def test_column_parallel_tp_slice(model_config, tp_rank, bf16):
+    """Under TP 2, a rank loads its rows of a column-parallel weight (q_b_proj)
+    from the full FP8 or BF16 checkpoint tensor, with the matching scale rows."""
+    with _DEVICE:
+        layer = ColumnParallelLinear(
+            256,
+            512,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            quant_config=Fp8DequantConfig([128, 128]),
+            tp_rank=tp_rank,
+            tp_size=2,
+        )
+    weight, scale = _block_fp8(512, 256, 3)
+    full = _dequant(weight, scale)
+    ckpt = {"weight": full} if bf16 else {"weight_scale_inv": scale, "weight": weight}
+    loaded: set[str] = set()
+    for name, tensor in ckpt.items():
+        param = getattr(layer, name)
+        param.weight_loader(param, tensor)
+        loaded.add(name)
+        load_unneeded_scale(name, param, tensor, loaded)
+    assert loaded == {"weight", "weight_scale_inv"}
+    process_weights_after_loading(layer, model_config, _DEVICE)
+    rows = slice(256 * tp_rank, 256 * (tp_rank + 1))
+    torch.testing.assert_close(layer.weight, full[rows], rtol=0, atol=0)
 
 
 # Sparse-attention indexer: `wk` (128 rows) and `weights_proj` (64 rows) fused
