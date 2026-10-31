@@ -18,6 +18,10 @@ from vllm.v1.worker.gpu.sample.logprob import (
 )
 
 CHUNK_SIZE = 1024
+# torch.topk's workspace grows with rows x k: ~5.5 GiB for a chunk of 1024
+# rows over a 152k vocab. Cap the elements each call ranks, which splits
+# chunks only when k is in the tens of thousands.
+TOPK_MAX_ELEMENTS = 64 << 20
 
 
 @dataclass
@@ -308,25 +312,30 @@ def compute_prompt_logprobs_with_chunking(
             if num_prompt_logprobs == -1
             else num_prompt_logprobs
         )
-        result = compute_topk_scores(
-            prompt_logits,
-            requested_num,
-            prompt_token_ids[start_idx:end_idx],
-            logits_mode=logits_mode,
-        )
-        # Return token_ids as int32 to reduce peak memory usage.
-        if num_tokens <= CHUNK_SIZE:
-            logprob_token_ids = result.logprob_token_ids.to(torch.int32)
-            return logprob_token_ids, result.logprobs, result.selected_token_ranks
-        if token_ids is None:
-            size = num_tokens, result.logprobs.shape[1]
-            token_ids = prompt_token_ids.new_empty(size, dtype=torch.int32)
-            scores = result.logprobs.new_empty(size)
-            ranks = result.selected_token_ranks.new_empty(num_tokens)
-        assert scores is not None and ranks is not None
-        token_ids[start_idx:end_idx] = result.logprob_token_ids
-        scores[start_idx:end_idx] = result.logprobs
-        ranks[start_idx:end_idx] = result.selected_token_ranks
+        rows_per_topk = max(1, TOPK_MAX_ELEMENTS // (requested_num + 1))
+        for block_start in range(0, prompt_logits.shape[0], rows_per_topk):
+            logits = prompt_logits[block_start : block_start + rows_per_topk]
+            num_logits = len(logits)
+            rows = slice(start_idx + block_start, start_idx + block_start + num_logits)
+            result = compute_topk_scores(
+                logits, requested_num, prompt_token_ids[rows], logits_mode=logits_mode
+            )
+            # Return token_ids as int32 to reduce peak memory usage.
+            if num_logits == num_tokens:
+                logprob_token_ids = result.logprob_token_ids.to(torch.int32)
+                return logprob_token_ids, result.logprobs, result.selected_token_ranks
+            if token_ids is None:
+                size = num_tokens, result.logprobs.shape[1]
+                token_ids = prompt_token_ids.new_empty(size, dtype=torch.int32)
+                scores = result.logprobs.new_empty(size)
+                ranks = result.selected_token_ranks.new_empty(num_tokens)
+            assert scores is not None and ranks is not None
+            token_ids[rows] = result.logprob_token_ids
+            scores[rows] = result.logprobs
+            ranks[rows] = result.selected_token_ranks
+            # Free each block's results before ranking the next.
+            del result
+        del prompt_logits, logits
 
     assert token_ids is not None and scores is not None and ranks is not None
     return token_ids, scores, ranks

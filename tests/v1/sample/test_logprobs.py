@@ -1630,17 +1630,25 @@ def test_token_logprobs_large_batch_int64_row_offset():
     )
 
 
+@pytest.mark.parametrize("split_topk", [False, True])
 @pytest.mark.parametrize("num_prompt_logprobs", [-1, 3])
-def test_chunked_prompt_logprobs_match_unchunked(num_prompt_logprobs: int):
-    """Chunks written into preallocated outputs must match one unchunked pass."""
+def test_chunked_prompt_logprobs_match_unchunked(
+    num_prompt_logprobs: int, split_topk: bool, monkeypatch
+):
+    """Chunks, and top-k blocks within them, written into preallocated outputs
+    must match one unchunked pass."""
     if not current_platform.is_cuda_alike():
         pytest.skip("the logprob kernels are Triton")
+    from vllm.v1.worker.gpu.sample import prompt_logprob
     from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
     from vllm.v1.worker.gpu.sample.prompt_logprob import (
         CHUNK_SIZE,
         compute_prompt_logprobs_with_chunking,
     )
 
+    if split_topk:
+        # Blocks of 100 rows at full vocab, straddling the chunk boundaries.
+        monkeypatch.setattr(prompt_logprob, "TOPK_MAX_ELEMENTS", 100 * 513)
     device = torch.device(current_platform.device_type)
     vocab_size = 512
     num_tokens = 2 * CHUNK_SIZE + 3
