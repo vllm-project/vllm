@@ -71,7 +71,15 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             self.weight_quant.strategy == QuantizationStrategy.CHANNEL
             and self.input_quant.strategy == QuantizationStrategy.TOKEN
         )
-        if not (per_tensor or per_channel):
+        # Per-tensor weights with dynamic per-token activations: e.g. an
+        # FP8_DYNAMIC checkpoint whose weights were requantized to per-tensor
+        # scales (the XPU fused-MoE kernel requires tensor weight scales and
+        # quantizes activations internally).
+        tensor_weight_token_act = (
+            self.weight_quant.strategy == QuantizationStrategy.TENSOR
+            and self.input_quant.strategy == QuantizationStrategy.TOKEN
+        )
+        if not (per_tensor or per_channel or tensor_weight_token_act):
             assert self.weight_quant.strategy == QuantizationStrategy.BLOCK
             self.weight_block_size = self.weight_quant.block_structure
             assert self.weight_quant.dynamic is not None
