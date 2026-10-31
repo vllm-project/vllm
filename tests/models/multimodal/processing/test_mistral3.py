@@ -6,7 +6,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 from PIL import Image
-from transformers import AutoProcessor, BatchFeature
+from transformers import AutoProcessor, BatchFeature, PreTrainedConfig
 from transformers.models.pixtral import PixtralProcessor
 
 from vllm.model_executor.layers.fusion.mm_input_norm import (
@@ -79,6 +79,9 @@ def test_pixtral_patch_embed_preserves_image_order_and_strides(
     reference = []
     for image in images:
         if normalize:
+            assert isinstance(norm, FusedMMInputNorm)
+            assert isinstance(norm.weight, torch.Tensor)
+            assert isinstance(norm.bias, torch.Tensor)
             normalized = (
                 image.float() * norm.weight[:, None, None] + norm.bias[:, None, None]
             )
@@ -250,13 +253,19 @@ def test_mm_device_do_normalize():
 
     normalized_inputs = processor(prompt, mm_items=mm_items)
     normalized_values = normalized_inputs["mm_kwargs"].get_data()["pixel_values"]
+    assert isinstance(normalized_values, (list, torch.Tensor))
 
     ctx.model_config.multimodal_config.mm_device_do_normalize = True
     raw_inputs = processor(prompt, mm_items=mm_items)
     raw_values = raw_inputs["mm_kwargs"].get_data()["pixel_values"]
-    assert all(value.dtype == torch.uint8 for value in raw_values)
+    assert isinstance(raw_values, (list, torch.Tensor))
+    assert all(
+        isinstance(value, torch.Tensor) and value.dtype == torch.uint8
+        for value in raw_values
+    )
 
-    input_norm = build_mm_input_norm(ctx.model_config)
+    device = torch.device(current_platform.device_type)
+    input_norm = build_mm_input_norm(ctx.model_config).to(device)
     patch_size = processor.info.get_hf_config().vision_config.patch_size
 
     def pack_patches(image: torch.Tensor) -> torch.Tensor:
@@ -271,9 +280,11 @@ def test_mm_device_do_normalize():
         )
 
     for raw, normalized in zip(raw_values, normalized_values):
-        output = input_norm(pack_patches(raw), normalized.dtype)
+        assert isinstance(raw, torch.Tensor)
+        assert isinstance(normalized, torch.Tensor)
+        output = input_norm(pack_patches(raw).to(device), normalized.dtype)
         torch.testing.assert_close(
-            output, pack_patches(normalized), rtol=1e-5, atol=1e-6
+            output, pack_patches(normalized).to(device), rtol=1e-5, atol=1e-6
         )
 
 
@@ -325,6 +336,6 @@ def test_lightonocr_keeps_vision_config_image_size():
     encoder_info = processor.info.get_vision_encoder_info()
     assert isinstance(encoder_info, PixtralHFEncoderInfo)
     assert not isinstance(encoder_info, Mistral3HFEncoderInfo)
-    assert encoder_info.get_image_size() == (
-        processor.info.get_hf_config().vision_config.image_size
-    )
+    vision_config = processor.info.get_hf_config().vision_config
+    assert isinstance(vision_config, PreTrainedConfig)
+    assert encoder_info.get_image_size() == vision_config.image_size
