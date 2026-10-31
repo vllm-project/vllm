@@ -965,6 +965,11 @@ async def test_d3_rejects_instructions(d3):
             ["low", "high"],
             "Which?\n\n0 low\n1 high\n\nReply with a single digit 0-1 only.",
         ),
+        (
+            "score",
+            ["1", "2"],
+            "Which?\n\n0 1\n1 2\n\nReply with a single digit 0-1 only.",
+        ),
     ],
 )
 def test_liquid_prompt_matches_the_checkpoint(type_name, criteria, ask):
@@ -1432,6 +1437,30 @@ def test_joint_prompt_numbers_each_question():
         "Question 6:\n"
         "0: low\n"
         "1: high\n"
+        "Answer with the number of one level only.\n\n"
+        'Reply with one line per question, in order, formatted as "number: answer".'
+    )
+
+
+def test_joint_prompt_shows_name_derived_labels():
+    def ask(qid, type_name, criteria):
+        return build_question(qid, type_name, "", criteria, 128)
+
+    questions = [
+        ask("key", "choice", dict.fromkeys("CADB")),
+        ask("stars", "score", ["1", "2", "3"]),
+    ]
+    strategy = object.__new__(DiffusionGemmaCanvasStrategy)
+    content = strategy._joint_content("S", questions, 1)
+    # Own letters label their own option, and own digits are not shown twice.
+    assert "A: C" not in content and "1: 1" not in content
+    assert content == (
+        "S\n\n"
+        "Question 1:\n"
+        "C: C\nA: A\nD: D\nB: B\n"
+        "Answer with the letter of one option only.\n\n"
+        "Question 2:\n"
+        "1\n2\n3\n"
         "Answer with the number of one level only.\n\n"
         'Reply with one line per question, in order, formatted as "number: answer".'
     )
