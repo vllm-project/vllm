@@ -172,3 +172,41 @@ def test_exporter_stores_each_callers_checkpoints(caller: str, state_layout: str
 
     assert torch.equal(conv_state, expected_conv)
     assert torch.equal(recurrent_state, expected_recurrent)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="needs a GPU")
+def test_exporter_int64_token_offset():
+    """Conv windows of rows past 2^31 // row stride need int64 input offsets.
+
+    Qwen3.5 passes ``raw_qkv`` as the qkv slice of the packed qkvz projection,
+    so its row stride is wider than its width.
+    """
+    width, row_stride, state_len, slot = 8192, 12288, 3, 5
+    num_tokens = 2**31 // row_stride + 64
+    free, _ = current_platform.mem_get_info()
+    if free < num_tokens * row_stride * 2 + (1 << 30):
+        pytest.skip("not enough free device memory")
+
+    device = torch.device("cuda")
+    gen = torch.Generator(device=device).manual_seed(0)
+    qkvz = torch.randn(
+        num_tokens, row_stride, device=device, dtype=torch.bfloat16, generator=gen
+    )
+    raw_qkv = qkvz[:, :width]
+    cu_seqlens = torch.tensor([0, num_tokens], dtype=torch.int32, device=device)
+    conv_state = torch.zeros(
+        NUM_SLOTS, width, state_len, device=device, dtype=torch.bfloat16
+    )
+    offset = num_tokens - 16
+    expected_conv = conv_state.clone()
+    expected_conv[slot] = raw_qkv[offset - state_len : offset].T
+
+    checkpoint = MambaPrefillCheckpointMetadata(
+        torch.tensor([offset], dtype=torch.int32, device=device),
+        torch.tensor([slot], dtype=torch.int32, device=device),
+    )
+    MambaPrefillCheckpointExporter(state_len=state_len).export(
+        checkpoint, raw_qkv=raw_qkv, conv_state=conv_state, cu_seqlens=cu_seqlens
+    )
+
+    assert torch.equal(conv_state, expected_conv)
