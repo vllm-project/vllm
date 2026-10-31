@@ -1,0 +1,2235 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Per-instance and per-engine drill-down: load balance, latency outliers, scheduler behaviour, API server process and configuration.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [
+    {
+      "asDropdown": false,
+      "icon": "external link",
+      "includeVars": true,
+      "keepTime": true,
+      "tags": [
+        "vllm"
+      ],
+      "targetBlank": false,
+      "title": "vLLM dashboards",
+      "type": "dashboards"
+    }
+  ],
+  "panels": [
+    {
+      "type": "table",
+      "title": "Instances (last 5 minutes)",
+      "description": "Current load and latency of every instance. Click an instance to focus the dashboard on it. *Uptime* comes from the API server's process metrics, which are not exported with `--api-server-count` > 1.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "count by (model_name, instance) (vllm:num_requests_running{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"})",
+          "legendFormat": "__auto",
+          "format": "table",
+          "instant": true,
+          "range": false,
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (model_name, instance) (vllm:num_requests_running{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"})",
+          "legendFormat": "__auto",
+          "format": "table",
+          "instant": true,
+          "range": false,
+          "refId": "B"
+        },
+        {
+          "expr": "sum by (model_name, instance) (vllm:num_requests_waiting{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"})",
+          "legendFormat": "__auto",
+          "format": "table",
+          "instant": true,
+          "range": false,
+          "refId": "C"
+        },
+        {
+          "expr": "max by (model_name, instance) (vllm:kv_cache_usage_perc{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"})",
+          "legendFormat": "__auto",
+          "format": "table",
+          "instant": true,
+          "range": false,
+          "refId": "D"
+        },
+        {
+          "expr": "sum by (model_name, instance) (rate(vllm:request_success_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[5m]))",
+          "legendFormat": "__auto",
+          "format": "table",
+          "instant": true,
+          "range": false,
+          "refId": "E"
+        },
+        {
+          "expr": "sum by (model_name, instance) (rate(vllm:generation_tokens_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[5m]))",
+          "legendFormat": "__auto",
+          "format": "table",
+          "instant": true,
+          "range": false,
+          "refId": "F"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, model_name, instance) (rate(vllm:time_to_first_token_seconds_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[5m])))",
+          "legendFormat": "__auto",
+          "format": "table",
+          "instant": true,
+          "range": false,
+          "refId": "G"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, model_name, instance) (rate(vllm:inter_token_latency_seconds_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[5m])))",
+          "legendFormat": "__auto",
+          "format": "table",
+          "instant": true,
+          "range": false,
+          "refId": "H"
+        },
+        {
+          "expr": "sum by (model_name, instance) (rate(vllm:num_preemptions_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[5m]))",
+          "legendFormat": "__auto",
+          "format": "table",
+          "instant": true,
+          "range": false,
+          "refId": "I"
+        },
+        {
+          "expr": "max by (model_name, instance) ((time() - process_start_time_seconds{job=~\"$job\", instance=~\"$instance\"}) * on (job, instance) group_left (model_name) group by (job, instance, model_name) (vllm:num_requests_running{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}))",
+          "legendFormat": "__auto",
+          "format": "table",
+          "instant": true,
+          "range": false,
+          "refId": "J"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {
+              "model_name": 0,
+              "instance": 1,
+              "Value #A": 2,
+              "Value #B": 3,
+              "Value #C": 4,
+              "Value #D": 5,
+              "Value #E": 6,
+              "Value #F": 7,
+              "Value #G": 8,
+              "Value #H": 9,
+              "Value #I": 10,
+              "Value #J": 11
+            },
+            "renameByName": {
+              "model_name": "Model",
+              "instance": "Instance",
+              "Value #A": "Engines",
+              "Value #B": "Running",
+              "Value #C": "Waiting",
+              "Value #D": "KV cache",
+              "Value #E": "Req/s",
+              "Value #F": "Output tok/s",
+              "Value #G": "TTFT p95",
+              "Value #H": "ITL p95",
+              "Value #I": "Preempt/s",
+              "Value #J": "Uptime"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          },
+          "mappings": [
+            {
+              "type": "special",
+              "options": {
+                "match": "nan",
+                "result": {
+                  "index": 0,
+                  "text": "No traffic"
+                }
+              }
+            }
+          ]
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Model"
+            },
+            "properties": [
+              {
+                "id": "custom.minWidth",
+                "value": 260
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Instance"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 160
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Engines"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Running"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Waiting"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "KV cache"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percentunit"
+              },
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Req/s"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "reqps"
+              },
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Output tok/s"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "count:tok/s"
+              },
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "TTFT p95"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "ITL p95"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Preempt/s"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Uptime"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Instance"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Focus on this instance",
+                    "url": "/d/vllm-instances?${datasource:queryparam}&${job:queryparam}&var-model_name=${__data.fields.Model}&var-instance=${__value.raw}&${__url_time_range}"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "KV cache"
+            },
+            "properties": [
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 0.9
+                    },
+                    {
+                      "color": "red",
+                      "value": 0.98
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds"
+                }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Preempt/s"
+            },
+            "properties": [
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 0.001
+                    },
+                    {
+                      "color": "red",
+                      "value": 1
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds"
+                }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "Running"
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1
+    },
+    {
+      "type": "row",
+      "title": "Load balance",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 8
+      },
+      "id": 2,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Running requests",
+      "description": "Requests in each engine's running batch.\n\nMetric: `vllm:num_requests_running`",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "sum by (instance, engine) (vllm:num_requests_running{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"})",
+          "legendFormat": "{{instance}} · engine {{engine}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never"
+          },
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 0,
+        "y": 9
+      },
+      "id": 3
+    },
+    {
+      "type": "timeseries",
+      "title": "Waiting requests",
+      "description": "Requests queued on each engine.\n\nMetric: `vllm:num_requests_waiting`",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "sum by (instance, engine) (vllm:num_requests_waiting{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"})",
+          "legendFormat": "{{instance}} · engine {{engine}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never"
+          },
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 8,
+        "y": 9
+      },
+      "id": 4
+    },
+    {
+      "type": "timeseries",
+      "title": "KV cache usage",
+      "description": "GPU KV cache usage of each engine.\n\nMetric: `vllm:kv_cache_usage_perc`",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "max by (instance, engine) (vllm:kv_cache_usage_perc{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"})",
+          "legendFormat": "{{instance}} · engine {{engine}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never"
+          },
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 16,
+        "y": 9
+      },
+      "id": 5
+    },
+    {
+      "type": "timeseries",
+      "title": "Requests / s",
+      "description": "Requests finished per second by each instance. Uneven values point at load balancing problems.\n\nMetric: `vllm:request_success_total`",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "sum by (instance) (rate(vllm:request_success_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval]))",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never"
+          },
+          "unit": "reqps",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 0,
+        "y": 19
+      },
+      "id": 6
+    },
+    {
+      "type": "timeseries",
+      "title": "Input tokens / s",
+      "description": "Prompt tokens per second on each engine.\n\nMetric: `vllm:prompt_tokens_total`",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "sum by (instance, engine) (rate(vllm:prompt_tokens_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval]))",
+          "legendFormat": "{{instance}} · engine {{engine}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never"
+          },
+          "unit": "count:tok/s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 8,
+        "y": 19
+      },
+      "id": 7
+    },
+    {
+      "type": "timeseries",
+      "title": "Output tokens / s",
+      "description": "Generated tokens per second on each engine.\n\nMetric: `vllm:generation_tokens_total`",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "sum by (instance, engine) (rate(vllm:generation_tokens_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval]))",
+          "legendFormat": "{{instance}} · engine {{engine}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never"
+          },
+          "unit": "count:tok/s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 16,
+        "y": 19
+      },
+      "id": 8
+    },
+    {
+      "type": "row",
+      "title": "Latency by instance",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 29
+      },
+      "id": 9,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "TTFT p95",
+      "description": "95th percentile time to first token on each instance.\n\nMetric: `vllm:time_to_first_token_seconds`",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, instance) (rate(vllm:time_to_first_token_seconds_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval])))",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never"
+          },
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 30
+      },
+      "id": 10
+    },
+    {
+      "type": "timeseries",
+      "title": "Inter-token latency p95",
+      "description": "95th percentile inter-token latency on each instance.\n\nMetric: `vllm:inter_token_latency_seconds`",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, instance) (rate(vllm:inter_token_latency_seconds_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval])))",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never"
+          },
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 30
+      },
+      "id": 11
+    },
+    {
+      "type": "timeseries",
+      "title": "E2E latency p95",
+      "description": "95th percentile end-to-end request latency on each instance.\n\nMetric: `vllm:e2e_request_latency_seconds`",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, instance) (rate(vllm:e2e_request_latency_seconds_bucket{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval])))",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never"
+          },
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 40
+      },
+      "id": 12
+    },
+    {
+      "type": "timeseries",
+      "title": "Mean queue time",
+      "description": "Mean time requests wait before being scheduled on each instance.\n\nMetric: `vllm:request_queue_time_seconds`",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "sum by (instance) (rate(vllm:request_queue_time_seconds_sum{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval])) / (sum by (instance) (rate(vllm:request_queue_time_seconds_count{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval])) > 0)",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never"
+          },
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 40
+      },
+      "id": 13
+    },
+    {
+      "type": "row",
+      "title": "Engine scheduler",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 50
+      },
+      "id": 14,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Engine steps / s",
+      "description": "Scheduler iterations per second.\n\nMetric: `vllm:iteration_tokens_total`",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "sum by (instance, engine) (rate(vllm:iteration_tokens_total_count{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval]))",
+          "legendFormat": "{{instance}} · engine {{engine}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never"
+          },
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 0,
+        "y": 51
+      },
+      "id": 15
+    },
+    {
+      "type": "timeseries",
+      "title": "Mean tokens per engine step",
+      "description": "Mean prefill + decode tokens per step, a proxy for batch size.\n\nMetric: `vllm:iteration_tokens_total`",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "sum by (instance, engine) (rate(vllm:iteration_tokens_total_sum{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval])) / (sum by (instance, engine) (rate(vllm:iteration_tokens_total_count{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval])) > 0)",
+          "legendFormat": "{{instance}} · engine {{engine}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never"
+          },
+          "unit": "count:tok",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 8,
+        "y": 51
+      },
+      "id": 16
+    },
+    {
+      "type": "timeseries",
+      "title": "Preemptions / s",
+      "description": "Requests preempted per second on each engine.\n\nMetric: `vllm:num_preemptions_total`",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "sum by (instance, engine) (rate(vllm:num_preemptions_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval]))",
+          "legendFormat": "{{instance}} · engine {{engine}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never"
+          },
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 16,
+        "y": 51
+      },
+      "id": 17
+    },
+    {
+      "type": "timeseries",
+      "title": "Waiting requests by reason",
+      "description": "*capacity*: waiting for KV cache or batch capacity. *deferred*: held back by a transient constraint such as the LoRA budget or a pending KV transfer.\n\nMetric: `vllm:num_requests_waiting_by_reason`",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "sum by (instance, engine, reason) (vllm:num_requests_waiting_by_reason{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"})",
+          "legendFormat": "{{instance}} · engine {{engine}} · {{reason}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never"
+          },
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 61
+      },
+      "id": 18
+    },
+    {
+      "type": "timeseries",
+      "title": "Prefix cache hit rate",
+      "description": "Share of prompt tokens found in each engine's prefix cache.\n\nMetrics: `vllm:prefix_cache_hits_total`, `vllm:prefix_cache_queries_total`",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "sum by (instance, engine) (rate(vllm:prefix_cache_hits_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval])) / (sum by (instance, engine) (rate(vllm:prefix_cache_queries_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval])) > 0)",
+          "legendFormat": "{{instance}} · engine {{engine}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never"
+          },
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 61
+      },
+      "id": 19
+    },
+    {
+      "type": "row",
+      "title": "API server process",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 71
+      },
+      "id": 20,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "CPU usage",
+      "description": "CPU cores used by the API server process (tokenization, detokenization, request handling). Engine core and GPU worker processes are not included. Not exported with `--api-server-count` > 1.\n\nMetric: `process_cpu_seconds_total`",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "sum by (instance) (rate(process_cpu_seconds_total{job=~\"$job\", instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never"
+          },
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 0,
+        "y": 72
+      },
+      "id": 21
+    },
+    {
+      "type": "timeseries",
+      "title": "Resident memory",
+      "description": "Resident memory of the API server process.\n\nMetric: `process_resident_memory_bytes`",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "sum by (instance) (process_resident_memory_bytes{job=~\"$job\", instance=~\"$instance\"})",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never"
+          },
+          "unit": "bytes",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 8,
+        "y": 72
+      },
+      "id": 22
+    },
+    {
+      "type": "timeseries",
+      "title": "Open file descriptors",
+      "description": "Open file descriptors as a share of the process limit. Each client connection holds one.\n\nMetrics: `process_open_fds`, `process_max_fds`",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "sum by (instance) (process_open_fds{job=~\"$job\", instance=~\"$instance\"}) / sum by (instance) (process_max_fds{job=~\"$job\", instance=~\"$instance\"})",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never"
+          },
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 16,
+        "y": 72
+      },
+      "id": 23
+    },
+    {
+      "type": "row",
+      "title": "Configuration",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 82
+      },
+      "id": 24,
+      "panels": []
+    },
+    {
+      "type": "table",
+      "title": "Cache configuration",
+      "description": "KV cache settings of each engine, from the `vllm:cache_config_info` info metric.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "vllm:cache_config_info{job=~\"$job\", instance=~\"$instance\", engine=~\"$engine\"}",
+          "legendFormat": "__auto",
+          "format": "table",
+          "instant": true,
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "filterFieldsByName",
+          "options": {
+            "include": {
+              "names": [
+                "instance",
+                "engine",
+                "num_gpu_blocks",
+                "block_size",
+                "cache_dtype",
+                "gpu_memory_utilization",
+                "enable_prefix_caching",
+                "prefix_caching_hash_algo",
+                "num_cpu_blocks",
+                "kv_offloading_backend",
+                "kv_offloading_size"
+              ]
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "indexByName": {
+              "instance": 0,
+              "engine": 1,
+              "num_gpu_blocks": 2,
+              "block_size": 3,
+              "cache_dtype": 4,
+              "gpu_memory_utilization": 5,
+              "enable_prefix_caching": 6,
+              "prefix_caching_hash_algo": 7,
+              "num_cpu_blocks": 8,
+              "kv_offloading_backend": 9,
+              "kv_offloading_size": 10
+            },
+            "renameByName": {
+              "instance": "Instance",
+              "engine": "Engine",
+              "num_gpu_blocks": "GPU blocks",
+              "block_size": "Block size",
+              "cache_dtype": "Cache dtype",
+              "gpu_memory_utilization": "GPU memory utilization",
+              "enable_prefix_caching": "Prefix caching",
+              "prefix_caching_hash_algo": "Prefix hash",
+              "num_cpu_blocks": "CPU blocks",
+              "kv_offloading_backend": "Offloading backend",
+              "kv_offloading_size": "Offloading size (GiB)"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        },
+        "showHeader": true
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 83
+      },
+      "id": 25
+    },
+    {
+      "type": "table",
+      "title": "LoRA adapters",
+      "description": "Adapters in the running and waiting batches, and the configured `--max-loras`, as last reported by each instance. Only exported when LoRA is enabled.\n\nMetric: `vllm:lora_requests_info`",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "topk by (job, instance) (1, vllm:lora_requests_info{job=~\"$job\", instance=~\"$instance\"})",
+          "legendFormat": "__auto",
+          "format": "table",
+          "instant": true,
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "filterFieldsByName",
+          "options": {
+            "include": {
+              "names": [
+                "instance",
+                "max_lora",
+                "running_lora_adapters",
+                "waiting_lora_adapters"
+              ]
+            }
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "indexByName": {
+              "instance": 0,
+              "max_lora": 1,
+              "running_lora_adapters": 2,
+              "waiting_lora_adapters": 3
+            },
+            "renameByName": {
+              "instance": "Instance",
+              "max_lora": "Max LoRAs",
+              "running_lora_adapters": "Running adapters",
+              "waiting_lora_adapters": "Waiting adapters"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        },
+        "showHeader": true
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 89
+      },
+      "id": 26
+    },
+    {
+      "type": "row",
+      "title": "Sleep mode and weight updates",
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 94
+      },
+      "id": 27,
+      "panels": [
+        {
+          "type": "state-timeline",
+          "title": "Engine sleep state",
+          "description": "Whether each engine is awake or put to sleep through the sleep mode API. Level 1 offloads the weights to CPU memory; level 2 discards them.\n\nMetric: `vllm:engine_sleep_state`",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "targets": [
+            {
+              "expr": "(1 - max by (instance, engine) (vllm:engine_sleep_state{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\", sleep_state=\"awake\"})) * (1 + max by (instance, engine) (vllm:engine_sleep_state{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\", sleep_state=\"discard_all\"}))",
+              "legendFormat": "{{instance}} · engine {{engine}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "fixedColor": "text",
+                "mode": "fixed"
+              },
+              "mappings": [
+                {
+                  "type": "value",
+                  "options": {
+                    "0": {
+                      "color": "green",
+                      "index": 0,
+                      "text": "Awake"
+                    },
+                    "1": {
+                      "color": "blue",
+                      "index": 1,
+                      "text": "Sleeping (level 1)"
+                    },
+                    "2": {
+                      "color": "purple",
+                      "index": 2,
+                      "text": "Sleeping (level 2)"
+                    }
+                  }
+                }
+              ]
+            },
+            "overrides": []
+          },
+          "options": {
+            "alignValue": "left",
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "mergeValues": true,
+            "rowHeight": 0.8,
+            "showValue": "never",
+            "tooltip": {
+              "mode": "single",
+              "sort": "none"
+            }
+          },
+          "gridPos": {
+            "h": 6,
+            "w": 24,
+            "x": 0,
+            "y": 95
+          },
+          "id": 28
+        },
+        {
+          "type": "table",
+          "title": "Sleep mode and weight update operations (since process start)",
+          "description": "Sleep, wake and KV cache release calls of the sleep mode API, and the weight transfer steps of RL weight updates, counted since each server started. Rows appear once an operation has run.\n\nMetrics: `vllm:sleep_mode_operation_duration_seconds`, `vllm:rl_weight_update_operation_duration_seconds`",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "targets": [
+            {
+              "expr": "sum by (operation) (last_over_time(vllm:sleep_mode_operation_duration_seconds_count{job=~\"$job\", instance=~\"$instance\"}[$__range])) or sum by (operation) (last_over_time(vllm:rl_weight_update_operation_duration_seconds_count{job=~\"$job\", instance=~\"$instance\"}[$__range]))",
+              "legendFormat": "__auto",
+              "format": "table",
+              "instant": true,
+              "range": false,
+              "refId": "A"
+            },
+            {
+              "expr": "sum by (operation) (last_over_time(vllm:sleep_mode_operation_duration_seconds_sum{job=~\"$job\", instance=~\"$instance\"}[$__range])) / (sum by (operation) (last_over_time(vllm:sleep_mode_operation_duration_seconds_count{job=~\"$job\", instance=~\"$instance\"}[$__range])) > 0) or sum by (operation) (last_over_time(vllm:rl_weight_update_operation_duration_seconds_sum{job=~\"$job\", instance=~\"$instance\"}[$__range])) / (sum by (operation) (last_over_time(vllm:rl_weight_update_operation_duration_seconds_count{job=~\"$job\", instance=~\"$instance\"}[$__range])) > 0)",
+              "legendFormat": "__auto",
+              "format": "table",
+              "instant": true,
+              "range": false,
+              "refId": "B"
+            },
+            {
+              "expr": "histogram_quantile(0.99, sum by (le, operation) (last_over_time(vllm:sleep_mode_operation_duration_seconds_bucket{job=~\"$job\", instance=~\"$instance\"}[$__range]))) or histogram_quantile(0.99, sum by (le, operation) (last_over_time(vllm:rl_weight_update_operation_duration_seconds_bucket{job=~\"$job\", instance=~\"$instance\"}[$__range])))",
+              "legendFormat": "__auto",
+              "format": "table",
+              "instant": true,
+              "range": false,
+              "refId": "C"
+            }
+          ],
+          "transformations": [
+            {
+              "id": "merge",
+              "options": {}
+            },
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true
+                },
+                "indexByName": {
+                  "operation": 0,
+                  "Value #A": 1,
+                  "Value #B": 2,
+                  "Value #C": 3
+                },
+                "renameByName": {
+                  "operation": "Operation",
+                  "Value #A": "Count",
+                  "Value #B": "Mean duration",
+                  "Value #C": "p99 duration"
+                }
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "align": "auto",
+                "cellOptions": {
+                  "type": "auto"
+                }
+              },
+              "mappings": [
+                {
+                  "type": "special",
+                  "options": {
+                    "match": "nan",
+                    "result": {
+                      "index": 0,
+                      "text": "No traffic"
+                    }
+                  }
+                }
+              ]
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Operation"
+                },
+                "properties": [
+                  {
+                    "id": "custom.minWidth",
+                    "value": 260
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Count"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "none"
+                  },
+                  {
+                    "id": "custom.width",
+                    "value": 120
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Mean duration"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "s"
+                  },
+                  {
+                    "id": "custom.width",
+                    "value": 120
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "p99 duration"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "s"
+                  },
+                  {
+                    "id": "custom.width",
+                    "value": 120
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "cellHeight": "sm",
+            "footer": {
+              "show": false
+            },
+            "showHeader": true,
+            "sortBy": [
+              {
+                "desc": true,
+                "displayName": "Count"
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 24,
+            "x": 0,
+            "y": 101
+          },
+          "id": 29
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Model FLOPs utilization (requires --enable-mfu-metrics)",
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 95
+      },
+      "id": 30,
+      "panels": [
+        {
+          "type": "timeseries",
+          "title": "Estimated compute per GPU",
+          "description": "Estimated floating point operations per second on each GPU. Divide by the GPU's peak dense FLOP/s for MFU.\n\nMetric: `vllm:estimated_flops_per_gpu_total`",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "targets": [
+            {
+              "expr": "sum by (instance, engine) (rate(vllm:estimated_flops_per_gpu_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval]))",
+              "legendFormat": "{{instance}} · engine {{engine}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "fillOpacity": 10,
+                "lineWidth": 1,
+                "showPoints": "never"
+              },
+              "unit": "flops",
+              "min": 0
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "mean",
+                "max",
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "gridPos": {
+            "h": 10,
+            "w": 12,
+            "x": 0,
+            "y": 96
+          },
+          "id": 31
+        },
+        {
+          "type": "timeseries",
+          "title": "Estimated memory traffic per GPU",
+          "description": "Estimated bytes read from and written to GPU memory per second. Divide by the GPU's peak memory bandwidth for utilization.\n\nMetrics: `vllm:estimated_read_bytes_per_gpu_total`, `vllm:estimated_write_bytes_per_gpu_total`",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "targets": [
+            {
+              "expr": "sum by (instance, engine) (rate(vllm:estimated_read_bytes_per_gpu_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval])) + sum by (instance, engine) (rate(vllm:estimated_write_bytes_per_gpu_total{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\", engine=~\"$engine\"}[$__rate_interval]))",
+              "legendFormat": "{{instance}} · engine {{engine}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "fillOpacity": 10,
+                "lineWidth": 1,
+                "showPoints": "never"
+              },
+              "unit": "Bps",
+              "min": 0
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "mean",
+                "max",
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "gridPos": {
+            "h": 10,
+            "w": 12,
+            "x": 12,
+            "y": 96
+          },
+          "id": 32
+        }
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": [
+    "vllm"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "selected": false,
+          "text": "default",
+          "value": "default"
+        },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Data source",
+        "multi": false,
+        "name": "datasource",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "regex": "",
+        "type": "datasource"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "definition": "label_values(vllm:num_requests_running, job)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Job",
+        "multi": true,
+        "name": "job",
+        "options": [],
+        "query": "label_values(vllm:num_requests_running, job)",
+        "refresh": 2,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "definition": "label_values(vllm:num_requests_running{job=~\"$job\"}, model_name)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Model",
+        "multi": true,
+        "name": "model_name",
+        "options": [],
+        "query": "label_values(vllm:num_requests_running{job=~\"$job\"}, model_name)",
+        "refresh": 2,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "definition": "label_values(vllm:num_requests_running{job=~\"$job\", model_name=~\"$model_name\"}, instance)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Instance",
+        "multi": true,
+        "name": "instance",
+        "options": [],
+        "query": "label_values(vllm:num_requests_running{job=~\"$job\", model_name=~\"$model_name\"}, instance)",
+        "refresh": 2,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "definition": "label_values(vllm:num_requests_running{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"}, engine)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Engine",
+        "multi": true,
+        "name": "engine",
+        "options": [],
+        "query": "label_values(vllm:num_requests_running{job=~\"$job\", model_name=~\"$model_name\", instance=~\"$instance\"}, engine)",
+        "refresh": 2,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "filters": [],
+        "hide": 0,
+        "label": "Filters",
+        "name": "filters",
+        "type": "adhoc"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "",
+  "title": "vLLM / Instances",
+  "uid": "vllm-instances",
+  "version": 1,
+  "weekStart": ""
+}
