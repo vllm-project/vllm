@@ -378,6 +378,18 @@ steps:
       # PLE and QSA import conflicting HC registrations in a shared process.
       - pytest -v -s models/qwen4_exp/test_ple.py
 
+- label: ":nvidia: (B200) Qwen4 Exp HC Kernels"
+  key: qwen4-exp-hc-kernels-b200
+  timeout_in_minutes: 20
+  device: b200-k8s
+  source_file_dependencies:
+  - csrc/qwen4_exp/
+  - vllm/models/qwen4_exp/nvidia/hyperconnection.py
+  - vllm/models/qwen4_exp/nvidia/ops/hc.py
+  - tests/models/qwen4_exp/test_hc_ops.py
+  commands:
+    - pytest -v -s models/qwen4_exp/test_hc_ops.py
+
 - label: ":amd: (MI300) Qwen4 Exp"
   key: qwen4-exp-unit-tests-mi300
   timeout_in_minutes: 40

@@ -3,14 +3,19 @@
 
 import pytest
 import torch
+import torch.nn.functional as F
 
+from vllm.models.qwen4_exp.common.hyperconnection import HyperConnectionConfig
+from vllm.models.qwen4_exp.nvidia import hyperconnection
 from vllm.models.qwen4_exp.nvidia.ops.cute_dsl.hc_down_silu import hc_down_silu
 from vllm.models.qwen4_exp.nvidia.ops.hc import (
+    MIN_FUSED_UP_M,
     grouped_gemma_rmsnorm,
     hc_combine,
     hc_combine_norm,
     hc_gate_mix,
     hc_silu,
+    hc_up_gate_mix,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
@@ -30,6 +35,11 @@ DOWN_N = LORA_RANK + HC + 12  # merged down+inject weight, 16-row padded
 requires_sm90 = pytest.mark.skipif(
     not current_platform.has_device_capability(90),
     reason="fused HC down+SiLU requires SM90+",
+)
+requires_hc_up_gate_mix = pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100)
+    or not hasattr(torch.ops._C, "qwen4_exp_hc_up_gate_mix"),
+    reason="fused HC up+gate mix requires an SM100-family build",
 )
 
 
@@ -155,3 +165,71 @@ def test_hc_down_silu_fused(num_tokens: int) -> None:
     torch.testing.assert_close(
         injection, down[:, LORA_RANK : LORA_RANK + HC], rtol=0.01, atol=0.01
     )
+
+
+@requires_hc_up_gate_mix
+@pytest.mark.parametrize("num_tokens", [1, 4097])
+def test_hc_up_gate_mix(num_tokens: int) -> None:
+    # lowrank is a column slice of the merged down+inject output, as in the model.
+    torch.manual_seed(0)
+    down = torch.randn(num_tokens, DOWN_N, dtype=torch.bfloat16, device="cuda")
+    lowrank = down[:, :LORA_RANK]
+    xn = torch.randn(num_tokens, HYPER_HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda")
+    w_up = (
+        torch.randn(HYPER_HIDDEN_SIZE, LORA_RANK, dtype=torch.bfloat16, device="cuda")
+        * LORA_RANK**-0.5
+    )
+
+    actual = hc_up_gate_mix(lowrank, xn, w_up)
+    expected = hc_gate_mix(xn, F.linear(lowrank, w_up), HC)
+
+    assert torch.equal(actual, expected)
+
+
+@requires_hc_up_gate_mix
+@pytest.mark.usefixtures("dist_init")
+@pytest.mark.parametrize("combine", [False, True])
+def test_gated_residual_fused_up_gate_mix(
+    combine: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Prefill-sized mix and combine_and_mix take the fused kernel bitwise."""
+    torch.manual_seed(0)
+    num_tokens = MIN_FUSED_UP_M + 1
+    config = HyperConnectionConfig(
+        hc_count=HC,
+        hidden_size=HIDDEN_SIZE,
+        hc_lowrank=LORA_RANK,
+        rms_norm_eps=EPS,
+        hc_per_branch_norm=True,
+    )
+    module = hyperconnection.GatedResidual(config).cuda()
+    for param in module.parameters():
+        param.data.normal_(std=0.02)
+    hidden = torch.randn(
+        num_tokens, HYPER_HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda"
+    )
+    block_output = torch.randn(
+        num_tokens, HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda"
+    )
+    injection = torch.randn(num_tokens, HC, dtype=torch.bfloat16, device="cuda")
+
+    def run() -> tuple[torch.Tensor, ...]:
+        if combine:
+            return module.combine_and_mix(hidden, block_output, injection)
+        return module.mix(hidden)
+
+    calls = []
+
+    def counted(*args):
+        calls.append(args[0].shape[0])
+        return hc_up_gate_mix(*args)
+
+    monkeypatch.setattr(hyperconnection, "hc_up_gate_mix", counted)
+    fused = run()
+    assert calls == [num_tokens]
+
+    module._use_hc_up_gate_mix = False
+    unfused = run()
+    assert len(calls) == 1
+    for actual, expected in zip(fused, unfused):
+        assert torch.equal(actual, expected)
