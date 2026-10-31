@@ -3,7 +3,6 @@
 import glob
 import itertools
 import os
-import subprocess
 import sys
 
 import jinja2
@@ -165,15 +164,19 @@ QUANT_CONFIGS = [
 OUTPUT_DIR = sys.argv[2] if len(sys.argv) > 2 else os.path.dirname(__file__)
 
 
-def remove_old_kernels():
-    for filename in glob.glob(OUTPUT_DIR + "/*kernel_*.cu"):
-        subprocess.call(["rm", "-f", filename])
-
-    filename = OUTPUT_DIR + "/kernel_selector.h"
-    subprocess.call(["rm", "-f", filename])
+def write_if_changed(filename, content):
+    # Skip unchanged writes so regenerating doesn't force a rebuild.
+    path = os.path.join(OUTPUT_DIR, filename)
+    if os.path.exists(path):
+        with open(path) as f:
+            if f.read() == content:
+                return
+    with open(path, "w") as f:
+        f.write(content)
 
 
 def generate_new_kernels():
+    written = set()
     result_dict = {}
     sm_75_result_dict = {}
 
@@ -300,8 +303,8 @@ def generate_new_kernels():
 
             filename = filename.lower()
 
-            with open(os.path.join(OUTPUT_DIR, filename), "w") as f:
-                f.write(file_content)
+            write_if_changed(filename, file_content)
+            written.add(filename)
 
     if not SUPPORT_FP8 and kernel_selector_str != FILE_HEAD_COMMENT:
         kernel_selector_str += (
@@ -310,10 +313,12 @@ def generate_new_kernels():
             '"marlin kernel with fp8 activation is not built.");'
         )
 
-    with open(os.path.join(OUTPUT_DIR, "kernel_selector.h"), "w") as f:
-        f.write(kernel_selector_str)
+    write_if_changed("kernel_selector.h", kernel_selector_str)
+
+    for path in glob.glob(OUTPUT_DIR + "/*kernel_*.cu"):
+        if os.path.basename(path) not in written:
+            os.remove(path)
 
 
 if __name__ == "__main__":
-    remove_old_kernels()
     generate_new_kernels()
