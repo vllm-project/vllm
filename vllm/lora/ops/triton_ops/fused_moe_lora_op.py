@@ -13,7 +13,7 @@ from vllm.triton_utils.allocation import set_triton_allocator
 from vllm.utils.mem_utils import get_max_shared_memory_bytes
 from vllm.utils.torch_utils import async_tensor_h2d, direct_register_custom_op
 
-from .utils import supports_pdl, supports_tma
+from .utils import FUSED_MOE_LORA_TWO_KERNEL_MAX_TOKENS, supports_pdl, supports_tma
 
 
 @triton.jit
@@ -1242,7 +1242,9 @@ def _fused_moe_lora_shrink(
     a_desc = None
     b_desc = None
     if use_tma and num_slices == 1:
-        b_desc = triton.tools.tensor_descriptor.TensorDescriptor.from_tensor(
+        from triton.tools.tensor_descriptor import TensorDescriptor
+
+        b_desc = TensorDescriptor.from_tensor(
             lora_a_stacked[0],
             [1, 1, shrink_config["BLOCK_SIZE_N"], shrink_config["BLOCK_SIZE_K"]],
         )
@@ -1372,13 +1374,15 @@ def _fused_moe_lora_expand(
     a_desc = None
     b_desc = None
     if use_tma:
+        from triton.tools.tensor_descriptor import TensorDescriptor
+
         if sorted_token_ids is not None:
-            a_desc = triton.tools.tensor_descriptor.TensorDescriptor.from_tensor(
+            a_desc = TensorDescriptor.from_tensor(
                 a_intermediate_cache1,
                 [expand_config["BLOCK_SIZE_M"], expand_config["BLOCK_SIZE_K"]],
             )
         if num_slices == 1:
-            b_desc = triton.tools.tensor_descriptor.TensorDescriptor.from_tensor(
+            b_desc = TensorDescriptor.from_tensor(
                 lora_b_stacked[0],
                 [1, 1, expand_config["BLOCK_SIZE_N"], expand_config["BLOCK_SIZE_K"]],
             )
@@ -1492,7 +1496,11 @@ def _fused_moe_lora(
     assert top_k_num == topk_weights.shape[1]
 
     # Fast path: single fused kernel
-    if not fully_sharded and max_lora_rank <= _FUSED_MOE_LORA_ONE_SHOT_MAX_RANK:
+    if (
+        not fully_sharded
+        and max_lora_rank <= _FUSED_MOE_LORA_ONE_SHOT_MAX_RANK
+        and topk_weights.shape[0] > FUSED_MOE_LORA_TWO_KERNEL_MAX_TOKENS
+    ):
         M_pairs = topk_weights.numel()
         if (
             sorted_token_ids is None
@@ -1560,7 +1568,11 @@ def _fused_moe_lora(
 
     # TMA is not currently compatiple with fully_sharded due to the non-determinism
     # of token id sorting across ranks.
-    use_tma = supports_tma(device) and not fully_sharded
+    use_tma = (
+        supports_tma(device)
+        and not fully_sharded
+        and max_lora_rank * output.element_size() % 16 == 0
+    )
 
     intermediate_cache_shape = (
         num_slices,
