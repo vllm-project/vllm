@@ -731,7 +731,13 @@ def dequantize_and_gather_k_cache_triton(
         return
 
     if k_cache.shape[-1] == V41_BYTES_PER_TOKEN:
-        _dequantize_and_gather_k_mxfp8_kernel[(num_reqs, NUM_WORKERS)](
+        # On ROCm the grid follows the gather length, as for the V4 record.
+        mxfp8_workers = (
+            gather_num_workers(max_gather_len)
+            if current_platform.is_rocm()
+            else NUM_WORKERS
+        )
+        _dequantize_and_gather_k_mxfp8_kernel[(num_reqs, mxfp8_workers)](
             out,
             out.stride(0),
             out.stride(1),
