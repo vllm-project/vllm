@@ -335,10 +335,13 @@ def test_load_audio_auto_falls_back_without_torchcodec(dummy_audio_bytes):
 
 
 def test_load_audio_auto_falls_back_without_ffmpeg(dummy_audio_bytes):
-    """Torchcodec installed but system ffmpeg missing (`AudioDecoder is None`)
-    must surface as ImportError so `auto` falls back to soundfile → PyAV."""
+    """Torchcodec without system ffmpeg must fall back to soundfile → PyAV."""
     ref_audio, ref_sr = load_audio_soundfile(BytesIO(dummy_audio_bytes), sr=None)
-    with patch.object(audio_module, "AudioDecoder", None):
+    with patch.object(
+        audio_module,
+        "_get_torchcodec_audio_decoder",
+        side_effect=ImportError("torchcodec audio backend is unavailable"),
+    ):
         with pytest.raises(ImportError, match="torchcodec audio backend"):
             load_audio_torchcodec(BytesIO(dummy_audio_bytes), sr=None)
         audio, sr = load_audio(BytesIO(dummy_audio_bytes), sr=None, backend="auto")
@@ -358,7 +361,11 @@ def test_load_audio_auto_falls_back_when_libtorchcodec_unloadable(
             raise RuntimeError("Could not load libtorchcodec. Likely causes: ...")
 
     ref_audio, ref_sr = load_audio_soundfile(BytesIO(dummy_audio_bytes), sr=None)
-    with patch.object(audio_module, "AudioDecoder", _UnloadableDecoder):
+    with patch.object(
+        audio_module,
+        "_get_torchcodec_audio_decoder",
+        return_value=_UnloadableDecoder,
+    ):
         with pytest.raises(ImportError, match="torchcodec audio backend"):
             load_audio_torchcodec(BytesIO(dummy_audio_bytes), sr=None)
         audio, sr = load_audio(BytesIO(dummy_audio_bytes), sr=None, backend="auto")

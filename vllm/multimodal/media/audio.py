@@ -37,18 +37,6 @@ try:
 except ImportError:
     soundfile = PlaceholderModule("soundfile")  # type: ignore[assignment]
 
-try:
-    from torchcodec.decoders import AudioDecoder
-except (ImportError, RuntimeError, OSError) as exc:
-    # torchcodec may fail to import when it is not installed (ImportError),
-    # the system ffmpeg is missing (RuntimeError), or its native library
-    # cannot be loaded (OSError).
-    AudioDecoder = None  # type: ignore[assignment]
-    _torchcodec_import_exc: BaseException | None = exc
-else:
-    _torchcodec_import_exc = None
-
-
 # Public libsndfile error codes exposed via `soundfile.LibsndfileError.code`,
 # soundfile being the main audio loading backend. Used to validate if an audio
 # loading error is due to a server error vs a client error (invalid audio file).
@@ -72,6 +60,15 @@ _TORCHCODEC_UNAVAILABLE_MSG = (
     "torchcodec audio backend is unavailable (requires the torchcodec "
     "package and a system ffmpeg installation)"
 )
+
+
+def _get_torchcodec_audio_decoder():
+    try:
+        from torchcodec.decoders import AudioDecoder
+    except (ImportError, RuntimeError, OSError) as exc:
+        raise ImportError(_TORCHCODEC_UNAVAILABLE_MSG) from exc
+    return AudioDecoder
+
 
 # Slack on the torchcodec decode window when enforcing `max_duration_s`, so an
 # over-long stream is rejected rather than truncated to the limit.
@@ -287,10 +284,7 @@ def load_audio_torchcodec(
         sample rate in Hz.
 
     """
-    if AudioDecoder is None:
-        # Unify "torchcodec not installed" and "system ffmpeg missing" into
-        # ImportError so `load_audio(backend="auto")` falls back cleanly.
-        raise ImportError(_TORCHCODEC_UNAVAILABLE_MSG) from _torchcodec_import_exc
+    AudioDecoder = _get_torchcodec_audio_decoder()
     if sr is not None and sr != int(sr):
         raise ValueError(f"torchcodec requires an integer sample rate, got {sr}")
     sample_rate = int(sr) if sr is not None else None

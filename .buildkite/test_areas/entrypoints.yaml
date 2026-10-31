@@ -31,6 +31,8 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/entrypoints
+  - vllm/multimodal/media/audio.py
+  - vllm/multimodal/video.py
   - vllm/utils/flashinfer.py
   - tests/entrypoints/unit_tests
   - tests/entrypoints/launchers

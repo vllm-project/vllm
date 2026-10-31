@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from abc import abstractmethod
-from typing import Any, ClassVar, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, ClassVar, TypeAlias, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -17,13 +17,13 @@ from vllm.multimodal.video_decoders import (
     decode_video,
     resolve_video_backend_kwargs,
 )
-from vllm.utils.import_utils import PlaceholderModule
+from vllm.utils.import_utils import LazyLoader
 from vllm.utils.registry import ExtensionManager
 
-try:
+if TYPE_CHECKING:
     import cv2
-except ImportError:
-    cv2 = PlaceholderModule("cv2")
+else:
+    cv2 = LazyLoader("cv2", globals(), "cv2")
 
 
 logger = init_logger(__name__)
