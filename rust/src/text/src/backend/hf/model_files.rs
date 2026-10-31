@@ -205,19 +205,20 @@ impl std::fmt::Display for RequiredFile {
 
 /// Model files of one source, read from disk or downloaded from the Hub on demand.
 enum SourceFiles {
-    /// A local model directory or a cached Hub snapshot.
+    /// A local model directory or a cached Hub snapshot in offline mode.
     Dir(PathBuf),
-    /// A Hub repo with its listed files.
+    /// A Hub repo with its listed files and an optional cached snapshot directory.
     Remote {
         model_id: String,
-        repo: ApiRepo,
+        repo: Box<ApiRepo>,
         siblings: BTreeSet<String>,
+        snapshot: Option<PathBuf>,
     },
 }
 
 impl SourceFiles {
     /// Open a local model directory when `source` points to one, otherwise a
-    /// cached snapshot that contains `required`, and finally the Hub.
+    /// cached snapshot in offline mode, and finally the Hub.
     async fn open(source: &ModelSource, required: RequiredFile) -> Result<Self> {
         let model_id = source.id.as_str();
         if Path::new(model_id).is_dir() {
@@ -232,12 +233,13 @@ impl SourceFiles {
         let cache = std::env::var_os("HF_HUB_CACHE")
             .map(|path| Cache::new(path.into()))
             .unwrap_or_else(Cache::from_env);
-        if let Some(snapshot) = cached_snapshot_dir(&cache, &repo).map(Self::Dir)
-            && snapshot.contains(required).await?
-        {
-            return Ok(snapshot);
-        }
+        let snapshot = cached_snapshot_dir(&cache, &repo);
         if is_hf_hub_offline() {
+            if let Some(snapshot) = snapshot.map(Self::Dir)
+                && snapshot.contains(required).await?
+            {
+                return Ok(snapshot);
+            }
             return Err(Error::Tokenizer(format!(
                 "model '{model_id}' at revision '{}' has no {required} in cache '{}' \
                  and HF_HUB_OFFLINE is enabled",
@@ -257,8 +259,9 @@ impl SourceFiles {
         let siblings = info.siblings.into_iter().map(|sibling| sibling.rfilename).collect();
         Ok(Self::Remote {
             model_id: model_id.to_string(),
-            repo,
+            repo: Box::new(repo),
             siblings,
+            snapshot,
         })
     }
 
@@ -270,8 +273,11 @@ impl SourceFiles {
                 model_id,
                 repo,
                 siblings,
+                snapshot,
             } => match siblings.contains(filename) {
-                true => download_known_file(repo, model_id, filename).await.map(Some),
+                true => download_known_file(repo, model_id, snapshot.as_deref(), filename)
+                    .await
+                    .map(Some),
                 false => Ok(None),
             },
         }
@@ -299,8 +305,13 @@ impl SourceFiles {
                 model_id,
                 repo,
                 siblings,
+                snapshot,
             } => match find_tiktoken_sibling(siblings) {
-                Some(filename) => download_known_file(repo, model_id, filename).await.map(Some),
+                Some(filename) => {
+                    download_known_file(repo, model_id, snapshot.as_deref(), filename)
+                        .await
+                        .map(Some)
+                }
                 None => Ok(None),
             },
         }
@@ -340,8 +351,13 @@ impl SourceFiles {
                 model_id,
                 repo,
                 siblings,
+                snapshot,
             } => match remote_chat_template_name(siblings) {
-                Some(filename) => download_known_file(repo, model_id, filename).await.map(Some),
+                Some(filename) => {
+                    download_known_file(repo, model_id, snapshot.as_deref(), filename)
+                        .await
+                        .map(Some)
+                }
                 None => Ok(None),
             },
         }
@@ -395,7 +411,15 @@ fn resolve_tokenizer_source(
     TokenizerSource::HuggingFace(tokenizer_path)
 }
 
-async fn download_known_file(repo: &ApiRepo, model_id: &str, filename: &str) -> Result<PathBuf> {
+async fn download_known_file(
+    repo: &ApiRepo,
+    model_id: &str,
+    snapshot: Option<&Path>,
+    filename: &str,
+) -> Result<PathBuf> {
+    if let Some(path) = snapshot.and_then(|dir| local_file_if_exists(dir, filename)) {
+        return Ok(path);
+    }
     repo.get(filename).await.map_err(|error| {
         Error::Tokenizer(format!(
             "failed to download '{filename}' for model '{model_id}': {}",
@@ -809,6 +833,105 @@ mod tests {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn online_resolution_completes_partial_cached_snapshot() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        const CHILD: &str = "VLLM_TEST_HF_PARTIAL_SNAPSHOT_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let cache = PathBuf::from(std::env::var_os("HF_HUB_CACHE").unwrap());
+            let files = ResolvedModelFiles::new("test/model", Some("release")).await.unwrap();
+            assert_eq!(
+                files.tokenizer.path(),
+                cache.join("models--test--model/snapshots/commit/tokenizer.json")
+            );
+            assert_eq!(
+                files.generation_config_path,
+                Some(cache.join("models--test--model/snapshots/commit/generation_config.json"))
+            );
+            return;
+        }
+
+        let dir = tempdir().unwrap();
+        let cache = dir.path().join("hub-cache");
+        let repo = cache.join("models--test--model");
+        fs::create_dir_all(repo.join("refs")).unwrap();
+        fs::create_dir_all(repo.join("snapshots/commit")).unwrap();
+        fs::write(repo.join("refs/release"), "commit").unwrap();
+        fs::write(repo.join("snapshots/commit/tokenizer.json"), "{}").unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0_u8; 4096];
+                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let first_line = req.lines().next().unwrap_or_default();
+                    let response = match first_line {
+                        "GET /api/models/test/model/revision/release HTTP/1.1" => {
+                            let body = r#"{"siblings":[{"rfilename":"tokenizer.json"},{"rfilename":"generation_config.json"}],"sha":"commit"}"#;
+                            format!(
+                                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                                body.len()
+                            )
+                        }
+                        "HEAD /test/model/resolve/release/generation_config.json HTTP/1.1" => {
+                            concat!(
+                                "HTTP/1.1 200 OK\r\n",
+                                "etag: \"gen-etag\"\r\n",
+                                "x-repo-commit: commit\r\n",
+                                "content-length: 2\r\n",
+                                "accept-ranges: bytes\r\n",
+                                "connection: close\r\n\r\n",
+                            )
+                            .to_string()
+                        }
+                        "GET /test/model/resolve/release/generation_config.json HTTP/1.1" => {
+                            concat!(
+                                "HTTP/1.1 206 Partial Content\r\n",
+                                "etag: \"gen-etag\"\r\n",
+                                "x-repo-commit: commit\r\n",
+                                "content-range: bytes 0-1/2\r\n",
+                                "content-length: 2\r\n",
+                                "connection: close\r\n\r\n",
+                                "{}",
+                            )
+                            .to_string()
+                        }
+                        _ => {
+                            "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                                .to_string()
+                        }
+                    };
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "backend::hf::model_files::tests::online_resolution_completes_partial_cached_snapshot",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("HF_HOME", dir.path().join("hf-home"))
+            .env("HF_HUB_CACHE", &cache)
+            .env_remove("HF_HUB_OFFLINE")
+            .env("HF_ENDPOINT", format!("http://{addr}"))
+            .output()
+            .unwrap();
+        server.abort();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[tokio::test]
