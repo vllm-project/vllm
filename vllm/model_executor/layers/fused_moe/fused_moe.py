@@ -409,6 +409,9 @@ def fused_moe_kernel(
         tl.extra.cuda.gdc_wait()
     num_tokens_post_padded = tl.load(num_tokens_post_padded_ptr)
     if pid_m * BLOCK_SIZE_M >= num_tokens_post_padded:
+        # Early exit after gdc_wait(). The dependent grid is released by the
+        # implicit trigger at grid completion; if an explicit
+        # gdc_launch_dependents() is ever added, it must also run on this path.
         return
     if not naive_block_assignment:
         offs_token_id = pid_m * BLOCK_SIZE_M + offs

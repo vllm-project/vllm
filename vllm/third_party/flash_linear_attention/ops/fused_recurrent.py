@@ -306,6 +306,9 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     if state_idx <= 0:
         zero = tl.zeros([BV], dtype=tl.float32).to(p_o.dtype.element_ty)
         tl.store(p_o, zero, mask=mask_v)
+        # Early exit after gdc_wait(). The dependent grid is released by the
+        # implicit trigger at grid completion; if an explicit
+        # gdc_launch_dependents() is ever added, it must also run on this path.
         return
 
     p_h0 = h0 + state_idx * stride_init_state_token
