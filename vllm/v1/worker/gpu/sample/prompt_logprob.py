@@ -190,8 +190,7 @@ class PromptLogprobsWorker:
             assert start_idx < end_idx, (
                 f"start_idx ({start_idx}) >= end_idx ({end_idx})"
             )
-            if not req_is_prompt_chunked:
-                end_idx -= 1
+            end_idx = min(end_idx, start_idx + prompt_lens[i] - computed_prefill[i] - 1)
             # Skip rows before prompt_logprob_start.
             start_idx += max(int(prompt_logprob_start[i]) - int(computed_prefill[i]), 0)
 
