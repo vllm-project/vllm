@@ -150,6 +150,12 @@ impl Error {
             _ => None,
         }
     }
+
+    /// Whether the request could not be taken now, so retrying later may
+    /// succeed.
+    pub fn is_unavailable(&self) -> bool {
+        matches!(self, Self::Text(error) if error.is_unavailable())
+    }
 }
 
 impl From<llm_multimodal::MediaConnectorError> for Error {
