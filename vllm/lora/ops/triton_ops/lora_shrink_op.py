@@ -14,6 +14,7 @@ from vllm.lora.ops.triton_ops.utils import (
     _get_lora_a_ptr,
     get_lora_op_configs,
     is_batch_invariant,
+    supports_multicta_shrink,
     supports_pdl,
 )
 from vllm.triton_utils import tl, triton
@@ -259,8 +260,11 @@ def _lora_shrink(
     if inputs.size(0) == 0:
         # An empty first call has no work to do.
         return
+    use_multicta = envs.VLLM_LORA_SHRINK_USE_MULTICTA and supports_multicta_shrink(
+        inputs.device
+    )
     partials: torch.Tensor | None = None
-    if is_batch_invariant:
+    if is_batch_invariant and not use_multicta:
         # Allocated before the no-LoRA return so profiling sees the scratch.
         # Per-call allocation keeps each CUDA graph's scratch in its own pool.
         partials = torch.empty(
@@ -304,7 +308,7 @@ def _lora_shrink(
 
     # Triton kernel configs
     kernel_config = get_lora_op_configs(
-        "shrink",
+        "shrink_multicta" if use_multicta else "shrink",
         max_loras=MAX_LORAS,
         batch=M,
         hidden_size=K,
@@ -316,8 +320,36 @@ def _lora_shrink(
     BLOCK_K = kernel_config["block_k"]
     SPLIT_K = kernel_config["split_k"]
     NUM_WARPS = kernel_config["num_warps"]
-    NUM_STAGES = kernel_config["num_stages"]
     NUM_CTAS = kernel_config["num_ctas"]
+
+    if use_multicta:
+        from vllm.lora.ops.triton_ops.lora_shrink_multicta import (
+            launch_lora_shrink_multicta,
+        )
+
+        launch_lora_shrink_multicta(
+            inputs,
+            lora_ptr_tensor,
+            output_tensor,
+            token_indices_sorted_by_lora_ids,
+            num_tokens_per_lora,
+            lora_token_start_loc,
+            lora_ids,
+            num_active_loras.item(),
+            scaling,
+            lora_strides_d0,
+            lora_strides_d1,
+            lora_strides_d2,
+            BLOCK_M=BLOCK_M,
+            BLOCK_N=BLOCK_N,
+            BLOCK_K=BLOCK_K,
+            SPLIT_K=SPLIT_K,
+            NUM_WARPS=NUM_WARPS,
+            NUM_CTAS=NUM_CTAS,
+        )
+        return
+
+    NUM_STAGES = kernel_config["num_stages"]
     GROUP_SIZE_M = kernel_config.get("group_size_m", 8)
 
     # Every M must keep the same K partition for batch invariance.
