@@ -446,6 +446,9 @@ ADD ./tools/ ./tools/
 # ship either file, and this stage does not inherit the vllm-src tree.
 ADD ./setup.py ./setup.py
 ADD ./requirements/cpu.txt ./requirements/cpu.txt
+# the (CPU) Params, Env, Tokenizers, Parser job installs cmake from a
+# hash-locked file; the wheel does not ship requirements/.
+ADD ./requirements/ci/ ./requirements/ci/
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
