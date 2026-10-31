@@ -31,7 +31,6 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
 from vllm.model_executor.model_loader.reload import finish_reload, start_reload
 from vllm.model_executor.model_loader.reload.direct import (
     begin_direct_reload,
-    direct_reload_pending,
     finish_direct_reload,
 )
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
@@ -290,8 +289,8 @@ class TestRefusals:
     def test_refused_begin_leaves_the_model_untouched(self):
         # proj is viewed back first, in module order; mimo's storage is short
         model = _cold_start(_checkpoint())
-        shape, stride, dtype, offset = model.mimo.weight._ckpt_layout
-        model.mimo.weight._ckpt_layout = ((64, 64), (64, 1), dtype, offset)
+        owner, (_, _, dtype, offset), attrs = model.mimo.weight._ckpt
+        model.mimo.weight._ckpt = (owner, ((64, 64), (64, 1), dtype, offset), attrs)
         before = _state(model)
         with pytest.raises(RuntimeError, match="checkpoint layout needs"):
             begin_direct_reload(model)
@@ -348,7 +347,7 @@ class TestRefusals:
         with pytest.raises(RuntimeError, match=r"replaced .*proj\.weight"):
             begin_direct_reload(model)
         _assert_same(_state(model), before, addresses=True)
-        assert not direct_reload_pending(model)
+        assert "_direct_reload_begun" not in model.__dict__
 
 
 def test_retry_after_aborted_update_matches_cold_start():
@@ -356,12 +355,12 @@ def test_retry_after_aborted_update_matches_cold_start():
     # updated and pending (nothing refuses to run it), and the next full
     # update repairs it.
     model = _cold_start(_checkpoint())
-    assert not direct_reload_pending(model)
+    assert "_direct_reload_begun" not in model.__dict__
     begin_direct_reload(model)
     model.load_weights(list(_checkpoint(1.01).items())[:3])  # update aborts
-    assert direct_reload_pending(model)
+    assert "_direct_reload_begun" in model.__dict__
     _reload(model, _checkpoint(1.01))
-    assert not direct_reload_pending(model)
+    assert "_direct_reload_begun" not in model.__dict__
     _assert_same(_state(model), _state(_cold_start(_checkpoint(1.01))))
 
 
@@ -398,7 +397,6 @@ def test_finish_retry_after_failed_direct_finish_raises(monkeypatch):
         finish_reload(model, _MODEL_CONFIG, _DEVICE)
     with pytest.raises(RuntimeError, match="finish without a begin"):
         finish_reload(model, _MODEL_CONFIG, _DEVICE)
-    assert direct_reload_pending(model)
 
 
 def test_begin_restores_loader_metadata(monkeypatch):
@@ -436,7 +434,7 @@ def test_shared_tensor_with_changed_layout_refused():
     before = _state(target)
     with pytest.raises(RuntimeError, match="shared from another model"):
         begin_direct_reload(draft)
-    assert not direct_reload_pending(draft)
+    assert "_direct_reload_begun" not in draft.__dict__
     _assert_same(_state(target), before, addresses=True)
 
 
@@ -470,9 +468,9 @@ def test_reload_keeps_address_of_padded_or_emptied_weight(monkeypatch, fn):
 def test_replace_parameter_keeps_the_target_checkpoint_layout():
     # post-load processing may pass another checkpoint parameter as new_tensor
     model = _cold_start(_checkpoint())
-    layout = model.proj.weight._ckpt_layout
+    ckpt = model.proj.weight._ckpt
     replace_parameter(model.proj, "weight", model.mimo.weight)
-    assert model.proj.weight._ckpt_layout == layout
+    assert model.proj.weight._ckpt == ckpt
 
 
 def _config(**overrides) -> SimpleNamespace:

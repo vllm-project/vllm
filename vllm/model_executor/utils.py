@@ -9,6 +9,7 @@ from typing import Any
 
 import torch
 
+import vllm.envs as envs
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 _weights_pre_processed: ContextVar[bool] = ContextVar(
@@ -68,7 +69,7 @@ def set_weight_attrs(
         setattr(weight, key, value)
 
 
-def storage_extent(t: torch.Tensor) -> int:
+def _extent(t: torch.Tensor) -> int:
     """Number of elements spanned by ``t`` in its storage."""
     if t.numel() == 0:
         return 0
@@ -102,7 +103,7 @@ def _in_own_storage(
     and an emptied weight (the checkpoint bytes stay for the next reload)."""
     storage = old.untyped_storage()
     offset, size = old.storage_offset() * old.element_size(), new.element_size()
-    span = storage_extent(new)
+    span = _extent(new)
     if whole_storage:
         fits = (
             span >= new.numel()  # not overlapping
@@ -113,8 +114,8 @@ def _in_own_storage(
             new.numel() > 0
             and span == new.numel()  # neither overlapping nor with gaps
             # its gaps may hold another tensor's data
-            and storage_extent(old) == old.numel()
-            and new.numel() * size <= storage_extent(old) * old.element_size()
+            and _extent(old) == old.numel()
+            and new.numel() * size <= _extent(old) * old.element_size()
         )
     if (
         not fits
@@ -177,12 +178,9 @@ def replace_parameter(
     # a loader riding along under that name has to be dropped as well.
     new_tensor_attrs.pop("weight_loader", None)
     new_tensor_attrs.pop("_weight_loader", None)
-    # A checkpoint layout belongs to the parameter it was recorded on (direct
-    # reload); another checkpoint parameter passed as new_tensor must not
-    # overwrite it.
-    new_tensor_attrs.pop("_ckpt_layout", None)
-    new_tensor_attrs.pop("_ckpt_loader_attrs", None)
-    new_tensor_attrs.pop("_ckpt_owner", None)
+    # A checkpoint record belongs to the parameter it was recorded on (direct
+    # reload); one on new_tensor (another checkpoint parameter) must not overwrite it.
+    new_tensor_attrs.pop("_ckpt", None)
 
     if isinstance(new_tensor, torch.nn.Parameter):
         new_tensor = new_tensor.data
@@ -204,12 +202,8 @@ def replace_parameter(
         elif getattr(getattr(layer, "quant_method", None), "uses_meta_device", False):
             old_param.data = new_tensor  # online quantization frees the source
         else:
-            from vllm.model_executor.model_loader.reload.direct import (
-                direct_reload_enabled,
-            )
-
             old_param.data = _in_own_storage(
-                old_param, new_tensor, whole_storage=direct_reload_enabled()
+                old_param, new_tensor, whole_storage=envs.VLLM_RELOAD_MODE == "direct"
             )
         for attr_name, attr in new_tensor_attrs.items():
             setattr(old_param, attr_name, attr)
