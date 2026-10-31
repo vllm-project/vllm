@@ -4,20 +4,13 @@
 
 The weight and its scale load independently (any order, any call, no pairing in
 the model's loader); BF16 rows load as is; post-load processing dequantizes in
-the weight's own storage, so cold start, layerwise reload and a sharded RDT
-replay all end with the same bytes at the startup address."""
+the weight's own storage, so cold start and layerwise reload both end with the
+same bytes at the startup address."""
 
 import pytest
 import torch
 
 from vllm.config import ModelConfig
-from vllm.distributed.weight_transfer.sharded_rdt_engine import (
-    bake_replay_plan,
-    begin_replayed_layer,
-    finish_replayed_layer,
-    replay_copy,
-)
-from vllm.distributed.weight_transfer.sharded_rdt_fake import _UnsupportedFakeOp
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     ReplicatedLinear,
@@ -412,62 +405,3 @@ def test_indexer_layerwise_reload_equals_cold_start(model_config, layout):
     assert get_layerwise_info(model.wk_weights_proj).load_numel_total is None
     finalize_layerwise_reload(model, model_config)
     torch.testing.assert_close(model.wk_weights_proj.weight, expected, rtol=0, atol=0)
-
-
-def _sharded_rdt_sync(model, ckpt, model_config) -> None:
-    """Bake a sharded RDT plan for ``ckpt``'s names, then replay it as the engine
-    does (the producer side applies each recorded op chain to the source)."""
-    name_meta = {
-        n: (str(t.dtype).removeprefix("torch."), list(t.shape)) for n, t in ckpt.items()
-    }
-    plan = bake_replay_plan(model, name_meta, _DEVICE)
-    assert plan.live_names == set(ckpt) <= set(plan.name_to_plan)
-
-    initialize_layerwise_reload(model)  # start_weight_update
-    for scatters in {id(p): p for p in plan.name_to_plan.values()}.values():
-        layer = scatters[0].layer
-        begin_replayed_layer(layer, plan.layer_fills.get(layer, ()))
-        for sc in scatters:
-            name, chain = sc.src
-            tensor = ckpt[name]
-            for op, args, kwargs in chain:
-                tensor = getattr(tensor, op)(*args, **dict(kwargs))
-            replay_copy(sc, tensor)
-        finish_replayed_layer(layer)
-    finalize_layerwise_reload(model, model_config)  # finish_weight_update
-
-
-@pytest.mark.parametrize("stale_fp8_rows", [False, True])
-def test_sharded_rdt_bf16_update(model_config, stale_fp8_rows):
-    """A BF16 trainer syncing into these layers bakes: the ones BF16 rows load
-    into their scale rows replay as fills. Rows an aborted FP8 load left
-    marked are not dequantized."""
-    model = _cold_start(_checkpoint(30), model_config)
-    if stale_fp8_rows:
-        model.o.weight.fp8_rows[:5] = True
-    new = _bf16(_checkpoint(31))
-    ptrs = _ptrs(model)
-    _sharded_rdt_sync(model, new, model_config)
-    _assert_runtime(model, _expected(new))
-    assert _ptrs(model) == ptrs
-
-
-def test_sharded_rdt_bf16_indexer_update(model_config):
-    model = _indexer_cold_start(_indexer_checkpoint(32)[0], model_config)
-    _, expected = _indexer_checkpoint(33)
-    new = {"wk.weight": expected[:_WK].clone(), "weights_proj.weight": expected[_WK:]}
-    _sharded_rdt_sync(model, new, model_config)
-    torch.testing.assert_close(model.wk_weights_proj.weight, expected, rtol=0, atol=0)
-
-
-def test_sharded_rdt_refuses_fp8(model_config):
-    """FP8 rows would need the loader at replay: refused at bake, with the
-    model left as it was."""
-    old = _checkpoint(34)
-    model = _cold_start(old, model_config)
-    with pytest.raises(_UnsupportedFakeOp, match="view of 'weight'"):
-        _sharded_rdt_sync(
-            model, {"o.-.weight": _checkpoint(35)["o.-.weight"]}, model_config
-        )
-    assert not any(p.is_meta for p in model.parameters())
-    _assert_runtime(model, _expected(old))

@@ -121,11 +121,6 @@ class Fp8DequantWeightParameter(ModelWeightParameter):
             load(loaded_weight, **kwargs)
         self.fp8_rows[rows] = fp8
 
-    def reset_replay_load_state(self) -> None:
-        """For a load that writes ``data`` without this parameter's loaders
-        (sharded RDT replay, BF16 only): no row holds FP8 bytes."""
-        self.fp8_rows.zero_()
-
     def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
         self._load(super().load_column_parallel_weight, loaded_weight, slice(None))
 
@@ -186,7 +181,7 @@ def _scale_groups(scale: torch.Tensor, rows: int, cols: int) -> torch.Tensor:
     scale per row and ``_ANY_LAYOUT_BLOCK[1]`` columns."""
     group = _ANY_LAYOUT_BLOCK[1]
     if scale.dtype == torch.float32 and tuple(scale.shape) == (rows, cdiv(cols, group)):
-        return scale  # in this layout already (no ops: a sharded RDT bake)
+        return scale  # in this layout already (e.g. `load_unneeded_scale`)
     if scale.dtype in (torch.uint8, torch.float8_e8m0fnu):
         scale = scale.view(torch.float8_e8m0fnu)
     scale = scale.to(torch.float32)
@@ -258,7 +253,7 @@ def load_unneeded_scale(
     scale = layer.weight_scale_inv
     block_n, block_k = scale.weight_block_size
     shape = (cdiv(tensor.shape[0], block_n), cdiv(tensor.shape[1], block_k))
-    ones = tensor.new_ones(shape, dtype=torch.float32)  # sharded RDT: a fill
+    ones = tensor.new_ones(shape, dtype=torch.float32)
     scale.weight_loader(scale, ones, *(() if shard_id is None else (shard_id,)))
     loaded.add(name.removesuffix("weight") + "weight_scale_inv")
 

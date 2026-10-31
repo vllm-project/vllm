@@ -35,7 +35,6 @@ from vllm.distributed.weight_transfer.sharded_rdt_engine import (
     ShardedRDTWeightTransferEngine,
     ShardedRDTWeightTransferInitInfo,
     _dtype_from_name,
-    _install_recording_stamps,
 )
 from vllm.distributed.weight_transfer.sharded_rdt_fake import (
     BakeSink,
@@ -369,68 +368,6 @@ class TestBakeRecording:
         # What the source name alone would have said, and what the producer
         # would NOT have sent.
         assert 2 * torch.float32.itemsize == 8 != 2 * torch.bfloat16.itemsize
-
-    def test_a_constant_records_a_fill_and_fetches_nothing(self):
-        """A loader filling rows it owns (``new_ones`` / ``new_full`` on a
-        fake) records a fill; its name is not live."""
-        rec, fake = self._recorder_and_fake()
-        layer = _FakeLayer("scale")
-        rec.current = (layer, "weight_scale_inv")
-        param = torch.empty((8, 6), dtype=torch.float32, device=META)
-        param.narrow(0, 4, 4).copy_(fake.new_ones((4, 6), dtype=torch.float32))
-        param.narrow(0, 0, 4).copy_(fake.new_full((4, 6), 2.0, dtype=torch.float32))
-        ones, twos = rec.copies_by_layer[layer]
-        assert (ones.fill, ones.offset, ones.shape) == (1.0, 24, (4, 6))
-        assert (twos.fill, twos.offset) == (2.0, 0)
-        assert rec.copied_names == set()
-
-    @pytest.mark.parametrize(
-        "make",
-        [
-            lambda w: w.new_zeros(2, 6),
-            lambda w: w.new_zeros((2, 6)),
-            lambda w: w.new_ones(size=(2, 6)),
-            lambda w: w.new_full((2, 6), fill_value=3.0),
-        ],
-    )
-    def test_constants_take_the_tensor_call_forms(self, make):
-        rec, fake = self._recorder_and_fake()
-        constant = make(fake)
-        assert isinstance(constant, FakeRDTTensor)
-        assert tuple(constant.shape) == (2, 6)
-        assert constant.dtype is torch.bfloat16
-
-    def test_a_copy_into_a_fake_is_refused_at_bake(self):
-        """Padding through a constant buffer (copy the weight into a
-        ``new_zeros`` buffer, then the buffer into the param) cannot be
-        replayed: the buffer's region is not the param's."""
-        rec, fake = self._recorder_and_fake()
-        rec.current = (_FakeLayer("padded"), "weight")
-        buf = fake.new_zeros((8, 6))
-        with pytest.raises(_UnsupportedFakeOp, match="copy_ into fake"):
-            buf.narrow(0, 4, 4).copy_(fake)
-
-    def test_a_copy_into_a_reinterpreting_view_is_refused_at_bake(self):
-        """The replay writes ``param.data`` in the parameter's dtype, so a copy
-        recorded through a view of another dtype (FP8 bytes written into a BF16
-        weight) would land elsewhere."""
-        rec = BakeSink()
-        fake = FakeRDTTensor(
-            name="w",
-            shape=torch.Size((4, 6)),
-            dtype=torch.float8_e4m3fn,
-            device=META,
-            sink=rec,
-        )
-
-        def fp8_rows_loader(param, loaded_weight):
-            param.data.view(torch.float8_e4m3fn)[:, :6].copy_(loaded_weight)
-
-        layer = torch.nn.Linear(6, 4, bias=False, device=META, dtype=torch.bfloat16)
-        layer.weight.weight_loader = fp8_rows_loader
-        _install_recording_stamps(layer, rec)
-        with pytest.raises(_UnsupportedFakeOp, match="view of 'weight'"):
-            layer.weight.weight_loader(layer.weight, fake)
 
     def test_a_broadcasting_copy_is_refused_at_bake(self):
         """The packed layout sizes each slice from the DESTINATION shape while
