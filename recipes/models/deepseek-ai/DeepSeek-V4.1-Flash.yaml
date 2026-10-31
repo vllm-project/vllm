@@ -892,6 +892,213 @@ presets:
       plus `--request-timeout-secs 14400` so long agentic requests outlive the 1800 s default
       and `--disable-retries` so a failed request is not replayed.
 
+  mi325x_agentx:
+    label: "AgentX TP8 / TP4 / TP2"
+    hardware: mi325x
+    strategy: single_node_tp
+    variants: [fp8]
+    workload: "Agentic (InferenceX AgentX)"
+    description: "TP8 with resident Engram tables, TP4 with monokernel and host Engram, and TP2 with host Engram and smaller scheduler and graph budgets; six concurrency points per topology."
+    source: { label: "InferenceX #4617", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4617", key: "dsv41flash-fp4-mi325x-vllm-agentic-dspark", revision: 7c375027a3cd50f63153222fa6eb7069ee86d3b4 }
+    image: "vllm/vllm-openai-rocm:nightly-rocm100-edad8b03c5285a1c12e7e4f83c1af709b319a01b@sha256:009169c114af5b15e25eddc808afb3c1fc3f12c94e746472b16f39fcf39cd716"
+    select:
+      frontend: rust
+      features: { tool_calling: true, reasoning: true, spec_decoding: true, text_only: true, encoder_parallel: false }
+      dcp: 1
+      kv_offload: off
+    args:
+      - "--served-model-name"
+      - "deepseek-ai/DeepSeek-V4.1-Flash"
+      - "--max-model-len"
+      - "1048576"
+      - "--max-num-seqs"
+      - "128"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--max-cudagraph-capture-size"
+      - "1024"
+      - "--disable-uvicorn-access-log"
+      - "--monokernel"
+    env:
+      OMP_NUM_THREADS: "1"
+      PYTHONUNBUFFERED: "1"
+    json_args:
+      "--speculative-config":
+        num_speculative_tokens: 5
+        draft_sample_method: probabilistic
+        rejection_sample_method: block
+        enable_adaptive_verification: false
+      "--compilation-config": { cudagraph_mode: FULL_DECODE_ONLY }
+    points:
+      tp8_c1:
+        label: "1 (TP8)"
+        concurrency: 1
+        tp: 8
+        remove_args: ["--monokernel"]
+        json_args:
+          "--engram-config": { cpu_offload: false }
+      tp8_c2:
+        label: "2 (TP8)"
+        concurrency: 2
+        tp: 8
+        remove_args: ["--monokernel"]
+        json_args:
+          "--engram-config": { cpu_offload: false }
+      tp8_c4:
+        label: "4 (TP8)"
+        concurrency: 4
+        tp: 8
+        remove_args: ["--monokernel"]
+        json_args:
+          "--engram-config": { cpu_offload: false }
+      tp8_c8:
+        label: "8 (TP8)"
+        concurrency: 8
+        tp: 8
+        remove_args: ["--monokernel"]
+        json_args:
+          "--engram-config": { cpu_offload: false }
+      tp8_c16:
+        label: "16 (TP8)"
+        concurrency: 16
+        tp: 8
+        remove_args: ["--monokernel"]
+        json_args:
+          "--engram-config": { cpu_offload: false }
+      tp8_c32:
+        label: "32 (TP8)"
+        concurrency: 32
+        tp: 8
+        remove_args: ["--monokernel"]
+        json_args:
+          "--engram-config": { cpu_offload: false }
+      tp4_c1:
+        label: "1 (TP4)"
+        concurrency: 1
+        tp: 4
+      tp4_c2:
+        label: "2 (TP4)"
+        concurrency: 2
+        tp: 4
+      tp4_c4:
+        label: "4 (TP4)"
+        concurrency: 4
+        default: true
+        tp: 4
+      tp4_c8:
+        label: "8 (TP4)"
+        concurrency: 8
+        tp: 4
+      tp4_c16:
+        label: "16 (TP4)"
+        concurrency: 16
+        tp: 4
+      tp4_c32:
+        label: "32 (TP4)"
+        concurrency: 32
+        tp: 4
+      tp2_c1:
+        label: "1 (TP2)"
+        concurrency: 1
+        tp: 2
+        remove_args: ["--monokernel"]
+        args:
+          - "--max-num-seqs"
+          - "16"
+          - "--max-num-batched-tokens"
+          - "8192"
+          - "--max-cudagraph-capture-size"
+          - "512"
+      tp2_c2:
+        label: "2 (TP2)"
+        concurrency: 2
+        tp: 2
+        remove_args: ["--monokernel"]
+        args:
+          - "--max-num-seqs"
+          - "16"
+          - "--max-num-batched-tokens"
+          - "8192"
+          - "--max-cudagraph-capture-size"
+          - "512"
+      tp2_c4:
+        label: "4 (TP2)"
+        concurrency: 4
+        tp: 2
+        remove_args: ["--monokernel"]
+        args:
+          - "--max-num-seqs"
+          - "16"
+          - "--max-num-batched-tokens"
+          - "8192"
+          - "--max-cudagraph-capture-size"
+          - "512"
+      tp2_c8:
+        label: "8 (TP2)"
+        concurrency: 8
+        tp: 2
+        remove_args: ["--monokernel"]
+        args:
+          - "--max-num-seqs"
+          - "16"
+          - "--max-num-batched-tokens"
+          - "8192"
+          - "--max-cudagraph-capture-size"
+          - "512"
+      tp2_c16:
+        label: "16 (TP2)"
+        concurrency: 16
+        tp: 2
+        remove_args: ["--monokernel"]
+        args:
+          - "--max-num-seqs"
+          - "32"
+          - "--max-num-batched-tokens"
+          - "8192"
+          - "--max-cudagraph-capture-size"
+          - "512"
+      tp2_c32:
+        label: "32 (TP2)"
+        concurrency: 32
+        tp: 2
+        remove_args: ["--monokernel"]
+        args:
+          - "--max-num-seqs"
+          - "64"
+          - "--max-num-batched-tokens"
+          - "8192"
+          - "--max-cudagraph-capture-size"
+          - "512"
+    runbook: |
+      These points serve the 0909 launch checkpoint with five-token DSpark and
+      real block verification. TP8 keeps Engram in HBM; TP4 and TP2 offload it
+      to host memory. TP2 uses smaller scheduler, prefill and graph budgets.
+      Decode uses full graphs, prefill runs eagerly, and decoder SWA bounded
+      replay keeps the pinned image's enabled default.
+
+      The TP4 monokernel runs eligible decode steps of at most 42 rows, then
+      falls back to the ordinary path for larger steps. On this image it also
+      quantizes DSpark draft FFN inputs from BF16 to MXFP8. The profile records
+      the measured configuration; its [InferenceX draft-precision qualification](https://github.com/SemiAnalysisAI/InferenceX/blob/main/CONTRIBUTING.md#draft-model-precision)
+      remains unresolved. TP8 and TP2 use the ordinary FFN path. Adaptive
+      verification remains disabled for the gfx942 startup issue tracked in
+      [vLLM #63816](https://github.com/vllm-project/vllm/pull/63816).
+
+      [Run 40744174186](https://github.com/SemiAnalysisAI/InferenceX/actions/runs/40744174186)
+      passed all 18 performance points and the TP8 c32 GSM8K evaluation at
+      `7c375027a3cd`. The separate [TP4 c4 evaluation](https://github.com/SemiAnalysisAI/InferenceX/actions/runs/40718348873)
+      at `3df335bfe629` confirmed active mono execution. Both GSM8K evaluations
+      scored 97.42% strict exact match over 1,319 samples. The effective serving
+      configuration is unchanged at reviewed source head `c8befe0ed1f0`.
+
+      InferenceX throughput measurement separately substitutes synthetic
+      acceptance length 3.51 from its committed DSpark thinking-on curve.
+      This control is excluded from the preset's serving and accuracy commands;
+      the generic Bench action is not an AgentX trace replay. Concurrency labels
+      identify the measured workload, while the generated sequence cap controls
+      admission and may queue additional sessions. No independent accuracy
+      evaluation was performed at every concurrency or on the 1017 checkpoint.
+
   mi355x_agentx:
     label: "AgentX TP2"
     hardware: mi355x
