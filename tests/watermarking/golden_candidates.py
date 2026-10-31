@@ -48,6 +48,7 @@ WATERMARK_CONFIG_FIELDS = (
     "deduplicate_contexts_max_history",
     "prf",
     "allow_target_only_watermarking",
+    "enforce",
 )
 
 # round(((i + 1) * (5**0.5 - 1) / 2) % 1.0, 4) for i in range(64)

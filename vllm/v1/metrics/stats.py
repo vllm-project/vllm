@@ -537,6 +537,10 @@ class IterationStats:
         ):
             req_stats.is_corrupted = True
 
+        # EngineCore reports what it applied, including enforced opt-outs.
+        if output.watermarking is not None:
+            req_stats.is_watermarked = output.watermarking
+
         # Process request-level engine core events
         if output.events is not None:
             self.update_from_events(

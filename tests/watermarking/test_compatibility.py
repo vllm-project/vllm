@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+from copy import copy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -16,9 +17,13 @@ from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.llm_engine import LLMEngine
+from vllm.v1.engine.output_processor import OutputProcessor
+from vllm.v1.engine.parallel_sampling import ParentRequest
 
 
-def _input_processor(server_uses_watermarking: bool = True) -> InputProcessor:
+def _input_processor(
+    server_uses_watermarking: bool = True, enforce: bool = False
+) -> InputProcessor:
     config = VllmConfig()
     config.model_config = SimpleNamespace(
         try_get_generation_config=lambda: {},
@@ -31,7 +36,7 @@ def _input_processor(server_uses_watermarking: bool = True) -> InputProcessor:
         is_diffusion=False,
     )
     config.watermark_config = (
-        WatermarkConfig(key=42) if server_uses_watermarking else None
+        WatermarkConfig(key=42, enforce=enforce) if server_uses_watermarking else None
     )
     renderer = MagicMock(spec=BaseRenderer)
     renderer.tokenizer = None
@@ -352,3 +357,102 @@ def test_shared_beam_search_params_are_not_rewritten_by_admission(
         assert _input_processor(True).resolve_watermarking(params) is False
     assert "beam search requests will run without watermarking" in caplog_vllm.text
     assert params.watermarking is None
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "resolved"),
+    [
+        ({"watermarking": False}, True),
+        # Enforce lifts the opt-out, but greedy and trace replay still cannot
+        # be watermarked.
+        ({"temperature": 0, "watermarking": False}, False),
+        ({"trace_decode_token_ids": [1], "watermarking": False}, False),
+    ],
+    ids=["opt-out", "greedy-opt-out", "trace-replay-opt-out"],
+)
+def test_enforce_resolves_opt_outs_in_frontend(kwargs, resolved, reset_warning_once):
+    processor = _input_processor(enforce=True)
+    params = SamplingParams(**kwargs)
+    # Resolving an already resolved request keeps the result.
+    for _ in range(2):
+        processor.apply_watermarking(params, processor.resolve_watermarking(params))
+        assert params.watermarking is resolved
+        assert params._watermarking_skipped is False
+
+
+def test_enforce_keeps_beam_search_unwatermarked(caplog_vllm, reset_warning_once):
+    params = BeamSearchParams(
+        beam_width=2, max_tokens=4, temperature=0.8, watermarking=False
+    )
+
+    with caplog_vllm.at_level("WARNING"):
+        assert _input_processor(enforce=True).resolve_watermarking(params) is False
+    assert "beam search requests will run without watermarking" in caplog_vllm.text
+    assert params.watermarking is False
+
+
+def _preprocess_in_engine_core(
+    params: SamplingParams, watermark_config: WatermarkConfig | None
+) -> SamplingParams:
+    from vllm.v1.engine.core import EngineCore
+
+    core = object.__new__(EngineCore)
+    core.vllm_config = VllmConfig()
+    core.vllm_config.watermark_config = watermark_config
+    core.mm_receiver_cache = None
+    core.request_block_hasher = None
+    request = _engine_core_request(params)
+    core.preprocess_add_request(request)
+    return request.sampling_params
+
+
+# EngineCore applies enforce again for frontends that never ran the check
+# (Rust HTTP and gRPC), so these params arrive unresolved.
+@pytest.mark.parametrize("enforce", [False, True])
+def test_enforce_engine_core_backstop_warns_once(
+    enforce, caplog_vllm, reset_warning_once
+):
+    config = VllmConfig()
+    config.watermark_config = WatermarkConfig(key=42, enforce=enforce)
+    with caplog_vllm.at_level("WARNING"):
+        for params in (
+            SamplingParams(temperature=0, watermarking=False),
+            SamplingParams(trace_decode_token_ids=[1, 2], watermarking=False),
+        ):
+            params = _preprocess_in_engine_core(params, config.watermark_config)
+            assert params.watermarking is False
+        assert "overriding watermarking=False" not in caplog_vllm.text
+        params = _preprocess_in_engine_core(
+            SamplingParams(watermarking=False), config.watermark_config
+        )
+        assert params.watermarking is enforce
+        assert caplog_vllm.text.count("overriding watermarking=False") == int(enforce)
+        for _ in range(2):
+            config._check_supports_watermarking(SamplingParams(watermarking=False))
+            params = _preprocess_in_engine_core(
+                SamplingParams(watermarking=False), config.watermark_config
+            )
+            assert params.watermarking is enforce
+    assert caplog_vllm.text.count("overriding watermarking=False") == int(enforce)
+
+
+@pytest.mark.parametrize("enforce", [False, True])
+def test_parallel_opt_out_stats_use_resolved_watermarking(enforce):
+    config = VllmConfig()
+    config.watermark_config = WatermarkConfig(key=42, enforce=enforce)
+    params = SamplingParams(n=4, watermarking=False, detokenize=False)
+    params.watermarking = config._check_supports_watermarking(params)
+    request = _engine_core_request(params)
+    request.external_req_id = request.request_id
+    parent = ParentRequest(request)
+    output_processor = OutputProcessor(None, log_stats=True)
+
+    for index in range(params.n):
+        child = copy(request)
+        child.request_id, child.sampling_params = parent.get_child_info(index)
+        output_processor.add_request(child, None, parent, index)
+        _preprocess_in_engine_core(child.sampling_params, config.watermark_config)
+
+    stats = [state.stats for state in output_processor.request_states.values()]
+    assert len(stats) == 4
+    assert all(stat is not None and stat.is_watermarked is enforce for stat in stats)
