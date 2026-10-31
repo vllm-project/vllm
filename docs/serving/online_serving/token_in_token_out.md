@@ -93,8 +93,16 @@ print(response["choices"][0]["token_ids"])
 - `parse_context` is ignored at other levels, so a rendered request can go to a prefill leg unchanged.
 - `logprobs` follow coupled chat. `top_logprobs` is cut to `sampling_params.logprobs`, `logprob_token_ids` is honored. When a parser hides the reasoning with `include_reasoning: false`, `logprobs`, `token_ids` and `sampling_mask` are dropped so they don't expose it.
 - `finish_reason` follows coupled chat too. It's `tool_calls` when the message has tool calls except with a named `tool_choice` or a `length` cut.
-- `stream: true` isn't supported yet.
+- With `stream: true`, each choice carries a chat `delta` (`role`, `content`, `reasoning`, `tool_calls`) instead of `text`, and `finish_reason` follows coupled chat. `role` is set on the first chunk of each choice, `n > 1` is supported, and `null` fields are left out of `delta`. A chunk is sent whenever the engine output carries a parsed delta, visible token IDs, logprobs or a `finish_reason`. Parsing runs on the API server event loop, so `--api-server-count` scales it.
 - Cohere grounding citations aren't returned. The parser strips the citation spans from `content`, and the document map can't go over JSON in `parse_context`.
+
+A streamed tool call looks like this, with the usage chunk and `data: [DONE]` framed as at the other levels:
+
+```text
+data: {"request_id": "...", "output_mode": "derender", "choices": [{"index": 0, "token_ids": [151657], "delta": {"role": "assistant", "tool_calls": [{"index": 0, "id": "chatcmpl-tool-...", "type": "function", "function": {"name": "get_weather", "arguments": ""}}]}, "finish_reason": null, ...}]}
+
+data: {"request_id": "...", "output_mode": "derender", "choices": [{"index": 0, "token_ids": [], "delta": {}, "finish_reason": "tool_calls", ...}]}
+```
 
 ### Logprobs
 
@@ -106,7 +114,6 @@ The server returns a 400 for:
 
 - `output_mode: "text"` or `"derender"` on a server without a tokenizer (`--tokens-only` or `--skip-tokenizer-init`).
 - `output_mode: "text"` or `"derender"` with `sampling_params.detokenize: false`.
-- `output_mode: "derender"` with `stream: true`.
 - `output_mode: "derender"` without `parse_context` on a server with a tool or reasoning parser or with a named `tool_choice` in `parse_context` that matches none of its `tools`. This is checked before generating.
 - An unsupported `output_mode` value.
 
