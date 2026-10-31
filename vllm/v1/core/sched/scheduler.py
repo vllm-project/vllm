@@ -81,6 +81,11 @@ from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
 
+# Mamba align mode takes a sub-block prefill chunk only when a block exceeds
+# 1 / this of the prefill budget; below that, the extra re-align step costs more
+# than the idle budget it recovers.
+MAMBA_ALIGN_SUB_BLOCK_BUDGET_DIVISOR = 4
+
 
 class Scheduler(SchedulerInterface):
     def __init__(
@@ -606,15 +611,22 @@ class Scheduler(SchedulerInterface):
         # Invariant: slot p holds the state after exactly (p + 1) * block_size
         # tokens. State is written at chunk ends, so chunk ends must be block
         # aligned. Exempt: the prompt's last chunk, whose slot decode advances
-        # to the boundary. A block too wide for one chunk advances sub-block
-        # and re-aligns at the next boundary.
+        # to the boundary. A chunk that cannot reach the next boundary is
+        # deferred, unless the block exceeds 1 / MAMBA_ALIGN_SUB_BLOCK_BUDGET_DIVISOR
+        # of the prefill budget: then deferring idles a large share of every
+        # step, so the chunk advances sub-block and re-aligns there (the
+        # mid-block stop below).
         if end < prefill_end:
             max_prefill_tokens = self.max_num_scheduled_tokens
             long_prefill_threshold = self.scheduler_config.long_prefill_token_threshold
             if long_prefill_threshold > 0:
                 max_prefill_tokens = min(max_prefill_tokens, long_prefill_threshold)
             aligned_end = end // block_size * block_size
-            if aligned_end > start or block_size <= max_prefill_tokens:
+            if (
+                aligned_end > start
+                or MAMBA_ALIGN_SUB_BLOCK_BUDGET_DIVISOR * block_size
+                <= max_prefill_tokens
+            ):
                 end = aligned_end
 
         next_block_boundary = (start // block_size + 1) * block_size
