@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -89,7 +91,7 @@ def unshuffle_weight(w: torch.Tensor):
     return torch.concat((first, second), dim=-1)
 
 
-def make_weights(dtype, k, n, e):
+def make_weights(dtype, k, n, e, interleave_gate_up: bool = True):
     w1 = torch.randn((e, k, 2 * n), dtype=dtype, device="cuda")
     w1_bias = torch.randn((e, 2 * n), dtype=dtype, device="cuda")
 
@@ -104,10 +106,6 @@ def make_weights(dtype, k, n, e):
     w1_bias_tri = w1_bias_tri.to(torch.float32)
     w2_bias_tri = w2_bias_tri.to(torch.float32)
 
-    # shuffle weights
-    w1_tri = shuffle_weight(w1_tri)
-    w1_bias_tri = shuffle_weight(w1_bias_tri)
-
     if current_platform.is_rocm():
         k_align, n2_align = 256, 512
     else:
@@ -118,16 +116,33 @@ def make_weights(dtype, k, n, e):
     w2_bottom_pad = w1_right_pad // 2
     w2_right_pad = w1_bottom_pad
 
-    w1_tri = F.pad(w1_tri, (0, w1_right_pad, 0, w1_bottom_pad, 0, 0))
+    # SWIGLUOAI expects gate/up interleaved. Other activations take [gate | up],
+    # so each half is padded separately to keep the split point at the middle.
+    if interleave_gate_up:
+        w1_tri = shuffle_weight(w1_tri)
+        w1_bias_tri = shuffle_weight(w1_bias_tri)
+        w1_tri = F.pad(w1_tri, (0, w1_right_pad, 0, w1_bottom_pad, 0, 0))
+        w1_bias_tri = F.pad(w1_bias_tri, (0, w1_right_pad, 0, 0))
+    else:
+        w1_tri = torch.cat(
+            [F.pad(h, (0, w2_bottom_pad)) for h in w1_tri.chunk(2, dim=-1)], dim=-1
+        )
+        w1_tri = F.pad(w1_tri, (0, 0, 0, w1_bottom_pad, 0, 0))
+        w1_bias_tri = torch.cat(
+            [F.pad(h, (0, w2_bottom_pad)) for h in w1_bias_tri.chunk(2, dim=-1)],
+            dim=-1,
+        )
     w2_tri = F.pad(w2_tri, (0, w2_right_pad, 0, w2_bottom_pad, 0, 0))
-    w1_bias_tri = F.pad(w1_bias_tri, (0, w1_right_pad, 0, 0))
     w2_bias_tri = F.pad(w2_bias_tri, (0, w2_right_pad, 0, 0))
 
     # quant triton_weights
     w1_tri, w1_scale_tri = downcast_to_mxfp(w1_tri, torch.uint8, axis=1)
     w1 = upcast_from_mxfp(w1_tri, w1_scale_tri, dtype, axis=1)
-    w1 = w1[..., :k, : 2 * n]
-    w1 = unshuffle_weight(w1)
+    if interleave_gate_up:
+        w1 = unshuffle_weight(w1[..., :k, : 2 * n])
+    else:
+        half = w1.shape[-1] // 2
+        w1 = torch.cat([w1[..., :k, :n], w1[..., :k, half : half + n]], dim=-1)
 
     w2_tri, w2_scale_tri = downcast_to_mxfp(w2_tri, torch.uint8, axis=1)
     w2 = upcast_from_mxfp(w2_tri, w2_scale_tri, dtype, axis=1)
@@ -188,6 +203,13 @@ def swiglu(x, alpha: float = 1.702, limit: float = 1.0):
     return out_glu * (x_linear + 1)
 
 
+def situ_and_mul(x, beta: float, linear_beta: float):
+    gate, up = torch.chunk(x.float(), 2, dim=-1)
+    gate = beta * torch.tanh(gate / beta) * torch.sigmoid(gate)
+    up = linear_beta * torch.tanh(up / linear_beta)
+    return (gate * up).to(x.dtype)
+
+
 def torch_moe_impl(
     hidden_states: torch.Tensor,  # (M, K)
     w1: torch.Tensor,  # (E, K, 2N)
@@ -196,11 +218,15 @@ def torch_moe_impl(
     w2_bias: torch.Tensor,  # (E, K)
     topk_weights: torch.Tensor,  # (M, topk)
     topk_ids: torch.Tensor,  # (M, topk)
+    act=None,
 ):
     w1 = w1[topk_ids, ...]
     w1_bias = w1_bias[topk_ids, ...]
     hidden_states = torch.einsum("bekc,bk->bec", w1, hidden_states) + w1_bias
-    hidden_states = swiglu(hidden_states, limit=7)
+    if act is None:
+        hidden_states = swiglu(hidden_states, limit=7)
+    else:
+        hidden_states = act(hidden_states)
 
     w2 = w2[topk_ids, ...]
     w2_bias = w2_bias[topk_ids, ...]
@@ -223,6 +249,8 @@ def oai_triton_moe_impl(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
     unfused: bool = False,
+    activation: MoEActivation = MoEActivation.SWIGLUOAI,
+    moe_config=None,
 ) -> torch.Tensor:
     quant_config = mxfp4_w4a16_moe_quant_config(
         w1_bias=w1_bias,
@@ -230,7 +258,8 @@ def oai_triton_moe_impl(
         w1_scale=w1_scale,
         w2_scale=w2_scale,
     )
-    moe_config = make_dummy_moe_config()
+    if moe_config is None:
+        moe_config = make_dummy_moe_config()
 
     if unfused:
         fused_experts = UnfusedOAITritonExperts(moe_config, quant_config)
@@ -253,7 +282,7 @@ def oai_triton_moe_impl(
         w2=w2,
         topk_weights=topk_weights,
         topk_ids=topk_ids,
-        activation=MoEActivation.SWIGLUOAI,
+        activation=activation,
         global_num_experts=num_experts,
         expert_map=None,
         apply_router_weight_on_input=False,
@@ -317,6 +346,80 @@ def test_oai_triton_moe(
             topk_weights,
             topk_ids,
             unfused,
+        )
+        out = out[..., :k]
+
+    assert_close(ref=out_ref, tri=out, maxtol=0.025, rmstol=0.005)
+
+
+@pytest.mark.skipif(
+    not UnfusedOAITritonExperts._supports_current_device(),
+    reason="Unfused OAI Triton MoE is not supported on this device.",
+)
+@pytest.mark.parametrize("m,n,k", MNK)
+@pytest.mark.parametrize("num_experts", [32])
+@pytest.mark.parametrize("topk", [4])
+def test_unfused_oai_triton_moe_situ(
+    m: int, n: int, k: int, num_experts: int, topk: int, workspace_init
+):
+    """SiTU (Kimi-K3) through UnfusedOAITritonExperts matches a torch reference.
+    The activation runs unfused, so the weights keep the [gate | up] layout."""
+    assert UnfusedOAITritonExperts._supports_activation(MoEActivation.SITU)
+    wait_for_gpu_memory_to_clear(devices=[0], threshold_ratio=0.1)
+    set_random_seed(0)
+    dtype = torch.bfloat16
+    beta, linear_beta = 4.0, 25.0  # Kimi-K3 config values
+
+    (
+        w1,
+        w2,
+        w1_bias,
+        w2_bias,
+        w1_tri,
+        w2_tri,
+        w1_bias_tri,
+        w2_bias_tri,
+        w1_precision_config,
+        w2_precision_config,
+        x_pad,
+    ) = make_weights(dtype, k, n, num_experts, interleave_gate_up=False)
+
+    x = torch.randn((m, k), dtype=dtype, device="cuda")
+    x_tri = F.pad(x, (0, x_pad, 0, 0))
+    router_logits = torch.randn(m, num_experts, device="cuda", dtype=dtype)
+    topk_weights, topk_ids = torch.topk(router_logits, k=topk, dim=-1, sorted=True)
+    topk_weights = torch.nn.functional.softmax(topk_weights, dim=-1)
+
+    moe_config = dataclasses.replace(
+        make_dummy_moe_config(activation=MoEActivation.SITU),
+        activation_situ_beta=beta,
+        activation_situ_linear_beta=linear_beta,
+    )
+    with set_current_vllm_config(VllmConfig()):
+        out_ref = torch_moe_impl(
+            x,
+            w1,
+            w2,
+            w1_bias,
+            w2_bias,
+            topk_weights,
+            topk_ids,
+            act=lambda h: situ_and_mul(h, beta, linear_beta),
+        )
+        out = oai_triton_moe_impl(
+            x_tri,
+            w1_tri,
+            w2_tri,
+            w1_precision_config,
+            w2_precision_config,
+            w1_bias_tri,
+            w2_bias_tri,
+            num_experts,
+            topk_weights,
+            topk_ids,
+            unfused=True,
+            activation=MoEActivation.SITU,
+            moe_config=moe_config,
         )
         out = out[..., :k]
 
