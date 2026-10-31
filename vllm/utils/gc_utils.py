@@ -131,6 +131,34 @@ def freeze_gc_heap() -> None:
     gc.freeze()
 
 
+# The oldest generation's collection threshold that defer_full_gc() sets: it
+# counts younger-generation collections, so this is never reached.
+_NEVER = 2**31 - 1
+
+
+def defer_full_gc() -> None:
+    """Stop automatic collections of the oldest generation.
+
+    A full collection traverses every live tracked object, including each
+    element of every list. The younger generations keep collecting, so cycles
+    that die young are still reclaimed; collect_deferred_gc() reclaims the rest
+    when the process idles.
+    """
+    gen0, gen1, _ = gc.get_threshold()
+    gc.set_threshold(gen0, gen1, _NEVER)
+
+
+def collect_deferred_gc() -> None:
+    """Run the full collection defer_full_gc() held back."""
+    start = time.monotonic()
+    collected = gc.collect()
+    logger.debug(
+        "Deferred full GC collected %d objects in %.1f ms.",
+        collected,
+        (time.monotonic() - start) * 1e3,
+    )
+
+
 def maybe_attach_gc_debug_callback() -> None:
     """Attached a callback for GC debug when VLLM_GC_DEBUG is enabled."""
     config = GCDebugConfig(envs.VLLM_GC_DEBUG)
