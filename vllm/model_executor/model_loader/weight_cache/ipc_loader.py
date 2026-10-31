@@ -52,6 +52,11 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     send_msg,
     verify_socket_owner,
 )
+
+# Re-exported: tests monkeypatch this name on this module.
+from vllm.model_executor.model_loader.weight_cache.protocol import (
+    check_ipc_platform_support as check_ipc_platform_support,
+)
 from vllm.model_executor.model_loader.weight_cache.utils import (
     is_draft_model_cacheable,
 )
