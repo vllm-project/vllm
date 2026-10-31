@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
+import sys
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import torch
 
 import vllm.model_executor.layers.sparse_attn_indexer as sparse_indexer
-from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_cutedsl
 from vllm.v1.attention.backends.mla.indexer import build_prefill_chunk_metadata
@@ -119,19 +122,32 @@ def _dcp_lse_merge(
     return merged_out, merged_lse
 
 
-class _FakeDCPGroup(GroupCoordinator):
-    """Single-process stand-in: ``all_gather`` returns the pre-built
-    concatenation of every rank's packed ``(score, global_id)`` candidates,
-    mirroring the one packed all-gather the merge issues.
+class _FakeDCPAllGather:
+    """Single-process stand-in for ``_dcp_all_gather_into``: fills the
+    rank-major destination from every rank's pre-built packed ``(score,
+    global_id)`` candidates. The merge walks the rows in chunks, so each call
+    serves the next ``input_.shape[0]`` rows of the current rank."""
 
-    ``GroupCoordinator.__init__`` is never run, so no process group exists."""
+    def __init__(self, packed_per_rank: list[torch.Tensor]) -> None:
+        self.packed_per_rank = packed_per_rank
+        self.rank = 0
+        self.row = 0
 
-    def __init__(self, gathered_packed: torch.Tensor) -> None:
-        self.gathered_packed = gathered_packed
+    def start_rank(self, rank: int) -> None:
+        self.rank, self.row = rank, 0
 
-    def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
-        assert dim == 1
-        return self.gathered_packed.clone()
+    def __call__(self, output: torch.Tensor, input_: torch.Tensor) -> None:
+        rows = input_.shape[0]
+        assert output.is_contiguous() and input_.is_contiguous()
+        torch.testing.assert_close(
+            input_, self.packed_per_rank[self.rank][self.row : self.row + rows]
+        )
+        world = len(self.packed_per_rank)
+        stacked = torch.stack(
+            [p[self.row : self.row + rows] for p in self.packed_per_rank]
+        )
+        output.view(world, rows, *input_.shape[1:]).copy_(stacked)
+        self.row += rows
 
 
 def _run_decode_topk(
@@ -234,13 +250,19 @@ def _merge_local_topks_global_with_fake_dcp(
             torch.stack((scores.float(), global_ids.to(torch.float32)), dim=-1)
         )
 
-    fake_group = _FakeDCPGroup(torch.cat(packed_per_rank, dim=1).contiguous())
-    original_get_dcp_group = sparse_indexer.get_dcp_group
-    sparse_indexer.get_dcp_group = lambda: fake_group
+    fake_all_gather = _FakeDCPAllGather(packed_per_rank)
+    original_all_gather_into = sparse_indexer._dcp_all_gather_into
+    sparse_indexer._dcp_all_gather_into = fake_all_gather
+    num_rows = local_topks[0].shape[0]
+    workspace = [
+        torch.empty(shape, dtype=dtype, device=local_topks[0].device)
+        for shape, dtype in sparse_indexer._dcp_topk_merge_specs(num_rows, topk, world)
+    ]
     try:
         merged = []
         for rank, (logits, indices) in enumerate(zip(local_logits, local_topks)):
             rank_indices = indices.clone()
+            fake_all_gather.start_rank(rank)
             # in-place merge; the None return is asserted below
             result = sparse_indexer._merge_dcp_topk_global(  # type: ignore[func-returns-value]
                 logits,
@@ -250,12 +272,161 @@ def _merge_local_topks_global_with_fake_dcp(
                 world,
                 interleave,
                 row_starts=None if row_starts is None else row_starts[rank],
+                workspace=workspace,
             )
             assert result is None
             merged.append(rank_indices)
         return merged
     finally:
-        sparse_indexer.get_dcp_group = original_get_dcp_group
+        sparse_indexer._dcp_all_gather_into = original_all_gather_into
+
+
+def test_dcp_topk_merge_specs_bound_the_scratch():
+    """The reservation covers one merge step: packed candidates, the
+    rank-major gather and the row-major selector input, capped at
+    DCP_TOPK_MERGE_ROWS rows whatever the batch."""
+    rows_cap = sparse_indexer.DCP_TOPK_MERGE_ROWS
+    for num_rows, topk, world in ((8192, 2048, 4), (17, 512, 2)):
+        rows = min(num_rows, rows_cap)
+        specs = sparse_indexer._dcp_topk_merge_specs(num_rows, topk, world)
+        assert [shape for shape, _ in specs] == [
+            (rows, topk, 2),
+            (world * rows, topk, 2),
+            (rows, world * topk, 2),
+        ]
+        assert all(dtype is torch.float32 for _, dtype in specs)
+        total = sum(math.prod(shape) * 4 for shape, _ in specs)
+        assert total == (1 + 2 * world) * 8 * rows * topk
+
+
+@pytest.mark.parametrize("dcp_world_size", [1, 2])
+def test_kpool_profiling_run_reserves_dcp_merge_scratch(monkeypatch, dcp_world_size):
+    """The kpool indexer takes the merge scratch together with its K gather
+    buffers, so the profile run must reserve both in one request."""
+    from vllm.models.glm5next.nvidia import sparse_indexer as kpool_indexer
+
+    rows, topk, kpool = 64, 512, 4
+    gather_specs = (((1024, 128), torch.uint8), ((1024, 4), torch.uint8))
+    requests: list[tuple] = []
+    monkeypatch.setattr(
+        kpool_indexer,
+        "get_forward_context",
+        lambda: SimpleNamespace(attn_metadata=None),
+    )
+    monkeypatch.setattr(
+        kpool_indexer, "_gather_workspace_shapes", lambda *a: gather_specs
+    )
+    monkeypatch.setattr(
+        kpool_indexer,
+        "current_workspace_manager",
+        lambda: SimpleNamespace(get_simultaneous=lambda *s: requests.append(s)),
+    )
+    monkeypatch.setattr(kpool_indexer, "get_current_vllm_config_or_none", lambda: None)
+    monkeypatch.setattr(
+        kpool_indexer, "_reserve_row_shard_exchange_transient", lambda *a: None
+    )
+    monkeypatch.setattr(kpool_indexer.envs, "VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", 1)
+
+    kpool_indexer.sparse_attn_indexer_kpool(
+        hidden_states=torch.empty(rows, 4),
+        k_cache_prefix="k",
+        kv_cache=torch.empty(4, 4),
+        q_quant=torch.empty(rows, 4),
+        q_scale=None,
+        k=None,
+        weights=torch.empty(rows),
+        quant_block_size=128,
+        scale_fmt=None,
+        topk_tokens=topk,
+        head_dim=128,
+        max_pool_len=256,
+        total_seq_lens=1024,
+        topk_indices_buffer=torch.empty((rows, topk), dtype=torch.int32),
+        skip_k_cache_insert=True,
+        index_kpool=kpool,
+        dcp_world_size=dcp_world_size,
+    )
+
+    assert len(requests) == 1
+    merge_specs = (
+        sparse_indexer._dcp_topk_merge_specs(rows, topk // kpool, dcp_world_size)
+        if dcp_world_size > 1
+        else []
+    )
+    assert list(requests[0][: len(gather_specs)]) == list(gather_specs)
+    assert list(requests[0][len(gather_specs) + 1 :]) == merge_specs
+
+
+def test_dcp_topk_merge_walks_rows_through_the_workspace(monkeypatch):
+    """Rows are merged DCP_TOPK_MERGE_ROWS at a time inside the given
+    workspace: each step packs its slice, gathers into a contiguous prefix
+    of the rank-major buffer and hands the selector the row-major
+    candidates, so no step allocates."""
+    rows_cap = sparse_indexer.DCP_TOPK_MERGE_ROWS
+    num_rows, topk, world, rank = 2 * rows_cap + 5, 4, 3, 1
+    logits = (
+        torch.arange(num_rows, dtype=torch.float32).view(-1, 1).expand(num_rows, 16)
+    )
+    topk_indices = torch.arange(num_rows * topk, dtype=torch.int32).view(num_rows, topk)
+    row_starts = torch.arange(num_rows, dtype=torch.int32)
+    workspace = [
+        torch.empty(shape, dtype=dtype)
+        for shape, dtype in sparse_indexer._dcp_topk_merge_specs(num_rows, topk, world)
+    ]
+    packed_calls: list[tuple[int, int]] = []
+    selector_calls: list[int] = []
+
+    def fake_pack(logits_, topk_, packed, rank_, world_, interleave, row_starts_):
+        start = int(row_starts_[0])
+        packed_calls.append((start, topk_.shape[0]))
+        assert packed.is_contiguous() and packed.shape == (*topk_.shape, 2)
+        assert packed.data_ptr() == workspace[0].data_ptr()
+        assert torch.equal(logits_[:, 0], logits[start : start + topk_.shape[0], 0])
+        packed[..., 0] = logits_[:, :1].expand_as(topk_)
+        packed[..., 1] = topk_.to(torch.float32)
+
+    def fake_all_gather(output, input_):
+        rows = input_.shape[0]
+        assert output.is_contiguous() and output.shape == (world * rows, topk, 2)
+        assert output.data_ptr() == workspace[1].data_ptr()
+        for r in range(world):
+            output[r * rows : (r + 1) * rows] = input_ + r
+
+    def fake_select(gathered, topk_, out=None):
+        rows = gathered.shape[0]
+        assert gathered.is_contiguous()
+        assert gathered.data_ptr() == workspace[2].data_ptr()
+        assert gathered.shape == (rows, world * topk_, 2)
+        # Row-major: rank r's candidates sit in columns [r*topk, (r+1)*topk).
+        base = gathered[:, :topk_]
+        for r in range(world):
+            torch.testing.assert_close(
+                gathered[:, r * topk_ : (r + 1) * topk_], base + r
+            )
+        selector_calls.append(rows)
+        out[:] = base[..., 1].to(torch.int32) + 1000
+
+    monkeypatch.setattr(
+        sparse_indexer, "_assert_cutedsl_dcp_merge_supported", lambda *_: None
+    )
+    monkeypatch.setattr(sparse_indexer, "_dcp_all_gather_into", fake_all_gather)
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl",
+        SimpleNamespace(
+            pack_dcp_topk_candidates_cutedsl=fake_pack,
+            stable_topk_from_gathered_candidates_cutedsl=fake_select,
+        ),
+    )
+
+    expected = topk_indices + 1000
+    sparse_indexer._merge_dcp_topk_global(
+        logits, topk_indices, topk, rank, world, 1, row_starts, workspace=workspace
+    )
+
+    assert packed_calls == [(0, rows_cap), (rows_cap, rows_cap), (2 * rows_cap, 5)]
+    assert selector_calls == [rows_cap, rows_cap, 5]
+    assert torch.equal(topk_indices, expected)
 
 
 @pytest.mark.parametrize("world", [1, 2, 4])

@@ -14,6 +14,7 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.indexer_topk import get_indexer_topk
 from vllm.model_executor.layers.sparse_attn_indexer import (
     PrefillRowShard,
+    _dcp_topk_merge_specs,
     _merge_dcp_topk_global,
     _reserve_row_shard_exchange_transient,
     as_fp32_logits,
@@ -143,6 +144,8 @@ def sparse_attn_indexer_kpool(
     attn_metadata = get_forward_context().attn_metadata
     fp8_dtype = current_platform.fp8_dtype()
     k_cache_prefix = _resolve_layer_name(k_cache_prefix)
+    # kpool: logits are pool-granular, so top-k selects pools.
+    select_k = topk_tokens // index_kpool if index_kpool > 1 else topk_tokens
 
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
@@ -150,11 +153,16 @@ def sparse_attn_indexer_kpool(
         values_spec, scales_spec = _gather_workspace_shapes(
             total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
         )
-        current_workspace_manager().get_simultaneous(
+        profile_specs: list[tuple[tuple[int, ...], torch.dtype]] = [
             values_spec,
             scales_spec,
             ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
-        )
+        ]
+        if dcp_world_size > 1:
+            profile_specs.extend(
+                _dcp_topk_merge_specs(hidden_states.shape[0], select_k, dcp_world_size)
+            )
+        current_workspace_manager().get_simultaneous(*profile_specs)
 
         # Reserve profiler-visible memory for the worst-case decode logits,
         # whose shape is [B * next_n, max_pool_len]. This profiling branch
@@ -312,10 +320,19 @@ def sparse_attn_indexer_kpool(
         values_spec, scales_spec = _gather_workspace_shapes(
             total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
         )
-        k_quant_full, k_scale_full = workspace_manager.get_simultaneous(
+        # The DCP merge scratch is taken in the same call: a separate request
+        # would alias k_quant_full, which a skip_kv_gather chunk reuses.
+        merge_specs = (
+            _dcp_topk_merge_specs(hidden_states.shape[0], select_k, dcp_world_size)
+            if dcp_world_size > 1
+            else []
+        )
+        k_quant_full, k_scale_full, *merge_bufs = workspace_manager.get_simultaneous(
             values_spec,
             scales_spec,
+            *merge_specs,
         )
+        merge_workspace = merge_bufs or None
         for chunk in prefill_metadata.chunks if not short_prefill else ():
             # Under DCP this rank only gathers the pools it owns.
             assert chunk.local_cu_seq_lens is not None
@@ -375,10 +392,8 @@ def sparse_attn_indexer_kpool(
                     row_ends,
                 )
 
-            # kpool: logits are pool-granular (compress_ratio == index_kpool),
-            # so topk selects pools. We pick topk_tokens // kpool pools then
-            # expand each pool back to its kpool constituent tokens.
-            select_k = topk_tokens // index_kpool if index_kpool > 1 else topk_tokens
+            # kpool: we pick topk_tokens // kpool pools then expand each pool
+            # back to its kpool constituent tokens.
             if index_kpool > 1:
                 pool_topk = torch.empty(
                     (num_rows, select_k), dtype=torch.int32, device=logits.device
@@ -409,6 +424,7 @@ def sparse_attn_indexer_kpool(
                 dcp_world_size,
                 pool_cp_interleave,
                 row_starts=None,
+                workspace=merge_workspace,
             )
 
             if index_kpool > 1:
@@ -628,9 +644,8 @@ def sparse_attn_indexer_kpool(
             seq_lens.view(-1),
         )
         num_rows = logits.shape[0]
-        # kpool: logits are pool-granular -> select topk_tokens//kpool pools,
-        # then expand each pool back to its kpool tokens.
-        select_k = topk_tokens // index_kpool if index_kpool > 1 else topk_tokens
+        # kpool: select topk_tokens // kpool pools, then expand each pool back
+        # to its kpool tokens.
         if index_kpool > 1:
             pool_topk = torch.empty(
                 (num_rows, select_k), dtype=torch.int32, device=logits.device
