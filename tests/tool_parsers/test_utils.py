@@ -223,6 +223,92 @@ class TestCoerceToSchemaType:
         def test_falls_through_to_string(self):
             assert coerce_to_schema_type("hello", ["integer", "string"]) == "hello"
 
+    class TestNonCanonicalNumericStrings:
+        """Regression for #62252: non-canonical numeric strings must remain
+        strings when string is an allowed type, to avoid corrupting IDs,
+        ZIP codes, and other string values that happen to parse as numbers.
+
+        When string is allowed, a numeric coercion is only accepted if it
+        round-trips (``str(coerced) == value``). When string is NOT allowed,
+        behavior is unchanged (``"0017"`` with ``"integer"`` alone still
+        coerces to ``17``).
+        """
+
+        @pytest.mark.parametrize(
+            "value,expected",
+            [
+                ("0017", "0017"),  # Leading zero
+                ("1_000", "1_000"),  # Underscores
+                ("+17", "+17"),  # Explicit plus sign
+                ("-0", "-0"),  # Negative zero (int("-0") = 0, str(0) = "0")
+            ],
+        )
+        def test_non_canonical_integer_stays_string(self, value, expected):
+            result = coerce_to_schema_type(value, ["string", "integer"])
+            assert result == expected
+            assert isinstance(result, str)
+
+        @pytest.mark.parametrize(
+            "value,expected",
+            [
+                ("3.50", "3.50"),  # Trailing zero
+                ("1e5", "1e5"),  # Scientific notation (100000.0 -> "100000.0")
+                ("1.0e2", "1.0e2"),  # Scientific notation variant
+                ("5.0", "5.0"),  # Whole float (normalizes to int 5, "5" != "5.0")
+            ],
+        )
+        def test_non_canonical_float_stays_string(self, value, expected):
+            result = coerce_to_schema_type(value, ["string", "number"])
+            assert result == expected
+            assert isinstance(result, str)
+
+        @pytest.mark.parametrize(
+            "value,expected,expected_type",
+            [
+                ("17", 17, int),  # Canonical integer
+                ("-5", -5, int),  # Canonical negative
+                ("0", 0, int),  # Zero
+                ("-42", -42, int),  # Canonical negative
+            ],
+        )
+        def test_canonical_numbers_coerce_normally(
+            self, value, expected, expected_type
+        ):
+            result = coerce_to_schema_type(value, ["string", "integer"])
+            assert result == expected
+            assert isinstance(result, expected_type)
+
+        def test_canonical_float_coerces_normally(self):
+            # Canonical float coerces when string and number are allowed
+            result = coerce_to_schema_type("3.5", ["string", "number"])
+            assert result == 3.5
+            assert isinstance(result, float)
+
+        @pytest.mark.parametrize(
+            "value,expected",
+            [
+                ("0017", 17),  # Leading zero coerces when string not allowed
+                ("1_000", 1000),  # Underscores coerce when string not allowed
+                ("+17", 17),  # Plus sign coerces when string not allowed
+            ],
+        )
+        def test_non_canonical_coerces_when_string_not_allowed(self, value, expected):
+            result = coerce_to_schema_type(value, "integer")
+            assert result == expected
+            assert isinstance(result, int)
+
+        def test_whole_float_normalizes_to_int(self):
+            # "5.0" is non-canonical (normalized to 5, str(5)="5" != "5.0"),
+            # so it stays as string when string is allowed.
+            result = coerce_to_schema_type("5.0", ["string", "number"])
+            assert result == "5.0"
+            assert isinstance(result, str)
+
+            # But when string is NOT allowed, it coerces normally to int.
+            result = coerce_to_schema_type("5.0", "number")
+            assert result == 5
+            assert isinstance(result, int)
+
     class TestFallback:
         def test_unknown_type_returns_string(self):
             assert coerce_to_schema_type("hello", "unknown_type") == "hello"
