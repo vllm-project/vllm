@@ -268,7 +268,9 @@ def _dequantize_and_gather_k_kernel(
         token_bf16_ptr = token_data_ptr + fp8_dim
 
         # Output pointer for this token (flattened)
-        output_row_ptr = out_ptr + batch_idx * out_stride0 + (offset + i) * out_stride1
+        output_row_ptr = (
+            out_ptr + batch_idx.to(tl.int64) * out_stride0 + (offset + i) * out_stride1
+        )
 
         # ========== Dequantize FP8 portion using UE8M0 ==========
         for qblock_idx in tl.static_range(n_quant_blocks):
@@ -372,7 +374,9 @@ def _dequantize_and_gather_k_one_pass_kernel(
             + cache_block_size * token_data_size
             + pos_in_block * scale_dim
         )
-        output_row_ptr = out_ptr + batch_idx * out_stride0 + (offset + i) * out_stride1
+        output_row_ptr = (
+            out_ptr + batch_idx.to(tl.int64) * out_stride0 + (offset + i) * out_stride1
+        )
 
         # The tile is scale_dim * quant_block = 512 against an fp8 region of
         # 448: the tail reads the token's own bf16 bytes, is scaled by a scale
@@ -461,7 +465,9 @@ def _dequantize_and_gather_k_mxfp8_kernel(
         scale = tl.exp2(encoded.to(tl.float32) - 127.0)
         dequant = tl.reshape(tiles * tl.reshape(scale, (scale_dim, 1)), (head_dim,))
 
-        output_row_ptr = out_ptr + batch_idx * out_stride0 + (offset + i) * out_stride1
+        output_row_ptr = (
+            out_ptr + batch_idx.to(tl.int64) * out_stride0 + (offset + i) * out_stride1
+        )
         tl.store(output_row_ptr + d, dequant.to(tl.bfloat16))
 
 

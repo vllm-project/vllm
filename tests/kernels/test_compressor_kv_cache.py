@@ -584,6 +584,58 @@ def test_v41_fp8_gather_is_grid_width_invariant(gather_len, one_pass, monkeypatc
         )
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="needs a CUDA or ROCm device"
+)
+@pytest.mark.parametrize("record", ["fp8", "fp8_one_pass", "mxfp8"])
+def test_v41_gather_rows_past_int32_elements(record, monkeypatch):
+    """A request whose rows start past 2^31 elements of `out` gets them.
+
+    The prefill gather workspace reaches this size for compress-ratio-1
+    layers at a 1M max_model_len. The request stride itself still fits in
+    int32, so only the row offset product can overflow.
+    """
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: record == "fp8_one_pass")
+    from vllm.models.deepseek_v41.common.ops import quantize_and_insert_k_cache
+    from vllm.models.deepseek_v41.common.ops.cache_utils import (
+        dequantize_and_gather_k_cache_triton,
+    )
+
+    torch.manual_seed(0)
+    device = "cuda"
+    block_size = 64
+    record_bytes = 528 if record == "mxfp8" else 584
+    insert_kwargs = {"bytes_per_token": 528} if record == "mxfp8" else {}
+    num_reqs = 64
+    rows = 2**31 // ((num_reqs - 1) * 512) + 1
+    assert (num_reqs - 1) * rows * 512 >= 2**31 > rows * 512
+
+    k = torch.randn(block_size, 512, dtype=torch.bfloat16, device=device)
+    cache = torch.zeros(1, block_size * record_bytes, dtype=torch.uint8, device=device)
+    quantize_and_insert_k_cache(
+        k,
+        cache,
+        torch.arange(block_size, dtype=torch.int64, device=device),
+        block_size=block_size,
+        **insert_kwargs,
+    )
+
+    # Every request gathers the same cached block, so all rows must match.
+    out = torch.zeros(num_reqs, rows, 512, dtype=torch.bfloat16, device=device)
+    dequantize_and_gather_k_cache_triton(
+        out,
+        cache.view(1, block_size, record_bytes),
+        torch.full((num_reqs,), block_size, dtype=torch.int32, device=device),
+        None,
+        torch.zeros(num_reqs, 1, dtype=torch.int32, device=device),
+        block_size,
+        0,
+    )
+    first = out[0, :block_size]
+    assert first.abs().amax() > 0
+    torch.testing.assert_close(out[-1, :block_size], first, rtol=0, atol=0)
+
+
 @pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA/ROCm only")
 def test_v41_mxfp8_cache_round_trip():
     """quantize_and_insert -> dequantize_and_gather recovers the V4.1 record.
