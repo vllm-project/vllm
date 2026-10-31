@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
 import time
-from typing import Self
+from typing import Any, Self
 
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorProm
 from vllm.v1.metrics.loggers import PrometheusStatLogger
@@ -113,6 +113,10 @@ class RayGaugeWrapper(RayPrometheusMetric):
     def set_to_current_time(self):
         # ray metrics doesn't have set_to_current time, https://docs.ray.io/en/latest/_modules/ray/util/metrics.html
         return self.set(time.time())
+
+    def remove(self, *labelvalues: Any) -> None:
+        """No-op: Ray metrics are pushed per record, so there are no child
+        series to remove."""
 
 
 class RayCounterWrapper(RayPrometheusMetric):
