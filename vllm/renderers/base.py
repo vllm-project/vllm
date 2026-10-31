@@ -1157,14 +1157,31 @@ class BaseRenderer(ABC, Generic[_T]):
         *,
         skip_mm_cache: bool = False,
         tok_params: TokenizeParams | None = None,
+        force_mm_processing: bool = False,
     ) -> SingletonInput:
         if "prompt_embeds" in prompt:
             return self._process_embeds(prompt)  # type: ignore[arg-type]
 
-        engine_input = self._process_tokens(  # type: ignore[arg-type]
-            prompt,  # type: ignore[arg-type]
-            skip_mm_cache=skip_mm_cache,
-        )
+        engine_input: TokensInput | MultiModalInput
+        if force_mm_processing and not prompt.get("multi_modal_data"):
+            # The model consumes the prompt tokens through the multimodal
+            # processor, so it must run even without multimodal data.
+            engine_input = self._process_multimodal(
+                prompt["prompt_token_ids"],  # type: ignore[typeddict-item]
+                {},
+                mm_uuids=None,
+                mm_processor_kwargs=prompt.get("mm_processor_kwargs"),
+                skip_mm_cache=skip_mm_cache,
+            )
+            if prompt_text := prompt.get("prompt"):
+                engine_input["prompt"] = prompt_text
+            if cache_salt := prompt.get("cache_salt"):
+                engine_input["cache_salt"] = cache_salt
+        else:
+            engine_input = self._process_tokens(  # type: ignore[arg-type]
+                prompt,  # type: ignore[arg-type]
+                skip_mm_cache=skip_mm_cache,
+            )
         self._truncate_expanded_prompt(engine_input, tok_params)
         return engine_input
 
@@ -1174,14 +1191,31 @@ class BaseRenderer(ABC, Generic[_T]):
         *,
         skip_mm_cache: bool = False,
         tok_params: TokenizeParams | None = None,
+        force_mm_processing: bool = False,
     ) -> SingletonInput:
         if "prompt_embeds" in prompt:
             return self._process_embeds(prompt)  # type: ignore[arg-type]
 
-        engine_input = await self._process_tokens_async(  # type: ignore[arg-type]
-            prompt,  # type: ignore[arg-type]
-            skip_mm_cache=skip_mm_cache,
-        )
+        engine_input: TokensInput | MultiModalInput
+        if force_mm_processing and not prompt.get("multi_modal_data"):
+            # The model consumes the prompt tokens through the multimodal
+            # processor, so it must run even without multimodal data.
+            engine_input = await self._process_multimodal_async(
+                prompt["prompt_token_ids"],  # type: ignore[typeddict-item]
+                {},
+                mm_uuids=None,
+                mm_processor_kwargs=prompt.get("mm_processor_kwargs"),
+                skip_mm_cache=skip_mm_cache,
+            )
+            if prompt_text := prompt.get("prompt"):
+                engine_input["prompt"] = prompt_text
+            if cache_salt := prompt.get("cache_salt"):
+                engine_input["cache_salt"] = cache_salt
+        else:
+            engine_input = await self._process_tokens_async(  # type: ignore[arg-type]
+                prompt,  # type: ignore[arg-type]
+                skip_mm_cache=skip_mm_cache,
+            )
         self._truncate_expanded_prompt(engine_input, tok_params)
         return engine_input
 
@@ -1192,6 +1226,16 @@ class BaseRenderer(ABC, Generic[_T]):
 
             if isinstance(self.mm_processor, EncDecMultiModalProcessor):
                 return self.mm_processor.skip_decoder_start_token
+        return False
+
+    def _get_process_text_only_encoder_prompt(self) -> bool:
+        """Whether the encoder prompt always goes through the multimodal
+        processor, because the encoder consumes the prompt tokens."""
+        if self.mm_processor is not None:
+            from vllm.multimodal.processing import EncDecMultiModalProcessor
+
+            if isinstance(self.mm_processor, EncDecMultiModalProcessor):
+                return self.mm_processor.process_text_only_encoder_prompt
         return False
 
     def _process_enc_dec(
@@ -1205,7 +1249,9 @@ class BaseRenderer(ABC, Generic[_T]):
 
         return build_enc_dec_input(
             encoder_input=self._process_singleton(
-                enc_prompt, skip_mm_cache=skip_mm_cache
+                enc_prompt,
+                skip_mm_cache=skip_mm_cache,
+                force_mm_processing=self._get_process_text_only_encoder_prompt(),
             ),
             decoder_input=(
                 None
@@ -1226,7 +1272,11 @@ class BaseRenderer(ABC, Generic[_T]):
         dec_prompt = prompt["decoder_prompt"]
 
         encoder_input, decoder_input = await asyncio.gather(
-            self._process_singleton_async(enc_prompt, skip_mm_cache=skip_mm_cache),
+            self._process_singleton_async(
+                enc_prompt,
+                skip_mm_cache=skip_mm_cache,
+                force_mm_processing=self._get_process_text_only_encoder_prompt(),
+            ),
             (
                 asyncio.sleep(0)
                 if dec_prompt is None
