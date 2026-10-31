@@ -22,8 +22,11 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.worker.dp_utils import skip_dp_coordination
 from vllm.v1.worker.gpu.async_utils import async_copy_to_np
 from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.dp_utils import DPSyncState
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_runner import ExecuteModelState, GPUModelRunner
 from vllm.v1.worker.gpu.spec_decode.standalone_ar import speculator as ar_module
 from vllm.v1.worker.gpu.spec_decode.utils import get_drafter_hidden_states
@@ -538,3 +541,72 @@ def test_standalone_draft_kv_dtype_override(
     assert target.cache_config.cache_dtype == "fp8_e4m3"
     assert draft_config.parallel_config.data_parallel_index == data_parallel_index
     assert target.parallel_config.data_parallel_index == data_parallel_index
+
+
+def test_standalone_draft_reports_its_own_dp_token_counts(monkeypatch):
+    """DPMetadata asserts each forward's DP token count for MoE models, so the
+    draft must report the tokens it runs, not the target's padded count."""
+    num_reqs, num_steps, dp_rank = 3, 3, 1
+    num_tokens = 2 * num_reqs
+    cpu = torch.device("cpu")
+    monkeypatch.setattr(ar_module.StandaloneARSpeculator, "max_model_len", 1024)
+    spec = object.__new__(ar_module.StandaloneARSpeculator)
+    spec.model = object()
+    spec.dp_size, spec.dp_rank = 2, dp_rank
+    spec.num_speculative_steps = num_steps
+    spec.input_buffers = InputBuffers(max_num_reqs=8, max_num_tokens=8, device=cpu)
+    spec.temperature = torch.zeros(8)
+    spec.seeds = torch.zeros(8, dtype=torch.int64)
+    spec.idx_mapping = torch.zeros(8, dtype=torch.int32)
+    spec.last_token_indices = torch.zeros(8, dtype=torch.int64)
+    spec.current_draft_step = torch.tensor(0)
+    spec.draft_tokens = torch.zeros(8, num_steps, dtype=torch.int64)
+    spec.draft_logits = None
+    spec.arange_gpu = torch.arange(9, dtype=torch.int32)
+    monkeypatch.setattr(
+        spec,
+        "sample_draft",
+        lambda hidden_states, *_: torch.zeros(
+            hidden_states.shape[0], dtype=torch.int64
+        ),
+    )
+
+    reported = []
+
+    def run_model(input_ids, positions, attn_md, slot_maps, num_tokens_across_dp):
+        reported.append((input_ids.shape[0], int(num_tokens_across_dp[dp_rank])))
+        return torch.zeros(input_ids.shape[0], 4)
+
+    monkeypatch.setattr(spec, "_run_model", run_model)
+
+    input_batch = InputBatch.make_dummy(
+        num_reqs, num_tokens, InputBuffers(8, 8, device=cpu)
+    )
+    # The target padded its batch to 16 tokens.
+    target_sync = DPSyncState(
+        num_tokens_across_dp=torch.full((2,), 16, dtype=torch.int32),
+        uniform_token_count=None,
+        max_query_len=None,
+        eager=False,
+        num_reqs=num_reqs,
+    )
+    with skip_dp_coordination():
+        spec.propose(
+            input_batch,
+            attn_metadata={},
+            slot_mappings={},
+            last_hidden_states=None,
+            aux_hidden_states=None,
+            num_sampled=torch.ones(num_reqs, dtype=torch.int32),
+            num_rejected=torch.zeros(num_reqs, dtype=torch.int32),
+            last_sampled=torch.zeros(8, dtype=torch.int64),
+            next_prefill_tokens=torch.zeros(8, dtype=torch.int32),
+            temperature=torch.zeros(8),
+            seeds=torch.zeros(8, dtype=torch.int64),
+            dp_sync_state=target_sync,
+            dummy_run=True,
+            skip_attn_for_dummy_run=True,
+        )
+
+    expected = [num_tokens] + [num_reqs] * (num_steps - 1)
+    assert reported == [(n, n) for n in expected]
