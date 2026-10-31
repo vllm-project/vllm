@@ -323,6 +323,96 @@ class TestMambaPlanSplitHandles:
         with pytest.raises(AssertionError, match="Head-sharded"):
             list(worker._build_local_splits_from_plan(plan, src_blocks_data, 2, 2))
 
+    def test_mamba_only_splits_tp2_padding_whole(self):
+        """Mamba-only (no attention group) with P_TP 2 -> D_TP 1: the FA slot
+        is layout padding never read on the decode side and passes through
+        whole; the SSM descs split across the 2 source ranks."""
+        plan = _compute_mapping(
+            remote_tp_size=2, num_kv_heads=0, group_spec_types=(MambaSpec,)
+        )
+        assert plan.all_source_ranks == (0, 1)
+
+        worker = _make_mock_worker_for_splits((MambaSpec,))
+        # 1 FA padding run + 2 SSM runs of one block each.
+        src_blocks_data = np.array(
+            [(1000, 100, 0, 100, 1), (3000, 400, 0, 400, 1), (4000, 400, 0, 400, 1)],
+            dtype=np.uint64,
+        )
+
+        splits = list(worker._build_local_splits_from_plan(plan, src_blocks_data, 1))
+
+        assert len(splits) == 2
+        # FA padding row is identical in every split: whole, unsplit.
+        for handle in splits:
+            assert handle[0].tolist() == [1000, 100, 0, 100, 1]
+        # SSM rows: len//2, rank 0 at +0, rank 1 at +chunk.
+        assert splits[0][1].tolist() == [3000, 200, 0, 400, 1]
+        assert splits[0][2].tolist() == [4000, 200, 0, 400, 1]
+        assert splits[1][1].tolist() == [3200, 200, 0, 400, 1]
+        assert splits[1][2].tolist() == [4200, 200, 0, 400, 1]
+
+    @pytest.mark.parametrize("block_size_ratio", [1, 128])
+    def test_mamba_only_hetero_ratio_padding_whole(self, block_size_ratio):
+        """The in-process executor ratio (P block 2048 vs D block 16 -> 128)
+        must not trip the head-sharded assert for Mamba-only models: the FA
+        padding slots pass whole regardless of the ratio, so no
+        'Head-sharded attention reads ... not supported' failure."""
+        plan = _compute_mapping(
+            remote_tp_size=2, num_kv_heads=0, group_spec_types=(MambaSpec,)
+        )
+
+        worker = _make_mock_worker_for_splits((MambaSpec,))
+        src_blocks_data = np.array(
+            [(1000, 100, 0, 100, 1), (3000, 400, 0, 400, 1)], dtype=np.uint64
+        )
+
+        # Must not raise.
+        splits = list(
+            worker._build_local_splits_from_plan(
+                plan, src_blocks_data, 1, block_size_ratio
+            )
+        )
+        assert len(splits) == 2
+        for handle in splits:
+            assert handle[0].tolist() == [1000, 100, 0, 100, 1]
+
+
+def _make_mock_worker_for_fa_remote(group_spec_types):
+    """Mock NixlConnectorWorker for _build_fa_remote (no NIXL/GPU needed)."""
+    worker = object.__new__(NixlConnectorWorker)
+    worker._group_spec_types = group_spec_types
+    worker.transfer_topo = SimpleNamespace()
+    worker.block_len_per_layer = [256]
+    worker._region_is_mla = [False]
+    worker._transfer_layer_region_indices = ()
+    worker._head_sharded_draft_regions = set()
+    worker.draft_tp_mappings = {}
+    return worker
+
+
+@pytest.mark.parametrize("remote_tp_size", [1, 2])
+def test_mamba_only_remote_fa_padding_covers_remote_pages(remote_tp_size):
+    """Without an attention group, remote FA padding rows still cover each
+    region's blocks (SSM desc ids are offset past them). The local page is
+    gathered from all remote source ranks, so each padding row shrinks by
+    the number of source ranks; NIXL validates every row against the
+    remote's registered memory, so this must stay within one remote page."""
+    plan = _compute_mapping(
+        remote_tp_size=remote_tp_size, num_kv_heads=0, group_spec_types=(MambaSpec,)
+    )
+    worker = _make_mock_worker_for_fa_remote((MambaSpec,))
+    meta = SimpleNamespace(
+        kv_caches_base_addr=[0x1000],
+        region_num_blocks=[4],
+        device_id=0,
+        block_strides=[256],
+    )
+
+    descs = worker._build_fa_remote(plan, meta, block_size_ratio=1)
+
+    num_reads = len(plan.all_source_ranks)
+    assert descs.tolist() == [[0x1000, 256 // num_reads, 0, 256, 4]]
+
 
 @pytest.mark.parametrize(
     ("total_kv_heads", "local_tp", "remote_tp", "compatible"),
