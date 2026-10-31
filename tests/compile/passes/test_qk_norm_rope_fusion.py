@@ -282,3 +282,72 @@ def test_qk_norm_rope_fusion_with_heterogeneous_draft_model():
             torch.compile(model, backend=backend)(qkv, positions)
 
             assert fusion_pass.matched_count == 1
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="Only test on CUDA and ROCm platforms",
+)
+def test_qk_norm_rope_fusion_skips_unsupported_head_size():
+    """An unsupported head size must not disable the fusion for other layers."""
+    if not hasattr(torch.ops._C, "fused_qk_norm_rope"):
+        pytest.skip("fused_qk_norm_rope custom op not available")
+
+    dtype = torch.bfloat16
+    torch.set_default_device(current_platform.device_type)
+    torch.set_default_dtype(dtype)
+    torch.manual_seed(0)
+
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(dtype=dtype),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            custom_ops=["+rms_norm", "+rotary_embedding"],
+            pass_config=PassConfig(
+                enable_qk_norm_rope_fusion=True,
+                eliminate_noops=True,
+            ),
+        ),
+    )
+
+    with (
+        set_current_vllm_config(vllm_config),
+        vllm_config.kernel_config.ir_op_priority.set_priority(),
+    ):
+        supported = QKNormRoPETestModel(
+            num_heads=16,
+            num_kv_heads=4,
+            head_dim=128,
+            eps=1e-6,
+            is_neox=True,
+            vllm_config=vllm_config,
+            dtype=dtype,
+            prefix="model.layers.0.self_attn.attn",
+        )
+        unsupported = QKNormRoPETestModel(
+            num_heads=16,
+            num_kv_heads=4,
+            head_dim=96,
+            eps=1e-6,
+            is_neox=True,
+            vllm_config=vllm_config,
+            dtype=dtype,
+            prefix="model.layers.1.self_attn.attn",
+        )
+
+        fusion_pass = QKNormRoPEFusionPass(vllm_config)
+        backend = TestBackend(
+            NoOpEliminationPass(vllm_config),
+            SplitCoalescingPass(vllm_config),
+            fusion_pass,
+            PostCleanupPass(vllm_config),
+        )
+
+        for model, expected_matches in ((supported, 1), (unsupported, 0)):
+            num_tokens = 5
+            qkv = torch.randn(num_tokens, model.q_size + 2 * model.kv_size)
+            positions = torch.arange(num_tokens, dtype=torch.long, device=qkv.device)
+            torch._dynamo.mark_dynamic(qkv, 0)
+            torch._dynamo.mark_dynamic(positions, 0)
+            torch.compile(model, backend=backend)(qkv, positions)
+            assert fusion_pass.matched_count == expected_matches
