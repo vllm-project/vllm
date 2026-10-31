@@ -6411,8 +6411,8 @@ def test_swa_reachable_block_mask_final_partial_segment():
 
     assert reachable_blocks(300) == {248, 249}
     assert reachable_blocks(250) == {246, 247, 248, 249}
-    assert reachable_blocks(300, use_eagle=True) == {243, 248, 249}
-    assert reachable_blocks(250, use_eagle=True) == {243, 248, 249}
+    assert reachable_blocks(300, use_eagle=True) == {243, 247, 248, 249}
+    assert reachable_blocks(250, use_eagle=True) == {243, 247, 248, 249}
 
 
 def test_swa_reachable_block_mask_pins_shared_prefix():
