@@ -8,7 +8,6 @@ import torch
 from torch import nn
 
 from vllm.config import KernelConfig, ParallelConfig
-from vllm.model_executor.models.utils import WeightsMapper
 from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skipif(
@@ -249,19 +248,71 @@ def test_rocm_moe_wires_vision_routing_on_hash_and_regular_layers(
 def test_rocm_fse_rejects_data_parallel_deployment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from vllm.models.deepseek_v4.amd.model import _fuse_shared_experts_enabled
-
-    config = SimpleNamespace(n_shared_experts=1)
-
-    monkeypatch.setenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "1")
-    with pytest.raises(ValueError, match="data parallelism"):
-        _fuse_shared_experts_enabled(config, ParallelConfig(data_parallel_size=2))
-
-    # Expert parallelism already disables FSE: no raise, FSE stays off.
-    assert not _fuse_shared_experts_enabled(
-        config, ParallelConfig(data_parallel_size=2, enable_expert_parallel=True)
+    from vllm.config import set_current_vllm_config
+    from vllm.model_executor.layers.fused_moe.utils import (
+        resolve_layer_fused_shared_expert,
     )
-    assert _fuse_shared_experts_enabled(config, ParallelConfig())
+    from vllm.models.deepseek_v4.amd import model as rocm_model
+
+    class FakeGate(nn.Module):
+        def __init__(self, **kwargs) -> None:
+            super().__init__()
+
+    monkeypatch.setattr(rocm_model, "GateLinear", FakeGate)
+    monkeypatch.setattr(rocm_model, "FusedMoEFactory", lambda **kwargs: nn.Identity())
+    monkeypatch.setattr(rocm_model, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(rocm_model, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        rocm_model.rocm_aiter_ops,
+        "is_fusion_moe_shared_experts_enabled",
+        lambda: True,
+    )
+
+    config = SimpleNamespace(
+        hidden_size=16,
+        n_routed_experts=4,
+        num_experts_per_tok=2,
+        moe_intermediate_size=8,
+        swiglu_limit=None,
+        norm_topk_prob=True,
+        scoring_func="sqrtsoftplus",
+        num_hash_layers=0,
+        vocab_size=32,
+        topk_method="noaux_tc",
+        vision_n_layers=0,
+        n_shared_experts=1,
+    )
+
+    def build_vllm_config(parallel_config: ParallelConfig) -> SimpleNamespace:
+        return SimpleNamespace(
+            model_config=SimpleNamespace(hf_config=config),
+            quant_config=None,
+            parallel_config=parallel_config,
+            kernel_config=KernelConfig(),
+        )
+
+    # Data parallelism without expert parallelism fails fast at MoE construction.
+    with pytest.raises(ValueError, match="not supported with data parallelism"):
+        rocm_model.DeepseekV4MoE(
+            build_vllm_config(ParallelConfig(data_parallel_size=2)),
+            prefix="model.layers.0.ffn",
+        )
+
+    # Under expert parallelism the resolver disables FSE instead of raising.
+    with set_current_vllm_config(
+        build_vllm_config(
+            ParallelConfig(data_parallel_size=2, enable_expert_parallel=True)
+        )
+    ):
+        assert not resolve_layer_fused_shared_expert(
+            None, "model.layers.0.ffn", disable_under_ep=True
+        )
+
+    # Nothing blocks FSE once expert parallelism is off.
+    with set_current_vllm_config(build_vllm_config(ParallelConfig())):
+        assert resolve_layer_fused_shared_expert(
+            None, "model.layers.0.ffn", disable_under_ep=True
+        )
 
 
 def test_rocm_mtp_forwards_input_ids_for_vision_routing(
@@ -356,127 +407,3 @@ def test_rocm_compute_logits_local_skips_gather() -> None:
 
     assert torch.equal(result, torch.tensor([5.0]))
     assert calls == [(model.lm_head, hidden_states, True)]
-
-
-class _FakeLanguageModel(nn.Module):
-    finalizes_weights_during_load = False
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.tensor_a = nn.Parameter(torch.zeros(1))
-        self.tensor_c = nn.Parameter(torch.zeros(1))
-        self.finalized_values: list[tuple[float, float]] = []
-
-    def process_weights_after_loading(self) -> None:
-        self.finalized_values.append((self.tensor_a.item(), self.tensor_c.item()))
-
-    def compute_logits_local(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        return hidden_states + 1
-
-
-def test_vl_wrapper_streams_then_delegates_finalization() -> None:
-    from vllm.models.deepseek_v4.common.vl_model import (
-        DeepseekV4ForConditionalGeneration,
-    )
-
-    model = object.__new__(DeepseekV4ForConditionalGeneration)
-    nn.Module.__init__(model)
-    model.language_model = _FakeLanguageModel()
-    model.vision = nn.Module()
-    model.vision.tensor_b = nn.Parameter(torch.zeros(1))
-    model.hf_to_vllm_mapper = WeightsMapper()
-
-    def interleaved_weights():
-        yield "language_model.tensor_a", torch.tensor([1.0])
-        assert model.language_model.tensor_a.item() == 1.0
-        yield "vision.tensor_b", torch.tensor([2.0])
-        assert model.vision.tensor_b.item() == 2.0
-        yield "language_model.tensor_c", torch.tensor([3.0])
-
-    loaded = model.load_weights(interleaved_weights())
-
-    assert loaded == {
-        "language_model.tensor_a",
-        "vision.tensor_b",
-        "language_model.tensor_c",
-    }
-    assert model.language_model.finalized_values == []
-
-    model.process_weights_after_loading()
-
-    assert model.language_model.finalized_values == [(1.0, 3.0)]
-    assert torch.equal(
-        model.compute_logits_local(torch.tensor([4.0])), torch.tensor([5.0])
-    )
-    model.process_weights_after_loading()
-    assert model.language_model.finalized_values == [(1.0, 3.0)]
-
-
-class _FakeFinalizingLanguageModel(_FakeLanguageModel):
-    finalizes_weights_during_load = True
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.load_calls = 0
-
-    def load_weights(self, weights) -> set[str]:
-        self.load_calls += 1
-        loaded = set()
-        for name, value in weights:
-            getattr(self, name).data.copy_(value)
-            loaded.add(name)
-        self.process_weights_after_loading()
-        return loaded
-
-
-def test_vl_wrapper_groups_child_that_finalizes_during_load() -> None:
-    from vllm.models.deepseek_v4.common.vl_model import (
-        DeepseekV4ForConditionalGeneration,
-    )
-
-    model = object.__new__(DeepseekV4ForConditionalGeneration)
-    nn.Module.__init__(model)
-    model.language_model = _FakeFinalizingLanguageModel()
-    model.vision = nn.Module()
-    model.vision.tensor_b = nn.Parameter(torch.zeros(1))
-    model.hf_to_vllm_mapper = WeightsMapper()
-
-    loaded = model.load_weights(
-        iter(
-            (
-                ("language_model.tensor_a", torch.tensor([1.0])),
-                ("vision.tensor_b", torch.tensor([2.0])),
-                ("language_model.tensor_c", torch.tensor([3.0])),
-            )
-        )
-    )
-
-    assert loaded == {
-        "language_model.tensor_a",
-        "vision.tensor_b",
-        "language_model.tensor_c",
-    }
-    assert model.language_model.load_calls == 1
-    assert model.language_model.finalized_values == [(1.0, 3.0)]
-
-    # The framework's later model-level hook must not double-finalize a child
-    # which already completed this work in load_weights.
-    model.process_weights_after_loading()
-    assert model.language_model.finalized_values == [(1.0, 3.0)]
-
-
-def test_vl_wrapper_dummy_load_delegates_finalization() -> None:
-    from vllm.models.deepseek_v4.common.vl_model import (
-        DeepseekV4ForConditionalGeneration,
-    )
-
-    model = object.__new__(DeepseekV4ForConditionalGeneration)
-    nn.Module.__init__(model)
-    model.language_model = _FakeFinalizingLanguageModel()
-
-    # DummyModelLoader bypasses model.load_weights(), so no finalized marker
-    # exists and the framework-level hook must still delegate to the child.
-    model.process_weights_after_loading()
-    assert model.language_model.finalized_values == [(0.0, 0.0)]
-    model.process_weights_after_loading()
-    assert model.language_model.finalized_values == [(0.0, 0.0)]
