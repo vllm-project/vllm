@@ -157,8 +157,27 @@ class AgRsAll2AllManager(All2AllManagerBase):
             hidden_states.shape[0] // dist_group.world_size,
             dist_group,
         )
+        reduced = self._quick_reduce_combine(hidden_states, dist_group, sizes)
+        if reduced is not None:
+            return reduced
         hidden_states = dist_group.reduce_scatterv(hidden_states, dim=0, sizes=sizes)
         return hidden_states
+
+    @staticmethod
+    def _quick_reduce_combine(
+        hidden_states: torch.Tensor, dist_group: Any, sizes: list[int]
+    ) -> torch.Tensor | None:
+        """Reduce-scatter as a QuickReduce all-reduce plus this rank's slice.
+
+        On a 2-GPU xGMI pair the quantized all-reduce of the gathered output
+        beats an RCCL bf16 reduce-scatter despite moving the whole tensor.
+        """
+        comm = getattr(dist_group.device_communicator, "moe_qr_comm", None)
+        if comm is None or not comm.should_quick_allreduce(hidden_states):
+            return None
+        rank = dist_group.rank_in_group
+        start = sum(sizes[:rank])
+        return comm.quick_all_reduce(hidden_states)[start : start + sizes[rank]]
 
     def allocate_combine_input(
         self,
@@ -189,6 +208,9 @@ class AgRsAll2AllManager(All2AllManagerBase):
             hidden_states.shape[0] // dist_group.world_size,
             dist_group,
         )
+        reduced = self._quick_reduce_combine(hidden_states, dist_group, sizes)
+        if reduced is not None:
+            return output.copy_(reduced)
         return dist_group.reduce_scatterv_into_output(
             hidden_states,
             output,

@@ -725,5 +725,76 @@ def test_custom_quick_allreduce_variable_input(tp_size, pipeline_parallel_size):
             raise RuntimeError(f"QuickReduce hang detected after {timeout} seconds!")
 
 
+@ray.remote(num_gpus=1, max_calls=1)
+def dp_moe_combine_quickreduce(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size,
+    pp_size,
+    rank,
+    distributed_init_port,
+    data_parallel_size,
+    data_parallel_master_port,
+):
+    from vllm.distributed.device_communicators.all2all import AgRsAll2AllManager
+    from vllm.distributed.parallel_state import get_dp_group
+
+    with monkeypatch.context() as m:
+        m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        m.delenv("HIP_VISIBLE_DEVICES", raising=False)
+        m.delenv("ROCR_VISIBLE_DEVICES", raising=False)
+        m.setenv("VLLM_ROCM_DP_MOE_QUICK_REDUCE", "1")
+        device = torch.device(f"cuda:{rank}")
+        torch.accelerator.set_device_index(device)
+        init_test_distributed_environment(
+            tp_size,
+            pp_size,
+            rank,
+            distributed_init_port,
+            local_rank=rank,
+            data_parallel_size=data_parallel_size,
+            data_parallel_master_port=data_parallel_master_port,
+        )
+        dp = get_dp_group()
+        # Only the MoE combine gets QuickReduce; generic DP all-reduces do not.
+        assert dp.device_communicator.qr_comm is None
+        comm = dp.device_communicator.moe_qr_comm
+        assert comm is not None and not comm.disabled
+
+        # [world * tokens, hidden] gathered MoE output, as combine receives it.
+        tokens, hidden = 1024, 5120
+        sizes = [tokens] * data_parallel_size
+        gen = torch.Generator(device=device).manual_seed(rank)
+        out = torch.randn(
+            data_parallel_size * tokens,
+            hidden,
+            dtype=torch.bfloat16,
+            device=device,
+            generator=gen,
+        )
+        got = AgRsAll2AllManager._quick_reduce_combine(out, dp, sizes)
+        assert got is not None
+        expected = dp.reduce_scatterv(out, dim=0, sizes=sizes)
+        torch.testing.assert_close(
+            got, expected, **_quickreduce_tolerance(comm.qr_quant_level)
+        )
+        # Tensors QuickReduce cannot take fall back to the reduce-scatter.
+        assert AgRsAll2AllManager._quick_reduce_combine(out[:2], dp, [1, 1]) is None
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="only test quick allreduce for rocm"
+)
+@pytest.mark.parametrize("quant_mode", ["FP", "INT4"])
+def test_dp_moe_combine_quick_reduce(monkeypatch: pytest.MonkeyPatch, quant_mode):
+    """The opt-in DP MoE combine matches the RCCL reduce-scatter."""
+    if torch.accelerator.device_count() < 2:
+        pytest.skip("Not enough GPUs to run the test.")
+    monkeypatch.setenv("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION", quant_mode)
+    monkeypatch.setenv("VLLM_ROCM_DP_MOE_QUICK_REDUCE", "1")
+    multi_process_parallel(
+        monkeypatch, 1, 1, dp_moe_combine_quickreduce, data_parallel_size=2
+    )
+
+
 if __name__ == "__main__":
     test_custom_quick_allreduce_variable_input(tp_size=4, pipeline_parallel_size=1)
