@@ -23,6 +23,7 @@ from vllm.entrypoints.scale_out.render.serving import ServingRender
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import GenerationError, VLLMValidationError
+from vllm.inputs.engine import tokens_input
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput, WeightVersionSpan
 from vllm.renderers.deepseek_v4 import DeepseekV4Renderer
@@ -836,6 +837,156 @@ async def test_completion_logs_outputs_when_enabled(stream: bool):
         assert logged[0]["outputs"] == "Hello world"
         assert logged[0]["output_token_ids"] == [100, 101]
         assert logged[0]["finish_reason"] == "stop"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "options",
+    [
+        pytest.param({}, id="plain"),
+        pytest.param({"stream_options": {"include_usage": True}}, id="final-usage"),
+        pytest.param(
+            {"stream_options": {"include_usage": True, "continuous_usage_stats": True}},
+            id="continuous-usage",
+        ),
+        pytest.param({"echo": True}, id="echo"),
+        pytest.param({"logprobs": 1}, id="logprobs"),
+        pytest.param({"return_token_ids": True}, id="token-ids"),
+        pytest.param({"return_weight_versions": True}, id="weight-versions"),
+        pytest.param({"request_id": "987654321"}, id="ambiguous-template"),
+    ],
+)
+async def test_completion_stream_matches_model_serialization(
+    options: dict[str, Any], monkeypatch: pytest.MonkeyPatch, caplog_vllm
+):
+    from vllm.entrypoints.openai.completion import serving as serving_module
+
+    engine = MagicMock(spec=AsyncLLM)
+    engine.model_config = MockModelConfig()
+    engine.input_processor = MagicMock()
+    engine.renderer = _build_renderer(engine.model_config)
+    serving = _build_serving_completion(
+        engine,
+        request_logger=RequestLogger(max_log_len=None),
+        enable_log_outputs=True,
+        enable_prompt_tokens_details=True,
+    )
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt=["Test prompt", "Test prompt"],
+        n=2,
+        max_tokens=3,
+        stream=True,
+        **options,
+    )
+    request_id = f"cmpl-{request.request_id}"
+
+    async def results():
+        for text, token_id, finish_reason in [
+            ('hé"\\\n', 100, None),
+            ("", 101, None),
+            (" end", 102, "stop"),
+        ]:
+            logprobs = [{token_id: Logprob(-0.1, decoded_token=text or "held")}]
+            for prompt_idx in range(2):
+                result = RequestOutput(
+                    request_id=request_id,
+                    prompt="Test prompt",
+                    prompt_token_ids=[1, 2, 3],
+                    prompt_logprobs=None,
+                    outputs=[
+                        CompletionOutput(
+                            index=i,
+                            text=text,
+                            token_ids=[token_id],
+                            cumulative_logprob=None,
+                            logprobs=logprobs,
+                            finish_reason=finish_reason,
+                            stop_reason=" end" if finish_reason else None,
+                            weight_versions=[WeightVersionSpan("v1", 0, 3)]
+                            if finish_reason
+                            else None,
+                        )
+                        for i in range(2)
+                    ],
+                    finished=finish_reason is not None,
+                    num_cached_tokens=2,
+                    kv_transfer_params={"remote": "cache"},
+                )
+                yield prompt_idx, result
+
+    async def collect():
+        caplog_vllm.clear()
+        metadata = RequestResponseMetadata(request_id=request_id)
+        frames = [
+            frame
+            async for frame in serving.completion_stream_generator(
+                request,
+                [tokens_input([1, 2, 3]), tokens_input([1, 2, 3])],
+                results(),
+                request_id,
+                1706000000,
+                MODEL_NAME,
+                2,
+                engine.renderer.tokenizer,
+                metadata,
+            )
+        ]
+        logs = [
+            record.getMessage()
+            for record in caplog_vllm.records
+            if record.name == "vllm.entrypoints.serve.utils.request_logger"
+        ]
+        return frames, metadata.final_usage_info, logs
+
+    actual = await collect()
+    with monkeypatch.context() as reference:
+        reference.setattr(serving_module, "_delta_frame_template", lambda *_: None)
+        assert actual == await collect()
+
+    frames, usage, logs = actual
+    assert frames[-1] == "data: [DONE]\n\n"
+    chunks = [json.loads(frame.removeprefix("data: ")) for frame in frames[:-1]]
+    choices = [chunk["choices"][0] for chunk in chunks if chunk["choices"]]
+    assert [choice["index"] for choice in choices] == [0, 1, 2, 3] * 3
+    assert [choice["text"] for choice in choices[:4]] == [
+        ("Test prompt" if request.echo else "") + 'hé"\\\n'
+    ] * 4
+    assert [choice["text"] for choice in choices[4:8]] == [""] * 4
+    assert all(choice["finish_reason"] == "stop" for choice in choices[-4:])
+    assert all(choice["stop_reason"] == " end" for choice in choices[-4:])
+    assert all(
+        chunk["kv_transfer_params"] == {"remote": "cache"} for chunk in chunks[8:12]
+    )
+    assert usage is not None
+    assert (usage.prompt_tokens, usage.completion_tokens, usage.total_tokens) == (
+        6,
+        12,
+        18,
+    )
+    assert usage.prompt_tokens_details is not None
+    assert usage.prompt_tokens_details.cached_tokens == 2
+    assert len(logs) == 12
+    assert sum("(streaming complete)" in log for log in logs) == 4
+    if request.return_token_ids:
+        assert all(choice["prompt_token_ids"] == [1, 2, 3] for choice in choices[:4])
+        assert [choice["token_ids"] for choice in choices] == [
+            [token_id] for token_id in (100, 101, 102) for _ in range(4)
+        ]
+    if request.return_weight_versions:
+        assert all(
+            choice["weight_versions"] == [{"version": "v1", "start": 0, "end": 3}]
+            for choice in choices[-4:]
+        )
+    if request.logprobs is not None:
+        assert choices[0]["logprobs"]["token_logprobs"] == [-0.1]
+    if request.stream_options and request.stream_options.include_usage:
+        assert chunks[-1]["choices"] == []
+        assert chunks[-1]["usage"] == usage.model_dump(exclude_none=True)
+        if request.stream_options.continuous_usage_stats:
+            assert [chunk["usage"]["completion_tokens"] for chunk in chunks[:12]] == [
+                count for count in (1, 2, 3) for _ in range(4)
+            ]
 
 
 @pytest.mark.asyncio
