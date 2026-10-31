@@ -121,6 +121,54 @@ def test_flashinfer_swigluoai_params_are_forwarded(activation, monkeypatch):
         )
 
 
+def test_flashinfer_cutlass_gelu_tanh_uses_tanh_geglu(monkeypatch):
+    """GELU_TANH must reach the CUTLASS kernel as GegluTanh, not erf Geglu."""
+    from flashinfer.fused_moe.core import ActivationType
+
+    moe_config = FusedMoEConfig(
+        num_experts=2,
+        experts_per_token=1,
+        hidden_dim=128,
+        intermediate_size=128,
+        num_local_experts=2,
+        num_logical_experts=2,
+        activation=MoEActivation.GELU_TANH,
+        device="cuda",
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        in_dtype=torch.bfloat16,
+        routing_method=RoutingMethodType.TopK,
+    )
+    experts = FlashInferExperts(
+        moe_config=moe_config, quant_config=FusedMoEQuantConfig.make()
+    )
+
+    call_args = {}
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.fused_moe.experts."
+        "flashinfer_cutlass_moe.flashinfer_cutlass_fused_moe",
+        lambda **kwargs: call_args.update(kwargs),
+    )
+    experts.apply(
+        output=torch.empty((1, 128), device="cuda", dtype=torch.bfloat16),
+        hidden_states=torch.empty((1, 128), device="cuda", dtype=torch.bfloat16),
+        w1=torch.empty((2, 256, 128), device="cuda", dtype=torch.bfloat16),
+        w2=torch.empty((2, 128, 128), device="cuda", dtype=torch.bfloat16),
+        topk_weights=torch.ones((1, 1), device="cuda", dtype=torch.float32),
+        topk_ids=torch.zeros((1, 1), device="cuda", dtype=torch.int64),
+        activation=MoEActivation.GELU_TANH,
+        global_num_experts=2,
+        expert_map=None,
+        a1q_scale=None,
+        a2_scale=None,
+        workspace13=None,
+        workspace2=None,
+        expert_tokens_meta=None,
+        apply_router_weight_on_input=False,
+    )
+
+    assert call_args["activation_type"] == ActivationType.GegluTanh
+
+
 @pytest.mark.parametrize("m,n,k", MNK_FACTORS)
 @pytest.mark.parametrize("e", [40, 64, 256])
 @pytest.mark.parametrize("topk", [1, 6, 8])
