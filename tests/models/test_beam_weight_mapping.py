@@ -17,10 +17,12 @@ import pytest
 import torch
 from torch import nn
 
-from vllm.models.beam.nvidia import model as beam
-from vllm.models.beam.nvidia.model import BeamModel
+from vllm.models.beam import attention
+from vllm.models.beam import model as beam
+from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.beam import BeamConfig
 
+BeamModel = beam.BeamModel
 MAPPER = BeamModel.hf_to_vllm_mapper
 
 
@@ -90,7 +92,7 @@ def test_attention_output_gate_is_renamed_not_fused():
     )
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA required")
 @torch.inference_mode()
 def test_checkpoint_norm_names_match_sublayer_order(default_vllm_config, monkeypatch):
     """Load reference names directly and use each weight on its intended branch."""
@@ -141,14 +143,13 @@ def test_checkpoint_norm_names_match_sublayer_order(default_vllm_config, monkeyp
     torch.testing.assert_close(actual, expected)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA required")
 @pytest.mark.parametrize("tp_size", [4, 8])
 @torch.inference_mode()
 def test_checkpoint_loads_into_merged_qkv_gate(
     default_vllm_config, monkeypatch, tp_size
 ):
     """All four checkpoint projections load directly into the allocated TP shard."""
-    from vllm.models.beam.nvidia import attention
     from vllm.models.beam.nvidia.projection import packed_projection
 
     for module in (
