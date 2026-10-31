@@ -498,6 +498,9 @@ def unified_attention_diffkv(
     tile_size = 32 if not use_3d else (16 if q.element_size() >= 2 else 32)
     if spec_tile is not None:
         tile_size = spec_tile
+    if q.element_size() < 2:
+        # Triton needs K >= 32 for FP8 tl.dot; P @ V reduces over the KV tile.
+        tile_size = max(tile_size, 32)
 
     grid: tuple[Any, ...]
     if use_3d:
