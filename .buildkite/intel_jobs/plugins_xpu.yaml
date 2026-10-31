@@ -47,6 +47,12 @@ steps:
   source_file_dependencies:
   - vllm/plugins/
   - tests/plugins/
+  - vllm/__init__.py
+  - vllm/env_override.py
+  - vllm/platforms/__init__.py
+  - vllm/utils/torch_utils.py
+  - vllm/utils/torch_version.py
+  - tests/plugins_tests/test_platform_plugins.py
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh

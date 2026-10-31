@@ -55,6 +55,7 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s v1/e2e/spec_decode/eagle/ -k "deepseek_eagle or qwen3_eagle3"
   source_file_dependencies:
@@ -81,6 +82,7 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s v1/e2e/spec_decode/eagle/ -k "not deepseek_eagle and not qwen3_eagle3"
   source_file_dependencies:
@@ -134,6 +136,7 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s v1/e2e/spec_decode/speculators/
   source_file_dependencies:
@@ -162,6 +165,7 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s v1/e2e/spec_decode/mtp/gemma4/
   source_file_dependencies:
@@ -190,6 +194,7 @@ steps:
     label: production
     gpu: "1"
     mem: 24+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s v1/e2e/spec_decode/mtp/deepseek/
   - pytest -v -s v1/e2e/spec_decode/mtp/mimo/
@@ -220,6 +225,7 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s v1/e2e/spec_decode/mtp/qwen3_5/
   source_file_dependencies:
@@ -278,6 +284,7 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s v1/e2e/spec_decode/ngram_suffix/
   - python3 spec_decode/test_custom_proposer.py
@@ -319,6 +326,37 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest --continue-on-collection-errors -v -s v1/e2e/spec_decode/draft_model/ --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
+- label: ':nvidia: (B200) [Nightly] Spec Decode Draft Model'
+  key: spec-decode-draft-model-nightly-b200
+  device: intel_gpu
+  timeout_in_minutes: 40
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  automatic_shard: true
+  _raw_old_commands:
+  - pytest -v -s v1/e2e/spec_decode/draft_model/
+  - pytest -v -s models/test_qwen3_dflash_mxfp8_context_kv.py
+  source_file_dependencies:
+  - vllm/v1/spec_decode/
+  - vllm/v1/worker/gpu/spec_decode/
+  - tests/v1/e2e/spec_decode/
+  - vllm/model_executor/models/qwen3_dflash.py
+  - tests/models/test_qwen3_dflash_mxfp8_context_kv.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest --continue-on-collection-errors -v -s v1/e2e/spec_decode/draft_model/ || true &&
+    pytest --continue-on-collection-errors -v -s models/test_qwen3_dflash_mxfp8_context_kv.py || true'
 - label: ':nvidia: (H100) [Nightly] Speculators Correctness'
   key: speculators-correctness
   device: intel_gpu
@@ -335,6 +373,7 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
   - pytest -v -s v1/spec_decode/test_speculators_correctness.py -m slow_test
@@ -365,6 +404,7 @@ steps:
     label: production
     gpu: 2+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s v1/e2e/spec_decode/test_mtp_parallel_load.py
   source_file_dependencies:
@@ -397,19 +437,23 @@ steps:
   automatic_shard: true
   _raw_old_commands:
   - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k "not dflash2"
+  - pytest -v -s v1/e2e/spec_decode/test_distribution_shift.py
   source_file_dependencies:
   - vllm/v1/spec_decode/
   - vllm/v1/worker/gpu/spec_decode/
   - vllm/model_executor/models/qwen3_dflash.py
   - vllm/model_executor/models/qwen3_dflash2.py
+  - vllm/models/qwen3_5/
   - vllm/model_executor/models/qwen3_5.py
+  - vllm/model_executor/models/qwen3_5_mtp.py
   - vllm/model_executor/models/laguna_dflash.py
   - tests/v1/e2e/spec_decode/
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest --continue-on-collection-errors -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k not dflash2 || true'
+    pytest --continue-on-collection-errors -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k not dflash2 || true &&
+    pytest --continue-on-collection-errors -v -s v1/e2e/spec_decode/test_distribution_shift.py || true'
 - label: ':nvidia: (B200) [Nightly] Spec Decode AL DFlash2'
   key: spec-decode-dflash2-nightly-b200
   device: intel_gpu
@@ -425,6 +469,7 @@ steps:
     label: production
     gpu: 1+
     mem: 24+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k "dflash2"
   source_file_dependencies:
@@ -432,7 +477,9 @@ steps:
   - vllm/v1/worker/gpu/spec_decode/
   - vllm/model_executor/models/qwen3_dflash.py
   - vllm/model_executor/models/qwen3_dflash2.py
+  - vllm/models/qwen3_5/
   - vllm/model_executor/models/qwen3_5.py
+  - vllm/model_executor/models/qwen3_5_mtp.py
   - tests/v1/e2e/spec_decode/
   commands:
   - >-
@@ -454,6 +501,7 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s v1/e2e/spec_decode/acceptance_rates/xpress/
   source_file_dependencies:
