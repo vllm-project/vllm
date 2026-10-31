@@ -1701,17 +1701,8 @@ class Engram(nn.Module):
         # suffix rule.
         self.embed_tokens = self._create_embedding(layout, layer_hash_index)
         n_hash_cols = (layout.max_ngram_size - 1) * layout.n_heads
-        # Without sequence parallelism every TP rank holds every token, so
-        # shard the output columns instead of replicating the projection.
-        self.wkv = ColumnParallelLinear(
-            n_hash_cols * layout.head_dim,
-            self.dim * (self.hc_mult + 1),
-            bias=False,
-            gather_output=True,
-            quant_config=quant_config,
-            return_bias=False,
-            prefix=f"{prefix}.wkv",
-            disable_tp=use_sequence_parallel,
+        self.wkv = self._create_wkv(
+            n_hash_cols * layout.head_dim, quant_config, f"{prefix}.wkv"
         )
         self.q_weight = nn.Parameter(
             torch.empty(self.hc_mult, self.dim, dtype=torch.bfloat16),
@@ -1724,6 +1715,22 @@ class Engram(nn.Module):
 
         max_tokens = get_current_vllm_config().scheduler_config.max_num_batched_tokens
         self._init_staging(max_tokens, layout.head_dim)
+
+    def _create_wkv(
+        self, input_size: int, quant_config: QuantizationConfig | None, prefix: str
+    ) -> ColumnParallelLinear:
+        # Without sequence parallelism every TP rank holds every token, so
+        # shard the output columns instead of replicating the projection.
+        return ColumnParallelLinear(
+            input_size,
+            self.dim * (self.hc_mult + 1),
+            bias=False,
+            gather_output=True,
+            quant_config=quant_config,
+            return_bias=False,
+            prefix=prefix,
+            disable_tp=self.use_sequence_parallel,
+        )
 
     def _create_embedding(
         self, layout: EngramLayout, layer_hash_index: int
@@ -1849,6 +1856,16 @@ class Engram(nn.Module):
             if token_mask is not None:
                 token_mask = token_mask[start : start + num_kv_tokens]
 
+        return self._post_wkv(hidden_states, kv, token_mask, num_kv_tokens)
+
+    def _post_wkv(
+        self,
+        hidden_states: torch.Tensor,
+        kv: torch.Tensor,
+        token_mask: torch.Tensor | None,
+        num_kv_tokens: int,
+    ) -> torch.Tensor:
+        """The gated update from the `wkv` output of `num_kv_tokens` tokens."""
         num_tokens, hc_mult, dim = hidden_states.shape
         assert hc_mult == self.hc_mult and dim == self.dim
         assert kv.ndim == 2 and kv.shape[1] == (hc_mult + 1) * dim
