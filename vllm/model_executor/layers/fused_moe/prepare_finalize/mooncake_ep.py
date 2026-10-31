@@ -54,7 +54,11 @@ class MooncakeEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         return torch.int64
 
     def supports_async(self) -> bool:
-        return True
+        # Mooncake's current P2P transport requires combine completion before
+        # the next MoE layer reuses the communication slot. Keep the initial
+        # integration on the synchronous modular-kernel lifecycle until the
+        # transport exposes a safe asynchronous slot-reuse contract.
+        return False
 
     def _check_supported(
         self, a1: torch.Tensor, quant_config: FusedMoEQuantConfig
