@@ -3,6 +3,7 @@
 """Utility methods for model layers."""
 
 import functools
+import importlib
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -15,6 +16,7 @@ from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.flashinfer import (
     flashinfer_bf16_mm,
+    has_flashinfer,
     is_flashinfer_cutedsl_bf16_gemm_supported,
 )
 from vllm.utils.platform_utils import num_compute_units
@@ -222,6 +224,201 @@ direct_register_custom_op(
     op_func=cuda_flashinfer_bf16_gemm_impl,
     fake_impl=cuda_flashinfer_bf16_gemm_fake,
 )
+
+
+# FlashInfer CuTe-DSL kernels and tactics pinned per (N, K) weight shape and
+# token count on SM103, for the BF16 Qwen3.5/3.8-27B linear layers at TP1
+# (MTP verify of 1-4 requests and the drafter). Tactics are:
+#   direct:  (block_size, outputs_per_block, rows_per_block)
+#   warp:    (output_tile, token_tile, k_tile, stages, b_loader_warps)
+#   cluster: (mma_m, mma_n, split_k, ab_stages)
+# They were picked by timing each GEMM inside the decode step, not alone, as
+# the autotuner does. For example, gate_up at 16 tokens runs while the previous
+# GDN layer's state write-back drains from L2: there cluster split-K is faster
+# in the step although it is ~3 us slower per call alone than warp split-K.
+_SM103_PINNED_BF16_GEMMS: dict[
+    tuple[int, int], dict[int, tuple[str, tuple[int, ...]]]
+] = {
+    # attention qkv_proj
+    (14336, 5120): {
+        1: ("direct", (128, 2, 1)),
+        2: ("direct", (128, 2, 2)),
+        3: ("warp", (32, 8, 256, 3, 2)),
+        4: ("warp", (32, 8, 256, 3, 2)),
+        8: ("warp", (32, 8, 256, 3, 2)),
+        12: ("warp", (32, 16, 128, 5, 1)),
+        16: ("warp", (32, 16, 128, 5, 2)),
+    },
+    # GDN in_proj_qkvz
+    (16384, 5120): {
+        4: ("warp", (16, 8, 256, 4, 1)),
+        8: ("warp", (16, 8, 256, 4, 2)),
+        12: ("warp", (32, 16, 256, 4, 2)),
+        16: ("warp", (32, 16, 256, 4, 2)),
+    },
+    # GDN in_proj_ba
+    (96, 5120): {
+        4: ("direct", (128, 1, 4)),
+        8: ("direct", (128, 1, 8)),
+        12: ("direct", (128, 1, 4)),
+        16: ("direct", (128, 1, 8)),
+    },
+    # MLP gate_up_proj
+    (34816, 5120): {
+        1: ("direct", (128, 2, 1)),
+        2: ("direct", (64, 4, 2)),
+        3: ("warp", (16, 8, 256, 4, 1)),
+        4: ("warp", (16, 8, 256, 4, 1)),
+        8: ("warp", (16, 8, 256, 6, 2)),
+        12: ("warp", (16, 16, 256, 4, 2)),
+        16: ("cluster", (128, 16, 1, 6)),
+    },
+    # MLP down_proj
+    (5120, 17408): {
+        1: ("direct", (128, 2, 1)),
+        2: ("direct", (128, 4, 2)),
+        3: ("direct", (64, 2, 3)),
+        4: ("cluster", (128, 8, 2, 6)),
+        8: ("cluster", (128, 8, 2, 6)),
+        12: ("cluster", (128, 16, 2, 6)),
+        16: ("cluster", (128, 16, 2, 6)),
+    },
+    # attention o_proj and GDN out_proj
+    (5120, 6144): {
+        1: ("direct", (256, 2, 1)),
+        2: ("direct", (256, 2, 2)),
+        3: ("warp", (16, 8, 256, 6, 1)),
+        4: ("warp", (16, 8, 256, 6, 2)),
+        8: ("warp", (16, 8, 256, 5, 2)),
+        12: ("warp", (16, 16, 256, 4, 2)),
+        16: ("warp", (16, 16, 256, 4, 2)),
+    },
+    # MTP fc
+    (5120, 10240): {
+        1: ("direct", (256, 2, 1)),
+        2: ("warp", (16, 8, 256, 6, 1)),
+        3: ("warp", (16, 8, 256, 6, 1)),
+        4: ("warp", (16, 8, 256, 5, 1)),
+        8: ("warp", (16, 8, 256, 5, 1)),
+        12: ("warp", (16, 16, 256, 4, 2)),
+        16: ("warp", (16, 16, 256, 4, 2)),
+    },
+}
+
+# kernel -> (FlashInfer module, tactic class, run function)
+_PINNED_BF16_GEMM_KERNELS = {
+    "direct": ("dense_bf16_gemm_direct", "DirectTactic", "run_direct_dense"),
+    "warp": (
+        "dense_bf16_gemm_warp_splitk",
+        "WarpSplitKTactic",
+        "run_warp_splitk_dense",
+    ),
+    "cluster": ("dense_bf16_gemm_sm100_splitk", "SplitKTactic", "run_splitk_dense"),
+}
+
+
+def _use_sm103_pinned_bf16_gemm() -> bool:
+    return (
+        not envs.VLLM_BATCH_INVARIANT
+        and current_platform.is_device_capability(103)
+        and has_flashinfer()
+    )
+
+
+@functools.cache
+def _pinned_bf16_gemm_runner(
+    n: int, k: int, m: int
+) -> Callable[..., torch.Tensor] | None:
+    entry = _SM103_PINNED_BF16_GEMMS.get((n, k), {}).get(m)
+    if entry is None:
+        return None
+    kernel, tactic = entry
+    module_name, tactic_cls, run_fn = _PINNED_BF16_GEMM_KERNELS[kernel]
+    try:
+        module = importlib.import_module(f"flashinfer.gemm.kernels.{module_name}")
+        kernel_tactic = getattr(module, tactic_cls)(*tactic)
+        module.validate_tactic(kernel_tactic, m, n, k)
+        run = getattr(module, run_fn)
+    except (ImportError, AttributeError, TypeError, ValueError) as e:
+        logger.warning_once(
+            "FlashInfer %s tactic %s for M=%d, N=%d, K=%d is unavailable "
+            "(%s); using F.linear.",
+            kernel,
+            tactic,
+            m,
+            n,
+            k,
+            e,
+        )
+        return None
+    extra = {"bias": None} if kernel == "cluster" else {}
+    return functools.partial(
+        run, pdl=current_platform.is_arch_support_pdl(), tactic=kernel_tactic, **extra
+    )
+
+
+def cuda_pinned_bf16_gemm_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+) -> torch.Tensor:
+    n, k = weight.shape
+    m = x.numel() // k
+    runner = _pinned_bf16_gemm_runner(n, k, m)
+    if runner is None or not _can_use_flashinfer_cutedsl_bf16(x, weight, None):
+        return torch.nn.functional.linear(x, weight)
+    out = x.new_empty((m, n))
+    runner(x.view(m, k), weight.t(), out=out)
+    return out.view(*x.shape[:-1], n)
+
+
+def cuda_pinned_bf16_gemm_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+) -> torch.Tensor:
+    return x.new_empty((*x.shape[:-1], weight.shape[0]))
+
+
+def cuda_pinned_bf16_gemm(
+    layer: torch.nn.Module,
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    if (
+        bias is not None
+        or weight.dtype != torch.bfloat16
+        or tuple(weight.shape) not in _SM103_PINNED_BF16_GEMMS
+    ):
+        return torch.nn.functional.linear(x, weight, bias)
+    return torch.ops.vllm.cuda_pinned_bf16_gemm(x, weight)
+
+
+direct_register_custom_op(
+    op_name="cuda_pinned_bf16_gemm",
+    op_func=cuda_pinned_bf16_gemm_impl,
+    fake_impl=cuda_pinned_bf16_gemm_fake,
+)
+
+
+def warmup_pinned_bf16_gemm(model: torch.nn.Module) -> None:
+    """Compile the pinned FlashInfer kernels before CUDA graph capture."""
+    from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+
+    seen: set[tuple[int, int]] = set()
+    for module in model.modules():
+        quant_method = getattr(module, "quant_method", None)
+        if (
+            not isinstance(quant_method, UnquantizedLinearMethod)
+            or quant_method._gemm_impl is not cuda_pinned_bf16_gemm
+        ):
+            continue
+        weight = module.weight
+        shape = tuple(weight.shape)
+        if shape in seen or weight.dtype != torch.bfloat16:
+            continue
+        seen.add(shape)
+        for m in _SM103_PINNED_BF16_GEMMS.get(shape, ()):
+            cuda_pinned_bf16_gemm_impl(weight.new_zeros((m, shape[1])), weight)
 
 
 def use_aiter_triton_gemm(n, m, k, dtype):
@@ -790,6 +987,8 @@ def dispatch_unquantized_gemm(
 
     backend_spec = _FLASHINFER_BF16_BACKENDS.get(linear_backend)
     if backend_spec is None:
+        if linear_backend == "auto" and _use_sm103_pinned_bf16_gemm():
+            return cuda_pinned_bf16_gemm
         return default_unquantized_gemm
 
     if not backend_spec.is_supported():
