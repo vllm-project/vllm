@@ -175,6 +175,24 @@ def test_rank_topology_derives_ranks_from_worker_rank(rank, expected):
     assert topology.local_namespace == expected
 
 
+@pytest.mark.parametrize("stage", [0, 1, 2])
+def test_rank_topology_uses_pipeline_stage_rank(stage):
+    # One stage per instance: worker ranks are stage-local, so the stage
+    # comes from pipeline_stage_rank, not from the worker rank.
+    topology = RankTopology.from_vllm_config(
+        _vllm_config(
+            {},
+            rank=1,
+            tensor_parallel_size=2,
+            pipeline_parallel_size=3,
+            pipeline_stage_rank=stage,
+            world_size=2,
+        )
+    )
+
+    assert topology.local_namespace == (1, 0, 0, stage)
+
+
 def test_rank_topology_maps_dcp_onto_tp_workers():
     topology = RankTopology(tp_rank=1, tp_size=4, dcp_rank=1, dcp_size=2)
 

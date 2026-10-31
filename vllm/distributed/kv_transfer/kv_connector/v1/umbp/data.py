@@ -85,10 +85,14 @@ class RankTopology:
         rank = getattr(parallel, "rank", 0)
         tp_rank = rank % tp_size
         dcp_size = getattr(parallel, "decode_context_parallel_size", 1)
+        pp_rank = getattr(parallel, "pipeline_stage_rank", None)
+        if pp_rank is None:
+            pp_rank = rank // (tp_size * pcp_size) % pp_size
+        # else one stage per instance: worker ranks are stage-local.
         return cls(
             tp_rank=tp_rank,
             tp_size=tp_size,
-            pp_rank=rank // (tp_size * pcp_size) % pp_size,
+            pp_rank=pp_rank,
             pp_size=pp_size,
             pcp_rank=rank // tp_size % pcp_size,
             pcp_size=pcp_size,

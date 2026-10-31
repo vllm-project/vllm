@@ -1728,6 +1728,8 @@ class ModelConfig:
         pp_rank = (
             parallel_config.rank // parallel_config.tensor_parallel_size
         ) % parallel_config.pipeline_parallel_size
+        if parallel_config.pipeline_stage_rank is not None:
+            pp_rank = parallel_config.pipeline_stage_rank
         pp_size = parallel_config.pipeline_parallel_size
         start, end = get_pp_indices(total_num_hidden_layers, pp_rank, pp_size)
         return start, end
