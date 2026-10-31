@@ -425,25 +425,23 @@ def test_transposed_kept_param_keeps_checkpoint_dims(single_rank_tp: None) -> No
     assert (weight.input_dim, weight.output_dim) == (1, 0)
 
 
-class TestRefillDerived:
+@pytest.mark.parametrize("kind", ["buffer", "attr", "absent"])
+@pytest.mark.parametrize(
+    "shape,in_place", [((2, 3), True), ((3, 3), False)], ids=["same", "new"]
+)
+def test_refill_derived(kind: str, shape: tuple[int, int], in_place: bool) -> None:
     """A tensor derived from the weights (a buffer or plain attribute kernels
     read) is refilled in place when the layout matches, so captured graphs keep
     its address, and never becomes a parameter."""
-
-    @pytest.mark.parametrize("kind", ["buffer", "attr", "absent"])
-    @pytest.mark.parametrize(
-        "shape,in_place", [((2, 3), True), ((3, 3), False)], ids=["same", "new"]
-    )
-    def test_refill(self, kind, shape, in_place):
-        layer = torch.nn.Module()
-        if kind == "buffer":
-            layer.register_buffer("t", torch.zeros(2, 3), persistent=False)
-        elif kind == "attr":
-            layer.t = torch.zeros(2, 3)
-        old = getattr(layer, "t", None)
-        held = refill_derived(layer, "t", torch.full(shape, 2.0))
-        assert held is layer.t
-        torch.testing.assert_close(held, torch.full(shape, 2.0))
-        assert (held is old) == (in_place and old is not None)
-        assert ("t" in layer._buffers) == (kind == "buffer")
-        assert not dict(layer.named_parameters())
+    layer = torch.nn.Module()
+    if kind == "buffer":
+        layer.register_buffer("t", torch.zeros(2, 3), persistent=False)
+    elif kind == "attr":
+        layer.t = torch.zeros(2, 3)
+    old = getattr(layer, "t", None)
+    held = refill_derived(layer, "t", torch.full(shape, 2.0))
+    assert held is layer.t
+    torch.testing.assert_close(held, torch.full(shape, 2.0))
+    assert (held is old) == (in_place and old is not None)
+    assert ("t" in layer._buffers) == (kind == "buffer")
+    assert not dict(layer.named_parameters())
