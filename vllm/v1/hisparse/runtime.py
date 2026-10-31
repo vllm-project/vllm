@@ -406,6 +406,8 @@ def allocate_hisparse_host_pools(
         barrier=tp_group.barrier,
         creator_memory_check=check_hisparse_host_memory,
         populate_shard=(tp_group.rank_in_group, tp_group.world_size),
+        shm_allocation_name="HiSparse host pool",
+        shm_size_option="the HiSparseConnector host_pool_gib",
     )
     pinned: list[torch.Tensor] = []
     try:
