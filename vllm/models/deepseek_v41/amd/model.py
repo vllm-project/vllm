@@ -58,6 +58,9 @@ from vllm.models.common.ops.sequence_parallel import (
 from vllm.models.deepseek_v4.amd.model import (
     DeepseekV4MoE as DeepseekV4MoEBase,
 )
+from vllm.models.deepseek_v4.amd.model import (
+    _heterogeneous_shared_expert_enabled,
+)
 from vllm.models.deepseek_v4.common.spec_decode import needs_mtp_hidden_buffer
 from vllm.models.deepseek_v41.amd.mono_decode import MonoDecodeLayer
 from vllm.models.deepseek_v41.amd.rocm import DeepseekV41ROCMAiterMLAAttention
@@ -93,11 +96,14 @@ class DeepseekV4MoE(DeepseekV4MoEBase):
         vllm_config: VllmConfig,
         prefix: str = "",
         use_sequence_parallel: bool = False,
+        fuse_heterogeneous_shared_expert: bool = False,
     ):
         config = vllm_config.model_config.hf_config
+        # Layers at or past the backbone are the DSpark draft cut.
+        is_dspark_draft = extract_layer_index(prefix) >= config.num_hidden_layers
         n_routed_experts = config.n_routed_experts
         n_activated_experts = config.num_experts_per_tok
-        if extract_layer_index(prefix) >= config.num_hidden_layers:
+        if is_dspark_draft:
             n_routed_experts = (
                 getattr(config, "dspark_n_routed_experts", 0) or n_routed_experts
             )
@@ -115,7 +121,16 @@ class DeepseekV4MoE(DeepseekV4MoEBase):
         config.num_experts_per_tok = n_activated_experts
         config.num_hash_layers = 0
         try:
-            super().__init__(vllm_config, prefix=prefix)
+            super().__init__(
+                vllm_config,
+                prefix=prefix,
+                fuse_heterogeneous_shared_expert=fuse_heterogeneous_shared_expert,
+                # The draft cut keeps the separate shared-expert path: the
+                # target model's fused construction already initialized
+                # AITER's process-global topK metadata, which a fused draft
+                # MoE would initialize a second time (assert).
+                keep_separate_shared_expert=is_dspark_draft,
+            )
         finally:
             config.n_routed_experts = old_routed
             config.num_experts_per_tok = old_activated
@@ -188,6 +203,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         aux_stream_list: list[torch.cuda.Stream] | None = None,
         candidate_block_buffer: torch.Tensor | None = None,
         engram_layout: EngramLayout | None = None,
+        fuse_heterogeneous_shared_expert: bool = False,
     ):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -221,6 +237,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             vllm_config,
             prefix=f"{prefix}.ffn",
             use_sequence_parallel=self.use_sequence_parallel,
+            fuse_heterogeneous_shared_expert=fuse_heterogeneous_shared_expert,
         )
 
         self.attn_norm = RMSNorm(self.hidden_size, self.rms_norm_eps)
@@ -562,6 +579,14 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 )
                 self.engram_dp_shared_memory = engram_config.dp_shared_memory
 
+        # Heterogeneous native-FP8 shared-expert fusion: same gate and
+        # wiring as the DeepSeek-V4 model; the flag flows Model ->
+        # DecoderLayer -> MoE. DSpark draft layers are built without the
+        # flag, so they keep the separate shared-expert path.
+        self.fuse_heterogeneous_shared_expert = _heterogeneous_shared_expert_enabled(
+            vllm_config
+        )
+
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: DeepseekV4DecoderLayer(
@@ -571,6 +596,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 aux_stream_list=aux_stream_list,
                 candidate_block_buffer=self.candidate_block_buffer,
                 engram_layout=self.engram_layout,
+                fuse_heterogeneous_shared_expert=(
+                    self.fuse_heterogeneous_shared_expert
+                ),
             ),
             prefix=f"{prefix}.layers",
         )

@@ -2921,6 +2921,95 @@ class rocm_aiter_ops:
         """Whether AITER has DSV4 native-I384 configs through the given M."""
         return cls._probe_dsv4_i384_fhmoe_capability(num_tokens)
 
+    @staticmethod
+    def _probe_fhmoe_default_config_capability(
+        num_tokens: int,
+        model_dim: int,
+        inter_dim: int,
+        experts: int,
+        topk: int,
+        intermediate_pad: int,
+    ) -> bool:
+        """Probe AITER's default-config two-stage FlyDSL path for a
+        heterogeneous FHMoE shape with no dedicated CSV (e.g.
+        DeepSeek-V4.1-Flash TP4: 5120/640/E=385/topk 7/pad 64). Mirrors
+        AITER's own I384 enumeration (every padded M tier through
+        ``num_tokens``), omitting ``config_file`` so the default config
+        machinery is used, then verifies the selected kernels are the
+        two-stage FlyDSL family."""
+        if type(num_tokens) is not int or num_tokens <= 0:
+            return False
+
+        try:
+            import inspect
+
+            import aiter.fhmoe as fhmoe
+            from aiter import ActivationType, QuantType, dtypes
+            from aiter.fused_moe import fused_moe, get_2stage_cfgs, get_padded_M
+            from aiter.ops.flydsl.moe_common import GateMode
+
+            params = inspect.signature(fused_moe).parameters
+            if not all(
+                name in params
+                for name in (
+                    "shared_w1",
+                    "shared_w2",
+                    "shared_w1_scale",
+                    "shared_w2_scale",
+                    "shared_expert_id",
+                )
+            ):
+                return False
+            wrappers = getattr(fhmoe, "_use_fhmoe_wrappers", None)
+            if not callable(wrappers):
+                return False
+            required_tokens = {
+                get_padded_M(1 << exponent)
+                for exponent in range(num_tokens.bit_length())
+            }
+            required_tokens.add(get_padded_M(num_tokens))
+            for token in required_tokens:
+                metadata = get_2stage_cfgs(
+                    token,
+                    model_dim,
+                    inter_dim,
+                    experts,
+                    topk,
+                    torch.bfloat16,
+                    dtypes.fp8,
+                    dtypes.fp4x2,
+                    QuantType.per_1x32,
+                    True,
+                    ActivationType.Silu,
+                    False,
+                    0,
+                    intermediate_pad,
+                    True,
+                    GateMode.INTERLEAVE,
+                )
+                wrappers(metadata)
+        except Exception:
+            return False
+        return True
+
+    @classmethod
+    @if_aiter_supported
+    @functools.cache
+    def fused_moe_supports_heterogeneous_shared_expert_shape(
+        cls,
+        num_tokens: int,
+        model_dim: int,
+        inter_dim: int,
+        experts: int,
+        topk: int,
+        intermediate_pad: int,
+    ) -> bool:
+        """Whether AITER's default configs cover a non-DSV4 heterogeneous
+        FHMoE shape through the given M (two-stage FlyDSL, INTERLEAVE)."""
+        return cls._probe_fhmoe_default_config_capability(
+            num_tokens, model_dim, inter_dim, experts, topk, intermediate_pad
+        )
+
     @classmethod
     @if_aiter_supported
     def is_indexer_top_k_enabled(cls) -> bool:
@@ -3789,7 +3878,7 @@ class rocm_aiter_ops:
 
         assert (o is None) != (out_mxfp8 is None)
         fp8_q = q.dtype == FP8_DTYPE
-        sparse_mla_fwd(
+        return sparse_mla_fwd(
             q,
             kv_buffer,
             kv_indptr,
