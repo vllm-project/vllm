@@ -513,17 +513,25 @@ def test_begin_restores_loader_metadata(monkeypatch):
     _assert_same(_state(model), _state(_cold_start(_checkpoint(1.01))))
 
 
-def test_shared_tensor_with_changed_layout_refused():
-    # a draft sharing the target's lm_head after its cold start: the draft's
-    # finish would reprocess it although a draft update does not resend it
+def test_draft_leaves_tensors_shared_from_the_target_to_it():
+    # a draft sharing the target's lm_head after its cold start: the target's
+    # updates refresh it, so a draft update neither views it back nor
+    # reprocesses it (and does not resend it)
     target = _cold_start(_checkpoint())
-    draft = _cold_start(_checkpoint())
+    draft = _cold_start(_checkpoint(2.0))
     draft.proj = target.proj  # its post-load processing transposes it
-    before = _state(target)
-    with pytest.raises(RuntimeError, match="shared from another model"):
-        begin_direct_reload(draft)
-    assert not direct_reload_pending(draft)
-    _assert_same(_state(target), before, addresses=True)
+    target_ptrs = _ptrs(_state(target))
+    new_target, new_draft = _checkpoint(1.01), _checkpoint(2.02)
+
+    _reload(target, new_target)
+    runs = target.proj.quant_method.runs
+    _reload(draft, {n: w for n, w in new_draft.items() if not n.startswith("proj.")})
+
+    assert target.proj.quant_method.runs == runs
+    _assert_same(_state(target), _state(_cold_start(new_target)))
+    assert _ptrs(_state(target)) == target_ptrs
+    own = [n for n in _state(draft) if not n.startswith("proj.")]
+    _assert_same(_state(draft), _state(_cold_start(new_draft)), names=own)
 
 
 def test_layerwise_start_refused_while_direct_update_pending(monkeypatch):

@@ -12,9 +12,10 @@ post-load processing runs once at the end:
   their checkpoint layout, on the same storage, and restores the loader
   metadata (packed/input/output dims) post-load processing retagged;
 - ``finish`` reruns ``process_weights_after_loading`` for every module, as
-  cold start does. Post-load processing has to refill derived tensors in
-  place (captured CUDA graphs keep their startup addresses); nothing moves
-  them back.
+  cold start does, except modules whose tensors another model owns (a target
+  lm_head shared into a draft): that model's updates refresh them. Post-load
+  processing has to refill derived tensors in place (captured CUDA graphs
+  keep their startup addresses); nothing moves them back.
 
 A reload is exactly as correct as a cold start on the delivered weights: no
 module is skipped because it "received nothing" (a loader may bypass the
@@ -191,17 +192,20 @@ def _check_supported(model: torch.nn.Module) -> None:
 
 def record_checkpoint_layout(model: torch.nn.Module) -> None:
     """Cold start, before post-load processing: remember each tensor's
-    checkpoint layout and loader metadata, which tensors this model owns, and
-    which parameter names hold checkpoint tensors.
+    checkpoint layout and loader metadata, which tensors this model owns (those
+    no other model recorded first), and which parameter names hold checkpoint
+    tensors.
     Runs once; reloads reuse the cold-start record."""
     if getattr(model, "_direct_layout_recorded", False) or is_weights_pre_processed():
         return  # pre-processed weights are already in runtime layout
     _check_supported(model)
     model._direct_layout_recorded = True
+    # a model owns the tensors it records; another model's (already recorded)
+    # are refreshed by that model's updates
     model._ckpt_tensor_ids = set()
     for _, t in _loadable_tensors(model):
-        model._ckpt_tensor_ids.add(id(t))
         if not t.is_meta and not hasattr(t, "_ckpt_layout"):
+            model._ckpt_tensor_ids.add(id(t))
             t._ckpt_layout = (tuple(t.shape), t.stride(), t.dtype, t.storage_offset())
             t._ckpt_loader_attrs = {
                 k: t.__dict__[k] for k in _LOADER_ATTRS if k in t.__dict__
@@ -236,6 +240,17 @@ def _check_params_kept(model: torch.nn.Module) -> None:
         )
 
 
+def _foreign_modules(model: torch.nn.Module) -> set[torch.nn.Module]:
+    """Modules all of whose own tensors another model owns: that model's
+    updates refresh them, so this model's finish must not process them."""
+    owned = model._ckpt_tensor_ids
+    return {
+        module
+        for module in model.modules()
+        if (ids := {id(t) for _, t in _own_tensors(module)}) and not ids & owned
+    }
+
+
 def _checkpoint_views(
     model: torch.nn.Module,
 ) -> list[tuple[torch.Tensor, torch.Tensor]]:
@@ -247,16 +262,10 @@ def _checkpoint_views(
         layout = getattr(t, "_ckpt_layout", None)
         if layout is None:
             continue  # no layout: created by post-load processing, derived
+        if id(t) not in model._ckpt_tensor_ids:
+            continue  # another model's (a target lm_head shared into a draft)
         if (tuple(t.shape), t.stride(), t.dtype, t.storage_offset()) == layout:
             continue
-        if id(t) not in model._ckpt_tensor_ids:
-            # shared from another model after this one's cold start (a draft
-            # sharing the target's lm_head): this model's finish would rerun
-            # its post-load processing on bytes this update may not resend
-            raise RuntimeError(
-                f"direct reload: {name} is shared from another model and its "
-                "post-load processing changed its layout"
-            )
         shape, stride, dtype, offset = layout
         storage = t.untyped_storage()
         span = storage_extent(torch.empty_strided(shape, stride, device="meta"))
@@ -315,10 +324,13 @@ def finish_direct_reload(
     # One-shot "already processed" guards would make the rerun below a no-op
     # and leave the freshly written checkpoint layout in place. Only quant
     # methods' guards: other modules set it for other reasons.
+    foreign = _foreign_modules(model)
     for module in model.modules():
-        if isinstance(getattr(module, "quant_method", None), QuantizeMethodBase):
+        if module not in foreign and isinstance(
+            getattr(module, "quant_method", None), QuantizeMethodBase
+        ):
             module.__dict__.pop("_already_called_process_weights_after_loading", None)
 
     with keeping_addresses(True):
-        process_weights_after_loading(model, model_config, device)
+        process_weights_after_loading(model, model_config, device, foreign)
     model._direct_reload_pending = False
