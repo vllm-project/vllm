@@ -30,7 +30,6 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
 from vllm.model_executor.model_loader.reload import (
     direct,
     finish_reload,
-    lifecycle,
     start_reload,
 )
 from vllm.model_executor.model_loader.reload.direct import (
@@ -433,31 +432,13 @@ def test_retry_after_aborted_update_matches_cold_start():
     _assert_same(_state(model), _state(_cold_start(_checkpoint(1.01))))
 
 
-def test_finish_reload_uses_the_mode_start_reload_began(monkeypatch):
+def test_start_and_finish_reload_run_direct_reload():
     model = _cold_start(_checkpoint())
     before = _state(model)
     start_reload(model)
-    monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
     model.load_weights(_checkpoint().items())
     finish_reload(model, _MODEL_CONFIG, _DEVICE)
     _assert_same(_state(model), before, addresses=True)
-
-
-def test_layerwise_finish_does_not_keep_addresses(monkeypatch):
-    # a layerwise update finishes layerwise even if the env says direct by then
-    model = _cold_start(_checkpoint())
-    monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
-    monkeypatch.setattr(lifecycle, "initialize_layerwise_reload", lambda model: None)
-    kept = []
-    monkeypatch.setattr(
-        lifecycle,
-        "finalize_layerwise_reload",
-        lambda *args: kept.append(direct.keep_addresses()),
-    )
-    start_reload(model)
-    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
-    finish_reload(model, _MODEL_CONFIG, _DEVICE)
-    assert kept == [False]
 
 
 def test_finish_keeps_guards_of_modules_without_quant_method():
@@ -471,7 +452,7 @@ def test_finish_keeps_guards_of_modules_without_quant_method():
 
 
 def test_finish_retry_after_failed_direct_finish_raises(monkeypatch):
-    # a retried finish must not fall back to layerwise and report success
+    # some modules may already be processed: only a new full update repairs it
     model = _cold_start(_checkpoint())
     start_reload(model)
     model.load_weights(_checkpoint(1.01).items())
@@ -482,7 +463,7 @@ def test_finish_retry_after_failed_direct_finish_raises(monkeypatch):
     monkeypatch.setattr(model.nvfp4.quant_method, "fn", fail)
     with pytest.raises(ValueError, match="boom"):
         finish_reload(model, _MODEL_CONFIG, _DEVICE)
-    with pytest.raises(RuntimeError, match="previous finish failed"):
+    with pytest.raises(RuntimeError, match="finish without a begin"):
         finish_reload(model, _MODEL_CONFIG, _DEVICE)
     assert direct_reload_pending(model)
 
@@ -532,17 +513,6 @@ def test_draft_leaves_tensors_shared_from_the_target_to_it():
     assert _ptrs(_state(target)) == target_ptrs
     own = [n for n in _state(draft) if not n.startswith("proj.")]
     _assert_same(_state(draft), _state(_cold_start(new_draft)), names=own)
-
-
-def test_layerwise_start_refused_while_direct_update_pending(monkeypatch):
-    model = _cold_start(_checkpoint())
-    start_reload(model)
-    monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
-    monkeypatch.setattr(
-        lifecycle, "initialize_layerwise_reload", lambda model: pytest.fail("ran")
-    )
-    with pytest.raises(RuntimeError, match="direct update is pending"):
-        start_reload(model)
 
 
 def test_replace_parameter_keeps_the_target_checkpoint_layout():

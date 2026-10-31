@@ -1,48 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Direct weight reload.
+"""Direct weight reload (``VLLM_RELOAD_MODE=direct``).
 
-Instead of moving layers to meta and rebuilding them, the loader writes
-checkpoint-format tensors straight into the live tensors and the cold-start
-post-load processing runs once at the end:
+Cold start records each tensor's checkpoint layout before post-load processing
+(PWAL). ``begin`` views re-laid-out tensors back to that layout on their
+storage, the loaders write the checkpoint in place, and ``finish`` reruns PWAL,
+which must keep addresses (captured CUDA graphs) and refill derived tensors.
+Between ``begin`` and a successful ``finish`` the model must not run; there is
+no rollback, the next full update repairs it.
 
-- cold start records each tensor's checkpoint layout (before post-load
-  processing);
-- ``begin`` views tensors whose layout post-load processing changed back to
-  their checkpoint layout, on the same storage, and restores the loader
-  metadata (packed/input/output dims) post-load processing retagged;
-- ``finish`` reruns ``process_weights_after_loading`` for every module, as
-  cold start does, except modules whose tensors another model owns (a target
-  lm_head shared into a draft): that model's updates refresh them. Post-load
-  processing has to refill derived tensors in place (captured CUDA graphs
-  keep their startup addresses); nothing moves them back.
-
-A reload is exactly as correct as a cold start on the delivered weights: no
-module is skipped because it "received nothing" (a loader may bypass the
-parameter's ``weight_loader``, and post-processing may read other modules'
-tensors).
-
-Delivery contract: an update must deliver every checkpoint tensor of each
-module whose post-load processing changes the tensor's layout or is not
-idempotent (it would convert the kept runtime bytes again). A tensor without
-such processing (e.g. an embedding table the trainer keeps frozen) may be left
-out and keeps its bytes. Nothing checks this contract here.
-
-Post-load processing must keep every checkpoint tensor registered under its
-checkpoint name (`replace_parameter`, `retire_parameter`): a reload loads it
-by that name.
-
-Between ``begin`` and a successful ``finish`` the model holds checkpoint-layout
-bytes and must not run; `direct_reload_pending` reports this. There is no
-rollback: after a failed update, the next full update repairs the model.
-
-Selected with ``VLLM_RELOAD_MODE=direct``; `start_reload` and `finish_reload`
-(``lifecycle.py``) dispatch on it.
+Delivery contract (not checked here): an update delivers every checkpoint
+tensor of each module whose PWAL changes its layout or is not idempotent.
 """
 
 from collections.abc import Iterator
-from contextlib import contextmanager
-from contextvars import ContextVar
 
 import torch
 
@@ -50,7 +21,11 @@ import vllm.envs as envs
 from vllm.config import ModelConfig, get_current_vllm_config_or_none
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
-from vllm.model_executor.utils import is_weights_pre_processed, storage_extent
+from vllm.model_executor.utils import (
+    is_weights_pre_processed,
+    storage_extent,
+    storage_view,
+)
 
 logger = init_logger(__name__)
 
@@ -59,8 +34,6 @@ __all__ = [
     "direct_reload_enabled",
     "direct_reload_pending",
     "finish_direct_reload",
-    "keep_addresses",
-    "keeping_addresses",
     "record_checkpoint_layout",
 ]
 
@@ -85,30 +58,14 @@ def direct_reload_enabled() -> bool:
     return envs.VLLM_RELOAD_MODE == "direct"
 
 
-_keep_addresses: ContextVar[bool | None] = ContextVar("keep_addresses", default=None)
-
-
-@contextmanager
-def keeping_addresses(keep: bool):
-    """Fix `keep_addresses` for a finish, whatever the env says by then."""
-    token = _keep_addresses.set(keep)
-    try:
-        yield
-    finally:
-        _keep_addresses.reset(token)
-
-
-def keep_addresses() -> bool:
-    """Whether `replace_parameter` writes into existing storage: at a direct
-    cold start and during a direct finish, never during a layerwise finish."""
-    keep = _keep_addresses.get()
-    return direct_reload_enabled() if keep is None else keep
-
-
 def direct_reload_pending(model: torch.nn.Module) -> bool:
     """True between ``begin`` and a successful ``finish``: the model holds
     checkpoint-layout bytes and must not run."""
     return model.__dict__.get("_direct_reload_pending", False)
+
+
+def _layout(t: torch.Tensor) -> tuple:
+    return tuple(t.shape), t.stride(), t.dtype, t.storage_offset()
 
 
 def _own_tensors(module: torch.nn.Module) -> Iterator[tuple[str, torch.Tensor]]:
@@ -196,17 +153,16 @@ def record_checkpoint_layout(model: torch.nn.Module) -> None:
     no other model recorded first), and which parameter names hold checkpoint
     tensors.
     Runs once; reloads reuse the cold-start record."""
-    if getattr(model, "_direct_layout_recorded", False) or is_weights_pre_processed():
+    if hasattr(model, "_ckpt_param_names") or is_weights_pre_processed():
         return  # pre-processed weights are already in runtime layout
     _check_supported(model)
-    model._direct_layout_recorded = True
     # a model owns the tensors it records; another model's (already recorded)
     # are refreshed by that model's updates
     model._ckpt_tensor_ids = set()
     for _, t in _loadable_tensors(model):
         if not t.is_meta and not hasattr(t, "_ckpt_layout"):
             model._ckpt_tensor_ids.add(id(t))
-            t._ckpt_layout = (tuple(t.shape), t.stride(), t.dtype, t.storage_offset())
+            t._ckpt_layout = _layout(t)
             t._ckpt_loader_attrs = {
                 k: t.__dict__[k] for k in _LOADER_ATTRS if k in t.__dict__
             }
@@ -222,16 +178,12 @@ def _check_params_kept(model: torch.nn.Module) -> None:
     """Raise if post-load processing registered a new parameter under a
     checkpoint name: `begin` cannot view it back, and the loader would write
     checkpoint bytes into its runtime layout."""
-    replaced = []
-    for name in model._ckpt_param_names:
-        module_name, _, local = name.rpartition(".")
-        try:
-            module = model.get_submodule(module_name)
-        except AttributeError:
-            continue
-        param = module._parameters.get(local)
-        if param is not None and not hasattr(param, "_ckpt_layout"):
-            replaced.append(name)
+    names = set(model._ckpt_param_names)
+    replaced = [
+        name
+        for name, p in model.named_parameters(remove_duplicate=False)
+        if name in names and not hasattr(p, "_ckpt_layout")
+    ]
     if replaced:
         raise RuntimeError(
             f"direct reload: post-load processing replaced the parameter object "
@@ -264,7 +216,7 @@ def _checkpoint_views(
             continue  # no layout: created by post-load processing, derived
         if id(t) not in model._ckpt_tensor_ids:
             continue  # another model's (a target lm_head shared into a draft)
-        if (tuple(t.shape), t.stride(), t.dtype, t.storage_offset()) == layout:
+        if _layout(t) == layout:
             continue
         shape, stride, dtype, offset = layout
         storage = t.untyped_storage()
@@ -275,9 +227,7 @@ def _checkpoint_views(
                 f"direct reload: {name} storage has {storage.nbytes()} bytes, "
                 f"its checkpoint layout needs {need}"
             )
-        view = torch.empty(0, dtype=dtype, device=t.device)
-        view.set_(storage, offset, shape, stride)
-        views.append((t, view))
+        views.append((t, storage_view(storage, offset, shape, stride, dtype)))
     return views
 
 
@@ -288,13 +238,14 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
     Everything that can refuse the reload is checked first and raises with
     the model untouched. Once this returns, the model holds checkpoint-layout
     bytes until a finish succeeds."""
-    if not getattr(model, "_direct_layout_recorded", False):
+    if not hasattr(model, "_ckpt_param_names"):
         raise RuntimeError("direct reload: no checkpoint layout was recorded")
     _check_params_kept(model)
     views = _checkpoint_views(model)
 
     # nothing above modified the model
     model._direct_reload_pending = True
+    model._direct_reload_begun = True  # one finish per begin
     for t, view in views:
         t.data = view  # no zeroing: the full sync rewrites the checkpoint region
     for _, t in _loadable_tensors(model):
@@ -318,6 +269,12 @@ def finish_direct_reload(
     """Rerun cold-start post-load processing."""
     from vllm.model_executor.model_loader.utils import process_weights_after_loading
 
+    if not model.__dict__.pop("_direct_reload_begun", False):
+        # e.g. a retry after a failed finish, which may have processed some
+        # modules already: only a new full update repairs the model
+        raise RuntimeError(
+            "direct reload: finish without a begin; start a new full update"
+        )
     if device.type != "cpu":
         torch.accelerator.synchronize()  # engines may write on other streams
 
@@ -331,6 +288,5 @@ def finish_direct_reload(
         ):
             module.__dict__.pop("_already_called_process_weights_after_loading", None)
 
-    with keeping_addresses(True):
-        process_weights_after_loading(model, model_config, device, foreign)
+    process_weights_after_loading(model, model_config, device, foreign)
     model._direct_reload_pending = False

@@ -91,8 +91,7 @@ def reload_weights(
     logger.info_once("Reloading weights inplace...")
     if is_checkpoint_format:
         # load weights from checkpoint/ original model format
-        device_config = vllm_config.device_config
-        device = torch.device(load_config.device or device_config.device)
+        device = torch.device(load_config.device or vllm_config.device_config.device)
         start_reload(model)
         loaded_weights = model.load_weights(weights_iterator)
         finish_reload(model, model_config, device)

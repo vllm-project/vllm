@@ -67,7 +67,7 @@ from vllm.model_executor.layers.quantization.online.lm_head import (
     share_source_lm_heads,
 )
 from vllm.model_executor.model_loader import get_model_loader
-from vllm.model_executor.model_loader.reload.direct import direct_reload_pending
+from vllm.model_executor.model_loader.reload.direct import direct_reload_enabled
 from vllm.model_executor.model_loader.weight_checksum import (
     compute_tensor_digests,
     zero_weights,
@@ -1632,13 +1632,17 @@ class Worker(WorkerBase):
                     local_update_info = update_info
                 self.weight_transfer_engine.update_weights(local_update_info)
             except BaseException:
-                self._weight_update_active = False
-                self.weight_transfer_engine.reset_weight_update_target()
-                if self._weight_update_is_draft and (
-                    (draft_model := self.get_draft_model()) is not None
-                ):
-                    restore_quantized_lm_heads(draft_model, refresh=False)
+                self._end_weight_update(refresh=False)
                 raise
+
+    def _end_weight_update(self, refresh: bool) -> None:
+        assert self.weight_transfer_engine is not None
+        self._weight_update_active = False
+        self.weight_transfer_engine.reset_weight_update_target()
+        if self._weight_update_is_draft and (
+            (draft_model := self.get_draft_model()) is not None
+        ):
+            restore_quantized_lm_heads(draft_model, refresh=refresh)
 
     def finish_weight_update(self) -> None:
         """Finish the current weight update session."""
@@ -1654,25 +1658,12 @@ class Worker(WorkerBase):
             try:
                 self.weight_transfer_engine.finish_weight_update()
             except BaseException:
-                model = (
-                    self.get_draft_model()
-                    if self._weight_update_is_draft
-                    else self.get_model()
-                )
-                if model is not None and direct_reload_pending(model):
+                if direct_reload_enabled():
                     # a failed direct finish cannot be retried: end the
                     # session so that a new full update can start
-                    self._weight_update_active = False
-                    self.weight_transfer_engine.reset_weight_update_target()
-                    if self._weight_update_is_draft:
-                        restore_quantized_lm_heads(model, refresh=False)
+                    self._end_weight_update(refresh=False)
                 raise
-            self.weight_transfer_engine.reset_weight_update_target()
-            self._weight_update_active = False
-            if self._weight_update_is_draft and (
-                (draft_model := self.get_draft_model()) is not None
-            ):
-                restore_quantized_lm_heads(draft_model)
+            self._end_weight_update(refresh=True)
 
         # Weight transfer bypasses GPUModelRunner.reload_weights().
         if not self._weight_update_is_draft:

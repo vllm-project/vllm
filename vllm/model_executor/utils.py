@@ -68,37 +68,6 @@ def set_weight_attrs(
         setattr(weight, key, value)
 
 
-def _view_in_place(
-    old_param: torch.Tensor, new_tensor: torch.Tensor
-) -> torch.Tensor | None:
-    """Under direct reload, a view of ``old_param``'s storage shaped like
-    ``new_tensor`` when it fits there, so the address survives a layout change.
-    None when it does not fit or ``new_tensor`` already lives in that storage."""
-    from vllm.model_executor.model_loader.reload.direct import keep_addresses
-
-    if (
-        not keep_addresses()
-        or new_tensor.device != old_param.device
-        or old_param.is_meta
-    ):
-        return None
-    shape, stride = tuple(new_tensor.shape), new_tensor.stride()
-    if any(st == 0 and s > 1 for s, st in zip(shape, stride)):
-        return None  # overlapping (expanded) layout: cannot be written in place
-    storage = old_param.untyped_storage()
-    if new_tensor.untyped_storage().data_ptr() == storage.data_ptr():
-        return None  # e.g. a transposed view of the same storage: rebind keeps it
-    itemsize = new_tensor.element_size()
-    offset = old_param.storage_offset() * old_param.element_size()
-    if (
-        offset % itemsize
-        or offset + storage_extent(new_tensor) * itemsize > storage.nbytes()
-    ):
-        return None
-    view = torch.empty(0, dtype=new_tensor.dtype, device=old_param.device)
-    return view.set_(storage, offset // itemsize, shape, stride)
-
-
 def storage_extent(t: torch.Tensor) -> int:
     """Number of elements spanned by ``t`` in its storage."""
     if t.numel() == 0:
@@ -106,24 +75,49 @@ def storage_extent(t: torch.Tensor) -> int:
     return 1 + sum((n - 1) * s for n, s in zip(t.shape, t.stride()))
 
 
-def _in_own_storage(old: torch.Tensor, new: torch.Tensor) -> torch.Tensor:
+def storage_view(
+    storage: torch.UntypedStorage,
+    offset: int,
+    shape: tuple[int, ...],
+    stride: tuple[int, ...],
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """A ``dtype`` tensor on ``storage`` at element ``offset``. ``set_`` does
+    not bounds-check: callers check that the view fits."""
+    view = torch.empty(0, dtype=dtype, device=storage.device)
+    return view.set_(storage, offset, shape, stride)
+
+
+def _in_own_storage(
+    old: torch.Tensor, new: torch.Tensor, whole_storage: bool = False
+) -> torch.Tensor:
     """``new`` copied into the bytes ``old`` spans if it fits, so the loaded
     storage is kept (with its ``data_ptr``); else ``new`` itself. An equal-size
     result fits too: a repack to the same byte count (e.g. FP8 → Marlin int32)
-    then keeps the address captured CUDA graphs read."""
+    then keeps the address captured CUDA graphs read.
+
+    With ``whole_storage`` (direct reload), ``new`` may use the rest of
+    ``old``'s storage, so a weight that post-load processing grew keeps its
+    address on a reload too."""
     storage = old.untyped_storage()
     offset, size = old.storage_offset() * old.element_size(), new.element_size()
+    room = (
+        storage.nbytes() - offset
+        if whole_storage
+        else storage_extent(old) * old.element_size()
+    )
     if (
         new.numel() == 0
         or old.device != new.device
         or new.untyped_storage().data_ptr() == storage.data_ptr()
         or storage_extent(new) != new.numel()  # overlapping or with gaps
-        or storage_extent(old) != old.numel()  # its gaps may hold another tensor's data
+        # its gaps may hold another tensor's data
+        or (not whole_storage and storage_extent(old) != old.numel())
         or offset % size
-        or new.numel() * size > storage_extent(old) * old.element_size()
+        or new.numel() * size > room
     ):
         return new
-    view = new.new_empty(0).set_(storage, offset // size, new.shape, new.stride())
+    view = storage_view(storage, offset // size, new.shape, new.stride(), new.dtype)
     return view.copy_(new)
 
 
@@ -200,14 +194,16 @@ def replace_parameter(
             and old_param.device == new_tensor.device
         ):
             old_param.data.copy_(new_tensor)
-        elif (view := _view_in_place(old_param, new_tensor)) is not None:
-            # direct reload: keep the address, write into the existing storage
-            view.copy_(new_tensor)
-            old_param.data = view
         elif getattr(getattr(layer, "quant_method", None), "uses_meta_device", False):
             old_param.data = new_tensor  # online quantization frees the source
         else:
-            old_param.data = _in_own_storage(old_param, new_tensor)
+            from vllm.model_executor.model_loader.reload.direct import (
+                direct_reload_enabled,
+            )
+
+            old_param.data = _in_own_storage(
+                old_param, new_tensor, whole_storage=direct_reload_enabled()
+            )
         for attr_name, attr in new_tensor_attrs.items():
             setattr(old_param, attr_name, attr)
         return
