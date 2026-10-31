@@ -1559,6 +1559,96 @@ class TestBidirectionalManager:
         sent = mgr_a._control._inbound_outbound["B:2"]._outbox  # type: ignore[attr-defined]  # _LoopbackControl
         assert [m[TYPE_KEY] for m in sent] == [ConnectMsg.TYPE]
 
+    def test_failed_registration_drops_the_peer_session(self, monkeypatch):
+        """B registered A and waits for A's ack when A fails to register B.
+
+        B must drop that session: a reconnect from A landing in it would be
+        acked without B's ConnectMsg, so A would look B up without having
+        registered it. Real managers on real ZMQ transports; only the NIXL
+        agent is faked.
+        """
+        from unittest.mock import MagicMock
+
+        import zmq
+
+        from tests.v1.kv_offload.conftest import make_offloading_config
+        from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
+        from vllm.v1.kv_offload.tiering.p2p.data import nixl as nixl_module
+
+        from .test_zmq_transport import _free_port
+
+        agents: list[MagicMock] = []
+
+        def make_agent(name, _config):
+            agent = MagicMock()
+            agent.get_agent_metadata.return_value = name.encode()
+            agent.add_remote_agent.side_effect = lambda metadata: metadata.decode()
+            agents.append(agent)
+            return agent
+
+        monkeypatch.setattr(nixl_module, "_NixlAgent", make_agent)
+        monkeypatch.setattr(nixl_module, "_NixlAgentConfig", MagicMock())
+        warnings: list[str] = []
+        monkeypatch.setattr(
+            manager_module.logger,
+            "warning",
+            lambda msg, *args, **_: warnings.append(msg % args if args else msg),
+        )
+        spec = CPUOffloadingSpec(make_offloading_config())
+        managers: list[P2PSecondaryTierManager] = []
+
+        def build() -> tuple[P2PSecondaryTierManager, str]:
+            for _ in range(8):
+                port = _free_port()
+                try:
+                    mgr = P2PSecondaryTierManager(
+                        spec,
+                        memoryview(np.zeros((8, 1024), dtype=np.uint8)),
+                        host="127.0.0.1",
+                        port=port,
+                    )
+                except zmq.ZMQError:
+                    continue
+                managers.append(mgr)
+                return mgr, f"127.0.0.1:{port}"
+            pytest.fail("could not bind a ZMQ port")
+
+        def poll_until(condition) -> bool:
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                for mgr in managers:
+                    list(mgr.get_finished_jobs())
+                if condition():
+                    return True
+                time.sleep(0.005)
+            return False
+
+        try:
+            mgr_a, peer_a = build()
+            agent_a = agents[-1]
+            agent_a.add_remote_agent.side_effect = RuntimeError(
+                "NIXL_ERR_INVALID_PARAM"
+            )
+            mgr_b, peer_b = build()
+            host, port = peer_b.rsplit(":", 1)
+            mgr_a.on_new_request(
+                ReqContext(
+                    req_id="req-1",
+                    kv_transfer_params=_remote_kv_source_kv_params(host, int(port)),
+                )
+            )
+            assert poll_until(lambda: agent_a.add_remote_agent.called)
+            assert poll_until(lambda: peer_b not in mgr_a._sessions)
+            assert poll_until(lambda: peer_a not in mgr_b._sessions), (
+                "B kept its session for A"
+            )
+            assert any(
+                peer_b in w and w.endswith("data-plane fault #1") for w in warnings
+            )
+        finally:
+            for mgr in managers:
+                mgr.shutdown()
+
     def test_lookup_expiry_allows_zmq_reconnect(self, lookup_clock):
         """The peer must retire the timed-out session before a new handshake."""
         import zmq
