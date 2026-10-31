@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
 import math
 from collections.abc import Sequence
 
@@ -18,6 +19,15 @@ from vllm.platforms import current_platform
 
 from .BlockScaledMMLinearKernel import Fp8BlockScaledMMLinearKernel
 from .ScaledMMLinearKernel import FP8ScaledMMLinearKernel, FP8ScaledMMLinearLayerConfig
+
+
+@functools.cache
+def xpu_has_native_fp8() -> bool:
+    # Xe3p GPUs (Crescent Island, Nova Lake-P) run FP8 GEMMs natively; earlier XPUs
+    # convert FP8 to 16-bit before the GEMM. The check is missing from older
+    # vllm-xpu-kernels builds; treat those as no native FP8.
+    is_xe3p_arch = getattr(torch.ops._xpu_C, "is_xe3p_arch", None)
+    return is_xe3p_arch is not None and bool(is_xe3p_arch())
 
 
 class XPUW8A8FP8LinearKernel(FP8ScaledMMLinearKernel):
