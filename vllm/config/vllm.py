@@ -725,41 +725,6 @@ class VllmConfig:
 
     @property
     def use_v2_model_runner(self) -> bool:
-        if self.attention_config.hisparse_config is not None:
-            if envs.VLLM_USE_V2_MODEL_RUNNER is False:
-                raise ValueError(
-                    "HiSparse requires Model Runner V2; remove "
-                    "VLLM_USE_V2_MODEL_RUNNER=0."
-                )
-            return True
-
-        speculative_config = getattr(self, "speculative_config", None)
-        custom_method = getattr(speculative_config, "custom_method", None)
-        if custom_method is not None:
-            requires_v2 = f"Custom speculative method '{custom_method}' requires"
-            if envs.VLLM_USE_V2_MODEL_RUNNER is False:
-                raise ValueError(
-                    f"{requires_v2} Model Runner V2; remove VLLM_USE_V2_MODEL_RUNNER=0."
-                )
-            if not HAS_TRITON:
-                raise ValueError(
-                    f"{requires_v2} Model Runner V2, which requires Triton."
-                )
-            if unsupported := self._get_v2_model_runner_unsupported_features():
-                raise ValueError(
-                    f"{requires_v2} Model Runner V2, which does not yet support "
-                    f"{', '.join(unsupported)}."
-                )
-            return True
-
-        if getattr(self, "watermark_config", None) is not None:
-            if envs.VLLM_USE_V2_MODEL_RUNNER is False:
-                logger.info_once(
-                    "Watermarking requires Model Runner V2 and overrides "
-                    "VLLM_USE_V2_MODEL_RUNNER=0."
-                )
-            return True
-
         use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
         if use_v2_model_runner is not None:
             return use_v2_model_runner
@@ -1263,6 +1228,55 @@ class VllmConfig:
                         f"{connector_name}; PD auxiliary output is not supported."
                     )
 
+    def _verify_direct_reload_compat(self) -> None:
+        """Reject configurations that direct weight reload cannot support."""
+        # not `direct_reload_enabled()`: importing it would load the model
+        # loaders into every process that builds a config
+        if envs.VLLM_RELOAD_MODE != "direct":
+            return
+        from vllm.model_executor.layers.quantization.online.base import (
+            OnlineQuantizationConfig,
+        )
+
+        offload = self.offload_config
+        if (
+            offload.offload_backend != "auto"
+            or offload.prefetch.offload_group_size > 0
+            or offload.uva.cpu_offload_gb > 0
+        ):
+            # CPU/UVA offload gives parameters new storage on every post-load
+            # processing; prefetch offload shares one buffer between layers
+            raise ValueError("Direct reload does not support weight offloading.")
+        model_config = self.model_config
+        if model_config is not None and model_config.quantization == "torchao":
+            # its load_weights runs a layerwise reload, and its post-load
+            # processing replaces the weight parameter
+            raise ValueError("Direct reload does not support torchao quantization.")
+        if isinstance(self.quant_config, OnlineQuantizationConfig) or (
+            getattr(self.quant_config, "online_quantization_config", None) is not None
+        ):
+            # `finish` clears the guard that keeps online quantization from
+            # quantizing its already-quantized bytes again
+            raise ValueError("Direct reload does not support online quantization.")
+        if self.lora_config is not None:
+            # LoRA wraps layers after cold start; their wrappers forward
+            # `quant_method`, so a rerun would process each base layer twice
+            raise ValueError("Direct reload does not support LoRA.")
+        spec = self.speculative_config
+        if spec is not None and spec.draft_lm_head_quantization is not None:
+            # after `begin` the draft's quantized lm_head is a view of the target
+            # lm_head's storage: post-load processing would write it there
+            raise ValueError(
+                "Direct reload does not support draft_lm_head_quantization."
+            )
+        transfer = self.weight_transfer_config
+        if transfer is not None and transfer.backend == "sharded_rdt":
+            # its replay plan is baked by a layerwise (meta) dry run
+            raise ValueError(
+                "Direct reload does not support the sharded_rdt weight-transfer "
+                "backend. Use VLLM_RELOAD_MODE=layerwise or another backend."
+            )
+
     def _verify_kv_transfer_compat(self) -> None:
         """Reject configurations that silently corrupt KV transfers."""
         if (
@@ -1559,6 +1573,11 @@ class VllmConfig:
         self.parallel_config.set_dcp_defaults()
 
         if self.model_config is not None:
+            # Normalize EPLB num_redundant_experts before verification.
+            self.parallel_config.compute_eplb_num_redundant_experts(
+                self.model_config.get_num_experts()
+            )
+
             self.model_config.verify_with_parallel_config(self.parallel_config)
             self.model_config.verify_dual_chunk_attention_config(self.load_config)
 
@@ -1619,6 +1638,7 @@ class VllmConfig:
             self.quant_config = VllmConfig._get_quantization_config(
                 self.model_config, self.load_config
             )
+        self._verify_direct_reload_compat()
 
         # "dummy" reads no weights at all, and the sharded formats read a vLLM
         # state dict, which stores tied word embeddings under the lm_head only.
@@ -3155,6 +3175,12 @@ class VllmConfig:
     def _get_v1_model_runner_unsupported_features(self) -> list[str]:
         unsupported: list[str] = []
 
+        if self.attention_config.hisparse_config is not None:
+            unsupported.append("HiSparse")
+
+        if self.watermark_config is not None:
+            unsupported.append("watermarking")
+
         # PCP runtime support is implemented only by the V2 model runner.
         if self.parallel_config.prefill_context_parallel_size > 1:
             unsupported.append("prefill context parallel")
@@ -3180,6 +3206,11 @@ class VllmConfig:
                 XPressSpeculatorConfig,
             )
 
+            if self.speculative_config.custom_method is not None:
+                unsupported.append(
+                    "custom speculative method "
+                    f"'{self.speculative_config.custom_method}'"
+                )
             if self.speculative_config.method == "dspark":
                 unsupported.append("dspark speculative decoding")
             elif isinstance(
