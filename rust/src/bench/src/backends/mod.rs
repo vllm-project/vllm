@@ -46,7 +46,26 @@ pub struct ChatChoice {
 
 #[derive(Deserialize)]
 pub struct ChatDelta {
+    pub role: Option<String>,
     pub content: Option<String>,
+    pub reasoning: Option<String>,
+    pub tool_calls: Option<Vec<serde_json::Value>>,
+    pub function_call: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+impl ChatDelta {
+    /// Whether this delta carries generated output rather than opening metadata.
+    pub fn has_streamed_output(&self) -> bool {
+        self.content
+            .as_ref()
+            .is_some_and(|content| !content.is_empty() || self.role.is_none())
+            || self.reasoning.as_ref().is_some_and(|reasoning| !reasoning.is_empty())
+            || self.tool_calls.as_ref().is_some_and(|tool_calls| !tool_calls.is_empty())
+            || self
+                .function_call
+                .as_ref()
+                .is_some_and(|function_call| !function_call.is_empty())
+    }
 }
 
 #[derive(Deserialize)]
@@ -320,5 +339,28 @@ mod tests {
 
         assert_eq!(output.server_queue_time, None);
         assert_eq!(output.server_ttft, Some(0.5));
+    }
+
+    #[test]
+    fn chat_delta_distinguishes_output_from_role_metadata() {
+        for (delta, expected) in [
+            (serde_json::json!({}), false),
+            (
+                serde_json::json!({"role": "assistant", "content": ""}),
+                false,
+            ),
+            (serde_json::json!({"reasoning": ""}), false),
+            (serde_json::json!({"tool_calls": []}), false),
+            (serde_json::json!({"function_call": {}}), false),
+            (serde_json::json!({"content": ""}), true),
+            (serde_json::json!({"content": "text"}), true),
+            (serde_json::json!({"reasoning": "thought"}), true),
+            (serde_json::json!({"tool_calls": [{}]}), true),
+            (serde_json::json!({"function_call": {"name": "f"}}), true),
+        ] {
+            let delta: ChatDelta = serde_json::from_value(delta).unwrap();
+
+            assert_eq!(delta.has_streamed_output(), expected);
+        }
     }
 }
