@@ -499,10 +499,14 @@ def load_audio(
         logger.error("Failed to load audio via soundfile: %r", exc)
     except soundfile.LibsndfileError as exc:
         # libsndfile covers fewer containers than FFmpeg, so defer only on a
-        # format-detection failure; re-raise anything else (e.g. corrupt but
-        # recognised) since PyAV would hit the same corruption.
+        # format-detection failure. Anything else (e.g. corrupt but recognised)
+        # is a bad input that PyAV would reject too; report it as a client
+        # error instead of letting the RuntimeError surface as an HTTP 500.
         if exc.code not in _BAD_SF_CODES:
-            raise
+            raise ValueError(
+                "Invalid or corrupted audio data. Ensure the input is a valid "
+                "audio file (e.g. a complete WAV, FLAC, or MP3)."
+            ) from exc
 
     # PyAV is terminal: nothing left to fall back to. Normalize an FFmpeg
     # failure to ValueError; let a missing soundfile/PyAV surface its
