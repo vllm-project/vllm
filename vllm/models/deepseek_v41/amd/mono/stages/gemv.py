@@ -52,6 +52,12 @@ def ld_bf(ptr, i):
     )
 
 
+def ld_vec(ptr, i, n, f32=False, cm=0):
+    dtype = T.f32 if f32 else T.i32
+    v = bo.buffer_load(rsrc(ptr), i, vec_width=n, dtype=dtype, cache_modifier=cm)
+    return fx.Vector(v) if n > 1 else v
+
+
 def token_tiles(s):
     """A step's tokens in GEMV passes: [(first token, tokens)]. A GEMV loads its
     weights once and runs every pass on them, an x tile in LDS at a time."""
