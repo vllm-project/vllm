@@ -272,6 +272,7 @@ def test_store_accepts_block_published_by_another_writer(fs_tier, monkeypatch):
     results = drain(tier)
     assert len(results) == 1
     assert results[0].success
+    assert results[0].transfer_bytes == 0
     assert os.listdir(os.path.dirname(dest)) == [os.path.basename(dest)]
     with open(dest, "rb") as f:
         assert f.read() == published
@@ -447,11 +448,53 @@ def test_store_load_data_integrity(fs_tier, monkeypatch, use_c_ext, batch_size):
     load_results = drain(tier)
     assert len(load_results) == 1
     assert load_results[0].success
+    assert load_results[0].transfer_bytes == len(keys) * tier._block_size
 
     for i, cid in enumerate(load_chunk_ids):
         assert torch.allclose(tensor[cid], expected[i]), (
             f"Chunk {cid} data mismatch after store+load"
         )
+
+
+@pytest.mark.parametrize("use_c_ext", [True, False])
+def test_store_reports_only_newly_written_blocks(fs_tier, monkeypatch, use_c_ext):
+    """transfer_bytes counts the blocks a job wrote, not those already on disk."""
+    import vllm.v1.kv_offload.tiering.fs.io as io_mod
+
+    if use_c_ext and not io_mod._HAS_FSIO_C:
+        pytest.skip("fs_io_C extension not built")
+    monkeypatch.setattr(io_mod, "_HAS_FSIO_C", use_c_ext)
+
+    tier, tensor = fs_tier
+    tensor[:] = _page_aligned_rand_tensor(_NUM_BLOCKS, _BLOCK_ELEMENTS)
+    published = tier.file_mapper.get_file_name(key(2))
+
+    tier.submit_store(make_job(1, [key(1), key(2)], [0, 1]))
+    results = drain(tier)
+    assert len(results) == 1
+    assert results[0].success
+    assert results[0].transfer_bytes == 2 * tier._block_size
+    with open(published, "rb") as f:
+        published_bytes = f.read()
+
+    # Change block 2's source so a rewrite would show on disk.
+    tensor[1] = 1.0
+    tier.submit_store(make_job(2, [key(2), key(3)], [1, 2]))
+    results = drain(tier)
+    assert len(results) == 1
+    assert results[0].success
+    assert results[0].transfer_bytes == tier._block_size
+    with open(published, "rb") as f:
+        assert f.read() == published_bytes
+    assert os.path.exists(tier.file_mapper.get_file_name(key(3)))
+
+    # Re-storing a published prefix writes nothing.
+    tier.submit_store(make_job(3, [key(1), key(2)], [0, 1]))
+    results = drain(tier)
+    assert len(results) == 1
+    assert results[0].success
+    assert results[0].transfer_bytes == 0
+    assert tier._job_block_counts == {}
 
 
 def test_store_load_roundtrip_without_o_direct(tmp_path, monkeypatch):
@@ -591,11 +634,13 @@ def test_out_of_bounds_block_id_smoke(fs_tier, monkeypatch, use_c_ext):
     store_results = drain(tier)
     assert len(store_results) == 1
     assert not store_results[0].success
+    assert store_results[0].transfer_bytes is None
 
     tier.submit_load(make_job(2, [key(1)], [out_of_bounds_bid], is_promotion=True))
     load_results = drain(tier)
     assert len(load_results) == 1
     assert not load_results[0].success
+    assert load_results[0].transfer_bytes is None
 
 
 @pytest.mark.parametrize("use_c_ext", [True, False])
@@ -997,6 +1042,63 @@ def test_cascade_store_emits_fs_event_through_tiering_manager(tmp_path):
         assert not fs_events[0].removed
     finally:
         tier.shutdown()
+
+
+def test_cascade_store_feeds_backpressure_only_written_bytes(tmp_path):
+    """Stores reaching the fs tier through the TieringOffloadingManager feed the
+    backpressure detector the bytes they wrote: a fully new batch counts in
+    full, a partially published one only its new blocks, and a batch already
+    on disk is not a latency sample at all."""
+    from vllm.v1.kv_offload.tiering.backpressure import EMABackpressureDetector
+    from vllm.v1.kv_offload.tiering.manager import (
+        CPUPrimaryTierOffloadingManager,
+        TieringOffloadingManager,
+    )
+
+    tensor = _page_aligned_rand_tensor(8, _BLOCK_ELEMENTS)
+    mock_region = MagicMock()
+    mock_region.create_kv_memoryview.return_value = memoryview(tensor.numpy())
+    primary = CPUPrimaryTierOffloadingManager(num_chunks=8, mmap_region=mock_region)
+    detector = EMABackpressureDetector(high_water_s=1.0, low_water_s=0.5)
+    tier = FileSystemTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=primary.get_kv_memoryview(),
+        tier_type="fs",
+        root_dir=str(tmp_path),
+        backpressure_detector=detector,
+    )
+    manager = TieringOffloadingManager(primary_tier=primary, secondary_tiers=[tier])
+    block_size = tier._block_size
+
+    update_bytes: list[int] = []
+    real_update = detector.update
+
+    def recording_update(submit_time: float, num_bytes: int) -> None:
+        update_bytes.append(num_bytes)
+        real_update(submit_time, num_bytes)
+
+    detector.update = recording_update  # type: ignore[method-assign]
+
+    # Blocks another instance already published to the shared directory.
+    for k in (key(3), key(5), key(6)):
+        path = tier.file_mapper.get_file_name(k)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(bytes(block_size))
+
+    try:
+        manager.on_new_request(_CTX)
+        for keys in ([key(1), key(2)], [key(3), key(4)], [key(5), key(6)]):
+            assert manager.prepare_store(keys, _CTX) is not None
+            manager.complete_store(keys, _CTX)  # cascades to the fs tier
+            tier.drain_jobs()
+            manager._process_finished_jobs()
+    finally:
+        tier.shutdown()
+
+    assert update_bytes == [2 * block_size, block_size, 0]
+    # The store that wrote nothing contributes no latency sample.
+    assert detector._completions == 2
 
 
 def test_fs_tier_cross_tp_round_trip(tmp_path):

@@ -93,11 +93,14 @@ def _store_block(
     offset: int,
     block_size: int,
     use_o_direct: bool = True,
-) -> None:
-    """Store callback: write to a temp file then atomically replace the target."""
+) -> bool:
+    """Write to a temp file then atomically replace the target.
+
+    Returns False, publishing nothing, if the target already exists.
+    """
     # Check if block already exists to avoid redundant writes
     if os.path.exists(dest_path):
-        return
+        return False
 
     tmp_path = dest_path + _get_tmp_suffix()
     # Ensure parent directories exist
@@ -130,6 +133,8 @@ def _store_block(
             # place holds this block and the store is done.
             with contextlib.suppress(OSError):
                 os.remove(tmp_path)
+            return False
+        return True
     except Exception:
         try:
             os.remove(tmp_path)
@@ -177,11 +182,17 @@ def batch_store_block(
     offsets: list[int],
     block_size: int,
     use_o_direct: bool = True,
-) -> None:
+) -> int:
     """Store a batch of KV blocks from a shared buffer to disk in one call.
 
     Each block buffer[offsets[i] : offsets[i]+block_size] is written atomically
-    to dest_paths[i] via a temp-file rename.  Raises on first error.
+    to paths[i] via a temp-file rename. Blocks whose file already exists, or
+    is published by another writer during the call, are skipped. Raises on
+    first error.
+
+    Returns:
+        The number of blocks written.
+
     """
     _validate_offsets(view, offsets, block_size)
 
@@ -190,9 +201,10 @@ def batch_store_block(
         view_slices = [view_B[x : x + block_size] for x in offsets]
         tmp_paths = [p + _get_tmp_suffix() for p in paths]
         return batch_store_block_C(tmp_paths, paths, view_slices, use_o_direct)
-    else:
-        for path, offset in zip(paths, offsets):
-            _store_block(path, view, offset, block_size, use_o_direct)
+    return sum(
+        _store_block(path, view, offset, block_size, use_o_direct)
+        for path, offset in zip(paths, offsets)
+    )
 
 
 def batch_load_block(
