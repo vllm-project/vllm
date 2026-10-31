@@ -184,7 +184,12 @@ def can_initialize(
         from vllm.platforms import current_platform
         from vllm.platforms.interface import DeviceCapability
 
-        if (
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_mi3xx
+
+            if not on_mi3xx():
+                pytest.skip("Step5 on ROCm requires MI300 or MI350")
+        elif (
             not current_platform.is_cuda()
             or current_platform.get_device_capability()
             not in (
