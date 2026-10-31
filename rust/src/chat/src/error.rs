@@ -129,7 +129,8 @@ impl Error {
             | Self::ToolChoiceFunctionNotFound { .. }
             | Self::UnsupportedChatRole { .. }
             | Self::UntrustedRequestChatTemplate
-            | Self::UnsupportedRequestChatTemplate => true,
+            | Self::UnsupportedRequestChatTemplate
+            | Self::Tokenizer(vllm_tokenizer::TokenizerError::Unavailable) => true,
             Self::Text(error) => error.is_request_validation_error(),
             Self::UnsupportedMultimodalRenderer
             | Self::UnsupportedMultimodalContent(_)
