@@ -5,6 +5,11 @@ from argparse import Namespace
 from starlette.datastructures import State
 
 from vllm.config import VllmConfig
+from vllm.distributed.io_transfer import (
+    ensure_io_transfer_initialized,
+    get_io_transfer,
+    has_io_transfer,
+)
 from vllm.entrypoints.common.cli_args import resolve_default_chat_template_kwargs
 from vllm.entrypoints.mcp.tool_server import init_tool_server
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
@@ -13,6 +18,7 @@ from vllm.entrypoints.scale_out.factories import init_render_state
 from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.plugins.endpoint_plugins.interface import init_endpoint_plugins_state
+from vllm.plugins.io_processors import has_io_processor
 from vllm.renderers import renderer_from_config
 from vllm.renderers.chat_utils import load_chat_template
 from vllm.renderers.online_derenderer import OnlineDerenderer
@@ -106,6 +112,27 @@ async def init_render_app_state(
         default_chat_template_kwargs=default_chat_template_kwargs,
         trust_request_chat_template=args.trust_request_chat_template,
     )
+
+    state.io_processor = None
+    if has_io_processor(
+        vllm_config,
+        vllm_config.model_config.io_processor_plugin,
+    ):
+        from vllm.entrypoints.pooling.pooling.io_processor import (
+            PluginWithIOProcessorPlugins,
+        )
+        from vllm.renderers.chat_utils import ChatTemplateConfig
+
+        state.io_processor = PluginWithIOProcessorPlugins(
+            vllm_config=vllm_config,
+            renderer=renderer,
+            chat_template_config=ChatTemplateConfig(
+                chat_template=resolved_chat_template
+            ),
+        )
+
+    ensure_io_transfer_initialized(vllm_config, create_io_executor=True)
+    state.io_connector = get_io_transfer() if has_io_transfer() else None
 
     init_render_state(
         state,
