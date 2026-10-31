@@ -7,6 +7,7 @@ import dataclasses
 import pytest
 import torch
 
+from tests.kernels.utils import assert_kernel_traps
 from vllm.model_executor.layers.fused_moe.utils import count_expert_num_tokens
 from vllm.platforms import current_platform
 
@@ -147,3 +148,47 @@ def test_compute_expert_num_tokens_from_numel(
         ep_size=ep_size,
         topk_ids_dtype=topk_ids_dtype,
     )
+
+
+@pytest.mark.parametrize(
+    ("topk_ids_dtype", "bad_id"), [(torch.int32, 4), (torch.int64, 0x3F988A43)]
+)
+def test_count_expert_num_tokens_traps_on_expert_id_outside_map(
+    topk_ids_dtype: torch.dtype, bad_id: int
+):
+    """An id at or past expert_map's length (the GLOBAL expert count) traps."""
+    assert_kernel_traps(f"""
+        from vllm.model_executor.layers.fused_moe.utils import count_expert_num_tokens
+        expert_map = torch.full((4,), -1, dtype=torch.int32, device="cuda")
+        expert_map[:2] = torch.arange(2, dtype=torch.int32, device="cuda")
+        ids = torch.zeros((4, 2), dtype={topk_ids_dtype}, device="cuda")
+        ids[1, 1] = {bad_id}
+        count_expert_num_tokens(ids, 2, expert_map)
+    """)
+
+
+@pytest.mark.parametrize("topk_ids_dtype", [torch.int32, torch.int64])
+def test_count_expert_num_tokens_bound_is_global_expert_count(
+    topk_ids_dtype: torch.dtype,
+):
+    """The gather bound must be expert_map's length, not the local count.
+
+    On a non-zero EP shard every routed global id is >= num_local_experts, so
+    bounding against the local count would drop all of them.
+    """
+    num_experts, num_local = 32, 16
+    expert_map = torch.full((num_experts,), -1, dtype=torch.int32, device="cuda")
+    expert_map[num_local:] = torch.arange(num_local, dtype=torch.int32, device="cuda")
+
+    topk_ids = torch.randint(
+        num_local, num_experts, (16, 2), dtype=topk_ids_dtype, device="cuda"
+    )
+
+    actual = count_expert_num_tokens(topk_ids, num_local, expert_map)
+
+    local = expert_map[topk_ids.long()]
+    expected = torch.zeros(num_local, dtype=actual.dtype, device="cuda")
+    for e in range(num_local):
+        expected[e] = ((local == e) & (local >= 0)).sum()
+
+    torch.testing.assert_close(actual, expected)
