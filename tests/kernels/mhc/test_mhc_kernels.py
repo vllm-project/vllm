@@ -1136,22 +1136,7 @@ def test_mhc_fused_post_pre(num_tokens, hidden_size, hc_mult, ieee_fp32_matmul):
     sinkhorn_repeat = 20
     hc_post_alpha = 1.0
 
-    def run_ref():
-        residual_ref = mhc_post_ref(x, residual, post_layer_mix, comb_res_mix)
-        post_mix_ref, res_mix_ref, layer_input_ref = mhc_pre_ref(
-            residual_ref,
-            fn,
-            hc_scale,
-            hc_base,
-            rms_eps,
-            hc_pre_eps,
-            hc_sinkhorn_eps,
-            hc_post_alpha,
-            sinkhorn_repeat,
-        )
-        return residual_ref, post_mix_ref, res_mix_ref, layer_input_ref
-
-    residual_ref, post_mix_ref, res_mix_ref, layer_input_ref = run_ref()
+    residual_ref = mhc_post_ref(x, residual, post_layer_mix, comb_res_mix)
 
     residual, post_mix, res_mix, x = torch.ops.vllm.mhc_fused_post_pre_tilelang(
         x,
@@ -1169,6 +1154,24 @@ def test_mhc_fused_post_pre(num_tokens, hidden_size, hc_mult, ieee_fp32_matmul):
     )
 
     torch.testing.assert_close(residual, residual_ref, atol=1e-2, rtol=1e-2)
+    # Unfused pre reads the stored BF16 streams. Use the same input so valid
+    # post-rounding differences are not amplified by cancellation in the collapse.
+    pre_residual_ref = (
+        residual
+        if mhc_fused_post_pre_split_config(num_tokens, hidden_size, hc_mult) is None
+        else residual_ref
+    )
+    post_mix_ref, res_mix_ref, layer_input_ref = mhc_pre_ref(
+        pre_residual_ref,
+        fn,
+        hc_scale,
+        hc_base,
+        rms_eps,
+        hc_pre_eps,
+        hc_sinkhorn_eps,
+        hc_post_alpha,
+        sinkhorn_repeat,
+    )
     torch.testing.assert_close(post_mix, post_mix_ref, atol=1e-2, rtol=1e-2)
     torch.testing.assert_close(res_mix, res_mix_ref, atol=1e-2, rtol=1e-2)
     torch.testing.assert_close(x, layer_input_ref, atol=1e-2, rtol=1e-2)
