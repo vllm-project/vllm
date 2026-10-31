@@ -171,7 +171,7 @@ FROM vllm-base AS ucx-nixl-build
 # NIXL_VERSION (nixl contrib/Dockerfile.manylinux: ARG UCX_REF), so XPU runs the
 # same UCX commit as the released nixl-cu* wheels rather than an untested pairing.
 ARG UCX_VERSION=v1.23.x
-ARG NIXL_VERSION=v1.5.0
+ARG NIXL_VERSION=v1.5.2
 
 # Build-time only: compiler, autotools, and verbs dev headers
 RUN apt-get update -y && apt-get install -y --no-install-recommends \
