@@ -6403,8 +6403,10 @@ def test_swa_reachable_block_mask_final_partial_segment():
 
     assert reachable_blocks(300) == {248, 249}
     assert reachable_blocks(250) == {246, 247, 248, 249}
-    assert reachable_blocks(300, use_eagle=True) == {243, 248, 249}
-    assert reachable_blocks(250, use_eagle=True) == {243, 248, 249}
+    # Under EAGLE each segment tail is one block wider on the low side (see
+    # #64808): the tail ending at the 252 peek block starts at 247, not 248.
+    assert reachable_blocks(300, use_eagle=True) == {243, 247, 248, 249}
+    assert reachable_blocks(250, use_eagle=True) == {243, 247, 248, 249}
 
 
 def test_swa_reachable_block_mask_pins_shared_prefix():
@@ -6498,6 +6500,41 @@ def test_swa_reachable_block_mask_with_dcp_scaling():
     assert mask_no_dcp != mask_with_dcp, (
         "DCP scaling should change retention granularity"
     )
+
+
+def test_swa_reachable_block_mask_eagle_periodic_tail_widens_by_one():
+    """Under EAGLE, each periodic segment tail keeps one extra block below
+    the writer's tail, so a sibling diverging right after a segment boundary
+    (whose hit lands one block lower because it cannot use the peek block)
+    still finds its sliding-window blocks instead of falling back a whole
+    retention interval (see #64808). Non-EAGLE masks are unchanged."""
+    from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
+
+    block_size = 16
+    spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=3 * block_size,  # need = 3, or 4 under EAGLE
+    )
+
+    def retained(use_eagle: bool) -> set[int]:
+        m = SlidingWindowManager.reachable_block_mask(
+            start_block=0,
+            end_block=16,
+            alignment_tokens=block_size,
+            kv_cache_spec=spec,
+            use_eagle=use_eagle,
+            retention_interval=8 * block_size,  # 8 blocks per segment
+            reachable_boundaries=(),
+        )
+        return None if m is None else {i for i, v in enumerate(m) if v}
+
+    # EAGLE tails are {4..8} and {12..15}: one block lower per segment than
+    # the writer-only tails {5..8} and {13..15}.
+    assert retained(use_eagle=True) == {4, 5, 6, 7, 8, 12, 13, 14, 15}
+    assert retained(use_eagle=False) == {5, 6, 7, 13, 14, 15}
 
 
 @pytest.mark.parametrize(
