@@ -48,7 +48,13 @@ _RECORDABLE_BUILDERS = frozenset(
     }
 )
 
+# Recordable builders that only read their block table: on a table that other
+# builders clamp in place, they build on branches of their own once those have.
+_BLOCK_TABLE_READERS = frozenset({DeepseekV41SparseIndexerMetadataBuilder})
+
 GraphKey = tuple[int, int, int, int]
+# A metadata build branch: (KV-cache group index, attention group) pairs.
+Branch = list[tuple[int, AttentionGroup]]
 # Builds the metadata of the attention groups it is given.
 BuildFn = Callable[[list[list[AttentionGroup]]], dict[str, Any]]
 
@@ -177,21 +183,34 @@ class AttnMetadataCudaGraphs:
         block_tables: Sequence[torch.Tensor],
         build_fn: BuildFn,
     ) -> dict[str, Any]:
-        """Build the KV-cache groups as concurrent branches on side streams.
+        """Build the attention groups as concurrent branches on side streams.
 
         The groups share only read-only inputs, with two exceptions. The sparse
-        MLA builder clamps its block table in place, so groups whose block
-        tables share storage stay on one branch, in serial order. And the first
-        group that needs the token-to-request map builds it into its own buffer,
-        which later groups reuse. Each branch builds its own map; the serial
-        build's producer is also the first of its branch to need one, so it
-        fills the buffer that the FULL forward graphs read.
+        MLA and compressor builders clamp their block table in place, so the
+        groups of one block table storage build on one branch, in serial order;
+        the groups that only read the table (``_BLOCK_TABLE_READERS``) then
+        build on branches of their own, each started after that branch. And
+        the first group that needs the token-to-request map builds it into its
+        own buffer, which later groups reuse. Each branch builds its own map;
+        the serial build's producer is also the first of its branch to need
+        one, so it fills the buffer that the FULL forward graphs read.
         """
-        branches: dict[int, list[int]] = {}
+        tables: dict[int, tuple[Branch, Branch]] = {}
         for i, groups in enumerate(attn_groups):
             if groups:
                 storage = block_tables[i].untyped_storage().data_ptr()
-                branches.setdefault(storage, []).append(i)
+                writers, readers = tables.setdefault(storage, ([], []))
+                for group in groups:
+                    reads = type(group.get_metadata_builder()) in _BLOCK_TABLE_READERS
+                    (readers if reads else writers).append((i, group))
+        # Each branch with the index of the branch it starts after, if any.
+        branches: list[tuple[Branch, int | None]] = []
+        for writers, readers in tables.values():
+            after = None
+            if writers:
+                after = len(branches)
+                branches.append((writers, None))
+            branches += [([reader], after) for reader in readers]
         if len(branches) < 2:
             return build_fn(attn_groups)
         # Reused, so a warm-up creates per-stream state (e.g. DeepGEMM's) on the
@@ -200,12 +219,17 @@ class AttnMetadataCudaGraphs:
             self._side_streams.append(torch.cuda.Stream())
         main_stream = current_stream()
         built: dict[str, Any] = {}
-        for stream, branch in zip(self._side_streams, branches.values()):
-            stream.wait_stream(main_stream)
+        for stream, (branch, after) in zip(self._side_streams, branches):
+            stream.wait_stream(
+                main_stream if after is None else self._side_streams[after]
+            )
             with torch.cuda.stream(stream):
                 built.update(
                     build_fn(
-                        [g if i in branch else [] for i, g in enumerate(attn_groups)]
+                        [
+                            [group for j, group in branch if j == i]
+                            for i in range(len(attn_groups))
+                        ]
                     )
                 )
         for stream in self._side_streams[: len(branches)]:

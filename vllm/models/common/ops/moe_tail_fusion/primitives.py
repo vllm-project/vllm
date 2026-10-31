@@ -113,6 +113,22 @@ def load_global_u32x2(pointer: cute.Pointer, *, loc=None, ip=None):
 
 
 @dsl_user_op
+def load_global_u64(address: Int64, *, loc=None, ip=None) -> Int64:
+    """Load one 64-bit word, such as a device address stored in global memory."""
+    return Int64(
+        _asm(
+            T.i64(),
+            [address.ir_value(loc=loc, ip=ip)],
+            "ld.global.u64 $0, [$1];",
+            "=l,l",
+            side_effects=False,
+            loc=loc,
+            ip=ip,
+        )
+    )
+
+
+@dsl_user_op
 def load_global_bf16_as_f32(address: Int64, *, loc=None, ip=None) -> Float32:
     return Float32(
         _asm(

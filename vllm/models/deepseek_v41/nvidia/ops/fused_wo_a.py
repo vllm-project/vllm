@@ -92,12 +92,16 @@ class FusedWoAKernel(VllmCuTeDSLJitKernel["FusedWoAKernel.CompileKey"]):
         n_groups: int
         heads_per_group: int
         o_lora_rank: int
+        # Trigger the PDL dependent right after the TMEM allocation rather than
+        # once the last stage has loaded.
+        early_trigger: bool = False
 
     @staticmethod
     def kernel(compile_key: CompileKey) -> Any:
         tokens = compile_key.tokens_per_tile
         token_tiles = compile_key.token_tiles
         full_tiles = compile_key.full_tiles
+        early_trigger = compile_key.early_trigger
         acc_cols = 1 << (tokens - 1).bit_length()
         tile_m = max(8, acc_cols)
         tile_n = 128
@@ -233,6 +237,16 @@ class FusedWoAKernel(VllmCuTeDSLJitKernel["FusedWoAKernel.CompileKey"]):
             if warp == 0:
                 cute.arch.alloc_tmem(tmem_cols, taddr)
                 cute.arch.relinquish_tmem_alloc_permit()
+                # With early_trigger, for a dependent wo_b GEMM that loads its
+                # weights before its own grid wait: launching it here overlaps
+                # that weight read with this kernel's quantization, MMA and
+                # reduction, and it reads this kernel's outputs only after its
+                # wait. It launches only once every CTA has issued this, after
+                # its own TMEM allocation, so it cannot take TMEM this kernel
+                # still needs.
+                if cutlass.const_expr(early_trigger):
+                    with cute.arch.elect_one():
+                        cute.arch.griddepcontrol_launch_dependents()
             copy_x = cute.make_copy_atom(
                 cute.nvgpu.CopyUniversalOp(), BFloat16, num_bits_per_copy=64
             )
@@ -343,7 +357,9 @@ class FusedWoAKernel(VllmCuTeDSLJitKernel["FusedWoAKernel.CompileKey"]):
                 for stage in cutlass.range_constexpr(num_stages):
                     cute.arch.mbarrier_wait(mbar_loaded + stage, 0)
                     _tcgen05.fence_after_thread_sync()
-                    if cutlass.const_expr(stage == num_stages - 1):
+                    if cutlass.const_expr(
+                        not early_trigger and stage == num_stages - 1
+                    ):
                         with cute.arch.elect_one():
                             cute.arch.griddepcontrol_launch_dependents()
                     adesc = sdesc | (sW[None, None, stage].iterator.toint() >> 4)
@@ -501,7 +517,13 @@ class FusedWoAKernel(VllmCuTeDSLJitKernel["FusedWoAKernel.CompileKey"]):
         return host_entrypoint
 
     def dispatch(  # type: ignore[override]
-        self, *, tokens: int, n_groups: int, heads_per_group: int, o_lora_rank: int
+        self,
+        *,
+        tokens: int,
+        n_groups: int,
+        heads_per_group: int,
+        o_lora_rank: int,
+        early_trigger: bool = False,
     ) -> CompileKey:
         token_tiles = (tokens + 31) // 32
         # Host integer arithmetic: balance tiles in multiples of four tokens.
@@ -517,10 +539,17 @@ class FusedWoAKernel(VllmCuTeDSLJitKernel["FusedWoAKernel.CompileKey"]):
             n_groups=n_groups,
             heads_per_group=heads_per_group,
             o_lora_rank=o_lora_rank,
+            early_trigger=early_trigger,
         )
 
     def get_warmup_keys(
-        self, *, max_tokens: int, n_groups: int, heads_per_group: int, o_lora_rank: int
+        self,
+        *,
+        max_tokens: int,
+        n_groups: int,
+        heads_per_group: int,
+        o_lora_rank: int,
+        early_trigger: bool = False,
     ) -> list[CompileKey]:
         # Trace all accepted token counts and deduplicate shared tile shapes.
         return self._trace_dispatch(self.dispatch)(
@@ -528,6 +557,7 @@ class FusedWoAKernel(VllmCuTeDSLJitKernel["FusedWoAKernel.CompileKey"]):
             n_groups=n_groups,
             heads_per_group=heads_per_group,
             o_lora_rank=o_lora_rank,
+            early_trigger=early_trigger,
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> tuple[Any, ...]:
@@ -570,8 +600,11 @@ class FusedWoAKernel(VllmCuTeDSLJitKernel["FusedWoAKernel.CompileKey"]):
         rope: torch.Tensor,
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
+        early_trigger: bool = False,
     ) -> CuTeDSLLaunchSpec["FusedWoAKernel.CompileKey"]:
-        """Return FP8 WO-A output and FlashInfer F8_128x4 scale bytes."""
+        """Return FP8 WO-A output and FlashInfer F8_128x4 scale bytes.
+        ``early_trigger`` launches the PDL dependent right after the TMEM
+        allocation, for a dependent that loads its weights before its wait."""
         tokens = x.shape[0]
         groups, rank = weight_scale.shape[:2]
         n = groups * rank
@@ -592,6 +625,7 @@ class FusedWoAKernel(VllmCuTeDSLJitKernel["FusedWoAKernel.CompileKey"]):
             n_groups=groups,
             heads_per_group=x.shape[1] // groups,
             o_lora_rank=rank,
+            early_trigger=early_trigger,
         )
         return compile_key, launch_args, (q, scales)
 

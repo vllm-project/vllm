@@ -42,7 +42,8 @@ class BoundaryAllReduce(AllReduceMHC):
         that stores its contribution itself, as ``_SharedOnlyPublishDeviceKernel``
         does: generation ``stage_state[0]``, slot ``[rank][token]``, BF16 with
         negative zero cleared, then ``stage_state[1] = stage_state[0]``. Both
-        stay valid for this instance's lifetime."""
+        stay valid for this instance's lifetime. This is the LL mailbox, for
+        steps of fewer than ``bt_min_rows`` rows."""
         return self._multicast, self._stage_state.data_ptr()
 
     def mark_published(self, x: torch.Tensor) -> None:
@@ -75,10 +76,13 @@ class BoundaryAllReduce(AllReduceMHC):
         if published is not x:
             raise RuntimeError("reducing a tensor other than the published one")
         m = x.shape[0]
+        if m >= self.bt_min_rows:
+            # The producer stored into the LL mailbox (``publish_target``);
+            # ``PublishingMxfp8Linear.supports`` admits only smaller calls.
+            raise RuntimeError(f"a published contribution of {m} rows takes BT")
         self._check(m, residual, post, comb, pre)
-        return self._collect(
-            residual, post, comb, pre, norm_weight, norm_eps, m, mxfp8_out
-        )
+        consumer = self._consumer(residual, pre, norm_weight, m, mxfp8_out, False)
+        return self._collect(consumer, residual, post, comb, norm_eps, m)
 
     def finalize(
         self,
