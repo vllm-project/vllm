@@ -5,8 +5,6 @@ layerwise reload (which restores layers on meta and replays wrapped loaders)
 sees them: after a reload with new weights the layer equals a cold start on
 those weights."""
 
-from collections.abc import Callable
-
 import pytest
 import torch
 from torch import nn
@@ -30,8 +28,6 @@ from vllm.models.inkling.configs import InklingModelConfig
 from vllm.models.inkling.nvidia import moe as nvidia_moe
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_dtype
-
-requires_cuda = pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA")
 
 N_ROUTED, N_SINK, HIDDEN = 4, 1, 128
 Checkpoint = dict[str, torch.Tensor]
@@ -107,38 +103,6 @@ class InklingMoELayer:
         }
 
 
-def assert_reload_matches_cold_start(
-    make_layer: Callable[[], InklingMoELayer], checkpoint: Callable[[int], Checkpoint]
-) -> InklingMoELayer:
-    layer = make_layer()
-    layer.load(checkpoint(0))
-    layer.process()
-    ptrs = {name: t.data_ptr() for name, t in layer.tensors().items()}
-
-    layer.reload(checkpoint(1))
-
-    fresh = make_layer()
-    fresh.load(checkpoint(1))
-    fresh.process()
-    got, want = layer.tensors(), fresh.tensors()
-    assert got.keys() == want.keys()
-    for name in want:
-        assert torch.equal(got[name], want[name]), name
-    assert {name: t.data_ptr() for name, t in got.items()} == ptrs
-    return layer
-
-
-def sink_checkpoint(gen: torch.Generator, intermediate: int) -> Checkpoint:
-    return {
-        "shared_experts.shared_w13_weight": torch.randn(
-            N_SINK, 2 * intermediate, HIDDEN, generator=gen
-        ).bfloat16(),
-        "shared_experts.shared_w2_weight": torch.randn(
-            N_SINK, HIDDEN, intermediate, generator=gen
-        ).bfloat16(),
-    }
-
-
 NVFP4_INTERMEDIATE = 128
 
 
@@ -162,11 +126,17 @@ def _nvfp4_checkpoint(seed: int) -> Checkpoint:
         "experts.w2_weight_scale": positive(e, h, i // 16).to(torch.float8_e4m3fn),
         "experts.w2_weight_scale_2": positive(e) / 100,
         "experts.w2_weight.input_amax": positive(e) * 7,
-        **sink_checkpoint(gen, i),
+        # bf16 sink experts
+        "shared_experts.shared_w13_weight": torch.randn(
+            N_SINK, 2 * i, h, generator=gen
+        ).bfloat16(),
+        "shared_experts.shared_w2_weight": torch.randn(
+            N_SINK, h, i, generator=gen
+        ).bfloat16(),
     }
 
 
-@requires_cuda
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
 def test_nvfp4_moe_reload_matches_cold_start(dist_init):
     """Routed NVFP4 experts (weights, block scales, per-expert global scales,
     calibrated input scales) and the sink experts take the new weights."""
@@ -187,14 +157,26 @@ def test_nvfp4_moe_reload_matches_cold_start(dist_init):
         )
 
     layer = make_layer()
-    layer.load(_nvfp4_checkpoint(0))
+    checkpoint = _nvfp4_checkpoint(0)
+    layer.load(checkpoint)
     # the calibrated input scale is float32 even under a bf16 default dtype
     for proj in ("w13", "w2"):
-        amax = float(_nvfp4_checkpoint(0)[f"experts.{proj}_weight.input_amax"].max())
+        amax = float(checkpoint[f"experts.{proj}_weight.input_amax"].max())
         scale = getattr(layer.moe.experts.routed_experts, f"{proj}_input_scale")
         assert torch.equal(scale, torch.full_like(scale, amax / (448.0 * 6.0)))
+    layer.process()
+    ptrs = {name: t.data_ptr() for name, t in layer.tensors().items()}
 
-    assert_reload_matches_cold_start(make_layer, _nvfp4_checkpoint)
+    layer.reload(_nvfp4_checkpoint(1))
+
+    fresh = make_layer()
+    fresh.load(_nvfp4_checkpoint(1))
+    fresh.process()
+    got, want = layer.tensors(), fresh.tensors()
+    assert got.keys() == want.keys()
+    for name in want:
+        assert torch.equal(got[name], want[name]), name
+    assert {name: t.data_ptr() for name, t in got.items()} == ptrs
 
 
 class _PaddedExperts(nn.Module):
