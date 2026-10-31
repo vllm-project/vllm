@@ -49,6 +49,31 @@ steps:
       'cd tests &&
       pytest -v -s kernels/core/test_uva.py'
 
+- label: ":intel: (BMG) Cache Kernel Tests"
+  key: cache-kernel-tests
+  timeout_in_minutes: 30
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - .buildkite/intel_jobs/kernels_intel.yaml
+    - tests/kernels/attention/test_cache.py
+    - vllm/_custom_ops.py
+    - vllm/platforms/
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests &&
+      pytest -v -s kernels/attention/test_cache.py'
+
 - label: ":intel: (BMG) XPU Sparse MLA Tests"
   key: xpu-sparse-mla-tests
   timeout_in_minutes: 20
