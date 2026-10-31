@@ -191,6 +191,12 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
         convention, pre-quantized blockscales must use the swizzled layout."""
         return kNvfp4Dynamic
 
+    def input_quant_activation_types(self) -> tuple[type[torch.nn.Module], ...]:
+        from vllm.model_executor.layers.activation import SiluAndMul
+
+        # Preserve the existing producer; ReLU2 is validated only with CuTe-DSL.
+        return (SiluAndMul,)
+
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
