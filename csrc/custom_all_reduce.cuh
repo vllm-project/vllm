@@ -4,7 +4,12 @@
 
 namespace vllm {
 
-template <typename T, int ngpus>
+// start_release: open with a release/acquire barrier so that writes made
+// before this kernel (e.g. by the kernel that produced the input) are visible
+// to peers that read the input directly. Needed for registered (zero-copy)
+// inputs over non-coherent links (PCIe); the default relaxed barrier is enough
+// on coherent fabrics (NVLink, XGMI).
+template <typename T, int ngpus, bool start_release = false>
 __global__ void __launch_bounds__(512, 1)
     cross_device_reduce_1stage(RankData* _dp, RankSignals sg, Signal* self_sg,
                                T* __restrict__ result, int rank, int size) {
@@ -13,7 +18,11 @@ __global__ void __launch_bounds__(512, 1)
   // note: we don't reorder the address so the accumulation order is the same
   // for all ranks, ensuring bitwise identical results
   auto dp = *_dp;
-  barrier_at_start<ngpus>(sg, self_sg, rank);
+  if constexpr (start_release) {
+    barrier_at_start_release<ngpus>(sg, self_sg, rank);
+  } else {
+    barrier_at_start<ngpus>(sg, self_sg, rank);
+  }
   // do the actual reduction
   for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < size;
        idx += gridDim.x * blockDim.x) {
@@ -27,7 +36,7 @@ DINLINE P* get_tmp_buf(Signal* sg) {
   return (P*)(((Signal*)sg) + 1);
 }
 
-template <typename T, int ngpus>
+template <typename T, int ngpus, bool start_release = false>
 __global__ void __launch_bounds__(512, 1)
     cross_device_reduce_2stage(RankData* _dp, RankSignals sg, Signal* self_sg,
                                T* __restrict__ result, int rank, int size) {
@@ -48,7 +57,11 @@ __global__ void __launch_bounds__(512, 1)
     tmps[i] = get_tmp_buf<P>(sg.signals[target]);
   }
   auto tmp_out = tmps[0];
-  barrier_at_start<ngpus>(sg, self_sg, rank);
+  if constexpr (start_release) {
+    barrier_at_start_release<ngpus>(sg, self_sg, rank);
+  } else {
+    barrier_at_start<ngpus>(sg, self_sg, rank);
+  }
 
   // stage 1: reduce scatter
   for (int idx = start + tid; idx < end; idx += stride) {
@@ -82,8 +95,12 @@ class CustomAllreduce {
  public:
   int rank_;
   int world_size_;
-  // Full NVLink or xGMI connection between GPUs.
+  // Full NVLink, xGMI, or PCIe peer-to-peer (RDNA4) connection between GPUs.
   bool fully_connected_;
+  // Use a release/acquire start barrier in the all-reduce kernels, making the
+  // producer's writes to registered inputs visible to peers over
+  // non-coherent links (see cross_device_reduce_1stage).
+  bool release_start_;
 
   RankSignals sg_;
   // Stores a map from a pointer to its peer pointers from all ranks.
@@ -123,10 +140,12 @@ class CustomAllreduce {
    * are passed in from the constructor.
    */
   CustomAllreduce(Signal** signals, void* rank_data, size_t rank_data_sz,
-                  int rank, int world_size, bool fully_connected = true)
+                  int rank, int world_size, bool fully_connected = true,
+                  bool release_start = false)
       : rank_(rank),
         world_size_(world_size),
         fully_connected_(fully_connected),
+        release_start_(release_start),
         self_sg_(signals[rank]),
         d_rank_data_base_(reinterpret_cast<RankData*>(rank_data)),
         d_rank_data_end_(d_rank_data_base_ + rank_data_sz / sizeof(RankData)) {
@@ -285,9 +304,16 @@ class CustomAllreduce {
       }
     }
 
-#define KL(ngpus, name)                                                       \
-  name<T, ngpus><<<blocks, threads, 0, stream>>>(ptrs, sg_, self_sg_, output, \
-                                                 rank_, size);
+#define KL(ngpus, name)                                      \
+  do {                                                       \
+    if (release_start_) {                                    \
+      name<T, ngpus, true><<<blocks, threads, 0, stream>>>(  \
+          ptrs, sg_, self_sg_, output, rank_, size);         \
+    } else {                                                 \
+      name<T, ngpus, false><<<blocks, threads, 0, stream>>>( \
+          ptrs, sg_, self_sg_, output, rank_, size);         \
+    }                                                        \
+  } while (0)
 #define REDUCE_CASE(ngpus)                              \
   case ngpus: {                                         \
     if (force_1stage) {                                 \

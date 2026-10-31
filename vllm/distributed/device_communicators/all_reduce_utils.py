@@ -55,6 +55,14 @@ CUSTOM_ALL_REDUCE_MAX_SIZES = {
     },
 }
 
+# RDNA4 over PCIe peer-to-peer, measured on Radeon AI PRO R9700: above these
+# sizes RCCL is faster. Custom allreduce is not used for unlisted world sizes.
+ROCM_RDNA4_PCIE_CUSTOM_ALL_REDUCE_MAX_SIZES = {
+    2: 8 * MiB,
+    4: 192 * KiB,
+    8: 128 * KiB,
+}
+
 SYMM_MEM_ALL_REDUCE_MAX_SIZES = {
     "9.0": {
         2: 64 * MiB,  # 64 MB
