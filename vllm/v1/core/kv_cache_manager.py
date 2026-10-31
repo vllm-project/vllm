@@ -390,6 +390,7 @@ class KVCacheManager:
         reserved_blocks: int = 0,
         has_scheduled_reqs: bool = True,
         skip_zeroing_group_ids: tuple[int, ...] = (),
+        num_draft_tokens: int | None = None,
     ) -> KVCacheBlocks | None:
         """Add slots for a request with new tokens to append.
 
@@ -424,6 +425,11 @@ class KVCacheManager:
                 this step, controls whether watermark is applied.
             skip_zeroing_group_ids: Groups whose external-token blocks will be
                 written by an async load and must not be zeroed concurrently.
+            num_draft_tokens: The drafts among `num_new_tokens` the request
+                verifies this step. Recurrent (Mamba) groups then hold one
+                speculative state block per draft and return the rest to the
+                pool; see `take_spec_state_block_counts`. None holds
+                `num_speculative_blocks` per request, as without speculation.
 
         Blocks layout:
         ```
@@ -541,6 +547,7 @@ class KVCacheManager:
                 num_tokens_main_model=full_num_tokens,
                 apply_admission_cap=True,
                 prefill_end=prefill_end,
+                num_draft_tokens=num_draft_tokens,
             )
             required_blocks = num_blocks_to_allocate + watermark_blocks
             if required_blocks > self.block_pool.get_num_free_blocks():
@@ -576,6 +583,7 @@ class KVCacheManager:
             num_local_computed_tokens=num_local_computed_tokens,
             num_tokens_main_model=num_tokens_main_model,
             prefill_end=prefill_end,
+            num_draft_tokens=num_draft_tokens,
         )
 
         # Keep `reserved_blocks` free for other in-flight sequences, and an
@@ -605,6 +613,7 @@ class KVCacheManager:
             num_tokens_need_slot,
             num_tokens_main_model,
             num_encoder_tokens,
+            num_draft_tokens=num_draft_tokens,
         )
 
         # P/D: delay caching blocks if we have to recv from
@@ -624,6 +633,16 @@ class KVCacheManager:
         self.coordinator.cache_blocks(request, num_tokens_to_cache)
 
         return self.create_kv_cache_blocks(new_blocks)
+
+    def take_spec_state_block_counts(self) -> dict[str, dict[int, int]]:
+        """Requests whose speculative state tail `allocate_slots` shortened
+        since the last call: request id -> {group id: new block count}. The
+        worker shortens those block table rows before appending new blocks."""
+        counts: dict[str, dict[int, int]] = {}
+        for mgr in self.coordinator.single_type_managers:
+            for req_id, num_blocks in mgr.take_spec_state_block_counts().items():
+                counts.setdefault(req_id, {})[mgr.kv_cache_group_id] = num_blocks
+        return counts
 
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.

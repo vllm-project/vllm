@@ -21,6 +21,10 @@ class SamplerOutput:
     num_sampled: torch.Tensor
     num_rejected: torch.Tensor
     sampling_mask_tensors: SamplingMaskTensors | None = None
+    # [num_reqs, C] int32: the verify row of each committed token, when a
+    # speculator's ``accept`` chose a path that is not a prefix of the rows.
+    # None: committed token k came from row k.
+    accept_path: torch.Tensor | None = None
 
 
 @triton.jit

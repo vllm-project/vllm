@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
+from dataclasses import fields, replace
 from typing import Any
 
 import numpy as np
@@ -25,6 +26,12 @@ from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     rejection_sample,
 )
+from vllm.v1.worker.gpu.spec_decode.round import (
+    AcceptResult,
+    VerifyOutput,
+    VerifyPlan,
+)
+from vllm.v1.worker.gpu.spec_decode.tree_accept import accept_greedy_tree
 
 # Cap on the FP32 target-logits buffer materialized by apply_sampling_params.
 # TODO(mgoin): Chunking is a workaround. The rejection kernels already upcast
@@ -33,6 +40,39 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
 # its traffic entirely.
 MAX_CHUNK_BYTES = 2**30  # 1GB
 _FP32_BYTES = 4
+
+
+AcceptFn = Callable[[VerifyPlan, VerifyOutput, Sampler], "AcceptResult | None"]
+
+
+def slice_plan(plan: VerifyPlan, start: int, end: int) -> VerifyPlan:
+    """The plan of batch rows ``[start, end)``: every tensor field is per request."""
+    return replace(
+        plan,
+        **{
+            f.name: value[start:end]
+            for f in fields(plan)
+            if isinstance(value := getattr(plan, f.name), torch.Tensor)
+        },
+    )
+
+
+def path_rows(
+    path: torch.Tensor,
+    path_len: torch.Tensor,
+    cu_num_logits: torch.Tensor,
+    expanded_local_pos: torch.Tensor,
+) -> torch.Tensor:
+    """``[num_logits]`` the logits row that committed token ``k`` of each request
+    came from (its own row past the path), so gathering these rows lays the logits
+    out as a chain would have."""
+    num_logits = expanded_local_pos.shape[0]
+    arange = torch.arange(num_logits, device=path.device, dtype=torch.int32)
+    req = torch.searchsorted(cu_num_logits[1:], arange, right=True)
+    local = expanded_local_pos.to(torch.int64).clamp(max=path.shape[1] - 1)
+    on_path = expanded_local_pos < path_len[req]
+    row = path[req, local].to(torch.int64)
+    return torch.where(on_path, cu_num_logits[req].to(torch.int64) + row, arange)
 
 
 def get_max_chunk_logits(vocab_size: int) -> int:
@@ -153,8 +193,11 @@ class RejectionSampler:
         device: torch.device,
         *,
         watermark_key: int | None = None,
+        accept: AcceptFn | None = None,
     ):
         self.sampler = sampler
+        # The speculator's accept, when it overrides the chain verification.
+        self.accept = accept
         self.watermark_key = watermark_key
         if watermark_key is not None:
             assert isinstance(sampler, GPUWatermarkSampler)
@@ -313,6 +356,7 @@ class RejectionSampler:
         torch.Tensor,
         LogprobsTensors | None,
         SamplingMaskTensors | None,
+        torch.Tensor | None,
     ]:
         cu_num_logits_np = input_batch.cu_num_logits_np
         use_processed_logits = self.sampler.logprobs_mode in PROCESSED_LOGPROBS_MODES
@@ -330,6 +374,12 @@ class RejectionSampler:
 
         sampled_chunks: list[torch.Tensor] = []
         num_sampled_chunks: list[torch.Tensor] = []
+        path_chunks: list[torch.Tensor] = []
+        # The positions the rows ran at: a plan that is not a chain gives siblings
+        # one position, while ``pos`` holds the chain positions.
+        plan_pos = pos
+        if input_batch.tree_pos_delta is not None:
+            plan_pos = pos + input_batch.tree_pos_delta[input_batch.logits_indices]
         logprobs_chunks: list[LogprobsTensors] = []
         sampling_mask_chunks: list[SamplingMaskTensors] = []
         max_num_kept = None
@@ -345,23 +395,75 @@ class RejectionSampler:
             hi = int(cu_num_logits_np[end])
             chunk_cu_num_logits_np = cu_num_logits_np[start : end + 1] - lo
             chunk_cu_num_logits = input_batch.cu_num_logits[start : end + 1] - lo
-            # draft_logits uses persistent request-state indices, not batch rows.
-            processed_logits, sampled, num_sampled = self._verify(
-                logits[lo:hi],
-                draft_logits,
-                draft_sampled[lo:hi],
-                pos[lo:hi],
-                chunk_cu_num_logits,
-                input_batch.idx_mapping[start:end],
-                input_batch.idx_mapping_np[start:end],
-                input_batch.expanded_idx_mapping[lo:hi],
-                input_batch.expanded_local_pos[lo:hi],
-                input_batch.seq_lens_cpu_upper_bound.numpy()[start:end],
-            )
+            result = None
+            plan = input_batch.verify_plan
+            if plan is not None and (self.accept is not None or not plan.is_chain):
+                plan = slice_plan(plan, start, end)
+                output = VerifyOutput(
+                    logits=logits[lo:hi],
+                    row_start=chunk_cu_num_logits,
+                    idx_mapping=input_batch.idx_mapping[start:end],
+                    idx_mapping_np=input_batch.idx_mapping_np[start:end],
+                    expanded_idx_mapping=input_batch.expanded_idx_mapping[lo:hi],
+                    expanded_local_pos=input_batch.expanded_local_pos[lo:hi],
+                    positions=plan_pos[lo:hi],
+                    drafted=draft_sampled[lo:hi],
+                    draft_tokens=draft_sampled[lo:hi],
+                    seq_lens_upper_bound_np=(
+                        input_batch.seq_lens_cpu_upper_bound.numpy()[start:end]
+                    ),
+                )
+                width = self.num_speculative_steps + 1
+                if self.accept is not None:
+                    result = self.accept(plan, output, self.sampler)
+                if result is None and not plan.is_chain:
+                    result = accept_greedy_tree(plan, output, self.sampler, width)
+                if result is not None and result.sampled.shape[1] < width:
+                    # Committed tokens are read at the chain's width.
+                    result.sampled = torch.nn.functional.pad(
+                        result.sampled, (0, width - result.sampled.shape[1])
+                    )
+            chunk_logits = logits[lo:hi]
+            if result is None:
+                if path_chunks:
+                    raise RuntimeError("accept returned a path for part of a batch")
+                # draft_logits uses persistent request-state indices, not batch
+                # rows.
+                processed_logits, sampled, num_sampled = self._verify(
+                    chunk_logits,
+                    draft_logits,
+                    draft_sampled[lo:hi],
+                    pos[lo:hi],
+                    chunk_cu_num_logits,
+                    input_batch.idx_mapping[start:end],
+                    input_batch.idx_mapping_np[start:end],
+                    input_batch.expanded_idx_mapping[lo:hi],
+                    input_batch.expanded_local_pos[lo:hi],
+                    input_batch.seq_lens_cpu_upper_bound.numpy()[start:end],
+                )
+            else:
+                if sampled_chunks and not path_chunks:
+                    raise RuntimeError("accept returned a path for part of a batch")
+                sampled, num_sampled = result.sampled, result.path_len
+                path_chunks.append(result.path)
+                processed_logits = result.processed_logits
+                if processed_logits is None:
+                    processed_logits = chunk_logits
+                if max_num_logprobs != NO_LOGPROBS or max_num_kept is not None:
+                    # Lay the rows out as a chain: committed token k's logits
+                    # first. Only paid for when logprobs or masks are returned.
+                    rows = path_rows(
+                        result.path,
+                        result.path_len,
+                        chunk_cu_num_logits,
+                        input_batch.expanded_local_pos[lo:hi],
+                    )
+                    processed_logits = processed_logits.index_select(0, rows)
+                    chunk_logits = chunk_logits.index_select(0, rows)
             chunk_logprobs = self._get_logprobs_tensors(
                 sampled,
                 num_sampled,
-                processed_logits if use_processed_logits else logits[lo:hi],
+                processed_logits if use_processed_logits else chunk_logits,
                 chunk_cu_num_logits,
                 chunk_cu_num_logits_np,
                 max_num_logprobs,
@@ -392,6 +494,7 @@ class RejectionSampler:
                 num_sampled_chunks[0],
                 logprobs_tensors,
                 sampling_mask_tensors,
+                path_chunks[0] if path_chunks else None,
             )
 
         logprobs_tensors = None
@@ -411,7 +514,8 @@ class RejectionSampler:
             if sampling_mask_chunks
             else None
         )
-        return sampled, num_sampled, logprobs_tensors, sampling_mask_tensors
+        path = torch.cat(path_chunks) if path_chunks else None
+        return sampled, num_sampled, logprobs_tensors, sampling_mask_tensors, path
 
     def __call__(
         self,
@@ -441,6 +545,7 @@ class RejectionSampler:
             num_sampled,
             logprobs_tensors,
             sampling_mask_tensors,
+            accept_path,
         ) = self._verify_in_chunks(
             logits,
             input_batch,
@@ -466,4 +571,5 @@ class RejectionSampler:
             num_sampled=num_sampled,
             num_rejected=num_rejected,
             sampling_mask_tensors=sampling_mask_tensors,
+            accept_path=accept_path,
         )

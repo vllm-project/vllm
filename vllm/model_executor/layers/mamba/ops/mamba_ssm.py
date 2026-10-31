@@ -191,6 +191,21 @@ def try_get_optimal_ssm_config(
     )
 
 
+def tree_ssm_launch_config(headdim: int, dstate: int) -> tuple[int, int]:
+    """(BLOCK_SIZE_M, num_warps) of a tree verify (``parents``).
+
+    A tree verify walks a request's rows in order, each step waiting on its
+    reduction over dstate and, at a branch, on reloading the parent's state,
+    so it is latency-bound: one warp per program keeps the reduction and the
+    branch's barrier inside the warp, on a 1024-element tile. The tile does
+    not depend on the batch, so neither do a row's bits.
+    """
+    if _ssm_config_override is not None:
+        return _ssm_config_override
+    block_dstate = triton.next_power_of_2(dstate)
+    return max(1, min(triton.next_power_of_2(headdim), 1024 // block_dstate)), 1
+
+
 if TRITON3:
 
     @triton.jit
@@ -233,6 +248,7 @@ cvt.rs.f16x2.f32 $0, $2, $1, $3;
     {"IS_SPEC_DECODING": lambda args: args["num_accepted_tokens_ptr"] is not None}
 )
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens_ptr"] is not None})
+@triton.heuristics({"IS_TREE": lambda args: args["parents_ptr"] is not None})
 @triton.heuristics(
     {"BLOCK_SIZE_DSTATE": lambda args: triton.next_power_of_2(args["dstate"])}
 )
@@ -255,6 +271,7 @@ def _selective_scan_update_kernel(
     null_block_id,
     num_accepted_tokens_ptr,
     cu_seqlens_ptr,
+    parents_ptr,
     # Matrix dimensions
     N,
     nheads,
@@ -305,6 +322,7 @@ def _selective_scan_update_kernel(
     HAS_STATE_BATCH_INDICES: tl.constexpr,
     IS_SPEC_DECODING: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    IS_TREE: tl.constexpr,
     BLOCK_SIZE_DSTATE: tl.constexpr,
     USE_RS_ROUNDING: tl.constexpr,
     PHILOX_ROUNDS: tl.constexpr,
@@ -391,6 +409,24 @@ def _selective_scan_update_kernel(
     A_ptrs = A_ptr + offs_m[:, None] * stride_A_dim + offs_n[None, :] * stride_A_dstate
 
     for i_t in range(seq_len):
+        if IS_TREE:
+            # A row whose parent is not the row before it starts from the
+            # parent's state, which this program stored at the parent's step.
+            i_p = tl.load(parents_ptr + bos + i_t).to(tl.int64)
+            if i_p != i_t - 1:  # the first row's parent is -1
+                parent_dst_idx = tl.load(
+                    dst_state_batch_indices_ptr + i_p * stride_dst_state_indices_T
+                ).to(tl.int64)
+                tl.debug_barrier()
+                state = tl.load(
+                    state_ptr_base
+                    + parent_dst_idx * stride_state_batch
+                    + pid_h * stride_state_head
+                    + offs_m[:, None] * stride_state_dim
+                    + offs_n[None, :] * stride_state_dstate,
+                    mask=mask & (parent_dst_idx != null_block_id),
+                    other=0.0,
+                ).to(tl.float32)
         x_ptrs = x_ptr + offs_m * stride_x_dim
         dt_ptrs = dt_ptr + offs_m * stride_dt_dim
         B_ptrs = B_ptr + offs_n * stride_B_dstate
@@ -513,6 +549,7 @@ def selective_state_update(
     is_blackwell=False,
     enable_stochastic_rounding=False,
     cache_philox_rounds=0,
+    parents=None,
 ):
     """Argument:
     state: (batch, dim, dstate) or (batch, nheads, dim, dstate)
@@ -537,7 +574,18 @@ def selective_state_update(
         tells the kernel which initial state to use
     cu_seqlens: (batch,)
         length per sequence, for variable length in speculative decoding cases
+    parents: (num_tokens,) int32, for a tree verify (needs num_accepted_tokens
+        and cu_seqlens): the parent of each row as a row index within its
+        sequence, -1 for the first row, every other row's parent an earlier
+        row. A row starts from its parent's state (stored at the parent's step
+        in dst_state_batch_indices[seq, parent]) instead of the previous row's.
+        None is a chain.
     """
+    if parents is not None and (num_accepted_tokens is None or cu_seqlens is None):
+        raise ValueError(
+            "a tree state update (`parents`) needs `num_accepted_tokens` and "
+            "`cu_seqlens`"
+        )
     if state.dim() == 3:
         state = state.unsqueeze(1)
     if x.dim() == 2:
@@ -618,9 +666,12 @@ def selective_state_update(
     # We don't want autotune since it will overwrite the state.
     # Load from JSON config if available, otherwise fall back to heuristic.
     cache_dtype = str(state.dtype).removeprefix("torch.")
-    BLOCK_SIZE_M, num_warps = try_get_optimal_ssm_config(
-        dim, dstate, N, nheads, cache_dtype, is_blackwell
-    )
+    if parents is not None:
+        BLOCK_SIZE_M, num_warps = tree_ssm_launch_config(dim, dstate)
+    else:
+        BLOCK_SIZE_M, num_warps = try_get_optimal_ssm_config(
+            dim, dstate, N, nheads, cache_dtype, is_blackwell
+        )
 
     tie_hdim = (
         A.stride(-1) == 0
@@ -652,6 +703,7 @@ def selective_state_update(
             null_block_id,
             num_accepted_tokens,
             cu_seqlens,
+            parents,
             N,
             nheads,
             dim,

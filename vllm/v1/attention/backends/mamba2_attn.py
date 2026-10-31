@@ -127,6 +127,11 @@ class Mamba2AttentionMetadata(BaseMambaAttentionMetadata):
     checkpoint_chunk_idx: torch.Tensor | None = None
     checkpoint_meta: MambaPrefillCheckpointMetadata | None = None
 
+    # ``CommonAttentionMetadata.tree_parents`` when the batch verifies a tree.
+    # The decode rows lead the batch, so it is indexed like
+    # ``query_start_loc_d``. None: chains.
+    tree_parents_d: torch.Tensor | None = None
+
 
 class Mamba2AttentionMetadataBuilder(
     BaseMambaAttentionMetadataBuilder[Mamba2AttentionMetadata]
@@ -216,6 +221,10 @@ class Mamba2AttentionMetadataBuilder(
                 checkpoint_offsets_p,
             )
 
+        tree_parents_d = None
+        if common.num_decodes > 0:
+            tree_parents_d = common_attn_metadata.tree_parents
+
         return replace(
             common,
             prep_initial_states=prep_initial_states,
@@ -225,6 +234,7 @@ class Mamba2AttentionMetadataBuilder(
             last_chunk_indices_p=last_chunk_indices_p,
             checkpoint_chunk_idx=checkpoint_chunk_idx,
             checkpoint_meta=checkpoint_meta,
+            tree_parents_d=tree_parents_d,
         )
 
     def update_block_table(

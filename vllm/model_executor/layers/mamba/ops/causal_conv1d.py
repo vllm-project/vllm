@@ -952,6 +952,259 @@ def _causal_conv1d_update_kernel(
         tl.store(o_ptrs, acc, mask=mask_1d)
 
 
+@triton.jit(do_not_specialize_on_alignment=["num_cache_lines"])
+def _causal_conv1d_update_tree_kernel(
+    x_ptr,  # (num_tokens, dim)
+    w_ptr,  # (dim, width)
+    bias_ptr,
+    conv_state_ptr,
+    conv_state_indices_ptr,
+    num_accepted_tokens_ptr,
+    query_start_loc_ptr,  # (batch + 1)
+    parents_ptr,  # (num_tokens,) parent row within the request, -1 for row 0
+    o_ptr,  # (num_tokens, dim)
+    dim: tl.constexpr,
+    num_cache_lines,
+    stride_x_dim: tl.constexpr,
+    stride_x_token: tl.int64,
+    stride_w_dim: tl.constexpr,
+    stride_w_width: tl.constexpr,
+    stride_conv_state_seq: tl.constexpr,
+    stride_conv_state_dim: tl.constexpr,
+    stride_conv_state_tok: tl.constexpr,
+    stride_state_indices: tl.constexpr,
+    stride_o_dim: tl.constexpr,
+    stride_o_token: tl.int64,
+    null_block_id: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+    KERNEL_WIDTH: tl.constexpr,
+    SILU_ACTIVATION: tl.constexpr,
+    HAS_NULL_BLOCK: tl.constexpr,
+    NP2_SEQLEN: tl.constexpr,
+    NP2_STATELEN: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    launch_pdl: tl.constexpr,
+):
+    """The spec-decode update of _causal_conv1d_update_kernel for a tree: every
+    row of a request at once, in a [NP2_SEQLEN, BLOCK_N] tile whose taps are
+    gathered by ancestor. The window is rolled as there, and each row's
+    products are summed in the same order (oldest tap first). A row's taps are
+    copies of its inputs: an ancestor row's ``x``, or a history column.
+    """
+    idx_seq = tl.program_id(0)
+    idx_feats = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
+    # The weights are parameters, which no earlier kernel writes: load them
+    # while it drains. After STEP 2's stores they would be one more round trip
+    # before the sum.
+    w_base = w_ptr + idx_feats * stride_w_dim
+    w_mask = idx_feats < dim
+    if KERNEL_WIDTH >= 6:
+        w5 = _weight_col(w_base, KERNEL_WIDTH - 6, stride_w_width, w_mask)
+    if KERNEL_WIDTH >= 5:
+        w4 = _weight_col(w_base, KERNEL_WIDTH - 5, stride_w_width, w_mask)
+    if KERNEL_WIDTH >= 4:
+        w3 = _weight_col(w_base, KERNEL_WIDTH - 4, stride_w_width, w_mask)
+    if KERNEL_WIDTH >= 3:
+        w2 = _weight_col(w_base, KERNEL_WIDTH - 3, stride_w_width, w_mask)
+    if KERNEL_WIDTH >= 2:
+        w1 = _weight_col(w_base, KERNEL_WIDTH - 2, stride_w_width, w_mask)
+    w0 = _weight_col(w_base, KERNEL_WIDTH - 1, stride_w_width, w_mask)
+    if HAS_BIAS:
+        acc_preload = tl.load(bias_ptr + idx_feats, mask=w_mask, other=0.0).to(
+            tl.float32
+        )
+    else:
+        acc_preload = tl.zeros((BLOCK_N,), dtype=tl.float32)
+    if launch_pdl:
+        tl.extra.cuda.gdc_wait()
+
+    conv_states_input_coord = tl.load(
+        conv_state_indices_ptr + idx_seq * stride_state_indices
+    ).to(tl.int64)
+    query_start_index = tl.load(query_start_loc_ptr + idx_seq).to(tl.int64)
+    seqlen = tl.load(query_start_loc_ptr + idx_seq + 1).to(tl.int64) - query_start_index
+    skip = seqlen == 0
+    if HAS_NULL_BLOCK:
+        skip = skip | (conv_states_input_coord == null_block_id)
+    if skip:
+        if launch_pdl:
+            tl.extra.cuda.gdc_launch_dependents()
+        return
+
+    # the history starts at the column of the last token the previous round
+    # accepted; the window keeps KERNEL_WIDTH - 2 history columns, then the rows
+    conv_state_token_offset = (
+        tl.load(num_accepted_tokens_ptr + idx_seq).to(tl.int64) - 1
+    )
+    state_len = KERNEL_WIDTH - 2 + seqlen
+    mask_w = idx_feats < dim
+    rows = tl.arange(0, NP2_SEQLEN)
+    mask_rows = rows < seqlen
+    mask_2d = mask_rows[:, None] & mask_w[None, :]
+    x_base = x_ptr + query_start_index * stride_x_token + idx_feats * stride_x_dim
+    conv_states_base = (
+        conv_state_ptr
+        + conv_states_input_coord * stride_conv_state_seq
+        + idx_feats * stride_conv_state_dim
+    )
+    history_base = conv_states_base + conv_state_token_offset * stride_conv_state_tok
+
+    # STEP 1: gather every row's taps, before the window is overwritten.
+    # tap j (j = 1 the parent) is ancestor j's input; above the first row the
+    # walk goes on into the history: -1 the newest column, -2 the one before
+    x_self = tl.load(x_base[None, :] + (rows * stride_x_token)[:, None], mask_2d, 0.0)
+    ancestor = rows
+    if KERNEL_WIDTH >= 2:
+        ancestor = _parent_rows(ancestor, parents_ptr + query_start_index, mask_rows)
+        tap1 = _row_tap(
+            ancestor,
+            x_base,
+            history_base,
+            stride_x_token,
+            stride_conv_state_tok,
+            mask_2d,
+            KERNEL_WIDTH,
+        )
+    if KERNEL_WIDTH >= 3:
+        ancestor = _parent_rows(ancestor, parents_ptr + query_start_index, mask_rows)
+        tap2 = _row_tap(
+            ancestor,
+            x_base,
+            history_base,
+            stride_x_token,
+            stride_conv_state_tok,
+            mask_2d,
+            KERNEL_WIDTH,
+        )
+    if KERNEL_WIDTH >= 4:
+        ancestor = _parent_rows(ancestor, parents_ptr + query_start_index, mask_rows)
+        tap3 = _row_tap(
+            ancestor,
+            x_base,
+            history_base,
+            stride_x_token,
+            stride_conv_state_tok,
+            mask_2d,
+            KERNEL_WIDTH,
+        )
+    if KERNEL_WIDTH >= 5:
+        ancestor = _parent_rows(ancestor, parents_ptr + query_start_index, mask_rows)
+        tap4 = _row_tap(
+            ancestor,
+            x_base,
+            history_base,
+            stride_x_token,
+            stride_conv_state_tok,
+            mask_2d,
+            KERNEL_WIDTH,
+        )
+    if KERNEL_WIDTH >= 6:
+        ancestor = _parent_rows(ancestor, parents_ptr + query_start_index, mask_rows)
+        tap5 = _row_tap(
+            ancestor,
+            x_base,
+            history_base,
+            stride_x_token,
+            stride_conv_state_tok,
+            mask_2d,
+            KERNEL_WIDTH,
+        )
+
+    # STEP 2: roll the window as the loop kernel does:
+    # [history[1:], x_0, .., x_{seqlen - 1}]
+    idx_tokens = tl.arange(0, NP2_STATELEN)
+    conv_state_ptrs_source = (
+        history_base[None, :] + ((idx_tokens + 1) * stride_conv_state_tok)[:, None]
+    )
+    mask = (
+        (conv_states_input_coord < num_cache_lines)
+        & ((idx_tokens + seqlen) < state_len)[:, None]
+        & mask_w[None, :]
+    )
+    conv_state = tl.load(conv_state_ptrs_source, mask, other=0.0)
+    VAL = state_len - seqlen
+    mask_x = (
+        (idx_tokens - VAL >= 0)[:, None]
+        & (idx_tokens - VAL < seqlen)[:, None]
+        & mask_w[None, :]
+    )
+    loaded_x = tl.load(
+        x_base[None, :] + ((idx_tokens - VAL) * stride_x_token)[:, None], mask_x, 0.0
+    )
+    # every gather above reads before any store below (the output may be x)
+    tl.debug_barrier()
+    new_conv_state = tl.where(mask, conv_state, loaded_x)
+    tl.store(
+        conv_states_base[None, :] + (idx_tokens * stride_conv_state_tok)[:, None],
+        new_conv_state,
+        (idx_tokens < state_len)[:, None] & mask_w[None, :],
+    )
+    if launch_pdl:
+        tl.extra.cuda.gdc_launch_dependents()
+
+    # STEP 3: the loop's sum, oldest tap first
+    acc = tl.broadcast_to(acc_preload[None, :], (NP2_SEQLEN, BLOCK_N))
+    if KERNEL_WIDTH >= 6:
+        acc += tap5 * w5
+    if KERNEL_WIDTH >= 5:
+        acc += tap4 * w4
+    if KERNEL_WIDTH >= 4:
+        acc += tap3 * w3
+    if KERNEL_WIDTH >= 3:
+        acc += tap2 * w2
+    if KERNEL_WIDTH >= 2:
+        acc += tap1 * w1
+    acc += x_self * w0
+    if SILU_ACTIVATION:
+        acc = acc / (1 + tl.exp(-acc))
+    o_ptrs = (
+        o_ptr
+        + ((query_start_index + rows) * stride_o_token)[:, None]
+        + (idx_feats * stride_o_dim)[None, :]
+    )
+    tl.store(o_ptrs, acc, mask=mask_2d)
+
+
+@triton.jit
+def _parent_rows(rows, parents_ptr, mask_rows):
+    """One step up from each of ``rows``. Above the request's first row the
+    walk goes on into the history: -1 is the newest column, -2 the one before."""
+    parent = tl.load(parents_ptr + tl.maximum(rows, 0), mask_rows, -1)
+    return tl.where(rows >= 0, parent, rows - 1)
+
+
+@triton.jit
+def _row_tap(
+    ancestor,
+    x_base,
+    history_base,
+    stride_x_token,
+    stride_conv_state_tok,
+    mask_2d,
+    KERNEL_WIDTH: tl.constexpr,
+):
+    """[NP2_SEQLEN, BLOCK_N] inputs of ancestors ``ancestor``: row ``ancestor``'s x, or
+    for ``ancestor`` < 0 history column ``KERNEL_WIDTH - 1 + ancestor`` (0 the oldest)."""
+    in_rows = (ancestor >= 0)[:, None]
+    from_x = tl.load(
+        x_base[None, :] + (tl.maximum(ancestor, 0) * stride_x_token)[:, None],
+        mask_2d & in_rows,
+        0.0,
+    )
+    col = tl.maximum(KERNEL_WIDTH - 1 + ancestor, 0)
+    from_history = tl.load(
+        history_base[None, :] + (col * stride_conv_state_tok)[:, None],
+        mask_2d & ~in_rows,
+        0.0,
+    )
+    return tl.where(in_rows, from_x, from_history)
+
+
+@triton.jit
+def _weight_col(w_base, j: tl.constexpr, stride_w_width, mask_w):
+    return tl.load(w_base + j * stride_w_width, mask_w, other=0.0)[None, :]
+
+
 def causal_conv1d_update(
     x: torch.Tensor,
     conv_state: torch.Tensor,
@@ -965,6 +1218,7 @@ def causal_conv1d_update(
     null_block_id: int = NULL_BLOCK_ID,
     validate_data=False,
     out: torch.Tensor | None = None,
+    parents: torch.Tensor | None = None,
 ):
     """x: Input tensor which can take the following shapes:
 
@@ -999,7 +1253,19 @@ def causal_conv1d_update(
             indices 0 and 3
     out: optional output tensor with the same shape as `x`. When omitted,
         the input is overwritten.
+    parents: (num_tokens,) int32, for a tree verify (needs
+        `num_accepted_tokens` and `query_start_loc`): the parent of each row as
+        a row index within its request, -1 for the request's first row. Every
+        other row's parent is an earlier row. A row's taps are its nearest
+        ancestors (then the history) instead of the rows before it; the window
+        is rolled as for a chain, so it keeps the rows in row order. None is a
+        chain.
     """
+    if parents is not None and (num_accepted_tokens is None or query_start_loc is None):
+        raise ValueError(
+            "a tree conv update (`parents`) needs `num_accepted_tokens` and "
+            "`query_start_loc`"
+        )
     if validate_data:
         assert null_block_id is not None
         assert x.stride(1) == 1
@@ -1074,6 +1340,45 @@ def causal_conv1d_update(
     else:
         state_len = width - 1
     np2_statelen = triton.next_power_of_2(state_len)
+
+    if parents is not None:
+        # One program per request and 32 channels, all rows at once.
+        np2_seqlen = triton.next_power_of_2(seqlen)
+        block_n = 32
+        _causal_conv1d_update_tree_kernel[(batch, triton.cdiv(dim, block_n))](
+            x,
+            weight,
+            bias,
+            conv_state,
+            conv_state_indices,
+            num_accepted_tokens,
+            query_start_loc,
+            parents,
+            out,
+            dim,
+            num_cache_lines,
+            stride_x_dim,
+            stride_x_token,
+            stride_w_dim,
+            stride_w_width,
+            stride_istate_seq,
+            stride_istate_dim,
+            stride_istate_token,
+            stride_state_indices,
+            stride_o_dim,
+            stride_o_token,
+            null_block_id,
+            HAS_BIAS=bias is not None,
+            KERNEL_WIDTH=width,
+            SILU_ACTIVATION=activation in ["silu", "swish"],
+            HAS_NULL_BLOCK=null_block_id is not None,
+            NP2_SEQLEN=np2_seqlen,
+            NP2_STATELEN=np2_statelen,
+            BLOCK_N=block_n,
+            launch_pdl=current_platform.is_arch_support_pdl(),
+            num_warps=max(1, min(4, np2_seqlen * block_n // 128)),
+        )
+        return out.to(original_x_dtype)
 
     def grid(META):
         return (

@@ -10,6 +10,7 @@ from tests.v1.core.utils import create_requests, create_scheduler
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.structured_output import StructuredOutputManager
+from vllm.v1.worker.gpu.spec_decode.round import PlanShape
 
 
 def _make_lookup(
@@ -140,8 +141,20 @@ def test_scheduler_initializes_dynamic_sd_lookup_from_speculative_config():
         runtime_num_speculative_tokens=3,
     )
 
-    assert scheduler.dynamic_sd_lookup is not None
+    assert not scheduler.pads_new_decode_rows
     assert scheduler.num_spec_tokens == 3
+    # The schedule's K + 1 for batch sizes 1..16 (max_num_seqs): all 4.
+    config = scheduler.speculator_config
+    assert config is not None
+    resources = config.resources(16)
+    assert resources.capture_shapes == (PlanShape(4),)
+    assert resources.max_candidates == 4
+    # Over every batch size the schedule reaches, one uniform shape per K.
+    assert config.resources(256).capture_shapes == (
+        PlanShape(1),
+        PlanShape(3),
+        PlanShape(4),
+    )
 
 
 def test_scheduler_uses_dsd_k_based_on_number_of_scheduled_requests():
@@ -185,7 +198,7 @@ def test_scheduler_falls_back_to_static_k_when_dsd_not_configured():
     )
     output = _add_requests_and_schedule(scheduler, 4)
 
-    assert scheduler.dynamic_sd_lookup is None
+    assert scheduler.pads_new_decode_rows
     assert output.num_spec_tokens_to_schedule == 3
 
 
@@ -206,7 +219,7 @@ def test_dynamic_sd_is_disabled_with_data_parallel(caplog_vllm):
     speculative_config = scheduler.vllm_config.speculative_config
     assert speculative_config is not None
     assert speculative_config.num_speculative_tokens_per_batch_size is None
-    assert scheduler.dynamic_sd_lookup is None
+    assert scheduler.pads_new_decode_rows
     assert "Dynamic speculative decoding is not supported with data parallelism" in (
         caplog_vllm.text
     )
@@ -241,7 +254,8 @@ def test_scheduler_passes_max_num_seqs_as_dsd_runtime_batch_limit():
     )
     output = _add_requests_and_schedule(scheduler, 16)
 
-    assert scheduler.dynamic_sd_lookup is not None
-    assert len(scheduler.dynamic_sd_lookup) == 17
+    assert not scheduler.pads_new_decode_rows
+    assert scheduler.speculator_config is not None
+    assert len(scheduler.speculator_config._dynamic_sd_schedule(16)) == 17
     assert len(output.num_scheduled_tokens) == 16
     assert output.num_spec_tokens_to_schedule == 3

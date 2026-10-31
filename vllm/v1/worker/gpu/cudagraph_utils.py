@@ -41,7 +41,6 @@ from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.hisparse.binding import release_hisparse_profiling_cache
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
@@ -57,6 +56,7 @@ from vllm.v1.worker.utils import AttentionGroup, clear_layer_kv_caches
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
     from vllm.v1.worker.gpu.pcp_manager import PCPManager
+    from vllm.v1.worker.gpu.spec_decode.round import SpecResources
     from vllm.v1.worker.gpu.ubatch_utils import UBatchRunner
 
 logger = init_logger(__name__)
@@ -193,6 +193,9 @@ class CudaGraphManager:
 
         self._candidates: dict[tuple[int, int], list[BatchExecutionDescriptor]] = {}
         self._capture_descs: dict[CUDAGraphMode, list[BatchExecutionDescriptor]] = {}
+        # The speculation resources to capture for; the declared ones until the
+        # engine core sets what the model verifies (set_spec_resources).
+        self.spec_resources: SpecResources | None = None
 
         # Breakable CUDA graph (PW CUDA graph without torch.compile)
         self.use_breakable_cg = (
@@ -256,6 +259,37 @@ class CudaGraphManager:
             desc, num_ubatches=num_ubatches, uniform_token_count=uniform_token_count
         )
 
+    def _decode_query_lens(self) -> list[int]:
+        """The uniform decode query lengths to capture.
+
+        A manager whose decode query length follows the drafts (it is above K:
+        the target's verify forward, a drafter's prefill) captures one length
+        per uniform shape the speculator declares (`SpecResources`). A uniform
+        count c is c - 1 drafts plus the tokens sampled per step.
+        """
+        speculative_config = self.vllm_config.speculative_config
+        num_speculative_tokens = self.vllm_config.num_speculative_tokens
+        if speculative_config is None or not (
+            self.decode_query_len > num_speculative_tokens
+        ):
+            return [self.decode_query_len]
+        resources = self.spec_resources or (
+            speculative_config.speculator_config.resources(self.max_num_reqs)
+        )
+        num_new_sampled_tokens_per_step = self.decode_query_len - num_speculative_tokens
+        lens = [
+            c - 1 + num_new_sampled_tokens_per_step for c in resources.uniform_counts
+        ]
+        return lens or [self.decode_query_len]
+
+    def set_spec_resources(self, resources: "SpecResources") -> None:
+        """Capture the decode shapes of ``resources`` (before any capture)."""
+        assert not self._graphs_captured
+        self.spec_resources = resources
+        self._candidates.clear()
+        self._capture_descs.clear()
+        self._init_candidates()
+
     def _init_candidates(self) -> None:
         """Build priority-ordered candidate lists for each token count."""
         capture_sizes = self.compilation_config.cudagraph_capture_sizes
@@ -273,34 +307,7 @@ class CudaGraphManager:
             defaultdict(list)
         )
 
-        # When using Dynamic SD, num_speculative_tokens is the max number of
-        # draft tokens. The scheduler might use a smaller number so we need
-        # to capture graphs for all possible values during decode.
-        speculative_config = self.vllm_config.speculative_config
-        if (
-            speculative_config
-            and speculative_config.uses_dynamic_speculative_decoding()
-            and self.decode_query_len > self.vllm_config.num_speculative_tokens
-        ):
-            # decode_query_len = num_speculative_steps + num_new_sampled_tokens
-            # _per_step. Recover num_new_sampled_tokens_per_step
-            # from the values the manager already has.
-            num_new_sampled_tokens_per_step = (
-                self.decode_query_len - self.vllm_config.num_speculative_tokens
-            )
-            dense_schedule = build_dynamic_sd_schedule_lookup(
-                speculative_config.num_speculative_tokens_per_batch_size,
-                vllm_max_batch_size=self.max_num_reqs,
-                vllm_num_speculative_tokens=self.vllm_config.num_speculative_tokens,
-            )
-            decode_query_lens = sorted(
-                {
-                    num_spec + num_new_sampled_tokens_per_step
-                    for num_spec in dense_schedule[1:]
-                }
-            )
-        else:
-            decode_query_lens = [self.decode_query_len]
+        decode_query_lens = self._decode_query_lens()
 
         capture_varlen_decode = (
             separate_decode_routine and bool(decode_mode) and self.varlen_decode

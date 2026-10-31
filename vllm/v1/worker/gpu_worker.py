@@ -162,6 +162,8 @@ if TYPE_CHECKING:
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner as GPUModelRunnerV2
+    from vllm.v1.worker.gpu.spec_decode.capabilities import SpecCapabilities
+    from vllm.v1.worker.gpu.spec_decode.round import SpecResources
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 
@@ -938,6 +940,15 @@ class Worker(WorkerBase):
         if connector is None:
             return None
         return connector.get_aligned_num_cpu_blocks()
+
+    def get_spec_capabilities(self) -> "SpecCapabilities | None":
+        # None without speculative decoding or on the V1 model runner.
+        spec_round = getattr(self.model_runner, "spec_round", None)
+        return spec_round.capabilities if spec_round is not None else None
+
+    def set_spec_resources(self, resources: "SpecResources") -> None:
+        if self.get_spec_capabilities() is not None:
+            cast("GPUModelRunnerV2", self.model_runner).set_spec_resources(resources)
 
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> CompilationTimes:

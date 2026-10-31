@@ -7,7 +7,7 @@ import itertools
 import os
 from collections.abc import Callable
 from dataclasses import replace
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import torch
 from einops import rearrange
@@ -108,6 +108,9 @@ if GDN_AITER_TRITON_AVAILABLE:
     from aiter.ops.triton.gated_delta_net.fused_rearrange_sigmoid_gdr import (
         fused_rearrange_sigmoid_gated_delta_rule as gdn_aiter_fused_rearrange_sigmoid_gated_delta_rule,  # noqa: E501
     )
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.spec_decode.kernels import SpecKernel
 
 logger = init_logger(__name__)
 
@@ -557,6 +560,9 @@ class ChunkGatedDeltaRule(CustomOp):
 
 @PluggableLayer.register("qwen_gated_delta_net_attention")
 class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
+    # The spec kernels follow CommonAttentionMetadata.tree_parents.
+    spec_layer_variant = "gdn"
+
     def get_state_shape(
         self,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
@@ -1641,6 +1647,46 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out=core_attn_out,
         )
 
+    def _forward_spec_rows(
+        self,
+        verify_kernel: "SpecKernel",
+        attn_metadata: GDNAttentionMetadata,
+        mixed_qkv: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        conv_state: torch.Tensor,
+        conv_weights: torch.Tensor,
+        ssm_state: torch.Tensor,
+        out: torch.Tensor,
+    ) -> None:
+        """Hand the spec-decode rows to the verify kernel bound to the layer."""
+        from vllm.v1.worker.gpu.spec_decode.kernels import GDNSpecRows
+
+        verify_kernel.verify(  # type: ignore[attr-defined]
+            GDNSpecRows(
+                layer_name=self.prefix,
+                mixed_qkv=mixed_qkv,
+                a=a,
+                b=b,
+                conv_state=conv_state,
+                conv_weight=conv_weights,
+                conv_bias=self.conv1d.bias,
+                activation=self.activation,
+                ssm_state=ssm_state,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                num_k_heads=self.num_k_heads // self.tp_size,
+                num_v_heads=self.num_v_heads // self.tp_size,
+                head_k_dim=self.head_k_dim,
+                head_v_dim=self.head_v_dim,
+                state_indices=attn_metadata.spec_state_indices_tensor,
+                num_accepted_tokens=attn_metadata.num_accepted_tokens,
+                query_start_loc=attn_metadata.spec_query_start_loc,
+                parents=attn_metadata.spec_tree_parents,
+                out=out,
+            )
+        )
+
     def _forward_core(
         self,
         mixed_qkv: torch.Tensor,
@@ -1712,8 +1758,32 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             self.conv1d.weight.size(0), self.conv1d.weight.size(2)
         )
 
+        verify_kernel = self.spec_verify_kernel
+        spec_only = (
+            spec_sequence_masks is not None
+            and attn_metadata.num_prefills == 0
+            and attn_metadata.num_decodes == 0
+        )
+        if verify_kernel is not None and spec_only:
+            # Only spec-decode rows: the kernel reads the projections as they
+            # are and writes the layer's output buffer.
+            self._forward_spec_rows(
+                verify_kernel,
+                attn_metadata,
+                mixed_qkv,
+                a,
+                b,
+                conv_state,
+                conv_weights,
+                ssm_state,
+                core_attn_out[:num_actual_tokens],
+            )
+            return
+        b = b.contiguous()
+        a = a.contiguous()
+
         if spec_sequence_masks is not None:
-            if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
+            if spec_only:
                 mixed_qkv_spec = mixed_qkv
                 a_spec = a
                 b_spec = b
@@ -1731,20 +1801,40 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if spec_sequence_masks is not None:
             # spec_state_indices_tensor is always set when spec_sequence_masks is set
             assert spec_state_indices_tensor is not None
-            mixed_qkv_spec = causal_conv1d_update(
-                mixed_qkv_spec,
-                conv_state,
-                conv_weights,
-                self.conv1d.bias,
-                self.activation,
-                conv_state_indices=spec_state_indices_tensor[:, 0][  # type: ignore[index]
-                    : attn_metadata.num_spec_decodes  # type: ignore[attr-defined]
-                ],
-                num_accepted_tokens=num_accepted_tokens,
-                query_start_loc=spec_query_start_loc,
-                max_query_len=spec_state_indices_tensor.size(-1),
-                validate_data=False,
-            )
+            if verify_kernel is not None:
+                kernel_out_spec = mixed_qkv_spec.new_empty(
+                    mixed_qkv_spec.shape[0],
+                    self.num_v_heads // self.tp_size,
+                    self.head_v_dim,
+                )
+                self._forward_spec_rows(
+                    verify_kernel,
+                    attn_metadata,
+                    mixed_qkv_spec,
+                    a_spec,
+                    b_spec,
+                    conv_state,
+                    conv_weights,
+                    ssm_state,
+                    kernel_out_spec,
+                )
+                mixed_qkv_spec = None
+            else:
+                mixed_qkv_spec = causal_conv1d_update(
+                    mixed_qkv_spec,
+                    conv_state,
+                    conv_weights,
+                    self.conv1d.bias,
+                    self.activation,
+                    conv_state_indices=spec_state_indices_tensor[:, 0][  # type: ignore[index]
+                        : attn_metadata.num_spec_decodes  # type: ignore[attr-defined]
+                    ],
+                    num_accepted_tokens=num_accepted_tokens,
+                    query_start_loc=spec_query_start_loc,
+                    max_query_len=spec_state_indices_tensor.size(-1),
+                    validate_data=False,
+                    parents=attn_metadata.spec_tree_parents,
+                )
 
         # 1.2: Process the remaining part
         conv_input_non_spec = mixed_qkv_non_spec
@@ -1843,7 +1933,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # 2. Recurrent attention
 
         # 2.1: Process the multi-query part
-        if spec_sequence_masks is not None:
+        if spec_sequence_masks is not None and verify_kernel is not None:
+            core_attn_out_spec = kernel_out_spec.unsqueeze(0)
+            last_recurrent_state = None
+        elif spec_sequence_masks is not None:
             core_attn_out_spec, last_recurrent_state = (
                 fused_sigmoid_gating_delta_rule_update(
                     A_log=self.A_log,
@@ -1862,6 +1955,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     ssm_state_indices=spec_state_indices_tensor,
                     num_accepted_tokens=num_accepted_tokens,
                     use_qk_l2norm_in_kernel=True,
+                    parents=attn_metadata.spec_tree_parents,
                 )
             )
         else:
@@ -2299,7 +2393,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     ) -> bool:
         state_indices = attn_metadata.spec_state_indices_tensor
         return (
-            attn_metadata.spec_sequence_masks is not None
+            self.spec_verify_kernel is None
+            # The fused CUDA kernel runs chains; the Triton path follows parents.
+            and attn_metadata.spec_tree_parents is None
+            and attn_metadata.spec_sequence_masks is not None
             and attn_metadata.num_decodes == 0
             and attn_metadata.num_spec_decodes > 0
             and self.kv_cache[1].dtype in FUSED_GDN_STATE_DTYPES
@@ -2378,8 +2475,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             return
         self._forward_core(
             mixed_qkv=mixed_qkv,
-            b=b.contiguous(),
-            a=a.contiguous(),
+            b=b,
+            a=a,
             core_attn_out=core_attn_out,
         )
         num_actual_tokens = attn_metadata.num_actual_tokens

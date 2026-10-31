@@ -42,6 +42,10 @@ class ModelSpecificAttnMetadata:
 class ModelState(ABC):
     supports_prompt_embeds: ClassVar[bool] = False
     """Whether this state implements user-provided prompt embeddings."""
+    supports_tree_verify: ClassVar[bool] = False
+    """Whether ``prepare_attn`` passes ``InputBatch.tree_parents`` and
+    ``tree_ancestors`` into the attention metadata, so its
+    batches can verify plans that are not chains."""
 
     def __init__(
         self,
@@ -171,7 +175,18 @@ class ModelState(ABC):
         idx_mapping: torch.Tensor,
         num_sampled: torch.Tensor,
         num_computed_tokens: torch.Tensor | None = None,
+        *,
+        accepted_row: torch.Tensor | None = None,
     ) -> None:
+        """Commit the step's per-request state.
+
+        ``num_sampled[b]`` tokens were committed for batch row ``b``.
+        ``accepted_row[b]``, when given, is the verify row whose state the request
+        resumes from (the last row of the accepted path of a plan that is not a
+        chain); None means a chain, whose accepted rows are the first
+        ``num_sampled`` rows. The runner passes ``accepted_row`` only when it is
+        not None, so an override without it keeps working on chain steps.
+        """
         return None
 
     @abstractmethod

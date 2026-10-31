@@ -42,11 +42,20 @@ from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
     OnlineAcceptanceEstimator,
 )
 from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
+from vllm.v1.worker.gpu.spec_decode.round import (
+    AcceptResult,
+    PlanBound,
+    PlanInputs,
+    SpecResources,
+    VerifyOutput,
+    VerifyPlan,
+)
 from vllm.v1.worker.utils import AttentionGroup
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.pcp_manager import PCPManager
     from vllm.v1.worker.gpu.sample.sampler import Sampler
+    from vllm.v1.worker.gpu.spec_decode.step_observation import StepObservation
 
 logger = init_logger(__name__)
 
@@ -73,6 +82,12 @@ class BaseSpeculator(ABC):
     should subclass `DraftModelSpeculator` (or `TargetDependentARSpeculator` if
     drafting consumes target model state), which the model runner loads and
     allocates draft KV cache for.
+
+    `propose` is not called on a step whose next round verifies no drafts
+    (candidate budget 1, `num_speculative_tokens == 0`), unless another data
+    parallel rank drafts. A drafter that keeps its own KV then has no entries
+    for the tokens accepted on that step; it may catch up in its next `propose`
+    from `input_batch`, or leave them, at a possible cost in acceptance.
     """
 
     num_query_per_req: int = 1
@@ -82,6 +97,16 @@ class BaseSpeculator(ABC):
     # Draft logits for probabilistic rejection sampling, or None for
     # greedy-draft verification and for speculators without a draft model.
     draft_logits: DraftLogitsCache | None = None
+    # What speculation runs with (`bind_resources`); None until then.
+    resources: SpecResources | None = None
+
+    def bind_resources(self, resources: SpecResources) -> None:
+        """Run with ``resources``: the config's declared resources lowered to
+        what the target's layers verify (``SpeculatorConfig.adapt_resources``).
+        Called once on every worker, before capture. With
+        ``resources.max_branching == 1`` every batch is ``PlanInputs.chain_only``.
+        """
+        self.resources = resources
 
     @abstractmethod
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
@@ -120,13 +145,83 @@ class BaseSpeculator(ABC):
         is_profile: bool = False,
         num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
-        pass
+        """Propose up to `num_speculative_tokens` drafts per request (the
+        speculator's K when None), -1 where it proposes fewer.
+
+        With `num_speculative_tokens == 0` (budget 1; called only when another
+        data parallel rank drafts) it proposes nothing and may write draft KV
+        only at this step's target positions, which `slot_mappings` cover: it
+        must run no draft decode step, whose KV slots exist for drafts.
+        """
 
     def prepare_watermarking(
         self, sampler: "GPUWatermarkSampler", idx_mapping: torch.Tensor
     ) -> None:
         """Prepare draft-side watermarking before `propose`. No-op by default."""
         return
+
+    def plan(self, inputs: PlanInputs) -> tuple[VerifyPlan, PlanBound] | None:
+        """The rows the target verifies this step.
+
+        Called once per scheduled batch that carries drafts, before its inputs
+        are built, unless adaptive verification (which sets its own budget) is
+        enabled. Return None (the default) to verify every scheduled draft as a
+        chain. Otherwise return a plan whose tensors cover ``inputs``' batch rows
+        and stay valid until the step commits, and its host bound: request ``r``
+        verifies ``bound.rows[r]`` rows (at most ``inputs.scheduled_rows[r]``);
+        the drafts past it leave the batch and count as rejected. A plan that is
+        not a chain needs ``SpecResources.max_branching > 1`` (in the bound
+        resources, see `bind_resources`) and a batch that is not
+        ``inputs.chain_only``. The plan's device ``count`` may stop short of its
+        bound: the rows past it are never accepted.
+        """
+        return None
+
+    def accept(
+        self, plan: VerifyPlan, output: VerifyOutput, sampler: "Sampler"
+    ) -> AcceptResult | None:
+        """Which rows of each request the target confirmed.
+
+        Called on the sampler's stream for every verified batch, once per
+        request range when a large batch is verified in pieces; ``plan`` and
+        ``output`` cover that range. ``sampler`` applies the sampling parameters
+        (``apply_sampling_params``) and holds the sampling states; it is an
+        internal interface and may change. Return None (the default) to let vLLM
+        verify: a chain through its rejection sampler (path ``arange``), a plan
+        that is not a chain by walking the tree on each row's argmax, which only
+        greedy requests accept. The runner commits the KV and the recurrent state
+        along the returned path and takes each committed token's logprobs from
+        its path row.
+        """
+        return None
+
+    def observe_step(self, step: "StepObservation") -> None:  # noqa: B027
+        """Receive the runner's record of a step once it has sampled.
+
+        Called once per step that ran the target forward and sampled, after
+        the runner committed the accepted path (``input_batch.accept_result``
+        is set) and before ``propose``, including steps without drafts
+        (candidate budget 1) and prefill steps. Capture and profiling runs are
+        not observed. With
+        pipeline parallelism only the last rank calls it. Runs on the host;
+        the record holds no copies and the runner does not sync for it, so
+        reading ``step.num_sampled`` on the host would add a sync. The default
+        does nothing, and the runner builds no record for a speculator that
+        does not override it.
+        """
+
+    def overridden_hooks(self) -> frozenset[str]:
+        """The optional per-step hooks this speculator overrides. The model
+        runner reads them once and skips the no-op defaults on every step."""
+        return frozenset(
+            name
+            for name in (
+                "plan",
+                "accept",
+                "observe_step",
+            )
+            if getattr(type(self), name) is not getattr(BaseSpeculator, name)
+        )
 
 
 class DraftModelSpeculator(BaseSpeculator):

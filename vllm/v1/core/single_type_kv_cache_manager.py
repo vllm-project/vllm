@@ -443,6 +443,11 @@ class SingleTypeKVCacheManager(ABC):
         self._pending_boundary_state_offloads = []
         return pending
 
+    def take_spec_state_block_counts(self) -> dict[str, int]:
+        """Drain request id -> block count of the rows whose speculative state
+        tail was dropped. Only mamba with dynamic spec blocks populates this."""
+        return {}
+
     def finalize_partial_tail_offload(
         self,
         request_id: str,
@@ -1443,6 +1448,15 @@ class MambaManager(SingleTypeKVCacheManager):
             "Mamba prefix caching requires mamba_cache_mode='align'"
         )
         self.num_speculative_blocks: int = kv_cache_spec.num_speculative_blocks
+        # With `num_draft_tokens` given, a request holds one spec state block per
+        # draft it verifies this step instead of `num_speculative_blocks`. Per
+        # request: the end of the last allocation's state span (state block plus
+        # spec blocks), kept until the next step has read the state the last one
+        # committed, and the tail blocks dropped this step, which the worker drops
+        # from its block table too.
+        self._spec_state_idx: dict[str, int] = {}
+        self._spec_span_end: dict[str, int] = {}
+        self._num_dropped_blocks: dict[str, int] = {}
         self.has_prefill_checkpoint_blocks = (
             self.mamba_cache_mode == "align"
             and kv_cache_spec.num_prefill_checkpoint_blocks > 0
@@ -1656,6 +1670,79 @@ class MambaManager(SingleTypeKVCacheManager):
                     self.block_pool.free_blocks([blocks[last_state_block_idx]])
                     blocks[last_state_block_idx] = self._null_block
 
+    def _num_spec_blocks(self, request_id: str) -> int:
+        """Spec blocks the request holds after its state block."""
+        if request_id not in self._spec_span_end:
+            return self.num_speculative_blocks
+        return (
+            len(self.req_to_blocks[request_id]) - 1 - self._spec_state_idx[request_id]
+        )
+
+    def _num_spec_blocks_needed(
+        self, request_id: str, state_idx: int, num_draft_tokens: int | None
+    ) -> int:
+        """Spec blocks the request holds past `state_idx` after this allocation.
+
+        None holds `num_speculative_blocks`. Otherwise one per draft this step
+        verifies, and no fewer than reach the end of the previous allocation's
+        span: the step that runs next reads the state the previous verify
+        accepted, which can sit in any of that verify's draft columns.
+        """
+        if num_draft_tokens is None:
+            return self.num_speculative_blocks
+        num_spec_blocks = min(num_draft_tokens, self.num_speculative_blocks)
+        if request_id not in self._spec_span_end:
+            return num_spec_blocks
+        prev_end = max(
+            self._spec_span_end[request_id], self._spec_state_idx[request_id] + 1
+        )
+        return max(num_spec_blocks, prev_end - state_idx - 1)
+
+    def _drop_spec_tail(self, request_id: str, keep: int) -> None:
+        """Free the request's blocks past index `keep`.
+
+        Only spec blocks past the state block the last step read and wrote
+        are dropped, so no step in flight touches them. The worker shortens
+        its block table row to the same length before this step's appends.
+        """
+        blocks = self.req_to_blocks[request_id]
+        if len(blocks) <= keep:
+            return
+        dropped = blocks[keep:]
+        # `keep` is past the state block, so only spec blocks drop: they are
+        # never cached or shared.
+        assert all(
+            not block.is_null and self.block_pool.is_block_writable(block)
+            for block in dropped
+        ), "spec blocks must be exclusively owned and unhashed"
+        del blocks[keep:]
+        self.block_pool.free_blocks(reversed(dropped))
+        self._num_dropped_blocks[request_id] = keep
+
+    def _record_spec_blocks(
+        self, request_id: str, state_idx: int, num_draft_tokens: int | None
+    ) -> None:
+        """Record an allocation whose verify keeps its state at `state_idx`.
+
+        The request's state block index only moves forward (an async step can
+        roll `state_idx` back by rejected drafts, but not the blocks laid out
+        for it). The span end bounds the columns this step's verify writes.
+        """
+        if self.num_speculative_blocks == 0:
+            return
+        if num_draft_tokens is not None:
+            self._spec_span_end[request_id] = (
+                state_idx + 1 + min(num_draft_tokens, self.num_speculative_blocks)
+            )
+        state_idx = max(state_idx, self._spec_state_idx.get(request_id, -1))
+        self._spec_state_idx[request_id] = state_idx
+
+    def take_spec_state_block_counts(self) -> dict[str, int]:
+        """Block counts of the rows whose tail was dropped since the last call."""
+        counts = self._num_dropped_blocks
+        self._num_dropped_blocks = {}
+        return counts
+
     def _needs_internal_checkpoint(
         self,
         request_id: str,
@@ -1684,7 +1771,8 @@ class MambaManager(SingleTypeKVCacheManager):
                 or blocks[checkpoint_idx].is_null
                 or (
                     request_id in self._allocated_block_reqs
-                    and checkpoint_idx >= len(blocks) - self.num_speculative_blocks
+                    and checkpoint_idx
+                    >= len(blocks) - self._num_spec_blocks(request_id)
                 )
             )
         )
@@ -1699,7 +1787,14 @@ class MambaManager(SingleTypeKVCacheManager):
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
         prefill_end: int = 0,
+        num_draft_tokens: int | None = None,
     ) -> int:
+        """See `SingleTypeKVCacheManager.get_num_blocks_to_allocate`.
+
+        `num_draft_tokens` is the number of drafts the request verifies this
+        step; the request then needs one spec block per draft instead of
+        `num_speculative_blocks`. None keeps `num_speculative_blocks`.
+        """
         assert isinstance(self.kv_cache_spec, MambaSpec)
         if (
             len(new_computed_blocks) > 0
@@ -1713,10 +1808,11 @@ class MambaManager(SingleTypeKVCacheManager):
         if self.mamba_cache_mode != "align":
             # Allocate extra `num_speculative_blocks` blocks for
             # speculative decoding (MTP/EAGLE) with linear attention.
-            if self.num_speculative_blocks > 0:
-                num_tokens += (
-                    self.kv_cache_spec.block_size * self.num_speculative_blocks
-                )
+            num_spec_blocks = self._num_spec_blocks_needed(
+                request_id, cdiv(num_tokens, self.block_size) - 1, num_draft_tokens
+            )
+            if num_spec_blocks > 0:
+                num_tokens += self.kv_cache_spec.block_size * num_spec_blocks
             return super().get_num_blocks_to_allocate(
                 request_id,
                 num_tokens,
@@ -1737,14 +1833,18 @@ class MambaManager(SingleTypeKVCacheManager):
 
             # NOTE(tdouble): this is an over-estimate of how many blocks we need because
             # num_tokens can include draft tokens that will later be rejected.
-            num_required_blocks = (
-                cdiv(num_tokens, self.block_size) + self.num_speculative_blocks
+            num_spec_blocks = self._num_spec_blocks_needed(
+                request_id, cdiv(num_tokens, self.block_size) - 1, num_draft_tokens
             )
+            num_required_blocks = cdiv(num_tokens, self.block_size) + num_spec_blocks
             num_new_blocks = (
                 num_required_blocks
                 - len(new_computed_blocks)
                 - len(self.req_to_blocks[request_id])
             )
+            if num_draft_tokens is not None:
+                # A shrinking speculative tail can hold more than it needs.
+                num_new_blocks = max(num_new_blocks, 0)
             has_partial_hit = (
                 self._has_partial_local_hit(
                     new_computed_blocks, num_local_computed_tokens
@@ -1786,7 +1886,12 @@ class MambaManager(SingleTypeKVCacheManager):
                 blocks_allocated = request_id in self._allocated_block_reqs
                 physical_block_cap = 1 + int(has_partial_hit) + checkpoint_block
                 if not blocks_allocated:
-                    physical_block_cap += self.num_speculative_blocks
+                    physical_block_cap += num_spec_blocks
+                else:
+                    # Growing the speculative tail takes new blocks too.
+                    physical_block_cap += max(
+                        num_spec_blocks - self._num_spec_blocks(request_id), 0
+                    )
                 num_new_blocks = min(num_new_blocks, physical_block_cap)
 
             num_evictable_computed_blocks = self._get_num_evictable_blocks(
@@ -1795,17 +1900,35 @@ class MambaManager(SingleTypeKVCacheManager):
             return num_new_blocks + num_evictable_computed_blocks
 
     def allocate_new_blocks(
-        self, request_id: str, num_tokens: int, num_tokens_main_model: int
+        self,
+        request_id: str,
+        num_tokens: int,
+        num_tokens_main_model: int,
+        num_draft_tokens: int | None = None,
     ) -> list[KVCacheBlock]:
+        """See `SingleTypeKVCacheManager.allocate_new_blocks`.
+
+        With `num_draft_tokens`, first frees the speculative blocks past what
+        this step and the state the previous verify accepted need; see
+        `take_spec_state_block_counts`.
+        """
         assert isinstance(self.kv_cache_spec, MambaSpec)
         if self.mamba_cache_mode != "align":
+            state_idx = cdiv(num_tokens, self.block_size) - 1
+            num_spec_blocks = self._num_spec_blocks_needed(
+                request_id, state_idx, num_draft_tokens
+            )
+            if num_draft_tokens is not None and request_id in self._spec_span_end:
+                self._drop_spec_tail(request_id, state_idx + 1 + num_spec_blocks)
             # Allocate extra `num_speculative_blocks` blocks for
             # speculative decoding (MTP/EAGLE) with linear attention.
-            if self.num_speculative_blocks > 0:
-                num_tokens += self.block_size * self.num_speculative_blocks
-            return super().allocate_new_blocks(
+            if num_spec_blocks > 0:
+                num_tokens += self.block_size * num_spec_blocks
+            new_blocks = super().allocate_new_blocks(
                 request_id, num_tokens, num_tokens_main_model
             )
+            self._record_spec_blocks(request_id, state_idx, num_draft_tokens)
+            return new_blocks
         else:
             # We don't allocate blocks for lookahead tokens in align mode, because if
             # x * block_size tokens are scheduled, num_tokens is
@@ -1814,41 +1937,50 @@ class MambaManager(SingleTypeKVCacheManager):
             # mamba layers.
             num_tokens = num_tokens_main_model
             req_blocks: list[KVCacheBlock] = self.req_to_blocks[request_id]
+            state_idx = cdiv(num_tokens, self.block_size) - 1
+            num_spec_blocks = self._num_spec_blocks_needed(
+                request_id, state_idx, num_draft_tokens
+            )
+            # A tracked request's spec tail follows its drafts. Its previous
+            # state block index, where the static layout has it otherwise.
+            dynamic = num_draft_tokens is not None and request_id in self._spec_span_end
+            if dynamic:
+                self._drop_spec_tail(request_id, state_idx + 1 + num_spec_blocks)
+                prev_state_idx = self._spec_state_idx[request_id]
+            else:
+                prev_state_idx = len(req_blocks) - 1 - self.num_speculative_blocks
             # NOTE(tdouble): this is an over-estimate of how many blocks we need because
             # num_tokens can include draft tokens that will later be rejected.
-            num_required_blocks = (
-                cdiv(num_tokens, self.block_size) + self.num_speculative_blocks
-            )
+            num_required_blocks = state_idx + 1 + num_spec_blocks
             checkpoint_block = int(request_id in self._checkpoints)
             partial_hit = self._partial_hit_reqs.get(request_id)
             has_partial_hit = partial_hit is not None
             # `num_required_blocks` might be less than `len(req_blocks)` if blocks are
-            # over-allocated at last round.
+            # over-allocated at last round. A shrunk tail can also cover a block
+            # boundary; crossing it still moves the state block below.
             if (
                 num_required_blocks <= len(req_blocks)
                 and not has_partial_hit
                 and not checkpoint_block
+                and not (dynamic and state_idx > prev_state_idx)
             ):
                 self._allocated_block_reqs.add(request_id)
+                self._record_spec_blocks(request_id, state_idx, num_draft_tokens)
                 return []
             else:
                 prev_block_len = len(req_blocks)
                 blocks_allocated = request_id in self._allocated_block_reqs
                 # Record the last state block
                 if blocks_allocated:
-                    # We always save the running state at the last
-                    # (1 + num_speculative_blocks) block
-                    self.last_state_block_idx[request_id] = (
-                        prev_block_len - 1 - self.num_speculative_blocks
-                    )
+                    # We always save the running state at the block before the
+                    # speculative tail.
+                    self.last_state_block_idx[request_id] = prev_state_idx
                 elif prev_block_len > 0:
                     # When a new request hits the prefix cache, the last block
                     # saves the hit state.
                     self.last_state_block_idx[request_id] = prev_block_len - 1
 
-                num_skipped_blocks = (
-                    num_required_blocks - self.num_speculative_blocks - 1
-                )
+                num_skipped_blocks = state_idx
                 # null blocks
                 if prev_block_len < num_skipped_blocks:
                     # minus the internal checkpoint block
@@ -1862,9 +1994,7 @@ class MambaManager(SingleTypeKVCacheManager):
                     # Relocate exclusively owned scratch blocks this step leaves
                     # behind. In a checkpoint step, one at the checkpoint index
                     # stays: the worker exports the checkpoint into that column.
-                    for block_idx in range(
-                        prev_block_len - self.num_speculative_blocks, prev_block_len
-                    ):
+                    for block_idx in range(prev_state_idx + 1, prev_block_len):
                         if block_idx < num_skipped_blocks - checkpoint_block:
                             self._relocate_speculative_block(req_blocks, block_idx)
                         else:
@@ -1874,7 +2004,11 @@ class MambaManager(SingleTypeKVCacheManager):
                     num_new_blocks = max(num_new_blocks, 0) + 1
                 max_new_blocks = 1 + int(has_partial_hit) + checkpoint_block
                 if not blocks_allocated:
-                    max_new_blocks += self.num_speculative_blocks
+                    max_new_blocks += num_spec_blocks
+                elif dynamic:
+                    max_new_blocks += max(
+                        num_spec_blocks - self._num_spec_blocks(request_id), 0
+                    )
                 assert num_new_blocks <= max_new_blocks
                 new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
                 returned_blocks = req_blocks[prev_block_len:]
@@ -1920,6 +2054,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 self._allocated_block_reqs.add(request_id)
                 self._partial_hit_reqs.pop(request_id, None)
                 returned_blocks.extend(new_blocks)
+                self._record_spec_blocks(request_id, state_idx, num_draft_tokens)
                 return returned_blocks
 
     def _relocate_speculative_block(
@@ -1950,6 +2085,10 @@ class MambaManager(SingleTypeKVCacheManager):
         return self.kv_cache_group_id, source_block, boundary_tokens
 
     def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
+        self._spec_state_idx.pop(request_id, None)
+        self._spec_span_end.pop(request_id, None)
+        # A request freed in the step that shrank it leaves the worker anyway.
+        self._num_dropped_blocks.pop(request_id, None)
         if self.mamba_cache_mode == "align":
             self._allocated_block_reqs.discard(request_id)
             self.last_state_block_idx.pop(request_id, None)
