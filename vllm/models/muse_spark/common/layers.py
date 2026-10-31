@@ -404,9 +404,8 @@ class MuseSpark1xQKVOGateParallelLinear(ColumnParallelLinear):
         assert param_shard.shape == loaded_weight.shape
         param_shard.copy_(loaded_weight)
 
-    # v2-loader linear methods bind ``weight_loader_v2`` to the parameters;
-    # route it here so every write goes through the parameter's loader, which a
-    # weight reload wraps to track what arrived.
+    # linear methods that support weight_loader_v2 bind it to the parameters
+    # instead of weight_loader; both must use this layer's fused layout.
     weight_loader_v2 = weight_loader
 
     def load_weights(
