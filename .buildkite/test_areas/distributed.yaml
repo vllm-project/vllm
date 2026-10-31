@@ -510,22 +510,24 @@ steps:
 
 - label: ":nvidia: (H100) [Nightly] Distributed Features"
   key: distributed-tests-2xh100-2xmi300
+  automatic_shard: true
   timeout_in_minutes: 30
   device: h100
   optional: true
   working_dir: "/vllm-workspace/"
   num_devices: 2
   commands:
-    - pytest -v -s tests/distributed/test_context_parallel.py
-    - pytest -v -s tests/distributed/test_dcp_direct_a2a_lse_reduce.py -k direct_a2a_matches_reference
     - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_async_new_apis.py
     - VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
+    - pytest -v -s tests/distributed/test_context_parallel.py
+    - pytest -v -s tests/distributed/test_dcp_direct_a2a_lse_reduce.py -k direct_a2a_matches_reference
     - pytest -v -s tests/v1/distributed/test_dbo.py
     - VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer.py
     - VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer_m2n.py
     - pytest -v -s tests/distributed/test_packed_tensor.py
   mirror:
     amd:
+      automatic_shard: true
       label: ':amd: (MI355) Distributed Features'
       dind: false
       device: mi355_2
@@ -564,11 +566,11 @@ steps:
       - tests/v1/attention/test_rocm_mla_dcp_context.py
       - vllm/v1/attention/ops/rocm_aiter_mla_prefill.py
       commands:
-      - pytest -v -s tests/distributed/test_context_parallel.py
-      - pytest -v -s tests/v1/attention/test_rocm_mla_dcp_context.py
       - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_async_new_apis.py
       - VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
       - VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=allgather_reducescatter --disable-nccl-for-dp-synchronization
+      - pytest -v -s tests/distributed/test_context_parallel.py
+      - pytest -v -s tests/v1/attention/test_rocm_mla_dcp_context.py
       - pytest -v -s tests/v1/distributed/test_dbo.py
       - VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer.py
       - pytest -v -s tests/distributed/test_packed_tensor.py
