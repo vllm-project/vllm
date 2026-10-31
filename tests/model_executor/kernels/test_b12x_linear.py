@@ -869,7 +869,7 @@ def test_b12x_nvfp4_w4a16_uses_weight_only_scale_and_a16_dispatch(
 
     default_vllm_config.compilation_config.cudagraph_capture_sizes = []
     calls = []
-    plans = []
+    plans: list[types.SimpleNamespace] = []
     packed_weight = types.SimpleNamespace(
         in_features=128,
         padded_in_features=128,
@@ -993,11 +993,12 @@ def test_b12x_nvfp4_w4a16_does_not_prepare_after_first_call(
 
     prepared = []
     prepare_default = session.prepare_default
-    monkeypatch.setattr(
-        session,
-        "prepare_default",
-        lambda request: prepared.append(request) or prepare_default(request),
-    )
+
+    def record_prepare(request):
+        prepared.append(request)
+        return prepare_default(request)
+
+    monkeypatch.setattr(session, "prepare_default", record_prepare)
     for m in (8, 4, 2, 1, 3, 40, capacity + 5):
         x = torch.randn(m, k, device="cuda", dtype=torch.bfloat16)
         expected = (x.double() @ decoded.double().T).bfloat16()
