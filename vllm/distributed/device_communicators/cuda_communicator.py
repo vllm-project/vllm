@@ -165,9 +165,15 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 register_graph_buffers=register,
             )
 
-        # AITER custom all-gather/reduce-scatter DP-attention dispatch/combine
+        # AITER custom all-gather/reduce-scatter DP-attention dispatch/combine.
+        # AITER requires a torch.distributed-registered group and exchanges IPC
+        # handles via the default store; stateless groups satisfy neither.
+        # Only StatelessGroupCoordinator passes tcp_store_group, so this checks
+        # the property AITER depends on rather than the feature that currently
+        # creates stateless groups (elastic EP).
         if (
             "dp" in unique_name
+            and tcp_store_group is None
             and self.world_size in (2, 4, 8)
             and current_platform.is_rocm()
             and rocm_aiter_ops.is_custom_all_reduce_enabled()
@@ -675,11 +681,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
         geometric growth bounds their total capacity to less than twice the
         current allocation.
 
-        Safe across serial MoE layers and eager sequence parallelism: the
-        producer and collective are ordered on the same stream before the next
-        same-role operation reuses the buffer. DBO microbatches use distinct
-        cache entries. Any future cross-layer communication overlap must also
-        use distinct roles.
+        These buffers are internal scratch. Returning one would let a later
+        collective with the same cache key overwrite an earlier live result.
+        MoE combines may reuse scratch when the producer and collective are
+        ordered on the same stream. DBO microbatches use distinct cache entries.
         """
         from vllm.distributed.device_communicators.pynccl_allocator import (
             nccl_symm_mem_context,
@@ -737,12 +742,13 @@ class CudaCommunicator(DeviceCommunicatorBase):
             )
             symm_input.copy_(input_tensor)
 
+        scratch_output = output is None
         if output is None:
             output = self._get_symm_scratch(
                 "rs_out", output_shape, input_tensor.dtype, input_tensor.device
             )
         pynccl_comm.reduce_scatter(output, symm_input)
-        return output
+        return output.clone() if scratch_output else output
 
     def get_symmetric_memory_buffer(
         self,
@@ -967,7 +973,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             "ag_out", out_size, input_.dtype, input_.device
         )
         pynccl_comm.all_gather(symm_output, input_)
-        return symm_output
+        return symm_output.clone()
 
     def _all_gather_batched_symm_mem(
         self, inputs: list[torch.Tensor]

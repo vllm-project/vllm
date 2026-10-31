@@ -6,14 +6,20 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.config.quantization import QuantizationConfigArgs
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
+)
+from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
+from vllm.model_executor.layers.quantization.utils.config_utils import (
+    is_shared_expert_quant_fse_compatible,
 )
 from vllm.models.deepseek_v4.amd import mega_moe as mega_moe_module
 from vllm.models.deepseek_v4.amd.mega_moe import (
     DeepseekV4AiterMegaMoEExperts,
 )
 from vllm.models.deepseek_v4.amd.model import DeepseekV4MoE
+from vllm.models.deepseek_v41.quant_config import DeepseekV4FP8Config
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import aux_stream
 
@@ -134,6 +140,37 @@ def test_runtime_selected_by_max_tokens_across_dp(
     # Every rank must take the same runtime, so a small local batch still gets
     # the prefill runtime when another DP rank is over the decode capacity.
     assert experts.select_runtime(4) == expected
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "moe_backend, targets, fused",
+    [
+        ("aiter_mega_moe", None, False),
+        ("aiter_mega_moe", {"*shared_experts*": "mxfp8"}, False),
+        ("aiter_mega_moe", {"*shared_experts*": "mxfp4"}, True),
+        ("aiter", {"*shared_experts*": "mxfp4"}, False),
+    ],
+)
+def test_mega_moe_shared_expert_fusion_requires_mxfp4_target(
+    moe_backend, targets, fused
+):
+    quant_config = DeepseekV4FP8Config(
+        is_checkpoint_fp8_serialized=True, weight_block_size=[128, 128]
+    )
+    quant_config._resolved_expert_dtype = "fp4"
+    quant_config.packed_modules_mapping = {"gate_up_proj": ["w1", "w3"]}
+    if targets is not None:
+        quant_config.online_quantization_config = OnlineQuantizationConfig(
+            QuantizationConfigArgs(targets=targets)
+        )
+    compatible, _ = is_shared_expert_quant_fse_compatible(
+        quant_config,
+        "model.layers.3.ffn.experts",
+        "model.layers.3.ffn.shared_experts",
+        moe_backend=moe_backend,
+    )
+    assert compatible is fused
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="Requires ROCm")

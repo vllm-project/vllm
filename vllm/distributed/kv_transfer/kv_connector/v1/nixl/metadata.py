@@ -50,8 +50,9 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #  12: Add per-region member names for PP push
 #  13: Add packed-member layouts and order-independent packed-push backend hashes
 #  14: Add Qwen3.8-Flash-Next PLE page length - #59997
+#  15: Add remote_registration_generation to kv_transfer_params
 #
-NIXL_CONNECTOR_VERSION: int = 14
+NIXL_CONNECTOR_VERSION: int = 15
 
 
 @dataclass
@@ -104,7 +105,7 @@ def _get_speculative_compatibility_factors(
 ) -> dict[str, Any] | None:
     """Return NIXL compatibility factors for hidden-state-based speculators."""
     speculative_config = vllm_config.speculative_config
-    if speculative_config is None or not speculative_config.use_eagle():
+    if speculative_config is None or not speculative_config.uses_target_hidden_states:
         return None
 
     draft_model_config = speculative_config.draft_model_config
@@ -236,6 +237,8 @@ class RemoteMeta:
     request_id: str
     blocks_expiry_time: float | None = None
     num_tokens: int | None = None
+    # Bumped each time the remote publishes a changed KV cache registration.
+    registration_generation: int = 0
 
 
 @dataclass
@@ -336,5 +339,8 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             port=kv_transfer_params["remote_port"],
             blocks_expiry_time=kv_transfer_params.get("remote_blocks_expiry_time"),
             num_tokens=kv_transfer_params.get("remote_num_tokens"),
+            registration_generation=kv_transfer_params.get(
+                "remote_registration_generation", 0
+            ),
         )
         self.reqs_to_recv[request_id] = req

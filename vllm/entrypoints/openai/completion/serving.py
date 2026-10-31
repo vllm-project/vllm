@@ -204,6 +204,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     lora_request=lora_request,
                     trace_headers=trace_headers,
                     session_id=session_id,
+                    priority=self._get_priority(request, raw_request),
                 )
             else:
                 generator = self.engine_client.generate(
@@ -459,6 +460,11 @@ class OpenAIServingCompletion(GenerateBaseServing):
                                 ),
                             )
                         ],
+                        kv_transfer_params=(
+                            res.kv_transfer_params
+                            if finish_reason is not None
+                            else None
+                        ),
                     )
                     # Stamp on terminal chunk only when no trailing usage chunk
                     # will follow (that one is the true final message).

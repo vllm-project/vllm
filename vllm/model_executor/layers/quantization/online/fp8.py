@@ -22,6 +22,9 @@ from vllm.model_executor.kernels.linear import (
 from vllm.model_executor.kernels.linear.scaled_mm import (
     MarlinFP8ScaledMMLinearKernel,
 )
+from vllm.model_executor.kernels.linear.scaled_mm.humming import (
+    HummingFP8ScaledMMLinearKernel,
+)
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
@@ -190,7 +193,9 @@ class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
     Loads fp16/bf16 weights and quantizes them per-tensor during loading."""
 
     activation_quant_key = (
-        kFp8DynamicTokenSym if cutlass_fp8_supported() else kFp8DynamicTensorSym
+        kFp8DynamicTokenSym
+        if cutlass_fp8_supported() or current_platform.is_xpu()
+        else kFp8DynamicTensorSym
     )
 
     def __init__(self):
@@ -247,6 +252,8 @@ class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
 
         # Update layer with new values.
         replace_parameter(layer, "weight", qweight.t().data)
+        # Transposed to (K, N); the param keeps its checkpoint dims.
+        layer.processed_weight_dims = (0, 1)
         replace_parameter(layer, "weight_scale", weight_scale.data)
 
         if self.use_marlin and hasattr(self.fp8_linear, "marlin_input_dtype"):
@@ -413,13 +420,17 @@ class Fp8PtpcOnlineLinearMethod(OnlineLinearBase):
             out_dtype=self.out_dtype,
             module_name=self.__class__.__name__,
         )
-        # PTPC requires per-token activation FP8; MarlinFP8 is W8A16 and
-        # would silently produce a weight-only fp8 model.
-        if isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel):
+        # PTPC requires per-token activation FP8; Marlin and Humming FP8 are
+        # W8A16 and would silently produce a weight-only fp8 model.
+        if isinstance(
+            self.fp8_linear,
+            (MarlinFP8ScaledMMLinearKernel, HummingFP8ScaledMMLinearKernel),
+        ):
             raise ValueError(
                 "FP8 PTPC online quant requires a kernel that honors "
-                "per-token activation quantization; MarlinFP8 is W8A16 "
-                "weight-only. Requires SM89+ for Cutlass FP8 or ROCm MI3xx "
+                "per-token activation quantization; "
+                f"{type(self.fp8_linear).__name__} is W8A16 weight-only. "
+                "Requires SM89+ for Cutlass FP8 or ROCm MI3xx "
                 "for rowwise scaled_mm."
             )
 
@@ -600,9 +611,18 @@ class Fp8PerTensorOnlineMoEMethod(_Fp8OnlineMoEBase):
         *,
         moe: FusedMoEConfig,
     ):
+        # A per-tensor dynamic activation scale is the max over every token in
+        # the batch, so a request's quantized expert inputs would depend on the
+        # requests it is batched with.
+        activation_key = (
+            kFp8DynamicTokenSym if envs.VLLM_BATCH_INVARIANT else kFp8DynamicTensorSym
+        )
+        self.per_act_token_quant = activation_key == kFp8DynamicTokenSym
         super().__init__(
             weight_block_size=None,
             moe=moe,
+            weight_key=kFp8StaticTensorSym,
+            activation_key=activation_key,
         )
 
     def process_weights_after_loading(self, layer: Module) -> None:
@@ -806,26 +826,43 @@ class Fp8PtpcOnlineMoEMethod(_Fp8OnlineMoEBase):
         fp8_dtype = current_platform.fp8_dtype()
         w13 = torch.empty_like(w13_weight, dtype=fp8_dtype)
         w2 = torch.empty_like(w2_weight, dtype=fp8_dtype)
-        # Scale's leading dim is taken from the fp8 weight tensor by
-        # construction, so it cannot drift from the weight's expert count
-        # under EP / padded MoE.
-        n_w13 = w13_weight.shape[1]
-        w13_scale = torch.ones(
-            w13.shape[0], n_w13, 1, device=w13.device, dtype=torch.float32
-        )
         layer.w13_input_scale = None
         layer.w2_input_scale = None
+
+        use_torch_w13_quant = False
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx942
+
+            use_torch_w13_quant = on_gfx942()
+
+        if use_torch_w13_quant:
+            # dynamic_per_token_scaled_fp8_quant can hard-crash on gfx942.
+            w13_amax = weight_amax(w13_weight, dim=-1, keepdim=True)
+            w13_scale = _fp8_channel_scale(w13_amax)
+        else:
+            # Scale's leading dim is taken from the fp8 weight tensor by
+            # construction, so it cannot drift from the weight's expert count
+            # under EP / padded MoE.
+            n_w13 = w13_weight.shape[1]
+            w13_scale = torch.ones(
+                w13.shape[0], n_w13, 1, device=w13.device, dtype=torch.float32
+            )
 
         w2_amax = weight_amax(w2_weight, dim=-1, keepdim=True)
         w2_amax = amax_for_moe_weight_quant(w2_amax, self.moe.tp_size)
         w2_scale = _fp8_channel_scale(w2_amax)
 
         for expert in range(layer.local_num_experts):
-            w13[expert], w13_scale[expert] = ops.scaled_fp8_quant(
-                w13_weight[expert],
-                scale=None,
-                use_per_token_if_dynamic=True,
-            )
+            if use_torch_w13_quant:
+                w13[expert] = _fp8_quant_per_channel(
+                    w13_weight[expert], w13_scale[expert]
+                )
+            else:
+                w13[expert], w13_scale[expert] = ops.scaled_fp8_quant(
+                    w13_weight[expert],
+                    scale=None,
+                    use_per_token_if_dynamic=True,
+                )
             w2[expert] = _fp8_quant_per_channel(w2_weight[expert], w2_scale[expert])
 
         self._setup_kernel(
