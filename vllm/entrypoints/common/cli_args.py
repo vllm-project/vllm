@@ -560,6 +560,24 @@ def validate_parsed_serve_args(args: argparse.Namespace):
     # Enable auto tool needs a tool call parser to be valid
     if args.enable_auto_tool_choice and not args.tool_call_parser:
         raise TypeError("Error: --enable-auto-tool-choice requires --tool-call-parser")
+    if args.enable_log_request_ids_only:
+        content_options = [
+            name
+            for name, is_set in (
+                ("--enable-log-requests", args.enable_log_requests),
+                ("--enable-log-outputs", args.enable_log_outputs),
+                (
+                    "VLLM_REQUEST_BODY_LOG_LEVEL",
+                    envs.is_set("VLLM_REQUEST_BODY_LOG_LEVEL"),
+                ),
+            )
+            if is_set
+        ]
+        if content_options:
+            raise TypeError(
+                "Error: --enable-log-request-ids-only cannot be combined with "
+                + ", ".join(content_options)
+            )
     if args.enable_log_outputs and not args.enable_log_requests:
         raise TypeError("Error: --enable-log-outputs requires --enable-log-requests")
 
