@@ -575,7 +575,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             prefix=f"{prefix}.layers",
         )
 
-        # Config flag is the switch: ROCm forces swa_cache_layer.bounded_replay off.
+        # Config flag is the switch. On ROCm, attention forces
+        # swa_cache_layer.bounded_replay off only when the CDNA version is
+        # not 4. CDNA4 keeps the window in bounded replay.
         self.decoder_replay_layers: DecoderReplayLayers | None = None
         self.decoder_replay_start = self.end_layer
         cut = max(config.kv_source_layer_ids)
