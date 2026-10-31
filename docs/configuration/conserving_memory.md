@@ -52,20 +52,8 @@ over system RAM as device memory. `torch.cuda.get_device_properties(0).total_mem
 reports the GTT limit (108 GiB on the system below), while `rocm-smi` reports only the small
 dedicated carve-out (512 MiB).
 
-`--gpu-memory-utilization` is resolved against that GTT limit, but what can actually be committed is
-the memory that is free on the host. If other processes hold RAM, startup fails even though the
-requested fraction looks conservative:
-
-```text
-ValueError: Free memory on device cuda:0 (34.85/108.0 GiB) on startup is less than
-desired GPU memory utilization (0.9, 97.2 GiB).
-```
-
-Nothing is misconfigured in that case: the APU shares one pool with every host process and
-container. Locate the holder with `rocm-smi --showpids` and pick a utilization below
-`free / total`.
-
-The KV cache scales linearly with the requested utilization, using the GTT limit as the denominator:
+`--gpu-memory-utilization` is resolved against that GTT limit, so the KV cache scales linearly with
+it. Measured on an idle unit:
 
 | `--gpu-memory-utilization` | Available KV cache | KV cache tokens (4096-token context) |
 | -------------------------- | ------------------ | ------------------------------------ |
@@ -76,6 +64,20 @@ The KV cache scales linearly with the requested utilization, using the GTT limit
 ??? note "Measurement setup"
     Ryzen AI MAX 395 (Radeon 8060S), 128 GiB RAM, ROCm 7.2.4, vLLM `0.32.0+rocm723`,
     `Qwen/Qwen3-0.6B`, `--max-model-len 4096`, otherwise idle machine.
+
+The pool is shared with every host process and container, so a utilization that is valid on an idle
+unit can still fail to start when something else holds RAM. Startup compares the request against the
+memory that is free at that moment, not against the GTT limit:
+
+```text
+ValueError: Free memory on device cuda:0 (34.85/108.0 GiB) on startup is less than
+desired GPU memory utilization (0.9, 97.2 GiB).
+```
+
+That failure came from an environment with an unrelated server already holding 73 GiB of GTT, not
+from an APU-specific limit: the same command started normally once it exited. If this happens, use
+`rocm-smi --showpids` to find the holder, and size the request from `free / total` while leaving
+headroom for the host — on an idle unit the default `0.9` would claim almost the whole shared pool.
 
 Because the denominator is shared with the host, prefer the byte-based `--kv-cache-memory-bytes` over a
 percentage when the footprint has to be reproducible. On the setup above vLLM reports
