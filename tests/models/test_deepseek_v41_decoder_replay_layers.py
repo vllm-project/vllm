@@ -83,6 +83,8 @@ def test_run_gathers_states():
 
     write_batch_kv = MagicMock()
     layers = DecoderReplayLayers(WINDOW, run_layers, write_batch_kv, set(), "swa")
+    # The model's output head runs on the replay rows only.
+    layers.finalize = lambda out, pre_mix: (out + 1, pre_mix)
     states = _states(NUM_TOKENS)
     hidden, residual = states[0], states[-1]
     full, sub = object(), object()
@@ -97,7 +99,7 @@ def test_run_gathers_states():
     assert torch.equal(seen["hidden_states"], hidden[rows])
     assert seen["attn_metadata"] is sub and seen["is_padding"] is None
     assert len(outputs) == 2 and outputs[0].shape == residual.shape
-    assert torch.equal(outputs[0][rows], residual[rows])
+    assert torch.equal(outputs[0][rows], residual[rows] + 1)
     assert outputs[0][1:173].abs().sum() == 0
 
 
