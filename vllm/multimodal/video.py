@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from abc import abstractmethod
+from bisect import bisect_left
 from typing import Any, ClassVar, TypeAlias, cast
 
 import numpy as np
@@ -31,6 +32,35 @@ logger = init_logger(__name__)
 DecodedFrames: TypeAlias = npt.NDArray | torch.Tensor
 """Decoded video frames: a host ``np.ndarray``, or a device ``torch.Tensor``
 when a GPU decoding codec is used (e.g. torchcodec with ``device="cuda"``)."""
+
+
+def _sample_glm_candidates(
+    total_frames: int,
+    duration_per_frame: float,
+    inv_fps: float,
+    max_second: float,
+    extract_t: int,
+) -> list[int]:
+    frames = range(total_frames)
+    indices = []
+    current_second = 0.0
+    start = 0
+    while start < total_frames:
+        frame_index = bisect_left(
+            frames,
+            current_second,
+            lo=start,
+            key=lambda index: index * duration_per_frame,
+        )
+        if frame_index == total_frames:
+            break
+        indices.append(frame_index)
+        current_second += inv_fps
+        # One extra candidate is enough to select the uniform-sampling fallback.
+        if current_second >= max_second or len(indices) > extract_t:
+            break
+        start = frame_index + 1
+    return indices
 
 
 class VideoLoaderRegistry(ExtensionManager):
@@ -840,15 +870,10 @@ class GLM46VVideoBackend(VideoBackend):
                 0, total_frames_num - 1, extract_t, dtype=int
             ).tolist()
         else:
-            frame_indices = []
-            current_second = 0.0
             inv_fps = 1 / (temporal_patch_size * target_fps)
-            for frame_index in range(total_frames_num):
-                if frame_index * duration_per_frame >= current_second:
-                    current_second += inv_fps
-                    frame_indices.append(frame_index)
-                    if current_second >= max_second:
-                        break
+            frame_indices = _sample_glm_candidates(
+                total_frames_num, duration_per_frame, inv_fps, max_second, extract_t
+            )
 
         if len(frame_indices) < extract_t:
             if len(frame_indices) == 0:
@@ -955,7 +980,6 @@ class Glm5NextVideoBackend(VideoBackend):
         extract_t = min(extract_t, int(max_frame_count))
 
         duration_per_frame = 1 / fps
-        timestamps = [i * duration_per_frame for i in range(total_frames)]
         max_second = int(duration)
 
         if total_frames < extract_t:
@@ -963,15 +987,10 @@ class Glm5NextVideoBackend(VideoBackend):
                 math.floor(_i * total_frames / extract_t) for _i in range(extract_t)
             ]
         else:
-            frame_indices = []
-            current_second = 0.0
             inv_fps = 1 / (temporal_patch_size * target_fps)
-            for frame_index in range(total_frames):
-                if timestamps[frame_index] >= current_second:
-                    current_second += inv_fps
-                    frame_indices.append(frame_index)
-                    if current_second >= max_second:
-                        break
+            frame_indices = _sample_glm_candidates(
+                total_frames, duration_per_frame, inv_fps, max_second, extract_t
+            )
 
         if len(frame_indices) < extract_t:
             if len(frame_indices) == 0:
@@ -1112,15 +1131,14 @@ class GLMGAVideoBackend(VideoBackend):
                 math.floor(i * total_frames_num / extract_t) for i in range(extract_t)
             ]
         else:
-            frame_indices = []
-            current_second = 0.0
             inv_fps = 1 / target_fps
-            for frame_index in range(total_frames_num):
-                if frame_index * duration_per_frame >= current_second:
-                    current_second += inv_fps
-                    frame_indices.append(frame_index)
-                    if current_second >= duration - inv_fps:
-                        break
+            frame_indices = _sample_glm_candidates(
+                total_frames_num,
+                duration_per_frame,
+                inv_fps,
+                duration - inv_fps,
+                extract_t,
+            )
 
         if len(frame_indices) < extract_t:
             if len(frame_indices) == 0:
