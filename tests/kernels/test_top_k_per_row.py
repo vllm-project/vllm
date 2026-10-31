@@ -18,6 +18,75 @@ DATA_GENERATION = ["random", "10LSBits"]
 RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
 
 
+@pytest.mark.parametrize("phase", ["prefill", "decode"])
+def test_sparse_topk_batch_invariance(
+    monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    """Report native order changes across batches; require canonical order when on."""
+    from vllm import _custom_ops as ops
+    from vllm.model_executor.layers.indexer_topk import canonicalize_topk_indices
+
+    device = current_platform.device_type
+    top_k, width = 2048, 8192
+    for batch_invariant in (False, True):
+        monkeypatch.setenv("VLLM_BATCH_INVARIANT", str(int(batch_invariant)))
+        set_random_seed(0)
+        target = torch.randperm(width, device=device).float()
+        expected = torch.full((2, top_k), -1, dtype=torch.int32, device=device)
+        expected[0, :1024] = torch.arange(1024, device=device)
+        expected[1] = target.topk(top_k).indices.sort().values
+        outputs: list[torch.Tensor] = []
+        for trial in range(100):
+            bs = (2, 3, 7, 16, 31, 64, 65, 128, 256)[trial % 9]
+            logits = torch.rand((bs, width), device=device)
+            positions = torch.randperm(bs, device=device)[:2]
+            logits[positions] = target
+            ends = torch.full((bs,), width, dtype=torch.int32, device=device)
+            ends[positions[0]] = 1024
+            indices = torch.full((bs, top_k), -1, dtype=torch.int32, device=device)
+            if phase == "prefill":
+                ops.top_k_per_row_prefill(
+                    logits,
+                    torch.zeros_like(ends),
+                    ends,
+                    indices,
+                    bs,
+                    logits.stride(0),
+                    logits.stride(1),
+                    top_k,
+                )
+            else:
+                ops.top_k_per_row_decode(
+                    logits,
+                    1,
+                    ends,
+                    indices,
+                    bs,
+                    logits.stride(0),
+                    logits.stride(1),
+                    top_k,
+                )
+            canonicalize_topk_indices(indices)
+            outputs.append(indices[positions])
+        results = torch.stack(outputs)
+        differences = int((results != results[0]).any(dim=-1).any(dim=-1).sum())
+        color = "\033[31m" if differences else "\033[32m"
+        print(
+            f"\nTesting {phase} with batch invariance "
+            f"{'enabled' if batch_invariant else 'disabled'}.\n"
+            "Ran 100 trials across batch sizes 2, 3, 7, 16, 31, 64, 65, 128, "
+            "and 256, using random seed 0.\n"
+            f"Compared with the first trial, {color}{differences} of the remaining"
+            "\033[0m 99 trials produced different output for at least one target row."
+        )
+        assert torch.equal(
+            results.sort(dim=-1).values, expected.sort(dim=-1).values.expand_as(results)
+        )
+        if batch_invariant:
+            assert differences == 0
+            assert torch.equal(results, expected.expand_as(results))
+
+
 def _has_device_capability(major: int) -> bool:
     return current_platform.is_cuda() and current_platform.has_device_capability(major)
 
