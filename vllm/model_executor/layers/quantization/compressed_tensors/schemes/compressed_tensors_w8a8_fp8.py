@@ -12,6 +12,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     init_fp8_linear_kernel,
 )
+from vllm.model_executor.kernels.linear.scaled_mm import (
+    CutlassFP8ScaledMMLinearKernel,
+)
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
     expose_input_quant_key,
@@ -37,7 +40,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
 )
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import is_weights_pre_processed, replace_parameter
 
 __all__ = ["CompressedTensorsW8A8Fp8"]
 
@@ -78,6 +81,12 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                 self.is_static_input_scheme
             ]
             self.weight_quant_key = weight_quant_key_mapping[self.strategy]
+
+    @property
+    def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
+        return isinstance(
+            getattr(self, "fp8_linear", None), CutlassFP8ScaledMMLinearKernel
+        )
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -146,6 +155,16 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         expose_input_quant_key(layer, self.fp8_linear)
 
     def process_weights_after_loading(self, layer) -> None:
+        if is_weights_pre_processed():
+            if not self.supports_pre_processed_weights:
+                raise RuntimeError(
+                    "Compressed-tensors FP8 backend cannot use pre-processed weights"
+                )
+            layer.processed_weight_dims = (0, 1)
+            if not self.is_static_input_scheme:
+                layer.input_scale = None
+            return
+
         if self.strategy == QuantizationStrategy.TENSOR:
             weight, weight_scale, input_scale = process_fp8_weight_tensor_strategy(
                 layer.weight,
