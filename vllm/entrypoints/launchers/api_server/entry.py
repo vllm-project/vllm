@@ -16,6 +16,7 @@ import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.common.cli_args import init_parser_plugin
+from vllm.entrypoints.warmup import load_warmup_config, warmup_engine
 from vllm.logger import configure_logging_from_args, init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.system_utils import decorate_logs
@@ -135,6 +136,12 @@ async def build_and_serve(
     logger.info("Supported tasks: %s", supported_tasks)
     app = build_app(args, supported_tasks, model_config)
     await init_app_state(engine_client, app.state, args, supported_tasks)
+
+    # Warm up after the app state exists so prompts are rendered exactly as
+    # the serving endpoints render them, but before accepting traffic.
+    warmup_config = load_warmup_config(args.warmup_config)
+    if warmup_config is not None:
+        await warmup_engine(engine_client, app.state.online_renderer, warmup_config)
 
     logger.info("Starting vLLM server on %s", listen_address)
 
