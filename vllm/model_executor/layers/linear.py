@@ -162,6 +162,17 @@ class LinearMethodBase(QuantizeMethodBase):
         Expects create_weights to have been called before on the layer."""
         raise NotImplementedError
 
+    def fuse_input_hadamard(self, layer: torch.nn.Module, size: int) -> bool:
+        """Offer to rotate the input inside `apply` (see
+        `InputHadamardLinearMethod`), which then skips its own rotation.
+
+        Called after `process_weights_after_loading`. Return True only if
+        `apply` will now rotate each contiguous `size`-wide block of the input
+        by the orthonormal Sylvester Hadamard matrix itself, for example inside
+        its activation quantization.
+        """
+        return False
+
 
 class UnquantizedLinearMethod(LinearMethodBase):
     """Linear method without quantization."""

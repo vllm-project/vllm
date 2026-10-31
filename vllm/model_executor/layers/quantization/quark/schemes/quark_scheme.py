@@ -59,6 +59,10 @@ class QuarkScheme(ABC):
         """
         raise NotImplementedError
 
+    def fuse_input_hadamard(self, layer: torch.nn.Module, size: int) -> bool:
+        """See `LinearMethodBase.fuse_input_hadamard`."""
+        return False
+
     @abstractmethod
     def process_weights_after_loading(self, layer: torch.nn.Module):
         """Called after weight loading is complete for any cleanup that
