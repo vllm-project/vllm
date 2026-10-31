@@ -28,11 +28,13 @@ from vllm.distributed import (
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp, PluggableLayer
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.layernorm import RMSNormGated
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.mamba.abstract import (
     get_mamba_prefill_checkpoint_alignment,
@@ -55,6 +57,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 from vllm.model_executor.layers.quantization.inc import INCConfig
+from vllm.model_executor.layers.utils import default_unquantized_gemm
 from vllm.model_executor.model_loader.weight_utils import (
     sharded_weight_loader,
 )
@@ -74,10 +77,12 @@ from vllm.third_party.flash_linear_attention.ops.fused_gdn_decode_post_conv_mtp 
 )
 from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 from vllm.utils.math_utils import cdiv
+from vllm.utils.multi_stream_utils import execute_in_parallel
 from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
     _resolve_layer_name,
+    aux_stream,
     direct_register_custom_op,
 )
 from vllm.v1.attention.backends.gdn_attn import (
@@ -107,6 +112,10 @@ if GDN_AITER_TRITON_AVAILABLE:
 logger = init_logger(__name__)
 
 MAX_FUSED_GDN_MTP_TOKENS = 8
+# Below this conservative threshold, overlap in_proj_ba with in_proj_qkvz on the aux
+# stream. On GB300, across Qwen3.5/3.8 shapes, quant formats and TP 1-8, the first
+# regression was at 272 tokens (27B BF16 TP8).
+_BA_PROJ_OVERLAP_MAX_TOKENS = 256
 FUSED_GDN_STATE_DTYPES = (torch.float32, torch.bfloat16)
 
 
@@ -568,6 +577,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         prefix: str = "",
         gqa_interleaved_layout=False,
         reduce_results: bool = True,
+        overlap_ba_proj: bool = False,
+        fused_gdn_gated_rms_norm: (
+            Callable[..., torch.Tensor | QuantizedActivation] | None
+        ) = None,
     ) -> None:
         super().__init__(config, vllm_config, prefix)
 
@@ -631,6 +644,21 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             prefix=f"{prefix}.in_proj_ba",
         )
         self.disable_tp_for_ba_proj = self.maybe_disable_tp(self.quant_config)
+        # Opt-in, for callers outside torch.compile (compiled callers would need a
+        # custom op or Dynamo stream tracing; not validated). Plain cuBLAS ba GEMM only:
+        # FlashInfer GEMMs share a process-wide workspace. Off with ubatching and LoRA.
+        self._ba_stream = None
+        ba_method = self.in_proj_ba.quant_method
+        if (
+            overlap_ba_proj
+            and current_platform.is_cuda()
+            and isinstance(ba_method, UnquantizedLinearMethod)
+            and ba_method._gemm_impl is default_unquantized_gemm
+            and not vllm_config.parallel_config.use_ubatching
+            and vllm_config.lora_config is None
+        ):
+            self._ba_stream = aux_stream()
+            self._ba_events = (torch.cuda.Event(), torch.cuda.Event())
 
         query_key_settings = (self.key_dim, 0, False)
         value_settings = (self.value_dim, 0, False)
@@ -709,10 +737,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.enable_packed_recurrent_decode = (
             envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
         )
-        # Off by default; the Qwen3.5 NVIDIA variant installs a fused gated
-        # RMS norm that reads z as a strided view of the packed qkvz
-        # projection, removing the z reshape copy (see Qwen3_5DecoderLayer).
-        self._fused_gdn_gated_rms_norm: Callable[..., None] | None = None
+        # Off by default; the Qwen3.5 NVIDIA variant passes a fused gated RMS
+        # norm that reads z strided from the packed qkvz projection and
+        # returns the out_proj input: `out`, or a pre-quantized activation.
+        self._fused_gdn_gated_rms_norm = fused_gdn_gated_rms_norm
         self.gdn_decode_kernel = envs.VLLM_GDN_DECODE_KERNEL.strip().lower()
         if self.gdn_decode_kernel == "cuda" and current_platform.is_cuda_alike():
             reason = self._fused_gdn_decode_unsupported_reason(vllm_config)
@@ -1144,18 +1172,39 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     def forward_cuda(
         self,
         hidden_states: torch.Tensor,
+        qkvz_input: QuantizedActivation | None = None,
     ) -> torch.Tensor:
         """Forward pass with three parts:
         1. Input projection
         2. Core attention (custom op)
         3. Output projection
+
+        ``qkvz_input``, if given, is ``hidden_states`` pre-quantized for
+        in_proj_qkvz; in_proj_ba still reads ``hidden_states``.
         """
         num_tokens = hidden_states.size(0)
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
-        mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
-        ba, _ = self.in_proj_ba(hidden_states)
+        qkvz_in = hidden_states if qkvz_input is None else qkvz_input
+        if self._ba_stream is None:
+            mixed_qkvz, _ = self.in_proj_qkvz(qkvz_in)
+            ba, _ = self.in_proj_ba(hidden_states)
+        else:
+            # Hide the tiny ba GEMM on the aux stream. Only under CUDA graph
+            # capture: eagerly the stream switch costs more host time than it
+            # saves. ba is enqueued first (aux-first order); qkvz-first
+            # regressed block-FP8 qkvz from ~100 tokens.
+            start, done = self._ba_events
+            mixed_qkvz, (ba,) = execute_in_parallel(
+                lambda: self.in_proj_qkvz(qkvz_in)[0],
+                [lambda: self.in_proj_ba(hidden_states)[0]],
+                start,
+                [done],
+                [self._ba_stream],
+                enable=num_tokens <= _BA_PROJ_OVERLAP_MAX_TOKENS
+                and torch.cuda.is_current_stream_capturing(),
+            )
 
         use_fused_gdn_spec_decode = (
             self.enable_fused_gdn_spec_decode
@@ -1224,18 +1273,19 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             and not self.gqa_interleaved_layout
         ):
             out2d = core_attn_out.view(num_tokens, -1)
-            self._fused_gdn_gated_rms_norm(
+            out_proj_input = self._fused_gdn_gated_rms_norm(
                 x=out2d,
                 z=z,
                 weight=self.norm.weight,
                 out=out2d,
+                out_proj=self.out_proj,
                 eps=self.norm.eps,
                 num_v_heads=self.num_v_heads // self.tp_size,
                 head_v_dim=self.head_v_dim,
                 norm_before_gate=self.norm.norm_before_gate,
                 activation=self.norm.activation,
             )
-            output, _ = self.out_proj(out2d)
+            output, _ = self.out_proj(out_proj_input)
             return output
 
         # ============================================================

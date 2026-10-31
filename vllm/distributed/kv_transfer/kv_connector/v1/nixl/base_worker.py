@@ -27,6 +27,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
     EngineTransferInfo,
     TransferTopology,
+    check_compressed_kernel_split,
     get_current_attn_backends,
     get_current_attn_backends_and_specs,
     kv_postprocess_blksize_and_layout_on_receive,
@@ -1097,6 +1098,9 @@ class NixlBaseConnectorWorker:
             self.vllm_config, self.kv_cache_config, self.attn_backends
         )
         kernel_block_size = select_common_block_size(self.block_size, backends, specs)
+        check_compressed_kernel_split(
+            self.vllm_config, self.kv_cache_config, kernel_block_size
+        )
         # Number of blocks not accounting for kernel block mismatches
         self._logical_num_blocks = self.num_blocks
         if self.block_size != kernel_block_size:
@@ -1573,6 +1577,7 @@ class NixlBaseConnectorWorker:
         registration_ranges: dict[tuple[int, str], tuple[int, int, int]] = {}
         region_mem_types: list[str] = []
         seen_base_addresses: list[int] = []
+        seen_region_keys: list[tuple[int, int]] = []
         self._ssm_region_indices = []
         region_groups: list[set[int]] = []
         self._ple_block_len = None
@@ -1679,9 +1684,9 @@ class NixlBaseConnectorWorker:
                 physical_ratio = self._physical_blocks_per_logical_kv_block
                 block_len = physical_page_size // physical_ratio
                 block_stride = physical_page_size
-                if self._is_csa_linear and cache.ndim != 1:
-                    # CSA-linear packs multiple cache owners in each block, so
-                    # state views advance by the packed block stride.
+                if (self._is_csa_linear or self._has_packed_cache) and cache.ndim != 1:
+                    # CSA-linear and block-outermost layouts pack several pages
+                    # in each block row, so state views advance by the row.
                     block_stride = cache.stride(0) * cache.element_size()
                 assert block_stride % physical_ratio == 0
                 region_specs = [
@@ -1774,10 +1779,13 @@ class NixlBaseConnectorWorker:
                     ]
 
             for base_addr, block_len, block_stride in region_specs:
-                # A packed PP producer keeps one region per layer, so aliases at
-                # one address (a layer and its SWA view) stay distinct.
-                if base_addr in seen_base_addresses and not route_packed_layers:
-                    region_index = seen_base_addresses.index(base_addr)
+                # Overlaid groups can page the same bytes with different page
+                # sizes (DSv4.1 SWA, indexer and compressor caches), so views at
+                # one address share a region only if their block_len matches.
+                # A packed PP producer keeps one region per layer.
+                region_key = (base_addr, block_len)
+                if region_key in seen_region_keys and not route_packed_layers:
+                    region_index = seen_region_keys.index(region_key)
                     assert region_mem_types[region_index] == mem_type
                     self._region_is_mla[region_index] |= is_mla_region
                     if is_mla_region:
@@ -1790,6 +1798,7 @@ class NixlBaseConnectorWorker:
                 else:
                     region_index = len(seen_base_addresses)
                     seen_base_addresses.append(base_addr)
+                    seen_region_keys.append(region_key)
                     self.block_len_per_layer.append(block_len)
                     self.block_stride_per_layer.append(block_stride)
                     self.region_group_ids.append(group_id)
