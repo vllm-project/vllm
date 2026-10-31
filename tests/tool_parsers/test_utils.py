@@ -37,17 +37,34 @@ class TestCoerceToSchemaType:
             assert coerce_to_schema_type("NULL", "null") is None
             assert coerce_to_schema_type("Null", "null") is None
 
-        def test_none_string_never_converted(self):
-            assert coerce_to_schema_type("none", "null") == "none"
-            assert coerce_to_schema_type("none", "string") == "none"
-            assert coerce_to_schema_type("none", ["string", "null"]) == "none"
+        def test_none_word_is_preserved_for_string_only(self):
+            for value in ["None", "none", "NONE", " nil "]:
+                assert coerce_to_schema_type(value, "string") == value
 
         def test_nil_string_never_converted(self):
-            assert coerce_to_schema_type("nil", "string") == "nil"
             assert coerce_to_schema_type("nil", ["string", "null"]) == "nil"
 
         def test_non_null_value_with_null_type(self):
             assert coerce_to_schema_type("hello", ["null", "string"]) == "hello"
+
+        @pytest.mark.parametrize(
+            "value", ["null", "NULL", "None", "none", "NONE", "  None  "]
+        )
+        @pytest.mark.parametrize(
+            "schema_type",
+            ["null", "integer", ["integer", "string"], ["string", "null"]],
+        )
+        def test_null_spellings_match_rust_non_string_conversion(
+            self, value, schema_type
+        ):
+            assert coerce_to_schema_type(value, schema_type) is None
+
+        @pytest.mark.parametrize("value", ["null", "None", "none", "NONE", "  None  "])
+        def test_string_only_keeps_null_spelling_verbatim(self, value):
+            assert coerce_to_schema_type(value, "string") == value
+
+        def test_non_null_word_remains_string(self):
+            assert coerce_to_schema_type("nil", ["integer", "string"]) == "nil"
 
     class TestStringType:
         def test_string_type(self):
