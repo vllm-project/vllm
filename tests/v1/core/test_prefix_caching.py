@@ -135,13 +135,21 @@ def make_request(
 
 
 def make_kv_cache_manager(
-    kv_cache_config: KVCacheConfig, vllm_config: VllmConfig | None = None, **kwargs
+    kv_cache_config: KVCacheConfig, vllm_config: VllmConfig | None = None,
+    mark_eagle_group: bool = True, **kwargs
 ) -> KVCacheManager:
     """Build a ``KVCacheManager``, deriving ``scheduler_block_size`` from the
     config (LCM of group block sizes) unless explicitly provided. This mirrors
     ``resolve_kv_cache_block_sizes`` for the non-context-parallel case used by
     these tests, so callers don't have to pass it at every site. With
     ``vllm_config``, a HiSparseConnector builds the HiSparse coordinator."""
+    if (
+        kwargs.get("use_eagle", False)
+        and mark_eagle_group
+        and not any(g.is_eagle_group for g in kv_cache_config.kv_cache_groups)
+    ):
+        for g in kv_cache_config.kv_cache_groups:
+            g.is_eagle_group = True
     kwargs.setdefault(
         "scheduler_block_size",
         lcm(*(g.kv_cache_spec.block_size for g in kv_cache_config.kv_cache_groups)),
@@ -6769,3 +6777,29 @@ def test_estimate_cached_tokens_tracks_hashed_prefix_of_each_group():
     full_attention_blocks = manager.get_blocks(request.request_id).blocks[0]
     manager.block_pool.evict_blocks({full_attention_blocks[3].block_id})
     assert manager.estimate_cached_tokens(request) == 3 * block_size
+
+
+def test_eagle_no_fallback_when_no_draft_group(caplog):
+    block_size = 16
+    kv_cache_config = make_kv_cache_config(block_size, num_blocks=100)
+    assert not any(g.is_eagle_group for g in kv_cache_config.kv_cache_groups)
+    with caplog.at_level("WARNING"):
+        manager = make_kv_cache_manager(
+            kv_cache_config, max_model_len=8192, enable_caching=True,
+            hash_block_size=block_size, use_eagle=True, mark_eagle_group=False,
+        )
+    assert manager.coordinator.eagle_group_ids == set()
+    assert manager.coordinator.drop_eagle_group_ids == set()
+    assert "no KV cache group was identified as a draft group" in caplog.text
+
+
+def test_eagle_drop_when_draft_group_present():
+    block_size = 16
+    kv_cache_config = make_kv_cache_config(block_size, num_blocks=100)
+    kv_cache_config.kv_cache_groups[0].is_eagle_group = True
+    manager = make_kv_cache_manager(
+        kv_cache_config, max_model_len=8192, enable_caching=True,
+        hash_block_size=block_size, use_eagle=True,
+    )
+    assert manager.coordinator.eagle_group_ids == {0}
+    assert manager.coordinator.drop_eagle_group_ids == {0}
