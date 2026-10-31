@@ -6,7 +6,8 @@ import os
 import random
 import sys
 import threading
-from collections.abc import Callable, Collection
+import time
+from collections.abc import Callable, Collection, Iterator
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import numpy as np
@@ -32,6 +33,60 @@ else:
     IntermediateTensors = object
 
 logger = init_logger(__name__)
+
+
+@contextlib.contextmanager
+def xpu_forward_debug(stage: str) -> Iterator[None]:
+    """Temporary blocking diagnostics for the XPU shutdown debug PR."""
+    if torch.compiler.is_compiling():
+        yield
+        return
+
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_xpu():
+        yield
+        return
+
+    start = time.monotonic()
+    rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else -1
+    identity = (
+        f"stage={stage} rank={rank} pid={os.getpid()} "
+        f"thread={threading.get_ident()} device={torch.xpu.current_device()}"
+    )
+
+    def checkpoint(phase: str) -> None:
+        logger.warning(
+            "[xpu-forward-diag] %s phase=%s sync.begin elapsed=%.6fs",
+            identity,
+            phase,
+            time.monotonic() - start,
+        )
+        if torch.xpu.is_current_stream_capturing():
+            logger.warning(
+                "[xpu-forward-diag] %s phase=%s sync.skipped(capture)",
+                identity,
+                phase,
+            )
+        else:
+            torch.xpu.synchronize()
+            logger.warning(
+                "[xpu-forward-diag] %s phase=%s sync.end elapsed=%.6fs",
+                identity,
+                phase,
+                time.monotonic() - start,
+            )
+
+    try:
+        checkpoint("enter")
+        logger.warning("[xpu-forward-diag] %s body.begin", identity)
+        yield
+        logger.warning("[xpu-forward-diag] %s body.end", identity)
+        checkpoint("exit")
+    except Exception:
+        # Do not synchronize while unwinding: a peer may be waiting in a collective.
+        logger.exception("[xpu-forward-diag] %s exception (no cleanup sync)", identity)
+        raise
 
 
 # NOTE: registration-time-mutable. Platform backends inject custom
