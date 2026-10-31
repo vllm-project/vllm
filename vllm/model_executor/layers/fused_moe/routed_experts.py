@@ -1004,8 +1004,32 @@ class RoutedExperts(PluggableLayer):
     def load_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[str]:
-        expert_mapping = self.get_expert_mapping(include_fused=True)
-        mapping_by_expert = _index_expert_mapping(expert_mapping)
+        mapping_key = None
+        # Subclasses may build mappings from additional state. Keep their
+        # mapping hooks uncached, including custom PluggableLayer backends.
+        if type(self) is RoutedExperts:
+            mapping_key = (
+                self.ckpt_gate_proj_name,
+                self.ckpt_down_proj_name,
+                self.ckpt_up_proj_name,
+                self.lora_base_layer_prefix,
+                self.moe_config.num_logical_experts,
+                self.moe_config.num_experts,
+                self.expert_map_manager.num_fused_shared_experts,
+                self.moe_config.is_act_and_mul,
+            )
+        cached = self.__dict__.get("_load_weights_mapping")
+        if mapping_key is not None and cached is not None and cached[0] == mapping_key:
+            _, expert_mapping, mapping_by_expert = cached
+        else:
+            expert_mapping = self.get_expert_mapping(include_fused=True)
+            mapping_by_expert = _index_expert_mapping(expert_mapping)
+            if mapping_key is not None:
+                self._load_weights_mapping = (
+                    mapping_key,
+                    expert_mapping,
+                    mapping_by_expert,
+                )
 
         for expert_name, loaded_weight in weights:
             qual_name = f"{self.layer_name}.{expert_name}"
