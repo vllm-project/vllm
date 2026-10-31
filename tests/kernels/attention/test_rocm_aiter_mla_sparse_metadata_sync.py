@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 import sys
+from dataclasses import replace
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 import torch
 
@@ -139,6 +142,8 @@ def _make_builder():
     builder.kv_cache_dtype = "fp8"
     builder.mla_dims = SimpleNamespace(kv_lora_rank=512, qk_rope_head_dim=64)
     builder.topk_tokens = topk_tokens
+    builder._seq_lens_ub_slack = 0
+
     # SparseMLACommonMetadataBuilder state consumed by its build() method.
     builder.cp_kv_cache_interleave_size = 1
     builder.use_pcp = False
@@ -355,6 +360,87 @@ def test_sparse_persistent_metadata_syncs_only_after_recompute(monkeypatch):
     assert fake_get_mla_metadata_v1_mock.call_count == 1
 
 
+@pytest.mark.parametrize(
+    "slack,ub_offset,expect_sync",
+    [
+        # No spec decode: the upper bound is exact.
+        (0, 0, False),
+        # Spec decode, context upper bounds (17, 9) minus slack are >= topk (4).
+        (2, 2, False),
+        # Spec decode, context upper bound 7 minus slack 8 < topk: needs exact.
+        (8, 0, True),
+        # The lower bound reaches topk exactly, even with in-flight batches.
+        (8, 5, False),
+        (8, 4, True),
+    ],
+)
+@pytest.mark.parametrize("padded", [False, True])
+def test_persistent_metadata_key_from_upper_bound(
+    monkeypatch, slack, ub_offset, expect_sync, padded
+):
+    """The metadata key skips the seq_lens D2H copy when the host upper bound
+    provably gives the same key, and matches the exact key either way."""
+    syncs: list[str] = []
+
+    @contextlib.contextmanager
+    def fake_gpu_sync_allowed():
+        syncs.append("sync")
+        yield
+
+    _patch_build_deps(monkeypatch)
+    monkeypatch.setattr(sparse_mod, "gpu_sync_allowed", fake_gpu_sync_allowed)
+    common_metadata = _make_common_metadata()
+    if padded:
+        starts = torch.tensor([0, 1, 1], dtype=torch.int32)
+        common_metadata = replace(
+            common_metadata,
+            query_start_loc=starts,
+            query_start_loc_cpu=starts,
+            seq_lens=torch.tensor([8, 8], dtype=torch.int32),
+            num_actual_tokens=1,
+            slot_mapping=common_metadata.slot_mapping[:1],
+        )
+
+    exact = _make_builder()
+    exact.build(
+        common_prefix_len=0,
+        common_attn_metadata=replace(common_metadata, seq_lens_cpu_upper_bound=None),
+    )
+    assert syncs == ["sync"]
+    syncs.clear()
+
+    builder = _make_builder()
+    builder._seq_lens_ub_slack = slack
+    upper_bound = common_metadata.seq_lens + ub_offset
+    if padded:
+        upper_bound[-1] = 0
+    builder.build(
+        common_prefix_len=0,
+        common_attn_metadata=replace(
+            common_metadata, seq_lens_cpu_upper_bound=upper_bound
+        ),
+    )
+
+    assert syncs == (["sync"] if expect_sync else [])
+    assert builder._prev_metadata_key == exact._prev_metadata_key
+
+
+@pytest.mark.parametrize("num_reqs", [0, 2])
+def test_metadata_key_without_queries_does_not_sync(monkeypatch, num_reqs):
+    """Empty and all-padding batches need no device sequence lengths."""
+    builder = _make_builder()
+    metadata = replace(
+        _make_common_metadata(), num_reqs=num_reqs, seq_lens_cpu_upper_bound=None
+    )
+    monkeypatch.setattr(
+        sparse_mod, "gpu_sync_allowed", Mock(side_effect=AssertionError("D2H copy"))
+    )
+    seq_lens = builder._metadata_key_seq_lens(
+        metadata, np.zeros(num_reqs, dtype=np.int32)
+    )
+    np.testing.assert_array_equal(seq_lens, np.zeros(num_reqs, dtype=np.int32))
+
+
 def test_dense_prefill_builds_sparse_metadata_for_decode_subset(monkeypatch):
     """Dense prefill must exclude prefill tokens from AITER sparse metadata.
 
@@ -375,6 +461,7 @@ def test_dense_prefill_builds_sparse_metadata_for_decode_subset(monkeypatch):
         query_start_loc_cpu=query_start_loc,
         seq_lens=seq_lens,
         seq_lens_cpu=seq_lens,
+        seq_lens_cpu_upper_bound=seq_lens,
         max_query_len=4,
         max_seq_len=16,
     )
@@ -461,6 +548,7 @@ def test_long_prefill_shares_full_sparse_metadata_with_decode(monkeypatch):
         query_start_loc_cpu=query_start_loc,
         seq_lens=seq_lens,
         seq_lens_cpu=seq_lens,
+        seq_lens_cpu_upper_bound=seq_lens,
         max_query_len=5,
         max_seq_len=16,
     )
@@ -685,6 +773,7 @@ def test_sparse_metadata_workload_length_dtype_matrix(
         query_start_loc_cpu=query_start_loc,
         seq_lens=seq_lens,
         seq_lens_cpu=seq_lens,
+        seq_lens_cpu_upper_bound=seq_lens,
         max_query_len=max(query_lens),
         max_seq_len=max(seq_lens_list),
     )
