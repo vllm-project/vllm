@@ -312,6 +312,17 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
                 connectors output.
 
         """
+        # Tell LMCache which blocks failed to load, so it does not promise
+        # the same chunks again for those requests (older LMCache versions do
+        # not implement this).
+        invalid_block_ids = connector_output.invalid_block_ids
+        if invalid_block_ids:
+            record_load_failures = getattr(
+                self._lmcache_engine, "record_load_failures", None
+            )
+            if record_load_failures is not None:
+                record_load_failures(invalid_block_ids)
+
         # Get the KV events
         kv_cache_events = connector_output.kv_cache_events
         if not kv_cache_events or not isinstance(kv_cache_events, LMCacheKVEvents):
