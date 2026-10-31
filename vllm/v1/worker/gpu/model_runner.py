@@ -1352,7 +1352,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         draft_tokens = scheduler_output.scheduled_spec_decode_tokens
         # batch_idx -> req_id
         req_ids = sort_batch_req_ids(
-            num_tokens_per_req, draft_tokens, self.decode_query_len
+            num_tokens_per_req,
+            draft_tokens,
+            self.decode_query_len,
+            self.req_states.num_computed_tokens_np,
+            self.req_states.req_id_to_index,
         )
 
         numtoks_iter = map(num_tokens_per_req.__getitem__, req_ids)
@@ -2537,12 +2541,27 @@ def sort_batch_req_ids(
     num_tokens_per_req: dict[str, int],
     draft_tokens: dict[str, list[int]],
     decode_query_len: int,
+    num_computed_tokens: np.ndarray | None = None,
+    req_id_to_index: dict[str, int] | None = None,
 ) -> list[str]:
-    # Order verification/decode -> short_extend -> prefill;
-    # split_decodes_and_prefills relies on decode-like requests leading.
-    key = lambda r: (
-        not draft_tokens.get(r),
-        (num := num_tokens_per_req[r]) != decode_query_len,
-        num,
-    )
+    # Order verification/decode -> short_extend -> extend -> prefill. The
+    # splitter clamps its prefill boundary, so sorting by context only keeps the
+    # extend region small; correctness does not depend on it.
+    def key(r: str) -> tuple[bool, bool, bool, int]:
+        num = num_tokens_per_req[r]
+        drafts = draft_tokens.get(r)
+        return (
+            not drafts,
+            # Rows up to decode_query_len stay with the decodes: a fresh one
+            # sorted behind the extends would run as a zero-context extend.
+            # `not` keeps numpy scalars, which compare slowly, out of the tuple.
+            num > decode_query_len
+            and not drafts
+            and num_computed_tokens is not None
+            and req_id_to_index is not None
+            and not num_computed_tokens[req_id_to_index[r]],
+            num != decode_query_len,
+            num,
+        )
+
     return sorted(num_tokens_per_req, key=key)
