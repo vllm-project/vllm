@@ -1073,8 +1073,8 @@ class NixlBaseConnectorWorker:
         self._head_sharded_draft_regions = set[int]()
         self._ssm_region_indices = list[int]()
         # Per transfer group, the regions holding its layers (None: all). Tracked
-        # explicitly because aliased layers share a region keyed by address, so
-        # e.g. a scratch page lands in the region of the page it overlays.
+        # explicitly because aliased layers may share a compatible covering
+        # region, so e.g. a scratch page can land in the region it overlays.
         self._group_region_indices = list[list[int] | None]()
         self._ple_region_index: int | None = None
         # Page length of the PLE short-conv state; its region may be shared with
@@ -1618,7 +1618,7 @@ class NixlBaseConnectorWorker:
         registration_ranges: dict[tuple[int, str], tuple[int, int, int]] = {}
         region_mem_types: list[str] = []
         seen_base_addresses: list[int] = []
-        seen_region_keys: list[tuple[int, int]] = []
+        region_is_packed_row: list[bool] = []
         self._ssm_region_indices = []
         region_groups: list[set[int]] = []
         self._ple_block_len = None
@@ -1640,6 +1640,36 @@ class NixlBaseConnectorWorker:
 
         region_layers: list[list[str]] = []
         packed_member_layouts: dict[str, tuple[int, int]] = {}
+
+        def find_compatible_region(
+            base_addr: int,
+            block_len: int,
+            block_stride: int,
+            num_blocks: int,
+            is_mla_region: bool,
+        ) -> int | None:
+            for region_index, existing_base_addr in enumerate(seen_base_addresses):
+                if existing_base_addr != base_addr:
+                    continue
+                existing_block_len = self.block_len_per_layer[region_index]
+                existing_is_packed_row = region_is_packed_row[region_index]
+                if existing_block_len == block_len:
+                    # Preserve the original exact-length alias behavior. MLA
+                    # aliases may still update the canonical kernel geometry.
+                    return region_index
+                # Only a packed whole-row region may cover a shorter alias.
+                # Other shorter scratch pages keep their own region, while a
+                # wider view always gets a new region to avoid truncation.
+                if is_mla_region or not existing_is_packed_row:
+                    continue
+                if self.block_stride_per_layer[region_index] != block_stride:
+                    continue
+                if self.region_num_blocks[region_index] != num_blocks:
+                    continue
+                if existing_block_len < block_len:
+                    continue
+                return region_index
+            return None
 
         # K and V are packed into the content dim, so each attention layer is a
         # single NIXL region whose block transfers as one unit. Mamba layers instead
@@ -1721,6 +1751,7 @@ class NixlBaseConnectorWorker:
                 )
 
             if isinstance(layer_spec, MambaSpec):
+                packed_row = False
                 physical_ratio = self._physical_blocks_per_logical_kv_block
                 block_len = physical_page_size // physical_ratio
                 block_stride = physical_page_size
@@ -1733,6 +1764,7 @@ class NixlBaseConnectorWorker:
                     (cache.data_ptr(), block_len, block_stride // physical_ratio)
                 ]
             else:
+                packed_row = False
                 if cache.ndim == 1:
                     # Flat byte view: HMA tensors shared between layer types carry
                     # no block dimension, so stride(0) is 1 byte. Blocks abut, so
@@ -1772,6 +1804,7 @@ class NixlBaseConnectorWorker:
                     # advertise where this layer's page sits so a remote with
                     # LB* can still address it (HiSparse).
                     storage_block_len = block_stride
+                    packed_row = True
                     region_specs = [
                         (registration_base, storage_block_len, storage_block_len)
                     ]
@@ -1819,26 +1852,34 @@ class NixlBaseConnectorWorker:
                     ]
 
             for base_addr, block_len, block_stride in region_specs:
-                # Overlaid groups can page the same bytes with different page
-                # sizes (DSv4.1 SWA, indexer and compressor caches), so views at
-                # one address share a region only if their block_len matches.
-                # A packed PP producer keeps one region per layer.
-                region_key = (base_addr, block_len)
-                if region_key in seen_region_keys and not split_packed_rows:
-                    region_index = seen_region_keys.index(region_key)
+                # Equal-length aliases preserve the existing region identity. A
+                # shorter non-MLA view can use a packed whole-row region when
+                # its stride and block count match; a wider view always gets a
+                # new region.
+                if not split_packed_rows:
+                    region_index = find_compatible_region(
+                        base_addr,
+                        block_len,
+                        block_stride,
+                        num_blocks,
+                        is_mla_region,
+                    )
+                else:
+                    region_index = None
+                if region_index is not None:
                     assert region_mem_types[region_index] == mem_type
                     self._region_is_mla[region_index] |= is_mla_region
                     if is_mla_region:
                         self.block_len_per_layer[region_index] = block_len
                         self.block_stride_per_layer[region_index] = block_stride
                         self.region_num_blocks[region_index] = num_blocks
+                    region_is_packed_row[region_index] |= packed_row
                     if self.region_group_ids[region_index] != group_id:
                         self.region_group_ids[region_index] = _SHARED_REGION_GROUP_ID
                     region_groups[region_index].add(group_id)
                 else:
                     region_index = len(seen_base_addresses)
                     seen_base_addresses.append(base_addr)
-                    seen_region_keys.append(region_key)
                     self.block_len_per_layer.append(block_len)
                     self.block_stride_per_layer.append(block_stride)
                     self.region_group_ids.append(group_id)
@@ -1847,6 +1888,7 @@ class NixlBaseConnectorWorker:
                     self.region_num_blocks.append(num_blocks)
                     self._region_is_mla.append(is_mla_region)
                     region_mem_types.append(mem_type)
+                    region_is_packed_row.append(packed_row)
 
                 if region_index == len(region_layers):
                     region_layers.append([layer_name])
@@ -1892,6 +1934,7 @@ class NixlBaseConnectorWorker:
             == len(self.region_group_ids)
             == len(self.region_names)
             == len(self.region_num_blocks)
+            == len(region_is_packed_row)
         )
         # Descriptor ids must be region-ordered, matching the remote side.
         self._group_region_indices = [
