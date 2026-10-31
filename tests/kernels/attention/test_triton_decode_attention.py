@@ -425,6 +425,47 @@ def test_packed_fp8_software_e4m3_conversion(scale):
     )
 
 
+@pytest.mark.parametrize(
+    "token_stride,block_padding,storage_offset,workspace_width,workspace_padding,error",
+    [
+        (657, 0, 0, 513, 0, "cache strides and storage offset"),
+        (656, 1, 0, 513, 0, "cache strides and storage offset"),
+        (656, 0, 1, 513, 0, "cache strides and storage offset"),
+        (656, 0, 0, 512, 0, "workspace"),
+        (656, 0, 0, 513, 1, "workspace"),
+    ],
+)
+def test_packed_fp8_decode_rejects_invalid_layout(
+    token_stride,
+    block_padding,
+    storage_offset,
+    workspace_width,
+    workspace_padding,
+    error,
+):
+    """Reject unsafe typed cache views and incompatible split-KV workspace layouts."""
+    storage = torch.empty(
+        2 * 16 * token_stride + block_padding + storage_offset, dtype=torch.uint8
+    )
+    cache = storage.as_strided(
+        (2, 16, 656),
+        (16 * token_stride + block_padding, token_stride, 1),
+        storage_offset,
+    )
+    q = torch.empty(2, 2, 576, dtype=torch.bfloat16)
+    output = torch.empty(2, 2, 512, dtype=q.dtype)
+    lse = torch.empty(2, 2, dtype=torch.float32)
+    table = torch.zeros(2, 1, dtype=torch.int32)
+    lengths = torch.ones(2, dtype=torch.int32)
+    mid = torch.empty(2, 2, 2, workspace_width + workspace_padding)[
+        ..., :workspace_width
+    ]
+    with pytest.raises(AssertionError, match=error):
+        decode_attention_fwd_fp8_ds_mla(
+            q, cache, output, lse, table, lengths, mid, 2, 576**-0.5
+        )
+
+
 def _make_packed_fp8_mla_case(batch, length, heads, page_size, padded):
     torch.manual_seed(42)
     pages_per_request = triton.cdiv(length, page_size)

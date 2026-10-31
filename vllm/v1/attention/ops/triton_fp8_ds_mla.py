@@ -37,6 +37,7 @@ def _decode_fp8_ds_mla_stage1(
     SPLITS: tl.constexpr,
     CACHE_BLOCK: tl.constexpr,
     CACHE_TOKEN: tl.constexpr,
+    KV_LORA_RANK: tl.constexpr,
     BLOCK_N: tl.constexpr,
     SCALE: tl.constexpr,
 ):
@@ -102,13 +103,16 @@ def _decode_fp8_ds_mla_stage1(
             acc = acc * alpha[:, None] + tl.dot(weights.to(tl.bfloat16), v)
             denominator = denominator * alpha + tl.sum(weights, 1)
             maximum = new_maximum
-        mid_base = (batch * HEADS + head[:, None]) * SPLITS * 513 + split * 513
+        mid_row_width = KV_LORA_RANK + 1
+        mid_base = ((batch * HEADS + head[:, None]) * SPLITS + split) * mid_row_width
         tl.store(
             Mid + mid_base + vd[None, :],
             acc / denominator[:, None],
             head[:, None] < HEADS,
         )
-        lse_base = (batch * HEADS + head) * SPLITS * 513 + split * 513 + 512
+        lse_base = (
+            (batch * HEADS + head) * SPLITS + split
+        ) * mid_row_width + KV_LORA_RANK
         if value_group == 0:
             tl.store(Mid + lse_base, maximum + tl.log(denominator), head < HEADS)
 
@@ -133,7 +137,22 @@ def decode_attention_fwd_fp8_ds_mla(
     assert q.dtype == torch.bfloat16 and q.shape[-1] == 576
     assert cache.dtype == torch.uint8 and cache.shape[-1] == 656
     assert cache.stride(-1) == 1
+    assert (
+        cache.stride(0) % 4 == 0
+        and cache.stride(1) % 4 == 0
+        and cache.storage_offset() % 4 == 0
+    ), "fp8_ds_mla cache strides and storage offset must be divisible by 4"
     batch, heads = q.shape[:2]
+    kv_lora_rank = o.shape[-1]
+    assert kv_lora_rank == 512
+    assert (
+        attn_logits.dtype == torch.float32
+        and attn_logits.shape == (batch, heads, num_kv_splits, kv_lora_rank + 1)
+        and attn_logits.is_contiguous()
+    ), (
+        "fp8_ds_mla workspace must be contiguous FP32 with shape "
+        "[batch, heads, splits, rank + 1]"
+    )
     _decode_fp8_ds_mla_stage1[(batch, triton.cdiv(heads, 16) * 2, num_kv_splits)](
         q,
         cache,
@@ -150,6 +169,7 @@ def decode_attention_fwd_fp8_ds_mla(
         num_kv_splits,
         cache.stride(0),
         cache.stride(1),
+        kv_lora_rank,
         32,
         sm_scale,
         num_warps=4,
@@ -167,8 +187,8 @@ def decode_attention_fwd_fp8_ds_mla(
         o.stride(1),
         lse.stride(0),
         NUM_KV_SPLITS=num_kv_splits,
-        BLOCK_DV=512,
-        Lv=512,
+        BLOCK_DV=kv_lora_rank,
+        Lv=kv_lora_rank,
         num_warps=4,
         num_stages=2,
     )
