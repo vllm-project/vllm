@@ -54,6 +54,13 @@ th {
     - A - Per activation token
     - T - Per tensor
 
+`flashinfer_nvlink_one_sided` releases its communication workspace during
+expert-parallel group teardown, before the process groups are destroyed.
+This also releases the manager's legacy process-wide workspace cache entries
+when using FlashInfer 0.7.2, so they do not survive until Python finalization.
+Custom integrations must finish outstanding GPU work and destroy the manager
+collectively while its CPU process group is still available.
+
 Modular kernels are supported by the following `FusedMoEMethodBase` classes.
 
 - [`ModelOptFp8MoEMethod`][vllm.model_executor.layers.quantization.modelopt.ModelOptFp8MoEMethod]
