@@ -4,7 +4,7 @@ meta:
   provider: "Moonshot AI"
   description: "Pre-release 2.8T-parameter native multimodal MoE with Kimi Delta Attention, Gated MLA, Attention Residuals, and a 1M-token context window"
   date_added: 2026-07-27
-  date_updated: 2026-10-29
+  date_updated: 2026-10-30
   tasks:
     - multimodal
     - text
@@ -175,6 +175,13 @@ variants:
     precision: fp8
     vram_minimum_gb: 3360
     description: "RedHatAI FP8 block quantization"
+  redhat_int4:
+    model_id: "RedHatAI/Kimi-K3-INT4"
+    precision: int4
+    label: "INT4 (RedHatAI)"
+    # Estimate from the model's parameter count; verify exact shard sizes.
+    vram_minimum_gb: 1711
+    description: "RedHatAI INT4 checkpoint; estimated footprint is larger than the 640 GB available on 8x H100"
 
 compatible_strategies:
   - single_node_tp
@@ -1994,3 +2001,7 @@ guide: |
   ```
 
   Confirm that a final answer is returned, and inspect the prefill/decode logs for successful KV transfers and transfer errors. Health checks alone do not exercise RDMA. Preserve `reasoning_content` and tool calls when building multi-turn conversations, as described in the [model card](https://huggingface.co/moonshotai/Kimi-K3#6-model-usage).
+
+  ## References
+
+  - [RedHatAI INT4 checkpoint](https://huggingface.co/RedHatAI/Kimi-K3-INT4)
