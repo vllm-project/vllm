@@ -14,6 +14,8 @@ from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     MPLinearLayerConfig,
+    NoCompatibleMPLinearKernelError,
+    _get_linear_backend,
     choose_mp_linear_kernel,
 )
 from vllm.model_executor.layers.fused_moe import (
@@ -307,6 +309,21 @@ class AutoAWQConfig(QuantizationConfig):
             if current_platform.is_cpu() or current_platform.is_xpu():
                 return AutoAWQMarlinLinearMethod(self)
 
+            # On RDNA the same path offers the RDNA3/RDNAHybrid W4A16 kernels.
+            # Other ROCm targets (CDNA/gfx9) keep the legacy AWQ kernels, whose
+            # mixed-precision counterparts have not been measured for AWQ.
+            if current_platform.is_rocm():
+                from vllm.platforms.rocm import on_gfx1x
+
+                if on_gfx1x():
+                    return AutoAWQMarlinLinearMethod(
+                        self,
+                        allow_legacy_fallback=(
+                            _get_linear_backend(quantization="mixed_precision")
+                            == "auto"
+                        ),
+                    )
+
             # Check if Marlin is supported and not using batch invariant mode
             # (Marlin kernels are not batch invariant)
             use_marlin = (
@@ -401,14 +418,17 @@ class AutoAWQMarlinLinearMethod(LinearMethodBase):
 
     _kernel_backends_being_used: set[str] = set()
 
-    def __init__(self, quant_config: AutoAWQConfig) -> None:
+    def __init__(
+        self, quant_config: AutoAWQConfig, *, allow_legacy_fallback: bool = False
+    ) -> None:
         self.quant_config = quant_config
+        self.allow_legacy_fallback = allow_legacy_fallback
         self.quant_type = scalar_types.uint4
         self.input_dtype = None
 
-        # Skip Marlin verification on CPU/XPU - they use dedicated WNA16
-        # kernels (CPUWNA16LinearKernel / XPUwNa16LinearKernel) instead.
-        if not (current_platform.is_cpu() or current_platform.is_xpu()):
+        # Marlin kernels are CUDA-only. Other platforms use their own WNA16 or
+        # W4A16 kernels, picked by choose_mp_linear_kernel in create_weights.
+        if current_platform.is_cuda():
             verify_marlin_supported(
                 quant_type=self.quant_config.quant_type,
                 group_size=self.quant_config.group_size,
@@ -445,7 +465,25 @@ class AutoAWQMarlinLinearMethod(LinearMethodBase):
             zero_points=self.quant_config.zero_point,
         )
 
-        kernel_type = choose_mp_linear_kernel(mp_linear_kernel_config)
+        try:
+            kernel_type = choose_mp_linear_kernel(mp_linear_kernel_config)
+        except NoCompatibleMPLinearKernelError as exc:
+            if not self.allow_legacy_fallback:
+                raise
+            # Select the legacy lifecycle before registering or repacking weights.
+            legacy_method = AutoAWQLinearMethod(self.quant_config)
+            legacy_method.create_weights(
+                layer,
+                input_size_per_partition,
+                output_partition_sizes,
+                input_size,
+                output_size,
+                params_dtype,
+                **extra_weight_attrs,
+            )
+            layer.quant_method = legacy_method
+            logger.warning_once("Falling back to legacy AutoAWQ kernels: %s", str(exc))
+            return
 
         if kernel_type.__name__ not in self._kernel_backends_being_used:
             logger.info("Using %s for AutoAWQMarlinLinearMethod", kernel_type.__name__)
