@@ -205,6 +205,8 @@ class TrtLlmBf16ExpertsModular(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsModular)
         from flashinfer.fused_moe import WeightLayout
 
         topk_ids = topk_ids.to(dtype=torch.int32)
+        if apply_router_weight_on_input:
+            topk_weights = torch.ones_like(topk_weights)
         defer = self._uses_post_gemm2_hook(topk_ids.shape[0])
 
         result = flashinfer.fused_moe.trtllm_bf16_routed_moe(
