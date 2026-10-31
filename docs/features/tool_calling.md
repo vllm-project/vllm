@@ -96,6 +96,78 @@ specify the `name` of one of the tools in the `tool_choice` parameter of the cha
 
 In the Responses API, `tool_choice={"type": "function", "name": "..."}` can select a function inside a namespace by its full `namespace__function` name or by its local name. Names are matched literally first, so a plain function named `other__add` never stands in for `add`. A local name defined in more than one namespace must be selected by its full name.
 
+## Namespaced Custom Tools in the Responses API
+
+The Responses API accepts custom tools inside a `namespace`. On non-Harmony
+routes, vLLM presents each custom tool to the model as a function with a single
+string `input` argument. Responses expose the tool's original name and namespace
+separately, with the decoded text in `custom_tool_call.input`.
+
+For example, start a server with a compatible tool parser:
+
+```bash
+vllm serve Qwen/Qwen3-1.7B \
+    --enable-auto-tool-choice \
+    --tool-call-parser hermes \
+    --reasoning-parser qwen3
+```
+
+Then request a namespaced custom tool using the OpenAI Python client:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="dummy")
+tools = [{
+    "type": "namespace",
+    "name": "sandbox",
+    "description": "Sandbox text utilities.",
+    "tools": [{
+        "type": "custom",
+        "name": "emit",
+        "description": "Emit the requested text unchanged.",
+        "format": {"type": "text"},
+    }],
+}]
+prompt = [{"role": "user", "content": "Use sandbox.emit to emit hello."}]
+response = client.responses.create(
+    model="Qwen/Qwen3-1.7B",
+    input=prompt,
+    tools=tools,
+    tool_choice={"type": "custom", "name": "sandbox__emit"},
+    temperature=0,
+    extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+)
+call = next(item for item in response.output if item.type == "custom_tool_call")
+assert (call.name, call.namespace) == ("emit", "sandbox")
+print(call.input)
+
+# Execute the tool in your application, then replay its call and result.
+follow_up = client.responses.create(
+    model="Qwen/Qwen3-1.7B",
+    instructions="Reply with the tool result. Do not call tools.",
+    input=[*prompt, call.model_dump(exclude_none=True), {
+        "type": "custom_tool_call_output",
+        "call_id": call.call_id,
+        "output": "Delivered.",
+    }],
+    tool_choice="none",
+    extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+)
+print(follow_up.output_text)
+```
+
+Use `namespace__name` to select a namespaced tool explicitly. A unique local
+name is also accepted; use the full name when local names are ambiguous. With
+`stream=True`, custom input arrives in
+`response.custom_tool_call_input.delta` and
+`response.custom_tool_call_input.done` events. The added and completed output
+items retain `name="emit"` and `namespace="sandbox"`.
+
+Custom `format={"type": "text"}` is supported. Grammar formats are rejected
+with a client error, including when the custom tool is inside a namespace.
+The application is responsible for executing the tool and returning its result.
+
 ## Required Function Calling
 
 vLLM supports the `tool_choice='required'` option in the chat completion API. Similar to the named function calling, it also uses structured outputs, so this is enabled by default and will work with any supported model. However, support for alternative decoding backends are on the [roadmap](../usage/v1_guide.md#features) for the V1 engine.

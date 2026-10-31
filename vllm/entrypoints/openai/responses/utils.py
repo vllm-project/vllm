@@ -56,7 +56,17 @@ logger = init_logger(__name__)
 
 
 def custom_tool_names(tools: list[Tool] | None) -> frozenset[str]:
-    return frozenset(tool.name for tool in tools or [] if tool.type == "custom")
+    names = set()
+    for tool in tools or []:
+        if tool.type == "custom":
+            names.add(tool.name)
+        elif tool.type == "namespace":
+            names.update(
+                flat_namespace_tool_name(tool.name, child.name)
+                for child in tool.tools
+                if child.type == "custom"
+            )
+    return frozenset(names)
 
 
 def encode_custom_tool_input(payload: str) -> str:
@@ -162,20 +172,21 @@ def build_response_output_items(
             call_id = tool_call.id or make_tool_call_id(
                 func_name=tool_call.name, idx=idx
             )
+            call_name = resolve_responses_tool_call_name(
+                tool_call.name, tool_call_name_map=tool_call_name_map
+            )
             if tool_call.name in custom_names:
                 outputs.append(
                     ResponseCustomToolCall(
                         id=f"ctc_{random_uuid()}",
                         call_id=call_id,
                         type="custom_tool_call",
-                        name=tool_call.name,
+                        name=call_name.name,
+                        namespace=call_name.namespace,
                         input=decode_custom_tool_input(tool_call.arguments),
                     )
                 )
                 continue
-            call_name = resolve_responses_tool_call_name(
-                tool_call.name, tool_call_name_map=tool_call_name_map
-            )
             outputs.append(
                 ResponseFunctionToolCall(
                     id=f"fc_{random_uuid()}",
@@ -349,10 +360,13 @@ def _construct_message_from_response_item(
         )
     elif _item_type(item) == "custom_tool_call":
         call = _item_dict(item)
+        tool_name = call["name"]
+        if call.get("namespace"):
+            tool_name = flat_namespace_tool_name(call["namespace"], tool_name)
         tool_call = ChatCompletionMessageToolCallParam(
             id=call["call_id"],
             function=FunctionCallTool(
-                name=call["name"],
+                name=tool_name,
                 arguments=encode_custom_tool_input(call.get("input") or ""),
             ),
             type="function",

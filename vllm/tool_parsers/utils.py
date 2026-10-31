@@ -223,18 +223,17 @@ def get_function_tools(
     function_tools: list[ChatCompletionToolsParam | FunctionTool] = []
     for tool in tools:
         if isinstance(tool, NamespaceTool):
-            function_tools.extend(
-                FunctionTool.model_validate(
-                    {
-                        **namespaced_tool.model_dump(by_alias=True),
-                        "name": flat_namespace_tool_name(
-                            tool.name, namespaced_tool.name
-                        ),
-                    }
+            for namespaced_tool in tool.tools:
+                if namespaced_tool.type == "custom":
+                    tool_dict = custom_tool_as_function_dict(namespaced_tool)
+                elif namespaced_tool.type == "function":
+                    tool_dict = namespaced_tool.model_dump(by_alias=True)
+                else:
+                    continue
+                tool_dict["name"] = flat_namespace_tool_name(
+                    tool.name, namespaced_tool.name
                 )
-                for namespaced_tool in tool.tools
-                if namespaced_tool.type == "function"
-            )
+                function_tools.append(FunctionTool.model_validate(tool_dict))
         elif isinstance(tool, CustomTool):
             function_tools.append(
                 FunctionTool.model_validate(custom_tool_as_function_dict(tool))
@@ -296,7 +295,7 @@ def build_responses_tool_call_name_map(
             continue
         namespace = tool.name
         for namespaced_tool in tool.tools:
-            if namespaced_tool.type != "function":
+            if namespaced_tool.type not in ("function", "custom"):
                 continue
             flat_name = flat_namespace_tool_name(namespace, namespaced_tool.name)
             name_map[flat_name] = ResponsesToolCallName(
