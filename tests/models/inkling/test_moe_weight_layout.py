@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+import subprocess
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -211,6 +215,67 @@ def test_moe_loads_channelwise_scale_for_tp(
         expected = expected[:, 4:].reshape(2, 2, 2, 1).transpose(1, 2).flatten(1, 2)
     torch.testing.assert_close(param, expected.float())
     assert loaded == [f"experts.routed_experts.{projection}_weight_scale"]
+
+
+def _assert_moe_w13_upload_reuses_cuda_allocator_segments() -> None:
+    torch.empty(1, device="cuda")
+
+    num_experts = 16
+    half = 256
+    hidden = 4096
+    param = torch.nn.Parameter(
+        torch.empty(
+            num_experts,
+            2 * half,
+            hidden,
+            dtype=torch.bfloat16,
+            device="cuda",
+        ),
+        requires_grad=False,
+    )
+    experts = SimpleNamespace(
+        w13_weight=param,
+        moe_config=SimpleNamespace(moe_parallel_config=SimpleNamespace(tp_rank=0)),
+    )
+    layer = SimpleNamespace(
+        experts=SimpleNamespace(routed_experts=experts),
+        _local_expert_slots=lambda: dict(enumerate(range(num_experts))),
+    )
+    checkpoint = (
+        torch.arange(
+            num_experts * 2 * half * hidden,
+            dtype=torch.int32,
+        )
+        .reshape(num_experts, 2 * half, hidden)
+        .to(torch.bfloat16)
+    )
+    reserved_before = torch.accelerator.memory_reserved()
+
+    moe.InklingMoE.load_expert_weight(
+        layer,
+        "experts.w13_weight",
+        checkpoint,
+    )
+    torch.accelerator.synchronize()
+
+    scratch_reserved = torch.accelerator.memory_reserved() - reserved_before
+    assert scratch_reserved <= 40 * 1024**2, (
+        f"expert uploads reserved {scratch_reserved} bytes of scratch CUDA memory"
+    )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
+def test_moe_w13_upload_reuses_cuda_allocator_segments() -> None:
+    env = os.environ.copy()
+    env["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:20"
+    repo_root = str(Path(__file__).parents[3])
+    env["PYTHONPATH"] = repo_root + os.pathsep + env.get("PYTHONPATH", "")
+    child_code = (
+        "from tests.models.inkling import test_moe_weight_layout as test_module\n"
+        "test_module._assert_moe_w13_upload_reuses_cuda_allocator_segments()\n"
+    )
+
+    subprocess.run([sys.executable, "-c", child_code], check=True, env=env)
 
 
 def test_sink_down_projection_is_packed_during_load(monkeypatch) -> None:
