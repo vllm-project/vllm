@@ -11,9 +11,13 @@ import regex as re
 import torch
 from torch import nn
 
+from vllm.model_executor.kernels.linear.cute_dsl import (
+    skinny_gemm_plans as skinny_plans,
+)
 from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
     SkinnyGemmConfig,
 )
+from vllm.model_executor.layers.utils import maybe_use_skinny_gemm
 from vllm.models.deepseek_v32.nvidia import glm52_low_latency_gemm as glm52_gemm
 from vllm.models.kimi_k3.nvidia import low_latency_gemm as k3_gemm
 from vllm.models.kimi_k3.nvidia.low_latency_gemm import KIMI_K3_PROJECTIONS
@@ -1029,6 +1033,75 @@ def test_qwen4_exp_sm121_selected_shapes(
         output.float().flatten(), reference.float().flatten(), dim=0
     ).item()
     assert cosine > 0.999
+
+
+@pytest.mark.parametrize(
+    "n,k,num_tokens,config",
+    [
+        pytest.param(n, k, num_tokens, config, id=f"{capability}-{n}x{k}-m{num_tokens}")
+        for capability, plans in skinny_plans.SKINNY_GEMM_PLANS_BY_CAPABILITY.items()
+        for (n, k), shape_plans in plans.items()
+        for num_tokens, config in shape_plans.items()
+    ],
+)
+def test_skinny_gemm_plans_are_valid(
+    n: int, k: int, num_tokens: int, config: SkinnyGemmConfig
+) -> None:
+    """Every registered plan must satisfy the wrapper and kernel constraints."""
+    assert config.num_rows == num_tokens
+    assert config.block_size % 32 == 0
+    assert n % config.outputs_per_block == 0
+    k_tile = config.block_size * config.vector_width
+    assert k % k_tile == 0
+    assert config.static_k in (None, k)
+    if config.static_k is not None:
+        assert config.static_k >= 2 * k_tile
+
+
+@pytest.mark.parametrize(
+    "dtype,bias,k,ndim,batch_invariant,expected",
+    [
+        pytest.param(torch.bfloat16, False, 1024, 2, False, True, id="planned"),
+        pytest.param(torch.float16, False, 1024, 2, False, False, id="fp16"),
+        pytest.param(torch.float32, False, 1024, 2, False, False, id="fp32"),
+        pytest.param(torch.bfloat16, True, 1024, 2, False, False, id="bias"),
+        pytest.param(torch.bfloat16, False, 128, 2, False, False, id="unlisted"),
+        pytest.param(torch.bfloat16, False, 1024, 2, True, False, id="batch-invariant"),
+        pytest.param(torch.bfloat16, False, 1024, 3, False, False, id="conv1d"),
+        pytest.param(torch.bfloat16, False, 1024, 4, False, False, id="conv2d"),
+    ],
+)
+def test_maybe_use_skinny_gemm(
+    monkeypatch: pytest.MonkeyPatch,
+    dtype: torch.dtype,
+    bias: bool,
+    k: int,
+    ndim: int,
+    batch_invariant: bool,
+    expected: bool,
+) -> None:
+    """Only eligible layers are marked; CPU tensors suffice for selection."""
+    assert (4096, 1024) in skinny_plans.SM121_SKINNY_GEMM_PLANS
+    assert (4096, 128) not in skinny_plans.SM121_SKINNY_GEMM_PLANS
+    # Isolate hardware/dependency detection, keeping the real plan lookup.
+    monkeypatch.setattr(
+        skinny_plans.current_platform, "get_device_capability", lambda: (12, 1)
+    )
+    monkeypatch.setattr(
+        skinny_plans.shape_dynamic_skinny_gemm, "is_available", lambda: True
+    )
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", str(int(batch_invariant)))
+    layer: nn.Module
+    if ndim == 2:
+        layer = nn.Linear(k, 4096, bias=bias, dtype=dtype, device="cpu")
+    elif ndim == 3:
+        layer = nn.Conv1d(k, 4096, 1, bias=bias, dtype=dtype, device="cpu")
+    else:
+        layer = nn.Conv2d(k, 4096, 1, bias=bias, dtype=dtype, device="cpu")
+
+    maybe_use_skinny_gemm(layer)
+
+    assert getattr(layer, "use_skinny_gemm", False) is expected
 
 
 def test_glm52_q_b_nonpacked_single_row_falls_back() -> None:
