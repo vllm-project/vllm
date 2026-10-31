@@ -81,9 +81,12 @@ steps:
     mem: 16+
   automatic_shard: true
   _raw_old_commands:
-  - pytest -s -v tests/quantization/test_blackwell_moe.py
+  - pytest -v -s tests/quantization/test_blackwell_moe.py tests/benchmarks/test_forward_cli.py::test_bench_forward_muse_balanced_routing
   source_file_dependencies:
   - tests/quantization/test_blackwell_moe.py
+  - tests/benchmarks/test_forward_cli.py
+  - vllm/benchmarks/forward/
+  - vllm/models/muse_spark/
   - vllm/model_executor/models/deepseek_v2.py
   - vllm/model_executor/models/gpt_oss.py
   - vllm/model_executor/models/llama4.py
@@ -95,7 +98,7 @@ steps:
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'pytest --continue-on-collection-errors -s -v tests/quantization/test_blackwell_moe.py || true'
+    'pytest --continue-on-collection-errors -v -s tests/quantization/test_blackwell_moe.py tests/benchmarks/test_forward_cli.py::test_bench_forward_muse_balanced_routing || true'
 - label: ':nvidia: (H200 MIG 35GB) Quantized Models %N'
   key: quantized-models-test
   device: intel_gpu

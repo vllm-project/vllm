@@ -18,6 +18,7 @@ steps:
     label: production
     gpu: 2+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s distributed/test_comm_ops.py
   - pytest -v -s distributed/test_shm_broadcast.py
@@ -52,6 +53,7 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s distributed/test_sharded_rdt_plan.py
   - pytest -v -s distributed/test_sharded_rdt_producer.py
@@ -133,10 +135,12 @@ steps:
     label: production
     gpu: 2+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - export NCCL_CUMEM_HOST_ENABLE=0
   - pytest -v -s entrypoints/llm/test_collective_rpc.py
   - pytest -v -s ./compile/test_wrapper.py
+  - pytest -v -s ./compile/test_aot_compile.py::test_load_on_another_device
   source_file_dependencies:
   - vllm/compilation/
   - vllm/distributed/
@@ -147,6 +151,7 @@ steps:
   - vllm/v1/engine/
   - vllm/v1/worker/
   - tests/compile/test_wrapper.py
+  - tests/compile/test_aot_compile.py
   - tests/entrypoints/llm/test_collective_rpc.py
   commands:
   - >-
@@ -154,7 +159,8 @@ steps:
     'export NCCL_CUMEM_HOST_ENABLE=0 || true &&
     cd tests &&
     pytest --continue-on-collection-errors -v -s entrypoints/llm/test_collective_rpc.py || true &&
-    pytest --continue-on-collection-errors -v -s ./compile/test_wrapper.py || true'
+    pytest --continue-on-collection-errors -v -s ./compile/test_wrapper.py || true &&
+    pytest --continue-on-collection-errors -v -s ./compile/test_aot_compile.py::test_load_on_another_device || true'
 - label: ':nvidia: (L4) Distributed Torchrun + Shutdown'
   key: distributed-torchrun-shutdown-tests-2-gpus-2
   device: intel_gpu
@@ -171,6 +177,7 @@ steps:
     label: production
     gpu: 2+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - export NCCL_CUMEM_HOST_ENABLE=0
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
@@ -310,6 +317,7 @@ steps:
     label: production
     gpu: 4+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - export NCCL_CUMEM_HOST_ENABLE=0
   # skip test_pyccl.py due to xpu will not support it.
@@ -379,6 +387,7 @@ steps:
     label: production
     gpu: 2+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s tests/distributed/test_custom_all_gather_reduce_scatter.py
   - pytest -v -s tests/distributed/test_context_parallel.py
@@ -409,6 +418,7 @@ steps:
     label: production
     gpu: 2+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s tests/kernels/test_gemm_rs_ar.py
   source_file_dependencies:
@@ -440,6 +450,7 @@ steps:
   - pytest -v -s distributed/test_pp_cudagraph.py
   - pytest -v -s distributed/test_pipeline_parallel.py
   - pytest -v -s v1/distributed/test_pp_dp_v2.py
+  - pytest -v -s benchmarks/test_forward_cli.py::test_bench_forward_pipeline
   source_file_dependencies:
   - vllm/distributed/
   - '!vllm/distributed/kv_transfer/'
@@ -450,13 +461,16 @@ steps:
   - vllm/v1/worker/gpu_worker.py
   - tests/distributed/
   - tests/v1/distributed/test_pp_dp_v2.py
+  - vllm/benchmarks/forward/
+  - tests/benchmarks/test_forward_cli.py
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest --continue-on-collection-errors -v -s distributed/test_pp_cudagraph.py || true &&
     pytest --continue-on-collection-errors -v -s distributed/test_pipeline_parallel.py || true &&
-    pytest --continue-on-collection-errors -v -s v1/distributed/test_pp_dp_v2.py || true'
+    pytest --continue-on-collection-errors -v -s v1/distributed/test_pp_dp_v2.py || true &&
+    pytest --continue-on-collection-errors -v -s benchmarks/test_forward_cli.py::test_bench_forward_pipeline || true'
 - label: ':nvidia: (L4) [Nightly] RayExecutorV2'
   key: rayexecutorv2-4-gpus
   device: intel_gpu
@@ -515,9 +529,11 @@ steps:
     label: production
     gpu: 2+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s model_executor/model_loader/test_weight_cache.py -m 'distributed(num_gpus=2)'
   source_file_dependencies:
+  - vllm/entrypoints/cli/preload.py
   - vllm/model_executor/model_loader/weight_cache/
   - vllm/model_executor/layers/fused_moe/expert_map_manager.py
   - tests/model_executor/model_loader/test_weight_cache.py

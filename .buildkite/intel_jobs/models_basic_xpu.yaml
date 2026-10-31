@@ -48,6 +48,7 @@ steps:
     label: production
     gpu: 1+
     mem: 24+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s models/test_initialization.py -k 'not test_can_initialize_small_subset' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   source_file_dependencies:
@@ -77,7 +78,7 @@ steps:
     mem: 24+
   automatic_shard: true
   _raw_old_commands:
-  - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py models/test_deepseek_v4_vl_rocm.py models/transformers/test_layer_registry_e2e.py models/test_deepseek_v41_replay_start.py models/test_deepseek_v41_decoder_replay_layers.py models/test_deepseek_v41_replay_batch.py models/test_deepseek_v41_pcp.py models/test_deepseek_v41_pipeline.py models/test_deepseek_v4_vl_stream_weights.py models/test_muse_spark_rocm_loading.py models/test_muse_spark_logits_local.py
+  - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py models/test_deepseek_v4_vl_rocm.py models/transformers/test_layer_registry_e2e.py models/test_deepseek_v41_replay_start.py models/test_deepseek_v41_decoder_replay_layers.py models/test_deepseek_v41_replay_batch.py models/test_deepseek_v41_pcp.py models/test_deepseek_v41_pipeline.py models/test_deepseek_v4_vl_stream_weights.py models/test_muse_spark_rocm_loading.py models/test_muse_spark_logits_local.py models/test_muse_spark_rocm_shared_rope.py
   source_file_dependencies:
   - vllm/
   - '!vllm/distributed/kv_transfer/'
@@ -94,11 +95,12 @@ steps:
   - tests/models/test_deepseek_v4_vl_stream_weights.py
   - tests/models/test_muse_spark_rocm_loading.py
   - tests/models/test_muse_spark_logits_local.py
+  - tests/models/test_muse_spark_rocm_shared_rope.py
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest --continue-on-collection-errors -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py models/test_deepseek_v4_vl_rocm.py models/transformers/test_layer_registry_e2e.py models/test_deepseek_v41_replay_start.py models/test_deepseek_v41_decoder_replay_layers.py models/test_deepseek_v41_replay_batch.py models/test_deepseek_v41_pcp.py models/test_deepseek_v41_pipeline.py models/test_deepseek_v4_vl_stream_weights.py models/test_muse_spark_rocm_loading.py models/test_muse_spark_logits_local.py || true'
+    pytest --continue-on-collection-errors -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py models/test_deepseek_v4_vl_rocm.py models/transformers/test_layer_registry_e2e.py models/test_deepseek_v41_replay_start.py models/test_deepseek_v41_decoder_replay_layers.py models/test_deepseek_v41_replay_batch.py models/test_deepseek_v41_pcp.py models/test_deepseek_v41_pipeline.py models/test_deepseek_v4_vl_stream_weights.py models/test_muse_spark_rocm_loading.py models/test_muse_spark_logits_local.py models/test_muse_spark_rocm_shared_rope.py || true'
 - label: ':nvidia: (B200) Inkling'
   key: inkling-unit-tests-b200
   device: intel_gpu

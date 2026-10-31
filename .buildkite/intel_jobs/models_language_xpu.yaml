@@ -17,16 +17,17 @@ steps:
     label: production
     gpu: 1+
     mem: 24+
+  automatic_shard: true
   _raw_old_commands:
   - pip freeze | grep -E 'torch'
-  - pytest -v -s models/language -m 'core_model and (not slow_test)'
+  - pytest -v -s models/language -m core_model -k 'not slow_test'
   source_file_dependencies:
   - vllm/
   - '!vllm/distributed/kv_transfer/'
   - tests/models/language
   commands:
   - >-
-    VLLM_TEST_COMMANDS="$$(printf %s Y2QgdGVzdHMgJiYgcHl0ZXN0IC0tY29udGludWUtb24tY29sbGVjdGlvbi1lcnJvcnMgLXYgLXMgbW9kZWxzL2xhbmd1YWdlIC1tICdjb3JlX21vZGVsIGFuZCAobm90IHNsb3dfdGVzdCknIHx8IHRydWU= | base64 --decode)" bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    VLLM_TEST_COMMANDS="$$(printf %s Y2QgdGVzdHMgJiYgcHl0ZXN0IC0tY29udGludWUtb24tY29sbGVjdGlvbi1lcnJvcnMgLXYgLXMgbW9kZWxzL2xhbmd1YWdlIC1tIGNvcmVfbW9kZWwgLWsgJ25vdCBzbG93X3Rlc3QnIHx8IHRydWU= | base64 --decode)" bash .buildkite/scripts/hardware_ci/run-intel-test.sh
 - label: ':nvidia: (H200 MIG 35GB) Language Models (Extra Standard) Shard %N'
   key: language-models-tests-extra-standard
   device: intel_gpu
