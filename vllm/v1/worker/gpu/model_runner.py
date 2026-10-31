@@ -1032,9 +1032,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.sampler.add_request(req_idx, warmup_params)
         self.sampler.apply_staged_writes()
         self.sample(hidden_states, dummy_input_batch, None)
-        if self.batch_sharder is not None and num_reqs < self.batch_sharder.tp_size:
-            # sample() skipped the sampler on ranks that own no dummy request.
-            # Profile it on one local row; all ranks take this branch.
+        if (
+            self.batch_sharder is not None
+            and self.batch_sharder.num_local_reqs(dummy_input_batch.idx_mapping_np) == 0
+        ):
+            # sample() skipped the sampler on this rank, which owns no dummy
+            # request. Profile it on one local row; this adds no collective.
             one_row_batch = InputBatch.make_dummy(1, 1, self.input_buffers)
             self.sampler(hidden_states.new_zeros(1, self.vocab_size), one_row_batch)
 
