@@ -1815,6 +1815,8 @@ __global__ void Marlin(
       }
 
       cp_async_wait<0>();
+      // Finish shared weight reads before reusing the buffer for reduction.
+      __syncthreads();
       bool last = slice_idx == slice_count - 1;
       // For per-column scales, we only fetch them here in the final step before
       // write-out
