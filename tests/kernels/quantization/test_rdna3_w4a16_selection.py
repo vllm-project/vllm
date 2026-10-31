@@ -69,9 +69,10 @@ def test_selection_prefers_rdna3(dtype):
         (scalar_types.uint4b8, -1, 256, 1024, False),  # channelwise unsupported
         (scalar_types.uint4b8, 128, 252, 1024, False),  # N not a multiple of 8
         (scalar_types.uint4b8, 96, 256, 1024, False),  # group does not divide K
+        (scalar_types.uint4b8, 16, 256, 1024, False),  # group not a multiple of 32
         (scalar_types.uint8b128, 128, 256, 1024, False),  # wrong quant type
     ],
-    ids=["ok", "channelwise", "bad_n", "group_ndiv_k", "wrong_qtype"],
+    ids=["ok", "channelwise", "bad_n", "group_ndiv_k", "group_lt_32", "wrong_qtype"],
 )
 def test_can_implement(weight_type, group_size, N, full_k, expected_ok):
     """can_implement gates on quant type, group size, and N divisibility."""
