@@ -22,6 +22,8 @@ ALLOWED_FILES = {
     "vllm/distributed/weight_transfer/ipc_engine.py",
     "vllm/distributed/weight_transfer/sharded_rdt_engine.py",
     "tests/distributed/test_packed_tensor.py",
+    # CUDA-only CC bridge microbenchmark; uses torch.cuda streams/events directly
+    "benchmarks/confidential_compute/",
 }
 
 
