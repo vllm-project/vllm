@@ -55,3 +55,26 @@ def test_gemma4_routing_kernel_triton(
                 f"tri_ids={tri_ids[r].tolist()}"
             )
         assert all_match
+
+
+@pytest.mark.parametrize(
+    ("num_tokens", "num_real"), [(1, 0), (16, 9), (24, 17), (512, 500)]
+)
+def test_gemma4_routing_kernel_triton_skips_padding(num_tokens: int, num_real: int):
+    torch.manual_seed(0)
+    num_experts, topk = 128, 8
+    gating = torch.randn(num_tokens, num_experts, dtype=torch.bfloat16, device="cuda")
+    scales = torch.rand(num_experts, dtype=torch.float32, device="cuda")
+    # CUDA-graph padding fills the tail of the batch.
+    is_padding = torch.arange(num_tokens, device="cuda") >= num_real
+
+    ref_w, ref_ids = gemma4_fused_routing_kernel_triton(gating, topk, scales)
+    w, ids = gemma4_fused_routing_kernel_triton(
+        gating, topk, scales, is_padding=is_padding
+    )
+
+    # Real rows are bit-identical to the unmasked call; padding rows select nothing.
+    assert torch.equal(ids[:num_real], ref_ids[:num_real])
+    assert torch.equal(w[:num_real], ref_w[:num_real])
+    assert (ids[num_real:] == -1).all()
+    assert (w[num_real:] == 0).all()

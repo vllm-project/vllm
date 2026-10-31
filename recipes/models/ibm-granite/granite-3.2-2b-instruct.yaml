@@ -1,0 +1,86 @@
+meta:
+  title: "Granite-3.2-2B-Instruct"
+  slug: "granite-3.2-2b-instruct"
+  provider: "IBM Granite"
+  description: "IBM Granite 3.2 2B instruction-tuned dense language model with long-context support."
+  date_added: 2026-08-19
+  date_updated: 2026-08-19
+  tasks:
+    - text
+  performance_headline: "Validated on Intel Xeon 6 with BF16 serving"
+  hardware:
+    xeon6: verified
+
+model:
+  model_id: "ibm-granite/granite-3.2-2b-instruct"
+  min_vllm_version: "0.6.1"
+  architecture: dense
+  parameter_count: "2B"
+  active_parameters: "2B"
+  context_length: 131072
+  base_args: []
+  base_env: {}
+
+features: {}
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 6
+    description: "Full precision BF16"
+    supported_hardware: [xeon6]
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+hardware_overrides: {}
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  Granite-3.2-2B-Instruct is IBM's compact instruction-tuned dense model with
+  long-context support.
+
+  ## Prerequisites
+
+  - Hardware: Intel Xeon 6/Xeon 5 CPUs
+  - vLLM >= 0.6.1
+
+  ### Docker (Intel Xeon 6 CPUs)
+
+  ```bash
+  docker pull vllm/vllm-openai-cpu:latest-x86_64
+  ```
+
+  ## Intel Xeon 6
+
+  ```bash
+  vllm serve ibm-granite/granite-3.2-2b-instruct  ```
+
+  TP/DP values and host-specific CPU placement remain deployment choices and
+  are not hard-coded into the portable recipe.
+
+  ## Runtime and Platform Tuning
+
+  The following settings are intentionally not prescribed as portable CPU model
+  defaults because they depend on the workload, hardware, or runtime environment:
+
+  - `--max-num-batched-tokens`: scheduler/throughput tuning.
+  - `--max-num-seqs`: concurrency and scheduler-capacity tuning.
+  - `--gpu-memory-utilization`: platform memory-budget tuning.
+  - `--no-enable-prefix-caching`: workload/benchmark cache-policy tuning.
+  - `VLLM_ENGINE_ITERATION_TIMEOUT_S`: operational runtime timeout.
+
+  These settings may still appear in validated hardware-specific overrides. Tune
+  them at deployment time based on platform resources, workload shape, and
+  latency/throughput goals.
+
+  ## References
+
+  - [Model card](https://huggingface.co/ibm-granite/granite-3.2-2b-instruct)
+  - [vLLM CPU installation](https://docs.vllm.ai/en/latest/getting_started/installation/cpu/)
