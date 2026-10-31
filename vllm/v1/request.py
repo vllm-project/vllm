@@ -166,12 +166,10 @@ class Request:
         # Drop the stale output instead, for same-step preempt + resume
         # (reset_prefix_cache).
         self.drop_stale_output = False
-        # A dropped stale output carried this request's completed prompt
-        # logprobs; the resumed prefill must recompute the whole prompt (#61490).
-        # This stays set until the prompt logprobs are produced, so it survives
-        # repeated preemptions of the redo (the fresh CPU logprobs tensor has one
-        # row per prompt position and only rows the prefill covers get written;
-        # a retained prefix hit would leave the hit rows uninitialized).
+        # Drop-mode preemption arms prompt-logprobs recomputation immediately,
+        # before a reset can resume while the dropped output is still in flight.
+        # It stays set until the prompt logprobs are actually produced, so it
+        # survives repeated preemptions of the redo.
         self.prompt_logprobs_dropped = False
         # The one-shot redo directive has been sent to the runner (V1 only);
         # decoupled from prompt_logprobs_dropped so the recompute forcing can

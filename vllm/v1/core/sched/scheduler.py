@@ -1821,6 +1821,18 @@ class Scheduler(SchedulerInterface):
         self._inflight_prefills.discard(request)
         request.status = RequestStatus.PREEMPTED
         request.num_computed_tokens = 0
+        if (
+            drop_stale_output
+            and request.sampling_params is not None
+            and request.sampling_params.prompt_logprobs is not None
+        ):
+            # Arm the redo before any stale output returns. An active reset can
+            # resume immediately, and a prefix hit on that first resume would
+            # otherwise leave the fresh prompt-logprobs tensor unwritten.
+            request.prompt_logprobs_dropped = True
+            # The runner may already have retired the requirement after the
+            # dropped prefill completed, so re-register it on the next resume.
+            request.redo_prompt_logprobs_sent = False
         if request.spec_token_ids:
             request.spec_token_ids = []
         # Async scheduling: mark all in-flight output as stale. Its tokens are

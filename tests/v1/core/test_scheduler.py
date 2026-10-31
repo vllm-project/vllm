@@ -2440,9 +2440,10 @@ def test_redo_prompt_logprobs_recomputes_past_a_prefix_hit():
     assert out.num_scheduled_tokens[request.request_id] == request.num_tokens
 
 
-def test_stale_output_without_prompt_logprobs_sets_no_redo_flag():
-    """A dropped stale chunk that carried no prompt logprobs (mid-prefill)
-    leaves the runner-side state intact, so no redo directive is sent."""
+def test_reset_arms_redo_before_mid_prefill_output_returns():
+    """The redo is armed at reset even if the dropped prefill had not yet
+    produced a prompt-logprobs output. Otherwise an immediate resume could
+    honor a prefix hit before the dropped output arrives (#61490)."""
     scheduler = create_scheduler(
         enable_prefix_caching=True, async_scheduling=True, use_v2_model_runner=False
     )
@@ -2451,6 +2452,8 @@ def test_stale_output_without_prompt_logprobs_sets_no_redo_flag():
 
     scheduler_output = scheduler.schedule()
     scheduler.reset_prefix_cache(reset_running_requests=True)
+    assert request.prompt_logprobs_dropped
+    assert not request.redo_prompt_logprobs_sent
 
     scheduler.update_from_output(
         scheduler_output,
@@ -2463,10 +2466,50 @@ def test_stale_output_without_prompt_logprobs_sets_no_redo_flag():
             pooler_output=[],
         ),
     )
-    assert not request.prompt_logprobs_dropped
+    cached = scheduler.schedule().scheduled_cached_reqs
+    assert request.request_id in cached.redo_prompt_logprobs_req_ids
 
+
+def test_preemption_without_prompt_logprobs_does_not_arm_redo():
+    scheduler = create_scheduler(
+        enable_prefix_caching=True, async_scheduling=True, use_v2_model_runner=False
+    )
+    request = create_requests(num_requests=1, prompt_logprobs=None)[0]
+    scheduler.add_request(request)
+    scheduler.schedule()
+    scheduler.reset_prefix_cache(reset_running_requests=True)
+
+    assert not request.prompt_logprobs_dropped
+    assert not request.redo_prompt_logprobs_sent
     cached = scheduler.schedule().scheduled_cached_reqs
     assert request.request_id not in cached.redo_prompt_logprobs_req_ids
+
+
+def test_redo_recompute_is_armed_before_stale_output_returns():
+    """A reset can resume before the dropped prefill output arrives. The redo
+    marker must already be set at preemption, or that first resume can honor a
+    prefix hit and leave the new prompt-logprobs tensor unwritten (#61490)."""
+    scheduler = create_scheduler(
+        enable_prefix_caching=True, async_scheduling=True, use_v2_model_runner=False
+    )
+    request = create_requests(num_requests=1, num_tokens=48, prompt_logprobs=5)[0]
+    scheduler.add_request(request)
+    scheduler.schedule()
+
+    # The original prefill output is still in flight. Resume immediately rather
+    # than dropping that output first, as happens with an active-request reset.
+    scheduler.reset_prefix_cache(reset_running_requests=True)
+    hit_tokens = 16
+    real_hit = scheduler._get_local_prefix_cache_hit
+
+    def patched_hit(req, max_cache_hit_length=None):
+        blocks, _num, boundary, diverged = real_hit(req, max_cache_hit_length)
+        return blocks, hit_tokens, boundary, diverged
+
+    with patch.object(scheduler, "_get_local_prefix_cache_hit", patched_hit):
+        out = scheduler.schedule()
+
+    assert out.num_scheduled_tokens[request.request_id] == request.num_tokens
 
 
 def test_redo_recompute_survives_a_second_preemption():
@@ -2499,10 +2542,12 @@ def test_redo_recompute_survives_a_second_preemption():
     )
     assert request.prompt_logprobs_dropped
 
-    # The resumed redo prefill is scheduled. It is then preempted again before
-    # it can produce any prompt logprobs.
+    # A completed redo may retire the runner-side requirement. Preempting it
+    # must therefore reset the one-shot directive as well, so the next resume
+    # re-registers instead of only forcing the token range.
     redo_output = scheduler.schedule()
     scheduler.reset_prefix_cache(reset_running_requests=True)
+    assert not request.redo_prompt_logprobs_sent
     scheduler.update_from_output(
         redo_output,
         ModelRunnerOutput(

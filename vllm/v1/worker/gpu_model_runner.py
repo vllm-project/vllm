@@ -5302,6 +5302,7 @@ class GPUModelRunner(
                 logprobs_tensors.logprob_token_ids[:, 0].fill_(-1)
                 request.in_progress_prompt_logprobs_cpu = logprobs_tensors
 
+            assert logprobs_tensors is not None
             # Determine number of logits to retrieve.
             start_idx = request.num_computed_tokens
             start_tok = start_idx + 1
