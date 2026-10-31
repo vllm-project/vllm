@@ -208,7 +208,11 @@ pub struct GenerateOutput {
     pub sampling_mask: Option<SamplingMask>,
     /// Per-request speculative-decoding metrics, present on terminal outputs.
     pub spec_decode_metrics: Option<Box<RequestSpecDecodeMetrics>>,
-    /// Weight-version spans over all output tokens, set on terminal outputs only.
+    /// Weight-version spans over all output tokens so far; `None` if tokens
+    /// arrived but no label was reported. Set on every output, not only
+    /// terminal ones, because text decoding may finish the request locally
+    /// after matching a stop string and then cuts the spans at the truncated
+    /// token count.
     pub weight_versions: Option<Vec<WeightVersionSpan>>,
     /// Routed-expert rows for the whole request, set on terminal outputs only.
     pub routed_experts: Option<Box<WireNdArray>>,
@@ -444,11 +448,7 @@ impl GenerateOutputStream {
         {
             self.request_metrics.record_finished(received_at, finish_reason.clone());
         }
-        let weight_versions = if finish_reason.is_some() {
-            self.weight_version_spans()
-        } else {
-            None
-        };
+        let weight_versions = self.weight_version_spans();
         let routed_experts = if finish_reason.is_some() {
             self.take_routed_experts(&raw.request_id)?
         } else {
