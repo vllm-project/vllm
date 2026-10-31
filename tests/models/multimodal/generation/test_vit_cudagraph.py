@@ -233,6 +233,17 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         vllm_runner_kwargs={"trust_remote_code": True},
         marks=[pytest.mark.core_model],
     ),
+    "ovis2_5": VitCudagraphTestConfig(
+        model="AIDC-AI/Ovis2.5-2B",
+        num_video_frames=8,
+        image_prompt=qwen_vl_chat_template("<image>\nWhat is in this image?"),
+        video_prompt=qwen_vl_chat_template(
+            "<video>\nDescribe this video in one sentence."
+        ),
+        needs_video_metadata=False,
+        vllm_runner_kwargs={"trust_remote_code": True},
+        marks=[pytest.mark.core_model],
+    ),
     "idefics3": VitCudagraphTestConfig(
         model="HuggingFaceTB/SmolVLM-256M-Instruct",
         modalities=["image"],
