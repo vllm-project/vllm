@@ -5,12 +5,13 @@ import threading
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
 import torch
 
+from vllm.distributed.aux_output_connector import store as store_module
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputConnectorMetadata,
     AuxOutputSchedulerConnector,
@@ -64,8 +65,27 @@ def test_background_store_publishes_without_blocking_caller():
     underlying.close.assert_called_once_with()
 
 
+def _kv_cache_manager(
+    cached: dict, hashes_per_block: int = 1, num_blocks: int = 0
+) -> SimpleNamespace:
+    block_pool = SimpleNamespace(
+        get_cached_block=lambda block_hash, _: cached.get(block_hash),
+        hash_block_size=_BLOCK_SIZE,
+    )
+    manager = SimpleNamespace(
+        block_size=hashes_per_block * _BLOCK_SIZE, block_pool=block_pool
+    )
+    return SimpleNamespace(
+        coordinator=SimpleNamespace(
+            single_type_managers=[manager], scheduler_block_size=manager.block_size
+        ),
+        block_pool=block_pool,
+        kv_cache_config=SimpleNamespace(num_blocks=num_blocks),
+    )
+
+
 def _make_connector():
-    return AuxOutputSchedulerConnector()
+    return AuxOutputSchedulerConnector(_kv_cache_manager({}))
 
 
 @dataclass
@@ -251,9 +271,6 @@ def test_next_step_does_not_consume_pending_output(monkeypatch):
     event = Mock()
     monkeypatch.setattr(torch.cuda, "Event", lambda **kwargs: event)
     monkeypatch.setattr(async_utils, "stream", lambda *args: nullcontext())
-    monkeypatch.setattr(
-        async_utils, "async_copy_to_np", lambda tensor: tensor.numpy().copy()
-    )
     worker = _make_worker(1)
     worker.begin_step(
         _metadata(0, [_request_metadata("request", 0, 1, 0, [])], {}).metadata
@@ -889,6 +906,58 @@ def test_worker_releases_newly_keyed_blocks_before_capture():
     worker.close()
 
 
+def test_worker_does_not_pin_unscheduled_prompt_blocks():
+    worker = _make_worker(2, max_num_batched_tokens=16, max_store_blocks=4)
+    connector = _make_connector()
+    prompt_hashes = [bytes([value]) * 32 for value in range(4)]
+    logical = np.arange(16 * 3 * 2, dtype=np.uint8).reshape(16, 3, 2)
+
+    def run(requests, token_counts, rows):
+        token_starts = [request.num_computed_tokens for request in requests]
+        metadata = connector.build_connector_meta(
+            _step_output(
+                [request.request_id for request in requests],
+                token_starts,
+                token_counts,
+            ),
+            {request.request_id: request for request in requests},
+        )
+        _process_output(
+            worker,
+            metadata,
+            rows,
+            [request.request_id for request in requests],
+            np.zeros(len(requests), dtype=np.int32),
+            token_starts=tuple(token_starts),
+            num_tokens=tuple(token_counts),
+        )
+        for request, num_tokens in zip(requests, token_counts):
+            request.num_computed_tokens += num_tokens
+
+    first = _scheduler_request("first", prompt_hashes, num_tokens=17)
+    first.num_computed_tokens = 0
+    run([first], [16], logical)
+    connector.request_finished(first)
+    worker.begin_step(connector.build_connector_meta(_step_output([], [], []), {}))
+
+    second = _scheduler_request("second", prompt_hashes, num_tokens=17)
+    second.num_computed_tokens = 0
+    other = _scheduler_request("other", [b"x" * 32], num_tokens=5)
+    other.num_computed_tokens = 0
+    run([second, other], [4, 4], np.concatenate((logical[:4], logical[4:8])))
+
+    np.testing.assert_array_equal(
+        materialize_routed_experts(
+            worker._store,
+            routed_experts_keys([b"x" * 32], "0"),
+            shape_per_token=_SHAPE,
+            dtype=_DTYPE,
+        ),
+        logical[4:8],
+    )
+    worker.close()
+
+
 def test_worker_publishes_pending_block_without_forward():
     worker = _make_worker(1)
     _begin_step(
@@ -1238,22 +1307,18 @@ def test_worker_fails_when_cached_aux_output_is_missing():
     worker.close()
 
 
-def test_store_rejects_oversized_batch_without_partial_write():
+def test_store_grows_with_a_warning_when_every_object_is_referenced():
     store = _make_store(max_bytes=6, object_nbytes=3)
-    store.put([BlockObject("retained", b"rrr")])
+    store.put([BlockObject("unused", b"uuu"), BlockObject("kept", b"kkk")])
+    store.put([], retain_keys=["kept"])
 
-    with pytest.raises(BlockObjectStoreError, match="cannot retain"):
-        store.put(
-            [
-                BlockObject("first", b"111"),
-                BlockObject("second", b"222"),
-                BlockObject("third", b"333"),
-            ]
-        )
+    with patch.object(store_module.logger, "warning") as warning:
+        store.put([BlockObject("first", b"111"), BlockObject("second", b"222")])
 
-    assert store.get_concatenated(["retained"]) == b"rrr"
+    warning.assert_called_once()
+    assert store.get_concatenated(["kept", "first", "second"]) == b"kkk111222"
     with pytest.raises(BlockObjectStoreError, match="does not exist"):
-        store.get_concatenated(["first"])
+        store.get_concatenated(["unused"])
     store.close()
 
 
@@ -1265,8 +1330,20 @@ def test_store_lru_and_immutable_put():
     store.put([BlockObject("first", b"1111"), BlockObject("third", b"3333")])
 
     assert store.get_concatenated(["first", "third"]) == b"11113333"
-    with pytest.raises(BlockObjectStoreError, match="Increase aux_output_config"):
+    with pytest.raises(BlockObjectStoreError, match="does not exist"):
         store.get_concatenated(["second"])
+    store.close()
+
+
+def test_store_replaces_only_unreferenced_aux_outputs():
+    store = _make_store(max_bytes=8)
+    store.put([BlockObject("block", b"1111")], retain_keys=["block"])
+    store.put([], release_keys=["block"])
+    store.put([BlockObject("block", b"2222")], retain_keys=["block"])
+    assert store.get_concatenated(["block"]) == b"2222"
+
+    store.put([BlockObject("block", b"3333")])
+    assert store.get_concatenated(["block"]) == b"2222"
     store.close()
 
 
@@ -1282,6 +1359,33 @@ def test_store_does_not_evict_referenced_aux_outputs():
     with pytest.raises(BlockObjectStoreError, match="does not exist"):
         store.get_concatenated(["second"])
     store.put([], release_keys=["first"])
+    store.close()
+
+
+def test_store_eviction_does_not_rescan_referenced_keys():
+    hashes = 0
+
+    class CountingKey(str):
+        def __hash__(self):
+            nonlocal hashes
+            hashes += 1
+            return super().__hash__()
+
+    store = _make_store(max_bytes=4 * 1000)
+    referenced = [CountingKey(f"referenced-{i}") for i in range(900)]
+    store.put([BlockObject(key, b"rrrr") for key in referenced], retain_keys=referenced)
+    old = [f"old-{i}" for i in range(100)]
+    store.put([BlockObject(key, b"oooo") for key in old])
+    hashes = 0
+
+    for i in range(100):
+        store.put([BlockObject(f"new-{i}", b"nnnn")])
+
+    assert hashes < len(referenced)
+    assert store.get_concatenated(referenced) == b"rrrr" * 900
+    for key in old:
+        with pytest.raises(BlockObjectStoreError):
+            store.get_concatenated([key])
     store.close()
 
 
@@ -1424,6 +1528,31 @@ def test_scheduler_connector_builds_worker_metadata_and_forwards_output():
     output = {"request": AuxRequestOutput(0, routing)}
     request.num_computed_tokens = 4
     np.testing.assert_array_equal(connector.take_output(request, output), routing)
+
+
+@pytest.mark.parametrize("finish", [False, True], ids=["hash-only-update", "finish"])
+def test_scheduler_connector_sends_only_computed_hashes_off_schedule(finish):
+    connector = _make_connector()
+    request = _scheduler_request("request", [b"a" * 32], num_tokens=9)
+    request.num_computed_tokens = 0
+    requests = {request.request_id: request}
+    metadata = connector.build_connector_meta(
+        _step_output([request.request_id], [0], [4]), requests
+    )
+    assert list(metadata.block_hashes[request.request_id]) == [b"a" * 32]
+
+    request.block_hashes.append(b"b" * 32)
+    request.num_computed_tokens = 7
+    if finish:
+        connector.request_finished(request)
+    metadata = connector.build_connector_meta(_step_output([], [], []), requests)
+    assert request.request_id not in metadata.block_hashes
+    assert metadata.finished_requests == ((request.request_id,) if finish else ())
+
+    if not finish:
+        request.num_computed_tokens = 8
+        metadata = connector.build_connector_meta(_step_output([], [], []), requests)
+        assert list(metadata.block_hashes[request.request_id]) == [b"b" * 32]
 
 
 def test_scheduler_starts_worker_output_at_requested_prompt_token():
@@ -1868,3 +1997,78 @@ def test_scheduler_connector_reset_derives_emit_start_from_request():
     assert metadata.generation == 1
     assert metadata.requests[request.request_id] == 4
     assert list(metadata.block_hashes[request.request_id]) == [b"a" * 32]
+
+
+_HASHES = [bytes([index]) * 32 for index in range(4)]
+
+
+def _kv_cache_metadata(connector: AuxOutputSchedulerConnector):
+    metadata = connector.build_connector_meta(_step_output([], [], []), {})
+    retained, released = metadata.retained_block_hashes, metadata.released_block_hashes
+    return list(retained or ()), list(released or ())
+
+
+def _finished_request_with_cached_blocks(num_blocks: int = 1):
+    cached = {_HASHES[1]: [Mock()], _HASHES[3]: [Mock()]}
+    connector = AuxOutputSchedulerConnector(_kv_cache_manager(cached, 2, num_blocks))
+    request = _SchedulerRequest("request", list(_HASHES), 17, num_computed_tokens=16)
+    connector.request_finished(request)
+    assert _kv_cache_metadata(connector) == (_HASHES, [])
+    return cached, connector, request
+
+
+def _finish_empty_request(connector: AuxOutputSchedulerConnector):
+    connector.request_finished(_SchedulerRequest("empty", [], 1))
+    return _kv_cache_metadata(connector)
+
+
+def test_connector_releases_oldest_uncached_blocks_past_capacity():
+    cached, connector, request = _finished_request_with_cached_blocks()
+    assert _finish_empty_request(connector) == ([], [])
+    assert connector.max_cache_hit(request) == 16
+
+    del cached[_HASHES[3]]
+    assert _finish_empty_request(connector) == ([], _HASHES[2:])
+    assert connector.max_cache_hit(request) == 8
+
+    del cached[_HASHES[1]]
+    assert _finish_empty_request(connector) == ([], [])
+    assert connector.max_cache_hit(request) == 8
+
+
+def test_connector_releases_retained_blocks_on_reset():
+    cached, connector, _ = _finished_request_with_cached_blocks()
+    connector.reset()
+    metadata = connector.build_connector_meta(_step_output([], [], []), {})
+    assert metadata.generation == 1
+    assert list(metadata.released_block_hashes) == _HASHES
+
+
+def test_connector_keeps_pending_load_blocks_retained():
+    cached, connector, request = _finished_request_with_cached_blocks()
+    connector.request_loading(request, 16)
+    cached.clear()
+    assert _finish_empty_request(connector) == ([], [])
+
+    connector.request_finished(request)
+    assert _kv_cache_metadata(connector) == ([], _HASHES[:2])
+
+
+def test_worker_retains_kv_cache_blocks_in_the_sending_generation():
+    worker = _make_worker(1)
+    store = worker._store
+    keys = routed_experts_keys(_HASHES[:2], "0")
+    step = _metadata(0, [], {})
+    step.metadata.retained_block_hashes = PackedBlockHashes(b"".join(_HASHES[:2]), 32)
+    _begin_step(worker, step)
+    assert all(store._references[key] == 1 for key in keys)
+
+    step = _metadata(0, [], {})
+    step.metadata.released_block_hashes = PackedBlockHashes(_HASHES[0], 32)
+    _begin_step(worker, step)
+    assert keys[0] not in store._references
+
+    step = _metadata(1, [], {})
+    step.metadata.released_block_hashes = PackedBlockHashes(_HASHES[1], 32)
+    _begin_step(worker, step)
+    assert not store._references
