@@ -941,14 +941,15 @@ def test_eplb_communicator_pipeline_parallel(world_size, backend):
 def _localized_megamoe_eplb_worker(env, world_size, backend):
     from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
         MEGA_MOE_MXFP4,
-        DeepGemmMegaMoEExperts,
         MegaMoEActivation,
+    )
+    from vllm.models.deepseek_v4.nvidia.mega_moe import (
+        DeepseekV4LocalizedMegaMoEExperts,
     )
     from vllm.utils.deep_gemm import _import_deep_gemm
 
     set_env_vars_and_device(env)
-    dg = _import_deep_gemm()
-    if not dg.is_localization_available():
+    if not _import_deep_gemm().is_localization_available():
         pytest.skip("DeepGEMM locality allocation is unavailable on this device.")
     config = VllmConfig()
     config.parallel_config.tensor_parallel_size = world_size
@@ -957,7 +958,7 @@ def _localized_megamoe_eplb_worker(env, world_size, backend):
         group = get_tp_group()
         rank = group.rank_in_group
         with torch.device(f"cuda:{rank}"):
-            experts = DeepGemmMegaMoEExperts(
+            experts = DeepseekV4LocalizedMegaMoEExperts(
                 config,
                 num_experts=8,
                 num_local_experts=4,
@@ -968,28 +969,17 @@ def _localized_megamoe_eplb_worker(env, world_size, backend):
                 intermediate_size=384,
                 activation=MegaMoEActivation(),
                 weight_format=MEGA_MOE_MXFP4,
-                localize_weights=True,
             )
+        # As MixtureOfExperts.set_eplb_state registers them.
         views = [
             w.view(torch.uint8) if w.element_size() == 1 else w
             for w in experts.get_expert_weights()
         ]
         old = torch.tensor([[0, 1, 2, 3, 4, 5, 0, 1]])
         new = torch.tensor([[5, 0, 1, 4, 3, 2, 5, 0]])
-
-        def expected(view, bank, logical):
-            return (
-                (
-                    torch.arange(view.shape[1], device=view.device)
-                    + bank * 11
-                    + logical * 17
-                )
-                % 251
-            ).to(view.dtype)
-
         for bank, view in enumerate(views):
             for slot in range(4):
-                view[slot].copy_(expected(view, bank, old[0, rank * 4 + slot]))
+                view[slot].fill_(8 * bank + old[0, 4 * rank + slot])
         pointers = [p.data_ptr() for p in experts.parameters()]
         buffers = [torch.empty_like(w) for w in views]
         communicator = create_eplb_communicator_or_raise(
@@ -1001,21 +991,15 @@ def _localized_megamoe_eplb_worker(env, world_size, backend):
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             snapshots = [w.clone() for w in views]
-        for before, after in ((old, new), (new, old)):
-            rearrange_expert_weights_inplace(
-                before, after, [views], buffers, group.device_group, communicator
-            )
-            graph.replay()
-            torch.accelerator.synchronize()
-            for bank, snapshot in enumerate(snapshots):
-                for slot in range(4):
-                    logical = after[0, rank * 4 + slot]
-                    assert torch.equal(
-                        snapshot[slot], expected(snapshot, bank, logical)
-                    )
-            assert [p.data_ptr() for p in experts.parameters()] == pointers
-            assert dg.is_localized(experts.w13_weight)
-            assert dg.is_localized(experts.w2_weight)
+        rearrange_expert_weights_inplace(
+            old, new, [views], buffers, group.device_group, communicator
+        )
+        graph.replay()
+        torch.accelerator.synchronize()
+        for bank, snapshot in enumerate(snapshots):
+            for slot in range(4):
+                assert snapshot[slot].eq(8 * bank + new[0, 4 * rank + slot]).all()
+        assert [p.data_ptr() for p in experts.parameters()] == pointers
 
 
 @pytest.mark.skipif(

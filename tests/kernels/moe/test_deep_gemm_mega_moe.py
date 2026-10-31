@@ -10,8 +10,6 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from vllm.config import VllmConfig
-from vllm.config.scheduler import SchedulerConfig
 from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
     MEGA_MOE_BF16,
     MEGA_MOE_MXFP4,
@@ -32,6 +30,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
     kNvfp4DynamicToken,
 )
+from vllm.models.deepseek_v4.nvidia.mega_moe import DeepseekV4LocalizedMegaMoEExperts
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 
@@ -54,14 +53,16 @@ def sm100_mega_moe_layout(monkeypatch):
     )
 
 
-def _make_experts(**kwargs) -> DeepGemmMegaMoEExperts:
+def _make_experts(
+    experts_cls=DeepGemmMegaMoEExperts, **kwargs
+) -> DeepGemmMegaMoEExperts:
     vllm_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_batched_tokens=4),
         compilation_config=SimpleNamespace(static_forward_context={}),
     )
     kwargs.setdefault("activation", MegaMoEActivation())
     kwargs.setdefault("weight_format", MEGA_MOE_MXFP4)
-    return DeepGemmMegaMoEExperts(vllm_config, **kwargs)
+    return experts_cls(vllm_config, **kwargs)
 
 
 def test_deep_gemm_mega_moe_capture_precedes_eplb(monkeypatch):
@@ -198,9 +199,13 @@ def _reference_mega_moe_layout(w13, s13, w2, s2):
 
 
 def _make_mega_moe_experts(
-    num_local_experts, num_logical_experts, weight_format=MEGA_MOE_MXFP4
+    num_local_experts,
+    num_logical_experts,
+    weight_format=MEGA_MOE_MXFP4,
+    experts_cls=DeepGemmMegaMoEExperts,
 ):
     return _make_experts(
+        experts_cls,
         num_experts=num_local_experts,
         num_local_experts=num_local_experts,
         experts_start_idx=0,
@@ -293,6 +298,13 @@ def _expected_mega_moe_layout(ckpt, num_local_experts, num_logical_experts):
     return expected
 
 
+def _skip_without_localization():
+    from vllm.utils.deep_gemm import _import_deep_gemm
+
+    if not _import_deep_gemm().is_localization_available():
+        pytest.skip("DeepGEMM locality allocation is unavailable on this device.")
+
+
 def _assert_mega_moe_layout(experts, expected):
     actual = (*experts.l1_weights, *experts.l2_weights)
     for tensor, reference in zip(actual, expected):
@@ -325,6 +337,32 @@ def test_deep_gemm_mega_moe_reload_overwrites_kernel_layout_in_place(weight_form
     ckpt = _load_mega_moe_checkpoint_shuffled(experts, 2, seed=1)
     assert [param.data_ptr() for param in experts.parameters()] == data_ptrs
     _assert_mega_moe_layout(experts, _expected_mega_moe_layout(ckpt, 2, 2))
+
+
+@requires_sm100
+def test_localized_mega_moe_loads_kernel_layout_in_place():
+    """Each domain holds its rows of the base layout; reloads and EPLB views
+    write the sole localized copy in place."""
+    _skip_without_localization()
+    with torch.device("cuda"):
+        experts = _make_mega_moe_experts(
+            4, 3, experts_cls=DeepseekV4LocalizedMegaMoEExperts
+        )
+    data_ptrs = [param.data_ptr() for param in experts.parameters()]
+    for seed in (0, 1):
+        ckpt = _load_mega_moe_checkpoint_shuffled(experts, 3, seed)
+        expected = _expected_mega_moe_layout(ckpt, 4, 3)
+        for tensor, reference in zip(
+            (*experts.l1_weights, *experts.l2_weights), expected
+        ):
+            if tensor.ndim == 4:  # Undo deep_gemm.localize(..., dim=-2).
+                tensor = tensor.movedim(0, 1).flatten(1, 2)
+            assert torch.equal(tensor.cpu().view(reference.dtype), reference)
+    assert [param.data_ptr() for param in experts.parameters()] == data_ptrs
+    for view in experts.get_expert_weights():
+        view[1].copy_(view[0])
+    for tensor in (*experts.l1_weights, *experts.l2_weights):
+        assert torch.equal(tensor[..., 1, :, :], tensor[..., 0, :, :])
 
 
 def test_deep_gemm_mega_moe_nvfp4_l2_scale_covers_every_expert():
@@ -1281,30 +1319,27 @@ def _calc_diff(x: torch.Tensor, y: torch.Tensor) -> float:
         for shared in (None, *(spec.dtype for spec in fmt.shared))
     ],
 )
-@pytest.mark.parametrize("localize_weights", [False, True])
+@pytest.mark.parametrize("localize", [False, True])
 def test_deep_gemm_mega_moe_matches_reference(
-    dist_init, fmt_name, shared, act_name, localize_weights
+    dist_init, fmt_name, shared, act_name, localize
 ):
     """``shared`` is the fused shared-expert dtype; None runs it unfused."""
     fmt, act = MEGA_MOE_WEIGHT_FORMATS[fmt_name], ACTIVATIONS[act_name]
-    if localize_weights:
-        from vllm.utils.deep_gemm import _import_deep_gemm
-
-        if fmt.uses_nvfp4_api or not _import_deep_gemm().is_localization_available():
-            pytest.skip("This format/device does not support localized MegaMoE.")
+    experts_cls = DeepGemmMegaMoEExperts
+    if localize:
+        if fmt.uses_nvfp4_api:
+            pytest.skip("Localized MegaMoE weights do not support NVFP4.")
+        _skip_without_localization()
+        experts_cls = DeepseekV4LocalizedMegaMoEExperts
     shared_spec = next(
         (spec for spec in fmt.shared if spec.dtype == shared), fmt.shared[0]
     )
     fuse_shared = shared is not None
     torch.manual_seed(0)
     device = torch.device("cuda")
-    vllm_config = VllmConfig(
-        scheduler_config=SchedulerConfig(
-            max_num_batched_tokens=NUM_TOKENS,
-            max_model_len=NUM_TOKENS,
-            max_num_seqs=1,
-            is_encoder_decoder=False,
-        )
+    vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=NUM_TOKENS),
+        compilation_config=SimpleNamespace(static_forward_context={}),
     )
 
     def randn(*shape, fan_in):
@@ -1327,7 +1362,7 @@ def test_deep_gemm_mega_moe_matches_reference(
     )
 
     with torch.device(device):
-        experts = DeepGemmMegaMoEExperts(
+        experts = experts_cls(
             vllm_config,
             num_experts=NUM_EXPERTS,
             num_local_experts=NUM_EXPERTS,
@@ -1337,7 +1372,6 @@ def test_deep_gemm_mega_moe_matches_reference(
             intermediate_size=INTER,
             activation=act,
             weight_format=fmt,
-            localize_weights=localize_weights,
             shared_experts=shared_mlp if fuse_shared else None,
             prefix=f"model.layers.0.{fmt_name}.{act_name}.{shared}",
         )
@@ -1417,45 +1451,3 @@ def test_deep_gemm_mega_moe_matches_reference(
     assert output.dtype == torch.bfloat16
     assert _calc_diff(output, expected) < 1e-3
     assert F.cosine_similarity(output.float(), expected, dim=-1).min() > 0.99
-
-
-@requires_sm100
-def test_deep_gemm_mega_moe_localized_reload_and_eplb_views():
-    """Reload and EPLB writes reach the sole localized copy of each weight."""
-    from vllm.utils.deep_gemm import _import_deep_gemm
-
-    dg = _import_deep_gemm()
-    if not dg.is_localization_available():
-        pytest.skip("DeepGEMM locality allocation is unavailable on this device.")
-    with torch.device("cuda"):
-        experts = DeepGemmMegaMoEExperts(
-            VllmConfig(),
-            num_experts=4,
-            num_local_experts=4,
-            experts_start_idx=0,
-            num_logical_experts=3,
-            top_k=1,
-            hidden_size=256,
-            intermediate_size=384,
-            activation=MegaMoEActivation(),
-            weight_format=MEGA_MOE_MXFP4,
-            localize_weights=True,
-        )
-    pointers = [p.data_ptr() for p in experts.parameters()]
-    for seed in (0, 1):
-        ckpt = _load_mega_moe_checkpoint_shuffled(experts, 3, seed)
-        expected = _expected_mega_moe_layout(ckpt, 4, 3)
-        for tensor, ref in zip((*experts.l1_weights, *experts.l2_weights), expected):
-            if tensor.ndim == 4:
-                assert dg.is_localized(tensor)
-                tensor = tensor.movedim(0, 1).flatten(1, 2)
-            assert torch.equal(tensor.cpu().view(ref.dtype), ref)
-        assert [p.data_ptr() for p in experts.parameters()] == pointers
-    for view in experts.get_expert_weights():
-        assert view.is_contiguous() and view.shape[0] == 4
-        view[1].copy_(view[0])
-    for tensor in (*experts.l1_weights, *experts.l2_weights):
-        if tensor.ndim == 4:
-            assert torch.equal(tensor[:, 1], tensor[:, 0])
-        else:
-            assert torch.equal(tensor[1], tensor[0])

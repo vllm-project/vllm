@@ -305,12 +305,6 @@ class KernelConfig:
     in a single launch (DeepSeek-V4.1 on MI355X, DeepSeek-V4-Pro at TP8 on
     MI355X). A deployment that cannot run it is refused at startup."""
 
-    mega_moe_localize_weights: bool = False
-    """Allocate DeepSeek MegaMoE weights across GPU locality domains.
-    Requires DeepGEMM's locality allocator; incompatible with CPU weight
-    offloading, sleep mode, and meta-device loading. Quantization is unchanged.
-    """
-
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Available options:
 
@@ -488,21 +482,6 @@ class KernelConfig:
             validate_flashinfer_moe_ep_model(
                 self.moe_backend, vllm_config.model_config.architectures
             )
-        if self.mega_moe_localize_weights:
-            if self.moe_backend != "deep_gemm_mega_moe":
-                raise ValueError("Weight localization requires deep_gemm_mega_moe.")
-            offload = vllm_config.offload_config
-            if (
-                (
-                    vllm_config.model_config is not None
-                    and vllm_config.model_config.enable_sleep_mode
-                )
-                or offload.uva.cpu_offload_gb > 0
-                or offload.prefetch.offload_group_size > 0
-            ):
-                raise ValueError(
-                    "MegaMoE localized weights do not support sleep or CPU offload."
-                )
         bind_passthrough_all2all_backend(self.moe_backend, vllm_config.parallel_config)
 
         platform_op_priority = current_platform.get_default_ir_op_priority(vllm_config)
