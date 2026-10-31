@@ -346,6 +346,7 @@ class DefaultModelLoader(BaseModelLoader):
                         safetensors_prefetch_block_size=(
                             self.load_config.safetensors_prefetch_block_size
                         ),
+                        verify_weights=self.load_config.verify_weights,
                     )
         else:
             if extra_config.get("enable_multithread_load"):
