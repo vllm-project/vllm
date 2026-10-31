@@ -125,8 +125,8 @@ class ParameterSweepItem(dict[str, object]):
             if k == "_benchmark_name":
                 continue
 
-            # Serialize dict values as JSON
-            if isinstance(v, dict):
+            # Serialize dict and list values as JSON
+            if isinstance(v, (dict, list)):
                 v = json.dumps(v)
 
             for k_candidate in self._iter_cmd_key_candidates(k):
