@@ -1232,6 +1232,25 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     message(STATUS "Building hadacore")
   endif()
 
+  # Fused MQA logits + top-k prefill kernel (SM100 family). It compiles against
+  # DeepGEMM's headers, so DeepGEMM is fetched here.
+  include(cmake/external_projects/deepgemm.cmake)
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.9)
+    cuda_archs_loose_intersection(FUSED_MQA_TOPK_ARCHS "10.0f" "${CUDA_ARCHS}")
+  endif()
+  if(FUSED_MQA_TOPK_ARCHS)
+    set(FUSED_MQA_TOPK_SRC "csrc/fused_mqa_topk/fused_mqa_topk.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${FUSED_MQA_TOPK_SRC}"
+      CUDA_ARCHS "${FUSED_MQA_TOPK_ARCHS}")
+    set_property(SOURCE ${FUSED_MQA_TOPK_SRC} APPEND PROPERTY INCLUDE_DIRECTORIES
+      "${deepgemm_SOURCE_DIR}/deep_gemm/include"
+      "${deepgemm_SOURCE_DIR}/third-party/cutlass/include")
+    list(APPEND VLLM_STABLE_EXT_SRC "${FUSED_MQA_TOPK_SRC}")
+    message(STATUS
+      "Building fused MQA top-k for archs: ${FUSED_MQA_TOPK_ARCHS}")
+  endif()
+
   # if CUDA endif
   endif()
 
@@ -1295,6 +1314,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     if(FUSED_KDA_DECODE_ARCHS)
       target_compile_definitions(_C_stable_libtorch PRIVATE
         VLLM_ENABLE_FUSED_KDA_DECODE=1)
+    endif()
+    if(FUSED_MQA_TOPK_ARCHS)
+      target_compile_definitions(_C_stable_libtorch PRIVATE
+        VLLM_ENABLE_FUSED_MQA_TOPK=1)
     endif()
     if(FUSED_GDN_DECODE_ARCHS)
       target_compile_definitions(_C_stable_libtorch PRIVATE
@@ -1714,7 +1737,6 @@ endif()
 
 # For CUDA we also build and ship some external projects.
 if (VLLM_GPU_LANG STREQUAL "CUDA")
-    include(cmake/external_projects/deepgemm.cmake)
     include(cmake/external_projects/deepselect.cmake)
     include(cmake/external_projects/fmha_sm100.cmake)
     include(cmake/external_projects/flashmla.cmake)
