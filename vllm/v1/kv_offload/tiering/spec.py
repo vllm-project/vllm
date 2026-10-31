@@ -97,6 +97,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
     """
 
     BLOCK_SIZE_ALIGNMENT = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    SHARED_REGION_PER_RANK = False
 
     @classmethod
     @override
