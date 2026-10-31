@@ -284,6 +284,10 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
     def requires_kv_delivery(self) -> bool:
         return False
 
+    @property
+    def reads_released_blocks(self) -> bool:
+        return True
+
     def has_pending_push_work(self) -> bool:
         assert self.connector_scheduler is not None
         assert self.connector_scheduler.coordinator is not None
