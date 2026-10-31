@@ -14,6 +14,7 @@ from pydantic import (
     Field,
     PrivateAttr,
     SerializeAsAny,
+    field_validator,
     model_serializer,
     model_validator,
 )
@@ -62,6 +63,8 @@ from vllm.sampling_params import (
     ThinkingTokenBudget,
 )
 from vllm.utils import random_uuid
+from vllm.v1.agent_hint import AgentHint
+from vllm.v1.kv_hints import kv_hints_from_wire
 
 if TYPE_CHECKING:
     from vllm.parser.abstract_parser import Parser
@@ -283,6 +286,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     # NOTE this will be ignored by vLLM
     user: str | None = None
+
+    agent_hint: AgentHint | None = Field(
+        default=None,
+        description=(
+            "Orchestrator-provided Agent Hint metadata. When "
+            "`context_management.manage_request` is true, the request is a "
+            "management-only request and the engine skips model execution."
+        ),
+    )
 
     # --8<-- [start:chat-completion-sampling-params]
     use_beam_search: bool = False
@@ -524,6 +536,23 @@ class ChatCompletionRequest(OpenAIBaseModel):
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
     )
+
+    kv_hints: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Orchestrator-provided KV hints envelope; see "
+            "`vllm/v1/kv_hints/README.md` for the wire schema. Malformed "
+            "envelopes are rejected at the API boundary, while malformed "
+            "individual actions are skipped by the engine's dispatcher."
+        ),
+    )
+
+    @field_validator("kv_hints")
+    @classmethod
+    def _validate_kv_hints(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        if value is not None:
+            kv_hints_from_wire(value)
+        return value
 
     ec_transfer_params: dict[str, Any] | None = Field(
         default=None,

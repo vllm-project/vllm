@@ -68,6 +68,8 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     SlidingWindowSpec,
 )
+from vllm.v1.kv_hints import KvHintAction, KvHintsEnvelope
+from vllm.v1.kv_hints.actions import CopyTo, KvHintResult
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import (
     DraftTokenIds,
@@ -338,6 +340,132 @@ def test_get_num_unfinished_requests():
     for i, request in enumerate(requests):
         scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_STOPPED)
         assert scheduler.get_num_unfinished_requests() == len(requests) - i - 1
+
+
+@pytest.mark.parametrize("abort", [False, True])
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_completed_priority_hint_changes_next_eviction(abort, async_scheduling):
+    """Completion applies a valid hint despite an invalid sibling; abort does not."""
+    scheduler = create_scheduler(
+        enable_prefix_caching=True, num_blocks=5, async_scheduling=async_scheduling
+    )
+    retained, ordinary = create_requests(
+        num_requests=2, num_tokens=32, max_tokens=1, same_prompt=False
+    )
+    retained.kv_hints = KvHintsEnvelope(
+        protocol_version="0.1",
+        message_id="router/message",
+        actions=[
+            KvHintAction("backend", "kv.fetch", "1.0", {"opaque": True}),
+            KvHintAction("invalid", "vllm.set_priority", "1.0", {}),
+            KvHintAction(
+                "retain",
+                "vllm.set_priority",
+                "1.0",
+                {
+                    "target": "request_cached",
+                    "location": "local_g1",
+                    "claim_id": "router/retain",
+                    "revision": 1,
+                    "value": 10,
+                    "ttl_seconds": 60,
+                },
+            ),
+        ],
+    )
+    for request in (retained, ordinary):
+        scheduler.add_request(request)
+    assert scheduler.kv_cache_manager.block_pool.kv_cache_priority is None
+    scheduled = scheduler.schedule()
+    retained_blocks = list(
+        scheduler.kv_cache_manager.get_blocks(retained.request_id).blocks[0]
+    )
+    ordinary_blocks = list(
+        scheduler.kv_cache_manager.get_blocks(ordinary.request_id).blocks[0]
+    )
+    if abort:
+        scheduler.finish_requests(retained.request_id, RequestStatus.FINISHED_ABORTED)
+    scheduler.update_from_output(
+        scheduled,
+        ModelRunnerOutput(
+            req_ids=[retained.request_id, ordinary.request_id],
+            req_id_to_index={retained.request_id: 0, ordinary.request_id: 1},
+            sampled_token_ids=[[0], [0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    pool = scheduler.kv_cache_manager.block_pool
+    expected = retained_blocks if abort else ordinary_blocks
+    assert pool.get_new_blocks(1)[0] in expected
+    assert scheduler.kv_hint_dispatcher.finish(retained, successful=True) == []
+
+
+def test_ingress_hint_applies_before_request_is_queued():
+    """An ingress consumer can affect the first scheduling decision."""
+    scheduler = create_scheduler(scheduling_policy="priority", max_num_seqs=1)
+
+    def set_request_priority(payload: dict, request: Request) -> KvHintResult:
+        request.priority = payload["priority"]
+        return KvHintResult("applied")
+
+    scheduler.kv_hint_dispatcher.register(
+        "vllm.test_priority",
+        "1.0",
+        dict,
+        set_request_priority,
+        when="ingress",
+    )
+    ordinary, prioritized = create_requests(num_requests=2)
+    prioritized.kv_hints = KvHintsEnvelope(
+        protocol_version="0.1",
+        message_id="router/message",
+        actions=[
+            KvHintAction("priority", "vllm.test_priority", "1.0", {"priority": -1})
+        ],
+    )
+    for request in (ordinary, prioritized):
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+
+    assert [req.req_id for req in output.scheduled_new_reqs] == [prioritized.request_id]
+
+
+def test_copy_to_hint_dispatched_at_ingress_without_failing_request():
+    """COPY_TO is decoded at ingress; without a prefetch-capable connector it
+    reports unsupported and the request proceeds normally."""
+    scheduler = create_scheduler(enable_prefix_caching=True)
+    request = create_requests(num_requests=1, num_tokens=32)[0]
+    request.kv_hints = KvHintsEnvelope(
+        protocol_version="0.1",
+        message_id="router/message",
+        actions=[
+            KvHintAction(
+                "prefetch",
+                "vllm.copy_to",
+                "1.0",
+                {
+                    "target": ["ab" * 32],
+                    "src": {"tier": "cpu"},
+                    "dst": {"tier": "gpu"},
+                },
+            )
+        ],
+    )
+    scheduler.add_request(request)
+    assert request.request_id in scheduler.requests
+
+    results = scheduler.kv_hint_dispatcher.dispatch(request)
+    assert [r.status for _, r in results] == ["unsupported"]
+
+
+def test_copy_to_action_registered_for_ingress():
+    scheduler = create_scheduler(enable_prefix_caching=True)
+    consumer = scheduler.kv_hint_dispatcher._consumers[("vllm.copy_to", "1.0")]
+    assert consumer.payload_type is CopyTo
+    assert consumer.when == "ingress"
 
 
 def test_max_num_active_seqs_caps_admission():
