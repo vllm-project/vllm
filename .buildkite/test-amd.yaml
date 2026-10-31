@@ -4560,11 +4560,11 @@ steps:
     --ignore=kernels/attention/test_rocm_aiter_mla_op_registration.py
     --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
-- label: ":amd: (MI355 DPX) MoE Kernels Shard %N" # TBD
+- label: ":amd: (MI355) MoE Kernels Shard %N" # TBD
   timeout_in_minutes: 55
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
-  agent_pool: mi355_dpx
+  agent_pool: mi355_1
   parallelism: 5
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
