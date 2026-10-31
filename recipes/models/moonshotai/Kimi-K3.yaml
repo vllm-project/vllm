@@ -13,6 +13,8 @@ meta:
     - "moonshotai/Kimi-K2.6"
     - "moonshotai/Kimi-K2.5"
   default_hardware: b300
+  default_variant:
+    ascend_950dt: ascend_mxfp4
   hardware:
     h200: verified
     b200: verified
@@ -21,6 +23,7 @@ meta:
     gb300: verified
     mi355x: verified
     ascend_910c: verified
+    ascend_950dt: verified
 
 model:
   model_id: "moonshotai/Kimi-K3"
@@ -98,6 +101,10 @@ features:
         args:
           - "--speculative-config"
           - '{"method":"dspark","model":"RedHatAI/Kimi-K3-speculator.dspark","num_speculative_tokens":7,"enforce_eager":true}'
+      ascend_950dt:
+        args:
+          - "--speculative-config"
+          - '{"method":"dspark","model":"Inferact/Kimi-K3-DSpark-Block5","num_speculative_tokens":7,"draft_sample_method":"greedy","enforce_eager":true}'
   text_only:
     description: "Skip the vision encoder for text-only workloads. Mutually exclusive with encoder_parallel."
     args:
@@ -128,6 +135,7 @@ variants:
     description: "RedHatAI compressed-tensors NVFP4 quantization; MoE layers quantized to NVFP4, attention and embeddings at full precision"
 
   ascend_w4a8:
+    # https://www.modelscope.cn/models/Eco-Tech/Kimi-K3-w4a8
     model_id: "Eco-Tech/Kimi-K3-w4a8"
     precision: int4
     label: "W4A8 (Ascend)"
@@ -159,6 +167,7 @@ variants:
       - "--allowed-local-media-path"
       - "/"
     extra_env:
+      VLLM_USE_MODELSCOPE: 'true'
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
       OMP_PROC_BIND: "false"
       OMP_NUM_THREADS: "1"
@@ -170,10 +179,58 @@ variants:
         docker_image: "quay.io/ascend/vllm-ascend:kimi-k3-a3"
     description: "ModelSlim INT4 W4A8 for Ascend NPU. Requires --quantization ascend. Validated on 4× 910C mixed P/D."
 
+  ascend_mxfp4:
+    # https://www.modelscope.cn/models/Eco-Tech/Kimi-K3-w4a8-mxfp-quarot
+    model_id: "Eco-Tech/Kimi-K3-w4a8-mxfp-quarot"
+    precision: mxfp4
+    label: MXFP4(ASCEND)
+    # Inherited loading estimate; not measured for this MXFP4 checkpoint.
+    vram_minimum_gb: 1711
+    supported_hardware: [ascend_950dt]
+    extra_args:
+      - "--quantization"
+      - "ascend"
+      - "--enable-prefix-caching"
+      - "--enable-expert-parallel"
+      - "--max-num-seqs"
+      - "16"
+      - "--max-model-len"
+      - "131072"
+      - "--max-num-batched-tokens"
+      - "24576"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--mm-processor-cache-gb"
+      - "0"
+      - "--additional-config"
+      - '{"enable_cpu_binding":true, "enable_flashcomm1":true}'
+      - "--mm-encoder-tp-mode"
+      - "data"
+      - "--limit-mm-per-prompt"
+      - '{"vision_chunk": 2}'
+      - "--allowed-local-media-path"
+      - "/"
+    extra_env:
+      VLLM_USE_MODELSCOPE: 'true'
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      OMP_PROC_BIND: "false"
+      OMP_NUM_THREADS: "1"
+      TASK_QUEUE_ENABLE: "1"
+      HCCL_BUFFSIZE: "800"
+      VLLM_ENGINE_READY_TIMEOUT_S: "7200"
+    hardware_overrides:
+      ascend_950dt:
+        docker_image: "quay.io/ascend/vllm-ascend:kimi-k3-a5"
+    description: ModelSlim MXFP4 with QuaRot for Ascend 950DT (A5). Requires --quantization ascend. Checkpoint not yet public; VRAM estimate is unverified.
+
   fp8:
     model_id: "RedHatAI/Kimi-K3-FP8-BLOCK"
     precision: fp8
     vram_minimum_gb: 3360
+    # Ascend profiles use their dedicated quantized variants.
+    supported_hardware: [h100, h200, b200, b300, gb200, gb300, mi300x, mi325x, mi350x, mi355x]
     description: "RedHatAI FP8 block quantization"
 
 compatible_strategies:
@@ -184,29 +241,44 @@ compatible_strategies:
   - multi_node_dep
   - pd_cluster
 
+kv_offload_hardware:
+  ascend_910c: unsupported
+  ascend_950dt: unsupported
+
 # TP-per-node + DP-across-nodes only makes sense where one node holds a full
 # replica and the cluster fabric fits the DP pattern: H200 (TP8·DP2 from 2
 # nodes) and GB200/GB300 NVL trays (TP4·DP4 from 4 trays). It's therefore not
 # in compatible_strategies (unlisted = unsupported by default); the
 # `supported` grants below opt it in on exactly the validated GPUs.
 strategy_hardware:
+  single_node_tp:
+    ascend_950dt: unsupported
   multi_node_tp_dp:
     h200: supported
     gb200: supported
     gb300: supported
     ascend_910c: supported
+    # A5 mixed serving: 4 nodes, DP4 / TP8 / EP32.
+    ascend_950dt: supported
   multi_node_dep:
     h100: unsupported
     h200: unsupported
     ascend_910c: unsupported
+    ascend_950dt: unsupported
   multi_node_tp:
     ascend_910c: unsupported
+    ascend_950dt: unsupported
   multi_node_tep:
     ascend_910c: unsupported
+    ascend_950dt: unsupported
   multi_node_tp_pp:
     ascend_910c: unsupported
+    ascend_950dt: unsupported
   pd_cluster:
     ascend_910c: unsupported
+    # A5 target: P DP1/TP8/PP4/EP8; D DP4/TP8/EP32 (4 nodes per role).
+    # Each role scales as independent 4-node groups (8 NPUs per node).
+    ascend_950dt: supported
 
 default_strategy: single_node_tp
 
@@ -231,6 +303,7 @@ strategy_min_gpus:
   gb200:
     multi_node_tp: 16
   ascend_910c: 64
+  ascend_950dt: 32
 
 hardware_overrides:
   hopper:
@@ -304,6 +377,13 @@ hardware_overrides:
       - '{"cudagraph_mode":"FULL_DECODE_ONLY","custom_ops":["+fused_rms_norm_gated"]}'
 
 strategy_overrides:
+  multi_node_tp_dp:
+    hardware_overrides:
+      ascend_910c:
+        worker_args: ["--headless"]
+      ascend_950dt:
+        worker_args: ["--headless"]
+
   # Use MegaMoE for DEP on GB200/GB300 NVL trays. B200/B300 leave
   # --moe-backend unset and use vLLM's default automatic selection.
   multi_node_dep:
@@ -354,15 +434,18 @@ strategy_overrides:
     router:
       intra_node_data_parallel_size: 1
     env:
-      VLLM_SSM_CONV_STATE_LAYOUT: "DS"
-    # Blackwell only (cuda_copy is CUDA-only); replaces the recipe-level nvidia block.
+      VLLM_SSM_CONV_STATE_LAYOUT: DS
     hardware_overrides:
       blackwell:
         extra_env:
-          UCX_TLS: "rc,cuda_copy"
+          UCX_TLS: rc,cuda_copy
     prefill:
-      parallelism: tep
-      tp: 8
+      parallelism:
+        default: tep
+        ascend_950dt: tp
+      tp:
+        default: 8
+        ascend_950dt: 8
       vllm_args:
         - "--max-num-batched-tokens"
         - "16384"
@@ -370,9 +453,74 @@ strategy_overrides:
         - "--disable-flashinfer-autotune"
       env:
         VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: "1"
+      nodes:
+        ascend_950dt: 4
+      nodes_per_instance:
+        ascend_950dt: 4
+      pp:
+        ascend_950dt: 4
+      hardware_overrides:
+        ascend_950dt:
+          remove_args:
+            - "--disable-flashinfer-autotune"
+            - "--no-disable-hybrid-kv-cache-manager"
+            - "--data-parallel-hybrid-lb"
+            - "--no-enable-prefix-caching"
+          extra_args:
+            - "--data-parallel-size"
+            - "1"
+            - "--host"
+            - "0.0.0.0"
+            - "--distributed-executor-backend"
+            - mp
+            - "--master-port"
+            - "41000"
+            - "--enable-prefix-caching"
+            - "--enable-expert-parallel"
+            - "--max-model-len"
+            - "262144"
+            - "--max-num-seqs"
+            - "32"
+            - "--gpu-memory-utilization"
+            - "0.80"
+            - "--mm-processor-cache-gb"
+            - "1"
+            - "--skip-mm-profiling"
+            - "--tokenizer-mode"
+            - kimi_k3
+            - "--seed"
+            - "1024"
+            - "--max-num-batched-tokens"
+            - "16384"
+            - "--enforce-eager"
+            - "--additional-config"
+            - '{"enable_flashcomm1":true,"multistream_overlap_shared_expert":false,"enable_fused_mc2":2,"enable_shared_expert_dp":true}'
+          extra_env:
+            HCCL_BUFFSIZE: "800"
+            HCCL_IF_IP: $LOCAL_IP
+            HCCL_SOCKET_IFNAME: $IFACE_NAME
+            GLOO_SOCKET_IFNAME: $IFACE_NAME
+            HCCL_OP_EXPANSION_MODE: CCU_SCHED
+            ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7
+            PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+            VLLM_USE_V2_MODEL_RUNNER: "1"
+            VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
+            VLLM_HOST_IP: $LOCAL_IP
+            PYTHONHASHSEED: "0"
+            LD_LIBRARY_PATH: /usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+            VLLM_PP_LAYER_PARTITION: 24,24,24,21
+          feature_overrides:
+            spec_decoding:
+              args:
+                - "--speculative-config"
+                - '{"method":"dspark","model":"Inferact/Kimi-K3-DSpark-Block5","num_speculative_tokens":7,"draft_sample_method":"greedy","draft_tensor_parallel_size":8,"enforce_eager":true}'
     decode:
-      parallelism: dep
-      tp: 1
+      parallelism:
+        default: dep
+        ascend_950dt: dep
+      tp:
+        default: 1
+        ascend_950dt: 8
       env: {}
       vllm_args:
         - "--data-parallel-hybrid-lb"
@@ -382,6 +530,68 @@ strategy_overrides:
         - "--max-num-batched-tokens"
         - "32"
         - "--no-disable-hybrid-kv-cache-manager"
+      nodes:
+        ascend_950dt: 4
+      nodes_per_instance:
+        ascend_950dt: 4
+      pp:
+        ascend_950dt: 1
+      hardware_overrides:
+        ascend_950dt:
+          remove_args:
+            - "--disable-flashinfer-autotune"
+            - "--no-disable-hybrid-kv-cache-manager"
+            - "--data-parallel-hybrid-lb"
+            - "--no-enable-prefix-caching"
+          extra_args:
+            - "--host"
+            - "0.0.0.0"
+            - "--enable-prefix-caching"
+            - "--enable-expert-parallel"
+            - "--max-model-len"
+            - "262144"
+            - "--max-num-seqs"
+            - "32"
+            - "--gpu-memory-utilization"
+            - "0.80"
+            - "--mm-processor-cache-gb"
+            - "1"
+            - "--skip-mm-profiling"
+            - "--tokenizer-mode"
+            - kimi_k3
+            - "--seed"
+            - "1024"
+            - "--max-num-batched-tokens"
+            - "768"
+            - "--block-size"
+            - "768"
+            - "--cp-kv-cache-interleave-size"
+            - "768"
+            - "--compilation-config"
+            - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+            - "--additional-config"
+            - '{"multistream_overlap_shared_expert":true,"enable_mlapo":true,"scheduler_config":{"recompute_scheduler_enable":true}}'
+          extra_env:
+            HCCL_BUFFSIZE: "800"
+            HCCL_IF_IP: $LOCAL_IP
+            HCCL_SOCKET_IFNAME: $IFACE_NAME
+            GLOO_SOCKET_IFNAME: $IFACE_NAME
+            HCCL_OP_EXPANSION_MODE: CCU_SCHED
+            ASCEND_RT_VISIBLE_DEVICES: 0,1,2,3,4,5,6,7
+            PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+            VLLM_USE_V2_MODEL_RUNNER: "1"
+            VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
+            VLLM_HOST_IP: $LOCAL_IP
+            PYTHONHASHSEED: "0"
+            LD_LIBRARY_PATH: /usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+          feature_overrides:
+            spec_decoding:
+              args:
+                - "--speculative-config"
+                - '{"method":"dspark","model":"Inferact/Kimi-K3-DSpark-Block5","num_speculative_tokens":7,"draft_sample_method":"greedy","draft_tensor_parallel_size":8,"enforce_eager":false}'
+    connectors:
+      ascend_950dt:
+        - mooncakev2
 
 # Tuned presets: the SemiAnalysis InferenceX AgentX lanes, each a delta on
 # the baseline command for one GPU + strategy, on by default there (Baseline
@@ -1813,6 +2023,7 @@ guide: |
   - **Prefix-match unit**: K3 is a hybrid model: its MLA attention layers and KDA (Mamba-like) layers form two KV-cache groups under the hybrid KV-cache manager. With prefix caching on, vLLM pads the attention block size up to match the Mamba state page, so both groups resolve to one (large) block size and the default prefix-cache hit boundary lands on that block — very coarse. The Blackwell profile sets `--prefix-match-unit 128`: the inflation formula always yields a multiple of 128, so 128 divides whatever block size results, and it aligns with the MLA kernel's native block boundary, giving finer prefix-hit granularity. The value is only effective when prefix caching (or a KV connector) is active; it is a no-op otherwise, and it is safe under all tensor-parallel layouts.
   - **Decode context parallelism (DCP)**: the qualified DCP layouts are part of the presets that ran them: DCP8 on the GB200 aggregated TP8 x PP2 and GB300 disaggregated TP8 pools, DCP16 on the GB200 TP16 disaggregated pools, DCP16/DCP8 at the GB300 low-latency points, and DCP8 in the MI355X AgentX cells. Each pairs `--decode-context-parallel-size` (a divisor of the tensor-parallel size) with `--dcp-comm-backend a2a` and an MLA attention backend that supports it (`TOKENSPEED_MLA` with `mla_prefill_backend: TRTLLM_RAGGED` on Blackwell, `ROCM_AITER_MLA` with `mla_prefill_backend: ROCM_AITER_FA` on MI355X). On builds that carry them, the `VLLM_USE_DIRECT_DCP_A2A`, `VLLM_USE_DIRECT_DCP_Q_GATHER` and `VLLM_USE_DIRECT_DCP_KV_GATHER` knobs default to auto; set them to `1` to pin the direct DCP ops or `0` to disable them, as the MI355X cells do.
   - Ascend W4A8 checkpoint (ModelScope): https://www.modelscope.cn/models/Eco-Tech/Kimi-K3-w4a8
+  - Ascend MXFP4 QuaRot checkpoint (ModelScope): https://www.modelscope.cn/models/Eco-Tech/Kimi-K3-w4a8-mxfp-quarot
   - vLLM Ascend tutorial: https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/Kimi-K3.html
 
   ## AMD MI355X: disaggregated prefill and decode
@@ -1994,3 +2205,51 @@ guide: |
   ```
 
   Confirm that a final answer is returned, and inspect the prefill/decode logs for successful KV transfers and transfer errors. Health checks alone do not exercise RDMA. Preserve `reasoning_content` and tool calls when building multi-turn conversations, as described in the [model card](https://huggingface.co/moonshotai/Kimi-K3#6-model-usage).
+
+  ## Ascend mixed Prefill/Decode deployment
+
+  KV Offload supports only **Off** on Ascend 910C (A3) and 950DT (A5), in both
+  mixed and disaggregated serving. Simple, CPU offloading, Mooncake Store, and
+  LMCache are unavailable for these recipe profiles.
+
+  In the four-node A3/A5 mixed deployment, node 0 runs the API server and
+  Nodes 1-3 join with `--headless` and their respective
+  `--data-parallel-start-rank` values of 1, 2, and 3.
+  Follow the [official mixed deployment reference](https://docs.vllm.ai/projects/vllm-ascend-cn/zh-cn/latest/tutorials/models/Kimi-K3.html#51-prefilldecode)
+  for the per-node communication settings and startup order.
+
+  ## Ascend 950DT PD separation
+
+  The A5 PD profile uses MooncakeConnectorV2 and the Ascend load-balancing proxy.
+  Each prefill instance occupies four eight-NPU nodes (DP1/TP8/PP4/EP8), and each
+  decode instance occupies four eight-NPU nodes (DP4/TP8/EP32). Each pool therefore
+  grows in 32-NPU groups; the default is one prefill group plus one decode group
+  (eight nodes, 64 NPUs total). Additional groups are independent replicas.
+
+  The A5 PD builder presents five launch steps:
+
+  1. **Scripts** downloads only `launch_online_dp.py` into the current directory.
+  2. **Prefill** saves `run_dp_template.sh` on each prefill node with TP8/PP4.
+     Manually replace `<NIC_NAME>` and `<LOCAL_IP>` in the template with this
+     node's communication interface and IP.
+  3. **Decode** saves its DP4/TP8 `run_dp_template.sh` on each decode node;
+     manually replace the same two placeholders with that node's values.
+  4. **Start_Server** provides separate Prefill and Decode launcher commands,
+     each with DP/TP size, group-local rank, master address, RPC port, and HTTP
+     port. Run only the matching command on each node. The launcher supplies
+     the template's seven positional arguments. Repeat on all four group nodes.
+  5. **Start_Proxy** starts the client-facing proxy after both pools are ready.
+
+  Run these commands in the installed vLLM Ascend environment. Keep the launcher
+  and the node's own role template in the same directory; do not write both
+  templates on the same node. Container setup belongs to the installation step.
+  Start each prefill group's rank 0 before ranks 1-3. Both Prefill and Decode
+  omit `--headless` in PD separation; only mixed deployment workers use it.
+  Every decode node keeps its HTTP endpoint. The transfer connector remains MooncakeConnectorV2.
+  The launcher runs in the foreground; open another shell for Start_Proxy, which
+  runs the separate proxy script from the vLLM Ascend installation.
+
+  The [official basic PD reference](https://docs.vllm.ai/projects/vllm-ascend-cn/zh-cn/latest/tutorials/models/Kimi-K3.html#52-basic-eight-node-pd-separation-deployment) documents the fixed eight-node
+  topology. Group replication and the private MXFP4 checkpoint have not been
+  validated on NPU hardware here. The guide's pooled PD section adds a MemCache
+  KV cache pool; this profile uses the basic Mooncake V2 transfer path.
