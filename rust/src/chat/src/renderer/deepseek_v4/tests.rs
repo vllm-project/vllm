@@ -13,7 +13,9 @@ use crate::EffortValue;
 use crate::event::{AssistantContentBlock, AssistantToolCall};
 use crate::renderer::deepseek_v41::DeepSeekV41ChatRenderer;
 use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
-use crate::request::{ChatContentPart, ChatMessage, ChatRequest, ChatTool, GenerationPromptMode};
+use crate::request::{
+    ChatContentPart, ChatMessage, ChatRequest, ChatTool, GenerationPromptMode, ResolvedToolContext,
+};
 
 fn render_request(request: &ChatRequest) -> String {
     DeepSeekV4ChatRenderer::default()
@@ -22,6 +24,158 @@ fn render_request(request: &ChatRequest) -> String {
         .prompt
         .into_text()
         .expect("deepseek v4 renderer should return text prompt")
+}
+
+#[test]
+fn leading_developer_instructions_render_as_system() {
+    let renderers: [(&dyn ChatRenderer, &str); 2] = [
+        (&DeepSeekV4ChatRenderer::default(), "\n\ndeveloper policy"),
+        (&DeepSeekV41ChatRenderer::default(), "developer policy"),
+    ];
+    for tools in [None, Some(vec![])] {
+        let request = thinking_request(vec![
+            ChatMessage::system("system policy"),
+            ChatMessage::developer("developer policy", tools),
+            ChatMessage::user("question"),
+        ]);
+        let mut expected = request.clone();
+        for (renderer, expected_policy) in renderers {
+            expected.messages[1] = ChatMessage::system(expected_policy);
+            let rendered = renderer.render(&request).unwrap().prompt.into_text().unwrap();
+            let expected = renderer.render(&expected).unwrap().prompt.into_text().unwrap();
+            assert!(rendered.contains("developer policy"));
+            assert_eq!(rendered, expected);
+        }
+        assert!(matches!(request.messages[1], ChatMessage::Developer { .. }));
+    }
+}
+
+#[test]
+fn converted_developer_separator_is_not_duplicated() {
+    let request = thinking_request(vec![
+        ChatMessage::developer("P1", None),
+        ChatMessage::developer("P2", None),
+        ChatMessage::user("q"),
+    ]);
+    expect!["<｜begin▁of▁sentence｜>P1\n\nP2<｜User｜>q<｜Assistant｜><think>"]
+        .assert_eq(&render_request(&request));
+}
+
+#[test]
+fn converted_developer_separator_stops_before_native_turn() {
+    let request = thinking_request(vec![
+        ChatMessage::system("SYS"),
+        ChatMessage::developer("P1", None),
+        ChatMessage::developer("P2", None),
+    ]);
+    expect!["<｜begin▁of▁sentence｜>SYS\n\nP1<｜User｜>P2<｜Assistant｜><think>"]
+        .assert_eq(&render_request(&request));
+}
+
+#[test]
+fn converted_developer_separator_precedes_retained_system() {
+    let request = thinking_request(vec![
+        ChatMessage::developer("P1", None),
+        ChatMessage::system("SYS"),
+        ChatMessage::user("q"),
+    ]);
+    expect!["<｜begin▁of▁sentence｜>P1\n\nSYS<｜User｜>q<｜Assistant｜><think>"]
+        .assert_eq(&render_request(&request));
+}
+
+#[test]
+fn converted_developer_keeps_content_part_separators() {
+    let request = thinking_request(vec![
+        ChatMessage::developer(
+            vec![ChatContentPart::text("P1"), ChatContentPart::text("P2")],
+            None,
+        ),
+        ChatMessage::user("q"),
+    ]);
+    expect!["<｜begin▁of▁sentence｜>P1\n\nP2<｜User｜>q<｜Assistant｜><think>"]
+        .assert_eq(&render_request(&request));
+}
+
+#[test]
+fn healthy_prefix_developers_keep_native_turns() {
+    let renderers: [&dyn ChatRenderer; 2] = [
+        &DeepSeekV4ChatRenderer::default(),
+        &DeepSeekV41ChatRenderer::default(),
+    ];
+    let tool = ChatTool {
+        name: "lookup".into(),
+        description: None,
+        parameters: Value::Object(Default::default()),
+        strict: None,
+        defer_loading: None,
+    };
+    for mode in ["chat", "drop_false", "request_tools", "message_tools"] {
+        let mut request = thinking_request(vec![
+            ChatMessage::developer("policy", None),
+            ChatMessage::user("question"),
+        ]);
+        match mode {
+            "chat" => {
+                request.chat_options.template_kwargs.insert("thinking".into(), false.into());
+            }
+            "drop_false" => {
+                request
+                    .chat_options
+                    .template_kwargs
+                    .insert("drop_thinking".into(), false.into());
+            }
+            "request_tools" => {
+                request.tool_context =
+                    ResolvedToolContext::new(&request.messages, vec![tool.clone()], None, true)
+                        .unwrap();
+            }
+            "message_tools" => {
+                request.messages.insert(
+                    1,
+                    ChatMessage::developer("tool policy", Some(vec![tool.clone()])),
+                );
+            }
+            _ => unreachable!(),
+        }
+        for renderer in renderers {
+            let rendered = renderer.render(&request).unwrap().prompt.into_text().unwrap();
+            assert!(rendered.contains("<｜User｜>policy"), "{mode}: {rendered}");
+        }
+    }
+}
+
+#[test]
+fn nonleading_and_final_developers_keep_native_turns() {
+    let renderers: [&dyn ChatRenderer; 2] = [
+        &DeepSeekV4ChatRenderer::default(),
+        &DeepSeekV41ChatRenderer::default(),
+    ];
+    for messages in [
+        vec![ChatMessage::developer("policy", None)],
+        vec![
+            ChatMessage::user("question"),
+            ChatMessage::developer("policy", None),
+        ],
+        vec![
+            ChatMessage::user("old question"),
+            ChatMessage::assistant_blocks(vec![
+                AssistantContentBlock::Reasoning {
+                    text: "OLD_REASONING".into(),
+                },
+                AssistantContentBlock::Text {
+                    text: "old answer".into(),
+                },
+            ]),
+            ChatMessage::developer("policy", None),
+        ],
+    ] {
+        let request = thinking_request(messages);
+        for renderer in renderers {
+            let rendered = renderer.render(&request).unwrap().prompt.into_text().unwrap();
+            assert!(rendered.ends_with("<｜User｜>policy<｜Assistant｜><think>"));
+            assert!(!rendered.contains("OLD_REASONING"));
+        }
+    }
 }
 
 fn thinking_request(messages: Vec<ChatMessage>) -> ChatRequest {
@@ -90,6 +244,7 @@ fn renders_developer_tools_like_hf_python() {
 #[test]
 fn drop_thinking_removes_developer_before_last_user() {
     let request = thinking_request(vec![
+        ChatMessage::user("old question"),
         ChatMessage::developer("old instruction", None),
         ChatMessage::assistant_blocks(vec![
             AssistantContentBlock::Reasoning {
@@ -105,7 +260,7 @@ fn drop_thinking_removes_developer_before_last_user() {
     let rendered = render_request(&request);
 
     expect![
-        "<｜begin▁of▁sentence｜>old answer<｜end▁of▁sentence｜><｜User｜>next question<｜Assistant｜><think>"
+        "<｜begin▁of▁sentence｜><｜User｜>old question<｜Assistant｜></think>old answer<｜end▁of▁sentence｜><｜User｜>next question<｜Assistant｜><think>"
     ]
     .assert_eq(&rendered);
 }
@@ -163,6 +318,7 @@ fn drop_thinking_false_keeps_historical_developer() {
 #[test]
 fn drop_thinking_removes_developer_before_tool_response() {
     let request = thinking_request(vec![
+        ChatMessage::user("old question"),
         ChatMessage::developer("old instruction", None),
         ChatMessage::assistant_text("old answer"),
         ChatMessage::tool_response("result", "call-1"),
@@ -171,7 +327,7 @@ fn drop_thinking_removes_developer_before_tool_response() {
     let rendered = render_request(&request);
 
     expect![
-        "<｜begin▁of▁sentence｜>old answer<｜end▁of▁sentence｜><｜User｜><tool_result>result</tool_result><｜Assistant｜><think>"
+        "<｜begin▁of▁sentence｜><｜User｜>old question<｜Assistant｜></think>old answer<｜end▁of▁sentence｜><｜User｜><tool_result>result</tool_result><｜Assistant｜><think>"
     ]
     .assert_eq(&rendered);
 }

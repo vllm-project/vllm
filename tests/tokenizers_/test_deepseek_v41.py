@@ -347,11 +347,24 @@ def test_tool_images_follow_rendered_order(render_with_media):
     ]
 
 
-def test_dropped_developer_only_image_leaves_text_prompt(render_with_media):
+def test_developer_instruction_image_is_preserved(render_with_media):
     prompt = render_with_media(
         [
             {"role": "developer", "content": [_image("red")]},
             {"role": "user", "content": "question"},
+        ]
+    )
+    assert "<｜deepseek_image｜>" in prompt["prompt"]
+    assert prompt["multi_modal_uuids"]["image"] == ["red"]
+    assert prompt["multi_modal_data"]["image"][0].getpixel((0, 0)) == (255, 0, 0)
+
+
+def test_nonleading_developer_image_still_drops_with_history(render_with_media):
+    prompt = render_with_media(
+        [
+            {"role": "user", "content": "first question"},
+            {"role": "developer", "content": [_image("red")]},
+            {"role": "user", "content": "next question"},
         ]
     )
     assert "<｜deepseek_image｜>" not in prompt["prompt"]
