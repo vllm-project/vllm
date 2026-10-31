@@ -102,6 +102,8 @@ class MoRIIOWriter:
         """
         self._worker_ref: weakref_ref[MoRIIOConnectorWorker] = weakref_ref(worker)
         self._write_task_q: Queue[WriteTask] = Queue()
+        # Sealed transfers whose RDMA completion the write worker must await.
+        self._finalize_q: Queue[tuple[TransferId, RemoteAllocInfo]] = Queue()
         self._write_worker_started = False
         self._write_worker_lock = threading.Lock()
         self._write_state_lock = threading.Lock()
@@ -187,12 +189,24 @@ class MoRIIOWriter:
                     request_info.writes_expected = write_count
                     pending.append((transfer_id, request_info))
 
-        for transfer_id, request_info in pending:
-            self._finalize_if_complete(transfer_id, request_info)
+        # Runs on the forward thread: the RDMA wait in _finalize_if_complete
+        # belongs to the write worker.
+        for item in pending:
+            self._finalize_q.put(item)
 
     def _write_worker_loop(self) -> None:
         """Main loop for the write worker thread."""
         while True:
+            while not self._finalize_q.empty():
+                transfer_id, request_info = self._finalize_q.get_nowait()
+                try:
+                    self._finalize_if_complete(transfer_id, request_info)
+                except Exception:
+                    logger.exception(
+                        "Finalizing transfer %s failed, marking done", transfer_id
+                    )
+                    self._mark_request_done(transfer_id)
+
             # Process deferred tasks first
             self._process_deferred_tasks()
 
@@ -619,7 +633,21 @@ class MoRIIOWriter:
             request_info.completion_notified = True
 
         # Wait for this request's transfers to complete.
-        self.worker.moriio_wrapper.waiting_for_transfer_complete(transfer_statuses)
+        try:
+            self.worker.moriio_wrapper.waiting_for_transfer_complete(transfer_statuses)
+        except TransferError:
+            # Fail only this request: decode reports it in failed_recving.
+            logger.exception(
+                "WRITE transfer failed for (request, transfer) %s, %s",
+                request_id,
+                transfer_id,
+            )
+            for remote_ip, remote_port in notify_targets:
+                self.worker.moriio_wrapper.send_notify(
+                    transfer_id, remote_ip, remote_port, message_type="write_failed"
+                )
+            self._mark_request_done(transfer_id)
+            return
 
         # Consider using RDMA immediate data in decode side
         # to eliminate the need for this notification.
