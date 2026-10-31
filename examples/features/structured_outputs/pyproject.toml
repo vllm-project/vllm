@@ -5,4 +5,4 @@ dependencies = ["openai==1.78.1", "pydantic==2.11.4"]
 version = "0.0.0"
 
 [project.scripts]
-structured-outputs = "structured_outputs:main"
+structured-outputs = "structured_outputs_client:main"
