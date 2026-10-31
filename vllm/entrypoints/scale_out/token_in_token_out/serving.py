@@ -40,14 +40,9 @@ from vllm.entrypoints.serve.engine.protocol import (
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import GenerationError, VLLMValidationError
-from vllm.inputs import EngineInput, TokensPrompt, mm_input
+from vllm.inputs import EngineInput, TokensPrompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
-from vllm.multimodal.inputs import (
-    MultiModalKwargsItem,
-    MultiModalKwargsItems,
-    PlaceholderRange,
-)
 from vllm.outputs import RequestOutput
 from vllm.renderers.chat_utils import AsyncMultiModalItemTracker
 from vllm.renderers.online_derenderer import OnlineDerenderer
@@ -58,7 +53,7 @@ from vllm.utils.collection_utils import as_list
 from vllm.utils.serial_utils import numpy2base64
 
 from .mm_features import (
-    mm_kwargs_from_features,
+    engine_input_from_features,
     placeholder_ranges_from_engine_input,
 )
 from .protocol import (
@@ -164,23 +159,6 @@ class ServingTokens(GenerateBaseServing):
             if mc.generation_config not in ("auto", "vllm")
             else getattr(mc, "override_generation_config", {}).get("max_new_tokens")
         )
-
-    def _validate_mm_cache_handles(
-        self,
-        mm_kwargs: dict[str, list[MultiModalKwargsItem | None]],
-        mm_hashes: dict[str, list[str]],
-    ) -> ErrorResponse | None:
-        cache = self.online_renderer.renderer.mm_processor_cache
-        if cache is None:
-            return None
-        try:
-            for modality, items in mm_kwargs.items():
-                for mm_hash, item in zip(mm_hashes[modality], items, strict=True):
-                    if item is not None:
-                        cache.validate_input_item(item, mm_hash)
-        except ValueError as error:
-            return self.create_error_response(error)
-        return None
 
     async def serve_tokens(
         self,
@@ -295,27 +273,18 @@ class ServingTokens(GenerateBaseServing):
                 [prompt]
             )
         elif features := request.features:
-            # Convert PlaceholderRangeInfo → PlaceholderRange per modality.
-            mm_placeholders: dict[str, list[PlaceholderRange]] = {
-                modality: [
-                    PlaceholderRange(offset=p.offset, length=p.length) for p in ranges
-                ]
-                for modality, ranges in features.mm_placeholders.items()
-            }
-
-            # Deserialize full tensor data and optional metadata-only data.
-            # Metadata-only items are valid when ec_transfer_params is set.
-            mm_kwargs = mm_kwargs_from_features(features)
-            if error := self._validate_mm_cache_handles(mm_kwargs, features.mm_hashes):
-                return error
-
-            engine_input = mm_input(
-                prompt_token_ids=request.token_ids,
-                mm_kwargs=MultiModalKwargsItems(mm_kwargs),
-                mm_hashes=features.mm_hashes,
-                mm_placeholders=mm_placeholders,
-                cache_salt=request.cache_salt,
-            )
+            # Shared builder (with the protocol's validations) so the
+            # generate and chat reuse paths cannot drift.
+            try:
+                engine_input = engine_input_from_features(
+                    request.token_ids,
+                    features,
+                    cache_salt=request.cache_salt,
+                    mm_cache=self.online_renderer.renderer.mm_processor_cache,
+                    ec_transfer_params=request.ec_transfer_params,
+                )
+            except ValueError as error:
+                return self.create_error_response(error)
         else:
             (engine_input,) = await self.online_renderer.preprocess_completion(
                 request,
