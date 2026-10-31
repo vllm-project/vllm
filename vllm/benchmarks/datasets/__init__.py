@@ -40,6 +40,10 @@ from vllm.benchmarks.datasets.datasets import (
     process_audio,
     process_image,
     process_video,
+    sample_hf_requests,
+    sample_random_requests,
+    sample_sharegpt_requests,
+    sample_sonnet_requests,
     zeta_prompt,
 )
 from vllm.benchmarks.datasets.utils import RangeRatio
@@ -83,6 +87,11 @@ __all__ = [
     "process_audio",
     "process_image",
     "process_video",
+    "sample_hf_requests",
+    "sample_random_requests",
+    "sample_sharegpt_requests",
+    "sample_sonnet_requests",
     "RangeRatio",
     "zeta_prompt",
 ]
+
