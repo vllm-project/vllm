@@ -105,12 +105,15 @@ impl OpenAIChatBackend {
 
                             update_server_metrics(&mut output, data.metrics.as_ref());
 
-                            if !data.choices.is_empty() {
-                                let content = data.choices[0]
-                                    .delta
-                                    .as_ref()
-                                    .and_then(|d| d.content.as_deref())
-                                    .unwrap_or("");
+                            // The opening role chunk and empty deltas carry no
+                            // token, so they set neither TTFT nor an ITL sample.
+                            if let Some(delta) = data
+                                .choices
+                                .first()
+                                .and_then(|c| c.delta.as_ref())
+                                .filter(|d| d.has_streamed_output())
+                            {
+                                let content = delta.content.as_deref().unwrap_or("");
 
                                 if !first_token_received {
                                     first_token_received = true;
@@ -366,6 +369,22 @@ mod tests {
         usage_delay: std::time::Duration,
         prompt_tokens: Option<u64>,
     ) -> String {
+        let prompt_tokens =
+            prompt_tokens.map_or(String::new(), |pt| format!(",\"prompt_tokens\":{pt}"));
+        let mut events = vec![r#"{"choices":[{"delta":{"content":"a"}}]}"#.to_string(); num_tokens];
+        events.push(format!(
+            "{{\"choices\":[],\"usage\":{{\"completion_tokens\":{num_tokens}{prompt_tokens}}}}}"
+        ));
+        spawn_scripted_sse_server(events, num_tokens, usage_delay)
+    }
+
+    /// Serve `events` as `data:` messages, sleeping `delay` before event
+    /// `delay_at`, then `[DONE]`. Returns the endpoint URL.
+    fn spawn_scripted_sse_server(
+        events: Vec<String>,
+        delay_at: usize,
+        delay: std::time::Duration,
+    ) -> String {
         use std::io::{BufRead, BufReader, Read, Write};
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -391,18 +410,74 @@ mod tests {
                 stream.flush().unwrap();
             };
             send("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n");
-            for _ in 0..num_tokens {
-                send("data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n");
+            for (i, event) in events.iter().enumerate() {
+                if i == delay_at {
+                    std::thread::sleep(delay);
+                }
+                send(&format!("data: {event}\n\n"));
             }
-            std::thread::sleep(usage_delay);
-            let prompt_tokens =
-                prompt_tokens.map_or(String::new(), |pt| format!(",\"prompt_tokens\":{pt}"));
-            send(&format!(
-                "data: {{\"choices\":[],\"usage\":{{\"completion_tokens\":{num_tokens}{prompt_tokens}}}}}\n\n"
-            ));
             send("data: [DONE]\n\n");
         });
         format!("http://{addr}/v1/chat/completions")
+    }
+
+    async fn run_chat(events: &[&str]) -> RequestFuncOutput {
+        let input = RequestFuncInput {
+            api_url: spawn_scripted_sse_server(
+                events.iter().map(|e| e.to_string()).collect(),
+                usize::MAX,
+                std::time::Duration::ZERO,
+            ),
+            model: "test-model".to_string(),
+            output_len: 3,
+            ..Default::default()
+        };
+        OpenAIChatBackend.send_request(&input, &reqwest::Client::new()).await.unwrap()
+    }
+
+    const ROLE: &str = r#"{"choices":[{"delta":{"role":"assistant","content":""}}]}"#;
+    const TOKEN: &str = r#"{"choices":[{"delta":{"content":"a"}}]}"#;
+    const USAGE: &str = r#"{"choices":[],"usage":{"completion_tokens":3}}"#;
+
+    /// The opening role chunk carries no token, so it must not set TTFT or add
+    /// an ITL sample. Mirrors vllm-project/vllm#62341.
+    #[tokio::test]
+    async fn test_role_chunk_is_not_a_streamed_output() {
+        let output = run_chat(&[ROLE, TOKEN, TOKEN, TOKEN, USAGE]).await;
+
+        assert!(output.success, "{}", output.error);
+        assert_eq!(output.itl.len(), 2);
+        assert_eq!(output.generated_text, "aaa");
+    }
+
+    #[tokio::test]
+    async fn test_empty_delta_adds_no_interval() {
+        let empty = r#"{"choices":[{"delta":{}}]}"#;
+        let output = run_chat(&[TOKEN, empty, TOKEN, TOKEN, USAGE]).await;
+
+        assert!(output.success, "{}", output.error);
+        assert_eq!(output.itl.len(), 2);
+    }
+
+    /// A token that renders as an empty string is still a token.
+    #[tokio::test]
+    async fn test_empty_string_token_is_counted() {
+        let empty_token = r#"{"choices":[{"delta":{"content":""}}]}"#;
+        let output = run_chat(&[ROLE, TOKEN, empty_token, TOKEN, USAGE]).await;
+
+        assert!(output.success, "{}", output.error);
+        assert_eq!(output.itl.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_reasoning_and_tool_call_deltas_are_streamed_outputs() {
+        let reasoning = r#"{"choices":[{"delta":{"reasoning":"hmm"}}]}"#;
+        let tool_call = r#"{"choices":[{"delta":{"tool_calls":[{"index":0}]}}]}"#;
+        let output = run_chat(&[ROLE, reasoning, tool_call, TOKEN, USAGE]).await;
+
+        assert!(output.success, "{}", output.error);
+        assert_eq!(output.itl.len(), 2);
+        assert_eq!(output.generated_text, "a");
     }
 
     /// The trailing usage chunk carries no token, so it must not extend the

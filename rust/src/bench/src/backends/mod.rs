@@ -46,7 +46,34 @@ pub struct ChatChoice {
 
 #[derive(Deserialize)]
 pub struct ChatDelta {
+    pub role: Option<String>,
     pub content: Option<String>,
+    pub reasoning: Option<String>,
+    pub tool_calls: Option<Vec<serde_json::Value>>,
+    pub function_call: Option<serde_json::Value>,
+}
+
+impl ChatDelta {
+    /// Whether this delta carries a generated token. Mirrors Python's
+    /// `_choice_has_streamed_output` (vllm-project/vllm#62341).
+    pub fn has_streamed_output(&self) -> bool {
+        let non_empty = |s: &Option<String>| s.as_deref().is_some_and(|s| !s.is_empty());
+        if non_empty(&self.content)
+            || non_empty(&self.reasoning)
+            || self.tool_calls.as_ref().is_some_and(|t| !t.is_empty())
+            || self
+                .function_call
+                .as_ref()
+                .and_then(|f| f.as_object())
+                .is_some_and(|f| !f.is_empty())
+        {
+            return true;
+        }
+        // A generated token can decode to an empty string, e.g. a special token
+        // under skip_special_tokens. Those chunks carry `content` and no `role`.
+        // The opening metadata chunk carries `role`.
+        self.content.as_deref() == Some("") && self.role.is_none()
+    }
 }
 
 #[derive(Deserialize)]
