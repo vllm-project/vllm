@@ -32,7 +32,7 @@ logger = init_logger(__name__)
 _SAMPLING_EPS = 1e-5
 _MAX_TEMP = 1e-2
 
-MAX_LOGPROB_TOKEN_IDS = 128
+MAX_LOGPROB_TOKEN_IDS = 256
 """Upper bound on `SamplingParams.logprob_token_ids` list length. Must match
 the per-request row width allocated by the sampler's `LogprobTokenIdsState`."""
 
