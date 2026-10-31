@@ -11,6 +11,12 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.experts.trtllm_moe_base import (
+    TrtLlmExpertsBase,
+)
+from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    activation_to_flashinfer_int,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kInt4Static32,
@@ -18,7 +24,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 
 
-class TrtLlmMxint4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
+class TrtLlmMxint4ExpertsMonolithic(TrtLlmExpertsBase, mk.FusedMoEExpertsMonolithic):
     """FlashInfer TRT-LLM MxInt4 MoE kernel. Monolithic interface
     (fused router + experts).
 
@@ -33,13 +39,6 @@ class TrtLlmMxint4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         num_dispatchers: int | None = None,
     ):
         super().__init__(moe_config, quant_config)
-        self.topk = moe_config.experts_per_token
-        self.intermediate_size_per_partition = (
-            moe_config.intermediate_size_per_partition
-        )
-        self.local_num_experts = moe_config.num_local_experts
-        self.ep_rank = moe_config.ep_rank
-        self.routing_method = moe_config.routing_method
 
     @staticmethod
     def _supports_current_device() -> bool:
@@ -104,10 +103,6 @@ class TrtLlmMxint4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             return routing_method == RoutingMethodType.DeepSeekV3
         return True
 
-    @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
-
     def supports_expert_map(self) -> bool:
         return False
 
@@ -158,7 +153,16 @@ class TrtLlmMxint4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             num_expert_group=num_expert_group,
             topk_group=topk_group,
             e_score_correction_bias=e_score_correction_bias,
-            routing_method_type=self.routing_method,
+            routing_method_type=self.routing_method_type,
             routing_replay_out=routing_replay_out,
+            workspace_buffer=self._get_workspace(
+                hidden_states,
+                quant_mode="mxint4",
+                hidden_size=self.moe_config.hidden_dim,
+                intermediate_size=self.intermediate_size_per_partition,
+                num_experts=global_num_experts,
+                top_k=self.topk,
+                activation_type=activation_to_flashinfer_int(activation),
+            ),
         )
         return result
