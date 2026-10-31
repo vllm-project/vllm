@@ -32,6 +32,7 @@ from vllm.distributed.parallel_state import get_ep_group
 from vllm.model_executor.layers.fused_moe.router.fused_topk_router import (
     FusedTopKRouter,
 )
+from vllm.platforms import current_platform
 from vllm.platforms.interface import Platform, PlatformEnum
 
 
@@ -354,26 +355,38 @@ def test_sync_commit_updates_maps_before_callback(model_state):
     )
 
 
-def test_router_calls_layer_mapping_with_live_padding_metadata():
+@pytest.mark.parametrize("use_hook", [False, True])
+def test_router_preserves_default_mapping_or_uses_layer_hook(use_hook):
     observed = []
+    device = current_platform.device_type
 
     def map_and_record(ids, num_tokens):
         observed.append(num_tokens)
         return ids + 1
 
     layer = EplbLayerState(
-        expert_load_view=torch.zeros(2),
-        logical_to_physical_map=torch.arange(2).unsqueeze(-1),
-        logical_replica_count=torch.ones(2),
-        should_record_tensor=torch.ones((), dtype=torch.bool),
-        num_unpadded_tokens_tensors=[torch.tensor(1)],
-        map_and_record=map_and_record,
+        expert_load_view=torch.zeros(2, dtype=torch.int32, device=device),
+        logical_to_physical_map=torch.tensor([[1], [0]], device=device),
+        logical_replica_count=torch.ones(2, dtype=torch.int64, device=device),
+        should_record_tensor=torch.ones((), dtype=torch.bool, device=device),
+        num_unpadded_tokens_tensors=[torch.tensor(1, device=device)],
+        map_and_record=map_and_record if use_hook else None,
     )
     router = FusedTopKRouter(top_k=1, global_num_experts=2, eplb_state=layer)
+    builtin_mapping = current_platform.is_cuda_alike() or current_platform.is_xpu()
     torch.testing.assert_close(
-        router._apply_eplb_mapping(torch.tensor([[0]])), torch.tensor([[1]])
+        router._apply_eplb_mapping(torch.tensor([[0]], device=device)),
+        torch.tensor([[1 if use_hook or builtin_mapping else 0]], device=device),
     )
-    assert observed == layer.num_unpadded_tokens_tensors
+    assert observed == (layer.num_unpadded_tokens_tensors if use_hook else [])
+    torch.testing.assert_close(
+        layer.expert_load_view,
+        torch.tensor(
+            [0, int(builtin_mapping and not use_hook)],
+            dtype=torch.int32,
+            device=device,
+        ),
+    )
 
 
 def test_idle_wait_can_stop_without_fabricating_device_event():

@@ -155,9 +155,7 @@ else:
         record_enabled: torch.Tensor,
         num_unpadded_tokens: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        raise RuntimeError(
-            "EPLB mapping requires a device-specific map_and_record hook"
-        )
+        return topk_ids
 
 
 def get_moe_padding_mask(num_tokens: int) -> torch.Tensor | None:
