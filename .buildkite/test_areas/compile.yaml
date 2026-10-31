@@ -185,6 +185,7 @@ steps:
 
 - label: ":nvidia: (B200) [Nightly] Fusion E2E Config Sweep"
   key: fusion-e2e-config-sweep-b200
+  automatic_shard: true
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"
   device: b200-k8s
@@ -198,6 +199,7 @@ steps:
     - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "inductor_partition and (FLASHINFER and not +rms_norm and (not +quant_fp8 or +quant_fp8 and (qwen3 or deepseek)) or llama-3)"
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) Fusion E2E FP8 Config Sweep"
       dind: false
       device: mi355_dpx

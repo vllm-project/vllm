@@ -171,6 +171,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) [Nightly] Multimodal Models (Extended Generation 1)"
   device: h200_35gb
   key: multi-modal-models-extended-generation-1
+  automatic_shard: true
   optional: true
   source_file_dependencies:
   - vllm/
@@ -186,6 +187,7 @@ steps:
     - pytest -v -s models/multimodal/test_mapping.py
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) Multimodal Models (Extended Generation 1)"
       dind: false
       device: mi355_dpx
@@ -196,6 +198,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) [Nightly] Multimodal Models (PPL)"
   device: h200_35gb
   key: multi-modal-models-extended-ppl
+  automatic_shard: true
   optional: true
   source_file_dependencies:
   - vllm/
@@ -205,6 +208,7 @@ steps:
     - pytest -v -s models/multimodal/generation_ppl_test/
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) Multimodal Models (PPL)"
       dind: false
       device: mi355_dpx
