@@ -419,8 +419,8 @@ class Worker(WorkerBase):
 
         """
         assert self.weight_transfer_engine is not None
-        if is_draft is None:
-            is_draft = self._weight_update_is_draft
+        if is_draft is not None:
+            self._weight_update_is_draft = is_draft
         self._weight_update_active = False
         try:
             self.weight_transfer_engine.abort_weight_update()
@@ -432,9 +432,7 @@ class Worker(WorkerBase):
                 "it may be left partially loaded."
             )
         finally:
-            self.weight_transfer_engine.reset_weight_update_target()
-            if is_draft and (draft_model := self.get_draft_model()) is not None:
-                restore_quantized_lm_heads(draft_model, refresh=False)
+            self._end_weight_update(refresh=False)
 
     def checkpoint_prepare(self) -> None:
         checkpoint_prepare_distributed_state()
@@ -1729,8 +1727,12 @@ class Worker(WorkerBase):
             try:
                 self.weight_transfer_engine.finish_weight_update()
             except BaseException:
-                # Without a rollback the session stays open for a retry.
-                if self.weight_transfer_engine.rolls_back_failed_updates:
+                # A failed direct finish cannot be retried; a failed layerwise
+                # finish stays open for a retry unless the engine rolls back.
+                if (
+                    direct_reload_enabled()
+                    or self.weight_transfer_engine.rolls_back_failed_updates
+                ):
                     self._abort_weight_update_session()
                 raise
             self._end_weight_update(refresh=True)

@@ -786,10 +786,10 @@ class TestWireTypes:
         assert stream.synchronize.call_count == 2
 
     @pytest.mark.parametrize("uses_load_weights", [True, False])
-    def test_abort_undoes_only_a_layerwise_reload(self, monkeypatch, uses_load_weights):
+    def test_abort_runs_only_for_fallback_entries(self, monkeypatch, uses_load_weights):
         aborted: list[object] = []
         monkeypatch.setattr(
-            "vllm.model_executor.model_loader.reload.abort_layerwise_reload",
+            "vllm.model_executor.model_loader.reload.abort_reload",
             aborted.append,
         )
         engine = object.__new__(M2NWeightTransferEngine)

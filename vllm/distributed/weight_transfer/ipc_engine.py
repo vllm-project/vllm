@@ -179,9 +179,9 @@ class IPCWeightTransferEngine(
 
     def abort_weight_update(self) -> None:
         """Put the pre-update weights back after a failed update."""
-        from vllm.model_executor.model_loader.reload import abort_layerwise_reload
+        from vllm.model_executor.model_loader.reload import abort_reload
 
-        abort_layerwise_reload(self.model)
+        abort_reload(self.model)
         self._packed_importer.close()
 
     def receive_weights(self, update_info: IPCWeightTransferUpdateInfo) -> None:

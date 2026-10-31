@@ -353,9 +353,11 @@ def test_successful_session_never_aborts():
 
 
 @pytest.mark.parametrize("mode", ["direct", "layerwise"])
-def test_failed_finish_ends_session_only_in_direct_mode(mode, monkeypatch):
+def test_failed_finish_without_rollback_ends_session_only_in_direct_mode(
+    mode, monkeypatch
+):
     monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
-    engine = _RecordingEngine(raise_on_finish=True)
+    engine = _RecordingEngine(raise_on_finish=True, rolls_back_failed_updates=False)
     worker = _make_worker(engine)
     Worker.start_weight_update(worker)
 
@@ -363,7 +365,8 @@ def test_failed_finish_ends_session_only_in_direct_mode(mode, monkeypatch):
         Worker.finish_weight_update(worker)
 
     # a failed direct finish cannot be retried, so the next start must work;
-    # a failed layerwise finish stays active and can be retried
+    # without a rollback, a failed layerwise finish stays active and can be
+    # retried
     direct = mode == "direct"
     assert worker._weight_update_active is not direct
     assert engine.reset_count == int(direct)
