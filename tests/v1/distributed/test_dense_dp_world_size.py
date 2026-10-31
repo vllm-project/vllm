@@ -1,12 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
 import os
 from typing import TYPE_CHECKING
 
 import pytest
 import requests
 
+from tests.models.utils import check_logprobs_close
 from tests.utils import VLLM_PATH, RemoteOpenAIServer
+from tests.v1.distributed.test_internal_lb_dp import (
+    _check_cpu_ep_scores,
+    _cpu_ep_completion,
+    _cpu_ep_score_prefix,
+)
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
@@ -189,3 +196,94 @@ def test_pcp_dp_with_auto_numa():
             (1, 0),
             (1, 1),
         ]
+
+
+@pytest.mark.cpu_test
+@pytest.mark.asyncio
+@pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU serving required")
+async def test_cpu_dense_dp_compiled_matches_reference(monkeypatch, tmp_path):
+    """Dense CPU replicas compile without creating an expert-parallel group."""
+    model = "hmellor/tiny-random-LlamaForCausalLM"
+    args = [
+        "--revision",
+        "9408c553e5c189a7dcdc5a5dbd2feb476b061759",
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "128",
+        "--max-num-batched-tokens",
+        "128",
+        "--max-num-seqs",
+        "4",
+        "--kv-cache-memory-bytes",
+        "16777216",
+        "--distributed-executor-backend",
+        "mp",
+        "--host",
+        "127.0.0.1",
+        "--api-server-count",
+        "1",
+        "--shutdown-timeout",
+        "5",
+    ]
+    env = {
+        "OMP_NUM_THREADS": "1",
+        "VLLM_CPU_OMP_THREADS_BIND": "nobind",
+        "VLLM_CPU_SIM_MULTI_NUMA": "0",
+        "VLLM_CPU_CI_ENV": "0",
+        "VLLM_USE_AOT_COMPILE": "1",
+        "VLLM_SERVER_DEV_MODE": "1",
+        "TORCHINDUCTOR_COMPILE_THREADS": "1",
+        "VLLM_HOST_IP": "127.0.0.1",
+        "VLLM_CACHE_ROOT": str(tmp_path / "vllm_cache"),
+    }
+    monkeypatch.delenv("VLLM_CPU_KVCACHE_SPACE", raising=False)
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    prompts = ["Hello, my name is", "The first positive integers are"]
+    with RemoteOpenAIServer(model, args + ["--enforce-eager"], env_dict=env) as server:
+        async with server.get_async_client(timeout=60) as client:
+            reference = [
+                await _cpu_ep_completion(client, model, prompt, 8) for prompt in prompts
+            ]
+            prefixes = [
+                prompt + output[1] for prompt, output in zip(prompts, reference)
+            ]
+            reference_scores = [
+                await _cpu_ep_score_prefix(client, model, prefix) for prefix in prefixes
+            ]
+    dp_args = args + [
+        "--data-parallel-size",
+        "2",
+        "--data-parallel-size-local",
+        "2",
+        "--data-parallel-backend",
+        "mp",
+    ]
+    with RemoteOpenAIServer(model, dp_args, env_dict=env) as server:
+        response = await asyncio.to_thread(
+            requests.get, server.url_for("get_world_size")
+        )
+        response.raise_for_status()
+        assert response.json() == {"world_size": 2}
+        response = await asyncio.to_thread(
+            requests.get,
+            server.url_for("get_world_size"),
+            params={"include_dp": "false"},
+        )
+        response.raise_for_status()
+        assert response.json() == {"world_size": 1}
+        async with server.get_async_client(timeout=60) as client:
+            outputs = await asyncio.gather(
+                *[_cpu_ep_completion(client, model, prompt, 8) for prompt in prompts]
+            )
+            scores = [
+                await _cpu_ep_score_prefix(client, model, prefix) for prefix in prefixes
+            ]
+        check_logprobs_close(
+            outputs_0_lst=reference,
+            outputs_1_lst=outputs,
+            name_0="CPU dense full model",
+            name_1="CPU dense DP2 compiled",
+            always_check_logprobs=True,
+        )
+        _check_cpu_ep_scores(reference_scores, scores, "dense DP2 compiled")

@@ -29,6 +29,13 @@ from vllm.v1.worker.worker_base import CompilationTimes
 logger = init_logger(__name__)
 
 
+def _get_cpushm_dist_ident(distributed_init_method: str) -> str:
+    if distributed_init_method.startswith("file://"):
+        return os.path.basename(distributed_init_method.removeprefix("file://"))
+
+    return distributed_init_method.rsplit(":", maxsplit=1)[-1]
+
+
 class CPUWorker(Worker):
     def __init__(
         self,
@@ -127,11 +134,9 @@ class CPUWorker(Worker):
 
         torch.set_num_threads = skip_set_num_threads
 
-        init_method = self.distributed_init_method
-        os.environ["VLLM_DIST_IDENT"] = (
-            os.path.basename(init_method.removeprefix("file://"))
-            if init_method.startswith("file://")
-            else init_method.split(":")[-1]
+        # Note: unique identifier for creating allreduce shared memory.
+        os.environ["VLLM_DIST_IDENT"] = _get_cpushm_dist_ident(
+            self.distributed_init_method
         )
         # Initialize the distributed environment.
         init_worker_distributed_environment(

@@ -73,7 +73,23 @@ class AgRsAll2AllManager(All2AllManagerBase):
             return get_dp_group()
         return get_pcp_group()
 
-    def _get_sizes(self, num_local_tokens: int, comm_group: Any) -> list[int]:
+    def _get_sizes(
+        self,
+        num_local_tokens: int,
+        comm_group: Any,
+        *,
+        sizes_override: list[int] | None = None,
+    ) -> list[int]:
+        if sizes_override is not None:
+            if len(sizes_override) != comm_group.world_size or any(
+                not isinstance(size, int) or isinstance(size, bool) or size < 0
+                for size in sizes_override
+            ):
+                raise ValueError(
+                    "sizes_override must contain one nonnegative integer per "
+                    f"subgroup rank (world_size={comm_group.world_size})."
+                )
+            return sizes_override
         if self.dp_world_size == 1:
             return [num_local_tokens] * comm_group.world_size
 
@@ -90,13 +106,17 @@ class AgRsAll2AllManager(All2AllManagerBase):
         router_logits: torch.Tensor,
         is_sequence_parallel: bool = False,
         extra_tensors: list[torch.Tensor] | None = None,
+        *,
+        sizes_override: list[int] | None = None,
     ) -> (
         tuple[torch.Tensor, torch.Tensor]
         | tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
         """Gather hidden_states and router_logits from all dp ranks."""
         dist_group = self._get_comm_group(is_sequence_parallel)
-        sizes = self._get_sizes(hidden_states.shape[0], dist_group)
+        sizes = self._get_sizes(
+            hidden_states.shape[0], dist_group, sizes_override=sizes_override
+        )
         assert sizes[dist_group.rank_in_group] == hidden_states.shape[0]
 
         tensors_to_gather = [hidden_states, router_logits]
@@ -120,13 +140,17 @@ class AgRsAll2AllManager(All2AllManagerBase):
         topk_ids: torch.Tensor,
         is_sequence_parallel: bool = False,
         extra_tensors: list[torch.Tensor] | None = None,
+        *,
+        sizes_override: list[int] | None = None,
     ) -> (
         tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
         """Gather hidden_states and router_logits from all dp ranks."""
         dist_group = self._get_comm_group(is_sequence_parallel)
-        sizes = self._get_sizes(hidden_states.shape[0], dist_group)
+        sizes = self._get_sizes(
+            hidden_states.shape[0], dist_group, sizes_override=sizes_override
+        )
         assert sizes[dist_group.rank_in_group] == hidden_states.shape[0]
 
         tensors_to_gather = [hidden_states, topk_weights, topk_ids]
@@ -149,13 +173,18 @@ class AgRsAll2AllManager(All2AllManagerBase):
         return hidden_states, topk_weights, topk_ids, gathered_tensors[3:]
 
     def combine(
-        self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
+        self,
+        hidden_states: torch.Tensor,
+        is_sequence_parallel: bool = False,
+        *,
+        sizes_override: list[int] | None = None,
     ) -> torch.Tensor:
         """Reduce-scatter hidden_states across all dp ranks."""
         dist_group = self._get_comm_group(is_sequence_parallel)
         sizes = self._get_sizes(
             hidden_states.shape[0] // dist_group.world_size,
             dist_group,
+            sizes_override=sizes_override,
         )
         hidden_states = dist_group.reduce_scatterv(hidden_states, dim=0, sizes=sizes)
         return hidden_states

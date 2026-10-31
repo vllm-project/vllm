@@ -138,6 +138,29 @@ def test_no_dynamo_cache_entry(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
+def test_inductor_aot_roundtrip(monkeypatch, fresh_vllm_cache):
+    """Stock Inductor reloads without the vLLM backend's deferred finalizer."""
+    monkeypatch.setenv("VLLM_USE_AOT_COMPILE", "1")
+    monkeypatch.setenv("VLLM_FORCE_AOT_LOAD", "0")
+    disable_envs_cache()
+    x = torch.arange(64).reshape(8, 8).float()
+    expected = reference_fn(x)
+    for warm in (False, True):
+        torch._dynamo.reset()
+        monkeypatch.setenv("VLLM_FORCE_AOT_LOAD", str(int(warm)))
+        disable_envs_cache()
+        config = VllmConfig(
+            compilation_config=CompilationConfig(
+                mode=CompilationMode.DYNAMO_TRACE_ONCE, backend="inductor"
+            )
+        )
+        with use_vllm_config(config):
+            mod = CompiledMod(vllm_config=config)
+            torch.testing.assert_close(mod(x), expected, atol=0, rtol=0)
+            assert mod.was_aot_compile_fn_loaded_from_disk == warm
+
+
+@pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
 def test_force_aot_load(monkeypatch: pytest.MonkeyPatch):
     with tempfile.TemporaryDirectory() as tmpdirname, monkeypatch.context() as m:
         args = (torch.randn(10, 10),)
@@ -950,6 +973,11 @@ def _run_graph_cache_probe():
 
     cache_dir()  # Exercise a tmp default populated before backend initialization.
     config = make_vllm_config()
+    # Exercise VllmBackend independently of platform serving-mode defaults.
+    config.compilation_config.mode = CompilationMode.VLLM_COMPILE
+    config.compilation_config.post_init_cudagraph_sizes()
+    assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
+    assert config.compilation_config.backend == "inductor"
     x = torch.arange(64, device=current_platform.device_type).reshape(8, 8).float()
     expected = x * 2 + 1 + int(os.environ["VLLM_TEST_CACHE_OFFSET"])
     with use_vllm_config(config):

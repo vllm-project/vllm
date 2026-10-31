@@ -81,6 +81,19 @@ void fused_experts_cpu(at::Tensor& out, at::Tensor& hidden_states,
                        const std::optional<double>& limit, bool is_vnni,
                        int64_t act_method);
 
+void fused_experts_cpu_local_skip(
+    at::Tensor& out, at::Tensor& hidden_states, at::Tensor& w1, at::Tensor& w2,
+    at::Tensor& topk_weights, at::Tensor& topk_ids, at::Tensor& expert_map,
+    int64_t moe_comp_method, const std::optional<at::Tensor>& w1_scale,
+    const std::optional<at::Tensor>& w2_scale,
+    const std::optional<at::Tensor>& w1_zero,
+    const std::optional<at::Tensor>& w2_zero,
+    const std::optional<std::vector<int64_t>> block_size,
+    const std::optional<at::Tensor>& w1_bias,
+    const std::optional<at::Tensor>& w2_bias,
+    const std::optional<double>& alpha, const std::optional<double>& limit,
+    bool is_vnni, int64_t act_method);
+
 at::Tensor int8_scaled_mm_with_quant(at::Tensor& mat1, at::Tensor& mat2,
                                      at::Tensor& scales2,
                                      const std::optional<at::Tensor>& bias,
@@ -346,7 +359,8 @@ void cpu_fused_moe(torch::Tensor& output, const torch::Tensor& input,
                    const std::optional<torch::Tensor>& w2_bias,
                    const torch::Tensor& topk_weights,
                    const torch::Tensor& topk_id, const bool skip_weighted,
-                   const std::string& act, const std::string& isa);
+                   const std::string& act, const std::string& isa,
+                   const std::optional<torch::Tensor>& expert_map);
 
 void prepack_moe_weight_int8(const torch::Tensor& weight,
                              torch::Tensor& packed_weight,
@@ -739,6 +753,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "()");
   ops.impl("fused_experts_cpu", torch::kCPU, &fused_experts_cpu);
   ops.def(
+      "fused_experts_cpu_local_skip(Tensor(a0!) out, Tensor hidden_states, "
+      "Tensor w1, Tensor w2, Tensor topk_weights, Tensor topk_ids, "
+      "Tensor expert_map, int "
+      "moe_comp_method, Tensor? w1_scale, Tensor? w2_scale, Tensor? w1_zero, "
+      "Tensor? w2_zero, int[]? block_size, Tensor? w1_bias, Tensor? w2_bias, "
+      "float? alpha, float? limit, bool is_vnni, int act_method) -> ()");
+  ops.impl("fused_experts_cpu_local_skip", torch::kCPU,
+           &fused_experts_cpu_local_skip);
+  ops.def(
       "int8_scaled_mm_with_quant(Tensor mat1, Tensor mat2, Tensor scales2, "
       "Tensor? bias, ScalarType out_dtype, bool is_vnni) -> Tensor");
   ops.impl("int8_scaled_mm_with_quant", torch::kCPU,
@@ -1012,7 +1035,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "cpu_fused_moe(Tensor(a0!) output, Tensor input, Tensor w13, Tensor w2, "
       "Tensor? w13_bias, Tensor? w2_bias, Tensor topk_weights, Tensor topk_id, "
       "bool skip_weighted, "
-      "str act, str isa) -> ()");
+      "str act, str isa, Tensor? expert_map=None) -> ()");
   ops.impl("cpu_fused_moe", torch::kCPU, &cpu_fused_moe);
 
 #if (defined(ARM_I8MM_SUPPORT) && defined(ARM_BF16_SUPPORT) && \
