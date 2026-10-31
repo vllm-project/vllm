@@ -9,7 +9,7 @@ import pytest
 from vllm import PoolingParams
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.openai.models.protocol import BaseModelPath
+from vllm.entrypoints.openai.models.protocol import BaseModelPath, LoRAModulePath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.pooling.base.serving import PoolingBaseServing
 from vllm.entrypoints.pooling.typing import PoolingServeContext
@@ -76,6 +76,27 @@ async def test_load_lora_adapter_success():
     assert len(serving_models.lora_requests) == 1
     assert "adapter" in serving_models.lora_requests
     assert serving_models.lora_requests["adapter"].lora_name == "adapter"
+
+
+@pytest.mark.asyncio
+async def test_show_available_models_lora_card_has_max_model_len():
+    _, mock_engine_client = await _async_serving_models_init_with_mock()
+    # One adapter registered at startup, one loaded at runtime.
+    serving_models = OpenAIServingModels(
+        engine_client=mock_engine_client,
+        base_model_paths=BASE_MODEL_PATHS,
+        lora_modules=[LoRAModulePath(name="static", path="/path/to/static")],
+    )
+    await serving_models.init_static_loras()
+    request = LoadLoRAAdapterRequest(lora_name="runtime", lora_path="/path/to/runtime")
+    await serving_models.load_lora_adapter(request)
+
+    cards = (await serving_models.show_available_models()).data
+    assert {card.id: card.max_model_len for card in cards} == {
+        MODEL_NAME: 2048,
+        "static": 2048,
+        "runtime": 2048,
+    }
 
 
 @pytest.mark.asyncio
