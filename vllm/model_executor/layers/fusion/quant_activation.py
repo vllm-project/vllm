@@ -13,7 +13,10 @@ from dataclasses import dataclass, replace
 
 import torch
 
-from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kNvfp4Dynamic,
+)
 
 
 @dataclass
@@ -46,20 +49,23 @@ class QuantizedActivation:
         )
 
 
-def expose_input_quant_key(layer: torch.nn.Module, kernel) -> None:
-    """Store the kernel's pre-quantized input key on the layer, if any.
+def expose_input_quant_key(
+    layer: torch.nn.Module,
+    kernel,
+    scale_attr: str | None = None,
+) -> None:
+    """Store the kernel's pre-quantized input key and scale attribute on the layer.
 
     This is the bridge from a kernel's input_quant_key() to the layer capability
-    that fusion call sites read through get_input_quant_key. The raw key is left
-    unset when the kernel quantizes its own input.
-
-    TODO(mgoin): Producers also need the consumer's quantization scales (e.g.
-    static input scale, global scale). Expose those here as well so producers
-    do not reach into kernel-specific layer attributes.
+    that fusion call sites read through get_input_quant_key and
+    get_input_quant_scale. The raw key is left unset when the kernel quantizes
+    its own input.
     """
     key = kernel.input_quant_key()
     if key is not None:
         layer._input_quant_key = key
+        if scale_attr is not None:
+            layer._input_quant_scale_attr = scale_attr
 
 
 def get_input_quant_key(layer: torch.nn.Module) -> QuantKey | None:
@@ -67,6 +73,28 @@ def get_input_quant_key(layer: torch.nn.Module) -> QuantKey | None:
     if getattr(layer, "requires_unquantized_input", False):
         return None
     return getattr(layer, "_input_quant_key", None)
+
+
+def get_input_quant_scale(layer: torch.nn.Module) -> torch.Tensor | None:
+    """Return the consumer's static or global input quantization scale, if any.
+
+    Producers call this instead of reaching into kernel-specific attributes
+    like ``layer.input_scale`` or ``layer.input_global_scale_inv``. Because
+    scales are finalized in ``process_weights_after_loading`` (after
+    ``expose_input_quant_key`` runs in ``create_weights``), the scale tensor
+    is resolved dynamically from the layer.
+    """
+    key = get_input_quant_key(layer)
+    if key is None:
+        return None
+    scale_attr = getattr(layer, "_input_quant_scale_attr", None)
+    if scale_attr is not None:
+        return getattr(layer, scale_attr, None)
+    if key == kNvfp4Dynamic:
+        return getattr(layer, "input_global_scale_inv", None)
+    if key.scale.static:
+        return getattr(layer, "input_scale", None)
+    return None
 
 
 def as_quantized_activation(
