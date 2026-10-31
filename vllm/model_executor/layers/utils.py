@@ -18,7 +18,7 @@ from vllm.utils.flashinfer import (
     is_flashinfer_cutedsl_bf16_gemm_supported,
 )
 from vllm.utils.platform_utils import num_compute_units
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, eager_bypass_custom_op
 
 logger = init_logger(__name__)
 
@@ -208,7 +208,7 @@ def cuda_flashinfer_bf16_gemm(
     vllm_backend: str,
     pdl: bool,
 ) -> torch.Tensor:
-    return torch.ops.vllm.cuda_flashinfer_bf16_gemm(
+    return _cuda_flashinfer_bf16_gemm_op(
         x,
         weight,
         bias,
@@ -221,6 +221,9 @@ direct_register_custom_op(
     op_name="cuda_flashinfer_bf16_gemm",
     op_func=cuda_flashinfer_bf16_gemm_impl,
     fake_impl=cuda_flashinfer_bf16_gemm_fake,
+)
+_cuda_flashinfer_bf16_gemm_op = eager_bypass_custom_op(
+    "cuda_flashinfer_bf16_gemm", cuda_flashinfer_bf16_gemm_impl
 )
 
 
