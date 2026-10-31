@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, ClassVar, cast
 
 import torch
 
+from vllm import envs
 from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.common.ops import (
@@ -48,6 +49,41 @@ class DeepseekSparseSWAFlashMLABackend(DeepseekSparseSWABackend):
         return DeepseekSparseSWAFlashMLAMetadataBuilder
 
 
+def _batch_invariant_prefill_chunk_plan(
+    metadata: "DeepseekSparseSWAMetadata",
+    compress_ratio: int,
+    window_size: int,
+) -> list[tuple[int, int, int, int]]:
+    if metadata.num_prefills == 0:
+        return []
+    assert metadata.prefill_seq_lens_cpu is not None
+    assert metadata.prefill_query_lens_cpu is not None
+    prefix_lens = metadata.prefill_seq_lens_cpu - metadata.prefill_query_lens_cpu
+    gather_lens = metadata.prefill_query_lens_cpu + torch.clamp(
+        prefix_lens, min=0, max=window_size - 1
+    )
+    compressed_lens = (
+        torch.zeros_like(metadata.prefill_seq_lens_cpu)
+        if compress_ratio <= 1
+        else torch.div(
+            metadata.prefill_seq_lens_cpu,
+            compress_ratio,
+            rounding_mode="floor",
+        )
+    )
+    compressed_values = compressed_lens.numpy()
+    gather_values = gather_lens.numpy()
+    return [
+        (
+            request_index,
+            request_index + 1,
+            int(compressed_values[request_index]),
+            int(compressed_values[request_index] + gather_values[request_index]),
+        )
+        for request_index in range(metadata.num_prefills)
+    ]
+
+
 class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
     """FlashMLA sparse MLA attention layer for DeepSeek V4 (CUDA)."""
 
@@ -56,6 +92,10 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        if self.max_image_tokens and envs.VLLM_BATCH_INVARIANT:
+            raise NotImplementedError(
+                "The aligned sparse attention path supports text-only DeepSeek V4."
+            )
         self._einsum_recipe, self._tma_aligned_scales = compute_fp8_einsum_recipe()
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
@@ -307,10 +347,26 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             assert self.topk_indices_buffer is not None
             topk_indices = self.topk_indices_buffer[num_decode_tokens:]
             top_k = 0
-        chunk_plan = swa_metadata.get_prefill_chunk_plan(
-            compress_ratio=self.compress_ratio,
-            prefill_chunk_size=self.PREFILL_CHUNK_SIZE,
-        )
+        if envs.VLLM_BATCH_INVARIANT:
+            # The grouped prefill path chooses shared workspace dimensions and
+            # offsets from all requests in a chunk. Its end-to-end attention
+            # output is therefore not bitwise invariant even though the sparse
+            # FlashMLA kernel itself is invariant for identical q/kv/indices.
+            # Keep each request in its own chunk in BI mode so N, M, gathers,
+            # indices and kernel launch geometry depend only on that request.
+            chunk_plan = _batch_invariant_prefill_chunk_plan(
+                swa_metadata,
+                self.compress_ratio,
+                self.window_size,
+            )
+            num_prefills = swa_metadata.num_prefills
+            if len(chunk_plan) > num_prefills:
+                raise RuntimeError("prefill BI launch count exceeded request count")
+        else:
+            chunk_plan = swa_metadata.get_prefill_chunk_plan(
+                compress_ratio=self.compress_ratio,
+                prefill_chunk_size=self.PREFILL_CHUNK_SIZE,
+            )
         assert chunk_plan, "prefill chunk plan must be non-empty when num_prefills > 0"
         workspace_manager = current_workspace_manager()
         combined_topk = round_up(top_k + self.window_size + self.max_image_tokens, 128)
