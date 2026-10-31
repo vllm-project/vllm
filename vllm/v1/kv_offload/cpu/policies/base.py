@@ -130,6 +130,21 @@ class CachePolicy(ABC):
         for keys in key_groups:
             self.touch(keys, req_context)
 
+    def demote(self, keys: Iterable[OffloadKey]) -> None:
+        """Move chunks to the front of the eviction order.
+
+        A hint that the chunks are unlikely to be reused here, for example
+        because a peer has just copied them. Demoted chunks stay cached until
+        evicted, and a later request-scoped access restores their recency. A
+        pinned chunk takes its demoted place once it becomes evictable. The
+        default ignores the hint.
+
+        Args:
+            keys: Cached chunks to demote, head-to-tail as in ``touch``.
+
+        """
+        return
+
     @abstractmethod
     def evict(
         self, n: int, protected: set[OffloadKey]

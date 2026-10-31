@@ -564,6 +564,45 @@ def test_lru_repeated_pin_cycles_compact_lazy_heap_entries():
     assert [evicted_key for evicted_key, _ in evicted] == [key]
 
 
+def _store_request(manager: CPUOffloadingManager, int_hashes: list[int]) -> None:
+    ctx = make_req_context(f"store-{int_hashes}")
+    keys = to_keys(int_hashes)
+    assert manager.prepare_store(keys, ctx) is not None
+    manager.complete_store(keys, ctx)
+    manager.on_request_finished(ctx)
+
+
+def _evict_for(manager: CPUOffloadingManager, int_hash: int) -> list[OffloadKey]:
+    output = manager.prepare_store(to_keys([int_hash]), make_req_context("evict"))
+    assert output is not None
+    return output.evicted_keys
+
+
+def test_lru_demote_evicts_demoted_chunks_first():
+    manager = make_cpu_manager(num_chunks=5, cache_policy="lru")
+    _store_request(manager, [1, 2, 3, 4, 5])  # LRU order: 5, 4, 3, 2, 1
+
+    # Tail first within a call, oldest call first; uncached keys are ignored.
+    assert manager.demote(to_keys([1, 2, 9])) == 2
+    assert manager.demote(to_keys([4])) == 1
+
+    evicted = [_evict_for(manager, int_hash) for int_hash in range(10, 14)]
+    assert evicted == [to_keys([2]), to_keys([1]), to_keys([4]), to_keys([5])]
+
+
+def test_reuse_restores_demoted_chunk():
+    manager = make_cpu_manager(num_chunks=3, cache_policy="lru")
+    _store_request(manager, [1, 2, 3])  # LRU order: 3, 2, 1
+    assert manager.demote(to_keys([3])) == 1
+
+    reuse_ctx = make_req_context("reuse")
+    manager.prepare_load(to_keys([3]), reuse_ctx)
+    manager.complete_load(to_keys([3]), reuse_ctx)
+    manager.on_request_finished(reuse_ctx)
+
+    assert _evict_for(manager, 4) == to_keys([2])
+
+
 def test_reset_discards_stale_request_access_classification():
     manager = make_cpu_manager(num_chunks=1, cache_policy="arc")
     policy = manager._policy
