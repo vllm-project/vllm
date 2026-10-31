@@ -33,7 +33,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     mxfp8_e4m3_quantize,
 )
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import is_weights_pre_processed, replace_parameter
 
 
 class Mxfp8OnlineLinearMethod(OnlineLinearBase):
@@ -43,6 +43,15 @@ class Mxfp8OnlineLinearMethod(OnlineLinearBase):
     """
 
     activation_quant_key: QuantKey | None = None
+
+    @property
+    def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
+        kernel = getattr(self, "kernel", None)
+        return (
+            self.requantization_source is None
+            and kernel is not None
+            and kernel.supports_pre_processed_weights
+        )
 
     def create_weights(
         self,
@@ -74,6 +83,15 @@ class Mxfp8OnlineLinearMethod(OnlineLinearBase):
         self.kernel = init_mxfp8_linear_kernel(weight_shape=layer.weight.shape)
 
     def process_weights_after_loading(self, layer: Module) -> None:
+        if is_weights_pre_processed():
+            if not self.supports_pre_processed_weights:
+                raise RuntimeError(
+                    "Online MXFP8 backend cannot use pre-processed weights"
+                )
+            layer.input_scale = None
+            layer._already_called_process_weights_after_loading = True
+            return
+
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
