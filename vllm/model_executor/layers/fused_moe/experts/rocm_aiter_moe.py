@@ -241,6 +241,7 @@ def aiter_moe_pads(
     intermediate_pad: int,
     activation: MoEActivation,
     use_mxfp4_w4a4: bool,
+    use_mxfp4_w4a16: bool,
     tp_size: int,
 ) -> tuple[int, int]:
     """Round the padding deltas to what AITER's MoE dispatch expects.
@@ -248,8 +249,9 @@ def aiter_moe_pads(
     SITU's A16W4 FlyDSL kernel pads per gate/up half, so its pads pass through
     unrounded. Otherwise the pads are rounded to AITER's CK/FlyDSL tile
     granularity, and at tp_size == 1 the intermediate pad is doubled for the
-    fused gate/up weight. The W4A4 SiLU path doubles it inside AITER, so it is
-    passed undoubled; doubling it here as well masks live intermediate rows.
+    fused gate/up weight. The W4A4 SiLU and W4A16 paths double it inside AITER,
+    so it is passed undoubled; doubling it here as well masks live
+    intermediate rows.
 
     Where AITER doubles it (v0.1.24.post1):
     - CK-Tile stage 1, aiter/fused_moe.py:
@@ -264,7 +266,11 @@ def aiter_moe_pads(
     """
     if activation == MoEActivation.SITU:
         return hidden_pad, intermediate_pad
-    double = tp_size == 1 and not (use_mxfp4_w4a4 and activation == MoEActivation.SILU)
+    double = (
+        tp_size == 1
+        and not use_mxfp4_w4a16
+        and not (use_mxfp4_w4a4 and activation == MoEActivation.SILU)
+    )
     return (
         hidden_pad // 128 * 128,
         intermediate_pad // 64 * 64 * (2 if double else 1),
@@ -407,8 +413,24 @@ def rocm_aiter_fused_experts(
             intermediate_pad,
             activation,
             quant_config.use_mxfp4_w4a4,
+            quant_config.use_mxfp4_w4a16,
             moe_config.tp_size,
         )
+
+        # For W4A16 paths, declare no intermediate padding so AITER's CK-Tile
+        # stage-1 kernel processes the full weight width without the per-column
+        # skip overhead.  Two reasons this is safe:
+        #
+        # - Bias-less (DSv4.1): FlyDSL stage-1 leaves padded columns unwritten
+        #   (ROCm/aiter#6598); zero weights give zero output there.
+        # - Biased (gpt-oss): GptOssMxfp4MoEMethod.get_fused_moe_quant_config
+        #   already pre-pads w1_bias to match the padded weight width so the
+        #   CK-Tile kernel's stride-kargs.N bias access is correct.  Padded
+        #   weight columns are zero, padded bias entries are zero → zero output.
+        #
+        # SITU zeroes its own scratch on a non-zero pad so it is excluded.
+        if quant_config.use_mxfp4_w4a16 and activation != MoEActivation.SITU:
+            intermediate_pad = 0
 
         # AITER's stage1 GEMM needs gate_mode to match how weights were
         # shuffled at load time (oracle/mxfp4.py). gpt-oss uses INTERLEAVE;
