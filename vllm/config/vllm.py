@@ -53,6 +53,7 @@ from .reasoning import ReasoningConfig
 from .scheduler import SchedulerConfig
 from .speculative import EagleModelTypes, NgramGPUTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
+from .tensor_dump import TensorDumpConfig
 from .utils import SupportsHash, config, get_field, replace
 from .watchdog_config import WatchdogConfig
 from .watermarking import WatermarkConfig
@@ -426,6 +427,8 @@ class VllmConfig:
     """
     profiler_config: ProfilerConfig = Field(default_factory=ProfilerConfig)
     """Profiling configuration."""
+    tensor_dump_config: TensorDumpConfig = Field(default_factory=TensorDumpConfig)
+    """Debug tensor capture configuration for eager Model Runner V2."""
     kv_transfer_config: KVTransferConfig | None = None
     """The configurations for distributed KV cache transfer."""
     kv_events_config: KVEventsConfig | None = None
@@ -2133,6 +2136,8 @@ class VllmConfig:
         self._resolve_mm_video_decode_device()
         self._validate_mm_processor_device()
 
+        self._validate_tensor_dump()
+
         if self.use_v2_model_runner:
             self._disable_cudagraphs_for_v2_stock_torch_compile()
             self._validate_v2_model_runner()
@@ -3420,6 +3425,14 @@ class VllmConfig:
                 "proton_graph_attribution=True to capture replayed kernels. "
                 "Enable attribution or use --enforce-eager."
             )
+
+    def _validate_tensor_dump(self) -> None:
+        if self.tensor_dump_config.output_dir is None:
+            return
+        if not self.use_v2_model_runner or not self.model_config.enforce_eager:
+            raise ValueError("Tensor dumping requires eager Model Runner V2")
+        if self.parallel_config.use_ubatching:
+            raise ValueError("Tensor dumping does not support microbatch execution")
 
     def _disable_cudagraphs_for_v2_stock_torch_compile(self) -> None:
         """Run stock torch.compile without CUDA graphs in Model Runner V2.

@@ -66,6 +66,7 @@ from vllm.config import (
     SchedulerConfig,
     SpeculativeConfig,
     StructuredOutputsConfig,
+    TensorDumpConfig,
     UVAOffloadConfig,
     VllmConfig,
     WatchdogConfig,
@@ -780,6 +781,7 @@ class EngineArgs:
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
 
     profiler_config: ProfilerConfig = get_field(VllmConfig, "profiler_config")
+    tensor_dump_config: TensorDumpConfig = get_field(VllmConfig, "tensor_dump_config")
 
     logging_config: LoggingConfig | None = None
     log_level: LogLevel | None = None
@@ -885,6 +887,8 @@ class EngineArgs:
             self.compilation_config = CompilationConfig(**self.compilation_config)
         if isinstance(self.attention_config, dict):
             self.attention_config = AttentionConfig(**self.attention_config)
+        if isinstance(self.tensor_dump_config, dict):
+            self.tensor_dump_config = TensorDumpConfig(**self.tensor_dump_config)
         if isinstance(self.aux_output_config, dict):
             self.aux_output_config = AuxOutputConfig(**self.aux_output_config)
         if self.enable_return_routed_experts:
@@ -1912,6 +1916,9 @@ class EngineArgs:
         vllm_group.add_argument("--profiler-config", **vllm_kwargs["profiler_config"])
         vllm_group.add_argument("--watchdog-config", **vllm_kwargs["watchdog_config"])
         vllm_group.add_argument(
+            "--tensor-dump-config", **vllm_kwargs["tensor_dump_config"]
+        )
+        vllm_group.add_argument(
             "--optimization-level", **vllm_kwargs["optimization_level"]
         )
         vllm_group.add_argument("--performance-mode", **vllm_kwargs["performance_mode"])
@@ -2912,6 +2919,7 @@ class EngineArgs:
             ec_manager_config=self.ec_manager_config,
             reasoning_config=self.reasoning_config,
             profiler_config=self.profiler_config,
+            tensor_dump_config=self.tensor_dump_config,
             additional_config=self.additional_config,
             optimization_level=self.optimization_level,
             performance_mode=self.performance_mode,
