@@ -86,7 +86,9 @@ class KVTransferConfig:
     """Experiment feature flag to enable HND to NHD KV Transfer"""
 
     kv_load_failure_policy: Literal["recompute", "fail"] = "fail"
-    """Policy for handling KV cache load failures.
+    """Policy for handling KV cache load failures, and KV that workers report
+    as lost after it was computed (`KVConnectorOutput.lost_kv_req_ids` /
+    `lost_all_kv`; without a KV transfer config such KV is recomputed).
     'recompute': reschedule the request to recompute failed blocks
     'fail': immediately fail the request with an error finish reason (default)"""
 

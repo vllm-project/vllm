@@ -401,6 +401,24 @@ class KVCacheCoordinator(ABC):
         )
         return all([pool.reset_prefix_cache() for pool in pools])
 
+    def evict_request_blocks(self, request_id: str) -> None:
+        """Evict the request's blocks from the prefix cache, each through the
+        pool that owns it (block IDs are only unique within a pool, e.g.
+        HiSparse keeps a separate host pool)."""
+        for manager in self.single_type_managers:
+            blocks = manager.req_to_blocks.get(request_id)
+            if blocks:
+                manager.block_pool.evict_blocks({block.block_id for block in blocks})
+
+    def evict_all_cached_blocks(self) -> None:
+        """Evict every block of every pool from the prefix cache. Unlike
+        reset_prefix_cache, this also works while blocks are in use."""
+        pools = dict.fromkeys(
+            manager.block_pool for manager in self.single_type_managers
+        )
+        for pool in pools:
+            pool.evict_blocks(set(range(len(pool.blocks))))
+
     def free(self, request_id: str) -> None:
         """Free the blocks for the request.
 

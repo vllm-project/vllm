@@ -811,3 +811,267 @@ def test_resumable_request_handoff():
 
     engine._process_oldest_step()
     assert len(request.output_token_ids) == 1
+
+
+@pytest.mark.parametrize("lost_all", [False, True])
+@pytest.mark.parametrize("pp_size", [1, 3])
+def test_lost_kv_recomputes_with_inflight_output(pp_size: int, lost_all: bool):
+    """KVConnectorOutput.lost_kv_req_ids preempts the requests (their KV is
+    gone on some worker): in-flight output is dropped, they resume with a
+    prefill of all their tokens, and the delivered tokens stay consistent."""
+    from vllm.v1.outputs import KVConnectorOutput
+
+    max_tokens = 24
+    scheduler = _create_async_pp_scheduler(num_spec=0, pp_size=pp_size, num_blocks=64)
+    requests = create_requests(
+        num_requests=6, num_tokens=8, max_tokens=max_tokens, ignore_eos=True
+    )
+    for req in requests:
+        scheduler.add_request(req)
+
+    lost_steps = {5, 12}
+    lost: set[str] = set()
+    processed = 0
+    orig_update = scheduler.update_from_output
+
+    def update_from_output(scheduler_output, model_runner_output):
+        nonlocal processed
+        processed += 1
+        if processed in lost_steps:
+            # E.g. a downstream pipeline stage was replaced: every running
+            # request lost its KV there.
+            ids = {req.request_id for req in scheduler.running}
+            lost.update(ids)
+            model_runner_output.kv_connector_output = (
+                KVConnectorOutput(lost_all_kv=True)
+                if lost_all
+                else KVConnectorOutput(lost_kv_req_ids=ids)
+            )
+        return orig_update(scheduler_output, model_runner_output)
+
+    scheduler.update_from_output = update_from_output
+    resumed_with_all_tokens = []
+    orig_schedule = scheduler.schedule
+
+    def schedule():
+        output = orig_schedule()
+        for new_req in output.scheduled_new_reqs:
+            if new_req.num_computed_tokens == 0 and len(new_req.prefill_token_ids) > 8:
+                resumed_with_all_tokens.append(new_req.req_id)
+        return output
+
+    scheduler.schedule = schedule
+    engine = PipelinedEngine(scheduler, queue_size=pp_size + 1)
+    engine.run()
+
+    assert lost, "test did not report lost KV"
+    assert set(resumed_with_all_tokens) == lost
+    for req in requests:
+        assert req.is_finished()
+        assert req.num_output_tokens == max_tokens
+        _assert_ordered_subset(
+            list(req.output_token_ids), engine.emitted[req.request_id]
+        )
+        _assert_positions_consistent(req, engine)
+        assert getattr(req, "num_stale_output_tokens", 0) == 0
+
+
+def test_lost_kv_fails_requests_under_fail_policy():
+    from vllm.v1.outputs import KVConnectorOutput
+
+    scheduler = _create_async_pp_scheduler(num_spec=0, pp_size=1, num_blocks=64)
+    scheduler.recompute_kv_load_failures = False
+    req0, req1 = create_requests(num_requests=2, num_tokens=8, max_tokens=8)
+    scheduler.add_request(req0)
+    scheduler.add_request(req1)
+    output = scheduler.schedule()
+    model_runner_output = _make_model_runner_output(output)
+    model_runner_output.kv_connector_output = KVConnectorOutput(
+        lost_kv_req_ids={req0.request_id}
+    )
+    scheduler.update_from_output(output, model_runner_output)
+    assert req0.status == RequestStatus.FINISHED_ERROR
+    assert req1.status == RequestStatus.RUNNING
+
+
+def test_lost_kv_evicts_prefix_cache():
+    """A request recomputed after its KV was lost must not resume from its own
+    (now invalid) prefix-cached blocks, and lost_all_kv drops the cache."""
+    from vllm.v1.outputs import KVConnectorOutput
+
+    for lost_all in (False, True):
+        scheduler = create_scheduler(
+            enable_prefix_caching=True, num_blocks=64, block_size=16
+        )
+        (req,) = create_requests(num_requests=1, num_tokens=40, max_tokens=8)
+        scheduler.add_request(req)
+        output = scheduler.schedule()
+        scheduler.update_from_output(output, _make_model_runner_output(output))
+        output = scheduler.schedule()  # decode step
+        model_runner_output = _make_model_runner_output(output)
+        model_runner_output.kv_connector_output = (
+            KVConnectorOutput(lost_all_kv=True)
+            if lost_all
+            else KVConnectorOutput(lost_kv_req_ids={req.request_id})
+        )
+        scheduler.update_from_output(output, model_runner_output)
+        assert req.status == RequestStatus.PREEMPTED
+        output = scheduler.schedule()
+        (resumed,) = output.scheduled_new_reqs
+        assert resumed.num_computed_tokens == 0
+        assert output.num_scheduled_tokens[req.request_id] == 41
+
+
+def _paused_session(scheduler, block_size=16):
+    """Run a resumable request to a paused streaming session that holds KV."""
+    from vllm.sampling_params import SamplingParams
+    from vllm.utils.hashing import sha256
+    from vllm.v1.core.kv_cache_utils import get_request_block_hasher
+    from vllm.v1.request import Request
+
+    session = Request(
+        request_id="session",
+        prompt_token_ids=list(range(1, 41)),
+        sampling_params=SamplingParams(max_tokens=1, ignore_eos=True),
+        pooling_params=None,
+        block_hasher=get_request_block_hasher(block_size, sha256),
+        resumable=True,
+    )
+    scheduler.add_request(session)
+    output = scheduler.schedule()
+    scheduler.update_from_output(output, _make_model_runner_output(output))
+    assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+    assert session.num_computed_tokens > 0
+    assert session in scheduler.kv_holding_waiting
+    return session
+
+
+@pytest.mark.parametrize("lost_all", [False, True])
+def test_lost_kv_resets_paused_streaming_session(lost_all: bool):
+    """A paused streaming session holds KV while it waits for its next input.
+    When that KV is lost it drops its blocks and computed tokens, stays
+    paused, and its next input runs a prefill of all its tokens."""
+    from vllm.sampling_params import SamplingParams
+    from vllm.v1.outputs import KVConnectorOutput
+    from vllm.v1.request import Request
+
+    scheduler = create_scheduler(enable_prefix_caching=True, num_blocks=64)
+    session = _paused_session(scheduler)
+
+    (other,) = create_requests(num_requests=1, num_tokens=8, req_ids=["other"])
+    scheduler.add_request(other)
+    output = scheduler.schedule()
+    model_runner_output = _make_model_runner_output(output)
+    model_runner_output.kv_connector_output = (
+        KVConnectorOutput(lost_all_kv=True)
+        if lost_all
+        else KVConnectorOutput(lost_kv_req_ids={session.request_id})
+    )
+    scheduler.update_from_output(output, model_runner_output)
+
+    assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+    assert session.num_computed_tokens == 0
+    assert session not in scheduler.kv_holding_waiting
+    assert session in scheduler.waiting
+    assert scheduler.kv_cache_manager.get_block_ids(session.request_id) == ([],)
+    # Only lost_all touches running requests that were not reported.
+    assert (other.status == RequestStatus.PREEMPTED) is lost_all
+
+    # The next input resumes the session from scratch, without a cache hit.
+    scheduler.add_request(
+        Request(
+            request_id=session.request_id,
+            prompt_token_ids=[7, 8, 9],
+            sampling_params=SamplingParams(max_tokens=1, ignore_eos=True),
+            pooling_params=None,
+            resumable=True,
+        )
+    )
+    output = scheduler.schedule()
+    (resumed,) = [
+        r for r in output.scheduled_new_reqs if r.req_id == session.request_id
+    ]
+    assert resumed.num_computed_tokens == 0
+    assert output.num_scheduled_tokens[session.request_id] == session.num_tokens
+
+
+def test_lost_kv_fails_paused_streaming_session_under_fail_policy():
+    from vllm.v1.outputs import KVConnectorOutput
+
+    scheduler = create_scheduler(enable_prefix_caching=True, num_blocks=64)
+    scheduler.recompute_kv_load_failures = False
+    session = _paused_session(scheduler)
+    (other,) = create_requests(num_requests=1, num_tokens=8, req_ids=["other"])
+    scheduler.add_request(other)
+    output = scheduler.schedule()
+    model_runner_output = _make_model_runner_output(output)
+    model_runner_output.kv_connector_output = KVConnectorOutput(
+        lost_kv_req_ids={session.request_id}
+    )
+    scheduler.update_from_output(output, model_runner_output)
+    assert session.status == RequestStatus.FINISHED_ERROR
+    assert scheduler.num_waiting_for_streaming_input == 0
+    assert other.status == RequestStatus.RUNNING
+
+
+def test_lost_kv_report_after_owner_left_invalidates_prefix_cache():
+    """A loss report can arrive after its request finished and freed its
+    blocks. Those blocks can no longer be found, so the whole prefix cache
+    is invalidated rather than leaving hashes of lost KV behind."""
+    from vllm.v1.outputs import KVConnectorOutput
+
+    scheduler = create_scheduler(enable_prefix_caching=True, num_blocks=64)
+    req, probe, other = create_requests(
+        num_requests=3, num_tokens=40, same_prompt=True, req_ids=["a", "b", "c"]
+    )
+    scheduler.add_request(req)
+    output = scheduler.schedule()
+    scheduler.update_from_output(output, _make_model_runner_output(output))
+    # Aborted before the step that reports its loss is processed.
+    scheduler.finish_requests(req.request_id, RequestStatus.FINISHED_ABORTED)
+    assert scheduler.kv_cache_manager.get_computed_blocks(probe)[1] == 32
+
+    scheduler.add_request(other)
+    output = scheduler.schedule()
+    model_runner_output = _make_model_runner_output(output)
+    model_runner_output.kv_connector_output = KVConnectorOutput(
+        lost_kv_req_ids={req.request_id}
+    )
+    scheduler.update_from_output(output, model_runner_output)
+    assert scheduler.kv_cache_manager.get_computed_blocks(probe)[1] == 0
+    # A request that did not lose its KV keeps running.
+    assert other.status == RequestStatus.RUNNING
+
+
+def test_lost_kv_evicts_blocks_through_their_owning_pool():
+    """Block IDs are only unique within a pool (HiSparse keeps a host pool
+    beside the GPU pool): eviction goes through each group's own pool, and
+    whole-cache loss visits every distinct pool once."""
+    from types import SimpleNamespace
+
+    from vllm.v1.core.kv_cache_coordinator import KVCacheCoordinator
+
+    def block(block_id):
+        return SimpleNamespace(block_id=block_id)
+
+    gpu_pool = Mock(blocks=[None] * 4)
+    host_pool = Mock(blocks=[None] * 8)
+    coordinator = SimpleNamespace(
+        single_type_managers=[
+            SimpleNamespace(
+                req_to_blocks={"r": [block(1), block(2)]}, block_pool=gpu_pool
+            ),
+            SimpleNamespace(req_to_blocks={"r": [block(3)]}, block_pool=gpu_pool),
+            SimpleNamespace(req_to_blocks={"r": [block(6)]}, block_pool=host_pool),
+        ]
+    )
+
+    KVCacheCoordinator.evict_request_blocks(coordinator, "r")
+    assert gpu_pool.evict_blocks.call_args_list == [(({1, 2},),), (({3},),)]
+    host_pool.evict_blocks.assert_called_once_with({6})
+
+    gpu_pool.reset_mock()
+    host_pool.reset_mock()
+    KVCacheCoordinator.evict_all_cached_blocks(coordinator)
+    gpu_pool.evict_blocks.assert_called_once_with(set(range(4)))
+    host_pool.evict_blocks.assert_called_once_with(set(range(8)))

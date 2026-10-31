@@ -679,6 +679,16 @@ class KVCacheManager:
         """
         self.block_pool.evict_blocks(block_ids)
 
+    def evict_request_blocks(self, request_id: str) -> None:
+        """Evict all blocks of a request from the prefix cache, in every
+        KV cache group and through the pool that owns each block."""
+        self.coordinator.evict_request_blocks(request_id)
+
+    def evict_all_cached_blocks(self) -> None:
+        """Evict every block from the prefix cache, in every pool, including
+        blocks still in use (they stay allocated, only their hashes go)."""
+        self.coordinator.evict_all_cached_blocks()
+
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
         flows to invalidate prefix caching after the weights are updated,
