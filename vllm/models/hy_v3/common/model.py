@@ -66,10 +66,12 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.sequence import IntermediateTensors
-
-from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
-from .utils import (
+from vllm.model_executor.models.interfaces import (
+    MixtureOfExperts,
+    SupportsLoRA,
+    SupportsPP,
+)
+from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     get_spec_layer_idx_from_weight_name,
@@ -78,6 +80,7 @@ from .utils import (
     make_layers,
     maybe_prefix,
 )
+from vllm.sequence import IntermediateTensors
 
 logger = init_logger(__name__)
 
