@@ -21,10 +21,6 @@ from ..utils import (
 MAX_ROWS, WIDTH, STEPS = 4096, 1024, 40
 
 
-def _rows(step: int) -> int:
-    return [MAX_ROWS, 1, 1337, 512][step % 4]
-
-
 def _fill(step: int, rank: int, key: int) -> int:
     return (step * 7 + rank * 3 + key) % 120
 
@@ -50,15 +46,9 @@ def send_buffer_chain_worker(
 
     lag = torch.randn(4096, 4096, device="cuda")
     for step in range(STEPS):
-        n = _rows(step)
+        n = (MAX_ROWS, 1, 1337, 512)[step % 4]
         if not first:
-            received, handles, postprocess = pp_group.irecv_tensor_dict(
-                all_gather_group=get_tp_group()
-            )
-            for handle in handles:
-                handle.wait()
-            for fn in postprocess:
-                fn()
+            received = pp_group.recv_tensor_dict(all_gather_group=get_tp_group())
             expected = {"hidden_states": 0, "residual": 1}
             for key, offset in expected.items():
                 want = _fill(step, rank - 1, offset)
