@@ -31,6 +31,9 @@ from vllm.model_executor.kernels.linear import (
     init_int8_linear_kernel,
     register_linear_kernel,
 )
+from vllm.model_executor.kernels.linear.mixed_precision.MPLinearKernel import (
+    MPLinearLayerConfig,
+)
 from vllm.model_executor.layers.quantization.utils.humming import prioritize_humming
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
@@ -38,6 +41,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.platforms import PlatformEnum
+from vllm.scalar_type import scalar_types
 
 pytestmark = pytest.mark.cpu_test
 
@@ -422,3 +426,34 @@ def test_humming_priority_only_reorders_humming_and_marlin(possible_kernels):
     del names[humming]
     assert names == [k.__name__ for k in original if "Humming" not in k.__name__]
     assert kernels == original
+
+
+@pytest.mark.parametrize(
+    "weight_type,group_size,zero_points,expected",
+    [
+        (scalar_types.uint4b8, 128, False, True),
+        (scalar_types.uint4, 32, True, False),
+        (scalar_types.uint4, 128, True, False),
+        (scalar_types.uint4b8, 32, False, False),
+        (scalar_types.uint8b128, 128, False, False),
+    ],
+)
+def test_humming_priority_sm100_mixed_precision(
+    weight_type, group_size, zero_points, expected
+):
+    """SM100 prefers Humming only for int4 symmetric group-128 weights."""
+    kernels = _POSSIBLE_KERNELS[PlatformEnum.CUDA]
+    config = MPLinearLayerConfig(
+        full_weight_shape=(5120, 5120),
+        partition_weight_shape=(5120, 5120),
+        weight_type=weight_type,
+        act_type=torch.bfloat16,
+        group_size=group_size,
+        zero_points=zero_points,
+    )
+
+    assert prioritize_humming(kernels, compute_capability=100) == kernels
+    names = [k.__name__ for k in prioritize_humming(kernels, 100, mp_config=config)]
+    humming = next(i for i, name in enumerate(names) if "Humming" in name)
+    marlin = next(i for i, name in enumerate(names) if "Marlin" in name)
+    assert (humming < marlin) == expected
