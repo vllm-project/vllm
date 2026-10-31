@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
+import importlib
 from types import SimpleNamespace
 
 import pytest
@@ -549,6 +550,104 @@ def test_combine_topk_swa_indices_keeps_vision_row_width_without_images() -> Non
 
     assert indices.shape == (1, 256)
     assert lens.item() == 1
+
+
+@pytest.mark.parametrize(
+    ("module", "attn_cls", "compress_ratio"),
+    [
+        ("deepseek_v4", "DeepseekV4ROCMAiterMLAAttention", 4),
+        ("deepseek_v41", "DeepseekV41ROCMAiterMLAAttention", 2),
+    ],
+)
+def test_forward_prefill_skips_padding_only_chunk(
+    monkeypatch, module, attn_cls, compress_ratio
+) -> None:
+    """Padded request slots trail the last prefill and count as prefills. Once
+    the real chunk is full by area, they form a chunk with no query rows, which
+    must launch nothing."""
+    from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
+
+    rocm = importlib.import_module(f"vllm.models.{module}.amd.rocm")
+    attn_cls = getattr(rocm, attn_cls)
+    calls = []
+    monkeypatch.setattr(
+        rocm,
+        "dequantize_and_gather_k_cache",
+        lambda kv, cache, **kw: calls.append(("gather", kw["seq_lens"].numel())),
+    )
+    monkeypatch.setattr(
+        rocm,
+        "combine_topk_swa_indices",
+        lambda topk, *a, **kw: calls.append(("combine", topk.shape[0])) or (0, 0),
+    )
+    monkeypatch.setattr(
+        rocm,
+        "rocm_sparse_attn_prefill",
+        lambda **kw: calls.append(("attn", kw["q"].shape[0])),
+    )
+    workspace = SimpleNamespace(
+        get_simultaneous=lambda *shapes: [torch.empty(s, dtype=d) for s, d in shapes]
+    )
+    monkeypatch.setattr(rocm, "current_workspace_manager", lambda: workspace)
+
+    # One decode, one 8-token prefill at 64 tokens of context, five padded slots.
+    query_start_loc = torch.tensor([0, 1, 9, 9, 9, 9, 9, 9], dtype=torch.int32)
+    seq_lens = torch.tensor([64, 0, 0, 0, 0, 0], dtype=torch.int32)
+    swa_metadata = DeepseekSparseSWAMetadata(
+        block_table=torch.zeros((7, 16), dtype=torch.int32),
+        slot_mapping=torch.zeros(9, dtype=torch.int64),
+        block_size=4,
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc,
+        num_decodes=1,
+        num_prefills=6,
+        num_decode_tokens=1,
+        num_prefill_tokens=8,
+        prefill_seq_lens=seq_lens,
+        prefill_seq_lens_cpu=seq_lens,
+        prefill_gather_lens=torch.tensor([11, 0, 0, 0, 0, 0], dtype=torch.int32),
+        prefill_query_lens_cpu=query_start_loc[2:] - query_start_loc[1:-1],
+        prefill_window_size=4,
+        prefill_max_model_len=64,
+        prefill_max_num_batched_tokens=8,
+    )
+    layer = SimpleNamespace(
+        _use_aiter_sparse_mla=False,
+        PREFILL_CHUNK_SIZE=attn_cls.PREFILL_CHUNK_SIZE,
+        compress_ratio=compress_ratio,
+        topk_indices_buffer=torch.zeros((9, 8), dtype=torch.int32),
+        max_model_len=64,
+        max_num_batched_tokens=8,
+        window_size=4,
+        max_image_tokens=0,
+        n_local_heads=1,
+        scale=1.0,
+        head_dim=8,
+        nope_head_dim=4,
+        rope_head_dim=4,
+        attn_sink=None,
+    )
+    if hasattr(attn_cls, "_prefill_workspace_shapes"):
+        layer._prefill_workspace_shapes = functools.partial(
+            attn_cls._prefill_workspace_shapes, layer
+        )
+    q = torch.zeros((8, 1, 8), dtype=torch.bfloat16)
+
+    attn_cls._forward_prefill(
+        layer,
+        q,
+        torch.zeros(8, dtype=torch.int64),
+        torch.empty(0),
+        torch.empty(0),
+        torch.empty_like(q),
+        SimpleNamespace(
+            block_table=torch.zeros((7, 16), dtype=torch.int32), block_size=16
+        ),
+        swa_metadata,
+    )
+
+    # Only the real chunk (the prefill plus three padded slots) runs.
+    assert calls == [("gather", 4), ("gather", 4), ("combine", 8), ("attn", 8)]
 
 
 def test_extra_cache_nan_free_provenance_gate(monkeypatch) -> None:
