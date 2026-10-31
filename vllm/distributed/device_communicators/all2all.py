@@ -1148,7 +1148,9 @@ class MoriEPv2All2AllManager(All2AllManagerBase):
         self._windows.append(window)
         return window
 
-    def _make_handle(self, **kwargs):
+    def _make_handle(self, ubatch_id: int = 0, **kwargs):
+        # ubatch_id is only part of the handle cache key, so each DBO microbatch
+        # gets its own op; MoRI's config does not take it.
         from mori.ops.dispatch_combine_v2 import (
             EpDispatchCombineConfig,
             EpDispatchCombineOp,

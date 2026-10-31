@@ -188,6 +188,19 @@ def maybe_roundup_layer_hidden_size(
     return hidden_size
 
 
+def _make_mori_epv2_ops(
+    all2all_manager: Any, all_to_all_args: dict[str, Any]
+) -> list[Any]:
+    """One MORI EPv2 op per DBO microbatch, or a single op without DBO."""
+    from vllm.v1.worker.ubatch_utils import get_num_ubatches
+
+    num_ops = get_num_ubatches(get_current_vllm_config().parallel_config)
+    return [
+        all2all_manager.get_handle({**all_to_all_args, "ubatch_id": i})
+        for i in range(num_ops)
+    ]
+
+
 def maybe_make_prepare_finalize(
     moe: FusedMoEConfig,
     quant_config: FusedMoEQuantConfig | None,
@@ -350,9 +363,8 @@ def maybe_make_prepare_finalize(
             num_experts_per_rank=num_local_experts,
             num_experts_per_token=moe.experts_per_token,
         )
-        handle = all2all_manager.get_handle(all_to_all_args)
         prepare_finalize = MoriEPv2PrepareAndFinalize(
-            handle,
+            _make_mori_epv2_ops(all2all_manager, all_to_all_args),
             max_tokens_per_rank=moe.max_num_tokens,
             num_dispatchers=all2all_manager.world_size,
             num_local_experts=num_local_experts,

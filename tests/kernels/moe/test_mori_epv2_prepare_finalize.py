@@ -14,6 +14,7 @@ import torch.multiprocessing as mp
 
 import vllm.model_executor.layers.fused_moe.prepare_finalize.mori_epv2 as mori_epv2
 import vllm.utils.import_utils as import_utils
+import vllm.v1.worker.ubatching as ubatching
 from vllm.config.parallel import resolve_mori_all2all
 from vllm.model_executor.layers.fused_moe.prepare_finalize.mori_epv2 import (
     MoriEPv2PrepareAndFinalize,
@@ -56,7 +57,9 @@ class FakeOp:
 
 
 def _make_pf(op, num_local_experts=2, rank_expert_offset=0):
-    return MoriEPv2PrepareAndFinalize(op, 16, 4, num_local_experts, rank_expert_offset)
+    return MoriEPv2PrepareAndFinalize(
+        [op], 16, 4, num_local_experts, rank_expert_offset
+    )
 
 
 def _run(monkeypatch, op, num_tokens_across_dp, topk_ids, **pf_kwargs):
@@ -192,16 +195,26 @@ def test_manager_requires_one_lsa_team(monkeypatch, world_size, lsa_size):
             combine_dtype=None,
             schedule=None,
         )
+        configs: list[dict] = []
+
+        def make_config(**kw):
+            configs.append(kw)
+            return SimpleNamespace(**(cfg | kw))
+
         monkeypatch.setitem(
             sys.modules,
             "mori.ops.dispatch_combine_v2",
             SimpleNamespace(
-                EpDispatchCombineConfig=lambda **kw: SimpleNamespace(**(cfg | kw)),
+                EpDispatchCombineConfig=make_config,
                 EpDispatchCombineOp=lambda config, comm: calls.op,
             ),
         )
         manager = all2all.MoriEPv2All2AllManager(object())
         assert manager.get_handle({}) is calls.op
+        # A DBO microbatch's op is a separate op; its id is not a MORI setting.
+        manager.get_handle({"ubatch_id": 1})
+        assert len(manager._ops) == 2
+        assert all("ubatch_id" not in kw for kw in configs)
         # The cache holds ops weakly; the manager keeps them alive itself.
         manager.handle_cache._cache.clear()
         manager.destroy()
@@ -469,3 +482,117 @@ def test_mori_epv1_kernel_choice(monkeypatch, backend, internode, max_tokens, ke
         num_experts_per_token=8,
     )
     assert kwargs["kernel_type"] == kernel
+
+
+class _DBOProbe:
+    """Stands in for vLLM's ubatching: which microbatch runs, and the handoffs."""
+
+    def __init__(self, monkeypatch, enabled=True):
+        self.ubatch_id = 0
+        self.events: list[tuple] = []
+        monkeypatch.setattr(ubatching, "dbo_enabled", lambda: enabled)
+        monkeypatch.setattr(mori_epv2, "dbo_current_ubatch_id", lambda: self.ubatch_id)
+        monkeypatch.setattr(
+            ubatching,
+            "dbo_yield_and_switch_from_compute_to_comm",
+            lambda: self.events.append(("to_comm", self.ubatch_id)),
+        )
+        monkeypatch.setattr(
+            ubatching,
+            "dbo_switch_to_compute_sync",
+            lambda: self.events.append(("to_compute", self.ubatch_id)),
+        )
+
+
+class _RecordingOp(FakeOp):
+    def __init__(self, name, events, **kwargs):
+        super().__init__(**kwargs)
+        self.name = name
+        self.events = events
+
+    def dispatch(self, *args, **kwargs):
+        self.events.append(("dispatch", self.name))
+        return super().dispatch(*args, **kwargs)
+
+    def combine(self, *args, **kwargs):
+        self.events.append(("combine", self.name))
+        return super().combine(*args, **kwargs)
+
+
+def test_dbo_microbatches_interleave_on_their_own_ops(monkeypatch):
+    dbo = _DBOProbe(monkeypatch)
+    ops = [_RecordingOp(f"op{i}", dbo.events, recv=3 + i) for i in range(2)]
+    ops[1].routing = object()
+    prepare_finalize = MoriEPv2PrepareAndFinalize(ops, 16, 4, 2, 0)
+    # Each microbatch's forward context carries its own DP token counts; the
+    # second microbatch is larger, so its receive bound is too.
+    contexts = [
+        SimpleNamespace(
+            dp_metadata=SimpleNamespace(num_tokens_across_dp_cpu=torch.tensor([n] * 4))
+        )
+        for n in (4, 9)
+    ]
+    monkeypatch.setattr(mori_epv2, "is_forward_context_available", lambda: True)
+    monkeypatch.setattr(
+        mori_epv2, "get_forward_context", lambda: contexts[dbo.ubatch_id]
+    )
+    monkeypatch.setattr(
+        mori_epv2, "get_dp_group", lambda: SimpleNamespace(rank_in_group=0)
+    )
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+    quant_config = SimpleNamespace(is_per_tensor=False, a1_scale=None)
+
+    def prepare(ubatch_id):
+        dbo.ubatch_id = ubatch_id
+        n = (4, 9)[ubatch_id]
+        return prepare_finalize.prepare(
+            torch.ones(n, 4, dtype=torch.bfloat16),
+            torch.ones(n, 2, dtype=torch.bfloat16),
+            torch.zeros(n, 2, dtype=torch.int64),
+            num_experts=8,
+            expert_map=None,
+            apply_router_weight_on_input=False,
+            quant_config=quant_config,
+        )
+
+    def finalize(ubatch_id, prepared):
+        dbo.ubatch_id = ubatch_id
+        prepare_finalize.finalize(
+            torch.empty((4, 9)[ubatch_id], 4, dtype=torch.bfloat16),
+            prepared[0],
+            prepared[4],
+            prepared[3],
+            False,
+            SimpleNamespace(),
+        )
+
+    # The DBO order: both dispatches, then both combines.
+    prepared = [prepare(0), prepare(1)]
+    finalize(0, prepared[0])
+    finalize(1, prepared[1])
+
+    assert dbo.events == [
+        ("to_comm", 0),
+        ("dispatch", "op0"),
+        ("to_compute", 0),
+        ("to_comm", 1),
+        ("dispatch", "op1"),
+        ("to_compute", 1),
+        ("to_comm", 0),
+        ("combine", "op0"),
+        ("to_compute", 0),
+        ("to_comm", 1),
+        ("combine", "op1"),
+        ("to_compute", 1),
+    ]
+    for i, op in enumerate(ops):
+        a1, _, meta, _, _ = prepared[i]
+        # Received rows come from this microbatch's op, bounded by its own
+        # token counts: 4 * 4 rows -> 32 and 4 * 9 rows -> 64.
+        assert a1.data_ptr() == op.recv_a1.data_ptr()
+        assert a1.shape[0] == (32, 64)[i]
+        assert int(meta.expert_num_tokens) == 3 + i
+        # Each combine used the routing of its own microbatch's dispatch.
+        assert op.combine_routing is op.routing
+        assert op.combine_input is not None and op.combine_input.shape[0] == a1.shape[0]
+    assert prepare_finalize._routings == [None, None]
