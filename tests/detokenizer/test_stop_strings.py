@@ -116,5 +116,5 @@ def test_stop_strings():
     _stop_basic(llm)
     _stop_multi_tokens(llm)
     _stop_partial_token(llm)
-    # FIXME: this does not respect include_in_output=False
+    # GPU e2e; CPU coverage is in test_stop_token_ids.py.
     # _stop_token_id(llm)
