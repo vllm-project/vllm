@@ -1197,6 +1197,43 @@ class TestFlashInferDistributionMatch:
             label=f"native top-k={topk} top-p={topp}",
         )
 
+    def test_int_top_k_distribution_matches_theoretical(self):
+        """The Model Runner V2 sampler passes an int top_k when every request
+        shares it. With a vocab of at least 64K and top_k <= 256, FlashInfer
+        then selects the top k first and runs top-p over only those k."""
+        from scipy.stats import chisquare
+
+        from vllm.v1.sample.ops.topk_topp_sampler import flashinfer_sample
+
+        torch.set_default_device(DEVICE_TYPE)
+        torch.manual_seed(self.SEED)
+
+        topk, topp = 20, 0.95
+        vocab = 64 * 1024
+        logits_one = torch.randn((1, vocab), dtype=torch.float32) * 2.0
+        masked = apply_top_k_top_p_pytorch(
+            logits_one.clone(),
+            torch.tensor([topk], dtype=torch.int32),
+            torch.tensor([topp], dtype=torch.float32),
+        )
+        expected_probs = masked.softmax(dim=-1).flatten().cpu().numpy()
+
+        # Sample in chunks: N_SAMPLES full-vocab rows would not fit in memory.
+        rows = 2_000
+        batch = logits_one.expand(rows, vocab).contiguous()
+        p_batch = torch.full((rows,), topp, dtype=torch.float32)
+        counts = torch.zeros(vocab, dtype=torch.int64)
+        for _ in range(self.N_SAMPLES // rows):
+            tokens = flashinfer_sample(batch, topk, p_batch, {})
+            counts += torch.bincount(tokens, minlength=vocab)
+
+        self._chi2_check(
+            counts.cpu().numpy(),
+            expected_probs * self.N_SAMPLES,
+            chisquare,
+            label=f"flashinfer int top-k={topk} top-p={topp}",
+        )
+
     def _chi2_check(self, empirical, expected, chisquare_fn, *, label):
         import numpy as np
 

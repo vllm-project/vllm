@@ -13,6 +13,9 @@ if not torch.cuda.is_available():
     pytest.skip("CUDA required for sampler flag tests", allow_module_level=True)
 
 from vllm.sampling_params import SamplingParams
+from vllm.v1.worker.gpu.input_batch import InputBuffers
+from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+from vllm.v1.worker.gpu.sample import sampler as sampler_module
 from vllm.v1.worker.gpu.sample.logits_processor import (
     LogitsContext,
     LogitsProcessor,
@@ -131,6 +134,86 @@ def test_has_topp_only_rows():
     # The kernel compares top_k against the logits width, so a top_k at or
     # above a narrower logits width counts as no top-k.
     assert has_topp_only_rows([0], vocab_size=10)
+
+
+def _flashinfer_top_k(monkeypatch, params: list[SamplingParams]):
+    """Run Sampler.sample on one row per request and return the top_k argument
+    it hands to FlashInfer."""
+    sampler = _make_sampler()
+    # flashinfer_sample is replaced below, so this also runs on GPUs where the
+    # FlashInfer sampler is disabled (e.g. CI's 16-SM MIG slices).
+    sampler.use_flashinfer = True
+    received = []
+
+    def fake_flashinfer_sample(logits, k, p):
+        received.append(k)
+        return torch.zeros(logits.shape[0], dtype=torch.int32, device=logits.device)
+
+    monkeypatch.setattr(sampler_module, "flashinfer_sample", fake_flashinfer_sample)
+    for req_idx, sampling_params in enumerate(params):
+        sampler.add_request(req_idx, sampling_params)
+    sampler.apply_staged_writes()
+
+    num_reqs = len(params)
+    idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=DEVICE)
+    sampler.sample(
+        torch.randn(num_reqs, VOCAB_SIZE, device=DEVICE),
+        expanded_idx_mapping=idx_mapping,
+        idx_mapping=idx_mapping,
+        idx_mapping_np=np.arange(num_reqs, dtype=np.int32),
+        pos=torch.zeros(num_reqs, dtype=torch.int64, device=DEVICE),
+        input_ids=torch.zeros(num_reqs, dtype=torch.int32, device=DEVICE),
+        expanded_local_pos=torch.zeros(num_reqs, dtype=torch.int32, device=DEVICE),
+        seq_lens_upper_bound_np=np.ones(num_reqs, dtype=np.int64),
+    )
+    assert len(received) == 1
+    return received[0]
+
+
+@pytest.mark.parametrize(
+    ("top_ks", "expected"),
+    [
+        pytest.param([20, 20, 20], 20, id="shared"),
+        pytest.param([20, 30], [20, 30], id="different"),
+        pytest.param([20, 0], [20, VOCAB_SIZE], id="one-without-top-k"),
+        pytest.param([0, 0], None, id="none-with-top-k"),
+    ],
+)
+def test_flashinfer_gets_int_top_k_only_when_requests_share_it(
+    monkeypatch, top_ks: list[int], expected: int | list[int] | None
+):
+    """FlashInfer only takes its faster top-k-first path for an int top_k."""
+    params = [SamplingParams(temperature=0.7, top_k=k, top_p=0.9) for k in top_ks]
+    top_k = _flashinfer_top_k(monkeypatch, params)
+
+    if isinstance(expected, list):
+        assert isinstance(top_k, torch.Tensor)
+        assert top_k.tolist() == expected
+    else:
+        assert type(top_k) is type(expected)
+        assert top_k == expected
+
+
+def test_dummy_sampler_run_profiles_requests_with_different_top_k():
+    """Requests that share a top_k take FlashInfer's leaner path, so the
+    profiling pass must mix top_k values to measure the per-row path."""
+    num_reqs = 4
+    sampler = _make_sampler()
+    runner = SimpleNamespace(
+        model=SimpleNamespace(
+            compute_logits=lambda hidden: torch.randn(
+                num_reqs, VOCAB_SIZE, device=DEVICE
+            )
+        ),
+        input_buffers=InputBuffers(
+            max_num_reqs=num_reqs, max_num_tokens=16, device=DEVICE
+        ),
+        sampler=sampler,
+    )
+
+    GPUModelRunner._dummy_sampler_run(runner, torch.zeros(num_reqs, 8, device=DEVICE))
+
+    assert len(set(sampler.sampling_states.top_k.np[:num_reqs].tolist())) > 1
 
 
 def test_logits_processing_cache_only_checks_active_requests():

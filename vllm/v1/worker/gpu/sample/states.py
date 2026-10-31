@@ -120,6 +120,13 @@ class SamplingStates:
         )
         return top_k, top_p, has_topp_only_rows
 
+    def get_uniform_top_k(self, idx_mapping_np: np.ndarray) -> int | None:
+        """Returns the top_k shared by all the given requests, or None if they
+        differ."""
+        top_k_np = self.top_k.np[idx_mapping_np]
+        top_k = int(top_k_np[0])
+        return top_k if np.all(top_k_np == top_k) else None
+
     def apply_top_k_top_p(
         self,
         logits: torch.Tensor,
