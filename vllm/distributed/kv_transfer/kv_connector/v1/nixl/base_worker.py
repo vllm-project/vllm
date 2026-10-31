@@ -27,6 +27,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
     EngineTransferInfo,
     TransferTopology,
+    check_compressed_kernel_split,
     get_current_attn_backends,
     get_current_attn_backends_and_specs,
     kv_postprocess_blksize_and_layout_on_receive,
@@ -1097,6 +1098,9 @@ class NixlBaseConnectorWorker:
             self.vllm_config, self.kv_cache_config, self.attn_backends
         )
         kernel_block_size = select_common_block_size(self.block_size, backends, specs)
+        check_compressed_kernel_split(
+            self.vllm_config, self.kv_cache_config, kernel_block_size
+        )
         # Number of blocks not accounting for kernel block mismatches
         self._logical_num_blocks = self.num_blocks
         if self.block_size != kernel_block_size:
