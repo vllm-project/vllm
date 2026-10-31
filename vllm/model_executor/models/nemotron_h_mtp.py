@@ -416,6 +416,14 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant):
         )
         return self.logits_processor(self.lm_head, hidden_states)
 
+    def get_top_tokens(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Greedy draft tokens without gathering the full-vocab logits
+        (``use_local_argmax_reduction``)."""
+        assert self.lm_head is not None, (
+            "lm_head not initialized - must be shared from target model"
+        )
+        return self.logits_processor.get_top_tokens(self.lm_head, hidden_states)
+
     def is_unused_checkpoint_weight(self, name: str) -> bool:
         """Only MTP weights are loaded: the embedding and LM head are the
         target's, shared after loading, so a target refit also updates the
