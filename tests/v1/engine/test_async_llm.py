@@ -28,7 +28,7 @@ from vllm.exceptions import (
     VLLMValidationError,
 )
 from vllm.inputs import PromptType
-from vllm.outputs import RequestOutput
+from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.platforms import current_platform
 from vllm.profiler.wrapper import WorkerProfiler
 from vllm.sampling_params import RequestOutputKind
@@ -138,6 +138,37 @@ def test_retryable_request_error_reaches_caller(
 
     with pytest.raises(RetryableRequestError):
         asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("method", "output_type"),
+    [("generate", RequestOutput), ("encode", PoolingRequestOutput)],
+)
+def test_closing_output_stream_early_aborts_request(
+    monkeypatch: pytest.MonkeyPatch, method: str, output_type: type
+):
+    """A caller that stops reading early (client disconnect, `break`, or the
+    generator being garbage collected) aborts the request in the engine."""
+    vllm_config = _mock_vllm_config()
+    vllm_config.profiler_config.should_profile_frontend = False
+    _mock_async_llm_dependencies(monkeypatch)
+    engine = AsyncLLM(vllm_config, MagicMock(), log_stats=False)
+    collector = MagicMock(request_id="r")
+    collector.get_nowait.return_value = MagicMock(spec=output_type, finished=False)
+    monkeypatch.setattr(engine, "add_request", AsyncMock(return_value=collector))
+    abort = AsyncMock()
+    monkeypatch.setattr(engine, "abort", abort)
+    params = SamplingParams() if method == "generate" else PoolingParams(task="embed")
+
+    async def run():
+        outputs = getattr(engine, method)(TEXT_PROMPT, params, "r")
+        async for _ in outputs:
+            break
+        await outputs.aclose()
+
+    asyncio.run(run())
+
+    abort.assert_awaited_once_with("r", internal=True)
 
 
 def test_cuda_profiler_requests_reach_engine_core(monkeypatch: pytest.MonkeyPatch):
