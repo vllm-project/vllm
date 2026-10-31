@@ -7,8 +7,10 @@ from typing import TypeAlias
 import torch
 import torch.nn as nn
 
+from vllm import envs
 from vllm.config.pooler import SequencePoolingType
 from vllm.model_executor.layers.pooler import PoolingParamsUpdate
+from vllm.platforms import current_platform
 from vllm.tasks import PoolingTask
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.pool.metadata import PoolingMetadata
@@ -16,6 +18,7 @@ from vllm.v1.pool.metadata import PoolingMetadata
 SequencePoolingMethodOutput: TypeAlias = torch.Tensor | list[torch.Tensor]
 
 _MEAN_POOL_ACCUMULATION_CHUNK_BYTES = 16 * 1024 * 1024  # 16MB
+_MEAN_POOL_MAX_SEQUENCE_LENGTH = 512
 
 
 class SequencePoolingMethod(nn.Module, ABC):
@@ -74,6 +77,21 @@ class MeanPool(SequencePoolingMethod):
         if num_seqs == 0:
             # early return for empty batch
             return hidden_states.new_empty((0, hidden_size), dtype=torch.float32)
+
+        # Bound each program's serial token loop.
+        if (
+            hidden_states.is_cuda
+            and current_platform.is_cuda()
+            and not envs.VLLM_BATCH_INVARIANT
+            and int(prompt_lens_cpu.max()) <= _MEAN_POOL_MAX_SEQUENCE_LENGTH
+        ):
+            from .mean_pool import segmented_mean
+
+            return segmented_mean(
+                hidden_states,
+                pooling_cursor.first_token_indices_gpu,
+                pooling_cursor.last_token_indices_gpu,
+            )
 
         prompt_lens = async_tensor_h2d(
             prompt_lens_cpu, device=hidden_states.device, dtype=torch.int64
