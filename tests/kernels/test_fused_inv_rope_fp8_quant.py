@@ -838,14 +838,13 @@ def _unfused_inv_rope_fp8_quant(
     ids=["H64_G8"],
 )
 @torch.inference_mode()
-def test_einsum_end_to_end(dist_init, num_tokens, num_heads, n_groups):
+def test_einsum_end_to_end(num_tokens, num_heads, n_groups):
     """End-to-end: fused inv_rope+quant → fp8_einsum must match
     unfused CUDA_rope+quant → fp8_einsum bitwise.
 
     This catches stride/layout bugs that only manifest when the einsum
     kernel actually consumes the quantized activations.
     """
-    from vllm.models.deepseek_v4.common.grouped_wo_a import DeepseekV4GroupedWoA
     from vllm.models.deepseek_v4.nvidia.ops.o_proj import deep_gemm_fp8_o_proj
     from vllm.utils.deep_gemm import (
         fp8_einsum,
@@ -914,12 +913,9 @@ def test_einsum_end_to_end(dist_init, num_tokens, num_heads, n_groups):
     )
 
     # -- FUSED path --
-    with torch.device("meta"):
-        wo_a = DeepseekV4GroupedWoA(
-            d, n_groups * o_lora_rank, bias=False, return_bias=False, disable_tp=True
-        )
-    wo_a.weight = torch.nn.Parameter(w_fp8, requires_grad=False)
-    wo_a.weight_scale = torch.nn.Parameter(w_scale_t, requires_grad=False)
+    wo_a = torch.nn.Module()
+    wo_a.register_buffer("weight", w_fp8)
+    wo_a.register_buffer("weight_scale", w_scale_t)
     z_fused = deep_gemm_fp8_o_proj(
         o.clone(),
         positions,
