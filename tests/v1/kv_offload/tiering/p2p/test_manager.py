@@ -1518,6 +1518,29 @@ def _build_paired_managers() -> tuple[P2PSecondaryTierManager, P2PSecondaryTierM
 class TestBidirectionalManager:
     """Two managers each load FROM and serve TO the other over a single peer."""
 
+    def test_retired_unsent_fetch_releases_parked_producer_blocks(
+        self, lookup_clock, monkeypatch
+    ):
+        from vllm.v1.kv_offload.tiering.p2p.session.client import _PD_LOAD_TIMEOUT_S
+
+        monkeypatch.setenv("VLLM_P2P_HANDSHAKE_TIMEOUT_S", "120")
+        consumer, producer = _build_paired_managers()
+        producer.submit_store(
+            _job_metadata(9, kv_params=_remote_decoder_kv_params("retired"))
+        )
+        params = _remote_prefiller_kv_params("B", 2, kv_request_id="retired")
+        consumer.on_new_request(_req_context(params))
+        consumer.submit_load(_job_metadata(7, kv_params=params))
+        lookup_clock.now = _PD_LOAD_TIMEOUT_S + 1
+        failed = list(consumer.get_finished_jobs())
+        assert len(failed) == 1 and failed[0].job_id == 7 and not failed[0].success
+        producer_results: list[JobResult] = []
+        for _ in range(10):
+            producer_results.extend(producer.get_finished_jobs())
+            list(consumer.get_finished_jobs())
+        assert "retired" not in producer._unbound_stores
+        assert [r.job_id for r in producer_results] == [9]
+
     def test_unanswered_lookup_falls_back_to_local_prefill(self, lookup_clock):
         mgr_a, mgr_b = _build_paired_managers()
         ctx = _req_context(_remote_kv_source_kv_params("B", 2))

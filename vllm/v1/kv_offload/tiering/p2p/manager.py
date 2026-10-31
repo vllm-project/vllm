@@ -1147,6 +1147,13 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             # inline in dispatch, so the replayed add_stored_blocks calls
             # match that demand and submit transfers immediately.
             for kv_request_id in result.new_fetch_ids:
+                if kv_request_id in result.terminal_fetch_ids:
+                    self._kv_to_session.pop(kv_request_id, None)
+                    for batch in self._unbound_stores.pop(kv_request_id, ()):
+                        self._finished_jobs.append(
+                            JobResult(job_id=batch.job_id, success=False)
+                        )
+                    continue
                 if kv_request_id in self._reaped_stores:
                     # This id's blocks were already reaped, so no
                     # submit_store will ever satisfy the demand on_fetch
