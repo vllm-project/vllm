@@ -76,6 +76,13 @@ def test_aux_output_capture_changes_compilation_hash():
     assert disabled.compute_hash() != enabled.compute_hash()
 
 
+def test_aux_output_hash_ignores_max_bytes():
+    assert (
+        AuxOutputConfig(max_bytes=1024).compute_hash()
+        == AuxOutputConfig().compute_hash()
+    )
+
+
 def test_legacy_routed_experts_flag_updates_aux_output_config():
     args = EngineArgs(enable_return_routed_experts=True)
 

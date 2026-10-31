@@ -25,8 +25,6 @@ class AuxOutputConfig:
 
     def compute_hash(self) -> str:
         """Hash AuxOutput settings that alter the model forward graph."""
-        from vllm.config.utils import hash_factors
+        from vllm.config.utils import get_hash_factors, hash_factors
 
-        return hash_factors(
-            {"enable_return_routed_experts": self.enable_return_routed_experts}
-        )
+        return hash_factors(get_hash_factors(self, {"max_bytes"}))
