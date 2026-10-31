@@ -20,7 +20,7 @@ from .column_parallel_linear import (
 )
 
 if TYPE_CHECKING:
-    from vllm.models.deepseek_v4.common.grouped_wo_a import DeepseekV4GroupedWoA
+    from vllm.models.deepseek_v41.common.grouped_wo_a import DeepseekV4GroupedWoA
 
 
 class DeepseekV4GroupedWoAWithLoRA(ColumnParallelLinearWithLoRA):
@@ -51,7 +51,7 @@ class DeepseekV4GroupedWoAWithLoRA(ColumnParallelLinearWithLoRA):
         einsum_recipe: tuple[int, int, int],
         tma_aligned_scales: bool,
     ) -> torch.Tensor:
-        assert not isinstance(o, QuantizedActivation), "RopeQuant is off under LoRA"
+        assert not isinstance(o, QuantizedActivation), "adapter needs BF16 input"
         base = cast("DeepseekV4GroupedWoA", self.base_layer)
         z = base.grouped_forward(
             o,

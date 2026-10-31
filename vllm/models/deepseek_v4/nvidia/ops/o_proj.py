@@ -1,20 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
-from typing import TYPE_CHECKING
 
 import torch
+import torch.nn as nn
 
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
 )
-from vllm.models.deepseek_v4.common.grouped_wo_a import DeepseekV4GroupedWoA
+from vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant import (
+    fused_inv_rope_fp8_quant,
+)
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import get_tma_aligned_size
-
-if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+from vllm.utils.deep_gemm import fp8_einsum, get_tma_aligned_size
 
 
 def compute_fp8_einsum_recipe(
@@ -37,7 +36,7 @@ def deep_gemm_fp8_o_proj(
     o: torch.Tensor | QuantizedActivation,
     positions: torch.Tensor,
     cos_sin_cache: torch.Tensor,
-    wo_a: DeepseekV4GroupedWoA,
+    wo_a: nn.Module,
     wo_b: Callable[[torch.Tensor], torch.Tensor],
     *,
     n_groups: int,
@@ -54,19 +53,53 @@ def deep_gemm_fp8_o_proj(
     layer selects the recipe at initialization. ``wo_b`` is any callable over
     the flattened ``z``: the projection module itself, or a wrapper that also
     reduce-scatters its output (DeepSeek-V4.1 GEMM-RS).
+
+    A QuantizedActivation ``o`` was already rotated and cast by the attention
+    kernel, one ``wo_a`` group per slot with the live groups first, so only
+    the padding groups are sliced off.
     """
-    z = wo_a.grouped_forward(
-        o,
-        positions,
-        cos_sin_cache,
-        n_groups=n_groups,
-        heads_per_group=heads_per_group,
-        nope_dim=nope_dim,
-        rope_dim=rope_dim,
-        o_lora_rank=o_lora_rank,
-        einsum_recipe=einsum_recipe,
-        tma_aligned_scales=tma_aligned_scales,
+    use_fp8 = wo_a.weight.dtype == torch.float8_e4m3fn
+    if isinstance(o, QuantizedActivation):
+        assert use_fp8
+        o_proj_input, o_scale = o.data[:, :n_groups], o.scale[:, :n_groups]
+    else:
+        o_proj_input, o_scale = fused_inv_rope_fp8_quant(
+            o,
+            positions,
+            cos_sin_cache,
+            n_groups=n_groups,
+            heads_per_group=heads_per_group,
+            nope_dim=nope_dim,
+            rope_dim=rope_dim,
+            quant_group_size=einsum_recipe[2],
+            tma_aligned_scales=tma_aligned_scales,
+            quantize=use_fp8,
+        )
+    z = torch.empty(
+        (o_proj_input.shape[0], n_groups, o_lora_rank),
+        device=o_proj_input.device,
+        dtype=torch.bfloat16,
     )
+    if use_fp8:
+        weight_scale = (
+            wo_a.weight_scale
+            if hasattr(wo_a, "weight_scale")
+            else wo_a.weight_scale_inv
+        )
+        fp8_einsum(
+            "bhr,hdr->bhd",
+            (o_proj_input, o_scale),
+            (wo_a.weight, weight_scale),
+            z,
+            recipe=einsum_recipe,
+        )
+    else:
+        grouped_weight = wo_a.weight.view(n_groups, o_lora_rank, -1)
+        torch.bmm(
+            o_proj_input.transpose(0, 1),
+            grouped_weight.transpose(1, 2),
+            out=z.transpose(0, 1),
+        )
     return wo_b(z.flatten(1))
 
 
@@ -79,9 +112,7 @@ _ROPE_QUANT_HEAD_DIM = 512
 _ROPE_QUANT_BLOCK = 128
 
 
-def rope_quant_unsupported_reason(
-    layer: torch.nn.Module, vllm_config: "VllmConfig"
-) -> str | None:
+def rope_quant_unsupported_reason(layer: torch.nn.Module) -> str | None:
     """Why ``layer`` cannot take FlashInfer's fused inverse RoPE + FP8 output.
 
     DSv4 always has 8 heads per ``wo_a`` group at any TP size, and the rest of
@@ -89,9 +120,6 @@ def rope_quant_unsupported_reason(
     cache) is what the SM100 layer uses anyway. What varies is the local head
     count and the configs the layer also serves unquantized.
     """
-    if vllm_config.lora_config is not None:
-        # wo_a's adapter needs the BF16 output, which RopeQuant never writes.
-        return "RopeQuant is incompatible with LoRA"
     if layer.n_local_heads != _ROPE_QUANT_NUM_HEADS:
         # Padding fewer heads up to the kernel's fixed 128 costs more
         # attention than the fused epilogue saves.
