@@ -65,7 +65,7 @@ impl Tokenizer for Utf8SpecialBackend {
                 bytes.push(token_id as u8);
             }
         }
-        Ok(String::from_utf8_lossy(&bytes).into_owned())
+        Ok(String::from_utf8_lossy_owned(bytes))
     }
 
     fn token_to_id(&self, _token: &str) -> Option<u32> {

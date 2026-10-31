@@ -1295,9 +1295,9 @@ async fn run_warmup(
     let start = Instant::now();
 
     let mut handles = Vec::with_capacity(num_warmups);
-    for i in 0..num_warmups {
+    for &delay in schedule.delays.iter().take(num_warmups) {
         // Wait until scheduled time
-        let target = std::time::Duration::from_secs_f64(schedule.delays[i]);
+        let target = std::time::Duration::from_secs_f64(delay);
         let elapsed = start.elapsed();
         if target > elapsed {
             tokio::time::sleep(target - elapsed).await;
