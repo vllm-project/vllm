@@ -197,7 +197,6 @@ def _metadata_launch_pdl() -> bool:
 @triton.jit(
     do_not_specialize=[
         "num_reqs",
-        "num_mapped_tokens",
         "num_tokens",
         "max_num_work",
         "num_search_steps",
@@ -217,7 +216,6 @@ def _build_qsa_metadata_kernel(
     block_table_stride_0: tl.constexpr,
     block_table_stride_1: tl.constexpr,
     num_reqs,
-    num_mapped_tokens,
     num_tokens,
     max_num_work,
     num_search_steps,
@@ -235,6 +233,9 @@ def _build_qsa_metadata_kernel(
         tl.extra.cuda.gdc_wait()
 
     pid = tl.program_id(0)
+    # Read the mapped-token count on device so that a replayed CUDA graph sees
+    # the padding of the replayed batch, not of the captured one.
+    num_mapped_tokens = tl.load(query_start_loc_ptr + num_reqs)
     token_idx = pid * TOKEN_BLOCK_SIZE + tl.arange(0, TOKEN_BLOCK_SIZE)
     store_mask = token_idx < num_tokens
     mapped = token_idx < num_mapped_tokens
@@ -417,7 +418,6 @@ def build_qsa_metadata_triton(
         visible_blocks,
         slot_mapping,
         k_work_metadata_buffer,
-        num_mapped_tokens=int(common_attn_metadata.query_start_loc_cpu[-1]),
         storage_block_size=storage_block_size,
         compress_ratio=compress_ratio,
         circular_buffer_size=circular_buffer_size,
@@ -439,7 +439,6 @@ def _launch_qsa_metadata_kernel(
     slot_mapping: torch.Tensor,
     k_work_metadata_buffer: torch.Tensor | None,
     *,
-    num_mapped_tokens: int,
     storage_block_size: int,
     compress_ratio: int,
     circular_buffer_size: int,
@@ -481,7 +480,6 @@ def _launch_qsa_metadata_kernel(
         block_table.stride(0),
         block_table.stride(1),
         num_reqs,
-        num_mapped_tokens,
         num_tokens,
         max_num_work,
         num_search_steps,
@@ -624,7 +622,6 @@ class QSAIndexerMetadata(AttentionMetadata):
     # Empty for raw or uncompressed caches.
     k_work_metadata: torch.Tensor  # [num_k_work, 2]
     common_slot_mapping: torch.Tensor
-    num_mapped_tokens: int
     num_actual_tokens: int
     num_decodes: int
     num_decode_tokens: int
@@ -755,7 +752,6 @@ class QSAIndexerMetadataBuilder(AttentionMetadataBuilder[QSAIndexerMetadata]):
             visible_blocks=visible_blocks,
             k_work_metadata=k_work_metadata,
             common_slot_mapping=common_attn_metadata.slot_mapping,
-            num_mapped_tokens=int(common_attn_metadata.query_start_loc_cpu[-1]),
             num_actual_tokens=num_tokens,
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
@@ -782,7 +778,6 @@ class QSAIndexerMetadataBuilder(AttentionMetadataBuilder[QSAIndexerMetadata]):
             metadata.visible_blocks,
             metadata.slot_mapping,
             metadata.k_work_metadata if build_k_work else None,
-            num_mapped_tokens=metadata.num_mapped_tokens,
             storage_block_size=self.storage_block_size,
             compress_ratio=self.compress_ratio,
             circular_buffer_size=(
