@@ -55,10 +55,15 @@ class MambaConfig:
     be supported by FlashInfer for the active GPU, state dtype, and decoding
     mode."""
 
-    @field_validator("backend", mode="before")
+    prefill_backend: MambaBackendEnum = MambaBackendEnum.TRITON
+    """Kernel backend for the SSD scan of Mamba2 prefills. "flashinfer" runs
+    FlashInfer's fused SSD scan (SM100/SM103 only); prefills that store Mamba
+    checkpoints always use "triton"."""
+
+    @field_validator("backend", "prefill_backend", mode="before")
     @classmethod
     def validate_backend_before(cls, value: Any) -> Any:
-        """Enable parsing of the `backend` enum type from string."""
+        """Enable parsing of the backend enum fields from strings."""
         if isinstance(value, str):
             return MambaBackendEnum[value.upper()]
         return value
@@ -80,8 +85,23 @@ class MambaConfig:
                 "or omit `--mamba-ssu-algorithm`."
             )
 
+    def validate_prefill_backend(self) -> None:
+        if self.prefill_backend == MambaBackendEnum.CPU:
+            raise ValueError(
+                "Unknown Mamba prefill backend: 'cpu'. "
+                "Valid options are: triton, flashinfer"
+            )
+        if self.prefill_backend == MambaBackendEnum.FLASHINFER:
+            from vllm.platforms import current_platform
+
+            if not current_platform.is_device_capability_family(100):
+                raise ValueError(
+                    "--mamba-prefill-backend flashinfer requires SM100/SM103."
+                )
+
     def __post_init__(self):
         self.validate_ssu_algorithm()
+        self.validate_prefill_backend()
         if self.enable_stochastic_rounding:
             from vllm.platforms import current_platform
 
