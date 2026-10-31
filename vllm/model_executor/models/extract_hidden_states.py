@@ -203,7 +203,15 @@ class CacheOnlyAttentionImpl(AttentionImpl):
             f"KV cache must be {self.kv_cache_torch_dtype}, got {kv_cache.dtype}"
         )
 
-        basic_cache(to_cache, kv_cache, slot_mapping)
+        ranges = getattr(layer, "hidden_state_window_ranges", None)
+        if ranges is None:
+            basic_cache(to_cache, kv_cache, slot_mapping)
+        else:
+            from vllm.model_executor.layers.hidden_state_cache import (
+                store_hidden_state_window,
+            )
+
+            store_hidden_state_window(to_cache, kv_cache, slot_mapping, ranges)
 
     def forward(self, *args, **kwargs):
         # Empty implementation of abstract method
@@ -328,9 +336,12 @@ class ExtractHiddenStatesModel(nn.Module):
         self.target_num_hidden_layers = (
             vllm_config.model_config.get_total_num_hidden_layers()
         )
-        self.num_hidden_states = len(
-            getattr(self.hf_config, "eagle_aux_hidden_state_layer_ids", [])
+        from vllm.distributed.kv_transfer.kv_connector.v1.hidden_state_window import (
+            extraction_layout,
         )
+
+        self.hidden_states_layout, layer_ids = extraction_layout(vllm_config)
+        self.num_hidden_states = len(layer_ids)
 
         cache_config = vllm_config.cache_config
 

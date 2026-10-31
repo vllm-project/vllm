@@ -101,9 +101,12 @@ class KVTransferConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        # no factors to consider.
-        # this config will not affect the computation graph.
         factors: list[Any] = []
+        if (
+            self.kv_connector == "ExampleHiddenStatesConnector"
+            and self.get_from_extra_config("enable_window_capture", False)
+        ):
+            factors.append("hidden_state_window_store")
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
