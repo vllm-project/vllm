@@ -132,3 +132,150 @@ def test_mega_moe_m_values_reach_mega_gate(monkeypatch) -> None:
         use_sequence_parallel=False,
     )
     assert deep_gemm_warmup._get_fp8_fp4_mega_moe_m_values(module, 40) == [16, 32, 40]
+
+
+@pytest.fixture
+def clear_fp8_einsum_warmup_cache():
+    deep_gemm_warmup.FP8_EINSUM_WARMUP_CACHE.clear()
+    yield
+    deep_gemm_warmup.FP8_EINSUM_WARMUP_CACHE.clear()
+
+
+def _dsv4_attention(
+    *,
+    weight_dtype: torch.dtype = torch.float8_e4m3fn,
+    is_bmm: bool = True,
+    recipe: tuple[int, int, int] | None = (1, 128, 128),
+    tma_aligned_scales: bool = False,
+):
+    """Minimal stand-in for a DeepSeek-V4 attention layer's o_proj inputs."""
+    n_groups, o_lora_rank, d = 2, 128, 256
+    wo_a = SimpleNamespace(
+        weight=torch.empty((n_groups, o_lora_rank, d), dtype=weight_dtype),
+        weight_scale_inv=torch.empty(
+            (n_groups, o_lora_rank // 128, d // 128), dtype=torch.float32
+        ),
+        is_bmm=is_bmm,
+    )
+    return SimpleNamespace(
+        wo_a=wo_a,
+        _einsum_recipe=recipe,
+        _tma_aligned_scales=tma_aligned_scales,
+    )
+
+
+def test_fp8_einsum_data_matches_only_fp8_bmm_o_proj() -> None:
+    assert deep_gemm_warmup._fp8_einsum_warmup_data(_dsv4_attention()) is not None
+    assert (
+        deep_gemm_warmup._fp8_einsum_warmup_data(
+            _dsv4_attention(weight_dtype=torch.bfloat16)
+        )
+        is None
+    )
+    assert (
+        deep_gemm_warmup._fp8_einsum_warmup_data(_dsv4_attention(is_bmm=False)) is None
+    )
+    assert (
+        deep_gemm_warmup._fp8_einsum_warmup_data(_dsv4_attention(recipe=None)) is None
+    )
+    assert deep_gemm_warmup._fp8_einsum_warmup_data(SimpleNamespace()) is None
+
+
+def test_fp8_einsum_relax_m_values_cover_small_m_and_boundaries(monkeypatch) -> None:
+    monkeypatch.setenv("VLLM_DEEP_GEMM_WARMUP", "relax")
+    seen_n = []
+
+    def fake_optimal(max_tokens, n, device):
+        seen_n.append(n)
+        return [1, 64, 513, 641, 1025, max_tokens]
+
+    monkeypatch.setattr(
+        deep_gemm_warmup, "_generate_optimal_warmup_m_values", fake_optimal
+    )
+    weight = torch.empty((2, 128, 256), dtype=torch.float8_e4m3fn)
+
+    m_values = deep_gemm_warmup._get_fp8_einsum_m_values(weight, 2048)
+
+    # N for the boundary heuristic is the einsum output width (o_lora_rank).
+    assert seen_n == [128]
+    assert m_values == [*range(1, 33), 64, 513, 641, 1025, 2048]
+
+
+def test_fp8_einsum_full_m_values_cover_every_m(monkeypatch) -> None:
+    monkeypatch.setenv("VLLM_DEEP_GEMM_WARMUP", "full")
+    weight = torch.empty((2, 128, 256), dtype=torch.float8_e4m3fn)
+    assert deep_gemm_warmup._get_fp8_einsum_m_values(weight, 5) == [1, 2, 3, 4, 5]
+
+
+@pytest.mark.parametrize(
+    ("recipe", "tma_aligned_scales", "scale_dtype", "scale_inner"),
+    [
+        ((1, 128, 128), False, torch.float32, 2),  # SM90: FP32 block scales
+        ((1, 1, 128), True, torch.int32, 1),  # SM100: INT32-packed UE8M0
+    ],
+)
+def test_fp8_einsum_warmup_matches_runtime_layout(
+    monkeypatch,
+    clear_fp8_einsum_warmup_cache,
+    recipe,
+    tma_aligned_scales,
+    scale_dtype,
+    scale_inner,
+) -> None:
+    monkeypatch.setattr(
+        deep_gemm_warmup, "_get_fp8_einsum_m_values", lambda weight, max_tokens: [1, 3]
+    )
+    calls = []
+    monkeypatch.setattr(
+        deep_gemm_warmup,
+        "fp8_einsum",
+        lambda eq, a, b, out, *, recipe: calls.append((eq, a, b, out, recipe)),
+    )
+    attn = _dsv4_attention(recipe=recipe, tma_aligned_scales=tma_aligned_scales)
+    weight, weight_scale = attn.wo_a.weight, attn.wo_a.weight_scale_inv
+
+    for _ in range(2):  # the second call is a cache hit
+        deep_gemm_warmup._deepgemm_fp8_einsum_warmup(
+            weight, weight_scale, recipe, tma_aligned_scales, max_tokens=3
+        )
+
+    assert len(calls) == 2
+    for num_tokens, (eq, (a, a_scale), b, out, actual_recipe) in zip([1, 3], calls):
+        aligned_t = deep_gemm_warmup.get_tma_aligned_size(num_tokens, 4)
+        assert eq == "bhr,hdr->bhd"
+        # fused_inv_rope_fp8_quant output: [T, G, D] over a [G, T, D] buffer.
+        assert a.shape == (num_tokens, 2, 256)
+        assert a.dtype == torch.float8_e4m3fn
+        assert a.stride() == (256, num_tokens * 256, 1)
+        assert a_scale.shape == (num_tokens, 2, scale_inner)
+        assert a_scale.dtype == scale_dtype
+        assert a_scale.stride() == (1, scale_inner * aligned_t, aligned_t)
+        assert b[0] is weight and b[1] is weight_scale
+        assert out.shape == (num_tokens, 2, 128) and out.dtype == torch.bfloat16
+        assert actual_recipe == recipe
+
+
+def test_count_warmup_iterations_counts_each_fp8_einsum_shape_once(
+    monkeypatch, clear_fp8_einsum_warmup_cache
+) -> None:
+    layers = [_dsv4_attention(), _dsv4_attention()]  # e.g. two decoder layers
+    monkeypatch.setattr(
+        deep_gemm_warmup,
+        "_fp8_einsum_warmup_data",
+        lambda m: (m.wo_a.weight, m.wo_a.weight_scale_inv, m._einsum_recipe, False)
+        if hasattr(m, "wo_a")
+        else None,
+    )
+    monkeypatch.setattr(deep_gemm_warmup, "_deep_gemm_linear_data", lambda m: None)
+    monkeypatch.setattr(
+        deep_gemm_warmup, "_fused_moe_grouped_gemm_may_use_deep_gemm", lambda m: False
+    )
+    monkeypatch.setattr(
+        deep_gemm_warmup, "_mega_moe_may_use_deep_gemm", lambda m: False
+    )
+    monkeypatch.setattr(
+        deep_gemm_warmup, "_get_fp8_einsum_m_values", lambda w, max_tokens: [1, 2, 3]
+    )
+    model = SimpleNamespace(modules=lambda: iter(layers))
+
+    assert deep_gemm_warmup._count_warmup_iterations(model, 3) == 3
