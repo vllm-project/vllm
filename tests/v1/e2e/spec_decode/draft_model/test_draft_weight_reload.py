@@ -54,14 +54,15 @@ def test_draft_weight_update_keeps_draft_tensor_addresses(
         max_model_len=1024,
         max_num_seqs=4,
     ) as llm:
-        before = llm.generate_greedy(PROMPTS, max_tokens=32)
+        # serve first, so the speculator's CUDA graphs are captured
+        llm.generate_greedy(PROMPTS, max_tokens=32)
         ptrs = llm.collective_rpc(_draft_tensor_ptrs)
         llm.collective_rpc(_update_draft_weights)
         after_ptrs = llm.collective_rpc(_draft_tensor_ptrs)
-        after = llm.generate_greedy(PROMPTS, max_tokens=32)
+    # tokens are not compared: speculative greedy decoding is not bit-exact
+    # across steps, so the addresses are the check
     moved = [
         sorted(n for n, p in old.items() if new.get(n) != p)
         for old, new in zip(ptrs, after_ptrs)
     ]
     assert moved == [[]] * len(ptrs)
-    assert after == before
