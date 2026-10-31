@@ -66,8 +66,8 @@ from vllm.model_executor.layers.quantization.online.lm_head import (
     restore_quantized_lm_heads,
     share_source_lm_heads,
 )
-from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.reload.direct import direct_reload_enabled
+from vllm.model_executor.model_loader.weight_cache.utils import ExternalWeightMemory
 from vllm.model_executor.model_loader.weight_checksum import (
     compute_tensor_digests,
     zero_weights,
@@ -221,6 +221,9 @@ class Worker(WorkerBase):
             distributed_init_method=distributed_init_method,
             is_driver_worker=is_driver_worker,
         )
+        # Track external weight memory charges; initialize here for CPU/XPU
+        # workers that inherit load_model but override init_device.
+        self._external_weights = ExternalWeightMemory()
 
         # configure float32 matmul precision according to vLLM env.
         precision = envs.VLLM_FLOAT32_MATMUL_PRECISION
@@ -547,14 +550,12 @@ class Worker(WorkerBase):
             torch.accelerator.empty_cache()
 
             # Weights from external model loader process
-            external_weight_memory = get_model_loader(
-                self.load_config
-            ).get_external_weight_memory(self.vllm_config)
+            self._external_weights = ExternalWeightMemory.query(self.vllm_config)
 
             # take current memory snapshot after external weights are ready
             self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)
             self.requested_memory = request_memory(
-                init_snapshot, self.cache_config, external_weight_memory
+                init_snapshot, self.cache_config, self._external_weights.bytes
             )
             logger.debug("worker init memory snapshot: %r", self.init_snapshot)
             logger.debug(
@@ -611,8 +612,18 @@ class Worker(WorkerBase):
             set_current_vllm_config(self.vllm_config),
             # 20 MiB is the minimum PyTorch allows for max_split_size_mb.
             self._scoped_allocator_max_split(max_split_size_mb=20),
+            self._external_weights.track_load(),
         ):
             self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
+
+        if self._external_weights.changed:
+            self.requested_memory = request_memory(
+                self.init_snapshot, self.cache_config, self._external_weights.bytes
+            )
+            logger.info(
+                "Updated engine memory budget after disk fallback: %s GiB",
+                format_gib(self.requested_memory),
+            )
 
         if has_ec_transfer():
             get_ec_transfer().start_worker_services()
