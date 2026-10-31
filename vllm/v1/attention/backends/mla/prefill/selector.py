@@ -12,11 +12,15 @@ from typing import TYPE_CHECKING, NamedTuple
 import torch
 
 from vllm.logger import init_logger
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backends.mla.prefill.base import MLADimensions
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
+    from vllm.v1.attention.backends.mla.prefill.registry import (
+        MLAPrefillBackendEnum,
+    )
 
 logger = init_logger(__name__)
 
@@ -35,12 +39,40 @@ class MLAPrefillSelectorConfig(NamedTuple):
         qk_rope_head_dim=0,
         v_head_dim=0,
     )
+    # Prefer backends that can consume an FP8-quantized query. Set when
+    # use_prefill_query_quantization is requested with a quantized KV cache.
+    prefer_query_quantization: bool = False
 
     def __repr__(self):
         return (
             f"MLAPrefillSelectorConfig(dtype={self.dtype}, "
-            f"mla_dimensions={self.mla_dimensions})"
+            f"mla_dimensions={self.mla_dimensions}, "
+            f"prefer_query_quantization={self.prefer_query_quantization})"
         )
+
+
+def _supports_query_quantization(backend: "MLAPrefillBackendEnum") -> bool:
+    try:
+        return backend.get_class().supports_query_quantization
+    except (ImportError, ValueError):
+        return False
+
+
+def prioritize_query_quantization(
+    priorities: list["MLAPrefillBackendEnum"],
+    selector_config: MLAPrefillSelectorConfig,
+) -> list["MLAPrefillBackendEnum"]:
+    """Move backends that can consume an FP8 query to the front.
+
+    Stable, so the platform's relative order is otherwise kept. Without this,
+    an explicit request for FP8 prefill attention is silently dropped when the
+    platform's first choice cannot consume an FP8 query.
+    """
+    if not selector_config.prefer_query_quantization:
+        return priorities
+    return sorted(
+        priorities, key=lambda backend: not _supports_query_quantization(backend)
+    )
 
 
 def get_mla_prefill_backend(
@@ -62,9 +94,23 @@ def get_mla_prefill_backend(
     """
     from vllm.platforms import current_platform
 
+    prefer_query_quantization = False
+    if vllm_config is not None:
+        attention_config = vllm_config.attention_config
+        cache_config = vllm_config.cache_config
+        prefer_query_quantization = bool(
+            attention_config is not None
+            and attention_config.use_prefill_query_quantization
+            and cache_config is not None
+            and is_quantized_kv_cache(cache_config.cache_dtype)
+        )
+
     model_config = vllm_config.model_config if vllm_config is not None else None
     if model_config is None:
-        selector_config = MLAPrefillSelectorConfig(dtype=torch.get_default_dtype())
+        selector_config = MLAPrefillSelectorConfig(
+            dtype=torch.get_default_dtype(),
+            prefer_query_quantization=prefer_query_quantization,
+        )
     else:
         hf_text_config = model_config.hf_text_config
         selector_config = MLAPrefillSelectorConfig(
@@ -74,6 +120,7 @@ def get_mla_prefill_backend(
                 qk_rope_head_dim=getattr(hf_text_config, "qk_rope_head_dim", 0),
                 v_head_dim=getattr(hf_text_config, "v_head_dim", 0),
             ),
+            prefer_query_quantization=prefer_query_quantization,
         )
 
     if current_platform.is_cpu():
