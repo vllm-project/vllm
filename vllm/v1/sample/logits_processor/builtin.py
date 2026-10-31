@@ -103,15 +103,24 @@ class MinPLogitsProcessor(LogitsProcessor):
         if not self.min_p_count:
             return logits
 
-        # Convert logits to probability distribution
-        probability_values = torch.nn.functional.softmax(logits, dim=-1)
-        # Calculate maximum probabilities per sequence
-        max_probabilities = torch.amax(probability_values, dim=-1, keepdim=True)
-        # Adjust min_p
-        adjusted_min_p = max_probabilities.mul_(self.min_p)
-        # Identify valid tokens using threshold comparison
-        invalid_token_mask = probability_values < adjusted_min_p
-        # Apply mask using boolean indexing
+        # Apply min-p directly in log-space to avoid a full-vocab softmax.
+        #
+        # min-p masks tokens whose probability is below ``min_p * max_prob``.
+        # Because softmax is monotonic and uses the same per-row normalizer,
+        # this is equivalent to masking tokens whose logit is below
+        # ``log(min_p) + max_logit``:
+        #
+        #   p_i < min_p * max_j p_j
+        #     <=> exp(logit_i) < min_p * exp(max_j logit_j)
+        #     <=> logit_i < log(min_p) + max_j logit_j
+        #
+        # This replaces the softmax (exp + sum + div over the vocab) with a
+        # cheaper amax reduction plus a small log, producing an identical mask.
+        # For ``min_p == 0`` the threshold becomes ``-inf`` so nothing is
+        # masked, matching the previous behavior.
+        max_logits = torch.amax(logits, dim=-1, keepdim=True)
+        min_p_thresholds = max_logits.add_(torch.log(self.min_p))
+        invalid_token_mask = logits < min_p_thresholds
         logits.masked_fill_(invalid_token_mask, -float("inf"))
         return logits
 
