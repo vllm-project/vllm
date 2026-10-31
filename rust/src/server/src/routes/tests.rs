@@ -3282,6 +3282,47 @@ async fn skip_model_name_validation_serves_unknown_model_with_base_model() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn untrusted_remote_cache_accounting_returns_client_error() {
+    let mut app = test_app().await;
+    for endpoint in ["/v1/completions", "/v1/chat/completions"] {
+        for stream in [false, true] {
+            for cached in [999999, 5] {
+                let mut body = json!({
+                    "model": "Qwen/Qwen1.5-0.5B-Chat", "stream": stream,
+                    "kv_transfer_params": {
+                        "do_remote_prefill": true, "remote_prefill_cached_tokens": cached,
+                    },
+                });
+                if endpoint == "/v1/completions" {
+                    body["prompt"] = json!("hello");
+                } else {
+                    body["messages"] = json!([{"role": "user", "content": "hello"}]);
+                }
+                let response = app
+                    .call(
+                        Request::builder()
+                            .method("POST")
+                            .uri(endpoint)
+                            .header("content-type", "application/json")
+                            .body(Body::from(body.to_string()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+                let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(error["error"]["param"], "kv_transfer_params");
+                assert!(
+                    error["error"]["message"].as_str().unwrap().contains("trusted P/D backend")
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn invalid_request_returns_openai_error() {
     let mut app = test_app().await;
     let response = app

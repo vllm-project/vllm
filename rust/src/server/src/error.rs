@@ -312,6 +312,13 @@ mod tests {
     }
 
     #[test]
+    fn untrusted_cache_accounting_maps_to_invalid_request() {
+        let error = vllm_text::Error::Llm(vllm_llm::Error::UntrustedRemotePrefillCachedTokens);
+        let api_error = text_submit_error("failed to submit completion request", error);
+        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
     fn logprobs_validation_maps_to_invalid_request() {
         let error = vllm_text::Error::Logprobs(vllm_text::LogprobsError::TooManyCount {
             parameter: "logprobs",
