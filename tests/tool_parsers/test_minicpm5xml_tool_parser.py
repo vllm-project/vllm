@@ -756,7 +756,7 @@ def make_tools_write() -> list[ChatCompletionToolsParam]:
 
 
 class TestParameterWhitespace:
-    """CDATA is verbatim, so its whitespace must survive."""
+    """Parameter values are verbatim, so their whitespace must survive."""
 
     def test_cdata_whitespace_preserved(self, parser: ToolParser) -> None:
         request = make_request(make_tools_write())
@@ -792,3 +792,72 @@ class TestParameterWhitespace:
         assert json.loads(reconstructor.tool_calls[0].function.arguments) == {
             "content": "    def foo():\n        pass\n"
         }
+
+    @pytest.mark.parametrize("city", [" ", "Tokyo ", " Tokyo", "Tokyo & Co "])
+    def test_bare_whitespace_streaming_matches_non_streaming(
+        self, parser: ToolParser, city: str
+    ) -> None:
+        """The chat template only wraps values containing <, & or a newline
+        in CDATA, so padded values arrive bare. "Tokyo & Co " is not
+        well-formed XML and takes the regex fallback."""
+        request = make_request(make_tools_weather())
+        chunks = [
+            '<function name="get_weather">',
+            f'<param name="city">{city}</param>',
+            "</function>\n",
+        ]
+
+        out = parser.extract_tool_calls("".join(chunks), request)
+        reconstructor = run_tool_extraction_streaming(
+            MiniCPM5XMLToolParser(MagicMock()),
+            chunks,
+            request,
+            assert_one_tool_per_delta=False,
+        )
+
+        assert json.loads(out.tool_calls[0].function.arguments) == {"city": city}
+        assert len(reconstructor.tool_calls) == 1
+        assert json.loads(reconstructor.tool_calls[0].function.arguments) == {
+            "city": city
+        }
+
+    @pytest.mark.parametrize(
+        "note", ["ok", "Tom & Co"], ids=["well_formed", "regex_fallback"]
+    )
+    def test_padded_non_string_value_keeps_type(
+        self, parser: ToolParser, note: str
+    ) -> None:
+        """Whitespace is only data for strings; a padded Python literal for a
+        non-string param must still parse to its type."""
+        request = make_request(
+            [
+                _tool(
+                    "set_flag",
+                    {
+                        "type": "object",
+                        "properties": {
+                            "note": {"type": "string"},
+                            "enabled": {"type": "boolean"},
+                        },
+                    },
+                )
+            ]
+        )
+        chunks = [
+            '<function name="set_flag">',
+            f'<param name="note">{note}</param>'
+            '<param name="enabled">\n  True\n</param>',
+            "</function>\n",
+        ]
+
+        out = parser.extract_tool_calls("".join(chunks), request)
+        reconstructor = run_tool_extraction_streaming(
+            MiniCPM5XMLToolParser(MagicMock()),
+            chunks,
+            request,
+            assert_one_tool_per_delta=False,
+        )
+
+        expected = {"note": note, "enabled": True}
+        assert json.loads(out.tool_calls[0].function.arguments) == expected
+        assert json.loads(reconstructor.tool_calls[0].function.arguments) == expected
