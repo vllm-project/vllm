@@ -18,6 +18,7 @@ from tests.v1.engine.utils import (
     MockEngineCore,
 )
 from vllm import PoolingParams
+from vllm.config import LoRAConfig
 from vllm.config.watermarking import WatermarkConfig
 from vllm.exceptions import RetryableRequestError, VLLMValidationError
 from vllm.logprobs import FlatLogprobs, Logprob, PromptLogprobs, SampleLogprobs
@@ -1309,14 +1310,17 @@ def test_lora_request_tracking(log_stats: bool, dummy_test_vectors):
     for request in requests:
         output_processor.add_request(request, None)
 
-    # First iteration: process outputs with QUEUED events
+    # A request's events ship with its first output, so QUEUED and SCHEDULED
+    # arrive together. First iteration: only request-0 (lora-1) is scheduled.
+    queued_and_scheduled = [
+        EngineCoreEvent.new_event(EngineCoreEventType.QUEUED, engine_core_timestamp),
+        EngineCoreEvent.new_event(EngineCoreEventType.SCHEDULED, engine_core_timestamp),
+    ]
     outputs = EngineCoreOutputs(
-        outputs=engine_core.get_outputs(), scheduler_stats=SchedulerStats()
+        outputs=engine_core.get_outputs(num_active=1), scheduler_stats=SchedulerStats()
     )
     for output in outputs.outputs:
-        output.events = [
-            EngineCoreEvent.new_event(EngineCoreEventType.QUEUED, engine_core_timestamp)
-        ]
+        output.events = queued_and_scheduled
 
     iteration_stats = IterationStats() if log_stats else None
     output_processor.process_outputs(
@@ -1325,30 +1329,43 @@ def test_lora_request_tracking(log_stats: bool, dummy_test_vectors):
     output_processor.update_scheduler_stats(outputs.scheduler_stats)
 
     if log_stats:
-        # Verify waiting counts
-        assert outputs.scheduler_stats.waiting_lora_adapters.get("lora-1") == 1
-        assert outputs.scheduler_stats.waiting_lora_adapters.get("lora-2") == 1
-        assert outputs.scheduler_stats.running_lora_adapters.get("lora-1") == 0
-        assert outputs.scheduler_stats.running_lora_adapters.get("lora-2") == 0
-        # Verify internal state
-        assert len(output_processor.lora_states.requests) == 2
-        assert "lora-1" in output_processor.lora_states.requests
-        assert "lora-2" in output_processor.lora_states.requests
+        # request-1 (lora-2) has no output yet, so it is still waiting
+        assert outputs.scheduler_stats.waiting_lora_adapters == {"lora-2": 1}
+        assert outputs.scheduler_stats.running_lora_adapters == {"lora-1": 1}
+
+        vllm_config = dummy_test_vectors.vllm_config
+        vllm_config.lora_config = LoRAConfig(max_loras=1)
+        try:
+            PrometheusStatLogger(vllm_config).record(
+                scheduler_stats=outputs.scheduler_stats, iteration_stats=None
+            )
+            lora_info_labels = [
+                sample.labels
+                for metric in prometheus_client.REGISTRY.collect()
+                for sample in metric.samples
+                if sample.name == "vllm:lora_requests_info"
+            ]
+        finally:
+            unregister_vllm_metrics()
+        assert lora_info_labels == [
+            {
+                "max_lora": "1",
+                "running_lora_adapters": "lora-1",
+                "waiting_lora_adapters": "lora-2",
+            }
+        ]
     else:
         # When log_stats=False, no tracking should occur
         assert iteration_stats is None
         assert len(output_processor.lora_states.requests) == 0
 
-    # Second iteration: process outputs with SCHEDULED events
+    # Second iteration: request-1 and request-2 are scheduled
     outputs = EngineCoreOutputs(
         outputs=engine_core.get_outputs(), scheduler_stats=SchedulerStats()
     )
     for output in outputs.outputs:
-        output.events = [
-            EngineCoreEvent.new_event(
-                EngineCoreEventType.SCHEDULED, engine_core_timestamp
-            )
-        ]
+        if output.request_id != "request-0-int":
+            output.events = queued_and_scheduled
 
     iteration_stats = IterationStats() if log_stats else None
     output_processor.process_outputs(
@@ -1357,11 +1374,11 @@ def test_lora_request_tracking(log_stats: bool, dummy_test_vectors):
     output_processor.update_scheduler_stats(outputs.scheduler_stats)
 
     if log_stats:
-        # Verify running counts
-        assert outputs.scheduler_stats.waiting_lora_adapters.get("lora-1") == 0
-        assert outputs.scheduler_stats.waiting_lora_adapters.get("lora-2") == 0
-        assert outputs.scheduler_stats.running_lora_adapters.get("lora-1") == 1
-        assert outputs.scheduler_stats.running_lora_adapters.get("lora-2") == 1
+        assert outputs.scheduler_stats.waiting_lora_adapters == {}
+        assert outputs.scheduler_stats.running_lora_adapters == {
+            "lora-1": 1,
+            "lora-2": 1,
+        }
     else:
         assert iteration_stats is None
         assert len(output_processor.lora_states.requests) == 0
@@ -1839,7 +1856,7 @@ def test_request_rejected_by_engine(runner: str, error, exception_type):
         prompt_token_ids=[1, 2],
         mm_features=None,
         arrival_time=0,
-        lora_request=None,
+        lora_request=LoRARequest("lora-1", 1, "/path/to/lora1"),
         cache_salt=None,
         data_parallel_rank=None,
         sampling_params=SamplingParams() if runner == "generate" else None,
@@ -1863,6 +1880,7 @@ def test_request_rejected_by_engine(runner: str, error, exception_type):
     assert result.reqs_to_abort == ([request.request_id] if request.resumable else [])
     assert not iteration_stats.finished_requests
     assert not iteration_stats.time_to_first_tokens_iter
+    assert not output_processor.lora_states.requests
     with pytest.raises(exception_type, match=error.message):
         queue.get_nowait()
 
