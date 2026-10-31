@@ -10,82 +10,34 @@ RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
 MXFP4_BLOCK_SIZE = 32
 
 
-def _build_decode_scatter_indices(
-    decode_lens: torch.Tensor,
-    num_requests: int,
-    n: int,
+def _build_decode_gather_indices(
+    decode_lens: torch.Tensor, lmax: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Per-token (request id, intra-request index) for a non-uniform decode
-    batch. ``n`` is the graph-padded token count and may be larger than
-    ``decode_lens.sum()`` under adaptive verification. All graph-padding tokens
-    are mapped to a dummy request that is appended as the last one
-    (``idx=num_requests``).
+    """Source indices and validity mask for a padded [requests, lmax] grid.
 
-    Shared by every ``_scatter_decode_tokens_by_request`` call in a step:
-    building it per call would repeat the same repeat_interleave/cumsum chain
-    up to 5x per layer on the eager decode break.
+    Reused across token tensors in a step. Graph-padding input rows are ignored.
     """
-    device = decode_lens.device
     dl = decode_lens.to(torch.int64)
-    # FULL CUDA graphs pad to the captured token count. Adaptive verification
-    # changes the live per-request lengths only on the GPU, so the padding
-    # amount must remain device-resident too.
-    graph_padding = n - dl.sum()
-    dl_with_dummy = torch.cat((dl, graph_padding.reshape(1)))
-    req_id = torch.repeat_interleave(
-        torch.arange(num_requests + 1, device=device, dtype=torch.int64),
-        dl_with_dummy,
-        output_size=n,
-    )
-    req_starts = torch.cumsum(
-        torch.cat(
-            [
-                torch.zeros(1, device=device, dtype=torch.int64),
-                dl_with_dummy[:-1],
-            ]
-        ),
-        dim=0,
-    )
-    # Broadcast the per-request start offsets to per-token (length n ==
-    # dl_with_dummy.sum()) so each token's intra-request index subtracts its
-    # own request's start.
-    starts = torch.repeat_interleave(req_starts, dl_with_dummy, output_size=n)
-    intra = torch.arange(n, device=device, dtype=torch.int64) - starts
-    # Padding may produce arbitrarily large intra-request indices, while the
-    # the dummy request has a fixed width. Since padding values are ignored,
-    # map every padding token to column zero.
-    intra = torch.where(req_id == num_requests, 0, intra)
-    return req_id, intra
+    starts = dl.cumsum(0) - dl
+    columns = torch.arange(lmax, device=dl.device)
+    indices = starts[:, None] + columns[None, :]
+    valid = columns[None, :] < dl[:, None]
+    # Invalid cells still need in-bounds indices before gathering.
+    indices = torch.where(valid, indices, 0)
+    return indices, valid
 
 
-def _scatter_decode_tokens_by_request(
+def _gather_decode_tokens_by_request(
     tokens: torch.Tensor,
-    pad_value,
-    num_requests: int,
-    lmax: int,
-    scatter_indices: tuple[torch.Tensor, torch.Tensor],
+    pad_value: int | float,
+    gather_indices: tuple[torch.Tensor, torch.Tensor],
 ) -> torch.Tensor:
-    """Group ``[N, ...]`` decode tokens into a padded ``[num_requests, lmax, ...]``
-    layout: request ``r``'s tokens at row ``r`` in order; short requests padded.
-
-    Unlike ``pack_seq_triton`` this is dtype-agnostic (needed for the int32
-    slot/pos tensors) — it scatters with the shared per-step indices from
-    ``_build_decode_scatter_indices``. Used only for the non-uniform
-    (``requires_padding``) decode batch; uniform batches use a zero-copy
-    reshape.
-    """
-    req_id, intra = scatter_indices
-    # The final row is the dummy request. It receives graph-padding tokens and
-    # is removed from the result. This avoids out-of-bounds advanced indexing
-    # without letting padding overwrite a live request's first token.
-    out = torch.full(
-        (num_requests + 1, lmax, *tokens.shape[1:]),
-        pad_value,
-        dtype=tokens.dtype,
-        device=tokens.device,
-    )
-    out[req_id, intra] = tokens
-    return out[:num_requests]
+    """Group [N, ...] tokens by request, filling short or empty rows with padding."""
+    indices, valid = gather_indices
+    if tokens.shape[0] == 0:
+        return tokens.new_full((*indices.shape, *tokens.shape[1:]), pad_value)
+    mask = valid.reshape(*valid.shape, *([1] * (tokens.ndim - 1)))
+    return torch.where(mask, tokens[indices], pad_value)
 
 
 def _decode_topk_seq_lens(
@@ -112,15 +64,9 @@ def _decode_topk_seq_lens(
     n = batch_size * next_n
     if not requires_padding:
         return positions[:n].to(torch.int32) + 1
-    scatter_idx = _build_decode_scatter_indices(
-        decode_lens, batch_size, num_decode_tokens
-    )
-    padded = _scatter_decode_tokens_by_request(
-        positions[:num_decode_tokens].to(torch.int32),
-        -1,
-        batch_size,
-        next_n,
-        scatter_idx,
+    gather_idx = _build_decode_gather_indices(decode_lens, next_n)
+    padded = _gather_decode_tokens_by_request(
+        positions[:num_decode_tokens].to(torch.int32), -1, gather_idx
     )
     return padded.reshape(n) + 1  # pad rows: -1 + 1 = 0 -> empty tail
 
