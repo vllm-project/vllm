@@ -34,6 +34,18 @@ vllm serve <hybrid-model> \
 
 Choose a value that divides the block size of every prefix-cacheable KV cache group, and that is a multiple of the per-state compression ratio for models that use one, such as sparse MLA. vLLM validates both at startup and names the offending sizes in the error. Read the served block size from the startup log. 64 is a reasonable starting point.
 
+### Evicting superseded Mamba states first
+
+In a multi-turn conversation, each turn caches the Mamba state at the end of its prompt. Once the next turn resumes from that state and caches a deeper one, the old state is superseded: later turns resume from the deeper state. Resuming also made the old state recently used, so LRU keeps it longer than the context of conversations that have been idle since. `--prefix-cache-eviction-policy mamba_aware_lru` evicts superseded states before every other cached block, which leaves more of the cache to live conversations. The default, `lru`, keeps plain LRU order.
+
+```bash
+vllm serve <hybrid-model> \
+    --enable-prefix-caching \
+    --prefix-cache-eviction-policy mamba_aware_lru
+```
+
+A superseded state still serves requests that branch off between it and the deeper state, such as a regenerated turn or a forked sub-task, and those requests find it evicted sooner than under `lru`. Shared-prefix junction states keep their LRU order. The policy pays off when multi-turn traffic, such as agentic coding sessions, fills the GPU prefix cache.
+
 ## Example workloads
 
 We describe two example workloads, where APC can provide huge performance benefit:
