@@ -104,11 +104,32 @@ def _warmup_ll_bf16_router_gemm(model: torch.nn.Module) -> None:
     )
 
 
+def _warmup_skinny_gemm(model: torch.nn.Module) -> None:
+    from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
+        SkinnyGemmConfig,
+        shape_dynamic_skinny_gemm,
+    )
+    from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm_plans import (
+        get_skinny_gemm_plan,
+    )
+
+    configs: set[SkinnyGemmConfig] = set()
+    for module in model.modules():
+        if not getattr(module, "use_skinny_gemm", False):
+            continue
+        plan = get_skinny_gemm_plan(*module.weight.shape)
+        if plan is not None:
+            configs.update(plan.values())
+    if configs:
+        # Compiled by cutedsl_warmup() below.
+        shape_dynamic_skinny_gemm.request_warmup_configs(torch.bfloat16, configs)
+
+
 def _warmup_bf16x3_router_gemm(
     model: torch.nn.Module,
     max_num_tokens: int,
 ) -> None:
-    from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_cutedsl import (  # noqa: E501
+    from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_sm100 import (  # noqa: E501
         warmup_bf16x3_router_gemm,
     )
     from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
@@ -162,9 +183,6 @@ def _autotune_kimi_k3_kda_qkvg(model: torch.nn.Module) -> None:
 
 
 def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
-    from vllm.model_executor.warmup.minimax_m3_msa_warmup import (
-        minimax_m3_msa_warmup,
-    )
     from vllm.model_executor.warmup.step5_dsa_warmup import step5_dsa_warmup
 
     if not worker.use_v2_model_runner:
@@ -222,6 +240,7 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         # TODO(roberto): Remove after registered CuTeDSL warmups are migrated
         # to the shared JIT warmup infrastructure.
         # https://github.com/vllm-project/vllm/pull/47451
+        _warmup_skinny_gemm(worker.get_model())
         cutedsl_warmup()
 
     if process_local_only:
@@ -249,7 +268,13 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
 
     b12x_warmup(worker, cudagraph_capture_sizes)
 
-    minimax_m3_msa_warmup(worker)
+    if current_platform.is_cuda():
+        # The MSA kernels, and the CuTe DSL their modules import, are CUDA-only.
+        from vllm.model_executor.warmup.minimax_m3_msa_warmup import (
+            minimax_m3_msa_warmup,
+        )
+
+        minimax_m3_msa_warmup(worker)
 
     # Allocate the exact decode-sized workspace, autotune cache misses, and
     # resolve every CUDA Graph bucket before capture begins.

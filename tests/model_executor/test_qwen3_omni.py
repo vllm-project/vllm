@@ -387,6 +387,7 @@ def test_dspark_shares_target_embedding_with_smaller_draft_vocabulary():
             attention_backend=None,
             kv_cache_dtype=None,
             draft_load_config=None,
+            draft_lm_head_quantization=None,
         ),
         parallel_config=ParallelConfig(),
         attention_config=SimpleNamespace(backend=None),
