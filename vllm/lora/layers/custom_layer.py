@@ -6,11 +6,37 @@
 Add LoRA support for custom layers that require specialized handling here.
 """
 
+import torch
+
 from .base_linear import BaseLinearLayerWithLoRA
 from .column_parallel_linear import (
     ColumnParallelLinearWithLoRA,
     MergedColumnParallelLinearWithLoRA,
 )
+
+
+class DeepseekV4CompressorKVScoreWithLoRA(MergedColumnParallelLinearWithLoRA):
+    """Adds the adapter delta to the compressor's FP32 ``wkv``/``wgate`` output."""
+
+    def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
+        output = self.base_layer(x)
+        # Punica expand writes in the LoRA dtype, so build the delta separately.
+        delta = torch.zeros_like(output, dtype=self.lora_b_stacked[0].dtype)
+        return output.add_(self._apply_lora_to_output(x, delta))
+
+    @classmethod
+    def can_replace_layer(
+        cls,
+        source_layer,
+        lora_config,
+        packed_modules_list,
+        model_config=None,
+        decorate: bool = True,
+    ) -> bool:
+        return (
+            type(source_layer).__name__ == "DeepseekV4CompressorKVScoreLinear"
+            and len(packed_modules_list) == 2
+        )
 
 
 class Step5FusedQKVIndexerWithLoRA(MergedColumnParallelLinearWithLoRA):

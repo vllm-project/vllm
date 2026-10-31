@@ -4,6 +4,7 @@
 import random
 from copy import deepcopy
 from dataclasses import dataclass
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -31,6 +32,7 @@ from vllm.lora.layers import (
 )
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.punica_wrapper import get_punica_wrapper
+from vllm.lora.utils import from_layer
 from vllm.model_executor.layers.fusion.quant_activation import (
     get_input_quant_key,
 )
@@ -1821,3 +1823,92 @@ def test_replicated_lora_preserves_base_forward_for_subclasses(
     merged_result = merged_layer(torch.cat(inputs))[0]
 
     torch.testing.assert_close(lora_result, merged_result, rtol=rtol, atol=atol)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA compressor projection")
+@pytest.mark.parametrize("aux_stream", [False, True])
+def test_dsv4_compressor_projections_apply_lora_with_fp32_output(
+    default_vllm_config, dist_init, aux_stream
+):
+    """Adapters on DeepSeek-V4's main and indexer compressor ``wkv``/``wgate``
+    must reach the FP32 kv_score; tokens without one keep the base result."""
+    from vllm.lora.layers import DeepseekV4CompressorKVScoreWithLoRA
+    from vllm.models.deepseek_v4.attention import DeepseekV4Attention
+    from vllm.models.deepseek_v4.compressor import DeepseekV4CompressorKVScoreLinear
+
+    torch.manual_seed(0)
+    tokens, columns, rank = 17, 256, 8
+    # Per-slice output size of the main and the indexer compressor.
+    sizes = (256, 128)
+    config = LoRAConfig(max_loras=2, max_lora_rank=rank, lora_dtype=torch.bfloat16)
+    ids = [i % 3 for i in range(tokens)]
+    with torch.device("cuda"), torch.inference_mode():
+        x = torch.randn(tokens, columns, dtype=torch.bfloat16)
+
+        def kv_scores(main, indexer):
+            attention = SimpleNamespace(
+                aux_stream_list=[torch.cuda.Stream() for _ in range(3)]
+                if aux_stream
+                else None,
+                ln_events=[torch.cuda.Event() for _ in range(4)],
+                compressor=SimpleNamespace(fused_wkv_wgate=main),
+                indexer=SimpleNamespace(
+                    weights_proj=lambda values: (values[:, :1], None),
+                    compressor=SimpleNamespace(fused_wkv_wgate=indexer),
+                ),
+                _fused_wqa_wkv_gemm=lambda values: values,
+            )
+            _, kv_score, indexer_kv_score, _ = (
+                DeepseekV4Attention._run_parallel_input_projections(attention, x)
+            )
+            return kv_score, indexer_kv_score
+
+        bases = []
+        for size in sizes:
+            base = DeepseekV4CompressorKVScoreLinear(
+                columns,
+                [size, size],
+                bias=False,
+                return_bias=False,
+                disable_tp=True,
+                params_dtype=torch.bfloat16,
+            )
+            base.weight.copy_(torch.randn_like(base.weight) / columns**0.5)
+            bases.append(base)
+        baselines = kv_scores(*bases)
+        for base, baseline in zip(bases, baselines):
+            # Without LoRA the layer must match the raw FP32 GEMM bit for bit.
+            reference = torch.mm(x, base.weight.T, out_dtype=torch.float32)
+            torch.testing.assert_close(baseline, reference, rtol=0, atol=0)
+
+        punica = get_punica_wrapper(tokens, tokens, x.device, lora_config=config)
+        layers, expected = [], []
+        for base, baseline, size in zip(bases, baselines, sizes):
+            layer = from_layer(base, 2, config, ["wkv", "wgate"])
+            assert isinstance(layer, DeepseekV4CompressorKVScoreWithLoRA)
+            layer.set_mapping(punica)
+            target = baseline.clone()
+            for slot in range(2):
+                a = [
+                    torch.randn(rank, columns, dtype=torch.bfloat16) / columns**0.5
+                    for _ in range(2)
+                ]
+                b = [
+                    torch.randn(size, rank, dtype=torch.bfloat16) / 8 for _ in range(2)
+                ]
+                layer.set_lora(slot, a, b)
+                active = torch.tensor([value == slot + 1 for value in ids])
+                for i in range(2):
+                    delta = F.linear(F.linear(x, a[i]), b[i]).float()
+                    target[active, i * size : (i + 1) * size] += delta[active]
+            layers.append(layer)
+            expected.append(target)
+        punica.update_metadata(LoRAMapping(ids, [1], is_prefill=True), [1, 2], 3, 128)
+
+        inactive = torch.tensor([value == 0 for value in ids])
+        for actual, target, baseline in zip(kv_scores(*layers), expected, baselines):
+            assert actual.dtype == torch.float32
+            torch.testing.assert_close(actual, target, rtol=0.02, atol=0.02)
+            torch.testing.assert_close(
+                actual[inactive], baseline[inactive], rtol=0, atol=0
+            )
