@@ -617,17 +617,32 @@ def test_v2_frontend_config_can_be_created_without_triton():
     )
 
 
-def test_hisparse_requires_v2_model_runner():
-    config = object.__new__(VllmConfig)
-    config.attention_config = AttentionConfig(hisparse_config=HiSparseConfig())
+@pytest.mark.parametrize(
+    ("overrides", "feature"),
+    [
+        (
+            {"attention_config": AttentionConfig(hisparse_config=HiSparseConfig())},
+            "HiSparse",
+        ),
+        ({"watermark_config": WatermarkConfig(key=42)}, "watermarking"),
+    ],
+)
+def test_v1_model_runner_rejects_v2_only_config(overrides, feature):
+    config = SimpleNamespace(
+        parallel_config=ParallelConfig(distributed_executor_backend="mp"),
+        scheduler_config=SchedulerConfig.default_factory(async_scheduling=False),
+        attention_config=AttentionConfig(),
+        watermark_config=None,
+        speculative_config=None,
+        model_config=None,
+    )
+    config._dflash_needs_multi_kv_group = lambda: False
+    config._is_dflash_candidate_draft = lambda: False
+    assert VllmConfig._get_v1_model_runner_unsupported_features(config) == []
 
-    with patch.object(envs, "VLLM_USE_V2_MODEL_RUNNER", None):
-        assert config.use_v2_model_runner
-    with (
-        patch.object(envs, "VLLM_USE_V2_MODEL_RUNNER", False),
-        pytest.raises(ValueError, match="requires Model Runner V2"),
-    ):
-        _ = config.use_v2_model_runner
+    for name, value in overrides.items():
+        setattr(config, name, value)
+    assert VllmConfig._get_v1_model_runner_unsupported_features(config) == [feature]
 
 
 def test_hisparse_rejects_decode_context_parallelism(monkeypatch):
@@ -1513,6 +1528,8 @@ def test_v1_model_runner_rejects_v2_only_features():
             distributed_executor_backend="mp",
         ),
         scheduler_config=SchedulerConfig.default_factory(async_scheduling=False),
+        attention_config=AttentionConfig(),
+        watermark_config=None,
         speculative_config=None,
         model_config=None,
     )
@@ -1700,6 +1717,8 @@ def test_v1_model_runner_rejects_pipeline_parallelism_with_async_scheduling():
             distributed_executor_backend="mp",
         ),
         scheduler_config=SchedulerConfig.default_factory(async_scheduling=False),
+        attention_config=AttentionConfig(),
+        watermark_config=None,
         speculative_config=None,
         model_config=None,
     )
@@ -4095,18 +4114,6 @@ def test_watermark_key_is_excluded_from_serialization():
     )
 
     assert "key" not in serialized
-
-
-def test_watermarking_forces_model_runner_v2(monkeypatch):
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
-
-    with patch("vllm.config.vllm.logger.info_once") as info_once:
-        assert _watermarked_vllm_config().use_v2_model_runner
-
-    info_once.assert_called_once_with(
-        "Watermarking requires Model Runner V2 and overrides "
-        "VLLM_USE_V2_MODEL_RUNNER=0."
-    )
 
 
 @patch("vllm.config.ModelConfig")
