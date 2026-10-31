@@ -9,6 +9,7 @@ from vllm.config import (
     CacheConfig,
     DiffusionConfig,
     ECTransferConfig,
+    KVEventsConfig,
     KVTransferConfig,
     LoRAConfig,
     ModelConfig,
@@ -93,6 +94,7 @@ def create_scheduler(
     scheduler_cls: type[Scheduler] | None = None,
     lora_config: LoRAConfig | None = None,
     speculative_config: SpeculativeConfig | None = None,
+    kv_events_config: KVEventsConfig | None = None,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -217,6 +219,7 @@ def create_scheduler(
             data_parallel_size=data_parallel_size,
         ),
         kv_transfer_config=kv_transfer_config,
+        kv_events_config=kv_events_config,
         speculative_config=speculative_config,
         diffusion_config=diffusion_config,
         ec_transfer_config=ec_transfer_config,
