@@ -438,8 +438,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
     """
 
     supports_dense_mha_prefill: ClassVar[bool] = True
-    # Under PCP+DCP only the decode rows carry an LSE; the base forward
-    # merges a full-batch LSE, so subclasses opt in with their own forward.
+    # PCP+DCP is validated per model; subclasses opt in.
     supports_pcp_dcp: ClassVar[bool] = False
 
     def __init__(
@@ -464,6 +463,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         non_causal_multi_token_decode: bool = False,
         sliding_window: int | None = None,
         prefill_backend_cls: type[MLAPrefillBackend] | None = None,
+        kv_sharing_target_layer_name: str | None = None,
         **extra_impl_args,
     ):
         super().__init__()
@@ -479,6 +479,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.W_UK_T_dcp_qrep: torch.Tensor | None = None
         self.head_size = kv_lora_rank + qk_rope_head_dim
         self.layer_name = prefix
+        self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
         self.indexer = indexer
         self.non_causal_multi_token_decode = non_causal_multi_token_decode
         self.sliding_window = sliding_window
@@ -583,7 +584,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             kv_cache_dtype=self.kv_cache_dtype,
             logits_soft_cap=None,
             attn_type=AttentionType.DECODER,
-            kv_sharing_target_layer_name=None,
+            kv_sharing_target_layer_name=kv_sharing_target_layer_name,
             # MLA Args
             q_lora_rank=self.q_lora_rank,
             kv_lora_rank=self.kv_lora_rank,
@@ -853,16 +854,17 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
             )
             layer_slot_mapping = slot_mapping.get(self.layer_name)
-            self.prepare_kv_cache_update(attn_metadata)
-            self.update_kv_cache(
-                kv_c_normed,
-                k_pe,
-                self_kv_cache,
-                layer_slot_mapping,
-                attn_metadata,
-                self.kv_cache_dtype,
-                self._k_scale,
-            )
+            if self.kv_sharing_target_layer_name is None:
+                self.prepare_kv_cache_update(attn_metadata)
+                self.update_kv_cache(
+                    kv_c_normed,
+                    k_pe,
+                    self_kv_cache,
+                    layer_slot_mapping,
+                    attn_metadata,
+                    self.kv_cache_dtype,
+                    self._k_scale,
+                )
             if self.hisparse_cache is not None:
                 self.hisparse_cache.finish_kv_update()
             output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
@@ -878,13 +880,15 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             return output
         else:
             encoded = _encode_layer_name(self.layer_name)
-            kv_cache_dummy_dep = torch.ops.vllm.unified_mla_kv_cache_update(
-                kv_c_normed,
-                k_pe,
-                encoded,
-                self.kv_cache_dtype,
-                self._k_scale,
-            )
+            kv_cache_dummy_dep = None
+            if self.kv_sharing_target_layer_name is None:
+                kv_cache_dummy_dep = torch.ops.vllm.unified_mla_kv_cache_update(
+                    kv_c_normed,
+                    k_pe,
+                    encoded,
+                    self.kv_cache_dtype,
+                    self._k_scale,
+                )
             output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
             torch.ops.vllm.unified_mla_attention_with_output(
                 q,
@@ -1138,7 +1142,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 assert lse is not None
                 assert self.dcp_manager is not None
                 decode_metadata = getattr(attn_metadata, "decode", None)
-                if not use_mha:
+                if not use_mha and not self.use_pcp:
                     seq_lens = cast(torch.Tensor, attn_metadata.seq_lens)  # type: ignore[attr-defined]
                     query_start_loc = attn_metadata.query_start_loc
                 else:
@@ -1152,12 +1156,23 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     query_start_loc = attn_metadata.query_start_loc[
                         : attn_metadata.num_decodes + 1
                     ]
-                attn_out = self.dcp_manager.combine(
-                    attn_out,
-                    lse,
-                    seq_lens=seq_lens,
-                    query_start_loc=query_start_loc,
-                )
+                # Under PCP+DCP the prefill rows attended over the gathered KV,
+                # so only the decode rows carry an LSE and take part in the merge.
+                num_merge_rows = lse.shape[0]
+                if num_merge_rows == attn_out.shape[0]:
+                    attn_out = self.dcp_manager.combine(
+                        attn_out,
+                        lse,
+                        seq_lens=seq_lens,
+                        query_start_loc=query_start_loc,
+                    )
+                elif num_merge_rows > 0:
+                    attn_out[:num_merge_rows] = self.dcp_manager.combine(
+                        attn_out[:num_merge_rows],
+                        lse,
+                        seq_lens=seq_lens,
+                        query_start_loc=query_start_loc,
+                    )
                 if self.use_pcp:
                     attn_out = finalize_mla_pcp_decode(attn_out, self.num_heads)
 
