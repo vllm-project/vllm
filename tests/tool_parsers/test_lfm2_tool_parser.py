@@ -697,6 +697,30 @@ def test_hyphenated_name_outside_request_tools_is_not_a_call(
     assert tool_calls == []
 
 
+@pytest.mark.parametrize("streaming", [True, False])
+def test_hyphenated_name_in_string_argument_with_many_tools(
+    streaming: bool, lfm2_tokenizer: TokenizerLike
+):
+    """With 11+ hyphenated tools, one alias must not be restored as a prefix
+    of another inside a string argument."""
+    names = [f"tool-{letter}" for letter in "abcdefghijk"]
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("lfm2")(lfm2_tokenizer)
+
+    _, tool_calls = run_tool_extraction(
+        tool_parser,
+        _wrap(
+            ", ".join(f"{name}(x=1)" for name in names[:10])
+            + ", tool-k(note='then, tool-k(y)')"
+        ),
+        request=_request_with_tools(*names),
+        streaming=streaming,
+    )
+
+    assert tool_calls[-1].function == FunctionCall(
+        name="tool-k", arguments='{"note": "then, tool-k(y)"}'
+    )
+
+
 def test_adjust_request_disables_skip_special_tokens(
     lfm2_tokenizer: TokenizerLike,
 ):
