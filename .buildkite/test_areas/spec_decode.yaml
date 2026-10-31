@@ -577,6 +577,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 35GB) [Nightly] Spec Decode AL DSpark"
   key: spec-decode-dspark-nightly
+  automatic_shard: true
   timeout_in_minutes: 60
   device: h200_35gb
   optional: true
@@ -591,6 +592,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Spec Decode AL DSpark Nightly"
+      automatic_shard: true
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 90
