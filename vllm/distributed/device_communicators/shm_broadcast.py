@@ -108,6 +108,10 @@ def to_bytes_big(value: int, size: int) -> bytes:
     return value.to_bytes(size, byteorder="big")
 
 
+class _PayloadNotDelivered(TimeoutError):
+    """The overflow payload never reached this process; keep the slot unread."""
+
+
 LONG_WAIT_TIME_LOG_MSG = (
     "No available shared memory broadcast block found "
     "in %d seconds. This typically happens "
@@ -878,6 +882,13 @@ class MessageQueue:
             logger.info(LONG_WAIT_TIME_LOG_MSG, VLLM_RINGBUFFER_WARNING_INTERVAL)
         return False
 
+    def _commit_read(self, metadata_buffer) -> None:
+        metadata_buffer[self.local_reader_rank + 1] = 1
+        memory_fence()
+        next_idx = self.current_idx + 1
+        self.current_idx = next_idx % self.buffer.max_chunks
+        self._spin_condition.record_read()
+
     @contextmanager
     def acquire_read(
         self,
@@ -897,16 +908,16 @@ class MessageQueue:
                 with self.buffer.get_data(self.current_idx) as buf:
                     try:
                         yield buf
-                    finally:
-                        # caller has read from the buffer; set the read flag.
-                        metadata_buffer[self.local_reader_rank + 1] = 1
-                        # Memory fence ensures the read flag is visible to the writer.
-                        # Without this, writer may not see our read completion and
-                        # could wait indefinitely for all readers to finish.
-                        memory_fence()
-                        next_idx = self.current_idx + 1
-                        self.current_idx = next_idx % self.buffer.max_chunks
-                        self._spin_condition.record_read()
+                    except _PayloadNotDelivered:
+                        # Payload never arrived: leave the slot readable so the
+                        # message is redelivered instead of desynchronizing.
+                        raise
+                    except BaseException:
+                        # Caller failed after delivery: never block the writer.
+                        self._commit_read(metadata_buffer)
+                        raise
+                    else:
+                        self._commit_read(metadata_buffer)
                 break
 
     def enqueue(self, obj, timeout: float | None = None):
@@ -1001,8 +1012,15 @@ class MessageQueue:
                         # Out-of-band arrays may outlive this reusable ring slot.
                         all_buffers.append(buffer if i == 0 else bytearray(buffer))
                     obj = pickle.loads(all_buffers[0], buffers=all_buffers[1:])
-            if overflow:
-                obj = MessageQueue.recv(self.local_socket, timeout)
+                else:
+                    # The payload lives on the socket, not in the slot: receive
+                    # it inside the slot's lifetime so that a failure leaves the
+                    # slot unread and the message is redelivered instead of
+                    # desynchronizing the stream.
+                    try:
+                        obj = MessageQueue.recv(self.local_socket, timeout)
+                    except TimeoutError:
+                        raise _PayloadNotDelivered from None
         elif self._is_remote_reader:
             obj = MessageQueue.recv(self.remote_socket, timeout)
         else:
