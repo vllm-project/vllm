@@ -18,6 +18,12 @@ from vllm.sampling_params import SamplingParams
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.distributed.aux_output_connector.connector import (
+        AuxOutputConnectorMetadata,
+        AuxRequestOutput,
+    )
+    from vllm.v1.request import Request
+    from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
 @dataclass(frozen=True)
@@ -58,7 +64,7 @@ class HiddenStateCapturePlan:
             raise ValueError("Hidden-state layout does not match auxiliary layers")
         if len(set(self.aux_layer_ids)) != len(self.aux_layer_ids):
             raise ValueError("Duplicate auxiliary hidden-state layers")
-        if not isinstance(self.logprob_topk, int) or self.logprob_topk < 0:
+        if self.logprob_topk < 0:
             raise ValueError("logprob_topk must be a nonnegative integer")
 
     @classmethod
@@ -372,8 +378,6 @@ def validate_capture_request(
     config: VllmConfig,
     resumable: bool = False,
 ) -> None:
-    from vllm.exceptions import VLLMValidationError
-
     plan = capture_plan(params, "", prompt_len)
     if plan is None:
         return
@@ -426,7 +430,7 @@ class PendingHiddenOutput:
 
 
 class HiddenStateWorker:
-    def __init__(self, model, config):
+    def __init__(self, model: torch.nn.Module, config: VllmConfig) -> None:
         from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
             get_eagle3_aux_layers_from_config,
             requires_aux_hidden_states,
@@ -445,7 +449,7 @@ class HiddenStateWorker:
             )
         self.layer_ids: tuple[int, ...] = tuple(sorted(set(layers)))
 
-    def begin_step(self, metadata) -> None:
+    def begin_step(self, metadata: AuxOutputConnectorMetadata) -> None:
         for request_id in (
             metadata.finished_requests + metadata.finished_hidden_requests
         ):
@@ -454,7 +458,13 @@ class HiddenStateWorker:
         self.plans.update(metadata.hidden_plans)
         self.accepted_ends.update(metadata.hidden_accepted_ends)
 
-    def prepare(self, batch, hidden_states, aux_hidden_states, logits) -> None:
+    def prepare(
+        self,
+        batch: InputBatch,
+        hidden_states: torch.Tensor,
+        aux_hidden_states: list[torch.Tensor] | None,
+        logits: torch.Tensor | None,
+    ) -> None:
         if not self.plans:
             self.pending = None
             return
@@ -482,18 +492,23 @@ class HiddenStateWorker:
             accepted_ends=self.accepted_ends,
             errors=errors,
         )
-        self.pending = PendingHiddenOutput(chunks) if chunks or errors else None
-        if self.pending is not None:
-            self.pending.errors = errors
+        self.pending = PendingHiddenOutput(chunks, errors) if chunks or errors else None
+
+    def close(self) -> None:
+        self.plans.clear()
+        self.accepted_ends.clear()
+        self.pending = None
 
 
 class HiddenStateScheduler:
-    def __init__(self):
+    def __init__(self) -> None:
         self.buffers: dict[str, HiddenStateCaptureBuffer] = {}
         self.done: set[str] = set()
         self.finished: set[str] = set()
 
-    def build_metadata(self, scheduled, requests):
+    def build_metadata(
+        self, scheduled: dict[str, int], requests: dict[str, Request]
+    ) -> tuple[dict[str, HiddenStateCapturePlan], tuple[str, ...]]:
         plans = {}
         for request_id in scheduled:
             if request_id in self.done:
@@ -510,7 +525,13 @@ class HiddenStateScheduler:
         finished, self.finished = tuple(self.finished), set()
         return plans, finished
 
-    def take_output(self, request, output, num_new_tokens: int, stopped: bool):
+    def take_output(
+        self,
+        request: Request,
+        output: AuxRequestOutput | None,
+        num_new_tokens: int,
+        stopped: bool,
+    ) -> tuple[HiddenStateCaptureResult | None, str | None]:
         request_id = request.request_id
         buffer = self.buffers.get(request_id)
         if buffer is None:
@@ -534,7 +555,7 @@ class HiddenStateScheduler:
             self.buffers.pop(request_id)
         return result, reason
 
-    def request_finished(self, request):
+    def request_finished(self, request: Request) -> None:
         self.finished.add(request.request_id)
         if request.is_finished():
             self.buffers.pop(request.request_id, None)

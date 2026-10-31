@@ -416,17 +416,19 @@ class RoutedExpertsWorkerConnector:
 class PendingCombinedAuxOutput:
     def __init__(
         self, routed: PendingAuxOutput | None, hidden: PendingHiddenOutput | None
-    ):
+    ) -> None:
         self.routed = routed
         self.hidden = hidden
 
-    def enqueue_cpu_copy(self, num_sampled, num_rejected):
+    def enqueue_cpu_copy(
+        self, num_sampled: np.ndarray, num_rejected: np.ndarray
+    ) -> None:
         if self.routed is not None:
             self.routed.enqueue_cpu_copy(num_sampled, num_rejected)
         if self.hidden is not None:
             self.hidden.enqueue_cpu_copy()
 
-    def process_output(self):
+    def process_output(self) -> dict[str, AuxRequestOutput]:
         outputs = {} if self.routed is None else self.routed.process_output()
         if self.hidden is not None:
             for request_id, chunk in self.hidden.chunks.items():
@@ -439,7 +441,7 @@ class PendingCombinedAuxOutput:
 class AuxOutputWorkerConnector:
     """Compose windowed hidden capture with optional routed-experts output."""
 
-    def __init__(self, *, vllm_config, model):
+    def __init__(self, *, vllm_config: VllmConfig, model: torch.nn.Module) -> None:
         self._routing = (
             RoutedExpertsWorkerConnector(vllm_config=vllm_config, model=model)
             if vllm_config.aux_output_config.enable_return_routed_experts
@@ -456,28 +458,34 @@ class AuxOutputWorkerConnector:
         if self._routing is not None:
             self._routing.initialize_output_storage(kv_cache_config)
 
-    def begin_step(self, metadata):
+    def begin_step(self, metadata: AuxOutputConnectorMetadata | None) -> None:
         if self._hidden is not None and metadata is not None:
             self._hidden.begin_step(metadata)
         if self._routing:
             self._routing.begin_step(metadata)
 
-    def prepare_hidden_output(self, batch, hidden_states, aux_hidden_states, logits):
+    def prepare_hidden_output(
+        self,
+        batch: InputBatch,
+        hidden_states: torch.Tensor,
+        aux_hidden_states: list[torch.Tensor] | None,
+        logits: torch.Tensor | None,
+    ) -> None:
         if self._hidden is not None:
             self._hidden.prepare(batch, hidden_states, aux_hidden_states, logits)
 
-    def prepare_output(self, input_batch):
+    def prepare_output(
+        self, input_batch: InputBatch
+    ) -> PendingCombinedAuxOutput | None:
         routed = self._routing.prepare_output(input_batch) if self._routing else None
         hidden = None if self._hidden is None else self._hidden.pending
         if routed is None and hidden is None:
             return None
         return PendingCombinedAuxOutput(routed, hidden)
 
-    def close(self):
+    def close(self) -> None:
         if self._hidden is not None:
-            self._hidden.plans.clear()
-            self._hidden.accepted_ends.clear()
-            self._hidden.pending = None
+            self._hidden.close()
         if self._routing:
             self._routing.close()
 

@@ -46,7 +46,9 @@ If generation ends before the window, the skip reason is `ended_before_window`.
 If fewer than `min_rows` are available, the reason is `insufficient_rows`.
 
 `hidden_states` is a CPU tensor. `hidden_positions`, layout, auxiliary layer IDs,
-request ID, collection ID, copy bytes and copy submission time accompany the result.
+request ID, collection ID, copy bytes and `copy_ms` accompany the result.
+`copy_ms` measures CPU allocation and asynchronous-copy submission time,
+not completed GPU-to-CPU transfer time.
 The connector settles and releases its capture state when the window completes;
 the frontend retains the result until delivery. Cumulative/final-only output emits
 the result at completion, while delta output can deliver it when the window settles.

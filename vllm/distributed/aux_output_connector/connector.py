@@ -15,6 +15,7 @@ import numpy as np
 from vllm.distributed.aux_output_connector.hidden_states import (
     HiddenStateCaptureChunk,
     HiddenStateCapturePlan,
+    HiddenStateCaptureResult,
     HiddenStateScheduler,
 )
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
@@ -266,7 +267,13 @@ class AuxOutputSchedulerConnector:
         )
         return request_output.rows[:local_end]
 
-    def take_hidden_output(self, request, output, num_new_tokens, stopped):
+    def take_hidden_output(
+        self,
+        request: Request,
+        output: dict[str, AuxRequestOutput] | None,
+        num_new_tokens: int,
+        stopped: bool,
+    ) -> tuple[HiddenStateCaptureResult | None, str | None]:
         if self._hidden is None:
             return None, None
         return self._hidden.take_output(

@@ -81,7 +81,11 @@ class HiddenStateCaptureResponse(OpenAIBaseModel):
     request_id: str
     collection_id: str
     copied_bytes: int
-    copy_ms: float
+    copy_ms: float = Field(
+        description="CPU allocation and asynchronous-copy submission time "
+        "in milliseconds; "
+        "not completed GPU-to-CPU transfer time."
+    )
     logprobs: CaptureTensor | None = None
     logprob_token_ids: CaptureTensor | None = None
 
