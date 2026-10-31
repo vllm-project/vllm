@@ -238,3 +238,16 @@ def test_backend_rejects_more_choices_than_single_token_labels():
     ).questions[0]
     with pytest.raises(StructuredDecisionError, match="at most 26 choices"):
         make_read_question(0, question)
+
+
+def test_backend_takes_more_choices_when_options_are_not_labeled():
+    question = request(
+        questions=[
+            {
+                "type": "choice",
+                "instructions": "x",
+                "choices": [{"value": str(i)} for i in range(27)],
+            }
+        ]
+    ).questions[0]
+    assert len(make_read_question(0, question, 255, labeled=False).options) == 27
