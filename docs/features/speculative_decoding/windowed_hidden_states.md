@@ -83,8 +83,54 @@ experimental and are not part of the validated model matrix.
 Routed-experts output keeps its own existing compatibility requirements and block
 storage; hidden capture does not use that storage.
 
-This API returns Python tensors through `LLM`/`AsyncLLM`. The OpenAI-compatible
-HTTP schema does not expose the nested capture request or its result. Existing
+The Python API returns tensors through `LLM`/`AsyncLLM`. For HTTP, enable the
+same runner and connector configuration:
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve Qwen/Qwen3-1.7B \
+  --no-async-scheduling --max-num-seqs 1 \
+  --aux-output-config '{"enable_hidden_states": true}'
+```
+
+Send the capture window to `POST /v1/completions` (or through the OpenAI client's
+`extra_body`):
+
+```json
+{
+  "model": "Qwen/Qwen3-1.7B",
+  "prompt": "Explain GPUs briefly.",
+  "max_tokens": 32,
+  "hidden_state_capture": {
+    "start": 0, "end": 4, "min_rows": 4,
+    "collection_id": "training-step-1", "logprob_topk": 3
+  }
+}
+```
+
+Each choice contains `hidden_state_capture` or `hidden_capture_skip_reason`.
+The capture contains window/position metadata, layout, layer IDs, collection ID,
+and `hidden_states`, with optional `logprobs` and `logprob_token_ids`. Each tensor
+contains `data` (Base64-encoded contiguous native-endian bytes), `dtype` (PyTorch
+name without `torch.`), and `shape`. Decode without losing BF16 precision:
+
+```python
+import base64
+import torch
+
+def decode_tensor(payload):
+    return torch.frombuffer(
+        bytearray(base64.b64decode(payload["data"])),
+        dtype=getattr(torch, payload["dtype"]),
+    ).reshape(payload["shape"])
+```
+
+HTTP capture supports non-streaming completions with `n=1`, including batched
+prompts; each choice has its own capture. Streaming, beam search and chat
+completions are not supported. The Python API's layout, memory budget and
+runner restrictions also apply. Base64 increases the tensor payload size by
+approximately one third.
+
+Existing
 `extract_hidden_states` instead exports speculative training features through
 its own connector; response-window capture shares auxiliary model outputs but
 does not replace that export workflow.

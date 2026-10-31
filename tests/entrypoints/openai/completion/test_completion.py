@@ -2,11 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import suppress
+from typing import Any
 
 import openai  # use the official client for correctness check
+import pybase64 as base64
 import pytest
 import pytest_asyncio
 import regex as re
+import torch
 from openai import BadRequestError
 
 from tests.utils import RemoteOpenAIServer
@@ -832,3 +835,81 @@ def test_completion_request_forwards_routed_experts_prompt_start():
     )
 
     assert sampling_params.routed_experts_prompt_start == 3
+
+
+@pytest.fixture(scope="module")
+def capture_server():
+    args = [
+        "--max-model-len",
+        "256",
+        "--max-num-seqs",
+        "1",
+        "--gpu-memory-utilization",
+        "0.35",
+        "--enforce-eager",
+        "--no-async-scheduling",
+        "--aux-output-config",
+        '{"enable_hidden_states": true}',
+    ]
+    with RemoteOpenAIServer(
+        MODEL_NAME, args, env_dict={"VLLM_USE_V2_MODEL_RUNNER": "1"}
+    ) as remote_server:
+        yield remote_server
+
+
+@pytest.mark.asyncio
+async def test_windowed_hidden_capture_http(capture_server):
+    """Capture preserves generated tokens and aligns raw logits with hidden rows."""
+    async with capture_server.get_async_client() as client:
+        common: dict[str, Any] = dict(
+            model=MODEL_NAME,
+            prompt="Explain GPUs briefly.",
+            max_tokens=8,
+            temperature=0,
+            extra_body={"ignore_eos": True, "return_token_ids": True},
+        )
+        plain = await client.completions.create(**common)
+        common["extra_body"]["hidden_state_capture"] = {
+            "start": 1,
+            "end": 5,
+            "min_rows": 4,
+            "collection_id": "http-test",
+            "logprob_topk": 3,
+        }
+        captured = await client.completions.create(**common)
+        choice = captured.choices[0]
+        assert choice.token_ids == plain.choices[0].token_ids
+        result = choice.hidden_state_capture
+        assert choice.hidden_capture_skip_reason is None
+        assert result["collection_id"] == "http-test"
+        assert result["hidden_positions"] == list(
+            range(plain.usage.prompt_tokens, plain.usage.prompt_tokens + 4)
+        )
+
+        def decode(payload):
+            return torch.frombuffer(
+                bytearray(base64.b64decode(payload["data"])),
+                dtype=getattr(torch, payload["dtype"]),
+            ).reshape(payload["shape"])
+
+        hidden = decode(result["hidden_states"])
+        logprobs = decode(result["logprobs"])
+        token_ids = decode(result["logprob_token_ids"])
+        assert hidden.shape[0] == 4
+        assert logprobs.shape == token_ids.shape == (4, 3)
+        assert torch.isfinite(hidden).all()
+        assert torch.isfinite(logprobs).all()
+        assert (logprobs <= 0).all()
+        assert (logprobs[:, :-1] >= logprobs[:, 1:]).all()
+        assert token_ids.dtype == torch.int64
+        common["extra_body"]["hidden_state_capture"]["start"] = 20
+        common["extra_body"]["hidden_state_capture"]["end"] = 24
+        missed = await client.completions.create(**common)
+        assert missed.choices[0].hidden_state_capture is None
+        assert missed.choices[0].hidden_capture_skip_reason == "ended_before_window"
+        common["extra_body"]["hidden_state_capture"]["end"] = 20
+        with pytest.raises(BadRequestError):
+            await client.completions.create(**common)
+        common["extra_body"]["hidden_state_capture"]["end"] = 24
+        with pytest.raises(BadRequestError):
+            await client.completions.create(**common, stream=True)
