@@ -438,21 +438,22 @@ def test_trtllm_fp4_moe_reprocess_does_not_refold_swiglu_params():
             torch.testing.assert_close(experts.gemm1_beta, beta * expected)
 
 
-@pytest.mark.parametrize("m,chunk_size", [(1, None), (16, None), (16, 5)])
+@pytest.mark.parametrize("m,configured_max", [(1, None), (16, None), (16, 5)])
 @torch.inference_mode()
 def test_trtllm_fp4_moe_deferred_finalize(
     m: int,
-    chunk_size: int | None,
+    configured_max: int | None,
     monkeypatch: pytest.MonkeyPatch,
     workspace_init,
 ):
     """TRTLLM-Gen NvFP4 modular experts can leave the top-k finalize to the caller."""
     e, topk, n, k = 128, 8, 1024, 1024
     dtype = torch.bfloat16
-    if chunk_size is not None:
-        monkeypatch.setattr(
-            TrtLlmNvFp4ExpertsModular, "_get_chunk_size", lambda self: chunk_size
-        )
+    env_name = "VLLM_TRTLLM_NVFP4_MOE_MAX_CHUNK_SIZE"
+    if configured_max is None:
+        monkeypatch.delenv(env_name, raising=False)
+    else:
+        monkeypatch.setenv(env_name, str(configured_max))
 
     set_random_seed(7)
     with set_current_vllm_config(
@@ -498,7 +499,7 @@ def test_trtllm_fp4_moe_deferred_finalize(
                 apply_router_weight_on_input=False,
             ),
             router_weights=topk_weights,
-            chunked=chunk_size is not None,
+            chunked=configured_max is not None,
         )
 
 
