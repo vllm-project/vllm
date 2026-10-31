@@ -17,31 +17,23 @@
 // Runtime dispatch for the ROCm paged attention kernels.
 //
 // The kernels themselves (and the expensive template instantiation they
-// trigger) live in attention_paged_attn_*.cu, one translation unit per
-// (dtype, kv-cache dtype, head size) combination, so ninja compiles them in
-// parallel instead of serializing the whole attention kernel set onto a single
-// core.
+// trigger) live in the generated attention_paged_attn_*.cu translation units,
+// one per (dtype, kv-cache dtype, head size, block size) combination, so ninja
+// compiles them in parallel instead of serializing the whole attention kernel
+// set onto a single core. Those translation units, their prototypes and the
+// dispatch below are all emitted from the variant list in
+// csrc/rocm/generate_paged_attn.py.
 #include <torch/all.h>
 
 #include "attention_kernels.cuh"
 #include "ops.h"
 
-// One prototype per entry point. Adding one here is useless unless
-// paged_attention() below also dispatches it (checked by CMakeLists.txt).
-ATTN_ENTRY(paged_attention_h64_f16_auto);
-ATTN_ENTRY(paged_attention_h128_f16_auto);
-ATTN_ENTRY(paged_attention_h64_bf16_auto);
-ATTN_ENTRY(paged_attention_h128_bf16_auto);
-ATTN_ENTRY(paged_attention_h64_f16_fp8_f16);
-ATTN_ENTRY(paged_attention_h128_f16_fp8_f16);
-ATTN_ENTRY(paged_attention_h64_f16_fp8_fp8);
-ATTN_ENTRY(paged_attention_h128_f16_fp8_fp8);
-ATTN_ENTRY(paged_attention_h64_bf16_fp8_f16);
-ATTN_ENTRY(paged_attention_h128_bf16_fp8_f16);
-ATTN_ENTRY(paged_attention_h64_bf16_fp8_fp8);
-ATTN_ENTRY(paged_attention_h128_bf16_fp8_fp8);
+// One prototype per generated entry point.
+#include "attention_paged_attn_entries.inc"
 
-// gfx11/gfx12 (RDNA) need a different kernel set than gfx9 (CDNA).
+// gfx11/gfx12 (RDNA) need a different kernel set than gfx9 (CDNA). Keep this
+// predicate in sync with the arch filter in CMakeLists.txt, which defines
+// VLLM_ROCM_ATTN_NO_NAVI when no Navi arch is targeted.
 bool is_navi_gpu() {
   static bool is_cached = false;
   static bool result;
@@ -59,22 +51,6 @@ bool is_navi_gpu() {
 
   return result;
 }
-
-// Each ATTN_HEAD_SWITCH() call below is a dispatch arm: it names the entry
-// point that paged_attention() calls, which is what makes the corresponding
-// attention_paged_attn_*.cu file reachable.
-#define ATTN_HEAD_SWITCH(FN64, FN128)                           \
-  switch (head_size) {                                          \
-    case 64:                                                    \
-      FN64(ATTN_FWD);                                           \
-      break;                                                    \
-    case 128:                                                   \
-      FN128(ATTN_FWD);                                          \
-      break;                                                    \
-    default:                                                    \
-      TORCH_CHECK(false, "Unsupported head size: ", head_size); \
-      break;                                                    \
-  }
 
 // clang-format off
 void paged_attention(
@@ -100,43 +76,11 @@ void paged_attention(
   // clang-format on
   bool is_navi = is_navi_gpu();
   const int head_size = query.size(2);
-  if (kv_cache_dtype == "auto") {
-    if (query.dtype() == at::ScalarType::Half) {
-      ATTN_HEAD_SWITCH(paged_attention_h64_f16_auto,
-                       paged_attention_h128_f16_auto);
-    } else if (query.dtype() == at::ScalarType::BFloat16) {
-      ATTN_HEAD_SWITCH(paged_attention_h64_bf16_auto,
-                       paged_attention_h128_bf16_auto);
-    } else {
-      TORCH_CHECK(false, "Unsupported data type: ", query.dtype());
-    }
-  } else if (kv_cache_dtype == "fp8" || kv_cache_dtype == "fp8_e4m3") {
-    if (query.dtype() == at::ScalarType::Half) {
-      if (mfma_type == "fp8") {
-        ATTN_HEAD_SWITCH(paged_attention_h64_f16_fp8_fp8,
-                         paged_attention_h128_f16_fp8_fp8);
-      } else {
-        ATTN_HEAD_SWITCH(paged_attention_h64_f16_fp8_f16,
-                         paged_attention_h128_f16_fp8_f16);
-      }
-    } else if (query.dtype() == at::ScalarType::BFloat16) {
-      if (mfma_type == "fp8") {
-        ATTN_HEAD_SWITCH(paged_attention_h64_bf16_fp8_fp8,
-                         paged_attention_h128_bf16_fp8_fp8);
-      } else {
-        ATTN_HEAD_SWITCH(paged_attention_h64_bf16_fp8_f16,
-                         paged_attention_h128_bf16_fp8_f16);
-      }
-    } else {
-      TORCH_CHECK(false, "Unsupported data type: ", query.dtype());
-    }
-  } else {
-    TORCH_CHECK(false, "Unsupported KV cache dtype: ", kv_cache_dtype);
-  }
+  // clang-format off
+  #include "attention_paged_attn_dispatch.inc"
+  // clang-format on
 }
 
-#undef ATTN_HEAD_SWITCH
 #undef ATTN_ENTRY
-#undef ATTN_LAUNCH
 #undef ATTN_FWD
 #undef ATTN_PARAMS
