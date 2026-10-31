@@ -573,6 +573,7 @@ def _to_serve_args(args: argparse.Namespace) -> argparse.Namespace:
         getattr(args, "enable_multimodal_chat", False) or backend == "vllm-chat"
     )
     # serve-only attrs throughput never exposed; keep serve's defaults.
+    d.setdefault("hf_name", None)
     d.setdefault("disable_shuffle", False)
     d.setdefault("skip_chat_template", False)
     d.setdefault("no_stream", False)
