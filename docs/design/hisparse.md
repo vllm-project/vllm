@@ -37,6 +37,14 @@ memory consumption is therefore topology- and implementation-dependent. The
 realized capacity may be slightly smaller because the budget is rounded down
 to complete host blocks.
 
+Startup logs report two concurrency bounds at `max_model_len`. The generic
+`Maximum concurrency` line charges each request its full admission footprint,
+including the in-flight window of every resident group. The `HiSparse
+steady-state maximum concurrency` line charges running requests that read from
+host only their active tail pages, plus one request being admitted at its full
+footprint. Host-pool metrics are listed in
+[Metrics](../usage/metrics.md#hisparse-kv-connector-metrics).
+
 ## Ownership
 
 | Thing | Owner | What “owner” means |
@@ -213,9 +221,16 @@ hot row? ──────── yes ──► existing hot physical row + upda
 choose GPU LRU victim ──► copy pinned host row ──► hot physical row
 ```
 
-ROCm is not currently supported because the fused HiSparse cache operations are
-implemented only by CUDA kernels. A future platform-specific worker may provide
-the same command, output, and cache-resolution boundaries.
+Device operations are selected by `Platform.get_hisparse_backend_cls()`. The base
+platform returns `None`; CUDA selects `CUDAHiSparseBackend` in `platforms/cuda.py`.
+Hardware plugins can provide a `HiSparseBackend` for host registration, cache
+operations, IPC events, capture queries, and transfers while reusing the common
+runtime and connector. HiSparse validates availability and cache formats before
+allocation. Streams, ordinary events, current-stream queries, and synchronization
+use `torch.Stream`, `torch.Event`, and `torch.accelerator` directly. The backend
+provides IPC event creation/import/export only for shared host pools.
+Without HiSparse, sparse attention keeps its normal stream and event path.
+ROCm does not currently provide a HiSparse backend.
 
 ## Main classes
 
@@ -252,6 +267,5 @@ the same command, output, and cache-resolution boundaries.
 The command/result and attention-layer boundaries can be shared. The host
 allocator, copy implementation, hot layout, and replacement policy should stay
 platform-specific. NVIDIA uses the current accelerator LRU and fused host/hot
-kernel. ROCm is not currently supported; AMD or other accelerator backends can
-implement their own worker without forcing NVIDIA's policy into the shared
-boundary.
+kernel. Other accelerators can implement `HiSparseBackend` and return its class
+path from their platform override without changing the shared control flow.
