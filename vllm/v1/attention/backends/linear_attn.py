@@ -48,6 +48,7 @@ class LinearAttentionMetadata:
 class LinearAttentionMetadataBuilder(AttentionMetadataBuilder[LinearAttentionMetadata]):
     kv_cache_spec: MambaSpec
     reorder_batch_threshold: int = 1
+    requires_decode_ordering = True
 
     _cudagraph_support = AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 

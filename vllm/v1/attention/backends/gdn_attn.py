@@ -150,6 +150,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         return max_decode_query_len(vllm_config)
 
     reorder_batch_threshold: int = 1
+    requires_decode_ordering = True
 
     def __init__(
         self,
