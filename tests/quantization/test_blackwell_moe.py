@@ -312,6 +312,19 @@ def test_nemotron_nvfp4_per_token_moe_flashinfer_trtllm(
     )
 
 
+def test_qwen3_ct_nvfp4_per_token_moe_flashinfer_trtllm(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    can_initialize(
+        "RedHatAI/Qwen3-30B-A3B-NVFP4",
+        hf_overrides=HF_OVERRIDE_TEXT,
+        extra_args=[
+            "--moe-backend=flashinfer_trtllm",
+            "--quantization-config.moe.activation=nvfp4_per_token",
+        ],
+    )
+
+
 def test_modelopt_nvfp4_dummy_scales(tmp_path, monkeypatch, vllm_runner):
     """Dummy NVFP4 MoE weights load with valid scales and produce finite logits."""
     import math
