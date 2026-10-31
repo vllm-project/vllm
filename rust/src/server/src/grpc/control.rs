@@ -8,7 +8,7 @@ use thiserror_ext::AsReport as _;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tonic::{Code, Request, Response, Status};
-use vllm_engine_core_client::EngineCoreClient;
+use vllm_engine_core_client::EngineClient;
 use vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse;
 use vllm_engine_core_client::protocol::utility::{PauseMode as EnginePauseMode, SleepLevel};
 
@@ -43,11 +43,11 @@ impl ControlServiceImpl {
     }
 
     fn ready(&self) -> &EngineCoreReadyResponse {
-        self.state.engine_core_client().ready_response()
+        self.state.engine_client().ready_response()
     }
 
-    fn client(&self) -> &EngineCoreClient {
-        self.state.engine_core_client()
+    fn client(&self) -> &dyn EngineClient {
+        self.state.engine_client()
     }
 
     fn parallelism_info(&self) -> pb::ParallelismInfo {
@@ -211,9 +211,9 @@ impl pb::control_server::Control for ControlServiceImpl {
             api_version: GRPC_API_VERSION.to_string(),
             instance_id: ready.instance_id.clone(),
             parallelism: Some(self.parallelism_info()),
-            max_model_len: self.state.engine_core_client().max_model_len(),
+            max_model_len: self.state.engine_client().max_model_len(),
             kv_block_size: ready.block_size.min(u64::from(u32::MAX)) as u32,
-            total_kv_blocks: self.state.engine_core_client().total_num_gpu_blocks(),
+            total_kv_blocks: self.state.engine_client().total_num_gpu_blocks(),
             max_running_requests: ready.max_num_seqs,
             max_batched_tokens: ready.max_num_batched_tokens,
             max_loras: ready.max_loras,
@@ -327,7 +327,7 @@ impl pb::control_server::Control for ControlServiceImpl {
         &self,
         _request: Request<pb::GetKvEventSourcesRequest>,
     ) -> Result<Response<pb::GetKvEventSourcesResponse>, Status> {
-        let client = self.state.engine_core_client();
+        let client = self.state.engine_client();
         let sources = client.ready_responses().into_iter().filter_map(kv_event_source).collect();
         Ok(Response::new(pb::GetKvEventSourcesResponse { sources }))
     }

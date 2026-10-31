@@ -65,7 +65,7 @@ mod stream;
 use std::collections::HashMap;
 
 use tracing::warn;
-use vllm_engine_core_client::EngineCoreClient;
+use vllm_engine_core_client::EngineClient;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
@@ -359,8 +359,8 @@ impl ChatLlm {
     /// Create a new chat facade from a text-generation facade plus a chat
     /// backend.
     pub fn new(text: TextLlm, backend: DynChatBackend) -> Self {
-        let model_dtype = text.engine_core_client().model_dtype();
-        let max_model_len = text.engine_core_client().max_model_len();
+        let model_dtype = text.engine_client().model_dtype();
+        let max_model_len = text.engine_client().max_model_len();
 
         Self {
             text,
@@ -444,8 +444,8 @@ impl ChatLlm {
 
     /// Expose the underlying engine-core client for low-level utility/admin
     /// calls.
-    pub fn engine_core_client(&self) -> &EngineCoreClient {
-        self.text.engine_core_client()
+    pub fn engine_client(&self) -> &dyn EngineClient {
+        self.text.engine_client()
     }
 
     /// Whether the loaded backend has a registered multimodal processor.

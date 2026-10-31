@@ -259,7 +259,7 @@ where
             .transpose()
             .context("invalid gRPC TLS configuration")?;
         let (health_reporter, health_service) = health_reporter();
-        let engine_health = state.engine_core_client().subscribe_health();
+        let engine_health = state.engine_client().subscribe_health();
         health_reporter.set_serving::<grpc::InferenceGrpcService>().await;
         health_reporter.set_serving::<grpc::ControlGrpcService>().await;
         let control_service = grpc::ControlGrpcService::new(

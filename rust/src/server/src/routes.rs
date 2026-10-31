@@ -188,7 +188,7 @@ fn build_router_with_options(
 
     // Process checkpoint lifecycle, which requires sleep mode.
     if state
-        .engine_core_client()
+        .engine_client()
         .ready_responses()
         .iter()
         .all(|ready| ready.enable_sleep_mode)

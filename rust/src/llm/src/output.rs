@@ -17,7 +17,7 @@ use vllm_engine_core_client::protocol::output::{
 use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
 use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_engine_core_client::{
-    AbortCause, EngineCoreOutputStream, EngineCoreStreamDelivery, EngineCoreStreamOutput,
+    AbortCause, EngineCoreStreamDelivery, EngineCoreStreamOutput, EngineOutputStream,
 };
 
 use crate::RequestTimestamps;
@@ -322,7 +322,7 @@ impl GenerateOutput {
 pub struct GenerateOutputStream {
     pending_prompt_info: Option<Box<GeneratePromptInfo>>,
     remote_prefill_cached_tokens: Option<usize>,
-    raw_stream: EngineCoreOutputStream,
+    raw_stream: Box<dyn EngineOutputStream>,
     request_metrics: RequestMetricsTracker,
     /// (weight version, first output-token index) for each span.
     weight_version_starts: Vec<(Arc<str>, usize)>,
@@ -340,7 +340,7 @@ impl GenerateOutputStream {
     pub(crate) fn new(
         prompt_token_ids: Arc<[u32]>,
         remote_prefill_cached_tokens: Option<usize>,
-        raw_stream: EngineCoreOutputStream,
+        raw_stream: Box<dyn EngineOutputStream>,
         request_metrics: RequestMetricsTracker,
         request_guard: RequestGuard,
     ) -> Self {
@@ -550,7 +550,7 @@ impl Drop for GenerateOutputStream {
         }
 
         // If the user or the upper layer drops a live generate stream,
-        // `EngineCoreOutputStream::Drop` will trigger an engine-side abort. Record the
+        // `EngineOutputStream` will trigger an engine-side abort. Record the
         // matching terminal request metrics here so frontend-driven aborts are still
         // visible as `finished_reason=...` instead of disappearing from observability
         // entirely.
