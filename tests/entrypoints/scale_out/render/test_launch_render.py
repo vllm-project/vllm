@@ -3,12 +3,15 @@
 """E2E tests for render endpoints via `vllm launch` (GPU-less serving)."""
 
 import httpx
+import pybase64 as base64
 import pytest
 import pytest_asyncio
 
+from tests.multimodal.utils import create_long_gop_video
 from tests.utils import RemoteLaunchRenderServer
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+QWEN2_VL_MODEL_NAME = "Qwen/Qwen2-VL-2B-Instruct"
 
 
 @pytest.fixture(scope="module")
@@ -24,6 +27,59 @@ async def client(server):
         base_url=server.url_for(""), timeout=30.0
     ) as http_client:
         yield http_client
+
+
+@pytest.fixture(scope="module")
+def qwen2vl_server():
+    args = [
+        "--max-model-len",
+        "2048",
+        "--limit-mm-per-prompt",
+        '{"video": 1}',
+        "--media-io-kwargs",
+        '{"video": {"backend": "opencv"}}',
+        "--trust-request-mm-kwargs",
+    ]
+    with RemoteLaunchRenderServer(QWEN2_VL_MODEL_NAME, args) as srv:
+        yield srv
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sampling_kwargs", [{}, {"num_frames": 4}])
+async def test_qwen2vl_single_frame_video_is_bad_request(
+    qwen2vl_server, sampling_kwargs
+):
+    """Reject an empty sample over HTTP and still preprocess a valid clip."""
+    async with httpx.AsyncClient(
+        base_url=qwen2vl_server.url_for(""), timeout=30.0
+    ) as client:
+        for frame_count in (1, 2):
+            video = create_long_gop_video(num_frames=frame_count, width=32, height=32)
+            url = "data:video/mp4;base64," + base64.b64encode(video).decode("ascii")
+            response = await client.post(
+                "/v1/chat/completions/render",
+                json={
+                    "model": QWEN2_VL_MODEL_NAME,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "Describe this video."},
+                                {"type": "video_url", "video_url": {"url": url}},
+                            ],
+                        }
+                    ],
+                    "media_io_kwargs": {"video": sampling_kwargs},
+                },
+            )
+            if frame_count == 1:
+                assert response.status_code == 400, response.text
+                error = response.json()["error"]
+                assert error["param"] == "video"
+                assert "no frames after temporal alignment" in error["message"]
+            else:
+                assert response.status_code == 200, response.text
+                assert response.json()["token_ids"]
 
 
 # -- Chat Completion Render --
