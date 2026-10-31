@@ -244,3 +244,213 @@ def test_maybe_fused_act_quant_preserves_required_unquantized_input(
 
     assert isinstance(result, torch.Tensor)
     torch.testing.assert_close(result, act_fn(x))
+
+
+# ---------------------------------------------------------------------------
+# GELU (tanh approximation) x FP8 static quant fusion
+# ---------------------------------------------------------------------------
+
+
+def ref_impl_gelu_tanh(x: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    """Reference: tanh-GELU -> gated multiply -> static fp8 quant."""
+    d = x.shape[-1] // 2
+    act = torch.nn.functional.gelu(x[..., :d], approximate="tanh") * x[..., d:]
+    return ops.scaled_fp8_quant(act, scale)[0]
+
+
+def ops_impl_gelu_tanh(x: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    out_shape = (x.shape[0], x.shape[1] // 2)
+    out = torch.empty(out_shape, dtype=current_platform.fp8_dtype(), device=x.device)
+    torch.ops._C.gelu_tanh_and_mul_quant(out, x, scale)
+    return out
+
+
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@torch.inference_mode()
+def test_gelu_tanh_and_mul_quant(
+    default_vllm_config,
+    num_tokens: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+    seed: int,
+    device: str,
+) -> None:
+    set_random_seed(seed)
+    torch.set_default_device(device)
+
+    scale = torch.randn((1), device=device, dtype=torch.float32)
+    x = torch.randn(num_tokens, 2 * hidden_size, dtype=dtype)
+
+    ref_out = ref_impl_gelu_tanh(x, scale)
+    fused_out = ops_impl_gelu_tanh(x, scale)
+
+    assert fused_out.dtype == current_platform.fp8_dtype()
+    assert ref_out.shape == fused_out.shape
+    assert torch.equal(ref_out.view(torch.uint8), fused_out.view(torch.uint8)), (
+        "fused kernel must be bit-identical to tanh-GELU -> mul -> quant"
+    )
+    opcheck(torch.ops._C.gelu_tanh_and_mul_quant, (fused_out, x, scale))
+
+
+@torch.inference_mode()
+def test_gelu_erf_does_not_fuse(default_vllm_config) -> None:
+    """GeluAndMul(approximate="none") must fall back to the unfused path."""
+    from vllm.model_executor.layers.activation import GeluAndMul
+    from vllm.model_executor.layers.fusion.fused_act_quant import (
+        maybe_fused_act_quant,
+    )
+
+    layer = GeluAndMul(approximate="none").cuda()
+    linear = MockLinearFp8Static(torch.ones(1, dtype=torch.float32, device="cuda"))
+    x = torch.randn(4, 256, dtype=torch.bfloat16, device="cuda")
+
+    out = maybe_fused_act_quant(layer, x, linear)
+    assert isinstance(out, torch.Tensor), (
+        "erf variant must not use the tanh-based fused kernel"
+    )
+
+
+@pytest.mark.parametrize("token_shape", [(1,), (16,), (128,), (1, 17), (2, 17)])
+@pytest.mark.parametrize("hidden_size", [128, 512, 1024])
+@pytest.mark.parametrize("dtype", DTYPES)
+@torch.inference_mode()
+def test_maybe_fused_act_quant_gelu_tanh(
+    default_vllm_config,
+    token_shape: tuple[int, ...],
+    hidden_size: int,
+    dtype: torch.dtype,
+) -> None:
+    """GeluAndMul(tanh) must fuse through maybe_fused_act_quant."""
+    from vllm.model_executor.layers.activation import GeluAndMul
+
+    device = "cuda:0"
+    torch.set_default_device(device)
+
+    act_fn = GeluAndMul(approximate="tanh")
+    scale = torch.tensor([0.5], device=device, dtype=torch.float32)
+    linear = MockLinearFp8Static(scale)
+
+    x = torch.randn(*token_shape, hidden_size * 2, dtype=dtype, device=device)
+    result = maybe_fused_act_quant(act_fn, x, linear)
+
+    assert isinstance(result, QuantizedActivation)
+    assert result.quant_key == kFp8StaticTensorSym
+    assert result.data.dtype == current_platform.fp8_dtype()
+    assert result.orig_dtype == dtype
+    assert result.orig_shape == (*token_shape, hidden_size)
+
+    ref_out = ref_impl(act_fn, x.reshape(-1, hidden_size * 2), scale).reshape(
+        result.orig_shape
+    )
+    assert torch.equal(result.data.view(torch.uint8), ref_out.view(torch.uint8)), (
+        "fused registry path must be bit-identical"
+    )
+
+
+# ---------------------------------------------------------------------------
+# GELU (tanh) x FP8 static quant: consistency with the unfused path and edges
+# ---------------------------------------------------------------------------
+
+# Odd / tiny / non-vector-width hidden sizes exercise the scalar cleanup loop.
+ODD_HIDDEN_SIZES = [1, 5, 7, 9, 1001, 4095]
+
+
+def _unfused_gelu_tanh_quant(x: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    """The path this fusion replaces: gelu_tanh_and_mul -> scaled_fp8_quant."""
+    d = x.shape[-1] // 2
+    tmp = torch.empty(x.shape[:-1] + (d,), dtype=x.dtype, device=x.device)
+    torch.ops._C.gelu_tanh_and_mul(tmp, x)
+    flat = tmp.reshape(-1, d)
+    out, _ = ops.scaled_fp8_quant(flat, scale)
+    return out.reshape(tmp.shape)
+
+
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@torch.inference_mode()
+def test_gelu_tanh_and_mul_quant_matches_unfused(
+    default_vllm_config,
+    num_tokens: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+    seed: int,
+) -> None:
+    """The fused op must be bit-identical to the ops it replaces.
+
+    `test_gelu_tanh_and_mul_quant` pins numerics against PyTorch's `F.gelu`;
+    this one uses the actual unfused vLLM path as the reference -- the ops a
+    model runs today -- so a drift between the fused and unfused paths shows up
+    here even if PyTorch's formula happens to agree.
+    """
+    set_random_seed(seed)
+    device = "cuda:0"
+    torch.set_default_device(device)
+
+    x = torch.randn(num_tokens, 2 * hidden_size, dtype=dtype)
+    scale = torch.randn((1), dtype=torch.float32)
+
+    ref_out = _unfused_gelu_tanh_quant(x, scale)
+    fused_out = ops_impl_gelu_tanh(x, scale)
+
+    assert torch.equal(ref_out.view(torch.uint8), fused_out.view(torch.uint8)), (
+        "fused kernel must match gelu_tanh_and_mul + scaled_fp8_quant"
+    )
+
+
+@pytest.mark.parametrize("hidden_size", ODD_HIDDEN_SIZES)
+@pytest.mark.parametrize("dtype", DTYPES)
+@torch.inference_mode()
+def test_gelu_tanh_and_mul_quant_odd_hidden_sizes(
+    default_vllm_config,
+    hidden_size: int,
+    dtype: torch.dtype,
+) -> None:
+    """Odd and sub-vector-width hidden sizes must match the unfused path."""
+    device = "cuda:0"
+    torch.set_default_device(device)
+
+    x = torch.randn(17, 2 * hidden_size, dtype=dtype)
+    scale = torch.randn((1), dtype=torch.float32)
+
+    ref_out = _unfused_gelu_tanh_quant(x, scale)
+    fused_out = ops_impl_gelu_tanh(x, scale)
+
+    assert fused_out.shape == (17, hidden_size)
+    assert torch.equal(ref_out.view(torch.uint8), fused_out.view(torch.uint8))
+
+
+@pytest.mark.parametrize("token_shape", [(1,), (2, 8), (3, 4, 2)])
+@pytest.mark.parametrize("hidden_size", [128, 512])
+@pytest.mark.parametrize("dtype", DTYPES)
+@torch.inference_mode()
+def test_gelu_tanh_and_mul_quant_ndim(
+    default_vllm_config,
+    token_shape: tuple[int, ...],
+    hidden_size: int,
+    dtype: torch.dtype,
+) -> None:
+    """The op accepts [..., d] input, not just 2D."""
+    device = "cuda:0"
+    torch.set_default_device(device)
+
+    x = torch.randn(*token_shape, 2 * hidden_size, dtype=dtype)
+    scale = torch.randn((1), dtype=torch.float32)
+
+    out = torch.empty(
+        *token_shape,
+        hidden_size,
+        dtype=current_platform.fp8_dtype(),
+        device=device,
+    )
+    torch.ops._C.gelu_tanh_and_mul_quant(out, x, scale)
+
+    ref_out = _unfused_gelu_tanh_quant(x, scale)
+    assert torch.equal(ref_out.view(torch.uint8), out.view(torch.uint8)), (
+        "3D input must be handled like the unfused path"
+    )
