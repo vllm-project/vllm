@@ -74,6 +74,10 @@ Follow these steps to run the script:
 
 5. Set `--output-dir` and optionally `--experiment-name` to control where to save the results.
 
+Sweep parameters replace matching long options in the base `--serve-cmd` or `--bench-cmd`, including repeated occurrences and both `--key value` and `--key=value` forms. Hyphens and underscores in the option prefix are equivalent; nested field names retain their spelling. Top-level boolean overrides replace both positive and `--no-` forms.
+
+For example, `{"compilation_config.use_inductor_graph_partition": false}` replaces `--compilation-config.use_inductor_graph_partition true` with `--compilation-config.use_inductor_graph_partition=false`, consuming the old value.
+
 Example command:
 
 ```bash
