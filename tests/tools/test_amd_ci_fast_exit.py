@@ -28,7 +28,12 @@ _keep = _CrashOnTeardown()
 def _run(tmp_path, body, *, plugin=True, env=None, args=()):
     (tmp_path / "test_case.py").write_text(CRASH_AT_TEARDOWN + body)
     run_env = {k: v for k, v in os.environ.items() if k != "PYTEST_ADDOPTS"}
-    for name in ("ROCP_TOOL_LIBRARIES", "CUDA_INJECTION64_PATH", "VLLM_CI_FAST_EXIT"):
+    for name in (
+        "ROCP_TOOL_LIBRARIES",
+        "CUDA_INJECTION64_PATH",
+        "LD_PRELOAD",
+        "VLLM_CI_FAST_EXIT",
+    ):
         run_env.pop(name, None)
     run_env["PYTHONPATH"] = str(PLUGIN_DIR)
     run_env.update(env or {})
@@ -78,6 +83,7 @@ def test_python_exit_handlers_still_run(tmp_path):
         {"VLLM_CI_FAST_EXIT": "0"},
         {"ROCP_TOOL_LIBRARIES": "/tmp/libkernrec_rocm.so"},
         {"CUDA_INJECTION64_PATH": "/tmp/libkernrec.so"},
+        {"LD_PRELOAD": "/opt/rocm/lib/librocprofiler-sdk.so"},
     ],
 )
 def test_off_when_disabled_or_a_kernel_recorder_needs_native_teardown(tmp_path, env):

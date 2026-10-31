@@ -27,6 +27,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
     EngineTransferInfo,
     TransferTopology,
+    check_compressed_kernel_split,
     get_current_attn_backends,
     get_current_attn_backends_and_specs,
     kv_postprocess_blksize_and_layout_on_receive,
@@ -1097,6 +1098,9 @@ class NixlBaseConnectorWorker:
             self.vllm_config, self.kv_cache_config, self.attn_backends
         )
         kernel_block_size = select_common_block_size(self.block_size, backends, specs)
+        check_compressed_kernel_split(
+            self.vllm_config, self.kv_cache_config, kernel_block_size
+        )
         # Number of blocks not accounting for kernel block mismatches
         self._logical_num_blocks = self.num_blocks
         if self.block_size != kernel_block_size:
@@ -1680,9 +1684,9 @@ class NixlBaseConnectorWorker:
                 physical_ratio = self._physical_blocks_per_logical_kv_block
                 block_len = physical_page_size // physical_ratio
                 block_stride = physical_page_size
-                if self._is_csa_linear and cache.ndim != 1:
-                    # CSA-linear packs multiple cache owners in each block, so
-                    # state views advance by the packed block stride.
+                if (self._is_csa_linear or self._has_packed_cache) and cache.ndim != 1:
+                    # CSA-linear and block-outermost layouts pack several pages
+                    # in each block row, so state views advance by the row.
                     block_stride = cache.stride(0) * cache.element_size()
                 assert block_stride % physical_ratio == 0
                 region_specs = [
