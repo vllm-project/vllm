@@ -1269,6 +1269,35 @@ class SpeculativeConfig:
         return hf_config
 
     @staticmethod
+    def _apply_dict_hf_override(
+        dict_overrides: dict[str, Any],
+        hf_config: PreTrainedConfig,
+        transformers_mtp_overrides: dict[str, Any] | None = None,
+    ) -> PreTrainedConfig:
+        hf_config = SpeculativeConfig.hf_config_override(
+            hf_config, transformers_mtp_overrides
+        )
+
+        def _update_nested(target: Any, overrides: dict[str, Any]) -> None:
+            for key, value in overrides.items():
+                if isinstance(value, dict):
+                    nested = (
+                        target.get(key)
+                        if isinstance(target, dict)
+                        else getattr(target, key, None)
+                    )
+                    if nested is not None:
+                        _update_nested(nested, value)
+                        continue
+                if isinstance(target, dict):
+                    target[key] = value
+                else:
+                    setattr(target, key, value)
+
+        _update_nested(hf_config, dict_overrides)
+        return hf_config
+
+    @staticmethod
     def _apply_composed_hf_override(
         target_hf_overrides: Callable[[PreTrainedConfig], PreTrainedConfig],
         hf_config: PreTrainedConfig,
@@ -1283,6 +1312,7 @@ class SpeculativeConfig:
     def compose_draft_hf_overrides(
         target_hf_overrides: HfOverrides | None,
         transformers_mtp_overrides: dict[str, Any] | None = None,
+        apply_dict_overrides: bool = False,
     ) -> Callable[[PreTrainedConfig], PreTrainedConfig]:
         """Build the ``hf_overrides`` for the draft ``ModelConfig``.
 
@@ -1290,8 +1320,13 @@ class SpeculativeConfig:
         (e.g. test harnesses shrinking ``num_hidden_layers``) and must also
         reach the draft config — otherwise a draft belonging to a large
         target is instantiated at full size even when the target is shrunk.
-        Dict overrides are target-specific key patches and are not applied
-        to the draft.
+        Dict overrides are target-specific key patches (e.g. YaRN rope
+        scalings and the accompanying context limit) and are replayed on the
+        draft only when ``apply_dict_overrides`` is set — i.e. when the
+        draft shares the target's config source (an MTP head shipped inside
+        the target checkpoint). An independent draft loaded from its own
+        checkpoint must keep its trained context limit and rope
+        configuration, so it is left on its own config.
 
         The composed override must stay picklable: the draft ``ModelConfig``
         is sent to spawned engine-core processes, so a local closure would
@@ -1300,6 +1335,16 @@ class SpeculativeConfig:
         method instead.
         """
         if not callable(target_hf_overrides):
+            if (
+                apply_dict_overrides
+                and isinstance(target_hf_overrides, dict)
+                and target_hf_overrides
+            ):
+                return functools.partial(
+                    SpeculativeConfig._apply_dict_hf_override,
+                    target_hf_overrides,
+                    transformers_mtp_overrides=transformers_mtp_overrides,
+                )
             return functools.partial(
                 SpeculativeConfig.hf_config_override,
                 transformers_mtp_overrides=transformers_mtp_overrides,
@@ -1310,6 +1355,33 @@ class SpeculativeConfig:
             target_hf_overrides,
             transformers_mtp_overrides=transformers_mtp_overrides,
         )
+
+    @staticmethod
+    def _draft_shares_target_config(spec: "SpeculativeConfig") -> bool:
+        """Whether the draft's config is read from the target's own source.
+
+        Same-checkpoint drafts (an MTP head shipped inside the target
+        checkpoint) inherit the target's raw config file, so target dict
+        hf-overrides must be replayed on them. A draft loaded from an
+        independent checkpoint has its own trained config and must not
+        receive them. Mirrors ``SpeculatorConfig.default_model``, which
+        derives ``spec.model`` from ``target.model_weights or target.model``
+        for same-checkpoint drafts.
+        """
+        target = spec.target_model_config
+        if spec.model is None or target is None:
+            return False
+
+        def _normalize(path: str) -> str:
+            path = path.rstrip("/")
+            if os.path.isabs(path):
+                path = os.path.normpath(path)
+            return path
+
+        sources = {target.model, target.model_weights}
+        return _normalize(spec.model) in {
+            _normalize(s) for s in sources if s is not None
+        }
 
     @staticmethod
     def _is_custom_proposer_path(model: str | None) -> bool:
