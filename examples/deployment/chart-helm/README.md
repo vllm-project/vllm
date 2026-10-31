@@ -19,6 +19,41 @@ This directory contains a Helm chart for deploying the vllm application. The cha
 - templates/pvc.yaml: Template for Persistent Volume Claims.
 - templates/secrets.yaml: Template for Kubernetes Secrets.
 - templates/service.yaml: Template for creating Services.
+- templates/servicemonitor.yaml: Optional metrics collection and filtering.
+
+## Metrics collection
+
+Set `serviceMonitor.enabled: true` to create a Prometheus Operator
+`ServiceMonitor`. Install the ServiceMonitor CRD first, and configure
+`serviceMonitor.additionalLabels` to match your Prometheus
+`serviceMonitorSelector`. The monitor selects this release's Service in the
+same namespace. It is disabled by default.
+
+For example, keep only request counts and end-to-end latency metrics:
+
+```yaml
+serviceMonitor:
+  enabled: true
+  additionalLabels:
+    release: prometheus
+  port: service-port
+  path: /metrics
+  interval: 30s
+  metricFilter:
+    action: keep
+    regex: 'vllm:(request_success_total|e2e_request_latency_seconds_(bucket|sum|count))'
+```
+
+Use `action: drop` with `regex: '(python|process)_.*'` to exclude Python and
+process metrics instead. An empty regex disables filtering. Expressions use
+Prometheus RE2 syntax and match the entire metric name; include `_bucket`,
+`_sum`, and `_count` explicitly when selecting histogram families.
+
+Filtering uses the ServiceMonitor's
+[`metricRelabelings`](https://prometheus-operator.dev/docs/api-reference/api/#endpoint)
+before ingestion into Prometheus. vLLM still generates and
+serves the full `/metrics` payload. Choose metric names appropriate to your
+vLLM version rather than relying on a built-in allowlist.
 
 ## Running Tests
 
