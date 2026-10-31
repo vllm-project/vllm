@@ -56,6 +56,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Quantized Fusions"
   device: h200_35gb
   key: quantized-fusions
+  automatic_shard: true
   timeout_in_minutes: 20
   source_file_dependencies:
   - tests/fusion
@@ -67,6 +68,7 @@ steps:
     - pytest -v -s fusion/
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI300) Quantized Fusions"
       dind: false
       device: mi300_1
@@ -108,6 +110,7 @@ steps:
       tests/benchmarks/test_forward_cli.py::test_bench_forward_muse_balanced_routing
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) Quantized MoE"
       dind: false
       device: mi355_1
