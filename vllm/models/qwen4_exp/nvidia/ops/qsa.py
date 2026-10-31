@@ -963,8 +963,8 @@ def qsa_store_cache_rows(
     rows: torch.Tensor,
 ) -> None:
     """Store fixed-width rows in a QSA cache without boolean indexing."""
-    if not cache.is_cuda or not HAS_TRITON:
-        raise RuntimeError("QSA CUDA cache stores require Triton")
+    if cache.device.type not in ("cuda", "xpu") or not HAS_TRITON:
+        raise RuntimeError("QSA cache stores require a CUDA or XPU device and Triton")
     if cache.ndim != 4 or cache.shape[2] != 1:
         raise ValueError("QSA cache must be [pages, page_size, 1, width]")
     if not all(cache.shape):
@@ -1008,8 +1008,8 @@ def qsa_compress_groups_with_ratio(
     rope_cache: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pool completed groups from the compressor-state ring and raw token rows."""
-    if not raw_keys.is_cuda or not HAS_TRITON:
-        raise RuntimeError("QSA CUDA compression requires Triton")
+    if raw_keys.device.type not in ("cuda", "xpu") or not HAS_TRITON:
+        raise RuntimeError("QSA compression requires a CUDA or XPU device and Triton")
     rows = token_to_req.numel()
     if compress_ratio <= 0:
         raise ValueError("QSA compression ratio must be positive")
