@@ -245,14 +245,12 @@ class HiSparseHostPool:
             ]
             assert config.hisparse_host_num_blocks is not None
             assert config.hisparse_host_block_stride is not None
-            _, self.pinned, self.shared_region = allocate_hisparse_host_pools(
+            self.pinned, self.shared_region = allocate_hisparse_host_pools(
                 self.vllm_config,
                 tensor_sizes,
                 config.hisparse_host_num_blocks,
                 config.hisparse_host_block_stride,
-                use_shared_host_pool=True,
             )
-            assert self.shared_region is not None
             self.registered = self.shared_region.base_tensor
             self.backing = self.registered[:size]
         else:
@@ -380,19 +378,8 @@ def allocate_hisparse_host_pools(
     tensor_sizes: list[int],
     num_blocks: int,
     host_block_stride: int,
-    *,
-    use_shared_host_pool: bool,
-) -> tuple[list[torch.Tensor], list[torch.Tensor], SharedOffloadRegion | None]:
-    """Allocate private host tensors or one mmap shared by local TP ranks."""
-    if not use_shared_host_pool:
-        check_hisparse_host_memory(sum(tensor_sizes))
-        private_pools = [allocate_pinned_host_pool(size) for size in tensor_sizes]
-        return (
-            [pool for pool, _ in private_pools],
-            [registered for _, registered in private_pools],
-            None,
-        )
-
+) -> tuple[list[torch.Tensor], SharedOffloadRegion]:
+    """Allocate one host mmap shared by local TP ranks."""
     tp_group = get_tp_group()
     region = SharedOffloadRegion(
         engine_id=(
@@ -415,13 +402,10 @@ def allocate_hisparse_host_pools(
             tensor = region.base_tensor[start:end]
             pin_tensor(tensor)
             pinned.append(tensor)
-        pools = [
-            region.create_next_canonical_view(size).view(-1) for size in tensor_sizes
-        ]
     except Exception:
         release_pinned_state([], pinned, region)
         raise
-    return pools, pinned, region
+    return pinned, region
 
 
 def release_pinned_state(
@@ -868,9 +852,6 @@ class HiSparseRuntime:
             plan.row_ids,
             plan.dst_rows,
             plan.miss_mask,
-            None,
-            None,
-            0,
         )
         return staged
 
@@ -972,14 +953,12 @@ class HiSparseRuntime:
             request_state_indices,
             self.region_stride,
             self.max_union_rows,
-            None,
             group.swap_stats,
             physical_topk_indices,
             hot.attention_block_stride,
             req_id_per_token[:num_tokens].contiguous(),
             block_table,
             block_size,
-            None,
             valid_topk_counts,
             swap_host_physical_rows,
             swap_device_physical_rows,
@@ -988,7 +967,6 @@ class HiSparseRuntime:
             resident.view.block_size
             if resident is not None and resident.view is not None
             else 0,
-            0,
             num_valid_rows,
         )
 
@@ -1360,9 +1338,8 @@ def create_hisparse_cache_handle(
         index_group.hisparse_group = runtime.index_group
     logger.info_once(
         "Enabled experimental HiSparse HMA hot cache: top_k=%d, "
-        "device_buffer_size=%d (%d LRU rows), max_num_seqs=%d.",
+        "device_buffer_size=%d, max_num_seqs=%d.",
         config.top_k,
-        config.device_buffer_size,
         config.device_buffer_size,
         max_num_reqs,
     )
