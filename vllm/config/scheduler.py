@@ -89,6 +89,21 @@ class SchedulerConfig:
     queued and running requests. Only applies when
     long_prefill_token_threshold is nonzero."""
 
+    long_prefill_context_budget: int = Field(default=0, ge=0)
+    """Shrink the long prefill cap as a prefill's context grows, so that each
+    chunk costs roughly the same however deep into the prompt it is. A chunk
+    is capped at ``long_prefill_context_budget / (1 + num_computed_tokens /
+    long_prefill_context_scale)`` tokens, but never fewer than 256 (or the
+    budget, if smaller). Only applies when long_prefill_token_threshold
+    caps the chunk, and only to prefills with at least
+    ``long_prefill_context_scale / 16`` tokens left or at least
+    ``long_prefill_context_scale / 2`` tokens computed. Shorter prompts keep
+    the plain threshold. 0 disables it (default)."""
+
+    long_prefill_context_scale: int = Field(default=262144, gt=0)
+    """Number of computed context tokens at which long_prefill_context_budget
+    halves the chunk size."""
+
     max_num_queued_reqs: int | None = Field(default=None, ge=0)
     """Maximum number of requests that can be in-flight (waiting or running)
     at the same time, or None for no limit. When the limit is reached, new
@@ -298,6 +313,7 @@ class SchedulerConfig:
             self.disable_chunked_mm_input = True
             self.enable_chunked_prefill = False
             self.long_prefill_token_threshold = 0
+            self.long_prefill_context_budget = 0
             logger.info(
                 "Encoder-decoder models do not support chunked prefill nor"
                 " prefix caching; disabling both."
@@ -357,6 +373,12 @@ class SchedulerConfig:
                 "long_prefill_token_threshold "
                 f"({self.long_prefill_token_threshold}) cannot be greater "
                 f"than the max_model_len ({max_model_len})."
+            )
+
+        if self.long_prefill_context_budget and not self.long_prefill_token_threshold:
+            raise ValueError(
+                "long_prefill_context_budget requires long_prefill_token_threshold "
+                "to be set."
             )
 
         return self
