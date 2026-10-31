@@ -5,7 +5,7 @@
 import copy
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any
+from typing import Any, overload
 
 import torch
 
@@ -127,11 +127,23 @@ def _in_own_storage(
     return view.copy_(new)
 
 
+@overload
+def replace_parameter(
+    layer: torch.nn.Module, param_name: str, new_tensor: None
+) -> None: ...
+
+
+@overload
+def replace_parameter(
+    layer: torch.nn.Module, param_name: str, new_tensor: torch.Tensor
+) -> torch.Tensor: ...
+
+
 def replace_parameter(
     layer: torch.nn.Module,
     param_name: str,
     new_tensor: torch.Tensor | None,
-):
+) -> torch.Tensor | None:
     """Replace a parameter of a layer while maintaining the ability to reload the
     weight. Called within implementations of the `process_weights_after_loading` method.
 
@@ -142,6 +154,7 @@ def replace_parameter(
     (so the loaded storage never shrinks), else ``.data`` is rebound to it. A new
     parameter is registered only if none exists under ``param_name``, or if the
     existing one is an online requantization source (released after conversion).
+    Returns the parameter now held under ``param_name``.
 
     Custom attributes set on ``new_tensor`` (e.g. kernel dispatch flags such as
     ``is_shuffled``) are carried over to the parameter, except ``weight_loader``,
@@ -165,7 +178,7 @@ def replace_parameter(
     # If new_tensor is None, set the parameter to None
     if new_tensor is None:
         setattr(layer, param_name, None)
-        return
+        return None
 
     old_param: torch.nn.Parameter | None = getattr(layer, param_name, None)
 
@@ -210,7 +223,7 @@ def replace_parameter(
             )
         for attr_name, attr in new_tensor_attrs.items():
             setattr(old_param, attr_name, attr)
-        return
+        return old_param
 
     new_param = torch.nn.Parameter(new_tensor, requires_grad=False)
 
@@ -222,6 +235,34 @@ def replace_parameter(
         set_weight_attrs(new_param, {"weight_loader": weight_loader})
 
     setattr(layer, param_name, new_param)
+    return new_param
+
+
+@overload
+def refill_derived(obj: object, name: str, new: None) -> None: ...
+
+
+@overload
+def refill_derived(obj: object, name: str, new: torch.Tensor) -> torch.Tensor: ...
+
+
+def refill_derived(
+    obj: object, name: str, new: torch.Tensor | None
+) -> torch.Tensor | None:
+    """Set ``obj.name`` (a buffer or plain attribute, never a parameter) to a
+    tensor derived from the weights. A held tensor of the same shape, dtype and
+    device is refilled in place, so captured CUDA graphs keep its address; it
+    must own its storage. Returns the tensor now held under ``name``."""
+    assert not isinstance(new, torch.nn.Parameter), name
+    old = getattr(obj, name, None)
+    if (
+        isinstance(old, torch.Tensor)
+        and new is not None
+        and (old.shape, old.dtype, old.device) == (new.shape, new.dtype, new.device)
+    ):
+        return old.copy_(new)
+    setattr(obj, name, new)
+    return new
 
 
 def move_parameter(layer: torch.nn.Module, src_name: str, dst_name: str) -> None:

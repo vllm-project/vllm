@@ -62,6 +62,13 @@ def is_valid_flashinfer_cutlass_fused_moe(
 
 
 class FlashInferExperts(mk.FusedMoEExpertsModular):
+    kept_constants: tuple[str, ...] = (
+        "gemm1_clamp_limit",
+        "gemm1_alpha",
+        "gemm1_beta",
+        "fake_input_scale",
+    )
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if self.quant_config.use_nvfp4_w4a4:
             layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)

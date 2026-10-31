@@ -13,6 +13,7 @@ from torch import nn
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.utils import refill_derived
 from vllm.models.muse_spark.common.ops.fused_rmsnorm import fused_rmsnorm_fwd
 
 
@@ -263,14 +264,16 @@ class MuseSpark1xNormPreservingResidualConnection(MuseSpark1xResidualConnection)
         return alpha, beta
 
     def materialize_coefficients(self) -> None:
-        """Cache alpha/beta as fp32 buffers. Call once, after weight loading."""
+        """Cache alpha/beta as fp32 buffers, refilled in place on reload."""
         w = self.gate.detach().float() / self.temperature
         alpha, beta = self.coefficients(w)
-        self.register_buffer("beta", beta.contiguous(), persistent=False)
-        if isinstance(alpha, torch.Tensor):
-            self.register_buffer("alpha", alpha.contiguous(), persistent=False)
-        else:
-            self.alpha = alpha
+        for name, value in (("beta", beta), ("alpha", alpha)):
+            if not isinstance(value, torch.Tensor):
+                setattr(self, name, value)
+            elif name in self._buffers:
+                refill_derived(self, name, value.contiguous())
+            else:
+                self.register_buffer(name, value.contiguous(), persistent=False)
         self._coefficients_ready = True
 
     def forward(self, stream: torch.Tensor, branch: torch.Tensor) -> torch.Tensor:

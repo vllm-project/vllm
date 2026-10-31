@@ -86,7 +86,6 @@ tests/quantization/test_humming_compile.py  # CI jobs disabled pending locked to
 tests/quantization/test_humming_ignore.py  # CI jobs disabled pending locked torchao transitive dependencies
 tests/quantization/test_humming_mxfp4_block_fp8.py  # CI jobs disabled pending locked torchao transitive dependencies
 tests/quantization/test_int8_moe_oracle.py  # CI jobs disabled pending locked torchao transitive dependencies
-tests/quantization/test_keep_param_objects.py  # CI jobs disabled pending locked torchao transitive dependencies
 tests/quantization/test_lm_head.py  # CI jobs disabled pending locked torchao transitive dependencies
 tests/quantization/test_mixed_precision.py  # CI jobs disabled pending locked torchao transitive dependencies
 tests/quantization/test_modelopt.py  # CI jobs disabled pending locked torchao transitive dependencies
