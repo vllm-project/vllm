@@ -101,6 +101,49 @@ def _distributed_run(fn, world_size: int, extra_env: dict[str, str]) -> None:
         assert process.exitcode == 0
 
 
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("tokens", [1, 4])
+@pytest.mark.parametrize("base_e", [False, True])
+@pytest.mark.parametrize("strided", [False, True])
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_correct_attn_out_head_major(dtype, tokens, base_e, strided):
+    """Correction keeps values and makes RS input staging a view, even in graphs."""
+    from vllm.v1.attention.ops.dcp import CPTritonContext, correct_attn_out
+
+    torch.manual_seed(0)
+    source = torch.randn(tokens, 8, 128, device="cuda", dtype=dtype)
+    lses = torch.randn(4, tokens, 8, device="cuda")
+    if strided:
+        source = source.transpose(0, 1).contiguous().transpose(0, 1)
+        lses = lses.transpose(1, 2).contiguous().transpose(1, 2)
+    lses[3, :, 0] = -float("inf")
+    lses[:, :, 1] = -float("inf")
+    lses[1, :, 2] = float("nan")
+    lses[2, :, 3] = float("inf")
+    source[:, 0] = float("nan")
+    expected, expected_lse = correct_attn_out(
+        source.clone(), lses, 3, CPTritonContext(), base_e
+    )
+    context = CPTritonContext()
+
+    def run():
+        return correct_attn_out(
+            source.clone(), lses, 3, context, base_e, output_head_major=True
+        )
+
+    actual, actual_lse = run()
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    torch.testing.assert_close(actual_lse, expected_lse, rtol=0, atol=0)
+    assert actual.movedim(0, 1).contiguous().data_ptr() == actual.data_ptr()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        replayed, replayed_lse = run()
+    for _ in range(2):
+        graph.replay()
+        torch.testing.assert_close(replayed, expected, rtol=0, atol=0)
+        torch.testing.assert_close(replayed_lse, expected_lse, rtol=0, atol=0)
+
+
 class TestDCPCommBackendConfig:
     """Test --dcp-comm-backend config validation."""
 
