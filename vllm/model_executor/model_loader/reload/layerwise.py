@@ -16,6 +16,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     finalize_model_weights,
 )
+from vllm.model_executor.utils import fill_padding
 
 from .meta import (
     SKIP_LOAD_TENSORS,
@@ -378,6 +379,7 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
         param = getattr(layer, name)
         args.arguments["param"] = param
         param.weight_loader(*args.args, **args.kwargs)
+    fill_padding(layer)
 
     # Process weights (quantization, repacking, etc.)
     quant_method = getattr(layer, "quant_method", None)

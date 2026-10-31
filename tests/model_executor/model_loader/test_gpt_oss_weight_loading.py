@@ -10,6 +10,7 @@ from vllm.model_executor.models.gpt_oss import (
     GptOssModel,
     GptOssRoutedExperts,
 )
+from vllm.model_executor.utils import fill_padding
 
 
 class _TestExperts(GptOssRoutedExperts):
@@ -81,6 +82,18 @@ def test_streamed_expert_resolves_wrapped_parameter(base_layer_prefix: str) -> N
     assert loaded_params == {fused_name}
     assert torch.equal(experts.w13_weight[1], loaded_weight[:, :4].t())
     assert torch.count_nonzero(experts.w13_weight[0]) == 0
+
+
+def test_streamed_expert_padding_is_filled_before_post_processing() -> None:
+    experts = _TestExperts("w2_bias", (2, 5))
+    experts.w2_bias.data.fill_(7)  # storage holding other bytes, as on a reload
+
+    assert _load(experts, "w2_bias", torch.ones(3), "gpt_oss_w2")
+    assert torch.all(experts.w2_bias[0, 3:] == 7)  # left to the fill
+    fill_padding(experts)
+    assert torch.equal(experts.w2_bias[0], torch.tensor([1.0, 1, 1, 0, 0]))
+    # recorded for every expert
+    assert torch.equal(experts.w2_bias[1], torch.tensor([7.0, 7, 7, 0, 0]))
 
 
 def test_streamed_expert_skips_non_local_expert() -> None:
