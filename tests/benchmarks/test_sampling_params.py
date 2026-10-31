@@ -83,7 +83,7 @@ class _FakeTokenizer(TokenizerLike):
     def convert_tokens_to_ids(self, tokens):
         raise NotImplementedError
 
-    def convert_tokens_to_string(self, tokens: list[str]) -> str:
+    def convert_tokens_to_string(self, tokens) -> str:
         raise NotImplementedError
 
     def decode(self, ids, skip_special_tokens: bool = False) -> str:
@@ -91,7 +91,7 @@ class _FakeTokenizer(TokenizerLike):
 
     def convert_ids_to_tokens(
         self, ids, skip_special_tokens: bool = False
-    ) -> list[str]:
+    ) -> list[str | bytes]:
         raise NotImplementedError
 
 
