@@ -212,6 +212,7 @@ steps:
 
 - label: ":nvidia: (B200) [Nightly] LM Eval HiSparse"
   key: lm-eval-hisparse-nightly-4xb200
+  automatic_shard: true
   timeout_in_minutes: 60
   device: b200-k8s
   num_devices: 4
@@ -495,6 +496,7 @@ steps:
 
 - label: ":nvidia: (H200) [Nightly] LM Eval DeepSeek R1 TP"
   key: lm-eval-deepseek-r1-tp-8xh200
+  automatic_shard: true
   timeout_in_minutes: 35
   device: h200
   optional: true
@@ -505,6 +507,7 @@ steps:
     amd:
       label: ":amd: (MI355) LM Eval DeepSeek R1 TP"
       dind: false
+      automatic_shard: true
       device: mi355_4
       num_devices: 4
       timeout_in_minutes: 65
@@ -583,6 +586,7 @@ steps:
 
 - label: ":nvidia: (H200) [Nightly] LM Eval DeepSeek V3.2 TP"
   key: lm-eval-deepseek-v32-tp-8xh200
+  automatic_shard: true
   timeout_in_minutes: 35
   device: h200
   optional: true
@@ -593,6 +597,7 @@ steps:
     amd:
       label: ":amd: (MI355) LM Eval DeepSeek V3-2 TP"
       dind: false
+      automatic_shard: true
       device: mi355_4
       num_devices: 4
       timeout_in_minutes: 65
