@@ -1631,6 +1631,68 @@ ModelOptMxFp8Config.FusedMoEMethodCls = ModelOptMxFp8FusedMoE
 ModelOptMxFp8Config.KVCacheMethodCls = ModelOptKVCacheMethod
 
 
+class ModelOptNvFp4EmbeddingMethod(QuantizeMethodBase):
+    """W4A16 NVFP4 token embedding.
+
+    Weights use the ModelOpt NVFP4 layout: two e2m1 values per byte (low nibble
+    first), one e4m3 scale per 16 values and a per-tensor fp32 scale. A lookup
+    gathers the packed rows and dequantizes only those.
+    """
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        if input_size_per_partition % 16:
+            raise ValueError("NVFP4 embedding requires a hidden size divisible by 16")
+        rows = sum(output_partition_sizes)
+        weight = torch.nn.Parameter(
+            torch.empty(rows, input_size_per_partition // 2, dtype=torch.uint8),
+            requires_grad=False,
+        )
+        weight_scale = torch.nn.Parameter(
+            torch.empty(
+                rows, input_size_per_partition // 16, dtype=torch.float8_e4m3fn
+            ),
+            requires_grad=False,
+        )
+        weight_scale_2 = torch.nn.Parameter(
+            torch.empty(1, dtype=torch.float32), requires_grad=False
+        )
+        for name, param in (
+            ("weight", weight),
+            ("weight_scale", weight_scale),
+            ("weight_scale_2", weight_scale_2),
+        ):
+            if param.ndim == 2:
+                set_weight_attrs(param, {"output_dim": 0})
+            set_weight_attrs(param, extra_weight_attrs)
+            layer.register_parameter(name, param)
+        layer.output_dtype = params_dtype
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        e2m1 = torch.tensor(
+            [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], device=layer.weight.device
+        )
+        layer.register_buffer("e2m1_lut", torch.cat((e2m1, -e2m1)), persistent=False)
+
+    def apply(self, layer, x, bias=None):
+        raise NotImplementedError("NVFP4 embedding has no linear apply")
+
+    def embedding(self, layer: torch.nn.Module, input_: torch.Tensor) -> torch.Tensor:
+        packed = layer.weight[input_]
+        scale = layer.weight_scale[input_].float() * layer.weight_scale_2
+        codes = torch.stack((packed & 0x0F, packed >> 4), dim=-1).flatten(-2)
+        values = layer.e2m1_lut[codes.int()].unflatten(-1, (-1, 16))
+        return (values * scale.unsqueeze(-1)).flatten(-2).to(layer.output_dtype)
+
+
 class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
     """Config class for ModelOpt MIXED_PRECISION.
 
@@ -1934,6 +1996,24 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             raise ValueError(
                 f"{quant_algo} requires a linear, embedding or routed experts"
             )
+
+        if (
+            quant_algo == "W4A16_NVFP4"
+            and isinstance(layer, VocabParallelEmbedding)
+            and not isinstance(layer, ParallelLMHead)
+        ):
+            model_config = getattr(
+                get_current_vllm_config_or_none(), "model_config", None
+            )
+            # The language model ties according to its own (text) config.
+            if model_config is not None and getattr(
+                model_config.hf_text_config, "tie_word_embeddings", False
+            ):
+                raise ValueError(
+                    "NVFP4 embeddings cannot be tied to an LM head; "
+                    "quantize the LM head separately"
+                )
+            return ModelOptNvFp4EmbeddingMethod()
 
         if isinstance(layer, (LinearBase, ParallelLMHead)):
             # Per-prefix algo -> its sub-config, then the generic linear method.
