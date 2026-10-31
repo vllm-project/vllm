@@ -195,6 +195,17 @@ class KVCacheEvictionEvent:
 
 
 @dataclass
+class KVTokenSlots:
+    """Token slots in the KV cache blocks of running and loading requests,
+    for one KV cache group."""
+
+    kv_group: int
+    filled: int
+    tail_slack: int
+    reserved: int
+
+
+@dataclass
 class SchedulerIterationDetails:
     """Scheduler-side details for one engine iteration."""
 
@@ -242,6 +253,7 @@ class SchedulerStats:
     connector_prefix_cache_stats: PrefixCacheStats | None = None
 
     kv_cache_eviction_events: list[KVCacheEvictionEvent] = field(default_factory=list)
+    kv_token_slots: list[KVTokenSlots] = field(default_factory=list)
 
     spec_decoding_stats: SpecDecodingStats | None = None
     kv_connector_stats: dict[str, Any] | None = None
