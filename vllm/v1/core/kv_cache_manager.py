@@ -225,6 +225,12 @@ class KVCacheManager:
             tuple(() for _ in range(self.num_kv_cache_groups))
         )
 
+        # Per-group usage is only informative when several groups share the
+        # pool, i.e. hybrid models.
+        self.track_usage_by_type = log_stats and self.num_kv_cache_groups > 1
+        if self.track_usage_by_type:
+            self.block_pool.enable_group_usage_tracking(self.num_kv_cache_groups)
+
     @property
     def usage(self) -> float:
         """Get the KV cache usage.
@@ -234,6 +240,27 @@ class KVCacheManager:
 
         """
         return self.block_pool.get_usage()
+
+    def get_usage_by_type(self) -> dict[str, float] | None:
+        """Get the fraction of the KV cache pool held by each KV cache type.
+
+        Returns:
+            Usage keyed by KV cache spec kind (groups of the same kind are
+            summed). Usage is relative to the whole shared pool, so the values
+            sum to ``usage``. None unless tracking is enabled (hybrid models
+            with ``log_stats``).
+
+        """
+        if not self.track_usage_by_type:
+            return None
+        num_used = self.block_pool.get_num_used_blocks_by_group()
+        assert num_used is not None
+        # Subtract 1 to account for the null block.
+        total = max(self.block_pool.num_gpu_blocks - 1, 1)
+        usage: dict[str, float] = {}
+        for (kind, _), n in zip(self.kv_cache_event_metadata, num_used):
+            usage[kind] = usage.get(kind, 0.0) + n / total
+        return usage
 
     def make_prefix_cache_stats(self) -> PrefixCacheStats | None:
         """Get (and reset) the prefix cache stats.

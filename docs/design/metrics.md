@@ -25,6 +25,7 @@ In v1, an extensive set of metrics are exposed via a Prometheus-compatible `/met
 
 - `vllm:num_requests_running` (Gauge) - Number of requests currently running.
 - `vllm:kv_cache_usage_perc` (Gauge) - Fraction of used KV cache blocks (0–1).
+- `vllm:kv_cache_usage_perc_by_type` (Gauge) - Hybrid models only: fraction of the shared KV cache pool used by each KV cache type (label `kv_cache_type`); values sum to `vllm:kv_cache_usage_perc`.
 - `vllm:prefix_cache_queries` (Counter) - Number of prefix cache queries.
 - `vllm:prefix_cache_hits` (Counter) - Number of prefix cache hits.
 - `vllm:prompt_tokens_total` (Counter) - Total number of prompt tokens processed.
