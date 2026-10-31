@@ -21,6 +21,14 @@ class FaultToleranceConfig:
     If vLLM does not recover during this time, the original error is raised.
     """
 
+    resume_requests_after_recovery: bool = False
+    """If True, in-flight requests are preempted back to the waiting queue on
+    fault (instead of being aborted) so they are automatically re-scheduled
+    after recovery. Clients will not receive abort notifications.
+    Setting this to False, or passing ``params={"abort": true}`` to the
+    ``retry`` instruction, discards the in-flight requests instead.
+    """
+
 
 def ft_tp_barrier_required(parallel_config: "ParallelConfig") -> bool:
     """Whether the per-step FT barrier over the TP cpu group is armed.

@@ -377,7 +377,7 @@ def _drive_to_faulted(
 @pytest.mark.skipif(not has_nixl_ep(), reason="Requires nixl_ep all2all backend")
 @multi_gpu_test(num_gpus=2)
 def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
-    """An exception injected into the inference path drives full retry recovery.
+    """Resume a faulted stream and preserve accuracy after retry recovery.
 
     The fault is patched into ``sync_cudagraph_and_dp_padding`` on rank 1 via
     a generated ``sitecustomize``; it raises on the engine's first DP-sync
@@ -387,11 +387,14 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
     The injection is armed (via /collective_rpc) only after the baseline
     accuracy eval; accuracy is compared before and after recovery, mirroring
     test_elastic_ep.py.
+    EOS is ignored so the stream must reach its fixed token count.
     """
     _install_fault_injection(monkeypatch, tmp_path, rank=1)
     dp_size = 2
     faulted_rank = 1
-    with _ft_manager(dp_size=dp_size) as servers:
+    max_tokens = 100
+    resume_args = ["--fault-tolerance-config.resume_requests_after_recovery", "true"]
+    with _ft_manager(resume_args, dp_size=dp_size) as servers:
         assert len(servers) == dp_size
         servers_by_rank = _servers_by_rank(servers, dp_size)
 
@@ -401,9 +404,40 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
         # 2. Baseline accuracy (the injection is still disarmed).
         initial_accuracy = _run_gsm8k_eval(servers_by_rank[0], "Initial")
 
-        # 3. Arm, then drive: the injected rank faults on its next engine step.
+        # Arm only after the stream has produced output.
+        client = servers_by_rank[0].get_client()
+        stream = client.completions.create(
+            model=MODEL_NAME,
+            prompt="Hello, my name is",
+            max_tokens=max_tokens,
+            temperature=0.0,
+            # Enforce fixed-length recovery so EOS cannot bypass the fault.
+            extra_body={"ignore_eos": True},
+            stream=True,
+            timeout=600.0,
+        )
+        chunks = []
+        stream_error = None
+        stream_started = threading.Event()
+
+        def _consume():
+            nonlocal stream_error
+            try:
+                for chunk in stream:
+                    chunks.append(chunk)
+                    if chunk.choices and chunk.choices[0].text:
+                        stream_started.set()
+            except Exception as e:
+                stream_error = e
+
+        consumer = threading.Thread(target=_consume, daemon=True)
+        consumer.start()
+        assert stream_started.wait(timeout=30), "stream did not start before fault"
+        assert consumer.is_alive(), "stream ended before fault injection"
         _arm_ft_injection(list(servers_by_rank.values()))
         faulted = _drive_to_faulted(servers_by_rank, match_values={"unhealthy"})
+        assert stream_error is None, stream_error
+        assert consumer.is_alive(), "stream ended instead of stalling at fault"
 
         # The rank that raised carries the fault info from its own exception.
         assert faulted[faulted_rank].get("fault_info"), faulted[faulted_rank]
@@ -411,10 +445,25 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
         # 4. retry every engine.
         round_id = str(uuid.uuid4())
         for server in servers_by_rank.values():
-            _apply_ft(server, "retry", request_id=round_id)
+            _apply_ft(server, "retry", {"abort": False}, request_id=round_id)
 
         # 5. Recovery completes: every engine returns to healthy and serves again.
         _assert_serving_and_healthy(list(servers_by_rank.values()))
+
+        # The stalled stream must complete without lost or duplicated tokens.
+        consumer.join(timeout=120)
+        assert not consumer.is_alive(), "stream did not complete after recovery"
+        assert stream_error is None, stream_error
+        content = [c for c in chunks if c.choices and c.choices[0].text]
+        assert len(content) == max_tokens, (
+            f"expected {max_tokens} streamed tokens, got {len(content)}"
+        )
+        finish_reasons = [
+            c.choices[0].finish_reason
+            for c in chunks
+            if c.choices and c.choices[0].finish_reason
+        ]
+        assert finish_reasons == ["length"], finish_reasons
 
         # 6. Post-recovery accuracy vs the pre-fault baseline.
         recovered_accuracy = _run_gsm8k_eval(servers_by_rank[0], "After retry")
