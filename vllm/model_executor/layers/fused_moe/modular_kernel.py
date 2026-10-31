@@ -563,6 +563,16 @@ class FusedMoEExperts(ABC):
         """
         return False
 
+    @property
+    def act_scale_ue8m0(self) -> bool | None:
+        """Scale format this kernel wants for dynamic block-quantized fp8
+        activations: True for UE8M0, False for fp32, None for no preference
+        (the platform default). The modular kernel copies a preference into
+        the quant config at construction, so every prepare step quantizes
+        the first GEMM's input the way the experts quantize the second's.
+        """
+        return None
+
     @staticmethod
     @abstractmethod
     def activation_format() -> FusedMoEActivationFormat:
@@ -1100,6 +1110,13 @@ class FusedMoEKernelModularImpl:
     ):
         self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
+        # Let the experts pick the activation scale format for the whole
+        # kernel (prepare step included) unless the config already set one.
+        if (
+            fused_experts.quant_config.act_scale_ue8m0 is None
+            and fused_experts.act_scale_ue8m0 is not None
+        ):
+            fused_experts.quant_config.act_scale_ue8m0 = fused_experts.act_scale_ue8m0
         # Experts that globalize recv_topk_idx themselves let a capable prepare
         # stage skip its standalone launch.
         from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (

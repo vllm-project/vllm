@@ -122,6 +122,7 @@ def torch_w8a8_block_fp8_moe(
     block_shape,
     silu_fp32=False,
     expert_map=None,
+    use_ue8m0=None,
 ):
     """Fused MoE with block-wise fp8 quantization using native torch.
 
@@ -129,6 +130,8 @@ def torch_w8a8_block_fp8_moe(
     directly, matching the modular Helion silu_and_mul_per_block_quant kernel;
     False rounds the SiLU output to bf16 first, matching fused_experts. Each
     kernel is checked against the reference variant matching its precision.
+    use_ue8m0 selects the activation scale format (None = platform default),
+    matching quant_config.use_ue8m0_act_scales of the kernel under test.
     """
     B, D = a.shape
     topk = topk_ids.size(1)
@@ -145,7 +148,9 @@ def torch_w8a8_block_fp8_moe(
     # Quantize with the production per-token-group fp8 kernel (same HIP/CUDA op the
     # kernels use) so the reference is bit-identical here; removes ~0.06-0.10% fp8
     # boundary-flip divergence that otherwise accumulates over K. Matmul stays fp32.
-    a_q, a_s = per_token_group_quant_fp8(a, block_k, dtype=current_platform.fp8_dtype())
+    a_q, a_s = per_token_group_quant_fp8(
+        a, block_k, dtype=current_platform.fp8_dtype(), use_ue8m0=use_ue8m0
+    )
     a_q = a_q.to(torch.float32)
     for i in range(w1.shape[0]):
         mask = topk_ids == i
@@ -157,7 +162,10 @@ def torch_w8a8_block_fp8_moe(
                 inter_out.float() if silu_fp32 else inter_out
             )
             act_out_q, act_out_s = per_token_group_quant_fp8(
-                act_out, block_k, dtype=current_platform.fp8_dtype()
+                act_out,
+                block_k,
+                dtype=current_platform.fp8_dtype(),
+                use_ue8m0=use_ue8m0,
             )
             out[mask] = native_w8a8_block_matmul(
                 act_out_q, w2[i], act_out_s, w2_s[i], block_shape, output_dtype=a.dtype
@@ -240,25 +248,25 @@ def test_w8a8_block_fp8_fused_moe(
     # 0.039 only needed for M >= 8192
     tol = 0.035 if M < 8192 else 0.039
 
-    # The modular path fuses SiLU+quant in fp32 (silu_and_mul_per_block_quant),
-    # while fused_experts/the reference round SiLU to bf16 first. On large K/N this
-    # ~1-ULP gap pushes m_out past the base tol, so validate m_out against an
-    # fp32-SiLU reference — keeping the tight base tolerance, no widened override.
-    if current_platform.is_rocm() and K >= 4096 and N >= 1024:
-        with set_current_vllm_config(vllm_config):
-            ref_out_m = torch_w8a8_block_fp8_moe(
-                a,
-                w1,
-                w2,
-                quant_config.w1_scale,
-                quant_config.w2_scale,
-                topk_weights,
-                topk_ids,
-                block_size,
-                silu_fp32=True,
-            )
-    else:
-        ref_out_m = ref_out
+    # The modular path fuses SiLU+quant in fp32 (silu_and_mul_per_block_quant)
+    # with the activation scale format its experts asked for (fp32 for the
+    # Triton experts), while fused_experts/the reference round SiLU to bf16
+    # first and quantize with the platform default. Validate m_out against a
+    # reference of matching precision — keeping the tight base tolerance, no
+    # widened override.
+    with set_current_vllm_config(vllm_config):
+        ref_out_m = torch_w8a8_block_fp8_moe(
+            a,
+            w1,
+            w2,
+            quant_config.w1_scale,
+            quant_config.w2_scale,
+            topk_weights,
+            topk_ids,
+            block_size,
+            silu_fp32=True,
+            use_ue8m0=quant_config.use_ue8m0_act_scales,
+        )
 
     torch.testing.assert_close(out, ref_out, atol=tol, rtol=tol)
     torch.testing.assert_close(m_out, ref_out_m, atol=tol, rtol=tol)
@@ -369,6 +377,119 @@ def test_w8a8_block_fp8_clamp_skips_fused_silu_quant(
     )
 
 
+@pytest.mark.parametrize("use_deepgemm_ue8m0", ["0", "1"])
+@torch.inference_mode()
+def test_w8a8_block_fp8_fused_silu_quant_ignores_deepgemm_ue8m0(
+    use_deepgemm_ue8m0, monkeypatch, workspace_init
+):
+    """A quant config that asks for fp32 activation scales (what the fp8 MoE
+    oracle emits for the Triton backend) must take the fused SiLU+quant path
+    whatever the DeepGEMM UE8M0 setting is, and match the fp32-SiLU reference.
+    Before, the fusion was gated on the global setting and was dead wherever
+    DeepGEMM is importable."""
+    from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
+
+    torch.manual_seed(0)
+    M, N, K, E, topk = 16, 256, 512, 8, 2
+    block_size = [128, 128]
+
+    a = torch.randn((M, K), dtype=torch.bfloat16) / 10
+    score = torch.randn((M, E), dtype=torch.bfloat16)
+    (_, w1, w1_s, _), (_, w2, w2_s, _) = make_test_weights(
+        E, N, K, torch.bfloat16, torch.float8_e4m3fn, block_shape=block_size
+    )
+    quant_config = fp8_w8a8_moe_quant_config(
+        w1_scale=w1_s, w2_scale=w2_s, block_shape=block_size
+    )
+    assert quant_config.act_scale_ue8m0 is None
+    m_fused_moe = modular_triton_fused_moe(make_dummy_moe_config(), quant_config)
+    # The Triton experts ask for fp32 scales; the kernel records it in the
+    # config at construction so the prepare step quantizes a1 the same way.
+    assert quant_config.act_scale_ue8m0 is False
+    topk_weights, topk_ids, _ = fused_topk(a, score.float(), topk, False)
+
+    fused_calls = 0
+    fused_op = triton_moe.ops.silu_and_mul_per_block_quant
+
+    def counting_fused_op(*args, **kwargs):
+        nonlocal fused_calls
+        fused_calls += 1
+        return fused_op(*args, **kwargs)
+
+    monkeypatch.setattr(
+        triton_moe.ops, "silu_and_mul_per_block_quant", counting_fused_op
+    )
+
+    with monkeypatch.context() as ctx:
+        ctx.setenv("VLLM_USE_DEEP_GEMM_E8M0", use_deepgemm_ue8m0)
+        is_deep_gemm_e8m0_used.cache_clear()
+        try:
+            if use_deepgemm_ue8m0 == "1" and not is_deep_gemm_e8m0_used():
+                pytest.skip("DeepGEMM E8M0 unavailable here; same as the '0' case")
+            assert not quant_config.use_ue8m0_act_scales
+            with set_current_vllm_config(vllm_config):
+                out = m_fused_moe.apply(
+                    a,
+                    w1,
+                    w2,
+                    topk_weights,
+                    topk_ids,
+                    activation=MoEActivation.SILU,
+                    apply_router_weight_on_input=False,
+                    expert_map=None,
+                    global_num_experts=E,
+                )
+                ref_out = torch_w8a8_block_fp8_moe(
+                    a,
+                    w1,
+                    w2,
+                    w1_s,
+                    w2_s,
+                    topk_weights,
+                    topk_ids,
+                    block_size,
+                    silu_fp32=True,
+                    use_ue8m0=False,
+                )
+        finally:
+            is_deep_gemm_e8m0_used.cache_clear()
+
+    assert fused_calls > 0, (
+        f"fused fast path skipped with VLLM_USE_DEEP_GEMM_E8M0={use_deepgemm_ue8m0}"
+    )
+    torch.testing.assert_close(out, ref_out, atol=0.035, rtol=0.035)
+
+
+def test_triton_experts_request_fp32_act_scales_for_block_fp8():
+    """TritonExperts declare fp32 activation scales for block fp8 and no
+    preference otherwise; the modular kernel copies a preference into a quant
+    config that has none, and leaves an explicit choice alone."""
+    E, N, K = 8, 256, 512
+    (_, _, w1_s, _), (_, _, w2_s, _) = make_test_weights(
+        E, N, K, torch.bfloat16, torch.float8_e4m3fn, block_shape=[128, 128]
+    )
+    block_cfg = fp8_w8a8_moe_quant_config(
+        w1_scale=w1_s, w2_scale=w2_s, block_shape=[128, 128]
+    )
+    assert block_cfg.act_scale_ue8m0 is None
+    modular_triton_fused_moe(make_dummy_moe_config(), block_cfg)
+    assert block_cfg.act_scale_ue8m0 is False
+    assert not block_cfg.use_ue8m0_act_scales
+
+    explicit_cfg = fp8_w8a8_moe_quant_config(
+        w1_scale=w1_s, w2_scale=w2_s, block_shape=[128, 128], act_scale_ue8m0=True
+    )
+    modular_triton_fused_moe(make_dummy_moe_config(), explicit_cfg)
+    assert explicit_cfg.act_scale_ue8m0 is True
+
+    (_, _, w1_ts, _), (_, _, w2_ts, _) = make_test_weights(
+        E, N, K, torch.bfloat16, torch.float8_e4m3fn, block_shape=None
+    )
+    tensor_cfg = fp8_w8a8_moe_quant_config(w1_scale=w1_ts, w2_scale=w2_ts)
+    modular_triton_fused_moe(make_dummy_moe_config(), tensor_cfg)
+    assert tensor_cfg.act_scale_ue8m0 is None
+
+
 @pytest.mark.parametrize(("M", "N", "K"), [(83, 512, 512), (2048, 4608, 512)])
 @pytest.mark.parametrize("topk", [2, 6])
 @pytest.mark.parametrize("ep_size", [2, 4])
@@ -402,7 +523,17 @@ def test_w8a8_block_fp8_fused_moe_expert_map(M, N, K, topk, ep_size, workspace_i
 
     with set_current_vllm_config(vllm_config):
         ref_out = torch_w8a8_block_fp8_moe(
-            a, w1, w2, w1_s, w2_s, topk_weights, topk_ids, block_size, expert_map=e_map
+            a,
+            w1,
+            w2,
+            w1_s,
+            w2_s,
+            topk_weights,
+            topk_ids,
+            block_size,
+            silu_fp32=True,
+            expert_map=e_map,
+            use_ue8m0=quant_config.use_ue8m0_act_scales,
         )
         m_out = m_fused_moe.apply(
             a,

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
 from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Union
@@ -264,10 +265,29 @@ class FusedMoEQuantConfig:
 
     mx_alignment: int = 0
 
+    # Scale format of dynamic block-quantized fp8 activations. None keeps the
+    # platform default (UE8M0 whenever DeepGEMM E8M0 is in use); False keeps
+    # fp32 scales, for kernels that take any fp32 scale and gain nothing from
+    # the power-of-two rounding (the Triton experts).
+    act_scale_ue8m0: bool | None = None
+
     def __post_init__(self):
         assert not self.per_act_token_quant or self.block_shape is None, (
             "illegal quantization"
         )
+
+    @functools.cached_property
+    def use_ue8m0_act_scales(self) -> bool:
+        """Whether dynamic block fp8 activation scales are rounded to UE8M0.
+
+        Resolved once per config: the modular kernel fixes `act_scale_ue8m0`
+        at construction, before the first forward reads this.
+        """
+        if self.act_scale_ue8m0 is not None:
+            return self.act_scale_ue8m0
+        from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
+
+        return is_deep_gemm_e8m0_used()
 
     #
     # Convenience accessors for various properties.
@@ -512,6 +532,7 @@ class FusedMoEQuantConfig:
         gemm1_alpha: float | None = None,
         gemm1_beta: float | None = None,
         gemm1_clamp_limit: float | None = None,
+        act_scale_ue8m0: bool | None = None,
     ) -> "FusedMoEQuantConfig":
         """General builder function for a FusedMoEQuantConfig.
         - quant_dtype: Optional quantization type. None if activations are
@@ -549,6 +570,8 @@ class FusedMoEQuantConfig:
         - gemm1_alpha: Optional MXFP4 TRTLLM SwiGLU alpha parameter.
         - gemm1_beta: Optional MXFP4 TRTLLM SwiGLU beta parameter.
         - gemm1_clamp_limit: Optional MXFP4 TRTLLM SwiGLU clamp limit.
+        - act_scale_ue8m0: Whether dynamic block fp8 activation scales are
+          rounded to UE8M0. None defers to the platform default.
         """
         assert not isinstance(quant_dtype, str) or quant_dtype in {
             "nvfp4",
@@ -586,6 +609,7 @@ class FusedMoEQuantConfig:
             gemm1_alpha=gemm1_alpha,
             gemm1_beta=gemm1_beta,
             gemm1_clamp_limit=gemm1_clamp_limit,
+            act_scale_ue8m0=act_scale_ue8m0,
         )
         assert quant_config.per_act_token_quant == per_act_token_quant
         assert quant_config.per_out_ch_quant == per_out_ch_quant
@@ -611,6 +635,7 @@ def fp8_w8a8_moe_quant_config(
     gemm1_alpha: float | None = None,
     gemm1_beta: float | None = None,
     gemm1_clamp_limit: float | None = None,
+    act_scale_ue8m0: bool | None = None,
 ) -> FusedMoEQuantConfig:
     """Construct a quant config for fp8 activations and fp8 weights."""
     return FusedMoEQuantConfig.make(
@@ -632,6 +657,7 @@ def fp8_w8a8_moe_quant_config(
         gemm1_alpha=gemm1_alpha,
         gemm1_beta=gemm1_beta,
         gemm1_clamp_limit=gemm1_clamp_limit,
+        act_scale_ue8m0=act_scale_ue8m0,
     )
 
 
