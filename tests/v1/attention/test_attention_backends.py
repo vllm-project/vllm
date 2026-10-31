@@ -1975,6 +1975,44 @@ def test_rocm_aiter_fa_unquantized_cache_ignores_kv_scales(
     )
 
 
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific test")
+@pytest.mark.parametrize(
+    "batch_spec",
+    [
+        BatchSpec(seq_lens=[24, 40], query_lens=[24, 40]),
+        BatchSpec(seq_lens=[32, 40, 48, 56], query_lens=[1, 1, 5, 56]),
+    ],
+    ids=["prefill", "mixed"],
+)
+# Head size 128 hits AITER's fmha_v3 ASM dispatch, which ignores `sink_ptr`;
+# head size 64 stays on the CK kernels, where extends merge partial attentions.
+@pytest.mark.parametrize("model", ["Qwen/Qwen3-0.6B", "HuggingFaceTB/SmolLM2-135M"])
+def test_rocm_aiter_fa_sinks(default_vllm_config, batch_spec: BatchSpec, model: str):
+    """Sinks must be applied exactly once on every ROCM_AITER_FA path."""
+    from vllm._aiter_ops import is_aiter_found_and_supported
+
+    if not is_aiter_found_and_supported():
+        pytest.skip("AITER is required")
+
+    def causal_mask_mod(
+        b: torch.Tensor,
+        h: torch.Tensor,
+        q_idx: torch.Tensor,
+        kv_idx: torch.Tensor,
+        *,
+        context_len: int,
+    ):
+        return (q_idx + context_len) >= kv_idx
+
+    _test_backend_correctness(
+        batch_spec,
+        model,
+        [AttentionBackendEnum.ROCM_AITER_FA],
+        causal_mask_mod,
+        use_sinks=True,
+    )
+
+
 @pytest.mark.parametrize(
     "batch_spec_name",
     [
