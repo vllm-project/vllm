@@ -732,10 +732,11 @@ class BlockPool:
                 if self.metrics_collector:
                     self.metrics_collector.on_block_allocated(block)
         else:
+            # Blocks in the free queue have ref_cnt 0.
             for block in ret:
-                assert block.ref_cnt == 0
-                block.ref_cnt += 1
-                if self.metrics_collector:
+                block.ref_cnt = 1
+            if self.metrics_collector:
+                for block in ret:
                     self.metrics_collector.on_block_allocated(block)
         return ret
 

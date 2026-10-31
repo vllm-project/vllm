@@ -84,6 +84,10 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     def supports_divergent_local_hybrid_hits(self) -> bool:
         return True
 
+    @property
+    def requires_block_hashes(self) -> bool:
+        return False
+
     def __init__(
         self,
         vllm_config: VllmConfig,

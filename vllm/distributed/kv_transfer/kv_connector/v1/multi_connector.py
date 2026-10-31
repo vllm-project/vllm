@@ -220,6 +220,10 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     def requires_kv_delivery(self) -> bool:
         return any(c.requires_kv_delivery for c in self._connectors)
 
+    @property
+    def requires_block_hashes(self) -> bool:
+        return any(c.requires_block_hashes for c in self._connectors)
+
     @classmethod
     def supports_sleep_mode(cls, kv_transfer_config: "KVTransferConfig") -> bool:
         children = [
