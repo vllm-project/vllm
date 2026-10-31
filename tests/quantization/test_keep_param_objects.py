@@ -43,11 +43,9 @@ pytestmark = pytest.mark.skipif(
 SIZE = 512
 
 
-def _load(layer: torch.nn.Module, names: list[str] | None = None) -> None:
+def _load(layer: torch.nn.Module) -> None:
     """Stand in for the weight loader: materialize and fill with finite values."""
     for name, param in list(layer.named_parameters(recurse=False)):
-        if names is not None and name not in names:
-            continue
         if param.is_meta:
             param = materialize_meta_tensor(param)
             setattr(layer, name, param)
@@ -100,7 +98,7 @@ def _online_linear():
     return layer, method
 
 
-def _moe(quant_config: QuantizationConfig | None, **kwargs):
+def _moe(quant_config: QuantizationConfig | None):
     layer = FusedMoEFactory(
         num_experts=8,
         top_k=2,
@@ -109,7 +107,6 @@ def _moe(quant_config: QuantizationConfig | None, **kwargs):
         params_dtype=torch.bfloat16,
         quant_config=quant_config,
         prefix="model.layers.0.mlp.experts",
-        **kwargs,
     ).routed_experts
     return layer, layer.quant_method
 
@@ -128,21 +125,14 @@ def _online_moe():
     return layer, method
 
 
-def _ct_dict(fmt: str, group: str, group_size: int, input_activations: bool):
+def _ct(fmt: str, group: str, group_size: int, input_activations: bool):
     args = dict(num_bits=4, type="float", strategy=group, group_size=group_size)
     args |= dict(symmetric=True, dynamic=False)
     acts = args | dict(dynamic="local") if input_activations else None
     group_0 = dict(targets=["Linear"], weights=args, input_activations=acts)
-    return dict(
-        quant_method="compressed-tensors",
-        format=fmt,
-        config_groups=dict(group_0=group_0),
-        ignore=[],
+    return CompressedTensorsConfig.from_config(
+        dict(format=fmt, config_groups=dict(group_0=group_0), ignore=[])
     )
-
-
-def _ct(*args):
-    return CompressedTensorsConfig.from_config(_ct_dict(*args))
 
 
 NVFP4 = dict(is_checkpoint_nvfp4_serialized=True, kv_cache_quant_algo=None)
