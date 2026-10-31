@@ -56,14 +56,6 @@ _DEQUANT_ROWS = 1024
 _ANY_LAYOUT_BLOCK = [1, 32]
 
 
-def _fp8_view_of(runtime: torch.Tensor, rows: int, cols: int) -> torch.Tensor:
-    """The FP8 checkpoint layout in ``runtime``'s storage: row i in the first
-    half of the bytes of runtime row i."""
-    view = torch.empty(0, dtype=torch.float8_e4m3fn, device=runtime.device)
-    offset = runtime.storage_offset() * runtime.element_size()
-    return view.set_(runtime.untyped_storage(), offset, (rows, cols), (2 * cols, 1))
-
-
 def _set_data(param: torch.nn.Parameter, tensor: torch.Tensor) -> None:
     # assigning `self.data` inside the subclass trips mypy's [has-type]
     param.data = tensor
@@ -72,44 +64,24 @@ def _set_data(param: torch.nn.Parameter, tensor: torch.Tensor) -> None:
 class Fp8DequantWeightParameter(ModelWeightParameter):
     """A ``[rows, cols]`` BF16 weight loadable from block-FP8 or BF16 rows.
 
-    ``data`` is the BF16 weight. An FP8 tensor loads through the FP8 view of
-    the same storage (row stride ``2 * cols`` bytes, row i in the first half of
-    BF16 row i's bytes); ``fp8_rows`` marks the rows whose bytes are FP8 and
-    still need dequantizing. Rows loaded as BF16, or never loaded (dummy
-    weights), hold runtime bytes."""
+    An FP8 tensor loads through `fp8_view`, the same storage in the
+    checkpoint's layout; ``fp8_rows`` (on the host) marks the rows whose bytes
+    are FP8 and still need dequantizing. Rows loaded as BF16, or never loaded
+    (dummy weights), hold runtime bytes."""
 
-    runtime_dtype: torch.dtype
     fp8_rows: torch.Tensor
     layer_ref: "weakref.ref[torch.nn.Module]"
 
-    @classmethod
-    def empty(
-        cls, rows: int, cols: int, dtype: torch.dtype, **kwargs
-    ) -> "Fp8DequantWeightParameter":
-        """An uninitialized ``[rows, cols]`` weight running in ``dtype``."""
-        assert dtype.itemsize == 2, dtype
-        param = cls(data=torch.empty(rows, cols, dtype=dtype), **kwargs)
-        param.runtime_dtype = dtype
-        # host bookkeeping: also when the model is built on meta (weight cache)
-        param.fp8_rows = torch.zeros(rows, dtype=torch.bool, device="cpu")
-        return param
-
     def fp8_view(self) -> torch.Tensor:
-        """The weight's storage in the checkpoint's FP8 layout."""
-        return _fp8_view_of(self.runtime_view(), *self.data.shape)
-
-    def runtime_view(self) -> torch.Tensor:
-        """The weight's storage as the contiguous runtime-dtype weight."""
+        """The weight's storage in the checkpoint's FP8 layout: row i in the
+        first half of the bytes of BF16 row i."""
         data = self.data
-        if data.dtype == self.runtime_dtype:
-            return data
-        offset = data.storage_offset() * data.element_size()  # the FP8 view
-        view = torch.empty(0, dtype=self.runtime_dtype, device=data.device)
-        return view.set_(
-            data.untyped_storage(), offset // 2, data.shape, (data.shape[1], 1)
-        )
+        rows, cols = data.shape
+        view = torch.empty(0, dtype=torch.float8_e4m3fn, device=data.device)
+        offset = data.storage_offset() * data.element_size()
+        return view.set_(data.untyped_storage(), offset, (rows, cols), (2 * cols, 1))
 
-    def _load(self, load, loaded_weight: torch.Tensor, rows: slice, **kwargs):
+    def _load(self, load, loaded_weight: torch.Tensor, **kwargs):
         fp8 = loaded_weight.dtype == torch.float8_e4m3fn
         if fp8:
             runtime = self.data
@@ -120,33 +92,32 @@ class Fp8DequantWeightParameter(ModelWeightParameter):
                 _set_data(self, runtime)
         else:
             load(loaded_weight, **kwargs)
+        rows = slice(None)  # the whole weight, or a merged / qkv shard's rows
+        if "shard_offset" in kwargs:
+            start = kwargs["shard_offset"]
+            rows = slice(start, start + kwargs["shard_size"])
         self.fp8_rows[rows] = fp8
 
     def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
-        self._load(super().load_column_parallel_weight, loaded_weight, slice(None))
+        self._load(super().load_column_parallel_weight, loaded_weight)
 
     def load_replicated_weight(self, loaded_weight: torch.Tensor):
-        self._load(self._assert_and_load, loaded_weight, slice(None))
+        self._load(self._assert_and_load, loaded_weight)
 
     def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
-        self._load(super().load_row_parallel_weight, loaded_weight, slice(None))
+        self._load(super().load_row_parallel_weight, loaded_weight)
 
     def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
-        start = kwargs["shard_offset"]
-        rows = slice(start, start + kwargs["shard_size"])
-        self._load(super().load_merged_column_weight, loaded_weight, rows, **kwargs)
+        self._load(super().load_merged_column_weight, loaded_weight, **kwargs)
 
     def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
-        start = kwargs["shard_offset"]
-        rows = slice(start, start + kwargs["shard_size"])
-        self._load(super().load_qkv_weight, loaded_weight, rows, **kwargs)
+        self._load(super().load_qkv_weight, loaded_weight, **kwargs)
 
     @torch.no_grad()
     def dequantize(self, scale_inv: torch.Tensor, block_size: list[int]) -> None:
-        """Dequantize the FP8 rows in place and switch ``data`` to the runtime
-        view. Every row then holds runtime bytes, so a later reload that leaves
-        this weight out keeps them."""
-        runtime = self.runtime_view()
+        """Dequantize the FP8 rows in place. Every row then holds runtime
+        bytes, so a later reload that leaves this weight out keeps them."""
+        runtime = self.data
         fp8 = self.fp8_view()
         block_n, block_k = block_size
         cols = fp8.shape[1]
@@ -169,11 +140,10 @@ class Fp8DequantWeightParameter(ModelWeightParameter):
             scale = scale.repeat_interleave(block_n, dim=0)[: end - start]
             scale = scale.repeat_interleave(block_k, dim=1)[:, :cols]
             # computed before writing: BF16 row i overwrites FP8 row i
-            out = (fp8[start:end].to(torch.float32) * scale).to(self.runtime_dtype)
+            out = (fp8[start:end].to(torch.float32) * scale).to(runtime.dtype)
             runtime[start:end].copy_(out)
             start = end
         self.fp8_rows.zero_()
-        _set_data(self, runtime)
 
 
 def _scale_groups(scale: torch.Tensor, rows: int, cols: int) -> torch.Tensor:
@@ -239,11 +209,12 @@ def load_unneeded_scale(
     loaded: set[str],
     shard_id: int | str | None = None,
 ) -> None:
-    """After ``tensor`` loaded into ``param`` (``name``): a BF16 tensor loaded
-    into a block-FP8 checkpoint weight needs no scale. Load ones into the scale
-    rows it owns, so that every element of the layer counts as loaded (a
-    layerwise reload processes a layer once all of them have arrived) and the
-    default loader's load check passes."""
+    """Model loaders call this after loading ``tensor`` into ``param``
+    (``name``): a BF16 tensor loaded into a block-FP8 checkpoint weight needs no
+    scale, so ones are loaded into the scale rows it owns and every element of
+    the layer counts as loaded (layerwise reload processes a layer once all of
+    them have arrived, counting each loader call; hence a separate call, not
+    one nested in the weight's own)."""
     if (
         not isinstance(param, Fp8DequantWeightParameter)
         or tensor.dtype == torch.float8_e4m3fn
@@ -261,16 +232,12 @@ def load_unneeded_scale(
 
 @register_weight_loader_v2_supported_method
 class Fp8DequantLinearMethod(UnquantizedLinearMethod):
-    """Loads block-FP8 (or BF16) checkpoint weights; runs in BF16.
+    """Loads block-FP8 (or BF16) checkpoint weights; runs in BF16. Model
+    loaders call `load_unneeded_scale` after each tensor they load into such a
+    weight.
 
     ``weight_block_size`` None: the layer is replicated and accepts the scale
-    in any checkpoint layout (see `_scale_groups`).
-
-    Model loaders call `load_unneeded_scale` after loading a tensor into such a
-    weight, as a separate loader call: a BF16 tensor then loads ones into the
-    scale rows it owns, so every element of the layer is loaded (layerwise
-    reload counts each loader call; a copy nested in the weight's own call
-    would count against the weight)."""
+    in any checkpoint layout (see `_scale_groups`)."""
 
     def __init__(self, weight_block_size: list[int] | None):
         super().__init__()
@@ -299,17 +266,19 @@ class Fp8DequantLinearMethod(UnquantizedLinearMethod):
             output_partition_sizes,
             self.weight_block_size,
         )
-        weight = Fp8DequantWeightParameter.empty(
-            sum(output_partition_sizes),
-            input_size_per_partition,
-            params_dtype,
+        assert params_dtype.itemsize == 2, params_dtype
+        rows, cols = sum(output_partition_sizes), input_size_per_partition
+        weight = Fp8DequantWeightParameter(
+            data=torch.empty(rows, cols, dtype=params_dtype),
             input_dim=1,
             output_dim=0,
             weight_loader=weight_loader,
         )
+        # host bookkeeping: also when the model is built on meta (weight cache)
+        weight.fp8_rows = torch.zeros(rows, dtype=torch.bool, device="cpu")
+        weight.layer_ref = weakref.ref(layer)  # see `load_unneeded_scale`
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
-        weight.layer_ref = weakref.ref(layer)  # see `load_unneeded_scale`
 
         scale = create_fp8_scale_parameter(
             BlockQuantScaleParameter,
@@ -319,7 +288,7 @@ class Fp8DequantLinearMethod(UnquantizedLinearMethod):
             weight_loader,
         )
         if self.any_scale_layout:
-            if getattr(layer, "tp_size", 1) > 1:
+            if layer.tp_size > 1:
                 raise ValueError("a scale in any layout needs a replicated layer")
             scale = Fp8DequantScaleParameter(
                 data=scale.data, input_dim=1, output_dim=0, weight_loader=weight_loader
