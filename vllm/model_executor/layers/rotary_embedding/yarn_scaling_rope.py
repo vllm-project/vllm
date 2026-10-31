@@ -34,6 +34,7 @@ class YaRNScalingRotaryEmbedding(RotaryEmbedding):
         self.beta_fast = beta_fast
         self.beta_slow = beta_slow
         self.truncate = truncate
+        self.original_max_position_embeddings = max_position_embeddings
         # Get n-d magnitude scaling corrected for interpolation
         if attention_factor is not None:
             self.mscale = float(attention_factor)
@@ -60,7 +61,7 @@ class YaRNScalingRotaryEmbedding(RotaryEmbedding):
             self.beta_slow,
             self.rotary_dim,
             self.base,
-            self.max_position_embeddings,
+            self.original_max_position_embeddings,
             self.truncate,
         )
         # Get n-d rotational scaling corrected for extrapolation
