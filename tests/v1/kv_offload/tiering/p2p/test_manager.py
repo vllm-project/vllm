@@ -779,6 +779,25 @@ class TestOnRequestFinished:
         assert bound.finishes == ["req-1"]
         assert "req-1" not in mgr._kv_to_session
 
+    def test_dual_role_finish_cleans_both_sessions(self):
+        """A dual-role request must finish both peer sessions."""
+        mgr = _make_manager()
+        source = _FakeSession(peer_id="source:1", connected=True)
+        decoder = _FakeSession(peer_id="decoder:2", connected=True)
+        mgr._sessions[source.peer_id] = source
+        mgr._sessions[decoder.peer_id] = decoder
+        mgr._kv_to_session["req-1"] = decoder
+        params = _remote_kv_source_kv_params(
+            remote_host="source", remote_port=1, kv_request_id="req-1"
+        )
+        params["remote_decoder"] = {"kv_request_id": "req-1"}
+
+        mgr.on_request_finished(_req_context(kv_params=params))
+
+        assert source.finishes == ["req-1"]
+        assert decoder.finishes == ["req-1"]
+        assert "req-1" not in mgr._kv_to_session
+
     def test_prefiller_unbound_id_leaves_batches_parked(self):
         """Prefiller-side finish for an id with parked unbound batches
         and no session binding is a no-op on `_unbound_stores`. The
