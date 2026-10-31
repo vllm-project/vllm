@@ -67,8 +67,9 @@ class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
         # AITER actually supports only per-token-per-channel GEMM.
         # Fused per-tensor weight scales become per-channel after loading
         # (see CutlassInt8ScaledMMLinearKernel).
-        weight_per_channel = c.is_channelwise or c.is_fused_module
-        if c.is_static_input_scheme or not weight_per_channel:
+        weight_group_shape = c.weight_quant_key.scale.group_shape
+        weight_per_channel = weight_group_shape.is_per_channel() or c.is_fused_module
+        if c.activation_quant_key.scale.static or not weight_per_channel:
             return (
                 False,
                 "supports only per-token activations with per-channel weights.",
