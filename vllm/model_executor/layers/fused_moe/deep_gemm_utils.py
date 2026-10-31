@@ -10,6 +10,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.utils import count_expert_num_tokens
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import get_mk_alignment_for_contiguous_layout
 from vllm.utils.math_utils import round_up
@@ -481,6 +482,19 @@ def deepgemm_moe_permute(
     device = aq.device
 
     block_m, block_k = get_mk_alignment_for_contiguous_layout()
+    # SM120: nv_dev's per-group BLOCK_M policy — cap the contiguous-group
+    # alignment at 64 when the expected per-expert M for this shape is <= 64.
+    # Without this, decode shapes pad every routed expert to 128 rows and the
+    # kernels run BLOCK_M=128 tiles over a handful of real rows (~2x MoE chain
+    # time on RTX 6000D/PRO 6000). Deterministic per token-count shape, so
+    # cudagraph capture/replay stay consistent.
+    if current_platform.is_device_capability_family(120):
+        _dyn_expected = -(
+            -(int(aq.size(0)) * int(topk_ids.shape[-1]))
+            // max(int(local_num_experts), 1)
+        )
+        if _dyn_expected <= 64 and block_m > 64:
+            block_m = 64
     # The activation-scale group size may differ from the M/K tile alignment
     # (e.g. MXFP8 uses a 32-element scale group while block_k stays 128).
     if block_size is not None:
