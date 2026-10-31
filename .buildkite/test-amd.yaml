@@ -14,12 +14,9 @@
 # command(str): the single command to run for tests. incompatible with commands.
 # commands(list): the list of commands to run for the test. incompatible with command.
 # mirror_hardwares(list): selector tags for AMD pipelines that should include the test.
-# dind(bool): when false, run the job directly in the AMD Kubernetes pod.
-#     When true or omitted, use the legacy Docker-in-Docker path.
+# dind(bool): must be false: the job runs directly in the AMD Kubernetes pod (no Docker-in-Docker).
 # num_gpus(int): override the number of GPUs for the test. defaults to 1 GPU. currently supports 2,4.
-# num_nodes(int): whether to simulate multi-node setup by launching multiple containers on one host,
-#     in this case, commands must be specified. the first command runs on the first host, the second
-#     command runs on the second host.
+# num_nodes(int): not supported on AMD (num_nodes >= 2 fails).
 # timeout_in_minutes(int): sets a timeout for the step in minutes. if not specified, uses the default timeout.
 # parallelism(int): number of parallel jobs to run for this step. enables test sharding using $$BUILDKITE_PARALLEL_JOB
 #     and $$BUILDKITE_PARALLEL_JOB_COUNT environment variables.
@@ -121,18 +118,26 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - .buildkite/scripts/docker-build-metadata-args.sh
-  - .buildkite/scripts/ci-bake-rocm.sh
   - .buildkite/release-pipeline.yaml
   - docker/Dockerfile
   - docker/Dockerfile.cpu
   - docker/Dockerfile.rocm
   - docker/Dockerfile.rocm_base
-  - docker/ci-rocm.hcl
   - docker/docker-bake.hcl
   - docker/docker-bake-rocm.hcl
+  - .buildkite/scripts/rocm/build.sh
+  - .buildkite/scripts/rocm/publish.sh
+  - tools/vllm-rocm/therock_wheels.py
   - tests/tools/test_docker_build_metadata_args.py
+  - tests/tools/test_rocm_build.py
+  - tests/tools/test_amd_ci_fast_exit.py
+  - .buildkite/scripts/hardware_ci/amd_ci_fast_exit.py
+  - tests/tools/test_kernel_symbol_map.py
+  - tools/ci/kernel_symbol_map.py
+  - tools/ci/rocm_kernel_symbol_map.py
   commands:
-  - pytest -v -s tools/test_docker_build_metadata_args.py
+  - pytest -v -s tools/test_docker_build_metadata_args.py tools/test_rocm_build.py tools/test_amd_ci_fast_exit.py
+  - pytest -v -s tools/test_kernel_symbol_map.py
 
 # Disabled until torch-abi-audit transitive dependencies are locked.
 # - label: ":amd: (MI300) Torch Stable ABI Audit" # TBD
@@ -1565,8 +1570,6 @@ steps:
   - vllm/
   - tests/models/language/generation
   commands:
-  - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
-  - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
   - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
 
 #----------------------------------------------------  mi300 · models / multimodal  ----------------------------------------------------#
@@ -2065,6 +2068,7 @@ steps:
   - VLLM_TEST_TP_SIZE=4 VLLM_TEST_DISABLE_CUSTOM_AR=1 pytest -v -s v1/determinism/test_batch_invariance.py -k bs1_vs_bsN
   - VLLM_TP_SIZE=4 VLLM_NEEDLE_TRIALS=2 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_ATTN
   - VLLM_TEST_MODEL=allenai/OLMoE-1B-7B-0924 VLLM_TEST_SERVER_ARGS="--data-parallel-size 4 --enable-expert-parallel --max-model-len 4096" pytest -v -s v1/determinism/test_online_batch_invariance.py
+  - VLLM_TEST_MODEL=ibm-granite/granite-3.0-1b-a400m-base VLLM_TEST_SERVER_ARGS="--data-parallel-size 4 --enable-expert-parallel --max-model-len 4096" pytest -v -s v1/determinism/test_online_batch_invariance.py
 
 - label: ":amd: (MI300) V1 Spec Decode Shard %N" # TBD
   timeout_in_minutes: 50
@@ -4154,6 +4158,8 @@ steps:
   - vllm/v1/kv_offload/
   - vllm/v1/simple_kv_offload/
   - tests/evals/gsm8k/test_gsm8k_offloading.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/umbp/
+  - tests/v1/kv_connector/umbp_test_utils.py
   - vllm/platforms/rocm.py
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "nemotron-h-8b or gemma-4-e4b-it"
@@ -4553,11 +4559,11 @@ steps:
     --ignore=kernels/attention/test_rocm_aiter_mla_op_registration.py
     --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
-- label: ":amd: (MI355 DPX) MoE Kernels Shard %N" # TBD
+- label: ":amd: (MI355) MoE Kernels Shard %N" # TBD
   timeout_in_minutes: 55
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
-  agent_pool: mi355_dpx
+  agent_pool: mi355_1
   parallelism: 5
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -4832,7 +4838,7 @@ steps:
   - tests/models/test_hyv4_rocm.py
   - tests/models/test_vision.py
   - tests/models/test_deepseek_v4_vl_rocm.py
-  - tests/models/test_deepseek_v4_vl_stream_weights.py
+  - tests/models/test_deepseek_v4_vl.py
   commands:
   - >-
     pytest -v -s
@@ -4840,7 +4846,7 @@ steps:
     models/transformers/test_backend.py
     models/test_registry.py
     models/test_deepseek_v4_vl_rocm.py
-    models/test_deepseek_v4_vl_stream_weights.py
+    models/test_deepseek_v4_vl.py
   - VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'not distributed'
   - pytest -v -s models/test_vision.py::test_simple_mrope_vision_model_spatial_merge
 
@@ -4863,6 +4869,34 @@ steps:
     models/qwen4_exp/test_qsa_prepare_amd.py
   # PLE and QSA import conflicting HC registrations in a shared process.
   - pytest -v -s models/qwen4_exp/test_ple.py
+
+- label: ":amd: (MI355 DPX) Step5"
+  timeout_in_minutes: 30
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_dpx
+  num_gpus: 1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/models/step5/
+  - tests/models/step5/
+  - vllm/model_executor/models/step3p7.py
+  - vllm/model_executor/models/step3_vl.py
+  - vllm/model_executor/models/step_vl.py
+  - vllm/config/compilation.py
+  - vllm/model_executor/layers/indexer_topk.py
+  - vllm/transformers_utils/configs/step5.py
+  - vllm/model_executor/warmup/step5_dsa_warmup.py
+  - vllm/v1/attention/backends/rocm_aiter_unified_attn.py
+  - vllm/triton_utils/
+  - vllm/platforms/rocm.py
+  - tests/v1/attention/utils.py
+  - tests/models/test_initialization.py
+  - tests/models/registry.py
+  commands:
+  - pytest -v -s models/step5
+  - pytest -v -s models/test_initialization.py -k Step5ForConditionalGeneration
 
 - label: ":amd: (MI355 DPX) GLM5Next"
   timeout_in_minutes: 35
@@ -4964,11 +4998,6 @@ steps:
   - vllm/
   - tests/models/language/generation
   commands:
-  - export GIT_CONFIG_COUNT=1
-  - export GIT_CONFIG_KEY_0=http.version
-  - export GIT_CONFIG_VALUE_0=HTTP/1.1
-  - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
-  - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
   - pytest -v -s models/language/generation -m hybrid_model -k 'not granite-4.0-tiny-preview' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 - label: ":amd: (MI355 DPX) Granite Language Model Compatibility"
@@ -4984,11 +5013,6 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/models/language/generation
   commands:
-  - export GIT_CONFIG_COUNT=1
-  - export GIT_CONFIG_KEY_0=http.version
-  - export GIT_CONFIG_VALUE_0=HTTP/1.1
-  - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
-  - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
   - pytest -v -s models/language/generation -m hybrid_model -k 'granite-4.0-tiny-preview'
 
 - label: ":amd: (MI355 DPX) Language Models (Extended Generation)" # TBD
@@ -5002,8 +5026,6 @@ steps:
   - tests/models/language/generation
   optional: true
   commands:
-  - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@rocm-7.0-v2.3.0'
-  - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
   - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
 
 - label: ":amd: (MI355 DPX) Language Models (Extended Pooling) Shard %N"
@@ -5594,6 +5616,9 @@ steps:
   - vllm/v1/kv_cache_interface.py
   - tests/v1/kv_connector/unit/test_umbp_
   - tests/v1/kv_connector/umbp_test_utils.py
+  - tests/v1/kv_connector/unit/utils.py
+  - tests/v1/kv_connector/conftest.py
+  - docker/Dockerfile.rocm_base
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   # Fail loudly instead of skipping every test if the image lacks mori.
@@ -5793,6 +5818,26 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s -m 'not distributed' tests/v1/kv_connector/extract_hidden_states_integration
+
+- label: ":amd: (MI355 DPX) UMBP Connector Integration"
+  timeout_in_minutes: 30
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_dpx
+  num_gpus: 1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/umbp/
+  - vllm/distributed/kv_transfer/kv_connector/v1/base.py
+  - tests/v1/kv_connector/umbp_integration/
+  - tests/v1/kv_connector/umbp_test_utils.py
+  - tests/v1/kv_connector/conftest.py
+  - tests/v1/kv_connector/rocm_pd_accuracy_utils.py
+  - docker/Dockerfile.rocm_base
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s -rs v1/kv_connector/umbp_integration
 
 - label: ":amd: (MI355 DPX) V1 Attention Shard %N" # TBD
   timeout_in_minutes: 125
@@ -6174,3 +6219,4 @@ steps:
   - vllm/envs.py
   commands:
   - pytest -v -s tests/jit_monitor/test_no_runtime_jit_rocm.py --timeout=300
+  - pytest -v -s tests/jit_monitor/test_flydsl_contract.py
