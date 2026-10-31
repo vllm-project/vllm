@@ -765,11 +765,14 @@ def cutlass_scaled_fp4_mm(
     block_scale_b: torch.Tensor,
     alpha: torch.Tensor,
     out_dtype: torch.dtype,
+    bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
     assert a.ndim == 2 and b.ndim == 2
     m, n = a.shape[0], b.shape[0]
     out = torch.empty((m, n), dtype=out_dtype, device=a.device)
-    torch.ops._C.cutlass_scaled_fp4_mm(out, a, b, block_scale_a, block_scale_b, alpha)
+    torch.ops._C.cutlass_scaled_fp4_mm(
+        out, a, b, block_scale_a, block_scale_b, alpha, bias
+    )
     return out
 
 
