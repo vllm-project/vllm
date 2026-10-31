@@ -6,10 +6,25 @@ from types import MappingProxyType
 from typing import NamedTuple, TypeVar, cast, overload
 
 import cachetools
+import torch
+
+from vllm.utils.mem_constants import MiB_bytes
 
 _K = TypeVar("_K", bound=Hashable)
 _V = TypeVar("_V")
 _T = TypeVar("_T")
+
+# Byte budget for per-shape vision RoPE caches keyed by grid geometry.
+VISION_ROPE_SHAPE_CACHE_BYTES = 256 * MiB_bytes
+
+
+def tensors_nbytes(value: object) -> float:
+    """Return the total nbytes of tensors in ``value`` (and nested tuples)."""
+    if isinstance(value, torch.Tensor):
+        return float(value.nbytes)
+    if isinstance(value, tuple):
+        return float(sum(tensors_nbytes(v) for v in value))
+    return 0.0
 
 
 class _Sentinel: ...
