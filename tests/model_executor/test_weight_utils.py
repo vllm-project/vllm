@@ -413,6 +413,48 @@ def test_dummy_fp8_weight_is_not_degenerate(dtype):
     assert (values != 0).float().mean() > 0.99
 
 
+@pytest.mark.parametrize("explicit_value", [None, 1.0])
+def test_dummy_engram_table_avoids_full_precision_temporary(
+    monkeypatch, explicit_value
+):
+    """Huge frozen FP8 tables must not require a second, larger allocation."""
+    from vllm.config.load import LoadConfig
+    from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
+
+    model = torch.nn.Module()
+    model.table = torch.nn.Module()
+    table = model.table
+    table.weight = torch.nn.Parameter(
+        torch.empty(8, 32, dtype=torch.float8_e4m3fn), requires_grad=False
+    )
+    table.weight_scale_inv = torch.nn.Parameter(
+        torch.empty(8, 1, dtype=torch.uint8), requires_grad=False
+    )
+    for param in table.parameters():
+        param.engram_vocab_start = 0
+    if explicit_value is not None:
+        table.weight.dummy_weight_value = explicit_value
+    model.other = torch.nn.Parameter(
+        torch.empty(4096, dtype=torch.float8_e4m3fn), requires_grad=False
+    )
+    empty_like = torch.empty_like
+    temporaries = []
+
+    def record_temporary(param, *args, **kwargs):
+        assert param is not table.weight, "Engram FP8 randomization allocates FP16"
+        temporaries.append(param)
+        return empty_like(param, *args, **kwargs)
+
+    monkeypatch.setattr(torch, "empty_like", record_temporary)
+    DummyModelLoader(LoadConfig(load_format="dummy")).load_weights(model, None)
+    expected = 0.0 if explicit_value is None else explicit_value
+    assert torch.all(table.weight.float() == expected)
+    assert torch.all(table.weight_scale_inv == 120)
+    assert torch.isfinite(model.other.float()).all()
+    assert (model.other.float() != 0).any()
+    assert any(param is model.other for param in temporaries)
+
+
 @pytest.mark.parametrize(
     ("dtype", "name"),
     [(torch.float8_e8m0fnu, "weight_scale_inv"), (torch.uint8, "w13_weight_scale")],
