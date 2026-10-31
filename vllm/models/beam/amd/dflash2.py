@@ -21,6 +21,7 @@ from torch import nn
 from vllm import _custom_ops as ops
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
@@ -108,6 +109,15 @@ class DFlash2BeamAttention(nn.Module):
             per_layer_sliding_window=config.sliding_window,
             prefix=f"{prefix}.attn",
         )
+        backend = self.attn.attn_backend
+        self.fuse_kv_insert = (
+            not backend.forward_includes_kv_cache_update
+            and backend.supports_kv_cache_update_bypass
+            and self.attn.impl.dcp_world_size == 1
+            and self.attn.kv_sharing_target_layer_name is None
+            and self.attn.kv_cache_dtype in ("auto", "bfloat16")
+        )
+        self.attn.kv_cache_update_bypass = self.fuse_kv_insert
         self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.v_scale = config.dflash_config.get("attention_value_scale")
@@ -121,6 +131,18 @@ class DFlash2BeamAttention(nn.Module):
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         if self.v_scale is not None:
             v = v * self.v_scale
+        cache, slots = None, None
+        mapping = get_forward_context().slot_mapping
+        assert isinstance(mapping, dict)
+        if (
+            self.fuse_kv_insert
+            and mapping
+            and self.attn.kv_cache.dtype == q.dtype == torch.bfloat16
+        ):
+            slots = mapping[self.attn.layer_name]
+            cache = self.attn.kv_cache
+            assert cache.dtype == q.dtype == torch.bfloat16
+            assert cache.ndim == 4
         rope = self.rotary_emb
         q, k = beam_qk_norm_rope(
             q,
@@ -133,9 +155,11 @@ class DFlash2BeamAttention(nn.Module):
             self.head_dim,
             rope.rotary_dim,
             rope.is_neox_style,
+            value=v,
+            kv_cache=cache,
+            slot_mapping=slots,
         )
-        # ROCm backends own their cache layout and update path.
-        output = self.attn(q, k, v)
+        output = self.attn(q, k, v) if cache is None else self.attn(q, None, None)
         output, _ = self.o_proj(output)
         return output
 

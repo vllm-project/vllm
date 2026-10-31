@@ -313,12 +313,12 @@ def test_beam_fused_candidate_edges(
     torch.testing.assert_close(actual, expected, rtol=0.01, atol=0.015625)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA required")
 @pytest.mark.parametrize("rows", [8, 64, 256])
 def test_beam_draft_qk_norm_rope_cache(rows):
     """Fused query preparation preserves BF16 rounding and ignores padded slots."""
     from vllm import _custom_ops as ops
-    from vllm.models.beam.nvidia.attention_ops import beam_qk_norm_rope
+    from vllm.models.beam import beam_qk_norm_rope
 
     torch.manual_seed(42)
     qkv = torch.randn(rows, 896, device="cuda", dtype=torch.bfloat16)

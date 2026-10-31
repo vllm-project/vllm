@@ -23,19 +23,6 @@ def _torch_boundary(x, residual, post_weight, post_eps, next_weight, next_eps, s
     return hidden, normalized
 
 
-def beam_qk_norm_rope(*args, ssmax=False, **kwargs):
-    """Call the active backend while preserving its production SSMax mode."""
-    from vllm.models.beam import beam_qk_norm_rope as backend_beam_qk_norm_rope
-
-    if current_platform.is_rocm():
-        if any(value is not None for value in kwargs.values()):
-            pytest.skip("Fused KV insertion is specific to the NVIDIA backend")
-        return backend_beam_qk_norm_rope(
-            *args, ssmax_mode="root10" if ssmax else "none"
-        )
-    return backend_beam_qk_norm_rope(*args, ssmax=ssmax, **kwargs)
-
-
 def _assert_boundary_close(actual, expected, *, relative_tolerance=1e-4):
     for value, reference in zip(actual, expected):
         if reference is None:
@@ -236,6 +223,8 @@ def test_output_gate_preserves_activation_dtype_rounding(dtype, rows, packed):
 def test_qk_norm_rope_keeps_norm_rounding_and_fp32_rotation(
     dtype, rotary_dim, neox, head_dim, q_heads, k_heads
 ):
+    from vllm.models.beam import beam_qk_norm_rope
+
     torch.manual_seed(42)
     rows = 17
     rotary_dim = min(rotary_dim, head_dim)
@@ -265,6 +254,8 @@ def test_qk_norm_rope_keeps_norm_rounding_and_fp32_rotation(
 @torch.inference_mode()
 def test_qk_norm_rope_inserts_only_mapped_kv(rows, kv_heads, nhd, rotary_dim, neox):
     """Cache insertion preserves Q/K and follows live slot mappings on replay."""
+    from vllm.models.beam import beam_qk_norm_rope
+
     torch.manual_seed(42)
     sizes = (6 * kv_heads * 128, kv_heads * 128, kv_heads * 128)
     qkv = torch.randn(rows, sum(sizes) + 1, device="cuda", dtype=torch.bfloat16)[:, 1:]
@@ -319,6 +310,8 @@ def test_qk_norm_rope_inserts_only_mapped_kv(rows, kv_heads, nhd, rotary_dim, ne
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 @torch.inference_mode()
 def test_ssmax_fuses_after_norm_rounding_and_scales_only_queries(dtype):
+    from vllm.models.beam import beam_qk_norm_rope
+
     torch.manual_seed(42)
     positions = torch.tensor(
         [0, 1, 15, 2047, 2048, 16384, 100000, 1048575], device="cuda"
@@ -343,7 +336,7 @@ def test_ssmax_fuses_after_norm_rounding_and_scales_only_queries(dtype):
 @pytest.mark.parametrize("rotary_dim", [0, 128])
 @torch.inference_mode()
 def test_attention_fusions_replay_with_changed_positions_and_gates(rotary_dim):
-    from vllm.models.beam import beam_output_gate
+    from vllm.models.beam import beam_output_gate, beam_qk_norm_rope
 
     torch.manual_seed(42)
     qkv = torch.randn(17, 1025, device="cuda", dtype=torch.bfloat16)[:, 1:]
@@ -402,12 +395,10 @@ def test_fused_kernels_reuse_specializations_across_token_counts(
     from vllm.models.beam import (
         beam_norm_residual_norm,
         beam_output_gate,
+        beam_qk_norm_rope,
         beam_rms_norm,
         beam_softcap_logits,
     )
-
-    if current_platform.is_rocm() and insert_kv:
-        pytest.skip("Fused KV insertion is specific to the NVIDIA backend")
 
     device = "cuda"
     dtype = torch.bfloat16
