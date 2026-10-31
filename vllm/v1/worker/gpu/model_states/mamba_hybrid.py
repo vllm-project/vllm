@@ -111,8 +111,23 @@ class MambaHybridModelState(DefaultModelState):
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         super().add_request(req_index, new_req_data)
-        # Must reset the speculative acceptance count in this idx which could be stale.
-        self.num_accepted_tokens_gpu[req_index].fill_(1)
+        # Speculative acceptance count is only tracked and read when speculative
+        # decoding, align (prefix-caching) mode, or RecoverSSM is active. In standard
+        # non-speculative serving without align mode, prepare_attn passes None and
+        # never reads num_accepted_tokens_gpu; launching an in-place device fill kernel
+        # during request addition is redundant and can trigger unhandled accelerator
+        # launch errors under multi-GPU / async execution.
+        num_speculative_tokens = (
+            getattr(self.vllm_config, "num_speculative_tokens", 0)
+            if hasattr(self, "vllm_config") and self.vllm_config is not None
+            else 0
+        )
+        if (
+            num_speculative_tokens > 0
+            or self._align_mode
+            or (hasattr(self, "recoverssm") and self.recoverssm is not None)
+        ):
+            self.num_accepted_tokens_gpu[req_index].fill_(1)
         if self._align_mode:
             # Seed the running state block from the resumed/prefilled position.
             # The column is in mamba blocks. cache_config.block_size is the
