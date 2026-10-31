@@ -481,6 +481,9 @@ class OpenAIServingChat(GenerateBaseServing):
         chat_template_kwargs: dict[str, Any] | None = None,
         mm_token_counts: dict[str, int] | None = None,
     ) -> AsyncGenerator[str, None]:
+        include_usage, _ = should_include_usage(
+            request.stream_options, self.enable_force_include_usage
+        )
         try:
             async for chunk in self.chat_completion_stream_generator_raw(
                 request,
@@ -496,6 +499,10 @@ class OpenAIServingChat(GenerateBaseServing):
                 if isinstance(chunk, ErrorResponse):
                     data = chunk.model_dump_json()
                 else:
+                    # OpenAI sends `"usage": null` on every chunk before the
+                    # final usage chunk when usage is requested.
+                    if include_usage and "usage" not in chunk.model_fields_set:
+                        chunk.usage = None
                     data = chunk.model_dump_json(
                         exclude_unset=True, exclude_none=not chunk.choices
                     )

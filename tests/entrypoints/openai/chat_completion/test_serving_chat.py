@@ -1124,6 +1124,16 @@ async def test_streaming_reasoning_usage_counts_across_deltas(
         assert final_chunks[0]["usage"].get("completion_tokens_details") == (
             expected_details
         )
+    for chunk in chunks:
+        if not chunk["choices"]:
+            continue
+        if continuous_usage:
+            assert chunk["usage"] is not None
+        elif include_usage:
+            # OpenAI sends "usage": null on all chunks but the final one.
+            assert chunk["usage"] is None
+        else:
+            assert "usage" not in chunk
     for i, parser in enumerate(parsers):
         expected_calls = (
             (num_steps if continuous_usage else 1) if include_details else 0
