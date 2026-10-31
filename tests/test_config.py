@@ -138,6 +138,7 @@ def test_rocm_mm_prefix_lm_disables_chunked_mm_input(
         parallel_config=SimpleNamespace(
             prefill_context_parallel_size=1,
             worker_cls="test-worker",
+            all2all_backend="naive",
         ),
         model_config=(
             None
@@ -153,6 +154,37 @@ def test_rocm_mm_prefix_lm_disables_chunked_mm_input(
     RocmPlatform.check_and_update_config(config)
 
     assert config.scheduler_config.disable_chunked_mm_input is expected
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific test")
+@pytest.mark.parametrize("backend", ["mori", "naive"])
+def test_rocm_resolves_the_mori_all2all_backend(monkeypatch, backend: str) -> None:
+    import vllm.config.parallel as parallel
+    from vllm.platforms.rocm import RocmPlatform
+
+    calls = []
+    monkeypatch.setattr(
+        parallel, "resolve_mori_all2all", lambda *args, **kwargs: calls.append(args)
+    )
+    config = SimpleNamespace(
+        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE),
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=1,
+            worker_cls="test-worker",
+            all2all_backend=backend,
+        ),
+        model_config=None,
+        scheduler_config=SimpleNamespace(
+            is_multimodal_model=False, disable_chunked_mm_input=False
+        ),
+        kernel_config=SimpleNamespace(moe_backend="aiter"),
+    )
+
+    RocmPlatform.check_and_update_config(config)
+
+    # Only "mori" picks between EPv1 and EPv2, once, at config time.
+    expected = [(config.parallel_config, None, "aiter")] if backend == "mori" else []
+    assert calls == expected
 
 
 def _sampling_replay_config(
