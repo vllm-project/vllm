@@ -150,5 +150,7 @@ def test_draft_decode_update_matches_fresh_build(builder_cls):
     expected = _draft_builder(builder_cls, rswa_window=None).build(0, replayed)
     assert torch.equal(metadata.seq_lens, expected.seq_lens)
     assert torch.equal(metadata.block_table, expected.block_table)
-    assert torch.equal(metadata.slot_mapping, expected.slot_mapping)
+    # slot_mapping no longer lives on backend metadata; it's read straight off
+    # the common metadata's persistent buffer, so there's nothing backend-level
+    # left to assert here beyond the `copy_` above already having happened.
     assert torch.equal(metadata.query_start_loc, expected.query_start_loc)
