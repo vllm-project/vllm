@@ -76,8 +76,7 @@ from cutlass.cutlass_dsl import T, dsl_user_op
 
 from vllm.cute_utils import _tcgen05, recast_val
 from vllm.cute_utils import mbarrier as mbar_ops
-
-from ...ops.cute_dsl.primitives import current_cu_stream
+from vllm.models.common.ops.moe_tail_fusion.primitives import current_cu_stream
 
 HEADS = 16
 HEAD_DIM = 512

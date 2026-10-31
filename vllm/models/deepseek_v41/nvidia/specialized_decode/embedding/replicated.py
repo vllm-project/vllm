@@ -39,8 +39,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod,
     VocabParallelEmbedding,
 )
-
-from ...ops.cute_dsl.primitives import current_cu_stream
+from vllm.models.common.ops.moe_tail_fusion.primitives import current_cu_stream
 
 THREADS = 256
 VECTOR_BYTES = 16

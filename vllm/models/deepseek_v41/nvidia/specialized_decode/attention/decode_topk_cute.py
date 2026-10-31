@@ -78,7 +78,7 @@ from cutlass._mlir.dialects import llvm
 from cutlass.cute.runtime import make_fake_stream, make_ptr
 from cutlass.cutlass_dsl import T, dsl_user_op
 
-from ...ops.cute_dsl.primitives import current_cu_stream
+from vllm.models.common.ops.moe_tail_fusion.primitives import current_cu_stream
 
 SAMPLES = 2048  # keys sampled a row, over the cluster
 CAPACITY = 8192  # survivors a row

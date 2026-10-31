@@ -295,7 +295,7 @@ def launch_low_latency(
     ``weight``. The kernel computes ``out.T``: its M is the weight's N."""
     import cutlass
 
-    from ...ops.cute_dsl.primitives import current_cu_stream
+    from vllm.models.common.ops.moe_tail_fusion.primitives import current_cu_stream
 
     k, n = weight.shape
     f8, sf, bf16 = cutlass.Float8E4M3FN, cutlass.Float8E8M0FNU, cutlass.BFloat16

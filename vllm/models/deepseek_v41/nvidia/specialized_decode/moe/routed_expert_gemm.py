@@ -59,8 +59,8 @@ import vllm.envs as envs
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
+from vllm.models.common.ops.moe_tail_fusion.primitives import current_cu_stream
 
-from ...ops.cute_dsl.primitives import current_cu_stream
 from .routed_expert_front_cute import RoutedExpertFront
 from .routed_expert_gemm_cute import (
     RoutedExpertGemm1,

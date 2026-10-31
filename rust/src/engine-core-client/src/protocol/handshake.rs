@@ -1,11 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use std::collections::BTreeMap;
-
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::OpaqueValue;
 use crate::protocol::dtype::ModelDtype;
 
 /// Decoded engine startup-handshake payload sent on the handshake socket.
@@ -135,5 +132,56 @@ pub struct HandshakeAddresses {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandshakeInitMessage {
     pub addresses: HandshakeAddresses,
-    pub parallel_config: BTreeMap<String, OpaqueValue>,
+    pub parallel_config: HandshakeParallelConfig,
+}
+
+/// `ParallelConfig` fields that the engine overwrites from INIT, encoded as a
+/// map.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandshakeParallelConfig {
+    /// Sent for coordinated (MoE) DP only; otherwise the map is empty.
+    #[serde(flatten)]
+    pub data_parallel_rendezvous: Option<DataParallelRendezvous>,
+}
+
+/// Where all DP ranks rendezvous to form their cross-rank torch process
+/// groups.
+///
+/// `_coord_store_port` is not sent: no coordination store runs, so engines
+/// take the listed ports.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DataParallelRendezvous {
+    pub data_parallel_master_ip: String,
+    pub data_parallel_master_port: u16,
+    /// Free ports that the engine takes one per process group before falling
+    /// back to incrementing `data_parallel_master_port`.
+    #[serde(rename = "_data_parallel_master_port_list")]
+    pub data_parallel_master_port_list: Vec<u16>,
+    pub data_parallel_size: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::{decode_value, encode_msgpack};
+
+    #[test]
+    fn handshake_parallel_config_encodes_rendezvous_fields_or_empty_map() {
+        let encode = |parallel_config: HandshakeParallelConfig| {
+            decode_value(&encode_msgpack(&parallel_config).unwrap()).unwrap().to_string()
+        };
+
+        let rendezvous = DataParallelRendezvous {
+            data_parallel_master_ip: "10.0.0.1".to_string(),
+            data_parallel_master_port: 29500,
+            data_parallel_master_port_list: vec![29501, 29502, 29503, 29504],
+            data_parallel_size: 4,
+        };
+
+        expect_test::expect!["{}"].assert_eq(&encode(HandshakeParallelConfig::default()));
+        expect_test::expect![[r#"{"data_parallel_master_ip": "10.0.0.1", "data_parallel_master_port": 29500, "_data_parallel_master_port_list": [29501, 29502, 29503, 29504], "data_parallel_size": 4}"#]]
+            .assert_eq(&encode(HandshakeParallelConfig {
+                data_parallel_rendezvous: Some(rendezvous),
+            }));
+    }
 }
