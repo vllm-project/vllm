@@ -1,12 +1,99 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import subprocess
+import sys
 from importlib import import_module
 from types import SimpleNamespace
 
 import pytest
 import torch
 
+from vllm.models.deepseek_v41.nvidia.pipeline import (
+    PipelineBoundary,
+    get_pipeline_boundaries,
+)
 from vllm.platforms import current_platform
+from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
+
+
+def test_pipeline_planner_import_does_not_load_gpu_runtime():
+    """Planning partitions on CPU must not initialize the GPU model or kernels."""
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import sys
+from vllm.models.deepseek_v41.nvidia.pipeline import get_pipeline_boundaries
+
+runtime_modules = {
+    "vllm.models.deepseek_v41.attention",
+    "vllm.models.deepseek_v41.nvidia.model",
+    "vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache",
+    "vllm.v1.attention.backends.mla.indexer",
+}
+assert not runtime_modules.intersection(sys.modules)
+""",
+        ],
+        check=True,
+    )
+
+
+@pytest.fixture
+def flash_sharing_config():
+    return DeepseekV41Config(
+        text_config={
+            "num_hidden_layers": 40,
+            "compress_ratios": [0, 0] + [2] * 18 + [1] * 20,
+            "kv_source_layer_ids": [2, 8, 14, 20],
+            "index_source_layer_ids": [2, 8, 14, 20, 24, 28, 32, 36],
+            "candidate_source_layer_id": 20,
+            "candidate_topk_blocks": 32,
+        },
+    )
+
+
+@pytest.mark.parametrize("cut", range(1, 40))
+def test_every_pipeline_cut_preserves_live_sharing_sources(flash_sharing_config, cut):
+    """KV, top-k and candidate state have different cross-stage lifetimes."""
+    config = flash_sharing_config
+    (boundary,) = get_pipeline_boundaries(config, [(0, cut), (cut, 40)])
+    assert boundary.kv_source == next(
+        (s for s, end in zip([2, 8, 14, 20], [8, 14, 20, 40]) if s < cut < end),
+        None,
+    )
+    index_sources = config.index_source_layer_ids
+    assert boundary.index_source == next(
+        (s for s, end in zip(index_sources, index_sources[1:] + [40]) if s < cut < end),
+        None,
+    )
+    assert boundary.candidate_source == (20 if 20 < cut <= 36 else None)
+
+
+def test_pipeline_state_survives_multiple_hops(flash_sharing_config):
+    boundaries = get_pipeline_boundaries(
+        flash_sharing_config, [(0, 10), (10, 12), (12, 25), (25, 40)]
+    )
+    assert boundaries == (
+        PipelineBoundary(8, 8),
+        PipelineBoundary(8, 8),
+        PipelineBoundary(20, 24, 20),
+    )
+
+
+@pytest.mark.parametrize(
+    "ranges",
+    [[], [(0, 0), (0, 40)], [(0, 10), (11, 40)], [(0, 10), (9, 40)], [(0, 39)]],
+)
+def test_invalid_pipeline_partition_rejected(flash_sharing_config, ranges):
+    with pytest.raises(ValueError, match="partition all layers"):
+        get_pipeline_boundaries(flash_sharing_config, ranges)
+
+
+def test_pipeline_cut_validates_source_topology(flash_sharing_config):
+    flash_sharing_config.index_source_layer_ids.remove(8)
+    with pytest.raises(ValueError, match="publish index keys"):
+        get_pipeline_boundaries(flash_sharing_config, [(0, 10), (10, 40)])
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")

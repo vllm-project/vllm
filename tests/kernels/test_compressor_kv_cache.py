@@ -45,6 +45,100 @@ from .test_fused_indexer_q_rope_quant import quantize_to_mxfp4
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
 @pytest.mark.parametrize(
+    "row_bytes,value_bytes", [(584, 576), (528, 528), (288, 288), (132, 128), (68, 64)]
+)
+@pytest.mark.parametrize("compress_ratio", [1, 2])
+@pytest.mark.parametrize(
+    "num_tokens,use_graph", [(1, False), (17, False), (1025, True)]
+)
+def test_pipeline_cache_relay_preserves_bytes_and_page_padding(
+    row_bytes, value_bytes, compress_ratio, num_tokens, use_graph
+):
+    """Relays remap physical pages, skip invalid/open groups and replay graphs."""
+    from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
+        copy_pipeline_cache_rows,
+    )
+
+    block_size = 32
+    num_blocks = math.ceil(num_tokens / block_size) + 1
+    stride = block_size * row_bytes + 256
+    source_cpu = torch.randint(0, 256, (num_blocks, stride), dtype=torch.uint8)
+    source_backing = source_cpu.cuda()
+    target_backing = torch.full_like(source_backing, 5)
+    source = source_backing.as_strided(
+        (num_blocks, block_size, row_bytes), (stride, row_bytes, 1)
+    )
+    target = target_backing.as_strided(source.shape, source.stride())
+    # Offset views exercise the alignment variants used by sliced PP batches.
+    positions = torch.arange(num_tokens + 1, device="cuda")[1:]
+    source_slots = torch.arange(num_tokens + 1, device="cuda")[1:]
+    source_slots[::5] = -1
+    # Match valid rows, while using a different physical location on the receiver.
+    target_slots = torch.where(source_slots >= 0, source_slots + block_size, -1)
+    rows = torch.empty((num_tokens + 1, row_bytes), device="cuda", dtype=torch.uint8)[
+        1:
+    ]
+
+    def relay():
+        copy_pipeline_cache_rows(
+            source,
+            rows,
+            positions,
+            source_slots,
+            compress_ratio,
+            value_bytes,
+            scatter=False,
+        )
+        copy_pipeline_cache_rows(
+            target,
+            rows,
+            positions,
+            target_slots,
+            compress_ratio,
+            value_bytes,
+            scatter=True,
+        )
+
+    relay()
+    if use_graph:
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            relay()
+        source_backing.bitwise_xor_(1)
+        source_cpu.bitwise_xor_(1)
+        target_backing.fill_(5)
+        graph.replay()
+    expected_rows = torch.zeros((num_tokens, row_bytes), dtype=torch.uint8)
+    expected_target = torch.full_like(source_cpu, 5)
+    byte = torch.arange(row_bytes)
+
+    def offsets(slot):
+        row = slot % block_size
+        return torch.where(
+            byte < value_bytes,
+            row * value_bytes + byte,
+            block_size * value_bytes
+            + row * (row_bytes - value_bytes)
+            + byte
+            - value_bytes,
+        )
+
+    for token, (src, dst, pos) in enumerate(
+        zip(
+            source_slots.cpu().tolist(),
+            target_slots.cpu().tolist(),
+            positions.cpu().tolist(),
+        )
+    ):
+        if src >= 0 and (pos + 1) % compress_ratio == 0:
+            expected_rows[token] = source_cpu[src // block_size, offsets(src)]
+            expected_target[dst // block_size, offsets(dst)] = expected_rows[token]
+    torch.testing.assert_close(rows.cpu(), expected_rows)
+    torch.testing.assert_close(target_backing.cpu(), expected_target)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.parametrize(
     "cache_dtype,kv_mxfp8",
     [
         (torch.uint8, False),
