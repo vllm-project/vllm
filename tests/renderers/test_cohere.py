@@ -709,6 +709,16 @@ class TestBuildRenderConfig:
         # JSON-encoded for melody (string-only schema field).
         assert cfg["json_schema"] == json.dumps(schema)
 
+    def test_response_format_v2_json_object_with_schema(self):
+        # Cohere v2 sends a schema as ``{type: json_object, json_schema: ...}``.
+        schema = {"type": "object", "properties": {"a": {"type": "string"}}}
+        _, cfg = _build_render_config(
+            self._conv(),
+            {"response_format": {"type": "json_object", "json_schema": schema}},
+        )
+        assert cfg["json_mode"] is True
+        assert cfg["json_schema"] == json.dumps(schema)
+
     def test_response_format_nested_json_schema_unwrapped(self):
         # When the SDK shape is ``{type: json_schema, schema: {schema:
         # {...}}}``, the inner ``schema`` value is used.
@@ -1254,3 +1264,40 @@ class TestRequestCitationsReachRenderedPrompt:
 
         assert "<co>" not in rendered
         assert "</co:" not in rendered
+
+
+@pytest.mark.parametrize("fmt", ["cmd3", "cmd4"])
+def test_v2_response_format_reaches_rendered_prompt(fmt):
+    """``response_format`` on a ``/cohere/v2/chat`` request reaches melody's
+    JSON-mode and JSON-schema prompt slots, not only constrained decoding."""
+    pytest.importorskip("cohere")
+    melody = pytest.importorskip("cohere_melody")
+    from vllm.entrypoints.cohere.protocol import CohereChatV2Request
+    from vllm.entrypoints.cohere.serving import CohereServingChatV2
+
+    schema = {"type": "object", "properties": {"capital": {"type": "string"}}}
+
+    def render(response_format):
+        body = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
+        if response_format is not None:
+            body["response_format"] = response_format
+        request = CohereChatV2Request.model_validate(body)
+        chat_request = CohereServingChatV2._convert_v2_to_chat_completion(request)
+        kwargs = dict(chat_request.chat_template_kwargs or {}, cohere_format=fmt)
+        _, config = _build_render_config([{"role": "user", "content": "hi"}], kwargs)
+        return getattr(melody, f"render_{fmt}")(config)
+
+    plain = render(None)
+    json_object = render({"type": "json_object"})
+    with_schema = render({"type": "json_object", "json_schema": schema})
+
+    assert render({"type": "text"}) == plain
+    assert json_object != plain
+    assert with_schema not in (plain, json_object)
+    assert '"capital"' in with_schema
+    # Melody renders json_mode + json_schema like json_schema alone.
+    _, schema_only = _build_render_config(
+        [{"role": "user", "content": "hi"}],
+        {"json_schema": schema, "cohere_format": fmt},
+    )
+    assert with_schema == getattr(melody, f"render_{fmt}")(schema_only)
