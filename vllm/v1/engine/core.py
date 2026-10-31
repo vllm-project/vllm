@@ -1636,7 +1636,11 @@ class EngineCoreProc(EngineCore):
                 engine_core._send_engine_dead()
             raise e
         finally:
-            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            # Ignore further SIGTERMs while tearing down: the front-end's process
+            # manager may send another one, and with SIG_DFL it would kill this
+            # process mid-way through the executor's worker teardown. The
+            # process manager still SIGKILLs it if teardown hangs.
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
             signal.signal(signal.SIGINT, signal.SIG_DFL)
             if signal_callback is not None:
                 signal_callback.stop()

@@ -705,6 +705,29 @@ class WorkerProcHandle:
         )
 
 
+def _make_worker_signal_handler(
+    shutdown_requested: threading.Event, teardown_started: threading.Event
+):
+    """SIGTERM/SIGINT handler for a worker process.
+
+    Raises SystemExit on the first signal, even if the death-pipe monitor has
+    already set ``shutdown_requested`` (it cannot wake a worker blocked on a
+    remote MQ read). Ignores signals once ``teardown_started`` is set.
+    """
+    raised = False
+
+    def handler(signum, frame):
+        nonlocal raised
+        if raised or teardown_started.is_set():
+            return
+        raised = True
+        shutdown_requested.set()
+        logger.debug("WorkerProc handling signal %d, raising SystemExit", signum)
+        raise SystemExit()
+
+    return handler
+
+
 class WorkerProc:
     """Wrapper that runs one Worker in a separate process."""
 
@@ -969,15 +992,10 @@ class WorkerProc:
         # SystemExit exception is only raised once to allow this and worker
         # processes to terminate without error
         shutdown_requested = threading.Event()
-
-        def signal_handler(signum, frame):
-            nonlocal shutdown_requested
-            if not shutdown_requested.is_set():
-                shutdown_requested.set()
-                logger.debug(
-                    "WorkerProc handling signal %d, raising SystemExit", signum
-                )
-                raise SystemExit()
+        teardown_started = threading.Event()
+        signal_handler = _make_worker_signal_handler(
+            shutdown_requested, teardown_started
+        )
 
         # Either SIGTERM or SIGINT will terminate the worker
         signal.signal(signal.SIGTERM, signal_handler)
@@ -1066,6 +1084,7 @@ class WorkerProc:
             # any worker dies. Set this value so we don't re-throw
             # SystemExit() to avoid zmq exceptions in __del__.
             shutdown_requested.set()
+            teardown_started.set()
 
         except SystemExit as e:
             # SystemExit is raised on SIGTERM or SIGKILL, which usually indicates that
@@ -1080,6 +1099,7 @@ class WorkerProc:
             raise e
 
         finally:
+            teardown_started.set()
             if ready_writer is not None:
                 ready_writer.close()
             if death_pipe is not None:
