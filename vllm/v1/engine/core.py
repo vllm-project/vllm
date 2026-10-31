@@ -54,12 +54,14 @@ from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.system_utils import decorate_logs, set_process_title
 from vllm.utils.watch_dog import get_watch_dog, start_watch_dog
 from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
+from vllm.v1.core import kv_cache_utils
 from vllm.v1.core.kv_cache_planning import (
     get_global_kv_cache_groups,
     get_kv_cache_configs,
 )
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
+    frontend_block_hashes,
     generate_scheduler_kv_cache_config,
     get_request_block_hasher,
     init_none_hash,
@@ -81,6 +83,7 @@ from vllm.v1.engine import (
     EngineCoreRequestType,
     FinishReason,
     PauseMode,
+    PrefixHashConfig,
     ReconfigureDistributedRequest,
     ReconfigureRankType,
     UtilityOutput,
@@ -224,6 +227,8 @@ class EngineCore:
         self.is_pooling_model = vllm_config.model_config.runner_type == "pooling"
 
         self.request_block_hasher: Callable[[Request], list[BlockHash]] | None = None
+        # Lets frontends hash prompt blocks; see EngineCoreRequest.block_hashes.
+        self.prefix_hash_config: PrefixHashConfig | None = None
         if vllm_config.cache_config.enable_prefix_caching or kv_connector is not None:
             caching_hash_fn = get_hash_fn_by_name(
                 vllm_config.cache_config.prefix_caching_hash_algo
@@ -234,6 +239,12 @@ class EngineCore:
                 hash_block_size,
                 caching_hash_fn,
                 vllm_config.num_hash_lookahead_tokens,
+            )
+            self.prefix_hash_config = PrefixHashConfig(
+                hash_algo=vllm_config.cache_config.prefix_caching_hash_algo,
+                hash_block_size=hash_block_size,
+                none_hash=kv_cache_utils.NONE_HASH,
+                num_lookahead_tokens=vllm_config.num_hash_lookahead_tokens,
             )
 
         self.step_fn = (
@@ -1179,7 +1190,10 @@ class EngineCore:
                 request.mm_features
             )
 
-        req = Request.from_engine_core_request(request, self.request_block_hasher)
+        frontend_hashes = frontend_block_hashes(request, self.prefix_hash_config)
+        req = Request.from_engine_core_request(
+            request, self.request_block_hasher, frontend_hashes
+        )
         if req.use_structured_output:
             # Note on thread safety: no race condition.
             # `grammar_init` is only invoked in input processing thread. For
@@ -1986,6 +2000,7 @@ class EngineCoreProc(EngineCore):
                 if envs.VLLM_SERVER_DEV_MODE
                 else None
             ),
+            prefix_hash_config=self.prefix_hash_config,
         )
 
     def process_input_sockets(

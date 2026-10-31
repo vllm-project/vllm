@@ -18,6 +18,7 @@ use crate::client::imp::{ClientInner, run_abort_loop, run_output_dispatcher_loop
 use crate::coordinator::CoordinatorHandle;
 use crate::error::{Error, Result, bail_invalid_client_config};
 use crate::metrics::EngineSleepState;
+use crate::prompt_block_hasher::PromptBlockHasher;
 use crate::protocol::dtype::ModelDtype;
 use crate::protocol::handshake::EngineCoreReadyResponse;
 use crate::protocol::lora::LoraRequest;
@@ -315,6 +316,8 @@ pub struct EngineCoreClient {
     inner: Arc<ClientInner>,
     coordinator: Option<CoordinatorHandle>,
     abort_tx: mpsc::UnboundedSender<AbortRequest>,
+    /// Hashes prompt blocks for the engines, if they all accept the same hashes.
+    prompt_block_hasher: Option<PromptBlockHasher>,
     /// Whether a profiling session is awaiting an explicit stop. Held across each
     /// start/stop utility call so a stale stop reply cannot clear a newer session.
     profile_active: Mutex<bool>,
@@ -404,6 +407,7 @@ impl EngineCoreClient {
         connected: transport::ConnectedTransport,
     ) -> Result<Self> {
         validate_lora_capabilities(&connected.engines)?;
+        let prompt_block_hasher = prompt_block_hasher(&connected.engines);
         let (output_tx, output_rx) = mpsc::channel(64);
         let (abort_tx, abort_rx) = mpsc::unbounded_channel();
         let engines = connected.engines;
@@ -472,6 +476,7 @@ impl EngineCoreClient {
             inner,
             coordinator,
             abort_tx,
+            prompt_block_hasher,
             profile_active: Mutex::new(false),
             runtime,
             output_task,
@@ -625,6 +630,24 @@ impl EngineCoreClient {
     }
 }
 
+/// Build the prompt block hasher if every engine reports the same supported
+/// prefix hash config. Requests can go to any engine, and an engine that
+/// doesn't hash blocks has no use for the hashes.
+fn prompt_block_hasher(engines: &[ConnectedEngine]) -> Option<PromptBlockHasher> {
+    let config = (engines.iter())
+        .map(|engine| engine.ready_response.prefix_hash_config.as_ref())
+        .all_equal_value()
+        .ok()??;
+    let hasher = PromptBlockHasher::new(config);
+    if hasher.is_none() {
+        debug!(
+            ?config,
+            "engine prefix hash config not supported; engine hashes prompts"
+        );
+    }
+    hasher
+}
+
 fn validate_lora_capabilities(engines: &[ConnectedEngine]) -> Result<()> {
     let first = engines.first().expect("engine core client requires at least one engine");
     for engine in engines {
@@ -664,6 +687,11 @@ impl EngineCoreClient {
     pub async fn call(&self, mut req: EngineCoreRequest) -> Result<EngineCoreOutputStream> {
         req.client_index = self.config.client_index;
         req.validate()?;
+        if req.block_hashes.is_none()
+            && let Some(hasher) = &self.prompt_block_hasher
+        {
+            req.block_hashes = hasher.hash_request(&req);
+        }
         trace!(
             request_id = %req.request_id,
             client_index = req.client_index,

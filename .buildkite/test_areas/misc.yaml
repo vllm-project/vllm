@@ -351,6 +351,7 @@ steps:
     - tests/v1
     - tests/watermarking
     - examples/disaggregated/mooncake_connector/mooncake_connector_proxy.py
+    - rust/src/engine-core-client/src/tests/prompt_block_hash_vectors.json
   device: cpu-small
   commands:
     # split the test to avoid interference
