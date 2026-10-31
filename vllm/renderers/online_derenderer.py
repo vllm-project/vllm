@@ -932,7 +932,12 @@ class OnlineDerenderer:
     ) -> tuple[list[CompletionResponseChoice], int, int]:
         n = len(generate_responses)
         prompt_tokens_list: list[int] = (
-            prompt_tokens if prompt_tokens is not None else [0] * n
+            prompt_tokens
+            if prompt_tokens is not None
+            else [
+                (gen.usage.prompt_tokens or 0) if gen.usage is not None else 0
+                for gen in generate_responses
+            ]
         )
         prompt_token_ids_list: list[list[int] | None] = (
             prompt_token_ids if prompt_token_ids is not None else [None] * n
