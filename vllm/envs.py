@@ -195,6 +195,7 @@ if TYPE_CHECKING:
     VLLM_HUMMING_USE_F16_ACCUM: bool = False
     VLLM_HUMMING_MOE_GEMM_TYPE: Literal["indexed", "grouped", "auto"] | None = None
     VLLM_B12X_MOE_FP4_FORCE_A16: bool = False
+    VLLM_B12X_MOE_MXFP4_CSF: bool = False
     VLLM_DEEPEPLL_NVFP4_DISPATCH: bool = False
     VLLM_V1_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_USING_PATHWAYS: bool = False
@@ -1709,6 +1710,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Force b12x FP4 MoE to use BF16 activations.
     "VLLM_B12X_MOE_FP4_FORCE_A16": lambda: bool(
         int(os.getenv("VLLM_B12X_MOE_FP4_FORCE_A16", "0"))
+    ),
+    # Keep MXFP4 MoE block scales compressed on eligible b12x W4A8 layers.
+    # Requires b12x with Mxfp4CsfWeights; disabled by default. BF16 activation
+    # backends and unsupported shapes keep uncompressed scales.
+    "VLLM_B12X_MOE_MXFP4_CSF": lambda: bool(
+        int(os.getenv("VLLM_B12X_MOE_MXFP4_CSF", "0"))
     ),
     # Allow use of FlashInfer MxInt4 MoE kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_INT4": lambda: bool(

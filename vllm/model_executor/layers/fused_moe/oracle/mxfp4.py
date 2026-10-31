@@ -2297,6 +2297,17 @@ def _validate_mxfp4_experts_config(
         )
 
 
+def mxfp4_backend_supports_csf_scales(
+    backend: Mxfp4MoeBackend, config: FusedMoEConfig
+) -> bool:
+    """Whether the selected MXFP4 backend can keep scales compressed."""
+    if backend != Mxfp4MoeBackend.B12X_MXFP4_MXFP8:
+        return False
+    from vllm.model_executor.layers.fused_moe.b12x import B12xExperts
+
+    return B12xExperts.supports_mxfp4_csf_scales(config)
+
+
 def make_mxfp4_moe_kernel(
     moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
@@ -2308,6 +2319,17 @@ def make_mxfp4_moe_kernel(
     _validate_mxfp4_experts_config(experts_cls, moe_config, mxfp4_backend)
 
     is_monolithic = issubclass(experts_cls, mk.FusedMoEExpertsMonolithic)
+
+    extra_kwargs = {}
+    if envs.VLLM_B12X_MOE_MXFP4_CSF and mxfp4_backend in B12X_BACKENDS:
+        if mxfp4_backend_supports_csf_scales(mxfp4_backend, moe_config):
+            extra_kwargs["csf_scales"] = True
+        else:
+            logger.warning_once(
+                "VLLM_B12X_MOE_MXFP4_CSF is enabled, but the selected b12x "
+                "backend, layer geometry or installed package does not support "
+                "resident MXFP4 CSF scales. Keeping uncompressed scales."
+            )
 
     prepare_finalize = maybe_make_prepare_finalize(
         moe=moe_config,
@@ -2335,6 +2357,7 @@ def make_mxfp4_moe_kernel(
         experts = experts_cls(
             moe_config=moe_config,
             quant_config=moe_quant_config,
+            **extra_kwargs,
         )
 
     kernel = mk.FusedMoEKernel(
