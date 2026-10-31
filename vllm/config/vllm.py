@@ -725,41 +725,6 @@ class VllmConfig:
 
     @property
     def use_v2_model_runner(self) -> bool:
-        if self.attention_config.hisparse_config is not None:
-            if envs.VLLM_USE_V2_MODEL_RUNNER is False:
-                raise ValueError(
-                    "HiSparse requires Model Runner V2; remove "
-                    "VLLM_USE_V2_MODEL_RUNNER=0."
-                )
-            return True
-
-        speculative_config = getattr(self, "speculative_config", None)
-        custom_method = getattr(speculative_config, "custom_method", None)
-        if custom_method is not None:
-            requires_v2 = f"Custom speculative method '{custom_method}' requires"
-            if envs.VLLM_USE_V2_MODEL_RUNNER is False:
-                raise ValueError(
-                    f"{requires_v2} Model Runner V2; remove VLLM_USE_V2_MODEL_RUNNER=0."
-                )
-            if not HAS_TRITON:
-                raise ValueError(
-                    f"{requires_v2} Model Runner V2, which requires Triton."
-                )
-            if unsupported := self._get_v2_model_runner_unsupported_features():
-                raise ValueError(
-                    f"{requires_v2} Model Runner V2, which does not yet support "
-                    f"{', '.join(unsupported)}."
-                )
-            return True
-
-        if getattr(self, "watermark_config", None) is not None:
-            if envs.VLLM_USE_V2_MODEL_RUNNER is False:
-                logger.info_once(
-                    "Watermarking requires Model Runner V2 and overrides "
-                    "VLLM_USE_V2_MODEL_RUNNER=0."
-                )
-            return True
-
         use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
         if use_v2_model_runner is not None:
             return use_v2_model_runner
@@ -1559,6 +1524,11 @@ class VllmConfig:
         self.parallel_config.set_dcp_defaults()
 
         if self.model_config is not None:
+            # Normalize EPLB num_redundant_experts before verification.
+            self.parallel_config.compute_eplb_num_redundant_experts(
+                self.model_config.get_num_experts()
+            )
+
             self.model_config.verify_with_parallel_config(self.parallel_config)
             self.model_config.verify_dual_chunk_attention_config(self.load_config)
 
@@ -3155,6 +3125,12 @@ class VllmConfig:
     def _get_v1_model_runner_unsupported_features(self) -> list[str]:
         unsupported: list[str] = []
 
+        if self.attention_config.hisparse_config is not None:
+            unsupported.append("HiSparse")
+
+        if self.watermark_config is not None:
+            unsupported.append("watermarking")
+
         # PCP runtime support is implemented only by the V2 model runner.
         if self.parallel_config.prefill_context_parallel_size > 1:
             unsupported.append("prefill context parallel")
@@ -3180,6 +3156,11 @@ class VllmConfig:
                 XPressSpeculatorConfig,
             )
 
+            if self.speculative_config.custom_method is not None:
+                unsupported.append(
+                    "custom speculative method "
+                    f"'{self.speculative_config.custom_method}'"
+                )
             if self.speculative_config.method == "dspark":
                 unsupported.append("dspark speculative decoding")
             elif isinstance(
