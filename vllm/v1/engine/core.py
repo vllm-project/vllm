@@ -807,14 +807,13 @@ class EngineCore:
         # in a field and do it immediately once step_with_batch_queue is
         # re-called. The latter slightly favors TTFT over TPOT/throughput.
         if deferred_scheduler_output:
-            # When draft tokens are used with structured output, validate them
-            # before computing the grammar bitmask for the deferred request.
+            # Update the deferred scheduler output before computing its grammar
+            # bitmask.
             if self.check_for_draft_tokens:
                 draft_token_ids = self.model_executor.take_draft_token_ids()
                 if draft_token_ids is not None:
-                    # Update the draft token ids in the scheduler output to
-                    # filter out the invalid spec tokens, which will be padded
-                    # with -1 and skipped by the grammar bitmask computation.
+                    # Update the draft token ids in the scheduler output while
+                    # preserving the worker-provided draft slots.
                     self.scheduler.update_draft_token_ids_in_output(
                         draft_token_ids, deferred_scheduler_output
                     )
@@ -1226,6 +1225,7 @@ class EngineCoreProc(EngineCore):
     ):
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
         self.output_queue = queue.Queue[tuple[int, EngineCoreOutputs] | bytes]()
+
         executor_fail_callback = lambda: self.input_queue.put_nowait(
             (EngineCoreRequestType.EXECUTOR_FAILED, b"")
         )
@@ -2509,7 +2509,11 @@ class DPEngineCoreProc(EngineCoreProc):
             self.dp_group, self.scheduler.has_unfinished_requests()
         )
 
-        if has_global_unfinished:
+        # Once a scale_down has disabled the DP coordinator, resume into
+        # always-running — no coordinator wake-up is available.
+        if has_global_unfinished or (
+            self.enable_fault_tolerance and self.ft_sentinel.coordinator_disabled
+        ):
             self.engines_running = True
 
     def barrier(self):
@@ -2671,6 +2675,9 @@ class DPEngineCoreProc(EngineCoreProc):
             self.ignore_start_dp_wave = True
             self.pending_pause = False
             logger.debug("DP pause consensus reached, ignoring START_DP_WAVE.")
+        elif self.enable_fault_tolerance and self.ft_sentinel.coordinator_disabled:
+            # Coordinator disabled: never idle-pause; engines keep stepping.
+            return True
 
         return has_unfinished
 
