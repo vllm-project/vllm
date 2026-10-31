@@ -9,6 +9,8 @@ from pydantic import Field
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.utils import random_uuid
 
+TRANSCRIPTION_LOGPROBS_INCLUDE = "item.input_audio_transcription.logprobs"
+
 # Client -> Server Events
 
 
@@ -32,6 +34,7 @@ class SessionUpdate(OpenAIBaseModel):
 
     type: Literal["session.update"] = "session.update"
     model: str | None = None
+    include: list[Literal["item.input_audio_transcription.logprobs"]] | None = None
 
 
 class SessionCreated(OpenAIBaseModel):
@@ -42,11 +45,20 @@ class SessionCreated(OpenAIBaseModel):
     created: int = Field(default_factory=lambda: int(time.time()))
 
 
+class TranscriptionLogProb(OpenAIBaseModel):
+    """Log probability of one sampled token."""
+
+    token: str
+    logprob: float
+    bytes: list[int]
+
+
 class TranscriptionDelta(OpenAIBaseModel):
     """Incremental transcription text."""
 
     type: Literal["transcription.delta"] = "transcription.delta"
     delta: str  # Incremental text
+    logprobs: list[TranscriptionLogProb] | None = None
 
 
 class TranscriptionDone(OpenAIBaseModel):
