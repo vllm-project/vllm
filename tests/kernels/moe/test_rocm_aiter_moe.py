@@ -965,6 +965,171 @@ def test_mxfp4_experts_check_accepts_aiter_deployments(
         _validate_mxfp4_experts_config(experts_cls, moe_config, mxfp4_backend)
 
 
+def test_aiter_no_act_and_mul_support_is_mxfp4_only():
+    """Guard against re-broadening non-gated (relu2) support to fp8/bf16
+    AiterExperts."""
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterExperts,
+        AiterFp8BlockExperts,
+        AiterFp8ChannelExperts,
+        AiterFp8TensorExperts,
+        AiterMxfp4Experts,
+        AiterUnquantizedExperts,
+    )
+
+    assert AiterMxfp4Experts._supports_no_act_and_mul() is True
+
+    for cls in (
+        AiterExperts,
+        AiterUnquantizedExperts,
+        AiterFp8BlockExperts,
+        AiterFp8TensorExperts,
+        AiterFp8ChannelExperts,
+    ):
+        assert cls._supports_no_act_and_mul() is False, (
+            f"{cls.__name__} must not claim non-gated activation support "
+            "until its CK-Tile relu2 kernel path is implemented and verified."
+        )
+
+
+@pytest.mark.parametrize(
+    "experts_cls_name",
+    [
+        "AiterExperts",
+        "AiterUnquantizedExperts",
+        "AiterFp8BlockExperts",
+        "AiterFp8TensorExperts",
+        "AiterFp8ChannelExperts",
+        "AiterMxfp4Experts",
+    ],
+)
+@pytest.mark.parametrize(
+    "no_mul_activation_name",
+    [
+        "SILU_NO_MUL",
+        "GELU_NO_MUL",
+        "GELU_TANH_NO_MUL",
+        "RELU2_NO_MUL",
+    ],
+)
+def test_aiter_non_gated_activation_dispatch_gating(
+    experts_cls_name, no_mul_activation_name, monkeypatch: pytest.MonkeyPatch
+):
+    """End-to-end evidence that is_supported_config() actually rejects
+    every non-gated activation for every AiterExperts subclass except
+    AiterMxfp4Experts, which is the only subclass with a verified
+    relu2 (non-gated) kernel on gfx950."""
+    from dataclasses import replace
+
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+    from vllm.model_executor.layers.fused_moe.experts import rocm_aiter_moe
+
+    monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", True)
+    monkeypatch.setattr(rocm_aiter_ops, "_FMOE_ENABLED", True)
+
+    experts_cls = getattr(rocm_aiter_moe, experts_cls_name)
+    no_mul_activation = MoEActivation[no_mul_activation_name]
+
+    moe_config = replace(
+        make_dummy_moe_config(
+            num_experts=8,
+            experts_per_token=2,
+            hidden_dim=256,
+            intermediate_size=256,
+            activation=no_mul_activation,
+        ),
+        routing_method=RoutingMethodType.Renormalize,
+    )
+    assert moe_config.is_act_and_mul is False, (
+        f"{no_mul_activation} must be non-gated (is_act_and_mul=False) "
+        "for this test to exercise the intended code path"
+    )
+
+    is_supported, reason = experts_cls.is_supported_config(
+        experts_cls,
+        moe_config,
+        weight_key=None,
+        activation_key=None,
+        activation_format=experts_cls.activation_format(),
+    )
+    if (
+        experts_cls_name == "AiterMxfp4Experts"
+        and no_mul_activation == MoEActivation.RELU2_NO_MUL
+    ):
+        assert reason is None or "no act_and_mul" not in reason, (
+            f"{experts_cls_name} should not be rejected on the "
+            f"no-act-and-mul gate for {no_mul_activation}, got: {reason}"
+        )
+    elif experts_cls_name == "AiterMxfp4Experts":
+        assert not is_supported, (
+            f"{experts_cls_name} must not claim support for "
+            f"{no_mul_activation} -- only RELU2_NO_MUL is in its "
+            "_supports_activation() list. Got is_supported=True."
+        )
+        assert reason is not None and "activation" in reason, (
+            f"{experts_cls_name} rejected {no_mul_activation} but for "
+            f"an unexpected reason: {reason!r} (expected an activation-gate "
+            "rejection, since it clears the no-act-and-mul gate first)"
+        )
+    else:
+        assert not is_supported, (
+            f"{experts_cls_name} must not claim support for "
+            f"{no_mul_activation} (non-gated) -- only AiterMxfp4Experts "
+            "has a verified non-gated kernel. Got is_supported=True."
+        )
+        assert reason is not None and "no act_and_mul" in reason, (
+            f"{experts_cls_name} rejected {no_mul_activation} but for "
+            f"the wrong reason: {reason!r} (expected 'no act_and_mul')"
+        )
+
+
+def test_select_mxfp4_moe_backend_relu2_dispatches_to_aiter(
+    monkeypatch: pytest.MonkeyPatch,
+    default_vllm_config,
+):
+    """Test that a relu2-activation MXFP4 MoE model actually
+    dispatches through select_mxfp4_moe_backend() to AiterMxfp4Experts on
+    ROCm.
+    """
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterMxfp4Experts,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle import mxfp4 as mxfp4_oracle
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        Mxfp4MoeBackend,
+        select_mxfp4_moe_backend,
+    )
+
+    monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", True)
+    monkeypatch.setattr(rocm_aiter_ops, "_FMOE_ENABLED", True)
+    monkeypatch.setattr(mxfp4_oracle, "_user_moe_activation_override", lambda: None)
+
+    moe_config = make_dummy_moe_config(
+        num_experts=8,
+        experts_per_token=2,
+        hidden_dim=256,
+        intermediate_size=256,
+        activation=MoEActivation.RELU2_NO_MUL,
+    )
+
+    backend, kernel_cls = select_mxfp4_moe_backend(moe_config)
+
+    assert backend == Mxfp4MoeBackend.AITER_MXFP4_BF16, (
+        f"relu2 MXFP4 MoE on ROCm must dispatch through AITER_MXFP4_BF16, "
+        f"got {backend}"
+    )
+    assert kernel_cls is AiterMxfp4Experts, (
+        f"relu2 MXFP4 MoE must select AiterMxfp4Experts as the kernel "
+        f"class, got {kernel_cls}"
+    )
+
+
 @pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
 def test_aiter_fused_moe_mi350_mxfp4_w4a16_accuracy():
     """The gfx950 AITER MXFP4 W4A16 MoE path should match the dequantized
