@@ -549,6 +549,9 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 quantization_emulation=self.quantization_emulation,
             )
 
+            # Zero out intermediate_cache3 before w2 kernel launch for TP sharding
+            intermediate_cache3.zero_()
+
         # LoRA w2: applied to intermediate_cache3 before moe_sum, using the
         # unquantized intermediate_cache2 as the lora_a input.  Reuses the
         # sorted_token_ids_lora computed above. Same dual-stream pattern as
@@ -815,6 +818,9 @@ class TritonWNA16Experts(TritonExperts):
             self.per_act_token_quant,
             self.block_shape,
         )
+
+        # Zero out intermediate_cache3 before w2 kernel launch for TP sharding
+        intermediate_cache3.zero_()
 
         invoke_fused_moe_wna16_triton_kernel(
             qintermediate_cache2,

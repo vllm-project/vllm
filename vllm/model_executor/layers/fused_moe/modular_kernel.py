@@ -1147,6 +1147,12 @@ class FusedMoEKernelModularImpl:
 
         workspace_dtype = self.fused_experts.workspace_dtype(out_dtype)
 
+        # TP sharding for output projection (w2): each rank computes K_local = K // tp_size
+        tp_size = 1
+        if self.moe_parallel_config is not None:
+            tp_size = self.moe_parallel_config.tp_size
+        K_local = K // tp_size if tp_size > 1 else K
+
         # Get intermediate workspace shapes based off the chunked M size.
         workspace13_shape, workspace2_shape, _ = self.fused_experts.workspace_shapes(
             M_chunk,
@@ -1159,6 +1165,12 @@ class FusedMoEKernelModularImpl:
             activation,
         )
 
+        # Adjust workspace13_shape for TP sharding: w2 output is K_local instead of K
+        # workspace13_shape = (M, topk, max(activation_out_dim, K)) -> (M, topk, max(activation_out_dim, K_local))
+        if tp_size > 1:
+            workspace13_shape = (workspace13_shape[0], workspace13_shape[1],
+                                 max(workspace13_shape[2], K_local))
+
         # Get final output shape based on the full M size.
         _, _, fused_out_shape = self.fused_experts.workspace_shapes(
             M_full,
@@ -1170,6 +1182,11 @@ class FusedMoEKernelModularImpl:
             expert_tokens_meta,
             activation,
         )
+
+        # Adjust fused_out_shape for TP sharding: output is K_local instead of K
+        # fused_out_shape = (M, K) -> (M, K_local)
+        if tp_size > 1:
+            fused_out_shape = (fused_out_shape[0], K_local)
 
         fused_out_alias = self.prepare_finalize.allocate_fused_expert_output(
             fused_out_shape,
