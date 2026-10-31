@@ -1,4 +1,4 @@
-#include "cache.h"
+#include <torch/all.h>
 #include "ops.h"
 #include "core/registration.h"
 
@@ -73,11 +73,13 @@ void fused_experts_cpu(at::Tensor& out, at::Tensor& hidden_states,
                        const std::optional<at::Tensor>& w2_scale,
                        const std::optional<at::Tensor>& w1_zero,
                        const std::optional<at::Tensor>& w2_zero,
+                       const std::optional<at::Tensor>& a1_scale,
                        const std::optional<std::vector<int64_t>> block_size,
                        const std::optional<at::Tensor>& w1_bias,
                        const std::optional<at::Tensor>& w2_bias,
                        const std::optional<double>& alpha,
-                       const std::optional<double>& limit, bool is_vnni);
+                       const std::optional<double>& limit, bool is_vnni,
+                       int64_t act_method);
 
 at::Tensor int8_scaled_mm_with_quant(at::Tensor& mat1, at::Tensor& mat2,
                                      at::Tensor& scales2,
@@ -90,6 +92,18 @@ at::Tensor fp8_scaled_mm_cpu(at::Tensor& mat1, at::Tensor& mat2,
                              std::vector<int64_t> block_size,
                              const std::optional<at::Tensor>& bias,
                              at::ScalarType out_dtype, bool is_vnni);
+
+// Adapted from sglang: FP8 W8A8 kernels
+std::tuple<at::Tensor, at::Tensor> float8_linear_prepack_impl(
+    const at::Tensor& weight, const at::Tensor& scales);
+at::Tensor fp8_scaled_mm_with_quant(const at::Tensor& act,
+                                    const std::optional<at::Tensor>& act_scales,
+                                    bool channelwise, const at::Tensor& weight,
+                                    const at::Tensor& weight_scales,
+                                    const std::optional<at::Tensor>& bias,
+                                    at::ScalarType output_dtype);
+std::tuple<at::Tensor, at::Tensor> quantize_fp8e4m3_vec(
+    const at::Tensor& t, bool channelwise, c10::optional<at::Tensor> scale_opt);
 
 // Adapted from sglang: MLA CPU kernels (AMX-only)
 void decode_attention_cpu(at::Tensor& query, at::Tensor& k_buffer,
@@ -268,19 +282,20 @@ at::Tensor causal_conv1d_fwd_cpu(
     const std::optional<at::Tensor>& query_start_loc,
     const std::optional<at::Tensor>& cache_indices,
     const std::optional<at::Tensor>& has_initial_state, bool silu_activation,
-    int64_t pad_slot_id, bool is_vnni);
+    int64_t pad_slot_id, bool is_weight_packed);
 
 at::Tensor causal_conv1d_update_cpu(
     const at::Tensor& x, const at::Tensor& conv_states,
     const at::Tensor& weight, const std::optional<at::Tensor>& bias,
     bool silu_activation, const std::optional<at::Tensor>& num_accepted_tokens,
     const std::optional<at::Tensor>& conv_state_indices, int64_t pad_slot_id,
-    bool is_vnni);
+    bool is_weight_packed);
 
 void activation_lut_bf16(torch::Tensor& out, torch::Tensor& input,
                          const std::string& activation);
 
 bool cpu_attn_has_isa(const std::string& isa);
+bool cpu_has_amx_fp8();
 
 torch::Tensor get_scheduler_metadata(
     const int64_t num_req, const int64_t num_heads_q,
@@ -379,9 +394,89 @@ void mamba_chunk_scan_fwd_cpu_impl(at::Tensor& out, at::Tensor& final_states,
                                    const c10::optional<at::Tensor>& z,
                                    const at::Tensor& cu_seqlens);
 
+torch::Tensor fused_gumbel_argmax(const torch::Tensor& logits,
+                                  const torch::Tensor& seeds);
+
+torch::Tensor greedy_argmax(const torch::Tensor& logits);
+
+void static_scaled_fp8_quant(
+    torch::Tensor& out, const torch::Tensor& input, const torch::Tensor& scale,
+    const std::optional<std::vector<int64_t>>& group_shape);
+void dynamic_per_token_scaled_fp8_quant(
+    torch::Tensor& out, const torch::Tensor& input, torch::Tensor& scale,
+    const std::optional<torch::Tensor>& scale_ub);
+
+torch::Tensor gumbel_sample_cpu(const torch::Tensor& logits,
+                                const torch::Tensor& expanded_idx_mapping,
+                                const torch::Tensor& temperature,
+                                const torch::Tensor& seeds,
+                                const torch::Tensor& positions,
+                                bool apply_temperature, bool is_drafting,
+                                bool use_fp64);
+
+void apply_logit_bias_cpu(
+    torch::Tensor& logits, const torch::Tensor& expanded_idx_mapping,
+    const torch::Tensor& positions, const torch::Tensor& num_allowed_token_ids,
+    const torch::Tensor& allowed_token_ids, const torch::Tensor& num_logit_bias,
+    const torch::Tensor& logit_bias_token_ids, const torch::Tensor& logit_bias,
+    const torch::Tensor& min_lens, const torch::Tensor& num_stop_token_ids,
+    const torch::Tensor& restore_when_all_masked,
+    const torch::Tensor& stop_token_ids, bool check_all_masked_rows);
+
 void init_cpu_memory_env(std::vector<int64_t> node_ids);
 
 namespace cpu_utils {
+// Kernels used only by standalone CPU MRV2.
+#ifdef VLLM_STANDALONE_CPU_MRV2
+void gather_block_table_cpu(const torch::Tensor& block_table,
+                            torch::Tensor& output,
+                            const torch::Tensor& idx_mapping,
+                            const torch::Tensor& num_blocks,
+                            const int64_t num_reqs_padded);
+void compute_slot_mapping_cpu(
+    const torch::Tensor& block_table, torch::Tensor& slot_mapping,
+    const torch::Tensor& idx_mapping, const torch::Tensor& query_start_loc,
+    const torch::Tensor& positions, const int64_t block_size,
+    const bool mapping_enabled, const int64_t pad_slot_id);
+void prepare_prefill_inputs_cpu(torch::Tensor& input_ids,
+                                torch::Tensor& next_prefill_tokens,
+                                const torch::Tensor& idx_mapping,
+                                const torch::Tensor& query_start_loc,
+                                const torch::Tensor& all_token_ids,
+                                const torch::Tensor& prefill_len,
+                                const torch::Tensor& num_computed_tokens);
+torch::Tensor get_prompt_logprobs_token_ids_cpu(
+    int64_t num_tokens, const torch::Tensor& query_start_loc,
+    const torch::Tensor& idx_mapping, const torch::Tensor& num_computed_tokens,
+    const torch::Tensor& all_token_ids);
+void prepare_pos_seq_lens_cpu(const torch::Tensor& idx_mapping,
+                              const torch::Tensor& query_start_loc,
+                              const torch::Tensor& num_computed_tokens,
+                              torch::Tensor& pos, torch::Tensor& seq_lens);
+void prepare_mrope_positions_cpu(torch::Tensor& positions,
+                                 const torch::Tensor& prefill_positions,
+                                 const torch::Tensor& prefill_delta,
+                                 const torch::Tensor& idx_mapping,
+                                 const torch::Tensor& query_start_loc,
+                                 const torch::Tensor& prefill_lens,
+                                 const torch::Tensor& num_computed_tokens);
+torch::Tensor combine_sampled_and_draft_tokens_cpu(
+    torch::Tensor& input_ids, const torch::Tensor& idx_mapping,
+    const torch::Tensor& last_sampled_tokens,
+    const torch::Tensor& query_start_loc, const torch::Tensor& seq_lens,
+    const torch::Tensor& prefill_len, const torch::Tensor& draft_tokens,
+    const torch::Tensor& cu_num_logits, const int64_t num_logits,
+    const int64_t num_new_sampled_tokens);
+void post_update_cpu(const torch::Tensor& idx_mapping,
+                     torch::Tensor& num_computed_tokens,
+                     torch::Tensor& last_sampled_tokens,
+                     const c10::optional<torch::Tensor>& output_bin_counts,
+                     const torch::Tensor& sampled_tokens,
+                     const torch::Tensor& num_sampled,
+                     const torch::Tensor& num_rejected,
+                     const c10::optional<torch::Tensor>& query_start_loc,
+                     torch::Tensor& all_token_ids, torch::Tensor& total_len);
+#endif
 void eagle_prepare_inputs_padded_kernel_impl(
     const torch::Tensor& cu_num_draft_tokens,
     const torch::Tensor& valid_sampled_tokens_count,
@@ -498,6 +593,33 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
 #endif  // (defined(__aarch64__) && !defined(__APPLE__))
 
+#if (defined(__aarch64__) && defined(ARM_BF16_SUPPORT) && \
+     !defined(__APPLE__)) ||                              \
+    (defined(__AVX512BF16__) && defined(__AVX512F__) &&   \
+     defined(__AVX512VNNI__))
+
+  // Adapted from sglang: casual_conv1d kernels
+  ops.def("causal_conv1d_weight_pack(Tensor weight) -> Tensor");
+  ops.impl("causal_conv1d_weight_pack", torch::kCPU,
+           &causal_conv1d_weight_pack);
+
+  ops.def(
+      "causal_conv1d_fwd_cpu(Tensor x, Tensor weight, Tensor? bias, Tensor? "
+      "conv_states, Tensor? query_start_loc,"
+      "Tensor? cache_indices, Tensor? has_initial_state, bool silu_activation, "
+      "int pad_slot_id, bool is_weight_packed) -> "
+      "Tensor");
+  ops.impl("causal_conv1d_fwd_cpu", torch::kCPU, &causal_conv1d_fwd_cpu);
+
+  ops.def(
+      "causal_conv1d_update_cpu(Tensor x, Tensor(a!) conv_states, Tensor "
+      "weight, Tensor? bias, bool silu_activation,"
+      "Tensor? num_accepted_tokens, Tensor? conv_state_indices, int "
+      "pad_slot_id, "
+      "bool is_weight_packed) -> Tensor");
+  ops.impl("causal_conv1d_update_cpu", torch::kCPU, &causal_conv1d_update_cpu);
+#endif
+
   // Layernorm
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
   ops.def(
@@ -611,9 +733,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "fused_experts_cpu(Tensor(a0!) out, Tensor hidden_states, Tensor w1, "
       "Tensor w2, Tensor topk_weights, Tensor topk_ids, "
       "int moe_comp_method, Tensor? w1_scale, Tensor? w2_scale, "
-      "Tensor? w1_zero, Tensor? w2_zero, int[]? block_size, "
+      "Tensor? w1_zero, Tensor? w2_zero, Tensor? a1_scale, int[]? block_size, "
       "Tensor? w1_bias, Tensor? w2_bias, float? alpha, float? limit, "
-      "bool is_vnni) -> "
+      "bool is_vnni, int act_method) -> "
       "()");
   ops.impl("fused_experts_cpu", torch::kCPU, &fused_experts_cpu);
   ops.def(
@@ -629,24 +751,22 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "bool is_vnni) -> Tensor");
   ops.impl("fp8_scaled_mm_cpu", torch::kCPU, &fp8_scaled_mm_cpu);
 
-  // Adapted from sglang: casual_conv1d kernels
-  ops.def("causal_conv1d_weight_pack(Tensor weight) -> Tensor");
-  ops.impl("causal_conv1d_weight_pack", torch::kCPU,
-           &causal_conv1d_weight_pack);
+  // Adapted from sglang: FP8 W8A8 kernels
   ops.def(
-      "causal_conv1d_fwd_cpu(Tensor x, Tensor weight, Tensor? bias, Tensor? "
-      "conv_states, Tensor? query_start_loc,"
-      "Tensor? cache_indices, Tensor? has_initial_state, bool silu_activation, "
-      "int pad_slot_id, bool is_vnni) -> "
-      "Tensor");
-  ops.impl("causal_conv1d_fwd_cpu", torch::kCPU, &causal_conv1d_fwd_cpu);
+      "float8_linear_prepack_cpu(Tensor weight, Tensor scales) -> (Tensor, "
+      "Tensor)");
+  ops.impl("float8_linear_prepack_cpu", torch::kCPU,
+           &float8_linear_prepack_impl);
   ops.def(
-      "causal_conv1d_update_cpu(Tensor x, Tensor(a!) conv_states, Tensor "
-      "weight, Tensor? bias, bool silu_activation,"
-      "Tensor? num_accepted_tokens, Tensor? conv_state_indices, int "
-      "pad_slot_id, "
-      "bool is_vnni) -> Tensor");
-  ops.impl("causal_conv1d_update_cpu", torch::kCPU, &causal_conv1d_update_cpu);
+      "fp8_scaled_mm_with_quant(Tensor act, Tensor? act_scales, bool "
+      "channelwise, "
+      "Tensor weight, Tensor weight_scales, Tensor? bias, ScalarType "
+      "output_dtype) -> Tensor");
+  ops.impl("fp8_scaled_mm_with_quant", torch::kCPU, &fp8_scaled_mm_with_quant);
+  ops.def(
+      "quantize_fp8e4m3_vec(Tensor input, bool channelwise, Tensor? scale_opt) "
+      "-> (Tensor, Tensor)");
+  ops.impl("quantize_fp8e4m3_vec", torch::kCPU, &quantize_fp8e4m3_vec);
 
   // Adapted from sglang: MLA CPU kernels (AMX-only, DeepSeek V2/V3/R1)
   ops.def(
@@ -832,6 +952,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "-> (Tensor, Tensor)");
   ops.impl("fused_gdn_gating_cpu", torch::kCPU, &fused_gdn_gating_cpu);
 
+  // Pure runtime CPU ISA capability check.
+  ops.def("cpu_has_amx_fp8() -> bool", &cpu_has_amx_fp8);
+
   // CPU attention kernels
   ops.def("cpu_attn_has_isa(str isa) -> bool", &cpu_attn_has_isa);
   ops.def(
@@ -859,12 +982,20 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       &cpu_attention_with_kv_cache);
 
   // placeholders
-  ops.def("static_scaled_fp8_quant() -> ()", placeholder_op);
+  ops.def(
+      "static_scaled_fp8_quant(Tensor! result, Tensor input, Tensor scale, "
+      "int[]? group_shape=None) -> ()");
+  ops.impl("static_scaled_fp8_quant", torch::kCPU, &static_scaled_fp8_quant);
   ops.def("dynamic_scaled_fp8_quant() -> ()", placeholder_op);
-  ops.def("dynamic_per_token_scaled_fp8_quant() -> ()", placeholder_op);
+  ops.def(
+      "dynamic_per_token_scaled_fp8_quant(Tensor! result, Tensor input, "
+      "Tensor! scale, Tensor? scale_ub) -> ()");
+  ops.impl("dynamic_per_token_scaled_fp8_quant", torch::kCPU,
+           &dynamic_per_token_scaled_fp8_quant);
 
   // WNA16
-#if defined(__AVX512F__) || defined(__riscv_v) || defined(__s390x__)
+#if defined(__AVX512F__) || defined(__riscv_v) || defined(__s390x__) || \
+    defined(__powerpc__)
   ops.def(
       "cpu_gemm_wna16(Tensor input, Tensor q_weight, Tensor(a2!) output, "
       "Tensor scales, Tensor? zeros, Tensor? bias, SymInt "
@@ -883,8 +1014,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "bool skip_weighted, "
       "str act, str isa) -> ()");
   ops.impl("cpu_fused_moe", torch::kCPU, &cpu_fused_moe);
-#if defined(ARM_I8MM_SUPPORT) && defined(ARM_BF16_SUPPORT) && \
-    !defined(__APPLE__)
+
+#if (defined(ARM_I8MM_SUPPORT) && defined(ARM_BF16_SUPPORT) && \
+     !defined(__APPLE__)) ||                                   \
+    defined(__powerpc64__)
   ops.def(
       "prepack_moe_weight_int8(Tensor weight, Tensor(a1!) packed_weight, "
       "str isa) -> ()");
@@ -895,8 +1028,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor? w2_bias, Tensor topk_weights, Tensor topk_id, bool "
       "skip_weighted, str act, str isa) -> ()");
   ops.impl("cpu_fused_moe_int8", torch::kCPU, &cpu_fused_moe_int8);
-#endif  // #if defined(ARM_I8MM_SUPPORT) && defined(ARM_BF16_SUPPORT) &&
-        // !defined(__APPLE__)
+#endif  // ARM_I8MM+BF16 or __powerpc64__
   ops.def(
       "mla_decode_kvcache("
       "   Tensor! out, Tensor query, Tensor kv_cache,"
@@ -934,6 +1066,85 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       &mamba_chunk_scan_fwd_cpu_impl);
 
   ops.def("init_cpu_memory_env(SymInt[] node_ids) -> ()", &init_cpu_memory_env);
+
+#ifdef VLLM_STANDALONE_CPU_MRV2
+  ops.def(
+      "gather_block_table_cpu(Tensor block_table, Tensor(a1!) output, "
+      "Tensor idx_mapping, Tensor num_blocks, SymInt num_reqs_padded) -> ()",
+      &cpu_utils::gather_block_table_cpu);
+
+  ops.def(
+      "compute_slot_mapping_cpu("
+      "Tensor block_table, Tensor(a1!) slot_mapping, Tensor idx_mapping, "
+      "Tensor query_start_loc, Tensor positions, SymInt block_size, "
+      "bool mapping_enabled, SymInt pad_slot_id) -> ()",
+      &cpu_utils::compute_slot_mapping_cpu);
+
+  ops.def(
+      "prepare_prefill_inputs_cpu(Tensor(a0!) input_ids, "
+      "Tensor(a1!) next_prefill_tokens, Tensor idx_mapping, "
+      "Tensor query_start_loc, Tensor all_token_ids, Tensor prefill_len, "
+      "Tensor num_computed_tokens) -> ()",
+      &cpu_utils::prepare_prefill_inputs_cpu);
+
+  ops.def(
+      "get_prompt_logprobs_token_ids_cpu("
+      "SymInt num_tokens, Tensor query_start_loc, Tensor idx_mapping, "
+      "Tensor num_computed_tokens, Tensor all_token_ids) -> Tensor",
+      &cpu_utils::get_prompt_logprobs_token_ids_cpu);
+
+  ops.def(
+      "prepare_pos_seq_lens_cpu(Tensor idx_mapping, Tensor query_start_loc, "
+      "Tensor num_computed_tokens, Tensor(a3!) pos, "
+      "Tensor(a4!) seq_lens) -> ()",
+      &cpu_utils::prepare_pos_seq_lens_cpu);
+
+  ops.def(
+      "prepare_mrope_positions_cpu("
+      "Tensor(a0!) positions, Tensor prefill_positions, Tensor prefill_delta, "
+      "Tensor idx_mapping, Tensor query_start_loc, Tensor prefill_lens, "
+      "Tensor num_computed_tokens) -> ()",
+      &cpu_utils::prepare_mrope_positions_cpu);
+
+  ops.def(
+      "combine_sampled_and_draft_tokens_cpu("
+      "Tensor(a0!) input_ids, Tensor idx_mapping, Tensor last_sampled_tokens, "
+      "Tensor query_start_loc, Tensor seq_lens, Tensor prefill_len, "
+      "Tensor draft_tokens, Tensor cu_num_logits, SymInt num_logits, "
+      "SymInt num_new_sampled_tokens) -> Tensor",
+      &cpu_utils::combine_sampled_and_draft_tokens_cpu);
+
+  ops.def(
+      "post_update_cpu(Tensor idx_mapping, "
+      "Tensor(a1!) num_computed_tokens, Tensor(a2!) last_sampled_tokens, "
+      "Tensor(a3!)? output_bin_counts, Tensor sampled_tokens, "
+      "Tensor num_sampled, Tensor num_rejected, Tensor? query_start_loc, "
+      "Tensor(a8!) all_token_ids, Tensor(a9!) total_len) -> ()",
+      &cpu_utils::post_update_cpu);
+#endif
+
+  // Fused sampling kernels
+  ops.def("fused_gumbel_argmax(Tensor logits, Tensor seeds) -> Tensor");
+  ops.impl("fused_gumbel_argmax", torch::kCPU, &fused_gumbel_argmax);
+
+  ops.def("greedy_argmax(Tensor logits) -> Tensor");
+  ops.impl("greedy_argmax", torch::kCPU, &greedy_argmax);
+
+  ops.def(
+      "gumbel_sample_cpu(Tensor logits, Tensor expanded_idx_mapping, "
+      "Tensor temperature, Tensor seeds, Tensor positions, "
+      "bool apply_temperature, bool is_drafting, bool use_fp64) -> Tensor");
+  ops.impl("gumbel_sample_cpu", torch::kCPU, &gumbel_sample_cpu);
+
+  ops.def(
+      "apply_logit_bias_cpu(Tensor(a0!) logits, "
+      "Tensor expanded_idx_mapping, Tensor positions, "
+      "Tensor num_allowed_token_ids, Tensor allowed_token_ids, "
+      "Tensor num_logit_bias, Tensor logit_bias_token_ids, "
+      "Tensor logit_bias, Tensor min_lens, Tensor num_stop_token_ids, "
+      "Tensor restore_when_all_masked, Tensor stop_token_ids, "
+      "bool check_all_masked_rows) -> ()",
+      &apply_logit_bias_cpu);
 
   // Speculative decoding kernels
   ops.def(

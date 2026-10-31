@@ -50,6 +50,23 @@ pub(super) fn decode_array2_u32(
     })
 }
 
+pub(crate) fn decode_array1_u32(
+    value: WireNdArray,
+    field: &str,
+    frames: &[Bytes],
+) -> Result<Vec<u32>> {
+    let (shape, bytes, scalar, endianness) =
+        decode_array_metadata(value, field, frames, &[TensorDtype::I32, TensorDtype::I64])?;
+    if shape.len() != 1 {
+        return Err(decode_error(
+            field,
+            &format!("expected rank-1 array, got rank {}", shape.len()),
+        ));
+    }
+
+    decode_u32_vec(bytes.as_ref(), scalar, endianness, field)
+}
+
 pub(super) enum DecodedRanks {
     /// Shape `[num_positions]`: sampled/selected rank only.
     Sampled(Vec<u32>),

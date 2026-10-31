@@ -14,6 +14,7 @@ use serde_json::Value;
 use serde_json_fmt::JsonFormat;
 
 use crate::error::{Error, Result};
+use crate::reasoning::ReasoningControl;
 use crate::request::{ChatContent, ChatMessage, ChatRequest, ChatRole, ChatTool};
 use crate::{AssistantContentBlock, AssistantMessageExt, AssistantToolCall};
 
@@ -42,8 +43,11 @@ struct RenderedToolSchema<'a> {
 }
 
 /// Render one chat request into the final prompt string.
-pub(super) fn render_request(request: &ChatRequest) -> Result<String> {
-    let thinking_mode = match request.enable_thinking()?.unwrap_or(false) {
+pub(super) fn render_request(
+    request: &ChatRequest,
+    reasoning: &ReasoningControl,
+) -> Result<String> {
+    let thinking_mode = match reasoning.is_enabled() {
         true => ThinkingMode::Thinking,
         false => ThinkingMode::Chat,
     };
@@ -51,11 +55,7 @@ pub(super) fn render_request(request: &ChatRequest) -> Result<String> {
         request.messages.last().map(ChatMessage::role),
         Some(ChatRole::User | ChatRole::Developer)
     );
-    let initial_tools = if request.tool_parsing_enabled() {
-        request.initial_tools()
-    } else {
-        &[]
-    };
+    let initial_tools = request.initial_tools();
     let render_offset = isize::from(!initial_tools.is_empty());
     let last_user_render_index =
         find_last_user_render_index(request.messages.as_slice(), render_offset);
@@ -154,6 +154,7 @@ fn render_message(
             thinking_mode == ThinkingMode::Thinking && after_or_at_last_user_turn,
             content,
         ),
+        ChatMessage::Custom { role, .. } => Err(Error::UnsupportedChatRole { role: role.clone() }),
     }
 }
 

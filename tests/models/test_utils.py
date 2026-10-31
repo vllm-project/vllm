@@ -217,3 +217,143 @@ def test_get_rename_mapper_keeps_only_renames():
     for name in ("drop_regex.w", "drop_substr.w", "drop_prefix.w", "w.drop_suffix"):
         assert mapper._map_name(name) is None
         assert renames._map_name(name) == name
+
+
+def test_weights_mapper_stacks_one_weight_into_several_shards():
+    """One checkpoint tensor can feed more than one shard of a stacked
+    parameter, and a dropped name stays dropped rather than reappearing as a
+    shard of the stacked one."""
+    mapper = WeightsMapper(
+        orig_to_new_substr={"layers.1.k_proj.": None},
+        orig_to_new_stacked={".k_proj.": (".qkv_proj.", ["k", "v"])},
+    )
+    weight = torch.ones(2)
+    weights = [(f"layers.{i}.k_proj.weight", weight) for i in (0, 1)]
+
+    mapped = list(mapper.apply(weights))
+
+    assert [(name, w.shard_id) for name, w in mapped] == [
+        ("layers.0.qkv_proj.weight", "k"),
+        ("layers.0.qkv_proj.weight", "v"),
+    ]
+    # Each shard needs its own tensor object, but they alias one allocation.
+    assert mapped[0][1] is not mapped[1][1]
+    assert mapped[0][1].data_ptr() == mapped[1][1].data_ptr() == weight.data_ptr()
+
+
+def _double(weights):
+    """Stateless recode: double every tensor."""
+    for name, tensor in weights:
+        yield name, tensor * 2
+
+
+def _pair_halves(weights):
+    """Stateful merge: cat a name's ``.first``/``.second`` halves on arrival."""
+    pending: dict[str, dict[str, torch.Tensor]] = {}
+    for name, tensor in weights:
+        for half in (".first", ".second"):
+            if name.endswith(half):
+                base = name[: -len(half)]
+                parts = pending.setdefault(base, {})
+                parts[half] = tensor
+                if len(parts) == 2:
+                    del pending[base]
+                    yield base, torch.cat([parts[".first"], parts[".second"]])
+                break
+        else:
+            yield name, tensor
+    if pending:
+        raise ValueError(f"unpaired: {sorted(pending)}")
+
+
+def test_weights_mapper_transform_runs_before_name_mapping():
+    """Transform-emitted names flow through the name mappings, and an N->1
+    merge completes however its inputs are ordered."""
+    mapper = WeightsMapper(
+        orig_to_new_suffix={".w": ".w_renamed"},
+        weights_transforms=[_pair_halves],
+    )
+    first, second = torch.ones(2), torch.zeros(2)
+    keep = torch.ones(1)
+    weights = [("keep.w", keep), ("e.w.second", second), ("e.w.first", first)]
+
+    mapped = list(mapper.apply(weights))
+
+    assert [name for name, _ in mapped] == ["keep.w_renamed", "e.w_renamed"]
+    assert mapped[0][1] is keep
+    assert torch.equal(mapped[1][1], torch.cat([first, second]))
+
+
+def test_weights_mapper_transform_can_recode_values():
+    mapper = WeightsMapper(weights_transforms=[_double])
+
+    mapped = list(mapper.apply([("w", torch.ones(2))]))
+
+    assert torch.equal(mapped[0][1], torch.full((2,), 2.0))
+
+
+def test_weights_mapper_transform_raises_at_iteration_not_at_apply():
+    """Incomplete input raises when the stream is exhausted; merely calling
+    apply() (or the transform) does nothing yet."""
+    mapper = WeightsMapper(weights_transforms=[_pair_halves])
+    stream = mapper.apply([("e.w.first", torch.ones(2))])
+
+    with pytest.raises(ValueError, match="unpaired"):
+        list(stream)
+
+
+def test_weights_mapper_transform_state_is_fresh_per_apply():
+    """The mapper is shared and long-lived; each apply() must start clean."""
+    mapper = WeightsMapper(weights_transforms=[_pair_halves])
+    with pytest.raises(ValueError, match="unpaired"):
+        list(mapper.apply([("e.w.first", torch.ones(2))]))
+    # A leaked pending entry would pair with this stream instead of raising.
+    with pytest.raises(ValueError, match="unpaired"):
+        list(mapper.apply([("e.w.second", torch.zeros(2))]))
+
+    first, second = torch.ones(2), torch.zeros(2)
+    mapped = list(mapper.apply([("e.w.second", second), ("e.w.first", first)]))
+    assert torch.equal(mapped[0][1], torch.cat([first, second]))
+
+
+def test_weights_mapper_or_concatenates_transforms_in_order():
+    """Self's transforms run before other's; a mapper without any adds none."""
+    seen = []
+
+    def tag(label):
+        def rename(weights):
+            for name, tensor in weights:
+                seen.append((label, name))
+                yield f"{name}.{label}", tensor
+
+        return rename
+
+    mapper = WeightsMapper(weights_transforms=[tag("x"), tag("y")]) | WeightsMapper(
+        weights_transforms=[tag("z")]
+    )
+    (mapped,) = list(mapper.apply([("w", torch.ones(1))]))
+
+    assert mapped[0] == "w.x.y.z"
+    assert seen == [("x", "w"), ("y", "w.x"), ("z", "w.x.y")]
+    assert (WeightsMapper() | WeightsMapper()).weights_transforms == []
+    one_side = WeightsMapper() | WeightsMapper(weights_transforms=[_pair_halves])
+    assert one_side.weights_transforms == [_pair_halves]
+
+
+def _double_w(weights):
+    """Stateless dispatch by name, the idiomatic inline ``endswith`` form."""
+    for name, tensor in weights:
+        if name.endswith(".w"):
+            tensor = tensor * 2
+        yield name, tensor
+
+
+def test_weights_mapper_transforms_see_earlier_emitted_names():
+    mapper = WeightsMapper(weights_transforms=[_pair_halves, _double_w])
+
+    (mapped,) = list(
+        mapper.apply([("e.w.second", torch.zeros(1)), ("e.w.first", torch.ones(1))])
+    )
+
+    # The halves merge into "e.w", which the suffix mapping then doubles.
+    assert torch.equal(mapped[1], torch.tensor([2.0, 0.0]))

@@ -74,8 +74,7 @@ def _get_lora_device(base_layer: nn.Module) -> torch.device:
 
 
 def _not_fully_sharded_can_replace(can_replace):
-    """
-    decorator which adds the condition of not using fully sharded loras
+    """Decorator which adds the condition of not using fully sharded loras
     intended to wrap can_replace_layer()
     """
 
@@ -88,8 +87,7 @@ def _not_fully_sharded_can_replace(can_replace):
 
 
 def _fully_sharded_can_replace(can_replace):
-    """
-    decorator which adds the condition of fully sharded loras
+    """Decorator which adds the condition of fully sharded loras
     intended to wrap can_replace_layer()
     """
 

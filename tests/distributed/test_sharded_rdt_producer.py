@@ -26,6 +26,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
+from functools import cached_property
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
@@ -34,6 +35,7 @@ import torch
 
 import vllm.distributed.weight_transfer.sharded_rdt_trainer as trainer_mod
 from vllm.distributed.nixl_utils import alias_nixl_for_ray
+from vllm.distributed.weight_transfer import ParamMeta, WeightSource
 from vllm.distributed.weight_transfer.sharded_rdt_common import (
     buffer_alloc_bytes,
     register_nixl_memory,
@@ -351,16 +353,23 @@ class TestFreeBarrier:
         assert server._group_names.get(GI_A) is None
 
 
-class _CountingSource:
-    """`iter_groups` yielding one CPU-tensor group per call, built lazily so a
-    group's tensors exist only once the engine's credit gate lets it gather."""
+class _CountingSource(WeightSource):
+    """`iter_full` yielding CPU tensors built lazily, so a group's tensors exist
+    only once the engine's credit gate lets it gather."""
 
     def __init__(self, groups):
         self._groups = groups
 
-    def iter_groups(self):
+    @cached_property
+    def metadata(self):
+        return [
+            ParamMeta(n, torch.float32, (16,)) for names in self._groups for n in names
+        ]
+
+    def iter_full(self):
         for names in self._groups:
-            yield list(names), [torch.zeros(16, dtype=torch.float32) for _ in names]
+            for n in names:
+                yield n, torch.zeros(16, dtype=torch.float32)
 
 
 class _ResidencyDict(dict):
@@ -391,9 +400,10 @@ def _loop_engine(server, n_groups, *, lookahead):
     e.source = _CountingSource(groups)
     e._server = server
     e._rpc = lambda method, *a: getattr(server, method)(*a)
+    e._meta = e.source.metadata
     e._groups = [list(g) for g in groups]
     e._owned_idx = list(range(n_groups))
-    e._held_names = None
+    e._owned_names = {m.name for m in e._meta}
     e._inflight = _ResidencyDict()
     return e
 
@@ -503,7 +513,7 @@ class TestGatherCredit:
     def test_the_residency_bound_scales_with_the_lookahead(
         self, server_factory, gather_engine
     ):
-        """lookahead + 1, not a hardcoded 2: at lookahead=2 a free-nothing
+        """Lookahead + 1, not a hardcoded 2: at lookahead=2 a free-nothing
         consumer sees exactly 3 groups gathered before the loop parks."""
         server = server_factory(gather_lookahead=2)
         engine = gather_engine(server, 8, lookahead=2)

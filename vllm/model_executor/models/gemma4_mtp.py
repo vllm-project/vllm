@@ -45,7 +45,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.gemma4 import gemma4_layer_config
+from vllm.v1.worker.gpu.spec_decode.gemma4.config import Gemma4MTPSpeculatorConfig
 
 from .gemma4 import Gemma4MLP, _get_text_config
 from .utils import (
@@ -101,6 +101,7 @@ class Gemma4MTPMaskedEmbedder(nn.Module):
         Returns:
             logits: (num_tokens, num_selected) sparse logits.
             indices: (num_tokens, num_selected) corresponding vocab indices.
+
         """
         num_tokens = hidden_states.shape[0]
         _, top_k_indices = torch.topk(
@@ -264,7 +265,7 @@ class Gemma4MTPDecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
 
         layer_idx = extract_layer_index(prefix)
-        layer_config = gemma4_layer_config(config, layer_idx)
+        layer_config = config.per_layer_config[layer_idx]
         head_dim = layer_config.head_dim
         num_kv_heads = layer_config.num_key_value_heads
 
@@ -446,6 +447,9 @@ class Gemma4MTP(nn.Module):
     hidden-state feedback buffer.
     """
 
+    # The speculator this is a draft model of (see SpeculativeDraftModel).
+    speculator_config_class = Gemma4MTPSpeculatorConfig
+
     has_own_lm_head = True
 
     hf_to_vllm_mapper = WeightsMapper(
@@ -516,7 +520,7 @@ class Gemma4MTP(nn.Module):
         draft_cfg = speculative_config.draft_model_config
         gen_cfg = draft_cfg.try_get_generation_config()
         self._suppress_token_ids = gen_cfg.get("suppress_tokens") if gen_cfg else None
-        # Materialized on-device in load_weights: compute_logits runs under CUDA
+        # Materialized on-device after loading: compute_logits runs under CUDA
         # graph capture in the V2 speculator, where indexing with a Python list
         # would issue an unpinned H2D copy (illegal during capture).
         self._suppress_idx: torch.Tensor | None = None
@@ -588,13 +592,14 @@ class Gemma4MTP(nn.Module):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        self._stable_full_lm_head_weight = None
         loader = AutoWeightsLoader(self)
-        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    def process_weights_after_loading(self) -> None:
+        self._stable_full_lm_head_weight = None
         if self._suppress_token_ids:
             self._suppress_idx = torch.tensor(
                 self._suppress_token_ids,
                 dtype=torch.long,
                 device=next(self.parameters()).device,
             )
-        return loaded

@@ -50,8 +50,7 @@ def _supports_torch_fp8_scaled_mm() -> bool:
 
 
 class TorchFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
-    """
-    Base class for FP8 linear kernels using Torch.
+    """Base class for FP8 linear kernels using Torch.
     Each subclass represents a kernel variant for
     specific device capabilities and torch versions.
     """

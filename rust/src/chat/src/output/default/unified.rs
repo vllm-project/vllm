@@ -48,25 +48,6 @@ impl UnifiedParserState {
         }
     }
 
-    /// Initialize parser state once prompt token IDs are available.
-    fn initialize(&mut self, prompt_token_ids: &[u32]) {
-        if self.parser_failed {
-            return;
-        }
-
-        match self.parser.initialize(prompt_token_ids) {
-            Ok(()) => {}
-            Err(error) => {
-                warn!(
-                    error = %error.as_report(),
-                    "failed to initialize unified parser; falling back to plain text deltas"
-                );
-                self.parser_failed = true;
-                self.open_call_index = None;
-            }
-        }
-    }
-
     /// Convert one decoded text delta into zero or more parsed assistant events.
     fn process_delta(&mut self, delta: DecodedText) -> Result<Vec<AssistantEvent>> {
         if self.parser_failed {
@@ -262,7 +243,6 @@ pub(crate) async fn unified_event_stream(
                 prompt_token_ids,
                 prompt_logprobs,
             } => {
-                state.initialize(&prompt_token_ids);
                 y.yield_ok(AssistantEvent::Start {
                     prompt_token_ids,
                     prompt_logprobs,
@@ -297,9 +277,12 @@ pub(crate) async fn unified_event_stream(
                             engine: finished.usage,
                             reasoning_tokens: state.reasoning_tokens,
                         },
+                        timestamps: finished.timestamps,
+                        spec_decode_metrics: finished.spec_decode_metrics,
                         finish_reason: finished.finish_reason,
                         kv_transfer_params: finished.kv_transfer_params,
                         ec_transfer_params: finished.ec_transfer_params,
+                        weight_versions: finished.weight_versions,
                     })
                     .await;
                 }
@@ -438,6 +421,10 @@ mod tests {
                 finish_reason: crate::FinishReason::Stop(None),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
+                sampling_mask: None,
+                spec_decode_metrics: None,
+                weight_versions: None,
+                timestamps: Default::default(),
             })),
         }
     }
@@ -526,7 +513,7 @@ mod tests {
     async fn unified_stream_parses_formatted_tool_call_without_latch() {
         use vllm_parser::tool::{HermesToolParser, ToolParser as _};
 
-        let hermes = HermesToolParser::create(&[]).unwrap();
+        let hermes = HermesToolParser::create(&[], Arc::new(TestTokenizer::new())).unwrap();
         let parser = vllm_parser::unified::CombinedParser::new(None, Some(hermes));
 
         // Regression guard: a formatted call (space before the outer `}`) must not
@@ -761,9 +748,12 @@ mod tests {
                 },
                 AssistantEvent::Done {
                     usage: done_usage(0),
+                    timestamps: Default::default(),
+                    spec_decode_metrics: None,
                     finish_reason: crate::FinishReason::Stop(None),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
+                    weight_versions: None,
                 },
             ]
         );
@@ -801,9 +791,12 @@ mod tests {
                 },
                 AssistantEvent::Done {
                     usage: done_usage(5),
+                    timestamps: Default::default(),
+                    spec_decode_metrics: None,
                     finish_reason: crate::FinishReason::Stop(None),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
+                    weight_versions: None,
                 },
             ]
         );
@@ -833,9 +826,12 @@ mod tests {
                 },
                 AssistantEvent::Done {
                     usage: done_usage(2),
+                    timestamps: Default::default(),
+                    spec_decode_metrics: None,
                     finish_reason: crate::FinishReason::Stop(None),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
+                    weight_versions: None,
                 },
             ]
         );
@@ -885,9 +881,12 @@ mod tests {
                 },
                 AssistantEvent::Done {
                     usage: done_usage(5),
+                    timestamps: Default::default(),
+                    spec_decode_metrics: None,
                     finish_reason: crate::FinishReason::Stop(None),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
+                    weight_versions: None,
                 },
             ]
         );
@@ -903,6 +902,7 @@ mod tests {
             description: None,
             parameters: serde_json::json!({ "type": "object" }),
             strict: None,
+            defer_loading: None,
         }];
         let parser = Gemma4UnifiedParser::new(&tools, Arc::new(tokenizer)).unwrap();
         let events = vec![
@@ -930,9 +930,12 @@ mod tests {
                 },
                 AssistantEvent::Done {
                     usage: done_usage(0),
+                    timestamps: Default::default(),
+                    spec_decode_metrics: None,
                     finish_reason: crate::FinishReason::Stop(None),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
+                    weight_versions: None,
                 },
             ]
         );

@@ -9,6 +9,7 @@ import torchaudio.compliance.kaldi as kaldi
 from torch.nn.utils.rnn import pad_sequence
 from transformers import (
     AutoFeatureExtractor,
+    AutoTokenizer,
     BatchFeature,
 )
 from transformers.feature_extraction_sequence_utils import SequenceFeatureExtractor
@@ -21,10 +22,7 @@ logger = init_logger(__name__)
 
 
 def apply_cmvn(inputs, cmvn):  # noqa
-    """
-    Apply CMVN with mvn data
-    """
-
+    """Apply CMVN with mvn data."""
     device = inputs.device
     # dtype = inputs.dtype
     frame, dim = inputs.shape
@@ -167,60 +165,9 @@ class WavFrontend(nn.Module):
             feats_pad = pad_sequence(feats, batch_first=True, padding_value=0.0)
         return feats_pad, feats_lens
 
-    def forward_fbank(
-        self, input: torch.Tensor, input_lengths: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        batch_size = input.size(0)
-        feats = []
-        feats_lens = []
-        for i in range(batch_size):
-            waveform_length = input_lengths[i]
-            waveform = input[i][:waveform_length]
-            waveform = waveform * (1 << 15)
-            waveform = waveform.unsqueeze(0)
-            mat = kaldi.fbank(
-                waveform,
-                num_mel_bins=self.n_mels,
-                frame_length=self.frame_length,
-                frame_shift=self.frame_shift,
-                dither=self.dither,
-                energy_floor=0.0,
-                window_type=self.window,
-                sample_frequency=self.fs,
-            )
-
-            feat_length = mat.size(0)
-            feats.append(mat)
-            feats_lens.append(feat_length)
-
-        feats_lens = torch.as_tensor(feats_lens)
-        feats_pad = pad_sequence(feats, batch_first=True, padding_value=0.0)
-        return feats_pad, feats_lens
-
-    def forward_lfr_cmvn(
-        self, input: torch.Tensor, input_lengths: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        batch_size = input.size(0)
-        feats = []
-        feats_lens = []
-        for i in range(batch_size):
-            mat = input[i, : input_lengths[i], :]
-            if self.lfr_m != 1 or self.lfr_n != 1:
-                mat = apply_lfr(mat, self.lfr_m, self.lfr_n)
-            if self.cmvn is not None:
-                mat = apply_cmvn(mat, self.cmvn)
-            feat_length = mat.size(0)
-            feats.append(mat)
-            feats_lens.append(feat_length)
-
-        feats_lens = torch.as_tensor(feats_lens)
-        feats_pad = pad_sequence(feats, batch_first=True, padding_value=0.0)
-        return feats_pad, feats_lens
-
 
 class FunASRFeatureExtractor(SequenceFeatureExtractor):
-    r"""
-    Constructs a FunASR feature extractor.
+    r"""Constructs a FunASR feature extractor.
 
     This feature extractor inherits from [`~feature_extraction_sequence_
         utils.SequenceFeatureExtractor`] which contains most of the main
@@ -255,6 +202,7 @@ class FunASRFeatureExtractor(SequenceFeatureExtractor):
             Dithering has similar effect as `spectrogram(mel_floor=...)`. It reduces
             the high log_mel_fbank values for signals with hard-zero sections,
             when VAD cutoff is present in the signal.
+
     """
 
     model_input_names = ["input_features"]
@@ -369,8 +317,7 @@ class FunASRFeatureExtractor(SequenceFeatureExtractor):
 
 
 class FunASRProcessor(ProcessorMixin):
-    r"""
-    Constructs a FunASR processor which wraps a FunASR feature extractor and
+    r"""Constructs a FunASR processor which wraps a FunASR feature extractor and
     a FunASR tokenizer into a single processor.
 
     [`FunASRProcessor`] offers all the functionalities of
@@ -385,10 +332,24 @@ class FunASRProcessor(ProcessorMixin):
         tokenizer (`Qwen2Tokenizer`):
             An instance of [`Qwen2Tokenizer`]. The tokenizer is a required
             input.
+
     """
 
     feature_extractor_class = "FunASRFeatureExtractor"
     tokenizer_class = ("Qwen2Tokenizer", "Qwen2TokenizerFast")
+
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path, **kwargs):
+        # Bypass ProcessorMixin's dynamic module lookup, see MiniMaxVLProcessor
+        tokenizer = kwargs.pop("tokenizer", None)
+        if tokenizer is None:
+            tokenizer = AutoTokenizer.from_pretrained(
+                pretrained_model_name_or_path, **kwargs
+            )
+        feature_extractor = FunASRFeatureExtractor.from_pretrained(
+            pretrained_model_name_or_path, **kwargs
+        )
+        return cls(feature_extractor=feature_extractor, tokenizer=tokenizer)
 
     def __init__(
         self,
@@ -410,8 +371,7 @@ class FunASRProcessor(ProcessorMixin):
         )
 
     def __call__(self, *args, **kwargs):
-        """
-        Forwards the `audio` argument to FunASRFeatureExtractor's
+        """Forwards the `audio` argument to FunASRFeatureExtractor's
         [`~FunASRFeatureExtractor.__call__`] and the `text` argument to
         [`~Qwen2Tokenizer.__call__`]. Please refer to the docstring of the
         above two methods for more information.

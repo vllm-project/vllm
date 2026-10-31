@@ -19,6 +19,7 @@ from vllm.entrypoints.serve.tokenize.api_router import attach_router
 from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeChatRequest,
     TokenizeCompletionRequest,
+    TokenizeResponse,
 )
 from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.exceptions import VLLMNotFoundError, VLLMValidationError
@@ -56,9 +57,10 @@ class MockModelConfig:
     encoder_config = None
     generation_config: str = "auto"
     media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
-    skip_tokenizer_init = False
+    skip_tokenizer_init: bool = False
     is_encoder_decoder: bool = False
     is_multimodal_model: bool = False
+    supports_multimodal_inputs: bool = False
     renderer_num_workers: int = 1
 
     def get_diff_sampling_param(self):
@@ -94,7 +96,7 @@ async def test_tokenize_chat_skips_mm_cache_for_renderer_only_path():
     mock_engine.renderer = MagicMock()
 
     serving = _build_serving_tokenization(mock_engine)
-    serving.online_renderer.preprocess_chat = AsyncMock(
+    serving.online_renderer.preprocess_chat = AsyncMock(  # type: ignore[method-assign]
         return_value=(
             [{"role": "user", "content": "Test"}],
             [{"prompt_token_ids": [1, 2, 3]}],
@@ -108,10 +110,41 @@ async def test_tokenize_chat_skips_mm_cache_for_renderer_only_path():
 
     response = await serving.create_tokenize(request, MagicMock(headers={}))
 
-    assert response.tokens == [1, 2, 3]
+    assert isinstance(response, TokenizeResponse) and response.tokens == [1, 2, 3]
     assert (
         serving.online_renderer.preprocess_chat.call_args.kwargs["skip_mm_cache"]
         is True
+    )
+
+
+@pytest.mark.skip_global_cleanup
+def test_tokenize_chat_forwards_response_format_to_renderer():
+    """Structured formats must affect Mistral tokenization, not just generation."""
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "answer",
+            "schema": {"type": "object", "properties": {"value": {"type": "string"}}},
+            "strict": True,
+        },
+    }
+    request = TokenizeChatRequest.model_validate(
+        {
+            "model": MODEL_NAME,
+            "messages": [{"role": "user", "content": "Return JSON"}],
+            "response_format": response_format,
+        }
+    )
+
+    params = request.build_chat_params(
+        default_template=None,
+        default_template_content_format="auto",
+    )
+
+    assert params.response_format is not None
+    assert (
+        params.response_format.model_dump(mode="json", by_alias=True, exclude_none=True)
+        == response_format
     )
 
 
@@ -124,7 +157,7 @@ async def test_tokenize_completion_skips_mm_cache_for_renderer_only_path():
     mock_engine.renderer = MagicMock()
 
     serving = _build_serving_tokenization(mock_engine)
-    serving.online_renderer.preprocess_completion = AsyncMock(
+    serving.online_renderer.preprocess_completion = AsyncMock(  # type: ignore[method-assign]
         return_value=[{"prompt_token_ids": [1, 2, 3]}]
     )
 
@@ -135,7 +168,7 @@ async def test_tokenize_completion_skips_mm_cache_for_renderer_only_path():
 
     response = await serving.create_tokenize(request, MagicMock(headers={}))
 
-    assert response.tokens == [1, 2, 3]
+    assert isinstance(response, TokenizeResponse) and response.tokens == [1, 2, 3]
     assert (
         serving.online_renderer.preprocess_completion.call_args.kwargs["skip_mm_cache"]
         is True

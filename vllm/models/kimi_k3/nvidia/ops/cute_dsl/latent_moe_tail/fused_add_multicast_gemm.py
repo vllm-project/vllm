@@ -52,10 +52,11 @@ from cutlass.cute.nvgpu.common import CacheEvictionPriority
 from cutlass.cute.runtime import from_dlpack
 from cutlass.pipeline import pipeline_init_arrive, pipeline_init_wait
 
+from vllm.models.common.ops.moe_tail_fusion.primitives import CUDAGraphCompatibleWrapper
+
 from .fused_add_multicast_skinny_gemm import (
     FusedAddMulticastSkinnyGemmKernel,
 )
-from .primitives import CUDAGraphCompatibleWrapper
 
 
 def _as_cute(tensor: torch.Tensor, *, dynamic_m: bool = False):
@@ -79,7 +80,6 @@ def validate_configuration(
     b_prime_stages: int,
 ) -> None:
     """Validate constraints imposed by this BF16 SM100 GEMM."""
-
     if latent_dim <= 0 or shard_dim <= 0:
         raise ValueError("GEMM K and N must be positive")
     if latent_dim % 8 or shard_dim % 8:
