@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import Enum
+from typing import Any
 
 import torch
 
@@ -36,6 +37,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
+from vllm.model_executor.utils import move_parameter
 
 logger = init_logger(__name__)
 
@@ -53,6 +55,15 @@ class NvFp4MoeBackend(Enum):
     EMULATION = "EMULATION"
     FLASHINFER_MOE_EP_CUTEDSL = "FLASHINFER_MOE_EP_CUTEDSL"
 
+
+# Backends whose experts quantize the MoE input themselves, with one scale per
+# token. ``make_nvfp4_moe_kernel`` only hands ``per_token_activation`` to these.
+PER_TOKEN_NVFP4_MOE_BACKENDS = frozenset(
+    {
+        NvFp4MoeBackend.FLASHINFER_CUTEDSL,
+        NvFp4MoeBackend.FLASHINFER_TRTLLM,
+    }
+)
 
 FLASHINFER_NVFP4_MOE_BACKENDS = [
     NvFp4MoeBackend.FLASHINFER_TRTLLM,
@@ -196,6 +207,18 @@ def select_nvfp4_moe_backend(
     """Select the primary NvFP4 MoE backend
     Note: Shape-specific fallbacks may still occur at runtime.
     """
+    from vllm.model_executor.layers.quantization.online.requantization import (
+        is_requantization_source,
+    )
+
+    # TODO: remove and let the oracles have an option to skip init.
+    if is_requantization_source():
+        from vllm.model_executor.layers.fused_moe.experts.nvfp4_emulation_moe import (
+            Nvfp4QuantizationEmulationTritonExperts,
+        )
+
+        return NvFp4MoeBackend.EMULATION, Nvfp4QuantizationEmulationTritonExperts
+
     # NOTE: the kernels are selected in the following order.
     # FLASHINFER_B12X is intentionally excluded from auto-selection until
     # the upstream CUTLASS SM121 MMA op guard is resolved; use
@@ -441,10 +464,10 @@ def convert_to_nvfp4_moe_kernel_format(
                 "strategy": "group",
                 "group_size": 16,
             }
-            # CT pack-quantized reads `weight_packed`; the method renamed it to
-            # `weight`. Re-alias (convert replaces all params anyway).
-            layer.w13_weight_packed = layer.w13_weight
-            layer.w2_weight_packed = layer.w2_weight
+            # CT pack-quantized reads `weight_packed`; the method aliased it as
+            # `weight`. Make the loaded `*_weight_packed` name the runtime one.
+            move_parameter(layer, "w13_weight", "w13_weight_packed")
+            move_parameter(layer, "w2_weight", "w2_weight_packed")
         else:
             quant_config = {"quant_method": "modelopt", "quant_algo": "nvfp4"}
 
@@ -615,6 +638,10 @@ def make_nvfp4_moe_kernel(
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     per_token_activation: bool = False,
 ) -> mk.FusedMoEKernel:
+    # Marlin consumes A16 and must not receive per-token A4 metadata.
+    if backend == NvFp4MoeBackend.MARLIN and moe_quant_config.use_nvfp4_w4a16:
+        per_token_activation = False
+
     # Create Prepare/Finalize.
     prepare_finalize = maybe_make_prepare_finalize(
         moe=moe_config,
@@ -628,15 +655,17 @@ def make_nvfp4_moe_kernel(
 
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
 
-    extra_kwargs = {}
-    if (
-        backend
-        in (
-            NvFp4MoeBackend.FLASHINFER_TRTLLM,
-            NvFp4MoeBackend.FLASHINFER_CUTEDSL,
-        )
-        and per_token_activation
-    ):
+    extra_kwargs: dict[str, Any] = {}
+    if per_token_activation:
+        # Prepare dispatched the input unquantized, so an expert that does
+        # not quantize it itself would read garbage. The backend selection
+        # does not catch this: several NVFP4 experts match on the weight key
+        # alone and accept any activation key.
+        if backend not in PER_TOKEN_NVFP4_MOE_BACKENDS:
+            raise ValueError(
+                f"Per-token NVFP4 activation scales are not supported by "
+                f"{backend.value}."
+            )
         extra_kwargs["per_token_activation"] = True
 
     # Create Experts.

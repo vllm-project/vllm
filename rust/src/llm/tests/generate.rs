@@ -438,8 +438,8 @@ async fn generate_merges_outputs_by_stream_interval() {
     assert_eq!(
         weight_versions,
         [
-            None,
-            None,
+            Some(vec![span("v7", 0, 1)]),
+            Some(vec![span("v7", 0, 2), span("v8", 2, 5)]),
             Some(vec![span("v7", 0, 2), span("v8", 2, 5), span("v7", 5, 7)])
         ]
     );
