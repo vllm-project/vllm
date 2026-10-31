@@ -51,6 +51,7 @@ def _quantize_and_setup_dispatch(
             block_shape=quant_config.block_shape,
             is_scale_swizzled=False,
             mx_alignment=quant_config.mx_alignment,
+            use_ue8m0=quant_config.act_scale_ue8m0,
         )
 
     # Skip gathering scales if we have static quantization

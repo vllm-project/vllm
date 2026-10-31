@@ -154,6 +154,15 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             and self.moe_config.moe_parallel_config.use_all2all_kernels
         )
 
+    @property
+    def act_scale_ue8m0(self) -> bool | None:
+        # fused_moe_kernel multiplies by whatever fp32 scale it is given, so
+        # the DeepGEMM-oriented UE8M0 rounding only coarsens the block fp8
+        # activation quant here (and keeps the fused SiLU+quant kernel off).
+        if self.quant_config.use_fp8_w8a8 and self.block_shape is not None:
+            return False
+        return None
+
     @staticmethod
     def _supports_current_device() -> bool:
         return current_platform.is_cuda_alike() or current_platform.is_xpu()
@@ -348,6 +357,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 self.per_act_token_quant,
                 self.block_shape,
                 quantization_emulation=self.quantization_emulation,
+                use_ue8m0=self.quant_config.act_scale_ue8m0,
             )
 
         E, num_tokens, N, K, top_k_num = self.moe_problem_size(
@@ -613,6 +623,11 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         # group_size=128, no LoRA requiring the BF16 intermediate).
         # The fused kernel has no clamp parameter, so a configured
         # SwiGLU clamp limit falls through to the unfused path.
+        # The per-block fused kernel writes fp32 group scales, so it needs the
+        # quant config to ask for fp32 (not UE8M0) activation scales; the fp8
+        # MoE oracle does so for the Triton backend, whose GEMM takes any fp32
+        # scale. The sorted-A TMA path rounds its own scales to UE8M0 and keeps
+        # the DeepGEMM gate.
         if use_sorted_a:
             qintermediate_cache2 = intermediate_cache1.new_empty(
                 (num_sorted_rows, cache2_dim),
@@ -639,7 +654,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             and self.quant_config.use_fp8_w8a8
             and self.block_shape == [128, 128]
             and lora_context is None
-            and not is_deep_gemm_e8m0_used()
+            and not self.quant_config.use_ue8m0_act_scales
         ):
             qintermediate_cache2, a2q_scale = ops.silu_and_mul_per_block_quant(
                 intermediate_cache1.view(-1, N),
@@ -668,6 +683,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 self.per_act_token_quant,
                 self.block_shape,
                 quantization_emulation=self.quantization_emulation,
+                use_ue8m0=self.quant_config.act_scale_ue8m0,
             )
 
         # LoRA w2: applied to intermediate_cache3 before moe_sum, using the
