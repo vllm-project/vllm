@@ -49,6 +49,15 @@ module prefix and decoder layer indices before constructing quantized layers.
     use `--linear-backend flashinfer_trtllm` to select FlashInfer's TensorRT-LLM
     GEMM backend.
 
+## Weight cache daemon
+
+Serialized ModelOpt `FP8`, `FP8_PER_CHANNEL_PER_TOKEN`, and `FP8_PB_WO`
+linear layers can reuse processed GPU weights across engine restarts with
+the CUTLASS backend. See the [Preload quick start](../preload.md#quick-start)
+and [quantization requirements](../preload.md#limitations) for daemon and
+engine commands, block sizes and activation grouping, partial output blocks,
+defaults, and unsupported configurations.
+
 ## Benchmarking with dummy weights
 
 For performance experiments with random weights, use `--load-format dummy`.

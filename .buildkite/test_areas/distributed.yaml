@@ -784,6 +784,42 @@ steps:
       - pytest -v -s distributed/test_pipeline_parallel.py -k "ray"
       - TARGET_TEST_SUITE=MI355 pytest -v -s basic_correctness/models/test_basic_correctness.py -k "ray"
 
+- label: ":nvidia: (L4) FP8 Preload"
+  key: preload-online-fp8
+  timeout_in_minutes: 15
+  working_dir: "/vllm-workspace/tests"
+  device: l4
+  num_devices: 1
+  source_file_dependencies:
+  - vllm/model_executor/model_loader/weight_cache/
+  - vllm/model_executor/layers/quantization/online/
+  - vllm/model_executor/layers/quantization/modelopt.py
+  - tests/quantization/test_modelopt.py
+  - vllm/model_executor/kernels/linear/scaled_mm/
+  - vllm/entrypoints/cli/preload.py
+  - tests/model_executor/model_loader/test_weight_cache.py
+  commands:
+  - pytest -v -s model_executor/model_loader/test_weight_cache.py -k "online_fp8 or modelopt_fp8"
+  - pytest -v -s quantization/test_modelopt.py -k "preprocessed_shared_weights or preprocessed_unsupported_backend"
+
+- label: ":nvidia: (B200) Quantized Preload"
+  key: preload-blackwell-quantization
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/tests"
+  device: b200-k8s
+  num_devices: 1
+  source_file_dependencies:
+  - vllm/model_executor/model_loader/weight_cache/
+  - vllm/model_executor/layers/quantization/
+  - vllm/model_executor/layers/fused_moe/experts/cutlass_moe.py
+  - vllm/model_executor/kernels/linear/
+  - vllm/entrypoints/cli/preload.py
+  - tests/model_executor/model_loader/test_weight_cache.py
+  - tests/quantization/test_modelopt.py
+  commands:
+  - pytest -v -s model_executor/model_loader/test_weight_cache.py -k 'online_blackwell or nvfp4_cutlass or modelopt_block_fp8'
+  - pytest -v -s quantization/test_modelopt.py -k "preprocessed_shared_weights or preprocessed_unsupported_backend"
+
 - label: ":nvidia: (L4) Distributed Preload"
   key: preload-2-gpus
   automatic_shard: true
