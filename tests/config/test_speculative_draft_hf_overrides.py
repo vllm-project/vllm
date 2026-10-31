@@ -416,3 +416,97 @@ def test_mtp_draft_architecture_follows_target_model_impl(
     draft = speculative_config.draft_model_config
     assert draft.architecture == architecture
     assert draft.hf_config.n_predict == 1
+
+
+def _make_mtp_target(tmp_path, *, num_nextn_predict_layers: int = 1, **target_kwargs):
+    """Local MTP checkpoint + target ModelConfig, mirroring the test above."""
+    config = AutoConfig.for_model(
+        "glm4_moe", num_nextn_predict_layers=num_nextn_predict_layers
+    )
+    config.architectures = [config.__class__.__name__.replace("Config", "ForCausalLM")]
+    config.save_pretrained(tmp_path)
+    return ModelConfig(
+        str(tmp_path), model_impl="auto", skip_tokenizer_init=True, **target_kwargs
+    )
+
+
+@pytest.mark.cpu_test
+def test_mtp_draft_inherits_target_revision(tmp_path):
+    """With method="mtp" and no explicit draft model, the draft IS the target
+    checkpoint, so the draft config must resolve config/weights from the
+    target's revision (as it already does for model and quantization).
+    Regression test for https://github.com/vllm-project/vllm/issues/61197:
+    the draft previously fell back to the repo's default branch."""
+    target = _make_mtp_target(tmp_path, revision="pre-final", code_revision="abc123")
+    config = SpeculativeConfig(
+        method="mtp",
+        num_speculative_tokens=1,
+        target_model_config=target,
+        target_parallel_config=ParallelConfig(),
+    )
+
+    assert config.revision == "pre-final"
+    assert config.code_revision == "abc123"
+    assert config.draft_model_config.revision == "pre-final"
+    assert config.draft_model_config.code_revision == "abc123"
+
+
+@pytest.mark.cpu_test
+def test_mtp_draft_explicit_revision_wins(tmp_path):
+    """An explicitly set speculative revision/code_revision is an override
+    and must not be clobbered by the target's revision."""
+    target = _make_mtp_target(tmp_path, revision="pre-final", code_revision="abc123")
+    config = SpeculativeConfig(
+        method="mtp",
+        num_speculative_tokens=1,
+        revision="explicit",
+        code_revision="explicit-code",
+        target_model_config=target,
+        target_parallel_config=ParallelConfig(),
+    )
+
+    assert config.draft_model_config.revision == "explicit"
+    assert config.draft_model_config.code_revision == "explicit-code"
+
+
+@pytest.mark.cpu_test
+def test_explicit_draft_model_does_not_inherit_revision(tmp_path):
+    """Revision inheritance only applies when the draft is the target
+    checkpoint. A separately provided draft checkpoint keeps its own
+    (unset) revision."""
+    target = _make_mtp_target(
+        tmp_path / "target", revision="pre-final", code_revision="abc123"
+    )
+    # A separately provided draft checkpoint. It uses the same model family
+    # so the target/draft vocab sizes match (new main validates this).
+    draft_config = AutoConfig.for_model("glm4_moe", num_nextn_predict_layers=1)
+    draft_config.architectures = [
+        draft_config.__class__.__name__.replace("Config", "ForCausalLM")
+    ]
+    draft_config.save_pretrained(tmp_path / "draft")
+
+    config = SpeculativeConfig(
+        method="draft_model",
+        model=str(tmp_path / "draft"),
+        num_speculative_tokens=1,
+        target_model_config=target,
+        target_parallel_config=ParallelConfig(),
+    )
+
+    assert config.draft_model_config.revision is None
+    assert config.draft_model_config.code_revision is None
+
+
+@pytest.mark.cpu_test
+def test_mtp_zero_n_predict_raises_readable_error(tmp_path):
+    """A draft checkpoint resolving to n_predict=0 must raise a readable
+    ValueError instead of ZeroDivisionError."""
+    target = _make_mtp_target(tmp_path, num_nextn_predict_layers=0)
+
+    with pytest.raises(ValueError, match="n_predict=0"):
+        SpeculativeConfig(
+            method="mtp",
+            num_speculative_tokens=1,
+            target_model_config=target,
+            target_parallel_config=ParallelConfig(),
+        )
