@@ -52,9 +52,9 @@ from vllm.v1.kv_cache_interface import (
 logger = init_logger(__name__)
 
 torch._dynamo.config.recompile_limit = 16
-create_block_mask_compiled = torch.compile(
-    create_block_mask, fullgraph=True, mode="reduce-overhead"
-)
+# Masks can outlive subsequent builds, so their tensors must not be backed by
+# the reusable output buffers of Inductor CUDA graph trees.
+create_block_mask_compiled = torch.compile(create_block_mask, fullgraph=True)
 flex_attention_compiled = torch.compile(flex_attention, fullgraph=True)
 
 
