@@ -42,6 +42,7 @@ TOOL_TEXT = "<|content_invoke_tool_text|>"
 TOOL_ERROR = "<|content_tool_error|>"
 END_MESSAGE = "<|end_message|>"
 END_SAMPLING = "<|content_model_end_sampling|>"
+CONTENT_XML = "<|content_xml|>"
 
 _TML_VOCAB = {
     MSG_MODEL: 200001,
@@ -50,6 +51,7 @@ _TML_VOCAB = {
     THINK_START: 200008,
     END_MESSAGE: 200010,
     TOOL_ERROR: 200022,
+    CONTENT_XML: 200024,
     TOOL_JSON: 200049,
     TOOL_TEXT: 200057,
 }
@@ -910,6 +912,73 @@ def test_content_tool_start_emits_reasoning_end_in_reasoning_pass():
         EventType.TEXT_CHUNK,
     ]
     assert events[1].value == TOOL_JSON
+
+
+class TestPlainTextStreaming:
+    """With no tools declared and ``reasoning_effort`` of ``none`` or
+    ``minimal``, Inkling answers in bare text with no ``<|content_text|>``
+    marker. The final content is correct either way, so these cases assert
+    *when* the deltas arrive, not just what they concatenate to."""
+
+    NO_TOOLS_PROMPT = [_TML_VOCAB[MSG_MODEL]]
+    TOOLS_PROMPT = [_TML_VOCAB[CONTENT_XML], _TML_VOCAB[END_MESSAGE], *NO_TOOLS_PROMPT]
+    ANSWER = "the answer is 42"
+
+    @staticmethod
+    def _content_deltas(tokenizer, request, effort, prompt, text):
+        parser_cls = ParserManager.get_parser(
+            tool_parser_name="inkling",
+            reasoning_parser_name="inkling",
+            enable_auto_tools=True,
+        )
+        parser = parser_cls(
+            tokenizer, [], chat_template_kwargs={"reasoning_effort": effort}
+        )
+        tokens = _tokenize(text)
+        out = []
+        for i, (token_id, token) in enumerate(tokens):
+            delta = parser.parse_delta(
+                token,
+                [token_id],
+                request,
+                prompt_token_ids=prompt if i == 0 else None,
+                finished=(i == len(tokens) - 1),
+            )
+            out.append(delta.content if delta and delta.content else "")
+        return out
+
+    @pytest.mark.parametrize("effort", ["none", "minimal"])
+    @pytest.mark.parametrize("closer", [END_MESSAGE, ""], ids=["end_message", "eos"])
+    def test_bare_text_streams_incrementally(
+        self, mock_tokenizer, mock_request, effort, closer
+    ):
+        deltas = self._content_deltas(
+            mock_tokenizer,
+            mock_request,
+            effort,
+            self.NO_TOOLS_PROMPT,
+            f"{self.ANSWER}{closer}",
+        )
+        assert [d for d in deltas if d] == list(self.ANSWER)
+
+    @pytest.mark.parametrize(
+        "effort,tools_declared",
+        [("none", True), ("minimal", True), ("low", False)],
+    )
+    def test_otherwise_keeps_message_header_parsing(
+        self, mock_tokenizer, mock_request, effort, tools_declared
+    ):
+        """Tools in the prompt -- from any source -- mean the text after
+        ``<|message_model|>`` may be a function name that must stay hidden."""
+        prompt = self.TOOLS_PROMPT if tools_declared else self.NO_TOOLS_PROMPT
+        deltas = self._content_deltas(
+            mock_tokenizer,
+            mock_request,
+            effort,
+            prompt,
+            f"get_weather{TEXT_START}{self.ANSWER}{END_MESSAGE}",
+        )
+        assert "".join(deltas) == self.ANSWER
 
 
 def test_skip_reasoning_parsing_inert_for_shared_markers():
