@@ -27,6 +27,7 @@ async def read_upload_with_limit(
         file: The FastAPI/Starlette ``UploadFile`` object.
         max_size_mb: Maximum allowed compressed file size in megabytes.
             Defaults to ``envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB``.
+            A value of 0 disables the check.
 
     Returns:
         The file content as ``bytes``.
@@ -38,9 +39,11 @@ async def read_upload_with_limit(
     if max_size_mb is None:
         max_size_mb = envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB
 
-    max_bytes = int(max_size_mb * MiB_bytes)
+    # A limit of 0 disables the filesize check, per
+    # docs/usage/security.md.
+    max_bytes = int(max_size_mb * MiB_bytes) if max_size_mb > 0 else None
 
-    if file.size is not None and file.size > max_bytes:
+    if max_bytes is not None and file.size is not None and file.size > max_bytes:
         raise VLLMValidationError(
             "Maximum file size exceeded",
             parameter="audio_filesize_mb",
@@ -54,7 +57,7 @@ async def read_upload_with_limit(
         if not chunk:
             break
         total += len(chunk)
-        if total > max_bytes:
+        if max_bytes is not None and total > max_bytes:
             raise VLLMValidationError(
                 "Maximum file size exceeded",
                 parameter="audio_filesize_mb",
