@@ -190,6 +190,13 @@ class XPUW8A16FP8LinearKernel(FP8ScaledMMLinearKernel):
 
 
 class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
+    # Opt-in W8A16 routing (XPU_BLOCK_FP8_W8A16=1, added by apply-w8a16.py): fp16 activations go straight into
+    # oneDNN fp8_gemm_w8a16 with the checkpoint's 128x128 scales, as llm-scaler 0.26 b1 routed block FP8.
+    # Unset, or any other value, keeps the stock path (activation quantization, then W8A8 fp8_gemm).
+    apply_input_quant = os.environ.get("XPU_BLOCK_FP8_W8A16", "0") != "1"
+    _w8a16_min_m = int(os.environ.get("XPU_BLOCK_FP8_W8A16_MIN_M", "1"))
+    _w8a16_seen: set = set()  # log keys already printed by this process (a cheap check before info_once)
+
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -274,6 +281,43 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         # B is [N, K]; .t() gives [K, N] view (no copy).
         # Bs is stored as [n_blocks, k_blocks] view; .t() recovers the
         # contiguous [k_blocks, n_blocks] buffer that oneDNN expects.
+        if not self.apply_input_quant:
+            n, k = B.shape
+            m = A.shape[0]
+            seen = self._w8a16_seen
+            if (
+                n % 128 == 0
+                and k % 128 == 0
+                and k > 128
+                and tuple(self.weight_group_shape) == (128, 128)
+                and A.dtype == torch.float16
+            ):
+                if m >= self._w8a16_min_m:
+                    if "active" not in seen:
+                        seen.add("active")
+                        logger.info_once(
+                            "XPU_BLOCK_FP8_W8A16: W8A16 active (oneDNN fp8_gemm_w8a16, fp16 "
+                            "activations, 128x128 weight scales); first use m=%d n=%d k=%d, "
+                            "min_m=%d",
+                            m, n, k, self._w8a16_min_m, scope="process",
+                        )
+                    scale_kn = Bs.t()
+                    if scale_kn.dtype != torch.float32 or not scale_kn.is_contiguous():
+                        scale_kn = scale_kn.to(torch.float32).contiguous()
+                    return torch.ops._xpu_C.fp8_gemm_w8a16(A.contiguous(), B.t(), scale_kn, None)
+                if "below_min_m" not in seen:
+                    seen.add("below_min_m")
+                    logger.info_once(
+                        "XPU_BLOCK_FP8_W8A16: W8A8 below min_m=%d (first m=%d n=%d k=%d)",
+                        self._w8a16_min_m, m, n, k, scope="process",
+                    )
+            elif ("fallback", n, k) not in seen:
+                seen.add(("fallback", n, k))
+                logger.info_once(
+                    "XPU_BLOCK_FP8_W8A16: fallback to W8A8 for n=%d k=%d (group %s, dtype %s)",
+                    n, k, str(tuple(self.weight_group_shape)), str(A.dtype), scope="process",
+                )
+            A, As = self.quant_fp8(A, None, None, use_triton=self.use_triton)
         return torch.ops._xpu_C.fp8_gemm(
             A,
             B.t(),
