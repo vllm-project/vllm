@@ -145,12 +145,17 @@ def _pareto_frontier(
     sorted_df = df.sort_values([x_col, y_col], ascending=[False, False])
     frontier_indices = []
     best_y = -math.inf
+    best_x = -math.inf
 
     for idx, row in sorted_df.iterrows():
+        x_val = row[x_col]
         y_val = row[y_col]
-        if y_val >= best_y - epsilon:
+        if y_val > best_y + epsilon:
             frontier_indices.append(idx)
-            best_y = max(best_y, y_val)
+            best_y = y_val
+            best_x = x_val
+        elif abs(y_val - best_y) <= epsilon and abs(x_val - best_x) <= epsilon:
+            frontier_indices.append(idx)
 
     return df.loc[frontier_indices]
 
@@ -216,7 +221,7 @@ def _plot_fig(
         y="tokens_per_gpu",
         color="0.5",
         alpha=0.6,
-        ax=ax,
+        ax=ax,  # type: ignore
         label="All runs",
     )
     sns.lineplot(
@@ -224,7 +229,7 @@ def _plot_fig(
         x="tokens_per_user",
         y="tokens_per_gpu",
         marker="o",
-        ax=ax,
+        ax=ax,  # type: ignore
         label="Pareto frontier",
     )
 
