@@ -1858,7 +1858,8 @@ def test_store_jobs_wait_for_missing_offload_key(request_runner):
     assert len(group_state.block_ids) >= 2
     assert len(group_state.offload_keys) == 2
 
-    missing_hash = req.block_hashes.pop()
+    missing_hash = req.block_hashes[-1]
+    del req.block_hashes[-1:]
     group_state.offload_keys.pop()
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output(keys)

@@ -15,6 +15,7 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHashListWithBlockSize,
     BlockHashWithGroupId,
     KVCacheBlock,
+    KVCacheBlockList,
     resolve_block_hashes,
     trim_null_head,
 )
@@ -123,7 +124,9 @@ class SingleTypeKVCacheManager(ABC):
         # Mapping from request ID to blocks to track the blocks allocated
         # for each request, so that we can free the blocks when the request
         # is finished.
-        self.req_to_blocks: defaultdict[str, list[KVCacheBlock]] = defaultdict(list)
+        self.req_to_blocks: defaultdict[str, KVCacheBlockList] = defaultdict(
+            lambda: KVCacheBlockList(self.block_pool.blocks)
+        )
 
         # {req_id: The number of cached blocks for this given request}
         # This is used to track the number of cached blocks for each request.
@@ -499,6 +502,8 @@ class SingleTypeKVCacheManager(ABC):
         if not self.kv_cache_spec.prefix_cacheable:
             return
         num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
+        if num_cached_blocks >= num_tokens // self.block_size:
+            return
         num_hashed_tokens = len(request.block_hashes) * self.block_pool.hash_block_size
         num_full_blocks = min(num_tokens, num_hashed_tokens) // self.block_size
 
@@ -568,7 +573,7 @@ class SingleTypeKVCacheManager(ABC):
         """
         return None
 
-    def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
+    def pop_blocks_for_free(self, request_id: str) -> Sequence[KVCacheBlock]:
         """Pop the request's bookkeeping and return its blocks without yet
         returning them to the block pool. The caller is responsible for
         eventually passing the returned blocks to `block_pool.free_blocks`,
@@ -583,7 +588,7 @@ class SingleTypeKVCacheManager(ABC):
 
         """
         # Default to [] in case a request is freed (aborted) before alloc.
-        req_blocks = self.req_to_blocks.pop(request_id, [])
+        req_blocks: Sequence[KVCacheBlock] = self.req_to_blocks.pop(request_id, [])
         self.num_cached_block.pop(request_id, None)
         self._partial_hit_reqs.pop(request_id, None)
         return trim_null_head(req_blocks)
@@ -1610,7 +1615,9 @@ class MambaManager(SingleTypeKVCacheManager):
     ) -> None:
         if self.mamba_cache_mode != "align":
             return super()._remove_blocks_in_range(request_id, first_block, last_block)
-        blocks = self.req_to_blocks.get(request_id, [])
+        blocks: KVCacheBlockList | list[KVCacheBlock] = self.req_to_blocks.get(
+            request_id, []
+        )
         first_block = max(first_block, self._num_retired_blocks.get(request_id, 0))
         last_block = min(last_block, len(blocks))
         if first_block >= last_block:
@@ -1813,7 +1820,7 @@ class MambaManager(SingleTypeKVCacheManager):
             # We can ignore lookahead tokens because current draft models don't have
             # mamba layers.
             num_tokens = num_tokens_main_model
-            req_blocks: list[KVCacheBlock] = self.req_to_blocks[request_id]
+            req_blocks: KVCacheBlockList = self.req_to_blocks[request_id]
             # NOTE(tdouble): this is an over-estimate of how many blocks we need because
             # num_tokens can include draft tokens that will later be rejected.
             num_required_blocks = (
@@ -1923,7 +1930,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 return returned_blocks
 
     def _relocate_speculative_block(
-        self, req_blocks: list[KVCacheBlock], block_idx: int
+        self, req_blocks: KVCacheBlockList, block_idx: int
     ) -> None:
         block = req_blocks[block_idx]
         assert self.block_pool.is_block_writable(block), (
@@ -1949,7 +1956,7 @@ class MambaManager(SingleTypeKVCacheManager):
             return None
         return self.kv_cache_group_id, source_block, boundary_tokens
 
-    def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
+    def pop_blocks_for_free(self, request_id: str) -> Sequence[KVCacheBlock]:
         if self.mamba_cache_mode == "align":
             self._allocated_block_reqs.discard(request_id)
             self.last_state_block_idx.pop(request_id, None)
@@ -2368,7 +2375,7 @@ class HiSparseSourceManager(FullAttentionManager):
             replay_boundaries=replay_boundaries,
         )
 
-    def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
+    def pop_blocks_for_free(self, request_id: str) -> Sequence[KVCacheBlock]:
         assert self.coordinator is not None
         self.coordinator.free(request_id)
         return super().pop_blocks_for_free(request_id)
@@ -2485,7 +2492,7 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
         req_blocks.extend(new_blocks)
         return new_blocks
 
-    def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
+    def pop_blocks_for_free(self, request_id: str) -> Sequence[KVCacheBlock]:
         self.hot_required.discard(request_id)
         return super().pop_blocks_for_free(request_id)
 
@@ -2573,7 +2580,7 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         req_blocks.extend(new_blocks)
         return new_blocks
 
-    def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
+    def pop_blocks_for_free(self, request_id: str) -> Sequence[KVCacheBlock]:
         assert self.coordinator is not None
         self.coordinator.free(request_id)
         blocks = self.get_residency_row(request_id)

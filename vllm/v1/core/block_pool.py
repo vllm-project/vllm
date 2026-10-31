@@ -34,12 +34,8 @@ logger = init_logger(__name__)
 
 
 class BlockHashToBlockMap:
-    """Cache of blocks that are used for prefix caching. It caches blocks
-    from hash directly to a block or multiple blocks
-    (i.e. {block_hash: KVCacheBlocks})
-    - Mostly block_hash maps to a single KVCacheBlock, and KVCacheBlocks
-        would simply be a KVCacheBlock.
-    - Otherwise, KVCacheBlocks is a dict from {block_id: KVCacheBlock}
+    """Cache of blocks that are used for prefix caching, from block hash to
+    one or more cached blocks of the pool.
 
     A cached block is a full block with a block hash that can be used
     for prefix caching.
@@ -51,87 +47,53 @@ class BlockHashToBlockMap:
     if there is already an identical block in the cache. This is because
     we want to make sure the allocated block IDs won't change so that
     block tables are append-only.
-    NOTE #2: The union type is introduced in order to reduce GC costs
-    from the inner dict.
+    NOTE #2: Entries hold block ids, not blocks: the cyclic GC does not track a
+    dict of only bytes and ints, so cached blocks add nothing to each collection.
     """
 
-    def __init__(self):
-        self._cache: dict[
-            BlockHashWithGroupId, KVCacheBlock | dict[int, KVCacheBlock]
-        ] = {}
+    def __init__(self, blocks: list[KVCacheBlock]):
+        self._blocks = blocks
+        # Block id of one block per key.
+        self._cache: dict[BlockHashWithGroupId, int] = {}
+        # All block ids, in insertion order, of keys cached by several blocks.
+        # Kept apart so that `_cache` holds no containers.
+        self._dup_ids: dict[BlockHashWithGroupId, dict[int, None]] = {}
 
     def get_one_block(self, key: BlockHashWithGroupId) -> KVCacheBlock | None:
         """Gets any block with the given block hash key."""
-        blocks = self._cache.get(key)
-        if blocks is not None:
-            if isinstance(blocks, KVCacheBlock):
-                return blocks
-            if isinstance(blocks, dict):
-                return next(iter(blocks.values()))
-            self._unexpected_blocks_type(blocks)
-        return None
+        block_id = self._cache.get(key)
+        return None if block_id is None else self._blocks[block_id]
 
     def contain(self, key: BlockHashWithGroupId, block_id: int) -> bool:
         """Checks whether the key maps to the given block ID."""
-        blocks = self._cache.get(key)
-        if blocks is None:
-            return False
-        if isinstance(blocks, KVCacheBlock):
-            return blocks.block_id == block_id
-        if isinstance(blocks, dict):
-            return block_id in blocks
-        self._unexpected_blocks_type(blocks)
-        return False
+        dup_ids = self._dup_ids.get(key)
+        if dup_ids is not None:
+            return block_id in dup_ids
+        return self._cache.get(key) == block_id
 
     def insert(self, key: BlockHashWithGroupId, block: KVCacheBlock) -> None:
         """Inserts the KVCacheBlock to the cache"""
-        blocks = self._cache.get(key)
-        if blocks is None:
-            # When key is not found, attach a single block to the key
-            self._cache[key] = block
-        elif isinstance(blocks, KVCacheBlock):
-            # If there's a block with the same key, merge the original block
-            # and the new block into a dict
-            self._cache[key] = {blocks.block_id: blocks, block.block_id: block}
-        elif isinstance(blocks, dict):
-            # If it's already a dict, simply insert the block
-            blocks[block.block_id] = block
-        else:
-            self._unexpected_blocks_type(blocks)
+        block_id = self._cache.setdefault(key, block.block_id)
+        if block_id != block.block_id:
+            self._dup_ids.setdefault(key, {block_id: None})[block.block_id] = None
 
     def pop(self, key: BlockHashWithGroupId, block_id: int) -> KVCacheBlock | None:
-        """Checks if block_hash exists and pop block_id from the cache"""
-        blocks = self._cache.pop(key, None)
-        if blocks is None:
-            # block_hash not found in the cache
-            return None
-        # TODO(Jialin): If key is found, block_id should always present
-        # in blocks. We currently keep the original behaviour for safety.
-        #
-        # Will add block_id == blocks.block_id assertion and
-        # use del blocks[block_id] instead as followup.
-        if isinstance(blocks, KVCacheBlock):
-            if blocks.block_id == block_id:
-                return blocks
-            # If the single block ID doesn't match, we should put the
-            # block back (it should happen rarely)
-            self._cache[key] = blocks
-            return None
-        if isinstance(blocks, dict):
-            # Try to pop block_id from the block dict, and if dict still
-            # contain blocks, put back to the cache.
-            block = blocks.pop(block_id, None)
-            if len(blocks) > 0:
-                self._cache[key] = blocks
-            return block
-        self._unexpected_blocks_type(blocks)
-        return None
+        """Pops block_id from the blocks cached under key, if it is there."""
+        dup_ids = self._dup_ids.get(key)
+        if dup_ids is None:
+            if self._cache.get(key) != block_id:
+                return None
+            del self._cache[key]
+        else:
+            if dup_ids.pop(block_id, False) is False:
+                return None
+            self._cache[key] = next(iter(dup_ids))
+            if len(dup_ids) == 1:
+                del self._dup_ids[key]
+        return self._blocks[block_id]
 
     def __len__(self) -> int:
         return len(self._cache)
-
-    def _unexpected_blocks_type(self, blocks: Any) -> None:
-        raise AssertionError(f"Invalid KV cache block type {type(blocks)}")
 
 
 class BlockPool:
@@ -182,7 +144,9 @@ class BlockPool:
         self.free_block_queue = FreeKVCacheBlockQueue(self.blocks)
 
         # Cache for block lookup
-        self.cached_block_hash_to_block: BlockHashToBlockMap = BlockHashToBlockMap()
+        self.cached_block_hash_to_block: BlockHashToBlockMap = BlockHashToBlockMap(
+            self.blocks
+        )
         self.cached_block_hashes_by_block: dict[int, set[BlockHashWithGroupId]] = {}
 
         # To represent a placeholder block with block_id=0.
@@ -230,7 +194,7 @@ class BlockPool:
     def cache_full_blocks(
         self,
         request: Request,
-        blocks: list[KVCacheBlock],
+        blocks: Sequence[KVCacheBlock],
         num_cached_blocks: int,
         num_full_blocks: int,
         block_size: int,
@@ -888,7 +852,7 @@ class BlockPool:
             return False
 
         # Remove all hashes so that no new blocks will hit.
-        self.cached_block_hash_to_block = BlockHashToBlockMap()
+        self.cached_block_hash_to_block = BlockHashToBlockMap(self.blocks)
         self.cached_block_hashes_by_block.clear()
         if self._reuse_watchers:
             self._notify_reuse(
