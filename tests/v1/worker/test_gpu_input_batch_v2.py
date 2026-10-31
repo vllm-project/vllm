@@ -12,9 +12,75 @@ from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.worker.gpu import cp_utils
-from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers, set_dummy_context
+from vllm.v1.worker.utils import get_uniform_decode_token_count
 
 DEVICE = current_platform.device_type
+
+
+def test_dummy_profile_context_preserves_padded_rows():
+    """Profiling context belongs only to real dummy rows, never graph padding."""
+    device = torch.device(DEVICE)
+    buffers = InputBuffers(8, 8, device)
+    batch = InputBatch.make_dummy(8, 8, buffers, uniform_token_count=3)
+    blocks = BlockTables([16], 8, 8, [4], device)
+    tables = blocks.get_dummy_block_tables(batch.num_reqs_after_padding)
+    set_dummy_context(batch, blocks, 16, 64, 64, input_block_tables=tables)
+    assert batch.seq_lens.tolist() == [19, 19, 0, 0, 0, 0, 0, 0]
+    assert batch.seq_lens_cpu_upper_bound.tolist() == [19, 19, 0, 0, 0, 0, 0, 0]
+    assert batch.positions.tolist() == [16, 17, 18, 16, 17, 18, 0, 0]
+    assert tables[0][batch.num_reqs :].eq(0).all()
+
+
+@pytest.mark.parametrize("physical_tokens,query_len", [(4, 4), (8, 3)])
+def test_dummy_batch_preserves_dp_agreement(physical_tokens, query_len):
+    """Varlen graph capacity must not repartition the target's uniform batch."""
+    buffers = InputBuffers(8, 8, torch.device("cpu"))
+    batch = InputBatch.make_dummy(
+        physical_tokens,
+        physical_tokens,
+        buffers,
+        max_query_len=4,
+        uniform_token_count=query_len,
+    )
+    uniform = get_uniform_decode_token_count(
+        batch.num_reqs,
+        batch.num_tokens,
+        int(batch.num_scheduled_tokens.max()),
+        batch.decode_graph_eligible,
+    )
+    assert uniform == query_len
+    assert batch.num_tokens == (physical_tokens // query_len) * query_len
+    assert batch.num_tokens_after_padding == physical_tokens
+    assert batch.num_reqs_after_padding == physical_tokens
+    assert batch.input_ids.numel() == physical_tokens
+    assert batch.seq_lens.numel() == batch.num_reqs_after_padding
+    assert batch.query_start_loc.numel() == batch.num_reqs_after_padding + 1
+    assert batch.query_start_loc_np.size == batch.num_reqs_after_padding + 1
+    assert batch.seq_lens_cpu_upper_bound.numel() == batch.num_reqs_after_padding
+    assert batch.logits_indices.numel() == batch.num_reqs
+    assert batch.query_start_loc[batch.num_reqs :].eq(batch.num_tokens).all()
+    assert buffers.seq_lens[batch.num_reqs :].eq(0).all()
+    sync = DPSyncState(
+        num_tokens_across_dp=torch.full((2,), physical_tokens),
+        uniform_token_count=query_len,
+        max_query_len=4,
+        eager=True,
+        num_reqs=1,
+    )
+    desc, reused = dispatch_cg_and_sync_dp(
+        None,
+        batch.num_reqs,
+        batch.num_tokens_after_padding,
+        uniform,
+        dp_size=2,
+        dp_rank=1,
+        dp_sync_state=sync,
+    )
+    assert desc.num_tokens == physical_tokens
+    assert reused is sync
 
 
 @pytest.mark.parametrize(

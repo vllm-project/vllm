@@ -1647,15 +1647,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self, input_batch: InputBatch, valid_state_slots: bool = False
     ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
         block_table_provider = self.pcp_manager or self.block_tables
-        block_tables = block_table_provider.get_dummy_block_tables(input_batch.num_reqs)
+        block_tables = block_table_provider.get_dummy_block_tables(
+            input_batch.num_reqs_after_padding
+        )
         if valid_state_slots:
             state_slots = torch.arange(
                 1, input_batch.num_reqs + 1, dtype=torch.int32, device=self.device
             )
             for block_table in block_tables:
-                block_table[:, 0].copy_(state_slots)
+                block_table[: input_batch.num_reqs, 0].copy_(state_slots)
         slot_mappings = block_table_provider.get_dummy_slot_mappings(
-            input_batch.num_tokens
+            input_batch.num_tokens_after_padding
         )
         return block_tables, slot_mappings
 
@@ -1918,6 +1920,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 batch_desc.num_tokens,
                 self.input_buffers,
                 max_query_len=batch_desc.max_query_len,
+                uniform_token_count=(
+                    dp_sync_state.uniform_token_count
+                    if dp_sync_state is not None
+                    else uniform_tok_count
+                ),
                 # Profiling and warmup must route the dummy tokens to experts
                 # so MoE memory is measured and MoE kernels are exercised.
                 is_padding=not is_profile,
