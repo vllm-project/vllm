@@ -97,6 +97,20 @@ vllm serve <model> \
 
 Secondary tiers are not supported yet on engines whose workers span several nodes; such an engine fails at startup.
 
+## Canonical Offloading for Chunked-Local Attention
+
+Chunked-local attention (including mixed chunked-local/full-attention models)
+supports canonical KV offloading across compatible tensor-parallel sizes. Set
+`canonical_layout: true` in `kv_connector_extra_config` on every instance sharing
+the cache; the option defaults to `false`. For filesystem sharing, add this
+option to the `TieringOffloadingSpec` configuration in [Multi-Tier Setup](#multi-tier-setup)
+and use the same `root_dir` on the producer and consumer.
+
+Only live blocks needed by the current attention chunk are restored. Canonical
+offloading still requires compatible KV head counts and runtime tensor layouts;
+this support does not enable per-token-head KV quantization or pipeline/context
+parallelism.
+
 ## `kv_connector_extra_config` Reference
 
 | Key | Required | Default | Scope | Notes |
@@ -148,7 +162,7 @@ Enable it on **every** instance that shares a secondary tier. The canonical form
 
 Requirements and limitations:
 
-- Supported layers: full and sliding-window attention whose KV heads divide evenly across TP ranks, and MLA attention. Per-token-head KV-cache quantization isn't supported.
+- Supported layers: full, sliding-window, and chunked-local attention with compatible KV head counts, and MLA attention. Mixed chunked-local/full-attention models are supported. Per-token-head KV-cache quantization isn't supported.
 - Tensor parallelism only: pipeline parallelism, prefill context parallelism (PCP), and decode context parallelism (DCP) are not supported, and the offload workers must be exactly the TP group.
 - Packed and cross-layer KV cache layouts are not supported.
 - If a layer can't be mapped to the canonical layout, the engine fails at startup with an error that says to remove `canonical_layout`, rather than silently storing non-portable bytes.
@@ -262,6 +276,19 @@ Inside that subdirectory, blocks are sharded across hash-prefix subdirectories t
 ```
 
 `config.json` records the run (block size, number of KV groups, etc.) and is written on first start. Each rank writes blocks under its own `_r<rank>` sibling directory, so multiple ranks can safely share the same `root_dir`.
+
+#### Canonical Cache Upgrades
+
+With `canonical_layout: true`, persisted KV uses a versioned storage namespace.
+Canonical format v2 deduplicates replicated GQA heads in storage sizing and is
+isolated from v1 for every tensor-parallel size. Compatible v2 TP1/TP2 instances
+can still share caches; the NHD/HND layout families remain separate.
+
+During rolling upgrades, old and new instances use different cache files, so
+an old reader cannot treat a compact v2 file as truncated and delete it. Expect
+cold cache misses and cache regeneration after upgrading. Old files are not
+migrated or automatically removed; reclaim them only after old instances stop
+using them. Noncanonical storage namespaces are unchanged.
 
 #### Cross-Process Sharing
 
