@@ -122,13 +122,22 @@ def _build_serve_params(config: dict[str, Any]) -> list[dict[str, Any]]:
             candidate["max_num_batched_tokens"] = max_num_batched_tokens
         candidates.append(candidate)
 
+    # Begin with the known-good configuration from the concurrency stage.
+    add("vllm_defaults", None, None)
+    # Isolate each parameter before testing combinations.
+    for name, batch in (
+        ("initial_batch_default_seqs", initial_batch),
+        ("smaller_batch_default_seqs", smaller_batch),
+        ("lower_batch_default_seqs", lower_batch),
+        ("higher_batch_default_seqs", higher_batch),
+    ):
+        add(name, None, batch)
+    for seqs in sorted({initial_seqs, _strict_upper_power_of_two(initial_seqs)}):
+        add(f"seqs_{seqs}_default_batch", seqs, None)
     add("initial", initial_seqs, initial_batch)
     add("smaller_batch_budget", initial_seqs, smaller_batch)
     add("lower_batch_budget", initial_seqs, lower_batch)
     add("higher_batch_budget", initial_seqs, higher_batch)
-    add("vllm_default_max_num_seqs", None, initial_batch)
-    add("vllm_default_max_num_batched_tokens", initial_seqs, None)
-    add("vllm_defaults", None, None)
     return candidates
 
 
