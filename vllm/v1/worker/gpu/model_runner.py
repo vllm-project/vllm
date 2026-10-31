@@ -335,6 +335,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 max_num_reqs=self.max_num_reqs,
                 num_speculative_steps=self.num_speculative_steps,
                 device=self.device,
+                pp_microbatch_enabled=vllm_config.pp_microbatch_enabled,
             )
 
         # Samplers and decode_query_len created in load_model() after
