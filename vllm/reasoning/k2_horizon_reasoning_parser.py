@@ -20,6 +20,10 @@ class K2HorizonReasoningParser(DeepSeekR1ReasoningParser):
         "medium": ("<ifm|think_fast>", "</ifm|think_fast>"),
         "low": ("<ifm|think_faster>", "</ifm|think_faster>"),
     }
+    # The model often closes medium/low thinking with </ifm|think>, so the end
+    # token of any effort ends reasoning.
+    _END_TOKENS = tuple(end for _, end in _EFFORT_TOKENS.values())
+    _BOUNDARY_TOKENS = (*_END_TOKENS, _TOOL_CALLS_START)
 
     def __init__(self, tokenizer: TokenizerLike, *args, **kwargs) -> None:
         chat_template_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
@@ -34,6 +38,9 @@ class K2HorizonReasoningParser(DeepSeekR1ReasoningParser):
         self._start_token, self._end_token = self._EFFORT_TOKENS[effort]
         super().__init__(tokenizer, *args, **kwargs)
         self._tool_calls_start_id = self.vocab.get(self._TOOL_CALLS_START)
+        self._end_token_ids = {
+            self.vocab[end] for end in self._END_TOKENS if end in self.vocab
+        }
         self._stream_buffer = ""
         self._stream_at_start = True
         self._stream_finished = False
@@ -49,15 +56,22 @@ class K2HorizonReasoningParser(DeepSeekR1ReasoningParser):
     def _without_generated_start(self, model_output: str) -> str:
         return model_output.removeprefix(self.start_token)
 
+    def _find_boundary(self, text: str) -> tuple[int, int] | None:
+        """Return (reasoning end, content start) of the earliest boundary."""
+        hits = [
+            (i, tag) for tag in self._BOUNDARY_TOKENS if (i := text.find(tag)) != -1
+        ]
+        if not hits:
+            return None
+        index, tag = min(hits)
+        return index, index if tag == self._TOOL_CALLS_START else index + len(tag)
+
     def _split_model_output(self, model_output: str) -> tuple[str, str | None]:
         output = self._without_generated_start(model_output)
-        if self.end_token in output:
-            reasoning, _, content = output.partition(self.end_token)
-            return reasoning, content or None
-
-        tool_start = output.find(self._TOOL_CALLS_START)
-        if tool_start != -1:
-            return output[:tool_start], output[tool_start:]
+        boundary = self._find_boundary(output)
+        if boundary is not None:
+            reasoning_end, content_start = boundary
+            return output[:reasoning_end], output[content_start:] or None
 
         return "", output or None
 
@@ -73,7 +87,7 @@ class K2HorizonReasoningParser(DeepSeekR1ReasoningParser):
         for token_id in reversed(input_ids):
             if token_id == self.start_token_id:
                 return False
-            if token_id == self.end_token_id or token_id == self._tool_calls_start_id:
+            if token_id in self._end_token_ids or token_id == self._tool_calls_start_id:
                 return True
         return False
 
@@ -83,18 +97,16 @@ class K2HorizonReasoningParser(DeepSeekR1ReasoningParser):
         delta_ids: Iterable[int],
     ) -> bool:
         del input_ids
-        return self._stream_finished or super().is_reasoning_end_streaming(
-            (), delta_ids
+        return self._stream_finished or any(
+            token_id in self._end_token_ids for token_id in delta_ids
         )
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
-        if self.end_token_id in input_ids:
-            return input_ids[input_ids.index(self.end_token_id) + 1 :]
-        if (
-            self._tool_calls_start_id is not None
-            and self._tool_calls_start_id in input_ids
-        ):
-            return input_ids[input_ids.index(self._tool_calls_start_id) :]
+        for index, token_id in enumerate(input_ids):
+            if token_id in self._end_token_ids:
+                return input_ids[index + 1 :]
+            if token_id == self._tool_calls_start_id:
+                return input_ids[index:]
         return input_ids if self._stream_finished else []
 
     def _strip_stream_start(self) -> bool:
@@ -133,18 +145,15 @@ class K2HorizonReasoningParser(DeepSeekR1ReasoningParser):
         if not self._strip_stream_start():
             return None
 
-        explicit_end = self._stream_buffer.find(self.end_token)
-        tool_start = self._stream_buffer.find(self._TOOL_CALLS_START)
-        if explicit_end != -1:
-            reasoning = self._stream_buffer[:explicit_end]
-            content = self._stream_buffer[explicit_end + len(self.end_token) :]
-        elif tool_start != -1:
-            reasoning = self._stream_buffer[:tool_start]
-            content = self._stream_buffer[tool_start:]
+        boundary = self._find_boundary(self._stream_buffer)
+        if boundary is not None:
+            reasoning_end, content_start = boundary
+            reasoning = self._stream_buffer[:reasoning_end]
+            content = self._stream_buffer[content_start:]
         else:
             overlap = max(
-                partial_tag_overlap(self._stream_buffer, self.end_token),
-                partial_tag_overlap(self._stream_buffer, self._TOOL_CALLS_START),
+                partial_tag_overlap(self._stream_buffer, tag)
+                for tag in self._BOUNDARY_TOKENS
             )
             sendable_end = len(self._stream_buffer) - overlap
             reasoning = self._stream_buffer[:sendable_end]
