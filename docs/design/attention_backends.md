@@ -241,3 +241,28 @@ default on NVIDIA is `FLASHINFER_MLA_SPARSE_DSV4` on SM12x and
 `FLASHMLA_SPARSE_DSV4` on other supported CUDA architectures.
 
 --8<-- "gen:table-mla-v4-decode"
+
+#### Experimental gfx950 FlyDSL MXFP4 indexer
+
+On ROCm gfx950, `--attention-config '{"indexer_kv_dtype":"mxfp4"}'` runs the
+DeepSeek V4 indexer on aiter's Triton paged MXFP4 kernels. Setting
+`VLLM_ROCM_USE_AITER_FLYDSL_MXFP4_INDEXER=1` as well runs it on aiter's
+FlyDSL paged FP4 scorers instead. The default indexer cache remains FP8.
+MXFP4 changes indexer Q/K precision and can change top-k selection; validate
+model accuracy for the workload.
+
+The FlyDSL path writes K with vLLM's fused compress, RMSNorm, RoPE, MXFP4
+quantization and cache-insert kernel, straight into the scorers' page layout,
+so no pooled BF16 K buffer or separate cache-write launch is needed. It needs
+aiter FlyDSL FP4 kernels with explicit shared-cache page strides, 64-bit
+physical-page addressing and precomputed decode/prefill schedules; without
+them vLLM warns and keeps the Triton MXFP4 indexer. It supports 64-token
+compressed pages, C4 compression, 64 query heads of dimension 128, and
+DCP/PCP size 1. Speculative rows are flattened before C4 length division.
+The metadata builder computes prefill windows and the scorers' schedules once
+per step for reuse across indexer layers, from host shapes only, with no
+device-to-host synchronization. Decode schedules use builder-owned storage
+refreshed before graph replay. Decode logits are temporary storage sized to the
+current batch or captured graph's row count, not the scheduler's maximum.
+Prefill chunks are bounded by query rows times the maximum compressed request
+length, rather than the sum of gathered request lengths.
