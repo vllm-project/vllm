@@ -9,7 +9,9 @@ Add LoRA support for custom layers that require specialized handling here.
 from typing import TYPE_CHECKING, cast
 
 import torch
+from transformers import PreTrainedConfig
 
+from vllm.config.lora import LoRAConfig
 from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 
@@ -27,8 +29,52 @@ class DeepseekV4GroupedWoAWithLoRA(ColumnParallelLinearWithLoRA):
     """Adds each head group's adapter delta to the grouped ``wo_a`` projection.
 
     All groups share LoRA-A; group ``g`` uses LoRA-B rows
-    ``g * o_lora_rank : (g + 1) * o_lora_rank``.
+    ``g * o_lora_rank : (g + 1) * o_lora_rank``, stored as its own buffer so
+    the kernels get a contiguous LoRA-B at a fixed address.
     """
+
+    def create_lora_weights(
+        self,
+        max_loras: int,
+        lora_config: LoRAConfig,
+        model_config: PreTrainedConfig | None = None,
+    ) -> None:
+        super().create_lora_weights(max_loras, lora_config, model_config)
+        n_groups = cast("DeepseekV4GroupedWoA", self.base_layer).n_local_groups
+        lora_b = self.lora_b_stacked[0]
+        self.lora_b_stacked = torch.zeros(
+            n_groups,
+            *lora_b.shape[:2],
+            lora_b.shape[2] // n_groups,
+            lora_b.shape[3],
+            dtype=lora_b.dtype,
+            device=lora_b.device,
+        ).unbind(0)
+
+    def reset_lora(self, index: int):
+        self.lora_a_stacked[0][index] = 0
+        for lora_b in self.lora_b_stacked:
+            lora_b[index] = 0
+
+    def set_lora(
+        self,
+        index: int,
+        lora_a: torch.Tensor | list[torch.Tensor],
+        lora_b: torch.Tensor | list[torch.Tensor],
+    ):
+        assert isinstance(lora_a, torch.Tensor)
+        assert isinstance(lora_b, torch.Tensor)
+        self.reset_lora(index)
+        if self.tp_size > 1:
+            lora_a = self.slice_lora_a(lora_a)
+            lora_b = self.slice_lora_b(lora_b)
+        self.lora_a_stacked[0][index, 0, : lora_a.shape[0], : lora_a.shape[1]].copy_(
+            lora_a, non_blocking=True
+        )
+        group_size = self.lora_b_stacked[0].shape[2]
+        for group, rows in enumerate(lora_b.split(group_size)):
+            group_b = self.lora_b_stacked[group][index, 0]
+            group_b[: rows.shape[0], : rows.shape[1]].copy_(rows, non_blocking=True)
 
     def slice_lora_a(self, lora_a: torch.Tensor) -> torch.Tensor:
         if not self.lora_config.fully_sharded_loras:
@@ -74,18 +120,29 @@ class DeepseekV4GroupedWoAWithLoRA(ColumnParallelLinearWithLoRA):
             nope_dim=nope_dim,
             rope_dim=rope_dim,
         )
-        lora_a = self.lora_a_stacked
-        if self.lora_config.fully_sharded_loras and self.tp_size > 1:
-            lora_a = (tensor_model_parallel_all_gather(lora_a[0], dim=2),)
+        shrunk = torch.empty(
+            n_groups,
+            x.shape[0],
+            self.lora_a_stacked[0].shape[2],
+            dtype=torch.float32,
+            device=x.device,
+        )
         for group in range(n_groups):
-            rows = slice(group * o_lora_rank, (group + 1) * o_lora_rank)
-            group_output = z[:, group].contiguous()
-            self.punica_wrapper.add_lora_linear(
-                group_output,
+            self.punica_wrapper.add_shrink(
+                shrunk[group : group + 1],
                 x[:, group].contiguous(),
-                lora_a,
-                (self.lora_b_stacked[0][:, :, rows].contiguous(),),
+                self.lora_a_stacked,
                 1.0,
+            )
+        if self.lora_config.fully_sharded_loras and self.tp_size > 1:
+            # Each rank holds a slice of LoRA-A's rank dim.
+            shrunk = tensor_model_parallel_all_gather(shrunk)
+        for group in range(n_groups):
+            group_output = z[:, group].contiguous()
+            self.punica_wrapper.add_expand(
+                group_output,
+                shrunk[group : group + 1],
+                (self.lora_b_stacked[group],),
                 (o_lora_rank,),
             )
             z[:, group] = group_output
