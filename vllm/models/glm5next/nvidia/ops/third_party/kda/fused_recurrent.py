@@ -165,7 +165,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
             b_g = tl.load(p_g).to(tl.float32)
             b_h *= exp(b_g)
         else:
-            b_gk = tl.load(p_gk).to(tl.float32)
+            b_gk = tl.load(p_gk, mask=mask_k, other=0).to(tl.float32)
             if COMPUTE_GATE:
                 # Replicates kda_gate_fwd_kernel's SAFE_GATE branch
                 # bit-for-bit (same tl.exp, same fp32 math; the intermediate
