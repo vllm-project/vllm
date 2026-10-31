@@ -1820,7 +1820,8 @@ class Scheduler(SchedulerInterface):
 
         prompt_token_ids = list(update.prompt_token_ids or ())
         session.prompt_token_ids = prompt_token_ids
-        session._all_token_ids = list(prompt_token_ids)
+        # In place: `all_token_ids` is a read-only view of this list.
+        session._all_token_ids[:] = prompt_token_ids
         session._output_token_ids.clear()
         session.num_prompt_tokens = len(prompt_token_ids)
         session.num_computed_tokens = 0

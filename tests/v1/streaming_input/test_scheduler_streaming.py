@@ -316,9 +316,7 @@ class TestStreamingScheduler(unittest.TestCase):
 
         # The new chunk's prompt is the whole prompt; segment 1's output is gone.
         assert session.prompt_token_ids == [4, 5, 6]
-        assert list(session._all_token_ids) == [4, 5, 6]
-        assert 10 not in session._all_token_ids
-        assert 11 not in session._all_token_ids
+        assert list(session.all_token_ids) == [4, 5, 6]
         assert session.num_prompt_tokens == 3
         # Text state and KV state move together.
         assert session.num_computed_tokens == 0
