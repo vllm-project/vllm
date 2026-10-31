@@ -468,9 +468,7 @@ def test_flashinfer_standalone_workspace_size(
 
 def _mock_flashinfer_allreduce_init(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(flashinfer_all_reduce, "fi_ar_available", True)
-    monkeypatch.setattr(
-        flashinfer_all_reduce.current_platform, "is_cuda", lambda: True
-    )
+    monkeypatch.setattr(flashinfer_all_reduce.current_platform, "is_cuda", lambda: True)
     monkeypatch.setattr(flashinfer_all_reduce.dist, "get_world_size", lambda group: 8)
     monkeypatch.setattr(flashinfer_all_reduce.dist, "get_rank", lambda group: 0)
     monkeypatch.setattr(
@@ -551,23 +549,58 @@ def test_flashinfer_workspace_honors_standalone_override(
     create_workspace.reset_mock()
     monkeypatch.setattr(flashinfer_all_reduce, "_fi_ar_workspace", None)
     monkeypatch.setattr(flashinfer_all_reduce, "_fi_ar_quant_workspace", None)
-    flashinfer_all_reduce.get_fi_ar_workspace(
-        8, 0, 128, 7168, torch.bfloat16, Mock()
-    )
+    flashinfer_all_reduce.get_fi_ar_workspace(8, 0, 128, 7168, torch.bfloat16, Mock())
 
     assert create_workspace.call_args.args[3] == expected_tokens
 
     create_workspace.reset_mock()
     monkeypatch.setattr(flashinfer_all_reduce, "_fi_ar_workspace", None)
     monkeypatch.setattr(flashinfer_all_reduce, "_fi_ar_quant_workspace", None)
-    flashinfer_all_reduce.get_fi_ar_workspace(
-        8, 0, 512, 7168, torch.bfloat16, Mock()
-    )
+    flashinfer_all_reduce.get_fi_ar_workspace(8, 0, 512, 7168, torch.bfloat16, Mock())
 
     # A larger fused-path requirement must not be truncated by the
     # standalone-only override.
     expected_after_direct_call = 512 if explicit_size_mb is not None else 4681
     assert create_workspace.call_args.args[3] == expected_after_direct_call
+
+
+def test_flashinfer_standalone_override_does_not_enable_tp16_sm90(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_flashinfer_allreduce_init(monkeypatch)
+    monkeypatch.setattr(flashinfer_all_reduce.dist, "get_world_size", lambda group: 16)
+    monkeypatch.setattr(
+        flashinfer_all_reduce.current_platform,
+        "get_device_capability",
+        lambda: Mock(to_int=lambda: 90),
+    )
+    monkeypatch.setattr(
+        flashinfer_all_reduce,
+        "_get_tuned_standalone_max_size",
+        Mock(return_value=None),
+    )
+    monkeypatch.setattr(
+        flashinfer_all_reduce.PassConfig,
+        "default_fi_allreduce_fusion_max_size_mb",
+        Mock(return_value={90: {8: 1.0}}),
+    )
+    pass_config = Mock(fi_allreduce_standalone_max_size_mb=2.0)
+    config = Mock()
+    config.compilation_config.pass_config = pass_config
+    monkeypatch.setattr(
+        flashinfer_all_reduce,
+        "get_current_vllm_config_or_none",
+        lambda: config,
+    )
+    group = Mock()
+
+    comm = flashinfer_all_reduce.FlashInferAllReduce(group, "cuda:0")
+
+    assert comm.disabled
+    assert (
+        flashinfer_all_reduce._get_standalone_workspace_floor(16, "mnnvl", group)
+        is None
+    )
 
 
 def test_flashinfer_explicit_two_mib_boundary(
