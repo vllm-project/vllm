@@ -904,6 +904,15 @@ class DelegatingParser(Parser):
                 should_transition = self._is_reasoning_end_streaming(
                     current_token_ids, delta_token_ids
                 )
+            # Wait for text held back by the detokenizer's stop buffer.
+            if (
+                should_transition
+                and reasoning_parser is not None
+                and not reasoning_parser.engine_based_streaming
+            ):
+                reasoning_end_str = getattr(reasoning_parser, "reasoning_end_str", None)
+                if reasoning_end_str and reasoning_end_str not in delta_text:
+                    should_transition = False
             if should_transition:
                 state.reasoning_ended = True
                 reasoning_transitioned = True
