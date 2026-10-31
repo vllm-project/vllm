@@ -359,6 +359,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                         assert prompt_token_ids is not None
                         if request.return_token_ids:
                             prompt_text = ""
+                            prompt_token_ids_to_return = prompt_token_ids
                         assert prompt_text is not None
                         if request.max_tokens == 0:
                             # only return the prompt
@@ -376,7 +377,6 @@ class OpenAIServingCompletion(GenerateBaseServing):
                                 *(prompt_logprobs or []),
                                 *(output.logprobs or []),
                             ]
-                        prompt_token_ids_to_return = prompt_token_ids
                         has_echoed[i] = True
                     else:
                         # return just the delta
