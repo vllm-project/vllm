@@ -15,6 +15,10 @@ from vllm.v1.watermarking.prfs import (
     WatermarkPRF,
     create_prf,
 )
+from vllm.v1.watermarking.sbw import (
+    SBWWatermarkDetector,
+    SBWWatermarker,
+)
 from vllm.v1.watermarking.watermarker import (
     SupportsSpeculativeDecoding,
     Watermarker,
@@ -27,6 +31,8 @@ __all__ = [
     "GumbelWatermarkDetector",
     "GumbelWatermarker",
     "PhiloxPRF",
+    "SBWWatermarkDetector",
+    "SBWWatermarker",
     "SupportsSpeculativeDecoding",
     "WatermarkDetection",
     "WatermarkDetector",
