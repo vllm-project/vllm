@@ -13,6 +13,7 @@ from typing import Any, TypeVar
 
 import huggingface_hub
 from huggingface_hub import HfApi, try_to_load_from_cache
+from huggingface_hub.errors import RemoteEntryNotFoundError
 from huggingface_hub.utils import (
     EntryNotFoundError,
     HfHubHTTPError,
@@ -242,22 +243,6 @@ def is_mistral_model_repo(
     )
 
 
-def file_exists(
-    repo_id: str,
-    file_name: str,
-    *,
-    repo_type: str | None = None,
-    revision: str | None = None,
-    token: str | bool | None = None,
-) -> bool:
-    # `list_repo_files` is cached and retried on error, so this is more efficient than
-    # huggingface_hub.file_exists default implementation when looking for multiple files
-    file_list = list_repo_files(
-        repo_id, repo_type=repo_type, revision=revision, token=token
-    )
-    return file_name in file_list
-
-
 # In offline mode the result can be a false negative
 def file_or_path_exists(
     model: str | Path, config_name: str, revision: str | None
@@ -273,14 +258,21 @@ def file_or_path_exists(
         # The config file exists in cache - we can continue trying to load
         return True
 
-    # NB: file_exists will only check for the existence of the config file on
-    # hf_hub. This will fail in offline mode.
+    if cached_filepath is not None or huggingface_hub.constants.HF_HUB_OFFLINE:
+        # Known not to exist, or offline with no cached copy
+        return False
 
-    if cached_filepath is None:
-        # The config file is not cached - check if it exists on hf_hub
-        return file_exists(str(model), config_name, revision=revision)
-    # The config file is known to not exist in cache - we can return False
-    return False
+    if envs.VLLM_USE_MODELSCOPE:
+        return config_name in list_repo_files(str(model), revision=revision)
+
+    # Probe the file itself rather than listing the repo: the listing API has a
+    # much smaller rate limit, and a 404 here caches a no-exist marker so later
+    # lookups skip the Hub.
+    try:
+        hf_api().hf_hub_download(str(model), config_name, revision=revision)
+    except RemoteEntryNotFoundError:
+        return False
+    return True
 
 
 def get_model_path(model: str | Path, revision: str | None = None):
