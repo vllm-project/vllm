@@ -20,6 +20,12 @@ vLLM supports AMD GPUs with ROCm 6.3 or above. Pre-built wheels are available fo
     - MI350 requires ROCm 7.0 or above
     - Ryzen AI MAX / AI 300 Series requires ROCm 7.0.2 or above
 
+!!! note "Ryzen AI MAX / AI 300 Series"
+    These are unified-memory APUs: there is no dedicated VRAM, and device memory is a window over
+    system RAM shared with the host, which changes how `--gpu-memory-utilization` should be sized.
+    See [Conserving Memory](../../configuration/conserving_memory.md#unified-memory-apus) for
+    measured KV cache sizes and the `gfx1151` notes.
+
 --8<-- [end:requirements]
 --8<-- [start:set-up-using-python]
 

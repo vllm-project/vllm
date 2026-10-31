@@ -45,7 +45,7 @@ from vllm import LLM
 llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct", max_model_len=2048, max_num_seqs=2)
 ```
 
-## Unified-memory APUs (Ryzen AI MAX / gfx1151)
+## Unified-memory APUs
 
 APUs such as AMD Ryzen AI MAX (`gfx1151`) have no dedicated VRAM: the runtime exposes a GTT window
 over system RAM as device memory. `torch.cuda.get_device_properties(0).total_memory` therefore
