@@ -292,8 +292,37 @@ steps:
   source_file_dependencies:
   - vllm/models/step5/
   - tests/models/step5/
+  - vllm/model_executor/warmup/step5_dsa_warmup.py
   commands:
     - pytest -v -s models/step5
+  mirror:
+    amd:
+      label: ":amd: (MI355 DPX) Step5"
+      dind: false
+      device: mi355_dpx
+      timeout_in_minutes: 30
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/models/step5/
+      - tests/models/step5/
+      - vllm/model_executor/models/step3p7.py
+      - vllm/model_executor/models/step3_vl.py
+      - vllm/model_executor/models/step_vl.py
+      - vllm/config/compilation.py
+      - vllm/model_executor/layers/indexer_topk.py
+      - vllm/transformers_utils/configs/step5.py
+      - vllm/model_executor/warmup/step5_dsa_warmup.py
+      - vllm/v1/attention/backends/rocm_aiter_unified_attn.py
+      - vllm/triton_utils/
+      - vllm/platforms/rocm.py
+      - tests/v1/attention/utils.py
+      - tests/models/test_initialization.py
+      - tests/models/registry.py
+      commands:
+        - pytest -v -s models/step5
+        - pytest -v -s models/test_initialization.py -k Step5ForConditionalGeneration
 
 - label: ":nvidia: (H200) GLM5Next"
   key: glm5next-unit-tests
@@ -384,6 +413,17 @@ steps:
       pytest -v -s
       models/qwen4_exp/test_config.py
       models/qwen4_exp/test_ple.py
+
+- label: ":nvidia: (B200) Qwen3.5"
+  key: qwen3-5-unit-tests-b200
+  timeout_in_minutes: 20
+  device: b200-k8s
+  source_file_dependencies:
+  - vllm/models/qwen3_5/
+  - vllm/model_executor/models/qwen3_next.py
+  - tests/models/qwen3_5/
+  commands:
+  - pytest -v -s models/qwen3_5/
 
 - label: ":computer: (CPU) Basic Models Other"
   key: basic-models-test-other-cpu
