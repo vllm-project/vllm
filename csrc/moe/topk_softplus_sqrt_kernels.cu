@@ -113,7 +113,7 @@ __launch_bounds__(128) __global__
       if (i < per_lane) {
         const int e = lane + 32 * i;
         const float x = input[warp * num_experts + e];
-        float v = sqrtf(fmaxf(x, 0.f) + __logf(1.f + __expf(-fabsf(x))));
+        float v = sqrtf(fmaxf(x, 0.f) + log1pf(expf(-fabsf(x))));
         if (isnan(v)) {
           v = 0.f;
         }
@@ -170,7 +170,7 @@ __launch_bounds__(128) __global__
     // only load and calculate for 6 experts
     expert = static_cast<int>(tid2eid[token_id * 6 + lane]);
     const float x = input[warp * num_experts + expert];
-    weight = sqrtf(fmaxf(x, 0.f) + __logf(1.f + __expf(-fabsf(x))));
+    weight = sqrtf(fmaxf(x, 0.f) + log1pf(expf(-fabsf(x))));
     if (isnan(weight)) {
       weight = 0.f;
     }
@@ -422,7 +422,7 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
       for (int ii = 0; ii < VPT; ++ii) {
         float val = row_chunk[ii];
         float val_b = val * beta;
-        val = (val_b > threshold) ? val : (__logf(1.0f + __expf(val_b))) / beta;
+        val = (val_b > threshold) ? val : log1pf(expf(val_b)) / beta;
         val = sqrtf(val);
 
         // Dummy/padding tokens can result in NaN values, so
@@ -499,7 +499,7 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
         float val_b = val * beta;
         // Compute softplus: log(1 + exp(val)) with numerical stability
         // When val > threshold, softplus(x) ≈ x to avoid exp overflow
-        val = (val_b > threshold) ? val : (__logf(1.0f + __expf(val_b))) / beta;
+        val = (val_b > threshold) ? val : log1pf(expf(val_b)) / beta;
         val = sqrtf(val);
         // Dummy/padding tokens can result in NaN values, so
         // clamp them to 0.0. Note: this clamp could likely be removed if
