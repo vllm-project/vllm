@@ -1581,6 +1581,32 @@ class TestModuleSource:
         for pairs in (source.iter_full(), source.iter_local()):
             assert [(n, t.dtype, tuple(t.shape)) for n, t in pairs] == declared
 
+    @pytest.mark.parametrize("shared_module", [False, True])
+    @pytest.mark.parametrize("mode", ["full", "local"])
+    def test_tied_names_are_transferred_each_round(self, shared_module, mode):
+        """A separate inference stage may require the tied output-head name."""
+        model = torch.nn.Module()
+        model.model = torch.nn.Module()
+        model.model.embed_tokens = _module_with(("weight", torch.zeros(3, 2)))
+        if shared_module:
+            model.lm_head = model.model.embed_tokens
+        else:
+            model.lm_head = torch.nn.Module()
+            model.lm_head.register_parameter("weight", model.model.embed_tokens.weight)
+        source = ModuleSource(model)
+        names = ["model.embed_tokens.weight", "lm_head.weight"]
+
+        for value in (1.0, 2.0):
+            model.model.embed_tokens.weight.data.fill_(value)
+            assert source.metadata == [
+                ParamMeta(name, torch.float32, (3, 2)) for name in names
+            ]
+            pairs = source.iter_full() if mode == "full" else source.iter_local()
+            received = dict(pairs)
+            assert list(received) == names
+            for name in names:
+                torch.testing.assert_close(received[name], torch.full((3, 2), value))
+
 
 @pytest.fixture
 def fake_world():
