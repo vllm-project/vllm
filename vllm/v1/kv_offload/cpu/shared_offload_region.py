@@ -6,6 +6,7 @@ import errno
 import functools
 import mmap
 import os
+import tempfile
 import time
 from collections.abc import Callable, Iterator
 from ctypes import c_int, c_long, c_size_t, c_void_p
@@ -28,6 +29,9 @@ _MAP_FIXED = 0x10
 # Page-cache inserts are serialized per shm file, capping pre-faulting of one
 # file near 10 GiB/s; smaller segments are not worth a file.
 _MIN_SEGMENT_BYTES = 1 << 30
+# Split the shared region into this many shm files so workers pre-fault them
+# in parallel (page-cache inserts are serialized per file).
+_REGION_SEGMENTS = 32
 
 
 def _wait_for_file_size(fd: int, expected_size: int, timeout: float = 30.0) -> None:
@@ -127,15 +131,18 @@ class SharedOffloadRegion:
 
         self.mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
         num_segments = min(num_segments, self.total_size_bytes // _MIN_SEGMENT_BYTES)
-        rows = max(1, cdiv(num_chunks, max(1, num_segments)))
+        alignment = 2 << 20 if num_chunks == 1 else self._row_stride
+        segment_bytes = round_up(
+            cdiv(self.total_size_bytes, max(1, num_segments)), alignment
+        )
         # (path, offset, length) per file.
         self._segments = [
             (
                 f"{self.mmap_path}.{i}" if i else self.mmap_path,
-                row * self._row_stride,
-                min(rows, num_chunks - row) * self._row_stride,
+                offset,
+                min(segment_bytes, self.total_size_bytes - offset),
             )
-            for i, row in enumerate(range(0, max(num_chunks, 1), rows))
+            for i, offset in enumerate(range(0, self.total_size_bytes, segment_bytes))
         ]
         self._creator = False  # set True only if this worker creates the file
         self.rank = rank
@@ -181,13 +188,23 @@ class SharedOffloadRegion:
                 )
 
             single = len(self._segments) == 1
-            self.mmap_obj: mmap.mmap | None = mmap.mmap(
-                self.fd if single else -1,
-                self.total_size_bytes,
-                flags=mmap.MAP_SHARED if single else mmap.MAP_PRIVATE,
-                prot=mmap.PROT_READ | mmap.PROT_WRITE,
-            )
-            if not single:
+            self.mmap_obj: mmap.mmap | None = None
+            if single:
+                self.mmap_obj = mmap.mmap(
+                    self.fd,
+                    self.total_size_bytes,
+                    flags=mmap.MAP_SHARED,
+                    prot=mmap.PROT_READ | mmap.PROT_WRITE,
+                )
+            else:
+                with tempfile.TemporaryFile() as reservation:
+                    reservation.truncate(self.total_size_bytes)
+                    self.mmap_obj = mmap.mmap(
+                        reservation.fileno(),
+                        self.total_size_bytes,
+                        flags=mmap.MAP_SHARED,
+                        prot=mmap.PROT_READ | mmap.PROT_WRITE,
+                    )
                 self._map_segments()
             if barrier is not None:
                 barriers_remaining -= 1
