@@ -53,7 +53,11 @@ def _cast_kv_tile(data, Q, tensor_scale, KV_QUANT_MODE: tl.constexpr):
     if KV_QUANT_MODE == 1:
         if Q.dtype.is_fp8():
             return data.to(Q.dtype)
-        return (data.to(tl.float32) * tl.load(tensor_scale)).to(Q.dtype)
+        # Keep the scale tensor-valued so dot-operand layout conversion can
+        # be hoisted through dequantization without a 16-bit shared tile.
+        scale_1d = tl.load(tensor_scale + tl.arange(0, 1))
+        scale_tile = tl.broadcast_to(scale_1d.reshape((1, 1)), data.shape)
+        return (data.to(tl.float32) * scale_tile).to(Q.dtype)
     return data.to(Q.dtype)
 
 
@@ -1121,6 +1125,19 @@ def unified_attention(
     else:
         grid = (total_num_q_blocks, num_kv_heads, num_par_softmax_segments)
         tile_size = TILE_SIZE_DECODE
+
+    # Limit pipeline depth on SM90 large-head 2D kernels to balance
+    # shared-memory savings and register pressure from FP8 conversion.
+    if (
+        kv_quant_mode == KVQuantMode.FP8_PER_TENSOR
+        and q.dtype != current_platform.fp8_dtype()
+        and current_platform.is_cuda()
+        and current_platform.is_device_capability_family(90)
+        and head_size >= 512
+        and not use_3d
+        and launch_num_stages is None
+    ):
+        launch_num_stages = 2
 
     launch_kwargs: dict[str, int] = {}
     if launch_num_warps is not None:
