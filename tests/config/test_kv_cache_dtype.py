@@ -119,6 +119,20 @@ def test_backend_sentinel_properties():
     assert mode.is_nvfp4 is False
 
 
+def test_mxfp4_kv_cache_dtype():
+    """The per-head MXFP4 KV cache: its own quant mode, uint8 pages, 68 B rows."""
+    from vllm.utils.torch_utils import mxfp4_kv_cache_full_dim
+
+    assert is_known_kv_cache_dtype("mxfp4")
+    assert CacheConfig(cache_dtype="mxfp4").cache_dtype == "mxfp4"
+    assert STR_DTYPE_TO_TORCH_DTYPE["mxfp4"] == torch.uint8
+    mode = get_kv_quant_mode("mxfp4")
+    assert mode == KVQuantMode.MXFP4 and mode.is_mxfp4
+    assert not mode.is_nvfp4
+    assert is_quantized_kv_cache("mxfp4")
+    assert mxfp4_kv_cache_full_dim(128) == 64 + 4
+
+
 def test_no_snapshot_of_shared_dtype_registry():
     """The registration-time-mutable registries must never be snapshotted.
 
