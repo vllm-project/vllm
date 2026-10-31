@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import inspect
 import threading
 from dataclasses import dataclass
 from typing import Any
@@ -134,7 +135,13 @@ def test_failed_parallel_warmup_does_not_leak_into_runtime(monkeypatch) -> None:
         raise RuntimeError("warmup failed")
 
     def warmup(**kwargs):
-        active_mode.get().submit(kwargs["second"], fail, lambda result: None)
+        submit = active_mode.get().submit
+        cleanup_kwargs = (
+            {"cleanup_fn": lambda future: None}
+            if "cleanup_fn" in inspect.signature(submit).parameters
+            else {}
+        )
+        submit(kwargs["second"], fail, lambda result: None, **cleanup_kwargs)
 
     monkeypatch.setattr(owner.kernel, "warmup", warmup)
     with pytest.raises(RuntimeError, match="warmup failed"):
