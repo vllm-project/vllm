@@ -110,6 +110,9 @@ class CUDAGraphMode(enum.Enum):
         return self != CUDAGraphMode.NONE
 
 
+CUDAGraphLaunchMode = Literal["host", "device"]
+
+
 @config
 class PassConfig:
     """Configuration for custom Inductor passes.
@@ -408,6 +411,8 @@ class CompilationConfig:
         [vllm.config.CompilationConfig.cudagraph_num_of_warmups]
         - [`cudagraph_copy_inputs`]
         [vllm.config.CompilationConfig.cudagraph_copy_inputs]
+        - [`cudagraph_launch_mode`]
+        [vllm.config.CompilationConfig.cudagraph_launch_mode]
     - Inductor compilation:
         - [`compile_sizes`][vllm.config.CompilationConfig.compile_sizes]
         - [`compile_ranges_endpoints`]
@@ -642,6 +647,20 @@ class CompilationConfig:
 
     Warning: This flag is new and subject to change in addition
     more modes may be added.
+    """
+    cudagraph_launch_mode: CUDAGraphLaunchMode = "host"
+    """How the CUDA graphs captured for the model forward pass are
+    instantiated:
+
+    - "host" (default): PyTorch instantiates them.
+    - "device": vLLM instantiates them with
+    `CUDA_GRAPH_INSTANTIATE_FLAG_DEVICE_LAUNCH` and uploads them at capture
+    time; replays are still launched from the host. A workaround to try when
+    host-launched replays hang (pytorch/pytorch#196133), not a performance
+    optimization: measure performance with and without it. Graphs the driver
+    cannot instantiate this way keep PyTorch's instantiation, with a warning.
+    Random numbers drawn from PyTorch's CUDA generator inside a captured graph
+    repeat on every replay. Requires NVIDIA CUDA and `cuda-bindings`.
     """
     cudagraph_num_of_warmups: int = 0
     """Number of warmup runs for cudagraph.
