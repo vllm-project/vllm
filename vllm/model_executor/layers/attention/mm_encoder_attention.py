@@ -30,7 +30,10 @@ from vllm.utils.flashinfer import (
 )
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import async_tensor_h2d
-from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
+from vllm.v1.attention.backends.fa_utils import (
+    get_flash_attn_version,
+    get_vit_long_seq_fa_version,
+)
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.ops.vit_attn_wrappers import (
     vit_aiter_fp8_attn_wrapper,
@@ -365,6 +368,9 @@ class MMEncoderAttention(CustomOp):
             if self.is_flash_attn_backend
             else None
         )
+        self._long_seq_fa_version = get_vit_long_seq_fa_version(
+            self._fa_version, head_size
+        )
 
         if self.attn_backend == AttentionBackendEnum.FLASHINFER:
             _get_flashinfer_workspace_buffer()
@@ -587,6 +593,7 @@ class MMEncoderAttention(CustomOp):
             scale=self.scale,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
+            long_seq_fa_version=self._long_seq_fa_version,
         )
         if is_reshaped:
             output = output.reshape(bsz, q_len, -1)
