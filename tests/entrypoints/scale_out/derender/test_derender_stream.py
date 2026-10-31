@@ -67,6 +67,8 @@ from vllm.renderers.online_derenderer import (
 )
 from vllm.tokenizers import get_tokenizer
 from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
+from vllm.tokenizers.mistral import MistralTokenizer
+from vllm.transformers_utils.repo_utils import with_retry
 from vllm.utils import random_uuid
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
@@ -569,7 +571,7 @@ class TestDetokenizeDelta:
             tokenizer, [], state, skip_special_tokens=True
         )
         assert text == ""
-        assert new_state.prev_tokens == state.prev_tokens
+        assert new_state.prev_token_ids == state.prev_token_ids
         assert new_state.prefix_offset == state.prefix_offset
         assert new_state.read_offset == state.read_offset
 
@@ -598,7 +600,7 @@ class TestDetokenizeDelta:
         assert state.prefix_offset == 0
 
     def test_state_window_stays_bounded(self, derenderer, tokenizer):
-        """prev_tokens must not grow with the number of chunks (bounded transport).
+        """prev_token_ids must not grow with the number of chunks (bounded transport).
 
         Guards that the carried decode window is a small constant
         tail, so cumulative `stream_state` transport is O(n) and not O(n^2).
@@ -613,7 +615,7 @@ class TestDetokenizeDelta:
         max_window = 0
         for tok in token_ids:
             _, state = derenderer._detokenize_delta(tokenizer, [tok], state)
-            max_window = max(max_window, len(state.prev_tokens))
+            max_window = max(max_window, len(state.prev_token_ids))
         # Bounded by a small constant independent of len(token_ids)
         assert max_window <= 32
 
@@ -710,6 +712,14 @@ def _decode_stream_expected(
 
 
 @pytest.fixture(scope="module")
+def tekken_tokenizer():
+    return with_retry(
+        lambda: MistralTokenizer.from_pretrained("mistralai/Pixtral-12B-2409"),
+        log_msg="Error loading Tekken tokenizer",
+    )
+
+
+@pytest.fixture(scope="module")
 def leading_space_ids(tokenizer):
     """(prompt_ids, output_ids, expected) where seeded and unseeded decode
     differ by the leading space."""
@@ -727,11 +737,44 @@ def leading_space_ids(tokenizer):
 class TestSeedStreamState:
     """`_seed_stream_state`: pure helper building the initial decode state."""
 
-    def test_seeds_prev_tokens_from_prompt_tail(self, tokenizer, leading_space_ids):
+    def test_seeds_prev_token_ids_from_prompt_tail(self, tokenizer, leading_space_ids):
         prompt_ids, _, _ = leading_space_ids
         state = _seed_stream_state(tokenizer, prompt_ids, skip_special_tokens=True)
-        assert state.prev_tokens
-        assert state.read_offset == len(state.prev_tokens)
+        assert state.prev_token_ids
+        assert state.read_offset == len(state.prev_token_ids)
+
+    @pytest.mark.parametrize("skip_special_tokens", [True, False])
+    def test_byte_fallback_survives_state_round_trip(
+        self, derenderer, tekken_tokenizer, skip_special_tokens
+    ):
+        """Byte-fallback pieces in the window must survive the JSON transport,
+        whether they come from the prompt tail or from a previous chunk."""
+        token_ids = tekken_tokenizer.encode("서울은 맑습니다", add_special_tokens=False)
+        fallback_ends = [
+            i + 1
+            for i, token_id in enumerate(token_ids)
+            if "�" in tekken_tokenizer.tokenizer.id_to_piece(token_id)
+        ]
+        assert fallback_ends
+
+        bos_id = tekken_tokenizer.bos_token_id
+        for split in [0, fallback_ends[-1]]:
+            state = _seed_stream_state(
+                tekken_tokenizer,
+                [bos_id, *token_ids[:split]],
+                skip_special_tokens=skip_special_tokens,
+            )
+            text = ""
+            for token_id in token_ids[split:]:
+                state = DerenderStreamState.model_validate_json(state.model_dump_json())
+                delta, state = derenderer._detokenize_delta(
+                    tekken_tokenizer,
+                    [token_id],
+                    state,
+                    skip_special_tokens=skip_special_tokens,
+                )
+                text += delta
+            assert text == tekken_tokenizer.decode(token_ids[split:])
 
     def test_none_prompt_token_ids_returns_empty_state(self, tokenizer):
         assert (
@@ -1930,13 +1973,13 @@ class TestDerenderStreamStateValidation:
         with pytest.raises(ValidationError):
             DerenderStreamState(read_offset=-1)
 
-    def test_prev_tokens_over_cap_rejected(self):
+    def test_prev_token_ids_over_cap_rejected(self):
         with pytest.raises(ValidationError):
-            DerenderStreamState(prev_tokens=["a"] * 1025)
+            DerenderStreamState(prev_token_ids=[1] * 1025)
 
-    def test_prev_tokens_at_cap_accepted(self):
-        state = DerenderStreamState(prev_tokens=["a"] * 1024)
-        assert len(state.prev_tokens) == 1024
+    def test_prev_token_ids_at_cap_accepted(self):
+        state = DerenderStreamState(prev_token_ids=[1] * 1024)
+        assert len(state.prev_token_ids) == 1024
 
     def test_output_chunk_lens_mismatch_rejected(self):
         with pytest.raises(ValidationError):
