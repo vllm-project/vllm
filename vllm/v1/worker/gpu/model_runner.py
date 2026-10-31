@@ -183,6 +183,10 @@ from vllm.v1.worker.gpu.ubatch_utils import (
     maybe_build_ubatch_runner,
 )
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
+from vllm.v1.worker.reanchor_rotary import (
+    init_reanchor_rotary_specs,
+    rerotate_shifted_sessions,
+)
 from vllm.v1.worker.utils import (
     KVBlockZeroer,
     clear_layer_kv_caches,
@@ -841,6 +845,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         self.model, self.vllm_config
                     )
                 self.aux_output_connector.initialize_output_storage(kv_cache_config)
+
+            if self.scheduler_config.enable_unbounded_streaming_input:
+                # Raises if a layer cannot be re-anchored.
+                self.reanchor_rotary_specs = init_reanchor_rotary_specs(
+                    self.model,
+                    kv_cache_config,
+                    self.compilation_config.static_forward_context,
+                )
 
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""
@@ -1811,6 +1823,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 for req_id, updates in scheduler_output.encoder_input_updates.items():
                     self.encoder_cache.update_encoder_inputs(req_id, updates)
             self.block_tables.apply_staged_writes()
+            if scheduler_output.reanchor_reqs:
+                # Before this step's forward writes new keys.
+                rerotate_shifted_sessions(
+                    scheduler_output,
+                    self.compilation_config.static_forward_context,
+                    self.kv_cache_config.kv_cache_groups,
+                    self.reanchor_rotary_specs,
+                    self.device,
+                )
             if self.aux_output_connector is not None:
                 # Register this step before the GPU forward.
                 self.aux_output_connector.begin_step(

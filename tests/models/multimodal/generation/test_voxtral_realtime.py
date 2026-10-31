@@ -12,6 +12,7 @@ from mistral_common.tokens.tokenizers.audio import Audio
 from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
 from mistral_common.tokens.tokenizers.tekken import SpecialTokenPolicy
 
+import vllm.envs as envs
 from vllm import LLM, SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.config import CUDAGraphMode
@@ -215,6 +216,95 @@ def test_voxtral_realtime_cudagraph(
 
         outputs = vllm_model.llm.generate(inputs, sampling_params=sampling_params)
         _assert_expected_text(outputs)
+
+
+# Small enough for a 128-token shift under max_model_len 300.
+_REANCHOR_WINDOW = {
+    "text_config": {"sliding_window": 128},
+    "audio_config": {"sliding_window": 128},
+}
+_REANCHOR_TEST_MML = 300
+
+
+async def _stream_transcribe(engine_args, tokenizer, audio_asset) -> list[int]:
+    """Run one greedy streaming session and return its output token ids."""
+    from vllm.model_executor.models.voxtral_realtime import VoxtralRealtimeBuffer
+
+    llm = AsyncLLM.from_engine_args(engine_args)
+    try:
+        audio_config = tokenizer.instruct_tokenizer.audio_encoder.audio_config
+        audio = Audio.from_file(audio_asset.get_local_path(), strict=False)
+        req = TranscriptionRequest(
+            streaming=StreamingMode.OFFLINE,
+            audio=audio.to_base64(audio.format),
+            language=None,
+        )
+        audio_enc = tokenizer.encode_transcription(req)
+        buffer = VoxtralRealtimeBuffer(audio_config, audio_enc.tokens)
+        await buffer.append_audio(audio_enc.audios[0].audio_array)
+        await buffer.append_audio(None)
+
+        async def input_stream():
+            async for prompt in buffer.get_input_stream():
+                parsed_prompt = parse_model_prompt(llm.model_config, prompt)
+                (engine_input,) = await llm.renderer.render_cmpl_async([parsed_prompt])
+                yield StreamingInput(prompt=engine_input)
+
+        output_tokens: list[int] = []
+        async for resp in llm.generate(
+            prompt=input_stream(),
+            sampling_params=SamplingParams(temperature=0.0, max_tokens=1),
+            request_id="reanchor-parity",
+        ):
+            tokens = resp.outputs[0].token_ids[-1:]
+            output_tokens.extend(tokens)
+            await buffer.append_tokens(tokens)
+        return output_tokens
+    finally:
+        llm.shutdown()
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Re-anchoring is CUDA only.")
+@pytest.mark.asyncio
+async def test_voxtral_realtime_reanchor_parity(monkeypatch, audio_assets, tokenizer):
+    """With --enable-unbounded-streaming-input and a max_model_len shorter than the
+    session, the output matches a run without re-anchoring."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    envs.disable_envs_cache()
+    audio_asset = audio_assets[1]  # winning_call (longer clip)
+
+    # Reference: no re-anchoring, max_model_len large enough for the clip.
+    ref_args = AsyncEngineArgs(
+        **{
+            **ENGINE_CONFIG,
+            "max_model_len": 2048,
+            "enable_prefix_caching": False,
+            "hf_overrides": _REANCHOR_WINDOW,
+        }
+    )
+    ref_tokens = await _stream_transcribe(ref_args, tokenizer, audio_asset)
+
+    test_args = AsyncEngineArgs(
+        **{
+            **ENGINE_CONFIG,
+            "max_model_len": _REANCHOR_TEST_MML,
+            "enable_unbounded_streaming_input": True,
+            "unbounded_streaming_input_margin_tokens": 24,
+            "enable_prefix_caching": False,
+            "hf_overrides": _REANCHOR_WINDOW,
+        }
+    )
+    test_tokens = await _stream_transcribe(test_args, tokenizer, audio_asset)
+
+    # The session is longer than the test's max_model_len, so it had to shift.
+    assert len(ref_tokens) > _REANCHOR_TEST_MML
+
+    def _decode(toks: list[int]) -> str:
+        return tokenizer.decode(toks, special_token_policy=SpecialTokenPolicy.IGNORE)
+
+    assert test_tokens == ref_tokens, (
+        f"ref: {_decode(ref_tokens)!r}\ntest: {_decode(test_tokens)!r}"
+    )
 
 
 @pytest.mark.asyncio

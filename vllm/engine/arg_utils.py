@@ -618,6 +618,12 @@ class EngineArgs:
     long_prefill_token_threshold_adaptive: bool = (
         SchedulerConfig.long_prefill_token_threshold_adaptive
     )
+    enable_unbounded_streaming_input: bool = (
+        SchedulerConfig.enable_unbounded_streaming_input
+    )
+    unbounded_streaming_input_margin_tokens: int | None = (
+        SchedulerConfig.unbounded_streaming_input_margin_tokens
+    )
     max_num_seqs: int | None = None
     max_num_active_seqs: int | None = SchedulerConfig.max_num_active_seqs
     max_num_queued_reqs: int | None = None
@@ -1780,6 +1786,14 @@ class EngineArgs:
             "--long-prefill-token-threshold-adaptive",
             **scheduler_kwargs["long_prefill_token_threshold_adaptive"],
         )
+        scheduler_group.add_argument(
+            "--enable-unbounded-streaming-input",
+            **scheduler_kwargs["enable_unbounded_streaming_input"],
+        )
+        scheduler_group.add_argument(
+            "--unbounded-streaming-input-margin-tokens",
+            **scheduler_kwargs["unbounded_streaming_input_margin_tokens"],
+        )
         # multi-step scheduling has been removed; corresponding arguments
         # are no longer supported.
         scheduler_group.add_argument(
@@ -2678,6 +2692,10 @@ class EngineArgs:
             long_prefill_token_threshold=self.long_prefill_token_threshold,
             long_prefill_token_threshold_adaptive=(
                 self.long_prefill_token_threshold_adaptive
+            ),
+            enable_unbounded_streaming_input=self.enable_unbounded_streaming_input,
+            unbounded_streaming_input_margin_tokens=(
+                self.unbounded_streaming_input_margin_tokens
             ),
             scheduler_reserve_full_isl=self.scheduler_reserve_full_isl,
             watermark=self.watermark,

@@ -49,6 +49,7 @@ from vllm.v1.core.sched.output import (
     ScheduledEncoderInputStats,
     SchedulerOutput,
 )
+from vllm.v1.core.sched.reanchor import SessionReanchor
 from vllm.v1.core.sched.request_queue import (
     RequestQueue,
     SchedulingPolicy,
@@ -366,6 +367,17 @@ class Scheduler(SchedulerInterface):
             enable_mamba_shared_prefix_checkpoint=(
                 self.cache_config.enable_mamba_shared_prefix_checkpoint
             ),
+        )
+        self.session_reanchor = (
+            SessionReanchor(
+                self.scheduler_config,
+                self.kv_cache_manager,
+                self.encoder_cache_manager,
+                self.max_model_len,
+                self.block_size,
+            )
+            if self.scheduler_config.enable_unbounded_streaming_input
+            else None
         )
         # Mamba managers already account for their speculative state blocks.
         num_spec_decode_tokens = (
@@ -1302,6 +1314,17 @@ class Scheduler(SchedulerInterface):
                     # We use `request.num_tokens` instead of
                     # `request.num_prompt_tokens` to consider the resumed
                     # requests, which have output tokens.
+                    # Shift the session down before it reaches max_model_len.
+                    if (
+                        self.session_reanchor is not None
+                        and request.resumable
+                        and request.num_tokens >= self.session_reanchor.trigger
+                        and self.session_reanchor.shift(request)
+                    ):
+                        # Holds old indices. A resumed request installs its
+                        # features again.
+                        self._pending_encoder_input_ids.pop(request.request_id, None)
+                        num_computed_tokens = request.num_computed_tokens
                     num_new_tokens = request.num_tokens - num_computed_tokens
 
                     # Pad new decode requests to uniform spec decoding size to
@@ -1637,6 +1660,15 @@ class Scheduler(SchedulerInterface):
             scheduled_running_reqs
         ) <= len(self.running)
 
+        # Only a WAITING session is shifted. If it did not get scheduled, it
+        # keeps its pending rotation for the next step it is scheduled in.
+        reanchor_reqs: dict[str, int] = {}
+        if self.session_reanchor is not None:
+            for req in scheduled_new_reqs:
+                if req.pending_reanchor_d:
+                    reanchor_reqs[req.request_id] = req.pending_reanchor_d
+                    req.pending_reanchor_d = 0
+
         # Construct the scheduler output.
         if self.use_v2_model_runner:
             scheduled_new_reqs.extend(scheduled_resumed_reqs)
@@ -1746,6 +1778,7 @@ class Scheduler(SchedulerInterface):
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
             skip_drafts=not drafts_needed,
             ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
+            reanchor_reqs=reanchor_reqs or None,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:

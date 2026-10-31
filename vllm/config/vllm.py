@@ -1749,6 +1749,14 @@ class VllmConfig:
             else:
                 self.scheduler_config.async_scheduling = True
 
+        if self.scheduler_config.enable_unbounded_streaming_input:
+            unsupported = self._get_unbounded_streaming_input_unsupported_features()
+            if unsupported:
+                raise ValueError(
+                    "--enable-unbounded-streaming-input does not support "
+                    f"{', '.join(unsupported)}."
+                )
+
         if self.parallel_config.disable_nccl_for_dp_synchronization is None:
             if self.scheduler_config.async_scheduling:
                 if self.parallel_config.data_parallel_size > 1 and (
@@ -3344,6 +3352,31 @@ class VllmConfig:
                     min_ubatch_tokens,
                 )
                 setattr(parallel_config, name, min_ubatch_tokens)
+
+    def _get_unbounded_streaming_input_unsupported_features(self) -> list[str]:
+        unsupported: list[str] = []
+
+        # Block hashes are not rebased with the positions.
+        if self.cache_config.enable_prefix_caching:
+            unsupported.append("prefix caching (use --disable-prefix-caching)")
+        if self.kv_transfer_config is not None:
+            unsupported.append("KV connectors")
+        if self.cache_config.kv_offloading_size is not None:
+            unsupported.append("KV offloading")
+
+        # Not tested with shifts.
+        if self.ec_transfer_config is not None:
+            unsupported.append("encoder cache connectors")
+        if self.speculative_config is not None:
+            unsupported.append("speculative decoding")
+        if self.parallel_config.pipeline_parallel_size > 1:
+            unsupported.append("pipeline parallelism")
+        if self.parallel_config.prefill_context_parallel_size > 1:
+            unsupported.append("prefill context parallelism")
+        if not current_platform.is_cuda():
+            unsupported.append("platforms other than CUDA")
+
+        return unsupported
 
     def _get_dbo_unsupported_features(self) -> list[str]:
         """Collect what the V2 model runner cannot combine with DBO.
