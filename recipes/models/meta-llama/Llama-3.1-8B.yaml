@@ -4,7 +4,7 @@ meta:
   provider: "Meta"
   description: "Meta Llama 3.1 8B dense base language model with a CPU-validated Red Hat AI W8A8 variant."
   date_added: 2026-08-19
-  date_updated: 2026-09-12
+  date_updated: 2026-10-30
   tasks:
     - text
   performance_headline: "W8A8 variant validated on Intel Xeon 6"
@@ -12,6 +12,7 @@ meta:
     - "meta-llama/Llama-3.1-8B-Instruct"
   hardware:
     xeon6: verified
+    h100: supported
 
 model:
   model_id: "meta-llama/Llama-3.1-8B"
@@ -39,6 +40,13 @@ variants:
     description: "Red Hat AI INT8 W8A8 compressed-tensors checkpoint"
     supported_hardware:
       - xeon6
+  redhat_fp8:
+    model_id: "RedHatAI/Meta-Llama-3.1-8B-FP8"
+    precision: fp8
+    label: "FP8 (RedHatAI)"
+    vram_minimum_gb: 10
+    description: "RedHatAI legacy FP8 checkpoint for Llama 3.1 8B"
+    supported_hardware: [arch:sm90, arch:sm100, arch:sm103]
 
 compatible_strategies:
   - single_node_tp
@@ -115,6 +123,8 @@ guide: |
   - Llama has native vLLM architecture support, so `--trust-remote-code` is not required by this recipe.
 
   ## References
+
+  - [RedHatAI FP8 checkpoint](https://huggingface.co/RedHatAI/Meta-Llama-3.1-8B-FP8)
 
   - [Parent model](https://huggingface.co/meta-llama/Llama-3.1-8B)
   - [Red Hat AI W8A8 variant](https://huggingface.co/RedHatAI/Meta-Llama-3.1-8B-quantized.w8a8)
