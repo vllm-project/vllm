@@ -4,6 +4,8 @@
 from importlib import import_module
 from typing import Any, Literal
 
+from vllm.multimodal.media_utils import validate_media_bytes
+
 from .base import (
     PYNVVIDEOCODEC_DEFAULT_HW_DECODERS,
     PYNVVIDEOCODEC_VIDEO_BACKEND,
@@ -88,6 +90,7 @@ def decode_video(
     frame_recovery: bool,
 ):
     """Decode a sampled video, importing only the selected backend."""
+    validate_media_bytes(data)
     _get_backend_option_defaults(backend)
     if frame_recovery and backend != "opencv":
         error = (

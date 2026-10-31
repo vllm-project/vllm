@@ -13,6 +13,15 @@ This page teaches you how to pass multi-modal inputs to [multi-modal models](../
 
     This restriction is especially important if you run vLLM in a containerized environment where the vLLM pods may have unrestricted access to internal networks.
 
+## Audio and Video File Formats
+
+The Python media loaders accept self-contained audio and video files, including
+HTTP URLs, base64 data URLs, and allowed local files. They reject FFmpeg concat
+scripts, HLS playlists (`#EXTM3U`), SDP stream descriptions, and XML manifests
+because these formats can open additional files or network connections while
+decoding. Upload the media itself instead of a playlist or stream description.
+Enabling `--allowed-local-media-path` does not enable these reference formats.
+
 ## Offline Inference
 
 To input multi-modal data, follow this schema in [vllm.inputs.PromptType][]:
@@ -1139,7 +1148,7 @@ Then, you can use the OpenAI client as follows:
         base_url=openai_api_base,
     )
 
-    # Any format supported by soundfile/PyAV is supported
+    # Use a self-contained audio format supported by soundfile/PyAV.
     audio_url = AudioAsset("winning_call").url
     audio_base64 = encode_base64_content_from_url(audio_url)
 
