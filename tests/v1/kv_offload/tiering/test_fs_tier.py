@@ -1042,3 +1042,31 @@ def test_fs_tier_cross_tp_round_trip(tmp_path):
         assert torch.allclose(reader_tensor[1], expected)
     finally:
         reader.shutdown()
+
+
+def test_evict_removes_oldest_blocks_and_stale_tmp(tmp_path):
+    """The external evictor keeps a shared root_dir under budget, oldest first,
+    and reclaims temp files orphaned by crashed writers."""
+    from vllm.v1.kv_offload.tiering.fs.evict import evict
+
+    now = time.time()
+
+    def write(name: str, age_s: float, size: int = 100) -> str:
+        path = tmp_path / "model_r0" / "abc" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x" * size)
+        os.utime(path, (now - age_s, now - age_s))
+        return str(path)
+
+    blocks = [write(f"{i}.bin", age_s=100 - i) for i in range(10)]
+    stale_tmp = write("old.bin_1.tmp", age_s=7200)
+    live_tmp = write("new.bin_2.tmp", age_s=1)
+
+    used, deleted = evict(str(tmp_path), max_bytes=500, low_watermark=0.8)
+
+    assert used == 400
+    assert deleted == 7
+    assert [os.path.exists(p) for p in blocks] == [False] * 6 + [True] * 4
+    assert not os.path.exists(stale_tmp)
+    assert os.path.exists(live_tmp)
+    assert evict(str(tmp_path), max_bytes=500) == (400, 0)
