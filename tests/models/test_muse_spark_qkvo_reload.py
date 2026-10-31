@@ -44,5 +44,5 @@ def test_qkvo_reload_takes_new_weights(dist_init):
     finalize_layerwise_reload(model, model_config=None)
 
     expected = torch.cat([w for _, w in _checkpoint(seed=1)])
-    torch.testing.assert_close(proj.weight.data, expected)
+    assert torch.equal(proj.weight.data, expected)
     assert proj.weight.data_ptr() == data_ptr

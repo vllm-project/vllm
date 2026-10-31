@@ -8,6 +8,7 @@ import torch
 
 from vllm.lora.utils import get_supported_lora_modules
 from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
+from vllm.models.inkling.amd import moe as amd_moe
 from vllm.models.inkling.common.weights import write_loader
 from vllm.models.inkling.nvidia import moe
 from vllm.models.inkling.nvidia.model import _TmlForCausalLMBase
@@ -145,8 +146,13 @@ def test_inkling_mapper_maps_compressed_tensors_expert_params(
     assert mapped == [f"model.layers.2.mlp.experts.{projection}_{suffix}"]
 
 
+@pytest.mark.parametrize("moe_cls", [moe.InklingMoE, amd_moe.InklingMoE])
 @pytest.mark.parametrize(("projection", "amax"), [("w13", 4.375), ("w2", 2960.0)])
-def test_moe_loads_calibrated_input_scale(projection: str, amax: float) -> None:
+def test_moe_loads_calibrated_input_scale(
+    moe_cls: type[moe.InklingMoE] | type[amd_moe.InklingMoE],
+    projection: str,
+    amax: float,
+) -> None:
     experts = SimpleNamespace(
         w13_input_scale=_expert_param(torch.empty(3, 2)),
         w2_input_scale=_expert_param(torch.empty(3)),
@@ -156,15 +162,14 @@ def test_moe_loads_calibrated_input_scale(projection: str, amax: float) -> None:
     # weights load under the model's default dtype; the fp32 scale must not
     # round through it
     with set_default_torch_dtype(torch.bfloat16):
-        loaded = moe.InklingMoE.load_expert_weight(
+        loaded = moe_cls.load_expert_weight(
             layer,
             f"experts.{projection}_weight.input_amax",
             torch.tensor([amax]),
         )
 
     scale = getattr(experts, f"{projection}_input_scale")
-    expected = torch.full_like(scale, amax / (448.0 * 6.0))
-    torch.testing.assert_close(scale, expected, rtol=0, atol=0)
+    assert torch.equal(scale, torch.full_like(scale, amax / (448.0 * 6.0)))
     assert loaded == [f"experts.routed_experts.{projection}_input_scale"]
 
 

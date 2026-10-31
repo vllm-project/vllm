@@ -17,6 +17,7 @@ from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBa
 from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
 from vllm.model_executor.model_loader.reload.layerwise import (
     finalize_layerwise_reload,
+    get_layerwise_info,
     initialize_layerwise_reload,
     record_metadata_for_reloading,
 )
@@ -65,8 +66,9 @@ class InklingMoELayer:
             self.moe = moe_cls(
                 config, prefix="model.layers.0.mlp", quant_config=quant_config
             )
-        self.model = nn.Sequential(self.moe)
-        record_metadata_for_reloading(self.model)
+            self.model = nn.Sequential(self.moe)
+            # as in model loading: a reload restores layers on this device
+            record_metadata_for_reloading(self.model)
 
     def load(self, checkpoint: Checkpoint) -> None:
         # weights load under the model dtype, as in DefaultModelLoader
@@ -89,6 +91,10 @@ class InklingMoELayer:
         with set_current_vllm_config(self.vllm_config):
             initialize_layerwise_reload(self.model)
             self.load(checkpoint)
+            # every routed element was counted: processed during the load,
+            # not left to finalize
+            routed = self.moe.experts.routed_experts
+            assert get_layerwise_info(routed).load_numel_total is None
             finalize_layerwise_reload(self.model, model_config=None)
 
     def tensors(self) -> dict[str, torch.Tensor]:
@@ -237,4 +243,4 @@ def test_padded_slots_reload_completes_and_keeps_padding():
     finalize_layerwise_reload(model, model_config=None)
 
     for param, expected in zip(experts.parameters(), cold):
-        torch.testing.assert_close(param.data, expected, rtol=0, atol=0)
+        assert torch.equal(param.data, expected)
