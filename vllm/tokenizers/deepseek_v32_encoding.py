@@ -41,8 +41,9 @@ thinking_start_token: str = "<think>"
 thinking_end_token: str = "</think>"
 dsml_token: str = "｜DSML｜"
 system_msg_template: str = "{content}"
-user_msg_template: str = "<｜User｜>{content}<｜Assistant｜>"
+user_msg_template: str = "<｜User｜>{content}"
 assistant_msg_template: str = "{reasoning}{content}{tool_calls}<｜end▁of▁sentence｜>"
+assistant_msg_wo_eos_template: str = "{reasoning}{content}{tool_calls}"
 thinking_template = "{reasoning}"
 
 response_format_template: str = "## Response Format:\n\nYou MUST strictly adhere to the following schema to reply:\n{schema}"
@@ -123,6 +124,8 @@ def render_message(
     messages: list[dict[str, Any]],
     thinking_mode: str,
     last_user_idx: int | None = None,
+    add_generation_prompt: bool = True,
+    continue_final_message: bool = False,
 ) -> str:
     if not (0 <= index < len(messages)):
         raise ValueError(
@@ -175,18 +178,22 @@ def render_message(
         content_developer += "\n\n# The user's message is: {}".format(content)
 
         prompt += user_msg_template.format(content=content_developer)
-        if index == last_user_idx and thinking_mode == "thinking":
-            prompt += thinking_start_token
-        else:
-            prompt += thinking_end_token
+        if add_generation_prompt:
+            prompt += "<｜Assistant｜>"
+            if index == last_user_idx and thinking_mode == "thinking":
+                prompt += thinking_start_token
+            else:
+                prompt += thinking_end_token
 
     elif role == "user":
         prompt += user_msg_template.format(content=content)
 
-        if index == last_user_idx and thinking_mode == "thinking":
-            prompt += thinking_start_token
-        else:
-            prompt += thinking_end_token
+        if add_generation_prompt:
+            prompt += "<｜Assistant｜>"
+            if index == last_user_idx and thinking_mode == "thinking":
+                prompt += thinking_start_token
+            else:
+                prompt += thinking_end_token
 
     elif role == "tool":
         prev_assistant_idx = index - 1
@@ -251,11 +258,24 @@ def render_message(
 
         if not tool_calls and is_prefix:
             prompt += summary_content
+        elif continue_final_message and index == len(messages) - 1:
+            prompt += assistant_msg_wo_eos_template.format(
+                reasoning=thinking_part,
+                content=summary_content,
+                tool_calls=tool_calls_content,
+            )
         else:
             prompt += assistant_msg_template.format(
                 reasoning=thinking_part,
                 content=summary_content,
                 tool_calls=tool_calls_content,
+            )
+        if add_generation_prompt and index == len(messages) - 1:
+            prompt += "<｜Assistant｜>"
+            prompt += (
+                thinking_start_token
+                if thinking_mode == "thinking"
+                else thinking_end_token
             )
     else:
         raise ValueError(f"Invalid role: {role}")
@@ -290,7 +310,17 @@ def encode_messages(
     context: list[dict[str, Any]] | None = None,
     drop_thinking: bool = True,
     add_default_bos_token: bool = True,
+    add_generation_prompt: bool = True,
+    continue_final_message: bool = False,
 ) -> str:
+    if continue_final_message:
+        add_generation_prompt = False
+        if not messages or messages[-1].get("role") != "assistant":
+            raise ValueError(
+                "Cannot set `continue_final_message` to True when the "
+                "last message is not from the assistant."
+            )
+
     context = context if context else []
     full_messages = context + messages
 
@@ -302,11 +332,18 @@ def encode_messages(
     last_user_idx = find_last_user_index(full_messages)
 
     for idx in range(len(messages)):
+        message_idx = idx + len(context)
         prompt += render_message(
-            idx + len(context),
+            message_idx,
             full_messages,
             thinking_mode=thinking_mode,
             last_user_idx=last_user_idx,
+            add_generation_prompt=(
+                message_idx + 1 < len(full_messages) or add_generation_prompt
+            ),
+            continue_final_message=(
+                continue_final_message and message_idx + 1 == len(full_messages)
+            ),
         )
 
     return prompt
