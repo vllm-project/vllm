@@ -3,6 +3,7 @@
 import pytest
 import torch
 
+import vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe as fi_moe
 from tests.kernels.moe.utils import make_test_quant_config
 from tests.kernels.quantization.nvfp4_utils import (
     FLOAT4_E2M1_MAX,
@@ -28,10 +29,20 @@ from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import 
     is_valid_flashinfer_cutlass_fused_moe,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
+from vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep import (
+    MoEPrepareAndFinalizeNoDPEPModular,
+)
+from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    activation_to_flashinfer_type,
+)
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
+from vllm.utils.flashinfer import (
+    has_flashinfer_cutlass_fused_moe,
+    has_flashinfer_cutlass_fused_moe_workspace,
+)
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.worker.workspace import current_workspace_manager
 
 if not has_flashinfer_cutlass_fused_moe() or not current_platform.has_device_capability(
     100
@@ -51,6 +62,154 @@ MNK_FACTORS = [
     (224, 1024, 1024),
     (224, 1024, 1536),
 ]
+
+
+@pytest.mark.skipif(
+    not has_flashinfer_cutlass_fused_moe_workspace(),
+    reason="Requires caller-owned CUTLASS MoE workspace support",
+)
+@pytest.mark.parametrize(
+    "max_num_tokens, dp_size, elastic_ep_max_dp_size, workspace_rows",
+    [(32, 1, None, 8192), (32, 2, None, 8192), (4096, 2, 4, 16384)],
+)
+@pytest.mark.parametrize("activation", [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL])
+@pytest.mark.parametrize("quant_dtype", [None, "nvfp4"])
+@torch.inference_mode()
+def test_flashinfer_workspace_reused_after_lock(
+    max_num_tokens,
+    dp_size,
+    elastic_ep_max_dp_size,
+    workspace_rows,
+    activation,
+    quant_dtype,
+    workspace_init,
+    monkeypatch,
+):
+    """Framework scratch must survive locking and graph replay without aliasing."""
+    parallel = FusedMoEParallelConfig.make_no_parallel()
+    parallel.dp_size = dp_size
+    config = FusedMoEConfig(
+        num_experts=8,
+        experts_per_token=2,
+        hidden_dim=256,
+        intermediate_size=512,
+        num_local_experts=8,
+        num_logical_experts=8,
+        activation=activation,
+        device="cuda",
+        moe_parallel_config=parallel,
+        in_dtype=torch.bfloat16,
+        routing_method=RoutingMethodType.TopK,
+        max_num_tokens=max_num_tokens,
+        elastic_ep_max_dp_size=elastic_ep_max_dp_size,
+    )
+    max_rows = max_num_tokens * dp_size
+    x = torch.randn(max_rows, 256, device="cuda", dtype=torch.bfloat16) / 10
+    w1 = (
+        torch.randn(
+            8,
+            512 * (2 if activation.is_gated else 1),
+            256,
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+        / 10
+    )
+    w2 = torch.randn(8, 256, 512, device="cuda", dtype=torch.bfloat16) / 10
+    quant_config = FusedMoEQuantConfig.make()
+    if quant_dtype is not None:
+        w1, w2, quant_config = make_test_quant_config(
+            8,
+            512,
+            256,
+            in_dtype=x.dtype,
+            quant_dtype=quant_dtype,
+            block_shape=None,
+            per_act_token_quant=False,
+            make_gate=activation.is_gated,
+        )
+    layers = [
+        FusedMoEKernel(
+            MoEPrepareAndFinalizeNoDPEPModular(),
+            FlashInferExperts(config, quant_config),
+        )
+        for _ in range(2)
+    ]
+    ids = torch.tensor([0, 1], device="cuda").expand(max_rows, 2)
+    weights = torch.full((max_rows, 2), 0.5, device="cuda")
+    expected_nbytes = fi_moe.flashinfer_cutlass_fused_moe_workspace_size(
+        workspace_rows,
+        256,
+        512,
+        8,
+        2,
+        x_dtype=torch.uint8 if quant_dtype == "nvfp4" else x.dtype,
+        weight_dtype=torch.long if quant_dtype == "nvfp4" else w1.dtype,
+        output_dtype=x.dtype,
+        activation_type=activation_to_flashinfer_type(activation),
+        device=x.device,
+    )
+    buffers = []
+    call_args: dict = {}
+    kernel = fi_moe.flashinfer_cutlass_fused_moe
+
+    def record_workspace(**kwargs):
+        call_args.clear()
+        call_args.update(kwargs)
+        scratch = kwargs["workspace_buffer"]
+        output = kwargs["output"]
+        buffers.append(scratch)
+        assert scratch.dtype == torch.uint8 and scratch.ndim == 1
+        assert scratch.nbytes >= expected_nbytes
+        # The common workspace reserves the output before workspace2, even
+        # when prepare/finalize supplies an external output allocation.
+        assert scratch.storage_offset() >= output.nbytes
+        assert (
+            scratch.data_ptr() + scratch.nbytes <= output.data_ptr()
+            or output.data_ptr() + output.nbytes <= scratch.data_ptr()
+        )
+        return kernel(**kwargs)
+
+    def run(layer, rows):
+        return layer.apply(
+            hidden_states=x[:rows],
+            w1=w1,
+            w2=w2,
+            topk_weights=weights[:rows],
+            topk_ids=ids[:rows],
+            activation=activation,
+            global_num_experts=8,
+            expert_map=None,
+            apply_router_weight_on_input=False,
+        )
+
+    def check_reference(output):
+        reference = torch.empty_like(output)
+        kernel(**{**call_args, "workspace_buffer": None, "output": reference})
+        torch.testing.assert_close(output, reference)
+
+    monkeypatch.setattr(fi_moe, "flashinfer_cutlass_fused_moe", record_workspace)
+    with set_current_vllm_config(VllmConfig()):
+        check_reference(run(layers[0], max_rows))
+        manager = current_workspace_manager()
+        manager.lock()
+        storage_ptr = manager.get_simultaneous(((1,), torch.uint8))[0].data_ptr()
+        for layer, rows in [(layers[1], 1), (layers[0], 17), (layers[1], max_rows)]:
+            check_reference(run(layer, rows))
+
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            run(layers[0], 16)
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            output = run(layers[0], 16)
+        for _ in range(2):
+            x[:16].normal_(std=0.1)
+            graph.replay()
+            check_reference(output)
+        assert all(b.untyped_storage().data_ptr() == storage_ptr for b in buffers)
 
 
 @pytest.mark.parametrize(
