@@ -5,8 +5,11 @@ import dataclasses
 import pytest
 import torch
 
-from tests.evals.gsm8k.gsm8k_eval import evaluate_gsm8k_offline
 from tests.utils import large_gpu_mark
+from tests.v1.e2e.spec_decode.utils import (
+    assert_spec_decode_metrics,
+    evaluate_llm_for_gsm8k,
+)
 from vllm import LLM
 from vllm.config import SpeculativeConfig
 from vllm.distributed import cleanup_dist_env_and_memory
@@ -202,24 +205,23 @@ def test_speculators_correctness(monkeypatch, config):
         disable_log_stats=False,
     )
 
-    results = evaluate_gsm8k_offline(spec_llm)
-    accuracy = results["accuracy"]
-    print(f"GSM8K Accuracy: {accuracy:.4f}")
-    accuracy_threshold = config.expected_gsm8k_accuracy * (1 - config.accuracy_rtol)
-    assert accuracy >= accuracy_threshold, (
-        f"Expected GSM8K accuracy >= {accuracy_threshold:.3f}, got {accuracy:.3f}"
+    evaluate_llm_for_gsm8k(
+        spec_llm,
+        config.expected_gsm8k_accuracy * (1 - config.accuracy_rtol),
+    )
+    metrics = spec_llm.get_metrics()
+
+    assert_spec_decode_metrics(
+        metrics=metrics,
+        expected_acceptance_rate=None,
+        expected_acceptance_len=(
+            config.expected_acceptance_len * (1 - config.acceptance_len_rtol)
+        ),
+        context=f"{config.display_name} speculators",
     )
 
-    current_metrics = spec_llm.get_metrics()
-    stats = compute_spec_decode_stats(current_metrics)
+    stats = compute_spec_decode_stats(metrics)
     print_spec_decode_stats(stats)
-
-    acceptance_len = stats["acceptance_len"]
-    al_threshold = config.expected_acceptance_len * (1 - config.acceptance_len_rtol)
-    assert acceptance_len >= al_threshold, (
-        f"{config.display_name} speculators acceptance length too low: "
-        f"{acceptance_len:.2f} < {al_threshold:.2f}"
-    )
 
     per_pos_rates = stats["per_pos_acceptance_rates"]
     for i, expected_rate in enumerate(config.expected_per_pos_acceptance_rates):
