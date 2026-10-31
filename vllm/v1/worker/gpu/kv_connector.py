@@ -30,6 +30,10 @@ if TYPE_CHECKING:
 class KVConnector:
     """KVConnector interface used by GPUModelRunner."""
 
+    @property
+    def requires_kv_delivery(self) -> bool:
+        return False
+
     def pre_forward(
         self,
         scheduler_output: "SchedulerOutput",
@@ -71,6 +75,10 @@ class ActiveKVConnector(KVConnector):
 
         self._pending_load_kwargs: dict[str, Any] | None = None
         self._disabled = False
+
+    @property
+    def requires_kv_delivery(self) -> bool:
+        return self.kv_connector.requires_kv_delivery
 
     def pre_forward(
         self,
