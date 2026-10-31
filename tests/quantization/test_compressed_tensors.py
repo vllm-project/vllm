@@ -48,6 +48,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     find_matched_target,
+    should_ignore_layer,
 )
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -57,6 +58,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.models.utils import WeightsMapper
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
@@ -124,6 +126,44 @@ def test_compressed_tensors_accepts_preordered_weights(actorder):
     )
     assert config.target_scheme_map["Linear"]["weights"].actorder == (
         actorder.value if isinstance(actorder, ActivationOrdering) else None
+    )
+
+
+def test_compressed_tensors_maps_regex_prefixes():
+    """An ignore regex written with HF names must still match after the
+    model renames that prefix (e.g. Qwen3-VL's "model.visual." -> "visual.")."""
+    config = CompressedTensorsConfig.from_config(
+        {
+            **_compressed_tensors_actorder_config(None),
+            "ignore": [
+                "re:model\\.visual\\..*",
+                "re:model.language_model.layers.0.mlp.*",
+                "re:.*embed_tokens",
+                "model.language_model.layers.1.mlp.down_proj",
+            ],
+        }
+    )
+    config.apply_vllm_mapper(
+        WeightsMapper(
+            orig_to_new_prefix={
+                "model.visual.": "visual.",
+                "model.language_model.": "language_model.model.",
+                "mtp.": None,
+            }
+        )
+    )
+    assert config.ignore == [
+        "re:visual\\..*",
+        "re:language_model\\.model\\.layers.0.mlp.*",
+        "re:.*embed_tokens",
+        "language_model.model.layers.1.mlp.down_proj",
+    ]
+    assert should_ignore_layer("visual.blocks.0.mlp.linear_fc1", config.ignore)
+    assert should_ignore_layer(
+        "language_model.model.layers.0.mlp.up_proj", config.ignore
+    )
+    assert not should_ignore_layer(
+        "language_model.model.layers.2.mlp.up_proj", config.ignore
     )
 
 
