@@ -284,6 +284,8 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
 
 
 class FlashAttentionBackend(AttentionBackend):
+    supports_kv_cache_update_bypass: bool = True
+
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
@@ -616,7 +618,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
     #  https://github.com/vllm-project/vllm/issues/22945
     _cudagraph_support = (
         AttentionCGSupport.ALWAYS
-        if get_flash_attn_version() in (3, 4)
+        if get_flash_attn_version() in (3, 4) or current_platform.is_xpu()
         else AttentionCGSupport.UNIFORM_BATCH
     )
     supports_update_block_table: bool = True

@@ -22,6 +22,7 @@ from vllm.v1.attention.backends.flash_attn import (
 from vllm.v1.kv_cache_interface import AttentionSpec, is_quantized_kv_cache
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
+from ..common.ops.summary_update import build_prefill_groups
 from .ops.attention_gate import headwise_sigmoid_gate
 from .ops.sparse_prefill import make_prefill_chunks
 from .ops.sparse_prefill_pages import (
@@ -29,7 +30,6 @@ from .ops.sparse_prefill_pages import (
     plan_staged_prefill_pages,
     stage_prefill_pages,
 )
-from .ops.summary_update import build_prefill_groups
 
 # Transient dense BF16 copy of a prefill batch's live pages for one KV group.
 _PREFILL_STAGING_BYTES = 512 << 20
@@ -294,7 +294,7 @@ class Step5DSAAttentionImpl(Step5SplitKVFlashAttentionImpl):
             capability is None
             or not Step5DSAAttentionBackend.supports_compute_capability(capability)
         ):
-            raise NotImplementedError("Step5 DSA requires SM90 or SM103")
+            raise NotImplementedError("Step5 DSA requires SM90, SM100 or SM103")
         if config is not None:
             # FlashInfer builds host-side ragged plans before CUDA graph capture.
             config.compilation_config.cudagraph_num_of_warmups = max(
@@ -894,7 +894,11 @@ class Step5DSAAttentionBackend(Step5SplitKVFlashAttentionBackend):
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
-        return capability in (DeviceCapability(9, 0), DeviceCapability(10, 3))
+        return capability in (
+            DeviceCapability(9, 0),
+            DeviceCapability(10, 0),
+            DeviceCapability(10, 3),
+        )
 
     @staticmethod
     def get_name() -> str:

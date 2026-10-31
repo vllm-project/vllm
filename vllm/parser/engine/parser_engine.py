@@ -158,6 +158,9 @@ class ParserEngine(Parser):
         self._suppress_tool_calls: bool = False
 
         self._arg_converter = parser_engine_config.arg_converter
+        self._complete_tool_call_validator = (
+            parser_engine_config.complete_tool_call_validator
+        )
         self._arg_structural_chars = parser_engine_config.arg_structural_chars
         self._arg_value_extender = parser_engine_config.arg_value_extender
         self._stream_arg_deltas = parser_engine_config.stream_arg_deltas
@@ -611,6 +614,15 @@ class ParserEngine(Parser):
         model_output: str,
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> ExtractedToolCallInformation:
+        if (
+            self._complete_tool_call_validator is not None
+            and self._complete_tool_call_validator(model_output) is False
+        ):
+            return ExtractedToolCallInformation(
+                tools_called=False,
+                tool_calls=[],
+                content=model_output,
+            )
         self._reset()
         self._streaming_initialized = True
         result = self.extract_tool_calls_streaming(
@@ -784,6 +796,19 @@ class ParserEngine(Parser):
         Must be called as a unit — ``_events_to_delta`` populates tool
         state that ``_build_extracted_result`` reads.
         """
+        if (
+            self._complete_tool_call_validator is not None
+            and self._complete_tool_call_validator(text) is False
+        ):
+            return (
+                None,
+                text or None,
+                ExtractedToolCallInformation(
+                    tools_called=False,
+                    tool_calls=[],
+                    content=text,
+                ),
+            )
         self._reset(initial_state=initial_state)
         events = self._feed(text, token_ids)
         events.extend(self._engine.finish())
@@ -1107,6 +1132,11 @@ class ParserEngine(Parser):
         if not safe_json:
             return None
         if prev and not safe_json.startswith(prev):
+            if self._arg_value_extender is not None:
+                # A repeated key replaced a streamed value. Deltas that only
+                # extend the new value skip the conversion until it closes.
+                slot.extend_open_value = self._arg_value_extender(slot.args)
+                slot.open_value_streams = False
             return None
 
         slot.streamed_json = safe_json

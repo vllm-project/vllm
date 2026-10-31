@@ -23,6 +23,7 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 LAYERS = 5
 SPARSE = (3, 4)
@@ -188,20 +189,16 @@ def _randomize(worker):
 
 
 def _requests():
-    g = torch.Generator().manual_seed(SEED)
+    set_random_seed(SEED)
+    requests = []
     for n in BATCHES:
         prompts = [
-            {
-                "prompt_token_ids": torch.randint(
-                    VOCAB, (int(size),), generator=g
-                ).tolist()
-            }
-            for size in torch.randint(16, 48, (n,), generator=g)
+            {"prompt_token_ids": torch.randint(VOCAB, (int(size),)).tolist()}
+            for size in torch.randint(16, 48, (n,))
         ]
-        traces = [
-            torch.randint(VOCAB, (STEPS,), generator=g).tolist() for _ in range(n)
-        ]
-        yield n, prompts, traces
+        traces = [torch.randint(VOCAB, (STEPS,)).tolist() for _ in range(n)]
+        requests.append((n, prompts, traces))
+    return requests
 
 
 def _decode(llm, capture=False):
@@ -452,3 +449,127 @@ def test_late_rank_fault_returns_no_tokens_from_full_graphs(
     logs = "".join(capfd.readouterr())
     # the error-word assert trapped the queue ahead of the step's sampling
     assert "hipErrorLaunchFailure" in logs or "HSA_STATUS_ERROR_EXCEPTION" in logs
+
+
+# EAGLE3 verify steps: 1 + SPEC_TOKENS rows a request, up to 4 requests (16
+# rows) fused
+SPEC_TOKENS = 3
+SPEC_BATCHES = (1, 2, 3, 4)
+
+
+@pytest.fixture(scope="module")
+def draft_dir(tmp_path_factory):
+    """A random one-layer EAGLE3 draft at the checkpoint draft's attention
+    shapes and the mini model's vocabulary, its auxiliary states taken after
+    layer 1 (stock) and layers 3 and 4 (fused)."""
+    import json
+
+    path = tmp_path_factory.mktemp("minimax_m3_eagle3_mini")
+    config = dict(
+        architectures=["LlamaForCausalLMEagle3"],
+        model_type="llama",
+        hidden_size=6144,
+        intermediate_size=4096,
+        num_hidden_layers=1,
+        num_attention_heads=64,
+        num_key_value_heads=64,
+        head_dim=128,
+        hidden_act="silu",
+        rms_norm_eps=1e-6,
+        rope_theta=5000000,
+        max_position_embeddings=4096,
+        vocab_size=VOCAB,
+        draft_vocab_size=VOCAB,
+        tie_word_embeddings=False,
+        torch_dtype="bfloat16",
+        fc_norm=True,
+        norm_output=True,
+        eagle_aux_hidden_state_layer_ids=[2, 4, 5],
+    )
+    (path / "config.json").write_text(json.dumps(config))
+    return str(path)
+
+
+def _epoch(worker):
+    return int(_executor(worker).runner.epoch[0])
+
+
+def _spec_requests():
+    set_random_seed(SEED + 1)
+    return [
+        [
+            {"prompt_token_ids": torch.randint(VOCAB, (int(k),)).tolist()}
+            for k in torch.randint(16, 48, (n,))
+        ]
+        for n in SPEC_BATCHES
+    ]
+
+
+def test_eagle3_verify_steps_match_native(vllm_runner, model_dir, draft_dir, capfd):
+    """EAGLE3 (random draft) with --monokernel under FULL graphs: the verify
+    steps of 1-4 requests (4, 8, 12 padded to 16, and 16 rows) run the fused
+    launches (the device epoch moves on); the target's full-vocabulary
+    logprobs along the generated tokens match native eager teacher-forced on
+    them. A late rank fault during a verify step then returns no token."""
+    from vllm import SamplingParams
+    from vllm.v1.engine.exceptions import EngineDeadError
+
+    greedy = SamplingParams(
+        max_tokens=STEPS, temperature=0, logprobs=-1, detokenize=False, ignore_eos=True
+    )
+    tokens, mono_rows = [], []
+    with _engine(
+        vllm_runner,
+        model_dir,
+        mono=True,
+        graphs=True,
+        speculative_config={
+            "method": "eagle3",
+            "model": draft_dir,
+            "num_speculative_tokens": SPEC_TOKENS,
+        },
+    ) as runner:
+        llm = runner.llm
+        llm.collective_rpc(_randomize)
+        for prompts in _spec_requests():
+            before = llm.collective_rpc(_epoch)
+            outputs = llm.generate(prompts, greedy, use_tqdm=False)
+            moved = {a - b for a, b in zip(llm.collective_rpc(_epoch), before)}
+            assert len(moved) == 1
+            assert moved.pop() > 0
+            tokens.append([list(out.outputs[0].token_ids) for out in outputs])
+            for out in outputs:
+                for step in out.outputs[0].logprobs[1:]:
+                    mono_rows.append([step[v].logprob for v in range(VOCAB)])
+        capfd.readouterr()
+        llm.collective_rpc(_arm_late_fault, args=(2, 500_000))
+        outputs = None
+        with pytest.raises(EngineDeadError):
+            outputs = llm.generate(_spec_requests()[0], greedy)
+        assert outputs is None
+
+    native_rows = []
+    with _engine(vllm_runner, model_dir, mono=False) as runner:
+        llm = runner.llm
+        llm.collective_rpc(_randomize)
+        for prompts, traces in zip(_spec_requests(), tokens):
+            params = [
+                SamplingParams(
+                    max_tokens=STEPS,
+                    temperature=0,
+                    logprobs=-1,
+                    trace_decode_token_ids=trace,
+                    detokenize=False,
+                    ignore_eos=True,
+                )
+                for trace in traces
+            ]
+            for out in llm.generate(prompts, params, use_tqdm=False):
+                for step in out.outputs[0].logprobs[1:]:
+                    native_rows.append([step[v].logprob for v in range(VOCAB)])
+    cos, rows = _logit_errors(torch.tensor(mono_rows), torch.tensor(native_rows))
+    close = (rows < 3e-2).float().mean().item()
+    print(
+        f"EAGLE3 cos {cos:.5f}, median row {rows.median():.2e}, within 3e-2 {close:.3f}"
+    )
+    assert cos > 0.99 and close > 0.8
