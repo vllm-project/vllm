@@ -17,6 +17,7 @@ steps:
     label: production
     gpu: 1+
     mem: 24+
+  automatic_shard: true
   _raw_old_commands:
   - VLLM_USE_FLASHINFER_SAMPLER=0 pytest -v -s samplers -k "not test_beam_search_passes_multimodal_data"
   - VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers -k "not test_beam_search_passes_multimodal_data"
@@ -47,6 +48,7 @@ steps:
     label: production
     gpu: 1+
     mem: 24+
+  automatic_shard: true
   _raw_old_commands:
   - VLLM_USE_FLASHINFER_SAMPLER=0 pytest -v -s samplers/test_beam_search.py::test_beam_search_passes_multimodal_data
   - VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers/test_beam_search.py::test_beam_search_passes_multimodal_data

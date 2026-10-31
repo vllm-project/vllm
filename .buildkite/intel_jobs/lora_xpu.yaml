@@ -46,6 +46,7 @@ steps:
     label: production
     gpu: 4+
     mem: 24+
+  automatic_shard: true
   _raw_old_commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
@@ -61,6 +62,7 @@ steps:
   source_file_dependencies:
   - vllm/lora
   - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/models/transformers/moe.py
   - tests/lora
   commands:
   - >-

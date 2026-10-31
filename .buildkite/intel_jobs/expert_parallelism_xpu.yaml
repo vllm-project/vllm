@@ -17,6 +17,7 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s distributed/test_eplb_algo.py
   - pytest -v -s distributed/test_eplb_migration_scheduler.py
@@ -49,6 +50,7 @@ steps:
     label: production
     gpu: 4+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
   - pytest -v -s distributed/test_eplb_execute.py
   - pytest -v -s distributed/test_eplb_spec_decode.py

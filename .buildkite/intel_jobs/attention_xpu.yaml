@@ -46,8 +46,9 @@ steps:
     label: production
     gpu: 1+
     mem: 16+
+  automatic_shard: true
   _raw_old_commands:
-  - pytest -v -s v1/attention/test_attention_backends.py -k test_flashinfer_xqa_nvfp4_decode_correctness
+  - pytest -v -s v1/attention/test_attention_backends.py -k nvfp4_decode_correctness
   source_file_dependencies:
   - vllm/v1/attention/backends/flashinfer.py
   - tests/v1/attention/test_attention_backends.py
@@ -55,4 +56,4 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest --continue-on-collection-errors -v -s v1/attention/test_attention_backends.py -k test_flashinfer_xqa_nvfp4_decode_correctness || true'
+    pytest --continue-on-collection-errors -v -s v1/attention/test_attention_backends.py -k nvfp4_decode_correctness || true'
