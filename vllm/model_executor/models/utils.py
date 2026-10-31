@@ -19,6 +19,9 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.model_loader.mtp_validation import (
+    is_mtp_completeness_check_enabled,
+)
 from vllm.model_executor.model_loader.reload import (
     support_quantized_model_reload_from_hp_weights,
 )
@@ -44,12 +47,21 @@ ShardId: TypeAlias = str | int | tuple[int, ...]
 ShardIds: TypeAlias = ShardId | list[ShardId]
 """One shard, or a list of shards the same weight is loaded into in turn."""
 
+WeightsTransformFn: TypeAlias = Callable[
+    [Iterable[tuple[str, torch.Tensor]]], Iterable[tuple[str, torch.Tensor]]
+]
+"""A lazy transform over a raw checkpoint ``(name, tensor)`` stream, passing
+unrecognized tensors through unchanged."""
+
 
 @dataclass
 class WeightsMapper:
     """Maps the name of each weight if they match the following patterns.
 
-    If a key maps to a value of `None`, the corresponding weight is ignored."""
+    If a key maps to a value of `None`, the corresponding weight is ignored.
+
+    ``weights_transforms`` rewrite the raw weight stream in list order before
+    any name mapping."""
 
     orig_to_new_renaming: list["WeightRenaming"] = field(default_factory=list)
     orig_to_new_regex: Mapping[re.Pattern, str | None] = field(default_factory=dict)
@@ -59,6 +71,7 @@ class WeightsMapper:
     )
     orig_to_new_prefix: Mapping[str, str | None] = field(default_factory=dict)
     orig_to_new_suffix: Mapping[str, str | None] = field(default_factory=dict)
+    weights_transforms: list[WeightsTransformFn] = field(default_factory=list)
 
     def __or__(self, other: "WeightsMapper") -> "WeightsMapper":
         """Combine two `WeightsMapper`s by merging their mappings."""
@@ -75,6 +88,7 @@ class WeightsMapper:
             },
             orig_to_new_prefix={**self.orig_to_new_prefix, **other.orig_to_new_prefix},
             orig_to_new_suffix={**self.orig_to_new_suffix, **other.orig_to_new_suffix},
+            weights_transforms=[*self.weights_transforms, *other.weights_transforms],
         )
 
     def map_name(self, key: str) -> str | None:
@@ -147,6 +161,8 @@ class WeightsMapper:
     def apply(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[tuple[str, torch.Tensor]]:
+        for transform in self.weights_transforms:
+            weights = transform(weights)
         for name, data in weights:
             result = self._map_name_with_shard(name)
             if result is None:
@@ -196,6 +212,7 @@ class WeightsMapper:
             orig_to_new_stacked={},
             orig_to_new_prefix=remove_none(self.orig_to_new_prefix),
             orig_to_new_suffix=remove_none(self.orig_to_new_suffix),
+            weights_transforms=[],
         )
 
 
@@ -490,7 +507,10 @@ class AutoWeightsLoader:
 
     def _check_skipped_aliases(self, autoloaded_weights: set[str]) -> None:
         """Guard against skipping an alias whose canonical name never loads."""
-        if not self._loaded_params_are_complete:
+        if (
+            not self._loaded_params_are_complete
+            or not is_mtp_completeness_check_enabled()
+        ):
             return
         for alias, canonical in self._skipped_aliases.items():
             if canonical not in autoloaded_weights:
