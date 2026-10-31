@@ -117,19 +117,21 @@ def murmur3_hash32(seed, pos, offset, domain: tl.constexpr = 0):
 
 
 @triton.jit
-def murmur3_uniform32(seed, pos, offset):
-    random32 = murmur3_hash32(seed, pos, offset)
-    # Split the uint32 before converting to fp32 so backends without a native
-    # uint32-to-float conversion can still use all 32 source bits. Both 16-bit
-    # halves convert exactly; their sum is the correctly rounded fp32 value of
-    # (random32 + 0.5) * 2**-32. In particular, the u -> 0 winning tail keeps
-    # the full 32-bit source resolution instead of being truncated to 24 bits.
-    hi16 = (random32 >> 16).to(tl.int32)
-    lo16 = (random32 & 0xFFFF).to(tl.int32)
+def _uniform32_from_random64(hi, lo):
+    # Exact 16-bit pieces, smallest first: u -> 0 keeps all 64 source bits.
     return (
-        hi16.to(tl.float32) * 1.52587890625e-05
-        + (lo16.to(tl.float32) + 0.5) * 2.3283064365386963e-10
+        ((lo & 0xFFFF).to(tl.int32).to(tl.float32) + 0.5) * 5.421010862427522e-20
+        + (lo >> 16).to(tl.int32).to(tl.float32) * 3.552713678800501e-15
+        + (hi & 0xFFFF).to(tl.int32).to(tl.float32) * 2.3283064365386963e-10
+        + (hi >> 16).to(tl.int32).to(tl.float32) * 1.52587890625e-05
     )
+
+
+@triton.jit
+def murmur3_uniform32(seed, pos, offset):
+    lo = murmur3_hash32(seed, pos, offset)
+    hi = murmur3_hash32(seed, pos, offset, domain=0x9E3779B9)
+    return _uniform32_from_random64(hi, lo)
 
 
 @triton.jit
