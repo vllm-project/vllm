@@ -174,11 +174,19 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             self.qk_nope_head_dim,
             self.v_head_dim,
         )  # [L, N, P]
-        self._w_fold = self._compute_w_fold(
+        w_fold = self._compute_w_fold(
             w_qb, W_UK, self.num_heads, self.qk_nope_head_dim, self.qk_rope_head_dim
         )
+        if self._w_fold is None:
+            self._w_fold = w_fold
+        else:
+            # Captured CUDA graphs read the first build's address.
+            self._w_fold.copy_(w_fold)
 
     def process_weights_after_loading(self) -> None:
+        self.refresh_derived_weights()
+
+    def refresh_derived_weights(self) -> None:
         if self._fold_qb_uk:
             self._build_w_fold()
 

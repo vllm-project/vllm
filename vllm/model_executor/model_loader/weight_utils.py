@@ -1512,6 +1512,19 @@ def finalize_model_weights(model: torch.nn.Module) -> None:
         model.process_weights_after_loading()
 
 
+@torch.no_grad()
+def refresh_derived_weights(model: torch.nn.Module) -> None:
+    """Call ``refresh_derived_weights()`` on every module that defines it, to
+    rebuild tensors kept out of ``state_dict()`` after the weights were
+    overwritten in place. Hooks must be idempotent, write in place, run no
+    collectives and read only non-expert weights.
+    """
+    for module in model.modules():
+        refresh = getattr(module, "refresh_derived_weights", None)
+        if callable(refresh):
+            refresh()
+
+
 def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
     """Default weight loader."""
     try:

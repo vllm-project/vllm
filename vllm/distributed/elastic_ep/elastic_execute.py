@@ -47,6 +47,7 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
 from vllm.model_executor.layers.fused_moe.eep_reconfigure import (
     make_eep_staged_quant_method,
 )
+from vllm.model_executor.model_loader.weight_utils import refresh_derived_weights
 from vllm.model_executor.warmup.flashinfer_autotune_cache import (
     sync_flashinfer_autotune_cache,
 )
@@ -710,6 +711,10 @@ class ElasticEPScalingExecutor:
             expert_weights=expert_weights,
         )
         torch.accelerator.synchronize()
+        # Tensors kept out of state_dict() still hold values derived from the
+        # dummy load.
+        with set_current_vllm_config(self.worker.vllm_config):
+            refresh_derived_weights(model)
         if not current_platform.is_rocm():
             self._warm_target_groups(get_dp_group(), get_ep_group())
         if self._can_reuse_fused_moe_kernel():
