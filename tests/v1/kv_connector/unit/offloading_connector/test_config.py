@@ -1212,6 +1212,7 @@ def _head_sharded_model_config(tmp_path_factory: pytest.TempPathFactory) -> Mode
     )
 
 
+@pytest.mark.cpu_test
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2])
 @pytest.mark.parametrize("canonical", [False, True])
 def test_head_sharded_attention_requires_canonical_layout_for_portability(
