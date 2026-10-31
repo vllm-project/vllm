@@ -392,6 +392,9 @@ class Scheduler(SchedulerInterface):
         # prefill batch fully drained the waiting queue. Prefill throttling
         # is disabled in this case.
         self.prefill_capacity_bound = False
+        self.dp_prefill_delayer = self.scheduler_config.dp_prefill_delayer
+        # Whether a step scheduled prefill since the delayer last looked.
+        self.ran_prefill = False
         # The DP engine core drives this cadence from a counter shared across
         # ranks; an engine without one never throttles, so apply the interval
         # locally, timed from the last prefill-carrying step. Three regimes:
@@ -745,10 +748,15 @@ class Scheduler(SchedulerInterface):
         self.kv_cache_manager.new_step_starts()
 
         # DP prefill balancing: on a throttled (non-cadence-aligned) step, defer
-        # all prefill compute unless saturated.
+        # all prefill compute unless saturated. The DP prefill delayer applies
+        # its own bounds. Only a rank with a decode to run is held: a rank left
+        # with nothing to schedule while its DP peers step hangs the engine
+        # (V2 model runner with speculative decoding).
         defer_prefills = (
-            throttle_prefills and not self.prefill_capacity_bound
-        ) and any(not r.is_prefill_chunk for r in self.running)
+            throttle_prefills
+            and (self.dp_prefill_delayer or not self.prefill_capacity_bound)
+            and any(not r.is_prefill_chunk for r in self.running)
+        )
 
         # `long_prefill_token_threshold` exists to stop a long prefill from
         # starving other requests of the token budget. When it is the only
@@ -1777,6 +1785,12 @@ class Scheduler(SchedulerInterface):
         # write KV and have their output processed later in update_from_output).
         if self.defer_block_free and total_num_scheduled_tokens > 0:
             self.sched_step_seq += 1
+
+        if self.dp_prefill_delayer and any(
+            n > 1 + len(scheduled_spec_decode_tokens.get(req_id, ()))
+            for req_id, n in num_scheduled_tokens.items()
+        ):
+            self.ran_prefill = True
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
