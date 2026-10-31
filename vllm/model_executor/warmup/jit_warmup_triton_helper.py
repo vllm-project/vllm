@@ -174,6 +174,14 @@ class TritonWarmupTensor:
 
     ``strides=None`` represents compact row-major storage. Pass explicit strides
     whenever the runtime tensor can be padded, transposed, or otherwise strided.
+
+    ``ptr_range_bytes`` is the byte size of the storage behind the runtime
+    tensor (its ``untyped_storage()``, not the view). With buffer ops enabled,
+    Triton's ROCm backend gives pointers into storage of at most 2 GB a
+    ``tt.pointer_range = 32`` specialization (32-bit buffer offsets), which is
+    part of the compile key. The default 0 assumes such a small storage; set it
+    above 2 GB for tensors that view a larger pool, such as a KV cache layer,
+    or warmup compiles a variant the runtime never uses. CUDA ignores it.
     """
 
     dtype: Any
@@ -181,12 +189,14 @@ class TritonWarmupTensor:
     shape: tuple[int, ...] = (1,)
     strides: tuple[int, ...] | None = None
     init: Any = 0
+    ptr_range_bytes: int = 0
 
     def data_ptr(self) -> int:
         return 0 if self.aligned else 1
 
     def ptr_range(self) -> int:
-        return 0
+        # Read by Triton's ROCm backend in place of untyped_storage().size().
+        return self.ptr_range_bytes
 
     @property
     def device(self) -> Any:

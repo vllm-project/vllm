@@ -67,7 +67,18 @@ class ServingTokenization(BaseServing):
 
         lora_request = self._maybe_get_adapters(request)
 
-        if isinstance(request, TokenizeChatRequest):
+        if (
+            isinstance(request, TokenizeChatRequest)
+            and self.online_renderer.use_harmony
+        ):
+            # The chat route renders GPT-OSS chats with Harmony, not the template.
+            rendered = await self.online_renderer.render_chat(
+                request.to_chat_completion_request(), skip_mm_cache=True
+            )
+            if isinstance(rendered, ErrorResponse):
+                return rendered
+            _, engine_inputs = rendered
+        elif isinstance(request, TokenizeChatRequest):
             tool_dicts = (
                 None
                 if request.tools is None

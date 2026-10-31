@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
 import vllm._custom_ops as ops
+import vllm.models.muse_spark.common.ops.fused_qk_norm_rope_kv as fused_ops
 from vllm.platforms import current_platform
 
 HEAD_DIM = 64
@@ -338,3 +341,190 @@ def test_fused_query_quant_matches_separate_quant(
     torch.testing.assert_close(cache, expected_cache, rtol=0, atol=0)
     torch.testing.assert_close(qkv[:, :qsz], original[:, :qsz], rtol=0, atol=0)
     torch.testing.assert_close(qkv[:, qsz:], reference[:, qsz:], rtol=0, atol=0)
+
+
+def test_fused_kv_insert_requires_backend_bypass_support(monkeypatch):
+    monkeypatch.setattr(
+        fused_ops,
+        "get_current_vllm_config",
+        lambda: SimpleNamespace(
+            parallel_config=SimpleNamespace(decode_context_parallel_size=1)
+        ),
+    )
+    backend = SimpleNamespace(
+        forward_includes_kv_cache_update=False,
+        supports_kv_cache_update_bypass=False,
+    )
+    attn_layer = SimpleNamespace(
+        attn_backend=backend,
+        kv_sharing_target_layer_name=None,
+        kv_cache_dtype="auto",
+    )
+
+    assert not fused_ops.supports_fused_kv_insert(attn_layer)
+    backend.supports_kv_cache_update_bypass = True
+    assert fused_ops.supports_fused_kv_insert(attn_layer)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm backend gate")
+def test_rocm_aiter_fa_takes_the_fused_kv_insert(monkeypatch):
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.v1.attention.backends.rocm_aiter_fa import AiterFlashAttentionBackend
+
+    monkeypatch.setattr(
+        fused_ops,
+        "get_current_vllm_config",
+        lambda: SimpleNamespace(
+            parallel_config=SimpleNamespace(decode_context_parallel_size=1)
+        ),
+    )
+    attn_layer = SimpleNamespace(
+        attn_backend=AiterFlashAttentionBackend,
+        kv_sharing_target_layer_name=None,
+        kv_cache_dtype="auto",
+    )
+    # The kernel writes the packed [B, H, N, 2*hd] page, so the backend only
+    # accepts the bypass outside the shuffle layout.
+    shuffle = rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+    assert AiterFlashAttentionBackend.supports_kv_cache_update_bypass is not shuffle
+    assert fused_ops.supports_fused_kv_insert(attn_layer) is not shuffle
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm compile boundary")
+def test_rocm_compiled_caller_keeps_the_kv_insert(monkeypatch):
+    from vllm.models.muse_spark.amd import model as amd_model
+
+    kv_cache = torch.zeros(4, 1, 16, 128, device="cuda", dtype=torch.bfloat16)
+    attn_layer = SimpleNamespace(
+        attn_backend=SimpleNamespace(get_name=lambda: "ROCM_AITER_FA"),
+        kv_cache_dtype="auto",
+    )
+    slot_mapping: list[torch.Tensor | None] = [None]
+    inserted: list[bool] = []
+
+    monkeypatch.setattr(
+        fused_ops,
+        "get_attention_context",
+        lambda layer_name: (None, attn_layer, kv_cache, slot_mapping[0]),
+    )
+    monkeypatch.setattr(
+        fused_ops.ops,
+        "fused_muse_spark_qknorm_rope_kv_insert",
+        lambda *args, **kwargs: inserted.append("slot_mapping" in kwargs),
+    )
+
+    @torch.compile(backend="eager", fullgraph=True)
+    def forward(qkv: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        amd_model.rocm_fused_qk_norm_rope_kv_insert(
+            qkv, positions, None, "layer", 1, 1, HEAD_DIM, 0, 1e-5
+        )
+        return qkv + 1
+
+    qkv = torch.zeros(2, 4 * HEAD_DIM, device="cuda", dtype=torch.bfloat16)
+    positions = torch.zeros(2, device="cuda", dtype=torch.int64)
+    forward(qkv, positions)
+    slot_mapping[0] = torch.arange(2, device="cuda", dtype=torch.int64)
+    with torch.compiler.set_stance("fail_on_recompile"):
+        forward(qkv, positions)
+
+    assert inserted == [False, True]
+
+
+@pytest.mark.parametrize(
+    "prefill_tokens,decode_tokens,prefill_dtype,decode_dtype,expected_fp8",
+    [
+        (0, 2, torch.bfloat16, torch.float8_e4m3fn, True),
+        (2, 0, torch.float8_e4m3fn, torch.bfloat16, True),
+        (1, 1, torch.float8_e4m3fn, torch.float8_e4m3fn, True),
+        (1, 1, torch.float8_e4m3fn, torch.bfloat16, False),
+        (0, 2, torch.float8_e4m3fn, torch.bfloat16, False),
+    ],
+)
+def test_query_fusion_respects_attention_metadata(
+    monkeypatch,
+    prefill_tokens,
+    decode_tokens,
+    prefill_dtype,
+    decode_dtype,
+    expected_fp8,
+):
+    from vllm.v1.attention.backends.flashinfer import FlashInferMetadata
+
+    metadata = FlashInferMetadata(
+        kv_cache_layout=None,
+        num_actual_tokens=2,
+        slot_mapping=None,
+        q_data_type_prefill=prefill_dtype,
+        q_data_type_decode=decode_dtype,
+        num_decodes=decode_tokens,
+        num_decode_tokens=decode_tokens,
+        num_prefills=int(prefill_tokens > 0),
+        num_prefill_tokens=prefill_tokens,
+        causal=True,
+        prefill=None,
+        decode=None,
+    )
+    layer = SimpleNamespace(
+        attn_backend=SimpleNamespace(get_name=lambda: "FLASHINFER"),
+        kv_cache_dtype="fp8",
+        _q_scale=torch.tensor(0.37, device="cuda"),
+    )
+    monkeypatch.setattr(
+        fused_ops,
+        "get_attention_context",
+        lambda _: (metadata, layer, torch.empty(0, device="cuda"), None),
+    )
+    qkv = torch.randn(2, 20 * HEAD_DIM, device="cuda", dtype=torch.bfloat16)
+    ref = qkv.clone()
+    positions = torch.arange(2, device="cuda", dtype=torch.int64)
+    ops.fused_muse_spark_qknorm_rope_kv_insert(ref, positions, 16, 2, HEAD_DIM, 1e-5)
+    q_fp8 = fused_ops.fused_qk_norm_rope_kv_insert(
+        qkv,
+        positions,
+        None,
+        "layer",
+        16,
+        2,
+        HEAD_DIM,
+        0,
+        1e-5,
+    )
+    assert (q_fp8 is not None) == expected_fp8
+    if expected_fp8:
+        assert q_fp8 is not None
+        expected_q, _ = ops.scaled_fp8_quant(ref[:, : 16 * HEAD_DIM], layer._q_scale)
+        torch.testing.assert_close(q_fp8.float(), expected_q.float(), rtol=0, atol=0)
+    else:
+        torch.testing.assert_close(qkv, ref, rtol=0, atol=0)
+
+
+def test_attention_accepts_fused_fp8_query_without_requantizing(monkeypatch):
+    """The model's FP8 Q must reach attention unchanged with BF16 output."""
+    from vllm.model_executor.layers.attention import attention as attention_module
+
+    layer = attention_module.Attention.__new__(attention_module.Attention)
+    torch.nn.Module.__init__(layer)
+    layer.kv_cache_dtype = "fp8"
+    layer.impl = SimpleNamespace(supports_quant_query_input=True)
+    layer.num_heads = 16
+    layer.head_size = layer.head_size_v = HEAD_DIM
+    layer.layer_name = "layer"
+    layer.use_direct_call = True
+    layer.attn_backend = SimpleNamespace(forward_includes_kv_cache_update=False)
+    layer.kv_sharing_target_layer_name = None
+
+    def unexpected_quant(*args):
+        pytest.fail("an already quantized query must not be quantized again")
+
+    layer.query_quant = unexpected_quant
+    query = torch.randn(2, 16 * HEAD_DIM, device="cuda").to(torch.float8_e4m3fn)
+
+    def attend(q, k, v, output, *args, **kwargs):
+        assert q.data_ptr() == query.data_ptr()
+        assert q.dtype == torch.float8_e4m3fn
+        assert output.dtype == torch.bfloat16
+        output.copy_(q)
+
+    monkeypatch.setattr(attention_module, "unified_attention_with_output", attend)
+    result = layer(query, None, None, output_dtype=torch.bfloat16)
+    torch.testing.assert_close(result, query.bfloat16(), rtol=0, atol=0)

@@ -94,20 +94,21 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
         b_h4 = tl.zeros([BV, 64], dtype=tl.float32)
 
     # calculate offset
-    h += ((boh * H + i_h) * V * K).to(tl.int64)
-    v += ((bos * H + i_h) * V).to(tl.int64)
-    k += ((bos * Hg + i_h // (H // Hg)) * K).to(tl.int64)
-    w += ((bos * H + i_h) * K).to(tl.int64)
+    # Cast before multiplying: the products overflow int32 for long batches.
+    h += (boh * H + i_h).to(tl.int64) * V * K
+    v += (bos * H + i_h).to(tl.int64) * V
+    k += (bos * Hg + i_h // (H // Hg)).to(tl.int64) * K
+    w += (bos * H + i_h).to(tl.int64) * K
     if SAVE_NEW_VALUE:
-        v_new += ((bos * H + i_h) * V).to(tl.int64)
+        v_new += (bos * H + i_h).to(tl.int64) * V
     stride_v = H * V
     stride_h = H * V * K
     stride_k = Hg * K
     stride_w = H * K
     if USE_INITIAL_STATE:
-        h0 = h0 + i_nh * V * K
+        h0 = h0 + i_nh.to(tl.int64) * V * K
     if STORE_FINAL_STATE:
-        ht = ht + i_nh * V * K
+        ht = ht + i_nh.to(tl.int64) * V * K
 
     # load initial state
     o_v = i_v * BV + tl.arange(0, BV)
@@ -291,7 +292,7 @@ def chunk_gated_delta_rule_fwd_h(
     chunk_indices: torch.Tensor | None = None,
     chunk_offsets: torch.Tensor | None = None,
     use_exp2: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
     # This kernel is slightly different from fla to support Q/K with different head numbers.
     # In fla, Q/K always have the same head number, so Hg is always equal to H.
     B, T, Hg, K, V = *k.shape, u.shape[-1]
