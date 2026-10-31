@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 import time
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Sequence
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import ClassVar, Generic, TypeVar
@@ -391,3 +391,19 @@ def clamp_prompt_logprobs(
             if logprob_values.logprob == float("-inf"):
                 logprob_values.logprob = -9999.0
     return prompt_logprobs
+
+
+def drop_misaligned_logprobs(
+    token_ids: Sequence[int], top_logprobs: Sequence[dict[int, Logprob] | None]
+) -> Sequence[dict[int, Logprob] | None]:
+    """Return `top_logprobs`, or one None per token if the lengths differ.
+    A missing or extra row may be anywhere, not only at the end, so no row
+    can be trusted to line up with its token."""
+    if len(top_logprobs) == len(token_ids):
+        return top_logprobs
+    logger.warning(
+        "Output has %d tokens but %d logprob positions; returning it without logprobs.",
+        len(token_ids),
+        len(top_logprobs),
+    )
+    return [None] * len(token_ids)
