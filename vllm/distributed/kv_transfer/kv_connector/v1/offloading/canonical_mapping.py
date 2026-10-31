@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 # Version of the canonical byte format; bump on any layout change
-CANONICAL_FORMAT_VERSION = 1
+CANONICAL_FORMAT_VERSION = 2
 
 
 def canonical_format_id(kv_cache_layout: str) -> str:
