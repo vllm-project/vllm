@@ -6,6 +6,7 @@ mod coordinator;
 mod error;
 mod metrics;
 pub mod mock_engine;
+mod prompt_block_hasher;
 pub mod protocol;
 pub mod runtime;
 #[cfg(any(test, feature = "test-util"))]
