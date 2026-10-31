@@ -8,8 +8,12 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
+    tensor_model_parallel_reduce_scatter,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.router.zero_expert_router import (
+    ZeroExpertRouter,
+)
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 
 logger = init_logger(__name__)
@@ -61,11 +65,34 @@ class ROCmLatentMoERunner(MoERunner):
             )
         self._logged_sharded_tail = False
 
+    @property
+    def token_shardable(self) -> bool:
+        """Whether ``forward`` supports ``token_sharded=True``."""
+        return (
+            self._tail_shardable
+            and not self._fused_output_is_reduced
+            and not self.moe_config.skip_final_all_reduce
+            and not isinstance(self.router, ZeroExpertRouter)
+        )
+
+    def sp_route_shard(
+        self, hidden_shard: torch.Tensor, router_logits: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Latent projection and top-k for this rank's token shard only."""
+        latent, _ = self.apply_routed_input_transform(hidden_shard)
+        topk_weights, topk_ids = self.router.select_experts(
+            hidden_states=latent,
+            router_logits=router_logits,
+            topk_indices_dtype=self._quant_method.topk_indices_dtype,
+        )
+        return latent, topk_weights, topk_ids
+
     def _shard_up_proj_tail(
         self,
         fused_output: torch.Tensor,
         shared_output: torch.Tensor,
         trunc_size: int | None,
+        token_sharded: bool = False,
     ) -> torch.Tensor:
         """Tier 2: column-parallel up-projection folded into the final reduce."""
         if not self._logged_sharded_tail:
@@ -97,6 +124,10 @@ class ROCmLatentMoERunner(MoERunner):
         # beta-add epilogue so folding in the shared partial costs no kernel.
         hidden_shard.addmm_(latent, up_proj_shard.t())
 
+        if token_sharded:
+            # Token-sharded residual stream: keep only this rank's tokens.
+            out = tensor_model_parallel_reduce_scatter(shared_output, dim=0)
+            return out[..., :trunc_size] if trunc_size is not None else out
         return self._maybe_reduce_final_output(
             shared_output, trunc_size, output_is_reduced=False
         )
@@ -107,10 +138,18 @@ class ROCmLatentMoERunner(MoERunner):
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
         shared_experts_input: torch.Tensor | None = None,
+        token_sharded: bool = False,
     ) -> torch.Tensor:
+        """``token_sharded`` reduce-scatters the output over tokens instead of
+        all-reducing it; it requires ``token_shardable``."""
+        assert not token_sharded or self.token_shardable
         if self._tail_shardable and not self._fused_output_is_reduced:
             return self._fused_forward(
-                hidden_states, router_logits, input_ids, shared_experts_input
+                hidden_states,
+                router_logits,
+                input_ids,
+                shared_experts_input,
+                token_sharded,
             )
         return super().forward(
             hidden_states, router_logits, input_ids, shared_experts_input
@@ -122,6 +161,7 @@ class ROCmLatentMoERunner(MoERunner):
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None,
         shared_experts_input: torch.Tensor | None,
+        token_sharded: bool,
     ) -> torch.Tensor:
         # When the caller pre-applies the routed input transform outside the
         # runner (e.g. to overlap it on a separate stream), it passes the
@@ -156,7 +196,7 @@ class ROCmLatentMoERunner(MoERunner):
             fused_output = fused_output[..., :og_hidden_dim_pre_xform]
 
         result = self._shard_up_proj_tail(
-            fused_output, shared_output, og_hidden_dim_post_xform
+            fused_output, shared_output, og_hidden_dim_post_xform, token_sharded
         )
 
         return self._maybe_add_zero_expert_output(result)
