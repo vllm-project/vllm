@@ -562,6 +562,7 @@ def _resolve_mm_processor_device(
     mm_config = MultiModalConfig(
         mm_processor_kwargs={} if device is None else {"device": device},
         mm_tensor_ipc=mm_tensor_ipc,
+        mm_cuda_ipc_pool_gb=(1.0 if mm_tensor_ipc == "cuda_ipc_pool" else 0.0),
     )
     model_config = MagicMock(spec=ModelConfig)
     model_config.multimodal_config = mm_config
@@ -578,9 +579,41 @@ def _resolve_mm_processor_device(
     return mm_config.get_mm_processor_device_type()
 
 
-def test_auto_mm_processor_device_uses_accelerator_on_encoder_instance():
+@pytest.mark.parametrize("mm_tensor_ipc", ["torch_shm", "cuda_ipc_pool"])
+def test_auto_mm_processor_device_uses_accelerator_on_encoder_instance(
+    mm_tensor_ipc: str,
+):
     """The one deployment that has the device to itself and can hand it over."""
-    assert _resolve_mm_processor_device(ec_role="ec_producer") == "cuda"
+    assert (
+        _resolve_mm_processor_device(
+            ec_role="ec_producer",
+            mm_tensor_ipc=mm_tensor_ipc,
+        )
+        == "cuda"
+    )
+
+
+def test_cuda_ipc_pool_requires_gpu_memory():
+    with pytest.raises(ValueError, match="mm_cuda_ipc_pool_gb"):
+        MultiModalConfig(mm_tensor_ipc="cuda_ipc_pool")
+
+
+def test_cuda_ipc_pool_memory_requires_pool_transport():
+    with pytest.raises(ValueError, match="should only be set"):
+        MultiModalConfig(mm_cuda_ipc_pool_gb=1.0)
+
+
+def test_cuda_ipc_pool_rejects_multiple_api_processes():
+    model_config = MagicMock(spec=ModelConfig)
+    model_config.multimodal_config = MultiModalConfig(
+        mm_tensor_ipc="cuda_ipc_pool",
+        mm_cuda_ipc_pool_gb=1.0,
+    )
+    parallel_config = MagicMock()
+    parallel_config._api_process_count = 2
+
+    with pytest.raises(ValueError, match="api-server-count=1"):
+        ModelConfig.verify_with_parallel_config(model_config, parallel_config)
 
 
 @pytest.mark.parametrize("ec_role", [None, "ec_consumer", "ec_both"])

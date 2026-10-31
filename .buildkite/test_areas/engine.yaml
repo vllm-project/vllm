@@ -52,8 +52,10 @@ steps:
   timeout_in_minutes: 45
   source_file_dependencies:
     - vllm/v1/engine/
+    - vllm/multimodal/gpu_ipc_memory.py
     - tests/v1/engine/
     - tests/v1/test_tensor_ipc_queue.py
+    - tests/v1/test_cuda_ipc_transport.py
   commands:
     - pytest -v -s v1/engine/test_preprocess_error_handling.py
     - >-
@@ -61,6 +63,7 @@ steps:
       v1/engine
       --ignore v1/engine/test_preprocess_error_handling.py
     - pytest -v -s v1/test_tensor_ipc_queue.py
+    - pytest -v -s v1/test_cuda_ipc_transport.py
   mirror:
     amd:
       label: ":amd: (MI250) V1 Engine"
