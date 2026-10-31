@@ -236,6 +236,31 @@ curl -s http://localhost:8000/score -H "Content-Type: application/json" -d '{
 
 An example can be found here: [examples/pooling/score/colqwen3_5_rerank_online.py](../../../examples/pooling/score/colqwen3_5_rerank_online.py)
 
+## ColUltraVBERT Multi-Modal Late Interaction Models
+
+ColUltraVBERT pairs the UltraBERT text encoder with a SigLIP vision encoder and returns per-token vectors for MaxSim scoring.
+
+| Architecture | Backbone | Example HF Models |
+| - | - | - |
+| `ColUltraVBertForRetrieval` | UltraVBERT | `athrael-soju/ColUltraVBERT` |
+
+Clients send the prompts the model was trained with: a page goes in as `User:<image>Describe the image.<end_of_utterance>\nAssistant:` with its image, and a query as its text followed by ten `<end_of_utterance>` tokens.
+
+```python
+from PIL import Image
+
+from vllm import LLM
+
+llm = LLM(model="athrael-soju/ColUltraVBERT", runner="pooling")
+page = {
+    "prompt": "User:<image>Describe the image.<end_of_utterance>\nAssistant:",
+    "multi_modal_data": {"image": Image.open("page.png").convert("RGB")},
+}
+query = "What was the total revenue in 2023?" + "<end_of_utterance>" * 10
+page_output, query_output = llm.encode([page, query], pooling_task="token_embed")
+page_vectors, query_vectors = page_output.outputs.data, query_output.outputs.data
+```
+
 ## Llama Nemotron Multimodal
 
 ### Embedding Model

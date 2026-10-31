@@ -56,6 +56,14 @@ def shuffle_weight(w: torch.Tensor) -> torch.Tensor:
     return stacked.reshape(shape)
 
 
+def _interleave_gate_up_rows(t: torch.Tensor) -> torch.Tensor:
+    """Reorder contiguous ``[gate; up]`` rows into gpt-oss interleaved order."""
+    e, two_i = t.shape[0], t.shape[1]
+    i, rest = two_i // 2, t.shape[2:]
+    perm = (0, 2, 1, *range(3, 3 + len(rest)))
+    return t.view(e, 2, i, *rest).permute(*perm).contiguous().view(e, two_i, *rest)
+
+
 def make_dummy_moe_config(
     num_experts: int = 1,
     num_local_experts: int | None = None,
@@ -292,7 +300,9 @@ def moe_quantize_weights_2d(
             raise RuntimeError(f"Unsupported quant type {quant_dtype}")
     else:
         if quant_dtype == torch.int8:
-            w, w_s = ops.scaled_int8_quant(
+            # Stale reference: scaled_int8_quant no longer accepts
+            # use_per_token_if_dynamic and returns (q, scale, azp).
+            w, w_s = ops.scaled_int8_quant(  # type: ignore[call-arg, misc]
                 w, w_s, use_per_token_if_dynamic=per_token_quant
             )
         elif is_fp8_dtype:
@@ -340,6 +350,15 @@ def moe_quantize_weights(
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
     assert w.dim() == 3
     e, rows, cols = w.shape
+
+    if quant_dtype == "mxfp4":
+        assert block_shape is None
+        assert not per_token_quant
+        from triton_kernels.numerics_details.mxfp import downcast_to_mxfp
+
+        w_q, w_scale = downcast_to_mxfp(w, torch.uint8, axis=-1)
+        return w_q, w_scale, None
+
     w_l = [None] * e
     w_s_l = [None] * e
     w_gs_l = [None] * e

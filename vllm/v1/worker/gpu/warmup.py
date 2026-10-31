@@ -250,6 +250,13 @@ def warmup_kernels(
         if adaptive_sampling:
             assert rejection_sampler is not None
             rejection_sampler.enable_adaptive_verification = True
+    if adaptive_verification is not None:
+        adaptive_verification.warmup_budget_kernel()
+    acceptance_estimator = getattr(
+        model_runner.speculator, "acceptance_estimator", None
+    )
+    if acceptance_estimator is not None:
+        acceptance_estimator.warmup()
 
 
 def _warmup_kernels(
@@ -384,7 +391,9 @@ def _warmup_kernels(
             vocab_size = model_runner.model_config.get_vocab_size()
             bitmask_width = (vocab_size + 31) // 32
             grammar_bitmask = np.full(
-                (len(req_ids), bitmask_width), fill_value=-1, dtype=np.int32
+                (len(req_ids) * model_runner.decode_query_len, bitmask_width),
+                fill_value=-1,
+                dtype=np.int32,
             )
             grammar_output = GrammarOutput(
                 structured_output_request_ids=req_ids, grammar_bitmask=grammar_bitmask
