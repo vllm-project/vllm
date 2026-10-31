@@ -8,7 +8,7 @@ than JSON, so the two parsers are tested together: the reasoning parser strips
 the reasoning span and forwards the remaining channels as content, and the tool
 parser reads ATEM markup out of those channels.
 
-Five areas, in order:
+Seven areas, in order:
 
   1. non-streaming tool-call extraction, including channel scoping (an
      ``<atem:invoke>`` echoed inside reasoning must never become a call);
@@ -19,21 +19,27 @@ Five areas, in order:
      header written without the closing ``<|eom|>`` still ends the reasoning;
   4. streaming, where markers routinely straddle chunk boundaries, plus
      truncation isolation for an unterminated ``to=self`` block;
-  5. tool-name normalization against the tools registered on the request.
+  5. tool-name normalization against the tools registered on the request;
+  6. reasoning token counting;
+  7. reasoning-end detection over token ids.
 
 These drive the parsers directly and need no checkpoint. The tests that require
-a real tokenizer live in ``test_muse_parse_delta.py``.
+a real Muse tokenizer live in ``test_muse_parse_delta.py``.
 """
 
 import json
 from contextlib import suppress
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import MagicMock
 
 import pytest
+from transformers import AutoTokenizer
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.parser import ParserManager
+from vllm.reasoning.muse_glimmer_reasoning_parser import MuseGlimmerReasoningParser
 from vllm.reasoning.muse_reasoning_parser import MuseReasoningParser
 from vllm.tool_parsers.muse_glimmer_tool_parser import MuseGlimmerToolParser
 from vllm.tool_parsers.muse_tool_parser import MuseToolParser
@@ -663,3 +669,159 @@ def test_count_reasoning_tokens(raw, expected):
     tok = _CharTokenizer()
     parser = MuseReasoningParser(tok)
     assert parser.count_reasoning_tokens(tok.encode(raw)) == expected
+
+
+# -------------------------------------------------- reasoning end over token ids
+
+_SYSTEM = "<|start|>system<|message|>" + "Answer briefly. " * 64 + "<|eom|>"
+_USER = "<|start|>user<|message|>hi<|eom|>"
+_PROMPT = _SYSTEM + _USER + "<|start|>assistant"
+_PRIOR_TOOL_TURN = (
+    "<|start|>assistant to=read.read<|message|><atem:function_calls>"
+    "</atem:function_calls><|eom|><|start|>user<|message|>again<|eom|>"
+)
+_RAW_UTF8_TOOLCALL = (
+    " to=self<|message|>思考 🤔 if a < b: <atem:invoke echoed<|eom|>"
+    "<|start|>assistant to=read.read<|message|>🤔<atem:function_calls>"
+)
+_PARSERS = [MuseReasoningParser, MuseGlimmerReasoningParser]
+# Three decodes per new token, plus held half characters.
+_DECODES_PER_TOKEN = 4
+
+
+@pytest.fixture(scope="module")
+def gpt2():
+    return AutoTokenizer.from_pretrained("gpt2")
+
+
+def _ids(tokenizer, text: str) -> list[int]:
+    return tokenizer.encode(text, add_special_tokens=False)
+
+
+def _decoded_lengths(tokenizer: MagicMock) -> list[int]:
+    return [len(call.args[0]) for call in tokenizer.decode.call_args_list]
+
+
+@pytest.mark.parametrize("chunk", [1, 5])
+@pytest.mark.parametrize(
+    ("prompt", "output"),
+    [
+        (_PROMPT, RAW_TOOLCALL),
+        (_PROMPT, RAW_ANSWER),
+        (_PROMPT, RAW_TRUNCATED),
+        (_PROMPT, RAW_MISSING_EOM_TOOLCALL),
+        (_PRIOR_TOOL_TURN + _PROMPT, RAW_ANSWER),
+        (_PROMPT, _RAW_UTF8_TOOLCALL),
+        (_SYSTEM + _USER, "<|start|> to=read.read<|message|><atem:function_calls>"),
+    ],
+    ids=["tool", "answer", "truncated", "missing_eom", "prior_turn", "utf8", "no_turn"],
+)
+@pytest.mark.parametrize("parser_cls", _PARSERS)
+def test_is_reasoning_end_streaming_decodes_only_new_tokens(
+    gpt2, parser_cls, prompt, output, chunk
+):
+    prompt_ids = _ids(gpt2, prompt)
+    ids = prompt_ids + _ids(gpt2, output)
+    reference, tokenizer = parser_cls(gpt2), MagicMock(wraps=gpt2)
+    parser = parser_cls(tokenizer)
+    assert parser.is_reasoning_end_streaming(
+        prompt_ids, prompt_ids
+    ) == reference.is_reasoning_end(prompt_ids)
+    tokenizer.decode.reset_mock()
+    for start in range(len(prompt_ids), len(ids), chunk):
+        history = ids[: start + chunk]
+        assert parser.is_reasoning_end_streaming(
+            history, history[start:]
+        ) == reference.is_reasoning_end(history), gpt2.decode(history)
+    assert sum(_decoded_lengths(tokenizer)) <= _DECODES_PER_TOKEN * (
+        len(ids) - len(prompt_ids)
+    )
+
+
+@pytest.mark.parametrize("parser_cls", _PARSERS)
+def test_is_reasoning_end_streaming_follows_speculative_steps(gpt2, parser_cls):
+    reference, tokenizer = parser_cls(gpt2), MagicMock(wraps=gpt2)
+    streams = [
+        (parser_cls(tokenizer), _ids(gpt2, _PROMPT + raw))
+        for raw in (RAW_TOOLCALL, RAW_ANSWER)
+    ]
+    rejected = _ids(gpt2, " Done")
+    for end in range(1, max(len(ids) for _, ids in streams)):
+        for parser, ids in streams:
+            drafts = ids[end : end + 2] + rejected
+            probes = [ids[:end] + drafts[:i] for i in range(len(drafts), 0, -1)]
+            for probe in [*probes, ids[: end + 1]]:
+                assert parser.is_reasoning_end_streaming(
+                    probe, probe[end:]
+                ) == reference.is_reasoning_end(probe), gpt2.decode(probe)
+    assert max(_decoded_lengths(tokenizer)) < len(_ids(gpt2, _PROMPT))
+
+
+@pytest.mark.parametrize("parser_cls", _PARSERS)
+def test_is_reasoning_end_streaming_rereads_changed_history(gpt2, parser_cls):
+    head = _ids(gpt2, _PROMPT + " to=self<|message|>Need it.<|eom|><|start|>assistant")
+    body = _ids(gpt2, " word" * 32 + "<atem:function_calls>")
+    tool, answer = (
+        head + _ids(gpt2, f" to={to}<|message|>") + body for to in ("read", "user")
+    )
+    assert len(tool) == len(answer)
+    tokenizer = MagicMock(wraps=gpt2)
+    parser = parser_cls(tokenizer)
+    for end in range(len(head), len(tool) + 1):
+        parser.is_reasoning_end_streaming(tool[:end], tool[end - 1 : end])
+    decodes = tokenizer.decode.call_count
+    assert parser.is_reasoning_end_streaming(tool, [])
+    assert tokenizer.decode.call_count == decodes
+    assert not parser.is_reasoning_end_streaming(answer, answer[-1:])
+    assert not parser.is_reasoning_end_streaming(head, head[-1:])
+    assert parser.is_reasoning_end_streaming(tool, tool)
+
+
+@pytest.mark.parametrize("chunk", [1, 3])
+@pytest.mark.parametrize(
+    ("output", "reasoning", "content", "tool_calls"),
+    [
+        (
+            RAW_TOOLCALL,
+            "I should read the hostname file to answer.",
+            "",
+            [("read.read", {"path": "/etc/hostname"})],
+        ),
+        (RAW_ANSWER, "Think about it.", "The answer is 42.", []),
+    ],
+    ids=["tool", "answer"],
+)
+@pytest.mark.parametrize("parser_name", ["muse", "muse_glimmer"])
+def test_parse_delta_reasoning_end_decodes_only_the_prompt(
+    gpt2, parser_name, output, reasoning, content, tool_calls, chunk
+):
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name=parser_name,
+        reasoning_parser_name=parser_name,
+        enable_auto_tools=True,
+    )
+    assert parser_cls is not None
+    tokenizer = MagicMock(wraps=gpt2)
+    parser = parser_cls(tokenizer)
+    request = SimpleNamespace(tools=None, tool_choice=None, include_reasoning=True)
+    prompt_ids, ids = _ids(gpt2, _PROMPT), _ids(gpt2, output)
+    reasonings, contents, calls = [], [], []
+    for start in range(0, len(ids), chunk):
+        delta_ids = ids[start : start + chunk]
+        delta = parser.parse_delta(
+            gpt2.decode(delta_ids),
+            delta_ids,
+            request,
+            prompt_token_ids=prompt_ids if start == 0 else None,
+            finished=start + chunk >= len(ids),
+        )
+        if delta is not None:
+            reasonings.append(delta.reasoning or "")
+            contents.append(delta.content or "")
+            calls.extend(delta.tool_calls)
+    assert "".join(reasonings) == reasoning
+    assert "".join(contents) == content
+    assert [
+        (name, json.loads(arguments)) for name, arguments in map(_fn_of, calls)
+    ] == tool_calls
+    assert _decoded_lengths(tokenizer) == [len(prompt_ids)]

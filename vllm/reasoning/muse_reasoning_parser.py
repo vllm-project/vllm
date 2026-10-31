@@ -17,6 +17,7 @@ Usage: ``--reasoning-parser muse``
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Sequence
+from dataclasses import dataclass, replace
 
 import regex as re
 
@@ -30,7 +31,13 @@ _EOT = "<|eot|>"
 _TRAILING_RECIPIENT_RE = re.compile(r"to=(?P<recipient>[^\s<]+)\s*$")
 _FUNCTION_CALLS_OPEN = "<atem:function_calls>"
 _REASONING_OPEN = "to=self<|message|>"
+_START = "<|start|>"
 _ASSISTANT_TURN_OPEN = "<|start|>assistant"
+# Every marker starts with "<", so text without one near it cannot change the
+# verdict.
+_MARKER_SPAN = len(_FUNCTION_CALLS_OPEN)
+_MAX_END_CHECKPOINTS = 8
+_UTF8_MAX_BYTES = 4
 # A channel header: ``to=<recipient><|message|>`` where recipient is ``self``
 # (reasoning), ``user`` (final answer) or ``<tool>[.<fn>]`` (tool call).
 _CHANNEL_HEADER_RE = re.compile(r"to=(?P<recipient>[^\s<]+)<\|message\|>")
@@ -146,6 +153,17 @@ def _trim_open_body(body: str) -> str:
         body = trimmed
 
 
+@dataclass
+class _EndCheckpoint:
+    num_ids: int
+    context_start: int
+    context_text: str
+    window: str = ""
+    awaiting_assistant: bool = False
+    tool_called: bool = False
+    ended: bool = False
+
+
 class MuseReasoningParser(ReasoningParser):
     _glimmer_compat = False
 
@@ -159,6 +177,9 @@ class MuseReasoningParser(ReasoningParser):
         self._emitted_content: str = ""
         self._tool_handoff_done: bool = False
         self._marker_ids: tuple[int | None, set[int]] | None = None
+        self._streamed_ids: Sequence[int] | None = None
+        self._end_ids: list[int] = []
+        self._end_checkpoints: list[_EndCheckpoint] = []
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
@@ -186,13 +207,116 @@ class MuseReasoningParser(ReasoningParser):
             text = self.model_tokenizer.decode(input_ids)
         except Exception:
             return False
-        remainder = self._tool_channel_remainder(text)
-        return _FUNCTION_CALLS_OPEN in remainder or "<atem:invoke" in remainder
+        return self._ends_reasoning(text)
 
     def is_reasoning_end_streaming(
         self, input_ids: Sequence[int], delta_ids: Iterable[int]
     ) -> bool:
-        return self.is_reasoning_end(list(input_ids))
+        # parse_delta passes the ids extract_reasoning_streaming just classified.
+        if input_ids is self._streamed_ids:
+            return self._tool_handoff_done
+        try:
+            return self._advance_reasoning_end(input_ids)
+        except Exception:
+            return False
+
+    def _advance_reasoning_end(self, input_ids: Sequence[int]) -> bool:
+        prev = self._restore_end_checkpoint(input_ids)
+        if prev is not None and len(input_ids) == prev.num_ids:
+            return prev.ended
+        if prev is not None:
+            text = self.model_tokenizer.decode(input_ids[prev.context_start :])
+            if text.startswith(prev.context_text):
+                new_text = text[len(prev.context_text) :]
+                state = replace(
+                    prev, num_ids=len(input_ids), context_start=prev.num_ids
+                )
+                if "<" in prev.window[-_MARKER_SPAN:] or "<" in new_text:
+                    self._update_end_state(
+                        state, prev.window + new_text, len(prev.window)
+                    )
+                else:
+                    state.window += new_text
+            else:
+                prev = None
+        if prev is None:
+            text = self.model_tokenizer.decode(list(input_ids))
+            state = _EndCheckpoint(len(input_ids), 0, text)
+            self._update_end_state(state, text, 0)
+        # A trailing U+FFFD may be half a character.
+        if not text.endswith("\ufffd"):
+            if prev is None:
+                self._end_checkpoints.clear()
+                self._end_ids.clear()
+                state.context_start, state.context_text = self._seed_context(
+                    input_ids, text
+                )
+            else:
+                state.context_text = self.model_tokenizer.decode(
+                    input_ids[prev.num_ids :]
+                )
+            self._end_ids.extend(input_ids[len(self._end_ids) :])
+            self._end_checkpoints.append(state)
+            del self._end_checkpoints[:-_MAX_END_CHECKPOINTS]
+        return state.ended
+
+    def _seed_context(self, input_ids: Sequence[int], text: str) -> tuple[int, str]:
+        num_ids = len(input_ids)
+        for start in reversed(range(max(num_ids - _UTF8_MAX_BYTES, 0), num_ids)):
+            context = self.model_tokenizer.decode(input_ids[start:])
+            if context and text.endswith(context):
+                return start, context
+        return 0, text
+
+    def _restore_end_checkpoint(
+        self, input_ids: Sequence[int]
+    ) -> _EndCheckpoint | None:
+        checkpoints, end_ids = self._end_checkpoints, self._end_ids
+        if not checkpoints:
+            return None
+        if input_ids[: len(end_ids)] == end_ids:
+            return checkpoints[-1]
+        base = checkpoints[0].num_ids
+        if input_ids[:base] != end_ids[:base]:
+            return None
+        while (
+            input_ids[base : checkpoints[-1].num_ids]
+            != end_ids[base : checkpoints[-1].num_ids]
+        ):
+            checkpoints.pop()
+        del end_ids[checkpoints[-1].num_ids :]
+        return checkpoints[-1]
+
+    def _update_end_state(
+        self, state: _EndCheckpoint, text: str, scan_from: int
+    ) -> None:
+        start = max(scan_from - _MARKER_SPAN, 1)
+        if self._glimmer_compat:
+            cut = text.rfind(_ASSISTANT_TURN_OPEN, start)
+            state.window = text[cut:] if cut != -1 else text
+            state.ended = self._ends_reasoning(state.window)
+            return
+        pos = 0
+        while (cut := text.find(_START, start)) != -1:
+            closed = text[pos:cut]
+            if _MUSE_OTHER_ROLE_RE.match(closed):
+                state.awaiting_assistant, state.tool_called = True, False
+            elif not state.awaiting_assistant or closed.startswith(
+                _ASSISTANT_TURN_OPEN
+            ):
+                state.awaiting_assistant = False
+                state.tool_called = state.tool_called or self._ends_reasoning(closed)
+            pos, start = cut, cut + 1
+        state.window = window = text[pos:]
+        in_turn = not _MUSE_OTHER_ROLE_RE.match(window) and (
+            not state.awaiting_assistant or window.startswith(_ASSISTANT_TURN_OPEN)
+        )
+        state.ended = in_turn and (state.tool_called or self._ends_reasoning(window))
+
+    @classmethod
+    def _ends_reasoning(cls, text: str) -> bool:
+        remainder = cls._tool_channel_remainder(text)
+        return _FUNCTION_CALLS_OPEN in remainder or "<atem:invoke" in remainder
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         # Content-id slicing is unreliable for multi-token markers; the serving
@@ -402,6 +526,7 @@ class MuseReasoningParser(ReasoningParser):
         emitted yet, so no framing token is ever surfaced and a delta straddling
         a channel boundary only contributes the portion inside a real body.
         """
+        self._streamed_ids = current_token_ids
         if not self._glimmer_compat and not self._tool_handoff_done:
             remainder = self._tool_channel_remainder(current_text)
             if remainder:
