@@ -625,3 +625,333 @@ def test_chunk_scan_fwd_every_config_matches(monkeypatch):
                 rtol=2e-2,
                 msg=lambda m, config=config: f"{config}: {m}",
             )
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        (64, 64, 128, 1, 128),
+        (64, 64, 128, 8, 128),
+        (16, 32, 64, 4, 64),
+        (32, 64, 256, 4, 128),
+        (16, 128, 128, 2, 256),
+    ],
+    ids=["granite", "grouped", "small-chunks", "large-state", "large-chunks"],
+)
+@pytest.mark.parametrize("state_dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("fp32_inputs", [False, True])
+@pytest.mark.parametrize(
+    "lengths,initial_slots,final_slots,valid,checkpoints,write_final",
+    [
+        ([32], [1], [1], [True], False, True),
+        ([257], [2], [3], [True], False, True),
+        ([33], [-1], [1], [False], False, True),
+        ([32, 257], [1, 1], [1, 3], [True, True], False, True),
+        ([257, 33], [1, 2], [2, 1], [True, True], False, True),
+        ([1, 257, 33], [1, -1, 1], [1, 2, 3], [True, False, True], False, True),
+        ([257], [1], [1], [True], True, False),
+        ([257, 33], [1, 1], [2, 3], [True, True], True, False),
+        ([257], [1], [1], [True], False, False),
+    ],
+    ids=[
+        "in-place-first-call",
+        "multi-chunk",
+        "masked-invalid-slot",
+        "shared-source-overwritten",
+        "crossed-slots",
+        "mixed-validity",
+        "single-checkpoint-fallback",
+        "shared-checkpoint-fallback",
+        "returned-final-state",
+    ],
+)
+def test_indexed_initial_state_handoff(
+    monkeypatch,
+    shape,
+    state_dtype,
+    fp32_inputs,
+    lengths,
+    initial_slots,
+    final_slots,
+    valid,
+    checkpoints,
+    write_final,
+):
+    _check_indexed_initial_state_handoff(
+        monkeypatch,
+        shape,
+        state_dtype,
+        fp32_inputs,
+        lengths,
+        initial_slots,
+        final_slots,
+        valid,
+        checkpoints,
+        write_final,
+    )
+
+
+def _check_indexed_initial_state_handoff(
+    monkeypatch,
+    shape,
+    state_dtype,
+    fp32_inputs,
+    lengths,
+    initial_slots,
+    final_slots,
+    valid,
+    checkpoints,
+    write_final,
+    *,
+    guard_autotune=False,
+    force_snapshot=False,
+    guard_gather_warmup=False,
+    initial_columns=2,
+):
+    """Cache inputs must behave like a snapshot, including the first aliasing call.
+
+    Checkpoint callers must still see inclusive states, and shared/crossed input
+    slots must survive other requests' final writes. Padding is a write sentinel.
+    """
+    from vllm.model_executor.layers.mamba.ops import (
+        ssd_combined,
+        ssd_state_passing,
+        triton_helpers,
+    )
+    from vllm.triton_utils import triton
+
+    set_random_seed(19)
+    monkeypatch.setattr(triton_helpers, "_autotuned_configs", {})
+    for kernel, config in [
+        (
+            _chunk_scan_fwd_kernel,
+            triton.Config(
+                {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
+                num_stages=1,
+            ),
+        ),
+        (
+            ssd_state_passing._state_passing_fwd_kernel,
+            triton.Config({"BLOCK_SIZE": 512}),
+        ),
+    ]:
+        monkeypatch.setattr(kernel, "configs", [config])
+        monkeypatch.setattr(kernel, "cache", {})
+    heads, dim, dstate, groups, chunk = shape
+    length = sum(lengths)
+    storage = torch.randn(
+        5, heads * dim * dstate + 128, device=DEVICE, dtype=state_dtype
+    )
+    reference_storage = storage.clone()
+    cache = storage[:, : heads * dim * dstate].view(5, heads, dim, dstate)
+    reference_cache = reference_storage[:, : heads * dim * dstate].view_as(cache)
+    indices = torch.tensor(initial_slots, device=DEVICE, dtype=torch.int32)
+    indices = indices.repeat_interleave(2)[::2]
+    mask = torch.tensor(valid, device=DEVICE).repeat_interleave(2)[::2]
+    if guard_gather_warmup:
+        # Match metadata's decode-row slice followed by prefill's [:, 0].
+        table = torch.zeros(
+            len(lengths) + 1, initial_columns, device=DEVICE, dtype=torch.int32
+        )
+        table[1:, 0] = indices
+        indices = table[1:, 0]
+        mask = torch.tensor(valid, device=DEVICE)
+    destinations = torch.tensor(final_slots, device=DEVICE, dtype=torch.int32)
+    destinations = destinations.repeat_interleave(2)[::2]
+    input_dtype = (
+        torch.float32
+        if fp32_inputs
+        else (torch.float16 if state_dtype == torch.float16 else torch.bfloat16)
+    )
+    x = torch.randn(length, heads, dim, device=DEVICE, dtype=input_dtype) * 0.1
+    dt = torch.randn(length, heads, device=DEVICE) - 3
+    A = -torch.rand(heads, device=DEVICE)
+    B = torch.randn(length, groups, dstate, device=DEVICE, dtype=x.dtype) * 0.1
+    C = torch.randn_like(B) * 0.1
+    cu = torch.tensor(
+        [0] + list(torch.tensor(lengths).cumsum(0).tolist()),
+        device=DEVICE,
+        dtype=torch.int32,
+    )
+    cu_chunk, last, seq = compute_varlen_chunk_metadata(cu, chunk)
+    common = dict(
+        x=x,
+        dt=dt,
+        A=A,
+        B=B,
+        C=C,
+        chunk_size=chunk,
+        cu_seqlens=cu,
+        cu_chunk_seqlens=cu_chunk,
+        last_chunk_indices=last,
+        seq_idx=seq,
+        dt_softplus=True,
+        state_dtype=state_dtype,
+        return_intermediate_states=checkpoints,
+        final_state_indices=destinations if write_final else None,
+    )
+    output, reference_output = torch.empty_like(x), torch.empty_like(x)
+    if fp32_inputs and state_dtype == torch.float32:
+        with pytest.raises(AssertionError, match="must have the same dtype"):
+            mamba_chunk_scan_combined_varlen(
+                **dict(common, state_dtype=torch.bfloat16),
+                out=output,
+                initial_state_cache=cache,
+                initial_state_indices=indices,
+                has_initial_state=mask,
+                final_states_out=cache if write_final else None,
+            )
+        torch.testing.assert_close(storage, reference_storage, rtol=0, atol=0)
+    snapshot_calls = []
+    with monkeypatch.context() as first_call:
+        if guard_gather_warmup:
+            from collections import defaultdict
+
+            from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
+                _gather_initial_states_kernel,
+            )
+            from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
+
+            kernel = _gather_initial_states_kernel.kernel
+            # Earlier tests or the disk cache must not hide a missing key.
+            first_call.setattr(
+                kernel,
+                "device_caches",
+                defaultdict(kernel.device_caches.default_factory),
+            )
+            registry = JitWarmupRegistry(None)
+            with registry.activate():
+                for _ in range(2):
+                    _gather_initial_states_kernel.register_warmup(
+                        row_size=heads * dim * dstate, state_dtype=state_dtype
+                    )
+            assert len(registry) == 1
+            raw_run = kernel.run
+
+            def require_compile_only(*args, **kwargs):
+                assert kwargs.get("warmup"), "Warmup must not launch the gather"
+                return raw_run(*args, **kwargs)
+
+            def forbid_allocation(*args, **kwargs):
+                pytest.fail("Gather warmup must not allocate real tensors")
+
+            with monkeypatch.context() as startup:
+                startup.setattr(kernel, "run", require_compile_only)
+                startup.setattr(torch, "empty", forbid_allocation)
+                startup.setattr(torch, "empty_strided", forbid_allocation)
+                registry.warmup()
+            previous_hook = triton.knobs.runtime.jit_post_compile_hook
+
+            def forbid_gather_compile(**kwargs):
+                if getattr(kwargs.get("fn"), "name", "") == kernel.__name__:
+                    pytest.fail("Strided snapshot compiled after startup warmup")
+                if previous_hook is not None:
+                    return previous_hook(**kwargs)
+
+            first_call.setattr(
+                triton.knobs.runtime, "jit_post_compile_hook", forbid_gather_compile
+            )
+        if force_snapshot:
+            first_call.setattr(current_platform, "is_cuda", lambda: False)
+            raw_passing = ssd_combined._state_passing_fwd
+
+            def require_snapshot(*args, **kwargs):
+                assert kwargs.get("initial_state_indices") is None
+                snapshot_calls.append(True)
+                return raw_passing(*args, **kwargs)
+
+            first_call.setattr(ssd_combined, "_state_passing_fwd", require_snapshot)
+        if guard_autotune:
+            kernel = ssd_state_passing._state_passing_fwd_kernel
+            first_call.setattr(
+                kernel,
+                "configs",
+                [triton.Config({"BLOCK_SIZE": size}) for size in (256, 512, 1024)],
+            )
+
+            def forbid_autotune(*args, **kwargs):
+                pytest.fail("Indexed aliasing must bypass the autotuner")
+
+            first_call.setattr(kernel, "run", forbid_autotune)
+            first_call.setattr(ssd_state_passing, "launch_autotuned", forbid_autotune)
+        actual_states = mamba_chunk_scan_combined_varlen(
+            **common,
+            out=output,
+            initial_state_cache=cache,
+            initial_state_indices=indices,
+            has_initial_state=mask,
+            final_states_out=cache if write_final else None,
+        )
+    if force_snapshot:
+        assert snapshot_calls == [True]
+    dense = torch.where(mask[:, None, None, None], reference_cache[indices], 0)
+    expected_states = mamba_chunk_scan_combined_varlen(
+        **common,
+        out=reference_output,
+        initial_states=dense,
+        final_states_out=reference_cache if write_final else None,
+    )
+    torch.testing.assert_close(output, reference_output, rtol=0, atol=0)
+    torch.testing.assert_close(storage, reference_storage, rtol=0, atol=0)
+    if write_final:
+        assert actual_states is expected_states is None
+    else:
+        torch.testing.assert_close(actual_states, expected_states, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Indexed CUDA path")
+def test_indexed_aliasing_bypasses_autotuner(monkeypatch):
+    """A first in-place multi-chunk call must not run destructive autotuning."""
+    _check_indexed_initial_state_handoff(
+        monkeypatch,
+        (32, 64, 256, 4, 128),
+        torch.float16,
+        False,
+        [257],
+        [1],
+        [1],
+        [True],
+        False,
+        True,
+        guard_autotune=True,
+    )
+
+
+def test_indexed_cache_uses_snapshot_off_cuda(monkeypatch):
+    """Unvalidated platforms retain snapshot semantics even for one request."""
+    _check_indexed_initial_state_handoff(
+        monkeypatch,
+        (16, 32, 64, 4, 64),
+        torch.bfloat16,
+        False,
+        [257],
+        [1],
+        [1],
+        [True],
+        False,
+        True,
+        force_snapshot=True,
+    )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Mamba2 CUDA warmup")
+@pytest.mark.parametrize("state_dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("columns", [1, 2, 3, 16, 17, 32])
+def test_strided_snapshot_does_not_compile_after_warmup(
+    monkeypatch, state_dtype, columns
+):
+    """A real B>1 fallback must reuse compile-only startup's gather keys."""
+    _check_indexed_initial_state_handoff(
+        monkeypatch,
+        (16, 32, 64, 4, 64),
+        state_dtype,
+        False,
+        [32, 33],
+        [1, 1],
+        [1, 2],
+        [True, True],
+        False,
+        True,
+        guard_gather_warmup=True,
+        initial_columns=columns,
+    )
