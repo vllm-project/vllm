@@ -2389,8 +2389,8 @@ def test_aiter_sparse_pa_layout_contract(monkeypatch, layout):
         assert v_view.shape == (40, 1, 1, 128, 16)
 
 
-def test_aiter_sparse_pa_rejects_multiple_kv_heads(monkeypatch):
-    """Do not pair AITER's separated cache layout with the Triton fallback."""
+def test_aiter_sparse_pa_selected_when_requested(monkeypatch):
+    """AITER sparse PA is selected whenever AITER shuffled KV cache is on."""
     import vllm.models.minimax_m3.common.sparse_attention as sparse_attn_mod
 
     monkeypatch.setattr(sparse_attn_mod.rocm_aiter_ops, "is_enabled", lambda: True)
@@ -2400,22 +2400,12 @@ def test_aiter_sparse_pa_rejects_multiple_kv_heads(monkeypatch):
         lambda: True,
     )
 
-    with pytest.raises(ValueError, match="num_kv_heads == 1"):
-        sparse_attn_mod.minimax_m3_use_aiter_sparse_pa(2)
-
-    # An indexer that emits the attend's page table addresses every head, so
-    # the pairing the check guards against does not arise.
-    assert sparse_attn_mod.minimax_m3_use_aiter_sparse_pa(
-        2, emits_sparse_block_table=True
-    )
     # The AITER path carries its own backend: its builder is what rebases the
     # block table the indexer's top-k resolves through, so selecting the impl
     # without it would leave that field unset.
     backend, impl_cls = sparse_attn_mod.select_main_backend_and_impl_cls(
         topk_blocks=TOPK,
         kv_cache_dtype="fp8_e4m3",
-        num_kv_heads=2,
-        emits_sparse_block_table=True,
     )
     assert impl_cls.__name__ == "MiniMaxM3SparseAiterPAImpl"
     assert backend.__name__ == "MiniMaxM3SparseAiterPABackend"
@@ -3042,6 +3032,229 @@ def test_aiter_decode_sparse_block_table_supports_spec_decode():
 
     assert torch.equal(sparse_ctx, expected_ctx)
     assert torch.equal(sparse_bt, expected_bt)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="MiniMax-M3 AITER sparse PA is ROCm-only",
+)
+@pytest.mark.parametrize("decode_query_len", [1, 2])
+@pytest.mark.parametrize("kvh", [2, 4])
+def test_aiter_decode_sparse_block_table_addresses_each_kv_head(decode_query_len, kvh):
+    """Each KV head's row must reach that head's own pages, head minor.
+
+    The attend flattens its ``[num_phys16, num_kv_heads, ...]`` cache before
+    calling Gluon, so the row for (token, head) is ``token * kvh + head`` and
+    page ``p`` of head ``h`` is ``p * kvh + h``. Selecting different blocks per
+    head is what separates a correct table from one that serves head 0 twice.
+    """
+    from vllm.models.minimax_m3.amd.ops.sparse_pa import (
+        minimax_m3_build_sparse_block_table_decode,
+    )
+
+    seq_lens = torch.tensor([390, 133], device="cuda", dtype=torch.int32)
+    # No zero entries: a selected page is then nonzero under the single-head
+    # numbering, which separates used slots from the zero fill below.
+    block_table = torch.tensor(
+        [[3, 9, 4, 6], [7, 2, 1, 5]], device="cuda", dtype=torch.int32
+    )
+    topk_idx = torch.tensor(
+        [
+            [[2, 0, 1, -1], [1, 2, 0, -1], [0, -1, 1, -1], [1, 0, -1, -1]],
+            [[1, 2, -1, -1], [0, 2, -1, -1], [1, 0, -1, -1], [0, -1, -1, -1]],
+            [[3, 1, -1, -1], [0, 1, -1, -1], [2, -1, -1, -1], [1, -1, -1, -1]],
+            [[0, 3, 2, -1], [1, -1, -1, -1], [3, 0, -1, -1], [0, 1, -1, -1]],
+        ],
+        device="cuda",
+        dtype=torch.int32,
+    )[:kvh, : block_table.shape[0] * decode_query_len, :]
+
+    sparse_bt, sparse_ctx = minimax_m3_build_sparse_block_table_decode(
+        topk_idx, block_table, seq_lens, decode_query_len
+    )
+    torch.accelerator.synchronize()
+
+    total_q = topk_idx.shape[1]
+    assert sparse_bt.shape[0] == total_q * kvh
+    for head in range(kvh):
+        head_bt, head_ctx = minimax_m3_build_sparse_block_table_decode(
+            topk_idx[head : head + 1].contiguous(),
+            block_table,
+            seq_lens,
+            decode_query_len,
+        )
+        torch.accelerator.synchronize()
+        rows = torch.arange(head, total_q * kvh, kvh, device="cuda")
+        expected_bt = torch.where(head_bt != 0, head_bt * kvh + head, head_bt)
+        assert torch.equal(sparse_bt[rows], expected_bt)
+        assert torch.equal(sparse_ctx[rows], head_ctx)
+
+    # The heads select different blocks, so an implementation that ignored the
+    # head axis would make the two rows of a token identical.
+    assert not torch.equal(sparse_bt[0::kvh], sparse_bt[1::kvh])
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="MiniMax-M3 AITER sparse PA is ROCm-only",
+)
+@pytest.mark.parametrize("kvh", [2, 4])
+def test_aiter_prefill_sparse_block_table_addresses_each_kv_head(kvh):
+    """The prefill builder must renumber pages per head the way decode does.
+
+    Prefill takes its request id and absolute position from per-token tensors
+    rather than deriving them from the program id, so the head-minor row and
+    page mapping is a separate code path from the decode builder's.
+    """
+    from vllm.models.minimax_m3.amd.ops.sparse_pa import (
+        minimax_m3_build_sparse_block_table_prefill,
+    )
+
+    block_table = torch.tensor(
+        [[3, 9, 4, 6], [7, 2, 1, 5]], device="cuda", dtype=torch.int32
+    )
+    query_req_id = torch.tensor([0, 0, 1, 1], device="cuda", dtype=torch.int32)
+    query_abs_pos = torch.tensor([300, 140, 400, 5], device="cuda", dtype=torch.int32)
+    topk_idx = torch.tensor(
+        [
+            [[2, 0, 1, -1], [1, 0, -1, -1], [3, 1, 0, -1], [0, -1, -1, -1]],
+            [[0, 2, -1, -1], [0, -1, -1, -1], [1, 3, -1, -1], [0, -1, -1, -1]],
+            [[1, 2, -1, -1], [1, -1, -1, -1], [0, 2, 3, -1], [0, -1, -1, -1]],
+            [[0, -1, -1, -1], [0, 1, -1, -1], [2, -1, -1, -1], [0, -1, -1, -1]],
+        ],
+        device="cuda",
+        dtype=torch.int32,
+    )[:kvh]
+
+    sparse_bt, sparse_ctx = minimax_m3_build_sparse_block_table_prefill(
+        topk_idx, block_table, query_req_id, query_abs_pos
+    )
+    torch.accelerator.synchronize()
+
+    total_q = topk_idx.shape[1]
+    assert sparse_bt.shape[0] == total_q * kvh
+    for head in range(kvh):
+        head_bt, head_ctx = minimax_m3_build_sparse_block_table_prefill(
+            topk_idx[head : head + 1].contiguous(),
+            block_table,
+            query_req_id,
+            query_abs_pos,
+        )
+        torch.accelerator.synchronize()
+        rows = torch.arange(head, total_q * kvh, kvh, device="cuda")
+        expected_bt = torch.where(head_bt != 0, head_bt * kvh + head, head_bt)
+        assert torch.equal(sparse_bt[rows], expected_bt)
+        assert torch.equal(sparse_ctx[rows], head_ctx)
+
+    assert not torch.equal(sparse_bt[0::kvh], sparse_bt[1::kvh])
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="MiniMax-M3 AITER sparse PA is ROCm-only",
+)
+@pytest.mark.parametrize("num_kv_heads", [2, 4])
+@pytest.mark.parametrize("entry", ["decode", "prefill"])
+def test_aiter_sparse_pa_output_does_not_depend_on_kv_head_count(num_kv_heads, entry):
+    """A head's attention output must not change when it shares a rank.
+
+    Tensor parallelism shards query and KV heads together, so a rank serving
+    several KV heads must produce, for each of them, what a rank holding that
+    head alone produces. The head axis reaches the Gluon kernel only through
+    the cache flattening in ``_run_gluon_decode`` and the page renumbering the
+    block-table builders apply, and this is the sole end-to-end coverage of
+    that pairing: the AITER attend has no reference oracle.
+    """
+    pytest.importorskip("aiter.ops.triton.gluon.pa_decode_gluon")
+    from vllm.models.minimax_m3.amd.ops.sparse_pa import (
+        minimax_m3_sparse_attn_decode_aiter,
+        minimax_m3_sparse_attn_prefill_aiter,
+    )
+
+    set_random_seed(0)
+    group_size = 8
+    num_q_heads = num_kv_heads * group_size
+    topk = 4
+    x = 16 // DTYPE.itemsize
+    num_blocks = 16
+    num_phys16 = num_blocks * (BLOCK_SIZE // 16)
+
+    seq_lens = torch.tensor([390, 520, 133], device="cuda", dtype=torch.int32)
+    batch = seq_lens.numel()
+    max_blocks = (int(seq_lens.max()) + BLOCK_SIZE - 1) // BLOCK_SIZE
+    block_table = (
+        torch.randperm(num_blocks, device="cuda")[: batch * max_blocks]
+        .to(torch.int32)
+        .view(batch, max_blocks)
+    )
+
+    topk_idx = torch.full(
+        (num_kv_heads, batch, topk), -1, device="cuda", dtype=torch.int32
+    )
+    for head in range(num_kv_heads):
+        for req, seq_len in enumerate(seq_lens.tolist()):
+            self_block = (seq_len - 1) // BLOCK_SIZE
+            picks = torch.randperm(self_block + 1, device="cuda")[:topk]
+            topk_idx[head, req, : picks.numel()] = picks.to(torch.int32)
+    # A kernel that ignored the head axis would serve head 0 to every head, so
+    # the heads have to disagree for the comparison below to mean anything.
+    assert not torch.equal(topk_idx[0], topk_idx[1])
+
+    # Separate K/V planes: equal page counts is what marks the sides as dense,
+    # which fixes the block page stride at one side's pages.
+    k_cache = torch.randn(
+        num_phys16, num_kv_heads, HEAD_DIM // x, 16, x, device="cuda", dtype=DTYPE
+    )
+    v_cache = torch.randn(
+        num_phys16, num_kv_heads, 16 // x, HEAD_DIM, x, device="cuda", dtype=DTYPE
+    )
+    q = torch.randn(batch, num_q_heads, HEAD_DIM, device="cuda", dtype=DTYPE)
+    query_req_id = torch.arange(batch, device="cuda", dtype=torch.int32)
+    query_abs_pos = (seq_lens - 1).to(torch.int32)
+
+    def run(q_in, k, v, topk_in, kvh, out):
+        if entry == "decode":
+            minimax_m3_sparse_attn_decode_aiter(
+                q_in, k, v, topk_in, block_table, seq_lens, kvh, SM_SCALE, out
+            )
+        else:
+            minimax_m3_sparse_attn_prefill_aiter(
+                q_in,
+                k,
+                v,
+                topk_in,
+                block_table,
+                query_req_id,
+                query_abs_pos,
+                kvh,
+                SM_SCALE,
+                out,
+            )
+
+    actual = torch.empty_like(q)
+    run(q, k_cache, v_cache, topk_idx, num_kv_heads, actual)
+
+    for head in range(num_kv_heads):
+        heads = slice(head * group_size, (head + 1) * group_size)
+        q_head = q[:, heads].contiguous()
+        expected = torch.empty_like(q_head)
+        run(
+            q_head,
+            k_cache[:, head : head + 1].contiguous(),
+            v_cache[:, head : head + 1].contiguous(),
+            topk_idx[head : head + 1].contiguous(),
+            1,
+            expected,
+        )
+        torch.accelerator.synchronize()
+
+        # Not bitwise: the flash-decoding partition count comes from
+        # total_q * num_kv_heads, so the arms merge a different number of bf16
+        # partials. Serving the wrong head's cache is a far larger error than
+        # the merge's, since the heads select different blocks.
+        error = (actual[:, heads].float() - expected.float()).abs()
+        assert error.mean().item() < 2.5e-4
+        assert error.max().item() < 2e-2
 
 
 @pytest.mark.skipif(
