@@ -725,52 +725,22 @@ class VllmConfig:
 
     @property
     def use_v2_model_runner(self) -> bool:
-        if self.attention_config.hisparse_config is not None:
-            if envs.VLLM_USE_V2_MODEL_RUNNER is False:
-                raise ValueError(
-                    "HiSparse requires Model Runner V2; remove "
-                    "VLLM_USE_V2_MODEL_RUNNER=0."
-                )
-            return True
-
-        speculative_config = getattr(self, "speculative_config", None)
-        custom_method = getattr(speculative_config, "custom_method", None)
-        if custom_method is not None:
-            requires_v2 = f"Custom speculative method '{custom_method}' requires"
-            if envs.VLLM_USE_V2_MODEL_RUNNER is False:
-                raise ValueError(
-                    f"{requires_v2} Model Runner V2; remove VLLM_USE_V2_MODEL_RUNNER=0."
-                )
-            if not HAS_TRITON:
-                raise ValueError(
-                    f"{requires_v2} Model Runner V2, which requires Triton."
-                )
-            if unsupported := self._get_v2_model_runner_unsupported_features():
-                raise ValueError(
-                    f"{requires_v2} Model Runner V2, which does not yet support "
-                    f"{', '.join(unsupported)}."
-                )
-            return True
-
-        if getattr(self, "watermark_config", None) is not None:
-            if envs.VLLM_USE_V2_MODEL_RUNNER is False:
-                logger.info_once(
-                    "Watermarking requires Model Runner V2 and overrides "
-                    "VLLM_USE_V2_MODEL_RUNNER=0."
-                )
-            return True
-
         use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
         if use_v2_model_runner is not None:
             return use_v2_model_runner
 
-        if not HAS_TRITON and not current_platform.is_unspecified():
+        unsupported = self._get_v2_model_runner_unsupported_features()
+
+        if current_platform.uses_standalone_cpu_model_runner():
+            unsupported.extend(
+                self._get_standalone_cpu_model_runner_unsupported_features()
+            )
+        elif not HAS_TRITON and not current_platform.is_unspecified():
             logger.warning_once(
                 "Model Runner V2 requires Triton; using the V1 model runner instead."
             )
             return False
 
-        unsupported = self._get_v2_model_runner_unsupported_features()
         if unsupported:
             logger.warning_once(
                 "Model Runner V2 does not yet support %s; using the V1 model "
@@ -1554,6 +1524,11 @@ class VllmConfig:
         self.parallel_config.set_dcp_defaults()
 
         if self.model_config is not None:
+            # Normalize EPLB num_redundant_experts before verification.
+            self.parallel_config.compute_eplb_num_redundant_experts(
+                self.model_config.get_num_experts()
+            )
+
             self.model_config.verify_with_parallel_config(self.parallel_config)
             self.model_config.verify_dual_chunk_attention_config(self.load_config)
 
@@ -3106,8 +3081,55 @@ class VllmConfig:
 
         return unsupported
 
+    def _get_standalone_cpu_model_runner_unsupported_features(self) -> list[str]:
+        """Collect features not supported by the standalone CPU model runner."""
+        unsupported: list[str] = []
+
+        if self.is_mm_encoder_only:
+            unsupported.append("multimodal encoder-only instances")
+
+        if self.speculative_config is not None:
+            unsupported.append("speculative decoding")
+
+        if self.model_config is not None:
+            if self.model_config.enable_prompt_embeds:
+                unsupported.append("prompt embeddings")
+            if self.model_config.is_diffusion:
+                unsupported.append("diffusion models")
+            if self.model_config.logits_processors:
+                unsupported.append("custom logits processors")
+
+        if self.parallel_config.decode_context_parallel_size > 1:
+            unsupported.append("decode context parallelism")
+
+        if self.parallel_config.prefill_context_parallel_size > 1:
+            unsupported.append("prefill context parallelism")
+
+        if self.parallel_config.enable_batch_sharded_sampling:
+            unsupported.append("batch-sharded sampling")
+
+        if self.parallel_config.use_ubatching:
+            unsupported.append("microbatching")
+
+        if self.parallel_config.enable_eplb:
+            unsupported.append("expert parallel load balancing")
+
+        if self.aux_output_config.enabled:
+            unsupported.append("routed-expert auxiliary outputs")
+
+        if self.lora_config and self.lora_config.enable_tower_connector_lora:
+            unsupported.append("multimodal tower and connector LoRA")
+
+        return unsupported
+
     def _get_v1_model_runner_unsupported_features(self) -> list[str]:
         unsupported: list[str] = []
+
+        if self.attention_config.hisparse_config is not None:
+            unsupported.append("HiSparse")
+
+        if self.watermark_config is not None:
+            unsupported.append("watermarking")
 
         # PCP runtime support is implemented only by the V2 model runner.
         if self.parallel_config.prefill_context_parallel_size > 1:
@@ -3134,6 +3156,11 @@ class VllmConfig:
                 XPressSpeculatorConfig,
             )
 
+            if self.speculative_config.custom_method is not None:
+                unsupported.append(
+                    "custom speculative method "
+                    f"'{self.speculative_config.custom_method}'"
+                )
             if self.speculative_config.method == "dspark":
                 unsupported.append("dspark speculative decoding")
             elif isinstance(
@@ -3373,6 +3400,13 @@ class VllmConfig:
             raise ValueError(
                 f"Model Runner V2 does not yet support: {', '.join(unsupported)}"
             )
+        if current_platform.uses_standalone_cpu_model_runner():
+            unsupported = self._get_standalone_cpu_model_runner_unsupported_features()
+            if unsupported:
+                raise ValueError(
+                    "CPU Model Runner V2 without Triton does not yet support: "
+                    f"{', '.join(unsupported)}"
+                )
 
     def _validate_v1_model_runner(self) -> None:
         unsupported = self._get_v1_model_runner_unsupported_features()
