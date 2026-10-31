@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from typing import TYPE_CHECKING
 
 import regex as re
@@ -129,6 +129,47 @@ class HunyuanA13BReasoningParser(ReasoningParser):
 
         return None, model_output
 
+    def _iter_delta_tokens(
+        self,
+        previous_token_ids: Sequence[int],
+        current_token_ids: Sequence[int],
+        delta_token_ids: Sequence[int],
+        delta_text: str,
+    ) -> Iterator[tuple[int, str]]:
+        """Yield each token of a streaming delta together with its own text.
+
+        The engine reports one generation step per call and a step can carry
+        several tokens (speculative decoding, MTP), while the state machine below
+        advances one token at a time. ``delta_text`` describes the whole step, so
+        per-token text is decoded from the token ids when the delta is longer than
+        one token. The single-token case keeps using the engine's ``delta_text``.
+        """
+        if len(delta_token_ids) == 1:
+            yield delta_token_ids[0], delta_text
+            return
+
+        prev_len = len(previous_token_ids)
+        # Text already emitted for this stream. A decode can end in U+FFFD when a
+        # character spans several tokens (byte-fallback tokenization); that
+        # replacement character is superseded once the character completes, which
+        # would break the prefix relation the slice below relies on. Dropping the
+        # incomplete tail keeps the emitted text a real prefix of later decodes.
+        emitted = self.model_tokenizer.decode(
+            list(current_token_ids[:prev_len]), skip_special_tokens=False
+        ).rstrip("\ufffd")
+        for offset, token in enumerate(delta_token_ids):
+            cur_text = self.model_tokenizer.decode(
+                list(current_token_ids[: prev_len + offset + 1]),
+                skip_special_tokens=False,
+            )
+            if cur_text.endswith("\ufffd"):
+                # Unfinished byte sequence: the token that completes the character
+                # emits its text. Same guard as detokenize_incrementally.
+                yield token, ""
+                continue
+            yield token, cur_text[len(emitted) :]
+            emitted = cur_text
+
     def extract_reasoning_streaming(
         self,
         previous_text: str,
@@ -144,9 +185,11 @@ class HunyuanA13BReasoningParser(ReasoningParser):
         response_start_sequence = self.response_start_ids
         response_end_sequence = self.response_end_ids
 
-        assert len(delta_token_ids) == 1
-        # Process each token in the delta
-        token = delta_token_ids[0]
+        if not delta_token_ids:
+            return None
+
+        reasoning_parts: list[str] = []
+        content_parts: list[str] = []
 
         def check_token_with_sequence(token):
             if self.current_state == "idle" or self.current_state == "think":
@@ -170,57 +213,64 @@ class HunyuanA13BReasoningParser(ReasoningParser):
             else:
                 return self.sequence_index == len(self.expected_sequence)
 
-        # Check if token matches expected sequence
-        token_in_state_seq = check_token_with_sequence(token)
+        for token, token_text in self._iter_delta_tokens(
+            previous_token_ids, current_token_ids, delta_token_ids, delta_text
+        ):
+            # Check if token matches expected sequence
+            token_in_state_seq = check_token_with_sequence(token)
 
-        if token_in_state_seq:
-            # Store matching token
-            self.token_buffer.append(token)
-            self.text_buffer += delta_text
-            self.sequence_index += 1
-            ## state change from idle->think->response->idle
+            if token_in_state_seq:
+                # Store matching token
+                self.token_buffer.append(token)
+                self.text_buffer += token_text
+                self.sequence_index += 1
+                ## state change from idle->think->response->idle
 
-            # Check if sequence fully matched
-            if check_last_token(token):
-                # State transition
-                if self.current_state == "idle":
-                    self.current_state = "think"
-                    self.expected_sequence = response_start_sequence
-                    self.expected_sequence_side = self.response_start_ids_fast
-                elif self.current_state == "think":
-                    self.current_state = "response"
-                    self.expected_sequence = response_end_sequence
-                elif self.current_state == "response":
-                    self.current_state = "idle"
-                    self.expected_sequence = think_start_sequence
-                    self.expected_sequence_side = self.think_start_ids_fast
+                # Check if sequence fully matched
+                if check_last_token(token):
+                    # State transition
+                    if self.current_state == "idle":
+                        self.current_state = "think"
+                        self.expected_sequence = response_start_sequence
+                        self.expected_sequence_side = self.response_start_ids_fast
+                    elif self.current_state == "think":
+                        self.current_state = "response"
+                        self.expected_sequence = response_end_sequence
+                    elif self.current_state == "response":
+                        self.current_state = "idle"
+                        self.expected_sequence = think_start_sequence
+                        self.expected_sequence_side = self.think_start_ids_fast
 
-                # Reset matching state
-                self.sequence_index = 0
-                self.token_buffer = []
-                self.text_buffer = ""
-                # Do not send content for state transition texts.
-        else:
-            # Sequence broken - handle buffered content
-            if self.token_buffer and len(self.token_buffer) > 0:
-                # Send buffered tokens
-                buffered_content = self.text_buffer + delta_text
-                # Reset matching state
-                self.sequence_index = 0
-                self.token_buffer = []
-                self.text_buffer = ""
-
-                # Return content based on current state
-                if self.current_state == "think":
-                    return DeltaMessage(reasoning=buffered_content, content=None)
-                else:
-                    return DeltaMessage(reasoning=None, content=buffered_content)
+                    # Reset matching state
+                    self.sequence_index = 0
+                    self.token_buffer = []
+                    self.text_buffer = ""
+                    # Do not send content for state transition texts.
             else:
-                # No buffered content, send normally
-                if self.current_state == "think":
-                    return DeltaMessage(reasoning=delta_text, content=None)
-                else:
-                    return DeltaMessage(reasoning=None, content=delta_text)
+                # Sequence broken - handle buffered content
+                if self.token_buffer and len(self.token_buffer) > 0:
+                    # Send buffered tokens
+                    buffered_content = self.text_buffer + token_text
+                    # Reset matching state
+                    self.sequence_index = 0
+                    self.token_buffer = []
+                    self.text_buffer = ""
 
-        # If no content to send in this delta
-        return None
+                    # Collect content based on current state
+                    if self.current_state == "think":
+                        reasoning_parts.append(buffered_content)
+                    else:
+                        content_parts.append(buffered_content)
+                else:
+                    # No buffered content, send normally
+                    if self.current_state == "think":
+                        reasoning_parts.append(token_text)
+                    else:
+                        content_parts.append(token_text)
+
+        reasoning = "".join(reasoning_parts)
+        content = "".join(content_parts)
+        if not reasoning and not content:
+            # If no content to send in this delta
+            return None
+        return DeltaMessage(reasoning=reasoning or None, content=content or None)
