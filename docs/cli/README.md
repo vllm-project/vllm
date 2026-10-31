@@ -98,7 +98,39 @@ vllm chat --quick "hi"
 
 # Print TTFT and throughput statistics after each response
 vllm chat --stats
+
+# Enable chat commands and recover from API errors
+vllm chat --interactive
 ```
+
+`--interactive` (alias `-i`) is opt-in and cannot be combined with `--quick`. It enables
+`/help`, `/clear` (reset conversation history while preserving the configured
+system prompt), and `/exit`. Commands are handled locally; prefix a message with
+`//` to send a literal leading slash. Unknown commands display a hint without
+sending a request.
+
+Install the optional line editor with `uv pip install 'vllm[chat]'`. In `-i` mode,
+when both input and output are terminals, it enables arrow-key input history and
+Emacs-style editing (Ctrl+A/Ctrl+E for the start/end of the line and
+Ctrl+B/Ctrl+F for moving backward/forward). The line editor uses `prompt_toolkit`,
+which supports Linux, macOS, and Windows terminals; it does not change vLLM's
+platform requirements. Without this optional dependency, or when input/output
+is redirected, the CLI uses plain `input()`.
+
+Input history stays in memory for the current chat session and is not written to
+disk. It is separate from the conversation sent to the model: `/clear` resets
+the conversation but keeps recalled input available through the arrow keys.
+Ctrl+C and end-of-input exit the prompt cleanly.
+
+In this mode, API errors during a chat request or response stream print their
+full traceback and return to the prompt. Startup errors still propagate.
+Previously completed turns remain in history; a failed or interrupted turn is
+not saved, even if part of its answer was already printed. The client does not
+automatically retry interrupted streams, truncate history, or summarize it.
+The OpenAI SDK's existing request retries are unchanged. Use `/clear` to recover
+when a conversation exceeds the server's context limit. Unexpected programming
+errors still propagate. Without `--interactive`, slash-prefixed messages are
+sent to the model and API errors propagate as before.
 
 See [vllm chat](./chat.md) for the full reference of all available arguments.
 
