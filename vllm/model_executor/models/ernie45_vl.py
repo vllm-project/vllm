@@ -951,7 +951,7 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
         else:
             preprocessed_size = ImageSize(width=image_width, height=image_height)
 
-        grid_t = max(num_frames // temporal_conv_size, 1)
+        grid_t = max((num_frames + temporal_conv_size - 1) // temporal_conv_size, 1)
         grid_h = preprocessed_size.height // patch_size
         grid_w = preprocessed_size.width // patch_size
 
@@ -1140,6 +1140,29 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
 
         videos = hf_data["videos"]
         assert isinstance(videos, Sequence)
+        # The temporal resampler consumes frame pairs. Normalize before HF
+        # processing so pixels, timestamps and placeholder counts agree, even
+        # for processors that do not pad odd-length videos themselves.
+        padded_videos = []
+        for video in videos:
+            frames, metadata = video if isinstance(video, tuple) else (video, None)
+            if len(frames) % 2:
+                if isinstance(frames, torch.Tensor):
+                    frames = torch.cat((frames, frames[-1:]), dim=0)
+                elif isinstance(frames, np.ndarray):
+                    frames = np.concatenate((frames, frames[-1:]), axis=0)
+                else:
+                    frames = [*frames, frames[-1]]
+                if metadata is not None:
+                    metadata = dict(metadata)
+                    frame_indices = metadata.get("frames_indices")
+                    indices = list(frame_indices) if frame_indices is not None else []
+                    if not indices:
+                        indices = list(range(len(frames) - 1))
+                    metadata["frames_indices"] = [*indices, indices[-1]]
+            padded_videos.append((frames, metadata) if metadata is not None else frames)
+        videos = padded_videos
+        hf_data["videos"] = videos
         if videos and not supports_video_metadata:
             # Old HF processor, unwrap tuple to pure frames
             logger.warning_once(
