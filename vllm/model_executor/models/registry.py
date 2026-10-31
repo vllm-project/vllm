@@ -945,6 +945,7 @@ class _ModelInfo:
     supports_transcription_only: bool
     supports_kv_cache_grouping: bool
     supported_video_pruning_methods: tuple[str, ...]
+    supports_image_pruning: bool
     supports_mm_device_do_normalize: bool
     # Fully-qualified name of `SpeculativeDraftModel.speculator_config_class`.
     speculator_config_class: str | None
@@ -985,6 +986,7 @@ class _ModelInfo:
             supported_video_pruning_methods=getattr(
                 model, "supported_video_pruning_methods", ()
             ),
+            supports_image_pruning=getattr(model, "supports_image_pruning", False),
             supports_mm_device_do_normalize=getattr(
                 model, "supports_mm_device_do_normalize", False
             ),
