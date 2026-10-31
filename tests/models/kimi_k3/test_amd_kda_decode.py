@@ -346,12 +346,15 @@ def test_decode_weights_staged_after_loading(
 
     Loaders that bypass ``weight_loader`` (e.g. ``--load-format dummy``) left
     them uninitialized, so decode could read NaN. Loading runs with grad mode
-    on, so the copies must also stay out of autograd.
+    on, so the copies must also stay out of autograd. A kernel-format reload
+    overwrites the weights in place without the post-load hook, so the copies
+    must be re-staged at the addresses captured graphs read.
     """
     _requires_kernel()
     from tests.v1.attention.utils import create_vllm_config
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.config import set_current_vllm_config
+    from vllm.model_executor.model_loader.reload.inplace import reload_weights
     from vllm.model_executor.model_loader.utils import process_weights_after_loading
     from vllm.models.kimi_k3.amd.kda import KimiK3DeltaAttention
     from vllm.models.kimi_k3.amd.ops.kda_chunk import is_fused_kda_chunk_supported
@@ -412,20 +415,36 @@ def test_decode_weights_staged_after_loading(
         torch.nn.ModuleList([layer]), vllm_config.model_config, torch.device("cuda")
     )
 
-    dim = layer.local_projection_size
-    conv_weights = layer.conv1d.weight.squeeze(1)
-    expected_conv = torch.stack(
-        [conv_weights[i * dim : (i + 1) * dim].transpose(0, 1) for i in range(3)]
-    )
-    torch.testing.assert_close(
-        layer.decode_conv1d_weight, expected_conv, atol=0, rtol=0
-    )
-    if layer.decode_norm_weight is not None:
-        torch.testing.assert_close(
-            layer.decode_norm_weight, layer.o_norm.weight.float(), atol=0, rtol=0
+    def check_staged() -> None:
+        dim = layer.local_projection_size
+        conv_weights = layer.conv1d.weight.squeeze(1)
+        expected_conv = torch.stack(
+            [conv_weights[i * dim : (i + 1) * dim].transpose(0, 1) for i in range(3)]
         )
-        assert not layer.decode_norm_weight.requires_grad
-    assert not layer.decode_conv1d_weight.requires_grad
+        torch.testing.assert_close(
+            layer.decode_conv1d_weight, expected_conv, atol=0, rtol=0
+        )
+        if layer.decode_norm_weight is not None:
+            torch.testing.assert_close(
+                layer.decode_norm_weight, layer.o_norm.weight.float(), atol=0, rtol=0
+            )
+            assert not layer.decode_norm_weight.requires_grad
+        assert not layer.decode_conv1d_weight.requires_grad
+
+    check_staged()
+    staged_ptrs = [buf.data_ptr() for buf in layer.buffers()]
+    model = torch.nn.ModuleList([layer])
+    new_weights = [(name, torch.randn_like(p)) for name, p in model.named_parameters()]
+    with torch.no_grad():
+        reload_weights(
+            vllm_config,
+            model,
+            new_weights,
+            weights_path=None,
+            is_checkpoint_format=False,
+        )
+    check_staged()
+    assert [buf.data_ptr() for buf in layer.buffers()] == staged_ptrs
 
 
 # --------------------------------------------------------------------------
