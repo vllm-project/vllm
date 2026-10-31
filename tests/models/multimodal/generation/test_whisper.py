@@ -44,6 +44,7 @@ def run_test(
     distributed_executor_backend: str | None = None,
     enforce_eager: bool = True,
     gpu_memory_utilization: float = 0.9,
+    max_num_seqs: int | None = None,
 ) -> None:
     """Inference result should be the same between hf and vllm.
 
@@ -62,6 +63,7 @@ def run_test(
         enforce_eager=enforce_eager,
         gpu_memory_utilization=gpu_memory_utilization,
         disable_custom_all_reduce=True,
+        max_num_seqs=max_num_seqs,
     ) as vllm_model:
         vllm_outputs_per_case = [
             vllm_model.generate_greedy_logprobs(
@@ -337,6 +339,33 @@ def test_models(
         num_logprobs=num_logprobs,
         tensor_parallel_size=1,
         enforce_eager=enforce_eager,
+    )
+
+
+@pytest.mark.core_model
+@pytest.mark.cpu_model
+@pytest.mark.parametrize("model", ["openai/whisper-large-v3-turbo"])
+def test_models_max_num_seqs_one(
+    hf_runner,
+    vllm_runner,
+    model: str,
+    input_audios,
+) -> None:
+    """The default max_num_batched_tokens is clamped to
+    max_num_seqs * max_model_len (448), below the 1500-token encoder input,
+    which used to fail engine startup unless the budget was set explicitly."""
+    check_model_available(model)
+    run_test(
+        hf_runner,
+        vllm_runner,
+        input_audios,
+        model,
+        dtype="float",
+        max_model_len=448,
+        max_tokens=200,
+        num_logprobs=5,
+        tensor_parallel_size=1,
+        max_num_seqs=1,
     )
 
 
