@@ -14,14 +14,17 @@ Q8KV4 kernels.
 
 import functools
 import os
-from dataclasses import dataclass, fields, replace
+import weakref
+from contextlib import nullcontext
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, ClassVar
 
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.attention import MiniMaxM3MSADecodeBackend
 from vllm.config.cache import CacheDType
+from vllm.device_allocator import get_mem_allocator_instance
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.models.minimax_m3.common.ops.sparse_attn import (
@@ -40,7 +43,6 @@ from vllm.models.minimax_m3.nvidia.msa_cutlass_sparse_decode import (
     NVFP4_BLOCK_SCALE_SHIFT,
     MSACutlassDecodeMetadata,
     MSACutlassDecodePlanCache,
-    is_nvfp4_kv_cache,
     msa_cutlass_sparse_decode,
     nvfp4_kv_cache_views,
     prepare_decode_metadata,
@@ -148,10 +150,41 @@ class MiniMaxM3SparseMSADecodeMetadata(MiniMaxM3SparseDecodeMetadata):
     msa_cutlass: MSACutlassDecodeMetadata | None = None
 
 
-@dataclass
-class MiniMaxM3SparseMSAPrefillMetadata(MiniMaxM3SparsePrefillMetadata):
-    # The builder's Q8KV4 prefill split workspace; None off Rubin.
-    workspace: "PrefillWorkspace | None" = None
+# WeakValueDictionary: live impls keep the workspace alive; the last model
+# teardown releases it instead of caching GPU memory forever.
+_prefill_workspaces: weakref.WeakValueDictionary[tuple, "PrefillWorkspace"] = (
+    weakref.WeakValueDictionary()
+)
+
+
+def _shared_prefill_workspace(
+    device_index: int, topk_blocks: int, max_tokens: int, num_q_heads: int
+) -> "PrefillWorkspace":
+    """The one Q8KV4 prefill split workspace per process, reserved for the
+    largest batch (attention impls are per layer)."""
+    from vllm.third_party.fmha_sm100.prefill_q8kv4 import PrefillWorkspace
+
+    key = (device_index, topk_blocks, max_tokens, num_q_heads)
+    if (workspace := _prefill_workspaces.get(key)) is not None:
+        return workspace
+    # tag="runtime": the weights pool is discarded by level-2 sleep and only
+    # named model tensors are restored on wake; the runtime pool is offloaded
+    # and restored with contents intact.
+    model_config = get_current_vllm_config().model_config
+    alloc_context = (
+        get_mem_allocator_instance().use_memory_pool(tag="runtime")
+        if current_platform.is_cuda_alike()
+        and model_config is not None
+        and model_config.enable_cumem_allocator
+        else nullcontext()
+    )
+    with alloc_context:
+        workspace = PrefillWorkspace(
+            device_index, block_scale_shift=NVFP4_BLOCK_SCALE_SHIFT
+        )
+        workspace.split_buffers(topk_blocks, max_tokens, num_q_heads)
+    _prefill_workspaces[key] = workspace
+    return workspace
 
 
 class MiniMaxM3SparseMSAMetadataBuilder(MiniMaxM3SparseMetadataBuilder):
@@ -181,22 +214,6 @@ class MiniMaxM3SparseMSAMetadataBuilder(MiniMaxM3SparseMetadataBuilder):
         )
         self.msa_cutlass_plan_cache = MSACutlassDecodePlanCache()
         self.msa_cutlass_min_batch_size = _get_msa_cutlass_min_batch_size()
-        # Rubin only: Q8KV4 prefill split partials striped over the memory
-        # locality domains, reserved for the largest batch.
-        self.prefill_workspace: "PrefillWorkspace | None" = None  # noqa: UP037
-        if is_nvfp4_kv_cache(
-            self.kv_cache_dtype
-        ) and current_platform.is_device_capability(107):
-            from vllm.third_party.fmha_sm100.prefill_q8kv4 import PrefillWorkspace
-
-            self.prefill_workspace = PrefillWorkspace(
-                device, block_scale_shift=NVFP4_BLOCK_SCALE_SHIFT
-            )
-            self.prefill_workspace.split_buffers(
-                self.topk_blocks,
-                vllm_config.scheduler_config.max_num_batched_tokens,
-                self.num_q_heads,
-            )
 
     def build(
         self,
@@ -209,12 +226,6 @@ class MiniMaxM3SparseMSAMetadataBuilder(MiniMaxM3SparseMetadataBuilder):
             common_attn_metadata,
             fast_build,
         )
-        prefill = metadata.prefill
-        if prefill is not None and self.prefill_workspace is not None:
-            metadata.prefill = MiniMaxM3SparseMSAPrefillMetadata(
-                **{f.name: getattr(prefill, f.name) for f in fields(prefill)},
-                workspace=self.prefill_workspace,
-            )
         decode = metadata.decode
         if decode is None:
             return metadata
@@ -508,6 +519,12 @@ class MiniMaxM3SparseMSANvfp4Impl(MiniMaxM3SparseMSABaseImpl):
         # NVFP4_BLOCK_SCALE_SHIFT assumes unit global scales; checked on the
         # first forward, once the checkpoint's KV scales are loaded.
         self._check_global_scales = True
+        self._prefill_workspace = _shared_prefill_workspace(
+            torch.accelerator.current_device_index(),
+            self.topk_blocks,
+            get_current_vllm_config().scheduler_config.max_num_batched_tokens,
+            self.num_heads,
+        )
 
     def forward(
         self,
@@ -592,10 +609,6 @@ class MiniMaxM3SparseMSANvfp4Impl(MiniMaxM3SparseMSABaseImpl):
                 v_global_scale=v_scale,
                 block_scale_shift=NVFP4_BLOCK_SCALE_SHIFT,
                 out=out[nd:],
-                workspace=(
-                    p.workspace
-                    if isinstance(p, MiniMaxM3SparseMSAPrefillMetadata)
-                    else None
-                ),
+                workspace=self._prefill_workspace,
             )
         return output
