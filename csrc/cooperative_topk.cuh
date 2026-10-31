@@ -483,7 +483,7 @@ __device__ void large_topk(const InT* __restrict__ row_input,
     return;
   }
 
-  // Tie-breaking uses FP32 (4-round radix sort)
+  // Tie-breaking uses the FP32 ordered key (radix-256 rounds)
   if constexpr (TopK <= hist4096::kBlockSize) {
     if (s_total_equal <= hist4096::kMaxTies) {
       // copy ties from tie_ws back to smem, then refine

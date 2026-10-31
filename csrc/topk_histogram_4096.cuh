@@ -153,12 +153,35 @@ __device__ __forceinline__ uint32_t warp_reduce_sum_full(uint32_t v) {
 #endif
 }
 
+// Bitwise OR across the warp.
+__device__ __forceinline__ uint32_t warp_reduce_or_full(uint32_t v) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+  return __reduce_or_sync(0xFFFFFFFF, v);
+#else
+  #pragma unroll
+  for (uint32_t mask = kWarpSize >> 1; mask > 0; mask >>= 1) {
+    v |= __shfl_xor_sync(0xFFFFFFFF, v, mask);
+  }
+  return v;
+#endif
+}
+
+// The first and last radix-256 rounds (round r covers key bits 31-8r..24-8r)
+// that can split ties whose keys differ from a reference key in `diff`: the
+// ties agree on every other bit. Equal keys take one round, to place them.
+__device__ __forceinline__ uint2 tie_rounds(uint32_t diff) {
+  return diff ? make_uint2(__clz(diff) / 8, (32 - __ffs(diff)) / 8)
+              : make_uint2(0, 0);
+}
+
 // ============================================================================
-// Tie refinement (single CTA): 4-round radix-256 topK on the full FP32 ordered
-// key Each round narrows by 8 bits until ties are fully resolved
+// Tie refinement (single CTA): radix-256 topK on the full FP32 ordered key.
+// Each round narrows by 8 bits until ties are fully resolved. With
+// kSkipSharedRounds, rounds over bits all ties share are skipped (BF16 scores
+// widen to keys ending in 16 zeros).
 // ============================================================================
 
-template <uint32_t TopK>
+template <uint32_t TopK, bool kSkipSharedRounds = true>
 __device__ void tie_handle(const Tie* ties, uint32_t num_ties,
                            uint32_t num_above, int32_t* output, void* _smem) {
   struct TS {
@@ -175,18 +198,19 @@ __device__ void tie_handle(const Tie* ties, uint32_t num_ties,
   const bool has = tx < num_ties;
   const auto tie = has ? ties[tx] : Tie{0, 0.0f};
   const uint32_t key = convert_to_uint32_v2(tie.score);
+  const uint32_t ref =
+      kSkipSharedRounds ? convert_to_uint32_v2(ties[0].score) : 0;
 
   bool active = has;  // tracks whether this thread's tie is still a candidate.
   uint32_t remain =
       TopK - num_above;  // decreases each round as ties are resolved.
   uint32_t wpos = TopK;  // wpos will hold the final output position.
   s->counter = 0;
-  __syncthreads();
+  __syncthreads();  // ties are in registers; `s` may overlap them
 
-  // The 4-round radix loop - each round narrows by 8 bits until ties are fully
-  // resolved
-#pragma unroll
-  for (int r = 0; r < 4; r++) {
+  // One radix round over key bits 31-8r..24-8r; returns whether all ties are
+  // resolved.
+  auto round = [&](uint32_t r, bool last) {
     uint32_t sh = 24 - r * 8;  // round 0: bits 31-24, round 1: 23-16, etc.
     uint32_t bin = (key >> sh) & 0xFF;  // this tie's 8-bit bin for this round
 
@@ -225,12 +249,26 @@ __device__ void tie_handle(const Tie* ties, uint32_t num_ties,
         active = false;
       } else if (bin < thr)
         active = false;  // below -> discard
-      else if (r == 3)
+      else if (last)
         wpos = TopK - atomicAdd(&s->match.equal_count,
                                 -1u);  // last round: place remaining
     }
     remain -= na;
-    if (!remain) break;  // all ties resolved early
+    return remain == 0;
+  };
+  if constexpr (kSkipSharedRounds) {
+    const uint32_t warp_diff = warp_reduce_or_full(has ? key ^ ref : 0);
+    if (li == 0) s->warp_sum[wi] = warp_diff;
+    __syncthreads();
+    const uint2 rounds = tie_rounds(warp_reduce_or_full(s->warp_sum[li]));
+    for (uint32_t r = rounds.x; r <= rounds.y; r++) {
+      if (round(r, r == rounds.y)) break;
+    }
+  } else {
+#pragma unroll
+    for (uint32_t r = 0; r < 4; r++) {
+      if (round(r, r == 3)) break;
+    }
   }
   // Final write
   if (wpos < TopK) output[wpos] = tie.idx;
@@ -260,12 +298,15 @@ __device__ void tie_handle_large(const Tie* ties, uint32_t num_ties,
   uint32_t keys[kPerThread];
   bool active[kPerThread];
 
+  const uint32_t ref = convert_to_uint32_v2(ties[0].score);
+  uint32_t diff = 0;
   for (uint32_t e = 0; e < kPerThread; e++) {
     uint32_t idx = e * kBlockSize + tx;
     if (idx < num_ties) {
       my_ties[e] = ties[idx];
       keys[e] = convert_to_uint32_v2(ties[idx].score);
       active[e] = true;
+      diff |= keys[e] ^ ref;
     } else {
       my_ties[e] = {0, 0.0f};
       keys[e] = 0;
@@ -275,9 +316,13 @@ __device__ void tie_handle_large(const Tie* ties, uint32_t num_ties,
 
   uint32_t remain = TopK - num_above;
   s->counter = 0;
+  __syncthreads();  // ties are in registers; `s` may overlap them
+  const uint32_t warp_diff = warp_reduce_or_full(diff);
+  if (li == 0) s->warp_sum[wi] = warp_diff;
   __syncthreads();
+  const uint2 rounds = tie_rounds(warp_reduce_or_full(s->warp_sum[li]));
 
-  for (int r = 0; r < 4; r++) {
+  for (uint32_t r = rounds.x; r <= rounds.y; r++) {
     uint32_t sh = 24 - r * 8;
     if (tx < RADIX) {
       s->histogram[tx] = 0;
@@ -329,7 +374,7 @@ __device__ void tie_handle_large(const Tie* ties, uint32_t num_ties,
         active[e] = false;
       } else if (bin < thr) {
         active[e] = false;
-      } else if (r == 3) {
+      } else if (r == rounds.y) {
         uint32_t wpos = TopK - atomicAdd(&s->match.equal_count, -1u);
         if (wpos < TopK) {
           output[wpos] = my_ties[e].idx;
@@ -619,9 +664,12 @@ __device__ void histogram_4096_topk(const InT* __restrict__ scores,
         output[num_above + r0 + r1] = target.idx;
     }
   } else {
-    // Large tie count: fall back to 4-round radix-256 sort
+    // Large tie count: fall back to the radix-256 tie refinement
     if constexpr (TopK <= kBlockSize) {
-      tie_handle<TopK>(smem->tie_buffer, num_ties, num_above, output, smem);
+      // FP32 keeps all four rounds here: the key-OR pass slowed this path by up
+      // to 0.9% even where it refines no ties.
+      tie_handle<TopK, sizeof(InT) == 2>(smem->tie_buffer, num_ties, num_above,
+                                         output, smem);
     } else {
       tie_handle_large<TopK>(smem->tie_buffer, num_ties, num_above, output,
                              smem);
