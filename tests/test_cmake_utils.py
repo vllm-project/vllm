@@ -36,6 +36,58 @@ endif()
     subprocess.run([_get_cmake_bin(), "-P", script], check=True)
 
 
+def test_plain_arch_kept_when_source_has_suffixed_variant(tmp_path: Path):
+    """A plain arch that is explicitly listed in the source must not be
+    dropped in favour of its arch-specific variant. Dropping it narrows the
+    build to the exact minor version of the suffixed target, e.g. only
+    `sm_100a` cubins are built, which do not run on a CC 10.3 device."""
+    repo_root = Path(__file__).parents[1]
+    script = tmp_path / "test_plain_arch.cmake"
+    script.write_text(
+        f"""
+cmake_minimum_required(VERSION 3.26)
+include("{repo_root / "cmake" / "utils.cmake"}")
+cuda_archs_loose_intersection(
+  actual "7.5;8.0;8.6;9.0;9.0a" "8.0;8.9;9.0")
+if(NOT "${{actual}}" STREQUAL "8.0;8.6;9.0;9.0a")
+  message(FATAL_ERROR "Expected '8.0;8.6;9.0;9.0a', got '${{actual}}'")
+endif()
+"""
+    )
+
+    subprocess.run([_get_cmake_bin(), "-P", script], check=True)
+
+
+def test_family_and_ptx_arch_targets(tmp_path: Path):
+    """Family (`f`) targets and PTX sources are resolved to the arch that is
+    actually built."""
+    repo_root = Path(__file__).parents[1]
+    script = tmp_path / "test_family_archs.cmake"
+    script.write_text(
+        f"""
+cmake_minimum_required(VERSION 3.26)
+include("{repo_root / "cmake" / "utils.cmake"}")
+# A family target is kept when the plain arch is requested.
+cuda_archs_loose_intersection(family "12.0f" "12.0")
+if(NOT "${{family}}" STREQUAL "12.0f")
+  message(FATAL_ERROR "Expected '12.0f', got '${{family}}'")
+endif()
+# A family target falls back to the requested arch-specific target.
+cuda_archs_loose_intersection(fallback "12.0f" "12.1a")
+if(NOT "${{fallback}}" STREQUAL "12.1a")
+  message(FATAL_ERROR "Expected '12.1a', got '${{fallback}}'")
+endif()
+# A PTX source also covers a newer major version.
+cuda_archs_loose_intersection(ptx "8.0+PTX" "9.0")
+if(NOT "${{ptx}}" STREQUAL "8.0+PTX")
+  message(FATAL_ERROR "Expected '8.0+PTX', got '${{ptx}}'")
+endif()
+"""
+    )
+
+    subprocess.run([_get_cmake_bin(), "-P", script], check=True)
+
+
 def test_extract_archs_prefers_sass_target_over_corrupted_virtual_arch(
     tmp_path: Path,
 ):

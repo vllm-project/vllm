@@ -383,7 +383,10 @@ endmacro()
 # We have special handling for x.0a, if x.0a is in `SRC_CUDA_ARCHS` and x.0 is
 #  in `TGT_CUDA_ARCHS` then we should remove x.0a from `SRC_CUDA_ARCHS` and add
 #  x.0a to the result (and remove x.0 from TGT_CUDA_ARCHS).
-# The result is stored in `OUT_CUDA_ARCHS`.
+# A plain architecture that is explicitly requested is kept alongside its
+#  suffixed variant, i.e. dropping it would silently narrow the build to the
+#  exact minor version of the suffixed target (see #56549).
+# The result is stored in `OUT_CUDA_ARCHS`, sorted in ascending order.
 #
 # Example:
 #   SRC_CUDA_ARCHS="7.5;8.0;8.6;9.0;9.0a"
@@ -427,7 +430,12 @@ function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_AR
       string(REGEX REPLACE "[af]$" "" _base "${_arch}")
       if("${_base}" IN_LIST _TGT_CUDA_ARCHS)
         list(REMOVE_ITEM _SRC_CUDA_ARCHS "${_arch}")
-        list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_base}")
+        # Only drop the plain target if the source list cannot provide the
+        # plain arch, otherwise the plain arch is silently narrowed to the
+        # exact minor version of the suffixed target.
+        if (NOT "${_base}" IN_LIST _SRC_CUDA_ARCHS)
+          list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_base}")
+        endif()
         list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_base}a" "${_base}f")
         list(APPEND _CUDA_ARCHS "${_arch}")
       endif()
@@ -506,6 +514,9 @@ function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_AR
   endforeach()
 
   list(REMOVE_DUPLICATES _CUDA_ARCHS)
+  # Emit the result in ascending order so that it is deterministic and matches
+  # the documented example above.
+  list(SORT _CUDA_ARCHS COMPARE NATURAL ORDER ASCENDING)
 
   # reapply +PTX suffix to architectures that requested PTX
   set(_FINAL_ARCHS)
