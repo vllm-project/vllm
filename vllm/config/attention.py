@@ -12,6 +12,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 IndexerKVDType = Literal["auto", "bf16", "fp8", "mxfp4", "nvfp4"]
 MiniMaxM3MSADecodeBackend = Literal["triton", "cutlass"]
+IndexerCacheSharding = Literal["off", "on"]
 
 
 @config
@@ -111,6 +112,19 @@ class AttentionConfig:
     needs `indexer_kv_dtype="nvfp4"` and TP 4 (one index head per rank); it is
     ignored with a warning where it does not apply. It pays off from about 4
     concurrent decodes at 128K context and grows with batch and context."""
+
+    indexer_cache_sharding: IndexerCacheSharding = "off"
+    """Shard the indexer cache across TP ranks on supported backends.
+    Layout is fixed at startup. MSA supports FP8 index K on single-node
+    NVLink TP2/TP4; unsupported configurations retain replicated storage."""
+
+    indexer_prefill_cp: Literal["gather", "local_score", "local_score_unified"] = (
+        "gather"
+    )
+    """MiniMax M3 MSA prefill execution with a TP-sharded index cache.
+    "gather" reconstructs K; "local_score" scores local K and exchanges Top16.
+    Experimental "local_score_unified" includes mixed-batch decode queries.
+    Pure decode and the startup cache layout are unchanged."""
 
     indexer_sparse_logits: bool | None = None
     """DeepSeek V4.1 two-level indexer: score only the candidate blocks with
