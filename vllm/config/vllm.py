@@ -1230,7 +1230,9 @@ class VllmConfig:
 
     def _verify_direct_reload_compat(self) -> None:
         """Reject configurations that direct weight reload cannot support."""
-        if envs.VLLM_RELOAD_MODE != "direct":
+        from vllm.model_executor.utils import direct_reload_enabled
+
+        if not direct_reload_enabled():
             return
         from vllm.model_executor.layers.quantization.online.base import (
             OnlineQuantizationConfig,

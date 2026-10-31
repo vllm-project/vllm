@@ -34,6 +34,11 @@ def is_weights_pre_processed() -> bool:
     return _weights_pre_processed.get()
 
 
+def direct_reload_enabled() -> bool:
+    """Whether weight updates reload in place (``VLLM_RELOAD_MODE=direct``)."""
+    return envs.VLLM_RELOAD_MODE == "direct"
+
+
 def set_weight_attrs(
     weight: torch.Tensor,
     weight_attrs: dict[str, Any] | None,
@@ -203,7 +208,7 @@ def replace_parameter(
             old_param.data = new_tensor  # online quantization frees the source
         else:
             old_param.data = _in_own_storage(
-                old_param, new_tensor, whole_storage=envs.VLLM_RELOAD_MODE == "direct"
+                old_param, new_tensor, whole_storage=direct_reload_enabled()
             )
         for attr_name, attr in new_tensor_attrs.items():
             setattr(old_param, attr_name, attr)
