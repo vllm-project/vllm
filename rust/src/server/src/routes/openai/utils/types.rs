@@ -124,7 +124,9 @@ pub fn validate_stop(stop: &StringOrArray) -> Result<(), validator::ValidationEr
 
 #[cfg(test)]
 mod tests {
-    use super::{StringOrArray, validate_stop};
+    use serde_json::json;
+
+    use super::{ChatMessage, StringOrArray, validate_stop};
 
     #[test]
     fn validate_stop_accepts_four_stop_strings() {
@@ -150,6 +152,56 @@ mod tests {
             error.code.as_ref(),
             "stop strings must contain at most 4 items"
         );
+    }
+
+    fn assistant_reasoning(message: ChatMessage) -> Option<String> {
+        match message {
+            ChatMessage::Assistant { reasoning, .. } => reasoning,
+            other => panic!("expected assistant message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn assistant_message_accepts_reasoning_with_every_alias() {
+        // Agent harnesses replaying prior assistant turns emit both the
+        // primary field and the legacy alias; serde's derived impls would
+        // fail with `duplicate field` before any normalization runs.
+        let message: ChatMessage = serde_json::from_value(json!({
+            "role": "assistant",
+            "content": "ok",
+            "reasoning": "primary",
+            "reasoning_content": "legacy",
+            "thinking": "alias",
+        }))
+        .expect("all reasoning aliases together are accepted");
+
+        assert_eq!(assistant_reasoning(message).as_deref(), Some("primary"));
+    }
+
+    #[test]
+    fn assistant_message_falls_back_to_alias_when_reasoning_is_null() {
+        let message: ChatMessage = serde_json::from_value(json!({
+            "role": "assistant",
+            "content": "ok",
+            "reasoning": null,
+            "reasoning_content": "legacy",
+        }))
+        .expect("null reasoning with a legacy alias is accepted");
+
+        assert_eq!(assistant_reasoning(message).as_deref(), Some("legacy"));
+    }
+
+    #[test]
+    fn assistant_message_prefers_legacy_alias_over_thinking() {
+        let message: ChatMessage = serde_json::from_value(json!({
+            "role": "assistant",
+            "content": "ok",
+            "reasoning_content": "legacy",
+            "thinking": "alias",
+        }))
+        .expect("legacy alias together with thinking is accepted");
+
+        assert_eq!(assistant_reasoning(message).as_deref(), Some("legacy"));
     }
 }
 
@@ -516,6 +568,31 @@ impl Serialize for ChatMessage {
     }
 }
 
+/// Merge the reasoning aliases of a message into the primary `reasoning` field.
+///
+/// Serde rejects a payload carrying two keys that map to one field with an
+/// opaque `duplicate field` error. Mirror the Python frontend's
+/// `_normalize_messages_before`: drop the legacy spellings and keep
+/// `reasoning` when it is set, otherwise promote an alias value. Agent
+/// harnesses replaying prior assistant turns emit both spellings, and the
+/// Python frontend accepts them.
+fn normalize_reasoning_aliases(message: &mut Value) {
+    let Some(message) = message.as_object_mut() else {
+        return;
+    };
+    for alias in ["reasoning_content", "thinking"] {
+        let Some(alias_value) = message.remove(alias) else {
+            continue;
+        };
+        if alias_value.is_null() {
+            continue;
+        }
+        if message.get("reasoning").is_none_or(Value::is_null) {
+            message.insert("reasoning".to_string(), alias_value);
+        }
+    }
+}
+
 impl<'de> Deserialize<'de> for ChatMessage {
     /// Dispatch on the role tag: standard roles keep their derived errors,
     /// and any other string role becomes [`ChatMessage::Custom`].
@@ -523,7 +600,8 @@ impl<'de> Deserialize<'de> for ChatMessage {
     where
         D: Deserializer<'de>,
     {
-        let value = Value::deserialize(deserializer)?;
+        let mut value = Value::deserialize(deserializer)?;
+        normalize_reasoning_aliases(&mut value);
         let is_custom = value
             .get("role")
             .and_then(Value::as_str)
