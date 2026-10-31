@@ -151,6 +151,9 @@ class VoxtralDummyInputsBuilder(BaseDummyInputsBuilder[VoxtralProcessingInfo]):
 
 
 class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo]):
+    # Raw waveforms: the log-mel is computed from them, so keep fp32.
+    keep_dtype_keys = frozenset({"audio_arrays"})
+
     def get_dummy_inputs(
         self,
         seq_len: int,

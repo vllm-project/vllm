@@ -976,6 +976,26 @@ def test_hf_processor_call_kwargs(
     assert result == expected_kwargs
 
 
+@pytest.mark.parametrize("model_id", ["Qwen/Qwen2-VL-2B-Instruct"])  # Dummy
+def test_call_hf_processor_keep_dtype_keys(model_id):
+    import torch
+    from transformers import BatchFeature
+
+    ctx = InputProcessingContext(
+        model_config=ModelConfig(model_id, dtype="bfloat16"),
+        tokenizer=None,
+    )
+
+    def processor(**_):
+        return BatchFeature(
+            {"wave": torch.zeros(4), "feats": torch.zeros(4)}, tensor_type="pt"
+        )
+
+    out = ctx.call_hf_processor(processor, {}, keep_dtype_keys=frozenset({"wave"}))
+    assert out["wave"].dtype == torch.float32
+    assert out["feats"].dtype == torch.bfloat16
+
+
 def test_apply_matches_no_match_exits_quickly():
     """Test that _apply_matches exits quickly when no matches are found.
 
