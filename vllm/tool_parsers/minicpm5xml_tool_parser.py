@@ -27,6 +27,11 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
+from vllm.tool_parsers.schema_types import (
+    ParameterTypes,
+    ParameterTypesCache,
+    convert_value,
+)
 from vllm.tool_parsers.utils import partial_tag_overlap, safe_literal_eval
 from vllm.utils import random_uuid
 
@@ -121,35 +126,19 @@ def _parse_arguments(json_value: str) -> tuple[Any, bool]:
         return json_value, False
 
 
-def _get_argument_type(
-    func_name: str,
-    arg_key: str,
-    name_to_tool: dict[str, ChatCompletionToolsParam],
-) -> str | None:
-    tool = name_to_tool.get(func_name)
-    if tool is None or tool.function.parameters is None:
-        return None
-    props = tool.function.parameters.get("properties", {})
-    if arg_key not in props:
-        return None
-    return props[arg_key].get("type")
-
-
 def _coerce_argument_value(
     func_name: str,
     arg_key: str,
     value: Any,
-    name_to_tool: dict[str, ChatCompletionToolsParam],
+    param_types: dict[str, ParameterTypes],
 ) -> Any:
-    arg_type = _get_argument_type(func_name, arg_key, name_to_tool)
-    if arg_type == "string":
-        return (
-            value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-        )
+    props, extra = param_types.get(func_name, ({}, None))
+    allowed = props.get(arg_key, extra)
     if isinstance(value, str):
-        parsed_val, _ = _parse_arguments(value)
-        return parsed_val
-    return value
+        return convert_value(value, allowed, lambda v: _parse_arguments(v)[0])
+    # Already decoded (wrapped arguments): serialize it where a string is meant.
+    text = json.dumps(value, ensure_ascii=False)
+    return convert_value(text, allowed, lambda _: value)
 
 
 def _add_argument(
@@ -159,7 +148,7 @@ def _add_argument(
     arguments: dict[str, Any],
     seen_keys: set[str],
     allowed_props: set[str],
-    name_to_tool: dict[str, ChatCompletionToolsParam],
+    param_types: dict[str, ParameterTypes],
 ) -> bool:
     """Add one argument; return False if it violates the tool schema."""
     # MiniCPM5 can emit OpenAI-style wrappers, e.g.
@@ -181,7 +170,7 @@ def _add_argument(
                 return False
             seen_keys.add(wrapped_key)
             arguments[wrapped_key] = _coerce_argument_value(
-                func_name, wrapped_key, wrapped_value, name_to_tool
+                func_name, wrapped_key, wrapped_value, param_types
             )
             added = True
         return added
@@ -191,7 +180,7 @@ def _add_argument(
     if key in seen_keys:
         return False
     seen_keys.add(key)
-    arguments[key] = _coerce_argument_value(func_name, key, val_text, name_to_tool)
+    arguments[key] = _coerce_argument_value(func_name, key, val_text, param_types)
     return True
 
 
@@ -275,13 +264,7 @@ def _normalize_alias_tool_call(
 
 def _build_tool_maps(
     tools: list[ChatCompletionToolsParam] | None,
-) -> tuple[
-    set[str],
-    dict[str, set[str]],
-    dict[str, set[str]],
-    dict[str, ChatCompletionToolsParam],
-]:
-    name_to_tool: dict[str, ChatCompletionToolsParam] = {}
+) -> tuple[set[str], dict[str, set[str]], dict[str, set[str]]]:
     name_to_allowed_props: dict[str, set[str]] = {}
     name_to_required: dict[str, set[str]] = {}
 
@@ -289,7 +272,6 @@ def _build_tool_maps(
         name = tool.function.name
         if not name:
             continue
-        name_to_tool[name] = tool
         params = tool.function.parameters or {}
         props = params.get("properties", {}) if isinstance(params, dict) else {}
         name_to_allowed_props[name] = set(props.keys())
@@ -305,12 +287,7 @@ def _build_tool_maps(
             )
             name_to_required[name] = set()
 
-    return (
-        set(name_to_tool.keys()),
-        name_to_allowed_props,
-        name_to_required,
-        name_to_tool,
-    )
+    return set(name_to_allowed_props), name_to_allowed_props, name_to_required
 
 
 def _parse_function_block(
@@ -318,7 +295,7 @@ def _parse_function_block(
     tool_names: set[str],
     name_to_allowed_props: dict[str, set[str]],
     name_to_required: dict[str, set[str]],
-    name_to_tool: dict[str, ChatCompletionToolsParam],
+    param_types: dict[str, ParameterTypes],
 ) -> dict[str, Any] | None:
     """Return {name, parameters} if block is valid, else None."""
     func_name: str | None = None
@@ -368,7 +345,7 @@ def _parse_function_block(
                     arguments,
                     seen_keys,
                     allowed_props,
-                    name_to_tool,
+                    param_types,
                 ):
                     has_invalid_param = True
                     break
@@ -401,7 +378,7 @@ def _parse_function_block(
                     arguments,
                     seen_keys,
                     allowed_props,
-                    name_to_tool,
+                    param_types,
                 ):
                     has_invalid_param = True
                     break
@@ -434,7 +411,7 @@ def _parse_partial_params(
     block: str,
     func_name: str,
     name_to_allowed_props: dict[str, set[str]],
-    name_to_tool: dict[str, ChatCompletionToolsParam],
+    param_types: dict[str, ParameterTypes],
 ) -> dict[str, Any]:
     arguments: dict[str, Any] = {}
     seen_keys: set[str] = set()
@@ -455,7 +432,7 @@ def _parse_partial_params(
             arguments,
             seen_keys,
             allowed_props,
-            name_to_tool,
+            param_types,
         )
     return arguments
 
@@ -472,6 +449,7 @@ class MiniCPM5XMLToolParser(ToolParser):
         self.tool_call_start_token = "<function"
         self.tool_call_end_token = "</function>"
         self._processed_len = 0
+        self._parameter_types_cache = ParameterTypesCache()
 
     def _reset_stream_state(self) -> None:
         self._processed_len = 0
@@ -504,8 +482,8 @@ class MiniCPM5XMLToolParser(ToolParser):
                 content=_strip_thinking_content(model_output),
             )
 
-        tool_names, name_to_allowed_props, name_to_required, name_to_tool = (
-            _build_tool_maps(request.tools)
+        tool_names, name_to_allowed_props, name_to_required = _build_tool_maps(
+            request.tools
         )
 
         tool_calls: list[ToolCall] = []
@@ -523,7 +501,7 @@ class MiniCPM5XMLToolParser(ToolParser):
                     tool_names,
                     name_to_allowed_props,
                     name_to_required,
-                    name_to_tool,
+                    self._parameter_types_cache.for_tools(request.tools),
                 )
                 if parsed is not None:
                     tool_calls.append(
@@ -627,15 +605,15 @@ class MiniCPM5XMLToolParser(ToolParser):
         block: str,
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
-        tool_names, name_to_allowed_props, name_to_required, name_to_tool = (
-            _build_tool_maps(request.tools)
+        tool_names, name_to_allowed_props, name_to_required = _build_tool_maps(
+            request.tools
         )
         parsed = _parse_function_block(
             block,
             tool_names,
             name_to_allowed_props,
             name_to_required,
-            name_to_tool,
+            self._parameter_types_cache.for_tools(request.tools),
         )
         if parsed is None:
             return DeltaMessage(content=block)
@@ -690,9 +668,7 @@ class MiniCPM5XMLToolParser(ToolParser):
         block: str,
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
-        tool_names, name_to_allowed_props, _, name_to_tool = _build_tool_maps(
-            request.tools
-        )
+        tool_names, name_to_allowed_props, _ = _build_tool_maps(request.tools)
         if _PARAM_MISSING_NAME_REGEX.search(block):
             return None
 
@@ -710,7 +686,7 @@ class MiniCPM5XMLToolParser(ToolParser):
             block,
             func_name,
             name_to_allowed_props,
-            name_to_tool,
+            self._parameter_types_cache.for_tools(request.tools),
         )
         if not arguments:
             return None
