@@ -251,7 +251,7 @@ def test_preempt_defers_free_and_clears_bookkeeping():
     ("policy", "failed_call"),
     [
         ("fcfs", 1),
-        ("priority", 2),
+        ("priority", 1),
     ],
 )
 def test_allocation_retry_waits_for_fence_then_succeeds(policy, failed_call):
@@ -274,7 +274,7 @@ def test_allocation_retry_waits_for_fence_then_succeeds(policy, failed_call):
         blocked = scheduler.schedule()
     assert allocate.call_count == failed_call
     assert not blocked.preempted_req_ids
-    retry_trigger = requests[failed_call - 1]
+    retry_trigger = trigger if policy == "priority" else requests[0]
     assert retry_trigger.request_id not in blocked.num_scheduled_tokens
 
     for output in (out0, out1, blocked):
