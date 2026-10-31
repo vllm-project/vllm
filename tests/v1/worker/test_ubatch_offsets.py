@@ -6,7 +6,7 @@ from unittest.mock import patch
 import numpy as np
 
 from vllm.v1.worker import ubatching
-from vllm.v1.worker.ubatch_utils import maybe_create_ubatch_slices
+from vllm.v1.worker.gpu.ubatch_common import compute_ubatch_slices
 from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_token_offset,
     make_ubatch_contexts,
@@ -64,17 +64,20 @@ def test_token_offset_per_ubatch_thread():
 
 
 def test_ubatch_slice_bounds_are_python_ints():
-    # The last bound comes from np.cumsum; numpy scalars leaking into the
+    # Request bounds come from np.searchsorted; numpy scalars leaking into the
     # per-ubatch metadata break Triton argument specialization.
-    ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
-        should_ubatch=True,
+    ubatch_slices = compute_ubatch_slices(
         num_scheduled_tokens=np.array([5, 9, 6], dtype=np.int32),
-        num_tokens_padded=20,
-        num_reqs_padded=3,
+        num_reqs=3,
+        num_reqs_padded=4,
+        num_tokens_padded=24,
         num_ubatches=2,
     )
-    for slices in (ubatch_slices, ubatch_slices_padded):
-        assert slices is not None
-        for s in slices:
-            for bound in (s.token_slice.start, s.token_slice.stop):
-                assert type(bound) is int
+    for s in ubatch_slices:
+        for bound in (
+            s.request_slice.start,
+            s.request_slice.stop,
+            s.token_slice.start,
+            s.token_slice.stop,
+        ):
+            assert type(bound) is int

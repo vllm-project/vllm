@@ -17,6 +17,34 @@ _NUM_UBATCHES: int = 2
 _CURRENT_CONTEXTS: list["UBatchContext | None"] = []
 
 
+class UBatchAbortedError(RuntimeError):
+    """A sibling failed before handing control back to this microbatch."""
+
+
+class _UBatchAbortState:
+    def __init__(
+        self, cpu_events: list[threading.Event], ready_barrier: threading.Barrier
+    ):
+        self.cpu_events = cpu_events
+        self.ready_barrier = ready_barrier
+        self.lock = threading.Lock()
+        self.failure: tuple[int, BaseException] | None = None
+
+    def abort(self, ubatch_id: int, error: BaseException) -> None:
+        with self.lock:
+            if self.failure is None:
+                self.failure = (ubatch_id, error)
+            for event in self.cpu_events:
+                event.set()
+            self.ready_barrier.abort()
+
+    def check(self) -> None:
+        failure = self.failure
+        if failure is not None:
+            ubatch_id, error = failure
+            raise UBatchAbortedError(f"Microbatch {ubatch_id} failed") from error
+
+
 class UBatchContext:
     """Context manager for micro-batching synchronization using threading events."""
 
@@ -31,6 +59,7 @@ class UBatchContext:
         cpu_signal_event: threading.Event,
         gpu_comm_done_event: torch.Event,
         gpu_compute_done_event: torch.Event,
+        abort_state: _UBatchAbortState,
         schedule: str = "default",
         token_offset: int = 0,
     ):
@@ -47,29 +76,48 @@ class UBatchContext:
         self.schedule = schedule
         self.token_offset = token_offset
         self.recv_hook = None
+        self.abort_state = abort_state
 
     def __enter__(self):
         global _CURRENT_CONTEXTS, _THREAD_ID_TO_CONTEXT
-        _THREAD_ID_TO_CONTEXT[threading.get_ident()] = self.id
-        _CURRENT_CONTEXTS[self.id] = self
-        # _NUM_UBATCHES is set in make_ubatch_contexts
-        self.ready_barrier.wait()
-
-        self.cpu_wait_event.wait()
-        self.cpu_wait_event.clear()
-        self._restore_context()
-        # Assume we want to start on the compute stream
-        self.update_stream(self.compute_stream)
+        try:
+            _THREAD_ID_TO_CONTEXT[threading.get_ident()] = self.id
+            _CURRENT_CONTEXTS[self.id] = self
+            self.ready_barrier.wait()
+            self._wait_for_turn()
+            self._restore_context()
+            # Assume we want to start on the compute stream
+            self.update_stream(self.compute_stream)
+        except BaseException as error:
+            # A failed __enter__ does not invoke __exit__ automatically.
+            self.abort_state.abort(self.id, error)
+            self._unregister()
+            raise
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        global _CURRENT_CONTEXTS, _THREAD_ID_TO_CONTEXT
-        _CURRENT_CONTEXTS[self.id] = None
-        del _THREAD_ID_TO_CONTEXT[threading.get_ident()]
-        self.maybe_run_recv_hook()
-        self.cpu_signal_event.set()
-        self.cpu_wait_event.clear()
+        if exc_val is not None:
+            self.abort_state.abort(self.id, exc_val)
+        self._unregister()
+        try:
+            self.maybe_run_recv_hook()
+        except BaseException as error:
+            self.abort_state.abort(self.id, error)
+            raise
+        finally:
+            self.cpu_wait_event.clear()
+            self.cpu_signal_event.set()
         return False
+
+    def _unregister(self):
+        _CURRENT_CONTEXTS[self.id] = None
+        _THREAD_ID_TO_CONTEXT.pop(threading.get_ident(), None)
+
+    def _wait_for_turn(self):
+        self.abort_state.check()
+        self.cpu_wait_event.wait()
+        self.cpu_wait_event.clear()
+        self.abort_state.check()
 
     def _restore_context(self):
         forward_context._forward_context = self.forward_context
@@ -92,6 +140,7 @@ class UBatchContext:
         self.compute_stream.wait_event(self.gpu_comm_done_event)
 
     def _cpu_yield(self):
+        self.abort_state.check()
         # It is critical for correctness that only one thread is running
         # at a time. These asserts just make sure that this is the only
         # thread running before waking the other one up and going to sleep
@@ -100,8 +149,7 @@ class UBatchContext:
         assert not self.cpu_wait_event.is_set()
 
         self.cpu_signal_event.set()
-        self.cpu_wait_event.wait()
-        self.cpu_wait_event.clear()
+        self._wait_for_turn()
         self._restore_context()
 
     def switch_to_comm(self):
@@ -223,6 +271,8 @@ def make_ubatch_contexts(
     assert num_micro_batches > 1, "num_micro_batches must be greater than 1"
 
     _NUM_UBATCHES = num_micro_batches
+    if ready_barrier.broken:
+        ready_barrier.reset()
     # Ensure the global context list is large enough
     if len(_CURRENT_CONTEXTS) < num_micro_batches:
         _CURRENT_CONTEXTS.extend([None] * (num_micro_batches - len(_CURRENT_CONTEXTS)))
@@ -231,6 +281,7 @@ def make_ubatch_contexts(
     Create a context manager for micro-batching synchronization.
     """
     cpu_events = [threading.Event() for _ in range(num_micro_batches)]
+    abort_state = _UBatchAbortState(cpu_events, ready_barrier)
     gpu_comm_done_events = [torch.Event() for _ in range(num_micro_batches)]
     gpu_compute_done_events = [torch.Event() for _ in range(num_micro_batches)]
 
@@ -246,6 +297,7 @@ def make_ubatch_contexts(
             cpu_signal_event=cpu_events[(i + 1) % num_micro_batches],
             gpu_comm_done_event=gpu_comm_done_events[i],
             gpu_compute_done_event=gpu_compute_done_events[i],
+            abort_state=abort_state,
             schedule=schedule,
             token_offset=token_offsets[i] if token_offsets else 0,
         )
