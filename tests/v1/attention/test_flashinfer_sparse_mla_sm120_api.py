@@ -4,6 +4,7 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from vllm.config import set_current_vllm_config
@@ -92,3 +93,45 @@ def test_sm120_dsv4_required_topk_tracks_dspark_width() -> None:
 
     assert _required_sm120_sparse_topk(causal, 128) == 128
     assert _required_sm120_sparse_topk(dspark, 128) == 192
+
+
+@pytest.mark.parametrize(
+    ("configs", "expected"),
+    [
+        pytest.param(None, False, id="no-config-api"),
+        pytest.param({}, False, id="no-dsv4-entry"),
+        pytest.param(
+            {"dsv4": SimpleNamespace(page_block_size=64)}, False, id="fixed-64-pages"
+        ),
+        pytest.param(
+            {"dsv4": SimpleNamespace(page_block_size_is_runtime=False)},
+            False,
+            id="runtime-flag-off",
+        ),
+        pytest.param(
+            {"dsv4": SimpleNamespace(page_block_size_is_runtime=True)},
+            True,
+            id="runtime-pages",
+        ),
+    ],
+)
+def test_sm120_dsv4_runtime_page_size_probe(monkeypatch, configs, expected) -> None:
+    fake_module = SimpleNamespace()
+    if configs is not None:
+        fake_module.supported_sparse_mla_sm120_configs = lambda: configs
+    monkeypatch.setattr(fi_utils, "has_flashinfer_sparse_mla_sm120", lambda: True)
+    monkeypatch.setattr(fi_utils, "_get_submodule", lambda _name: fake_module)
+    fi_utils.has_flashinfer_sparse_mla_sm120_runtime_page_size.cache_clear()
+
+    assert fi_utils.has_flashinfer_sparse_mla_sm120_runtime_page_size() is expected
+
+    fi_utils.has_flashinfer_sparse_mla_sm120_runtime_page_size.cache_clear()
+
+
+def test_sm120_dsv4_runtime_page_size_probe_needs_decode_api(monkeypatch) -> None:
+    monkeypatch.setattr(fi_utils, "has_flashinfer_sparse_mla_sm120", lambda: False)
+    fi_utils.has_flashinfer_sparse_mla_sm120_runtime_page_size.cache_clear()
+
+    assert not fi_utils.has_flashinfer_sparse_mla_sm120_runtime_page_size()
+
+    fi_utils.has_flashinfer_sparse_mla_sm120_runtime_page_size.cache_clear()
