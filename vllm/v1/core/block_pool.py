@@ -408,6 +408,9 @@ class BlockPool:
         num_cached_blocks: int,
         block_size: int,
         kv_cache_group_id: int,
+        *,
+        cached_blocks: Sequence[KVCacheBlock] | None = None,
+        num_cached_tokens: int | None = None,
     ) -> None:
         """Generate BlockStored events for blocks reused from prefix cache.
 
@@ -420,9 +423,30 @@ class BlockPool:
             num_cached_blocks: Number of blocks that were cache hits.
             block_size: Number of tokens per block.
             kv_cache_group_id: The KV cache group ID.
+            cached_blocks: Actual blocks covering the reused prefix. Required
+                to report sparse or partial hits accurately.
+            num_cached_tokens: Exact number of reused tokens. Required to
+                report sparse or partial hits accurately.
 
         """
         if not self.enable_kv_cache_events or num_cached_blocks == 0:
+            return
+
+        if (
+            cached_blocks is not None
+            and num_cached_tokens is not None
+            and (
+                num_cached_tokens != num_cached_blocks * block_size
+                or any(block.is_null for block in cached_blocks)
+            )
+        ):
+            self._emit_sparse_cached_block_events(
+                request,
+                cached_blocks,
+                num_cached_tokens,
+                block_size,
+                kv_cache_group_id,
+            )
             return
 
         block_hashes = resolve_block_hashes(
@@ -482,6 +506,71 @@ class BlockPool:
                 lookahead_token_ids=lookahead_token_ids,
             )
         )
+
+    def _emit_sparse_cached_block_events(
+        self,
+        request: Request,
+        cached_blocks: Sequence[KVCacheBlock],
+        num_cached_tokens: int,
+        block_size: int,
+        kv_cache_group_id: int,
+    ) -> None:
+        assert len(cached_blocks) == (num_cached_tokens + block_size - 1) // block_size
+
+        for block_idx, block in enumerate(cached_blocks):
+            if block.is_null:
+                continue
+            block_start = block_idx * block_size
+            block_end = min(block_start + block_size, num_cached_tokens)
+            # EAGLE can reuse less than the registered entry covers.
+            max_block_end = min(
+                block_start + block_size,
+                len(request.block_hashes) * self.hash_block_size,
+            )
+            for stored_end in range(block_end, max_block_end + 1, self.hash_block_size):
+                block_hash = self._get_partial_block_hash(request, stored_end)
+                if self.cached_block_hash_to_block.contain(
+                    make_block_hash_with_group_id(block_hash, kv_cache_group_id),
+                    block.block_id,
+                ):
+                    block_end = stored_end
+                    break
+            else:
+                continue
+            parent_hash = (
+                request.block_hashes[block_start // self.hash_block_size - 1]
+                if block_start > 0
+                else None
+            )
+            if block_end % block_size:
+                parent_hash, block_start = (
+                    self._get_partial_block_parent_hash_and_start(request, block_end)
+                )
+            parent_block_hash = (
+                maybe_convert_block_hash(parent_hash)
+                if parent_hash is not None
+                else None
+            )
+            extra_keys, _ = self._generate_event_extra_keys(
+                request, block_start, block_end, 0
+            )
+            self.kv_event_queue.append(
+                self._build_block_stored_event(
+                    request,
+                    block_hashes=[maybe_convert_block_hash(block_hash)],
+                    parent_block_hash=parent_block_hash,
+                    start_token_idx=block_start,
+                    end_token_idx=block_end,
+                    block_size=block_end - block_start,
+                    kv_cache_group_id=kv_cache_group_id,
+                    extra_keys_list=[extra_keys],
+                    lookahead_token_ids=(
+                        [self._lookahead_token_ids(request, block_end)]
+                        if self.num_hash_lookahead_tokens
+                        else None
+                    ),
+                )
+            )
 
     def cache_partial_block(
         self,
