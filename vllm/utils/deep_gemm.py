@@ -9,7 +9,9 @@ import contextlib
 import functools
 import importlib
 import os
+import re
 import shutil
+import subprocess
 from collections.abc import Callable
 from enum import Enum
 from typing import Any, NoReturn
@@ -133,6 +135,18 @@ def _deep_gemm_nvcc_path() -> str | None:
     return shutil.which(nvcc)
 
 
+def _nvcc_version(nvcc: str) -> tuple[int, int] | None:
+    """Return the (major, minor) release of ``nvcc``, or None if unreadable."""
+    try:
+        out = subprocess.run(
+            [nvcc, "--version"], capture_output=True, text=True, timeout=60
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    match = re.search(r"release (\d+)\.(\d+)", out)
+    return (int(match[1]), int(match[2])) if match else None
+
+
 @functools.cache
 def is_deep_gemm_supported() -> bool:
     """Return `True` if DeepGEMM is supported on the current platform.
@@ -141,11 +155,23 @@ def is_deep_gemm_supported() -> bool:
     is_supported_arch = current_platform.support_deep_gemm()
     if not (is_supported_arch and envs.VLLM_USE_DEEP_GEMM and has_deep_gemm()):
         return False
-    if _deep_gemm_nvcc_path() is None:
+    nvcc = _deep_gemm_nvcc_path()
+    if nvcc is None:
         logger.warning_once(
             "DeepGEMM kernels are disabled: DeepGEMM JIT-compiles its kernels "
             "with nvcc, which is missing (CUDA_HOME, CUDA_PATH, PATH or "
             "/usr/local/cuda). Set CUDA_HOME to a CUDA toolkit to enable them."
+        )
+        return False
+    # DeepGEMM's JIT asserts nvcc >= 12.9 and aborts the engine otherwise.
+    version = _nvcc_version(nvcc)
+    if version is not None and version < (12, 9):
+        logger.warning_once(
+            "DeepGEMM kernels are disabled: DeepGEMM's JIT needs nvcc 12.9 or "
+            "newer, found %d.%d at %s. Set CUDA_HOME to a newer CUDA toolkit "
+            "to enable them.",
+            *version,
+            nvcc,
         )
         return False
     return True
