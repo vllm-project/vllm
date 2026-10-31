@@ -475,8 +475,8 @@ class AiterFlashAttentionMetadataBuilder(
         self.num_heads_q = self.model_config.get_num_attention_heads(
             self.parallel_config
         )
-        self.num_heads_kv = self.model_config.get_num_kv_heads(self.parallel_config)
-        self.headdim = self.model_config.get_head_size()
+        self.num_heads_kv = kv_cache_spec.num_kv_heads
+        self.headdim = kv_cache_spec.head_size
         self.block_size = kv_cache_spec.block_size
         # Sliding window size to be used with the AOT scheduler will be
         # populated on first build() call.
@@ -1233,13 +1233,16 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 chunked_output = tmp_output
                 chunked_lse = tmp_lse
 
-        merge_attn_states(
-            output=output,
-            prefix_output=chunked_output,
-            prefix_lse=chunked_lse,
-            suffix_output=out,
-            suffix_lse=lse,
-        )
+        if chunked_output is None:
+            output.copy_(out)
+        else:
+            merge_attn_states(
+                output=output,
+                prefix_output=chunked_output,
+                prefix_lse=chunked_lse,
+                suffix_output=out,
+                suffix_lse=lse,
+            )
 
     def forward(
         self,

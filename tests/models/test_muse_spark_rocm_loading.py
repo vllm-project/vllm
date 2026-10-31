@@ -315,3 +315,123 @@ def test_aiter_kv_workspace_only_for_cache_readers(
         spec, ["attn"], default_vllm_config, torch.device("cpu")
     )
     assert (builder.kv_sharing_workspace is not None) == (sharing or bypass)
+
+
+def test_aiter_builder_sizes_workspace_from_kv_cache_spec_and_zero_chunk_extend(
+    monkeypatch: pytest.MonkeyPatch, default_vllm_config
+) -> None:
+    from vllm.model_executor.layers.attention import Attention
+    from vllm.v1.attention.backends import rocm_aiter_fa
+    from vllm.v1.attention.backends.rocm_aiter_fa import (
+        AiterChunkContextMetadata,
+        AiterFlashAttentionExtendMetadata,
+        AiterFlashAttentionImpl,
+        AiterFlashAttentionMetadata,
+        AiterFlashAttentionMetadataBuilder,
+    )
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+    layer = Attention.__new__(Attention)
+    torch.nn.Module.__init__(layer)
+    layer.impl = AiterFlashAttentionImpl.__new__(AiterFlashAttentionImpl)
+    layer.impl.sliding_window = (-1, -1)
+    layer.impl.num_kv_heads = 2
+    layer.impl.head_size = 64
+    layer.impl.scale = 0.125
+    layer.impl.alibi_slopes = None
+    layer.impl.sinks = None
+    layer.impl.kv_cache_dtype = "auto"
+    layer.kv_sharing_target_layer_name = None
+    layer.kv_cache_update_bypass = False
+    monkeypatch.setattr(
+        default_vllm_config.compilation_config,
+        "static_forward_context",
+        {"drafter_attn": layer},
+    )
+    monkeypatch.setattr(
+        default_vllm_config,
+        "model_config",
+        SimpleNamespace(
+            dtype=torch.bfloat16,
+            get_num_attention_heads=lambda _: 16,
+            get_num_kv_heads=lambda _: 1,
+            get_head_size=lambda: 128,
+        ),
+    )
+    drafter_spec = FullAttentionSpec(
+        block_size=16, num_kv_heads=2, head_size=64, dtype=torch.bfloat16
+    )
+    builder = AiterFlashAttentionMetadataBuilder(
+        drafter_spec, ["drafter_attn"], default_vllm_config, torch.device("cpu")
+    )
+    assert builder.num_heads_kv == 2
+    assert builder.headdim == 64
+    assert tuple(builder.extend_workspace.shape[2:]) == (2, 64)
+
+    expected_out = torch.randn(4, 4, 64, dtype=torch.bfloat16)
+    expected_lse = torch.randn(4, 4, dtype=torch.float32)
+    monkeypatch.setattr(
+        rocm_aiter_fa.rocm_aiter_ops,
+        "flash_attn_varlen_func",
+        lambda **_: (expected_out, expected_lse),
+    )
+    chunk_meta = AiterChunkContextMetadata(
+        workspace=builder.extend_workspace,
+        cu_seq_lens_chunk=torch.zeros((0, 2), dtype=torch.int32),
+        max_seq_lens=[],
+        chunk_starts=torch.zeros((0, 1), dtype=torch.int32),
+        token_to_batch=torch.zeros((0, 0), dtype=torch.int32),
+        total_token_per_batch=[],
+        num_chunks=0,
+    )
+    attn_meta = AiterFlashAttentionMetadata(
+        num_actual_tokens=4,
+        max_query_len=4,
+        query_start_loc=torch.tensor([0, 4], dtype=torch.int32),
+        max_seq_len=4,
+        seq_lens=torch.tensor([4], dtype=torch.int32),
+        block_table=torch.zeros((1, 1), dtype=torch.int32),
+        slot_mapping=torch.arange(4, dtype=torch.int64),
+        use_cascade=False,
+        common_prefix_len=0,
+        cu_prefix_query_lens=None,
+        prefix_kv_lens=None,
+        suffix_kv_lens=None,
+        num_decodes=0,
+        num_decode_tokens=0,
+        decode_metadata=None,
+        num_prefills=0,
+        num_prefill_tokens=0,
+        prefill_metadata=None,
+        num_extends=1,
+        num_extend_tokens=4,
+        extend_metadata=AiterFlashAttentionExtendMetadata(
+            max_query_len=4,
+            min_query_len=4,
+            max_seq_len=4,
+            query_start_loc=torch.tensor([0, 4], dtype=torch.int32),
+            chunk_context_metadata=chunk_meta,
+            swa_metadata=None,
+        ),
+    )
+    output = torch.zeros_like(expected_out)
+    layer.impl.extend_forward(
+        attn_metadata=attn_meta,
+        query=expected_out,
+        key=torch.zeros(4, 2, 64, dtype=torch.bfloat16),
+        value=torch.zeros(4, 2, 64, dtype=torch.bfloat16),
+        key_cache=torch.zeros(1, 16, 2, 64, dtype=torch.bfloat16),
+        value_cache=torch.zeros(1, 16, 2, 64, dtype=torch.bfloat16),
+        output=output,
+        cu_seqlens_q=torch.tensor([0, 4], dtype=torch.int32),
+        max_seqlen_q=4,
+        min_seqlen_q=4,
+        max_seqlen_k=4,
+        min_seqlen_k=4,
+        block_table=torch.zeros((1, 1), dtype=torch.int32),
+        slot_mapping=torch.arange(4, dtype=torch.int64),
+        k_scale=torch.ones(1, dtype=torch.float32),
+        v_scale=torch.ones(1, dtype=torch.float32),
+    )
+    torch.testing.assert_close(output, expected_out)
+
