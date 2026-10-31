@@ -403,10 +403,24 @@ class InputProcessor:
         dp_local_size = parallel_config.data_parallel_size_local
         num_ranks = dp_local_size if parallel_config.local_engines_only else dp_size
         if data_parallel_rank is not None and not (0 <= data_parallel_rank < num_ranks):
-            raise VLLMValidationError(
-                f"data_parallel_rank {data_parallel_rank} "
-                f"is out of range [0, {num_ranks})."
-            )
+            start_rank = parallel_config.data_parallel_index
+            if (
+                parallel_config.local_engines_only
+                and start_rank <= data_parallel_rank < start_rank + num_ranks
+            ):
+                # Local indices take precedence over overlapping global ranks.
+                data_parallel_rank -= start_rank
+            else:
+                valid_ranges = f"[0, {num_ranks})"
+                if parallel_config.local_engines_only and start_rank != 0:
+                    valid_ranges += (
+                        f" (local index) or [{start_rank}, "
+                        f"{start_rank + num_ranks}) (global rank)"
+                    )
+                raise VLLMValidationError(
+                    f"data_parallel_rank {data_parallel_rank} "
+                    f"is out of range {valid_ranges}."
+                )
 
         if isinstance(prompt, dict) and "type" in prompt:
             if arrival_time is None:

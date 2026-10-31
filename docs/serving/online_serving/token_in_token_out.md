@@ -44,7 +44,9 @@ The top level adds `request_id`, `usage`, `prompt_token_ids` and `prompt_logprob
 
 ## Targeting a data-parallel rank (`X-data-parallel-rank`)
 
-Send the header `X-data-parallel-rank: <int>` to pin a request to one data-parallel (DP) engine rank; there is no body field. Without the header, or with a non-integer value, the request is load balanced. A rank outside `[0, data_parallel_size)` is rejected.
+Send the header `X-data-parallel-rank: <int>` to pin a request to one data-parallel (DP) engine rank; there is no body field. Without the header, or with a non-integer value, the request is load balanced.
+
+Accepted ranks and local/global rank interpretation depend on the frontend and load-balancing mode. See [Routing requests with `X-data-parallel-rank`](../data_parallel_deployment.md#routing-requests-with-x-data-parallel-rank) for the Python hybrid/external aliases, local-index precedence, and range validation.
 
 ## Output modes
 
