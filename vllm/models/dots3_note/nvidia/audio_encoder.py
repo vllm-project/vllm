@@ -18,7 +18,10 @@ from transformers.modeling_utils import PreTrainedModel
 from transformers.models.whisper.configuration_whisper import WhisperConfig
 from transformers.utils import logging
 
-from vllm.vllm_flash_attn import flash_attn_varlen_func, is_fa_version_supported
+from vllm.v1.attention.backends.fa_utils import (
+    flash_attn_varlen_func,
+    is_fa_version_supported,
+)
 
 _FLASH_ATTN_VERSION = 3 if is_fa_version_supported(3) else 2
 
