@@ -159,8 +159,8 @@ def record_checkpoint_layout(model: torch.nn.Module) -> None:
     if hasattr(model, "_ckpt_param_names") or is_weights_pre_processed():
         return  # pre-processed weights are already in runtime layout
     _check_supported(model)
-    # a model owns the tensors it records; another model's (already recorded)
-    # are refreshed by that model's updates
+    # a model owns the tensors it records first; `begin` refuses a shared one
+    # (a target lm_head in a draft) whose post-load processing re-laid it out
     model._ckpt_owner = object()  # tags owned tensors (ids of freed ones recur)
     for _, t in _loadable_tensors(model):
         if not t.is_meta and not hasattr(t, "_ckpt_layout"):
@@ -199,17 +199,6 @@ def _owned(model: torch.nn.Module, t: torch.Tensor) -> bool:
     return getattr(t, "_ckpt_owner", None) is model._ckpt_owner
 
 
-def _foreign_modules(model: torch.nn.Module) -> set[torch.nn.Module]:
-    """Modules all of whose own tensors another model owns: that model's
-    updates refresh them, so this model's finish must not process them."""
-    return {
-        module
-        for module in model.modules()
-        if (tensors := [t for _, t in _own_tensors(module)])
-        and not any(_owned(model, t) for t in tensors)
-    }
-
-
 def _checkpoint_views(
     model: torch.nn.Module,
 ) -> list[tuple[torch.Tensor, torch.Tensor]]:
@@ -221,10 +210,15 @@ def _checkpoint_views(
         layout = getattr(t, "_ckpt_layout", None)
         if layout is None:
             continue  # no layout: created by post-load processing, derived
-        if not _owned(model, t):
-            continue  # another model's (a target lm_head shared into a draft)
         if _layout(t) == layout:
             continue
+        if not _owned(model, t):
+            # shared from another model (a target lm_head in a draft): this
+            # finish would reprocess bytes a draft update does not resend
+            raise RuntimeError(
+                f"direct reload: {name} is shared from another model and its "
+                "post-load processing changed its layout"
+            )
         shape, stride, dtype, offset = layout
         storage = t.untyped_storage()
         span = storage_extent(torch.empty_strided(shape, stride, device="meta"))
@@ -288,12 +282,9 @@ def finish_direct_reload(
     # One-shot "already processed" guards would make the rerun below a no-op
     # and leave the freshly written checkpoint layout in place. Only quant
     # methods' guards: other modules set it for other reasons.
-    foreign = _foreign_modules(model)
     for module in model.modules():
-        if module not in foreign and isinstance(
-            getattr(module, "quant_method", None), QuantizeMethodBase
-        ):
+        if isinstance(getattr(module, "quant_method", None), QuantizeMethodBase):
             module.__dict__.pop("_already_called_process_weights_after_loading", None)
 
-    process_weights_after_loading(model, model_config, device, foreign)
+    process_weights_after_loading(model, model_config, device)
     model._direct_reload_pending = False

@@ -5,7 +5,6 @@
 import inspect
 import time
 import warnings
-from collections.abc import Container
 from contextlib import contextmanager, nullcontext
 from typing import Any, assert_never
 
@@ -139,15 +138,9 @@ def initialize_model(
 
 
 def process_weights_after_loading(
-    model: nn.Module,
-    model_config: ModelConfig,
-    target_device: torch.device,
-    skip_modules: Container[nn.Module] = (),
+    model: nn.Module, model_config: ModelConfig, target_device: torch.device
 ) -> None:
     """Post-process loaded weights into runtime format.
-
-    ``skip_modules`` are not processed (a direct reload skips modules another
-    model owns, e.g. a target lm_head shared into a draft).
 
     Under ``weights_already_processed`` (weight cache IPC loader), quant
     methods skip tensor transforms and must declare
@@ -170,8 +163,6 @@ def process_weights_after_loading(
         record_checkpoint_layout(model)  # cold start only; reloads reuse it
 
     for name, module in model.named_modules():
-        if module in skip_modules:
-            continue
         quant_method = getattr(module, "quant_method", None)
         if isinstance(quant_method, QuantizeMethodBase):
             if (
@@ -222,7 +213,7 @@ def process_weights_after_loading(
     # encoder. NOTE: Happens after other modules so we can easily decompress
     # weights.
     for _, module in model.named_modules():
-        if module not in skip_modules and is_deferred_attention_layer(module):
+        if is_deferred_attention_layer(module):
             # TODO(lucas): see if there is a way to unify the signatures
             # of process_weights_after_loading
             with device_loading_context(module, target_device):
