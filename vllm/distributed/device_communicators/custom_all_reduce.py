@@ -126,8 +126,6 @@ class CustomAllreduce:
         16: 2 * 1024 * 1024,
     }
     _DEFAULT_REDUCE_SCATTER_MAX_SIZE = 16 * 1024 * 1024
-    _DEFAULT_MNNVL_REDUCE_SCATTER_MAX_SIZE = 16 * 1024 * 1024
-    _DEFAULT_MNNVL_MULTIMEM_REDUCE_SCATTER_MAX_SIZE = 64 * 1024 * 1024
     _MNNVL_MULTIMEM_REDUCE_SCATTER_BLOCKS = 8
 
     # max_size: max supported allreduce size
@@ -139,10 +137,8 @@ class CustomAllreduce:
         max_all_gather_size=_DEFAULT_ALL_GATHER_MAX_SIZE,
         max_mnnvl_all_gather_size=None,
         max_reduce_scatter_size=_DEFAULT_REDUCE_SCATTER_MAX_SIZE,
-        max_mnnvl_reduce_scatter_size=_DEFAULT_MNNVL_REDUCE_SCATTER_MAX_SIZE,
-        max_mnnvl_multimem_reduce_scatter_size=(
-            _DEFAULT_MNNVL_MULTIMEM_REDUCE_SCATTER_MAX_SIZE
-        ),
+        max_mnnvl_reduce_scatter_size=None,
+        max_mnnvl_multimem_reduce_scatter_size=None,
         symm_mem_enabled=False,
         *,
         register_graph_buffers: bool = True,
@@ -225,6 +221,12 @@ class CustomAllreduce:
         # now `device` is a `torch.device` object
         assert isinstance(device, torch.device)
         self.device = device
+        if max_mnnvl_reduce_scatter_size is None:
+            max_mnnvl_reduce_scatter_size = envs.VLLM_MNNVL_REDUCE_SCATTER_MAX_BYTES
+        if max_mnnvl_multimem_reduce_scatter_size is None:
+            max_mnnvl_multimem_reduce_scatter_size = (
+                envs.VLLM_MNNVL_MULTIMEM_RS_MAX_BYTES
+            )
         mnnvl_multimem_rs_supported = _supports_mnnvl_multimem_reduce_scatter(
             device, world_size
         )
@@ -342,9 +344,15 @@ class CustomAllreduce:
             )
         )
         if world_size in _MNNVL_MULTIMEM_REDUCE_SCATTER_WORLD_SIZES:
+            # An empty multimem window (max <= the Lamport ceiling, e.g. when
+            # the backend is disabled via VLLM_MNNVL_MULTIMEM_RS_MAX_BYTES)
+            # leaves the backend unreachable, so report it unsupported and map
+            # nothing.
             self.mnnvl_multimem_rs_supported = _all_ranks_true(
                 self.group,
                 mnnvl_multimem_rs_supported and bool(self.mnnvl_multicast_ptr),
+            ) and (
+                max_mnnvl_multimem_reduce_scatter_size > max_mnnvl_reduce_scatter_size
             )
         if not same_node and not self.mnnvl_multicast_ptr:
             logger.warning(
@@ -353,6 +361,15 @@ class CustomAllreduce:
             )
             self.close()
             self.disabled = True
+        if (
+            not self.disabled
+            and not self.batch_invariant
+            and self.mnnvl_multimem_rs_supported
+        ):
+            # Map the multicast buffer now for setups where this backend is
+            # reachable; creating it on first use would allocate and rendezvous
+            # symmetric memory while other kernels and CUDA graphs are live.
+            self._init_mnnvl_multimem_reduce_scatter_buffer()
 
     def _init_mnnvl_buffer(self, stage_size: int) -> None:
         if torch_symm_mem is None or not current_platform.is_cuda():
@@ -638,13 +655,7 @@ class CustomAllreduce:
             if inp_size <= self.max_mnnvl_reduce_scatter_size:
                 return "mnnvl_lamport"
             if (
-                (
-                    self.mnnvl_multimem_rs_multicast_ptr
-                    or (
-                        self.mnnvl_multimem_rs_supported
-                        and not self.mnnvl_multimem_rs_initialized
-                    )
-                )
+                self.mnnvl_multimem_rs_multicast_ptr
                 and not envs.VLLM_BATCH_INVARIANT
                 and inp_size <= self.max_mnnvl_multimem_reduce_scatter_size
             ):
@@ -665,12 +676,6 @@ class CustomAllreduce:
         backend = self._select_reduce_scatter_backend(inp)
         if backend is None:
             return None
-        if backend == "mnnvl_multimem" and not self.mnnvl_multimem_rs_multicast_ptr:
-            if self._IS_CAPTURING:
-                return None
-            self._init_mnnvl_multimem_reduce_scatter_buffer()
-            if not self.mnnvl_multimem_rs_multicast_ptr:
-                return None
 
         out_shape = (inp.shape[0] // self.world_size,) + inp.shape[1:]
         out = torch.empty(out_shape, dtype=inp.dtype, device=inp.device)
