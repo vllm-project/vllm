@@ -48,6 +48,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import (
     flashinfer_trtllm_fused_allreduce_norm,
     fused_allreduce_gemma_rms_norm,
+    fused_allreduce_gemma_rms_norm_quant,
 )
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.fusion.quant_activation import (
@@ -366,15 +367,22 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
             return super().forward(hidden_states, residual, positions, **kwargs)
 
         # Each norm absorbs the preceding row-parallel linear's deferred
-        # all-reduce (use_fused_allreduce_norm), or quantizes for its
+        # all-reduce (use_fused_allreduce_norm) and/or quantizes for its
         # consumer. layer_scale commutes with the deferred all-reduce.
         is_gdn = self.layer_type == "linear_attention"
         in_proj = self.linear_attn.in_proj_qkvz if is_gdn else self.self_attn.qkv_proj
         in_proj_input = None
         if residual is not None and self.mlp_output_is_partial:
-            hidden_states, residual = fused_allreduce_gemma_rms_norm(
-                hidden_states, residual, self.input_layernorm
-            )
+            if (key := _norm_quant_key(in_proj)) is not None:
+                in_proj_input, hidden_states, residual = (
+                    fused_allreduce_gemma_rms_norm_quant(
+                        hidden_states, residual, self.input_layernorm, in_proj, key
+                    )
+                )
+            else:
+                hidden_states, residual = fused_allreduce_gemma_rms_norm(
+                    hidden_states, residual, self.input_layernorm
+                )
         elif (key := _norm_quant_key(in_proj)) is not None:
             # GDN's in_proj_ba reads the unquantized normed activation.
             in_proj_input, hidden_states, residual = self.input_layernorm.forward_quant(
@@ -411,9 +419,14 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
         # The MoE router needs the unquantized activation.
         gate_up = self.mlp.gate_up_proj if isinstance(self.mlp, Qwen3NextMLP) else None
         if self.use_fused_allreduce_norm:
-            hidden_states, residual = fused_allreduce_gemma_rms_norm(
-                hidden_states, residual, self.post_attention_layernorm
-            )
+            if gate_up is not None and (key := _norm_quant_key(gate_up)) is not None:
+                hidden_states, _, residual = fused_allreduce_gemma_rms_norm_quant(
+                    hidden_states, residual, self.post_attention_layernorm, gate_up, key
+                )
+            else:
+                hidden_states, residual = fused_allreduce_gemma_rms_norm(
+                    hidden_states, residual, self.post_attention_layernorm
+                )
         elif gate_up is not None and (key := _norm_quant_key(gate_up)) is not None:
             hidden_states, _, residual = self.post_attention_layernorm.forward_quant(
                 hidden_states, residual, gate_up, key
