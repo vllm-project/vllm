@@ -454,11 +454,10 @@ def enable_glm52_low_latency_gemm(
 
     warmup_configs: set[SkinnyGemmConfig] = set()
     for child in module.modules():
-        method = getattr(child, "quant_method", None)
-        if not isinstance(child, LinearBase) or type(method) not in (
-            UnquantizedLinearMethod,
-            Fp8DequantLinearMethod,
-        ):
+        if not isinstance(child, LinearBase):
+            continue
+        method = child.quant_method
+        if type(method) not in (UnquantizedLinearMethod, Fp8DequantLinearMethod):
             continue
         weight = getattr(child, "weight", None)
         if weight is None or weight.dim() != 2 or weight.dtype != torch.bfloat16:

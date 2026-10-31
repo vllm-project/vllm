@@ -2112,14 +2112,14 @@ def test_glm5next_genuine_fusion_resolves_gate_up_to_block_fp8():
     assert scheme_cls is QuarkW8A8Fp8PerBlock
 
 
-def _glm5_mla_params(block_n: int = 128) -> dict:
+def _glm5_mla_params() -> dict:
     """Params of a GLM5-next MLA layer whose projections load a block-FP8
     checkpoint (see `Fp8DequantConfig`): only the scales matter here."""
     prefix = "layers.3.self_attn"
     params = {}
     for target in ("fused_qkv_a_proj", "q_b_proj", "o_proj"):
         scale = torch.nn.Parameter(torch.empty(0), requires_grad=False)
-        scale.weight_block_size = [block_n, block_n]
+        scale.weight_block_size = [128, 128]
         params[f"{prefix}.{target}.weight_scale_inv"] = scale
     return params
 
