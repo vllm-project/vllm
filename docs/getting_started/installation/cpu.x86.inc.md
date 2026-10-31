@@ -277,6 +277,15 @@ Otherwise, vLLM falls back to the default `CpuPlatform` (oneDNN / sgl-kernel pat
 
 `bfloat16` is listed first either way, so `--dtype auto` keeps resolving to it.
 
+### MXFP4 and NVFP4 checkpoints
+
+On `ZenCpuPlatform`, zentorch serves these with no extra flag:
+
+- MXFP4 MoE experts from `mxfp4` checkpoints such as `openai/gpt-oss-20b`, and MXFP4 dense linear layers.
+- NVFP4 (W4A4, from ModelOpt or llm-compressor) MoE experts and dense linear layers.
+
+Compressed-tensors and AutoRound MXFP4 MoE layers, and NVFP4 W4A16 linear layers, are not served by zentorch. The weights are never expanded or requantized: the checkpoint tensors and ZenDNN's packed copy of them both stay four-bit, and the W4A8 kernel quantizes activations to int8 per token on the fly. To confirm, look for `Using 'ZEN_CPU' Mxfp4 MoE backend`, `Using 'ZEN_CPU' NvFp4 MoE backend`, or `Using ZentorchMxFp4LinearKernel` / `Using ZentorchNvFp4LinearKernel` in the startup logs.
+
 ### Environment variables
 
 - `VLLM_ZENTORCH_WEIGHT_PREPACK` (default `1`): eagerly prepacks linear weights into ZenDNN's blocked layout at model load time, eliminating per-inference layout conversion overhead. Set to `0` to disable.
