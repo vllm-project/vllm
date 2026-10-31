@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 import torch
@@ -9,9 +10,16 @@ import torch
 import vllm.model_executor.layers.sparse_attn_indexer as sparse_indexer
 import vllm.models.deepseek_v32.attention as deepseek_attention
 from vllm.config import CUDAGraphMode
+from vllm.forward_context import ForwardContext, override_forward_context
 from vllm.models.deepseek_v32 import attention as deepseek_v32_attention
 from vllm.models.deepseek_v32.attention import DeepseekV32Attention
-from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
+from vllm.v1.attention.backend import AttentionMetadata
+from vllm.v1.attention.backends.mla.indexer import (
+    DeepseekV32IndexerMetadata,
+    DeepseekV32IndexerPrefillChunkMetadata,
+    DeepseekV32IndexerPrefillMetadata,
+)
+from vllm.v1.worker.workspace import init_workspace_manager, reset_workspace_manager
 
 INDEXER_LAYER = "model.layers.0.self_attn.indexer.k_cache"
 MLA_LAYER = "model.layers.0.self_attn.attn"
@@ -80,7 +88,7 @@ def make_indexer_metadata(
         num_decode_tokens=num_decode_tokens,
         num_prefills=num_prefills,
         num_prefill_tokens=num_prefill_tokens,
-        prefill=SimpleNamespace(chunks=[]) if num_prefills else None,
+        prefill=DeepseekV32IndexerPrefillMetadata(chunks=[]) if num_prefills else None,
     )
 
 
@@ -128,6 +136,21 @@ def test_short_prefill_updates_k_cache_before_scoring_decision(
         num_prefill_tokens=num_prefill_tokens,
         slot_mapping=slot_mapping,
     )
+    if indexer_metadata.prefill is not None:
+        indexer_metadata.prefill.chunks.append(
+            DeepseekV32IndexerPrefillChunkMetadata(
+                block_table=torch.zeros((2, 1), dtype=torch.int32),
+                cu_seqlen_ks=torch.tensor([0, 0, 2, 2, 2], dtype=torch.int32),
+                cu_seqlen_ke=torch.tensor([1, 2, 3, 4, 5], dtype=torch.int32),
+                cu_seq_lens=torch.tensor([0, 2, 5], dtype=torch.int32),
+                token_to_seq=torch.tensor([0, 0, 1, 1, 1], dtype=torch.int32),
+                total_seq_lens=5,
+                max_seqlen_k=3,
+                token_start=0,
+                token_end=5,
+                num_reqs=2,
+            )
+        )
     if indexer_metadata.num_decodes:
         indexer_metadata.decode = object()
     mla_metadata = make_mla_metadata(
@@ -220,6 +243,51 @@ def test_short_prefill_updates_k_cache_before_scoring_decision(
     # K cache is always updated before the scoring decision.
     torch.testing.assert_close(observed["k"], k[: slot_mapping.numel()])
     assert observed["slots"] is slot_mapping
+
+
+@pytest.mark.parametrize("skip_topk_buffer_clear", [False, True])
+def test_empty_prefill_preserves_topk_initialization(
+    skip_topk_buffer_clear: bool,
+) -> None:
+    """Two-token prefills have no compressed KV, but still need valid sentinels."""
+    metadata = make_indexer_metadata(num_prefills=32, num_prefill_tokens=64)
+    context = ForwardContext(
+        no_compile_layers={},
+        attn_metadata={INDEXER_LAYER: cast(AttentionMetadata, metadata)},
+        slot_mapping={},
+        cudagraph_runtime_mode=CUDAGraphMode.FULL,
+    )
+    initial_value = -1 if skip_topk_buffer_clear else 17
+    topk = torch.full((65, 2048), initial_value, dtype=torch.int32)
+    init_workspace_manager(torch.device("cpu"))
+    try:
+        with override_forward_context(context):
+            result = sparse_indexer.sparse_attn_indexer(
+                hidden_states=torch.empty(64, 1),
+                k_cache_prefix=INDEXER_LAYER,
+                kv_cache=torch.empty(0),
+                q_quant=torch.empty(64, 1, 128),
+                q_scale=None,
+                k=None,
+                weights=torch.empty(64, 1),
+                quant_block_size=128,
+                scale_fmt="ue8m0",
+                topk_tokens=2048,
+                head_dim=128,
+                max_model_len=4096,
+                total_seq_lens=0,
+                topk_indices_buffer=topk,
+                skip_k_cache_insert=True,
+                use_pcp=False,
+                pcp_shard_decode_requests=False,
+                dense_mha_metadata_layer_name="",
+                skip_topk_buffer_clear=skip_topk_buffer_clear,
+            )
+    finally:
+        reset_workspace_manager()
+    assert result is topk
+    assert torch.all(topk[:64] == -1)
+    assert torch.all(topk[64:] == initial_value)
 
 
 def test_skipped_k_cache_insert_accepts_no_k(
