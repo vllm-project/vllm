@@ -259,6 +259,11 @@ class InklingMultiTokenPredictor(nn.Module):
 
 
 class InklingMTP(nn.Module, SupportsMultiModalEmbeddings):
+    # The drafter never builds its own embedding; it always uses the target's.
+    # Declaring it lets maybe_share_target_embed attach the target's
+    # embedding under PP > 1 too (undeclared drafts are skipped there).
+    has_own_embed_tokens = False
+
     hf_to_vllm_mapper = _TmlForCausalLMBase.hf_to_vllm_mapper | WeightsMapper(
         orig_to_new_prefix={"model.mtp.": "model."},
     )
