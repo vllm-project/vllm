@@ -103,10 +103,5 @@ BF16 residual merging is fused into one kernel; wider streams retain the
 original matrix multiplication to preserve its accumulation order. These paths
 support CUDA Graph replay without reducing router precision.
 
-Run `benchmarks/kernels/benchmark_sensenova_loop_mhc.py` with FlashInfer and CUPTI
-installed to compare the routing and merging operations. The benchmark checks
-projection against FP64 and merging against the original BF16 computation
-before measuring CUDA Graph replay with cold L2 cache.
-
 Use `--enforce-eager` instead of the compilation configuration for an eager
 baseline. Add `--cudagraph-metrics` to inspect actual graph dispatch statistics.
