@@ -3,6 +3,7 @@
 """A draft-model weight update reruns the drafter's post-load processing; the
 tensors the speculator's CUDA graphs read must keep their addresses."""
 
+import pytest
 import torch
 
 PROMPTS = [
@@ -26,23 +27,22 @@ def _update_draft_weights(worker) -> None:
     engine loading the received weights, `finish_weight_update`), with the
     drafter's own checkpoint as the update."""
     from vllm.model_executor.model_loader import DefaultModelLoader
-    from vllm.model_executor.model_loader.reload import (
-        finalize_layerwise_reload,
-        initialize_layerwise_reload,
-    )
+    from vllm.model_executor.model_loader.reload import finish_reload, start_reload
 
     model = worker.get_draft_model()
     config = worker.speculative_config.draft_model_config
     loader = DefaultModelLoader(worker.vllm_config.load_config)
-    initialize_layerwise_reload(model)
+    start_reload(model)
     model.load_weights(loader.get_all_weights(config, model))
-    finalize_layerwise_reload(model, config)
+    finish_reload(model, config, worker.device)
 
 
+@pytest.mark.parametrize("reload_mode", ["direct", "layerwise"])
 def test_draft_weight_update_keeps_draft_tensor_addresses(
-    vllm_runner, monkeypatch
+    reload_mode: str, vllm_runner, monkeypatch
 ) -> None:
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setenv("VLLM_RELOAD_MODE", reload_mode)
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     with vllm_runner(
         "Qwen/Qwen3-4B",
