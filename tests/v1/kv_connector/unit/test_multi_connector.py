@@ -10,13 +10,22 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from tests.v1.kv_connector.unit.utils import create_vllm_config, maybe_update_block_size
+from tests.v1.kv_connector.unit.utils import (
+    create_model_runner_output,
+    create_request,
+    create_scheduler,
+    create_vllm_config,
+    maybe_update_block_size,
+)
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
+    KVConnectorMetadata,
+    KVConnectorTransferResults,
+    KVLoadRange,
     SupportsHMA,
     supports_hma,
 )
@@ -26,6 +35,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiConnector,
+    MultiKVConnectorMetadata,
     MultiKVConnectorPromMetrics,
     MultiKVConnectorStats,
     MultiKVConnectorWorkerMetadata,
@@ -33,9 +43,21 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlKVConnectorStats,
 )
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    MambaSpec,
+    SlidingWindowMLASpec,
+    SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
+)
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput, KVConnectorWorkerMetadata
+from vllm.v1.request import RequestStatus
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 
@@ -259,6 +281,587 @@ def test_cache_hit_sources_delegate_to_selected_connector(mc: MultiConnector):
     )
 
 
+class RangeTransport(KVConnectorBase_V1, SupportsHMA):
+    """Deterministic external transport; MultiConnector itself is real."""
+
+    def __init__(self, config, role, kv_cache_config):
+        super().__init__(config, role, kv_cache_config)
+        self.options = config.kv_transfer_config.kv_connector_extra_config
+        self.loads = []
+        self.lookups = []
+        self.completions = KVConnectorTransferResults()
+
+    @property
+    def supports_load_range(self):
+        return self.options.get("range", True)
+
+    @property
+    def load_range_alignment(self):
+        return self.options.get("alignment")
+
+    def get_num_new_matched_tokens(self, request, num_computed_tokens):
+        self.lookups.append(num_computed_tokens)
+        endpoint = self.options.get("endpoint", 0)
+        return (
+            None if endpoint is None else max(0, endpoint - num_computed_tokens),
+            self.options.get("async", True),
+        )
+
+    def get_loaded_kv_cache_group_ids(self, request):
+        return tuple(self.options.get("groups", [0]))
+
+    def get_loadable_window_group_ids(self, request, end_token):
+        if "windows" in self.options:
+            return tuple(self.options["windows"].get(str(end_token), []))
+        if end_token <= self.options.get("endpoint", 0):
+            return tuple(g for g in self.options.get("groups", [0]) if g != 0)
+        return ()
+
+    def get_external_cache_hit_sources(self, request, num_external_tokens):
+        return {CacheHitSource.DISK: num_external_tokens} if num_external_tokens else {}
+
+    def update_state_after_alloc(self, request, blocks, num_external_tokens):
+        self.loads.append(num_external_tokens)
+
+    def update_state_after_alloc_for_range(self, request, blocks, load_range):
+        self.loads.append(load_range)
+
+    def get_transfer_results(self, finished_req_ids):
+        return self.completions
+
+    def get_block_ids_with_load_errors(self):
+        return set(self.options.get("load_errors", []))
+
+    def build_connector_meta(self, scheduler_output):
+        return KVConnectorMetadata()
+
+    def start_load_kv(self, forward_context, **kwargs):
+        pass
+
+    def wait_for_layer_load(self, layer_name):
+        pass
+
+    def save_kv_layer(self, layer_name, kv_layer, attn_metadata, **kwargs):
+        pass
+
+    def wait_for_save(self):
+        pass
+
+    def request_finished_all_groups(self, request, block_ids):
+        return False, None
+
+
+KVConnectorFactory.register_connector("RangeTransport", __name__, "RangeTransport")
+
+
+def _range_config(options, policy="range_aware"):
+    extra = {
+        "connectors": [
+            {
+                "kv_connector": "RangeTransport",
+                "kv_role": "kv_both",
+                "kv_connector_extra_config": option,
+            }
+            for option in options
+        ]
+    }
+    if policy is not None:
+        extra["load_policy"] = policy
+    return create_vllm_config(
+        kv_connector="MultiConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config=extra,
+        max_num_batched_tokens=256,
+        max_model_len=256,
+    )
+
+
+def _range_cache(kind="full"):
+    full = FullAttentionSpec(
+        block_size=16, num_kv_heads=1, head_size=64, dtype=torch.bfloat16
+    )
+    groups = [KVCacheGroupSpec(["full"], full)]
+    if kind != "full":
+        spec = (
+            SlidingWindowMLASpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=64,
+                dtype=torch.bfloat16,
+                sliding_window=32,
+                bounded_replay=True,
+            )
+            if kind == "bounded"
+            else SlidingWindowSpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=64,
+                dtype=torch.bfloat16,
+                sliding_window=32,
+            )
+        )
+        groups.append(KVCacheGroupSpec(["swa"], spec))
+    return KVCacheConfig(num_blocks=1000, kv_cache_tensors=[], kv_cache_groups=groups)
+
+
+def _range_connector(options, policy="range_aware", role=KVConnectorRole.SCHEDULER):
+    return MultiConnector(_range_config(options, policy), role, _range_cache())
+
+
+@pytest.mark.parametrize(
+    "options,local,adopted,expected",
+    [
+        (
+            [{"endpoint": 64, "range": False}, {"endpoint": 96}],
+            0,
+            96,
+            [64, KVLoadRange(64, 96)],
+        ),
+        (
+            [{"endpoint": 64}, {"endpoint": 96}],
+            0,
+            96,
+            [KVLoadRange(0, 64, False), KVLoadRange(64, 96)],
+        ),
+        ([{"endpoint": 64}, {"endpoint": 96}], 0, 0, [0, 0]),
+        (
+            [{"endpoint": 64, "range": False}, {"endpoint": 96}],
+            32,
+            64,
+            [32, KVLoadRange(64, 96)],
+        ),
+        (
+            [{"endpoint": 60}, {"endpoint": 96}],
+            0,
+            96,
+            [KVLoadRange(0, 48, False), KVLoadRange(48, 96)],
+        ),
+        ([{"endpoint": 60, "range": False}, {"endpoint": 96}], 0, 96, [0, 96]),
+        ([{"endpoint": 64, "async": False}, {"endpoint": 96}], 0, 96, [0, 96]),
+        ([{"endpoint": 12, "range": False}, {"endpoint": 96}], 0, 96, [0, 96]),
+        (
+            [{"endpoint": 60, "alignment": 24}, {"endpoint": 96, "alignment": 4}],
+            0,
+            96,
+            [KVLoadRange(0, 48, False), KVLoadRange(48, 96)],
+        ),
+        (
+            [{"endpoint": 48, "alignment": 64}, {"endpoint": 80}, {"endpoint": 112}],
+            16,
+            96,
+            [0, KVLoadRange(16, 80, False), KVLoadRange(80, 112)],
+        ),
+        (
+            [{"endpoint": 48, "alignment": 64}, {"endpoint": 80, "alignment": 64}],
+            16,
+            64,
+            [0, 64],
+        ),
+        (
+            [{"endpoint": 64, "range": False}, {"endpoint": 96}, {"endpoint": 128}],
+            0,
+            128,
+            [64, KVLoadRange(64, 96, False), KVLoadRange(96, 128)],
+        ),
+        (
+            [
+                {"endpoint": 64, "range": False},
+                {"endpoint": 96, "range": False},
+                {"endpoint": 128},
+            ],
+            0,
+            128,
+            [64, 0, KVLoadRange(64, 128)],
+        ),
+        (
+            [{"endpoint": 64, "range": False}, {"endpoint": 70}],
+            0,
+            70,
+            [64, KVLoadRange(64, 70)],
+        ),
+        ([{"endpoint": 96}, {"endpoint": 96}], 0, 96, [96, 0]),
+        ([{"endpoint": 96}, {"endpoint": 64}], 0, 96, [96, 0]),
+        (
+            [{"endpoint": 64, "range": False}, {"endpoint": 96, "range": False}],
+            0,
+            96,
+            [0, 96],
+        ),
+        (
+            [{"endpoint": 64}, {"endpoint": 96}],
+            0,
+            80,
+            [KVLoadRange(0, 64, False), KVLoadRange(64, 80)],
+        ),
+        ([{"endpoint": 64}, {"endpoint": 96}], 0, 64, [KVLoadRange(0, 64), 0]),
+        ([{"endpoint": 64}, {"endpoint": 96}], 0, 32, [KVLoadRange(0, 32), 0]),
+    ],
+)
+@pytest.mark.cpu_test
+def test_range_assignments(options, local, adopted, expected):
+    connector = _range_connector(options)
+    request = create_request(num_tokens=160)
+    matched, _ = connector.get_num_new_matched_tokens(request, local)
+    assert matched == max(o["endpoint"] for o in options) - local
+    blocks = KVCacheBlocks(([],))
+    connector.update_state_after_alloc(request, blocks, adopted)
+    assert [c.loads for c in connector.sub_connectors] == [[e] for e in expected]
+    # A later no-load update must not repeat a transfer or discard replay state.
+    connector.update_state_after_alloc(request, blocks, 0)
+    assert [c.loads for c in connector.sub_connectors] == [[e, 0] for e in expected]
+    if adopted:
+        assert connector.get_external_cache_hit_sources(request, adopted) == {
+            CacheHitSource.DISK: adopted
+        }
+
+
+@pytest.mark.cpu_test
+def test_range_lookup_waits_for_all_sources():
+    connector = _range_connector([{"endpoint": None}, {"endpoint": 96}])
+    request = create_request(num_tokens=160)
+    assert connector.get_num_new_matched_tokens(request, 0) == (None, False)
+    assert [c.lookups for c in connector.sub_connectors] == [[0], [0]]
+
+
+@pytest.mark.cpu_test
+def test_range_load_errors_are_unioned():
+    connector = _range_connector([{"load_errors": [1, 2]}, {"load_errors": [2, 3]}])
+    assert connector.get_block_ids_with_load_errors() == {1, 2, 3}
+
+
+@pytest.mark.parametrize("alignment", [0, -1])
+@pytest.mark.cpu_test
+def test_range_invalid_alignment(alignment):
+    connector = _range_connector(
+        [{"endpoint": 64}, {"endpoint": 96, "alignment": alignment}]
+    )
+    with pytest.raises(ValueError, match="load_range_alignment must be positive"):
+        connector.get_num_new_matched_tokens(create_request(num_tokens=160), 0)
+
+
+@pytest.mark.cpu_test
+def test_unknown_range_policy():
+    with pytest.raises(ValueError, match="Unknown MultiConnector load_policy"):
+        _range_connector([{"endpoint": 64}], policy="range-aware")
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize("range_capable", [False, True])
+@pytest.mark.cpu_test
+def test_recurrent_load_uses_single_source(wrapped, range_capable):
+    spec = MambaSpec(block_size=16, shapes=((1, 1),), dtypes=(torch.float32,))
+    if wrapped:
+        spec = UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs={"mamba": spec})
+    cache = KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["mamba"], spec)],
+    )
+    config = _range_config([{"endpoint": 64, "range": range_capable}, {"endpoint": 96}])
+    connector = MultiConnector(config, KVConnectorRole.SCHEDULER, cache)
+    request = create_request(num_tokens=160)
+    assert connector.get_num_new_matched_tokens(request, 0) == (96, True)
+    connector.update_state_after_alloc(request, KVCacheBlocks(([],)), 96)
+    assert [c.loads for c in connector.sub_connectors] == [[0], [96]]
+
+
+@pytest.mark.cpu_test
+def test_range_hybrid_block_alignment():
+    cache = _range_cache("swa")
+    cache.kv_cache_groups[0].kv_cache_spec = FullAttentionSpec(
+        block_size=256, num_kv_heads=1, head_size=64, dtype=torch.bfloat16
+    )
+    connector = MultiConnector(
+        _range_config([{"endpoint": 384}, {"endpoint": 512, "groups": [0, 1]}]),
+        KVConnectorRole.SCHEDULER,
+        cache,
+    )
+    request = create_request(num_tokens=600)
+    assert connector.get_num_new_matched_tokens(request, 0) == (512, True)
+    connector.update_state_after_alloc(request, KVCacheBlocks(([], [])), 512)
+    assert [c.loads for c in connector.sub_connectors] == [
+        [KVLoadRange(0, 256, False)],
+        [KVLoadRange(256, 512, window_group_ids=(1,), window_end_token=512)],
+    ]
+
+
+@pytest.mark.parametrize("groups", [[0], [0, 1]])
+@pytest.mark.cpu_test
+def test_legacy_window_loader_cannot_race_terminal_source(groups):
+    connector = MultiConnector(
+        _range_config(
+            [
+                {"endpoint": 64, "range": False, "groups": groups},
+                {"endpoint": 96, "groups": [0, 1]},
+            ]
+        ),
+        KVConnectorRole.SCHEDULER,
+        _range_cache("swa"),
+    )
+    request = create_request(num_tokens=160)
+    assert connector.get_num_new_matched_tokens(request, 0) == (96, True)
+    connector.update_state_after_alloc(request, KVCacheBlocks(([], [])), 96)
+    assert [c.loads for c in connector.sub_connectors] == [[0], [96]]
+
+
+@pytest.mark.parametrize("policy", [None, "range_aware"])
+@pytest.mark.parametrize("is_async", [False, True])
+@pytest.mark.parametrize("kind", ["full", "swa", "bounded"])
+@pytest.mark.parametrize(
+    "endpoint,window_loaded", [(128, False), (127, False), (128, True), (127, True)]
+)
+@pytest.mark.cpu_test
+def test_range_scheduler_replay(policy, is_async, kind, endpoint, window_loaded):
+    """Complete async receives before checking the real scheduler's replay."""
+    groups = [0, 1] if window_loaded or kind == "swa" else [0]
+    config = _range_config(
+        [
+            {
+                "endpoint": 64,
+                "async": is_async,
+                "groups": [0, 1] if kind == "swa" else [0],
+            },
+            {"endpoint": endpoint, "async": is_async, "groups": groups},
+        ],
+        policy,
+    )
+    register_all_kvcache_specs(config)
+    scheduler = create_scheduler(
+        config, num_blocks=1000, kv_cache_config=_range_cache(kind)
+    )
+    request = create_request(num_tokens=160)
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    adopted = endpoint if policy else 64
+    restores = bool(policy and window_loaded)
+    if kind == "bounded" and not restores:
+        adopted = adopted // 16 * 16
+    if is_async:
+        assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+        scheduler.update_from_output(
+            output,
+            create_model_runner_output([], finished_recving={request.request_id}),
+        )
+        output = scheduler.schedule()
+    expected = adopted - 32 if kind == "bounded" and not restores else adopted
+    new = next(r for r in output.scheduled_new_reqs if r.req_id == request.request_id)
+    assert new.num_computed_tokens == expected
+    assert new.replay_start == (expected if kind == "bounded" and not restores else 0)
+    assert output.num_scheduled_tokens[request.request_id] == 160 - expected
+    assert scheduler.connector.get_external_cache_hit_sources(request, adopted) == {
+        CacheHitSource.DISK: adopted
+    }
+
+
+@pytest.mark.parametrize("adopted", [32, 64, 80, 96])
+@pytest.mark.cpu_test
+def test_truncation_reselects_window_before_allocation(adopted):
+    connector = MultiConnector(
+        _range_config(
+            [{"endpoint": 64, "groups": [0, 1]}, {"endpoint": 96, "groups": [0, 1]}]
+        ),
+        KVConnectorRole.SCHEDULER,
+        _range_cache("swa"),
+    )
+    request = create_request(num_tokens=160)
+    connector.get_num_new_matched_tokens(request, 0)
+    assert connector.get_loaded_kv_cache_group_ids_for_prefix(request, adopted) == (
+        0,
+        1,
+    )
+    connector.update_state_after_alloc(request, KVCacheBlocks(([], [])), adopted)
+    assert connector.get_loaded_kv_cache_group_ids(request) == (0, 1)
+    loads = [c.loads[0] for c in connector.sub_connectors]
+    owner = 0 if adopted <= 64 else 1
+    assert loads[owner].window_group_ids == (1,)
+    assert loads[owner].window_end_token == adopted
+    assert loads[1 - owner] == 0 or loads[1 - owner].window_group_ids == ()
+    assert connector.get_external_cache_hit_sources(request, adopted) == {
+        CacheHitSource.DISK: adopted
+    }
+
+
+@pytest.mark.parametrize("owner", [0, 2, None, "sync_only"])
+@pytest.mark.parametrize("kind", ["swa", "bounded"])
+@pytest.mark.cpu_test
+def test_window_owner_is_independent_of_prefix_ranges(owner, kind):
+    options: list[dict[str, Any]] = [{"endpoint": n} for n in (64, 96, 32)]
+    if owner == "sync_only":
+        options[2].update({"async": False, "windows": {"96": [1]}})
+    elif owner is not None:
+        options[owner]["windows"] = {"96": [1]}
+        if owner == 0:
+            options[1]["windows"] = {"96": [1]}
+    connector = MultiConnector(
+        _range_config(options), KVConnectorRole.SCHEDULER, _range_cache(kind)
+    )
+    request = create_request(num_tokens=160)
+    assert connector.get_num_new_matched_tokens(request, 0) == (96, True)
+    connector.update_state_after_alloc(request, KVCacheBlocks(([], [])), 96)
+    loads = [c.loads[0] for c in connector.sub_connectors]
+    if owner is None or owner == "sync_only":
+        assert loads == [0, 96, 0]
+        assert connector.get_loaded_kv_cache_group_ids(request) == (0,)
+    else:
+        assert loads[0].start_token == 0 and loads[0].end_token == 64
+        assert loads[1] == KVLoadRange(64, 96)
+        assert loads[owner].window_group_ids == (1,)
+        assert loads[owner].window_end_token == 96
+        if owner == 2:
+            assert loads[2].num_tokens == 0
+        assert connector.get_loaded_kv_cache_group_ids(request) == (0, 1)
+        metadata = connector.build_connector_meta(SchedulerOutput.make_empty())
+        assert metadata.pending_async_loads == {
+            request.request_id: (0, 1, 2) if owner == 2 else (0, 1)
+        }
+    assert connector.get_external_cache_hit_sources(request, 96) == {
+        CacheHitSource.DISK: 96
+    }
+
+
+@pytest.mark.parametrize("is_async", [False, True])
+@pytest.mark.cpu_test
+def test_scheduler_uses_window_only_source_without_replay(is_async):
+    config = _range_config(
+        [
+            {"endpoint": 64, "async": is_async},
+            {"endpoint": 128, "async": is_async},
+            {"endpoint": 32, "async": is_async, "windows": {"128": [1]}},
+        ]
+    )
+    register_all_kvcache_specs(config)
+    scheduler = create_scheduler(
+        config, num_blocks=1000, kv_cache_config=_range_cache("bounded")
+    )
+    request = create_request(num_tokens=160)
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    if is_async:
+        scheduler.update_from_output(
+            output,
+            create_model_runner_output([], finished_recving={request.request_id}),
+        )
+        output = scheduler.schedule()
+    new = next(r for r in output.scheduled_new_reqs if r.req_id == request.request_id)
+    assert new.num_computed_tokens == 128
+    assert new.replay_start == 0
+    assert output.num_scheduled_tokens[request.request_id] == 32
+    assert scheduler.connector.sub_connectors[2].loads[0] == KVLoadRange(
+        128, 128, window_group_ids=(1,), window_end_token=128
+    )
+
+
+@pytest.mark.cpu_test
+def test_window_missing_at_shortened_endpoint_falls_back_before_allocation():
+    connector = MultiConnector(
+        _range_config([{"endpoint": 64, "windows": {"96": [1]}}, {"endpoint": 96}]),
+        KVConnectorRole.SCHEDULER,
+        _range_cache("bounded"),
+    )
+    request = create_request(num_tokens=160)
+    connector.get_num_new_matched_tokens(request, 0)
+    assert connector.get_loaded_kv_cache_group_ids(request) == (0, 1)
+    assert connector.get_loaded_kv_cache_group_ids_for_prefix(request, 80) == (0,)
+    connector.update_state_after_alloc(request, KVCacheBlocks(([], [])), 80)
+    assert [c.loads for c in connector.sub_connectors] == [[0], [80]]
+
+
+@pytest.mark.parametrize("first_source", [0, 1])
+@pytest.mark.parametrize("failed_source", [None, 0, 1])
+@pytest.mark.parametrize(
+    "abort_timing", ["never", "before", "with_first", "after_first"]
+)
+@pytest.mark.cpu_test
+def test_range_receive_barrier(first_source, failed_source, abort_timing):
+    """Cancellation and a failed source cannot release another writer's blocks."""
+    worker = _range_connector([{}, {}, {}], role=KVConnectorRole.WORKER)
+    worker.bind_connector_metadata(
+        MultiKVConnectorMetadata(
+            metadata=tuple(KVConnectorMetadata() for _ in range(3)),
+            pending_async_loads={"req": (0, 1)},
+        )
+    )
+    children = worker.sub_connectors
+    children[2].completions = KVConnectorTransferResults(
+        finished_recving={"req"}, failed_recving={"req"}
+    )
+    if abort_timing == "before":
+        assert worker.get_transfer_results({"req"}) == KVConnectorTransferResults()
+    children[first_source].completions = KVConnectorTransferResults(
+        finished_recving={"req"},
+        failed_recving={"req"} if failed_source == first_source else set(),
+    )
+    finished = {"req"} if abort_timing == "with_first" else set()
+    assert worker.get_transfer_results(finished) == KVConnectorTransferResults()
+    if abort_timing == "after_first":
+        assert worker.get_transfer_results({"req"}) == KVConnectorTransferResults()
+    assert worker.get_transfer_results(set()) == KVConnectorTransferResults()
+    last = 1 - first_source
+    children[last].completions = KVConnectorTransferResults(
+        finished_recving={"req"},
+        failed_recving={"req"} if failed_source == last else set(),
+    )
+    assert worker.get_transfer_results(set()) == KVConnectorTransferResults(
+        finished_recving={"req"},
+        failed_recving={"req"} if failed_source is not None else set(),
+    )
+    for child in children:
+        child.completions = KVConnectorTransferResults()
+    assert worker.get_transfer_results({"req"}) == KVConnectorTransferResults()
+
+
+@pytest.mark.cpu_test
+def test_range_three_source_metadata_and_completion():
+    options = [{"endpoint": n} for n in (64, 96, 128)]
+    scheduler = _range_connector(options)
+    request = create_request(num_tokens=160)
+    scheduler.get_num_new_matched_tokens(request, 0)
+    scheduler.update_state_after_alloc(request, KVCacheBlocks(([],)), 128)
+    metadata = scheduler.build_connector_meta(SchedulerOutput.make_empty())
+    assert metadata.pending_async_loads == {request.request_id: (0, 1, 2)}
+    worker = _range_connector(options, role=KVConnectorRole.WORKER)
+    worker.bind_connector_metadata(metadata)
+    for index, child in enumerate(worker.sub_connectors):
+        child.completions = KVConnectorTransferResults(
+            finished_recving={request.request_id}
+        )
+        assert worker.get_finished(set()) == (
+            None,
+            {request.request_id} if index == 2 else None,
+        )
+    assert worker.get_finished(set()) == (None, None)
+
+
+@pytest.mark.cpu_test
+def test_default_first_hit_and_async_saves():
+    worker = _range_connector([{"endpoint": 64}, {"endpoint": 96}], policy=None)
+    request = create_request(num_tokens=160)
+    assert worker.get_num_new_matched_tokens(request, 0) == (64, True)
+    worker.update_state_after_alloc(request, KVCacheBlocks(([],)), 64)
+    assert [c.loads for c in worker.sub_connectors] == [[64], [0]]
+    worker.bind_connector_metadata(
+        MultiKVConnectorMetadata(
+            metadata=(KVConnectorMetadata(), KVConnectorMetadata()),
+            extra_async_saves={"saved": 1},
+        )
+    )
+    first, second = worker.sub_connectors
+    first.completions = KVConnectorTransferResults(
+        finished_sending={"saved"},
+        finished_recving={"failed"},
+        failed_recving={"failed"},
+    )
+    second.completions = KVConnectorTransferResults(
+        finished_sending={"saved"},
+        finished_recving={"loaded"},
+    )
+    assert worker.get_transfer_results(set()) == KVConnectorTransferResults(
+        finished_sending={"saved"},
+        finished_recving={"failed", "loaded"},
+        failed_recving={"failed"},
+    )
+
+
 # Helper function to compare directories recursively
 def _compare_directories(dir1: Path, dir2: Path) -> bool:
     """Compares two directories recursively for identical content."""
@@ -423,11 +1026,14 @@ def test_multi_example_connector_consistency():
     storage2_scheduler_events = _events_from_request(
         _ignore_event_collection(events["storage2-SCHEDULER"])
     )
-    assert storage1_scheduler_events[:4] == [
+    assert storage1_scheduler_events[:5] == [
         "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc "
-        f"num_blocks=[{expected_num_blocks}] {expected_num_matched_tokens}",
+        f"get_loaded_kv_cache_group_ids_for_prefix {expected_num_matched_tokens}",
+        (
+            "update_state_after_alloc "
+            f"num_blocks=[{expected_num_blocks}] {expected_num_matched_tokens}"
+        ),
         "build_connector_meta",
     ]
     assert storage2_scheduler_events[:4] == [
@@ -464,11 +1070,14 @@ def test_multi_example_connector_consistency():
         f"update_state_after_alloc num_blocks=[{expected_num_blocks}] 0",
         "build_connector_meta",
     ]
-    assert storage2_scheduler_events[:4] == [
+    assert storage2_scheduler_events[:5] == [
         "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc "
-        f"num_blocks=[{expected_num_blocks}] {expected_num_matched_tokens}",
+        f"get_loaded_kv_cache_group_ids_for_prefix {expected_num_matched_tokens}",
+        (
+            "update_state_after_alloc "
+            f"num_blocks=[{expected_num_blocks}] {expected_num_matched_tokens}"
+        ),
         "build_connector_meta",
     ]
 
@@ -1010,7 +1619,7 @@ class TestMultiConnectorStats:
         assert not stats.is_empty()
 
 
-def test_multi_connector_overrides_all_base_methods():
+def test_multi_connector_overrides_all_base_methods(mc):
     """Ensure MultiConnector overrides all public methods from KVConnectorBase_V1."""
     # These are fine to inherit from KVConnectorBase_V1
     # TODO(https://github.com/vllm-project/vllm/pull/31811): Remove
@@ -1019,7 +1628,15 @@ def test_multi_connector_overrides_all_base_methods():
         "role",
         "has_connector_metadata",
         "get_kv_connector_kv_cache_events",
+        "supports_load_range",
+        "load_range_alignment",
+        "update_state_after_alloc_for_range",
+        # MultiConnector coordinates range loaders, but is not itself one.
+        "get_loadable_window_group_ids",
     }
+
+    assert not mc.supports_load_range
+    assert mc.get_loadable_window_group_ids(create_request(num_tokens=160), 96) == ()
 
     base_members = {
         name for name in dir(KVConnectorBase_V1) if not name.startswith("_")
