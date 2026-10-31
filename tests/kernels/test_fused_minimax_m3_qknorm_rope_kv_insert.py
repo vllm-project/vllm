@@ -551,12 +551,15 @@ def test_sparse_skip_index_branch(num_tokens, block_size, kv_cache_dtype):
     reason="e4m3 conversion requires CUDA SM89+.",
 )
 @pytest.mark.parametrize("num_tokens", [1, 7, 64, 513])
-@pytest.mark.parametrize("block_size", [16, 64])
-def test_sparse_full_fp8_index(num_tokens, block_size):
+@pytest.mark.parametrize(
+    "block_size,num_kv_heads,tp_shard",
+    [(16, 4, 1), (64, 4, 1), (128, 1, 2), (128, 1, 4), (256, 1, 2), (256, 1, 4)],
+)
+def test_sparse_full_fp8_index(num_tokens, block_size, num_kv_heads, tp_shard):
     torch.manual_seed(1)
     device, dtype, eps = "cuda", torch.bfloat16, 1e-6
     base, max_pos = 5_000_000.0, 4096
-    num_heads, num_kv_heads, num_idx_heads = 16, 4, 4
+    num_heads, num_idx_heads = 16, 4
 
     q_w = torch.randn(HEAD_DIM, dtype=dtype, device=device) * 0.1
     k_w = torch.randn(HEAD_DIM, dtype=dtype, device=device) * 0.1
@@ -578,8 +581,10 @@ def test_sparse_full_fp8_index(num_tokens, block_size):
         num_blocks * block_size, dtype=torch.int64, device=device
     )[:num_tokens]
     index_slot_mapping = torch.roll(slot_mapping, shifts=1)
+    if block_size >= 128 and num_tokens > 1:
+        index_slot_mapping[-1] = -1
 
-    def run(index_dtype):
+    def run(index_dtype, index_cache=None, index_slots=None):
         qkv = qkv0.clone()
         kv_cache = torch.zeros(
             num_blocks,
@@ -589,9 +594,10 @@ def test_sparse_full_fp8_index(num_tokens, block_size):
             dtype=dtype,
             device=device,
         )
-        index_cache = torch.zeros(
-            num_blocks, block_size, HEAD_DIM, dtype=index_dtype, device=device
-        )
+        if index_cache is None:
+            index_cache = torch.zeros(
+                num_blocks, block_size, HEAD_DIM, dtype=index_dtype, device=device
+            )
         q_out = torch.empty(num_tokens, qsz, dtype=dtype, device=device)
         index_q = torch.empty(num_tokens, iqsz, dtype=index_dtype, device=device)
         ops.fused_minimax_m3_qknorm_rope_kv_insert(
@@ -608,7 +614,7 @@ def test_sparse_full_fp8_index(num_tokens, block_size):
             ik_w,
             num_idx_heads,
             slot_mapping,
-            index_slot_mapping,
+            index_slot_mapping if index_slots is None else index_slots,
             kv_cache,
             index_cache,
             block_size,
@@ -634,6 +640,52 @@ def test_sparse_full_fp8_index(num_tokens, block_size):
         iq_fp.view(torch.uint8), iq_bf.to(torch.float8_e4m3fn).view(torch.uint8)
     )
     torch.testing.assert_close(idxc_fp.float(), idxc_bf.float(), rtol=0.13, atol=0.05)
+
+    if block_size >= 128:
+        from vllm.config import VllmConfig, set_current_vllm_config
+        from vllm.models.minimax_m3.common.indexer import MiniMaxM3IndexerCache
+
+        with set_current_vllm_config(VllmConfig()):
+            cache = MiniMaxM3IndexerCache(
+                HEAD_DIM,
+                prefix="index_cache",
+                indexer_kv_dtype="fp8",
+                tp_shard=tp_shard,
+            )
+        for rank in range(tp_shard):
+            packed = torch.zeros(
+                num_blocks,
+                1,
+                block_size,
+                HEAD_DIM // tp_shard,
+                dtype=torch.float8_e4m3fn,
+                device=device,
+            )
+            cache.bind_kv_cache(packed)
+            assert cache.kv_cache.data_ptr() == packed.data_ptr()
+            page = index_slot_mapping // block_size
+            offset = index_slot_mapping % block_size
+            rows = block_size // tp_shard
+            owner = offset // rows if block_size == 256 else offset % tp_shard
+            local = offset % rows if block_size == 256 else offset // tp_shard
+            index_slots = page * rows + local
+            index_slots.masked_fill_((index_slot_mapping < 0) | (owner != rank), -1)
+            qkv_sh, kvc_sh, idxc_sh, qo_sh, iq_sh = run(
+                torch.float8_e4m3fn, cache.kv_cache, index_slots
+            )
+            # Sharding only changes index-K storage; all query heads and the
+            # main KV insert must be identical to the unsharded run.
+            for actual, expected in zip(
+                (qkv_sh, kvc_sh, qo_sh, iq_sh), (qkv_fp, kvc_fp, qo_fp, iq_fp)
+            ):
+                assert torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
+            rows = block_size // tp_shard
+            expected = (
+                idxc_fp[:, rank * rows : (rank + 1) * rows]
+                if block_size == 256
+                else idxc_fp[:, rank::tp_shard]
+            )
+            assert torch.equal(idxc_sh.view(torch.uint8), expected.view(torch.uint8))
 
 
 # ── Test 5: sparse mode with an NVFP4 main KV cache ──────────────────────────
@@ -951,6 +1003,141 @@ def test_sparse_full_nvfp4_index(num_tokens, kv_cache_dtype, page_pad):
         f"{int((index_cache != expected[:, 0]).sum())} NVFP4 index bytes differ"
     )
     assert not raw[:, block_size * page_width :].any()
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != 10,
+    reason="The NVFP4 index cache needs SM100",
+)
+@pytest.mark.parametrize("num_tokens", [1, 7, 513])
+@pytest.mark.parametrize(
+    "block_size,tp_shard", [(128, 2), (128, 4), (256, 2), (256, 4)]
+)
+def test_sparse_full_nvfp4_index_sharded(num_tokens, block_size, tp_shard):
+    """A TP-sharded NVFP4 index cache gets this rank's rows (interleaved for
+    P128, a contiguous slice for P256) as NVFP4 pages of block_size / TP rows,
+    E2M1 then linear scales, addressed by local slots; the rest is unchanged."""
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.models.minimax_m3.common.indexer import MiniMaxM3IndexerCache
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec
+
+    torch.manual_seed(7)
+    device, dtype, eps = "cuda", torch.bfloat16, 1e-6
+    base, max_pos = 5_000_000.0, 4096
+    num_heads, num_kv_heads, num_idx_heads = 16, 1, 4
+    page_width = HEAD_DIM // 2 + HEAD_DIM // 16
+    rows = block_size // tp_shard
+
+    weights = [
+        torch.randn(HEAD_DIM, dtype=dtype, device=device) * 0.1 for _ in range(4)
+    ]
+    cos_sin = make_cos_sin_cache(max_pos, ROTARY_DIM, base, dtype, device)
+    positions = torch.randint(
+        0, max_pos, (num_tokens,), dtype=torch.int64, device=device
+    )
+    qsz, kvsz = num_heads * HEAD_DIM, num_kv_heads * HEAD_DIM
+    iqsz = num_idx_heads * HEAD_DIM
+    qkv0 = torch.randn(
+        num_tokens, qsz + 2 * kvsz + iqsz + HEAD_DIM, dtype=dtype, device=device
+    )
+    num_blocks = (num_tokens + block_size - 1) // block_size + 1
+    slot_mapping = torch.randperm(
+        num_blocks * block_size, dtype=torch.int64, device=device
+    )[:num_tokens]
+    index_slot_mapping = torch.randperm(
+        num_blocks * block_size, dtype=torch.int64, device=device
+    )[:num_tokens]
+    index_slot_mapping[::5] = -1
+
+    def run(index_cache, index_slots):
+        qkv = qkv0.clone()
+        kv_cache = torch.zeros(
+            num_blocks,
+            num_kv_heads,
+            block_size,
+            2 * HEAD_DIM,
+            dtype=dtype,
+            device=device,
+        )
+        index_q = torch.empty(
+            num_tokens, iqsz, dtype=torch.float8_e4m3fn, device=device
+        )
+        ops.fused_minimax_m3_qknorm_rope_kv_insert(
+            qkv,
+            weights[0],
+            weights[1],
+            cos_sin,
+            positions,
+            num_heads,
+            num_kv_heads,
+            ROTARY_DIM,
+            eps,
+            weights[2],
+            weights[3],
+            num_idx_heads,
+            slot_mapping,
+            index_slots,
+            kv_cache,
+            index_cache,
+            block_size,
+            torch.empty(num_tokens, qsz, dtype=dtype, device=device),
+            index_q,
+            "auto",
+        )
+        return qkv, kv_cache, index_q
+
+    full_cache = torch.zeros(
+        num_blocks, block_size, page_width, dtype=torch.uint8, device=device
+    )
+    qkv_full, kv_cache_full, index_q_full = run(full_cache, index_slot_mapping)
+    index_k = qkv_full.split([qsz, kvsz, kvsz, iqsz, HEAD_DIM], dim=-1)[-1]
+
+    config = VllmConfig()
+    config.cache_config.block_size = block_size
+    with set_current_vllm_config(config):
+        cache = MiniMaxM3IndexerCache(
+            HEAD_DIM,
+            prefix="index_cache",
+            indexer_kv_dtype="nvfp4",
+            tp_shard=tp_shard,
+        )
+    # Each rank budgets its share of the 72 B NVFP4 row.
+    spec = cache.get_kv_cache_spec(config)
+    assert isinstance(spec, MLAAttentionSpec)
+    assert spec.state_content_bytes == page_width // tp_shard
+    page = index_slot_mapping // block_size
+    offset = index_slot_mapping % block_size
+    owner = offset // rows if block_size == 256 else offset % tp_shard
+    local = offset % rows if block_size == 256 else offset // tp_shard
+    for rank in range(tp_shard):
+        packed = torch.zeros(
+            num_blocks,
+            1,
+            block_size,
+            page_width // tp_shard,
+            dtype=torch.uint8,
+            device=device,
+        )
+        cache.bind_kv_cache(packed)
+        assert cache.kv_cache.shape == (num_blocks, rows, page_width)
+        index_slots = (page * rows + local).masked_fill(
+            (index_slot_mapping < 0) | (owner != rank), -1
+        )
+        qkv, kv_cache, index_q = run(cache.kv_cache, index_slots)
+        # Sharding changes only where index-K is stored.
+        assert torch.equal(qkv, qkv_full)
+        assert torch.equal(kv_cache, kv_cache_full)
+        assert torch.equal(index_q.view(torch.uint8), index_q_full.view(torch.uint8))
+        expected = nvfp4_pages(
+            [(index_k.reshape(num_tokens, 1, HEAD_DIM), 1.0)],
+            index_slots,
+            num_blocks,
+            rows,
+        )
+        assert torch.equal(cache.kv_cache, expected[:, 0]), (
+            f"rank {rank}: "
+            f"{int((cache.kv_cache != expected[:, 0]).sum())} NVFP4 index bytes differ"
+        )
 
 
 # ── Test 7: write_qkv=False, for callers that read only the FP8 q ────────────
