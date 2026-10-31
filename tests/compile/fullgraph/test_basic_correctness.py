@@ -30,7 +30,9 @@ class TestSetting:
         # MoE model
         TestSetting(
             model="ibm-granite/granite-3.0-1b-a400m-instruct",
-            model_args=["--max-model-len", "2048"],
+            # Dummy weights give a near-uniform distribution, so top-k logprobs
+            # are ties and the compared token set is arbitrary.
+            model_args=["--max-model-len", "2048", "--load-format", "auto"],
             pp_size=1,
             tp_size=1,
             attn_backend=ATTN_BACKEND,
