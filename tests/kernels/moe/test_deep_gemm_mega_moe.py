@@ -702,6 +702,42 @@ def test_deep_gemm_mega_moe_adds_unfused_shared_expert_once(monkeypatch, fused):
     assert ("shared_l1_weights" in launches[-1]) == fused
 
 
+def test_deep_gemm_mega_moe_symm_buffer_releases_cached_blocks(monkeypatch):
+    """The symmetric buffer is mapped outside the caching allocator, so blocks
+    the allocator caches (most of the GPU after a large profile run) must be
+    released first, or the driver allocation fails with free memory cached."""
+    reserved_at_alloc = []
+
+    def get_symm_buffer_for_mega_moe(*args, **kwargs):
+        reserved_at_alloc.append(torch.accelerator.memory_reserved())
+        return SimpleNamespace()
+
+    monkeypatch.setattr(
+        "vllm.utils.deep_gemm._import_deep_gemm",
+        lambda: SimpleNamespace(
+            get_symm_buffer_for_mega_moe=get_symm_buffer_for_mega_moe
+        ),
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe.get_ep_group",
+        lambda: SimpleNamespace(device_group=object()),
+    )
+    experts = _make_experts(
+        num_experts=2,
+        num_local_experts=2,
+        experts_start_idx=0,
+        top_k=1,
+        hidden_size=128,
+        intermediate_size=128,
+    )
+    cached = torch.empty(256 << 20, dtype=torch.uint8, device="cuda")
+    del cached
+    reserved = torch.accelerator.memory_reserved()
+    experts.get_symm_buffer()
+
+    assert reserved_at_alloc[0] <= reserved - (256 << 20)
+
+
 @requires_sm100
 @pytest.mark.parametrize("num_tokens", [7, 63, 64, 65, 127, 128, 135, 434, 1025, 16384])
 @pytest.mark.parametrize("hidden_size", [256, 5120])
