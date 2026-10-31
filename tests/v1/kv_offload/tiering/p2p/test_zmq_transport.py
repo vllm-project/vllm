@@ -24,10 +24,12 @@ from vllm.v1.kv_offload.tiering.p2p.control.zmq import (
 _WEDGED_TRANSPORTS: list[ZmqTransport] = []
 
 
-def _free_port() -> int:
+def _free_port(host: str = "127.0.0.1") -> int:
     """Find a free TCP port."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
+    host = host.removeprefix("[").removesuffix("]")
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    with socket.socket(family, socket.SOCK_STREAM) as s:
+        s.bind((host, 0))
         return s.getsockname()[1]
 
 
@@ -40,7 +42,7 @@ def _make_transport(host: str = "127.0.0.1", attempts: int = 8):
     """
     last_err: Exception | None = None
     for _ in range(attempts):
-        port = _free_port()
+        port = _free_port(host)
         try:
             return ZmqTransport(f"{host}:{port}", host, port), port
         except (zmq.ZMQError, OSError) as e:
@@ -147,23 +149,54 @@ class TestZmqTransportConnectivity:
             transport_a.close()
             transport_b.close()
 
-    def test_bidirectional_messaging(self):
+    @pytest.mark.parametrize("host_a", ["127.0.0.1", "::1"])
+    @pytest.mark.parametrize("host_b", ["127.0.0.1", "::1"])
+    def test_bidirectional_messaging(self, host_a, host_b):
         """Both sides can send and receive after connection."""
-        transport_a, port_a = _make_transport()
-        transport_b, _ = _make_transport()
+        transport_a, port_a = _make_transport(host_a)
+        transport_b, port_b = _make_transport(host_b)
 
         try:
-            conn_b = transport_b.connect(f"127.0.0.1:{port_a}")
+            conn_b = transport_b.connect(f"{host_a}:{port_a}")
             conn_b.send({"type": "connect", "from": "b"})
 
             new_conns = _wait_for_inbound(transport_a)
             assert len(new_conns) == 1
             conn_a = new_conns[0]
+            assert conn_a.peer_id == f"{host_b}:{port_b}"
+            assert _wait_for_messages(transport_a, conn_a, 1) == [
+                {"type": "connect", "from": "b"}
+            ]
 
             conn_a.send({"type": "reply", "from": "a"})
 
             msgs = _wait_for_messages(transport_b, conn_b, 1)
             assert msgs == [{"type": "reply", "from": "a"}]
+        finally:
+            transport_a.close()
+            transport_b.close()
+
+    def test_bracketed_ipv6_host_is_accepted(self):
+        """A bracketed IPv6 literal binds and dials like the bare form."""
+        transport_a, port_a = _make_transport("::1")
+        transport_b, port_b = _make_transport("[::1]")
+
+        try:
+            conn_b = transport_b.connect(f"::1:{port_a}")
+            conn_b.send({"type": "connect", "from": "b"})
+
+            new_conns = _wait_for_inbound(transport_a)
+            assert len(new_conns) == 1
+            conn_a = new_conns[0]
+            assert conn_a.peer_id == f"[::1]:{port_b}"
+            assert _wait_for_messages(transport_a, conn_a, 1) == [
+                {"type": "connect", "from": "b"}
+            ]
+
+            conn_a.send({"type": "reply", "from": "a"})
+            assert _wait_for_messages(transport_b, conn_b, 1) == [
+                {"type": "reply", "from": "a"}
+            ]
         finally:
             transport_a.close()
             transport_b.close()
