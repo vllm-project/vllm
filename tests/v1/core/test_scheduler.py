@@ -2793,6 +2793,72 @@ def test_schedule_spec_decoding_stats(
         assert "per_step_accepted" not in payload  # summary level
 
 
+@pytest.mark.parametrize(
+    "request_state",
+    ["active", "grammar_invalid", "finished_removed", "finished_retained"],
+)
+def test_adaptive_verification_stats_count_actual_budget(request_state):
+    scheduler = create_scheduler(
+        num_speculative_tokens=5, per_request_spec_decode_metrics="detailed"
+    )
+    [request] = create_requests(num_requests=1, num_tokens=1)
+    scheduler.add_request(request)
+    req_id = request.request_id
+    req_id_to_index = {req_id: 0}
+    scheduler.update_from_output(
+        scheduler.schedule(),
+        ModelRunnerOutput(
+            req_ids=[req_id],
+            req_id_to_index=req_id_to_index,
+            sampled_token_ids=[[0]],
+        ),
+    )
+    scheduler.update_draft_token_ids(DraftTokenIds([req_id], [[1, 2, 3, 4, 5]]))
+    output = scheduler.schedule()
+    if request_state == "grammar_invalid":
+        # Async grammar validation happens after scheduling; invalid draft
+        # positions can still be sent to the verifier.
+        output.num_invalid_spec_tokens = {req_id: 2}
+    elif request_state == "finished_removed":
+        scheduler.finish_requests(req_id, RequestStatus.FINISHED_STOPPED)
+    elif request_state == "finished_retained":
+        request.status = RequestStatus.FINISHED_STOPPED
+    engine_outputs = scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=[req_id],
+            req_id_to_index=req_id_to_index,
+            sampled_token_ids=[[1, 2, 3]],
+            num_verified_draft_tokens_per_req=[4],
+        ),
+    )
+
+    stats = engine_outputs[0].scheduler_stats.spec_decoding_stats
+    if request_state == "active":
+        assert stats.num_draft_tokens == 5
+        assert stats.num_verified_draft_tokens == 4
+    elif request_state == "grammar_invalid":
+        assert stats.num_verified_draft_tokens == 4
+    else:
+        assert stats is None
+    if stats is not None:
+        assert stats.num_verified_draft_tokens_per_pos == [1, 1, 1, 1, 0]
+        payload = request.spec_decode_metrics.to_dict()
+        assert payload["num_draft_tokens"] == stats.num_draft_tokens
+        assert payload["num_verified_draft_tokens"] == 4
+        assert payload["per_step_verified"] == [4]
+
+
+def test_per_request_spec_decode_omits_verified_without_adaptive_verification():
+    scheduler = create_scheduler(
+        num_speculative_tokens=3, per_request_spec_decode_metrics="detailed"
+    )
+    req = _run_spec_verify_steps(scheduler, [([1, 2, 3], [1, 2, 3, 4])])
+    payload = scheduler.requests[req.request_id].spec_decode_metrics.to_dict()
+    assert "num_verified_draft_tokens" not in payload
+    assert "per_step_verified" not in payload
+
+
 def _run_spec_verify_steps(scheduler, rounds, num_invalid_per_round=None):
     """Drive prefill + one draft/verify step per round for a single request.
 

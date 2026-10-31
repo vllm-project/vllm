@@ -370,6 +370,10 @@ class RequestSpecDecodeMetrics:
             (``detailed`` only; empty otherwise).
         per_step_drafted: Ordered proposed-draft count per verify step
             (``detailed`` only; empty otherwise).
+        num_verified_draft_tokens: Total draft positions sent to the target
+            verifier (``None`` without adaptive verification).
+        per_step_verified: Ordered verified-draft count per verify step
+            (``detailed`` with adaptive verification only; empty otherwise).
     """
 
     num_spec_tokens: int
@@ -377,6 +381,8 @@ class RequestSpecDecodeMetrics:
     num_draft_tokens: int = 0
     per_step_accepted: list[int] = field(default_factory=list)
     per_step_drafted: list[int] = field(default_factory=list)
+    num_verified_draft_tokens: int | None = None
+    per_step_verified: list[int] = field(default_factory=list)
 
     @classmethod
     def new(cls, num_spec_tokens: int) -> "RequestSpecDecodeMetrics":
@@ -386,13 +392,23 @@ class RequestSpecDecodeMetrics:
         )
 
     def observe(
-        self, num_draft_tokens: int, num_accepted: int, detailed: bool = False
+        self,
+        num_draft_tokens: int,
+        num_accepted: int,
+        detailed: bool = False,
+        num_verified_draft_tokens: int | None = None,
     ) -> None:
         self.histogram[num_accepted] += 1
         self.num_draft_tokens += num_draft_tokens
         if detailed:
             self.per_step_accepted.append(num_accepted)
             self.per_step_drafted.append(num_draft_tokens)
+        if num_verified_draft_tokens is not None:
+            self.num_verified_draft_tokens = (
+                self.num_verified_draft_tokens or 0
+            ) + num_verified_draft_tokens
+            if detailed:
+                self.per_step_verified.append(num_verified_draft_tokens)
 
     def to_dict(self) -> dict[str, Any]:
         """Payload matching ``SpeculativeDecodingMetrics`` for the response.
@@ -419,6 +435,10 @@ class RequestSpecDecodeMetrics:
         if self.per_step_accepted:
             result["per_step_accepted"] = self.per_step_accepted
             result["per_step_drafted"] = self.per_step_drafted
+        if self.num_verified_draft_tokens is not None:
+            result["num_verified_draft_tokens"] = self.num_verified_draft_tokens
+        if self.per_step_verified:
+            result["per_step_verified"] = self.per_step_verified
         return result
 
 
