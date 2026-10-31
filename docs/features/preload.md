@@ -1,54 +1,49 @@
 # Preload
 
-vLLM's preload feature keeps model artifacts resident in GPU memory across
-engine restarts, so a restarting engine reuses them instead of rebuilding them
-from scratch. The design is extensible to different kinds of artifacts; it
-currently supports **model weights** via the weight cache daemon.
+vLLM's preload feature keeps model weights in GPU memory across engine restarts. A weight cache daemon per GPU loads and post-processes the weights once and serves them to engines over a Unix domain socket. An engine started with `--load-format ipc_cache` maps them through CUDA IPC instead of loading them from disk, which cuts the weight-loading part of a restart from minutes to seconds. If no daemon is reachable, or its weights do not match the engine's configuration, the engine loads from disk as usual.
 
-With weight preloading, a daemon process per GPU holds its rank's
-post-quantized, TP-sharded weights and serves CUDA IPC handles to vLLM engines
-over a Unix domain socket, so a restarting engine maps the weights via
-zero-copy IPC instead of reloading them from disk.
+## Requirements
 
-Key benefits:
-
-- **Fast engine restarts**: weight loading reduces to mapping existing GPU
-  memory, cutting restart time from minutes (disk load + quantization
-  processing) to seconds.
-- **Zero-copy sharing**: in the default `zero_copy` mode the engine directly
-  shares the daemon's GPU memory, so a restart adds no extra GPU memory
-  footprint.
-- **Safe fallback**: if the daemon is unavailable or its cached weights don't
-  match the engine's configuration, the engine falls back to loading from
-  disk.
-
-!!! note
-    Weight preloading is only supported on CUDA and ROCm platforms. Tensor,
-    expert and data parallelism are supported, including across nodes;
-    pipeline parallelism is rejected when launching the daemon.
+- **Platform**: CUDA or ROCm. Other platforms raise `UnsupportedPlatformForIPCError`, even when fallback is enabled.
+- **Same node and user**: the daemon serves over a Unix domain socket, and CUDA IPC handles work only on the node that created them. The daemon and the engine must run as the same user.
+- **Same vLLM version** on the daemon and the engine.
+- **Quantization**: every quantization method in the model must support loading pre-processed weights. Unquantized models, except MoE models with `--all2all-backend moonep`, and `fp8`, ModelOpt NVFP4 and MXFP4 checkpoints, except GPT-OSS, are supported. Other methods, such as compressed-tensors, GPTQ and AWQ, raise `UnsupportedQuantForIPCError`, even when fallback is enabled.
+- **Sleep mode**: do not use [sleep mode](sleep_mode.md) in `zero_copy` mode. The weights live in the daemon's CUDA IPC allocations, so they cannot be offloaded.
+- **Parallelism**: tensor, pipeline, expert and data parallelism are supported, including across nodes. Expert parallel load balancing, `--enable-eplb`, is not supported.
 
 ## Quick start
 
-Launch one weight cache daemon per GPU with a single command:
+1. Start one daemon per GPU. Pass the engine arguments, such as model, dtype, quantization and parallelism, that you will pass to `vllm serve`:
 
-```bash
-vllm preload --model meta-llama/Llama-3.1-8B-Instruct --tensor-parallel-size 4
-```
+    ```bash
+    vllm preload --model meta-llama/Llama-3.1-8B-Instruct --tensor-parallel-size 4
+    ```
 
-The daemon process loads and post-processes the weights once, then waits for
-engines. Each rank binds its Unix socket only after its shard is fully cached,
-so engines connecting before that simply fall back to disk loading.
+    Each daemon loads and post-processes its shard and, on Hopper and newer GPUs, runs the [FlashInfer autotune pass](#preloading-the-flashinfer-autotune-cache). It binds its socket only after that. `vllm preload` logs `Weight cache daemon READY` once every rank is serving.
 
-Then start (or restart) engines with the `ipc_cache` load format:
+2. Start the engine with the `ipc_cache` load format:
 
-```bash
-vllm serve meta-llama/Llama-3.1-8B-Instruct \
-    --tensor-parallel-size 4 \
-    --load-format ipc_cache
-```
+    ```bash
+    vllm serve meta-llama/Llama-3.1-8B-Instruct \
+        --tensor-parallel-size 4 \
+        --load-format ipc_cache
+    ```
 
-The daemon itself must load from disk; passing `--load-format ipc_cache` to
-`vllm preload` is an error.
+    On success the engine logs `Mapped <N> tensors from the weight cache daemon (zero_copy mode)`. If the daemon is not ready, it logs `Weight cache unusable (...); falling back to disk loading` and loads from disk.
+
+3. After an engine restart, run the same `vllm serve` command. The weights are mapped from the daemon instead of loaded from disk.
+
+The daemon must keep running as long as engines use it. `SIGINT` or `SIGTERM` stops all ranks.
+
+!!! tip "Start order"
+    An engine that starts before the daemon is ready falls back to disk and keeps its own copy of the weights next to the daemon's. Wait for the [health endpoint](#health-endpoint) or the `READY` log line before starting the engine, or disable the fallback so the engine waits for the daemon:
+
+    ```bash
+    vllm serve ... --load-format ipc_cache \
+        --model-loader-extra-config '{"fallback": false}'
+    ```
+
+    With `fallback` disabled the engine retries for up to `state_timeout_s`, 300 seconds by default, and fails if the daemon is still not ready. Set it above the daemon's load and tuning time.
 
 ## Preloading the FlashInfer autotune cache
 
@@ -70,10 +65,17 @@ loading and before binding its socket, then writes the cache:
 vllm preload --model /path/to/model --tensor-parallel-size 4
 ```
 
-After warmup, the daemon releases its communication resources and, on CUDA,
-cached cuBLAS workspaces before accepting engine connections. The model weights
-remain resident for CUDA IPC sharing. This reduces the daemon's GPU memory
-overhead; the amount reclaimed depends on the model and allocator state.
+Each rank logs `tuned FlashInfer; the tuned configs are in the on-disk autotune cache` when it finishes.
+
+The pass runs where the engine's own autotune does: FlashInfer must be installed and the GPU must be Hopper (compute capability 9.0) or newer. It finishes before the daemon reports ready.
+
+Pass `vllm preload` and `vllm serve` the same arguments. An engine reuses the tuned configs only when its configuration matches the daemon's, and `vllm preload` builds its configuration with the same batch size defaults as `vllm serve`. An engine with different arguments, or one created through the offline `LLM` class, which uses different batch size defaults, tunes again. The load format does not affect reuse.
+
+With MTP, EAGLE or EAGLE3 speculative decoding both daemon groups skip the pass: the target cannot run the drafter's dummy passes, and a table tuned on the draft model would key on the draft's config, which no engine looks up. The first engine tunes and fills the cache instead. Otherwise, tuning runs across the daemons' world group, including across nodes and DP ranks.
+
+A failure in the pass is fatal: the daemon rank exits and `vllm preload` shuts down the other ranks. Pass `--disable-flashinfer-autotune` to skip the pass.
+
+The daemon and the engine must read the same cache location. Set `VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR` to the same path in both to pin it, and in Docker put that path on a volume shared by both containers, as shown in [Docker](#docker). Each process logs the location it uses, as `Using FlashInfer autotune cache file: <path>` or `Using FlashInfer managed autotune cache (root=<path>)`.
 
 ### Seeding warmup caches between daemons (D2D)
 
@@ -119,27 +121,277 @@ further daemon state (e.g. Triton warmup caches or weight manifests) plugs in
 as additional kinds — small JSON payloads travel inline, while large binary
 state rides the data plane.
 
+The source must be started with the listener flags, because a running daemon cannot enable them later. Its seeding listener starts only after its daemons have finished loading and tuning, so wait for the source replica to report ready before starting a mirror. A mirror that cannot reach the source tunes locally. The mirror must use the same engine arguments as the source, because the source looks the table up by configuration hash. A launcher dials a single source host, which covers a replica on one node. For a replica that spans nodes, point each node's launcher at the source node that serves the same ranks. A mirror rank logs `Adopted remote flashinfer_autotune seed` when it installs a table.
+
+Only the per-rank autotune files written by deployments with more than one daemon rank are seeded. A single-rank deployment uses FlashInfer's managed autotune store when the installed FlashInfer provides it. That store is not seeded, so its daemon tunes locally.
+
 ## How it works
 
-1. `vllm preload` spawns one daemon process per GPU. Each daemon loads its
-   shard from disk using the configured loader, runs quantization
-   post-processing, and exports every parameter/buffer as a CUDA IPC handle.
-2. An engine started with `--load-format ipc_cache` builds its model on the
-   meta device (no storage) and requests the tensors from the daemon on its
-   GPU.
-3. Before serving anything, the engine and daemon compare a fingerprint of the
-   cached weights: checkpoint content (hashed from safetensors metadata, so
-   identical weights in different directories still match), model
-   architecture, TP/DP size/rank, dtype, quantization method and config, text
-   RoPE parameters, model revision, KV cache dtype and quantization skip layers,
-   and vLLM version. On any mismatch the engine falls back to disk loading
-   (unless `fallback` is disabled).
-4. The engine also verifies the daemon's GPU UUID matches its own device, so a
-   stale socket cannot serve weights for the wrong GPU.
+1. Each daemon loads its shard with the regular loader, runs quantization post-processing and, where applicable, the autotune pass, and binds a Unix domain socket named after its GPU's UUID. An engine worker connects to the socket of the GPU it runs on, so the order of `CUDA_VISIBLE_DEVICES` does not matter.
+2. An engine started with `--load-format ipc_cache` builds its model on the meta device and requests the tensors from the daemon. Before anything is transferred, both sides compare a fingerprint of the cached weights: checkpoint content, hashed from safetensors metadata so that identical weights in different directories still match, model architecture, TP and PP size and rank, DP size and rank for MoE models, expert parallelism and expert placement strategy, dtype, quantization method and config, text RoPE parameters, KV cache dtype and KV cache dtype skip layers, MoE and linear kernel backends, model revision, and vLLM version. On a mismatch the engine falls back to disk loading, or fails if `fallback` is disabled. The engine also checks that the daemon's GPU UUID matches its own device.
+3. The daemon exports each GPU tensor as a CUDA IPC handle and sends the few CPU tensors by value. The engine maps the handles, re-establishes tied weights, such as `lm_head.weight` sharing storage with `embed_tokens.weight`, as aliases, and re-runs only the Python-side part of post-processing, such as MoE kernel selection.
 
-Tied weights (e.g. `lm_head.weight` sharing storage with
-`embed_tokens.weight`) are exported once and re-established as aliases in the
-engine, preserving parameter identity.
+### GPU memory accounting
+
+In `zero_copy` mode the daemon allocates the weights. The engine asks the daemon how much memory its exported weights occupy and counts it toward its own budget, so `--gpu-memory-utilization` keeps its usual meaning: the fraction of the GPU used for weights and KV cache together, including the daemon's weights. The engine logs the split as `Weights are held outside this process: ...`. If the daemon's weights alone exceed the budget, startup fails with `Externally held weights ... exceed the desired GPU memory utilization`, and the fix is a higher `--gpu-memory-utilization`.
+
+The autotune pass needs transient activation memory on top of the weights. After loading, and after the autotune pass where it runs, the daemon frees the transient allocations, tears down its process groups and, on CUDA, releases the cached cuBLAS workspaces, which would otherwise pin GPU memory for as long as the daemon runs.
+
+## Cache modes
+
+Select the mode with `--model-loader-extra-config '{"mode": "..."}'`:
+
+- `zero_copy` (default): the engine maps the daemon's allocations directly. Each GPU holds one copy of the weights, and the daemon serves any number of engine restarts. Keep the daemon running for as long as the engine runs. If it exits, the engine keeps serving from the mapped weights, and engine restarts miss the cache until a daemon serves again.
+- `copy`: the engine copies every tensor into its own GPU memory and then asks the daemon to release its cache. Use this when the daemon should free its GPU memory after the handoff. The GPU holds two copies during the copy. Afterwards the daemon has nothing left to serve, so the next restart falls back to disk, or fails after `state_timeout_s` if `fallback` is disabled.
+
+## Health endpoint
+
+`--weight-cache-health-port` makes `vllm preload` serve an HTTP endpoint for orchestrators:
+
+```bash
+vllm preload --model meta-llama/Llama-3.1-8B-Instruct --tensor-parallel-size 4 \
+    --weight-cache-health-port 8001
+```
+
+`GET /health` returns `200` once every local daemon rank, including the draft group with speculative decoding, is serving, and `503` before that. If a rank exits, `vllm preload` shuts down the other ranks and the endpoint and exits with a nonzero status. The endpoint binds to `0.0.0.0`, or to `--weight-cache-health-host` if set. Without a port it is disabled.
+
+## Docker
+
+Run the daemon and the engine as separate containers. The daemon container is long-lived. The engine container can restart without losing the cached weights. The containers need the following:
+
+| Requirement | Reason |
+| --- | --- |
+| `--ipc=host` on both containers | PyTorch keeps the reference counters of shared CUDA tensors in `/dev/shm`, which both containers must see. |
+| `--pid=host` on both containers | CUDA IPC handles identify the exporting process by PID, so both processes must be in the same PID namespace. |
+| A shared volume for the sockets and the autotune cache | The engine connects to the daemon's Unix sockets and reads the [FlashInfer autotune results](#preloading-the-flashinfer-autotune-cache) the daemon wrote. Pass a path on the volume as `--weight-cache-socket-dir` to the daemon and as `socket_dir` to the engine. Set `VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR` to another path on it in both containers, or the engine tunes again. |
+| The same GPUs | Pass the same `--gpus` selection to both containers. |
+| The same user | The socket directory and the sockets must be owned by the user that connects. Run both containers as root, the default, or with the same `--user`. |
+| The same image tag | The fingerprint includes the vLLM version. |
+| The same engine arguments | The engine falls back to disk, or fails if `fallback` is disabled, when its configuration does not match the daemon's. See [How it works](#how-it-works). |
+
+The `vllm/vllm-openai` image uses `vllm serve` as its entrypoint. Start the daemon with `--entrypoint vllm` and pass `preload` as the first argument.
+
+!!! note "Socket directory ownership"
+    An explicitly configured socket directory must be owned by the user running the daemon. A named volume is created root-owned, and a bind mount is owned by whoever created it. Point the daemon at a subdirectory of the mount, such as `/run/vllm-weight-cache/sockets`, which it creates with the right owner. A non-root container also needs a mount that is writable by its UID.
+
+### docker run
+
+```bash
+MODEL=meta-llama/Llama-3.1-8B-Instruct
+SOCKET_DIR=/run/vllm-weight-cache/sockets
+AUTOTUNE_DIR=/run/vllm-weight-cache/autotune
+
+# 1. The daemon: long-lived, holds the weights.
+docker run -d --name vllm-weight-cache \
+    --gpus all --ipc=host --pid=host \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    -v vllm-weight-cache:/run/vllm-weight-cache \
+    -e VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR=$AUTOTUNE_DIR \
+    --health-cmd "curl -sf http://localhost:8001/health || exit 1" \
+    --health-interval 10s --health-start-period 10m \
+    --entrypoint vllm \
+    vllm/vllm-openai:latest \
+    preload --model $MODEL --tensor-parallel-size 4 \
+        --weight-cache-socket-dir $SOCKET_DIR \
+        --weight-cache-health-port 8001
+
+# 2. The engine: restarted by Docker whenever it exits.
+docker run -d --name vllm \
+    --gpus all --ipc=host --pid=host \
+    --restart always \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    -v vllm-weight-cache:/run/vllm-weight-cache \
+    -e VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR=$AUTOTUNE_DIR \
+    -p 8000:8000 \
+    vllm/vllm-openai:latest \
+    $MODEL --tensor-parallel-size 4 \
+        --load-format ipc_cache \
+        --model-loader-extra-config "{\"socket_dir\": \"$SOCKET_DIR\", \"fallback\": false}"
+```
+
+With `"fallback": false` the engine waits for the daemon on a cold start instead of loading from disk next to it. It gives up after `state_timeout_s`, 300 seconds by default, and `--restart always` then starts it again, so raise `state_timeout_s` above the daemon's load and tuning time to avoid the restarts. Without `"fallback": false`, start the engine only after `docker inspect` reports the daemon as `healthy`. Raise `--health-start-period` for models that take longer than 10 minutes to load and tune.
+
+Restarting the engine container, by hand or through `--restart always`, reuses the cached weights. Do not restart the daemon container while an engine runs against it in `zero_copy` mode: the engine keeps serving from the weights it has mapped, and the new daemon loads a second copy next to them. For the same reason only the engine has a restart policy in these examples.
+
+To seed a new replica's autotune cache from a running one, start the source with the `--seed-listen-*` flags from the beginning and the new replica with the `--seed-source-*` flags, as described in [Seeding warmup caches between daemons](#seeding-warmup-caches-between-daemons-d2d). On the source, either use `--network host` or publish the ports the daemon ranks bind, such as `-p 29600-29603:29600-29603` for four ranks with `--seed-listen-port 29600`. Bind the listener to `0.0.0.0` so that the published ports reach it.
+
+### Docker Compose
+
+The same deployment as a Compose file. `condition: service_healthy` starts the engine only after the daemon reports ready. Raise `start_period` for models that take longer than 10 minutes to load and tune.
+
+```yaml
+services:
+  weight-cache:
+    image: vllm/vllm-openai:latest
+    entrypoint: ["vllm", "preload"]
+    command:
+      - --model=meta-llama/Llama-3.1-8B-Instruct
+      - --tensor-parallel-size=4
+      - --weight-cache-socket-dir=/run/vllm-weight-cache/sockets
+      - --weight-cache-health-port=8001
+    ipc: host
+    pid: host
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+      - weight-cache:/run/vllm-weight-cache
+    environment:
+      VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: /run/vllm-weight-cache/autotune
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8001/health || exit 1"]
+      interval: 10s
+      start_period: 10m
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  vllm:
+    image: vllm/vllm-openai:latest
+    command:
+      - meta-llama/Llama-3.1-8B-Instruct
+      - --tensor-parallel-size=4
+      - --load-format=ipc_cache
+      - '--model-loader-extra-config={"socket_dir": "/run/vllm-weight-cache/sockets", "fallback": false}'
+    ipc: host
+    pid: host
+    restart: always
+    ports:
+      - "8000:8000"
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+      - weight-cache:/run/vllm-weight-cache
+    environment:
+      VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: /run/vllm-weight-cache/autotune
+    depends_on:
+      weight-cache:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  weight-cache:
+```
+
+`docker compose restart vllm` restarts only the engine.
+
+### Scoping the shared namespaces
+
+To share the IPC and PID namespaces between the two containers only, not with the host, start the daemon with `--ipc=shareable` instead of `--ipc=host`, since Docker's default IPC mode is private, and without `--pid=host`. Start the engine with `--ipc=container:vllm-weight-cache --pid=container:vllm-weight-cache`. The engine then uses the daemon container's `/dev/shm`, so size the daemon's `--shm-size` for both.
+
+## Kubernetes
+
+With the standard GPU device plugins a GPU is allocated to one container, so the daemon and the engine cannot be separate containers that request the same GPUs. Run both in one container: the daemon in the background and the engine in a restart loop, so an engine crash restarts only the engine.
+
+```yaml
+spec:
+  volumes:
+    - name: shm
+      emptyDir:
+        medium: Memory
+        sizeLimit: "2Gi"
+  containers:
+    - name: vllm
+      image: vllm/vllm-openai:latest
+      command: ["/bin/bash", "-c"]
+      args:
+        - |
+          vllm preload --model meta-llama/Llama-3.1-8B-Instruct \
+              --tensor-parallel-size 4 \
+              --weight-cache-health-port 8001 &
+          while true; do
+            vllm serve meta-llama/Llama-3.1-8B-Instruct \
+                --tensor-parallel-size 4 \
+                --load-format ipc_cache \
+                --model-loader-extra-config '{"fallback": false}'
+            sleep 1
+          done
+      ports:
+        - containerPort: 8000
+        - containerPort: 8001
+      resources:
+        limits:
+          nvidia.com/gpu: "4"
+      volumeMounts:
+        - name: shm
+          mountPath: /dev/shm
+      # Give the daemon up to 30 minutes to load and tune before liveness applies.
+      startupProbe:
+        httpGet:
+          path: /health
+          port: 8001
+        periodSeconds: 10
+        failureThreshold: 180
+      # Restart the container only when the daemon is unhealthy.
+      livenessProbe:
+        httpGet:
+          path: /health
+          port: 8001
+        periodSeconds: 10
+      # Serve traffic only while the engine is up.
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 8000
+        periodSeconds: 5
+```
+
+In this spec:
+
+- The liveness probe targets the daemon. A liveness probe on the engine would restart the container, and the daemon with it, on every engine crash.
+- Both processes share the container's IPC and PID namespaces, the default socket directory and the default autotune cache location, so no extra configuration is needed. To keep the tuned FlashInfer configs across container restarts, mount a volume and set `VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR` to a path on it.
+- The engine waits for the daemon because `fallback` is disabled. If the daemon's load and tuning take longer than `state_timeout_s`, the engine exits and the loop restarts it. Raise the timeout to avoid this.
+
+See [Using Kubernetes](../deployment/k8s.md) for a complete deployment manifest to add this container spec to.
+
+## Loader configuration
+
+The `ipc_cache` loader accepts these keys through `--model-loader-extra-config`:
+
+```bash
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
+    --load-format ipc_cache \
+    --model-loader-extra-config '{"fallback": false, "state_timeout_s": 900}'
+```
+
+| Key | Default | Description |
+| --- | ------- | ----------- |
+| `mode` | `zero_copy` | `zero_copy` or `copy`. See [Cache modes](#cache-modes). |
+| `fallback` | `true` | Load from disk when the daemon is unavailable or the fingerprints mismatch. When `false`, the engine waits up to `state_timeout_s` for the daemon and fails if it never becomes usable. |
+| `socket_dir` | per-user private directory under the temp dir | Directory containing the daemon sockets. Must match the daemon's `--weight-cache-socket-dir`. |
+| `socket_path` | derived from the GPU UUID | Explicit socket path. Cannot be combined with a cached speculative draft (MTP, EAGLE or EAGLE3), which needs separate target and draft sockets. |
+| `connect_timeout_s` | `5.0` | Socket connect timeout in seconds. |
+| `state_timeout_s` | `300.0` | Timeout for the weight-transfer request in seconds. With `fallback` disabled, also the total time to wait for the daemon. |
+
+## Daemon configuration
+
+`vllm preload` takes the full set of engine arguments plus:
+
+| Flag | Default | Description |
+| --- | ------- | ----------- |
+| `--weight-cache-socket-dir` | per-user private directory under the temp dir | Directory for the per-GPU Unix sockets. Must match the engine's `socket_dir`. |
+| `--weight-cache-health-port` | disabled | Port for the `/health` readiness endpoint. |
+| `--weight-cache-health-host` | `0.0.0.0` | Host for the `/health` endpoint. |
+| `--weight-cache-master-port` | a free port | Rendezvous port for the daemons' own process group. Required and identical on every node for multi-node setups. Must differ from the engine's `--master-port`. |
+| `--weight-cache-draft-master-port` | `--weight-cache-master-port + 1` for multi-node, otherwise a free port | Rendezvous port for the draft daemon group with speculative decoding. |
+| `--seed-listen-host` | disabled | Host the daemon binds to serve its warmup caches to other daemons. Requires `--seed-listen-port` and `--seed-token`. See [Seeding warmup caches between daemons](#seeding-warmup-caches-between-daemons-d2d). |
+| `--seed-listen-port` | disabled | Base port of the seeding listener. The daemon with global rank `r` binds `base + r`, and the draft group, if any, binds `base + world size + r`. |
+| `--seed-source-host` | disabled | Host of the source replica to fetch warmup caches from. Requires `--seed-source-port` and `--seed-token`. |
+| `--seed-source-port` | disabled | Base port of the source replica, with the same per-rank layout as `--seed-listen-port`. |
+| `--seed-token` | none | Shared secret that authenticates seeding requests. Required when a seed host and port is set, and an error when none is. |
+
+The daemon itself must load from disk. Passing `--load-format ipc_cache` to `vllm preload` is an error.
+
+The default socket directory is `$TMPDIR/vllm_weight_cache_<uid>`, created with mode `0700`. An explicit directory must be owned by the user running the daemon, but its permission bits are not enforced.
+
+See [vllm preload](../cli/preload.md) for the full CLI reference.
 
 ## Multi-node and data parallelism
 
@@ -159,6 +411,8 @@ vllm preload --model /path/to/model --tensor-parallel-size 16 \
     --nnodes 2 --node-rank 1 --master-addr 10.0.0.1 \
     --weight-cache-master-port 29600
 ```
+
+Pipeline parallelism needs no extra flags. There is still one daemon per local GPU, and the daemons' global ranks enumerate data-parallel, then pipeline, then tensor ranks, matching the engine's placement.
 
 For data parallelism (e.g. a TP1 x DP16 x EP decode fleet), run one launcher
 per node with the engine's DP placement flags. Local GPU `i` serves DP rank
@@ -182,79 +436,7 @@ flag sets. Each node then serves a contiguous block of the
 
 ## Speculative decoding
 
-With MTP, EAGLE or EAGLE3 speculative decoding, `vllm preload` additionally
-starts a draft daemon group that caches the draft model. It uses its own cache
-key, Unix sockets (`*_draft.sock`) and rendezvous port
-(`--weight-cache-draft-master-port`, default `--weight-cache-master-port + 1`),
-so each daemon process serves exactly one model role. Other draft types are
-not cached and keep loading from disk in the engine.
-
-## Cache modes
-
-The loader supports two modes, selected via `--model-loader-extra-config`:
-
-- `zero_copy` (default): the engine maps the daemon's CUDA allocations
-  directly. The daemon must stay alive for the engine's lifetime, and each
-  GPU carries only one copy of the weights.
-- `copy`: the engine clones every tensor into its own GPU memory and then
-  asks the daemon to release its cache. Use this when the daemon should free
-  GPU memory after handing off, at the cost of a full copy per restart.
-
-!!! warning
-    In `zero_copy` mode the weights live in the daemon's CUDA IPC allocations,
-    so [sleep mode](sleep_mode.md) (CuMemAllocator weight offloading) must not
-    be used with this loader.
-
-## Loader configuration
-
-The `ipc_cache` loader accepts extra keys via `--model-loader-extra-config`:
-
-```bash
-vllm serve meta-llama/Llama-3.1-8B-Instruct \
-    --load-format ipc_cache \
-    --model-loader-extra-config '{"mode": "copy", "fallback": false}'
-```
-
-| Key | Default | Description |
-| --- | ------- | ----------- |
-| `socket_path` | per-GPU path derived from the GPU UUID | Explicit daemon socket path. |
-| `socket_dir` | per-user private dir under the temp dir | Directory containing the daemon sockets. |
-| `mode` | `zero_copy` | `zero_copy` or `copy` (see above). |
-| `fallback` | `true` | Fall back to disk loading when the daemon is unavailable or the fingerprints mismatch. |
-| `connect_timeout_s` | `5.0` | Socket connect timeout in seconds. |
-| `state_timeout_s` | `300.0` | Timeout for the weight-transfer request in seconds. |
-
-The daemon's `--weight-cache-socket-dir` and the loader's `socket_dir` /
-`socket_path` must agree when the default per-user directory is not used.
-Socket paths are derived from the GPU UUID, so they are stable regardless of
-`CUDA_VISIBLE_DEVICES` index remapping.
-
-## Limitations
-
-- **Platform**: CUDA and ROCm only; other platforms raise
-  `UnsupportedPlatformForIPCError` even when `fallback` is enabled, since it
-  is a permanent misconfiguration rather than a transient daemon outage.
-- **Parallelism**: tensor, expert, pipeline and data parallelism are
-  supported, including across nodes.
-- **Autotune preloading**: tuning runs across the daemon's world group,
-  including across nodes and DP ranks. With model-based speculative decoding
-  both daemon groups skip it (the target cannot run the drafter's dummy
-  passes, and a table tuned on the draft model would key on the draft's
-  config, which no engine looks up), so those deployments' first engine
-  tunes and fills the cache instead.
-- **Warmup cache seeding**: only the v1 per-rank FlashInfer autotune cache is
-  seeded; single-rank daemons use FlashInfer's managed v2 store and always
-  tune in place. Seeding requires a trusted network — the TCP channel is
-  authenticated by a shared token but unencrypted.
-- **Quantization**: every quantization method in the model must declare
-  support for pre-processed weights (the daemon transfers weights *after*
-  quantization post-processing). Unsupported methods raise
-  `UnsupportedQuantForIPCError`.
-- **Consistency**: the daemon and engine must run the same vLLM version and
-  agree on model, dtype, quantization, and TP/DP layout, otherwise the
-  fingerprint mismatch triggers the disk fallback.
-- **Localhost only**: the daemon serves over a Unix domain socket; both the
-  daemon and the engines must run on the same node as the same user.
+Pass the same `--speculative-config` to `vllm preload` and `vllm serve`. With MTP, EAGLE or EAGLE3, `vllm preload` also starts a draft daemon group that caches the draft model under its own cache key, Unix sockets (`*_draft.sock`) and rendezvous port (`--weight-cache-draft-master-port`). The engine routes the draft load to that group automatically. Other draft types are not cached and load from disk. Both groups skip the [FlashInfer autotune pass](#preloading-the-flashinfer-autotune-cache).
 
 ## Security
 
@@ -274,8 +456,7 @@ an unauthenticated peer that stops sending is cut off by a whole-message
 deadline instead of blocking the accept loop. The channel is unencrypted —
 bind it to a trusted network.
 
-See the [security documentation](../usage/security.md) for vLLM's general
-threat model.
+The `--ipc=host` and `--pid=host` flags used in [Docker](#docker) let a container see host processes and shared memory. To limit this, share the namespaces between the two containers only, as described in [Scoping the shared namespaces](#scoping-the-shared-namespaces). See the [security documentation](../usage/security.md) for vLLM's general threat model.
 
 ## Daemon lifecycle
 
@@ -294,5 +475,24 @@ threat model.
   killed and reaped, releasing their GPU memory. A forcibly
   terminated rank may leave a stale socket; the next daemon replaces it
   after acquiring the per-GPU lock.
+- If a daemon exits while a `zero_copy` engine is running, the engine keeps serving, because the CUDA driver keeps the mapped weights alive until the engine exits. The engine logs a warning that the daemon exited. A restarted daemon loads a second copy of the weights on the GPU, and engine restarts miss the cache until a daemon serves again. Stop the engine before restarting the preload group to avoid holding two copies.
 
-See [vllm preload](../cli/preload.md) for the full CLI reference.
+## Troubleshooting
+
+| Symptom | Cause and fix |
+| --- | --- |
+| `Weight cache socket ... is unavailable` or `Cannot connect to weight cache daemon at ...` | No daemon is serving at that path. Check that the daemon logged `READY`, that both sides use the same socket directory, which in Docker means the same mounted volume, and that the engine runs on the same GPUs. |
+| `Weight cache daemon did not become ready within ...` | `fallback` is disabled and the daemon was not ready within `state_timeout_s`. Check the daemon logs, or raise the timeout if loading and tuning are slow. |
+| `Another weight cache daemon already owns ...` | A daemon for this GPU is already running. Stop it first. The lock is released when a daemon exits or crashes. |
+| `WeightCacheKey mismatch on fields: [...]` | The engine's configuration differs from the daemon's in the listed fields, such as `dtype`, `quantization`, `kv_cache_dtype`, `tp_size`, `moe_backend` or `vllm_version`. Start the daemon with the same arguments and vLLM version as the engine. |
+| `Socket directory ... is not owned by the current user` | The daemon and the engine run as different users, or someone else owns the directory. Point `--weight-cache-socket-dir` at a subdirectory the daemon can create, and run both as the same user. |
+| `Daemon GPU ... != engine GPU ...` | The socket belongs to a daemon on another GPU, usually because of an explicit `socket_path`. Use `socket_dir` and let the path derive from the GPU UUID. |
+| `Weights were released` | The daemon already handed its weights off in `copy` mode. Restart the daemon. |
+| `Externally held weights ... exceed the desired GPU memory utilization` | The daemon's weights alone exceed the `--gpu-memory-utilization` budget, so nothing is left for the engine. Raise the utilization. |
+| `Free memory on device ... is less than the engine's budget after excluding external process's weights` | The engine's budget is `--gpu-memory-utilization` of the GPU minus the weights held by the daemon, the external process in the message, and that much memory must be free at startup. Something other than the daemon's weights, such as an unrelated process, holds more than `1 - --gpu-memory-utilization` of the GPU. Free that memory or lower `--gpu-memory-utilization`. |
+| `UnsupportedQuantForIPCError` | The model uses a quantization method that cannot load pre-processed weights. Load this model from disk. |
+| `Weight cache daemon rank(s) exited during startup` or `during serving` | A daemon rank crashed while loading, tuning, binding its seeding port or serving, and `vllm preload` shut down the other ranks and exited. The traceback above the message names the cause. A rank killed by a signal leaves no traceback and shows a negative exit code in `exitcodes`, such as `-9` for `SIGKILL`. If the traceback comes from the FlashInfer autotune pass, add `--disable-flashinfer-autotune`. The first engine then tunes instead. Stop engines that were using the group, restart the whole preload group, and wait for it to be ready before starting them again. |
+| `Weight cache daemon at ... exited. This engine keeps serving` | The daemon behind this engine's mapped weights exited, and the engine keeps serving because the CUDA driver keeps the mapped weights alive until the engine exits. A restarted daemon loads a second copy of the weights on the GPU, and engine restarts miss the cache until a daemon serves again. To get back to one copy, stop the engine, restart the preload group and wait for it to be ready, then start the engine. |
+| The engine tunes FlashInfer again although the daemon tuned | The engine did not find the daemon's results. Compare the cache location the two processes log. They must be the same path on a shared filesystem, which in Docker means a shared volume and `VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR` set to a path on it in both containers. Also check that both use the same engine arguments and that the engine runs through `vllm serve` rather than the offline `LLM` class. |
+| `Cannot fetch flashinfer_autotune from ... over D2D`, `No remote flashinfer_autotune seed adopted` or `Rejected the remote flashinfer_autotune seed` | The mirror daemon tuned locally instead of adopting the source's table. `Cannot fetch` means the source is unreachable: check the host and the published ports, and that the source already reported ready. Status `miss` means the source has no table for this rank and configuration, so run the mirror with the same engine arguments as the source. Single-rank deployments that use FlashInfer's managed autotune store always miss. Status `error` means the source refused the request, usually because the `--seed-token` values differ. `Rejected` is followed by the reason, such as a different GPU or CUDA stack. |
+| `The weight cache daemon does not support EPLB.` or `The IPC weight cache loader does not support EPLB.` | Expert parallel load balancing is not supported. Remove `--enable-eplb` from the daemon and the engine. |
