@@ -568,15 +568,37 @@ void launchFusedMuseSpark(
     DISPATCH_HPG(scalar_t, HD);   \
   }
 
+  // Which head_dim arm this translation unit instantiates. 0 (the default)
+  // keeps all of them; the build compiles this file once per lane instead, each
+  // with FUSED_MUSE_SPARK_LANE = 64/128/256, so the device code of one head_dim
+  // is generated per unit instead of all three landing on one core.
+#ifndef FUSED_MUSE_SPARK_LANE
+  #define FUSED_MUSE_SPARK_LANE 0
+#endif
+
   switch (head_dim) {
     case 64:
-      DISPATCH_ROPE_T(64);
+      if constexpr (FUSED_MUSE_SPARK_LANE == 0 || FUSED_MUSE_SPARK_LANE == 64) {
+        DISPATCH_ROPE_T(64);
+      } else {
+        STD_TORCH_CHECK(false, "head_dim 64 not compiled");
+      }
       break;
     case 128:
-      DISPATCH_ROPE_T(128);
+      if constexpr (FUSED_MUSE_SPARK_LANE == 0 ||
+                    FUSED_MUSE_SPARK_LANE == 128) {
+        DISPATCH_ROPE_T(128);
+      } else {
+        STD_TORCH_CHECK(false, "head_dim 128 not compiled");
+      }
       break;
     case 256:
-      DISPATCH_ROPE_T(256);
+      if constexpr (FUSED_MUSE_SPARK_LANE == 0 ||
+                    FUSED_MUSE_SPARK_LANE == 256) {
+        DISPATCH_ROPE_T(256);
+      } else {
+        STD_TORCH_CHECK(false, "head_dim 256 not compiled");
+      }
       break;
     default:
       STD_TORCH_CHECK(false, "unsupported head_dim: ", head_dim);
