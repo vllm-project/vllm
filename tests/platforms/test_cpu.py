@@ -50,6 +50,7 @@ def _cpu_config(
             layer_types=layer_types,
         ),
         registry=_FakeRegistry,
+        multimodal_config=None,
     )
     config = VllmConfig(cache_config=cache_config)
     config.model_config = model_config
@@ -222,3 +223,35 @@ def test_cpu_conv_state_layout_selection(
 
     CpuPlatform.check_and_update_config(config)
     assert os.environ.get(layout_env) == expected_layout
+
+
+@pytest.mark.parametrize(
+    ("kv_cache_space", "compile_mm_encoder", "expected_skip"),
+    [
+        pytest.param("8", False, True, id="explicit-kv-cache"),
+        pytest.param(None, False, False, id="auto-kv-cache"),
+        pytest.param("8", True, False, id="explicit-kv-cache-encoder-compile"),
+    ],
+)
+def test_cpu_mm_profiling_skipped_with_explicit_kv_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    kv_cache_space: str | None,
+    compile_mm_encoder: bool,
+    expected_skip: bool,
+) -> None:
+    monkeypatch.setattr("torch.cpu._is_avx512_bf16_supported", lambda: False)
+    if kv_cache_space is None:
+        monkeypatch.delenv("VLLM_CPU_KVCACHE_SPACE", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_CPU_KVCACHE_SPACE", kv_cache_space)
+    config = _cpu_config(
+        CacheConfig(mamba_ssm_cache_dtype="float32"),
+        model_type="qwen3_5",
+        resolved_dtype="float32",
+    )
+    mm_config = SimpleNamespace(skip_mm_profiling=False)
+    config.model_config.multimodal_config = mm_config
+    config.compilation_config.compile_mm_encoder = compile_mm_encoder
+
+    CpuPlatform.check_and_update_config(config)
+    assert mm_config.skip_mm_profiling is expected_skip
