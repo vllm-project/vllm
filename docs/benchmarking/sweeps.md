@@ -208,7 +208,7 @@ vllm bench sweep startup \
 
 `vllm bench sweep plot` can be used to plot performance curves from parameter sweep results.
 
-Control the variables to plot via `--var-x` and `--var-y`, optionally applying `--filter-by` and `--bin-by` to the values. The plot is organized according to `--fig-by`, `--row-by`, `--col-by`, and `--curve-by`.
+Control the variables to plot via `--var-x` and `--var-y`, optionally applying `--filter-by` and `--bin-by` to the values. Boolean filter targets are case-insensitive (e.g. `--filter-by enable_prefix_caching==true`), while string-valued labels remain literal comparisons. The plot is organized according to `--fig-by`, `--row-by`, `--col-by`, and `--curve-by`.
 
 Example commands for visualizing [Workload Explorer](#workload-explorer) results:
 
