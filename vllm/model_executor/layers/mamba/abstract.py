@@ -8,6 +8,7 @@ import torch
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
@@ -24,12 +25,16 @@ class MambaBase(AttentionLayerBase):
     # in the shape specified by `self.get_state_shape`.
     kv_cache: tuple[torch.Tensor, ...]
     supports_dcp: bool = False
+    use_flashinfer_replayssm: bool = False
+    state_alignment: int = 1
+    _replayssm_ring_start: torch.Tensor
+    _replayssm_prev_num_accepted: torch.Tensor
 
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
         """Unpack a raw ``[B, 1, 1, C]`` int8 page view into per-state views.
 
         Each block's ``C`` bytes hold the layer's states (e.g. conv, ssm)
-        packed contiguously; slice them out and reinterpret per dtype/shape.
+        packed by dtype/shape with the layer's state alignment.
         """
         pages = kv_cache.squeeze(dim=(1, 2))
         states: list[torch.Tensor] = []
@@ -38,7 +43,7 @@ class MambaBase(AttentionLayerBase):
             nbytes = prod(shape) * get_dtype_size(dtype)
             state = pages[:, offset : offset + nbytes].view(dtype)
             states.append(state.view(-1, *shape))
-            offset += nbytes
+            offset += round_up(nbytes, self.state_alignment)
         self.kv_cache = tuple(states)
 
     @abstractmethod
@@ -76,6 +81,9 @@ class MambaBase(AttentionLayerBase):
         return MambaSpec(
             shapes=tuple(self.get_state_shape()),
             dtypes=self.get_state_dtype(),
+            use_flashinfer_replayssm=self.use_flashinfer_replayssm,
+            state_alignment=self.state_alignment,
+            block_stride_alignment=self.state_alignment,
             block_size=mamba_block_size,
             page_size_padded=page_size_padded,
             mamba_type=self.mamba_type,

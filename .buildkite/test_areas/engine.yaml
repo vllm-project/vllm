@@ -206,18 +206,26 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
     - tests/v1/e2e/test_replayssm_decode.py
+    - tests/kernels/mamba/test_ssu_dispatch.py
+    - vllm/v1/core/sched/scheduler.py
+    - vllm/v1/worker/utils.py
+    - vllm/v1/kv_cache_interface.py
     - vllm/config/cache.py
     - vllm/config/vllm.py
     - vllm/model_executor/layers/mamba/
     - vllm/model_executor/models/nemotron_h.py
+    - vllm/model_executor/warmup/kernel_warmup.py
     - vllm/model_executor/warmup/replayssm_warmup.py
     - vllm/v1/attention/backends/mamba_attn.py
+    - vllm/v1/worker/mamba_utils.py
+    - vllm/v1/worker/replayssm_utils.py
     - vllm/v1/spec_decode/
     - vllm/v1/worker/gpu/
     - vllm/v1/worker/gpu_model_runner.py
     - vllm/v1/worker/gpu_worker.py
   commands:
-    - pytest -v -s v1/e2e/test_replayssm_decode.py
+    - VLLM_TEST_REQUIRE_REPLAYSSM=1 pytest -v -s v1/e2e/test_replayssm_decode.py
+    - VLLM_TEST_REQUIRE_REPLAYSSM=1 pytest -v kernels/mamba/test_ssu_dispatch.py::test_replayssm_materializes_only_accepted_boundary_with_compacted_rows kernels/mamba/test_ssu_dispatch.py::test_replayssm_postprocess_commits_staged_transition
   mirror:
     amd:
       label: ":amd: (MI355) ReplaySSM E2E"
@@ -229,6 +237,8 @@ steps:
       - image-build-amd
       source_file_dependencies:
       - vllm/platforms/rocm.py
+      commands:
+      - pytest -v -s v1/e2e/test_replayssm_decode.py
 
 - label: ":nvidia: (L4) [Nightly] V1 E2E"
   key: v1-e2e-2-gpus

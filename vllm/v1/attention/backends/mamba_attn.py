@@ -8,7 +8,6 @@ from typing import Any, ClassVar, TypeVar
 import torch
 
 from vllm.config import VllmConfig
-from vllm.config.mamba import MambaBackendEnum
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
@@ -106,10 +105,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         self.use_spec_decode = self.num_spec_tokens > 0
         self.use_replayssm = vllm_config.cache_config.use_replayssm
         self.replayssm_buffer_len = vllm_config.cache_config.replayssm_buffer_len
-        self.use_flashinfer_replayssm = (
-            self.use_replayssm
-            and vllm_config.mamba_config.backend == MambaBackendEnum.FLASHINFER
-        )
+        self.use_flashinfer_replayssm = vllm_config.use_flashinfer_replayssm
 
         scheduler_config = vllm_config.scheduler_config
         self.decode_cudagraph_max_bs: int = scheduler_config.max_num_seqs
