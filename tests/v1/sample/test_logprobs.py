@@ -1652,7 +1652,10 @@ def test_chunked_prompt_logprobs_match_unchunked(
     device = torch.device(current_platform.device_type)
     vocab_size = 512
     num_tokens = 2 * CHUNK_SIZE + 3
-    logits = torch.randn(num_tokens, vocab_size, device=device)
+    # Distinct values per row, since topk's order among ties can vary with the
+    # number of rows ranked together.
+    logits = torch.rand(num_tokens, vocab_size, device=device).argsort(dim=-1)
+    logits = logits.float() / vocab_size
     prompt_token_ids = torch.randint(vocab_size, (num_tokens,), device=device)
 
     token_ids, logprobs, ranks = compute_prompt_logprobs_with_chunking(
