@@ -35,6 +35,22 @@ class LateInteractionParams(
     query_key: str
     query_uses: int | None = None
 
+    def verify(self) -> None:
+        if self.mode not in ("cache_query", "score_doc"):
+            raise VLLMValidationError(
+                f"mode must be 'cache_query' or 'score_doc', got {self.mode!r}"
+            )
+        # cache_query without a positive use count poisons the worker cache
+        # lifecycle: a None count crashes the runner's assert, and a
+        # non-positive one pops the entry on the first score_doc, so the
+        # paired requests fail with a cache miss.
+        if self.mode == "cache_query" and (
+            type(self.query_uses) is not int or self.query_uses <= 0
+        ):
+            raise VLLMValidationError(
+                "query_uses must be a positive integer for cache_query mode"
+            )
+
 
 class LateChunkingParams(
     msgspec.Struct,
@@ -46,6 +62,10 @@ class LateChunkingParams(
     Requests recompute all prompt tokens, bypassing prefix cache reads.
     Special tokens count toward chunk boundaries and are included in chunk means,
     including the BOS token normally filtered from BGE-M3 token embeddings.
+
+    Attributes:
+        chunk_size: Tokens per chunk, as an integer in [1, 2**63 - 1].
+
     """
 
     chunk_size: int
@@ -54,8 +74,10 @@ class LateChunkingParams(
         self.verify()
 
     def verify(self) -> None:
-        if type(self.chunk_size) is not int or self.chunk_size <= 0:
-            raise VLLMValidationError("chunk_size must be a positive integer")
+        if type(self.chunk_size) is not int or not 0 < self.chunk_size < 2**63:
+            raise VLLMValidationError(
+                "chunk_size must be a positive integer less than 2**63"
+            )
 
 
 class PoolingParams(
@@ -120,6 +142,11 @@ class PoolingParams(
         return deepcopy(self)
 
     def verify(self, model_config: ModelConfig) -> None:
+        # Late-interaction fields are filled during input processing (the
+        # scoring path assigns them per query/doc), so they are validated here
+        # and not at construction time.
+        if self.late_interaction_params is not None:
+            self.late_interaction_params.verify()
         if self.late_chunking_params is not None:
             self.late_chunking_params.verify()
             if self.task != "token_embed":

@@ -1,77 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use prometheus_client::encoding::EncodeLabelSet;
-use prometheus_client::metrics::family::{Family, MetricConstructor};
+use prometheus_client::metrics::family::Family;
 use prometheus_client::registry::Registry;
 
-use crate::{EngineLabels, Histogram, HistogramFamily, U64Counter};
-
-const TTFT_BUCKETS: [f64; 22] = [
-    0.001, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0,
-    20.0, 40.0, 80.0, 160.0, 640.0, 2560.0,
-];
-const ITL_BUCKETS: [f64; 19] = [
-    0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0, 20.0,
-    40.0, 80.0,
-];
-const REQUEST_LATENCY_BUCKETS: [f64; 21] = [
-    0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 60.0, 120.0, 240.0,
-    480.0, 960.0, 1920.0, 7680.0,
-];
-const REQUEST_PARAMS_N_BUCKETS: [f64; 5] = [1.0, 2.0, 5.0, 10.0, 20.0];
-const REQUEST_NUM_PREEMPTIONS_BUCKETS: [f64; 7] = [1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 20.0];
-const ITERATION_TOKENS_BUCKETS: [f64; 13] = [
-    1.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0, 2048.0, 4096.0, 8192.0, 16384.0,
-];
-
-/// Build a 1-2-5 series of buckets capped at `max_value`, like Python's
-/// `build_1_2_5_buckets`: `100` gives `[1, 2, 5, 10, 20, 50, 100]`.
-fn build_1_2_5_buckets(max_value: u32) -> Vec<f64> {
-    let max_value = u64::from(max_value);
-    let mut buckets = Vec::new();
-    let mut exponent = 0;
-    loop {
-        for mantissa in [1_u64, 2, 5] {
-            let value = mantissa * 10_u64.pow(exponent);
-            if value > max_value {
-                return buckets;
-            }
-            buckets.push(value as f64);
-        }
-        exponent += 1;
-    }
-}
-
-fn time_to_first_token_histogram() -> Histogram {
-    Histogram::new(TTFT_BUCKETS.iter().copied())
-}
-
-fn inter_token_latency_histogram() -> Histogram {
-    Histogram::new(ITL_BUCKETS.iter().copied())
-}
-
-fn request_time_per_output_token_histogram() -> Histogram {
-    Histogram::new(ITL_BUCKETS.iter().copied())
-}
-
-fn request_latency_histogram() -> Histogram {
-    Histogram::new(REQUEST_LATENCY_BUCKETS.iter().copied())
-}
-
-fn request_params_n_histogram() -> Histogram {
-    Histogram::new(REQUEST_PARAMS_N_BUCKETS.iter().copied())
-}
-
-fn request_num_preemptions_histogram() -> Histogram {
-    Histogram::new(REQUEST_NUM_PREEMPTIONS_BUCKETS.iter().copied())
-}
-
-fn iteration_tokens_histogram() -> Histogram {
-    Histogram::new(ITERATION_TOKENS_BUCKETS.iter().copied())
-}
+use crate::buckets::{BucketConfig, BucketFamily, FamilyHistogram};
+use crate::{BucketHistogramFamily, EngineLabels, U64Counter};
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct FinishedReasonLabels {
@@ -89,34 +26,11 @@ pub struct PromptTokenSourceLabels {
 
 pub(crate) type FinishedReasonCounterFamily = Family<FinishedReasonLabels, U64Counter>;
 pub(crate) type PromptTokenSourceCounterFamily = Family<PromptTokenSourceLabels, U64Counter>;
-pub(crate) type RequestTokensHistogramFamily =
-    Family<EngineLabels, Histogram, RequestTokensHistogram>;
-
-/// Constructor of the request token-count histograms, which share Python's
-/// `request_tokens` buckets: a 1-2-5 series capped at `max_model_len`.
-///
-/// The registry is built before any engine is connected, so the buckets are
-/// filled in later by [`RequestMetrics::set_max_model_len`].
-#[derive(Clone, Debug, Default)]
-pub struct RequestTokensHistogram {
-    buckets: Arc<OnceLock<Vec<f64>>>,
-}
-
-impl MetricConstructor<Histogram> for RequestTokensHistogram {
-    fn new_metric(&self) -> Histogram {
-        let buckets = self
-            .buckets
-            .get()
-            .expect("max_model_len must be set before recording request token metrics");
-        Histogram::new(buckets.iter().copied())
-    }
-}
-
 /// Request and output-batch Prometheus families.
 pub struct RequestMetrics {
     /// Computed prompt and generated tokens per nonempty engine output batch,
     /// recorded by the engine-core client for requests tracked by this frontend.
-    pub iteration_tokens_total: HistogramFamily,
+    pub iteration_tokens_total: BucketHistogramFamily,
 
     // Request-derived counters.
     pub num_preemptions: Family<EngineLabels, U64Counter>,
@@ -128,33 +42,33 @@ pub struct RequestMetrics {
 
     // Request lifecycle counters and histograms.
     pub request_success: FinishedReasonCounterFamily,
-    pub request_prompt_tokens: RequestTokensHistogramFamily,
-    pub request_generation_tokens: RequestTokensHistogramFamily,
-    pub request_max_num_generation_tokens: RequestTokensHistogramFamily,
-    pub request_params_max_tokens: RequestTokensHistogramFamily,
-    pub request_params_n: HistogramFamily,
-    pub request_num_preemptions: HistogramFamily,
-    pub request_prefill_kv_computed_tokens: RequestTokensHistogramFamily,
-    pub time_to_first_token_seconds: HistogramFamily,
-    pub inter_token_latency_seconds: HistogramFamily,
-    pub e2e_request_latency_seconds: HistogramFamily,
-    pub request_queue_time_seconds: HistogramFamily,
-    pub request_prefill_time_seconds: HistogramFamily,
-    pub request_decode_time_seconds: HistogramFamily,
-    pub request_inference_time_seconds: HistogramFamily,
-    pub request_time_per_output_token_seconds: HistogramFamily,
+    pub request_prompt_tokens: BucketHistogramFamily,
+    pub request_generation_tokens: BucketHistogramFamily,
+    pub request_max_num_generation_tokens: BucketHistogramFamily,
+    pub request_params_max_tokens: BucketHistogramFamily,
+    pub request_params_n: BucketHistogramFamily,
+    pub request_num_preemptions: BucketHistogramFamily,
+    pub request_prefill_kv_computed_tokens: BucketHistogramFamily,
+    pub time_to_first_token_seconds: BucketHistogramFamily,
+    pub inter_token_latency_seconds: BucketHistogramFamily,
+    pub e2e_request_latency_seconds: BucketHistogramFamily,
+    pub request_queue_time_seconds: BucketHistogramFamily,
+    pub request_prefill_time_seconds: BucketHistogramFamily,
+    pub request_decode_time_seconds: BucketHistogramFamily,
+    pub request_inference_time_seconds: BucketHistogramFamily,
+    pub request_time_per_output_token_seconds: BucketHistogramFamily,
 
-    /// Constructor shared by the request token-count histogram families.
-    request_tokens_histogram: RequestTokensHistogram,
+    /// Bucket settings shared with the histogram constructors.
+    buckets: Arc<BucketConfig>,
 }
 
 impl RequestMetrics {
     /// Register the request-oriented metric families into the shared registry.
-    pub(crate) fn register(registry: &mut Registry) -> Self {
-        let request_tokens_histogram = RequestTokensHistogram::default();
+    pub(crate) fn register(registry: &mut Registry, buckets: &Arc<BucketConfig>) -> Self {
+        let histogram =
+            |family| Family::new_with_constructor(FamilyHistogram::new(family, buckets));
 
-        let iteration_tokens_total =
-            Family::new_with_constructor(iteration_tokens_histogram as fn() -> Histogram);
+        let iteration_tokens_total = histogram(BucketFamily::IterationTokens);
         registry.register(
             "vllm:iteration_tokens_total",
             "Histogram of computed prompt and generated tokens per nonempty engine output batch.",
@@ -212,120 +126,105 @@ impl RequestMetrics {
             request_success.clone(),
         );
 
-        let request_prompt_tokens = Family::new_with_constructor(request_tokens_histogram.clone());
+        let request_prompt_tokens = histogram(BucketFamily::RequestTokens);
         registry.register(
             "vllm:request_prompt_tokens",
             "Number of prefill tokens processed.",
             request_prompt_tokens.clone(),
         );
 
-        let request_generation_tokens =
-            Family::new_with_constructor(request_tokens_histogram.clone());
+        let request_generation_tokens = histogram(BucketFamily::RequestTokens);
         registry.register(
             "vllm:request_generation_tokens",
             "Number of generation tokens processed.",
             request_generation_tokens.clone(),
         );
 
-        let request_max_num_generation_tokens =
-            Family::new_with_constructor(request_tokens_histogram.clone());
+        let request_max_num_generation_tokens = histogram(BucketFamily::RequestTokens);
         registry.register(
             "vllm:request_max_num_generation_tokens",
             "Histogram of maximum number of requested generation tokens.",
             request_max_num_generation_tokens.clone(),
         );
 
-        let request_params_max_tokens =
-            Family::new_with_constructor(request_tokens_histogram.clone());
+        let request_params_max_tokens = histogram(BucketFamily::RequestTokens);
         registry.register(
             "vllm:request_params_max_tokens",
             "Histogram of the max_tokens request parameter.",
             request_params_max_tokens.clone(),
         );
 
-        let request_params_n =
-            Family::new_with_constructor(request_params_n_histogram as fn() -> Histogram);
+        let request_params_n = histogram(BucketFamily::RequestParamsN);
         registry.register(
             "vllm:request_params_n",
             "Histogram of the n request parameter.",
             request_params_n.clone(),
         );
 
-        let request_num_preemptions =
-            Family::new_with_constructor(request_num_preemptions_histogram as fn() -> Histogram);
+        let request_num_preemptions = histogram(BucketFamily::RequestNumPreemptions);
         registry.register(
             "vllm:request_num_preemptions",
             "Histogram of the number of times a request was preempted.",
             request_num_preemptions.clone(),
         );
 
-        let request_prefill_kv_computed_tokens =
-            Family::new_with_constructor(request_tokens_histogram.clone());
+        let request_prefill_kv_computed_tokens = histogram(BucketFamily::RequestTokens);
         registry.register(
             "vllm:request_prefill_kv_computed_tokens",
             "Histogram of new KV tokens computed during prefill (excluding cached tokens).",
             request_prefill_kv_computed_tokens.clone(),
         );
 
-        let time_to_first_token_seconds =
-            Family::new_with_constructor(time_to_first_token_histogram as fn() -> Histogram);
+        let time_to_first_token_seconds = histogram(BucketFamily::TimeToFirstToken);
         registry.register(
             "vllm:time_to_first_token_seconds",
             "Histogram of time to first token in seconds.",
             time_to_first_token_seconds.clone(),
         );
 
-        let inter_token_latency_seconds =
-            Family::new_with_constructor(inter_token_latency_histogram as fn() -> Histogram);
+        let inter_token_latency_seconds = histogram(BucketFamily::InterTokenLatency);
         registry.register(
             "vllm:inter_token_latency_seconds",
             "Histogram of inter-token latency in seconds.",
             inter_token_latency_seconds.clone(),
         );
 
-        let e2e_request_latency_seconds =
-            Family::new_with_constructor(request_latency_histogram as fn() -> Histogram);
+        let e2e_request_latency_seconds = histogram(BucketFamily::RequestLatency);
         registry.register(
             "vllm:e2e_request_latency_seconds",
             "Histogram of e2e request latency in seconds.",
             e2e_request_latency_seconds.clone(),
         );
 
-        let request_queue_time_seconds =
-            Family::new_with_constructor(request_latency_histogram as fn() -> Histogram);
+        let request_queue_time_seconds = histogram(BucketFamily::RequestLatency);
         registry.register(
             "vllm:request_queue_time_seconds",
             "Histogram of time spent in WAITING phase for request.",
             request_queue_time_seconds.clone(),
         );
 
-        let request_prefill_time_seconds =
-            Family::new_with_constructor(request_latency_histogram as fn() -> Histogram);
+        let request_prefill_time_seconds = histogram(BucketFamily::RequestLatency);
         registry.register(
             "vllm:request_prefill_time_seconds",
             "Histogram of time spent in PREFILL phase for request.",
             request_prefill_time_seconds.clone(),
         );
 
-        let request_decode_time_seconds =
-            Family::new_with_constructor(request_latency_histogram as fn() -> Histogram);
+        let request_decode_time_seconds = histogram(BucketFamily::RequestLatency);
         registry.register(
             "vllm:request_decode_time_seconds",
             "Histogram of time spent in DECODE phase for request.",
             request_decode_time_seconds.clone(),
         );
 
-        let request_inference_time_seconds =
-            Family::new_with_constructor(request_latency_histogram as fn() -> Histogram);
+        let request_inference_time_seconds = histogram(BucketFamily::RequestLatency);
         registry.register(
             "vllm:request_inference_time_seconds",
             "Histogram of time spent in RUNNING phase for request.",
             request_inference_time_seconds.clone(),
         );
 
-        let request_time_per_output_token_seconds = Family::new_with_constructor(
-            request_time_per_output_token_histogram as fn() -> Histogram,
-        );
+        let request_time_per_output_token_seconds = histogram(BucketFamily::InterTokenLatency);
         registry.register(
             "vllm:request_time_per_output_token_seconds",
             "Histogram of time_per_output_token_seconds per request.",
@@ -356,7 +255,7 @@ impl RequestMetrics {
             request_decode_time_seconds,
             request_inference_time_seconds,
             request_time_per_output_token_seconds,
-            request_tokens_histogram,
+            buckets: buckets.clone(),
         }
     }
 
@@ -367,7 +266,7 @@ impl RequestMetrics {
     /// process-global and serves one model, so only the first call takes
     /// effect.
     pub fn set_max_model_len(&self, max_model_len: u32) {
-        let _ = self.request_tokens_histogram.buckets.set(build_1_2_5_buckets(max_model_len));
+        self.buckets.set_max_model_len(max_model_len);
     }
 }
 
@@ -384,7 +283,7 @@ mod tests {
     #[test]
     fn request_token_buckets_are_capped_at_max_model_len() {
         let mut registry = Registry::default();
-        let metrics = RequestMetrics::register(&mut registry);
+        let metrics = RequestMetrics::register(&mut registry, &Arc::default());
         metrics.set_max_model_len(4096);
         metrics.request_prompt_tokens.get_or_create_owned(&EngineLabels {
             model_name: "model".to_string(),
