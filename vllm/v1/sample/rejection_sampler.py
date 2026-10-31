@@ -130,6 +130,7 @@ class RejectionSampler(nn.Module):
         # [num_tokens + batch_size, vocab_size]
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
+        raw_logits: torch.Tensor | None = None,
     ) -> SamplerOutput:
         """Args:
             metadata:
@@ -172,6 +173,7 @@ class RejectionSampler(nn.Module):
                 max_num_logprobs=-1,
             ),
             predict_bonus_token=True,
+            raw_logits=None if raw_logits is None else raw_logits[bonus_logits_indices],
             # Override the logprobs mode to return logits because they are
             # needed later to compute the accepted token logprobs.
             logprobs_mode_override="processed_logits"
@@ -223,6 +225,8 @@ class RejectionSampler(nn.Module):
 
         logprobs_tensors = None
         if sampling_metadata.max_num_logprobs is not None:
+            if raw_logits is not None and not self.is_processed_logprobs_mode:
+                raw_target_logits = raw_logits[target_logits_indices].to(torch.float32)
             logprobs_tensors = self._get_logprobs_tensors(
                 sampling_metadata.max_num_logprobs,
                 metadata,

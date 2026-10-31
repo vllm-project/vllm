@@ -3404,6 +3404,7 @@ class GPUModelRunner(
         self,
         logits: torch.Tensor | None,
         spec_decode_metadata: SpecDecodeMetadata | None,
+        raw_logits: torch.Tensor | None = None,
     ) -> SamplerOutput:
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
@@ -3414,6 +3415,7 @@ class GPUModelRunner(
             return self.sampler(
                 logits=logits,
                 sampling_metadata=sampling_metadata,
+                raw_logits=raw_logits,
             )
 
         # Update spec_token_ids with real draft tokens from pre step only when
@@ -3428,6 +3430,7 @@ class GPUModelRunner(
             draft_probs,
             logits,
             sampling_metadata,
+            raw_logits=raw_logits,
         )
         return sampler_output
 
@@ -4287,13 +4290,20 @@ class GPUModelRunner(
         self.execute_model_state = None
 
         # Apply structured output bitmasks if present.
+        raw_logits = None
         if grammar_output is not None:
+            sampling_metadata = self.input_batch.sampling_metadata
+            if self.sampler.logprobs_mode not in PROCESSED_LOGPROBS_MODES and (
+                sampling_metadata.max_num_logprobs is not None
+                or sampling_metadata.logprob_token_ids
+            ):
+                raw_logits = logits.clone()
             apply_grammar_bitmask(
                 scheduler_output, grammar_output, self.input_batch, logits
             )
 
         with record_function_or_nullcontext("gpu_model_runner: sample"):
-            sampler_output = self._sample(logits, spec_decode_metadata)
+            sampler_output = self._sample(logits, spec_decode_metadata, raw_logits)
 
         self._update_states_after_model_execute(
             sampler_output.sampled_token_ids, scheduler_output

@@ -27,6 +27,7 @@ from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.exceptions import VLLMValidationError
 from vllm.logprobs import Logprob
 from vllm.platforms import current_platform
+from vllm.sampling_params import StructuredOutputsParams
 from vllm.v1.engine.input_processor import InputProcessor
 
 from ...conftest import HfRunner, VllmRunner
@@ -637,6 +638,107 @@ def test_all_logprobs(example_prompts):
             assert prompt_logprobs[0] is None
             for prompt_logprob in prompt_logprobs[1:]:
                 assert len(prompt_logprob) == vocab_size
+
+
+@pytest.mark.parametrize("logprobs_mode", ["raw_logprobs", "raw_logits"])
+@pytest.mark.parametrize("use_v2", [False, True], ids=["v1", "v2"])
+def test_structured_output_preserves_raw_scores(
+    logprobs_mode: LogprobsMode, use_v2: bool, monkeypatch: pytest.MonkeyPatch
+):
+    from vllm import LLM
+
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(use_v2)))
+    llm = LLM(
+        "facebook/opt-125m",
+        max_logprobs=-1,
+        max_model_len=32,
+        enforce_eager=True,
+        enable_prefix_caching=False,
+        gpu_memory_utilization=0.15,
+        logprobs_mode=logprobs_mode,
+    )
+    try:
+        assert llm.llm_engine.vllm_config.use_v2_model_runner is use_v2
+        prompt = "The capital of France is"
+        reference = llm.generate(
+            [prompt], SamplingParams(temperature=0, max_tokens=1, logprobs=-1)
+        )[0].outputs[0]
+        constrained = llm.generate(
+            [prompt],
+            SamplingParams(
+                temperature=0,
+                max_tokens=1,
+                logprobs=5,
+                structured_outputs=StructuredOutputsParams(choice=[" not"]),
+            ),
+        )[0].outputs[0]
+        token = constrained.token_ids[0]
+        assert reference.logprobs is not None and constrained.logprobs is not None
+        assert constrained.logprobs[0][token].logprob == pytest.approx(
+            reference.logprobs[0][token].logprob, abs=1e-4
+        )
+        reference_top = sorted(
+            reference.logprobs[0].items(),
+            key=lambda item: item[1].logprob,
+            reverse=True,
+        )[:5]
+        for token, score in reference_top:
+            assert token in constrained.logprobs[0]
+            assert constrained.logprobs[0][token].logprob == pytest.approx(
+                score.logprob, abs=1e-4
+            )
+    finally:
+        del llm
+        torch.accelerator.empty_cache()
+        cleanup_dist_env_and_memory()
+
+
+def test_v2_structured_raw_scores_with_speculation(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    prompt = " Hello world" * 8
+    params = SamplingParams(
+        temperature=0,
+        max_tokens=20,
+        logprobs=3,
+        structured_outputs=StructuredOutputsParams(choice=[" Hello world" * 6]),
+    )
+    kwargs = dict(
+        max_logprobs=3,
+        max_model_len=80,
+        enforce_eager=True,
+        enable_prefix_caching=False,
+        gpu_memory_utilization=0.15,
+        disable_log_stats=False,
+    )
+    with VllmRunner("facebook/opt-125m", **kwargs) as runner:
+        expected = runner.llm.generate([prompt], params)[0].outputs[0]
+    with VllmRunner(
+        "facebook/opt-125m",
+        speculative_config={
+            "method": "ngram",
+            "prompt_lookup_max": 3,
+            "prompt_lookup_min": 1,
+            "num_speculative_tokens": 3,
+        },
+        **kwargs,
+    ) as runner:
+        assert runner.llm.llm_engine.vllm_config.use_v2_model_runner
+        actual = runner.llm.generate([prompt], params)[0].outputs[0]
+        accepted = sum(
+            m.value
+            for m in runner.llm.get_metrics()
+            if m.name == "vllm:spec_decode_num_accepted_tokens"
+        )
+    assert accepted > 0
+    assert actual.token_ids == expected.token_ids
+    assert actual.logprobs is not None and expected.logprobs is not None
+    for token, actual_scores, expected_scores in zip(
+        actual.token_ids, actual.logprobs, expected.logprobs
+    ):
+        assert actual_scores[token].logprob == pytest.approx(
+            expected_scores[token].logprob, abs=1e-4
+        )
 
 
 @pytest.mark.parametrize("logprobs_mode", get_args(LogprobsMode))
