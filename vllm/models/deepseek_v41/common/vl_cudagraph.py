@@ -245,7 +245,8 @@ class DeepseekV4VLEncoderCudaGraphMixin:
         total_patches = r * r * per_item_out * max_batch_size
 
         p = config.vision_patch_size
-        patches = torch.zeros(total_patches, 3, p, p, device=device, dtype=dtype)
+        patch_dtype = self.vision.patch_embed.input_norm.input_dtype or dtype
+        patches = torch.zeros(total_patches, 3, p, p, device=device, dtype=patch_dtype)
 
         metadata = build_packed_vit_metadata(
             grids,
@@ -284,8 +285,9 @@ class DeepseekV4VLEncoderCudaGraphMixin:
         vit_grid = self._get_grid_list(mm_kwargs, "vit_grid")
         patches = mm_kwargs["patches"]
         dtype = self.aligner.w1.weight.dtype
-        if patches.dtype != dtype:
-            patches = patches.to(dtype)
+        patch_dtype = self.vision.patch_embed.input_norm.input_dtype or dtype
+        if patches.dtype != patch_dtype:
+            patches = patches.to(patch_dtype)
 
         # Unpadded: the manager zero-pads patches/cos/sin/merge buffers, and
         # pad_cu_seqlens pads the tail with zero-length sequences.
@@ -326,7 +328,7 @@ class DeepseekV4VLEncoderCudaGraphMixin:
         mm_kwargs: dict[str, Any],
         path: str = "default",
     ) -> torch.Tensor:
-        patches = mm_kwargs["patches"].to(self.aligner.w1.weight.dtype)
+        patches = mm_kwargs["patches"]
         vit_grid = self._get_grid_list(mm_kwargs, "vit_grid")
         outs: list[torch.Tensor] = []
         offset = 0
@@ -337,7 +339,11 @@ class DeepseekV4VLEncoderCudaGraphMixin:
             )
             offset += n_vit
         if not outs:
-            return patches.new_zeros((0, self.config.hidden_size))
+            return torch.zeros(
+                (0, self.config.hidden_size),
+                device=patches.device,
+                dtype=self.aligner.w2.weight.dtype,
+            )
         return torch.cat(outs, dim=0)
 
     def postprocess_encoder_output(
