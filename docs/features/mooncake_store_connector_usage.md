@@ -327,7 +327,7 @@ Strict isolation requires a Mooncake master started with `--enable_multi_tenants
   `"BAREX"` selects the BAR-exposed allocator. Unset by default. Both are
   incompatible with sleep mode and the CuMem allocator.
 - `cache_prefix` (str): Namespace prepended to every store key. Lets separate deployments share one Mooncake master without polluting each other — instances configured with different prefixes never see each other's cached blocks, even for identical prompts. All instances that should share a prefix cache must use the same value. Default: `""` (no prefix; keys are byte-identical to the unprefixed format).
-- `save_decode_cache` (bool): Enable offloading decode tokens' KV cache. A `kv_consumer` does not save during prefill; when decode starts, it fills any missing block-aligned prompt prefix before appending completed decode blocks. Default: `false`.
+- `save_decode_cache` (bool): Enable offloading decode tokens' KV cache. A `kv_consumer` does not save during prefill; when decode starts, it fills any missing block-aligned prompt prefix before appending completed decode blocks. Default: `false`. For hybrid Mamba/GDN models the Mamba boundary states of decode blocks are also offloaded, but only if the core retains them: set `--prefix-cache-retention-interval` to the scheduler block size. The default `0` retains no Mamba boundary, so an external prefix hit can never complete.
 - `store_tp_size` (int): Common Store TP for divisible heterogeneous-TP
   sharing. See [Sharing one Store across multiple Prefill TP sizes](#sharing-one-store-across-multiple-prefill-tp-sizes).
 
@@ -535,6 +535,25 @@ prefill. This example does not implement eviction-safe provider removal,
 restart recovery or forced teardown during transfers.
 
 ## Notes
+
+### Store Key Layout
+
+Every key is
+
+```text
+[<cache_prefix>@]<model dir name>[<store namespace>]@cfg:<fingerprint>@tp_rank:<r>@pcp<r>@dcp<r>@pp_rank:<r>@group:<g>@<block hash>
+```
+
+`<fingerprint>` is a 12-hex-digit digest of the settings that change a block's
+bytes or shape: KV cache dtype, model dtype, quantization, Mamba cache dtypes,
+scheduler and hash block sizes, every stored cache group's full spec and layer
+count, the resolved KV cache layout, and the parallel layout (TP/PP/PCP/DCP sizes
+for rank-local keys; PCP/DCP only for TP-shared namespaces, whose store TP and PP
+are already in the namespace). Instances of the same model directory that differ
+in any of these therefore never read each other's blocks, and the worker logs the
+digest at startup. Because the digest is part of the key, changing any of these
+settings, or upgrading from a vLLM that did not compute it, leaves existing store
+contents unreachable: the first requests miss.
 
 ### Reproducible Block Hashes Across Processes
 
