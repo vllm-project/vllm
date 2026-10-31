@@ -355,6 +355,19 @@ class NixlBaseConnectorWorker:
         """
         return tp_ratio < 0 and (not self.use_mla or len(plan.all_source_ranks) > 1)
 
+    def _is_gqa_replicated_pull(self, tp_ratio: int, remote_engine_id: str) -> bool:
+        """D pulls from a larger P whose GQA KV heads are replicated: D reads one
+        P rank per head (see compute_tp_mapping) and notifies the skipped ones.
+        """
+        assert self.transfer_topo is not None
+        return (
+            self._TRANSFER_MODE == "pull"
+            and tp_ratio < 0
+            and not self.use_mla
+            and not self._has_mamba
+            and self.transfer_topo.is_kv_replicated(remote_engine_id)
+        )
+
     def _fa_desc_replicated(
         self,
         desc_starts: np.ndarray,
@@ -2765,12 +2778,20 @@ class NixlBaseConnectorWorker:
         block_size_ratio = self.transfer_topo.block_size_ratio(
             nixl_agent_meta.block_size
         )
-        # num_kv_heads > tp_size with P_TP > D_TP not supported for non-mamba.
+        # Pull mode reads one replica per head from a remote whose TP exceeds both
+        # the local TP and num_kv_heads. Push mode does not support it: P validates
+        # D, and D may validate P through its heartbeat handshake.
         # Mamba models can have replicated FA KV with tp_ratio < 0.
         # MLA models do not need to handle kv replication.
-        if not self.use_mla and not self._has_mamba:
+        gqa_replicated_pull = self._is_gqa_replicated_pull(tp_ratio, remote_engine_id)
+        if not self.use_mla and not self._has_mamba and not gqa_replicated_pull:
             assert not (
                 tp_ratio < 0 and self.transfer_topo.is_kv_replicated(remote_engine_id)
+            ), (
+                f"NIXL push mode does not support a remote TP ({remote_tp_size}) "
+                f"above both the local TP ({self.transfer_topo.tp_size}) and "
+                f"num_kv_heads ({self.transfer_topo.total_num_kv_heads}); "
+                "use pull mode."
             )
         has_draft_regions = bool(self._head_sharded_draft_regions)
         draft_local_heads = draft_remote_heads = 1
@@ -2877,7 +2898,10 @@ class NixlBaseConnectorWorker:
         if (
             abs(tp_ratio) != 1
             and not self.use_mla
-            and not self.transfer_topo.is_kv_replicated(remote_engine_id)
+            and (
+                gqa_replicated_pull
+                or not self.transfer_topo.is_kv_replicated(remote_engine_id)
+            )
             and not KVCacheLayout[kv_cache_layout].is_block_contiguous
             and not self.enable_permute_local_kv
         ):
@@ -2945,8 +2969,10 @@ class NixlBaseConnectorWorker:
             assert len(local_regions) == len(nixl_agent_meta.block_lens), (
                 "Number of KV layers must match between prefill and decode"
             )
-            model_replicated = self.use_mla or self.transfer_topo.is_kv_replicated(
-                remote_engine_id
+            # A smaller D still head-splits a GQA-replicated P.
+            model_replicated = self.use_mla or (
+                not gqa_replicated_pull
+                and self.transfer_topo.is_kv_replicated(remote_engine_id)
             )
             total_kv_heads = self.transfer_topo.total_num_kv_heads
             for i, region_idx in enumerate(local_regions):
