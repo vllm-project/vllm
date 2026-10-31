@@ -11,6 +11,9 @@ from tests.kernels.quant_utils import (
     ref_dynamic_per_token_quant,
 )
 from tests.kernels.utils import opcheck
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    dequant_fp8_weight,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     scaled_quantize,
@@ -253,3 +256,119 @@ def test_static_fp8_quant_1d_scale(
     torch.testing.assert_close(ref_out.float(), ops_out.float(), rtol=0.12, atol=0.0)
 
     opcheck_fp8_quant(ops_out, x, scale=scale_1d, group_shape=group_shape)
+
+
+@pytest.mark.skipif(not current_platform.supports_fp8(), reason="FP8 not supported.")
+@pytest.mark.parametrize("shape", [(16, 16), (257, 513), (1024, 4096)])
+@pytest.mark.parametrize("weight_layout", ["transposed", "row_major", "padded"])
+@pytest.mark.parametrize(
+    "scale_layout",
+    ["scalar_0d", "scalar_1d", "per_row_1d", "per_row_2d", "ptpc", "ptpc_fp16"],
+)
+def test_dequant_fp8_weight_bitwise(
+    shape: tuple[int, int],
+    weight_layout: str,
+    scale_layout: str,
+) -> None:
+    """Verify dequant_fp8_weight matches the float32 reference expression bit
+    for bit (values and layout) on inputs where a bf16-rounded or misapplied
+    scale changes the result.
+    """
+    K, N = shape
+    out_dtype = torch.float16 if scale_layout == "ptpc_fp16" else torch.bfloat16
+
+    # Every finite FP8 code (NaN codes -> 0).
+    codes = torch.arange(256, dtype=torch.uint8, device="cuda")
+    if current_platform.is_fp8_fnuz():
+        codes[codes == 0x80] = 0
+    else:
+        codes[(codes & 0x7F) == 0x7F] = 0
+    w_flat = codes.repeat((K * N + 255) // 256)[: K * N]
+    if weight_layout == "transposed":
+        # [K, N] with stride (1, K), as after process_weights_after_loading.
+        weight = w_flat.view(FP8_DTYPE).reshape(N, K).t()
+    elif weight_layout == "row_major":
+        weight = w_flat.view(FP8_DTYPE).reshape(K, N)
+    else:
+        # [K, N] with stride (1, K + 256), as _maybe_pad_fp8_weight leaves it on ROCm.
+        padded = torch.zeros(N, K + 256, dtype=torch.uint8, device="cuda")
+        padded[:, :K] = w_flat.reshape(N, K)
+        weight = padded[:, :K].view(FP8_DTYPE).t()
+        assert weight.stride() == (1, K + 256)
+
+    num_scales = {
+        "per_row_1d": K,
+        "per_row_2d": K,
+        "ptpc": N,
+        "ptpc_fp16": N,
+    }.get(scale_layout, 1)
+    gen = torch.Generator().manual_seed(0)
+    values = torch.empty(num_scales).uniform_(2**-12, 2**-4, generator=gen)
+    # A checkpoint scale whose bf16 rounding changes 122 of the 254 finite e4m3fn codes.
+    values[0] = torch.tensor(0x3A9B4C70, dtype=torch.int32).view(torch.float32)
+    values = values.cuda()
+    if scale_layout == "scalar_0d":
+        scale = scale_bcast = values[0]
+    elif scale_layout == "scalar_1d":
+        scale = scale_bcast = values
+    elif scale_layout == "per_row_1d":
+        scale, scale_bcast = values, values.unsqueeze(1)
+    elif scale_layout == "per_row_2d":
+        scale = scale_bcast = values.unsqueeze(1)
+    else:  # ptpc, ptpc_fp16: the transposed [N, 1] scale passed at the call site.
+        scale = scale_bcast = values.reshape(N, 1).t()
+
+    ref = (weight.to(torch.float32) * scale_bcast.to(torch.float32)).to(out_dtype)
+    got = dequant_fp8_weight(weight, scale, out_dtype=out_dtype)
+
+    assert got.shape == ref.shape
+    assert got.dtype == out_dtype
+    assert got.stride() == ref.stride()
+    assert torch.equal(got.view(torch.uint16), ref.view(torch.uint16))
+
+    if out_dtype == torch.bfloat16:
+        bf16_scale = weight.to(torch.bfloat16) * scale_bcast.to(torch.bfloat16)
+        assert not torch.equal(bf16_scale.view(torch.uint16), ref.view(torch.uint16))
+    if num_scales > 1:
+        first_only = (weight.to(torch.float32) * values[0].to(torch.float32)).to(
+            out_dtype
+        )
+        assert not torch.equal(first_only.view(torch.uint16), ref.view(torch.uint16))
+
+    if shape == (16, 16):
+        got_cpu = dequant_fp8_weight(weight.cpu(), scale.cpu(), out_dtype=out_dtype)
+        assert torch.equal(got_cpu.view(torch.uint16), ref.cpu().view(torch.uint16))
+
+
+@pytest.mark.skipif(not current_platform.supports_fp8(), reason="FP8 not supported.")
+@pytest.mark.parametrize("scale_layout", ["scalar", "per_row", "ptpc"])
+def test_dequant_fp8_weight_eager_equals_compiled(scale_layout: str) -> None:
+    """Eager (Triton kernel) and torch.compile (Inductor-fused expression)
+    produce identical bits across scalar, per-row, and PTPC scale layouts.
+    """
+    K, N = 64, 128
+    codes = torch.arange(256, dtype=torch.uint8, device="cuda")
+    if current_platform.is_fp8_fnuz():
+        codes[codes == 0x80] = 0
+    else:
+        codes[(codes & 0x7F) == 0x7F] = 0
+    weight = (
+        codes.repeat((K * N + 255) // 256)[: K * N].view(FP8_DTYPE).reshape(N, K).t()
+    )
+
+    num_scales = {"per_row": K, "ptpc": N}.get(scale_layout, 1)
+    gen = torch.Generator().manual_seed(0)
+    values = torch.empty(num_scales).uniform_(2**-12, 2**-4, generator=gen)
+    values[0] = torch.tensor(0x3A9B4C70, dtype=torch.int32).view(torch.float32)
+    values = values.cuda()
+    if scale_layout == "scalar":
+        scale = values[0]
+    elif scale_layout == "per_row":
+        scale = values
+    else:
+        scale = values.reshape(N, 1).t()
+
+    compiled_fn = torch.compile(dequant_fp8_weight, fullgraph=True)
+    eager_out = dequant_fp8_weight(weight, scale, out_dtype=torch.bfloat16)
+    compiled_out = compiled_fn(weight, scale, out_dtype=torch.bfloat16)
+    assert torch.equal(eager_out.view(torch.uint16), compiled_out.view(torch.uint16))
