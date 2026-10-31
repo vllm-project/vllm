@@ -14,7 +14,7 @@ import vllm.envs as envs
 from tests.v1.kv_connector.rocm_pd_accuracy_utils import _REVISIONS, QWEN_MODEL
 from tests.v1.kv_connector.umbp_test_utils import mori_has_umbp
 from vllm import SamplingParams, TokensPrompt
-from vllm.config import KVTransferConfig
+from vllm.config import CUDAGraphMode, KVTransferConfig
 from vllm.platforms import current_platform
 
 pytestmark = pytest.mark.skipif(
@@ -50,6 +50,51 @@ def umbp_llm(vllm_runner, socket_dir, monkeypatch):
         yield runner.llm
 
 
+@pytest.fixture(params=["eager", "full_graph"])
+def lazy_umbp_llm(request, vllm_runner, socket_dir, monkeypatch):
+    """`umbp_llm` with lazy offload and a GPU cache small enough to cycle.
+
+    `full_graph` decodes from the restored KV through FULL CUDA graphs.
+    """
+    enforce_eager = request.param == "eager"
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    with vllm_runner(
+        QWEN_MODEL,
+        revision=_REVISIONS[QWEN_MODEL],
+        enforce_eager=enforce_eager,
+        compilation_config={
+            "cudagraph_mode": "NONE" if enforce_eager else "FULL_DECODE_ONLY",
+            "cudagraph_capture_sizes": [1, 2, 4],
+        },
+        block_size=BLOCK_SIZE,
+        # The default lazy scan covers 2 * 1024 / 16 = 128 free-queue blocks, so a
+        # finished prompt is stored only once the GPU is about to reuse its blocks.
+        max_num_batched_tokens=1024,
+        num_gpu_blocks_override=512,
+        enable_prefix_caching=True,
+        disable_log_stats=False,
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="UMBPStoreConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "mode": "embedded",
+                # Holds every block the flush below can store, so only GPU
+                # memory evicts.
+                "capacity_bytes": 2 << 30,
+                "lookup_dir": socket_dir,
+                "lazy_offload": True,
+            },
+        ),
+    ) as runner:
+        if not enforce_eager:
+            assert (
+                runner.llm.llm_engine.vllm_config.compilation_config.cudagraph_mode
+                == CUDAGraphMode.FULL_DECODE_ONLY
+            )
+        yield runner.llm
+
+
 def _prompt(seed: int, num_tokens: int) -> TokensPrompt:
     return TokensPrompt(
         prompt_token_ids=[
@@ -77,6 +122,18 @@ def _reset_gpu_prefix_cache(llm) -> None:
             SamplingParams(max_tokens=1),
             use_tqdm=False,
         )
+
+
+def _reuse_gpu_blocks(llm) -> None:
+    """Cycle every GPU block, so lazy offload stores the prefixes it reuses."""
+    cache_config = llm.llm_engine.vllm_config.cache_config
+    num_tokens = int(cache_config.num_gpu_blocks * BLOCK_SIZE * 1.5)
+    tokens_per_prompt = 32 * BLOCK_SIZE
+    prompts = [
+        _prompt(1000 + seed, tokens_per_prompt)
+        for seed in range(-(-num_tokens // tokens_per_prompt))
+    ]
+    llm.generate(prompts, SamplingParams(max_tokens=1), use_tqdm=False)
 
 
 def _assert_same_outputs(expected, actual) -> None:
@@ -126,3 +183,20 @@ def test_restore_extends_a_local_prefix_hit(umbp_llm):
     assert mixed[0].num_cached_tokens == 8 * BLOCK_SIZE
     assert _external_tokens(umbp_llm) - before == 6 * BLOCK_SIZE
     _assert_same_outputs(computed, mixed)
+
+
+def test_lazy_offload_restores_reused_blocks(lazy_umbp_llm):
+    """Full blocks stored when the GPU reuses them restore exactly."""
+    prompts = [
+        _prompt(seed, 4 * BLOCK_SIZE + tail)
+        for seed, tail in enumerate((1, 7, BLOCK_SIZE - 1))
+    ]
+    computed = lazy_umbp_llm.generate(prompts, PARAMS, use_tqdm=False)
+    _reuse_gpu_blocks(lazy_umbp_llm)
+    _reset_gpu_prefix_cache(lazy_umbp_llm)
+
+    before = _external_tokens(lazy_umbp_llm)
+    restored = lazy_umbp_llm.generate(prompts, PARAMS, use_tqdm=False)
+
+    assert _external_tokens(lazy_umbp_llm) - before == 3 * 4 * BLOCK_SIZE
+    _assert_same_outputs(computed, restored)

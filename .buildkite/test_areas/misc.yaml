@@ -221,7 +221,7 @@ steps:
   - docker/Dockerfile.rocm_base
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s -rs v1/kv_connector/unit/test_umbp_async_lookup.py v1/kv_connector/unit/test_umbp_core.py v1/kv_connector/unit/test_umbp_embedded.py v1/kv_connector/unit/test_umbp_events.py v1/kv_connector/unit/test_umbp_hybrid.py
+  - pytest -v -s -rs v1/kv_connector/unit/test_umbp_async_lookup.py v1/kv_connector/unit/test_umbp_core.py v1/kv_connector/unit/test_umbp_embedded.py v1/kv_connector/unit/test_umbp_events.py v1/kv_connector/unit/test_umbp_hybrid.py v1/kv_connector/unit/test_umbp_lazy.py v1/kv_connector/unit/test_umbp_standalone.py
 
 - label: ":amd: (MI355 DPX) UMBP Connector Integration"
   key: amd-umbp-connector-integration-mi355
@@ -243,6 +243,26 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s -rs v1/kv_connector/umbp_integration
+
+- label: ":amd: (MI355) UMBP Standalone Integration"
+  key: amd-umbp-standalone-integration-mi355
+  dind: false
+  device: mi355_2
+  num_devices: 2
+  timeout_in_minutes: 20
+  working_dir: /vllm-workspace/tests
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/umbp/
+  - vllm/distributed/kv_transfer/kv_connector/v1/base.py
+  - tests/v1/kv_connector/umbp_integration/test_mori_standalone_gpu.py
+  - tests/v1/kv_connector/umbp_test_utils.py
+  - tests/v1/kv_connector/conftest.py
+  - docker/Dockerfile.rocm_base
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s -rs v1/kv_connector/umbp_integration/test_mori_standalone_gpu.py
 
 # Single-node MoRIIO P/D on dummy weights, WRITE and READ mode: prefill and
 # decode on separate GPUs over xGMI, compared exactly against a direct serve.
