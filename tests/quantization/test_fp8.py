@@ -470,8 +470,8 @@ def test_mxfp8_bmm_loads_and_projects_grouped_weights(
     from vllm.model_executor.kernels.linear.mxfp8.deep_gemm import (
         DeepGemmMxfp8BmmLinearKernel,
     )
+    from vllm.model_executor.layers.linear import ColumnParallelLinear
     from vllm.model_executor.layers.quantization import get_quantization_config
-    from vllm.models.deepseek_v4.common.grouped_wo_a import DeepseekV4GroupedWoA
     from vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant import (
         fused_inv_rope_fp8_quant,
     )
@@ -499,7 +499,7 @@ def test_mxfp8_bmm_loads_and_projects_grouped_weights(
             {"quant_method": "mxfp8"}
         )
     with torch.device("cuda"):
-        linear = DeepseekV4GroupedWoA(
+        linear = ColumnParallelLinear(
             512,
             256,
             bias=False,

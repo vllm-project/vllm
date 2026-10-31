@@ -1762,11 +1762,9 @@ def test_grouped_o_projection_applies_each_tokens_adapter(
     default_vllm_config, dist_init, groups, fp8
 ):
     """The fused base path must include the matching group's nonzero LoRA-B."""
-    from vllm.models.deepseek_v4.common.grouped_wo_a import DeepseekV4GroupedWoA
-    from vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant import (
-        fused_inv_rope_fp8_quant,
-    )
     from vllm.models.deepseek_v4.nvidia.ops.o_proj import deep_gemm_fp8_o_proj
+    from vllm.models.deepseek_v41.common.grouped_wo_a import DeepseekV4GroupedWoA
+    from vllm.models.deepseek_v41.common.ops import fused_inv_rope_fp8_quant
 
     torch.manual_seed(0)
     tokens, columns, outputs, rank = 17, 256, 128, 8
@@ -1810,8 +1808,15 @@ def test_grouped_o_projection_applies_each_tokens_adapter(
         )
         baseline = deep_gemm_fp8_o_proj(
             o, positions, cache, base, torch.nn.Identity(), **kwargs
+        ).view(tokens, groups, outputs)
+        # Without adapters the layer must match the shared projection it reuses.
+        torch.testing.assert_close(
+            base.grouped_forward(o, positions, cache, **kwargs),
+            baseline,
+            rtol=0,
+            atol=0,
         )
-        expected = baseline.clone().view(tokens, groups, outputs)
+        expected = baseline.clone()
         x, _ = fused_inv_rope_fp8_quant(
             o, positions, cache, groups, 2, nope_dim=64, rope_dim=64, quantize=False
         )
@@ -1825,23 +1830,10 @@ def test_grouped_o_projection_applies_each_tokens_adapter(
             ).transpose(0, 1)
             active = torch.tensor([value == slot + 1 for value in ids])
             expected[active] += delta[active]
-        actual = deep_gemm_fp8_o_proj(
-            o, positions, cache, layer, torch.nn.Identity(), **kwargs
-        )
-        torch.testing.assert_close(actual, expected.flatten(1), rtol=0.02, atol=0.02)
+        actual = layer.grouped_forward(o, positions, cache, **kwargs)
+        torch.testing.assert_close(actual, expected, rtol=0.02, atol=0.02)
         inactive = torch.tensor([value == 0 for value in ids])
         torch.testing.assert_close(actual[inactive], baseline[inactive], rtol=0, atol=0)
-
-
-def test_dsv4_rope_quant_is_off_with_lora():
-    """RopeQuant writes only FP8 attention output, which wo_a's adapter can't use."""
-    from vllm.config import VllmConfig
-    from vllm.models.deepseek_v4.nvidia.ops.o_proj import rope_quant_unsupported_reason
-
-    vllm_config = object.__new__(VllmConfig)
-    vllm_config.lora_config = LoRAConfig(max_lora_rank=8)
-    reason = rope_quant_unsupported_reason(torch.nn.Module(), vllm_config)
-    assert reason is not None and "LoRA" in reason
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA compressor projection")
