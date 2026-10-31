@@ -245,9 +245,11 @@ class SparseIndexerTopk(torch.nn.Module):
                 and _HAS_DEEP_SELECT_C
                 and is_deep_select_supported(logits, topk_tokens)
             )
-        # auto tries cooperative first (see _resolve_auto).
-        if self._backend in ("auto", "cooperative") and not (
-            self._cooperative_constraints(logits, topk_tokens, num_rows)
+        if self._backend == "cooperative":
+            return not self._cooperative_constraints(logits, topk_tokens, num_rows)
+        if (
+            self._backend == "auto"
+            and self._resolve_auto(logits, topk_tokens, num_rows) == "cooperative"
         ):
             return True
         return (

@@ -1625,14 +1625,16 @@ def test_cooperative_topk_candidate_overflow(seq_len: int, top_k: int) -> None:
 @pytest.mark.skipif(not _has_device_capability(90), reason="This test requires SM90+")
 @pytest.mark.parametrize("num_rows", [9, 34, 64])
 @pytest.mark.parametrize("seq_len", [65535, 65536, 65537])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @torch.inference_mode()
 def test_cooperative_topk_overflow_cluster_boundary(
-    num_rows: int, seq_len: int
+    num_rows: int, seq_len: int, dtype: torch.dtype
 ) -> None:
     top_k = 2048
-    stride = (seq_len + 3) & ~3
+    # Rows are 16-byte aligned: 4 FP32 or 8 BF16 scores.
+    stride = (seq_len + 7) & ~7 if dtype == torch.bfloat16 else (seq_len + 3) & ~3
     row = 1.0 + torch.arange(seq_len, dtype=torch.float32) * (0.01 / seq_len)
-    logits = torch.full((num_rows, stride), float("inf"), device="cuda")
+    logits = torch.full((num_rows, stride), float("inf"), device="cuda", dtype=dtype)
     logits[:, :seq_len] = row.cuda()
     lengths = torch.full((num_rows,), seq_len, dtype=torch.int32, device="cuda")
     indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
@@ -1844,9 +1846,10 @@ def test_cooperative_topk_overflow_special_bins(
 @pytest.mark.parametrize("backend", WORKSPACE_TOPK_BACKENDS)
 @pytest.mark.parametrize("top_k", [512, 2048])
 @pytest.mark.parametrize("num_rows", [9, 64])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @torch.inference_mode()
 def test_cooperative_topk_overflow_mixed_lengths(
-    num_rows: int, top_k: int, backend: str
+    num_rows: int, top_k: int, backend: str, dtype: torch.dtype
 ) -> None:
     # One launch mixes short, cluster, overflowing and non-overflowing rows;
     # scores past each row's length must never be selected.
@@ -1860,7 +1863,7 @@ def test_cooperative_topk_overflow_mixed_lengths(
             logits[row, :length] = 1.0 + torch.rand(length, generator=generator) * 0.01
         else:
             logits[row, :length] = torch.randn(length, generator=generator)
-    logits = logits.cuda()
+    logits = logits.to(dtype).cuda()
     lengths = torch.tensor(row_lengths, dtype=torch.int32, device="cuda")
     indices = torch.full((num_rows, top_k), -1, dtype=torch.int32, device="cuda")
 
