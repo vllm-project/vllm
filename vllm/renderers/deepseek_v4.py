@@ -34,6 +34,16 @@ class DeepseekV4Renderer(BaseRenderer[DeepseekV4Tokenizer]):
         )
 
     def _apply_chat_template(self, *args, **kwargs):
+        def render(**render_kwargs):
+            # ``kwargs`` carries the conversation and the template kwargs, so
+            # the probe has to keep them and only override ``tokenize``.
+            return self.get_tokenizer().apply_chat_template(
+                *args, **{**kwargs, **render_kwargs}
+            )
+
+        token_ids = self._cached_chat_token_ids(render, kwargs)
+        if token_ids is not None:
+            return token_ids, None
         return self.get_tokenizer().apply_chat_template(*args, **kwargs), None
 
     def _build_prompt(self, rendered, mm_data, mm_uuids) -> DictPrompt:
