@@ -384,6 +384,14 @@ resolve_parent_commit
 export PARENT_COMMIT
 resolve_merge_base_cache_commit
 
+# A merge burst can start before the parent publishes its cache. Keep a few
+# completed ancestors alongside the usual parent and rolling latest imports.
+while IFS= read -r cache_ref; do
+    [[ -n "${cache_ref}" ]] || continue
+    echo "Adding ancestor cache: ${cache_ref}"
+    BAKE_FILES+=(--set "*.cache-from+=${cache_ref}")
+done < <(python3 .buildkite/scripts/resolve-image-cache.py)
+
 print_bake_config
 
 echo "--- :docker: Building ${TARGET}"
