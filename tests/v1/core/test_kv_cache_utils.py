@@ -57,6 +57,7 @@ from vllm.v1.core.kv_cache_utils import (
     tensor_data,
     to_event_extra_keys,
 )
+from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.hisparse.layout import (
     create_hisparse_layout,
     get_hisparse_kv_cache_groups,
@@ -2306,3 +2307,25 @@ def test_null_head_len():
         assert null_head_len(table) == expected
     blocks = KVCacheBlocks(([null] * 4 + real, [null] + real[:1] + [null]))
     assert blocks.get_unhashed_block_ids_all_groups() == [[1, 2, 3], [1]]
+
+
+def test_null_head_block_ids_round_trip():
+    """Null heads sent as counts expand back to the full block table."""
+    null = KVCacheBlock(0, is_null=True)
+    real = [KVCacheBlock(i) for i in range(1, 4)]
+    blocks = KVCacheBlocks(([null] * 4 + real, real, [null] + real[:1] + [null]))
+    block_ids, heads = blocks.get_block_ids_after_null_head()
+    assert block_ids == ([1, 2, 3], [1, 2, 3], [1, 0])
+    assert heads == (4, 0, 1)
+    req_data = NewRequestData(
+        req_id="0",
+        prompt_token_ids=None,
+        mm_features=[],
+        sampling_params=None,
+        pooling_params=None,
+        block_ids=block_ids,
+        num_computed_tokens=0,
+        lora_request=None,
+        block_id_null_heads=heads,
+    )
+    assert req_data.full_block_ids() == blocks.get_block_ids()
