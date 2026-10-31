@@ -1,20 +1,93 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Routed-experts auxiliary output keys, publication, and materialization."""
+"""Routed-experts buffers, storage, and output accumulation."""
 
 from __future__ import annotations
 
 from collections.abc import Hashable, Iterable, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from vllm.v1.engine import EngineCoreOutputs
 
 from vllm.distributed.aux_output_connector.store import (
     BackgroundBlockObjectStore,
     BlockObject,
     BlockObjectStore,
 )
+
+RoutedExpertsAccumulator = tuple[bytearray, np.dtype[Any], tuple[int, ...]]
+
+
+def pack_routed_experts(outputs: EngineCoreOutputs) -> None:
+    """Pack this message's request arrays without delaying incremental output."""
+    chunks = [output.routed_experts for output in outputs.outputs]
+    present = [rows for rows in chunks if rows is not None]
+    if not present:
+        return
+    profile = present[0].dtype, present[0].shape[1:]
+    if any((rows.dtype, rows.shape[1:]) != profile for rows in present):
+        raise ValueError("routed-experts profiles differ within a batch")
+    outputs.routed_experts = (
+        np.concatenate(present),
+        [-1 if rows is None else len(rows) for rows in chunks],
+    )
+    for output in outputs.outputs:
+        output.routed_experts = None
+
+
+def unpack_routed_experts(
+    outputs: EngineCoreOutputs, packed: tuple[np.ndarray, list[int]]
+) -> None:
+    """Restore per-request views from a decoded batch payload."""
+    rows, lengths = packed
+    if (
+        len(lengths) != len(outputs.outputs)
+        or any(length < -1 for length in lengths)
+        or sum(length for length in lengths if length >= 0) != len(rows)
+    ):
+        raise ValueError("invalid routed-experts batch row counts")
+    offset = 0
+    for output, length in zip(outputs.outputs, lengths):
+        if length >= 0:
+            if output.routed_experts is not None:
+                raise ValueError("routed experts present in both batch and request")
+            output.routed_experts = rows[offset : offset + length]
+            offset += length
+    outputs.routed_experts = None
+
+
+def append_routed_experts(
+    accumulated: RoutedExpertsAccumulator | None, rows: np.ndarray
+) -> RoutedExpertsAccumulator:
+    """Own incremental rows without retaining the shared IPC batch buffer."""
+    if accumulated is None:
+        accumulated = (bytearray(), rows.dtype, rows.shape[1:])
+    if (rows.dtype, rows.shape[1:]) != accumulated[1:]:
+        raise ValueError("routed-experts profile changed mid-request")
+    accumulated[0].extend(np.ascontiguousarray(rows).data)
+    return accumulated
+
+
+def snapshot_routed_experts(
+    accumulated: RoutedExpertsAccumulator, *, copy: bool = True
+) -> np.ndarray:
+    """Copy for resumable input; otherwise transfer the completed buffer."""
+    data, dtype, shape = accumulated
+    rows = np.frombuffer(data, dtype).reshape((-1, *shape))
+    return rows.copy() if copy else rows
+
+
+def trim_routed_experts(
+    accumulated: RoutedExpertsAccumulator | None, rows: np.ndarray, num_dropped: int
+) -> None:
+    """Trim a positive dropped suffix, capped to the current step's rows."""
+    assert accumulated is not None
+    data = accumulated[0]
+    del data[len(data) - rows[-num_dropped:].nbytes :]
 
 
 @dataclass
@@ -69,7 +142,6 @@ class RoutedExpertsBuffer:
         self, request_id: Hashable, token_start: int, rows: np.ndarray
     ) -> list[tuple[int, np.ndarray]]:
         """Stage rows and return completed blocks without retaining them."""
-        rows = np.asarray(rows)
         assert rows.shape[1:] == self.shape_per_token and rows.dtype == self.dtype, (
             "routed-experts capture profile changed"
         )
@@ -100,12 +172,9 @@ class RoutedExpertsBuffer:
                 f"actual={position}"
             )
             count = min(self.block_size - local_start, len(rows) - offset)
-            if count == 1:
-                self._rows[tail.slot, local_start] = rows[offset]
-            else:
-                self._rows[tail.slot, local_start : local_start + count] = rows[
-                    offset : offset + count
-                ]
+            self._rows[tail.slot, local_start : local_start + count] = rows[
+                offset : offset + count
+            ]
             tail.length += count
             offset += count
             if tail.length == self.block_size:
