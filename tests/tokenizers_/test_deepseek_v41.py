@@ -89,6 +89,24 @@ def test_drop_thinking_keeps_current_turn_across_tool_results():
     assert next_turn.endswith("q3<｜Assistant｜><think>")
 
 
+@pytest.mark.parametrize("thinking", [False, True])
+def test_continue_final_message_keeps_the_last_assistant_turn_open(thinking):
+    messages = [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": "Sure, the answer is"},
+    ]
+    closed = render(messages, thinking=thinking)
+    assert closed.endswith("Sure, the answer is<｜end▁of▁sentence｜>")
+    assert render(
+        messages, thinking=thinking, continue_final_message=True
+    ) == closed.removesuffix("<｜end▁of▁sentence｜>")
+    # Only the last message, and only an assistant one, is continued.
+    user_last = [*messages, {"role": "user", "content": "q2"}]
+    assert render(user_last, thinking=thinking, continue_final_message=True) == (
+        render(user_last, thinking=thinking)
+    )
+
+
 @pytest.mark.parametrize("role", ["user", "tool"])
 @pytest.mark.parametrize("as_part", [False, True])
 def test_rejects_image_placeholder_in_text(role, as_part):
