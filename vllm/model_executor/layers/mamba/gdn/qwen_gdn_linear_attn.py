@@ -116,6 +116,13 @@ MAX_FUSED_GDN_MTP_TOKENS = 8
 # stream. On GB300, across Qwen3.5/3.8 shapes, quant formats and TP 1-8, the first
 # regression was at 272 tokens (27B BF16 TP8).
 _BA_PROJ_OVERLAP_MAX_TOKENS = 256
+# FlashInfer's GDN prefill picks its chunk-parallel (CP) route whenever the
+# batch has few sequences relative to the SM count, regardless of their length.
+# CP splits a long sequence across the GPU but has a fixed cost of ~175 us per
+# call on GB300, while the regular route costs ~30 us per 1k tokens. Below
+# this many prefill tokens the regular route is faster at every TP size
+# measured (Qwen3.5 head counts, TP 2-8), so CP is only allowed above it.
+_FI_GDN_PREFILL_CP_MIN_TOKENS = 8192
 FUSED_GDN_STATE_DTYPES = (torch.float32, torch.bfloat16)
 
 
@@ -2013,6 +2020,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         assert has_initial_state is not None
         initial_state = ssm_state[attn_metadata.prefill_state_indices]
         initial_state[~has_initial_state, ...] = 0
+        # The total bounds every sequence's length, and it is known on the host.
+        use_cp: Literal["auto"] | bool = (
+            "auto"
+            if attn_metadata.num_prefill_tokens >= _FI_GDN_PREFILL_CP_MIN_TOKENS
+            else False
+        )
         plan = attn_metadata.flashinfer_checkpoint_plan
         if plan is None:
             return fi_chunk_gated_delta_rule(
@@ -2025,6 +2038,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 output_final_state=True,
                 cu_seqlens=attn_metadata.prefill_query_start_loc,
                 use_qk_l2norm_in_kernel=False,
+                use_cp=use_cp,
                 output=output,
             )
 
@@ -2042,6 +2056,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             output_final_state=True,
             cu_seqlens=attn_metadata.prefill_query_start_loc,
             use_qk_l2norm_in_kernel=False,
+            use_cp=use_cp,
             output=output,
             state_checkpoints=state_checkpoints,
             checkpoint_cu_starts=plan.cu_starts,
