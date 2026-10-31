@@ -28,10 +28,6 @@ requires_qsa_kernels = pytest.mark.skipif(
     not (current_platform.is_cuda() or current_platform.is_xpu()) or not HAS_TRITON,
     reason="QSA kernels require CUDA or XPU and Triton",
 )
-requires_qsa_block_topk = pytest.mark.skipif(
-    not current_platform.is_cuda() or not HAS_TRITON,
-    reason="QSA block top-k requires CUDA and Triton",
-)
 
 
 def test_qsa_mtp_index_share_updates_cache_but_skips_selection(
@@ -723,7 +719,7 @@ def test_qsa_fused_metadata_matches_pytorch_for_large_padded_prefill() -> None:
     torch.testing.assert_close(actual_k_work, expected_k_work)
 
 
-@requires_qsa_block_topk
+@requires_qsa_kernels
 @pytest.mark.parametrize(
     ("decode_query_len", "num_requests"),
     [
@@ -831,7 +827,7 @@ def test_qsa_decode_selection_correctness(
     torch.testing.assert_close(actual.sort().values, expected.sort().values)
 
 
-@requires_qsa_block_topk
+@requires_qsa_kernels
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])
 @pytest.mark.parametrize("seq_len_slack", [0, 1792])
 @pytest.mark.parametrize("force_chunk", [False, True])
@@ -1140,7 +1136,7 @@ def test_qsa_sparse_paged_attention_correctness(
     torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
 
 
-@requires_qsa_block_topk
+@requires_qsa_kernels
 @pytest.mark.parametrize("decode_query_len", [1, 2, 3, 4])
 def test_qsa_split_selection_correctness(workspace_init, decode_query_len: int) -> None:
     query_lens = [decode_query_len, decode_query_len, 33]
@@ -1239,7 +1235,7 @@ def test_qsa_split_selection_correctness(workspace_init, decode_query_len: int) 
     )
 
 
-@requires_qsa_block_topk
+@requires_qsa_kernels
 def test_qsa_selection_handles_no_complete_compressed_blocks(workspace_init) -> None:
     q = torch.zeros(2, 4, 8, device=DEVICE_TYPE, dtype=torch.bfloat16)
     cache = torch.zeros(1, 16, 1, 8, device=DEVICE_TYPE, dtype=torch.bfloat16)

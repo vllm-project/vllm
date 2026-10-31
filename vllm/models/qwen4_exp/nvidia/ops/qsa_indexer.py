@@ -5,6 +5,7 @@
 import torch
 
 import vllm.envs as envs
+from vllm import _custom_ops as ops
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
 )
@@ -14,6 +15,9 @@ from vllm.utils.math_utils import round_up
 
 _TOPK_WORKSPACE_BYTES = 1024 * 1024
 _DECODE_BLOCK_N = 64
+# Intel Triton 3.8 rejects tl.dot with N below the sub-group size (16), and a
+# plain decode scores N = 1 query row x 4 heads.
+_DECODE_MIN_DOT_N = 16 if current_platform.is_xpu() else 1
 
 
 @triton.jit
@@ -37,10 +41,14 @@ def _qsa_mqa_paged_uniform_kernel(
     BLOCK_N: tl.constexpr,
     TILES_PER_PROG: tl.constexpr,
     STAGES: tl.constexpr,
+    MIN_DOT_N: tl.constexpr = 1,
 ) -> None:
     NUM_COLUMNS: tl.constexpr = PAGE_TABLE_WIDTH * PAGE_SIZE
-    DECODE_QUERY_LEN_PADDED: tl.constexpr = triton.next_power_of_2(DECODE_QUERY_LEN)
     NUM_HEADS_PADDED: tl.constexpr = triton.next_power_of_2(NUM_HEADS)
+    # Padded query rows are masked; they only lift the dot's N to MIN_DOT_N.
+    DECODE_QUERY_LEN_PADDED: tl.constexpr = max(
+        triton.next_power_of_2(DECODE_QUERY_LEN), MIN_DOT_N // NUM_HEADS_PADDED
+    )
     # tl.dot requires a reduction dimension of at least 16.
     BLOCK_D: tl.constexpr = max(16, triton.next_power_of_2(HEAD_DIM))
     request = tl.program_id(0)
@@ -368,6 +376,7 @@ def warmup_qsa_mqa_paged_decode(
             BLOCK_N=_DECODE_BLOCK_N,
             TILES_PER_PROG=tiles_per_program,
             STAGES=2,
+            MIN_DOT_N=_DECODE_MIN_DOT_N,
             # tuned on GB300
             num_warps=1 if k_cache.dtype == torch.float8_e4m3fn else 2,
             grid=(
@@ -484,6 +493,20 @@ def _topk(
 ) -> None:
     # similar dispatch logic as DeepSeek indexer
     block_topk = token_topk // compress_ratio
+    if current_platform.is_xpu():
+        # vllm-xpu-kernels' top_k_per_row_decode with next_n=1 bounds row i
+        # by visible_blocks[i], like cooperative/persistent_topk.
+        ops.top_k_per_row_decode(
+            logits,
+            1,
+            visible_blocks,
+            block_indices,
+            logits.shape[0],
+            logits.stride(0),
+            logits.stride(1),
+            block_topk,
+        )
+        return
     use_cooperative_topk = (
         logits.shape[0] <= 64
         and logits.stride(0) % 4 == 0
@@ -563,6 +586,7 @@ def qsa_select_paged_decode(
         BLOCK_N=_DECODE_BLOCK_N,
         TILES_PER_PROG=tiles_per_program,
         STAGES=2,
+        MIN_DOT_N=_DECODE_MIN_DOT_N,
         # tuned on GB300
         num_warps=1 if k_cache.dtype == torch.float8_e4m3fn else 2,
     )
