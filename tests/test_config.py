@@ -617,17 +617,32 @@ def test_v2_frontend_config_can_be_created_without_triton():
     )
 
 
-def test_hisparse_requires_v2_model_runner():
-    config = object.__new__(VllmConfig)
-    config.attention_config = AttentionConfig(hisparse_config=HiSparseConfig())
+@pytest.mark.parametrize(
+    ("overrides", "feature"),
+    [
+        (
+            {"attention_config": AttentionConfig(hisparse_config=HiSparseConfig())},
+            "HiSparse",
+        ),
+        ({"watermark_config": WatermarkConfig(key=42)}, "watermarking"),
+    ],
+)
+def test_v1_model_runner_rejects_v2_only_config(overrides, feature):
+    config = SimpleNamespace(
+        parallel_config=ParallelConfig(distributed_executor_backend="mp"),
+        scheduler_config=SchedulerConfig.default_factory(async_scheduling=False),
+        attention_config=AttentionConfig(),
+        watermark_config=None,
+        speculative_config=None,
+        model_config=None,
+    )
+    config._dflash_needs_multi_kv_group = lambda: False
+    config._is_dflash_candidate_draft = lambda: False
+    assert VllmConfig._get_v1_model_runner_unsupported_features(config) == []
 
-    with patch.object(envs, "VLLM_USE_V2_MODEL_RUNNER", None):
-        assert config.use_v2_model_runner
-    with (
-        patch.object(envs, "VLLM_USE_V2_MODEL_RUNNER", False),
-        pytest.raises(ValueError, match="requires Model Runner V2"),
-    ):
-        _ = config.use_v2_model_runner
+    for name, value in overrides.items():
+        setattr(config, name, value)
+    assert VllmConfig._get_v1_model_runner_unsupported_features(config) == [feature]
 
 
 def test_hisparse_rejects_decode_context_parallelism(monkeypatch):
@@ -1513,6 +1528,8 @@ def test_v1_model_runner_rejects_v2_only_features():
             distributed_executor_backend="mp",
         ),
         scheduler_config=SchedulerConfig.default_factory(async_scheduling=False),
+        attention_config=AttentionConfig(),
+        watermark_config=None,
         speculative_config=None,
         model_config=None,
     )
@@ -1700,6 +1717,8 @@ def test_v1_model_runner_rejects_pipeline_parallelism_with_async_scheduling():
             distributed_executor_backend="mp",
         ),
         scheduler_config=SchedulerConfig.default_factory(async_scheduling=False),
+        attention_config=AttentionConfig(),
+        watermark_config=None,
         speculative_config=None,
         model_config=None,
     )
@@ -3655,6 +3674,138 @@ def test_scheduler_config_init():
         print(SchedulerConfig.default_factory().max_model_len)
 
 
+def test_eplb_num_redundant_experts_default():
+    """Test that num_redundant_experts defaults to None and can be set."""
+    from vllm.config.parallel import EPLBConfig, ParallelConfig
+
+    # Test default is None
+    eplb_config = EPLBConfig()
+    assert eplb_config.num_redundant_experts is None
+
+    # Test explicit value
+    eplb_config_explicit = EPLBConfig(num_redundant_experts=4)
+    assert eplb_config_explicit.num_redundant_experts == 4
+
+    # Models read num_redundant_experts without a ModelConfig, so the
+    # disabled case must resolve to 0 at ParallelConfig construction.
+    parallel_config = ParallelConfig(
+        enable_eplb=False,
+        enable_expert_parallel=False,
+    )
+    assert parallel_config.eplb_config.num_redundant_experts == 0
+
+    # Test ParallelConfig validation - EPLB disabled with non-zero value
+    with pytest.raises(ValidationError, match="EPLB is not enabled"):
+        ParallelConfig(
+            enable_eplb=False,
+            enable_expert_parallel=False,
+            eplb_config=EPLBConfig(num_redundant_experts=4),
+        )
+
+    # Test validation for negative value (validated in ParallelConfig)
+    with pytest.raises(ValidationError, match="greater than or equal to"):
+        ParallelConfig(
+            enable_eplb=False,
+            enable_expert_parallel=False,
+            eplb_config=EPLBConfig(num_redundant_experts=-1),
+        )
+
+
+@pytest.mark.parametrize(
+    "num_experts,tp_size,pcp_size,dp_size,expected",
+    [
+        (8, 8, 1, 1, 0),  # ep_size=8, divisible: 8 % 8 = 0
+        (8, 8, 1, 2, 8),  # ep_size=16, ep_size > experts: need 8 redundant
+        (8, 2, 1, 3, 4),  # ep_size=6, non-divisible: need 4 redundant
+        (16, 4, 1, 2, 0),  # ep_size=8, divisible: 16 % 8 = 0
+        (10, 4, 1, 2, 6),  # ep_size=8, non-divisible: need 6 redundant
+        (7, 2, 1, 2, 1),  # ep_size=4, non-divisible: need 1 redundant
+        (1, 2, 1, 2, 3),  # ep_size=4, single expert: need 3 redundant
+        # The EP group spans TP x PCP x DP, so PCP must be accounted for.
+        (8, 2, 2, 1, 0),  # ep_size=4, divisible: 8 % 4 = 0
+        (10, 2, 2, 1, 2),  # ep_size=4, non-divisible: need 2 redundant
+        (8, 2, 3, 1, 4),  # ep_size=6, non-divisible: need 4 redundant
+    ],
+)
+def test_eplb_num_redundant_experts_auto_computation(
+    num_experts, tp_size, pcp_size, dp_size, expected
+):
+    """Test that num_redundant_experts is correctly computed by ParallelConfig.
+
+    The computation ensures (num_logical_experts + num_redundant_experts)
+    is divisible by ep_size (= tp_size * pcp_size * dp_size).
+    """
+    from vllm.config.parallel import ParallelConfig
+
+    with (
+        patch(
+            "vllm.config.parallel.current_platform.is_cuda_alike",
+            return_value=True,
+        ),
+        patch(
+            "vllm.config.parallel.current_platform.device_count",
+            return_value=tp_size * pcp_size * dp_size,
+        ),
+    ):
+        parallel_config = ParallelConfig(
+            tensor_parallel_size=tp_size,
+            prefill_context_parallel_size=pcp_size,
+            data_parallel_size=dp_size,
+            enable_expert_parallel=True,
+            enable_eplb=True,
+        )
+    # num_redundant_experts should be None before computation
+    assert parallel_config.eplb_config.num_redundant_experts is None
+
+    # Call the computation method
+    parallel_config.compute_eplb_num_redundant_experts(num_experts)
+
+    # Verify the computed value matches expected
+    assert parallel_config.eplb_config.num_redundant_experts == expected, (
+        f"Expected num_redundant_experts={expected} for "
+        f"num_experts={num_experts}, ep_size={tp_size * pcp_size * dp_size}, "
+        f"got {parallel_config.eplb_config.num_redundant_experts}"
+    )
+    # Verify divisibility constraint
+    ep_size = tp_size * pcp_size * dp_size
+    total = num_experts + parallel_config.eplb_config.num_redundant_experts
+    assert total % ep_size == 0, (
+        f"Divisibility check failed: ({num_experts} + "
+        f"{parallel_config.eplb_config.num_redundant_experts}) % {ep_size} != 0"
+    )
+
+
+def test_eplb_num_redundant_experts_explicit_value_preserved():
+    """Test that explicitly set num_redundant_experts is not overwritten."""
+    from vllm.config.parallel import EPLBConfig, ParallelConfig
+
+    with (
+        patch(
+            "vllm.config.parallel.current_platform.is_cuda_alike",
+            return_value=True,
+        ),
+        patch(
+            "vllm.config.parallel.current_platform.device_count",
+            return_value=8,
+        ),
+    ):
+        parallel_config = ParallelConfig(
+            tensor_parallel_size=4,
+            data_parallel_size=2,
+            enable_expert_parallel=True,
+            enable_eplb=True,
+            eplb_config=EPLBConfig(num_redundant_experts=10),
+        )
+    # num_redundant_experts is explicitly set
+    assert parallel_config.eplb_config.num_redundant_experts == 10
+
+    # Call the computation method - should not override
+    parallel_config.compute_eplb_num_redundant_experts(num_logical_experts=8)
+
+    # Should still be the explicit value
+    assert parallel_config.eplb_config.num_redundant_experts == 10
+
+
 def test_scheduler_config_rejects_zero_max_num_scheduled_tokens():
     """A zero token budget never schedules anything, so generation would hang."""
     with pytest.raises(ValidationError, match="max_num_scheduled_tokens"):
@@ -4095,18 +4246,6 @@ def test_watermark_key_is_excluded_from_serialization():
     )
 
     assert "key" not in serialized
-
-
-def test_watermarking_forces_model_runner_v2(monkeypatch):
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
-
-    with patch("vllm.config.vllm.logger.info_once") as info_once:
-        assert _watermarked_vllm_config().use_v2_model_runner
-
-    info_once.assert_called_once_with(
-        "Watermarking requires Model Runner V2 and overrides "
-        "VLLM_USE_V2_MODEL_RUNNER=0."
-    )
 
 
 @patch("vllm.config.ModelConfig")
