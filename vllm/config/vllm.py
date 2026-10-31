@@ -1230,7 +1230,9 @@ class VllmConfig:
 
     def _verify_direct_reload_compat(self) -> None:
         """Reject configurations that direct weight reload cannot support."""
-        from vllm.model_executor.utils import direct_reload_enabled
+        from vllm.model_executor.model_loader.reload.direct import (
+            direct_reload_enabled,
+        )
 
         if not direct_reload_enabled():
             return

@@ -9,7 +9,6 @@ from typing import Any
 
 import torch
 
-import vllm.envs as envs
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 _weights_pre_processed: ContextVar[bool] = ContextVar(
@@ -32,11 +31,6 @@ def weights_already_processed():
 
 def is_weights_pre_processed() -> bool:
     return _weights_pre_processed.get()
-
-
-def direct_reload_enabled() -> bool:
-    """Whether weight updates reload in place (``VLLM_RELOAD_MODE=direct``)."""
-    return envs.VLLM_RELOAD_MODE == "direct"
 
 
 def set_weight_attrs(
@@ -207,6 +201,10 @@ def replace_parameter(
         elif getattr(getattr(layer, "quant_method", None), "uses_meta_device", False):
             old_param.data = new_tensor  # online quantization frees the source
         else:
+            from vllm.model_executor.model_loader.reload.direct import (
+                direct_reload_enabled,
+            )
+
             old_param.data = _in_own_storage(
                 old_param, new_tensor, whole_storage=direct_reload_enabled()
             )

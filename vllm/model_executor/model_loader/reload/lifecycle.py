@@ -6,9 +6,8 @@
 import torch
 
 from vllm.config import ModelConfig
-from vllm.model_executor.utils import direct_reload_enabled
 
-from .direct import begin_direct_reload, finish_direct_reload
+from .direct import begin_direct_reload, direct_reload_enabled, finish_direct_reload
 from .layerwise import finalize_layerwise_reload, initialize_layerwise_reload
 
 __all__ = ["finish_reload", "start_reload"]

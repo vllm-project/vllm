@@ -17,6 +17,7 @@ from collections.abc import Iterator
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
@@ -29,6 +30,7 @@ logger = init_logger(__name__)
 
 __all__ = [
     "begin_direct_reload",
+    "direct_reload_enabled",
     "finish_direct_reload",
     "record_checkpoint_layout",
 ]
@@ -48,6 +50,11 @@ _LOADER_ATTRS = (
     "packed_factor",
     "pack_factor",
 )
+
+
+def direct_reload_enabled() -> bool:
+    """Whether weight updates reload in place (``VLLM_RELOAD_MODE=direct``)."""
+    return envs.VLLM_RELOAD_MODE == "direct"
 
 
 def _layout(t: torch.Tensor) -> tuple:
