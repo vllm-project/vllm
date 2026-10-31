@@ -631,6 +631,11 @@ class MoeWNA16Method(FusedMoEMethodBase):
                 loaded_weight = loaded_weight.repeat_interleave(
                     layer.group_size_div_factor, 1
                 )
+                # Remove repeats beyond the input width before TP sharding.
+                num_groups = param.shape[-1]
+                if shard_id == "w2":
+                    num_groups *= layer.moe_config.tp_size
+                loaded_weight = loaded_weight[:, :num_groups]
 
             if "w13_qzeros" in weight_name:
                 tensor = loaded_weight.view(
