@@ -55,6 +55,15 @@ def test_factory_registered():
     assert cls is ECCPUConnector
 
 
+def test_tiering_factory_registered():
+    from vllm.distributed.ec_transfer.ec_connector.tiering.connector import (
+        ECTieringConnector,
+    )
+
+    cls = ECConnectorFactory._registry["ECTieringConnector"]()
+    assert cls is ECTieringConnector
+
+
 def test_request_finished_forwards_to_scheduler(monkeypatch):
     from unittest.mock import MagicMock
 
