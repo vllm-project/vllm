@@ -863,6 +863,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         context_len: int = 0,
         skip_eplb: bool = False,
         is_profile: bool = False,
+        profile_step_cost: bool = False,
         valid_dummy_state_slots: bool = False,
         randomize_inputs: bool = False,
         **kwargs,
@@ -941,6 +942,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 dummy_run=True,
                 skip_attn_for_dummy_run=skip_attn,
                 is_profile=is_profile,
+                profile_step_cost=profile_step_cost,
                 context_len=context_len,
                 valid_dummy_state_slots=valid_dummy_state_slots,
                 randomize_inputs=randomize_inputs,
@@ -1794,6 +1796,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         is_profile: bool = False,
+        profile_step_cost: bool = False,
         context_len: int = 0,
         valid_dummy_state_slots: bool = False,
         randomize_inputs: bool = False,
@@ -1918,9 +1921,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 batch_desc.num_tokens,
                 self.input_buffers,
                 max_query_len=batch_desc.max_query_len,
-                # Profiling and warmup must route the dummy tokens to experts
-                # so MoE memory is measured and MoE kernels are exercised.
-                is_padding=not is_profile,
+                # Memory and step-cost profiling must include routed experts.
+                is_padding=not (is_profile or profile_step_cost),
             )
             if randomize_inputs:
                 # All-zero input_ids route every token to the same experts.
