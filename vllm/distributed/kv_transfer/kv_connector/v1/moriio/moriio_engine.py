@@ -110,6 +110,8 @@ class MoRIIOWriter:
         self._scheduled_layers: dict[TransferId, set[str]] = defaultdict(set)
         self._sealed_writes: dict[TransferId, int] = {}
         self._defer_timeout = worker.moriio_config.defer_timeout
+        self._pp_rank = worker.pp_rank
+        self._pp_size = worker.pp_size
 
     @property
     def worker(self) -> "MoRIIOConnectorWorker":
@@ -627,6 +629,7 @@ class MoRIIOWriter:
 
         # Send completion notification
         for (remote_ip, remote_port), num_writers in notify_targets.items():
+            num_writers *= self._pp_size
             self.worker.moriio_wrapper.send_notify(
                 transfer_id,
                 remote_ip,
@@ -634,7 +637,12 @@ class MoRIIOWriter:
                 message_type="write_done",
                 # The consumer rank has its KV once every writer reported.
                 message_fields=(
-                    {"num_writers": num_writers} if num_writers != 1 else None
+                    {
+                        "num_writers": num_writers,
+                        "sender": [self._pp_rank, self.worker.tp_rank],
+                    }
+                    if num_writers != 1
+                    else None
                 ),
             )
         # mark request as done, then we can free the blocks
@@ -750,8 +758,8 @@ class MoRIIOWrapper:
         self.done_remote_allocate_req_dict: dict[TransferId, RemoteAllocInfo] = {}
         self.done_write_cache_req_ids: list[str] = []
         self.failed_write_cache_req_ids: list[str] = []
-        # write_done messages received per transfer whose writers are not all in.
-        self._write_done_counts: dict[TransferId, int] = {}
+        # Writers that sent write_done, per transfer whose writers are not all in.
+        self._write_done_senders: dict[TransferId, set[Any]] = {}
         self._terminal_transfer_ids: OrderedDict[TransferId, None] = OrderedDict()
         self._transfer_timeout = transfer_timeout
         self.notify_thread: threading.Thread | None = None
@@ -1083,19 +1091,28 @@ class MoRIIOWrapper:
         )
         transfer_id = data["transfer_id"]
         num_writers = int(data.get("num_writers", 1))
+        sender = data.get("sender")
         with self.lock:
-            received = self._write_done_counts.get(transfer_id, 0) + 1
-            if received < num_writers:
-                self._write_done_counts[transfer_id] = received
+            if self._is_transfer_terminal_locked(transfer_id):
                 return
-            self._write_done_counts.pop(transfer_id, None)
+            senders = self._write_done_senders.setdefault(transfer_id, set())
+            # Older peers do not name themselves; each of their messages counts.
+            senders.add(tuple(sender) if sender is not None else object())
+            if len(senders) < num_writers:
+                return
+            del self._write_done_senders[transfer_id]
+            self._mark_transfer_terminal_locked(transfer_id)
             self.done_write_cache_req_ids.append(transfer_id)
 
     def _handle_write_failed_message(self, data: dict):
         assert get_role() != ROLE.PRODUCER, "Only decode can get WRITE failure messages"
         transfer_id = data["transfer_id"]
         with self.lock:
-            self._write_done_counts.pop(transfer_id, None)
+            # The other stages still report after the first failure.
+            if self._is_transfer_terminal_locked(transfer_id):
+                return
+            self._write_done_senders.pop(transfer_id, None)
+            self._mark_transfer_terminal_locked(transfer_id)
             self.failed_write_cache_req_ids.append(transfer_id)
 
     def _handle_release_message(self, data: dict):

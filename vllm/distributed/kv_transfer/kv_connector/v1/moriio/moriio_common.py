@@ -20,6 +20,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
 )
 from vllm.distributed.parallel_state import (
+    get_pipeline_model_parallel_rank,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
@@ -146,6 +147,9 @@ class MoRIIOAgentMetadata(
     # Tokens per block of each attention layer. Hybrid models size attention
     # blocks to the recurrent-state page, which depends on the TP size.
     attention_block_sizes: dict[str, int] = {}
+    # Layer name -> index of its first region in kv_caches_base_addr. Peers can
+    # register different layers (a pipeline stage holds a slice of them).
+    layer_base_addr_index: dict[str, int] = {}
 
 
 class RoleManager:
@@ -233,8 +237,35 @@ def get_moriio_mode(kv_transfer_config: KVTransferConfig) -> MoRIIOMode:
         return MoRIIOMode.WRITE
 
 
-def get_port_offset(dp_rank: int, tp_rank: int, tp_size: int = 1) -> int:
-    return (dp_rank) * tp_size + tp_rank
+def get_port_offset(
+    dp_rank: int,
+    tp_rank: int,
+    tp_size: int = 1,
+    pp_rank: int = 0,
+    pp_stride: int = 0,
+) -> int:
+    return pp_rank * pp_stride + dp_rank * tp_size + tp_rank
+
+
+def get_pp_port_stride(tp_size: int, dp_size: int) -> int:
+    return max(tp_size, 1) * max(dp_size, 1)
+
+
+def get_peer_notify_ports(
+    base_port: int, dp_rank: int, tp_size: int, pp_size: int, dp_size: int
+) -> list[int]:
+    """Notify ports of every (pp, tp) worker of one peer DP rank.
+
+    ``dp_rank`` and ``dp_size`` are the peer's pod-local values, which its own
+    ports are derived from.
+    """
+    pp_stride = get_pp_port_stride(tp_size, dp_size)
+    return [
+        base_port
+        + get_port_offset(dp_rank, tp_rank, pp_rank=pp_rank, pp_stride=pp_stride)
+        for pp_rank in range(max(pp_size, 1))
+        for tp_rank in range(max(tp_size, 1))
+    ]
 
 
 def fold_local_rank(global_dp_rank: int, dp_size_local: int) -> int:
@@ -305,6 +336,9 @@ class MoRIIOConfig:
     transfer_timeout: float
     defer_timeout: float
     recv_abort_timeout: float
+    pp_rank: int = 0
+    pp_size: int = 1
+    port_offset: int = 0
     read_mode: bool = False
     qp_per_transfer: int = 1
     post_batch_size: int = -1
@@ -354,7 +388,16 @@ class MoRIIOConfig:
         dp_rank = fold_local_rank(pc.data_parallel_rank, pc.data_parallel_size_local)
         base_notify_port = int(extra_config["notify_port"])
         tp_size = get_tensor_model_parallel_world_size()
-        port_offset = get_port_offset(dp_rank, tp_rank)
+        pp_size = pc.pipeline_parallel_size
+        pp_rank = get_pipeline_model_parallel_rank() if pp_size > 1 else 0
+        port_offset = get_port_offset(
+            dp_rank,
+            tp_rank,
+            pp_rank=pp_rank,
+            pp_stride=get_pp_port_stride(
+                tp_size, pc.data_parallel_size_local or pc.data_parallel_size
+            ),
+        )
         backend = str(extra_config.get("backend", "rdma")).lower()
         if backend not in ("rdma", "xgmi"):
             raise ValueError(
@@ -403,6 +446,9 @@ class MoRIIOConfig:
             # per-pod port folding, not for routing.
             dp_size=pc.data_parallel_size,
             tp_size=tp_size,
+            pp_rank=pp_rank,
+            pp_size=pp_size,
+            port_offset=port_offset,
             read_mode=get_moriio_mode(kv_transfer_config) == MoRIIOMode.READ,
             qp_per_transfer=int(extra_config.get("qp_per_transfer", 1)),
             post_batch_size=int(extra_config.get("post_batch_size", -1)),
