@@ -129,10 +129,19 @@ def _dsml_arg_converter(
         if open_param:
             name, is_str, value, _ = open_param
             if is_str == "true":
-                params[name] = value
-            else:
+                params.setdefault(name, value)
+            elif name not in params:
                 with contextlib.suppress(json.JSONDecodeError, ValueError):
                     params[name] = json.loads(value)
+    elif open_param := _match_open_param(
+        raw_args, last_end, partial_param_re, param_start
+    ):
+        name, is_str, value, _ = open_param
+        if name not in params:
+            if is_str != "true":
+                with contextlib.suppress(json.JSONDecodeError, ValueError):
+                    value = json.loads(value)
+            params[name] = value
 
     return json.dumps(params, ensure_ascii=False)
 
