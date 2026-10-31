@@ -5376,6 +5376,7 @@ class GPUModelRunner(
         # sentinel after the sync was genuinely skipped, e.g. by a prefix-cache
         # hit the redo failed to ignore (#61490).
         for req_id, tensors in prompt_logprobs_dict.items():
+            assert tensors is not None
             unwritten = (tensors.logprob_token_ids[:, 0] == -1).nonzero()
             if unwritten.numel():
                 positions = unwritten.flatten().tolist()
