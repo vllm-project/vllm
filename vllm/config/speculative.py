@@ -1841,13 +1841,26 @@ class SpeculativeConfig:
     def use_ngram(self) -> bool:
         return self.method in ("ngram", "ngram_gpu")
 
+    def num_mtp_modules(self) -> int:
+        """Number of MTP modules the drafter selects among by draft step."""
+        assert self.draft_model_config is not None
+        return getattr(self.draft_model_config.hf_config, "n_predict", None) or 1
+
     def use_multi_module_mtp(self) -> bool:
         if self.method != "mtp" or self.draft_model_config is None:
             return False
-        num_mtp_layers = getattr(
-            self.draft_model_config.hf_config, "num_nextn_predict_layers", 1
-        )
-        return min(num_mtp_layers, self.num_speculative_tokens) > 1
+        hf_config = self.draft_model_config.hf_config
+        if min(self.num_mtp_modules(), self.num_speculative_tokens) <= 1:
+            return False
+        index_share = self.index_share_for_mtp_iteration
+        if index_share is None:
+            index_share = getattr(hf_config, "index_share_for_mtp_iteration", False)
+        if index_share:
+            # TODO: Support index_share_for_mtp_iteration in
+            # MultiModuleMTPSpeculator.
+            return False
+        # TODO: Verify MiniMax-M3 with MultiModuleMTPSpeculator.
+        return hf_config.model_type != "minimax_m3_mtp"
 
     def __repr__(self) -> str:
         method = self.custom_method or self.method
