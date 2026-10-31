@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import replace
 from typing import NamedTuple
 
 import torch
@@ -8,7 +9,12 @@ from torch import nn
 from torch.nn.parameter import Parameter
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
+from vllm.config import (
+    CacheConfig,
+    ModelConfig,
+    VllmConfig,
+    get_current_vllm_config,
+)
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -22,6 +28,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.model_executor.layers.mamba.checkpoint import MambaPrefillCheckpointExporter
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
@@ -44,6 +51,7 @@ from vllm.utils.torch_utils import (
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.mamba1_attn import Mamba1AttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 
 
 # Adapted from transformers.models.mamba.modeling_mamba.MambaMixer
@@ -333,23 +341,37 @@ class MambaMixer(MambaBase, PluggableLayer):
             time_proj_bias = self._time_proj_bias()
 
             # 4. Perform the recurrence y ← SSM(A, B, C, Δ)(x)
-            scan_out_p = selective_scan_fn(
-                conv_out_p,
-                ssm_state,
-                discrete_time_step_p,
-                self.A,
-                B_p.transpose(-2, -1),
-                C_p.transpose(-2, -1),
-                self.D.float(),
-                gate_p,
-                time_proj_bias,
-                delta_softplus=True,
-                cache_indices=state_indices_tensor_p,
-                has_initial_state=has_initial_states_p,
-                query_start_loc=query_start_loc_p,
-                cu_chunk_seqlen=cu_chunk_seqlen_p,
-                last_chunk_indices=last_chunk_indices_p,
-            )
+            if attn_metadata.checkpoint_segments is not None:
+                scan_out_p = self._scan_through_checkpoints(
+                    attn_metadata,
+                    hidden_states_BC_p,
+                    conv_state,
+                    ssm_state,
+                    conv_out_p,
+                    discrete_time_step_p,
+                    B_p.transpose(-2, -1),
+                    C_p.transpose(-2, -1),
+                    gate_p,
+                    time_proj_bias,
+                )
+            else:
+                scan_out_p = selective_scan_fn(
+                    conv_out_p,
+                    ssm_state,
+                    discrete_time_step_p,
+                    self.A,
+                    B_p.transpose(-2, -1),
+                    C_p.transpose(-2, -1),
+                    self.D.float(),
+                    gate_p,
+                    time_proj_bias,
+                    delta_softplus=True,
+                    cache_indices=state_indices_tensor_p,
+                    has_initial_state=has_initial_states_p,
+                    query_start_loc=query_start_loc_p,
+                    cu_chunk_seqlen=cu_chunk_seqlen_p,
+                    last_chunk_indices=last_chunk_indices_p,
+                )
             ssm_outputs.append(scan_out_p)
 
         if has_decode:
@@ -405,6 +427,69 @@ class MambaMixer(MambaBase, PluggableLayer):
             out = self.out_proj(scan_outputs_combined.transpose(-2, -1))[0]
 
         output[:num_actual_tokens] = out
+
+    def _scan_through_checkpoints(
+        self,
+        attn_metadata: Mamba1AttentionMetadata,
+        x: torch.Tensor,
+        conv_state: torch.Tensor,
+        ssm_state: torch.Tensor,
+        u: torch.Tensor,
+        delta: torch.Tensor,
+        B: torch.Tensor,
+        C: torch.Tensor,
+        z: torch.Tensor,
+        delta_bias: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Scan the prefill rows cut at their checkpoints, exporting each
+        head's state and the conv window before it into the checkpoint block.
+        """
+        segments = attn_metadata.checkpoint_segments
+        checkpoint = attn_metadata.checkpoint_meta
+        assert segments is not None and checkpoint is not None
+        # Both passes must write into the same z, and selective_scan_fn copies
+        # a non-contiguous one per call.
+        u, delta, B, C, z = (t.contiguous() for t in (u, delta, B, C, z))
+        D = self.D.float()
+
+        def scan(state_indices: torch.Tensor) -> torch.Tensor:
+            return selective_scan_fn(
+                u,
+                ssm_state,
+                delta,
+                self.A,
+                B,
+                C,
+                D,
+                z,
+                delta_bias,
+                delta_softplus=True,
+                cache_indices=state_indices,
+                has_initial_state=segments.has_initial_states,
+                query_start_loc=segments.query_start_loc,
+            )
+
+        scan(segments.head_state_indices)
+        MambaPrefillCheckpointExporter().export(
+            checkpoint,
+            raw_qkv=x.transpose(0, 1),
+            conv_state=conv_state,
+            cu_seqlens=attn_metadata.query_start_loc_p,
+            recurrent_checkpoint=ssm_state,
+            recurrent_state=ssm_state,
+            recurrent_rows=attn_metadata.state_indices_tensor_p,
+        )
+        return scan(segments.tail_state_indices)
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
+        spec = super().get_kv_cache_spec(vllm_config)
+        if not isinstance(spec, MambaSpec):
+            return spec
+        # The metadata builder cuts the prefill at the checkpoint and the scan
+        # resumes from the stored state, so any token position works.
+        return replace(
+            spec, num_prefill_checkpoint_blocks=1, prefill_checkpoint_alignment=1
+        )
 
     def get_state_dtype(self) -> tuple[torch.dtype]:
         assert self.model_config is not None
