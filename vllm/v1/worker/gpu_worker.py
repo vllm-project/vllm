@@ -1409,6 +1409,8 @@ class Worker(WorkerBase):
             and not get_pp_group().is_last_rank
         )
 
+        # None on the V1 runner and ranks whose profile run sized no buffer:
+        # those keep the original wait for the previous send before forwarding.
         if self._pp_send_buffer is not None:
             self._pp_send_buffer.send(output.tensors, get_pp_group(), get_tp_group())
         else:
