@@ -44,6 +44,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetric,
     PromMetricT,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.dcp_mapping import (
+    _filter_dcp_block_ids,
+    _get_decode_ranks_for_prefill,
+    _get_prefill_rank_groups,
+    _validate_dcp_group_block_sizes,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import (
     MooncakeBootstrapServer,
     RegisterWorkerPayload,
@@ -268,8 +274,16 @@ def _compute_sender_transfer_plan(
     remote_kv_block_len: int,
     producer_cache_replicated: bool,
     total_num_kv_heads: int | None = None,
+    *,
+    local_dcp_size: int = 1,
+    remote_dcp_size: int = 1,
 ) -> tuple[bool, int, int, int]:
     """Plan one producer-rank to one consumer-rank copy for heterogeneous TP."""
+    if local_dcp_size > 1 or remote_dcp_size > 1:
+        # MLA has one unsplit KV vector. Block ownership was resolved earlier.
+        # Replicated P ranks still ACK, but only rank 0 sends the payload.
+        return local_dcp_size > 1 or local_tp_rank == 0, 0, 0, local_kv_block_len
+
     tp_ratio = _get_tp_ratio(local_tp_size, remote_tp_size)
 
     if tp_ratio == 1:
@@ -648,6 +662,14 @@ class MooncakeXferMetadata(
     # peer did not send the field, so the run must not be promoted.
     registered_row_offsets: list[int] = msgspec.field(default_factory=list)
     remote_pp_size: int = 1
+    # Missing on older peers; required for DCP with differing P/D PP sizes.
+    remote_pp_rank: int | None = None
+    remote_dcp_size: int = 1
+    remote_interleave_size: int = 1
+    # Indexed by transfer group, as in req_blocks and registered_group_indices.
+    remote_group_block_sizes: list[int] = msgspec.field(default_factory=list)
+    remote_group_dcp_sharded: list[bool] = msgspec.field(default_factory=list)
+    req_num_computed_tokens: dict[ReqId, int] = msgspec.field(default_factory=dict)
     # Random per register_kv_caches, so ids never repeat across restarts.
     # 0 means the peer sends the layout on every pull.
     layout_id: int = 0
@@ -724,6 +746,7 @@ class PullReqMeta:
     # A failure is sticky; still settle later peer results before releasing
     # destination blocks to prevent write-after-free from delayed peer writes.
     failed: bool = False
+    num_computed_tokens: int = 0
 
 
 @dataclass
@@ -733,9 +756,33 @@ class SendBlockMeta:
     local_block_ids: list[list[int]]
     ready: asyncio.Event
     expire_time: float = float("inf")
+    # Zero until the expected total is known, including all relevant PP stages.
     need_send: int = 0
     sent: int = 0
     sending: int = 0
+    need_send_by_pp: dict[int, int] | None = None
+
+    def update_need_send(
+        self, tp_count: int, pp_count: int = 1, pp_rank: int | None = None
+    ) -> None:
+        if pp_rank is None:
+            self.need_send = tp_count * pp_count
+            return
+        if self.need_send_by_pp is None:
+            self.need_send_by_pp = {}
+        previous = self.need_send_by_pp.setdefault(pp_rank, tp_count)
+        if previous != tp_count:
+            raise ValueError("Mooncake consumer TP fanout changed within a PP stage.")
+        # Zero means the total is unknown until every expected PP stage appears.
+        self.need_send = (
+            sum(self.need_send_by_pp.values())
+            if len(self.need_send_by_pp) == pp_count
+            else 0
+        )
+
+    def mark_sent(self) -> bool:
+        self.sent += 1
+        return self.need_send > 0 and self.sent == self.need_send
 
 
 class MooncakeConnectorMetadata(KVConnectorMetadata):
@@ -764,6 +811,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
                 remote_engine_id=remote_engine_id,
                 remote_bootstrap_addr=kv_transfer_params["remote_bootstrap_addr"],
                 transfer_id=transfer_id,
+                num_computed_tokens=kv_transfer_params.get("num_computed_tokens", 0),
             )
         else:
             self.reqs_to_send[request_id] = (transfer_id, local_block_ids)
@@ -1156,6 +1204,8 @@ class MooncakeConnectorScheduler:
         if params.get("do_remote_prefill"):
             # Remote prefill: get all prompt blocks from remote.
             assert not self.is_kv_producer
+            # Request.num_computed_tokens is updated after allocation by the scheduler.
+            params["num_computed_tokens"] = num_computed_tokens
             token_ids = request.prompt_token_ids or []
             count = self._get_remote_prefill_token_count(len(token_ids)) - (
                 num_computed_tokens
@@ -1381,11 +1431,14 @@ class MooncakeConnectorWorker:
         )
 
         self._remote_agents: dict[EngineId, dict[int, dict[int, str]]] = {}
+        # Local transfer-group indices per participating remote TP rank.
+        self._remote_rank_groups: dict[EngineId, dict[int, tuple[int, ...]]] = {}
         self._pending_bootstrap_queries: dict[str, asyncio.Event] = {}
         self.side_channel_port: int = 0  # we will bind it in register_kv_caches()
         self.engine_id: EngineId = engine_id
         self.tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = get_tensor_model_parallel_world_size()
+        self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
         self.block_len_per_layer: list[int] = []
         self.kv_block_len_per_layer: list[int] = []
         self.registered_layer_names: list[str] = []
@@ -1496,6 +1549,10 @@ class MooncakeConnectorWorker:
         )
 
         self._tp_size: dict[EngineId, int] = {self.engine_id: self.tp_size}
+        self._dcp_size: dict[EngineId, int] = {self.engine_id: self.dcp_size}
+        self._group_dcp_sharded = tuple(
+            group.kv_cache_spec.dcp_sharded for group in kv_cache_config.transfer_groups
+        )
         self._layer_specs: dict[str, KVCacheSpec] = {}
         for group in kv_cache_config.transfer_groups:
             group_spec = group.kv_cache_spec
@@ -1576,6 +1633,7 @@ class MooncakeConnectorWorker:
             tp_rank=self.tp_rank,
             pp_rank=self.pp_rank,
             addr=worker_addr,
+            dcp_size=self.dcp_size,
         )
         timeout = envs.VLLM_MOONCAKE_CONNECTOR_TIMEOUT
         max_attempts = _BOOTSTRAP_MAX_ATTEMPTS
@@ -1711,7 +1769,25 @@ class MooncakeConnectorWorker:
         self, identity: bytes, sock: zmq.asyncio.Socket, meta: MooncakeXferMetadata
     ):
         pending_reqs: dict[ReqId, SendBlockMeta] = {}
-        remote_tp_ranks = self.transfer_topo.handshake_target_ranks(meta.remote_tp_size)
+        uses_dcp = self.dcp_size > 1 or meta.remote_dcp_size > 1
+        if (
+            uses_dcp
+            and meta.remote_pp_size > 1
+            and meta.remote_pp_size != self.pp_size
+            and meta.remote_pp_rank is None
+        ):
+            raise ValueError("Mooncake DCP requires consumer PP rank in the handshake.")
+        remote_tp_ranks = _get_decode_ranks_for_prefill(
+            p_tp_rank=self.tp_rank,
+            p_tp_size=self.tp_size,
+            p_dcp_size=self.dcp_size,
+            d_tp_size=meta.remote_tp_size,
+            d_dcp_size=meta.remote_dcp_size,
+            group_dcp_sharded=tuple(meta.remote_group_dcp_sharded),
+            non_dcp_ranks=self.transfer_topo.handshake_target_ranks(
+                meta.remote_tp_size
+            ),
+        )
         if meta.remote_tp_rank not in remote_tp_ranks:
             # This D worker does not pair with the P worker.
             msg = (
@@ -1770,12 +1846,15 @@ class MooncakeConnectorWorker:
                 )
                 await sock.send_multipart((identity, self._encoder.encode(response)))
                 return
+        # MLA DCP changes block ownership, not the per-block payload width.
         validation_err = _validate_asymmetric_region_lengths(
             local_regions=local_regions,
             remote_regions=remote_regions,
-            local_tp_size=self.tp_size,
-            remote_tp_size=meta.remote_tp_size,
-            producer_cache_replicated=self._producer_cache_is_replicated(),
+            local_tp_size=1 if uses_dcp else self.tp_size,
+            remote_tp_size=1 if uses_dcp else meta.remote_tp_size,
+            producer_cache_replicated=(
+                False if uses_dcp else self._producer_cache_is_replicated()
+            ),
             total_num_kv_heads=(
                 None
                 if self.use_mla or self.kv_cache_config.has_mamba_layers
@@ -1867,11 +1946,14 @@ class MooncakeConnectorWorker:
                 # Do we still in reqs_need_send (not expired)?
                 if send_meta.transfer_id in self.reqs_need_send:
                     # Mark it sending to avoid expiration.
-                    send_meta.sending += 1
                     if not send_meta.need_send:
                         self.resolve_need_send(
-                            send_meta, remote_tp_ranks, meta.remote_pp_size
+                            send_meta,
+                            remote_tp_ranks,
+                            meta.remote_pp_size,
+                            meta.remote_pp_rank if uses_dcp else None,
                         )
+                    send_meta.sending += 1
                     ready_reqs.append((d_req_id, send_meta))
                 else:
                     # Otherwise (expired, very unlikely), just forget it.
@@ -1928,9 +2010,8 @@ class MooncakeConnectorWorker:
                 if d_req_id in err_req_set:
                     continue
 
-                send_meta.sent += 1
                 if (
-                    send_meta.sent == send_meta.need_send
+                    send_meta.mark_sent()
                     and self.reqs_need_send.pop(send_meta.transfer_id, None) is not None
                 ):
                     self.finished_sending_reqs.add(send_meta.p_req_id)
@@ -1949,15 +2030,17 @@ class MooncakeConnectorWorker:
         send_meta: SendBlockMeta,
         remote_tp_ranks: list[int],
         remote_pp_size: int = 1,
+        remote_pp_rank: int | None = None,
     ):
-        # Prepare for heterogeneous TP (one P pairs to multiple D)
-        send_meta.need_send = len(remote_tp_ranks)
-        if remote_pp_size > 1 and remote_pp_size != self.pp_size:
-            # Each consumer PP stage pulls every producer stage, including
-            # peers with no shared layers.
-            send_meta.need_send *= remote_pp_size
+        pp_count = remote_pp_size if remote_pp_size != self.pp_size else 1
+        send_meta.update_need_send(
+            len(remote_tp_ranks),
+            pp_count,
+            remote_pp_rank if pp_count > 1 else None,
+        )
         logger.debug(
-            "Mooncake request %s will be served by %d consumer workers: TP ranks=%s",
+            "Mooncake request %s: expected completions=%d "
+            "(0 while PP stages are pending), TP ranks=%s",
             send_meta.transfer_id,
             send_meta.need_send,
             remote_tp_ranks,
@@ -2004,6 +2087,31 @@ class MooncakeConnectorWorker:
         err_msg: str | None = None
         remote_session = f"{agent_meta.remote_hostname}:{agent_meta.remote_port}"
 
+        uses_dcp = self.dcp_size > 1 or agent_meta.remote_dcp_size > 1
+        is_non_dcp_peer = (
+            not uses_dcp
+            or agent_meta.remote_tp_rank
+            in self.transfer_topo.handshake_target_ranks(agent_meta.remote_tp_size)
+        )
+        # Each peer validates its own interleave at cache registration.
+        # Only cross-peer group compatibility remains to be checked here.
+        if uses_dcp and (
+            agent_meta.remote_group_block_sizes != list(self._group_block_sizes)
+            or agent_meta.remote_group_dcp_sharded != list(self._group_dcp_sharded)
+        ):
+            # Empty pulls only acknowledge completion; they read no KV.
+            err_reqs = [
+                req_id
+                for req_id, _ in ready_reqs
+                if any(agent_meta.req_blocks[req_id][1])
+            ]
+            err_msg = (
+                "Mooncake P/D group block sizes and DCP sharding must match."
+                if err_reqs
+                else None
+            )
+            return [], [], [], err_reqs, err_msg
+
         for d_req_id, send_meta in ready_reqs:
             _, remote_block_ids_per_group = agent_meta.req_blocks[d_req_id]
 
@@ -2035,10 +2143,32 @@ class MooncakeConnectorWorker:
             for group_index, (local_group, remote_group) in enumerate(
                 zip(send_meta.local_block_ids, remote_block_ids_per_group)
             ):
-                is_mamba_group = isinstance(
-                    group_specs[group_index].kv_cache_spec,
-                    MambaSpec,
-                )
+                spec = group_specs[group_index].kv_cache_spec
+                if uses_dcp and spec.dcp_sharded and remote_group:
+                    prefix_tokens = agent_meta.req_num_computed_tokens[d_req_id]
+                    try:
+                        local_group, remote_group = _filter_dcp_block_ids(
+                            local_group,
+                            remote_group,
+                            self.tp_rank % self.dcp_size,
+                            self.dcp_size,
+                            agent_meta.remote_tp_rank % agent_meta.remote_dcp_size,
+                            agent_meta.remote_dcp_size,
+                            prefix_tokens,
+                            spec.block_size,
+                        )
+                    except ValueError as exc:
+                        has_block_error = True
+                        err_msg = err_msg or str(exc)
+                        break
+                    local_block_ids_by_group.append(local_group)
+                    remote_block_ids_by_group.append(remote_group)
+                    continue
+                if not is_non_dcp_peer:
+                    local_block_ids_by_group.append([])
+                    remote_block_ids_by_group.append([])
+                    continue
+                is_mamba_group = isinstance(spec, MambaSpec)
                 if is_mamba_group:
                     # Mamba/GDN prefix caching can use null blocks only as
                     # align-mode placeholders. They do not carry transferable
@@ -2102,17 +2232,27 @@ class MooncakeConnectorWorker:
 
             # Regions of the same KV group share block ids; group them once.
             block_runs: dict[tuple[int, tuple[int, ...]], tuple[np.ndarray, ...]] = {}
-            for local_region, remote_region in zip(local_regions, remote_regions):
+            # DCP ownership can differ between groups sharing one packed row.
+            region_groups = (
+                (local_region, remote_region, group_index)
+                for local_region, remote_region in zip(local_regions, remote_regions)
+                for group_index in (
+                    local_region.shared_group_ids
+                    if uses_dcp and local_region.group_index == _SHARED_REGION_GROUP_ID
+                    else (local_region.group_index,)
+                )
+            )
+            for local_region, remote_region, group_index in region_groups:
                 assert local_region.group_index == remote_region.group_index, (
                     "Aligned Mooncake transfer regions must belong to the same "
                     "KV group."
                 )
-                group_key = (local_region.group_index, local_region.shared_group_ids)
+                group_key = (group_index, local_region.shared_group_ids)
                 if group_key not in block_runs:
                     local_ids = np.asarray(
                         _block_ids_for_region(
                             local_block_ids_by_group,
-                            local_region.group_index,
+                            group_index,
                             local_region.shared_group_ids,
                         ),
                         dtype=np.int64,
@@ -2120,7 +2260,7 @@ class MooncakeConnectorWorker:
                     remote_ids = np.asarray(
                         _block_ids_for_region(
                             remote_block_ids_by_group,
-                            remote_region.group_index,
+                            group_index,
                             local_region.shared_group_ids,
                         ),
                         dtype=np.int64,
@@ -2144,6 +2284,8 @@ class MooncakeConnectorWorker:
                     remote_kv_block_len=remote_region.kv_block_len,
                     remote_tp_rank=agent_meta.remote_tp_rank,
                     remote_tp_size=agent_meta.remote_tp_size,
+                    remote_dcp_size=agent_meta.remote_dcp_size,
+                    dcp_sharded=uses_dcp and self._group_dcp_sharded[group_index],
                 )
                 if not should_transfer:
                     # Replicated KV cache: only one producer rank in the TP group
@@ -2236,6 +2378,18 @@ class MooncakeConnectorWorker:
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in mooncake."""
+        if self.dcp_size > 1 and not self.use_mla:
+            raise ValueError("Mooncake DCP currently supports only MLA KV caches.")
+        # Use transfer-group indices, matching registered_group_indices and
+        # transfer_group_index_by_layer, rather than all cache-group indices.
+        groups = self.kv_cache_config.transfer_groups
+        self._group_block_sizes = tuple(g.kv_cache_spec.block_size for g in groups)
+        _validate_dcp_group_block_sizes(
+            self._group_block_sizes,
+            self._group_dcp_sharded,
+            self.dcp_size,
+            self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
+        )
         logger.info("Registering KV_Caches. use_mla: %s", self.use_mla)
 
         kv_data_ptrs: list[int] = []
@@ -2792,14 +2946,44 @@ class MooncakeConnectorWorker:
                 data: dict = response.json()
                 for _, dp_entry in data.items():
                     remote_engine_id = dp_entry["engine_id"]
-                    self._remote_agents[remote_engine_id] = {
+                    remote_agents = {
                         int(tp_rank): {
                             int(pp_rank): worker_addr
                             for pp_rank, worker_addr in tp_entry.items()
                         }
                         for tp_rank, tp_entry in dp_entry["worker_addr"].items()
                     }
-                    self._tp_size[remote_engine_id] = len(dp_entry["worker_addr"])
+                    remote_tp_size = len(remote_agents)
+                    remote_dcp_size = dp_entry.get("dcp_size", 1)
+                    try:
+                        rank_groups = _get_prefill_rank_groups(
+                            d_tp_rank=self.tp_rank,
+                            d_tp_size=self.tp_size,
+                            d_dcp_size=self.dcp_size,
+                            p_tp_size=remote_tp_size,
+                            p_dcp_size=remote_dcp_size,
+                            group_dcp_sharded=self._group_dcp_sharded,
+                            non_dcp_ranks=self.transfer_topo.handshake_target_ranks(
+                                remote_tp_size
+                            ),
+                        )
+                        if any(not remote_agents.get(rank) for rank in rank_groups):
+                            raise ValueError(
+                                "Bootstrap is missing selected TP/PP peers."
+                            )
+                    except (ValueError, AssertionError) as exc:
+                        logger.error(
+                            "Rejecting bootstrap topology for engine %s: %s",
+                            remote_engine_id,
+                            exc,
+                        )
+                        continue
+                    # Publish the engine only after its routing is validated.
+                    # No await between these updates: readers see a complete entry.
+                    self._tp_size[remote_engine_id] = remote_tp_size
+                    self._dcp_size[remote_engine_id] = remote_dcp_size
+                    self._remote_rank_groups[remote_engine_id] = rank_groups
+                    self._remote_agents[remote_engine_id] = remote_agents
         except Exception as e:
             logger.error(
                 "Failed to connect to bootstrap server %s (%s): %s",
@@ -2807,20 +2991,18 @@ class MooncakeConnectorWorker:
                 type(e).__name__,
                 e,
             )
-
-        # Always notify others regardless of connection success or failure.
-        self._pending_bootstrap_queries[remote_bootstrap_addr].set()
-        del self._pending_bootstrap_queries[remote_bootstrap_addr]
+        finally:
+            # Wake waiters and allow retries even if this query is cancelled.
+            self._pending_bootstrap_queries[remote_bootstrap_addr].set()
+            del self._pending_bootstrap_queries[remote_bootstrap_addr]
 
     def _select_remote_workers(
         self, remote_engine_id: EngineId
     ) -> dict[int, list[int]]:
         """Return the producer PP ranks to pull from, by producer TP rank."""
-        remote_tp_ranks = self.transfer_topo.handshake_target_ranks(
-            self._tp_size[remote_engine_id]
-        )
+        rank_groups = self._remote_rank_groups[remote_engine_id]
         selected_remote_pp: dict[int, list[int]] = {}
-        for remote_tp_rank in remote_tp_ranks:
+        for remote_tp_rank in rank_groups:
             pp_to_addr = self._remote_agents[remote_engine_id][remote_tp_rank]
             if self.pp_size == len(pp_to_addr) and self.pp_rank in pp_to_addr:
                 selected_remote_pp[remote_tp_rank] = [self.pp_rank]
@@ -2880,7 +3062,7 @@ class MooncakeConnectorWorker:
             if remote_engine_id not in self._remote_agents:
                 logger.warning(
                     "Skipping KV lease renewal for %d requests: remote "
-                    "engine_id %s not found from bootstrap server %s.",
+                    "engine_id %s unavailable after querying bootstrap server %s.",
                     len(heartbeat.transfer_ids),
                     remote_engine_id,
                     heartbeat.remote_bootstrap_addr,
@@ -2936,8 +3118,8 @@ class MooncakeConnectorWorker:
             self._handle_failed_recv(
                 pull_metas,
                 list(pull_metas),
-                f"remote engine_id {remote_engine_id} not found from bootstrap "
-                f"server {remote_bootstrap_addr}",
+                f"remote engine_id {remote_engine_id} unavailable after querying "
+                f"bootstrap server {remote_bootstrap_addr}",
             )
             return
 
@@ -3178,6 +3360,10 @@ class MooncakeConnectorWorker:
             req_id: (pull_meta.transfer_id, pull_meta.local_block_ids)
             for req_id, pull_meta in pull_metas.items()
         }
+        req_num_computed_tokens = {
+            req_id: pull_meta.num_computed_tokens
+            for req_id, pull_meta in pull_metas.items()
+        }
         if not include_layout:
             return MooncakeXferMetadata(
                 remote_hostname=self.hostname,
@@ -3185,8 +3371,16 @@ class MooncakeConnectorWorker:
                 remote_tp_size=self.tp_size,
                 remote_tp_rank=self.tp_rank,
                 remote_pp_size=self.pp_size,
+                remote_pp_rank=self.pp_rank,
                 layout_id=self._kv_layout_id,
                 req_blocks=req_blocks,
+                req_num_computed_tokens=req_num_computed_tokens,
+                remote_dcp_size=self.dcp_size,
+                remote_interleave_size=(
+                    self.vllm_config.parallel_config.cp_kv_cache_interleave_size
+                ),
+                remote_group_block_sizes=list(self._group_block_sizes),
+                remote_group_dcp_sharded=list(self._group_dcp_sharded),
                 kv_caches_base_addr=[],
                 block_lens=[],
                 kv_block_lens=[],
@@ -3197,8 +3391,16 @@ class MooncakeConnectorWorker:
             remote_tp_size=self.tp_size,
             remote_tp_rank=self.tp_rank,
             remote_pp_size=self.pp_size,
+            remote_pp_rank=self.pp_rank,
             layout_id=self._kv_layout_id,
             req_blocks=req_blocks,
+            req_num_computed_tokens=req_num_computed_tokens,
+            remote_dcp_size=self.dcp_size,
+            remote_interleave_size=(
+                self.vllm_config.parallel_config.cp_kv_cache_interleave_size
+            ),
+            remote_group_block_sizes=list(self._group_block_sizes),
+            remote_group_dcp_sharded=list(self._group_dcp_sharded),
             kv_caches_base_addr=self.kv_caches_base_addr,
             block_lens=self.block_len_per_layer,
             kv_block_lens=self.kv_block_len_per_layer,
@@ -3269,6 +3471,9 @@ class MooncakeConnectorWorker:
         remote_kv_block_len: int,
         remote_tp_rank: int,
         remote_tp_size: int,
+        *,
+        remote_dcp_size: int = 1,
+        dcp_sharded: bool = False,
     ) -> tuple[bool, int, int, int]:
         return _compute_sender_transfer_plan(
             local_tp_rank=self.tp_rank,
@@ -3283,6 +3488,8 @@ class MooncakeConnectorWorker:
                 if self.use_mla or self.kv_cache_config.has_mamba_layers
                 else self.transfer_topo.total_num_kv_heads
             ),
+            local_dcp_size=self.dcp_size if dcp_sharded else 1,
+            remote_dcp_size=remote_dcp_size if dcp_sharded else 1,
         )
 
     def _log_debug_cache_registration(
