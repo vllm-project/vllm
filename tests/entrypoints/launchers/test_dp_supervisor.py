@@ -87,6 +87,7 @@ def _make_unit_args(**overrides) -> argparse.Namespace:
         "disable_uvicorn_access_log": False,
         "disable_access_log_for_endpoints": None,
         "log_config_file": None,
+        "log_prefix": True,
     }
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -125,6 +126,7 @@ def _make_args(**overrides) -> argparse.Namespace:
         disable_uvicorn_access_log=False,
         disable_access_log_for_endpoints=None,
         log_config_file=None,
+        log_prefix=True,
     )
     base.update(overrides)
     return argparse.Namespace(**base)
