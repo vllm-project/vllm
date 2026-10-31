@@ -614,6 +614,19 @@ class GroupCoordinator:
         assert sibling is not None
         return sibling
 
+    def sibling_broadcast(
+        self, tensor: torch.Tensor, src: int, group: ProcessGroup
+    ) -> None:
+        """Broadcast `tensor` from global rank `src` over `group`, a group
+        returned by `make_sibling_device_group`, on the current stream.
+
+        The V2 model runner sends the sampled tokens from the last PP rank to
+        the other PP ranks through this method, so a `pp_group_cls` that moves
+        the inter-stage tensors over its own transport can carry these too
+        (overriding both methods).
+        """
+        torch.distributed.broadcast(tensor, src=src, group=group)
+
     def create_mq_broadcaster(
         self, writer_rank=0, external_writer_handle=None, blocking=True
     ):
@@ -1529,8 +1542,9 @@ def init_model_parallel_group(
     group_name: str | None = None,
     use_device_communicator: bool = True,
     use_all2all: bool = False,
+    group_cls: type[GroupCoordinator] = GroupCoordinator,
 ) -> GroupCoordinator:
-    return GroupCoordinator(
+    return group_cls(
         group_ranks=group_ranks,
         local_rank=local_rank,
         torch_distributed_backend=backend,
@@ -2082,6 +2096,18 @@ def _engram_dp_shard_size(
     return shard_size
 
 
+def _resolve_pp_group_cls(qualname: str) -> type[GroupCoordinator]:
+    if not qualname:
+        return GroupCoordinator
+    group_cls = resolve_obj_by_qualname(qualname)
+    if not (isinstance(group_cls, type) and issubclass(group_cls, GroupCoordinator)):
+        raise TypeError(
+            f"pp_group_cls must name a GroupCoordinator subclass, got {qualname!r}"
+        )
+    logger.info("Using %s for the pipeline parallel group.", qualname)
+    return group_cls
+
+
 def initialize_model_parallel(
     tensor_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
@@ -2303,7 +2329,11 @@ def initialize_model_parallel(
         )
         group_ranks = [x.tolist() for x in group_ranks]
     _PP = init_model_parallel_group(
-        group_ranks, get_world_group().local_rank, backend, group_name="pp"
+        group_ranks,
+        get_world_group().local_rank,
+        backend,
+        group_name="pp",
+        group_cls=_resolve_pp_group_cls(config.parallel_config.pp_group_cls),
     )
 
     global _DP
