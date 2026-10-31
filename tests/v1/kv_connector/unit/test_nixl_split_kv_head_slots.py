@@ -157,6 +157,18 @@ def test_split_kv_head_slots_restrict_layouts_to_block_contiguous():
 
 
 @pytest.mark.skip_global_cleanup
+def test_split_kv_head_slots_disable_kv_cache_update_bypass():
+    """Fused external KV writers produce the packed page, so the setting turns
+    the bypass off for every model."""
+    from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+
+    with set_current_vllm_config(create_vllm_config(attention_backend="FLASHINFER")):
+        assert FlashInferBackend.supports_kv_cache_update_bypass is True
+    with set_current_vllm_config(_split_config()):
+        assert FlashInferBackend.supports_kv_cache_update_bypass is False
+
+
+@pytest.mark.skip_global_cleanup
 def test_compatibility_hash_includes_split_kv_head_slots():
     packed = create_vllm_config(attention_backend="FLASHINFER")
     split = _split_config()
@@ -192,6 +204,12 @@ def test_split_slot_page_registers_k_and_v_regions(
 
     # The K region of block b holds exactly the K heads of block b, and the V
     # region exactly its V heads.
+    # Each layer advertises its K region then its V region, so a peer pairs them
+    # in that order.
+    assert worker.region_members == [
+        [f"layer{layer}"] for layer in range(num_layers) for _ in range(2)
+    ]
+
     blocks = expand_strided_descs(block_runs)
     assert len(blocks) == 2 * num_layers * NUM_BLOCKS
     for region in range(2 * num_layers):
@@ -257,6 +275,7 @@ def test_handshake_with_separate_kv_slab_peer(default_vllm_config, dist_init):
         ssm_sizes=(0, 0),
         attn_backend_name=worker.backend_name,
         physical_blocks_per_logical_kv_block=1,
+        region_members=worker.region_members,
     )
     worker.add_remote_agent(meta, remote_tp_size=1)
 
@@ -329,6 +348,7 @@ def test_heterogeneous_tp_slices_heads_within_each_kv_region(
             ssm_sizes=(0, 0),
             attn_backend_name=worker.backend_name,
             physical_blocks_per_logical_kv_block=1,
+            region_members=worker.region_members,
         )
         worker.add_remote_agent(
             meta, remote_tp_rank=remote_rank, remote_tp_size=remote_tp
