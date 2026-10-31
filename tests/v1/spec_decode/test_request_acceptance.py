@@ -109,6 +109,23 @@ def test_observe_records_proposed_and_accepted_independently():
     assert d["num_draft_tokens"] == 5  # proposed summed independently: 2 + 3
 
 
+def test_merge_sums_histograms_and_concatenates_per_step_arrays():
+    a = _metrics([(3, 3), (3, 0)], detailed=True)
+    b = _metrics([(2, 1)], detailed=True)
+    a.merge(b)
+    assert a.histogram == [1, 1, 0, 1]
+    assert a.num_draft_tokens == 8
+    assert a.per_step_accepted == [3, 0, 1]
+    assert a.per_step_drafted == [3, 3, 2]
+    # the merged-in sequence is left unchanged
+    assert b.histogram == [0, 1, 0, 0]
+
+
+def test_merge_rejects_mismatched_num_spec_tokens():
+    with pytest.raises(AssertionError):
+        _metrics([(3, 1)]).merge(_metrics([(4, 1)], num_spec_tokens=4))
+
+
 def test_engine_core_output_round_trips_spec_decode_metrics():
     # The accumulator rides EngineCoreOutput (msgspec, array_like) to the
     # frontend; verify it serializes (incl. per-step arrays) and is omitted
