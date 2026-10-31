@@ -537,6 +537,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 prefill_query_start_loc = non_spec_query_start_loc
                 prefill_query_start_loc_cpu = non_spec_query_start_loc_cpu
                 prefill_state_indices = non_spec_state_indices_tensor
+            # FlashInfer's prefill kernels take a contiguous index tensor;
+            # with spec decode configured the block table rows hold
+            # 1 + num_spec slots, so column 0 is a strided view.
+            prefill_state_indices = prefill_state_indices.contiguous()
 
             if self.gdn_prefill_backend == "aiter_flydsl":
                 # AITER carries its own reusable varlen metadata and has no use
@@ -784,7 +788,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         if masks is None:
             non_spec_indices = blk_table[:, 0]
             if m.num_prefills > 0:
-                prefill_indices = non_spec_indices[m.num_decodes :]
+                # Same contiguity requirement as in build().
+                prefill_indices = non_spec_indices[m.num_decodes :].contiguous()
         elif m.num_prefills == 0:
             # Same as build(): padded sequences trail the spec decodes.
             spec_indices = blk_table[: m.num_spec_decodes, : self.num_spec + 1]
