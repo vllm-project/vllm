@@ -73,7 +73,7 @@ def _supports_kw(
         if (
             requires_kw_only
             and is_sig_param
-            and param_val.kind != inspect.Parameter.KEYWORD_ONLY
+            and param_val.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD
         ):
             return False
         if (requires_kw_only and param_val.kind == inspect.Parameter.KEYWORD_ONLY) or (
