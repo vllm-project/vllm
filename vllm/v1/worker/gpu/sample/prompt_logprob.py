@@ -18,9 +18,8 @@ from vllm.v1.worker.gpu.sample.logprob import (
 )
 
 CHUNK_SIZE = 1024
-# torch.topk's workspace grows with rows x k: ~5.5 GiB for a chunk of 1024
-# rows over a 152k vocab. Cap the elements each call ranks, which splits
-# chunks only when k is in the tens of thousands.
+# Cap rows x k per torch.topk call, whose workspace grows with both (~5.5 GiB
+# for 1024 rows at a 152k vocab). Only splits chunks when k is very large.
 TOPK_MAX_ELEMENTS = 64 << 20
 
 
