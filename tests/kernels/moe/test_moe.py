@@ -69,6 +69,73 @@ from vllm.utils.torch_utils import set_random_seed
 DEVICE_TYPE = current_platform.device_type
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@pytest.mark.parametrize(
+    "k,block_k", [(31, 128), (81, 64), (96, 64), (160, 128), (256, 64)]
+)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("strided", [False, True])
+@pytest.mark.parametrize("topk,weighted", [(1, True), (2, False)])
+def test_triton_moe_non_aligned_dimensions(k, block_k, dtype, strided, topk, weighted):
+    """Non-aligned dimensions preserve routing, bias and expert filtering."""
+    set_random_seed(7)
+    m, n, block_m = 9, 67, 16
+    step = 2 if strided else 1
+    a = (torch.randn((m, k * step + 1), device="cuda", dtype=dtype) / 10)[:, 1::step]
+    b = (torch.randn((3, n, k * step + 1), device="cuda", dtype=dtype) / 10)[
+        :, :, 1::step
+    ]
+    bias = torch.randn((3, n), device="cuda", dtype=dtype) / 10
+    out = torch.empty((m, topk, n * step + 1), device="cuda", dtype=dtype)[
+        :, :, 1::step
+    ]
+    weights = torch.rand((m, topk), device="cuda", dtype=torch.float32)
+    routes = m * topk
+    sorted_ids = []
+    for expert in range(4):
+        assigned = list(range(expert, routes, 4))
+        sorted_ids.extend(assigned + [routes] * (block_m - len(assigned)))
+    alignment = (
+        torch.tensor(sorted_ids, device="cuda", dtype=torch.int32),
+        torch.tensor([-1, 0, 1, 2], device="cuda", dtype=torch.int32),
+        torch.tensor([len(sorted_ids)], device="cuda", dtype=torch.int32),
+    )
+    fused_moe_module.invoke_fused_moe_triton_kernel(
+        a,
+        b,
+        out,
+        None,
+        None,
+        weights,
+        *alignment,
+        weighted,
+        topk,
+        {
+            "BLOCK_SIZE_M": block_m,
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": block_k,
+            "GROUP_SIZE_M": 1,
+            "num_warps": 4,
+            "num_stages": 2,
+        },
+        tl.float16 if dtype == torch.float16 else tl.bfloat16,
+        False,
+        False,
+        False,
+        False,
+        False,
+        B_bias=bias,
+    )
+    reference = torch.zeros((m, topk, n), device="cuda", dtype=torch.float32)
+    for route in range(routes):
+        expert = route % 4 - 1
+        if expert >= 0:
+            row, slot = divmod(route, topk)
+            value = a[row].float() @ b[expert].float().T + bias[expert].float()
+            reference[row, slot] = value * weights[row, slot] if weighted else value
+    torch.testing.assert_close(out, reference.to(dtype), atol=0.002, rtol=0.02)
+
+
 def test_triton_moe_launcher_passes_scalar_scale_as_pointer(monkeypatch) -> None:
     captured: dict[str, torch.Tensor] = {}
 
