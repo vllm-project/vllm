@@ -200,17 +200,15 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
         self,
         config: Qwen3OmniMoeAudioEncoderConfig,
         prefix: str = "",
+        quant_config: QuantizationConfig | None = None,
     ):
         super().__init__()
         self.embed_dim = config.d_model
         self.num_heads = config.encoder_attention_heads
         self.head_dim = self.embed_dim // self.num_heads
-        # Audio encoder uses 20 heads. Shard across TP when divisible
-        # (e.g. TP=2/4); otherwise keep unreplicated (e.g. TP=8).
         tp_size = get_tensor_model_parallel_world_size()
-        disable_tp = self.num_heads % tp_size != 0
-        effective_tp = 1 if disable_tp else tp_size
-        self.num_local_heads = self.num_heads // effective_tp
+        # Qwen3OmniMoeAudioEncoder raises unless heads divide tp_size.
+        self.num_local_heads = self.num_heads // tp_size
 
         if (self.head_dim * self.num_heads) != self.embed_dim:
             raise ValueError(
@@ -226,7 +224,7 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
             total_num_heads=self.num_heads,
             total_num_kv_heads=self.num_heads,
             bias=True,
-            disable_tp=disable_tp,
+            quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
         )
 
@@ -234,7 +232,7 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
             input_size=self.embed_dim,
             output_size=self.embed_dim,
             bias=True,
-            disable_tp=disable_tp,
+            quant_config=quant_config,
             prefix=f"{prefix}.out_proj",
         )
 
@@ -278,28 +276,29 @@ class Qwen3OmniMoeAudioEncoderLayer(nn.Module):
         self,
         config: Qwen3OmniMoeAudioEncoderConfig,
         prefix: str = "",
+        quant_config: QuantizationConfig | None = None,
     ):
         super().__init__()
         self.embed_dim = config.d_model
         self.self_attn = Qwen3OmniMoeAudioAttention(
-            config, prefix=f"{prefix}.self_attn"
+            config,
+            prefix=f"{prefix}.self_attn",
+            quant_config=quant_config,
         )
         self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
         self.activation_fn = _ACTIVATION_REGISTRY[config.activation_function]
-        tp_size = get_tensor_model_parallel_world_size()
-        disable_tp = config.encoder_attention_heads % tp_size != 0
         self.fc1 = ColumnParallelLinear(
             self.embed_dim,
             config.encoder_ffn_dim,
             bias=True,
-            disable_tp=disable_tp,
+            quant_config=quant_config,
             prefix=f"{prefix}.fc1",
         )
         self.fc2 = RowParallelLinear(
             config.encoder_ffn_dim,
             self.embed_dim,
             bias=True,
-            disable_tp=disable_tp,
+            quant_config=quant_config,
             prefix=f"{prefix}.fc2",
         )
         self.final_layer_norm = nn.LayerNorm(self.embed_dim)
@@ -342,6 +341,54 @@ class Qwen3OmniMoeAudioEncoderLayer(nn.Module):
         return hidden_states
 
 
+def _gather_audio_chunks(
+    input_features: torch.Tensor,
+    chunk_lengths: torch.Tensor,
+    pad_width: int,
+) -> torch.Tensor:
+    """Right-pad variable chunks to ``pad_width`` without a host length list.
+
+    ``input_features`` is ``[mel, time]``.
+    Returns ``[num_chunks, mel, pad_width]``.
+    """
+    mel, time = input_features.shape
+    num_chunks = chunk_lengths.shape[0]
+    if num_chunks == 0 or pad_width == 0:
+        return input_features.new_zeros((num_chunks, mel, pad_width))
+    starts = F.pad(chunk_lengths.cumsum(0), (1, 0))[:-1]
+    pos = torch.arange(pad_width, device=input_features.device)
+    index = starts[:, None] + pos[None, :]
+    valid = pos[None, :] < chunk_lengths[:, None]
+    index = index.clamp(max=time - 1)
+    gathered = input_features[:, index].permute(1, 0, 2).contiguous()
+    return gathered.masked_fill(~valid[:, None, :], 0)
+
+
+def _audio_cu_seqlens(
+    aftercnn_lens: torch.Tensor, window_aftercnn: int
+) -> torch.Tensor:
+    """int32 cumulative attention boundaries on ``aftercnn_lens``'s device.
+
+    Segment lengths stay on device: full windows via ``repeat_interleave``,
+    then a non-zero remainder. The result starts at 0.
+    """
+    if window_aftercnn <= 0 or aftercnn_lens.numel() == 0:
+        return aftercnn_lens.new_zeros((1,), dtype=torch.int32)
+    num_full = aftercnn_lens // window_aftercnn
+    remainder = aftercnn_lens % window_aftercnn
+    has_rem = (remainder != 0).to(dtype=aftercnn_lens.dtype)
+    values = torch.stack(
+        (
+            aftercnn_lens.new_full(aftercnn_lens.shape, window_aftercnn),
+            remainder,
+        ),
+        dim=1,
+    ).reshape(-1)
+    repeats = torch.stack((num_full, has_rem), dim=1).reshape(-1)
+    segment_lengths = torch.repeat_interleave(values, repeats)
+    return F.pad(segment_lengths.cumsum(0), (1, 0), value=0).to(torch.int32)
+
+
 class Qwen3OmniMoeAudioEncoder(nn.Module):
     """vLLM-native Qwen3-Omni Audio Encoder."""
 
@@ -357,8 +404,16 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         self,
         config: Qwen3OmniMoeAudioEncoderConfig,
         prefix: str = "",
+        quant_config: QuantizationConfig | None = None,
     ):
         super().__init__()
+        heads = config.encoder_attention_heads
+        tp_size = get_tensor_model_parallel_world_size()
+        if heads % tp_size != 0:
+            raise ValueError(
+                f"encoder_attention_heads={heads} is not divisible by "
+                f"tensor_parallel_size={tp_size}"
+            )
 
         embed_dim = config.d_model
         self.num_mel_bins = config.num_mel_bins
@@ -396,6 +451,7 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
             conv_out_dim,
             config.d_model,
             bias=False,
+            quant_config=quant_config,
             return_bias=False,
             prefix=f"{prefix}.conv_out",
         )
@@ -406,6 +462,7 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
                 Qwen3OmniMoeAudioEncoderLayer(
                     config,
                     prefix=f"{prefix}.layers.{i}",
+                    quant_config=quant_config,
                 )
                 for i in range(config.encoder_layers)
             ]
@@ -417,6 +474,7 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
             config.d_model,
             config.d_model,
             bias=True,
+            quant_config=quant_config,
             return_bias=False,
             prefix=f"{prefix}.proj1",
         )
@@ -425,6 +483,7 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
             config.d_model,
             config.output_dim,
             bias=True,
+            quant_config=quant_config,
             return_bias=False,
             prefix=f"{prefix}.proj2",
         )
@@ -460,34 +519,51 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         feature_lens: torch.Tensor,
         aftercnn_lens: torch.Tensor,
     ):
-        # Compute chunk information.
-        chunk_num = torch.ceil(feature_lens / (self.n_window * 2)).long()
+        # One D2H for (chunk_count, pad_width). clamp(max=window).amax()
+        # equals chunk_lengths.max() after the rewrite: a zero length is not
+        # a chunk, and every kept chunk is <= window.
+        window = self.n_window * 2
+        chunk_num = torch.ceil(feature_lens / window).long()
+        if feature_lens.numel() == 0:
+            chunk_count, pad_width = 0, 0
+        else:
+            meta = torch.stack(
+                (
+                    chunk_num.sum().to(torch.int64),
+                    feature_lens.clamp(max=window).amax().to(torch.int64),
+                )
+            )
+            with gpu_sync_allowed():
+                chunk_count, pad_width = (int(v) for v in meta.tolist())
 
-        with gpu_sync_allowed():
-            total_chunks = int(chunk_num.sum())
+        if chunk_count == 0:
+            return input_features.new_empty((0, self.proj2.output_size))
 
-        chunk_lengths = async_tensor_h2d(
-            [self.n_window * 2] * total_chunks,
+        # Extra slot is a sink. A zero-length row repeats the previous tail
+        # (a leading zero is -1 and would wrap onto the last chunk). Point
+        # those rows at the sink so the scatter does not boolean-index.
+        chunk_lengths = torch.full(
+            (chunk_count + 1,),
+            window,
             dtype=torch.long,
             device=feature_lens.device,
         )
         tail_chunk_index = F.pad(chunk_num, (1, 0), value=-1).cumsum(0)[1:]
-        chunk_lengths[tail_chunk_index] = feature_lens % (self.n_window * 2)
-        chunk_lengths[chunk_lengths == 0] = self.n_window * 2
+        tail_chunk_index = torch.where(chunk_num > 0, tail_chunk_index, chunk_count)
+        # A zero remainder on a positive multiple is a full last window.
+        remainder = feature_lens % window
+        remainder = torch.where(
+            remainder == 0, remainder.new_full((), window), remainder
+        )
+        chunk_lengths[tail_chunk_index] = remainder
+        chunk_lengths = chunk_lengths[:-1]
 
-        # Split input features into chunks and pad
-        with gpu_sync_allowed():
-            chunk_lengths_list = chunk_lengths.tolist()
-        chunk_list = input_features.T.split(chunk_lengths_list, dim=0)
-        padded_feature = nn.utils.rnn.pad_sequence(
-            chunk_list, batch_first=True
-        ).transpose(1, 2)
+        padded_feature = _gather_audio_chunks(input_features, chunk_lengths, pad_width)
 
-        # Compute feature lengths after CNN
         feature_lens_after_cnn = self._get_cnn_output_lengths(chunk_lengths)
-        # Vectorized mask creation: avoid creating many small tensors.
-        with gpu_sync_allowed():
-            max_len_after_cnn = feature_lens_after_cnn.max().item()
+        max_len_after_cnn = pad_width
+        for _ in range(3):
+            max_len_after_cnn = (max_len_after_cnn - 1) // 2 + 1
         indices = torch.arange(max_len_after_cnn, device=padded_feature.device)
         padded_mask_after_cnn = indices.unsqueeze(0) < feature_lens_after_cnn.unsqueeze(
             1
@@ -528,23 +604,11 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
 
         with gpu_sync_allowed():
             hidden_states = padded_embed[padded_mask_after_cnn]
-            # Use tolist() for efficient batch conversion from tensor to Python.
-            aftercnn_lens_list = aftercnn_lens.tolist()
 
-        # Compute cumulative sequence lengths for chunked attention
-        cu_chunk_lens = [0]
         window_aftercnn = padded_mask_after_cnn.shape[-1] * (
             self.n_window_infer // (self.n_window * 2)
         )
-        for cnn_len in aftercnn_lens_list:
-            num_full_chunks = cnn_len // window_aftercnn
-            remainder = cnn_len % window_aftercnn
-            cu_chunk_lens.extend([window_aftercnn] * num_full_chunks)
-            if remainder:
-                cu_chunk_lens.append(remainder)
-        cu_seqlens = async_tensor_h2d(
-            cu_chunk_lens, dtype=torch.int32, device=aftercnn_lens.device
-        ).cumsum(-1, dtype=torch.int32)
+        cu_seqlens = _audio_cu_seqlens(aftercnn_lens, window_aftercnn)
 
         max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
 
@@ -1587,18 +1651,15 @@ class Qwen3OmniMoeConditionalGenerationMixin(Qwen2_5OmniConditionalGenerationMix
         audio_input: Qwen2_5OmniAudioFeatureInputs,
     ) -> tuple[torch.Tensor, ...]:
         input_features = audio_input["input_features"]
-        # audio_feature_lengths is keep_on_cpu; the audio tower derives
-        # device placement from feature_lens, so move it explicitly.
-        audio_feature_lengths = async_tensor_h2d(
-            audio_input["audio_feature_lengths"], input_features.device
-        )
-
+        # Lengths stay on the CPU (keep_on_cpu=True). H2D only the tower inputs.
+        audio_feature_lengths = audio_input["audio_feature_lengths"]
         audio_output_lengths = _get_feat_extract_output_lengths(audio_feature_lengths)
+        device = input_features.device
 
         audio_features = self.audio_tower(
             input_features.to(self.audio_tower.dtype),
-            feature_lens=audio_feature_lengths,
-            aftercnn_lens=audio_output_lengths,
+            feature_lens=async_tensor_h2d(audio_feature_lengths, device),
+            aftercnn_lens=async_tensor_h2d(audio_output_lengths, device),
         )
         return audio_features.split(audio_output_lengths.tolist())
 
@@ -1668,6 +1729,9 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         # MoE LoRA uses the architecture to determine its weight layout.
         thinker_config.architectures = vllm_config.model_config.hf_config.architectures
         quant_config = vllm_config.quant_config
+        if quant_config is not None:
+            quant_config.apply_vllm_mapper(self.hf_to_vllm_mapper.get_rename_mapper())
+            quant_config.packed_modules_mapping.update(self.packed_modules_mapping)
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = thinker_config
         self.multimodal_config = multimodal_config
@@ -1677,6 +1741,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
             self.audio_tower = Qwen3OmniMoeAudioEncoder(
                 thinker_config.audio_config,
                 prefix=maybe_prefix(prefix, "audio_tower"),
+                quant_config=quant_config,
             )
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):
