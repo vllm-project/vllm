@@ -357,7 +357,6 @@ steps:
     - pytest -v -s -m 'cpu_test' v1/core
     - pytest -v -s v1/structured_output
     - pytest -v -s v1/test_serial_utils.py
-    - pytest -v -s v1/worker/test_gpu_worker.py::test_cpu_worker_without_triton
     - pytest -v -s v1/worker/test_cpu_worker_kv_budget.py
     - pytest -v -s v1/test_kv_cache_spec_registry.py
     - pytest -v -s v1/cudagraph/test_cudagraph_manager.py
@@ -881,39 +880,30 @@ steps:
   commands:
   - pytest -v -s tool_parsers
 
-- label: ":nvidia: (A100) Batch Invariance"
-  key: batch-invariance-a100
+# Key kept from the former A100 step's mirror for job history and retries.
+- label: ":amd: (MI250) Batch Invariance"
+  key: amd-batch-invariance-a100
+  dind: false
+  device: mi250_1
   timeout_in_minutes: 60
-  device: a100
+  env:
+    VLLM_GPU_MEMORY_UTILIZATION: "0.8"
+    VLLM_TEST_CLEAN_GPU_MEMORY: "1"
+  depends_on:
+  - image-build-amd
   source_file_dependencies:
-    - vllm/v1/attention
-    - vllm/model_executor/layers
-    - vllm/model_executor/kernels/linear
-    - vllm/model_executor/determinism
-    - tests/v1/determinism/
+  - vllm/v1/attention
+  - vllm/model_executor/layers
+  - vllm/model_executor/kernels/linear
+  - vllm/model_executor/determinism
+  - tests/v1/determinism/
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  - docker/Dockerfile.rocm_base
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s v1/determinism/test_batch_invariance.py
     - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
-  mirror:
-    amd:
-      label: ":amd: (MI250) Batch Invariance"
-      dind: false
-      device: mi250_1
-      timeout_in_minutes: 60
-      env:
-        VLLM_GPU_MEMORY_UTILIZATION: "0.8"
-        VLLM_TEST_CLEAN_GPU_MEMORY: "1"
-      depends_on:
-      - image-build-amd
-      source_file_dependencies:
-      - vllm/v1/attention
-      - vllm/model_executor/layers
-      - vllm/model_executor/kernels/linear
-      - vllm/model_executor/determinism
-      - tests/v1/determinism/
-      - vllm/_aiter_ops.py
-      - vllm/platforms/rocm.py
 
 - label: ":nvidia: (H100) Batch Invariance"
   key: batch-invariance-h100

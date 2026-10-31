@@ -287,3 +287,20 @@ async def test_unsupported_nested_tool_result_returns_bad_request(
                 },
             ],
         )
+
+
+@pytest.mark.asyncio
+async def test_anthropic_server_tool_is_rejected(client: anthropic.AsyncAnthropic):
+    with pytest.raises(anthropic.BadRequestError) as exc_info:
+        await client.messages.create(
+            model="claude-3-7-sonnet-latest",
+            max_tokens=16,
+            messages=[{"role": "user", "content": "What's new in vLLM?"}],
+            tools=[
+                {"type": "web_search_20250305", "name": "web_search", "max_uses": 8}
+            ],
+        )
+
+    message = exc_info.value.body["error"]["message"]
+    assert "'web_search_20250305' is not supported" in message
+    assert "Field required" not in message
