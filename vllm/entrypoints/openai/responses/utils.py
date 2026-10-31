@@ -179,7 +179,6 @@ def build_response_output_items(
                 content=[
                     ResponseReasoningTextContent(text=reasoning, type="reasoning_text")
                 ],
-                status=None,
             )
         )
 
@@ -221,17 +220,17 @@ def build_response_output_items(
             call_name = resolve_responses_tool_call_name(
                 tool_call.name, tool_call_name_map=tool_call_name_map
             )
-            outputs.append(
-                ResponseFunctionToolCall(
-                    id=f"fc_{random_uuid()}",
-                    call_id=call_id,
-                    type="function_call",
-                    status=last_item_status if is_last else "completed",
-                    name=call_name.name,
-                    namespace=call_name.namespace,
-                    arguments=tool_call.arguments,
-                )
+            function_call = ResponseFunctionToolCall(
+                id=f"fc_{random_uuid()}",
+                call_id=call_id,
+                type="function_call",
+                status=last_item_status if is_last else "completed",
+                name=call_name.name,
+                arguments=tool_call.arguments,
             )
+            if call_name.namespace:
+                function_call.namespace = call_name.namespace
+            outputs.append(function_call)
 
     return outputs
 

@@ -6,11 +6,14 @@ from openai_harmony import (
 )
 from pydantic import ValidationError
 
+from vllm.entrypoints.generate.base.protocol import FunctionCall
 from vllm.entrypoints.openai.responses.protocol import (
     ResponsesRequest,
+    ResponsesResponse,
     serialize_message,
     serialize_messages,
 )
+from vllm.entrypoints.openai.responses.utils import build_response_output_items
 from vllm.exceptions import VLLMValidationError
 
 
@@ -72,3 +75,52 @@ def test_malformed_tools_rejected_by_field_validation(tools) -> None:
     AttributeError inside the custom-format validator (500)."""
     with pytest.raises(ValidationError):
         ResponsesRequest(input="hi", tools=tools)
+
+
+def test_response_json_omits_unset_item_and_tool_fields() -> None:
+    """Unset optional fields stay off the wire; what the client sent doesn't."""
+    parameters = {"type": "object", "properties": {"a": {"default": None}}}
+    request = ResponsesRequest(
+        input="hi",
+        tools=[
+            {"type": "function", "name": "f", "parameters": parameters},
+            {"type": "function", "name": "g", "strict": True, "description": None},
+        ],
+    )
+    response = ResponsesResponse.from_request(
+        request,
+        request.to_sampling_params(default_max_tokens=8),
+        model_name="m",
+        created_time=0,
+        output=build_response_output_items(
+            reasoning="r",
+            content=None,
+            tool_calls=[FunctionCall(id="call_1", name="f", arguments="{}")],
+            tools=request.tools,
+        ),
+        status="completed",
+    )
+
+    data = response.model_dump(mode="json", by_alias=True)
+
+    assert data["output"][0].keys() == {"id", "summary", "type", "content"}
+    assert data["output"][1].keys() == {
+        "id",
+        "call_id",
+        "name",
+        "arguments",
+        "type",
+        "status",
+    }
+    assert data["tools"] == [
+        {"type": "function", "name": "f", "parameters": parameters, "strict": None},
+        {
+            "type": "function",
+            "name": "g",
+            "strict": True,
+            "description": None,
+            "parameters": None,
+        },
+    ]
+    # Defaulted fields on the response itself are unaffected.
+    assert data["object"] == "response"

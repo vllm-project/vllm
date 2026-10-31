@@ -966,6 +966,26 @@ class ResponsesResponse(OpenAIBaseModel):
     def serialize_input_messages(self, msgs, _info):
         return serialize_messages(msgs)
 
+    # The SDK types default every optional field to None, including ones the
+    # OpenAI schema doesn't allow to be null and ones newer SDKs added.
+    @field_serializer("output", when_used="json")
+    def serialize_output(self, output, _info):
+        return [
+            item.model_dump(mode="json", by_alias=True, exclude_unset=True)
+            for item in output
+        ]
+
+    @field_serializer("tools", when_used="json")
+    def serialize_tools(self, tools, _info):
+        serialized = []
+        for tool in tools:
+            data = tool.model_dump(mode="json", by_alias=True, exclude_unset=True)
+            if tool.type == "function":
+                # The schema requires these two, but allows them to be null.
+                data = {"parameters": None, "strict": None, **data}
+            serialized.append(data)
+        return serialized
+
     @classmethod
     def from_request(
         cls,

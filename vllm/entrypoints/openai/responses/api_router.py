@@ -37,11 +37,13 @@ async def _convert_stream_to_sse_events(
     """Convert the generator to a stream of events in SSE format."""
     async for event in generator:
         event_type = getattr(event, "type", "unknown")
-        # https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events#event_stream_format
-        event_data = (
-            f"event: {event_type}\ndata: "
-            f"{event.model_dump_json(indent=None, by_alias=True)}\n\n"
+        # ResponsesResponse serializes its own items and has defaults to keep. Other
+        # events hold SDK items and parts, so drop their unset fields here.
+        event_json = event.model_dump_json(
+            indent=None, by_alias=True, exclude_unset=not hasattr(event, "response")
         )
+        # https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events#event_stream_format
+        event_data = f"event: {event_type}\ndata: {event_json}\n\n"
         yield event_data
 
 

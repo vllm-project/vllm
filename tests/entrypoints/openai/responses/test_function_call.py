@@ -5,6 +5,7 @@ import json
 
 import openai  # use the official client for correctness check
 import pytest
+import requests
 
 MODEL_NAME = "Qwen/Qwen3-1.7B"
 tools = [
@@ -227,6 +228,50 @@ async def test_named_tool_use(client: openai.AsyncOpenAI):
     response_2 = await client.responses.create(model=MODEL_NAME, input=input_messages)
     # check the output
     assert len(response_2.output_text) > 0
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_wire_format_omits_unset_item_and_tool_fields(server_with_store, stream):
+    """The SDK hides this, so read the wire format: strict clients reject nulls
+    the OpenAI schema doesn't allow and tool fields they don't know."""
+    tool = {
+        "type": "function",
+        "name": "get_weather",
+        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+    }
+    response = requests.post(
+        server_with_store.url_for("v1/responses"),
+        json={
+            "model": MODEL_NAME,
+            "input": "What's the weather like in Paris today?",
+            "tools": [tool],
+            "tool_choice": {"type": "function", "name": "get_weather"},
+            "temperature": 0,
+            "stream": stream,
+        },
+    )
+    response.raise_for_status()
+
+    if stream:
+        events = [
+            json.loads(line.removeprefix("data: "))
+            for line in response.text.splitlines()
+            if line.startswith("data: ")
+        ]
+        items = [e["item"] for e in events if "item" in e]
+        body = next(e["response"] for e in events if e["type"] == "response.completed")
+    else:
+        items = []
+        body = response.json()
+
+    items += body["output"]
+    function_calls = [item for item in items if item["type"] == "function_call"]
+    assert function_calls
+    for item in function_calls:
+        assert item["status"] in ("in_progress", "completed")
+        assert not {"namespace", "caller", "async"} & item.keys()
+    assert body["tools"] == [{**tool, "strict": None}]
+    assert body["object"] == "response"
 
 
 @pytest.mark.asyncio

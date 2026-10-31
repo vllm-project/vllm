@@ -1078,15 +1078,17 @@ def emit_simple_tool_call_open(
             input="",
         )
     else:
-        item = ResponseFunctionToolCallItem(
+        function_call = ResponseFunctionToolCallItem(
             type="function_call",
             id=state.current_item_id,
             call_id=state.tool_call_id,
             name=name,
-            namespace=namespace,
             arguments="",
             status="in_progress",
         )
+        if namespace:
+            function_call.namespace = namespace
+        item = function_call
     return [
         ResponseOutputItemAddedEvent(
             type="response.output_item.added",
@@ -1187,15 +1189,17 @@ def emit_simple_tool_call_done(
                 name=state.tool_call_name,
             )
         ]
-        item = ResponseFunctionToolCall(
+        function_call = ResponseFunctionToolCall(
             type="function_call",
             name=state.tool_call_name,
-            namespace=state.tool_call_namespace,
             arguments=state.accumulated_text,
             status=status,
             id=state.current_item_id,
             call_id=state.tool_call_id,
         )
+        if state.tool_call_namespace:
+            function_call.namespace = state.tool_call_namespace
+        item = function_call
     events.append(
         ResponseOutputItemDoneEvent(
             type="response.output_item.done",

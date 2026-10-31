@@ -346,7 +346,6 @@ def _parse_reasoning(message: Message) -> list[ResponseOutputItem]:
             content=[
                 ResponseReasoningTextContent(text=content.text, type="reasoning_text")
             ],
-            status=None,
         )
         output_items.append(reasoning_item)
     return output_items
