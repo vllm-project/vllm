@@ -106,6 +106,9 @@ _TOOL_PARSERS_TO_REGISTER = {
         "hy_v3_tool_parser",
         "HYV3ToolParser",
     ),
+    "hyperclovax_seed_think_14b": (
+        "hyperclovax_seed_think_14b_tool_parser",
+        "HyperCLOVAXSeedThink14BToolParser",
     "hy_v4": (
         "hy_v4_tool_parser",
         "HYV4ToolParser",

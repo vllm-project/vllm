@@ -100,6 +100,9 @@ _REASONING_PARSERS_TO_REGISTER = {
         "hy_v3_reasoning_parser",
         "HYV3ReasoningParser",
     ),
+    "hyperclovax_seed_think_14b": (
+        "hyperclovax_seed_think_14b_reasoning_parser",
+        "HyperCLOVAXSeedThink14BReasoningParser",
     "hy_v4": (
         "hy_v4_reasoning_parser",
         "HYV4ReasoningParser",
