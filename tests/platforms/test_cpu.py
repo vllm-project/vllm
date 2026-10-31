@@ -2,13 +2,55 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from vllm.config import CacheConfig, KVTransferConfig, VllmConfig
+from vllm.config import CacheConfig, DeviceConfig, KVTransferConfig, VllmConfig
 from vllm.platforms.cpu import CpuPlatform
+
+
+@pytest.mark.parametrize(
+    ("library_dir", "ld_preload", "append_libgomp"),
+    [
+        ("torch.libs", "", True),
+        ("torch/lib", "/opt/lib/libcustom.so", True),
+        ("torch/lib", "/opt/lib/libgomp.so.1", False),
+        ("torch/lib", "/opt/lib/libomp.so", False),
+        ("torch/lib", "/opt/lib/libiomp5.so", False),
+        (None, "/opt/lib/libcustom.so", False),
+    ],
+)
+def test_riscv_preloads_bundled_openmp_for_thread_binding(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    library_dir: str | None,
+    ld_preload: str,
+    append_libgomp: bool,
+) -> None:
+    monkeypatch.setattr(os, "environ", os.environ.copy())
+    config = VllmConfig(device_config=DeviceConfig(device="cpu"))
+    torch_pkg = tmp_path / "torch"
+    torch_pkg.mkdir()
+    libgomp = None
+    if library_dir is not None:
+        libgomp = tmp_path / library_dir / "libgomp.so.1"
+        libgomp.parent.mkdir(parents=True, exist_ok=True)
+        libgomp.touch()
+    monkeypatch.setattr(torch, "__file__", str(torch_pkg / "__init__.py"))
+    monkeypatch.setattr("platform.system", lambda: "Linux")
+    monkeypatch.setattr("platform.machine", lambda: "riscv64")
+    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: {0, 1}, raising=False)
+    monkeypatch.setenv("LD_PRELOAD", ld_preload)
+
+    CpuPlatform.check_and_update_config(config)
+
+    expected = ld_preload
+    if append_libgomp:
+        expected = ":".join(filter(None, (ld_preload, str(libgomp))))
+    assert os.environ["LD_PRELOAD"] == expected
 
 
 class _FakeModel:
