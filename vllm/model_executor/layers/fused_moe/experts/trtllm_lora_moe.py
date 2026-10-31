@@ -21,8 +21,12 @@ Constraints (matching the PR support matrix; final gating lives in the oracle):
 
 import functools
 from abc import abstractmethod
+from typing import TYPE_CHECKING
 
 import torch
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -149,6 +153,24 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             p.is_cuda()
             and p.is_device_capability_family(100)
             and has_flashinfer_trtllm_fused_moe()
+        )
+
+    @staticmethod
+    def is_supported_config(
+        cls: type[mk.FusedMoEExperts],
+        moe_config: FusedMoEConfig,
+        weight_key: "QuantKey | None",
+        activation_key: "QuantKey | None",
+        activation_format: mk.FusedMoEActivationFormat,
+    ) -> tuple[bool, str | None]:
+        if moe_config.fully_sharded_loras:
+            return False, "kernel does not support fully_sharded_loras"
+        return mk.FusedMoEExperts.is_supported_config(
+            cls,
+            moe_config,
+            weight_key,
+            activation_key,
+            activation_format,
         )
 
     def workspace_shapes(
