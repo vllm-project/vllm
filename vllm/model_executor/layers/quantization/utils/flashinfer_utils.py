@@ -111,12 +111,13 @@ def rotate_weights_for_fi_trtllm_fp8_per_tensor_moe(
             shuffle_matrix_a(gemm2_weights[i].view(torch.uint8), epilogue_tile_m)
         )
 
-    # Stack weights for all experts
-    gemm1_weights.data = torch.stack(gemm1_weights_fp8_shuffled).view(
-        torch.float8_e4m3fn
+    # Stack weights for all experts, in place: they may be the layer's
+    # parameters, whose addresses captured CUDA graphs keep across reloads
+    gemm1_weights.copy_(
+        torch.stack(gemm1_weights_fp8_shuffled).view(torch.float8_e4m3fn)
     )
-    gemm2_weights.data = torch.stack(gemm2_weights_fp8_shuffled).view(
-        torch.float8_e4m3fn
+    gemm2_weights.copy_(
+        torch.stack(gemm2_weights_fp8_shuffled).view(torch.float8_e4m3fn)
     )
 
 

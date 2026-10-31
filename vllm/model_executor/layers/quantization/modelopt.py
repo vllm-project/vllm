@@ -114,6 +114,7 @@ from vllm.model_executor.parameter import (
 )
 from vllm.model_executor.utils import (
     is_weights_pre_processed,
+    refill_derived,
     replace_parameter,
     retire_parameter,
     set_weight_attrs,
@@ -2735,21 +2736,12 @@ class ModelOptLinearMethod(LinearMethodBase):
                 )
             assert self.ctx.group_size is not None
             # Copies: the kernel may write its layout into the params in place.
-            layer.register_buffer(
-                "_nvfp4_weight_for_gather",
-                layer.weight.detach().clone(),
-                persistent=False,
-            )
-            layer.register_buffer(
-                "_nvfp4_weight_scale_for_gather",
-                layer.weight_scale.detach().clone(),
-                persistent=False,
-            )
-            layer.register_buffer(
-                "_nvfp4_weight_global_scale_for_gather",
-                layer.weight_global_scale.detach().clone(),
-                persistent=False,
-            )
+            for name, src in (
+                ("_nvfp4_weight_for_gather", layer.weight),
+                ("_nvfp4_weight_scale_for_gather", layer.weight_scale),
+                ("_nvfp4_weight_global_scale_for_gather", layer.weight_global_scale),
+            ):
+                refill_derived(layer, name, src.detach().clone())
             layer._nvfp4_group_size_for_gather = self.ctx.group_size
         self.kernel.process_weights_after_loading(layer)
 
