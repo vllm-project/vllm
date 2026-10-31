@@ -370,6 +370,18 @@ def compute_mm_encoder_budget(
             "max_num_batched_tokens."
         )
 
+    long_prefill_threshold = scheduler_config.long_prefill_token_threshold
+    if (
+        scheduler_config.disable_chunked_mm_input
+        and 0 < long_prefill_threshold < max_tokens_per_mm_item
+    ):
+        raise ValueError(
+            "Chunked MM input disabled but long_prefill_token_threshold "
+            f"({long_prefill_threshold}) is smaller than max_tokens_per_mm_item "
+            f"({max_tokens_per_mm_item}). Set long_prefill_token_threshold to 0 "
+            "to disable the cap, or increase it to fit a whole multimodal item."
+        )
+
     encoder_compute_budget = max(
         scheduler_config.max_num_encoder_input_tokens, max_tokens_per_mm_item
     )
