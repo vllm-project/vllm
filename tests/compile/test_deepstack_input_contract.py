@@ -61,7 +61,7 @@ def _run_contract(
 def test_qwen3_vl_deepstack_payload_after_empty_compile(monkeypatch):
     monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
 
-    deepstack_buffer = object.__new__(Qwen3VLForConditionalGeneration)
+    deepstack_buffer = object.__new__(Qwen3VLForConditionalGeneration)  # type: ignore[type-abstract]
     deepstack_buffer.deepstack_input_embeds = [torch.zeros(2, 4, device="cuda")]
     deepstack_buffer.deepstack_input_embeds_num_tokens = 0
     deepstack_buffer.deepstack_num_level = 1
