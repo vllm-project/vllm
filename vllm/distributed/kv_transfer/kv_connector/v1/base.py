@@ -618,6 +618,20 @@ class KVConnectorBase_V1(ABC):
         """
         return
 
+    def on_preschedule_request(self, request: "Request") -> Any:
+        """Called on the engine-core input thread right after ``request`` is
+        built, before the scheduler sees it, so it may run concurrently with
+        schedule(). Implementations must not read or write mutable connector
+        or scheduler state; they may only start self-contained, thread-safe
+        background work (e.g. an async prefix lookup) and return a handle.
+
+        The handle is stored on ``request.kv_preschedule_handle``, which hands it
+        to the scheduler thread: the connector takes it from there (e.g. in
+        get_num_new_matched_tokens) and owns it from then on. Returns None
+        to start nothing. The default implementation is a no-op.
+        """
+        return None
+
     def update_connector_output(self, connector_output: KVConnectorOutput):
         """Update KVConnector state from worker-side connectors output.
 
