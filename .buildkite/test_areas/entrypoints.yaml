@@ -4,7 +4,6 @@ depends_on:
 steps:
 - label: ":nvidia: (H200) [Nightly] Initialized Snapshot E2E"
   key: initialized-snapshot-e2e
-  automatic_shard: true
   device: h200
   num_devices: 1
   no_plugin: true
