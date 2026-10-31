@@ -14,7 +14,6 @@ from collections.abc import Sequence
 import regex as re
 from partial_json_parser.core.options import Allow
 
-from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -26,6 +25,7 @@ from vllm.entrypoints.generate.base.protocol import (
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
+from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
@@ -417,7 +417,9 @@ class ApertusToolParser(ToolParser):
 
         """
         try:
-            parsed, _ = partial_json_loads(json_str, Allow.ALL)
+            # An exponent can change a number's already-streamed representation.
+            flags = Allow.ALL if is_final else Allow.ALL & ~Allow.NUM
+            parsed, _ = partial_json_loads(json_str, flags)
             if not isinstance(parsed, list):
                 parsed = [parsed] if parsed else []
         except Exception:

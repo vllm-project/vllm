@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Abstract interfaces and data types for the secondary tiering layer."""
 
+import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable
@@ -11,6 +12,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 import numpy as np
 
 from vllm.v1.kv_offload.base import (
+    ConfigInfoMapping,
     Locality,
     LookupResult,
     Medium,
@@ -24,6 +26,7 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.tiering.backpressure import (
     BackpressureDetector,
 )
+from vllm.v1.metrics.cache_hit_source import CacheHitSource
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
@@ -34,6 +37,8 @@ if TYPE_CHECKING:
 
 # Type alias for job IDs used in async transfer tracking
 JobId = int
+
+TIER_LABEL = "tier"
 
 
 class TieringOffloadingMetrics:
@@ -61,6 +66,9 @@ class TieringOffloadingMetrics:
     )
     BACKPRESSURE_STORES_DROPPED = "vllm:kv_offload_tiering_backpressure_stores_dropped"
     BACKPRESSURE_BLOCKS_DROPPED = "vllm:kv_offload_tiering_backpressure_blocks_dropped"
+    PROMOTION_LATENCY = "vllm:kv_offload_tiering_promotion_latency_seconds"
+    DEFERRED_RELEASE_CHUNKS = "vllm:kv_offload_tiering_deferred_release_chunks"
+    DEFERRED_RELEASE_HOLD = "vllm:kv_offload_tiering_deferred_release_hold_seconds"
 
 
 @dataclass
@@ -88,6 +96,13 @@ class JobResult:
     successful_keys: Collection[OffloadKey] | None = None
     transfer_time: float | None = None
     transfer_bytes: int | None = None
+    # Only applicable to failed promotion jobs. Set when the tier's I/O may
+    # still write into the primary chunks of the failed keys: the manager fails
+    # those keys now but defers releasing their chunks to the free pool until
+    # the tier sets the event. The tier may set it from any thread, once its
+    # I/O can no longer touch those chunks; the manager applies the release on
+    # its own polling path.
+    deferred_release: threading.Event | None = None
 
 
 class ParentManager(ABC):
@@ -138,9 +153,36 @@ class SecondaryTierManager(ABC):
     IMPORTANT: All methods run in the Scheduler process and must be
     lightweight and non-blocking. submit_load() and submit_store() submit
     async jobs; get_finished_jobs() polls for completion.
+
+    Methods are called under the tiering manager's lock, so they are never
+    entered concurrently -- but not always from the same thread. A tier that
+    sets tolerates_off_thread_polling is also serviced from the manager's
+    tier-poll thread, and any tier can be reached from there via
+    ParentManager fan-out. Keep per-thread assumptions out of tier state.
     """
 
     medium: ClassVar[Medium | None] = None
+    # Cache tier reported for hits served from this tier. Derived from
+    # ``medium`` unless a subclass sets it; ``None`` medium means unknown.
+    cache_hit_source: ClassVar[CacheHitSource] = CacheHitSource.EXTERNAL_UNSPECIFIED
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        if "cache_hit_source" not in cls.__dict__ and cls.medium is not None:
+            cls.cache_hit_source = {
+                Medium.CPU: CacheHitSource.HOST,
+                Medium.STORAGE: CacheHitSource.DISK,
+            }[cls.medium]
+
+    # Whether the tiering manager may also service this tier from its
+    # tier-poll thread, between engine steps, rather than only from
+    # on_schedule_end(). That thread calls both get_finished_jobs() and
+    # serve_external_requests(); see poll_tiers(). Set it on a tier that
+    # answers a counterpart the engine does not drive -- a remote peer, say --
+    # whose requests would otherwise wait for a step boundary. Overriding
+    # serve_external_requests() alone does not opt in: setting this asserts
+    # the tier tolerates those calls off the scheduler thread.
+    tolerates_off_thread_polling: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -312,9 +354,20 @@ class SecondaryTierManager(ABC):
     def serve_external_requests(self, parent: ParentManager) -> None:
         """Process remotely-originated requests using the parent manager.
 
-        Called once per scheduler step, BEFORE _flush_pending_promotions().
-        The parent handle is valid only for the duration of this call.
-        Tiers that don't serve external requests leave this as a no-op.
+        Called once per scheduler step, BEFORE _flush_pending_promotions(), and
+        additionally once per tier-poll round for tiers that set
+        tolerates_off_thread_polling. The _flush_pending_promotions() ordering
+        holds only for the per-step call: a promotion this method initiates from
+        a tier-poll round is submitted at the next on_schedule_end().
+
+        The parent handle is valid only for the duration of this call, and the
+        caller holds the manager lock throughout it -- so a lookup() HIT taken
+        here stays valid until this call pins it. An implementation must not
+        release that lock partway through.
+
+        Tiers that don't serve external requests leave this as a no-op. A tier
+        that overrides it without setting tolerates_off_thread_polling is served
+        once per step only.
         """
         return
 
@@ -341,6 +394,10 @@ class SecondaryTierManager(ABC):
         would corrupt either the primary memoryview or the secondary backing
         store. Queued (not-yet-started) transfers may be cancelled, but their
         failure result must still appear in `get_finished_jobs()`.
+
+        Likewise, every ``JobResult.deferred_release`` event must be set
+        before this returns, so the tier must bound how long it can defer a
+        release.
         """
         pass
 
@@ -358,3 +415,23 @@ class SecondaryTierManager(ABC):
     def get_stats(self) -> "OffloadingConnectorStats | None":
         """Return and reset metric observations collected by this tier."""
         return None
+
+    @classmethod
+    def config_info_keys(cls, tier_config: dict[str, Any]) -> tuple[str, ...]:
+        """Return the info metric label names of this tier.
+
+        TieringOffloadingSpec merges the names of all tiers and adds
+        TIER_LABEL, so a tier must not declare it. See ConfigInfo.
+
+        Args:
+            tier_config: Configuration dict of this tier.
+
+        """
+        return ()
+
+    def config_info(self) -> ConfigInfoMapping:
+        """Return the info metric labels of this tier, for its one series.
+
+        TieringOffloadingManager adds TIER_LABEL. See ConfigInfo.
+        """
+        return {}

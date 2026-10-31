@@ -27,7 +27,9 @@ vLLM provides multiple communication backends for EP. Use `--all2all-backend` to
 | `deepep_high_throughput` | Multi-node prefill | Grouped GEMM with continuous layout, optimized for prefill | Prefill-dominated workloads, high-throughput scenarios |
 | `deepep_low_latency` | Multi-node decode | CUDA graph support, masked layout, optimized for decode | Decode-dominated workloads, low-latency scenarios |
 | `flashinfer_nvlink_one_sided` | MNNVL systems | FlashInfer's one-sided A2A strategy for multi-node NVLink | High-throughput workloads |
+| `passthrough` | Any | Internal, not accepted on the CLI: bound automatically for MoE backends that dispatch and combine themselves, so no all-to-all runs in the framework | `--moe-backend flashinfer_moe_ep_*` (FlashInfer MoE-EP megakernels) |
 | `flashinfer_nvlink_two_sided` | MNNVL systems | FlashInfer's two-sided A2A strategy for multi-node NVLink | Systems with NVLink across nodes |
+| `mori` | ROCm | MoRI EP: EPv2 (dispatch/combine over a CCO symmetric-memory window) where supported, otherwise EPv1 | AMD Instinct; see [MoRI EP](#mori-ep-rocm) |
 
 ## Single Node Deployment
 
@@ -78,6 +80,48 @@ vllm serve deepseek-ai/DeepSeek-V3-0324 \
     --data-parallel-size 8 \         # Data parallelism across 8 processes
     --enable-expert-parallel         # Enable expert parallelism
 ```
+
+### MoRI EP (ROCm)
+
+`--all2all-backend mori` moves MoE tokens with MoRI. It runs MoRI EPv2 (`mori.ops.dispatch_combine_v2`, which reads and writes peer GPU memory directly through a MoRI CCO symmetric-memory window) where EPv2 is supported, and MoRI EPv1 otherwise.
+
+```bash
+VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1 \
+VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0 \
+vllm serve deepseek-ai/DeepSeek-V4-Pro \
+    --tensor-parallel-size 1 \
+    --data-parallel-size 8 \
+    --enable-expert-parallel \
+    --all2all-backend mori
+```
+
+`VLLM_MORI_EP_V2` selects the MoRI version:
+
+| `VLLM_MORI_EP_V2` | Behavior |
+| ----------------- | -------- |
+| unset | EPv2, falling back to EPv1 with a warning when MoRI is older than 1.2.4, the GPU is not gfx950 or gfx1250, EP spans hosts (except on gfx1250, whose UALink team can span hosts), `MORI_ENABLE_SDMA=1`, `--moe-backend aiter_mega_moe`, the model is not BF16, or MoE activations use per-tensor FP8 |
+| `1` | Always EPv2. The checks above only log a warning; startup fails if the EP ranks are not in one CCO-LSA team |
+| `0` | EPv1 |
+
+On EPv1, `mori` uses the IntraNode kernel within one node. Across nodes it uses InterNodeV1LL when the per-rank token budget (`--max-num-batched-tokens`) is at most `VLLM_MORI_DISPATCH_INTER_KERNEL_SWITCH_THRESHOLD` (default 256), and InterNodeV1 otherwise. `mori_high_throughput` and `mori_low_latency` always run EPv1 and pin the inter-node kernel to InterNodeV1 and InterNodeV1LL respectively.
+
+Choosing a MoRI backend: use EPv2 wherever it applies, and EPv1 for deployments EPv2 does not support. EPv2 cuts its receive buffers to the rows a step can actually receive and lets AITER fused MoE write its output straight into the combine buffer, so it does less work per step than EPv1.
+
+| Deployment | Backend |
+| ---------- | ------- |
+| EP within one node (or one gfx1250 UALink fabric), BF16 model, AITER fused MoE | `mori` (runs EPv2) |
+| EP within one node, with experts that take activations quantized before dispatch (e.g. FP8 or INT8 Triton experts) | EPv2 rejects these experts at startup. Enable AITER fused MoE (`VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1`) so `mori` runs EPv2 with AITER experts; MoRI EPv1 (`VLLM_MORI_EP_V2=0`) also needs AITER fused MoE. To keep Triton experts without AITER, use a non-MoRI backend such as `allgather_reducescatter` |
+| EP across nodes | `mori` (falls back to EPv1; picks InterNodeV1LL when the per-rank token budget is at most `VLLM_MORI_DISPATCH_INTER_KERNEL_SWITCH_THRESHOLD`, else InterNodeV1) |
+
+Within one node, all EPv1 options run the same IntraNode kernel. To pin the inter-node kernel, set the threshold: `0` always picks InterNodeV1, and a value at least the per-rank token budget always picks InterNodeV1LL. `mori_high_throughput` and `mori_low_latency` do the same pinning but are deprecated and will be removed in a future release; use `mori` instead.
+
+EPv2 limitations:
+
+- All EP ranks must be in one MoRI CCO-LSA team, i.e. GPUs that can load and store each other's memory: one node, or one UALink fabric. Startup fails otherwise; there is no multi-node RDMA path yet.
+- Activations are dispatched in BF16, so the model dtype must be BF16 and the experts must take unquantized inputs (AITER fused MoE, which quantizes after the all-to-all, or BF16 experts). Experts that expect activations quantized before dispatch, such as FP8 or INT8 Triton experts, are rejected at startup. Block FP8 and MXFP4 weights work; per-tensor FP8 activations (`--quantization fp8` without blocks, ModelOpt FP8) do not, since AITER cannot quantize the received rows per tensor.
+- AITER shared-expert fusion is not supported: set `VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0`.
+- Install a MoRI build that ships `mori.ops.dispatch_combine_v2`. On NICs that limit a registered memory region to 2 GiB, the window registration fails once the dispatch arena outgrows that limit (DeepSeek-V4-Pro at EP8 already does at the default 16k batched tokens).
+- Older MoRI builds leave a stale HIP error behind when the fabric-handle probe fails (e.g. on a single MI355X node), and the next PyTorch allocation raises `operation not supported`.
 
 ## Multi-Node Deployment
 
@@ -155,7 +199,7 @@ Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. T
 | `num_redundant_experts` | Additional global experts per EP rank beyond equal distribution | `0` |
 | `use_async` | Use non-blocking EPLB for reduced latency overhead | `true` |
 | `policy` | The policy type for expert parallel load balancing | `"default"` |
-| `communicator` | Backend for expert weight transfers: `"torch_nccl"`, `"torch_gloo"`, `"pynccl"`, `"nixl"`,  or `null` (auto) | `null` |
+| `communicator` | Backend for expert weight transfers: `"torch_nccl"`, `"torch_gloo"`, `"pynccl"`, `"nixl"`, `"symm_mem"`, or `null` (auto) | `null` |
 
 For example:
 
@@ -187,6 +231,8 @@ EPLB uses redundant experts that need to fit in GPU memory. This means that EPLB
 
 This overhead equals `NUM_MOE_LAYERS * BYTES_PER_EXPERT * (NUM_TOTAL_EXPERTS + NUM_REDUNDANT_EXPERTS) ÷ NUM_EP_RANKS`.
 For DeepSeekV3, this is approximately `2.4 GB` for one redundant expert per EP rank.
+
+The `symm_mem` communicator requires all EP ranks in one NVLink domain (MNNVL across nodes). It allocates its one-layer receive buffer in symmetric memory instead of regular memory, and senders write into it directly, so it uses no more memory than the other backends.
 
 ### Example Command
 
@@ -315,6 +361,47 @@ except Exception as e:
 
 ### Benchmarking
 
-- To simulate the decode deployment of disaggregated serving, pass `--kv-transfer-config '{"kv_connector":"DecodeBenchConnector","kv_role":"kv_both"}'` to the `vllm serve` invocation. The connector populates KV cache with random values so decode can be profiled in isolation.
+- To simulate the decode deployment of disaggregated serving, pass `--kv-transfer-config '{"kv_connector":"DecodeBenchConnector","kv_role":"kv_both"}'` to the `vllm serve` invocation. The connector populates KV cache with random values so decode can be profiled in isolation. Add `"kv_connector_extra_config":{"startup_fill":true}` to fill the whole KV cache once at startup instead of in the decode steps that admit new requests (see the connector docstring for its limitations).
 
 - **CUDAGraph capture**: Use `--compilation_config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'` to enable CUDA graph capture for decode only and save KV cache.
+
+## Fault tolerance and scale-down recovery
+
+Scale-down reloads every surviving physical replica using the recovered EPLB
+placement. The fused GPT-OSS MXFP4 checkpoint loader is not supported for this
+reload path; recovery rejects it rather than loading weights into the wrong slots.
+
+Fault tolerance lets vLLM recover from certain distributed engine failures without
+restarting the entire deployment. An external orchestrator detects failures and
+coordinates recovery across the engines.
+
+### Configuring recovery
+
+Both retry and scale-down require `--enable-fault-tolerance`,
+`--enable-expert-parallel`, an FT-capable `--all2all-backend` (`nixl_ep` or
+`deepep_low_latency`), and the v2 model runner (`VLLM_USE_V2_MODEL_RUNNER=1`).
+Retry can recover from a fault when all workers remain alive.
+
+For scale-down recovery, also enable `--enable-eplb` and configure enough
+redundant expert slots with `--eplb-config.num_redundant_experts` to fit all
+logical experts on the surviving ranks. The original checkpoint must remain
+accessible to survivors so they can reload expert weights.
+The orchestrator selects the recovery mode when it sends the recovery request.
+
+### Coordinating recovery
+
+Send recovery instructions to `POST /v1/fault_tolerance/apply`, then poll
+`GET /v1/fault_tolerance/status` on each participating engine. Use a new,
+nonempty `request_id` for each recovery round and send the same ID to every
+engine in that round. An HTTP 202 response means the instruction was accepted;
+wait until all participating engines report `healthy` before resuming traffic.
+
+Use `retry` when all workers are still alive. To remove a failed DP rank, stop
+routing traffic to it and send `scale_down` to every surviving engine once they
+report `unhealthy`. Include the original rank IDs in `removed_dp_ranks`. If the
+removed rank hosted the DP store, also provide a reachable surviving
+`dp_master_ip` and a free `dp_store_port`.
+
+Scale-down restores service with fewer ranks; it does not restart the removed
+engines or restore their capacity. The previous `/fault_tolerance/apply`
+endpoint is no longer registered.

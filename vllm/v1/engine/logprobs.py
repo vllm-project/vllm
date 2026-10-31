@@ -5,6 +5,8 @@ import itertools
 from collections.abc import Iterable
 from dataclasses import dataclass
 
+import numpy as np
+
 from vllm.logger import init_logger
 from vllm.logprobs import (
     FlatLogprobs,
@@ -38,6 +40,8 @@ class LogprobsProcessor:
     cumulative_logprob: float | None
     num_logprobs: int | None
     num_prompt_logprobs: int | None
+    # [num_scored_rows, num_token_ids], set once on the final prefill chunk.
+    prompt_token_id_logprobs: np.ndarray | None = None
 
     @classmethod
     def from_new_request(
@@ -49,6 +53,12 @@ class LogprobsProcessor:
         assert sampling_params is not None
         num_logprobs = sampling_params.num_logprobs
         num_prompt_logprobs = sampling_params.prompt_logprobs
+        prompt_logprobs = None
+        if num_prompt_logprobs is not None:
+            prompt_logprobs = create_prompt_logprobs(sampling_params.flat_logprobs)
+            # Positions up to prompt_logprob_start are not scored.
+            for _ in range(sampling_params.prompt_logprob_start or 0):
+                prompt_logprobs.append(None)
         return cls(
             tokenizer=tokenizer,
             cumulative_logprob=(None if num_logprobs is None else 0.0),
@@ -57,11 +67,7 @@ class LogprobsProcessor:
                 if num_logprobs is None
                 else create_sample_logprobs(sampling_params.flat_logprobs)
             ),
-            prompt_logprobs=(
-                None
-                if num_prompt_logprobs is None
-                else create_prompt_logprobs(sampling_params.flat_logprobs)
-            ),
+            prompt_logprobs=prompt_logprobs,
             num_prompt_logprobs=num_prompt_logprobs,
             num_logprobs=num_logprobs,
         )
@@ -203,6 +209,12 @@ class LogprobsProcessor:
         if plp:
             self.prompt_logprobs = []
         return plp
+
+    def pop_prompt_token_id_logprobs(self) -> np.ndarray | None:
+        """Pop and return the fixed-ID prompt scores."""
+        scores = self.prompt_token_id_logprobs
+        self.prompt_token_id_logprobs = None
+        return scores
 
     @staticmethod
     def _get_sampled_context_ids(
@@ -352,3 +364,5 @@ class LogprobsProcessor:
             self._update_sample_logprobs(output.new_logprobs)
         if output.new_prompt_logprobs_tensors is not None:
             self._update_prompt_logprobs(output.new_prompt_logprobs_tensors)
+        if output.prompt_token_id_logprobs is not None:
+            self.prompt_token_id_logprobs = output.prompt_token_id_logprobs.numpy()

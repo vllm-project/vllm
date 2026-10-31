@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig
+from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -143,8 +144,19 @@ class MiniMaxM3MultiTokenPredictor(nn.Module):
 
 
 class MiniMaxM3MTP(nn.Module):
+    # Shares the target's input embedding unless loading finds its own (only
+    # tracked under V2 PP, where the target's may not be available).
+    has_own_embed_tokens = False
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
+        self._tracks_own_embed = (
+            vllm_config.use_v2_model_runner and get_pp_group().world_size > 1
+        )
+        if self._tracks_own_embed:
+            # Preserve embeddings from loaders that bypass load_weights.
+            self.has_own_embed_tokens = vllm_config.load_config.load_format != "dummy"
 
         assert vllm_config.speculative_config is not None
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
@@ -315,4 +327,10 @@ class MiniMaxM3MTP(nn.Module):
                     f"Failed to load MTP layer {layer_idx} weights from checkpoint."
                 )
 
+        if self._tracks_own_embed:
+            if "model.embed_tokens.weight" in loaded_params:
+                self.has_own_embed_tokens = True
+            elif is_mtp_completeness_check_enabled():
+                # A complete checkpoint without embeddings borrows the target's.
+                self.has_own_embed_tokens = False
         return loaded_params

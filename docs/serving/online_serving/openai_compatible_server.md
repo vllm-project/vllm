@@ -174,6 +174,8 @@ see our [Multimodal Inputs](../../features/multimodal_inputs.md) guide for more 
 
 Code example: [examples/basic/online_serving/openai_chat_completion_client.py](../../../examples/basic/online_serving/openai_chat_completion_client.py)
 
+With `--enable-prompt-tokens-details`, `/v1/chat/completions/batch` sums `cached_tokens`, `created_cache_tokens` and per-modality `multimodal_tokens` across conversations in `usage.prompt_tokens_details`; an unreported cache count makes that total `null`, and disabling the flag leaves the details `null`.
+
 #### Extra parameters
 
 The following [sampling parameters](../../api/README.md#inference-parameters) are supported.
@@ -203,6 +205,12 @@ To get prompt token IDs before generation, use
 [`/v1/responses/render`](renderer.md#get-responses-prompt-token-ids). It preprocesses
 a self-contained Responses request without inference and returns the prompt
 token IDs, so a separate `/tokenize` call is not needed.
+
+#### Sampling parameters
+
+In addition to the OpenAI request fields, the Responses API forwards vLLM
+[sampling parameters](../../api/README.md#inference-parameters) such as `top_k`,
+`min_p`, `repetition_penalty`, `seed`, `stop`, and `ignore_eos` to the engine.
 
 #### Extra parameters
 
