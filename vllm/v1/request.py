@@ -256,7 +256,7 @@ class Request:
             sampling_params=request.sampling_params,
             pooling_params=request.pooling_params,
             arrival_time=request.arrival_time,
-            lora_request=request.lora_request,
+            lora_request=request.resolved_lora_request,
             cache_salt=request.cache_salt,
             priority=request.priority,
             trace_headers=request.trace_headers,

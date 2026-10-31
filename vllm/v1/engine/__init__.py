@@ -12,7 +12,7 @@ import numpy as np
 import torch
 
 from vllm.config.kv_events import KVEventsConfig
-from vllm.lora.request import LoRARequest
+from vllm.lora.request import LoRARequest, LoRARequestLike, LoRARoutingRequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.outputs import RequestError
 from vllm.pooling_params import PoolingParams
@@ -187,6 +187,13 @@ class EngineCoreRequest(
 
     session_id: str | None = None
     kv_hints: KvHintsEnvelope | None = None
+    lora_routing_request: LoRARoutingRequest | None = None
+
+    @property
+    def resolved_lora_request(self) -> LoRARequestLike | None:
+        if self.lora_request is not None and self.lora_routing_request is not None:
+            raise ValueError("Specify only one scalar or routed LoRA request")
+        return self.lora_routing_request or self.lora_request
 
     @property
     def params(self) -> SamplingParams | PoolingParams:

@@ -13,7 +13,7 @@ from typing_extensions import TypeVar
 from vllm.exceptions import GenerationError, RetryableRequestError, VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import PromptLogprobs, SampleLogprobs
-from vllm.lora.request import LoRARequest
+from vllm.lora.request import LoRARequestLike
 from vllm.v1.metrics.stats import RequestSpecDecodeMetrics, RequestStateStats
 
 logger = init_logger(__name__)
@@ -92,7 +92,7 @@ class CompletionOutput:
     routed_experts: np.ndarray | None = None  # [seq_len,layer_num,topk]
     finish_reason: str | None = None
     stop_reason: int | str | None = None
-    lora_request: LoRARequest | None = None
+    lora_request: LoRARequestLike | None = None
     sampling_mask: SamplingMask | None = None
     spec_decode_metrics: RequestSpecDecodeMetrics | None = None
     weight_versions: list[WeightVersionSpan] | None = None
@@ -175,7 +175,7 @@ class RequestOutput:
         outputs: list[CompletionOutput],
         finished: bool,
         metrics: RequestStateStats | None = None,
-        lora_request: LoRARequest | None = None,
+        lora_request: LoRARequestLike | None = None,
         encoder_prompt: str | None = None,
         encoder_prompt_token_ids: list[int] | None = None,
         num_cached_tokens: int | None = None,

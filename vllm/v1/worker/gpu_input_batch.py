@@ -1036,7 +1036,7 @@ class InputBatch:
                 token.
             3. lora_requests: Set of relevant LoRA requests.
             4. lora_route_mapping: Optional routed mapping for multi-adapter
-               LoRA execution.
+                LoRA execution.
 
         """
         req_lora_mapping = self.request_lora_mapping[: self.num_reqs]

@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import hashlib
+import json
 import math
 from typing import TypeAlias
 
@@ -75,7 +77,7 @@ class LoRARoutingRequest(
     omit_defaults=True,  # type: ignore[call-arg]
     array_like=True,
 ):  # type: ignore[call-arg]
-    """Internal request for fixed-weight routed mixtures of LoRA adapters."""
+    """Fixed-weight composition of independently loaded LoRA adapters."""
 
     routing_name: str
     routing_int_id: int
@@ -110,6 +112,20 @@ class LoRARoutingRequest(
             raise ValueError("lora_weights must be non-negative")
         if sum(self.lora_weights) <= 0:
             raise ValueError("At least one lora weight must be positive")
+
+    @property
+    def cache_fingerprint(self) -> str:
+        """Identify the ordered computation, independently of its display name."""
+        components = [
+            (adapter.lora_name, adapter.lora_path, float(weight).hex())
+            for adapter, weight in zip(self.lora_requests, self.lora_weights)
+        ]
+        payload = json.dumps(
+            ("lora_route_v1", self.routing_strategy, components),
+            ensure_ascii=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
 
     @property
     def adapter_id(self):

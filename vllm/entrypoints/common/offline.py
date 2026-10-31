@@ -18,7 +18,7 @@ from vllm.config import ModelConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
-from vllm.lora.request import LoRARequest
+from vllm.lora.request import LoRARequest, LoRARequestLike, LoRARoutingRequest
 from vllm.renderers import BaseRenderer, ChatParams, merge_kwargs
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
@@ -59,10 +59,13 @@ class OfflineInferenceMixin:
     def _resolve_mm_lora(
         self,
         prompt: EngineInput,
-        lora_request: LoRARequest | None,
-    ) -> LoRARequest | None:
+        lora_request: LoRARequestLike | None,
+    ) -> LoRARequestLike | None:
         if prompt["type"] != "multimodal":
             return lora_request
+
+        if isinstance(lora_request, LoRARoutingRequest):
+            raise VLLMValidationError("Routed LoRA supports text-only inputs")
 
         lora_config = self.llm_engine.vllm_config.lora_config
         default_mm_loras = None if lora_config is None else lora_config.default_mm_loras
@@ -268,9 +271,9 @@ class OfflineInferenceMixin:
 
     def _lora_request_to_seq(
         self,
-        lora_request: LoRARequest | None | Sequence[LoRARequest | None],
+        lora_request: LoRARequestLike | None | Sequence[LoRARequestLike | None],
         num_requests: int,
-    ) -> Sequence[LoRARequest | None]:
+    ) -> Sequence[LoRARequestLike | None]:
         if isinstance(lora_request, Sequence):
             if len(lora_request) != num_requests:
                 raise VLLMValidationError(
@@ -309,7 +312,7 @@ class OfflineInferenceMixin:
         | Sequence[SamplingParams | PoolingParams],
         *,
         use_tqdm: bool | Callable[..., tqdm] = True,
-        lora_request: Sequence[LoRARequest] | LoRARequest | None = None,
+        lora_request: Sequence[LoRARequestLike | None] | LoRARequestLike | None = None,
         priority: int | Sequence[int] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
@@ -346,7 +349,7 @@ class OfflineInferenceMixin:
         output_type: type[_O],
         *,
         use_tqdm: bool | Callable[..., tqdm] = True,
-        lora_request: Sequence[LoRARequest] | LoRARequest | None = None,
+        lora_request: Sequence[LoRARequestLike | None] | LoRARequestLike | None = None,
         priority: int | Sequence[int] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
@@ -372,7 +375,7 @@ class OfflineInferenceMixin:
         output_type: type[_O],
         *,
         use_tqdm: bool | Callable[..., tqdm] = True,
-        lora_request: Sequence[LoRARequest] | LoRARequest | None = None,
+        lora_request: Sequence[LoRARequestLike | None] | LoRARequestLike | None = None,
         priority: int | Sequence[int] | None = None,
         chat_template: str | None = None,
         chat_template_content_format: ChatTemplateContentFormatOption = "auto",
@@ -409,7 +412,7 @@ class OfflineInferenceMixin:
         | Sequence[SamplingParams | PoolingParams],
         *,
         use_tqdm: bool | Callable[..., tqdm] = True,
-        lora_request: Sequence[LoRARequest] | LoRARequest | None = None,
+        lora_request: Sequence[LoRARequestLike | None] | LoRARequestLike | None = None,
         priority: int | Sequence[int] | None = None,
         chat_template: str | None = None,
         chat_template_content_format: ChatTemplateContentFormatOption = "auto",
@@ -513,7 +516,7 @@ class OfflineInferenceMixin:
         params: Sequence[SamplingParams | PoolingParams],
         output_type: type[_O],
         *,
-        lora_requests: Sequence[LoRARequest | None] | None = None,
+        lora_requests: Sequence[LoRARequestLike | None] | None = None,
         priorities: Sequence[int] | None = None,
         use_tqdm: bool | Callable[..., tqdm] = True,
     ):
@@ -541,7 +544,7 @@ class OfflineInferenceMixin:
         prompts: Iterable[EngineInput],
         params: Sequence[SamplingParams | PoolingParams],
         *,
-        lora_requests: Sequence[LoRARequest | None] | None = None,
+        lora_requests: Sequence[LoRARequestLike | None] | None = None,
         priorities: Sequence[int] | None = None,
     ) -> list[str]:
         added_request_ids: list[str] = []
@@ -569,7 +572,7 @@ class OfflineInferenceMixin:
         self,
         prompt: EngineInput,
         params: SamplingParams | PoolingParams,
-        lora_request: LoRARequest | None = None,
+        lora_request: LoRARequestLike | None = None,
         priority: int = 0,
     ) -> str:
         if isinstance(params, SamplingParams):

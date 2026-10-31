@@ -22,7 +22,7 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.exceptions import ProfilerAlreadyActiveError
 from vllm.inputs import EngineInput, PromptType
 from vllm.logger import configure_logging_if_needed, init_logger
-from vllm.lora.request import LoRARequest
+from vllm.lora.request import LoRARequest, LoRARequestLike
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
@@ -232,7 +232,7 @@ class LLMEngine:
         prompt: EngineCoreRequest | PromptType | EngineInput,
         params: SamplingParams | PoolingParams,
         arrival_time: float | None = None,
-        lora_request: LoRARequest | None = None,
+        lora_request: LoRARequestLike | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,

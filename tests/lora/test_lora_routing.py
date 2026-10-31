@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import cast
+
 import numpy as np
 import pytest
 import torch
@@ -19,6 +21,7 @@ from vllm.lora.punica_wrapper.punica_cpu import PunicaWrapperCPU
 from vllm.lora.punica_wrapper.utils import convert_route_mapping
 from vllm.lora.request import (
     LoRARequest,
+    LoRARequestLike,
     LoRARoutingRequest,
     iter_lora_int_ids,
     iter_lora_requests,
@@ -39,6 +42,193 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.v1.worker.gpu.lora_utils import LoraState
 
 pytestmark = pytest.mark.skip_global_cleanup
+
+
+@pytest.fixture
+def tiny_composition_model(tmp_path):
+    from peft import LoraConfig, get_peft_model
+    from transformers import OPTConfig, OPTForCausalLM
+
+    torch.manual_seed(42)
+    base = OPTForCausalLM(
+        OPTConfig(
+            vocab_size=64,
+            hidden_size=64,
+            word_embed_proj_dim=64,
+            ffn_dim=64,
+            num_hidden_layers=2,
+            num_attention_heads=2,
+            max_position_embeddings=256,
+        )
+    ).eval()
+    model_path = tmp_path / "base"
+    base.save_pretrained(model_path)
+    config = LoraConfig(
+        r=4,
+        lora_alpha=8,
+        target_modules=["q_proj", "v_proj"],
+        init_lora_weights=False,
+        task_type="CAUSAL_LM",
+    )
+    reference = get_peft_model(base, config)
+    reference.add_adapter("second", config)
+    adapters_path = tmp_path / "adapters"
+    reference.save_pretrained(adapters_path)
+    adapters = (
+        LoRARequest("first", 1, str(adapters_path)),
+        LoRARequest("second", 2, str(adapters_path / "second")),
+    )
+    return str(model_path), reference.eval(), adapters
+
+
+@torch.inference_mode()
+def assert_generation_matches_reference(reference, prompt, completion, num_tokens):
+    assert len(completion.token_ids) == num_tokens
+    assert len(completion.logprobs) == num_tokens
+    # Evaluate every prediction against its actual generated prefix, including
+    # decode steps after vLLM has started reusing its KV cache.
+    token_ids = prompt + list(completion.token_ids[:-1])
+    expected = (
+        reference(torch.tensor([token_ids]), use_cache=False)
+        .logits[0, len(prompt) - 1 :]
+        .log_softmax(-1)
+    )
+    actual = torch.tensor(
+        [
+            [scores[token].logprob for token in range(expected.shape[-1])]
+            for scores in completion.logprobs
+        ]
+    )
+    torch.testing.assert_close(actual, expected.cpu(), atol=2e-4, rtol=2e-4)
+
+
+@pytest.mark.parametrize("prefix_caching", [False, True])
+def test_generate_composition_matches_peft_and_isolates_prefix_cache(
+    tiny_composition_model,
+    vllm_runner,
+    prefix_caching,
+):
+    from vllm import SamplingParams
+
+    model_path, reference, adapters = tiny_composition_model
+    prompt = [3, 4, 5, 6] * 40
+    num_tokens = 8
+    params = SamplingParams(
+        temperature=0,
+        max_tokens=num_tokens,
+        ignore_eos=True,
+        logprobs=64,
+        detokenize=False,
+    )
+    with vllm_runner(
+        model_path,
+        dtype="float32",
+        enforce_eager=True,
+        skip_tokenizer_init=True,
+        enable_lora=True,
+        max_loras=4,
+        max_loras_per_request=2,
+        max_lora_rank=8,
+        max_model_len=192,
+        block_size=128,
+        kv_cache_memory_bytes=16 * 1024 * 1024,
+        max_num_seqs=4,
+        max_logprobs=64,
+        enable_prefix_caching=prefix_caching,
+    ) as runner:
+        llm = runner.get_llm()
+        for index, weights in enumerate(((0.7, 0.3), (0.3, 0.7))):
+            name = f"reference_{index}"
+            reference.add_weighted_adapter(
+                ["default", "second"],
+                list(weights),
+                name,
+                combination_type="cat",
+            )
+            reference.set_adapter(name)
+            route = make_routing_request(adapters, weights)
+            output = llm.generate(
+                [{"prompt_token_ids": prompt}],
+                params,
+                lora_request=route,
+                use_tqdm=False,
+            )[0]
+            assert output.lora_request.lora_weights == weights
+            assert (output.num_cached_tokens or 0) == 0
+            assert_generation_matches_reference(
+                reference, prompt, output.outputs[0], num_tokens
+            )
+            repeated = llm.generate(
+                [{"prompt_token_ids": prompt}],
+                params,
+                lora_request=route,
+                use_tqdm=False,
+            )[0]
+            if prefix_caching:
+                assert repeated.num_cached_tokens > 0
+            assert_generation_matches_reference(
+                reference, prompt, repeated.outputs[0], num_tokens
+            )
+
+        selections = [route, adapters[0], None]
+        mixed = llm.generate(
+            [{"prompt_token_ids": prompt}] * 3,
+            params,
+            lora_request=selections,
+            use_tqdm=False,
+        )
+        for output, selection in zip(mixed, selections):
+            assert output.lora_request == selection
+            if selection is None:
+                with reference.disable_adapter():
+                    assert_generation_matches_reference(
+                        reference, prompt, output.outputs[0], num_tokens
+                    )
+            else:
+                reference.set_adapter(
+                    "default" if isinstance(selection, LoRARequest) else name
+                )
+                assert_generation_matches_reference(
+                    reference, prompt, output.outputs[0], num_tokens
+                )
+
+
+@pytest.mark.parametrize(
+    "eager,limit,error",
+    [
+        (False, 2, "enforce_eager"),
+        (True, 1, "max_loras_per_request"),
+    ],
+)
+def test_input_processor_rejects_unsupported_composition(
+    tiny_composition_model,
+    eager,
+    limit,
+    error,
+):
+    from vllm import SamplingParams
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.exceptions import VLLMValidationError
+    from vllm.v1.engine.input_processor import InputProcessor
+
+    model_path, _, adapters = tiny_composition_model
+    config = EngineArgs(
+        model=model_path,
+        skip_tokenizer_init=True,
+        enforce_eager=eager,
+        enable_lora=True,
+        max_loras=2,
+        max_loras_per_request=limit,
+    ).create_engine_config()
+    processor = InputProcessor(config)
+    with pytest.raises(VLLMValidationError, match=error):
+        processor.process_inputs(
+            "rejected",
+            {"prompt_token_ids": [3, 4]},
+            SamplingParams(max_tokens=1),
+            ("generate",),
+            lora_request=make_routing_request(adapters, (0.7, 0.3)),
+        )
 
 
 def fake_quantize_activation(x: torch.Tensor, num_bits: int) -> torch.Tensor:
@@ -94,7 +284,7 @@ class FakeQuantConfig(QuantizationConfig):
         self.num_bits = num_bits
 
     def get_name(self) -> QuantizationMethods:
-        return "custom_quant"
+        return cast(QuantizationMethods, "custom_quant")
 
     def get_supported_act_dtypes(self) -> list[torch.dtype]:
         return [torch.float32]
@@ -127,6 +317,111 @@ def make_lora_request(lora_id: int) -> LoRARequest:
         lora_int_id=lora_id,
         lora_path="/tmp/lora",
     )
+
+
+@pytest.mark.parametrize("limit", [0, -1, 3])
+def test_per_request_limit_rejects_invalid_config(limit):
+    with pytest.raises(ValueError):
+        LoRAConfig(max_loras=2, max_loras_per_request=limit)
+
+
+def test_per_request_limit_defaults_to_one():
+    assert LoRAConfig(max_loras=4).max_loras_per_request == 1
+    assert LoRAConfig(max_loras=4, max_loras_per_request=2).max_loras_per_request == 2
+
+
+def test_per_request_limit_cli_plumbing():
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    parsed = parser.parse_args(
+        [
+            "--enable-lora",
+            "--max-loras",
+            "4",
+            "--max-loras-per-request",
+            "2",
+        ]
+    )
+    args = EngineArgs.from_cli_args(parsed)
+    assert args.max_loras == 4
+    assert args.max_loras_per_request == 2
+
+
+@pytest.mark.parametrize("weights", [(0.7, 0.3), (0.3, 0.7)])
+def test_routed_request_engine_transport(weights):
+    from vllm import SamplingParams
+    from vllm.v1.engine import EngineCoreRequest
+    from vllm.v1.request import Request
+    from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+
+    route = make_routing_request((make_lora_request(1), make_lora_request(2)), weights)
+    request = EngineCoreRequest(
+        request_id="route",
+        prompt_token_ids=[1, 2],
+        mm_features=None,
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        arrival_time=0.0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        lora_routing_request=route,
+    )
+    decoded = MsgpackDecoder(EngineCoreRequest).decode(MsgpackEncoder().encode(request))
+    resolved = decoded.resolved_lora_request
+    assert isinstance(resolved, LoRARoutingRequest)
+    assert resolved.lora_requests == route.lora_requests
+    assert resolved.lora_weights == weights
+    assert resolved.cache_fingerprint == route.cache_fingerprint
+    assert Request.from_engine_core_request(decoded, None).lora_request == route
+    decoded.lora_request = make_lora_request(3)
+    with pytest.raises(ValueError, match="only one"):
+        _ = decoded.resolved_lora_request
+
+
+@pytest.mark.parametrize("adapter", [None, LoRARequest("scalar", 1, "/tmp/scalar")])
+def test_ordinary_engine_transport_accepts_missing_route_field(adapter):
+    import msgspec
+
+    from vllm import SamplingParams
+    from vllm.v1.engine import EngineCoreRequest
+    from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+
+    request = EngineCoreRequest(
+        request_id="scalar",
+        prompt_token_ids=[1],
+        mm_features=None,
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        arrival_time=0.0,
+        lora_request=adapter,
+        cache_salt=None,
+        data_parallel_rank=None,
+    )
+    encoder = MsgpackEncoder()
+    raw = msgspec.msgpack.decode(encoder.encode(request)[0])
+    assert raw[-1] is None
+    old_payload = msgspec.msgpack.encode(raw[:-1])
+    decoded = MsgpackDecoder(EngineCoreRequest).decode([old_payload])
+    assert decoded.resolved_lora_request == adapter
+
+
+def test_routed_offline_broadcast_and_prompt_selection():
+    from vllm.entrypoints.common.offline import OfflineInferenceMixin
+    from vllm.exceptions import VLLMValidationError
+
+    mixin = OfflineInferenceMixin()
+    adapter = make_lora_request(1)
+    route = make_routing_request((adapter, make_lora_request(2)), (0.7, 0.3))
+    assert mixin._lora_request_to_seq(route, 2) == [route, route]
+    selections = [route, adapter, None]
+    assert mixin._lora_request_to_seq(selections, 3) == selections
+    with pytest.raises(VLLMValidationError, match="lengths"):
+        mixin._lora_request_to_seq(selections, 2)
+    with pytest.raises(VLLMValidationError, match="text-only"):
+        mixin._resolve_mm_lora({"type": "multimodal"}, route)
 
 
 def make_routing_request(
@@ -289,9 +584,9 @@ def test_lora_routing_utils_track_indexed_requests():
     lora_3 = make_lora_request(3)
     routed_request = make_routing_request((lora_1, lora_2), (0.25, 0.75))
     request_lora_mapping = np.zeros(3, dtype=np.int64)
-    request_lora_requests = {}
-    lora_id_to_request_ids = {}
-    lora_id_to_lora_request = {}
+    request_lora_requests: dict[int, LoRARequestLike] = {}
+    lora_id_to_request_ids: dict[int, set[str]] = {}
+    lora_id_to_lora_request: dict[int, LoRARequest] = {}
 
     add_lora_request(
         request_lora_mapping,
