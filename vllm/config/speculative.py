@@ -551,11 +551,11 @@ class SpeculativeConfig:
 
     # Ngram proposer configuration
     prompt_lookup_max: int | None = Field(default=None, ge=1)
-    """Maximum size of ngram token window when using Ngram proposer, required
-    when method is set to ngram."""
+    """Maximum size of ngram token window when using Ngram proposer. Defaults
+    to `prompt_lookup_min` if set, otherwise 5."""
     prompt_lookup_min: int | None = Field(default=None, ge=1)
-    """Minimum size of ngram token window when using Ngram proposer, if
-    provided. Defaults to 1."""
+    """Minimum size of ngram token window when using Ngram proposer. Defaults
+    to `prompt_lookup_max` if set, otherwise 5."""
 
     # Alternative drafting strategies
     parallel_drafting: bool = False
