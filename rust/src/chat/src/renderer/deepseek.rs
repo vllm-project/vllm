@@ -230,13 +230,7 @@ pub(super) fn render_request_with_media_order(
             }
             ChatMessage::Custom { role, content } if role == "latest_reminder" => {
                 out.push_str(LATEST_REMINDER_SP_TOKEN);
-                write_chat_content(
-                    &mut out,
-                    content,
-                    dialect,
-                    message_index,
-                    &mut media_order,
-                )?;
+                write_chat_content(&mut out, content, dialect, message_index, &mut media_order)?;
             }
             ChatMessage::Custom { role, .. } => {
                 return Err(Error::UnsupportedChatRole { role: role.clone() });
