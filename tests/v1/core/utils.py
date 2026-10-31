@@ -89,6 +89,7 @@ def create_scheduler(
     per_request_spec_decode_metrics: str = "none",
     prefill_schedule_interval: int = 1,
     scheduling_policy: SchedulerPolicy = "fcfs",
+    residual_sjf_max_wait_ms: int = 10_000,
     diffusion_canvas_length: int | None = None,
     scheduler_cls: type[Scheduler] | None = None,
     lora_config: LoRAConfig | None = None,
@@ -143,6 +144,7 @@ def create_scheduler(
         # Ensure admission/preemption mechanics are deterministic
         watermark=0.0,
         policy=scheduling_policy,
+        residual_sjf_max_wait_ms=residual_sjf_max_wait_ms,
     )
     # Cache config, optionally force APC
     cache_config = CacheConfig(

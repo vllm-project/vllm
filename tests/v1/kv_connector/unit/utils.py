@@ -375,8 +375,14 @@ class TestExampleConnector(ExampleConnector):
         # Intercept calls to the connector interface and write an event
         # for each one to a file, which can be read back in the main test proc.
         if callable(attr):
+            if name == "on_preschedule_request":
+                return lambda request: self.name
 
             def wrapper(*args, **kwargs):
+                if name == "on_new_request":
+                    request = args[0]
+                    assert request.kv_preschedule_handle == self.name
+                    request.kv_preschedule_handle = None
                 self.call_record[name] += 1
 
                 # Include args that we're interested in
@@ -441,6 +447,10 @@ class MockKVConnector(KVConnectorBase_V1):
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
         return self.config.supports_divergent_local_hybrid_hits
+
+    def get_num_cached_tokens(self, request, num_computed_tokens):
+        params = request.kv_transfer_params or {}
+        return params.get("cached_tokens")
 
     def get_num_new_matched_tokens(
         self,

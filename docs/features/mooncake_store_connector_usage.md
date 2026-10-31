@@ -317,10 +317,21 @@ Strict isolation requires a Mooncake master started with `--enable_multi_tenants
 - **kv_consumer**: For instances that load KV caches from the pool.
 - **kv_both**: The instance both stores and loads KV caches. Use this for single-node CPU offloading or prefiller instances.
 
+### Arrival-time lookup with MultiConnector
+
+For flat or nested MultiConnector, set `lookup_async` and
+`lookup_prefetch_limit` in each Mooncake child's `kv_connector_extra_config`.
+Each child has its own limit and TTL; selection still uses the first hit.
+Early queries can be wasted on later aborts or full local hits. Rejected requests
+and discarded streaming updates cancel queued queries; running RPCs may finish.
+Shutdown interrupts pending replies and closes scheduler lookup clients.
+
 ### kv_connector_extra_config
 
 - `load_async` (bool): Enable asynchronous loading for better compute-I/O overlap. Default: `true`.
-- `lookup_async` (bool): Run the external prefix-cache lookup on a background thread so it never blocks the scheduler step. The request is held until the in-flight lookup completes, then resumed on a later step. Default: `false`.
+- `lookup_async` (bool): Run the external prefix-cache lookup on a background thread without waiting for its result. With a positive `lookup_prefetch_limit`, lookup starts on the engine-core input thread as soon as the request arrives, so it overlaps the wait for the scheduler. GPU KV allocation and loading still happen through the scheduler. Default: `false`.
+- `lookup_prefetch_limit` (int): Maximum number of arrival-time lookups in flight. Beyond it, a request is looked up when the scheduler first reaches it; scheduler lookups are not capped. Set to a positive value to enable arrival-time lookup. Default: `0` (disabled).
+- `lookup_prefetch_ttl_s` (float): Maximum age of an arrival-time lookup result when the scheduler first reaches the request, measured from submission, and of a cached async result, measured from its first read. Older results are looked up again, as are lookups whose token/hash range changed. Default: `2.0` seconds.
 - `lookup_rpc_port` (int): Custom port for the ZMQ lookup RPC socket. Default: `0`.
 - `custom_mem_pool` (str): Optional Mooncake allocator for the GPU KV cache.
   `"NVLINK"` is used in the [EGM deployment example](#standalone-egm-over-nvlink);

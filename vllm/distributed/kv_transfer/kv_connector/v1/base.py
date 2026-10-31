@@ -512,6 +512,18 @@ class KVConnectorBase_V1(ABC):
         """
         return self._kv_cache_config.prefix_cacheable_group_ids
 
+    def get_num_cached_tokens(
+        self, request: "Request", num_computed_tokens: int
+    ) -> int | None:
+        """Estimate the total usable external prefix length for queue ordering.
+
+        Called on the scheduler thread. Must not block, start work, consume
+        lookup results or reserve a load. Return None for an unknown/pending
+        estimate and 0 for a known miss. Admission still validates the result
+        through get_num_new_matched_tokens().
+        """
+        return None
+
     @abstractmethod
     def get_num_new_matched_tokens(
         self,
@@ -615,6 +627,28 @@ class KVConnectorBase_V1(ABC):
 
         Connectors can override this to inspect the request and perform
         bookkeeping. The default implementation is a no-op.
+        """
+        return
+
+    def on_preschedule_request(self, request: "Request") -> Any:
+        """Called on the engine-core input thread right after ``request`` is
+        built, before the scheduler sees it, so it may run concurrently with
+        schedule(). Implementations must not read or write mutable connector
+        or scheduler state; they may only start self-contained, thread-safe
+        background work (e.g. an async prefix lookup) and return a handle.
+
+        The handle is stored on ``request.kv_preschedule_handle``, which hands it
+        to the scheduler thread: the connector takes it from there (e.g. in
+        get_num_new_matched_tokens) and owns it from then on. Returns None
+        to start nothing. The default implementation is a no-op.
+        """
+        return None
+
+    def cancel_preschedule_request(self, request: "Request") -> None:
+        """Cancel unadopted work when preprocessing or admission drops a request.
+
+        May run on either the input or scheduler thread. Cancellation must be
+        idempotent; shutdown must also cover handles still in the input queue.
         """
         return
 

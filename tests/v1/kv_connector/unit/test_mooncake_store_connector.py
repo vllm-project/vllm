@@ -3,6 +3,8 @@
 
 import threading
 import time
+from concurrent.futures import CancelledError
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -30,6 +32,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
     MooncakeStoreConnectorStats,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
+    MultiConnector,
+)
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
@@ -42,7 +47,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
 
-from .utils import create_vllm_config
+from .utils import create_request, create_vllm_config
 
 
 def _make_vllm_config():
@@ -806,6 +811,227 @@ def _gated_recv(gate: threading.Event, value: int):
     return recv
 
 
+@contextmanager
+def _multi_store_lookup(hit_lengths=(16, 32), *, nested=False):
+    configs = [
+        {
+            "kv_connector": "MooncakeStoreConnector",
+            "kv_role": "kv_both",
+            "kv_connector_extra_config": {
+                "lookup_async": True,
+                "lookup_prefetch_limit": 4,
+            },
+        }
+        for _ in hit_lengths
+    ]
+    if nested:
+        configs = [
+            {
+                "kv_connector": "MultiConnector",
+                "kv_role": "kv_both",
+                "kv_connector_extra_config": {"connectors": configs},
+            }
+        ]
+    config = create_vllm_config(
+        kv_connector="MultiConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"connectors": configs},
+    )
+    gates = [threading.Event() for _ in hit_lengths]
+    sockets = [MagicMock() for _ in hit_lengths]
+    for sock, gate, hit in zip(sockets, gates, hit_lengths):
+        gate.set()
+        sock.recv.side_effect = _gated_recv(gate, hit)
+    with (
+        set_current_vllm_config(config),
+        patch.object(worker, "make_zmq_socket", side_effect=sockets),
+    ):
+        connector = MultiConnector(
+            config, KVConnectorRole.SCHEDULER, _make_kv_cache_config()
+        )
+    stores = connector.sub_connectors
+    if nested:
+        stores = stores[0].sub_connectors
+    try:
+        yield connector, [s.connector_scheduler.client for s in stores], sockets, gates
+    finally:
+        for gate in gates:
+            gate.set()
+        connector.shutdown()
+
+
+def _lookup_states(request, nested=False):
+    handles = request.kv_preschedule_handle.handles
+    return handles[0].handles if nested else handles
+
+
+@pytest.mark.parametrize(
+    "nested,hits", [(False, (16, 32)), (True, (0, 32)), (False, (0, 0))]
+)
+def test_multi_store_preschedule_retains_later_handle_when_first_is_pending(
+    nested, hits
+):
+    with _multi_store_lookup(hits, nested=nested) as (mc, _, sockets, gates):
+        gates[0].clear()
+        request = create_request(num_tokens=48)
+        request.prefix_cache_hit_limit = 16
+        assert mc.on_preschedule_request(request) is None
+        request.prefix_cache_hit_limit = None
+        request.kv_preschedule_handle = mc.on_preschedule_request(request)
+        states = list(_lookup_states(request, nested))
+        assert states[1].future.result(timeout=5).hit_length == hits[1]
+        assert mc.get_num_cached_tokens(request, 0) is None
+        assert mc.get_num_new_matched_tokens(request, 0) == (None, False)
+        assert _lookup_states(request, nested) == [None, states[1]]
+        gates[0].set()
+        assert states[0].future.result(timeout=5).hit_length == hits[0]
+        expected = next((hit for hit in hits if hit), 0)
+        assert mc.get_num_cached_tokens(request, 0) == expected
+        assert mc.get_num_cached_tokens(request, 16) == hits[1]
+        assert mc.get_num_new_matched_tokens(request, 0) == (expected, bool(expected))
+        assert [sock.send_multipart.call_count for sock in sockets] == [1, 1]
+
+
+@pytest.mark.parametrize("adopted", [False, True])
+def test_multi_store_abort_cancels_queued_queries(adopted):
+    with _multi_store_lookup(nested=True) as (mc, clients, sockets, gates):
+        for client, gate in zip(clients, gates):
+            gate.clear()
+            client.executor.submit(gate.wait)
+        request = create_request(num_tokens=48)
+        request.kv_preschedule_handle = mc.on_preschedule_request(request)
+        states = list(_lookup_states(request, nested=True))
+        if adopted:
+            assert mc.get_num_new_matched_tokens(request, 0) == (None, False)
+            assert mc.request_finished(request, []) == (False, None)
+        else:
+            mc.cancel_preschedule_request(request)
+        assert request.kv_preschedule_handle is None
+        assert all(state.future.cancelled() for state in states)
+        for client, gate in zip(clients, gates):
+            gate.set()
+            client.executor.submit(lambda: None).result(timeout=5)
+        assert all(sock.send_multipart.call_count == 0 for sock in sockets)
+
+
+def _make_lookup_client(extra_config=None):
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeStoreConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config=extra_config,
+    )
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+        "worker.make_zmq_socket"
+    ) as make_socket:
+        client = worker.LookupKeyClient(vllm_config)
+    return client, make_socket.return_value
+
+
+def test_lookup_close_stops_running_rpc_and_cancels_unadopted_work():
+    with _multi_store_lookup() as (mc, clients, sockets, gates):
+        client = clients[0]
+        started = threading.Event()
+        sockets[0].send_multipart.side_effect = lambda *a, **kw: started.set()
+        gates[0].clear()
+        sockets[0].poll.side_effect = lambda timeout: gates[0].wait(timeout / 1000)
+        running = client.prefetch(48, [])
+        assert started.wait(timeout=5)
+        queued = client.prefetch(48, [])
+        mc.shutdown()
+        with pytest.raises(CancelledError):
+            running.future.result(timeout=5)
+        assert queued.future.cancelled()
+        assert all(c.prefetch(48, []) is None for c in clients)
+
+
+@pytest.mark.parametrize("limit", [None, 0, 1])
+def test_lookup_prefetch_cap_bounds_in_flight_prefetches(limit, monkeypatch):
+    client, sock = _make_lookup_client(
+        {} if limit is None else {"lookup_prefetch_limit": limit}
+    )
+    gate = threading.Event()
+    sock.recv.side_effect = _gated_recv(gate, 32)
+    monkeypatch.setattr(worker.time, "monotonic", lambda: 0.0)
+    try:
+        first = client.prefetch(48, [])
+        assert (first is not None) == bool(limit)
+        assert client.prefetch(48, []) is None
+        # Scheduler probes bypass the cap.
+        assert client.lookup("next", 48, [], non_block=True) is None
+        pending = client._lookups["next"].future
+        monkeypatch.setattr(worker.time, "monotonic", lambda: 3.0)
+        assert client.lookup("next", 48, [], non_block=True) is None
+        assert client._lookups["next"].future is pending
+        if limit:
+            gate.set()
+            # The single worker runs callbacks before taking its next task.
+            client.executor.submit(lambda: None).result(timeout=5)
+            later = client.prefetch(48, [])
+            assert later is not None
+            later.future.result(timeout=5)
+    finally:
+        gate.set()
+        client.close()
+
+
+@pytest.mark.parametrize("change", ["tokens", "hash", "expired", "cached_expired"])
+def test_lookup_client_refreshes_changed_or_expired_query(monkeypatch, change):
+    client, sock = _make_lookup_client({"lookup_prefetch_limit": 1})
+    sock.recv.return_value = (32).to_bytes(4, "big")
+    clock = [0.0]
+    monkeypatch.setattr(worker.time, "monotonic", lambda: clock[0])
+    num_tokens, hashes = 48, [b"h0", b"h1", b"h2"]
+    try:
+        state = client.prefetch(num_tokens, hashes)
+        client.adopt("req", state)
+        first = state.future
+        assert first.result(timeout=5).hit_length == 32
+        assert client.peek_hit_length("req", num_tokens, hashes) == 32
+        if change == "expired":
+            # Prefetched long before the scheduler's first probe.
+            clock[0] = 3.0
+        else:
+            assert client.lookup("req", num_tokens, hashes, non_block=True) is not None
+            if change == "tokens":
+                num_tokens += 1
+            elif change == "hash":
+                hashes[-1] = b"different-tail"
+            else:
+                clock[0] = 3.0
+
+        assert client.peek_hit_length("req", num_tokens, hashes) is None
+        client.lookup("req", num_tokens, hashes, non_block=True)
+        refreshed = client._lookups["req"].future
+        assert refreshed is not first
+        assert refreshed.result(timeout=5).hit_length == 32
+        assert client.lookup("req", num_tokens, hashes, non_block=True).hit_length == 32
+        assert sock.send_multipart.call_count == 2
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize(
+    "adopted,reply",
+    [(False, protocol.RESP_OK), (True, protocol.RESP_OK), (False, protocol.RESP_ERR)],
+)
+def test_reset_clears_cached_async_results(adopted, reply):
+    client, sock = _make_lookup_client({"lookup_prefetch_limit": 2})
+    sock.recv.side_effect = [(32).to_bytes(4, "big"), reply, bytes(4)]
+    try:
+        old = client.prefetch(48, [])
+        assert old.future.result(timeout=5).hit_length == 32
+        if adopted:
+            client.adopt("old", old)
+        assert client.reset() == (reply == protocol.RESP_OK)
+        assert client.peek_hit_length("old", 48, [], old) is None
+        client.adopt("old", old)
+        assert client.lookup("old", 48, []).hit_length == 0
+        assert sock.send_multipart.call_count == 2
+    finally:
+        client.close()
+
+
 def test_lookup_key_client_non_block_lookup_async():
     """Non-blocking lookup defers to the executor: None first, hit once the
     Future resolves."""
@@ -827,8 +1053,10 @@ def test_lookup_key_client_non_block_lookup_async():
     # Release the executor; a later poll returns the hit length.
     gate.set()
     assert _poll_lookup(client, "req1") == 7
-    # Future is consumed (popped) on read.
-    assert "req1" not in client.futures
+    # Repeated reads reuse the completed result until expiry or discard.
+    assert _poll_lookup(client, "req1") == 7
+    assert fake_socket.send_multipart.call_count == 1
+    client.close()
 
 
 def test_lookup_key_client_discard_clears_state():
@@ -846,17 +1074,18 @@ def test_lookup_key_client_discard_clears_state():
     fake_socket.recv.side_effect = _gated_recv(gate, 9)
 
     # Submit while gated so the call returns None and the Future stays in
-    # `futures` (unconsumed) once it resolves.
+    # the client once it resolves.
     assert client.lookup("req2", 128, [], non_block=True) is None
     gate.set()
     deadline = time.monotonic() + 5.0
     while time.monotonic() < deadline:
-        if client.futures["req2"].done():
+        if client._lookups["req2"].future.done():
             break
         time.sleep(0.005)
     # discard() drops the completed result before any lookup consumes it.
     client.discard("req2")
-    assert "req2" not in client.futures
+    assert client.peek_hit_length("req2", 128, []) is None
+    assert "req2" not in client._lookups
     # A fresh query re-submits rather than returning a stale value: hold the
     # gate so the resubmitted lookup stays in flight.
     gate.clear()
@@ -1143,23 +1372,3 @@ def test_del_invokes_shutdown_and_closes_store():
     connector.__del__()
 
     worker.close.assert_called_once_with()
-
-
-def test_shutdown_scheduler_role_is_noop():
-    vllm_config = _make_vllm_config()
-    kv_cache_config = _make_kv_cache_config()
-
-    with (
-        set_current_vllm_config(vllm_config),
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
-            "connector.MooncakeStoreScheduler"
-        ),
-    ):
-        connector = mooncake_store_connector.MooncakeStoreConnector(
-            vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
-        )
-
-    # Scheduler role holds no store handle, so shutdown must be a safe no-op.
-    assert connector.connector_worker is None
-    connector.shutdown()

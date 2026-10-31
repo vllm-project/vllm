@@ -220,6 +220,9 @@ class Scheduler(SchedulerInterface):
 
         # req_id -> Request
         self.requests: dict[str, Request] = {}
+        self._residual_sjf_local_hits: dict[
+            Request, tuple[int, int, bytes | None, int]
+        ] = {}
         # Scheduling policy
         try:
             self.policy = SchedulingPolicy(self.scheduler_config.policy)
@@ -228,11 +231,11 @@ class Scheduler(SchedulerInterface):
                 f"Unknown scheduling policy: {self.scheduler_config.policy}"
             ) from e
         # Priority queues for requests.
-        self.waiting = create_request_queue(self.policy)
+        self.waiting = self._create_waiting_request_queue()
         # Waiting requests that hold KV blocks are always drained before
         # self.waiting: a block-holder must never sit behind a request whose
         # failed allocation would stop the scheduling scan.
-        self.kv_holding_waiting = create_request_queue(self.policy)
+        self.kv_holding_waiting = self._create_waiting_request_queue()
         # Waiting requests that are deferred, i.e. were skipped by the scheduling
         # scan or enqueued in a blocked status.
         self.deferred_waiting: set[Request] = set()
@@ -1107,6 +1110,7 @@ class Scheduler(SchedulerInterface):
 
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
+                    self._residual_sjf_local_hits.pop(request, None)
                     if request.resumable and self.num_hash_lookahead_tokens:
                         # Resident KV can retain a discarded streaming token's
                         # hash. Recomputing KV must use the current token sequence.
@@ -2699,6 +2703,37 @@ class Scheduler(SchedulerInterface):
             or request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
         )
 
+    def _create_waiting_request_queue(self) -> RequestQueue:
+        return create_request_queue(
+            self.policy,
+            residual_cost_fn=self._get_residual_sjf_cost,
+            residual_sjf_max_wait_ms=self.scheduler_config.residual_sjf_max_wait_ms,
+        )
+
+    def _get_residual_sjf_cost(self, request: Request) -> int:
+        hit = request.num_computed_tokens
+        if request.prefix_cache_hit_limit != 0:
+            signature = (
+                request.num_tokens,
+                request.num_preemptions,
+                request.block_hashes[-1] if request.block_hashes else None,
+            )
+            cached = self._residual_sjf_local_hits.get(request)
+            if cached is None or cached[:3] != signature:
+                local_hit = self.kv_cache_manager.get_num_local_computed_tokens(request)
+                self._residual_sjf_local_hits[request] = (*signature, local_hit)
+            else:
+                local_hit = cached[3]
+            hit = max(hit, local_hit)
+            if self.connector is not None and not request.skip_reading_external_kv:
+                external_hit = self.connector.get_num_cached_tokens(
+                    request, local_hit - local_hit % self.block_size
+                )
+                if external_hit is not None:
+                    hit = max(hit, external_hit)
+        remaining = max(0, request.num_tokens - hit)
+        return (remaining + self.block_size - 1) // self.block_size
+
     def _enqueue_waiting_request(self, request: Request) -> None:
         if self._is_blocked_waiting_status(request.status):
             self.deferred_waiting.add(request)
@@ -2921,6 +2956,8 @@ class Scheduler(SchedulerInterface):
     def add_request(self, request: Request) -> None:
         existing = self.requests.get(request.request_id)
         if existing is not None:
+            if self.connector is not None:
+                self.connector.cancel_preschedule_request(request)
             update = StreamingUpdate.from_request(request)
             if existing.status != RequestStatus.WAITING_FOR_STREAMING_REQ:
                 assert existing.streaming_queue is not None, "duplicate request id"
@@ -3022,6 +3059,8 @@ class Scheduler(SchedulerInterface):
         self, request: Request, delay_free_blocks: bool = False
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         assert request.is_finished()
+
+        self._residual_sjf_local_hits.pop(request, None)
 
         if self.aux_output_connector is not None:
             self.aux_output_connector.request_finished(request)
@@ -3200,6 +3239,8 @@ class Scheduler(SchedulerInterface):
             self.prev_step_scheduled_req_ids.clear()
 
         reset_successful = self.kv_cache_manager.reset_prefix_cache()
+        if reset_successful:
+            self._residual_sjf_local_hits.clear()
         if reset_running_requests and not reset_successful:
             raise RuntimeError(
                 "Failed to reset KV cache even when all the running requests are "
