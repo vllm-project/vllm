@@ -36,14 +36,18 @@ constexpr uint32_t kSizePerStage =
 
 // CS=4 two-pass path uses two TMA stages as a double buffer.
 constexpr uint32_t kStreamingStagesCS4 = 2;
+// BF16 stages take half the bytes, so the same smem holds twice as many.
+template <typename InT>
+constexpr uint32_t kStagesPerFp32Stage = sizeof(float) / sizeof(InT);
 // CS=8/16 fused paths keep all loaded TMA stages resident in smem.
-constexpr uint32_t kFusedStagesCS8 = 2;
-constexpr uint32_t kFusedStagesCS16 = 2;
+template <typename InT>
+constexpr uint32_t kFusedStagesCS8 = 2 * kStagesPerFp32Stage<InT>;
+template <typename InT>
+constexpr uint32_t kFusedStagesCS16 = kFusedStagesCS8<InT>;
 
-// CS=4 single-pass path
-constexpr uint32_t kMaxSinglePassStages = 3;
-constexpr uint32_t kMaxSinglePassPerBlock =
-    kMaxSinglePassStages * kSizePerStage;  // 49152
+// CS=4 single-pass path: 49152 FP32 or 98304 BF16 elements per block
+template <typename InT>
+constexpr uint32_t kMaxSinglePassStages = 3 * kStagesPerFp32Stage<InT>;
 
 // Elements per 16-byte TMA unit: rows, per-block slices and copy sizes are
 // aligned to this.
@@ -292,7 +296,7 @@ struct SmemFused {
 template <typename InT>
 using Smem4 = SmemFused<kStreamingStagesCS4, 2, InT>;
 template <typename InT>
-using SmemSinglePass = SmemFused<kMaxSinglePassStages, 1, InT>;
+using SmemSinglePass = SmemFused<kMaxSinglePassStages<InT>, 1, InT>;
 
 #include "cooperative_topk_overflow.cuh"
 
@@ -442,9 +446,8 @@ __device__ void large_topk(const InT* __restrict__ row_input,
   // Output collection via DSMEM prefix sum
   constexpr uint32_t kAboveBits = 16;
   constexpr uint32_t kAboveMask = (1 << kAboveBits) - 1;
+  // A block's above-threshold count is below TopK, like the whole row's.
   static_assert(kAboveMask >= TopK);
-  static_assert(kAboveMask >= kMaxSinglePassPerBlock,
-                "kAboveBits must cover max per-block element count");
 
   const uint32_t la = smem->counter_gt;
   const uint32_t le_full = smem->counter_eq;
@@ -582,18 +585,18 @@ __device__ void cooperative_topk_body(CooperativeTopKParams<TopK, InT> params) {
   // kSizePerStage are multiples of that unit, so the path and stage count
   // come out the same.
   const uint32_t per_block = (static_cast<uint32_t>(sl) + CS - 1) / CS;
-  constexpr uint32_t kFusedMax = ((CS == 16)  ? kFusedStagesCS16
-                                  : (CS == 8) ? kFusedStagesCS8
-                                              : kMaxSinglePassStages) *
-                                 kSizePerStage;
+  constexpr uint32_t kFusedMax =
+      ((CS == 16)  ? kFusedStagesCS16<InT>
+       : (CS == 8) ? kFusedStagesCS8<InT>
+                   : kMaxSinglePassStages<InT>)*kSizePerStage;
   const bool use_singlepass =
       per_block <=
       kFusedMax;  // single pass or TMA streaming: histogram+scatter
 
   // Select smem type and stage count at compile time based on CS
-  constexpr uint32_t kFusedStages = (CS == 16)  ? kFusedStagesCS16
-                                    : (CS == 8) ? kFusedStagesCS8
-                                                : kMaxSinglePassStages;
+  constexpr uint32_t kFusedStages = (CS == 16)  ? kFusedStagesCS16<InT>
+                                    : (CS == 8) ? kFusedStagesCS8<InT>
+                                                : kMaxSinglePassStages<InT>;
   using FusedSmem = SmemFused<kFusedStages, 1, InT>;
 
   extern __shared__ __align__(128) uint8_t sr[];
@@ -664,8 +667,8 @@ constexpr size_t kSmemSize4 = (sizeof(Smem4<InT>) > sizeof(SmemSinglePass<InT>)
 template <typename InT>
 constexpr size_t kSmemSize2 = kSmemSize4<InT>;
 template <typename InT>
-constexpr size_t kSmemSize8 =
-    sizeof(SmemFused<kFusedStagesCS8, 1, InT>) + sizeof(int32_t) * 2048 + 128;
+constexpr size_t kSmemSize8 = sizeof(SmemFused<kFusedStagesCS8<InT>, 1, InT>) +
+                              sizeof(int32_t) * 2048 + 128;
 
 }  // namespace cooperative
 
