@@ -9,12 +9,17 @@ use hf_hub::api::tokio::{Api, ApiBuilder, ApiRepo};
 use hf_hub::{Cache, Repo, RepoType};
 use serde::Serialize;
 use thiserror_ext::AsReport as _;
+use tokio::sync::OnceCell;
+use tracing::warn;
 
 use super::HfOverrides;
 use super::config::{HfTokenizerConfig, load_tokenizer_config};
 use crate::error::{Error, Result};
 
 const HF_TOKEN_ENV: &str = "HF_TOKEN";
+/// How long to wait for the Hub when a cached snapshot is missing a file, matching the
+/// default `HF_HUB_ETAG_TIMEOUT` of Python's `huggingface_hub`.
+const HUB_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// The tokenizer source selected for a model.
 #[derive(Debug, Clone)]
@@ -205,14 +210,31 @@ impl std::fmt::Display for RequiredFile {
 
 /// Model files of one source, read from disk or downloaded from the Hub on demand.
 enum SourceFiles {
-    /// A local model directory or a cached Hub snapshot.
+    /// A local model directory given by path.
     Dir(PathBuf),
+    /// A cached Hub snapshot of `model_id` at `commit`. Files missing from it are
+    /// looked up on the Hub at the same commit.
+    Snapshot {
+        dir: PathBuf,
+        model_id: String,
+        commit: String,
+        cache: Cache,
+        /// The Hub listing at `commit`, fetched at most once; `None` when the Hub
+        /// could not be reached.
+        hub: OnceCell<Option<HubListing>>,
+    },
     /// A Hub repo with its listed files.
     Remote {
         model_id: String,
         repo: ApiRepo,
         siblings: BTreeSet<String>,
     },
+}
+
+/// The files of a Hub repo at one commit.
+struct HubListing {
+    repo: ApiRepo,
+    siblings: BTreeSet<String>,
 }
 
 impl SourceFiles {
@@ -232,10 +254,11 @@ impl SourceFiles {
         let cache = std::env::var_os("HF_HUB_CACHE")
             .map(|path| Cache::new(path.into()))
             .unwrap_or_else(Cache::from_env);
-        if let Some(snapshot) = cached_snapshot_dir(&cache, &repo).map(Self::Dir)
-            && snapshot.contains(required).await?
-        {
-            return Ok(snapshot);
+        if let Some(dir) = cached_snapshot_dir(&cache, &repo) {
+            let snapshot = Self::snapshot(model_id, dir, &cache);
+            if snapshot.contains(required).await? {
+                return Ok(snapshot);
+            }
         }
         if is_hf_hub_offline() {
             return Err(Error::Tokenizer(format!(
@@ -262,10 +285,47 @@ impl SourceFiles {
         })
     }
 
-    /// Return the path of `filename`, downloading it if the source lists it.
+    /// Return the path of `filename`, downloading it if the source lists it. A cached
+    /// snapshot that lacks the file looks it up on the Hub at the snapshot's commit.
     async fn get(&self, filename: &str) -> Result<Option<PathBuf>> {
+        let Self::Snapshot {
+            dir,
+            model_id,
+            commit,
+            cache,
+            hub,
+        } = self
+        else {
+            return self.probe(filename).await;
+        };
+
+        if let Some(path) = local_file_if_exists(dir, filename) {
+            return Ok(Some(path));
+        }
+        let marker = no_exist_marker(dir, commit, filename);
+        if marker.as_ref().is_some_and(|marker| marker.exists()) || is_hf_hub_offline() {
+            return Ok(None);
+        }
+        let listing =
+            hub.get_or_init(|| fetch_hub_listing(cache, model_id, commit, filename)).await;
+        let Some(listing) = listing else {
+            return Ok(None);
+        };
+        if listing.siblings.contains(filename) {
+            return download_known_file(&listing.repo, model_id, filename).await.map(Some);
+        }
+        if let Some(marker) = marker {
+            record_no_exist(&marker);
+        }
+        Ok(None)
+    }
+
+    /// Look for `filename` without treating its absence as a cache miss: a
+    /// tokenizer format the model may not use, or a file that decides whether
+    /// a cached snapshot is usable.
+    async fn probe(&self, filename: &str) -> Result<Option<PathBuf>> {
         match self {
-            Self::Dir(dir) => Ok(local_file_if_exists(dir, filename)),
+            Self::Dir(dir) | Self::Snapshot { dir, .. } => Ok(local_file_if_exists(dir, filename)),
             Self::Remote {
                 model_id,
                 repo,
@@ -281,7 +341,7 @@ impl SourceFiles {
     async fn contains(&self, required: RequiredFile) -> Result<bool> {
         Ok(match required {
             RequiredFile::Tokenizer => self.tokenizer_file().await?.is_some(),
-            RequiredFile::Config => self.get("config.json").await?.is_some(),
+            RequiredFile::Config => self.probe("config.json").await?.is_some(),
             RequiredFile::Nothing => true,
         })
     }
@@ -289,12 +349,12 @@ impl SourceFiles {
     /// Find the tokenizer file: `tekken.json`, `tokenizer.json`, or a tiktoken file.
     async fn tokenizer_file(&self) -> Result<Option<PathBuf>> {
         for filename in ["tekken.json", "tokenizer.json"] {
-            if let Some(path) = self.get(filename).await? {
+            if let Some(path) = self.probe(filename).await? {
                 return Ok(Some(path));
             }
         }
         match self {
-            Self::Dir(dir) => Ok(discover_tiktoken_in_dir(dir)),
+            Self::Dir(dir) | Self::Snapshot { dir, .. } => Ok(discover_tiktoken_in_dir(dir)),
             Self::Remote {
                 model_id,
                 repo,
@@ -319,6 +379,10 @@ impl SourceFiles {
                     "model '{model_id}' does not expose a supported tokenizer file \
                      (tokenizer.json, tiktoken.model, or *.tiktoken) on Hugging Face"
                 ),
+                Self::Snapshot { dir, model_id, .. } => format!(
+                    "cached snapshot '{}' of model '{model_id}' does not contain a supported tokenizer file (tokenizer.json, tiktoken.model, or *.tiktoken)",
+                    dir.display()
+                ),
             }));
         };
         if tokenizer_path.ends_with("tekken.json") {
@@ -335,7 +399,7 @@ impl SourceFiles {
     /// Find the dedicated chat template file, if any.
     async fn chat_template(&self) -> Result<Option<PathBuf>> {
         match self {
-            Self::Dir(dir) => Ok(discover_chat_template_in_dir(dir)),
+            Self::Dir(dir) | Self::Snapshot { dir, .. } => Ok(discover_chat_template_in_dir(dir)),
             Self::Remote {
                 model_id,
                 repo,
@@ -344,6 +408,18 @@ impl SourceFiles {
                 Some(filename) => download_known_file(repo, model_id, filename).await.map(Some),
                 None => Ok(None),
             },
+        }
+    }
+
+    /// A cached snapshot of `model_id`, at the commit its directory is named after.
+    fn snapshot(model_id: &str, dir: PathBuf, cache: &Cache) -> Self {
+        let commit = dir.file_name().and_then(|name| name.to_str()).unwrap_or_default().to_string();
+        Self::Snapshot {
+            dir,
+            model_id: model_id.to_string(),
+            commit,
+            cache: cache.clone(),
+            hub: OnceCell::new(),
         }
     }
 }
@@ -402,6 +478,64 @@ async fn download_known_file(repo: &ApiRepo, model_id: &str, filename: &str) -> 
             error.as_report()
         ))
     })
+}
+
+/// List the files of `model_id` at `commit` on the Hub, or `None` when the Hub can't
+/// be reached in time.
+async fn fetch_hub_listing(
+    cache: &Cache,
+    model_id: &str,
+    commit: &str,
+    missing_file: &str,
+) -> Option<HubListing> {
+    let unreachable = |reason: String| {
+        warn!(
+            model_id,
+            commit,
+            missing_file,
+            reason,
+            "cached snapshot is missing a file and the Hugging Face Hub could not be \
+             reached, so it is treated as absent; download the model files again or set \
+             HF_HUB_OFFLINE=1 to skip this lookup"
+        );
+        None
+    };
+    let api = match build_api(cache) {
+        Ok(api) => api,
+        Err(error) => return unreachable(error.to_report_string()),
+    };
+    let repo = api.repo(Repo::with_revision(
+        model_id.to_string(),
+        RepoType::Model,
+        commit.to_string(),
+    ));
+    match tokio::time::timeout(HUB_LOOKUP_TIMEOUT, repo.info()).await {
+        Ok(Ok(info)) => Some(HubListing {
+            siblings: info.siblings.into_iter().map(|sibling| sibling.rfilename).collect(),
+            repo,
+        }),
+        Ok(Err(error)) => unreachable(error.to_report_string()),
+        Err(_) => unreachable(format!("timed out after {HUB_LOOKUP_TIMEOUT:?}")),
+    }
+}
+
+/// Where Python's `huggingface_hub` records that `filename` does not exist at
+/// `commit`: `<repo>/.no_exist/<commit>/<filename>`, beside `<repo>/snapshots/`.
+fn no_exist_marker(snapshot_dir: &Path, commit: &str, filename: &str) -> Option<PathBuf> {
+    let repo_dir = snapshot_dir.parent()?.parent()?;
+    Some(repo_dir.join(".no_exist").join(commit).join(filename))
+}
+
+/// Record that a file does not exist, so later startups skip the Hub lookup. A failure
+/// only costs a lookup next time, so it is logged and ignored, as Python does.
+fn record_no_exist(marker: &Path) {
+    let result = marker
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| std::fs::File::create(marker).map(drop));
+    if let Err(error) = result {
+        warn!(path = %marker.display(), error = %error.as_report(), "failed to record a missing Hub file");
+    }
 }
 
 fn is_hf_hub_offline() -> bool {
@@ -501,7 +635,7 @@ fn discover_chat_template_in_dir(dir: &std::path::Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use tempfile::tempdir;
     use vllm_tokenizer::{TiktokenTokenizer, Tokenizer};
@@ -513,6 +647,142 @@ mod tests {
             id: id.as_ref().to_str().unwrap().to_string(),
             revision: revision.map(str::to_string),
         }
+    }
+
+    /// A fake Hub serving one repo at one commit, recording every request path.
+    #[derive(Clone)]
+    struct FakeHub {
+        commit: String,
+        files: std::sync::Arc<std::collections::BTreeMap<String, Vec<u8>>>,
+        requests: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        /// Answer the listing request with 500, like an unreachable Hub.
+        fail_listing: bool,
+    }
+
+    impl FakeHub {
+        async fn serve(self) -> String {
+            use axum::routing::get;
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let router = axum::Router::new()
+                .route(
+                    "/api/models/{org}/{name}/revision/{rev}",
+                    get(Self::listing),
+                )
+                .route("/{org}/{name}/resolve/{rev}/{file}", get(Self::resolve))
+                .with_state(self);
+            tokio::spawn(axum::serve(listener, router).into_future());
+            endpoint
+        }
+
+        fn record(&self, path: String) {
+            self.requests.lock().unwrap().push(path);
+        }
+
+        fn requests(&self) -> Vec<String> {
+            self.requests.lock().unwrap().clone()
+        }
+
+        async fn listing(
+            axum::extract::State(hub): axum::extract::State<Self>,
+            axum::extract::Path((_, _, rev)): axum::extract::Path<(String, String, String)>,
+        ) -> axum::response::Response {
+            use axum::response::IntoResponse as _;
+            hub.record(format!("listing/{rev}"));
+            if hub.fail_listing {
+                return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+            let siblings: Vec<_> =
+                hub.files.keys().map(|name| serde_json::json!({ "rfilename": name })).collect();
+            axum::Json(serde_json::json!({ "sha": hub.commit, "siblings": siblings }))
+                .into_response()
+        }
+
+        async fn resolve(
+            axum::extract::State(hub): axum::extract::State<Self>,
+            axum::extract::Path((_, _, rev, file)): axum::extract::Path<(
+                String,
+                String,
+                String,
+                String,
+            )>,
+        ) -> axum::response::Response {
+            use axum::response::IntoResponse as _;
+            hub.record(format!("resolve/{rev}/{file}"));
+            let Some(content) = hub.files.get(&file) else {
+                return axum::http::StatusCode::NOT_FOUND.into_response();
+            };
+            // One response serves both hf-hub's metadata probe (headers only) and its
+            // single-chunk download of a small file.
+            (
+                [
+                    ("x-repo-commit", hub.commit.clone()),
+                    ("etag", format!("\"{file}\"")),
+                    ("content-range", format!("bytes 0-0/{}", content.len())),
+                ],
+                content.clone(),
+            )
+                .into_response()
+        }
+    }
+
+    const FAKE_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    /// A cached snapshot of `test/model` at [`FAKE_COMMIT`] holding `files`, as a
+    /// tokenizer-only Python download leaves it.
+    fn partial_snapshot(cache: &std::path::Path, files: &[&str]) -> PathBuf {
+        let repo = cache.join("models--test--model");
+        fs::create_dir_all(repo.join("refs")).unwrap();
+        fs::write(repo.join("refs/main"), FAKE_COMMIT).unwrap();
+        let snapshot = repo.join("snapshots").join(FAKE_COMMIT);
+        fs::create_dir_all(&snapshot).unwrap();
+        for file in files {
+            fs::write(snapshot.join(file), "{}").unwrap();
+        }
+        snapshot
+    }
+
+    /// Rerun this test binary with only `test`, as a child that resolves `test/model`
+    /// against the fake Hub at `endpoint` with `cache` as its HF cache.
+    async fn run_child(
+        test: &str,
+        child_marker: &str,
+        cache: &Path,
+        endpoint: &str,
+        extra_env: &[(&str, &str)],
+    ) {
+        let exe = std::env::current_exe().unwrap();
+        let test = format!("backend::hf::model_files::tests::{test}");
+        let child_marker = child_marker.to_string();
+        let hf_home = cache.with_file_name("hf-home");
+        let cache = cache.to_path_buf();
+        let endpoint = endpoint.to_string();
+        let extra_env: Vec<(String, String)> = extra_env
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        let output = tokio::task::spawn_blocking(move || {
+            let mut command = std::process::Command::new(exe);
+            command
+                .args(["--exact", &test, "--nocapture"])
+                .env(child_marker, "1")
+                .env("HF_HOME", hf_home)
+                .env("HF_HUB_CACHE", cache)
+                .env("HF_ENDPOINT", endpoint)
+                .env_remove("HF_HUB_OFFLINE");
+            for (key, value) in extra_env {
+                command.env(key, value);
+            }
+            command.output().unwrap()
+        })
+        .await
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
@@ -736,6 +1006,192 @@ mod tests {
                 .map(|sha| dir.path().join(repo.folder_name()).join("snapshots").join(sha));
             assert_eq!(super::cached_snapshot_dir(&cache, &repo), expected);
         }
+    }
+
+    const GENERATION_CONFIG: &str = r#"{"eos_token_id":[1,2]}"#;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cached_snapshot_fetches_missing_files_from_the_hub_at_its_commit() {
+        const TEST: &str = "cached_snapshot_fetches_missing_files_from_the_hub_at_its_commit";
+        const CHILD: &str = "VLLM_TEST_HF_SNAPSHOT_FETCH_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let cache = PathBuf::from(std::env::var_os("HF_HUB_CACHE").unwrap());
+            let snapshot = cache.join("models--test--model/snapshots").join(FAKE_COMMIT);
+            let files = ResolvedModelFiles::new("test/model", None).await.unwrap();
+            assert_eq!(files.config_path, Some(snapshot.join("config.json")));
+            // The missing file lands in the same snapshot, at the cached commit.
+            assert_eq!(
+                files.generation_config_path,
+                Some(snapshot.join("generation_config.json"))
+            );
+            assert_eq!(
+                fs::read_to_string(snapshot.join("generation_config.json")).unwrap(),
+                GENERATION_CONFIG
+            );
+            assert_eq!(files.preprocessor_config_path, None);
+            assert_eq!(files.video_preprocessor_config_path, None);
+            assert_eq!(files.processor_config_path, None);
+            return;
+        }
+
+        let dir = tempdir().unwrap();
+        let cache = dir.path().join("hub-cache");
+        partial_snapshot(
+            &cache,
+            &["tokenizer.json", "tokenizer_config.json", "config.json"],
+        );
+        let hub = FakeHub {
+            commit: FAKE_COMMIT.to_string(),
+            files: std::sync::Arc::new(std::collections::BTreeMap::from(
+                [
+                    ("tokenizer.json", "{}"),
+                    ("tokenizer_config.json", "{}"),
+                    ("config.json", "{}"),
+                    ("generation_config.json", GENERATION_CONFIG),
+                ]
+                .map(|(name, content)| (name.to_string(), content.as_bytes().to_vec())),
+            )),
+            requests: Default::default(),
+            fail_listing: false,
+        };
+        let endpoint = hub.clone().serve().await;
+
+        run_child(TEST, CHILD, &cache, &endpoint, &[]).await;
+
+        // One listing at the cached commit, then only the missing file is fetched.
+        let requests = hub.requests();
+        let listing = format!("listing/{FAKE_COMMIT}");
+        let fetch = format!("resolve/{FAKE_COMMIT}/generation_config.json");
+        assert_eq!(
+            requests.iter().filter(|request| **request == listing).count(),
+            1,
+            "{requests:?}"
+        );
+        assert!(
+            requests.iter().all(|request| *request == listing || *request == fetch),
+            "{requests:?}"
+        );
+        // Files the Hub lacks are recorded like huggingface_hub does; fetched ones are not.
+        let no_exist = cache.join("models--test--model/.no_exist").join(FAKE_COMMIT);
+        for file in [
+            "preprocessor_config.json",
+            "video_preprocessor_config.json",
+            "processor_config.json",
+        ] {
+            assert!(no_exist.join(file).exists(), "{file}");
+        }
+        assert!(!no_exist.join("generation_config.json").exists());
+        // The branch ref still points at the cached commit.
+        assert_eq!(
+            fs::read_to_string(cache.join("models--test--model/refs/main")).unwrap(),
+            FAKE_COMMIT
+        );
+
+        // Once complete, a later startup never contacts the Hub.
+        let before = hub.requests().len();
+        run_child(TEST, CHILD, &cache, &endpoint, &[]).await;
+        assert_eq!(
+            hub.requests().len(),
+            before,
+            "{:?}",
+            &hub.requests()[before..]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cached_snapshot_skips_the_hub_for_recorded_absences_offline_and_local_dirs() {
+        const TEST: &str =
+            "cached_snapshot_skips_the_hub_for_recorded_absences_offline_and_local_dirs";
+        const CHILD: &str = "VLLM_TEST_HF_SNAPSHOT_SKIP_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let files = ResolvedModelFiles::new("test/model", None).await.unwrap();
+            assert_eq!(files.generation_config_path, None);
+            // A local model directory is read as given, whatever the Hub has.
+            let local = tempdir().unwrap();
+            for file in ["tokenizer.json", "tokenizer_config.json", "config.json"] {
+                fs::write(local.path().join(file), "{}").unwrap();
+            }
+            let files =
+                ResolvedModelFiles::new(local.path().to_str().unwrap(), None).await.unwrap();
+            assert_eq!(files.generation_config_path, None);
+            return;
+        }
+
+        let dir = tempdir().unwrap();
+        // The Hub has the file, so any lookup would find and fetch it.
+        let hub = FakeHub {
+            commit: FAKE_COMMIT.to_string(),
+            files: std::sync::Arc::new(std::collections::BTreeMap::from([(
+                "generation_config.json".to_string(),
+                GENERATION_CONFIG.as_bytes().to_vec(),
+            )])),
+            requests: Default::default(),
+            fail_listing: false,
+        };
+        let endpoint = hub.clone().serve().await;
+        let partial = ["tokenizer.json", "tokenizer_config.json", "config.json"];
+
+        // Every missing file is already recorded as absent at this commit.
+        let recorded = dir.path().join("recorded");
+        partial_snapshot(&recorded, &partial);
+        let no_exist = recorded.join("models--test--model/.no_exist").join(FAKE_COMMIT);
+        fs::create_dir_all(&no_exist).unwrap();
+        for file in [
+            "generation_config.json",
+            "preprocessor_config.json",
+            "video_preprocessor_config.json",
+            "processor_config.json",
+        ] {
+            fs::write(no_exist.join(file), "").unwrap();
+        }
+        run_child(TEST, CHILD, &recorded, &endpoint, &[]).await;
+
+        // Offline, nothing is looked up or recorded.
+        let offline = dir.path().join("offline");
+        partial_snapshot(&offline, &partial);
+        run_child(TEST, CHILD, &offline, &endpoint, &[("HF_HUB_OFFLINE", "1")]).await;
+        assert!(!offline.join("models--test--model/.no_exist").exists());
+
+        assert_eq!(hub.requests(), Vec::<String>::new());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unreachable_hub_is_asked_once_per_source_and_records_no_absence() {
+        const TEST: &str = "unreachable_hub_is_asked_once_per_source_and_records_no_absence";
+        const CHILD: &str = "VLLM_TEST_HF_SNAPSHOT_UNREACHABLE_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let cache = PathBuf::from(std::env::var_os("HF_HUB_CACHE").unwrap());
+            let snapshot = cache.join("models--test--model/snapshots").join(FAKE_COMMIT);
+            // Resolution still succeeds from what the snapshot has.
+            let files = ResolvedModelFiles::new("test/model", None).await.unwrap();
+            assert_eq!(files.config_path, Some(snapshot.join("config.json")));
+            assert_eq!(files.generation_config_path, None);
+            return;
+        }
+
+        let dir = tempdir().unwrap();
+        let cache = dir.path().join("hub-cache");
+        partial_snapshot(
+            &cache,
+            &["tokenizer.json", "tokenizer_config.json", "config.json"],
+        );
+        let hub = FakeHub {
+            commit: FAKE_COMMIT.to_string(),
+            files: std::sync::Arc::new(std::collections::BTreeMap::from([(
+                "generation_config.json".to_string(),
+                GENERATION_CONFIG.as_bytes().to_vec(),
+            )])),
+            requests: Default::default(),
+            fail_listing: true,
+        };
+        let endpoint = hub.clone().serve().await;
+
+        run_child(TEST, CHILD, &cache, &endpoint, &[]).await;
+
+        // Four files are missing, but the failed listing is not retried for the others.
+        assert_eq!(hub.requests(), vec![format!("listing/{FAKE_COMMIT}")]);
+        // Not knowing whether the files exist, nothing is recorded as absent.
+        assert!(!cache.join("models--test--model/.no_exist").exists());
     }
 
     #[tokio::test]
