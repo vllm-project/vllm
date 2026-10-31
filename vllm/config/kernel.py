@@ -346,6 +346,10 @@ class KernelConfig:
                    running QDQ on activations.
     """
 
+    batch_invariant: bool = True
+    """If False, MoE expert selection ignores `VLLM_BATCH_INVARIANT`. Set for
+    the drafter through `--speculative-config`'s `batch_invariant`."""
+
     sparse_indexer_topk_backend: SparseIndexerTopkBackend = "auto"
     """Backend for the DSA sparse indexer decode top-k kernel. Available options:
 
