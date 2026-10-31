@@ -784,11 +784,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             piecewise_capture_available=piecewise_capture_available,
         )
         # Fixed-width speculation also produces short decode rows at admission
-        # and request completion. Capture their mixtures when attention supports it.
+        # and request completion. The padded draft pass must fit the token budget.
         varlen_decode = self.adaptive_verification is not None or (
             self.decode_query_len > 1
             and self.ubatch_runner is None
             and self.pcp_manager is None
+            and (
+                self.speculator is None
+                or self.max_num_reqs * self.speculator.num_query_per_req
+                <= self.max_num_tokens
+            )
             and additional_attn_cg_support[0] == AttentionCGSupport.ALWAYS
             and get_varlen_cudagraph_unsupported_backend(
                 self.attn_groups,
