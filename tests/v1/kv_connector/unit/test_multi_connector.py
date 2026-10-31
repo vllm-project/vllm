@@ -5,7 +5,7 @@ import shutil
 import tempfile
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -14,7 +14,10 @@ from tests.v1.kv_connector.unit.utils import create_vllm_config, maybe_update_bl
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
-from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1 import (
+    KVConnectorRole,
+    multi_connector,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     SupportsHMA,
@@ -215,6 +218,30 @@ def test_loaded_groups_follow_the_connector_serving_the_request(mc, chosen):
     assert mc.get_num_new_matched_tokens(request, 0) == (16, True)
     assert mc.get_loaded_kv_cache_group_ids(request) == (chosen,)
     mc._connectors[1 - chosen].get_loaded_kv_cache_group_ids.assert_not_called()
+
+
+def test_first_hit_warns_once_when_later_connector_reports_more(mc):
+    mc._connectors[0].get_num_new_matched_tokens.return_value = (16, True)
+    mc._connectors[1].get_num_new_matched_tokens.return_value = (128, False)
+    with patch.object(multi_connector.logger, "warning") as warning:
+        for request_id in ("r0", "r1"):
+            request = MagicMock(request_id=request_id)
+            assert mc.get_num_new_matched_tokens(request, 0) == (16, True)
+            assert mc._requests_to_connector[request_id] == 0
+    warning.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "matches",
+    [((128, True), (16, False)), ((64, True), (64, False)), ((0, False),) * 2],
+)
+def test_first_hit_does_not_warn_without_a_larger_later_hit(mc, matches):
+    for connector, match in zip(mc._connectors, matches):
+        connector.get_num_new_matched_tokens.return_value = match
+    request = MagicMock(request_id="r")
+    with patch.object(multi_connector.logger, "warning") as warning:
+        assert mc.get_num_new_matched_tokens(request, 0) == matches[0]
+    warning.assert_not_called()
 
 
 def test_multi_connector_mem_pool_context_none(mc: MultiConnector):
