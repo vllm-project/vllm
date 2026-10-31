@@ -12,7 +12,6 @@ import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.entrypoints.generate.base.protocol import (
     AnyResponseFormat,
-    MMPayload,
     PerRequestMetrics,
     StopParam,
     StreamOptions,
@@ -24,6 +23,7 @@ from vllm.entrypoints.generate.base.protocol import (
 )
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.exceptions import VLLMValidationError
+from vllm.inputs.mm_features.specs import MMPayload
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import WeightVersionSpan

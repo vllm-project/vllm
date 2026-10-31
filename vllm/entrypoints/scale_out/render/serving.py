@@ -13,7 +13,6 @@ from vllm.entrypoints.anthropic.serving import (
     AnthropicServingMessages,
     DisabledThinkingEffortResolver,
 )
-from vllm.entrypoints.generate.base.protocol import MMPayload
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.models.serving import (
@@ -21,12 +20,8 @@ from vllm.entrypoints.openai.models.serving import (
     OpenAIServingModels,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-from vllm.entrypoints.scale_out.token_in_token_out.mm_features import (
-    extract_mm_features,
-)
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     GenerateRequest,
-    MultiModalFeatures,
     ParseContext,
     ReasoningParserKwargs,
 )
@@ -35,6 +30,8 @@ from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import EngineInput
+from vllm.inputs.mm_features.convert import extract_mm_features
+from vllm.inputs.mm_features.specs import MMPayload, MultiModalFeatures
 from vllm.logger import init_logger
 from vllm.multimodal.parse import MultiModalDataParser
 from vllm.parser.utils import count_history_tool_calls

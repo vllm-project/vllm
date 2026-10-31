@@ -28,13 +28,10 @@ from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.scale_out.render.api_router import router
 from vllm.entrypoints.scale_out.render.serving import ServingRender
-from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
-    GenerateRequest,
-    MultiModalFeatures,
-    PlaceholderRangeInfo,
-)
+from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateRequest
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import create_json_response
+from vllm.inputs.mm_features.specs import MultiModalFeatures, PlaceholderRangeInfo
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import SamplingParams
 
