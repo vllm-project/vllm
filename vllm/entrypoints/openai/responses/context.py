@@ -6,6 +6,7 @@ import copy
 import json
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from contextlib import AsyncExitStack
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Final, Union
@@ -23,7 +24,10 @@ from openai_harmony import Author, Message, Role, TextContent
 from vllm import envs
 from vllm.entrypoints.mcp.tool import Tool
 from vllm.entrypoints.mcp.tool_server import ToolServer
-from vllm.entrypoints.openai.parser.harmony_utils import render_for_completion
+from vllm.entrypoints.openai.parser.harmony_utils import (
+    get_encoding,
+    render_for_completion,
+)
 from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
     ResponseRawMessageAndToken,
@@ -37,6 +41,7 @@ from vllm.entrypoints.openai.responses.utils import (
 from vllm.entrypoints.serve.utils.tool_calls_utils import (
     maybe_filter_parallel_tool_calls,
 )
+from vllm.logprobs import LogprobsOnePosition, SampleLogprobs
 from vllm.outputs import RequestOutput
 from vllm.parser.abstract_parser import Parser
 from vllm.renderers.chat_utils import (
@@ -48,6 +53,7 @@ from vllm.utils import random_uuid
 if TYPE_CHECKING:
     from mcp.client import ClientSession
 
+    from vllm.parser.harmony import Segment
     from vllm.v1.metrics.stats import RequestStateStats
 
 logger = logging.getLogger(__name__)
@@ -661,6 +667,19 @@ class HarmonyContext(ConversationContext):
 
         self.last_append_segments: list[Segment] = []
         self.last_append_flush_status: bool = False
+        # Logprobs of user-visible text tokens, as (token_id, logprobs).
+        # last_append_text_logprobs is aligned with last_append_segments
+        # (None for segments that are not output text) and drives streaming
+        # deltas. text_logprobs_by_message groups the same entries per
+        # completed message (keyed by id(message)) for the final output, so
+        # streaming and non-streaming report the same tokens.
+        self.last_append_text_logprobs: list[
+            tuple[int, LogprobsOnePosition] | None
+        ] = []
+        self.text_logprobs_by_message: dict[
+            int, list[tuple[int, LogprobsOnePosition]]
+        ] = {}
+        self._current_message_text_logprobs: list[tuple[int, LogprobsOnePosition]] = []
         # Each completed message with the items sent for it in
         # output_item.done events, so the final response can reuse their ids.
         self.streamed_items_by_message: list[
@@ -703,11 +722,52 @@ class HarmonyContext(ConversationContext):
             self.current_turn_metrics.reset()
 
         self.last_append_segments = segments
+        self.last_append_text_logprobs = self._collect_text_logprobs(
+            segments, output_token_ids, output.outputs[0].logprobs
+        )
+        if output.finished:
+            self._current_message_text_logprobs = []
         self._messages.extend(
             segment.completed_message
             for segment in segments
             if segment.completed_message is not None
         )
+
+    def _collect_text_logprobs(
+        self,
+        segments: list["Segment"],
+        token_ids: Sequence[int],
+        logprobs: SampleLogprobs | None,
+    ) -> list[tuple[int, LogprobsOnePosition] | None]:
+        """Pick the logprobs of output text tokens, aligned with segments.
+
+        A token is output text if it was parsed on the final or commentary
+        channel with no recipient (the rule used to build output_text items)
+        and is not a Harmony control token. Tokens with an empty delta (e.g.
+        part of a multi-byte character) still count.
+        """
+        per_segment: list[tuple[int, LogprobsOnePosition] | None] = []
+        for segment in segments:
+            entry = None
+            if (
+                logprobs is not None
+                and segment.token_index is not None
+                and segment.completed_message is None
+                and segment.recipient is None
+                and segment.channel in ("final", "commentary")
+            ):
+                token_id = token_ids[segment.token_index]
+                if not get_encoding().is_special_token(token_id):
+                    entry = (token_id, logprobs[segment.token_index])
+                    self._current_message_text_logprobs.append(entry)
+            if segment.completed_message is not None:
+                if self._current_message_text_logprobs:
+                    self.text_logprobs_by_message[id(segment.completed_message)] = (
+                        self._current_message_text_logprobs
+                    )
+                self._current_message_text_logprobs = []
+            per_segment.append(entry)
+        return per_segment
 
     def append_tool_output(self, output: list[Message]) -> None:
         output_msgs = output

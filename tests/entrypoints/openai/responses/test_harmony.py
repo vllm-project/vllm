@@ -174,6 +174,72 @@ async def test_max_tokens(client: OpenAI, model_name: str):
     assert response.incomplete_details.reason == "max_output_tokens"
 
 
+def _output_text_logprobs(response) -> list:
+    return [
+        lp
+        for item in response.output
+        if item.type == "message"
+        for content in item.content
+        for lp in content.logprobs or []
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_logprobs(client: OpenAI, model_name: str):
+    response = await client.responses.create(
+        model=model_name,
+        input="Say hello in one word.",
+        reasoning={"effort": "low"},
+        include=["message.output_text.logprobs"],
+        top_logprobs=3,
+        temperature=0.0,
+    )
+    assert response.status == "completed"
+    logprobs = _output_text_logprobs(response)
+    assert logprobs
+    # Logprobs cover exactly the output text, no Harmony control tokens.
+    assert "".join(lp.token for lp in logprobs) == response.output_text
+    for lp in logprobs:
+        assert lp.logprob <= 0.0
+        assert 0 < len(lp.top_logprobs) <= 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_streaming_logprobs_match_final_output(client: OpenAI, model_name: str):
+    stream = await client.responses.create(
+        model=model_name,
+        input="Say hello in one word.",
+        reasoning={"effort": "low"},
+        include=["message.output_text.logprobs"],
+        top_logprobs=3,
+        temperature=0.0,
+        stream=True,
+    )
+    delta_logprobs = []
+    done_logprobs = []
+    completed = None
+    async for event in stream:
+        if event.type == "response.output_text.delta":
+            delta_logprobs.extend(event.logprobs)
+        elif event.type == "response.output_item.done" and event.item.type == "message":
+            for content in event.item.content:
+                done_logprobs.extend(content.logprobs or [])
+        elif event.type == "response.completed":
+            completed = event.response
+
+    assert completed is not None
+    final_logprobs = _output_text_logprobs(completed)
+    assert final_logprobs
+    # Deltas, done events and the final response report the same tokens.
+    assert [lp.token for lp in delta_logprobs] == [lp.token for lp in final_logprobs]
+    assert [lp.logprob for lp in delta_logprobs] == [
+        lp.logprob for lp in final_logprobs
+    ]
+    assert done_logprobs == final_logprobs
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_chat(client: OpenAI, model_name: str):
