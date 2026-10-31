@@ -256,3 +256,115 @@ def test_summaries_on_coarse_summary_blocks():
     assert fine.any() and torch.equal(fine, coarse)
     for row, length in enumerate(lengths.tolist()):
         assert torch.equal(fine_scores[row, :length], coarse_scores[row, :length])
+
+
+@pytest.mark.parametrize(
+    ("groups", "heads_per_group", "query_len", "kv_fp8"),
+    [(4, 16, 1, False), (1, 8, 4, True)],
+    ids=["tp1_decode_bf16_kv", "tp8_verify_fp8_kv"],
+)
+def test_decode_selects_and_attends_over_summaries(
+    groups: int, heads_per_group: int, query_len: int, kv_fp8: bool
+):
+    """Decode and MTP verify chain summary scores, top-k and gated attention as
+    step5_csa_attention does, at the TP1 and TP8 head layouts. The 70-token
+    request selects all history; the 1100-token one has more regions than
+    top-k and than one 128-region score tile."""
+    from vllm.models.step5.common.ops.sparse_decode_attention import (
+        sparse_decode_splits,
+    )
+    from vllm.models.step5.common.ops.sparse_indexer_scores import (
+        decode_summary_scores,
+    )
+
+    torch.manual_seed(0)
+    dim, topk, indexer_heads = 192, 16, 4
+    seq_lens = [70, 1100]
+    tokens = len(seq_lens) * query_len
+    rows = tokens * groups
+    heads = groups * heads_per_group
+    fp8 = torch.float8_e4m3fn
+    kv_dtype = current_platform.fp8_dtype() if kv_fp8 else None
+
+    pos = torch.tensor(
+        [s - query_len + i for s in seq_lens for i in range(query_len)],
+        device=DEVICE,
+    )
+    req = torch.arange(len(seq_lens), device=DEVICE).repeat_interleave(query_len)
+    means = [
+        torch.randn((-(-s // REGION), PROXY), device=DEVICE).to(fp8).view(torch.uint8)
+        for s in seq_lens
+    ]
+    mean, summary_table = _paged(means, 384 // REGION)
+    # The indexer stores groups outermost and pads its 4 heads per group to 8.
+    q8 = torch.randn((groups, tokens, 8, PROXY), device=DEVICE).to(fp8)
+    q8 = q8.transpose(0, 1)
+    w = torch.rand((groups, tokens, 8), device=DEVICE)
+    w[..., indexer_heads:] = 0
+    w = w.transpose(0, 1)
+
+    scores, meta = decode_summary_scores(
+        q8,
+        w,
+        mean,
+        summary_table,
+        torch.arange(tokens, device=DEVICE),
+        torch.tensor(seq_lens, dtype=torch.int32, device=DEVICE),
+        summary_table.shape[1] * mean.shape[1],
+        num_sms=current_platform.num_compute_units(),
+        row_groups=groups,
+        query_len=query_len,
+    )
+    row_pos = pos.repeat_interleave(groups)
+    assert torch.equal(meta.positions, row_pos)
+    assert torch.equal(meta.topk_lengths.long(), row_pos // REGION)
+    q8_ref, w_ref, scores_ref = q8.float().cpu(), w.cpu(), scores.cpu()
+    for row in range(rows):
+        t, g = divmod(row, groups)
+        live = int(pos[t]) // REGION + 1
+        keys = means[int(req[t])][:live].view(fp8).float().cpu()
+        want = (keys @ q8_ref[t, g].T).relu() @ w_ref[t, g]
+        torch.testing.assert_close(scores_ref[row, :live], want, atol=1e-4, rtol=1e-4)
+
+    regions = select_regions(
+        scores,
+        meta.current,
+        topk,
+        "per_row",
+        topk_lengths=meta.topk_lengths,
+        sort=False,
+    )
+    want = ref_select(scores.view(tokens, groups, -1), pos, topk).view(rows, -1)
+    for row, (got_row, want_row) in enumerate(zip(regions.cpu(), want)):
+        live = min(int(row_pos[row]) // REGION, topk) + 1
+        assert (got_row[:-live] == -1).all() and (got_row[-live:] >= 0).all()
+        assert sorted(got_row[-live:].tolist()) == sorted(want_row[-live:].tolist())
+
+    shape = (len(seq_lens), max(seq_lens), groups, dim)
+    k = torch.randn(shape, dtype=torch.bfloat16, device=DEVICE)
+    v = torch.randn(shape, dtype=torch.bfloat16, device=DEVICE)
+    kq, vq, k, v, k_scale, v_scale = _quant_kv(k, v, kv_dtype)
+    kv_cache, bt = _paged(
+        [torch.cat([kq[r, :s], vq[r, :s]], -1) for r, s in enumerate(seq_lens)], 16
+    )
+    q = torch.randn((tokens, heads, dim), dtype=torch.bfloat16, device=DEVICE)
+    gate = torch.randn((tokens, heads), dtype=torch.bfloat16, device=DEVICE)
+    got = torch.empty_like(q)
+    sparse_decode_attention(
+        q.view(rows, heads_per_group, dim),
+        kv_cache.transpose(1, 2).contiguous(),
+        regions,
+        bt,
+        meta.positions,
+        meta.active,
+        got.view(rows, heads_per_group, dim),
+        scale=dim**-0.5,
+        query_len=query_len,
+        splits=sparse_decode_splits(rows),
+        k_scale=k_scale,
+        v_scale=v_scale,
+        gate=gate,
+    )
+    want = ref_attention(q, k, v, regions.view(tokens, groups, -1), req, pos, dim**-0.5)
+    want *= torch.sigmoid(gate.float().cpu()).unsqueeze(-1)
+    torch.testing.assert_close(got.float().cpu(), want, atol=2e-2, rtol=2e-2)
