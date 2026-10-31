@@ -410,6 +410,26 @@ class TritonAttentionImpl(AttentionImpl):
     # Per-token-head quant: scale views carved from inline head padding.
     _k_scale_cache: torch.Tensor | None = None
     _v_scale_cache: torch.Tensor | None = None
+    _kv_view_cache: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
+
+    def _get_kv_views(
+        self, kv_cache: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        cache = self._kv_view_cache
+        if cache is None or cache[0] is not kv_cache:
+            key_cache, value_cache = kv_cache.transpose(1, 2).split(
+                self.head_size, dim=-1
+            )
+            if (
+                is_quantized_kv_cache(self.kv_cache_dtype)
+                and key_cache.dtype != self.fp8_dtype
+            ):
+                key_cache = key_cache.view(self.fp8_dtype)
+                value_cache = value_cache.view(self.fp8_dtype)
+            if self._set_kv_ptr_range:
+                set_triton_ptr_range(kv_cache, key_cache, value_cache)
+            cache = self._kv_view_cache = (kv_cache, key_cache, value_cache)
+        return cache[1], cache[2]
 
     def _ensure_scale_caches(self, kv_cache: torch.Tensor) -> None:
         """Extract per-head scale views from the padded content dimension.
@@ -652,17 +672,7 @@ class TritonAttentionImpl(AttentionImpl):
             q_descale = k_descale = v_descale = None
         # FP8 per-tensor / auto path (original flow).
         else:
-            kv_cache = kv_cache.transpose(1, 2)
-            hs = self.head_size
-            key_cache, value_cache = kv_cache.split(hs, dim=-1)
-            if (
-                is_quantized_kv_cache(self.kv_cache_dtype)
-                and key_cache.dtype != self.fp8_dtype
-            ):
-                key_cache = key_cache.view(self.fp8_dtype)
-                value_cache = value_cache.view(self.fp8_dtype)
-            if self._set_kv_ptr_range:
-                set_triton_ptr_range(kv_cache, key_cache, value_cache)
+            key_cache, value_cache = self._get_kv_views(kv_cache)
             descale_shape = (
                 attn_metadata.query_start_loc.shape[0] - 1,
                 key_cache.shape[2],
@@ -740,12 +750,15 @@ class TritonAttentionImpl(AttentionImpl):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Per-token-head K/V cache views (ensures scale caches; FP8 retyped)."""
         self._ensure_scale_caches(kv_cache)
-        padded_hs = kv_cache.shape[-1] // 2
-        key_cache, value_cache = kv_cache.transpose(1, 2).split(padded_hs, dim=-1)
-        if self._kv_quant_mode == KVQuantMode.FP8_PER_TOKEN_HEAD:
-            key_cache = key_cache.view(self.fp8_dtype)
-            value_cache = value_cache.view(self.fp8_dtype)
-        return key_cache, value_cache
+        cache = self._kv_view_cache
+        if cache is None or cache[0] is not kv_cache:
+            padded_hs = kv_cache.shape[-1] // 2
+            key_cache, value_cache = kv_cache.transpose(1, 2).split(padded_hs, dim=-1)
+            if self._kv_quant_mode == KVQuantMode.FP8_PER_TOKEN_HEAD:
+                key_cache = key_cache.view(self.fp8_dtype)
+                value_cache = value_cache.view(self.fp8_dtype)
+            cache = self._kv_view_cache = (kv_cache, key_cache, value_cache)
+        return cache[1], cache[2]
 
     def _forward_encoder_attention(
         self,
@@ -825,12 +838,7 @@ class TritonAttentionImpl(AttentionImpl):
             return
         # For decoder and cross-attention, use KV cache as before.
         # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
-        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
-        if is_quantized_kv_cache(self.kv_cache_dtype):
-            key_cache = key_cache.view(self.fp8_dtype)
-            value_cache = value_cache.view(self.fp8_dtype)
-        if self._set_kv_ptr_range:
-            set_triton_ptr_range(kv_cache, key_cache, value_cache)
+        key_cache, value_cache = self._get_kv_views(kv_cache)
         triton_reshape_and_cache_flash(
             key,
             value,
@@ -860,13 +868,10 @@ class TritonAttentionImpl(AttentionImpl):
         layer_slot_mapping: torch.Tensor,
     ):
         # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
-        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
+        key_cache, value_cache = self._get_kv_views(kv_cache)
         flash_layout = True
 
         is_fp8_kv_cache = is_quantized_kv_cache(self.kv_cache_dtype)
-        if is_fp8_kv_cache:
-            key_cache = key_cache.view(self.fp8_dtype)
-            value_cache = value_cache.view(self.fp8_dtype)
 
         rocm_aiter_ops.triton_rope_and_cache(
             query,
