@@ -14,28 +14,10 @@ on how the EPLB algorithm works.
 import numpy as np
 import torch
 
-from .abstract import (
-    AbstractEplbPolicy,
-    EplbPlan,
-    EplbPolicyState,
-    EplbRebalanceContext,
-)
+from .abstract import AbstractEplbPolicy
 
 
 class DefaultEplbPolicy(AbstractEplbPolicy):
-    def rebalance_experts(
-        self, context: EplbRebalanceContext, policy_state: EplbPolicyState
-    ) -> EplbPlan:
-        physical_to_logical_map = self._rebalance_from_weights(
-            context.load_window_cpu.sum(dim=0),
-            context.num_replicas,
-            context.topology.num_groups,
-            context.topology.num_nodes,
-            context.topology.num_ranks,
-            context.physical_to_logical_map_cpu,
-        )
-        return EplbPlan(physical_to_logical_map)
-
     @classmethod
     def balanced_packing(
         cls, weight: np.ndarray, num_packs: int
@@ -288,39 +270,40 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
         return post_phy2log
 
     @classmethod
-    def _rebalance_from_weights(
+    def rebalance_experts(
         cls,
         weight: torch.Tensor,
         num_replicas: int,
         num_groups: int,
         num_nodes: int,
         num_ranks: int,
-        old_physical_to_logical_map: torch.Tensor | None = None,
+        old_global_expert_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Compute a target placement from aggregate logical-expert loads.
+        """Entry point for expert-parallelism load balancer.
 
         Args:
             weight: [layers, num_logical_experts], the load statistics for all
                 logical experts
             num_replicas: number of physical experts, must be a multiple of
-                `num_ranks`
+                `num_gpus`
             num_groups: number of expert groups
             num_nodes: number of server nodes, where the intra-node network
                 (e.g, NVLink) is faster
             num_ranks: number of ranks, must be a multiple of `num_nodes`
-            old_physical_to_logical_map: [layers, num_replicas], the current
-                physical-to-logical map. Used to avoid unnecessary weight copying
-                for experts that remain on the same rank.
+            old_global_expert_indices: [layers, num_logical_experts], the old global
+                expert indices. Used to avoid unnecessary weight copying
+                for experts moving within one rank.
 
         Returns:
+        -------
             phy2log: [layers, num_replicas], the expert
                 index of each replica
 
         """
         weight_np = weight.float().cpu().numpy()
         old_phy2log_np = (
-            old_physical_to_logical_map.cpu().numpy()
-            if old_physical_to_logical_map is not None
+            old_global_expert_indices.cpu().numpy()
+            if old_global_expert_indices is not None
             else None
         )
 

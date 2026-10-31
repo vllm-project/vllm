@@ -12,7 +12,6 @@ from vllm.logger import init_logger
 
 from .eplb_utils import CpuGpuEvent, device_stream
 from .migration_scheduler import schedule_migration_batches_for_layers
-from .policy import EplbPlan, EplbRebalanceContext, EplbTopology
 from .rebalance_execute import AsyncEplbLayerResult, transfer_layer
 
 if TYPE_CHECKING:
@@ -53,25 +52,20 @@ def run_rebalance_experts(
     eplb_state: "EplbState",
     physical_to_logical_map_cpu: torch.Tensor,
     stream: torch.Stream,
-) -> EplbPlan:
+) -> torch.Tensor:
     assert model_state.eplb_stats is not None
     stats = model_state.eplb_stats
     with device_stream(stream):
-        load_window_cpu = stats.global_expert_load_window.cpu().unsqueeze(0)
-    context = EplbRebalanceContext(
-        load_window_cpu=load_window_cpu,
-        physical_to_logical_map_cpu=physical_to_logical_map_cpu,
-        topology=EplbTopology(
-            num_groups=stats.num_groups,
-            num_nodes=stats.num_nodes,
-            num_ranks=stats.num_gpus,
-        ),
-        num_replicas=stats.num_replicas,
-        cpu_group=get_eplb_group().cpu_group,
+        load_window_cpu = stats.global_expert_load_window.cpu()
+    return eplb_state.rebalance_experts(
+        model_state,
+        load_window_cpu,
+        stats.num_replicas,
+        stats.num_groups,
+        stats.num_nodes,
+        stats.num_gpus,
+        physical_to_logical_map_cpu,
     )
-    plan = eplb_state.rebalance_experts(model_state, context)
-
-    return plan
 
 
 def transfer_run_periodically(
@@ -96,10 +90,9 @@ def transfer_run_periodically(
             with device_stream(stream):
                 physical_to_logical_map_cpu = model_state.physical_to_logical_map.cpu()
 
-            plan = run_rebalance_experts(
+            new_physical_to_logical_map = run_rebalance_experts(
                 model_state, state, physical_to_logical_map_cpu, stream
             )
-            new_physical_to_logical_map = plan.physical_to_logical_map
 
             migration_batches_by_layer = None
             if state.parallel_config.eplb_config.migration_batching_enabled:
@@ -174,7 +167,7 @@ def transfer_run_periodically(
 
                 model_state.pending_result = AsyncEplbLayerResult(
                     layer_idx=layer_idx,
-                    plan=plan,
+                    new_physical_to_logical_map=new_physical_to_logical_map[layer_idx],
                     transfer_metadata=transfer_metadata,
                     consumed_event=consumed_event,
                 )

@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import threading
-from dataclasses import dataclass, field
 
 import pytest
 import torch
@@ -16,22 +15,18 @@ from vllm.distributed import (
     init_distributed_environment,
     initialize_model_parallel,
 )
+from vllm.distributed.eplb.async_worker import run_rebalance_experts
 from vllm.distributed.eplb.eplb_communicator import TorchDistGlooStagedEplbCommunicator
 from vllm.distributed.eplb.eplb_state import (
     EplbLayerState,
     EplbModelState,
     EplbState,
+    EplbStats,
     _move_to_workspace,
     compute_logical_maps,
 )
 from vllm.distributed.eplb.eplb_utils import CpuGpuEvent
-from vllm.distributed.eplb.policy import (
-    DefaultEplbPolicy,
-    EplbPlan,
-    EplbPolicyState,
-    EplbRebalanceContext,
-    EplbTopology,
-)
+from vllm.distributed.eplb.policy import DefaultEplbPolicy
 from vllm.distributed.eplb.rebalance_execute import AsyncEplbLayerResult, transfer_layer
 from vllm.distributed.parallel_state import get_ep_group
 from vllm.model_executor.layers.fused_moe.router.fused_topk_router import (
@@ -213,44 +208,24 @@ class _ExpertModel(torch.nn.Module):
         return x @ self.weight[expert_id]
 
 
-@dataclass
-class _PolicyState(EplbPolicyState):
-    committed_layers: list[int] = field(default_factory=list)
-
-
-class _Policy(DefaultEplbPolicy):
-    def __init__(self, target=None, fail_commit=False):
-        self.target = target
-        self.fail_commit = fail_commit
-
-    def create_state(self, num_moe_layers):
-        return _PolicyState()
-
-    def rebalance_experts(self, context, policy_state):
-        if self.target is not None:
-            return EplbPlan(self.target)
-        return super().rebalance_experts(context, policy_state)
-
-    def on_layer_committed(self, policy_state, plan, layer_idx):
-        if self.fail_commit:
-            raise RuntimeError("policy commit failed")
-        policy_state.committed_layers.append(layer_idx)
-
-
 class _State(EplbState):
     def __init__(self, policy=None, fail_commit=False):
-        self.selected_policy = policy or _Policy()
+        self.selected_policy = policy or DefaultEplbPolicy()
         self.fail_commit = fail_commit
         self.committed_layers = []
+        self.committed_maps = []
         super().__init__(ParallelConfig(), torch.device("cpu"))
 
     def create_policy(self):
         return self.selected_policy
 
     def on_layer_committed(self, model_state, layer_idx):
+        if model_state.pending_result is not None:
+            assert not model_state.pending_result.consumed_event.wait(timeout=0)
         if self.fail_commit:
             raise RuntimeError("device commit failed")
         self.committed_layers.append(layer_idx)
+        self.committed_maps.append(model_state.physical_to_logical_map.clone())
 
 
 @pytest.fixture
@@ -275,61 +250,49 @@ def model_state(cpu_group):
         eplb_stats=None,
         device_index=None,
         communicator=TorchDistGlooStagedEplbCommunicator(cpu_group),
-        policy_state=_PolicyState(),
     )
 
 
-def test_default_policy_preserves_aggregate_result(cpu_group):
-    context = EplbRebalanceContext(
-        load_window_cpu=torch.tensor([[[9, 1, 3, 2]], [[4, 2, 1, 1]]]),
-        physical_to_logical_map_cpu=torch.tensor([[0, 1, 2, 3, 0, 1]]),
-        topology=EplbTopology(num_groups=1, num_nodes=1, num_ranks=2),
-        num_replicas=6,
-        cpu_group=cpu_group,
-    )
-    policy = DefaultEplbPolicy()
-    result = policy.rebalance_experts(context, policy.create_state(1))
-    expected = policy._rebalance_from_weights(
-        torch.tensor([[13, 3, 4, 3]]),
-        6,
-        1,
-        1,
-        2,
-        context.physical_to_logical_map_cpu,
-    )
-    torch.testing.assert_close(result.physical_to_logical_map, expected, rtol=0, atol=0)
+@pytest.mark.parametrize("use_async", [False, True])
+def test_planning_hook_preserves_existing_policy_result(model_state, use_async):
+    loads = torch.tensor([[13, 3, 4, 3]])
+    current = torch.tensor([[0, 1, 2, 3, 0, 1]])
+    observed = []
+
+    class State(_State):
+        def rebalance_experts(self, model, weight, *args):
+            observed.append(model)
+            assert weight.ndim == 2
+            return super().rebalance_experts(model, weight, *args)
+
+    state = State()
+    if use_async:
+        model_state.eplb_stats = EplbStats(loads, 6, 1, 1, 2)
+        result = run_rebalance_experts(model_state, state, current, None)
+    else:
+        result = state.rebalance_experts(model_state, loads, 6, 1, 1, 2, current)
+    expected = DefaultEplbPolicy.rebalance_experts(loads, 6, 1, 1, 2, current)
+    torch.testing.assert_close(result, expected, rtol=0, atol=0)
+    assert len(observed) == 1 and observed[0] is model_state
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.int32, torch.int64])
-def test_policy_target_requires_cpu_integer(model_state, cpu_group, dtype):
+def test_policy_target_requires_cpu_integer(model_state, dtype):
     target = torch.zeros(1, 4, dtype=dtype)
-    state = _State(_Policy(target))
-    context = EplbRebalanceContext(
-        torch.ones(1, 1, 4),
-        torch.arange(4).reshape(1, 4),
-        EplbTopology(1, 1, 1),
-        4,
-        cpu_group,
-    )
+
+    class Policy(DefaultEplbPolicy):
+        @classmethod
+        def rebalance_experts(cls, *args, **kwargs):
+            return target
+
+    state = _State(Policy())
     if dtype == torch.float32:
         with pytest.raises(ValueError, match="CPU int32 or int64"):
-            state.rebalance_experts(model_state, context)
+            state.rebalance_experts(model_state, torch.ones(1, 4), 4, 1, 1, 1)
     else:
         assert (
-            state.rebalance_experts(model_state, context).physical_to_logical_map
-            is target
+            state.rebalance_experts(model_state, torch.ones(1, 4), 4, 1, 1, 1) is target
         )
-
-
-def test_shared_policy_keeps_model_state_independent(model_state, cpu_group):
-    policy = _Policy()
-    first, second = policy.create_state(1), policy.create_state(1)
-    plan = EplbPlan(torch.arange(4).reshape(1, 4))
-    policy.on_layer_committed(first, plan, 0)
-    assert first.committed_layers == [0]
-    assert second.committed_layers == []
-    state = _State(policy)
-    assert state.policy is policy
 
 
 def test_aggregate_allreduce_keeps_original_payload_shape(model_state):
@@ -342,14 +305,16 @@ def test_aggregate_allreduce_keeps_original_payload_shape(model_state):
     torch.testing.assert_close(reduced[1], second, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("failure", ["device", "policy"])
-def test_commit_failure_keeps_buffer_unacknowledged(model_state, failure):
-    state = _State(_Policy(fail_commit=failure == "policy"), failure == "device")
-    plan = EplbPlan(torch.tensor([[1, 0, 3, 2]]))
+@pytest.mark.parametrize("fail_commit", [False, True])
+def test_async_commit_updates_maps_before_buffer_acknowledgement(
+    model_state, fail_commit
+):
+    state = _State(fail_commit=fail_commit)
+    target = torch.tensor([[1, 0, 3, 2]])
     original = model_state.model.weight.detach().clone()
     metadata = transfer_layer(
         old_layer_indices=model_state.physical_to_logical_map[0],
-        new_layer_indices=plan.physical_to_logical_map[0],
+        new_layer_indices=target[0],
         expert_weights=model_state.model.expert_weights[0],
         expert_weights_buffer=model_state.expert_buffer,
         communicator=model_state.communicator,
@@ -357,26 +322,33 @@ def test_commit_failure_keeps_buffer_unacknowledged(model_state, failure):
         stream=None,
         is_profile=False,
     )
-    result = AsyncEplbLayerResult(0, plan, metadata, CpuGpuEvent())
+    result = AsyncEplbLayerResult(0, target[0], metadata, CpuGpuEvent())
     model_state.pending_result = result
     model_state.rebalanced = True
-    with pytest.raises(RuntimeError, match="commit failed"):
+    if fail_commit:
+        with pytest.raises(RuntimeError, match="commit failed"):
+            _move_to_workspace(model_state, 0, state._commit_rebalance)
+    else:
         _move_to_workspace(model_state, 0, state._commit_rebalance)
     torch.testing.assert_close(model_state.model.weight, original[[1, 0, 3, 2]])
-    torch.testing.assert_close(
-        model_state.physical_to_logical_map, plan.physical_to_logical_map
-    )
-    assert model_state.policy_state.committed_layers == []
-    assert model_state.pending_result is result
-    assert not result.consumed_event.wait(timeout=0)
+    torch.testing.assert_close(model_state.physical_to_logical_map, target)
+    if fail_commit:
+        assert state.committed_layers == []
+        assert model_state.pending_result is result
+        assert not result.consumed_event.wait(timeout=0)
+    else:
+        assert state.committed_layers == [0]
+        torch.testing.assert_close(state.committed_maps[0], target)
+        assert model_state.pending_result is None
+        assert result.consumed_event.wait(timeout=0)
 
 
-def test_sync_commit_updates_maps_then_policy_state(model_state):
+def test_sync_commit_updates_maps_before_callback(model_state):
     state = _State()
-    plan = EplbPlan(torch.tensor([[1, 0, 3, 2]]))
-    state._commit_rebalance(model_state, plan)
+    target = torch.tensor([[1, 0, 3, 2]])
+    state._commit_rebalance(model_state, target)
     assert state.committed_layers == [0]
-    assert model_state.policy_state.committed_layers == [0]
+    torch.testing.assert_close(state.committed_maps[0], target)
     torch.testing.assert_close(
         model_state.logical_to_physical_map[0, :, 0], torch.tensor([1, 0, 3, 2])
     )
