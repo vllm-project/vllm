@@ -51,6 +51,7 @@ from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import IterationStats, PrefillStats, SchedulerStats
 from vllm.v1.outputs import SamplingMaskLists
+from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 
 @pytest.mark.parametrize("flat_logprobs", [False, True])
@@ -95,6 +96,7 @@ def test_completion_output_preserves_each_sampling_mask_position() -> None:
         SamplingMaskLists(token_ids=np.array([30, 31, 32])),
     ]
     state.routed_experts_chunks = []
+    state.token_output_chunks = {}
     state.spec_decode_metrics = None
     state.weight_version_starts = []
 
@@ -1562,6 +1564,127 @@ def test_routed_experts_are_accumulated_until_finish():
     )
 
 
+@pytest.mark.parametrize(
+    "output_kind", [RequestOutputKind.CUMULATIVE, RequestOutputKind.FINAL_ONLY]
+)
+def test_last_hidden_states_are_accumulated_until_finish(
+    output_kind: RequestOutputKind, dummy_test_vectors
+):
+    """One row per generated token, returned with the final output only."""
+    output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=False)
+    request = EngineCoreRequest(
+        request_id="request-0",
+        external_req_id="external-0",
+        prompt_token_ids=dummy_test_vectors.prompt_tokens[0],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(
+            max_tokens=3,
+            output_kind=output_kind,
+            return_last_hidden_states=True,
+        ),
+        pooling_params=None,
+    )
+    output_processor.add_request(request, None)
+    rows = torch.randn(3, 8).to(torch.bfloat16)
+
+    results = []
+    for step in range(3):
+        finished = step == 2
+        processed = output_processor.process_outputs(
+            [
+                EngineCoreOutput(
+                    request_id="request-0",
+                    new_token_ids=[dummy_test_vectors.generation_tokens[0][step]],
+                    new_token_outputs={"last_hidden_states": rows[step : step + 1]},
+                    finish_reason=FinishReason.LENGTH if finished else None,
+                )
+            ]
+        )
+        results.extend(processed.request_outputs)
+
+    assert results[-1].finished
+    for partial in results[:-1]:
+        assert partial.outputs[0].last_hidden_states is None
+    final = results[-1].outputs[0]
+    assert final.last_hidden_states.dtype == torch.bfloat16
+    assert torch.equal(final.last_hidden_states, rows)
+
+
+def test_last_hidden_states_do_not_alias_transport_buffers(dummy_test_vectors):
+    """The returned rows own their memory: the decoder hands the output processor
+    zero-copy views of the received frames, which must not outlive the request."""
+    output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=False)
+    request = EngineCoreRequest(
+        request_id="request-0",
+        external_req_id="external-0",
+        prompt_token_ids=dummy_test_vectors.prompt_tokens[0],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(max_tokens=1, return_last_hidden_states=True),
+        pooling_params=None,
+    )
+    output_processor.add_request(request, None)
+    # Above the zero-copy threshold, so the row travels as an auxiliary buffer.
+    rows = torch.randn(1, 512).to(torch.bfloat16)
+    frames = [
+        bytearray(buf)
+        for buf in MsgpackEncoder().encode(
+            EngineCoreOutputs(
+                outputs=[
+                    EngineCoreOutput(
+                        request_id="request-0",
+                        new_token_ids=[dummy_test_vectors.generation_tokens[0][0]],
+                        new_token_outputs={"last_hidden_states": rows},
+                        finish_reason=FinishReason.LENGTH,
+                    )
+                ]
+            )
+        )
+    ]
+    assert len(frames) > 1
+    decoded = MsgpackDecoder(EngineCoreOutputs).decode(frames)
+    processed = output_processor.process_outputs(decoded.outputs)
+
+    final = processed.request_outputs[0].outputs[0].last_hidden_states
+    for frame in frames[1:]:
+        frame[:] = bytes(len(frame))
+    assert torch.equal(final, rows)
+
+
+def test_last_hidden_states_survive_output_aggregation():
+    rows = torch.ones(2, 4)
+    outputs = [
+        RequestOutput(
+            request_id="r",
+            prompt=None,
+            prompt_token_ids=[1, 2],
+            prompt_logprobs=None,
+            outputs=[
+                CompletionOutput(
+                    index=0,
+                    text="a",
+                    token_ids=[idx],
+                    cumulative_logprob=None,
+                    logprobs=None,
+                    last_hidden_states=rows if idx == 1 else None,
+                    finish_reason="length" if idx == 1 else None,
+                )
+            ],
+            finished=idx == 1,
+        )
+        for idx in range(2)
+    ]
+    outputs[0].add(outputs[1], aggregate=True)
+    assert torch.equal(outputs[0].outputs[0].last_hidden_states, rows)
+
+
 @pytest.mark.asyncio
 async def test_cumulative_output_collector_n():
     """Test collector correctly handles multiple outputs by index."""
@@ -1879,6 +2002,7 @@ def test_sampling_masks_follow_output_kind(output_kind):
     state.request_index = 0
     state.sampling_mask_chunks = []
     state.routed_experts_chunks = []
+    state.token_output_chunks = {}
     state.spec_decode_metrics = None
     state.weight_version_starts = []
 
@@ -2060,3 +2184,27 @@ def test_weight_version_spans(output_kind: RequestOutputKind, steps, expected):
     final = queue.get_nowait()
     assert final is not None and final.finished
     assert final.outputs[0].weight_versions == [WeightVersionSpan(*s) for s in expected]
+
+
+def test_token_outputs_follow_tokens_trimmed_past_a_stop_string():
+    """Every entry's rows are cut with the tokens when a stop string ends the
+    request before the last token of a step, so rows and token ids stay one to
+    one."""
+    detokenizer = Mock()
+    detokenizer.num_output_tokens.return_value = 2
+    req_state = Mock(detokenizer=detokenizer)
+    output = Mock(
+        new_token_ids=[7, 8, 9],
+        new_logprobs=None,
+        new_sampling_mask=None,
+        routed_experts=None,
+        new_token_outputs={
+            "last_hidden_states": torch.arange(12.0).reshape(3, 4),
+            "probe": torch.arange(3.0).reshape(3, 1),
+        },
+    )
+    OutputProcessor._trim_surplus_tokens(req_state, output, num_prev_tokens=0)
+    assert output.new_token_ids == [7, 8]
+    kept = output.new_token_outputs
+    assert torch.equal(kept["last_hidden_states"], torch.arange(8.0).reshape(2, 4))
+    assert torch.equal(kept["probe"], torch.arange(2.0).reshape(2, 1))
