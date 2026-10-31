@@ -690,6 +690,8 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 !!! note
     For `Gemma4ForConditionalGeneration`:
     - audio input is only supported by the `gemma-4-E2B` and `gemma-4-E4B` variants.
+    - With online FP8 quantization (`--quantization fp8`), image and video
+      activations use the model dtype before the quantized vision projections.
     - The model does not ingest videos directly. However, vLLM’s Gemma 4 implementation supports video inputs by handling video processing internally. Users can send videos directly in the message structure to vLLM, where they are converted into text and image frames before being passed to the model.
     - Gemma 4 assistant checkpoints for speculative decoding use vLLM’s Gemma
       4 MTP path, not generic draft-model speculative decoding. See the
