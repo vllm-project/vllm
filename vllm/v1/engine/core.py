@@ -2409,8 +2409,14 @@ class DPEngineCoreProc(EngineCoreProc):
         if scheduler_config.dp_prefill_delayer:
             from vllm.v1.core.sched import prefill_delayer
 
-            if vllm_config.parallel_config.enable_elastic_ep:
-                raise ValueError("dp_prefill_delayer does not support elastic EP.")
+            # Both can change the DP size at runtime; the delayer counts on it.
+            if (
+                vllm_config.parallel_config.enable_elastic_ep
+                or vllm_config.parallel_config.enable_fault_tolerance
+            ):
+                raise ValueError(
+                    "dp_prefill_delayer does not support elastic EP or fault tolerance."
+                )
             self.prefill_delayer = prefill_delayer.PrefillDelayer(
                 vllm_config.parallel_config.data_parallel_size,
                 scheduler_config.max_num_batched_tokens,
