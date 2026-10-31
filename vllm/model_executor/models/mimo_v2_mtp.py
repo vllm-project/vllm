@@ -33,7 +33,6 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -115,12 +114,8 @@ class MiMoV2MTPLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
         )
         # a fused fp8 qkv_proj checkpoint loads as rows and row scales
-        qkv_proj = self.self_attn.qkv_proj
-        if (
-            _fused_qkv_chunks(config, quant_config)
-            and type(qkv_proj.quant_method) is Fp8LinearMethod
-        ):
-            _use_row_scales(qkv_proj)
+        if _fused_qkv_chunks(config, quant_config):
+            _use_row_scales(self.self_attn.qkv_proj)
         self.pre_mlp_layernorm = RMSNorm(
             config.hidden_size, eps=config.layernorm_epsilon
         )

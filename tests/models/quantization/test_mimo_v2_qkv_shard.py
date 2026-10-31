@@ -27,7 +27,7 @@ from vllm.model_executor.models.mimo_v2 import (
     _fused_qkv_kv_chunk_rows,
     _fused_qkv_rank_rows,
     _fused_qkv_row_scales,
-    _fused_qkv_weight_rows,
+    _gather_rows,
     _row_scales_to_blocks,
     _split_qkv,
 )
@@ -84,10 +84,7 @@ def _shard_fp8_qkv_proj(
         s_full, *geometry, rows, tp_size, ckpt_tp, block, kv_chunk_rows
     )
     return _row_scales_to_blocks(
-        _fused_qkv_weight_rows(w_full, *geometry, rows, ckpt_tp),
-        row_scales,
-        requantize,
-        block,
+        _gather_rows(w_full, rows), row_scales, requantize, block
     )
 
 
