@@ -1656,16 +1656,29 @@ class VllmConfig:
             and hasattr(self.quant_config, "use_deep_gemm")
             and self.quant_config.use_deep_gemm is None
         ):
-            from vllm.utils.deep_gemm import should_auto_disable_deep_gemm
+            from vllm.utils.deep_gemm import (
+                is_deep_gemm_fp8_linear_requested,
+                should_auto_disable_deep_gemm,
+            )
 
             model_type = getattr(self.model_config.hf_text_config, "model_type", None)
             if should_auto_disable_deep_gemm(model_type):
-                self.quant_config.use_deep_gemm = False
-                logger.warning_once(
-                    "Auto-disabled DeepGemm for model_type=%s on Blackwell. "
-                    "To disable DeepGemm globally, set VLLM_USE_DEEP_GEMM=0.",
-                    model_type,
-                )
+                if is_deep_gemm_fp8_linear_requested(self.kernel_config):
+                    logger.warning_once(
+                        "DeepGemm is auto-disabled for model_type=%s on this "
+                        "GPU, but --linear-backend deep_gemm requests it. "
+                        "Using DeepGemm for the FP8 linear layers.",
+                        model_type,
+                    )
+                else:
+                    self.quant_config.use_deep_gemm = False
+                    logger.warning_once(
+                        "Auto-disabled DeepGemm for model_type=%s on Blackwell. "
+                        "To use it anyway, pass --linear-backend deep_gemm for "
+                        "the FP8 linear layers. To disable DeepGemm globally, "
+                        "set VLLM_USE_DEEP_GEMM=0.",
+                        model_type,
+                    )
 
         from vllm.platforms import current_platform
         from vllm.v1.executor.abstract import Executor
