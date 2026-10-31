@@ -19,7 +19,7 @@ use zeromq::RouterSendHalf;
 use crate::client::state::{
     OutputReceiver, OutputSender, RequestRegistry, UtilityReceiver, UtilityRegistry,
 };
-use crate::client::stream::EngineCoreStreamOutput;
+use crate::client::stream::{EngineCoreOutputStream, EngineCoreStreamOutput};
 use crate::client::{AbortCause, AbortRequest};
 use crate::error::{client_closed, dispatcher_closed, unexpected_dispatcher_output};
 use crate::metrics::{
@@ -291,11 +291,28 @@ impl ClientInner {
         &self,
         engine_id: &EngineId,
         mut payload: EngineCoreRequest,
-    ) -> Result<()> {
+        stream: EngineCoreOutputStream,
+    ) -> Result<EngineCoreOutputStream> {
         let aux_frames = payload.extract_aux_frames(self.msgpack_zero_copy_threshold);
         let payload = Bytes::from(encode_msgpack(&payload)?);
-        self.send_encoded_to_engine(engine_id, EngineCoreRequestType::Add, payload, aux_frames)
-            .await
+        let mut input_send = self.input_send.clone();
+        let engine_id = engine_id.clone();
+
+        self.handle
+            .spawn(async move {
+                // If the caller cancels, dropping the stream must enqueue Abort
+                // after Add, not while this detached send is still pending.
+                transport::send_message(
+                    &mut input_send,
+                    &engine_id,
+                    EngineCoreRequestType::Add.to_frame(),
+                    payload,
+                    aux_frames,
+                )
+                .await?;
+                Ok(stream)
+            })
+            .await?
     }
 
     async fn send_encoded_to_engine(
@@ -549,10 +566,16 @@ pub(crate) async fn run_output_dispatcher_loop(
 
 #[cfg(test)]
 mod tests {
-    use zeromq::{RouterSocket, Socket};
+    use std::time::Duration;
+
+    use tokio::runtime::Builder;
+    use tokio::time::timeout;
+    use zeromq::{DealerSocket, RouterSocket, Socket, SocketRecv, SocketSend};
 
     use super::*;
+    use crate::client::output_channel::output_channel;
     use crate::mock_engine::default_ready_response;
+    use crate::protocol::sampling::EngineCoreSamplingParams;
 
     async fn test_inner() -> ClientInner {
         let mut socket = RouterSocket::new();
@@ -568,6 +591,68 @@ mod tests {
                 ready_response: default_ready_response(),
             }],
         )
+    }
+
+    #[test]
+    fn cancelling_add_defers_abort_until_send_completes() {
+        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        let send_runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let mut router = RouterSocket::new();
+            let endpoint = router.bind("tcp://127.0.0.1:0").await.unwrap();
+            let mut dealer = DealerSocket::new();
+            dealer.connect(&endpoint.to_string()).await.unwrap();
+            dealer.send("ready".into()).await.unwrap();
+            let ready = router.recv().await.unwrap().into_vec();
+            let engine_id = EngineId::from(ready[0].to_vec());
+            let (input_send, _) = router.split();
+            let inner = ClientInner::new(
+                input_send,
+                send_runtime.handle().clone(),
+                "test-model".to_string(),
+                false,
+                &[],
+            );
+            let (abort_tx, mut abort_rx) = mpsc::unbounded_channel();
+            let (_output_tx, output_rx) = output_channel(NonZeroU32::MIN);
+            let stream = EngineCoreOutputStream::new("req-1".to_string(), 0, abort_tx, output_rx);
+            let request = EngineCoreRequest {
+                request_id: "req-1".to_string(),
+                prompt_token_ids: Some(vec![1]),
+                sampling_params: Some(EngineCoreSamplingParams::for_test()),
+                ..Default::default()
+            };
+            let mut send = Box::pin(inner.send_request_to_engine(&engine_id, request, stream));
+
+            // The send runtime is not running yet, so cancellation happens
+            // after spawning the send but before Add can enter the socket queue.
+            assert!(futures::poll!(send.as_mut()).is_pending());
+            drop(send);
+            assert!(matches!(
+                abort_rx.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+
+            let abort = std::thread::scope(|scope| {
+                scope
+                    .spawn(|| {
+                        send_runtime.block_on(async {
+                            timeout(Duration::from_secs(5), abort_rx.recv()).await.unwrap().unwrap()
+                        })
+                    })
+                    .join()
+                    .unwrap()
+            });
+            assert_eq!(abort.request_id, "req-1");
+            let add = timeout(Duration::from_secs(5), dealer.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .into_vec();
+            assert_eq!(add[0], EngineCoreRequestType::Add.to_frame());
+            let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+            assert_eq!(request.request_id, abort.request_id);
+        });
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

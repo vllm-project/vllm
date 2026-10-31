@@ -695,30 +695,25 @@ impl EngineCoreClient {
             rx,
         );
 
-        let result: Result<()> = async {
-            // The engine that receives it wakes the other ranks if they are idle.
-            if let Some(coordinator) = self.coordinator.as_ref() {
-                req.current_wave = coordinator.snapshot().current_wave;
-            }
-
-            debug!(
-                request_id = req.request_id,
-                ?engine_id,
-                "registered request to engine"
-            );
-
-            self.inner.send_request_to_engine(&engine_id, req).await?;
-            Ok(())
+        // The engine that receives it wakes the other ranks if they are idle.
+        if let Some(coordinator) = self.coordinator.as_ref() {
+            req.current_wave = coordinator.snapshot().current_wave;
         }
-        .await;
+
+        debug!(
+            request_id = req.request_id,
+            ?engine_id,
+            "registered request to engine"
+        );
+
+        let result = self.inner.send_request_to_engine(&engine_id, req, stream).await;
 
         // Failed to send the request to the engine, roll back the registration.
-        if let Err(error) = result {
+        if result.is_err() {
             self.inner.rollback_request(&request_id);
-            return Err(error);
         }
 
-        Ok(stream)
+        result
     }
 
     /// Abort currently in-flight requests by request ID.
