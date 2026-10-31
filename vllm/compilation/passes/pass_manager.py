@@ -24,9 +24,11 @@ if rocm_aiter_ops.is_enabled() or rocm_aiter_ops.is_rdna_aiter_enabled():
     )
     from .fusion.rocm_aiter_fusion import (
         MLADualRMSNormFusionPass,
+        RocmAiterActMulMxfp4GemmFusionPass,
         RocmAiterRMSNormQuantFusionPass,
         RocmAiterSiluMulFp8GroupQuantFusionPass,
         RocmAiterTritonAddRMSNormPadFusionPass,
+        act_mxfp4_pass_enabled,
     )
 
 if current_platform.is_cuda_alike() or current_platform.is_xpu():
@@ -101,6 +103,8 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
 
     def __init__(self) -> None:
         self.passes: list[InductorPass] = []
+        # The VllmBackend prefix of the graph being compiled; set before configure().
+        self.compile_prefix: str | None = None
 
     @with_pattern_match_debug
     def __call__(self, graph: fx.Graph) -> None:
@@ -192,6 +196,12 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                     or rocm_aiter_ops.is_rdna_aiter_enabled()
                 ):
                     self.passes += [RocmAiterSiluMulFp8GroupQuantFusionPass(config)]
+                    if act_mxfp4_pass_enabled(self.pass_config.fuse_act_quant):
+                        self.passes += [
+                            RocmAiterActMulMxfp4GemmFusionPass(
+                                config, compile_prefix=self.compile_prefix
+                            )
+                        ]
 
             if self.pass_config.fuse_qk_norm_rope_kvcache:
                 self.passes += [SplitCoalescingPass(config)]
@@ -221,6 +231,16 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
             self.clone_elimination = UnsafeCloneEliminationPass(config)
             self.post_cleanup = PostCleanupPass(config)
             self.fix_functionalization = FixFunctionalizationPass(config)
+
+    def finish_compile(self) -> None:
+        """Called by VllmBackend once every piece of the split graph has compiled
+        for every compile range, so a pass can judge what only the whole graph
+        shows. A pass without a ``finish_compile`` method is skipped.
+        """
+        for pass_ in self.passes:
+            finish = getattr(pass_, "finish_compile", None)
+            if finish is not None:
+                finish()
 
     def add(self, pass_: InductorPass) -> None:
         assert isinstance(pass_, InductorPass)
