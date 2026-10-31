@@ -107,6 +107,11 @@ class WhisperAudioInputs(TensorSchema):
         TensorShape("b", "nmb", "t"),
     ]
 
+    audio_pcm: Annotated[
+        list[torch.Tensor] | None,
+        TensorShape("b", "samples"),
+    ]
+
 
 class WhisperEncoderAttention(MMEncoderAttention):
     """Multi-headed attention for Whisper encoder with 2D tensor support."""
@@ -563,34 +568,117 @@ class WhisperEncoder(nn.Module):
                 sinusoids(*self.embed_positions.weight.shape)
             )
 
+    def _conv_embed(self, features: torch.Tensor) -> torch.Tensor:
+        """Batched conv stem: gelu(conv1) → gelu(conv2) → transpose →
+        add learned/sinusoidal position embeddings.
+
+        Works on either a rank-2 (num_mel, time) or rank-3
+        (batch, num_mel, time) input.
+        """
+        embeds = nn.functional.gelu(self.conv1(features))
+        embeds = nn.functional.gelu(self.conv2(embeds))
+
+        embeds = embeds.transpose(-1, -2)
+        # Add positional embedding; slice to actual sequence length.
+        embeds = embeds + self.embed_positions.weight[: embeds.size(-2), :]
+        return embeds.to(embeds.dtype)
+
+    def _static_full_chunk_mel_len(self) -> int | None:
+        """Return the fixed mel time length for a stock Whisper stem,
+        or ``None`` when the conv configuration is non-standard.
+
+        Stock Whisper: conv1 stride=1 / conv2 stride=2, both kernel=3 padding=1.
+        Then for ``max_source_positions`` (1500), mel_len = 1500*2 = 3000.
+        """
+        c1, c2 = self.conv1, self.conv2
+        if (
+            c1.stride[0] == 1
+            and c2.stride[0] == 2
+            and c1.kernel_size[0] == 3
+            and c2.kernel_size[0] == 3
+            and c1.padding[0] == 1
+            and c2.padding[0] == 1
+        ):
+            mel_len = self.max_source_positions * c2.stride[0]
+            # Sanity: (mel_len - 1) // 2 + 1 should equal max_source_positions.
+            if (mel_len - 1) // 2 + 1 == self.max_source_positions:
+                return mel_len
+        return None
+
     def forward(
         self, input_features: torch.Tensor | list[torch.Tensor]
     ) -> torch.Tensor:
-        hidden_states = []
-        input_is_batched = False
-        for features in input_features:
-            embeds = nn.functional.gelu(self.conv1(features))
-            embeds = nn.functional.gelu(self.conv2(embeds))
+        # Fast paths: rank-3 tensor, or equal-shape lists we can cat/stack.
+        if isinstance(input_features, torch.Tensor):
+            if input_features.ndim == 3:
+                return self._forward_batched(input_features)
+            # Rank-2: a single item, no loop needed.
+            return self._forward_single(input_features)
 
-            embeds = embeds.transpose(-1, -2)
-            embeds = (embeds + self.embed_positions.weight[: embeds.size(-2), :]).to(
-                embeds.dtype
-            )
+        if not input_features:
+            raise ValueError("WhisperEncoder got an empty input_features list")
 
-            hidden_states.append(embeds)
-            input_is_batched = embeds.ndim > 2
-        # Input to MHA must be B x T x D
-        if input_is_batched:
-            # Models using WhisperEncoder may handle batching internally.
-            hidden_states = torch.cat(hidden_states)
-        else:
-            hidden_states = torch.stack(hidden_states, dim=0)
+        # All rank-2?  All rank-3?
+        all_rank3 = all(x.ndim == 3 for x in input_features)
+        all_rank2 = all(x.ndim == 2 for x in input_features)
+
+        if all_rank3 and self._all_equal_shapes(input_features):
+            # Moss path: equal batched items, cat on dim 0.
+            stacked = torch.cat(input_features, dim=0)
+            return self._forward_batched(stacked)
+
+        if all_rank2 and self._all_equal_shapes(input_features):
+            stacked = torch.stack(input_features, dim=0)
+            return self._forward_batched(stacked)
+
+        # Slow fallback: unequal shapes or mixed ranks, per-item loop.
+        return self._forward_loop(input_features)
+
+    @staticmethod
+    def _all_equal_shapes(items: list[torch.Tensor]) -> bool:
+        ref_shape = items[0].shape
+        return all(t.shape == ref_shape for t in items[1:])
+
+    def _forward_single(self, features: torch.Tensor) -> torch.Tensor:
+        # features: (num_mel, time)
+        embeds = self._conv_embed(features.unsqueeze(0))
+        embeds = embeds.squeeze(0)
 
         for encoder_layer in self.layers:
-            hidden_states = encoder_layer(hidden_states)
+            embeds = encoder_layer(embeds)
 
-        hidden_states = self.layer_norm(hidden_states)
-        return hidden_states
+        return self.layer_norm(embeds)
+
+    def _forward_batched(self, features: torch.Tensor) -> torch.Tensor:
+        # features: (B, num_mel, time)
+        embeds = self._conv_embed(features)
+
+        for encoder_layer in self.layers:
+            embeds = encoder_layer(embeds)
+
+        return self.layer_norm(embeds)
+
+    def _forward_loop(self, input_features: list[torch.Tensor]) -> torch.Tensor:
+        hidden_states: list[torch.Tensor] = []
+        input_is_batched = False
+        for features in input_features:
+            embeds = self._conv_embed(
+                features.unsqueeze(0) if features.ndim == 2 else features
+            )
+            if embeds.ndim == 3:
+                embeds = embeds.squeeze(0)
+            hidden_states.append(embeds)
+            input_is_batched = hidden_states[-1].dim() > 2
+
+        if input_is_batched:
+            hidden_states_out = torch.cat(hidden_states)
+        else:
+            hidden_states_out = torch.stack(hidden_states, dim=0)
+
+        for encoder_layer in self.layers:
+            hidden_states_out = encoder_layer(hidden_states_out)
+
+        return self.layer_norm(hidden_states_out)
 
 
 @support_torch_compile(dynamic_arg_dims={"input_ids": 0, "positions": -1})
@@ -742,6 +830,10 @@ class WhisperDummyInputsBuilder(BaseDummyInputsBuilder[WhisperProcessingInfo]):
 
 
 class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo]):
+    # Whisper ships raw PCM to the worker where the GPU STFT runs.
+    # Keep fp32 so the GPU-side extractor formula matches transformers'.
+    keep_dtype_keys = frozenset({"audio_pcm"})
+
     def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
@@ -761,15 +853,28 @@ class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo
         mm_items: MultiModalDataItems,
         hf_kwargs: Mapping[str, object],
     ) -> HFMultiModalInputs:
-        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
+        # Ship resampled mono float32 PCM as passthrough.  The HF
+        # WhisperFeatureExtractor is intentionally not called here; the
+        # GPU worker computes log-mel from the PCM in embed_multimodal.
+        passthrough_data: dict[str, object] = {}
+        for modality, items in mm_items.items():
+            if items is None or not items:
+                continue
+            if modality == "audio":
+                passthrough_data["audio_pcm"] = items.get_all()
 
+        # HF-side kwargs are still returned so the processor sees them;
+        # hf_data is intentionally empty so no extractor runs.
         feature_extractor = self.info.get_feature_extractor(**hf_kwargs)
-        return hf_inputs._replace(
-            hf_kwargs=dict(
-                hf_inputs.hf_kwargs,
-                sampling_rate=feature_extractor.sampling_rate,
-                truncation=True,
-            )
+        merged_hf_kwargs = dict(
+            hf_kwargs,
+            sampling_rate=feature_extractor.sampling_rate,
+            truncation=True,
+        )
+        return HFMultiModalInputs(
+            hf_data={},
+            hf_kwargs=merged_hf_kwargs,
+            passthrough_data=passthrough_data,
         )
 
     def _get_mm_fields_config(
@@ -777,7 +882,9 @@ class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        return dict(input_features=MultiModalFieldConfig.batched("audio"))
+        # The GPU worker runs the log-mel extractor; the renderer only ships
+        # the raw PCM waveform.
+        return dict(audio_pcm=MultiModalFieldConfig.batched("audio"))
 
     def _get_prompt_updates(
         self,
@@ -967,6 +1074,39 @@ class WhisperForConditionalGeneration(
         self.config = config
         self.dtype = vllm_config.model_config.dtype
 
+        # Capture feature-extractor constants for the GPU-side log-mel path.
+        try:
+            processor = cached_processor_from_config(vllm_config.model_config)
+            extractor = processor.feature_extractor  # type: ignore[union-attr]
+            assert isinstance(extractor, WhisperFeatureExtractor)
+            self._fe_n_fft = extractor.n_fft
+            self._fe_hop_length = extractor.hop_length
+            self._fe_win_length = extractor.win_length
+            self._fe_feature_size = extractor.feature_size  # n_mels
+            self._fe_chunk_length = extractor.chunk_length
+            self._fe_sampling_rate = extractor.sampling_rate
+            self._fe_padding_value = extractor.padding_value
+            self._fe_do_normalize = extractor.do_normalize
+            self._fe_dither = extractor.dither
+            self._fe_center = extractor.center
+            # mel_filters: (n_mels, 1 + n_fft//2) Slaney filterbank
+            self._fe_mel_filters = torch.from_numpy(extractor.mel_filters).float()
+            self._fe_hann_window = torch.hann_window(self._fe_win_length)
+        except Exception:
+            # Stock Whisper defaults when processor is unavailable at init time.
+            self._fe_n_fft = 400
+            self._fe_hop_length = 160
+            self._fe_win_length = 400
+            self._fe_feature_size = 80
+            self._fe_chunk_length = 30
+            self._fe_sampling_rate = 16000
+            self._fe_padding_value = 0.0
+            self._fe_do_normalize = False
+            self._fe_dither = 0.0
+            self._fe_center = True
+            self._fe_mel_filters = None
+            self._fe_hann_window = None
+
         with self._mark_composite_model(
             vllm_config,
             language_targets=WhisperDecoder,
@@ -1003,11 +1143,111 @@ class WhisperForConditionalGeneration(
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         # Required as part of SupportsMultiModal interface.
         audio_input = self._parse_and_validate_audio_input(**kwargs)
+
+        if audio_input["audio_pcm"] is not None:
+            # GPU-side log-mel extractor path.
+            input_features = self._gpu_log_mel(audio_input["audio_pcm"])
+        elif audio_input["input_features"] is not None:
+            # Backward-compat: caller still shipped pre-computed log-mel.
+            input_features = audio_input["input_features"]
+        else:
+            raise ValueError(
+                "Whisper requires either 'audio_pcm' (GPU STFT path) "
+                "or 'input_features' (CPU precomputed log-mel)."
+            )
+
         # Split concatenated encoder outputs into one tensor per audio input
-        enc_output = self.model.get_encoder_outputs(audio_input["input_features"])
+        enc_output = self.model.get_encoder_outputs(input_features)
         assert enc_output is not None
         # The assumption is we can only process whole mm items (audios)
         return enc_output.unbind(dim=0)
+
+    def _gpu_log_mel(
+        self,
+        audio_pcm: list[torch.Tensor],
+    ) -> list[torch.Tensor]:
+        """Compute log-mel spectrograms from PCM on the GPU worker.
+
+        Mirrors ``transformers.WhisperFeatureExtractor._torch_extract_fbank_features``
+        (see ``src/transformers/models/whisper/feature_extraction_whisper.py``)
+        within ``1e-5``, but runs entirely on the device that hosts the
+        Whisper encoder.
+        """
+        device = self.model.encoder.conv1.weight.device
+        target_dtype = self.model.encoder.conv1.weight.dtype
+
+        # Lazy-load mel_filters + hann to the correct device the first call.
+        if self._fe_mel_filters is None:
+            # Fallback: create extractor just for its filterbank.
+            from transformers import WhisperFeatureExtractor
+
+            fe = WhisperFeatureExtractor(
+                n_fft=self._fe_n_fft,
+                hop_length=self._fe_hop_length,
+                win_length=self._fe_win_length,
+                feature_size=self._fe_feature_size,
+                sampling_rate=self._fe_sampling_rate,
+            )
+            self._fe_mel_filters = torch.from_numpy(fe.mel_filters).float()
+            self._fe_hann_window = torch.hann_window(self._fe_win_length)
+
+        mel_filters = self._fe_mel_filters.to(device=device)
+        hann_window = self._fe_hann_window.to(device=device)
+
+        n_samples = self._fe_chunk_length * self._fe_sampling_rate
+        log_mel_list: list[torch.Tensor] = []
+
+        for pcm in audio_pcm:
+            # pcm: CPU float32 waveform, shape (n_samples_or_less,)
+            waveform = pcm.to(device=device, dtype=torch.float32)
+
+            # Pad / truncate to fixed n_samples.
+            if waveform.numel() < n_samples:
+                waveform = torch.nn.functional.pad(
+                    waveform,
+                    (0, n_samples - waveform.numel()),
+                    value=self._fe_padding_value,
+                )
+            elif waveform.numel() > n_samples:
+                waveform = waveform[:n_samples]
+            else:
+                waveform = waveform.contiguous()
+
+            # Optional dither.
+            if self._fe_dither != 0.0:
+                waveform = waveform + (torch.randn_like(waveform) * self._fe_dither)
+
+            # STFT.
+            stft = torch.stft(
+                waveform,
+                n_fft=self._fe_n_fft,
+                hop_length=self._fe_hop_length,
+                win_length=self._fe_win_length,
+                window=hann_window,
+                center=self._fe_center,
+                pad_mode="reflect",
+                normalized=False,
+                onesided=True,
+                return_complex=True,
+            )
+
+            # Power spectrum (drop last bin to match extractor).
+            magnitudes = (stft[..., :-1].abs() ** 2).contiguous()
+
+            # Slaney mel filterbank.
+            mel_spec = mel_filters @ magnitudes
+
+            # Log scale with per-clip max normalization.
+            log_spec = mel_spec.clamp(min=1e-10).log10()
+            # max over time dim first, then over mel-bin dim.
+            log_spec_max = log_spec.max(dim=-1).values.max(dim=-1).values
+            log_spec = log_spec - log_spec_max[:, None, None] + 4.0
+            log_spec = log_spec / 4.0
+
+            # Cast to model dtype.
+            log_mel_list.append(log_spec.to(target_dtype))
+
+        return log_mel_list
 
     def embed_input_ids(
         self,
@@ -1021,16 +1261,28 @@ class WhisperForConditionalGeneration(
         return self.model.decoder.embed_input_ids(input_ids)
 
     def _parse_and_validate_audio_input(self, **kwargs: object) -> WhisperAudioInputs:
+        audio_pcm = kwargs.pop("audio_pcm", None)
         input_features = kwargs.pop("input_features", None)
 
         def to_dtype(value: object) -> torch.Tensor:
             assert isinstance(value, torch.Tensor)
             return value.to(self.dtype)
 
+        def keep_fp32(value: object) -> torch.Tensor:
+            assert isinstance(value, torch.Tensor)
+            return value.to(torch.float32)
+
         if input_features is not None:
             input_features = json_map_leaves(to_dtype, input_features)
 
-        return WhisperAudioInputs(input_features=input_features)
+        if audio_pcm is not None:
+            # Keep PCM in fp32 for the GPU STFT path.
+            audio_pcm = json_map_leaves(keep_fp32, audio_pcm)
+
+        return WhisperAudioInputs(
+            input_features=input_features,
+            audio_pcm=audio_pcm,
+        )
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         logits = self.logits_processor(self.proj_out, hidden_states)
