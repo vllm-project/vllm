@@ -9,6 +9,7 @@ import operator
 import os
 import pprint
 import time
+import tokenize
 from collections import defaultdict
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
@@ -1075,7 +1076,7 @@ class VllmBackend:
                 continue
             hash_content.append(filepath)
             try:
-                with open(filepath) as f:
+                with tokenize.open(filepath) as f:
                     hash_content.append(f.read())
             except (OSError, UnicodeDecodeError):
                 logger.warning("Failed to read file %s", filepath)
