@@ -93,12 +93,30 @@ def make_video_embedding(
     return unpruned_tokens_sequence, pruned_tokens_sequence, retention_mask
 
 
+def lump_video_tokens(tokens: torch.Tensor) -> torch.Tensor:
+    """Move every video token onto the first frame, as the processor does when
+    pruning."""
+    num_video_tokens = int((tokens == VIDEO_TOKEN_ID).sum())
+    rest = tokens[tokens != VIDEO_TOKEN_ID].tolist()
+    first_vision_start = rest.index(VISION_START_TOKEN_ID)
+    return torch.tensor(
+        rest[: first_vision_start + 1]
+        + [VIDEO_TOKEN_ID] * num_video_tokens
+        + rest[first_vision_start + 1 :]
+    )
+
+
 @pytest.mark.parametrize("spatial_merge_size", [1, 2])
 @pytest.mark.parametrize("grid_thw", [[3, 8, 7], [128, 10, 12]])
 @pytest.mark.parametrize("num_prefix_tokens", [1, 11])
 @pytest.mark.parametrize("num_suffix_tokens", [0, 7])
 @pytest.mark.parametrize("video_pruning_rate", [0, 0.25, 0.75])
 @pytest.mark.parametrize("interleave_text_tokens", [(0, 0), (1, 4)])
+# Qwen3-VL prompts keep the outer vision markers around the expanded video; the
+# recompute may start at the outer vision_start (-1) or right after it (0).
+@pytest.mark.parametrize(
+    "outer_vision_markers, cursor_shift", [(False, 0), (True, 0), (True, -1)]
+)
 def test_match_qwen3vl_mrope_evs_on(
     spatial_merge_size: int,
     num_prefix_tokens: int,
@@ -106,14 +124,18 @@ def test_match_qwen3vl_mrope_evs_on(
     num_suffix_tokens: int,
     video_pruning_rate: float,
     interleave_text_tokens: tuple[int, int],
+    outer_vision_markers: bool,
+    cursor_shift: int,
 ):
     hf_config = DummyConfig()
     hf_config.vision_config.spatial_merge_size = spatial_merge_size
 
     t, h, w = grid_thw
     population = list(range(1, 100))
-    prefix_tokens = random.choices(population, k=num_prefix_tokens)
-    suffix_tokens = random.choices(population, k=num_suffix_tokens)
+    outer_start = [VISION_START_TOKEN_ID] if outer_vision_markers else []
+    outer_end = [VISION_END_TOKEN_ID] if outer_vision_markers else []
+    prefix_tokens = random.choices(population, k=num_prefix_tokens) + outer_start
+    suffix_tokens = outer_end + random.choices(population, k=num_suffix_tokens)
 
     video_tokens, video_tokens_pruned, retention_mask = make_video_embedding(
         t,
@@ -125,7 +147,9 @@ def test_match_qwen3vl_mrope_evs_on(
     assert len(video_tokens) == len(retention_mask)
 
     input_tokens = prefix_tokens + video_tokens.tolist() + suffix_tokens
-    input_tokens_pruned = prefix_tokens + video_tokens_pruned.tolist() + suffix_tokens
+    input_tokens_pruned = (
+        prefix_tokens + lump_video_tokens(video_tokens_pruned).tolist() + suffix_tokens
+    )
 
     whole_sequence_retention_mask = torch.cat(
         [
@@ -228,10 +252,131 @@ def test_match_qwen3vl_mrope_evs_on(
         input_ids=input_tokens_pruned,
         multimodal_embeddings=multimodal_embeddings,
         mrope_positions=computed_mrope,
-        num_computed_tokens=len(prefix_tokens),
+        num_computed_tokens=len(prefix_tokens) + cursor_shift,
         vision_start_token_id=hf_config.vision_start_token_id,
         image_token_id=hf_config.image_token_id,
         video_token_id=hf_config.video_token_id,
     )
 
     assert torch.equal(actual_mrope, expected_mrope_masked)
+
+
+def _video_feature(
+    grid_thw: list[int], offset: int, length: int
+) -> MultiModalFeatureSpec:
+    return MultiModalFeatureSpec(
+        data=MultiModalKwargsItem(
+            {
+                "video_grid_thw": MultiModalFieldElem(
+                    data=torch.tensor(grid_thw),
+                    field=None,  # HACK.
+                ),
+            }
+        ),
+        modality="video",
+        identifier="DUMMY",
+        mm_position=PlaceholderRange(offset=offset, length=length),
+    )
+
+
+@pytest.mark.parametrize("num_videos", [1, 2])
+@pytest.mark.parametrize("outer_markers", [False, True])
+@pytest.mark.parametrize("chunk_size", [1, 8, 4096])
+def test_qwen3vl_mrope_evs_chunked_prefill(
+    num_videos: int, outer_markers: bool, chunk_size: int
+):
+    """Chunk boundaries inside pruned videos must not change their positions."""
+    random.seed(0)
+    torch.manual_seed(0)
+    hf_config = DummyConfig()
+    grid_thw = [4, 3, 4]
+    t, h, w = grid_thw
+
+    # Lay out videos the way the processor does: every retained video token on
+    # the first frame, optionally between outer vision start / end tokens.
+    prompt = random.choices(range(1, 100), k=5)
+    videos = []
+    for _ in range(num_videos):
+        video_tokens, pruned_tokens, retention_mask = make_video_embedding(
+            t, h, w, interleave_text_tokens=(3, 6), video_pruning_rate=0.5
+        )
+        video_mrope, _ = Qwen3VLForConditionalGeneration._get_mrope_input_positions(
+            input_tokens=video_tokens.tolist(),
+            mm_features=[_video_feature(grid_thw, 0, video_tokens.numel())],
+            config=hf_config,
+        )
+        is_video = pruned_tokens == VIDEO_TOKEN_ID
+        mm_pos = torch.cat(
+            [
+                video_mrope[:, retention_mask],
+                (pruned_tokens == VISION_START_TOKEN_ID)[None],
+                is_video[None],
+            ]
+        ).long()
+
+        placeholder = pruned_tokens[~is_video].tolist()
+        first_frame_start = placeholder.index(VISION_START_TOKEN_ID) + 1
+        placeholder[first_frame_start:first_frame_start] = [VIDEO_TOKEN_ID] * int(
+            is_video.sum()
+        )
+
+        if outer_markers:
+            prompt.append(VISION_START_TOKEN_ID)
+        videos.append((len(prompt), mm_pos))
+        prompt += placeholder
+        if outer_markers:
+            prompt.append(VISION_END_TOKEN_ID)
+        prompt += random.choices(range(1, 100), k=4)
+
+    expected = torch.empty((3, len(prompt)), dtype=torch.long)
+    cursor = next_pos = 0
+    for offset, mm_pos in videos:
+        expected[:, cursor:offset] = torch.arange(offset - cursor) + next_pos
+        end = offset + mm_pos.shape[1]
+        expected[:, offset:end] = mm_pos[:3] + next_pos + offset - cursor
+        cursor, next_pos = end, int(expected[:, offset:end].max()) + 1
+    expected[:, cursor:] = torch.arange(len(prompt) - cursor) + next_pos
+
+    positions, _ = Qwen3VLForConditionalGeneration._get_mrope_input_positions(
+        input_tokens=prompt,
+        mm_features=[
+            _video_feature(grid_thw, offset, mm_pos.shape[1])
+            for offset, mm_pos in videos
+        ],
+        config=hf_config,
+    )
+
+    # Mirror the model runner: each chunk gets the slices of the placeholders it
+    # overlaps, and the positions it is run with are the ones written for it.
+    hidden_size = 16
+    chunk_positions = torch.empty_like(expected)
+    for start in range(0, len(prompt), chunk_size):
+        end = min(start + chunk_size, len(prompt))
+        embeddings, offsets = [], []
+        for offset, mm_pos in videos:
+            lo, hi = max(start - offset, 0), min(end - offset, mm_pos.shape[1])
+            if lo < hi:
+                embeddings.append(
+                    torch.cat(
+                        [torch.zeros(hi - lo, hidden_size), mm_pos[:, lo:hi].T.float()],
+                        dim=1,
+                    )
+                )
+                offsets.append(offset)
+
+        _, positions, delta = (
+            Qwen3VLForConditionalGeneration._recompute_mrope_positions(
+                input_ids=prompt,
+                multimodal_embeddings=embeddings,
+                mrope_positions=positions,
+                num_computed_tokens=start,
+                vision_start_token_id=hf_config.vision_start_token_id,
+                image_token_id=hf_config.image_token_id,
+                video_token_id=hf_config.video_token_id,
+                multimodal_offsets=offsets,
+            )
+        )
+        chunk_positions[:, start:end] = positions[:, start:end]
+
+    assert torch.equal(chunk_positions, expected)
+    assert delta == int(expected.max()) + 1 - len(prompt)

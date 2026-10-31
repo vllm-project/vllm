@@ -2966,6 +2966,7 @@ class Qwen3VLForConditionalGeneration(
         multimodal_embeddings: Sequence[torch.Tensor],
         mrope_positions: torch.LongTensor,
         num_computed_tokens: int,
+        multimodal_offsets: Sequence[int] | None = None,
     ) -> tuple[Sequence[torch.Tensor], torch.Tensor, int]:
         """Update part of input mrope positions (starting with
         num_computed_tokens index). Original mrope_positions are computed
@@ -2981,6 +2982,8 @@ class Qwen3VLForConditionalGeneration(
             mrope_positions: Existing mrope positions (3, N) for entire
                 sequence
             num_computed_tokens: A number of computed tokens so far.
+            multimodal_offsets: Placeholder offset of the media item that
+                each of multimodal_embeddings belongs to.
 
         Returns:
             Tuple of (multimodal_embeddings, mrope_positions,
@@ -2995,6 +2998,7 @@ class Qwen3VLForConditionalGeneration(
             image_token_id=self.config.image_token_id,
             video_token_id=self.config.video_token_id,
             vision_start_token_id=self.config.vision_start_token_id,
+            multimodal_offsets=multimodal_offsets,
         )
 
     @staticmethod
@@ -3006,6 +3010,7 @@ class Qwen3VLForConditionalGeneration(
         vision_start_token_id: int,
         image_token_id: int,
         video_token_id: int,
+        multimodal_offsets: Sequence[int] | None = None,
     ) -> tuple[Sequence[torch.Tensor], torch.Tensor, int]:
         # Device
         device = (
@@ -3046,6 +3051,7 @@ class Qwen3VLForConditionalGeneration(
                 vision_start_token_id,
                 image_token_id,
                 video_token_id,
+                multimodal_offsets,
             )
 
         return mm_embeddings_out, positions, mrope_positions_delta
