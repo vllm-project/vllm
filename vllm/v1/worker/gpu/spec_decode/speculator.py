@@ -361,11 +361,20 @@ class DraftModelSpeculator(BaseSpeculator):
     ) -> None:
         self.model_state = model_state
         self.kv_cache_config = kv_cache_config
+        # Draft layers share KV cache groups with the target, whose cache is laid
+        # out in the kernel blocks the target's backends picked. Reuse them so
+        # the draft decode steps read that cache with the same page size.
         self.attn_groups, self.attn_cg_support, _ = init_attn_backend(
             kv_cache_config,
             self.attn_vllm_config,
             self.device,
             active_layer_names=self.draft_attn_layer_names,
+            kernel_block_sizes=[
+                (groups[0].kernel_block_size or groups[0].kv_cache_spec.block_size)
+                if groups
+                else None
+                for groups in target_attn_groups
+            ],
         )
         self.block_tables = block_tables
         # The target model runner's buffers and attention groups. Draft
