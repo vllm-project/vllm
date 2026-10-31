@@ -90,7 +90,7 @@ def test_runai_model_loader_download_files(vllm_runner):
 @create_new_process_for_each_test("spawn")
 def test_runai_mtp_real_checkpoint(vllm_runner, tmp_path, monkeypatch):
     """Skip main-only shards without changing a real MTP model's generation."""
-    from vllm.model_executor.models.qwen3_5_mtp import Qwen3_5MTP
+    from vllm.models.qwen3_5 import Qwen3_5MTP
     from vllm.platforms import current_platform
     from vllm.transformers_utils.repo_utils import hf_api
     from vllm.v1.metrics.reader import Counter
@@ -108,7 +108,7 @@ def test_runai_mtp_real_checkpoint(vllm_runner, tmp_path, monkeypatch):
         tensors.update(load_file(path))
     # Reshard real, unmodified weights so selection cannot pass vacuously on
     # the published single mixed file. This predicate needs no model state.
-    selector = Qwen3_5MTP.__new__(Qwen3_5MTP)
+    selector = Qwen3_5MTP.__new__(Qwen3_5MTP)  # type: ignore[type-abstract]
     main: dict[str, torch.Tensor] = {}
     draft: dict[str, torch.Tensor] = {}
     for name, tensor in tensors.items():

@@ -18,7 +18,7 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Any, ClassVar, Final, NamedTuple
+from typing import Any, ClassVar, Final, Literal, NamedTuple
 
 from openai.types.responses import (
     ResponseCodeInterpreterCallCodeDeltaEvent,
@@ -79,6 +79,7 @@ from vllm.entrypoints.openai.responses.utils import (
     custom_tool_names,
     decode_custom_tool_input,
     decode_custom_tool_input_prefix,
+    extend_custom_tool_input_prefix,
     resolve_responses_tool_call_name,
 )
 from vllm.outputs import CompletionOutput
@@ -829,6 +830,9 @@ class SimpleStreamingState:
     tool_call_index: int | None = None
     tool_call_is_custom: bool = False
     tool_call_payload: str = ""
+    # End of the custom-tool arguments decoded into tool_call_payload, or -1
+    # once they need a full decode.
+    tool_call_payload_end: int = 0
     current_state: _StateType = field(default_factory=lambda: _StateType.NONE)
 
 
@@ -910,6 +914,7 @@ def emit_simple_content_delta(
 
 def emit_simple_content_done(
     state: SimpleStreamingState,
+    status: Literal["completed", "incomplete"] = "completed",
 ) -> list[StreamingResponsesResponse]:
     part = ResponseOutputText(
         type="output_text",
@@ -944,7 +949,7 @@ def emit_simple_content_done(
                 type="message",
                 role="assistant",
                 content=[part] if state.accumulated_text else [],
-                status="completed",
+                status=status,
             ),
         ),
     ]
@@ -1002,6 +1007,7 @@ def emit_simple_reasoning_delta(
 
 def emit_simple_reasoning_done(
     state: SimpleStreamingState,
+    status: Literal["completed", "incomplete"] = "completed",
 ) -> list[StreamingResponsesResponse]:
     part = ResponseReasoningTextContent(
         text=state.accumulated_text,
@@ -1031,7 +1037,7 @@ def emit_simple_reasoning_done(
             item=ResponseReasoningItem(
                 type="reasoning",
                 content=[part],
-                status="completed",
+                status=status,
                 id=state.current_item_id,
                 summary=[],
             ),
@@ -1060,6 +1066,7 @@ def emit_simple_tool_call_open(
     state.tool_call_index = index
     state.tool_call_is_custom = is_custom
     state.tool_call_payload = ""
+    state.tool_call_payload_end = 0
     state.accumulated_text = ""
     item: ResponseOutputItem
     if is_custom:
@@ -1112,15 +1119,27 @@ def _emit_custom_tool_input_delta(
     ]
 
 
+def _custom_tool_input_prefix(state: SimpleStreamingState) -> str:
+    if state.tool_call_payload_end >= 0:
+        result = extend_custom_tool_input_prefix(
+            state.accumulated_text,
+            state.tool_call_payload,
+            state.tool_call_payload_end,
+        )
+        if result is not None:
+            payload, state.tool_call_payload_end = result
+            return payload
+        state.tool_call_payload_end = -1
+    return decode_custom_tool_input_prefix(state.accumulated_text)
+
+
 def emit_simple_tool_call_delta(
     state: SimpleStreamingState,
     delta: str,
 ) -> list[StreamingResponsesResponse]:
     state.accumulated_text += delta
     if state.tool_call_is_custom:
-        return _emit_custom_tool_input_delta(
-            state, decode_custom_tool_input_prefix(state.accumulated_text)
-        )
+        return _emit_custom_tool_input_delta(state, _custom_tool_input_prefix(state))
     return [
         ResponseFunctionCallArgumentsDeltaEvent(
             type="response.function_call_arguments.delta",
@@ -1134,6 +1153,7 @@ def emit_simple_tool_call_delta(
 
 def emit_simple_tool_call_done(
     state: SimpleStreamingState,
+    status: Literal["completed", "incomplete"] = "completed",
 ) -> list[StreamingResponsesResponse]:
     events: list[StreamingResponsesResponse]
     item: ResponseOutputItem
@@ -1172,7 +1192,7 @@ def emit_simple_tool_call_done(
             name=state.tool_call_name,
             namespace=state.tool_call_namespace,
             arguments=state.accumulated_text,
-            status="completed",
+            status=status,
             id=state.current_item_id,
             call_id=state.tool_call_id,
         )
@@ -1312,12 +1332,14 @@ class SimpleStreamingEventProcessor:
             and self.state.tool_call_index != tool_call.index
         )
 
-    def close_current(self) -> list[StreamingResponsesResponse]:
+    def close_current(
+        self, status: Literal["completed", "incomplete"] = "completed"
+    ) -> list[StreamingResponsesResponse]:
         """Close the current state and emit its 'done' event sequence."""
         handlers = self._STATE_HANDLERS.get(self.state.current_state)
         if handlers is None:
             return []
-        events = handlers.done_fn(self.state)
+        events = handlers.done_fn(self.state, status)
         self.output_items.extend(
             event.item
             for event in events

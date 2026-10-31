@@ -703,6 +703,47 @@ class ImageProjectorMLP(nn.Module):
         return x
 
 
+def _prepare_molmo2_pooling(
+    image_features: torch.Tensor,
+    token_pooling: torch.Tensor,
+    *,
+    masked_average: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    batch_size, num_crops, num_patches, dim = image_features.shape
+    pool_size = token_pooling.shape[-1]
+
+    valid = token_pooling >= 0
+    flat_indices = token_pooling.clamp_min(0)
+    batch_offsets = torch.arange(
+        batch_size,
+        dtype=token_pooling.dtype,
+        device=token_pooling.device,
+    ).view(batch_size, 1, 1)
+    flat_indices.add_(batch_offsets * (num_crops * num_patches))
+
+    to_pool = torch.index_select(
+        image_features.reshape(-1, dim),
+        0,
+        flat_indices.reshape(-1),
+    )
+    to_pool = to_pool.reshape(-1, pool_size, dim)
+    to_pool.mul_(valid.reshape(-1, pool_size, 1))
+
+    if masked_average:
+        denom = valid.sum(-1, dtype=torch.float32).reshape(-1).clamp_min_(1)
+        query = to_pool.sum(-2, keepdim=True)
+        query.div_(denom[:, None, None])
+    else:
+        query = to_pool.mean(-2, keepdim=True)
+
+    return (
+        to_pool,
+        query,
+        valid.reshape(-1, 1, 1, pool_size),
+        valid.any(-1),
+    )
+
+
 class Molmo2VisionBackbone(nn.Module, SupportsQuant):
     packed_modules_mapping = {
         "merged_qkv": ["wq", "wk", "wv"],  # vision backbone
@@ -808,37 +849,12 @@ class Molmo2VisionBackbone(nn.Module, SupportsQuant):
         images = images.to(device=self.device, dtype=self.dtype)
         image_features = self.encode_image(images)
 
-        dim = image_features.shape[-1]
-        valid = token_pooling >= 0
-        valid_token = torch.any(valid, -1)
-
-        # Use `token_pooling` to arange the features for image pooling
-        batch_idx = torch.arange(
-            token_pooling.shape[0],
-            dtype=torch.long,
-            device=token_pooling.device,
+        to_pool, query, valid, valid_token = _prepare_molmo2_pooling(
+            image_features,
+            token_pooling,
+            masked_average=self.adapter_config.pooling_attention_mask,
         )
-        batch_idx = torch.tile(
-            batch_idx.view(batch_size, 1, 1),
-            [1, token_pooling.shape[1], token_pooling.shape[2]],
-        )
-
-        # Now [batch, num_features, num_pooled_patches, dim]
-        to_pool = image_features.reshape(batch_size, -1, dim)[
-            batch_idx, torch.clip(token_pooling, 0)
-        ]
-        to_pool = to_pool * valid.to(self.dtype)[:, :, :, None]
-        to_pool = to_pool.reshape([-1, token_pooling.shape[-1], dim])
-        if self.adapter_config.pooling_attention_mask:
-            attn_mask = valid.reshape([-1, 1, 1, valid.shape[-1]])
-            denom = valid.view(-1, to_pool.shape[-2]).float().sum(-1)
-            denom = torch.where(denom == 0, 1, denom)
-            query = to_pool.sum(-2, keepdim=True) / denom[:, None, None].to(
-                to_pool.dtype
-            )
-        else:
-            attn_mask = None
-            query = to_pool.mean(-2, keepdim=True)
+        attn_mask = valid if self.adapter_config.pooling_attention_mask else None
 
         pooled_features = self.image_pooling_2d(query, to_pool, attn_mask=attn_mask)
         pooled_features = pooled_features.reshape(

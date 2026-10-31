@@ -292,7 +292,7 @@ class RayExecutorV2(MultiprocExecutor):
         # Step 1: Initialize Ray cluster and retrieve placement group
         if ray is None:
             raise ImportError("Using Ray backend requires installation of ray.")
-        initialize_ray_cluster(self.parallel_config, require_gpu_on_driver=False)
+        initialize_ray_cluster(self.parallel_config)
         placement_group = self.parallel_config.placement_group
 
         tp_size, pp_size, pcp_size = self._get_parallel_sizes()

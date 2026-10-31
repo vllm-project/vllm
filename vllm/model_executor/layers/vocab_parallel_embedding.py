@@ -28,7 +28,10 @@ from vllm.model_executor.layers.quantization.base_config import (
     resolve_quant_method,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import is_fp8
-from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
+from vllm.model_executor.layers.utils import (
+    dispatch_unquantized_gemm,
+    maybe_use_skinny_gemm,
+)
 from vllm.model_executor.parameter import BasevLLMParameter
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
@@ -69,6 +72,8 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
             from vllm.model_executor.layers.utils import dispatch_cpu_unquantized_gemm
 
             dispatch_cpu_unquantized_gemm(layer, remove_weight=False)
+        elif current_platform.is_cuda() and isinstance(layer, ParallelLMHead):
+            maybe_use_skinny_gemm(layer)
 
     def apply(
         self,
@@ -607,6 +612,7 @@ class ParallelLMHead(VocabParallelEmbedding):
         prefix: str = "",
         *,
         disable_tp: bool = False,
+        quant_method: QuantizeMethodBase | None = None,
     ):
         self.has_bias = bias
         super().__init__(
@@ -618,6 +624,7 @@ class ParallelLMHead(VocabParallelEmbedding):
             quant_config,
             prefix,
             disable_tp=disable_tp,
+            quant_method=quant_method,
         )
         self.quant_config = quant_config
         if bias:

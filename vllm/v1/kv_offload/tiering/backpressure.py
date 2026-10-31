@@ -132,6 +132,13 @@ class BackpressureDetector(ABC):
     @abstractmethod
     def on_store_completed(self, elapsed_s: float, num_bytes: int) -> None: ...
 
+    def on_store_failed(self) -> None:
+        """Observe a store job that completed with ``success=False``.
+
+        Ignored by default; detectors may treat failures as pressure.
+        """
+        return
+
     @abstractmethod
     def is_under_pressure(self) -> bool: ...
 
@@ -229,6 +236,16 @@ class EMABackpressureDetector(BackpressureDetector):
     # detector enters a "healthy" fast-path that bypasses policy checks.
     _HEALTHY_THRESHOLD = 10
 
+    # Consecutive failed stores that put a storage tier under pressure
+    # (e.g. ENOSPC/EDQUOT on a full filesystem). Not applied to tiers such
+    # as p2p, whose store failures are per-request rather than tier health.
+    DEFAULT_FAILURE_THRESHOLD = 3
+
+    # Failure-induced pressure raises the EMA to this multiple of the high
+    # water mark, enough for ThrottledDropPolicy (ramp_factor=2.0) to drop
+    # every store until idle decay lets a probe store through.
+    _FAILURE_EMA_FACTOR = 4.0
+
     LOCAL_HIGH_WATER_S = 0.010
     LOCAL_LOW_WATER_S = 0.002
 
@@ -236,21 +253,24 @@ class EMABackpressureDetector(BackpressureDetector):
     NETWORK_LOW_WATER_S = 0.010
 
     _NETWORK_TIER_TYPES = frozenset({"obj"})
+    _STORAGE_TIER_TYPES = frozenset({"fs", "obj"})
 
     @classmethod
-    def default_config(
-        cls, tier_type: str, *, locality: str | None = None
-    ) -> dict | None:
+    def default_config(cls, tier_type: str, *, locality: str | None = None) -> dict:
         is_remote = locality is not None and locality.upper() == "REMOTE"
         if is_remote or tier_type in cls._NETWORK_TIER_TYPES:
-            return {
+            config: dict = {
                 "high_water_s": cls.NETWORK_HIGH_WATER_S,
                 "low_water_s": cls.NETWORK_LOW_WATER_S,
             }
-        return {
-            "high_water_s": cls.LOCAL_HIGH_WATER_S,
-            "low_water_s": cls.LOCAL_LOW_WATER_S,
-        }
+        else:
+            config = {
+                "high_water_s": cls.LOCAL_HIGH_WATER_S,
+                "low_water_s": cls.LOCAL_LOW_WATER_S,
+            }
+        if tier_type in cls._STORAGE_TIER_TYPES:
+            config["failure_threshold"] = cls.DEFAULT_FAILURE_THRESHOLD
+        return config
 
     def __init__(
         self,
@@ -260,6 +280,7 @@ class EMABackpressureDetector(BackpressureDetector):
         warmup_completions: int = DEFAULT_WARMUP_COMPLETIONS,
         decay_half_life_s: float = DEFAULT_DECAY_HALF_LIFE_S,
         cooldown_s: float = DEFAULT_COOLDOWN_S,
+        failure_threshold: int | None = None,
         policy: BackpressurePolicy | None = None,
     ):
         super().__init__(policy=policy)
@@ -269,6 +290,8 @@ class EMABackpressureDetector(BackpressureDetector):
             raise ValueError(
                 f"low_water_s ({low_water_s}) must be <= high_water_s ({high_water_s})"
             )
+        if failure_threshold is not None and failure_threshold < 1:
+            raise ValueError(f"failure_threshold must be >= 1, got {failure_threshold}")
 
         self._alpha = alpha
         self._high = high_water_s
@@ -291,6 +314,13 @@ class EMABackpressureDetector(BackpressureDetector):
         # Monotonic timestamp when pressure was last cleared (for cooldown).
         self._pressure_cleared_at: float = 0.0
         self._cooldown_count: int = 0
+        # Consecutive failed stores that trigger pressure; None ignores
+        # failures.
+        self._failure_threshold = failure_threshold
+        self._consecutive_failures: int = 0
+        # Failure-induced pressure can start before warmup completes, so it
+        # must be allowed to decay during warmup.
+        self._failure_tripped: bool = False
 
     def _apply_idle_decay(self) -> None:
         """Decay the EMA toward zero based on elapsed idle time.
@@ -311,6 +341,7 @@ class EMABackpressureDetector(BackpressureDetector):
     def on_store_completed(self, elapsed_s: float, num_bytes: int) -> None:
         now = time.monotonic()
         s_per_mib = elapsed_s / (num_bytes / self._MIB)
+        self._consecutive_failures = 0
         self._completions += 1
         if self._completions <= self._warmup_completions:
             self._warmup_samples.append(s_per_mib)
@@ -329,15 +360,37 @@ class EMABackpressureDetector(BackpressureDetector):
                 self._pressure_cleared_at = now
                 self._cooldown_count = 0
             self._under_pressure = False
+            self._failure_tripped = False
             self._healthy_streak += 1
         else:
             self._healthy_streak = 0
 
+    def on_store_failed(self) -> None:
+        """Enter pressure after ``failure_threshold`` consecutive failures.
+
+        Idle decay then lets probe stores through: a failed probe re-enters
+        pressure at once, and a successful one resets the failure streak.
+        """
+        if self._failure_threshold is None:
+            return
+        self._consecutive_failures += 1
+        self._healthy_streak = 0
+        if self._consecutive_failures < self._failure_threshold:
+            return
+        self._ema = max(self._ema, self._high * self._FAILURE_EMA_FACTOR)
+        self._last_update = time.monotonic()
+        self._under_pressure = True
+        self._failure_tripped = True
+        self._pressure_cleared_at = 0.0
+
     def is_under_pressure(self) -> bool:
-        if self._under_pressure and self._completions >= self._warmup_completions:
+        if self._under_pressure and (
+            self._completions >= self._warmup_completions or self._failure_tripped
+        ):
             self._apply_idle_decay()
             if self._ema < self._low:
                 self._under_pressure = False
+                self._failure_tripped = False
                 self._pressure_cleared_at = time.monotonic()
                 self._cooldown_count = 0
         return self._under_pressure
@@ -378,6 +431,8 @@ class EMABackpressureDetector(BackpressureDetector):
         self._healthy_streak = 0
         self._pressure_cleared_at = 0.0
         self._cooldown_count = 0
+        self._consecutive_failures = 0
+        self._failure_tripped = False
         self._policy.reset()
 
     @property
@@ -390,4 +445,7 @@ class EMABackpressureDetector(BackpressureDetector):
 
     @property
     def stats(self) -> dict[str, float]:
-        return {"store_latency_ema": self._ema}
+        return {
+            "store_latency_ema": self._ema,
+            "consecutive_store_failures": self._consecutive_failures,
+        }
