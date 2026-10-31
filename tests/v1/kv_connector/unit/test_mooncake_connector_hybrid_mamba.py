@@ -255,7 +255,7 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages(block_o
     worker._layout_by_peer = OrderedDict()
     worker._acked_layout_peers = set()
     worker.use_mla = False
-    worker.engine = SimpleNamespace(batch_register_memory=lambda *_: 0)
+    worker.transfer_backend = SimpleNamespace(register_regions=lambda *_: None)
     worker.is_kv_consumer = True
     worker.tp_rank = 0
     worker.tp_size = 1
@@ -336,6 +336,7 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages(block_o
         src_ptrs,
         dst_ptrs,
         lengths,
+        owners,
         err_reqs,
         err_msg,
     ) = await worker._build_transfer_params(
@@ -367,6 +368,7 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages(block_o
             src_ptrs,
             dst_ptrs,
             lengths,
+            owners,
             err_reqs,
             err_msg,
         ) = await worker._build_transfer_params(
@@ -429,8 +431,8 @@ def test_register_kv_caches_deduplicates_shared_backing_memory(monkeypatch):
         gdn_cache = backing[:3]
 
         with patch.object(
-            worker.engine, "batch_register_memory", return_value=0
-        ) as batch_register_memory:
+            worker.transfer_backend, "register_regions", return_value=None
+        ) as register_regions:
             worker.register_kv_caches(
                 {
                     "model.layers.0.self_attn": fa_cache,
@@ -442,10 +444,12 @@ def test_register_kv_caches_deduplicates_shared_backing_memory(monkeypatch):
             fa_cache.data_ptr(),
             gdn_cache.data_ptr(),
         ]
-        batch_register_memory.assert_called_once()
-        registered_ptrs, registered_lens = batch_register_memory.call_args[0]
-        assert registered_ptrs == [backing.data_ptr()]
-        assert registered_lens == [backing.untyped_storage().nbytes()]
+        register_regions.assert_called_once()
+        (regions,) = register_regions.call_args[0]
+        assert [region.base_addr for region in regions] == [backing.data_ptr()]
+        assert [region.length for region in regions] == [
+            backing.untyped_storage().nbytes()
+        ]
 
         worker.shutdown()
         worker.shutdown = noop_shutdown
@@ -547,7 +551,7 @@ def test_hybrid_gdn_transfer_params_preserve_group_identity(monkeypatch):
             ),
         ]
 
-        src_ptrs, dst_ptrs, lengths, err_reqs, err_msg = asyncio.run(
+        src_ptrs, dst_ptrs, lengths, owners, err_reqs, err_msg = asyncio.run(
             build_transfer_params()
         )
 
