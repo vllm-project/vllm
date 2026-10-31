@@ -21,6 +21,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingSpec,
 )
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
+from vllm.v1.metrics.prometheus import set_gauge_initial_value
 
 logger = init_logger(__name__)
 
@@ -450,6 +451,14 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
             self._offloading_metric_defs[metric_name] = self._create_metric(
                 metric_name, metadata
             )
+            if (
+                isinstance(metadata, OffloadingGaugeMetadata)
+                and metadata.initial_value is not None
+                and not metadata.labelnames
+            ):
+                for engine_idx in per_engine_labelvalues:
+                    gauge = self._get_prometheus_metric(metric_name, (), engine_idx)
+                    set_gauge_initial_value(gauge, metadata.initial_value)
 
     def _create_metric(
         self, metric_name: str, metadata: OffloadingMetricMetadata
