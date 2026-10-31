@@ -33,6 +33,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kFp8Static128BlockSym,
     kMxfp4Static,
     kNvfp4Static,
     require_finite_positive_scales,
@@ -41,13 +42,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 if TYPE_CHECKING:
     pass
 
-# Layer parameters the megakernel reads. After ``process_weights_after_loading``
-# they alias the megakernel's own tensors, so EPLB permutes exactly what it uses.
-KERNEL_WEIGHT_NAMES = ("w13_weight", "w13_weight_scale", "w2_weight", "w2_weight_scale")
-
 
 _supported_weight_quant_schemes: frozenset[QuantKey] = frozenset(
-    (kNvfp4Static, kMxfp4Static)
+    (kNvfp4Static, kMxfp4Static, kFp8Static128BlockSym)
 )
 
 _supported_activations: frozenset[MoEActivation] = frozenset((MoEActivation.SILU,))
@@ -140,22 +137,42 @@ class FlashInferMoeEpExperts(mk.FusedMoEExpertsModular):
         epilogue alphas.
         """
         validate_flashinfer_moe_ep_layer(layer)  # type: ignore[arg-type]
+        block_fp8 = (
+            self.quant_config.use_fp8_w8a8 and self.quant_config.is_block_quantized
+        )
+        if block_fp8 and layer.apply_router_weight_on_input:
+            # The SM90 FP8 kernel weights the activation before fc2, which is
+            # not equivalent to weighting the expert input.
+            raise ValueError(
+                f"{self.moe_config.moe_backend} with block-FP8 weights does not "
+                "support apply_router_weight_on_input"
+            )
+        # Layer parameters the megakernel reads. They end up aliasing the
+        # megakernel's own tensors, so EPLB permutes exactly what it uses.
+        # Block-FP8 layers may name their scales weight_scale_inv.
+        scale = (
+            "weight_scale_inv"
+            if hasattr(layer, "w13_weight_scale_inv")
+            else "weight_scale"
+        )
+        names = ("w13_weight", f"w13_{scale}", "w2_weight", f"w2_{scale}")
         adapter = FlashInferMoeEp(
             self.moe_config,
             FlashInferMoeEpWeights(
                 w13=layer.w13_weight,
                 w2=layer.w2_weight,
-                w13_scale=getattr(layer, "w13_weight_scale", None),
-                w2_scale=getattr(layer, "w2_weight_scale", None),
+                w13_scale=getattr(layer, names[1], None),
+                w2_scale=getattr(layer, names[3], None),
             ),
             epilogue_from_quant_config(self.quant_config),
             apply_topk_in_fc1=apply_topk_in_fc1(
                 self.moe_config,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
             ),
+            block_fp8=block_fp8,
         )
         adapter.warmup()
-        for name, tensor in zip(KERNEL_WEIGHT_NAMES, adapter.kernel_weights()):
+        for name, tensor in zip(names, adapter.kernel_weights()):
             # Rebind, never copy: the params must alias the megakernel buffers (EPLB).
             getattr(layer, name).data = tensor
         self._adapter = adapter
