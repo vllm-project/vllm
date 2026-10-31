@@ -75,11 +75,14 @@ def vocab_mapping(request):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("requires CUDA")
 
-    # Intersection: {a, b}. x/y/z are target-only, u/v are draft-only
+    # Intersection: {a, b}. x/y/z are target-only, u/v are draft-only.
+    # Tokenizers may also expose embedding placeholders outside the model vocab.
     target = _FakeTokenizer(
-        vocab={"a": 0, "b": 1, "x": 2, "y": 3, "z": 4}, unk_token_id=0
+        vocab={"a": 0, "b": 1, "x": 2, "y": 3, "z": 4, "<embed>": 5}, unk_token_id=0
     )
-    draft = _FakeTokenizer(vocab={"a": 0, "b": 1, "u": 2, "v": 3}, unk_token_id=2)
+    draft = _FakeTokenizer(
+        vocab={"a": 0, "b": 1, "u": 2, "v": 3, "<embed>": 4}, unk_token_id=2
+    )
     return VocabMapping(target, draft, 5, 4, device)
 
 
@@ -89,6 +92,9 @@ def vocab_mapping(request):
         ([0, 1, 2, 3, 4], [0, 1, 2, 2, 2]),  # mixed
         ([0, 1], [0, 1]),  # all present
         ([2, 3, 4], [2, 2, 2]),  # all missing
+        ([1, 5, 6], [1, 2, 2]),  # placeholder and larger out-of-vocab ID
+        ([-5, 1], [2, 1]),  # negative IDs must not wrap around
+        ([], []),  # empty input
     ],
 )
 def test_map_target_to_draft_ids(monkeypatch, vocab_mapping, target_ids, expected):
@@ -111,6 +117,9 @@ def test_map_target_to_draft_ids(monkeypatch, vocab_mapping, target_ids, expecte
         ([0, 1, 2, 3], [0, 1, 0, 0]),  # mixed
         ([0, 1], [0, 1]),  # all present
         ([2, 3], [0, 0]),  # all missing
+        ([1, 4, 5], [1, 0, 0]),  # added token and larger out-of-vocab ID
+        ([-3, 1], [0, 1]),  # negative IDs must not wrap around
+        ([], []),  # empty input
     ],
 )
 def test_map_draft_to_target_ids(monkeypatch, vocab_mapping, draft_ids, expected):
