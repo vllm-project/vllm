@@ -359,6 +359,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                     per_act_token_quant=False,
                     block_shape=quant_config.block_shape,
                     is_scale_swizzled=quant_config.is_scale_swizzled,
+                    use_ue8m0=quant_config.act_scale_ue8m0,
                 )
 
         return (
@@ -402,6 +403,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 block_shape=quant_config.block_shape,
                 is_scale_swizzled=False,
                 mx_alignment=quant_config.mx_alignment,
+                use_ue8m0=quant_config.act_scale_ue8m0,
             )
             if a1q_scale is not None and a1q_scale.numel() == 1:
                 a1q_scale = a1q_scale.view(1, 1)
