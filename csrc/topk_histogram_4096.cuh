@@ -9,6 +9,7 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <cstdint>
+#include <type_traits>
 
 namespace vllm {
 namespace topk_histogram_4096 {
@@ -133,6 +134,63 @@ __device__ __forceinline__ uint2 extract_coarse_bins_bf16x2(uint32_t w) {
   // Per half: ~bits if negative, else bits | 0x8000.
   const uint32_t key = bits ^ ((sign - (sign >> 15)) | 0x80008000u);
   return make_uint2((key & 0xFFFFu) >> (16 - kBits), key >> (32 - kBits));
+}
+
+// Four consecutive scores held in registers: FP32 as float4, BF16 packed in a
+// uint2 until binned.
+template <typename InT>
+using ScoreVec4 = std::conditional_t<sizeof(InT) == 2, uint2, float4>;
+
+__device__ __forceinline__ float vec_score(const float4& v, uint32_t e) {
+  return reinterpret_cast<const float*>(&v)[e];
+}
+__device__ __forceinline__ float vec_score(const uint2& v, uint32_t e) {
+  const uint32_t w = e < 2 ? v.x : v.y;
+  return __uint_as_float(e % 2 ? w & 0xFFFF0000u : w << 16);
+}
+
+// Coarse bin of score e: BF16 bins all four scores up front with two packed
+// conversions (`packed`), FP32 bins each score when it is used.
+template <uint32_t kBits>
+__device__ __forceinline__ uint4 packed_bins(const float4&) {
+  return {};
+}
+template <uint32_t kBits>
+__device__ __forceinline__ uint4 packed_bins(const uint2& v) {
+  const uint2 lo = extract_coarse_bins_bf16x2<kBits>(v.x);
+  const uint2 hi = extract_coarse_bins_bf16x2<kBits>(v.y);
+  return make_uint4(lo.x, lo.y, hi.x, hi.y);
+}
+template <uint32_t kBits>
+__device__ __forceinline__ uint32_t vec_bin(const float4& v, const uint4&,
+                                            uint32_t e) {
+  return extract_coarse_bin_N<kBits>(vec_score(v, e));
+}
+template <uint32_t kBits>
+__device__ __forceinline__ uint32_t vec_bin(const uint2&, const uint4& packed,
+                                            uint32_t e) {
+  return reinterpret_cast<const uint32_t*>(&packed)[e];
+}
+
+__device__ __forceinline__ void load_vec4(const float* ptr, float4& v) {
+  v = *reinterpret_cast<const float4*>(ptr);
+}
+__device__ __forceinline__ void load_vec4(const __nv_bfloat16* ptr, uint2& v) {
+  v = *reinterpret_cast<const uint2*>(ptr);
+}
+// Scores at or past `length` load as -inf.
+__device__ __forceinline__ void load_vec4_predicated(const float* ptr, int base,
+                                                     int length, float4& v) {
+  load_float4_predicated(ptr, base, length, v.x, v.y, v.z, v.w);
+}
+__device__ __forceinline__ void load_vec4_predicated(const __nv_bfloat16* ptr,
+                                                     int base, int length,
+                                                     uint2& v) {
+  const auto* raw = reinterpret_cast<const uint16_t*>(ptr);
+  uint32_t h[4];
+#pragma unroll
+  for (int e = 0; e < 4; e++) h[e] = base + e < length ? raw[e] : 0xFF80u;
+  v = make_uint2(h[0] | (h[1] << 16), h[2] | (h[3] << 16));
 }
 
 // running sum within each warp — thread 0 gets its own value, thread 1 gets
@@ -435,9 +493,10 @@ __device__ __noinline__ void exact_topk_rescan_cold(
 enum class OverflowRecovery { kFp32Rescan, kRegisterValues };
 
 // Defined in topk_histogram_4096_overflow.cuh, like exact_topk_rescan_cold.
-template <uint32_t TopK, uint32_t HistBits, uint32_t VecsPerThread>
+template <uint32_t TopK, uint32_t HistBits, uint32_t VecsPerThread,
+          typename Vec>
 __device__ __forceinline__ bool exact_topk_refine_registers(
-    const float4 (&vecs)[VecsPerThread], int32_t* __restrict__ output,
+    const Vec (&vecs)[VecsPerThread], int32_t* __restrict__ output,
     uint32_t length, uint32_t coarse_bin, uint32_t num_above, void* _smem);
 
 template <uint32_t TopK, uint32_t BlockSize, uint32_t VecSize,
@@ -466,8 +525,7 @@ __device__ void histogram_4096_topk(const InT* __restrict__ scores,
   const auto warp_id = tx / kWarpSize;
 
   // Phase 1: Load all data into RF + build histogram
-  float4
-      vecs[VECS_PER_THREAD];  // 4 vectors x 4 floats = 16 elements per thread
+  ScoreVec4<InT> vecs[VECS_PER_THREAD];  // 4 vectors x 4 = 16 elements/thread
   if constexpr (ITEMS_PER_THREAD >= 4) {
     // Zero the histogram (SMEM writes)
     for (uint32_t i = 0; i < ITEMS_PER_THREAD / 4; i++)
@@ -482,17 +540,17 @@ __device__ void histogram_4096_topk(const InT* __restrict__ scores,
     smem->counter_eq = 0;
   }
   if constexpr (UsePredicatedLoads || sizeof(InT) == 2) {
-    const bool row_aligned = (reinterpret_cast<uintptr_t>(scores) & 0xFu) == 0;
+    const bool row_aligned =
+        (reinterpret_cast<uintptr_t>(scores) % sizeof(vecs[0])) == 0;
 #pragma unroll
     for (uint32_t v = 0; v < VECS_PER_THREAD; v++) {
       const uint32_t base = (tx + v * kBlockSize) * 4;
       if (base < length) {
         if (row_aligned && base + 3 < length) {
-          vecs[v] = load_score4(scores + base);
+          load_vec4(scores + base, vecs[v]);
         } else {
-          load_float4_predicated(scores + base, static_cast<int>(base),
-                                 static_cast<int>(length), vecs[v].x, vecs[v].y,
-                                 vecs[v].z, vecs[v].w);
+          load_vec4_predicated(scores + base, static_cast<int>(base),
+                               static_cast<int>(length), vecs[v]);
         }
       }
     }
@@ -501,7 +559,7 @@ __device__ void histogram_4096_topk(const InT* __restrict__ scores,
     for (uint32_t v = 0; v < VECS_PER_THREAD; v++) {
       const uint32_t base = (tx + v * kBlockSize) * 4;
       if (base < length) {
-        vecs[v] = load_score4(scores + base);
+        load_vec4(scores + base, vecs[v]);
       }
     }
   }
@@ -511,15 +569,14 @@ __device__ void histogram_4096_topk(const InT* __restrict__ scores,
   bool done = false;
 #pragma unroll
   for (uint32_t v = 0; v < VECS_PER_THREAD && !done; v++) {
-    const float* elems = reinterpret_cast<const float*>(&vecs[v]);
+    const uint4 bins = packed_bins<HIST_BITS>(vecs[v]);
 #pragma unroll
     for (uint32_t e = 0; e < 4 && !done; e++) {
       const uint32_t idx = (tx + v * kBlockSize) * 4 + e;
       if (idx >= length) {
         done = true;
       } else {
-        atomicAdd(&smem->histogram[extract_coarse_bin_N<HIST_BITS>(elems[e])],
-                  1);
+        atomicAdd(&smem->histogram[vec_bin<HIST_BITS>(vecs[v], bins, e)], 1);
       }
     }
   }
@@ -589,14 +646,14 @@ __device__ void histogram_4096_topk(const InT* __restrict__ scores,
   done = false;
 #pragma unroll
   for (uint32_t v = 0; v < VECS_PER_THREAD && !done; v++) {
-    const float* elems = reinterpret_cast<const float*>(&vecs[v]);
+    const uint4 bins = packed_bins<HIST_BITS>(vecs[v]);
 #pragma unroll
     for (uint32_t e = 0; e < 4 && !done; e++) {
       const uint32_t idx = (tx + v * kBlockSize) * 4 + e;
       if (idx >= length) {
         done = true;
       } else {
-        const uint32_t bin = extract_coarse_bin_N<HIST_BITS>(elems[e]);
+        const uint32_t bin = vec_bin<HIST_BITS>(vecs[v], bins, e);
         if (bin > thr_bin) {
           output[atomicAdd(&smem->counter_gt, 1)] =
               idx;  // above -> output directly
@@ -608,7 +665,7 @@ __device__ void histogram_4096_topk(const InT* __restrict__ scores,
             }
           } else {
             if (pos < TopK) {
-              smem->tie_buffer[pos] = {idx, elems[e]};
+              smem->tie_buffer[pos] = {idx, vec_score(vecs[v], e)};
             }
           }
         }
