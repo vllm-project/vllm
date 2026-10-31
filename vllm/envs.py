@@ -661,13 +661,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_REPLICATE_EMBED": lambda: (
         os.getenv("VLLM_REPLICATE_EMBED", "0").strip().lower() in ("1", "true")
     ),
-    # Use tensor descriptors for Q/K/V loads and output stores in the
-    # Triton unified-attention kernel.  Enables HW 2D block reads on
-    # Intel XPU; the non-TD branch is dead-code-eliminated at Triton
-    # compile time so other platforms see no overhead.  Tri-state override:
-    # unset (default) lets the `triton_attn` backend auto-select per
-    # platform (currently auto-enabled on XPU only); ``1`` forces TD on;
-    # ``0`` forces TD off.  Useful for A/B benchmarking the TD path.
+    # Use tensor descriptors (TD) for loads/stores in Triton kernels that
+    # have a TD path: unified attention (`triton_attn` backend), the fused
+    # MoE kernels (`fused_moe_kernel` for unquantized weights,
+    # `fused_moe_kernel_gptq_awq` for grouped int4_w4a16 weights, batched
+    # MoE) and the compressed-tensors `triton_scaled_mm`.  Enables HW 2D
+    # block reads on Intel XPU; the non-TD branch is dead-code-eliminated
+    # at Triton compile time so other platforms see no overhead.
+    # Tri-state override: unset (default) auto-enables TD on XPU only;
+    # ``1`` forces TD on (on CUDA the MoE TD paths need sm100+; the int4
+    # WNA16 MoE kernel stays on the pointer path below sm100 and for shapes
+    # its TD path does not cover); ``0`` forces TD off.  Useful for A/B
+    # benchmarking the TD path.
     "VLLM_TRITON_USE_TD": lambda: {"1": True, "0": False}.get(
         os.getenv("VLLM_TRITON_USE_TD", "").strip()
     ),

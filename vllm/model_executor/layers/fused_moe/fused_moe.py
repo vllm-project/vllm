@@ -28,6 +28,7 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
 from vllm.model_executor.layers.fused_moe.utils import (
     enable_swap_ab,
     moe_kernel_quantize_input,
+    moe_use_td_hw_supported,
     resolve_moe_use_td,
     warn_if_moe_use_td_ineffective,
 )
@@ -109,6 +110,8 @@ def fused_moe_kernel_gptq_awq(
     has_zp: tl.constexpr,
     use_int4_w4a16: tl.constexpr,
     use_int8_w8a16: tl.constexpr,
+    # int4_w4a16 only.
+    USE_TD: tl.constexpr = False,
 ):
     """Implements the fused computation for a Mixture of Experts (MOE) using
     token and expert matrices.
@@ -183,25 +186,45 @@ def fused_moe_kernel_gptq_awq(
 
     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int64)) % N
     offs_k = tl.arange(0, BLOCK_SIZE_K)
-    a_ptrs = a_ptr + (
-        offs_token[:, None] // top_k * stride_am + offs_k[None, :] * stride_ak
-    )
 
-    if use_int4_w4a16:
-        b_ptrs = (
-            b_ptr
-            + off_experts * stride_be
-            + (offs_k[:, None] // 2) * stride_bk
-            + offs_bn[None, :] * stride_bn
+    if USE_TD:
+        m_td = num_valid_tokens // top_k
+        a_desc = tl.make_tensor_descriptor(
+            base=a_ptr,
+            shape=(m_td, K),
+            strides=(stride_am, stride_ak),
+            block_shape=(1, BLOCK_SIZE_K),
         )
-        b_shifter = (offs_k[:, None] % 2) * 4
-    elif use_int8_w8a16:
-        b_ptrs = (
-            b_ptr
-            + off_experts * stride_be
-            + offs_k[:, None] * stride_bk
-            + offs_bn[None, :] * stride_bn
+        # Padding entries (offs_token == num_valid_tokens) gather row m_td,
+        # one past the end: the descriptor fills it with zeros and those rows
+        # are masked at the store.
+        gather_idx = (offs_token // top_k).to(tl.int32)
+        # B is packed 2 nibbles/byte along K: (E, N, K // 2) bytes.
+        b_desc = tl.make_tensor_descriptor(
+            base=b_ptr + off_experts * stride_be,
+            shape=(N, K // 2),
+            strides=(stride_bn, stride_bk),
+            block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_K // 2),
         )
+    else:
+        a_ptrs = a_ptr + (
+            offs_token[:, None] // top_k * stride_am + offs_k[None, :] * stride_ak
+        )
+        if use_int4_w4a16:
+            b_ptrs = (
+                b_ptr
+                + off_experts * stride_be
+                + (offs_k[:, None] // 2) * stride_bk
+                + offs_bn[None, :] * stride_bn
+            )
+            b_shifter = (offs_k[:, None] % 2) * 4
+        elif use_int8_w8a16:
+            b_ptrs = (
+                b_ptr
+                + off_experts * stride_be
+                + offs_k[:, None] * stride_bk
+                + offs_bn[None, :] * stride_bn
+            )
 
     if not has_zp and use_int4_w4a16:
         b_zp_num = 8
@@ -227,14 +250,22 @@ def fused_moe_kernel_gptq_awq(
             k_mask = None
             k_other = None
 
-        a = tl.load(
-            a_ptrs,
-            mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
-            other=0.0,
-        )
-        b = tl.load(b_ptrs)
-        if use_int4_w4a16:
-            b = (b >> b_shifter) & 0xF
+        if USE_TD:
+            a = a_desc.gather(gather_idx, k * BLOCK_SIZE_K)
+            # Interleave along the K // 2 axis before transposing.
+            b_packed = b_desc.load([pid_n * BLOCK_SIZE_N, (k * BLOCK_SIZE_K) // 2])
+            b_lo = b_packed & 0xF  # even k
+            b_hi = (b_packed >> 4) & 0xF  # odd k
+            b = tl.interleave(b_lo, b_hi).T
+        else:
+            a = tl.load(
+                a_ptrs,
+                mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
+                other=0.0,
+            )
+            b = tl.load(b_ptrs)
+            if use_int4_w4a16:
+                b = (b >> b_shifter) & 0xF
 
         b_scale_ptrs = (
             b_scale_ptr
@@ -274,12 +305,13 @@ def fused_moe_kernel_gptq_awq(
             b = ((b.to(tl.float32) - b_zp_num) * b_scale).to(compute_type)
         accumulator = tl.dot(a, b, acc=accumulator)
 
-        # Advance the ptrs to the next K block.
-        a_ptrs += BLOCK_SIZE_K * stride_ak
-        if use_int4_w4a16:
-            b_ptrs += (BLOCK_SIZE_K // 2) * stride_bk
-        else:
-            b_ptrs += BLOCK_SIZE_K * stride_bk
+        if not USE_TD:
+            # Advance the ptrs to the next K block.
+            a_ptrs += BLOCK_SIZE_K * stride_ak
+            if use_int4_w4a16:
+                b_ptrs += (BLOCK_SIZE_K // 2) * stride_bk
+            else:
+                b_ptrs += BLOCK_SIZE_K * stride_bk
 
     if MUL_ROUTED_WEIGHT:
         moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0)
@@ -698,6 +730,7 @@ def invoke_fused_moe_wna16_triton_kernel(
     use_int8_w8a16: bool,
     use_int4_w4a16: bool,
     block_shape: list[int] | None,
+    num_input_tokens: int | None = None,
 ):
     assert B_scale is not None and B_scale.ndim == 3
     assert B_zp is None or B_zp.ndim == 3
@@ -731,6 +764,41 @@ def invoke_fused_moe_wna16_triton_kernel(
             block_size_m=config["BLOCK_SIZE_M"],
         )
     )
+
+    # The down projection gets num_input_tokens * top_k rows (and top_k=1),
+    # so A.size(0) is the MoE layer's token count only for the first GEMM.
+    if num_input_tokens is None:
+        num_input_tokens = M
+    use_td = (
+        use_int4_w4a16
+        and resolve_moe_use_td()
+        and moe_use_td_hw_supported()
+        # TD and pointer paths may round differently: keep every batch size
+        # on one path.
+        and not envs.VLLM_BATCH_INVARIANT
+        # tensor_descriptor.gather() needs at least 8 rows.
+        and config["BLOCK_SIZE_M"] >= 8
+        # TD was ~40% slower than the pointer path at BLOCK_SIZE_M=32 on
+        # Arc Pro B60. Not measured on other devices, so keep the pointer
+        # path there as well.
+        and config["BLOCK_SIZE_M"] != 32
+        # Descriptor setup does not pay off for single-token batches.
+        and num_input_tokens > 1
+        # The packed-byte B descriptor needs an inner block of >= 16 bytes.
+        and config["BLOCK_SIZE_K"] >= 32
+    )
+    if use_td and A.size(1) % config["BLOCK_SIZE_K"] != 0:
+        # Same fallback as invoke_fused_moe_triton_kernel: the TD path is
+        # not validated with a K tail.
+        logger.warning_once(
+            "Disabling VLLM_TRITON_USE_TD for this WNA16 MoE launch: K=%d is "
+            "not a multiple of BLOCK_SIZE_K=%d.",
+            A.size(1),
+            config["BLOCK_SIZE_K"],
+        )
+        use_td = False
+    if use_td:
+        set_triton_allocator(A.device)
 
     fused_moe_kernel_gptq_awq[grid](
         A,
@@ -767,6 +835,7 @@ def invoke_fused_moe_wna16_triton_kernel(
         has_zp=B_zp is not None,
         use_int4_w4a16=use_int4_w4a16,
         use_int8_w8a16=use_int8_w8a16,
+        USE_TD=use_td,
         **config,
     )
 
@@ -967,6 +1036,7 @@ def dispatch_fused_moe_kernel(
     per_channel_quant: bool,
     block_shape: list[int] | None = None,
     B_bias: torch.Tensor | None = None,
+    num_input_tokens: int | None = None,
 ) -> None:
     assert topk_weights is not None or not mul_routed_weight
     assert topk_weights is None or topk_weights.stride(1) == 1
@@ -1021,6 +1091,7 @@ def dispatch_fused_moe_kernel(
             use_int8_w8a16,
             use_int4_w4a16,
             block_shape,
+            num_input_tokens=num_input_tokens,
         )
 
     else:
@@ -1923,6 +1994,7 @@ def fused_experts_impl(
         per_channel_quant=per_channel_quant,
         block_shape=block_shape,
         B_bias=w2_bias,
+        num_input_tokens=num_tokens,
     )
 
     ops.moe_sum(

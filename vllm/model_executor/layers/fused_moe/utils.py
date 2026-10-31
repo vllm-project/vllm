@@ -734,7 +734,10 @@ def resolve_moe_use_td() -> bool:
     dispatcher in ``triton_attn.py``. ``1``/``0`` force it on/off regardless
     of hardware; forcing ``1`` where it cannot compile (see
     ``moe_use_td_hw_supported``) fails at ptxas. Blackwell CUDA (sm100+) can
-    compile it but is opt-in only, pending validation.
+    compile it but is opt-in only, pending validation. The WNA16 launcher
+    (``invoke_fused_moe_wna16_triton_kernel``) additionally requires
+    ``moe_use_td_hw_supported()`` and falls back to the pointer path for
+    shapes and configs its TD path does not cover.
     """
     override = envs.VLLM_TRITON_USE_TD
     if override is None:
@@ -751,9 +754,10 @@ def warn_if_moe_use_td_ineffective(
     """One-shot warning when ``VLLM_TRITON_USE_TD`` is set but ignored.
 
     Fires when the user set the env explicitly and either (a) the active
-    MoE backend is not the fused Triton kernel, or (b) the model is
-    quantized (the TD path falls back to the pointer path under any
-    quantization).
+    MoE backend is not the fused Triton kernel, or (b) ``fused_moe_kernel``
+    is launched with quantized weights, for which it ignores the flag.
+    Grouped ``int4_w4a16`` weights use ``fused_moe_kernel_gptq_awq`` instead,
+    which has its own TD path and does not call this.
     """
     global _warned_moe_use_td_ineffective
     if _warned_moe_use_td_ineffective:
@@ -769,11 +773,7 @@ def warn_if_moe_use_td_ineffective(
             "`--moe-backend triton` to enable the tensor-descriptor path"
         )
     else:
-        reason = (
-            "the model uses quantized MoE weights; the TD path is "
-            "currently restricted to non-quantized weights and falls "
-            "back to the pointer path"
-        )
+        reason = "fused_moe_kernel ignores it for quantized weights"
     logger.warning(
         "VLLM_TRITON_USE_TD is set to %s but %s.",
         envs.VLLM_TRITON_USE_TD,
