@@ -289,8 +289,22 @@ def test_feature_resolves_a_tiny_complement_mass(complement_mass: float):
 
     estimator.predict(logits, idx_mapping, draft_step, confidence_probs, temperature)
 
-    # fp64 reference, computed without ever forming 1 + mass.
-    expected = -torch.tensor(complement_mass, dtype=torch.float64).log()
+    # fp64 reference from the same logits, by a different route than the kernel
+    # takes: mask the top token out and reduce the rest, so 1 + mass is never
+    # formed and there is nothing to cancel.
+    scaled = logits.double()
+    top = scaled.max(dim=-1, keepdim=True)
+    rest = scaled.scatter(-1, top.indices, float("-inf"))
+    expected = -torch.logsumexp(rest - top.values, dim=-1)[0]
+
+    # The tail holds `complement_mass` by construction, so the reference should
+    # land on -log of it. Guards the test's own setup, loosely: the logit written
+    # into each tail slot is fp32-rounded.
+    torch.testing.assert_close(
+        expected.item(), -torch.tensor(complement_mass).log().item(), rtol=1e-5, atol=0
+    )
+    # rtol is ~3 orders looser than fp32 needs here, to stay robust across
+    # backends' exp(); the bug this pins produced 40.0 against a true 27.63.
     torch.testing.assert_close(
         estimator.features[0, 0].double(), expected, rtol=1e-5, atol=0
     )
