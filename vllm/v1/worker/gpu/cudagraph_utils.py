@@ -680,6 +680,9 @@ class ModelCudaGraphManager(CudaGraphManager):
         ) -> Callable[[CUDAGraphMode], None]:
             num_tokens = desc.num_tokens
             num_reqs = desc.num_reqs or min(num_tokens, self.max_num_reqs)
+            if desc.cg_mode == CUDAGraphMode.PIECEWISE and pcp_manager is not None:
+                # PCP prefills can split each request into two local segments.
+                num_reqs = min(num_tokens, input_buffers.max_num_reqs)
 
             # Set LoRA state before capture so kernels see correct adapters.
             if lora_capture_hook is not None:

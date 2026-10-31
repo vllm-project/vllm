@@ -128,6 +128,22 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
         # every PCP rank needs the full ring tail. Ordinary decode only needs
         # the latest open row to complete the next ratio-2 pair.
         self.tail_size = self.capacity if self.vllm_config.speculative_config else 1
+        if self.pcp_size > 1:
+            max_rows = min(
+                max_num_batched_tokens,
+                2 * self.vllm_config.scheduler_config.max_num_seqs,
+            )
+            self.gather_tokens_buffer = torch.empty(
+                max_rows * self.tail_size, dtype=torch.int64, device=self.device
+            )
+            self.ring_write_slots_buffer = torch.empty(
+                self.pcp_size * max_rows * self.tail_size,
+                dtype=torch.int64,
+                device=self.device,
+            )
+            self.prev_row_indices_buffer = torch.empty(
+                max_rows, dtype=torch.int64, device=self.device
+            )
 
     def build(
         self,
@@ -227,9 +243,16 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
             & (sorted_keys[found] == wanted)
         )
 
-        metadata.gather_tokens = gather_tokens.flatten()
-        metadata.ring_write_slots = ring_write_slots
-        metadata.prev_row_indices = torch.where(has_prev, order[found], -1)
+        # These tensors are prepared outside the graph and read by its kernels.
+        metadata.gather_tokens = self.gather_tokens_buffer[
+            : gather_tokens.numel()
+        ].copy_(gather_tokens.flatten())
+        metadata.ring_write_slots = self.ring_write_slots_buffer[
+            : ring_write_slots.numel()
+        ].copy_(ring_write_slots)
+        metadata.prev_row_indices = self.prev_row_indices_buffer[:num_reqs].copy_(
+            torch.where(has_prev, order[found], -1)
+        )
 
 
 class CompressorStateCache(torch.nn.Module, AttentionLayerBase):

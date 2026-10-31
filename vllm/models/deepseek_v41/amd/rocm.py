@@ -379,6 +379,7 @@ class DeepseekV41ROCMAiterSparseSWAMetadataBuilder(DeepseekV41SparseSWAMetadataB
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
         replay_start: torch.Tensor | None = None,
+        cache_positions: torch.Tensor | None = None,
     ) -> DeepseekV41ROCMAiterSparseSWAMetadata:
         # On gfx942 and gfx950 with --monokernel, a decode batch gets this
         # metadata from one launch instead of 8 launches per SWA group
@@ -401,6 +402,7 @@ class DeepseekV41ROCMAiterSparseSWAMetadataBuilder(DeepseekV41SparseSWAMetadataB
             common_attn_metadata=common_attn_metadata,
             fast_build=fast_build,
             replay_start=replay_start,
+            cache_positions=cache_positions,
         )
 
         prefill_ragged_indices = None
