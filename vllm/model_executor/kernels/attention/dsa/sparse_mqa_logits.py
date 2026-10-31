@@ -80,6 +80,7 @@ _INT32_BIG = tl.constexpr(2**31 - 1)
 def _expand_candidates_kernel(
     cand_ptr,
     cand_stride,
+    cand_row_repeat,
     ks_ptr,
     ks_stride,
     ke_ptr,
@@ -105,7 +106,8 @@ def _expand_candidates_kernel(
     ks = tl.load(ks_ptr + row * ks_stride)
     ke = tl.load(ke_ptr + row * ke_stride)
     cols = tl.arange(0, K)
-    cand = tl.load(cand_ptr + row * cand_stride + cols)  # K is pow2, no mask
+    cand_row = row // cand_row_repeat
+    cand = tl.load(cand_ptr + cand_row * cand_stride + cols)  # K is pow2
     if RATIO == 2:
         cand = tl.interleave(cand * RATIO, cand * RATIO + 1)
 
@@ -192,9 +194,11 @@ def candidate_blocks_to_sparse_indices(
     """Expand request-local candidate blocks into DeepGEMM sparse block ids.
 
     Args:
-        candidate_blocks: [rows, K] int32 request-local candidate block ids
-            (-1 padded), in units of ``candidate_block_size`` positions. K
-            must be a power of two (the in-kernel sort); rows may be strided.
+        candidate_blocks: [candidate_rows, K] int32 request-local candidate
+            block ids (-1 padded), in units of ``candidate_block_size``
+            positions. K must be a power of two (the in-kernel sort); rows may
+            be strided. If ``candidate_rows < rows``, each candidate row is
+            repeated over consecutive speculative decode rows.
         row_ks: [rows] int32 per-row K range start; bounds are in the same
             (packed-workspace) coordinates the sparse kernel iterates over.
             Pass zeros for the paged path, whose blocks are context-relative.
@@ -216,7 +220,10 @@ def candidate_blocks_to_sparse_indices(
             always form a prefix because the block ids are sorted.
 
     """
-    rows, num_candidates = candidate_blocks.shape
+    candidate_rows, num_candidates = candidate_blocks.shape
+    rows = row_ks.shape[0]
+    assert rows % candidate_rows == 0, (rows, candidate_rows)
+    candidate_row_repeat = rows // candidate_rows
     ratio = candidate_block_size // sparse_block_kv
     assert ratio * sparse_block_kv == candidate_block_size and ratio in (1, 2), (
         candidate_block_size,
@@ -239,6 +246,7 @@ def candidate_blocks_to_sparse_indices(
     _expand_candidates_kernel[(rows,)](
         candidate_blocks,
         candidate_blocks.stride(0),
+        candidate_row_repeat,
         row_ks,
         row_ks.stride(0),
         row_ke,

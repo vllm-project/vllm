@@ -685,6 +685,120 @@ def test_candidate_blocks_to_sparse_indices_matches_reference(
     assert not end_buf[1 - end_offset :: 2].any()
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton kernel")
+def test_candidate_expansion_broadcasts_speculative_rows():
+    from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
+        candidate_blocks_to_sparse_indices,
+    )
+
+    candidates = torch.tensor(
+        [[0, 2, -1, -1], [1, 3, 0, -1]], dtype=torch.int32, device="cuda"
+    )
+    rows, next_n = 4, 2
+    ks = torch.zeros(rows, dtype=torch.int32, device="cuda")
+    ke = torch.tensor([8, 24, 16, 32], dtype=torch.int32, device="cuda")
+    got_indices, got_end = candidate_blocks_to_sparse_indices(
+        candidates, ks, ke, candidate_block_size=8, sparse_block_kv=8
+    )
+    ref_indices, ref_end = _expand_candidates_reference(
+        candidates.repeat_interleave(next_n, dim=0), ks, ke, 8, 8
+    )
+    assert torch.equal(got_indices, ref_indices)
+    assert torch.equal(got_end, ref_end)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton kernel")
+def test_candidate_gather_supports_packed_cache_and_tail_tile():
+    from vllm.model_executor.kernels.attention.dsa.candidate_gather import (
+        gather_candidate_k_decode,
+    )
+
+    torch.manual_seed(0)
+    num_blocks, block_size, head_dim = 8, 4, 128
+    page_bytes = block_size * (head_dim + 4)
+    block_stride = page_bytes + 64
+    backing = torch.zeros((num_blocks, block_stride), dtype=torch.uint8, device="cuda")
+    values = torch.randint(
+        0,
+        256,
+        (num_blocks, block_size, head_dim),
+        dtype=torch.uint8,
+        device="cuda",
+    )
+    scales = (
+        torch.arange(num_blocks * block_size, dtype=torch.float32, device="cuda")
+        .reshape(num_blocks, block_size)
+        .add_(0.5)
+    )
+    backing[:, : block_size * head_dim] = values.reshape(num_blocks, -1)
+    backing[:, block_size * head_dim : page_bytes] = scales.view(torch.uint8).reshape(
+        num_blocks, -1
+    )
+    cache = torch.as_strided(
+        backing,
+        (num_blocks, block_size, head_dim + 4),
+        (block_stride, head_dim + 4, 1),
+    )
+    assert not cache.is_contiguous()
+
+    # A strided block table also exercises the explicit column stride. Two
+    # speculative rows share each request's page table without materializing it.
+    bt_storage = torch.full((2, 8), -1, dtype=torch.int32, device="cuda")
+    block_table = bt_storage[:, ::2]
+    block_table.copy_(
+        torch.tensor([[3, 0, 6, 1], [5, 2, 7, 4]], dtype=torch.int32, device="cuda")
+    )
+    rows, sparse_block_kv, num_cols = 4, 8, 16
+    sparse_indices = torch.tensor(
+        [[0, 1], [0, 1], [0, 1], [0, 1]], dtype=torch.int32, device="cuda"
+    )
+    end = torch.tensor([13, 16, 9, 7], dtype=torch.int32, device="cuda")
+    out_k = torch.empty((rows, num_cols, head_dim), dtype=torch.uint8, device="cuda")
+    out_s = torch.empty((rows, num_cols), dtype=torch.float32, device="cuda")
+    gather_candidate_k_decode(
+        cache,
+        block_table,
+        sparse_indices,
+        end,
+        head_dim,
+        sparse_block_kv,
+        out_k,
+        out_s,
+    )
+
+    expected_k = torch.zeros_like(out_k)
+    expected_s = torch.zeros_like(out_s)
+    for row in range(rows):
+        request = row // 2
+        for col in range(int(end[row])):
+            pos = int(sparse_indices[row, col // sparse_block_kv]) * sparse_block_kv
+            pos += col % sparse_block_kv
+            physical = int(block_table[request, pos // block_size])
+            offset = pos % block_size
+            expected_k[row, col] = values[physical, offset]
+            expected_s[row, col] = scales[physical, offset]
+    assert torch.equal(out_k, expected_k)
+    assert torch.equal(out_s, expected_s)
+
+
+def test_candidate_gather_profitability_gate(monkeypatch: pytest.MonkeyPatch):
+    from vllm.model_executor.kernels.attention.dsa.candidate_gather import (
+        candidate_gather_decode_profitable,
+    )
+
+    monkeypatch.setenv("VLLM_DSA_CANDIDATE_GATHER_FORCE", "0")
+    monkeypatch.setenv("VLLM_DSA_CANDIDATE_GATHER_MIN_WORK_RATIO", "64")
+    monkeypatch.setenv("VLLM_DSA_CANDIDATE_GATHER_MIN_ROWS", "16")
+    candidate_width = 32 * 16
+    # The row floor applies before any work accounting.
+    assert not candidate_gather_decode_profitable(64 * candidate_width, 15, 32, 16)
+    # Work is rows x context, so a long context alone is not sufficient and a
+    # shorter context becomes profitable once enough rows scan it.
+    assert not candidate_gather_decode_profitable(4 * candidate_width - 1, 16, 32, 16)
+    assert candidate_gather_decode_profitable(4 * candidate_width, 16, 32, 16)
+    assert candidate_gather_decode_profitable(2 * candidate_width, 32, 32, 16)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_sparse_topk_remap_bounds_nan_rows():
     """DeepSelect writes an out-of-range sentinel to slot 0 of NaN rows (the
