@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from typing import Any
 
 import prometheus_client
 import pytest
@@ -10,6 +13,7 @@ import torch
 from tests.conftest import VllmRunner
 from tests.utils import fork_new_process_for_each_test
 from vllm.config import AttentionConfig, HiSparseConfig, KVTransferConfig
+from vllm.distributed.device_communicators.shm_broadcast import SHM_PATH
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
     HiSparseConnector,
 )
@@ -38,6 +42,13 @@ HF_OVERRIDES = {
     "num_experts_per_tok": 2,
     "index_topk": 128,
 }
+
+
+@pytest.fixture
+def shm_pool_dir():
+    """Keep the custom host pool on tmpfs inside containers as well."""
+    with TemporaryDirectory(dir=SHM_PATH) as directory:
+        yield Path(directory)
 
 
 def _shrink_config(config):
@@ -88,12 +99,13 @@ def _get_hisparse_worker(runner: VllmRunner) -> HiSparseConnectorWorker:
     not current_platform.is_cuda(), reason="HiSparse requires NVIDIA CUDA"
 )
 @pytest.mark.parametrize(
-    "with_offloading,attention_backend",
+    "with_offloading,attention_backend,custom_host_pool",
     [
-        pytest.param(False, None, id="standalone"),
-        pytest.param(True, None, id="offload"),
+        pytest.param(False, None, False, id="standalone"),
+        pytest.param(False, None, True, id="standalone-host-pool-dir"),
+        pytest.param(True, None, False, id="offload"),
         # Offloading does not touch the attention kernels: FA4 runs standalone.
-        pytest.param(False, "FLASH_ATTN_MLA_SPARSE_FA4", id="standalone-fa4"),
+        pytest.param(False, "FLASH_ATTN_MLA_SPARSE_FA4", False, id="standalone-fa4"),
     ],
 )
 @fork_new_process_for_each_test
@@ -102,6 +114,8 @@ def test_hisparse_spill_and_prefix_restore(
     vllm_runner: type[VllmRunner],
     with_offloading: bool,
     attention_backend: str | None,
+    custom_host_pool: bool,
+    shm_pool_dir: Path,
 ):
     """Spilled prefixes restore and FULL-graph decode writes reach host KV.
 
@@ -124,11 +138,15 @@ def test_hisparse_spill_and_prefix_restore(
         [2000 + request_idx * 128 + i % 64 for i in range(257)]
         for request_idx in range(4)
     ]
-    hisparse_connector = {
+    hisparse_connector: dict[str, Any] = {
         "kv_connector": "HiSparseConnector",
         "kv_role": "kv_both",
         "kv_connector_extra_config": {"host_pool_gib": 1},
     }
+    if custom_host_pool:
+        hisparse_connector["kv_connector_extra_config"]["host_pool_dir"] = str(
+            shm_pool_dir
+        )
     kv_transfer_config = KVTransferConfig(**hisparse_connector)
     if with_offloading:
         kv_transfer_config = KVTransferConfig(
@@ -171,6 +189,9 @@ def test_hisparse_spill_and_prefix_restore(
             "cudagraph_capture_sizes": [1, 4],
         },
     ) as runner:
+        if custom_host_pool:
+            mappings = Path("/proc/self/maps").read_text()
+            assert str(shm_pool_dir / "vllm_hisparse_") in mappings
         worker = _get_hisparse_worker(runner)
         engine_core = runner.llm.llm_engine.engine_core.engine_core
         model_runner = engine_core.model_executor.driver_worker.worker.model_runner

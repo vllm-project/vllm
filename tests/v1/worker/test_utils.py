@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import mmap
+import shutil
 from collections import deque
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call
 
 import numpy as np
+import psutil
 import pytest
 import torch
 
@@ -261,7 +263,8 @@ def test_hisparse_shares_host_pool_only_for_local_tp(monkeypatch):
 
 
 @pytest.mark.skip_global_cleanup
-def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
+@pytest.mark.parametrize("host_pool_dir", [None, "/dev/hugepages"])
+def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch, host_pool_dir):
     page = mmap.PAGESIZE
     tp_group = MagicMock(rank_in_group=1, world_size=2)
     monkeypatch.setattr(hisparse_runtime_module, "get_tp_group", lambda: tp_group)
@@ -312,6 +315,13 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
     config = SimpleNamespace(
         instance_id="instance",
         parallel_config=_hisparse_parallel_config(),
+        kv_transfer_config=SimpleNamespace(
+            kv_connector="HiSparseConnector",
+            kv_connector_extra_config={
+                "host_pool_gib": 1,
+                "host_pool_dir": host_pool_dir,
+            },
+        ),
     )
 
     pools, pinned_pools, region = hisparse_runtime_module.allocate_hisparse_host_pools(
@@ -334,6 +344,7 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
         "barrier": tp_group.barrier,
         "creator_memory_check": hisparse_runtime_module.check_hisparse_host_memory,
         "populate_shard": (1, 2),
+        "shm_dir": host_pool_dir or "/dev/shm",
     }
     assert region.view_sizes == [24, 40]
     assert [pool.shape for pool in pools] == [(24,), (40,)]
@@ -374,7 +385,9 @@ def test_shared_host_pool_tracks_successful_registrations(
     cudart.cudaHostUnregister.return_value = SimpleNamespace(value=0)
     monkeypatch.setattr(torch.cuda, "cudart", lambda: cudart)
     config = SimpleNamespace(
-        instance_id="test", parallel_config=SimpleNamespace(data_parallel_index=0)
+        instance_id="test",
+        parallel_config=SimpleNamespace(data_parallel_index=0),
+        kv_transfer_config=None,
     )
     context = (
         pytest.raises(RuntimeError, match="cudaHostRegister failed")
@@ -443,6 +456,43 @@ def test_shared_host_pool_registers_layer_spans_in_one_backing(monkeypatch):
     assert backing.numel() == 44
     assert backing.data_ptr() == region.base_tensor.data_ptr()
     assert pool.registered is region.base_tensor
+
+
+def test_private_host_pool_maps_unlinked_file_in_host_pool_dir(monkeypatch, tmp_path):
+    """A host_pool_dir pool is file-backed yet leaves no file to leak."""
+    pinned: list[torch.Tensor] = []
+    monkeypatch.setattr(hisparse_runtime_module, "pin_tensor", pinned.append)
+    size = mmap.PAGESIZE + 10
+
+    host_pool, registered = hisparse_runtime_module.allocate_pinned_host_pool(
+        size, str(tmp_path)
+    )
+
+    assert list(tmp_path.iterdir()) == []
+    assert pinned == [registered]
+    assert registered.nbytes == 2 * mmap.PAGESIZE
+    assert host_pool.nbytes == size
+    assert host_pool.data_ptr() == registered.data_ptr()
+    host_pool.fill_(7)
+    assert int(registered[:size].sum()) == 7 * size
+
+
+@pytest.mark.parametrize("resource", ["ram", "space"])
+def test_custom_host_pool_rejects_insufficient_resources(
+    monkeypatch, tmp_path, resource
+):
+    """Custom tmpfs backing must pass memory checks before faulting pages."""
+    if resource == "ram":
+        memory = psutil.virtual_memory()._replace(available=0)
+        monkeypatch.setattr(psutil, "virtual_memory", lambda: memory)
+        error, message = ValueError, "RAM is available"
+    else:
+        usage = shutil.disk_usage(tmp_path)._replace(free=0)
+        monkeypatch.setattr(shutil, "disk_usage", lambda path: usage)
+        error, message = RuntimeError, "Insufficient space"
+    with pytest.raises(error, match=message):
+        hisparse_runtime_module._map_host_pool_file(str(tmp_path), mmap.PAGESIZE)
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_hisparse_registration_chunks_end_between_host_blocks():
