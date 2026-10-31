@@ -354,13 +354,10 @@ class RustFrontendProcessManager:
             args_dict["model_tag"] = model_tag
 
         # The Rust `frontend` subcommand parses --args-json via serde_json,
-        # which bypasses clap and therefore ignores any `#[arg(env = ...)]`
-        # declarations on SharedRuntimeArgs fields. Forward the env-driven
-        # values explicitly so VLLM_ENGINE_READY_TIMEOUT_S and
-        # VLLM_HTTP_TIMEOUT_KEEP_ALIVE behave the same on both Python and Rust
-        # frontends.
+        # which bypasses clap defaults. Forward values that need a value even
+        # when the user accepts the Python frontend default.
         args_dict["engine_ready_timeout_secs"] = envs.VLLM_ENGINE_READY_TIMEOUT_S
-        args_dict["http_timeout_keep_alive"] = envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE
+        args_dict["http_timeout_keep_alive"] = args.http_timeout_keep_alive
         args_json = json.dumps(args_dict, sort_keys=True)
         cmd.extend(["--args-json", args_json])
 
