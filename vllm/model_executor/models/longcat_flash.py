@@ -540,6 +540,21 @@ class FlashModel(nn.Module):
                     if is_pp_missing_parameter(name, self):
                         continue
                     param = params_dict[name]
+                    if self.config.mla_scale_q_lora and name.endswith(
+                        "q_a_layernorm.weight"
+                    ):
+                        loaded_weight = (
+                            loaded_weight
+                            * (self.config.hidden_size / self.config.q_lora_rank) ** 0.5
+                        )
+                    elif self.config.mla_scale_kv_lora and name.endswith(
+                        "kv_a_layernorm.weight"
+                    ):
+                        loaded_weight = (
+                            loaded_weight
+                            * (self.config.hidden_size / self.config.kv_lora_rank)
+                            ** 0.5
+                        )
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
                     )
