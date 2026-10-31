@@ -157,6 +157,23 @@ def test_split_kv_head_slots_restrict_layouts_to_block_contiguous():
 
 
 @pytest.mark.skip_global_cleanup
+def test_worker_reports_split_kv_head_slot_layouts_outside_a_config_context():
+    """The engine core collects layouts by RPC, outside set_current_vllm_config,
+    so the worker must report them under its own config."""
+    from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+    from vllm.v1.worker.worker_base import WorkerBase
+
+    worker = WorkerBase(
+        _split_config(), local_rank=0, rank=0, distributed_init_method="tcp://"
+    )
+    with patch(
+        "vllm.v1.worker.worker_base.get_current_attn_backends",
+        return_value=[FlashInferBackend],
+    ):
+        assert worker.get_supported_kv_cache_layouts() == ["LBHNC", "BLHNC"]
+
+
+@pytest.mark.skip_global_cleanup
 def test_split_kv_head_slots_disable_kv_cache_update_bypass():
     """Fused external KV writers produce the packed page, so the setting turns
     the bypass off for every model."""
