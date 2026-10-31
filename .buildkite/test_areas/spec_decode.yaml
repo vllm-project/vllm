@@ -381,6 +381,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) Spec Decode Draft Model Nightly"
+      automatic_shard: true
       dind: false
       device: mi355_1
       num_devices: 1
