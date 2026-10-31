@@ -222,9 +222,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 and all(group >= 0 for group in local_region_groups)
                 and all(group >= 0 for group in remote_region_groups)
             ):
-                transfer_groups = self.kv_cache_config.transfer_group_ids
                 num_computed_blocks = [
-                    meta.local_num_computed_blocks[transfer_groups[group]]
+                    meta.local_num_computed_blocks[group]
                     * self._physical_blocks_per_logical_kv_block
                     for group in local_region_groups
                 ]
@@ -371,6 +370,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 remote_xfer_side_handle=remote_xfer_side_handle,
                 expected_consumers=plan.local_consumers,
                 awaiting_kvs=meta.awaiting_kvs,
+                load_start_token=meta.load_start_token,
+                load_end_token=meta.load_end_token,
             ):
                 return
 
@@ -409,6 +410,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         remote_xfer_side_handle: int,
         expected_consumers: int,
         awaiting_kvs: bool,
+        load_start_token: int = 0,
+        load_end_token: int = 0,
     ) -> bool:
         """Post a READ point-to-point xfer request from a single local worker to
         a single remote worker.
@@ -491,6 +494,9 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     prefill_physical_per_logical=(
                         remote_info.remote_physical_blocks_per_logical
                     ),
+                    load_start_token=load_start_token,
+                    load_end_token=load_end_token,
+                    block_size_ratio=block_size_ratio,
                 )
 
         # NOTE (nicolo) With homogeneous TP, each TP worker loads KV from

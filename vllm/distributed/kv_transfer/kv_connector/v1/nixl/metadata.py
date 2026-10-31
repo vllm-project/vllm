@@ -51,8 +51,9 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #  13: Add packed-member layouts and order-independent packed-push backend hashes
 #  14: Add Qwen3.8-Flash-Next PLE page length - #59997
 #  15: Add remote_registration_generation to kv_transfer_params
+#  16: Add explicit token windows to range-load metadata
 #
-NIXL_CONNECTOR_VERSION: int = 15
+NIXL_CONNECTOR_VERSION: int = 16
 
 
 @dataclass
@@ -264,6 +265,9 @@ class ReqMeta:
     # Worker-only, per-region physical pages to zero after a successful pull.
     # None selects group-based completion; empty lists mean no zeroing.
     region_blocks_to_zero: BlockIds | None = None
+    # Token range loaded from the remote. An end of 0 means unspecified.
+    load_start_token: int = 0
+    load_end_token: int = 0
 
 
 class NixlConnectorMetadata(KVConnectorMetadata):
@@ -294,6 +298,8 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         kv_transfer_params: dict[str, Any],
         local_num_computed_blocks: tuple[int, ...] = (),
         awaiting_kvs: bool = False,
+        load_start_token: int = 0,
+        load_end_token: int = 0,
     ) -> ReqMeta:
         return ReqMeta(
             local_block_ids=local_block_ids,
@@ -305,6 +311,8 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             pp_size=kv_transfer_params.get("pp_size", 1),
             local_num_computed_blocks=local_num_computed_blocks,
             awaiting_kvs=awaiting_kvs,
+            load_start_token=load_start_token,
+            load_end_token=load_end_token,
         )
 
     def add_new_req_to_save(
@@ -324,12 +332,16 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         kv_transfer_params: dict[str, Any],
         local_num_computed_blocks: tuple[int, ...] = (),
         awaiting_kvs: bool = False,
+        load_start_token: int = 0,
+        load_end_token: int = 0,
     ):
         req = self._add_new_req(
             local_block_ids,
             kv_transfer_params,
             local_num_computed_blocks,
             awaiting_kvs,
+            load_start_token,
+            load_end_token,
         )
         req.remote = RemoteMeta(
             block_ids=kv_transfer_params["remote_block_ids"],

@@ -54,6 +54,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
     TPMapping,
     _is_attention_spec,
+    _is_full_attention_spec,
     _is_ssm_spec,
     compute_tp_mapping,
 )
@@ -3314,8 +3315,7 @@ class NixlBaseConnectorWorker:
             # transfer clipped. The latter happens either at remote-block
             # granularity (block_size_ratio > 1) or at kernel-block
             # granularity, when equal kernel pages meet differing logical
-            # block sizes and _apply_prefix_caching front-trims to the
-            # minimum count (hybrid heterogeneous TP).
+            # block sizes and _apply_prefix_caching selects a token window.
             remote_info = self.transfer_topo.get_engine_info(meta.remote.engine_id)
             block_size_ratio = self.transfer_topo.block_size_ratio(
                 remote_info.remote_block_size
@@ -3324,16 +3324,34 @@ class NixlBaseConnectorWorker:
                 remote_info.remote_physical_blocks_per_logical
                 != self._physical_blocks_per_logical_kv_block
             )
-            if block_size_ratio > 1 or self.enable_permute_local_kv or hetero_ppl:
+            windowed = (
+                meta.load_end_token > meta.load_start_token
+                and self.dcp_size == 1
+                and remote_info.remote_dcp_size == 1
+            )
+            if (
+                block_size_ratio > 1
+                or self.enable_permute_local_kv
+                or hetero_ppl
+                or windowed
+            ):
                 for g, local_group in enumerate(meta.local_physical_block_ids):
                     if not local_group or _is_ssm_spec(self._group_spec_types[g]):
                         continue
                     # Number of remote-sized sub-blocks the transfer covered;
                     # everything past this was clipped and must be zeroed.
-                    covered_sub_blocks = min(
-                        len(local_group) * block_size_ratio,
-                        len(meta.remote.block_ids[g]),
-                    )
+                    if windowed and _is_full_attention_spec(self._group_spec_types[g]):
+                        _, covered_sub_blocks = self._kernel_block_window(
+                            meta.load_start_token,
+                            meta.load_end_token,
+                            block_size_ratio,
+                        )
+                        assert len(local_group) * block_size_ratio >= covered_sub_blocks
+                    else:
+                        covered_sub_blocks = min(
+                            len(local_group) * block_size_ratio,
+                            len(meta.remote.block_ids[g]),
+                        )
                     block_ids_for_blocksize_post_process[block_size_ratio].append(
                         (g, local_group, covered_sub_blocks)
                     )
@@ -3797,41 +3815,63 @@ class NixlBaseConnectorWorker:
             )
         return decode_block_ids, trimmed_prefill
 
+    def _kernel_block_window(
+        self,
+        load_start_token: int,
+        load_end_token: int,
+        block_size_ratio: int = 1,
+    ) -> tuple[int, int]:
+        """Return the remote-granularity block start and transfer count."""
+        assert 0 <= load_start_token <= load_end_token
+        assert block_size_ratio >= 1
+        assert self.block_size % block_size_ratio == 0
+        transfer_block_size = self.block_size // block_size_ratio
+        assert load_start_token % transfer_block_size == 0, (
+            f"Load start {load_start_token} is not aligned to transfer block size "
+            f"{transfer_block_size}"
+        )
+        start = load_start_token // transfer_block_size
+        return start, cdiv(load_end_token, transfer_block_size) - start
+
     def _apply_prefix_caching(
         self,
         decode_block_ids: BlockIds,
         prefill_block_ids: BlockIds,
         decode_physical_per_logical: int,
         prefill_physical_per_logical: int,
+        load_start_token: int = 0,
+        load_end_token: int = 0,
+        block_size_ratio: int = 1,
     ) -> tuple[BlockIds, BlockIds]:
-        """Trim block ID lists so only the uncomputed suffix is transferred.
+        """Pair Decode destinations with the same Prefill token window.
 
-        Inputs are *kernel* (physical) block IDs, already expanded from logical IDs
-        with each side's physical-per-logical ratio. Both pull and push call this after
-        that expansion so the trim happens at kernel granularity.
-
-        The prefix-cache hit is always on the decode (D) side, so ``decode``
-        holds only its uncomputed blocks while prefill (P) holds the full
-        sequence. This is mode-independent: pull passes its own (D) blocks as
-        ``decode``, push passes the remote D registration as ``decode``.
-
-        For non-Mamba models: end-trim ``prefill`` to match ``decode`` count, so
-        already-cached prefix blocks are skipped in the transfer.
-
-        For Mamba hybrid: SSM groups pair state slots by position and FA
-        groups end-trim to the uncomputed suffix when physical-per-logical
-        matches.
+        Inputs are kernel-block IDs. Without an explicit window this preserves
+        the legacy suffix trim. Recurrent-state groups are paired by position.
         """
-        # Partial prefix cache hit: just transfer uncomputed blocks.
-        # Skip mamba groups — their blocks represent full state (conv+ssm),
-        # not per-token data, so trimming would corrupt the transfer.
         prefill_block_ids = list(prefill_block_ids)
+        has_window = load_end_token > load_start_token
         if not self._has_mamba:
+            decode_block_ids = list(decode_block_ids)
             for i, prefill_group in enumerate(prefill_block_ids):
                 num_decode_blocks = len(decode_block_ids[i])
+                if (
+                    num_decode_blocks
+                    and has_window
+                    and _is_full_attention_spec(self._group_spec_types[i])
+                ):
+                    start, count = self._kernel_block_window(
+                        load_start_token, load_end_token, block_size_ratio
+                    )
+                    assert num_decode_blocks >= count
+                    assert len(prefill_group) >= start + count
+                    decode_block_ids[i] = decode_block_ids[i][:count]
+                    prefill_block_ids[i] = prefill_group[start : start + count]
+                    continue
                 assert num_decode_blocks <= len(prefill_group)
                 if num_decode_blocks < len(prefill_group):
-                    prefill_block_ids[i] = prefill_group[-num_decode_blocks:]
+                    prefill_block_ids[i] = (
+                        prefill_group[-num_decode_blocks:] if num_decode_blocks else []
+                    )
         else:
             # (NOTE: ZhanqiuHu) HeteroTP can cause different kernel block counts
             # due to logical block rounding.
