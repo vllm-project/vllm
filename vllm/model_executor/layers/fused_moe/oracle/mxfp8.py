@@ -9,6 +9,9 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     backend_to_kernel_cls,
 )
 from vllm.model_executor.layers.quantization.utils.humming import prioritize_humming
+from vllm.model_executor.layers.quantization.utils.humming.priority import (
+    _HUMMING_PREFERRED_CAPABILITIES,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
     kMxfp8Static,
@@ -30,6 +33,13 @@ _SUPPORTED_BACKENDS = (
     Fp8MoeBackend.TRITON_MXFP8,
     Fp8MoeBackend.EMULATION,
 )
+
+# Compute capabilities where Humming outranks Marlin for MXFP8 MoE. On top of
+# the global set, SM120 (RTX PRO 6000 Blackwell, RTX 50xx): with only 99 KB of
+# shared memory per block, the 8-bit Marlin MoE kernel has no fitting tile for
+# expert shapes whose intermediate size is not a multiple of 128 and fails at
+# warm-up with "Invalid thread config". Humming has no such limit.
+_MXFP8_HUMMING_PREFERRED_CAPABILITIES = _HUMMING_PREFERRED_CAPABILITIES | {120}
 
 _BACKEND_NAME_MAP: dict[str, Fp8MoeBackend] = {
     "flashinfer_trtllm": Fp8MoeBackend.FLASHINFER_TRTLLM,
@@ -130,7 +140,10 @@ def select_mxfp8_moe_backend(
         return backend, _select_kernel_cls(backend, config)
 
     # Auto-select: pick the first supported backend.
-    backends = prioritize_humming(list(_SUPPORTED_BACKENDS))
+    backends = prioritize_humming(
+        list(_SUPPORTED_BACKENDS),
+        capabilities=_MXFP8_HUMMING_PREFERRED_CAPABILITIES,
+    )
     for backend in backends:
         try:
             experts_cls = _select_kernel_cls(backend, config)

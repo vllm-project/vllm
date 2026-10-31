@@ -11,28 +11,33 @@ _KernelT = TypeVar("_KernelT", bound=type | Enum)
 _HUMMING_PREFERRED_CAPABILITIES = frozenset({90})
 
 
-def prefers_humming(compute_capability: int | None = None) -> bool:
+def prefers_humming(
+    compute_capability: int | None = None,
+    capabilities: frozenset[int] = _HUMMING_PREFERRED_CAPABILITIES,
+) -> bool:
     """Whether Humming outranks Marlin. A missing compute capability uses the
-    current device."""
+    current device. ``capabilities`` lets a caller widen the preferred set for
+    one kernel family without changing the global default."""
     if compute_capability is None:
         from vllm.platforms import current_platform
 
         if current_platform.is_cuda():
             cc = current_platform.get_device_capability()
             compute_capability = cc.to_int() if cc is not None else None
-    return compute_capability in _HUMMING_PREFERRED_CAPABILITIES
+    return compute_capability in capabilities
 
 
 def prioritize_humming(
     kernels: list[_KernelT],
     compute_capability: int | None = None,
+    capabilities: frozenset[int] = _HUMMING_PREFERRED_CAPABILITIES,
 ) -> list[_KernelT]:
     """Move Humming directly ahead of Marlin where Humming is preferred.
 
     Every other entry keeps its relative order and the input list is not
     modified. Match kernel class names or MoE backend enum names.
     """
-    if not prefers_humming(compute_capability):
+    if not prefers_humming(compute_capability, capabilities):
         return kernels
 
     names = [
