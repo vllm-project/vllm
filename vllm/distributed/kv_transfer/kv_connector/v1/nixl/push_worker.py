@@ -29,6 +29,10 @@ lease expires (the base worker reports it via ``done_sending``) or the WRITE com
 ``get_finished`` enqueues an eviction onto ``_evict_finished_inbox`` so
 the writer drops any leftover ``_push_finished_blocks`` /
 ``_pending_d_registrations`` and stops self-polling.
+
+An error for one request fails only that request. A pass that still raises
+is retried with exponential backoff, and ``get_transfer_results`` raises if
+the writer thread has died.
 """
 
 import queue
@@ -77,6 +81,9 @@ logger = init_logger(__name__)
 # main thread (start_load_kv / get_finished). Smaller -> lower latency
 # while active, slightly more CPU.
 _PUSH_WRITER_POLL_INTERVAL_MS = 1.0
+
+# Cap on the writer's exponential backoff after consecutive failed passes.
+_PUSH_WRITER_MAX_BACKOFF_S = 1.0
 
 
 class NixlPushConnectorWorker(NixlBaseConnectorWorker):
@@ -254,6 +261,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
     def _push_writer_loop(self) -> None:
         sleep_s = _PUSH_WRITER_POLL_INTERVAL_MS / 1000.0
+        backoff_s = sleep_s
 
         while not self._push_writer_stop.is_set():
             try:
@@ -263,7 +271,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                         rid, rd = self._reg_send_inbox.get_nowait()
                     except queue.Empty:
                         break
-                    self._send_registration_to_p(rid, rd)
+                    self._try_send_registration_to_p(rid, rd)
 
                 # 2. Deferred P→D pushes whose handshake just completed; do xfer now
                 while True:
@@ -271,7 +279,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                         rid, blocks, rd = self._deferred_push_inbox.get_nowait()
                     except queue.Empty:
                         break
-                    self._do_start_push_kv(rid, blocks, rd)
+                    self._try_start_push_kv(rid, blocks, rd)
 
                 # 3. P-side finished blocks; match against pending regs.
                 while True:
@@ -281,7 +289,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                         break
                     matched = self._pop_matching_registration(rid)
                     if matched is not None:
-                        self._do_start_push_kv(rid, blocks, matched)
+                        self._try_start_push_kv(rid, blocks, matched)
                     else:
                         self._push_finished_blocks[rid] = blocks
 
@@ -305,7 +313,14 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                         else:
                             self._pending_completion_notifs.put(notif)
             except Exception:
-                logger.exception("nixl-push-writer error; continuing")
+                # Per-request errors stay in the _try_* helpers. A pass that
+                # still fails (e.g. get_new_notifs raising) is retried with
+                # exponential backoff instead of at the poll interval.
+                backoff_s = min(backoff_s * 2, _PUSH_WRITER_MAX_BACKOFF_S)
+                logger.exception("nixl-push-writer error; retrying in %.3fs", backoff_s)
+                self._push_writer_stop.wait(timeout=backoff_s)
+                continue
+            backoff_s = sleep_s
 
             # Self-poll only while there is no other wake source: P-side
             # finished blocks waiting for a D PUSH_REG match. All other
@@ -330,11 +345,47 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         match = self._pop_matching_finished_blocks(rid)
         if match is not None:
             fin_id, blocks = match
-            self._do_start_push_kv(fin_id, blocks, reg_data)
+            self._try_start_push_kv(fin_id, blocks, reg_data)
         else:
             self._pending_d_registrations[rid] = reg_data
 
+    def _try_start_push_kv(
+        self,
+        request_id: str,
+        local_block_ids: BlockIds,
+        registration_data: dict[str, Any],
+    ) -> None:
+        """``_do_start_push_kv``, recording an error as this request's send
+        failure so it cannot drop the rest of the writer pass."""
+        try:
+            self._do_start_push_kv(request_id, local_block_ids, registration_data)
+        except Exception as e:
+            self._log_failure(
+                failure_type="push_start_failed", req_id=request_id, error=e
+            )
+            # Same bookkeeping as a WRITE that failed to post (``_xfer_blocks``).
+            with self._sending_transfers_lock:
+                self._send_failures.add(request_id)
+            self._handle_failed_transfer(request_id, None)
+
     # --- D-side registration send (writer thread) ---------------------- #
+
+    def _try_send_registration_to_p(
+        self,
+        req_id: str,
+        reg_data: dict[str, Any],
+    ) -> None:
+        """``_send_registration_to_p``, failing the receive on an error. Errors
+        escape before any PUSH_REG is sent, so P never WRITEs this request."""
+        try:
+            self._send_registration_to_p(req_id, reg_data)
+        except Exception as e:
+            self._log_failure(
+                failure_type="push_reg_send_failed", req_id=req_id, error=e
+            )
+            # As when there is no agent to send to (``_do_send_reg_notif``).
+            self.xfer_stats.record_failed_notification()
+            self._failed_recv_reqs.put(req_id)
 
     def _send_registration_to_p(
         self,
@@ -807,6 +858,12 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         return set()
 
     def get_transfer_results(self) -> KVConnectorTransferResults:
+        writer = self._push_writer_thread
+        if writer is not None and not writer.is_alive():
+            # Nothing would drain the writer's queues; fail instead of letting
+            # every pending push wait out its timeout.
+            raise RuntimeError("nixl-push-writer thread exited unexpectedly")
+
         # Engine main thread asking for completions: also wake the writer
         # so it gets a chance to drain NIXL notifs (heartbeats, completion
         # notifs, late PUSH_REGs) even if it had been parked.
