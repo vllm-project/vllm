@@ -133,6 +133,16 @@ def get_text(msg: Message) -> str:
     return msg.content[0].text if msg.content else ""
 
 
+def completed_message_rows(
+    segments: Sequence[Any],
+) -> list[tuple[str | None, str | None, str | None, str]]:
+    return [
+        (msg.channel, msg.recipient, msg.content_type, get_text(msg))
+        for segment in segments
+        if (msg := segment.completed_message) is not None
+    ]
+
+
 def tool_call_tuples(tool_calls: list[FunctionCall] | None) -> list[tuple[str, str]]:
     return [] if tool_calls is None else [(tc.name, tc.arguments) for tc in tool_calls]
 
@@ -167,6 +177,79 @@ def tool_call_entries(delta_message) -> list[tuple[int, str | None, str | None]]
             tool_call.function.arguments if tool_call.function else None,
         )
         for tool_call in delta_message.tool_calls
+    ]
+
+
+def collect_streamed_tool_calls(delta_messages) -> list[tuple[int, str, str]]:
+    calls: dict[int, list[str]] = {}
+    for delta_message in delta_messages:
+        for tool_call in delta_message.tool_calls or []:
+            function = tool_call.function
+            assert function is not None
+            if function.name is not None:
+                assert tool_call.index not in calls
+                calls[tool_call.index] = [function.name, function.arguments or ""]
+            else:
+                assert tool_call.index in calls
+                calls[tool_call.index][1] += function.arguments or ""
+    return [(index, name, arguments) for index, (name, arguments) in calls.items()]
+
+
+def parse_delta_stream(
+    harmony_parser, chat_request, output, chunk_size, monkeypatch
+) -> tuple[list[Message], list[Any]]:
+    completed_messages = []
+    poll_completed_message = harmony_parser._poll_completed_message
+
+    def capture_completed_message():
+        message = poll_completed_message()
+        if message is not None:
+            completed_messages.append(message)
+        return message
+
+    monkeypatch.setattr(
+        harmony_parser, "_poll_completed_message", capture_completed_message
+    )
+    delta_messages = []
+    for start in range(0, len(output), chunk_size):
+        delta = harmony_parser.parse_delta(
+            delta_text="",
+            delta_token_ids=output[start : start + chunk_size],
+            request=chat_request,
+            finished=False,
+        )
+        if delta is not None:
+            delta_messages.append(delta)
+    final_delta = harmony_parser.parse_delta(
+        delta_text="",
+        delta_token_ids=[],
+        request=chat_request,
+        finished=True,
+    )
+    if final_delta is not None:
+        delta_messages.append(final_delta)
+    return completed_messages, delta_messages
+
+
+def streamed_delta_text(delta_messages) -> str:
+    emitted_parts = []
+    for delta in delta_messages:
+        parts = [delta.reasoning or "", delta.content or ""]
+        parts.extend(
+            tool_call.function.arguments or ""
+            for tool_call in delta.tool_calls or []
+            if tool_call.function is not None
+        )
+        nonempty_parts = [part for part in parts if part]
+        assert len(nonempty_parts) <= 1
+        emitted_parts.extend(nonempty_parts)
+    return "".join(emitted_parts)
+
+
+def message_rows(messages: Sequence[Message]):
+    return [
+        (message.channel, message.recipient, message.content_type, get_text(message))
+        for message in messages
     ]
 
 
@@ -314,6 +397,34 @@ class TestParse:
             ("not_json_no_content_type", "foo"),
             ("empty_args", json.dumps({})),
             ("no_args", ""),
+        ]
+
+    def test_alternating_valid_and_repaired_messages(
+        self, harmony_parser, chat_request
+    ):
+        output = encode_output(
+            "<|channel|>analysis<|message|>think-1<|end|>"
+            "<|start|>assistant<|channel|>commentary to=functions.one "
+            '<|constrain|>analysis json<|message|>{"value":1}<|call|>'
+            "<|start|>assistant<|channel|>final<|message|>answer-1<|end|>"
+            "<|start|>assistant<|channel|>commentary to=functions.two "
+            "<|constrain|>final code<|message|>raw-two<|call|>"
+            "<|start|>assistant<|channel|>analysis<|message|>think-2<|end|>"
+            "<|start|>assistant<|channel|>commentary to=functions.three "
+            '<|constrain|>commentary json<|message|>{"value":3}<|call|>'
+            "<|start|>assistant<|channel|>final<|message|>answer-2<|end|>"
+        )
+
+        reasoning, content, tool_calls = harmony_parser.parse(
+            "", chat_request, model_output_token_ids=output
+        )
+
+        assert reasoning == "think-1\nthink-2"
+        assert content == "answer-1\nanswer-2"
+        assert tool_call_tuples(tool_calls) == [
+            ("one", json.dumps({"value": 1})),
+            ("two", "raw-two"),
+            ("three", json.dumps({"value": 3})),
         ]
 
     def test_tool_call_bare_recipient(self, harmony_parser, chat_request):
@@ -802,6 +913,127 @@ class TestParseDelta:
         ]
         assert [tool.index for tool in tool_call_headers(third_delta)] == [2]
 
+    @pytest.mark.parametrize("chunk_size", [1, 4, 11])
+    def test_alternating_valid_and_repaired_messages_stream_across_chunks(
+        self,
+        harmony_parser,
+        gpt_oss_tokenizer,
+        chat_request,
+        monkeypatch,
+        chunk_size,
+    ):
+        output = encode_output(
+            "<|channel|>analysis<|message|>valid-1<|end|>"
+            "<|start|>assistant<|channel|>commentary to=functions.first "
+            "<|constrain|>analysis code<|message|>repair-1<|call|>"
+            "<|start|>assistant<|channel|>final<|message|>valid-2<|end|>"
+            "<|start|>assistant<|channel|>commentary to=functions.second "
+            '<|constrain|>final json<|message|>{"repair":2}<|call|>'
+            "<|start|>assistant<|channel|>commentary<|message|>valid-3<|end|>"
+            "<|start|>assistant<|channel|>commentary to=functions.third "
+            "<|constrain|>commentary to=assistant "
+            "<|constrain|>analysis to=functions.third code"
+            "<|message|>repair-3<|call|>"
+            "<|start|>assistant<|channel|>final<|message|>valid-4"
+        )
+        bulk_reasoning_count = (
+            HarmonyParser(gpt_oss_tokenizer).process_chunk(output).reasoning_token_count
+        )
+        completed_messages, delta_messages = parse_delta_stream(
+            harmony_parser, chat_request, output, chunk_size, monkeypatch
+        )
+
+        assert message_rows(completed_messages) == [
+            ("analysis", None, None, "valid-1"),
+            (
+                "commentary",
+                "functions.first",
+                "<|constrain|>code",
+                "repair-1",
+            ),
+            ("final", None, None, "valid-2"),
+            (
+                "commentary",
+                "functions.second",
+                "<|constrain|>json",
+                '{"repair":2}',
+            ),
+            ("commentary", None, None, "valid-3"),
+            (
+                "commentary",
+                "functions.third",
+                "<|constrain|>code",
+                "repair-3",
+            ),
+            ("final", None, None, "valid-4"),
+        ]
+        assert "".join(delta.reasoning or "" for delta in delta_messages) == "valid-1"
+        assert "".join(delta.content or "" for delta in delta_messages) == (
+            "valid-2valid-3valid-4"
+        )
+        assert collect_streamed_tool_calls(delta_messages) == [
+            (0, "first", "repair-1"),
+            (1, "second", '{"repair":2}'),
+            (2, "third", "repair-3"),
+        ]
+        if chunk_size == 1:
+            assert streamed_delta_text(delta_messages) == (
+                'valid-1repair-1valid-2{"repair":2}valid-3repair-3valid-4'
+            )
+        assert harmony_parser._num_counted_tokens == len(output)
+        assert harmony_parser._num_reasoning_tokens == bulk_reasoning_count
+        assert harmony_parser.count_reasoning_tokens(output) == bulk_reasoning_count
+        assert harmony_parser._next_tool_call_index == 0
+        assert_parser_is_reset(harmony_parser)
+
+    def test_unrepairable_headers_stream_across_repair_and_flush(
+        self, harmony_parser, chat_request, monkeypatch
+    ):
+        output = encode_output(
+            "<|channel|>analysis<|message|>valid-before<|end|>"
+            "<|start|>assistant<|channel|>commentary to=functions.before "
+            "<|constrain|>analysis code<|message|>repair-before<|call|>"
+            "<|start|>assistant<|channel|>commentary to=functions.ignored "
+            "<|constrain|>analysis authored code<|message|>ignored-1<|call|>"
+            "<|start|>assistant<|channel|>final<|message|>valid-middle<|end|>"
+            "<|start|>assistant<|channel|>commentary to=functions.after "
+            '<|constrain|>final json<|message|>{"repair":"after"}<|call|>'
+            "<|start|>assistant<|channel|>commentary to=functions.ignored "
+            "<|constrain|>analysis yaml<|message|>ignored-2<|call|>"
+            "<|start|>assistant<|channel|>final<|message|>flush-tail"
+        )
+        completed_messages, delta_messages = parse_delta_stream(
+            harmony_parser, chat_request, output, 1, monkeypatch
+        )
+
+        assert message_rows(completed_messages) == [
+            ("analysis", None, None, "valid-before"),
+            (
+                "commentary",
+                "functions.before",
+                "<|constrain|>code",
+                "repair-before",
+            ),
+            ("final", None, None, "valid-middle"),
+            (
+                "commentary",
+                "functions.after",
+                "<|constrain|>json",
+                '{"repair":"after"}',
+            ),
+            ("final", None, None, "flush-tail"),
+        ]
+        assert streamed_delta_text(delta_messages) == (
+            'valid-beforerepair-beforevalid-middle{"repair":"after"}flush-tail'
+        )
+        assert collect_streamed_tool_calls(delta_messages) == [
+            (0, "before", "repair-before"),
+            (1, "after", '{"repair":"after"}'),
+        ]
+        assert harmony_parser._num_counted_tokens == len(output)
+        assert harmony_parser._next_tool_call_index == 0
+        assert_parser_is_reset(harmony_parser)
+
 
 class TestProcessChunk:
     def test_empty(self, harmony_parser):
@@ -884,6 +1116,250 @@ class TestProcessChunk:
         result = harmony_parser.process_chunk(malformed)
         assert "".join(s.delta for s in result.segments if s.delta) == "thinkanswer"
 
+    @pytest.mark.parametrize("recipient", ["python", "assistant"])
+    def test_malformed_header_drops_channel_from_content_type(
+        self, harmony_parser, recipient
+    ):
+        malformed = encode_output(
+            f"<|channel|>commentary to={recipient} "
+            "<|constrain|>analysis code<|message|>print(6 * 7)<|call|>"
+            "<|start|>assistant<|channel|>final<|message|>Done<|end|>"
+        )
+
+        result = harmony_parser.process_chunk(malformed)
+        messages = [
+            segment.completed_message
+            for segment in result.segments
+            if segment.completed_message is not None
+        ]
+
+        assert [(msg.channel, msg.recipient, msg.content_type) for msg in messages] == [
+            ("commentary", recipient, "<|constrain|>code"),
+            ("final", None, None),
+        ]
+        assert get_text(messages[0]) == "print(6 * 7)"
+        assert get_text(messages[1]) == "Done"
+
+    def test_malformed_header_drops_recipient_from_content_type(self, harmony_parser):
+        malformed = encode_output(
+            "<|channel|>commentary to=python "
+            "<|constrain|>python code<|message|>print(6 * 7)<|call|>"
+        )
+
+        result = harmony_parser.process_chunk(malformed)
+        messages = [
+            segment.completed_message
+            for segment in result.segments
+            if segment.completed_message is not None
+        ]
+
+        assert [(msg.channel, msg.recipient, msg.content_type) for msg in messages] == [
+            ("commentary", "python", "<|constrain|>code")
+        ]
+        assert get_text(messages[0]) == "print(6 * 7)"
+
+    def test_malformed_header_drops_spliced_metadata_from_content_type(
+        self, harmony_parser
+    ):
+        malformed = encode_output(
+            "<|start|>assistant<|channel|>commentary to=python "
+            "<|constrain|>commentary to=assistant "
+            "<|constrain|>analysis to=python code"
+            "<|message|>print(6 * 7)<|call|>"
+        )
+
+        result = harmony_parser.process_chunk(malformed)
+        messages = [
+            segment.completed_message
+            for segment in result.segments
+            if segment.completed_message is not None
+        ]
+
+        assert [(msg.channel, msg.recipient, msg.content_type) for msg in messages] == [
+            ("commentary", "python", "<|constrain|>code")
+        ]
+        assert get_text(messages[0]) == "print(6 * 7)"
+
+    @pytest.mark.parametrize(
+        "duplicate_markers",
+        [
+            "<|constrain|>",
+            "<|channel|><|constrain|>",
+            "<|constrain|><|channel|><|constrain|>",
+        ],
+    )
+    def test_malformed_header_drops_repeated_bare_markers(
+        self, harmony_parser, duplicate_markers
+    ):
+        malformed = encode_output(
+            "<|channel|>commentary to=python "
+            f"<|constrain|>{duplicate_markers}code"
+            "<|message|>print(6 * 7)<|call|>"
+        )
+
+        result = harmony_parser.process_chunk(malformed)
+
+        assert completed_message_rows(result.segments) == [
+            ("commentary", "python", "<|constrain|>code", "print(6 * 7)")
+        ]
+
+    def test_alternating_valid_and_repaired_messages_are_delivered_once(
+        self, harmony_parser
+    ):
+        output = encode_output(
+            "<|channel|>analysis<|message|>valid-1<|end|>"
+            "<|start|>assistant<|channel|>commentary to=python "
+            "<|constrain|>analysis code<|message|>repair-1<|call|>"
+            "<|start|>assistant<|channel|>final<|message|>valid-2<|end|>"
+            "<|start|>assistant<|channel|>commentary to=functions.second "
+            '<|constrain|>final json<|message|>{"repair":2}<|call|>'
+            "<|start|>assistant<|channel|>commentary<|message|>valid-3<|end|>"
+            "<|start|>assistant<|channel|>commentary to=assistant "
+            "<|constrain|>commentary to=assistant "
+            "<|constrain|>analysis to=assistant code"
+            "<|message|>repair-3<|call|>"
+            "<|start|>assistant<|channel|>final<|message|>valid-4<|end|>"
+        )
+
+        result = harmony_parser.process_chunk(output)
+        messages = completed_message_rows(result.segments)
+
+        assert len(messages) == 7
+        assert messages == [
+            ("analysis", None, None, "valid-1"),
+            ("commentary", "python", "<|constrain|>code", "repair-1"),
+            ("final", None, None, "valid-2"),
+            (
+                "commentary",
+                "functions.second",
+                "<|constrain|>json",
+                '{"repair":2}',
+            ),
+            ("commentary", None, None, "valid-3"),
+            ("commentary", "assistant", "<|constrain|>code", "repair-3"),
+            ("final", None, None, "valid-4"),
+        ]
+
+    def test_unrepairable_headers_preserve_cursor_across_repair_and_flush(
+        self, harmony_parser
+    ):
+        output = encode_output(
+            "<|channel|>analysis<|message|>valid-before<|end|>"
+            "<|start|>assistant<|channel|>commentary to=python "
+            "<|constrain|>analysis code<|message|>repair-before<|call|>"
+            "<|start|>assistant<|channel|>commentary to=python "
+            "<|constrain|>analysis authored code<|message|>ignored-1<|call|>"
+            "<|start|>assistant<|channel|>final<|message|>valid-middle<|end|>"
+            "<|start|>assistant<|channel|>commentary to=functions.after "
+            '<|constrain|>final json<|message|>{"repair":"after"}<|call|>'
+            "<|start|>assistant<|channel|>commentary to=python "
+            "<|constrain|>analysis yaml<|message|>ignored-2<|call|>"
+            "<|start|>assistant<|channel|>final<|message|>flush-tail"
+        )
+
+        result = harmony_parser.process_chunk(output)
+        flushed = harmony_parser.flush()
+        messages = completed_message_rows([*result.segments, *flushed])
+
+        assert len(messages) == 5
+        assert messages == [
+            ("analysis", None, None, "valid-before"),
+            ("commentary", "python", "<|constrain|>code", "repair-before"),
+            ("final", None, None, "valid-middle"),
+            (
+                "commentary",
+                "functions.after",
+                "<|constrain|>json",
+                '{"repair":"after"}',
+            ),
+            ("final", None, None, "flush-tail"),
+        ]
+
+    def test_malformed_header_on_second_message_preserves_both(self, harmony_parser):
+        output = encode_output(
+            "<|channel|>analysis<|message|>First<|end|>"
+            "<|start|>assistant<|channel|>commentary to=python "
+            "<|constrain|>commentary to=assistant "
+            "<|constrain|>analysis to=python code"
+            "<|message|>print(6 * 7)<|call|>"
+        )
+
+        result = harmony_parser.process_chunk(output)
+        messages = [
+            segment.completed_message
+            for segment in result.segments
+            if segment.completed_message is not None
+        ]
+
+        assert [
+            (msg.channel, msg.recipient, msg.content_type, get_text(msg))
+            for msg in messages
+        ] == [
+            ("analysis", None, None, "First"),
+            ("commentary", "python", "<|constrain|>code", "print(6 * 7)"),
+        ]
+
+    def test_repair_uses_latest_start_after_rejected_header(self, harmony_parser):
+        output = encode_output(
+            "<|channel|>analysis<|message|>First<|end|>"
+            "<|start|>assistant<|channel|>commentary to=python "
+            "<|constrain|>analysis authored code<|message|>ignored<|call|>"
+            "<|start|>assistant<|channel|>commentary to=python "
+            "<|constrain|>analysis code<|message|>print(42)<|call|>"
+        )
+
+        result = harmony_parser.process_chunk(output)
+        messages = [
+            segment.completed_message
+            for segment in result.segments
+            if segment.completed_message is not None
+        ]
+
+        assert [get_text(msg) for msg in messages] == ["First", "print(42)"]
+
+    def test_malformed_initial_header_uses_first_channel(self, harmony_parser):
+        output = encode_output(
+            "<|channel|>commentary to=python "
+            "<|constrain|><|channel|>analysis code"
+            "<|message|>print(42)<|call|>"
+        )
+
+        result = harmony_parser.process_chunk(output)
+        messages = [
+            segment.completed_message
+            for segment in result.segments
+            if segment.completed_message is not None
+        ]
+
+        assert [
+            (msg.channel, msg.recipient, msg.content_type, get_text(msg))
+            for msg in messages
+        ] == [
+            ("commentary", "python", "<|constrain|>code", "print(42)"),
+        ]
+
+    @pytest.mark.parametrize(
+        "malformed_section",
+        ["<|constrain|>", "analysis yaml", "analysis authored code"],
+    )
+    def test_repair_does_not_drop_unrecognized_header_text(
+        self, harmony_parser, malformed_section
+    ):
+        output = encode_output(
+            "<|channel|>commentary to=python "
+            f"<|constrain|>{malformed_section}<|message|>ignored<|call|>"
+            "<|start|>assistant<|channel|>final<|message|>Kept<|end|>"
+        )
+
+        result = harmony_parser.process_chunk(output)
+        messages = [
+            segment.completed_message
+            for segment in result.segments
+            if segment.completed_message is not None
+        ]
+
+        assert [(msg.channel, get_text(msg)) for msg in messages] == [("final", "Kept")]
+
 
 class TestCountReasoningTokens:
     def test_matches_process_chunk(self, harmony_parser, gpt_oss_tokenizer):
@@ -944,6 +1420,240 @@ class TestCountReasoningTokens:
             "", chat_request, model_output_token_ids=token_ids
         )
         assert (reasoning, content) == ("Think", "Answer")
+
+
+class TestUnterminatedToolHeader:
+    @pytest.mark.parametrize(
+        ("channel", "separator"),
+        [
+            ("analysis", ""),
+            ("commentary", ""),
+            ("commentary", " "),
+            ("commentary", "<|constrain|>"),
+            ("commentary", " <|constrain|>"),
+        ],
+    )
+    @pytest.mark.parametrize("chunk_size", [None, 1, 4, 11])
+    @pytest.mark.parametrize("prefix", ["", "<|start|>assistant"])
+    def test_complete_call(
+        self,
+        harmony_parser,
+        chat_request,
+        monkeypatch,
+        channel,
+        separator,
+        chunk_size,
+        prefix,
+    ):
+        arguments = '{"command": "str_replace", "path": "/tmp/é", "new_str": "x"}'
+        if separator == " ":
+            arguments = separator + arguments
+            separator = ""
+        output = encode_output(
+            f"{prefix}<|channel|>{channel} to=functions.file_editor"
+            f"{separator}{arguments}<|call|>"
+        )
+        if chunk_size is None:
+            reasoning, content, calls = harmony_parser.parse(
+                "", chat_request, model_output_token_ids=output
+            )
+            assert reasoning is content is None
+            assert tool_call_tuples(calls) == [
+                ("file_editor", json.dumps(json.loads(arguments)))
+            ]
+        else:
+            messages, deltas = parse_delta_stream(
+                harmony_parser, chat_request, output, chunk_size, monkeypatch
+            )
+            assert collect_streamed_tool_calls(deltas) == [
+                (0, "file_editor", arguments)
+            ]
+            assert message_rows(messages) == [
+                (channel, "functions.file_editor", "<|constrain|>json", arguments)
+            ]
+        assert harmony_parser._num_counted_tokens == len(output)
+        assert harmony_parser.count_reasoning_tokens(output) == 0
+        assert_parser_is_reset(harmony_parser)
+
+    @pytest.mark.parametrize("chunk_size", [None, 1, 4, 11])
+    @pytest.mark.parametrize("cross_boundary", [False, True])
+    def test_literal_control_text_survives(
+        self, harmony_parser, chat_request, monkeypatch, chunk_size, cross_boundary
+    ):
+        arguments = '{"x":"<|call|><|start|><|message|><|constrain|><|end|>"}'
+        output = (
+            encode_output("<|channel|>commentary to=functions.file_editor")
+            + get_encoding().encode(arguments, disallowed_special=())
+            + encode_output("<|call|>")
+        )
+        name = "file_editor"
+        if cross_boundary:
+            name += "_"
+            output = (
+                encode_output("<|channel|>commentary to=functions.file_editor")
+                + [22305]  # Ordinary BPE token spelling `_{`.
+                + get_encoding().encode(arguments[1:], disallowed_special=())
+                + encode_output("<|call|>")
+            )
+        if chunk_size is None:
+            result = harmony_parser.process_chunk(output)
+            result.segments.extend(harmony_parser.flush())
+            assert completed_message_rows(result.segments)[0][3] == arguments
+            return
+        messages, deltas = parse_delta_stream(
+            harmony_parser, chat_request, output, chunk_size, monkeypatch
+        )
+        assert get_text(messages[0]) == arguments
+        assert collect_streamed_tool_calls(deltas) == [(0, name, arguments)]
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            'python{"x":1}<|call|>',
+            'browser.search{"x":1}<|call|>',
+            'not_a_declared_tool{"x":1}<|call|>',
+            '{"x":1}<|call|>',
+            'functions.{"x":1}<|call|>',
+            'functions.bad.name{"x":1}<|call|>',
+            'functions.file_editor{"x":1<|call|>',
+            'functions.file_editor{"x":"unterminated<|call|>',
+            'functions.file_editor{"x":1}{}<|call|>',
+            'functions.file_editor{"x":1} prose<|call|>',
+            "functions.file_editor[]<|call|>",
+            'functions.file_editor"string"<|call|>',
+            'functions.file_editor{"x":1}',
+            'functions.file_editor{"x":1}<|end|>',
+            "functions.file_editor<|constrain|><|call|>",
+            'functions.file_editor ({"x":1}<|call|>',
+            'functions.file_editor{"x":"<|constrain|>"}<|call|>',
+            'functions.file_editor{"x":"<|call|>"}<|call|>',
+        ],
+    )
+    @pytest.mark.parametrize("chunk_size", [None, 1, 4, 11])
+    def test_unsafe_shape_stays_raw(
+        self, harmony_parser, chat_request, monkeypatch, body, chunk_size
+    ):
+        text = "<|channel|>commentary to=" + body
+        output = encode_output(text)
+        if chunk_size is None:
+            reasoning, content, calls = harmony_parser.parse(
+                "", chat_request, model_output_token_ids=output
+            )
+            assert reasoning is calls is None
+            assert content == text
+        else:
+            _, deltas = parse_delta_stream(
+                harmony_parser, chat_request, output, chunk_size, monkeypatch
+            )
+            assert collect_streamed_tool_calls(deltas) == []
+            assert "".join(d.content or "" for d in deltas) == text
+
+    @pytest.mark.parametrize("chunk_size", [None, 1, 4, 11])
+    def test_literal_constrain_in_header_stays_raw(
+        self, harmony_parser, chat_request, monkeypatch, chunk_size
+    ):
+        output = (
+            encode_output("<|channel|>commentary to=functions.file_editor")
+            + get_encoding().encode('<|constrain|>{"x":1}', disallowed_special=())
+            + encode_output("<|call|>")
+        )
+        if chunk_size is None:
+            _, content, calls = harmony_parser.parse(
+                "", chat_request, model_output_token_ids=output
+            )
+            assert calls is None
+        else:
+            _, deltas = parse_delta_stream(
+                harmony_parser, chat_request, output, chunk_size, monkeypatch
+            )
+            assert collect_streamed_tool_calls(deltas) == []
+            content = "".join(d.content or "" for d in deltas)
+        assert content == get_encoding().decode(output)
+
+    @pytest.mark.parametrize("prefix", [" ", "\n", "prose"])
+    def test_leading_text_stays_raw(self, harmony_parser, chat_request, prefix):
+        text = prefix + '<|channel|>commentary to=functions.file_editor{"x":1}<|call|>'
+        reasoning, content, calls = harmony_parser.parse(
+            "", chat_request, model_output_token_ids=encode_output(text)
+        )
+        assert reasoning is calls is None
+        assert content == text
+
+    @pytest.mark.parametrize("declared", [[], ["different"], ["file_editor"]])
+    def test_declared_tool_scope(self, gpt_oss_tokenizer, chat_request, declared):
+        tools = (
+            ChatCompletionRequest(
+                model=REASONING_MODEL_NAME,
+                messages=[],
+                tools=[
+                    {"type": "function", "function": {"name": name, "parameters": {}}}
+                    for name in declared
+                ],
+            ).tools
+            if declared
+            else []
+        )
+        parser = HarmonyParser(gpt_oss_tokenizer, tools=tools)
+        output = encode_output(
+            '<|channel|>commentary to=functions.file_editor{"x":1}<|call|>'
+        )
+        result = parser.process_chunk(output)
+        result.segments.extend(parser.flush())
+        rows = completed_message_rows(result.segments)
+        assert rows[0][1] == (
+            "functions.file_editor" if "file_editor" in declared else None
+        )
+
+    @pytest.mark.parametrize("chunk_size", [1, 4, 11])
+    def test_order_counters_and_later_turn(
+        self, harmony_parser, chat_request, monkeypatch, chunk_size
+    ):
+        earlier = encode_output(
+            "<|channel|>analysis<|message|>Think<|end|>"
+            "<|start|>assistant<|channel|>commentary to=functions.first "
+            '<|constrain|>json<|message|>{"a":1}<|end|>'
+            "<|start|>assistant<|channel|>commentary to=python "
+            "<|constrain|>python code<|message|>print(1)<|end|>"
+            "<|start|>assistant"
+        )
+        malformed = encode_output(
+            '<|channel|>analysis to=functions.file_editor{"x":1}\n <|call|>'
+        )
+        output = earlier + malformed
+        expected_reasoning = HarmonyParser(harmony_parser.model_tokenizer)
+        expected_reasoning.process_chunk(earlier)
+        messages, deltas = parse_delta_stream(
+            harmony_parser, chat_request, output, chunk_size, monkeypatch
+        )
+        assert [m.recipient for m in messages] == [
+            None,
+            "functions.first",
+            "python",
+            "functions.file_editor",
+        ]
+        assert collect_streamed_tool_calls(deltas) == [
+            (0, "first", '{"a":1}'),
+            (1, "file_editor", '{"x":1}\n '),
+        ]
+        assert harmony_parser._num_counted_tokens == len(output)
+        assert (
+            harmony_parser._num_reasoning_tokens
+            == expected_reasoning._num_reasoning_tokens
+        )
+        assert not any(s.recipient or s.delta for s in harmony_parser.flush())
+        deltas = []
+        for i in range(0, len(malformed), chunk_size):
+            d = harmony_parser.parse_delta(
+                "", malformed[i : i + chunk_size], chat_request, finished=False
+            )
+            if d:
+                deltas.append(d)
+        deltas.append(harmony_parser.parse_delta("", [], chat_request, finished=True))
+        assert collect_streamed_tool_calls([d for d in deltas if d]) == [
+            (0, "file_editor", '{"x":1}\n ')
+        ]
+        assert harmony_parser._num_counted_tokens == len(output) + len(malformed)
+        assert_parser_is_reset(harmony_parser)
 
 
 class TestAdjustRequest:
