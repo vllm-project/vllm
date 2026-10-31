@@ -346,7 +346,7 @@ def _stream_parse_delta(parser, tokenizer, gen_ids, request, prompt_ids):
     """Stream `gen_ids` through `parse_delta` and reconstruct reasoning/content."""
     reasoning = ""
     content = ""
-    previous_tokens: list[str] | None = None
+    previous_tokens: list[str | bytes] | None = None
     prefix_offset = 0
     read_offset = 0
     for i, tok in enumerate(gen_ids):
@@ -467,7 +467,7 @@ def _stream_turn(
     reasoning = ""
     content = ""
     tool_call_acc: dict[int, dict[str, str]] = {}
-    previous_tokens: list[str] | None = None
+    previous_tokens: list[str | bytes] | None = None
     prefix_offset = 0
     read_offset = 0
     for i, tok in enumerate(gen_ids):

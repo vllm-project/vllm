@@ -144,7 +144,10 @@ def run_reasoning_extraction_streaming_mistral(
     previous_tokens: list[int] = []
     for model_delta in model_deltas:
         token_delta = [model_delta]
-        delta = reasoning_parser.model_tokenizer.convert_ids_to_tokens([model_delta])[0]
+        delta = cast(
+            str,
+            reasoning_parser.model_tokenizer.convert_ids_to_tokens([model_delta])[0],
+        )
         current_text = previous_text + delta
         current_tokens = previous_tokens + token_delta
         delta_message = reasoning_parser.extract_reasoning_streaming(
