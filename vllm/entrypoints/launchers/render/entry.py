@@ -2,9 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import argparse
 import asyncio
+import contextlib
 import signal
 import socket
 from argparse import Namespace
+from collections.abc import MutableSequence
+from typing import Any
 
 from vllm import AsyncEngineArgs, envs
 from vllm.config import VllmConfig
@@ -23,10 +26,16 @@ async def build_and_serve_renderer(
     listen_address: str,
     sock: socket.socket,
     args: Namespace,
-    **uvicorn_kwargs,
+    peer_loads: tuple[MutableSequence[int], int] | None = None,
+    **uvicorn_kwargs: Any,
 ) -> asyncio.Task:
     """Build FastAPI app for a CPU-only render server, initialize state, and
     start serving.
+
+    ``peer_loads`` enables cross-process accept arbitration when several
+    workers share one listening socket (see ``NoSignalServer``). Pass
+    ``(shared_load_array, this_worker_index)`` from the multi-process
+    launcher; leave ``None`` for the single-process path.
 
     Returns the shutdown task for the caller to await.
     """
@@ -43,6 +52,7 @@ async def build_and_serve_renderer(
     return await serve_http(
         app,
         sock=sock,
+        peer_loads=peer_loads,
         enable_ssl_refresh=args.enable_ssl_refresh,
         host=args.host,
         port=args.port,
@@ -62,7 +72,10 @@ async def build_and_serve_renderer(
     )
 
 
-async def run_launch_fastapi(args: argparse.Namespace) -> None:
+async def _run_launch_fastapi(
+    args: argparse.Namespace,
+    exit_stack: contextlib.ExitStack,
+) -> None:
     """Run the online serving layer with FastAPI (no GPU inference)."""
 
     # Interrupt initialization if SIGTERM arrives before uvicorn installs
@@ -72,10 +85,30 @@ async def run_launch_fastapi(args: argparse.Namespace) -> None:
 
     signal.signal(signal.SIGTERM, _interrupt_init)
 
-    # 1. Socket binding
     listen_address, sock = setup_server(args, reuse_port=False)
+    exit_stack.callback(sock.close)
 
-    # 2. Build and serve the API server
+    vllm_config = build_vllm_config(args)
+    shutdown_task = await build_and_serve_renderer(
+        vllm_config, listen_address, sock, args
+    )
+    await shutdown_task
+
+
+async def run_launch_fastapi(args: argparse.Namespace) -> None:
+    with contextlib.ExitStack() as exit_stack:
+        try:
+            await _run_launch_fastapi(args, exit_stack)
+        except KeyboardInterrupt:
+            logger.info_once("[shutdown] API server: interrupted by user.")
+        except Exception:
+            logger.exception("[shutdown] API server: unexpected error during shutdown")
+            raise
+
+
+def build_vllm_config(args: argparse.Namespace) -> VllmConfig:
+    """Build a fresh ``VllmConfig`` for a render server worker."""
+    # Build and serve the API server
     engine_args = AsyncEngineArgs.from_cli_args(args)
     model_config = engine_args.create_model_config()
 
@@ -91,18 +124,11 @@ async def run_launch_fastapi(args: argparse.Namespace) -> None:
     # structured outputs config, mirroring `create_engine_config`, which this
     # GPU-less entrypoint bypasses. Model-specific defaults are then applied
     # by `verify_and_update_config` during VllmConfig construction.
-    vllm_config = VllmConfig(
+    return VllmConfig(
         model_config=model_config,
         logging_config=engine_args.create_logging_config(),
         structured_outputs_config=engine_args.create_structured_outputs_config(),
     )
-    shutdown_task = await build_and_serve_renderer(
-        vllm_config, listen_address, sock, args
-    )
-    try:
-        await shutdown_task
-    finally:
-        sock.close()
 
 
 if __name__ == "__main__":
