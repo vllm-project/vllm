@@ -156,6 +156,27 @@ def _hash_state(use_slot_cache: bool) -> NgramHashState:
     return state
 
 
+def test_engram_hash_state_uses_tokenizer_revision(monkeypatch):
+    from transformers import AutoTokenizer
+
+    def capture_revision(*args, **kwargs):
+        raise RuntimeError(kwargs["revision"])
+
+    monkeypatch.setattr(AutoTokenizer, "from_pretrained", capture_revision)
+    model_config = SimpleNamespace(
+        tokenizer="engram/tokenizer",
+        trust_remote_code=True,
+        revision="model-revision",
+        tokenizer_revision="tokenizer-revision",
+    )
+    with pytest.raises(RuntimeError, match="tokenizer-revision"):
+        NgramHashState(
+            SimpleNamespace(use_v2_model_runner=True, model_config=model_config),
+            SimpleNamespace(max_ngram_size=2),
+            SimpleNamespace(block_size=16),
+        )
+
+
 @pytest.mark.parametrize("num_tokens", [0, 7])
 def test_engram_dummy_hashes_leave_history_untouched(num_tokens):
     """Dummy forwards have no valid table IDs and do not alter cached history."""
