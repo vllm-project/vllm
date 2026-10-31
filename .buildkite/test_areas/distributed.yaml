@@ -12,10 +12,12 @@ steps:
   source_file_dependencies:
   - vllm/distributed
   - "!vllm/distributed/kv_transfer/"
+  - vllm/v1/worker/pp_send_buffer.py
   - tests/distributed
   commands:
   - pytest -v -s distributed/test_localization.py
   - pytest -v -s distributed/test_comm_ops.py
+  - pytest -v -s distributed/test_pp_send_buffer.py
   - pytest -v -s distributed/test_cpu_all_reduce.py
   - pytest -v -s distributed/test_shm_broadcast.py
   - pytest -v -s distributed/test_shm_buffer.py
@@ -32,10 +34,12 @@ steps:
       - image-build-amd
       source_file_dependencies:
       - vllm/distributed
+      - vllm/v1/worker/pp_send_buffer.py
       - tests/distributed
       - vllm/platforms/rocm.py
       commands:
       - pytest -v -s distributed/test_comm_ops.py
+      - pytest -v -s distributed/test_pp_send_buffer.py
       - pytest -v -s distributed/test_shm_broadcast.py
       - pytest -v -s distributed/test_shm_buffer.py
       - pytest -v -s distributed/test_shm_storage.py
@@ -502,6 +506,7 @@ steps:
   # NOTE: don't test llama model here, it seems hf implementation is buggy
   # see https://github.com/vllm-project/vllm/pull/5689 for details
   - pytest -v -s distributed/test_custom_all_reduce.py
+  - pytest -v -s distributed/test_pp_send_buffer.py
   - torchrun --nproc_per_node=2 distributed/test_ca_buffer_sharing.py
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s distributed/test_weight_transfer.py -k multiple_sources
   - TARGET_TEST_SUITE=MI355 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'

@@ -104,6 +104,7 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
 )
 from vllm.v1.utils import compute_iteration_details, report_usage_stats
+from vllm.v1.worker.pp_send_buffer import PPSendBuffer
 from vllm.v1.worker.sentinel.gpu_worker_sentinel import WorkerSentinel
 from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
@@ -252,6 +253,8 @@ class Worker(WorkerBase):
 
         # Device handles of the previous step's PP intermediate-tensor send.
         self._pp_send_work: list[Handle] = []
+        # Non-last PP ranks send from here once the profile run sized it.
+        self._pp_send_buffer: PPSendBuffer | None = None
 
         # Resolved lazily on first sleep/wake; persists worker-process state.
         self._sleep_mode_backend: SleepModeBackend | None = None
@@ -651,6 +654,20 @@ class Worker(WorkerBase):
         with set_current_vllm_config(self.vllm_config):
             self.model_runner.reload_weights(*args, **kwargs)
 
+    def _init_pp_send_buffer(self) -> int:
+        """Allocate the PP send buffer sized by the profile run, after its peak,
+        and return the device memory it took."""
+        if not self.use_v2_model_runner or self._pp_send_buffer is not None:
+            return 0
+        nbytes = getattr(self.model_runner, "profile_pp_send_bytes", 0)
+        if nbytes == 0:
+            return 0
+        free_before, _ = torch.accelerator.get_memory_info(self.device)
+        with self._maybe_get_memory_pool_context("workspace"):
+            self._pp_send_buffer = PPSendBuffer(nbytes, self.device)
+        free_after, _ = torch.accelerator.get_memory_info(self.device)
+        return free_before - free_after
+
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
         """Profiles the peak memory usage of the model to determine how much
@@ -674,6 +691,7 @@ class Worker(WorkerBase):
                 self.model_runner.profile_run(
                     randomize_inputs=self.randomize_dummy_inputs
                 )
+            self._init_pp_send_buffer()
 
             msg = (
                 f"Initial free memory {format_gib(self.init_snapshot.free_memory)} "
@@ -712,6 +730,10 @@ class Worker(WorkerBase):
             set_current_vllm_config(self.vllm_config),
         ):
             self.model_runner.profile_run(randomize_inputs=self.randomize_dummy_inputs)
+
+        pp_send_bytes = self._init_pp_send_buffer()
+        profile_result.transient_peak_headroom += pp_send_bytes
+        profile_result.non_kv_cache_memory += pp_send_bytes
 
         # Profile CUDA graph memory if graphs will be captured. The V2 runner
         # decides itself, since encoder graphs don't depend on cudagraph_mode.
@@ -1388,14 +1410,19 @@ class Worker(WorkerBase):
             and not get_pp_group().is_last_rank
         )
 
-        # Non-blocking send of the intermediate tensors. The metadata handle
-        # is reaped lazily by the GroupCoordinator; the device handles are
-        # waited at the top of the next step.
-        handles = get_pp_group().isend_tensor_dict(
-            output.tensors,
-            all_gather_group=get_tp_group(),
-        )
-        self._pp_send_work = handles[1:]
+        # None on the V1 runner and ranks whose profile run sized no buffer:
+        # those keep the original wait for the previous send before forwarding.
+        if self._pp_send_buffer is not None:
+            self._pp_send_buffer.send(output.tensors, get_pp_group(), get_tp_group())
+        else:
+            # Non-blocking send of the intermediate tensors. The metadata
+            # handle is reaped lazily by the GroupCoordinator; the device
+            # handles are waited at the top of the next step.
+            handles = get_pp_group().isend_tensor_dict(
+                output.tensors,
+                all_gather_group=get_tp_group(),
+            )
+            self._pp_send_work = handles[1:]
 
         if self.use_v2_model_runner and self.model_runner.is_pooling_model:
             return self.model_runner.pool()  # type: ignore
