@@ -210,6 +210,9 @@ def _canonicalize_fp4_zero_signs_(packed: torch.Tensor) -> None:
 class B12xExperts(mk.FusedMoEExpertsModular):
     """FP4 MoE experts backed by the b12x SM12x planned API."""
 
+    # apply() runs on weights prepared at load time, not on w1/w2.
+    reads_weight_args = False
+
     def __init__(
         self,
         moe_config: mk.FusedMoEConfig,
