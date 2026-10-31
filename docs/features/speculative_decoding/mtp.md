@@ -9,6 +9,16 @@ MTP is useful when:
 - Your model natively supports MTP.
 - You want model-based speculative decoding with minimal extra configuration.
 
+## Draft MoE backend
+
+An unquantized MTP head may need a different MoE backend from its quantized
+target. Set `moe_backend` inside `--speculative-config`, for example
+`'{"method":"mtp","num_speculative_tokens":2,"moe_backend":"flashinfer_trtllm"}'`.
+When the target uses a self-dispatching FlashInfer MoE backend, a regular draft
+backend uses the default all-gather/reduce-scatter communication instead of
+inheriting the target's internal `passthrough` setting. The target retains its
+own backend and communication configuration.
+
 ## Gemma 4 Assistant Models
 
 Gemma 4 assistant checkpoints use vLLM's Gemma 4 MTP path. They are not generic
