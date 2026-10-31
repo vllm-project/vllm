@@ -338,6 +338,7 @@ class MambaHybridModelState(DefaultModelState):
             dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
             positions=input_batch.positions,
             model_specific_attn_metadata=mamba_attn_metadata,
+            mm_req_doc_ranges=self.get_mm_prefix_ranges(input_batch),
             for_cudagraph_capture=for_capture,
             rswa_prefix_lens=input_batch.prompt_lens,
         )

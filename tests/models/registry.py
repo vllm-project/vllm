@@ -773,6 +773,7 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
             "d3-mini": "vllm-sr/d3-mini",
             "d3-nano": "vllm-sr/d3-nano",
             "d3-lite": "vllm-sr/d3-lite",
+            "d3-turbo": "vllm-sr/d3-turbo",
         },
         max_model_len=4096,
     ),
@@ -796,6 +797,20 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
     ),
     "RobertaForSequenceClassification": _HfExamplesInfo(
         "cross-encoder/quora-roberta-base"
+    ),
+    "StartLuxDecisionForSequenceClassification": _HfExamplesInfo(
+        "startlux-models/StartLux-Decision-4B",
+        hf_overrides={"architectures": ["StartLuxDecisionForSequenceClassification"]},
+        enable_prefix_caching=False,
+        max_model_len=8192,
+    ),
+    "StartLuxDecisionMoeForSequenceClassification": _HfExamplesInfo(
+        "startlux-models/StartLux-Decision-35B-A3B",
+        hf_overrides={
+            "architectures": ["StartLuxDecisionMoeForSequenceClassification"]
+        },
+        enable_prefix_caching=False,
+        max_model_len=8192,
     ),
     "XLMRobertaForSequenceClassification": _HfExamplesInfo("BAAI/bge-reranker-v2-m3"),
 }
