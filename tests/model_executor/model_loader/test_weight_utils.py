@@ -36,7 +36,7 @@ def test_auto_prefetch_selection(
     monkeypatch.setattr(weight_utils, "_get_fs_type", lambda _: fs_type)
     monkeypatch.setattr(
         weight_utils,
-        "_get_available_ram_bytes",
+        "get_available_memory",
         lambda: checkpoint.stat().st_size * available_ram_multiplier,
     )
     prefetch_calls = []

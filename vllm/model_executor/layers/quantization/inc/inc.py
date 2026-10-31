@@ -34,9 +34,8 @@ class INCConfig(QuantizationConfig):
     Repo: https://github.com/intel/neural-compressor
     """
 
+    SUPPORTED_BITS = {2, 3, 4, 5, 6, 7, 8}
     DEFAULT_INT_PACKING_FORMAT = "auto_round:auto_gptq"
-
-    SUPPORTED_BITS = {2, 3, 4, 8}
     SUPPORTED_DTYPES = {"int", "mx_fp", "fp"}
     SUPPORTED_FORMATS = {
         "auto_round:auto_gptq",

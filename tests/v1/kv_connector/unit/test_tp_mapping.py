@@ -38,6 +38,7 @@ def _compute_mapping(
     group_spec_types: tuple[type, ...] = (FullAttentionSpec,),
     dcp_size: int = 1,
     remote_dcp_size: int = 1,
+    head_sharded_kv_heads: int | None = None,
 ) -> TPMapping:
     transfer_topology = object.__new__(TransferTopology)
     transfer_topology.tp_rank = tp_rank
@@ -50,6 +51,7 @@ def _compute_mapping(
         remote_tp_size=remote_tp_size,
         group_spec_types=group_spec_types,
         remote_dcp_size=remote_dcp_size,
+        head_sharded_kv_heads=head_sharded_kv_heads,
     )
 
 
@@ -73,8 +75,43 @@ class TestTPMappingStructure:
 
 
 @pytest.mark.parametrize(
+    "tp_rank,tp_size,remote_tp_size,draft_kv_heads,expected_offset",
+    [
+        (3, 8, 1, 8, 3),  # one draft head per decode rank
+        (5, 8, 2, 8, 1),  # rank 5 reads P rank 1, second head slot
+        (5, 16, 1, 8, 2),  # D_TP > heads: two ranks share each head
+    ],
+)
+def test_head_sharded_draft_under_mla_target_gets_gqa_offset(
+    tp_rank, tp_size, remote_tp_size, draft_kv_heads, expected_offset
+):
+    """An MLA target's mapping reads every head at offset 0, which is wrong
+    for a GQA draft's head-sharded KV. Mapping the draft as GQA with its own
+    head count recovers each rank's slice from the same source rank."""
+    mla = _compute_mapping(
+        tp_rank=tp_rank,
+        tp_size=tp_size,
+        remote_tp_size=remote_tp_size,
+        is_mla=True,
+        num_kv_heads=1,
+    )
+    draft = _compute_mapping(
+        tp_rank=tp_rank,
+        tp_size=tp_size,
+        remote_tp_size=remote_tp_size,
+        is_mla=True,
+        num_kv_heads=1,
+        head_sharded_kv_heads=draft_kv_heads,
+    )
+    assert mla.rank_offset_factor == 0
+    assert draft.rank_offset_factor == expected_offset
+    assert draft.all_source_ranks == mla.all_source_ranks
+
+
+@pytest.mark.parametrize(
     "tp_rank,tp_size,remote_tp_size,dcp_size,remote_dcp_size,expected_ranks",
     [
+        (0, 1, 8, 1, 8, tuple(range(8))),
         (0, 4, 4, 1, 4, (0, 1, 2, 3)),
         (2, 4, 4, 4, 4, (2,)),
         (0, 2, 4, 2, 4, (0, 2)),
@@ -144,9 +181,8 @@ def _make_mock_worker_for_splits(group_spec_types):
     """Build a mock NixlConnectorWorker with _group_spec_types for split tests.
 
     No per-region replicate flags are configured (``block_len_per_layer`` empty
-    and ``num_regions == 0``), so ``_fa_desc_replicated`` takes its early-return
-    path and treats every FA descriptor as SPLIT, matching the legacy behavior
-    these tests assert.
+    and ``num_regions == 0``), so ``_build_local_splits_from_plan`` treats every
+    FA descriptor as SPLIT, matching the legacy behavior these tests assert.
     """
     worker = object.__new__(NixlConnectorWorker)
     worker._group_spec_types = group_spec_types
@@ -173,11 +209,9 @@ class TestBuildSrcSplitHandles:
         )
 
         worker = _make_mock_worker_for_splits((FullAttentionSpec,))
-        src_blocks_data = np.array(
-            [(0x2000 + i * 1024, 1024, 0) for i in range(8)],
-            dtype=np.uint64,
-        )
-        num_descs = len(src_blocks_data)
+        # One region of 8 dense 1024-byte blocks as a single strided run.
+        src_blocks_data = np.array([(0x2000, 1024, 0, 1024, 8)], dtype=np.uint64)
+        num_descs = 8
         splits = list(
             worker._build_local_splits_from_plan(
                 plan,
@@ -188,9 +222,10 @@ class TestBuildSrcSplitHandles:
 
         assert len(splits) == remote_tp_size
         for handle in splits:
-            assert len(handle) == len(src_blocks_data)
-            for _, length, _ in handle:
-                assert length == 1024 // remote_tp_size
+            assert handle.shape == src_blocks_data.shape
+            # The head slice shrinks the length; block stride and count are kept.
+            assert handle[:, 1].tolist() == [1024 // remote_tp_size]
+            assert handle[:, 3:].tolist() == [[1024, 8]]
 
 
 class TestMambaPlanSplitHandles:
@@ -208,12 +243,12 @@ class TestMambaPlanSplitHandles:
         )
 
         worker = _make_mock_worker_for_splits((FullAttentionSpec, MambaSpec))
-        # 2 FA descs + 1 SSM desc
+        # 2 FA runs + 1 SSM run of one block each: (addr, len, dev, stride, count)
         src_blocks_data = np.array(
             [
-                (1000, 200, 0),  # FA desc 0
-                (2000, 200, 0),  # FA desc 1
-                (3000, 400, 0),  # SSM desc 0
+                (1000, 200, 0, 200, 1),  # FA desc 0
+                (2000, 200, 0, 200, 1),  # FA desc 1
+                (3000, 400, 0, 400, 1),  # SSM desc 0
             ],
             dtype=np.uint64,
         )
@@ -223,14 +258,22 @@ class TestMambaPlanSplitHandles:
         assert len(splits) == 2  # 2 source ranks
 
         # Rank 0 (FA source, p_idx=0):
-        # FA: chunk=200//1=200, slot=0 → (1000, 200, 0), (2000, 200, 0)
-        # SSM: chunk=400//2=200, idx=0 → (3000, 200, 0)
-        assert splits[0] == [(1000, 200, 0), (2000, 200, 0), (3000, 200, 0)]
+        # FA: chunk=200//1=200, slot=0 → (1000, 200), (2000, 200)
+        # SSM: chunk=400//2=200, idx=0 → (3000, 200); block stride stays 400
+        assert splits[0].tolist() == [
+            [1000, 200, 0, 200, 1],
+            [2000, 200, 0, 200, 1],
+            [3000, 200, 0, 400, 1],
+        ]
 
         # Rank 1 (not FA source, p_idx=1):
-        # FA: chunk=200//1=200, slot=0 (skip_fa) → (1000, 200, 0), (2000, 200, 0)
-        # SSM: chunk=400//2=200, idx=1 → (3200, 200, 0)
-        assert splits[1] == [(1000, 200, 0), (2000, 200, 0), (3200, 200, 0)]
+        # FA: chunk=200//1=200, slot=0 (skip_fa) → (1000, 200), (2000, 200)
+        # SSM: chunk=400//2=200, idx=1 → (3200, 200); block stride stays 400
+        assert splits[1].tolist() == [
+            [1000, 200, 0, 200, 1],
+            [2000, 200, 0, 200, 1],
+            [3200, 200, 0, 400, 1],
+        ]
 
     def test_hetero_block_size_splits(self):
         """With a block-size ratio, single-source FA sub-block descs pass
@@ -243,14 +286,13 @@ class TestMambaPlanSplitHandles:
         )
 
         worker = _make_mock_worker_for_splits((FullAttentionSpec, MambaSpec))
-        # 2 FA blocks x ratio 2 sub-blocks + 1 SSM desc (never expanded).
+        # 2 FA blocks x ratio 2 sub-blocks (one run of 2 per block) + 1 SSM desc
+        # (never expanded).
         src_blocks_data = np.array(
             [
-                (1000, 100, 0),
-                (1100, 100, 0),
-                (2000, 100, 0),
-                (2100, 100, 0),
-                (3000, 400, 0),
+                (1000, 100, 0, 100, 2),
+                (2000, 100, 0, 100, 2),
+                (3000, 400, 0, 400, 1),
             ],
             dtype=np.uint64,
         )
@@ -258,14 +300,9 @@ class TestMambaPlanSplitHandles:
         splits = list(worker._build_local_splits_from_plan(plan, src_blocks_data, 4, 2))
 
         assert len(splits) == 2
-        fa_passthrough = [
-            (1000, 100, 0),
-            (1100, 100, 0),
-            (2000, 100, 0),
-            (2100, 100, 0),
-        ]
-        assert splits[0] == fa_passthrough + [(3000, 200, 0)]
-        assert splits[1] == fa_passthrough + [(3200, 200, 0)]
+        fa_passthrough = [[1000, 100, 0, 100, 2], [2000, 100, 0, 100, 2]]
+        assert splits[0].tolist() == fa_passthrough + [[3000, 200, 0, 400, 1]]
+        assert splits[1].tolist() == fa_passthrough + [[3200, 200, 0, 400, 1]]
 
     def test_hetero_block_size_head_sharded_asserts(self):
         """Head-sharded FA reads (multiple FA sources) are incompatible with
@@ -279,7 +316,7 @@ class TestMambaPlanSplitHandles:
 
         worker = _make_mock_worker_for_splits((FullAttentionSpec, MambaSpec))
         src_blocks_data = np.array(
-            [(1000, 100, 0), (1100, 100, 0), (3000, 400, 0)],
+            [(1000, 100, 0, 100, 2), (3000, 400, 0, 400, 1)],
             dtype=np.uint64,
         )
 

@@ -25,9 +25,18 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    dequantize_to_dtype,
+    nvfp4_gathered_bias,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
 )
+from vllm.model_executor.model_loader.mtp_validation import (
+    is_mtp_completeness_check_enabled,
+)
+from vllm.platforms import current_platform
+from vllm.v1.worker.gpu.spec_decode.dspark.config import DSparkSpeculatorConfig
 
 from .qwen3_dflash import DFlashQwen3ForCausalLM, DFlashQwen3Model
 from .utils import (
@@ -60,6 +69,7 @@ class DSparkMarkovHead(nn.Module):
         markov_rank: int,
         prefix: str,
         quant_config: QuantizationConfig | None = None,
+        retain_weight_for_gather: bool = False,
     ) -> None:
         super().__init__()
         self.markov_w1 = nn.Embedding(vocab_size, markov_rank)
@@ -71,6 +81,8 @@ class DSparkMarkovHead(nn.Module):
             prefix=maybe_prefix(prefix, "markov_w2"),
             disable_tp=True,
         )
+        self.markov_w2._retain_weight_for_gather = retain_weight_for_gather
+        self.markov_w2.is_w4a16_nvfp4 = False
 
     def embed(self, token_ids: torch.Tensor) -> torch.Tensor:
         """r-dim Markov embedding of ``token_ids`` ([B] -> [B, r])."""
@@ -98,8 +110,52 @@ class DSparkMarkovHead(nn.Module):
         positions. This method scatters the corrected candidate values into
         that dense buffer so the normal sampler sees the truncated proposal.
         """
-        weight = self.markov_w2.weight[index]
-        corrected = values.unsqueeze(-1)
+        if self.markov_w2._retain_weight_for_gather and self.markov_w2.is_w4a16_nvfp4:
+            # Use the fast Triton kernel for W4A16 NVFP4 weights with BF16
+            # activations on CUDA. FP16 activations, non-CUDA accelerators, and
+            # CPU use the slower dequantize/scatter fallback below.
+            if (
+                current_platform.is_cuda()
+                and markov_embed.is_cuda
+                and markov_embed.dtype == torch.bfloat16
+                and values.dtype == torch.bfloat16
+                and logits.dtype == torch.bfloat16
+            ):
+                nvfp4_gathered_bias(
+                    markov_embed,
+                    self.markov_w2._nvfp4_weight_for_gather,
+                    self.markov_w2._nvfp4_weight_scale_for_gather,
+                    self.markov_w2._nvfp4_weight_global_scale_for_gather,
+                    values,
+                    index,
+                    logits,
+                    scale,
+                )
+                return logits
+
+            flat_index = index.reshape(-1)
+            packed_weight = self.markov_w2._nvfp4_weight_for_gather.index_select(
+                0, flat_index
+            )
+            weight_scale = self.markov_w2._nvfp4_weight_scale_for_gather.index_select(
+                0, flat_index
+            )
+            weight = dequantize_to_dtype(
+                packed_weight,
+                weight_scale,
+                self.markov_w2._nvfp4_weight_global_scale_for_gather,
+                dtype=markov_embed.dtype,
+                block_size=self.markov_w2._nvfp4_group_size_for_gather,
+                swizzle=False,
+            ).view(*index.shape, -1)
+        else:
+            weight = self.markov_w2.weight[index]
+            if weight.dtype != markov_embed.dtype:
+                raise RuntimeError(
+                    "Gathered Markov projection requires unquantized weights or "
+                    "retained ModelOpt W4A16 NVFP4 weights."
+                )
+        corrected = values.unsqueeze(-1).clone()
         corrected.baddbmm_(
             weight,
             markov_embed.unsqueeze(-1),
@@ -160,6 +216,9 @@ class Qwen3DSparkModel(DFlashQwen3Model):
             config.markov_rank,
             prefix=maybe_prefix(prefix, "markov_head"),
             quant_config=self.quant_config,
+            retain_weight_for_gather=(
+                getattr(config, "dspark_draft_topk", None) is not None
+            ),
         )
         self.confidence_head: DSparkConfidenceHead | None = None
         if getattr(config, "enable_confidence_head", False):
@@ -176,16 +235,20 @@ class Qwen3DSparkModel(DFlashQwen3Model):
 
 
 class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
+    # The speculator this is a draft model of (see SpeculativeDraftModel).
+    speculator_config_class = DSparkSpeculatorConfig
+    model_cls = Qwen3DSparkModel
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
-        self.draft_model_config = vllm_config.speculative_config.draft_model_config
+        speculative_config = vllm_config.speculative_config
+        assert speculative_config is not None
+        self.draft_model_config = speculative_config.draft_model_config
         self.config = self.draft_model_config.hf_config
         if getattr(self.config, "draft_vocab_size", None) is None:
             self.config.draft_vocab_size = getattr(self.config, "vocab_size", None)
-        target_layer_num = vllm_config.model_config.get_num_layers(
-            vllm_config.parallel_config
-        )
-        self.model = Qwen3DSparkModel(
+        target_layer_num = vllm_config.model_config.get_total_num_hidden_layers()
+        self.model = self.model_cls(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),
             start_layer_id=target_layer_num,
@@ -201,7 +264,10 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
             self.config.draft_vocab_size, scale=logit_scale
         )
         self.target_vocab_size = vllm_config.model_config.get_vocab_size()
-        if self.config.draft_vocab_size != self.target_vocab_size:
+        # Only a pruned draft (subset of the target vocab) needs a d2t mapping to
+        # scatter ids up. A draft >= the target vocab (e.g. padded to the target's
+        # physical embedding size) maps identically, so no d2t is needed.
+        if self.config.draft_vocab_size < self.target_vocab_size:
             self.draft_id_to_target_id = nn.Parameter(
                 torch.zeros(self.config.draft_vocab_size, dtype=torch.long),
                 requires_grad=False,
@@ -216,6 +282,10 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
         # Draft-vocab logits without the d2t scatter: the speculator adds the
         # Markov bias in draft space, then remaps via map_draft_to_target.
         return self.logits_processor(self.lm_head, hidden_states)
+
+    def compute_draft_logits_local(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """This TP rank's vocab shard of compute_draft_logits, not gathered."""
+        return self.logits_processor(self.lm_head, hidden_states, skip_gather=True)
 
     def map_draft_to_target(self, draft_ids: torch.Tensor) -> torch.Tensor:
         # Map draft-vocab ids to target ids (identity for full-vocab drafts).
@@ -281,18 +351,19 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
         # embed_tokens / lm_head are optional; when omitted they are shared from
         # the target by load_dspark_model, so skip the unloaded params here.
         uses_expanded_input_vocab = self.config.vocab_size > self.target_vocab_size
-        uses_reduced_vocab = self.config.draft_vocab_size != self.target_vocab_size
-        if uses_expanded_input_vocab and not includes_embed_tokens:
+        uses_reduced_vocab = self.config.draft_vocab_size < self.target_vocab_size
+        complete = is_mtp_completeness_check_enabled()
+        if complete and uses_expanded_input_vocab and not includes_embed_tokens:
             raise ValueError(
                 "Qwen3 DSpark checkpoints whose input vocab_size is larger than "
                 "the target vocabulary must include embed_tokens weights."
             )
-        if uses_reduced_vocab and not includes_lm_head:
+        if complete and uses_reduced_vocab and not includes_lm_head:
             raise ValueError(
                 "Reduced-vocabulary Qwen3 DSpark checkpoints must include "
                 "lm_head weights; the full target lm_head cannot be shared."
             )
-        if uses_reduced_vocab and not includes_draft_id_mapping:
+        if complete and uses_reduced_vocab and not includes_draft_id_mapping:
             raise ValueError(
                 "Reduced-vocabulary Qwen3 DSpark checkpoints must include a "
                 "d2t mapping so sampled draft ids can be converted to target ids."
@@ -305,10 +376,10 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
             orig_to_new_substr["lm_head"] = None
         if not includes_draft_id_mapping:
             orig_to_new_substr["draft_id_to_target_id"] = None
-        if self.model.confidence_head is None or not includes_confidence_head:
+        if complete and not includes_confidence_head:
             self.model.confidence_head = None
+        if self.model.confidence_head is None:
             orig_to_new_substr["confidence_head"] = None
         mapper = WeightsMapper(orig_to_new_substr=orig_to_new_substr)
         loader = AutoWeightsLoader(self)
         loader.load_weights(model_weights.items(), mapper=mapper)
-        self.model._build_fused_kv_buffers()

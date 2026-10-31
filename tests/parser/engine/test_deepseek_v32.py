@@ -285,3 +285,27 @@ class TestStreaming:
         assert collect_function_name(results) == "fn"
         args = json.loads(collect_tool_arguments(results))
         assert args == {"k": "v"}
+
+
+class TestMissingFunctionCallsWrapper:
+    """An invoke without the ``<｜DSML｜function_calls>`` wrapper is still a
+    tool call (V3.2 counterpart of #48931)."""
+
+    def test_non_streaming(self, mock_tokenizer, mock_request):
+        text = _invoke("fn", _param("k", "true", "v"))
+        parser = DeepSeekV32Parser(mock_tokenizer)
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert result.tool_calls[0].function.name == "fn"
+        assert json.loads(result.tool_calls[0].function.arguments) == {"k": "v"}
+        assert result.content is None
+
+    def test_streaming(self, mock_tokenizer, mock_request):
+        text = "Sure.\n" + _invoke("fn", _param("k", "true", "v"))
+        parser = DeepSeekV32Parser(mock_tokenizer)
+        results = simulate_tool_streaming(parser, mock_request, list(text))
+
+        assert collect_function_name(results) == "fn"
+        assert json.loads(collect_tool_arguments(results)) == {"k": "v"}
+        assert "DSML" not in collect_content(results)

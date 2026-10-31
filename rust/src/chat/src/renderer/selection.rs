@@ -22,24 +22,30 @@ pub enum RendererSelection {
     DeepSeekV32,
     /// Force the DeepSeek V4 renderer.
     DeepSeekV4,
+    /// Force the DeepSeek V4.1 renderer.
+    DeepSeekV41,
     /// Force the GPT-OSS Harmony renderer.
     Harmony,
     /// Force the Inkling native token renderer.
     Inkling,
     /// Force the Kimi K3 XTML renderer.
     KimiK3,
+    /// Force the native GLM-5.3 / GLM-5.3-Flash renderer.
+    Glm5Next,
 }
 
 impl RendererSelection {
     pub const AUTO_LITERAL: &str = "auto";
     pub const DEEPSEEK_V32_LITERAL: &str = "deepseek_v32";
     pub const DEEPSEEK_V4_LITERAL: &str = "deepseek_v4";
+    pub const DEEPSEEK_V41_LITERAL: &str = "deepseek_v41";
     pub const GPT_OSS_MODEL_TYPE: &str = "gpt_oss";
     pub const HARMONY_LITERAL: &str = "harmony";
     pub const HF_LITERAL: &str = "hf";
     pub const INKLING_LITERAL: &str = "inkling";
     pub const INKLING_MODEL_TYPE: &str = "inkling_mm_model";
     pub const KIMI_K3_LITERAL: &str = "kimi_k3";
+    pub const GLM5_NEXT_LITERAL: &str = "glm5_next";
 
     /// Resolve the renderer selection using the given model type string, if
     /// it's `Auto`.
@@ -48,9 +54,11 @@ impl RendererSelection {
             Self::Auto => match model_type {
                 Self::DEEPSEEK_V32_LITERAL => Self::DeepSeekV32,
                 Self::DEEPSEEK_V4_LITERAL => Self::DeepSeekV4,
+                Self::DEEPSEEK_V41_LITERAL => Self::DeepSeekV41,
                 Self::GPT_OSS_MODEL_TYPE => Self::Harmony,
                 Self::INKLING_MODEL_TYPE => Self::Inkling,
                 Self::KIMI_K3_LITERAL => Self::KimiK3,
+                Self::GLM5_NEXT_LITERAL => Self::Glm5Next,
                 _ => Self::Hf,
             },
             selection => selection,
@@ -70,12 +78,16 @@ impl FromStr for RendererSelection {
             Ok(Self::DeepSeekV32)
         } else if value.eq_ignore_ascii_case(Self::DEEPSEEK_V4_LITERAL) {
             Ok(Self::DeepSeekV4)
+        } else if value.eq_ignore_ascii_case(Self::DEEPSEEK_V41_LITERAL) {
+            Ok(Self::DeepSeekV41)
         } else if value.eq_ignore_ascii_case(Self::HARMONY_LITERAL) {
             Ok(Self::Harmony)
         } else if value.eq_ignore_ascii_case(Self::INKLING_LITERAL) {
             Ok(Self::Inkling)
         } else if value.eq_ignore_ascii_case(Self::KIMI_K3_LITERAL) {
             Ok(Self::KimiK3)
+        } else if value.eq_ignore_ascii_case(Self::GLM5_NEXT_LITERAL) {
+            Ok(Self::Glm5Next)
         } else {
             Err(format!(
                 "unknown renderer `{value}` (expected one of: {})",
@@ -92,9 +104,11 @@ impl fmt::Display for RendererSelection {
             Self::Hf => f.write_str(Self::HF_LITERAL),
             Self::DeepSeekV32 => f.write_str(Self::DEEPSEEK_V32_LITERAL),
             Self::DeepSeekV4 => f.write_str(Self::DEEPSEEK_V4_LITERAL),
+            Self::DeepSeekV41 => f.write_str(Self::DEEPSEEK_V41_LITERAL),
             Self::Harmony => f.write_str(Self::HARMONY_LITERAL),
             Self::Inkling => f.write_str(Self::INKLING_LITERAL),
             Self::KimiK3 => f.write_str(Self::KIMI_K3_LITERAL),
+            Self::Glm5Next => f.write_str(Self::GLM5_NEXT_LITERAL),
         }
     }
 }
@@ -118,10 +132,24 @@ mod tests {
     }
 
     #[test]
+    fn auto_resolves_glm5_next_from_model_type_only() {
+        // GLM-5.3 shares `glm_moe_dsa` with GLM-5 through GLM-5.2, whose
+        // templates differ, so it needs an explicit `glm5_next`.
+        assert_eq!(
+            RendererSelection::Auto.resolve("glm5_next"),
+            RendererSelection::Glm5Next
+        );
+        assert_eq!(
+            RendererSelection::Auto.resolve("glm_moe_dsa"),
+            RendererSelection::Hf
+        );
+    }
+
+    #[test]
     fn renderer_selection_expected_error_message() {
         let err = RendererSelection::from_str("unknown").unwrap_err();
         expect_test::expect![
-            "unknown renderer `unknown` (expected one of: auto, hf, deepseek_v32, deepseek_v4, harmony, inkling, kimi_k3)"
+            "unknown renderer `unknown` (expected one of: auto, hf, deepseek_v32, deepseek_v4, deepseek_v41, harmony, inkling, kimi_k3, glm5_next)"
         ]
         .assert_eq(&err);
     }

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Layerwise weight reloading utilities for vLLM.
+"""Layerwise weight reloading utilities for vLLM.
 
 This module provides functionality to reload model weights layer-by-layer,
 which is useful for weight updates without full model reconstruction.
@@ -22,6 +21,8 @@ __all__ = [
     "initialize_layerwise_reload",
     "finalize_layerwise_processing",
     "finalize_layerwise_reload",
+    "finish_reload",
+    "start_reload",
     "set_torchao_reload_attrs",
     "support_quantized_model_reload_from_hp_weights",
 ]
@@ -32,6 +33,7 @@ from .layerwise import (
     initialize_layerwise_reload,
     record_metadata_for_reloading,
 )
+from .lifecycle import finish_reload, start_reload
 from .torchao_decorator import (
     set_torchao_reload_attrs,
     support_quantized_model_reload_from_hp_weights,
