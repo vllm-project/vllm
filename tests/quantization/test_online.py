@@ -156,6 +156,62 @@ else:
 
 
 DEVICE = current_platform.device_type
+
+
+def test_online_nvfp4_linear_requantization_preserves_partition_scales():
+    from vllm.model_executor.layers.quantization.modelopt import resolve
+    from vllm.model_executor.layers.quantization.online.requantization import (
+        OnlineRequantizationMixin,
+    )
+
+    spec, ctx, fmt = resolve("NVFP4", SimpleNamespace(group_size=16), "")
+    source = ModelOptLinearMethod(spec, ctx, fmt)
+    method = OnlineRequantizationMixin()
+    method.set_requantization_source(source)
+    layer = torch.nn.Module()
+    layer.logical_widths = [4, 2, 2]
+    layer.weight = torch.nn.Parameter(
+        torch.full((8, 16), 0x22, dtype=torch.uint8), requires_grad=False
+    )
+    layer.weight_scale = torch.nn.Parameter(
+        torch.ones(8, 2, dtype=torch.float8_e4m3fn), requires_grad=False
+    )
+    layer.weight_scale_2 = torch.nn.Parameter(
+        torch.tensor([2.0, 3.0, 5.0]), requires_grad=False
+    )
+    assert method.requantization_source is not None
+    actual = method.requantization_source.dequantize_weight(layer)
+    assert isinstance(actual, torch.Tensor)
+    expected = torch.tensor([2.0] * 4 + [3.0] * 2 + [5.0] * 2)
+    torch.testing.assert_close(actual.float(), expected[:, None].expand(8, 32))
+
+
+@pytest.mark.parametrize("requested", [None, "mxfp4"])
+def test_modelopt_nvfp4_mxfp4_shorthand_preserves_checkpoint_source(requested):
+    model_config = SimpleNamespace(
+        quantization=requested,
+        quantization_config=None,
+        model_arch_config=SimpleNamespace(
+            quantization_config={"quant_method": "modelopt", "quant_algo": "NVFP4"}
+        ),
+        hf_config=SimpleNamespace(),
+    )
+    from unittest.mock import patch
+
+    with patch.object(current_platform, "verify_quantization") as verify:
+        ModelConfig._verify_quantization(model_config)
+
+    assert model_config.quantization == "modelopt_fp4"
+    if requested is None:
+        assert model_config.quantization_config is None
+        verify.assert_called_once_with("modelopt_fp4")
+    else:
+        assert model_config.quantization_config == resolve_quantization_config(
+            "mxfp4", {}
+        )
+        verify.assert_called_once_with("online")
+
+
 GRANITE_MODEL_NAME = "ibm-granite/granite-3.0-1b-a400m-base"
 PARTIALLY_PREQUANTIZED_MODEL_NAME = (
     "nm-testing/tinysmokeqwen3moe-W4A16-first-only-CTstable"
@@ -693,7 +749,7 @@ def _nvfp4_moe_checkpoint_tensors(
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("tp_rank", [0, 1])
 @pytest.mark.parametrize("projection", ["column", "row", "merged"])
-@pytest.mark.parametrize("source_format", ["modelopt_mxfp8"])
+@pytest.mark.parametrize("source_format", ["modelopt_mxfp8", "modelopt_nvfp4"])
 def test_weight_loading_requantization(
     source_format: str,
     projection: str,
@@ -716,6 +772,13 @@ def test_weight_loading_requantization(
         )
         config = _fully_quantized_modelopt_mxfp8_config()
         expected_source_cls = ModelOptLinearMethod
+    elif source_format == "modelopt_nvfp4":
+        from vllm.model_executor.layers.quantization.online.requantization import (
+            _ModelOptNvfp4LinearSource,
+        )
+
+        config = ModelOptNvFp4Config(is_checkpoint_nvfp4_serialized=True)
+        expected_source_cls = _ModelOptNvfp4LinearSource
     else:
         pytest.fail(f"Unsupported checkpoint source: {source_format}")
     config.online_quantization_config = OnlineQuantizationConfig(
@@ -753,12 +816,27 @@ def test_weight_loading_requantization(
             ),
             "weight_scale": torch.randint(124, 131, (rows, 4), dtype=MXFP8_SCALE_DTYPE),
         }
+    elif source_format == "modelopt_nvfp4":
+        checkpoint = {
+            "weight": torch.randint(0, 256, (rows, 64), dtype=torch.uint8),
+            "weight_scale": torch.ones(rows, 8, dtype=torch.float8_e4m3fn),
+            "weight_scale_2": torch.tensor(
+                [2.0, 3.0] if projection == "merged" else [2.0]
+            ),
+        }
     else:
         pytest.fail(f"Unsupported checkpoint source: {source_format}")
     expected = {}
     for name, tensor in checkpoint.items():
         param = getattr(layer, name)
-        if projection == "merged":
+        if name == "weight_scale_2":
+            if projection == "merged":
+                for shard, scale in enumerate(tensor):
+                    param.weight_loader(param, scale, shard)
+            else:
+                param.weight_loader(param, tensor)
+            expected[name] = tensor
+        elif projection == "merged":
             for shard, part in enumerate(tensor.chunk(2, dim=0)):
                 param.weight_loader(param, part, shard)
             expected[name] = torch.cat(
@@ -770,9 +848,13 @@ def test_weight_loading_requantization(
                 tp_rank
             ]
         # TP loading must preserve each source weight/scale shard exactly.
-        torch.testing.assert_close(param.cpu(), expected[name], rtol=0, atol=0)
+        torch.testing.assert_close(
+            param.cpu().float(), expected[name].float(), rtol=0, atol=0
+        )
     actual_weight = source.dequantize_weight(layer)
-    reference = source.dequantize_weight(SimpleNamespace(**expected))
+    reference = source.dequantize_weight(
+        SimpleNamespace(**expected, logical_widths=layer.logical_widths)
+    )
     # Loaded source shards must dequantize identically to their checkpoint slices.
     torch.testing.assert_close(actual_weight.cpu(), reference.cpu(), rtol=0, atol=0)
     # Source loading must leave the online processing method attached.
