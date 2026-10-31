@@ -34,6 +34,8 @@ vllm serve <hybrid-model> \
 
 Choose a value that divides the block size of every prefix-cacheable KV cache group, and that is a multiple of the per-state compression ratio for models that use one, such as sparse MLA. vLLM validates both at startup and names the offending sizes in the error. Read the served block size from the startup log. 64 is a reasonable starting point.
 
+With `--prefix-match-unit` smaller than the Mamba block size, a prefill also stops at the prompt's last prefix-match-unit boundary, so a longer follow-up prompt can resume there. When the backend cannot store that state within the prompt's last chunk, the stop costs one extra forward step per prompt. `--no-mamba-prompt-tail-checkpoint` skips the stop; follow-up prompts then resume from an earlier Mamba state and recompute more tokens.
+
 ## Example workloads
 
 We describe two example workloads, where APC can provide huge performance benefit:

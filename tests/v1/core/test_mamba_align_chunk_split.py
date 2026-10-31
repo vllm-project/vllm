@@ -139,6 +139,7 @@ def _split(
     num_prefill_checkpoint_blocks: int = 0,
     max_num_scheduled_tokens: int = 16384,
     num_hash_lookahead_tokens: int = 0,
+    prompt_tail_checkpoint: bool = True,
 ) -> int:
     """Call the real `Scheduler._mamba_block_aligned_split` on a stub self."""
     if use_eagle_block_drop is None:
@@ -153,6 +154,7 @@ def _split(
         # `prefix_match_unit` finer than the block size (#46384).
         mamba_partial_cache_hit=partial_hit,
         mamba_shared_prefix_checkpoint=False,
+        mamba_prompt_tail_checkpoint=partial_hit and prompt_tail_checkpoint,
         hash_block_size=ATTN_BLOCK_SIZE,
         mamba_has_prefill_checkpoint_blocks=(num_prefill_checkpoint_blocks > 0),
         mamba_prefill_checkpoint_alignment=(
@@ -353,6 +355,66 @@ def test_lookahead_split_caches_partial_tail_boundary(lookahead: int) -> None:
 
     _, num_computed, _ = manager.get_computed_blocks(make("resend"))
     assert num_computed == boundary
+
+
+@pytest.mark.parametrize("prompt_tail_checkpoint", [True, False])
+def test_prompt_tail_checkpoint_opt_out_skips_the_tail_stop(
+    prompt_tail_checkpoint: bool,
+) -> None:
+    """A resume one block short of the prompt end runs to the end in one chunk
+    when the prompt-tail stop is disabled."""
+    prompt_len, resume_at = 3602, 2 * MAMBA_BLOCK_SIZE
+    tail_stop = prompt_len // ATTN_BLOCK_SIZE * ATTN_BLOCK_SIZE
+    (request,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
+    request.num_computed_tokens = resume_at
+    num_new = _split(
+        request,
+        prompt_len - resume_at,
+        use_eagle=False,
+        partial_hit=True,
+        prompt_tail_checkpoint=prompt_tail_checkpoint,
+    )
+    assert resume_at + num_new == (tail_stop if prompt_tail_checkpoint else prompt_len)
+
+
+@pytest.mark.parametrize("prompt_tail_checkpoint", [True, False])
+def test_prompt_tail_checkpoint_opt_out_resumes_from_block_state(
+    prompt_tail_checkpoint: bool,
+) -> None:
+    """Without the tail stop the cached slots stay consistent and a resend
+    resumes from the last Mamba block boundary instead of the prompt tail."""
+    init_none_hash(sha256)
+    prompt_len = 3601
+    manager = _make_hybrid_kv_cache_manager(num_hash_lookahead_tokens=1)
+
+    def make(request_id: str) -> Request:
+        return make_request(
+            request_id,
+            list(range(prompt_len)),
+            ATTN_BLOCK_SIZE,
+            sha256,
+            num_hash_lookahead_tokens=1,
+        )
+
+    producer = make("producer")
+    state_at = _run_chunked_prefill(
+        manager,
+        producer,
+        budgets=[],
+        use_eagle_block_drop=False,
+        partial_hit=True,
+        num_hash_lookahead_tokens=1,
+        prompt_tail_checkpoint=prompt_tail_checkpoint,
+    )
+    assert producer.num_computed_tokens == prompt_len
+    _count_cached_boundary_states(manager, producer, state_at)
+    manager.free(producer)
+    manager.new_step_starts()
+
+    _, num_computed, _ = manager.get_computed_blocks(make("resend"))
+    tail = (prompt_len - 1) // ATTN_BLOCK_SIZE * ATTN_BLOCK_SIZE
+    block = (prompt_len - 1) // MAMBA_BLOCK_SIZE * MAMBA_BLOCK_SIZE
+    assert num_computed == (tail if prompt_tail_checkpoint else block)
 
 
 @pytest.mark.parametrize("first_chunk", [800, 900, 1599, 1601, 2000])
