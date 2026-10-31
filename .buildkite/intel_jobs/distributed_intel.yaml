@@ -5,16 +5,11 @@ steps:
 - label: ":intel: (BMG) Distributed Torchrun + Shutdown"
   key: distributed-torchrun-shutdown-tests-2-gpus
   timeout_in_minutes: 50
-  device: intel_gpu
-  agent_tags:
-    label: production
-    gpu: 2+
-    mem: 24+
-  no_plugin: true
-  working_dir: "."
+  device: intel_gpu_k8s
+  num_devices: 2
+  resource_claim_template: b70-2
+  working_dir: "/workspace/vllm/"
   env:
-    REGISTRY: "public.ecr.aws/q9t5s3a7"
-    REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
   - vllm/distributed/
@@ -28,6 +23,5 @@ steps:
   - tests/v1/shutdown
   - tests/v1/worker/test_worker_memory_snapshot.py
   commands:
-    - >-
-      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'cd tests && pytest -v -s v1/shutdown'
+    - cd tests
+    - pytest -v -s v1/shutdown
