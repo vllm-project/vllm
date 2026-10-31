@@ -9,6 +9,46 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 
 @triton.jit
+def _hc_prenorm_gemm(
+    X, FN, OUT, SQ, xs, N: tl.constexpr, K: tl.constexpr, BLOCK: tl.constexpr
+):
+    row = tl.program_id(0).to(tl.int64)
+    n = tl.program_id(1)
+    k = tl.arange(0, BLOCK)
+    x = tl.load(X + row * xs + k, k < K, 0).to(tl.float32)
+    fn = tl.load(FN + n * K + k, k < K, 0)
+    tl.store(OUT + row * N + n, tl.sum(x * fn, 0))
+    if n == 0:
+        tl.store(SQ + row, tl.sum(x * x, 0))
+
+
+def hc_prenorm_gemm_batch_invariant(
+    x: torch.Tensor, fn: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Project residual streams and sum their squares without batch-dependent splits."""
+    assert x.ndim == fn.ndim == 2 and x.shape[1] == fn.shape[1]
+    assert x.stride(1) == 1 and fn.is_contiguous() and fn.dtype == torch.float32
+    out = torch.empty(
+        (1, x.shape[0], fn.shape[0]), dtype=torch.float32, device=x.device
+    )
+    sq = torch.empty((1, x.shape[0]), dtype=torch.float32, device=x.device)
+    if x.shape[0]:
+        _hc_prenorm_gemm[(x.shape[0], fn.shape[0])](
+            x,
+            fn,
+            out,
+            sq,
+            x.stride(0),
+            fn.shape[0],
+            x.shape[1],
+            triton.next_power_of_2(x.shape[1]),
+            num_warps=8,
+            enable_fp_fusion=False,
+        )
+    return out, sq
+
+
+@triton.jit
 def _rmsnorm_nw_kernel(
     x_ptr,
     out_ptr,
