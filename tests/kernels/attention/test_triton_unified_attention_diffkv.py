@@ -29,7 +29,7 @@ DEVICE_TYPE = current_platform.device_type
 
 # (num_query_heads, num_kv_heads): MHA, GQA, and the num_kv_heads==1
 # (degenerate-stride) case.
-NUM_HEADS = [(4, 4), (8, 2), (5, 1)]
+NUM_HEADS = [(4, 4), (8, 2), (5, 1), (32, 2)]
 # (head_size_qk, head_size_v).  (192, 128) is the canonical asymmetric
 # DiffKV shape; FA4 on Blackwell only supports head_size>128 when it is
 # 192, and FA3 on Hopper supports it too -- so this pair is runnable on
@@ -98,6 +98,7 @@ def test_triton_unified_attn_diffkv_vs_reference(
     kv_cache_dtype: torch.dtype | None,
     block_size: int,
     seq_threshold_3D: int,
+    monkeypatch: pytest.MonkeyPatch,
     quant_query: bool = False,
 ) -> None:
     head_size_qk, head_size_v = head_sizes
@@ -110,7 +111,7 @@ def test_triton_unified_attn_diffkv_vs_reference(
             head_size=head_size_qk, head_size_v=head_size_v
         )
         if not is_flash_attn_varlen_func_available() or fa_version not in (3, 4):
-            pytest.skip(f"FA DiffKV needs FA3/FA4 (got version {fa_version}).")
+            use_torch_ref = True
 
     torch.set_default_device(DEVICE_TYPE)
     set_random_seed(0)
@@ -214,6 +215,9 @@ def test_triton_unified_attn_diffkv_vs_reference(
         seq_threshold_3D, num_query_heads, head_size_v
     )
     triton_out = torch.empty(sum(query_lens), num_query_heads, head_size_v, dtype=dtype)
+    # Exercise the SM12x tile after computing the reference.
+    monkeypatch.setattr(current_platform, "is_device_capability_family", lambda _: True)
+
     unified_attention_diffkv(
         q=query,
         k=key_cache,
@@ -248,7 +252,7 @@ def test_triton_unified_attn_diffkv_vs_reference(
     "seq_lens,seq_threshold_3D",
     [([(129, 463)], 0), ([(1, 2011)], 0), ([(1, 2011)], 8)],
 )
-def test_triton_unified_attn_diffkv_fp8_query(seq_lens, seq_threshold_3D):
+def test_triton_unified_attn_diffkv_fp8_query(seq_lens, seq_threshold_3D, monkeypatch):
     test_triton_unified_attn_diffkv_vs_reference(
         seq_lens=seq_lens,
         num_heads=(8, 2),
@@ -259,6 +263,7 @@ def test_triton_unified_attn_diffkv_fp8_query(seq_lens, seq_threshold_3D):
         kv_cache_dtype=current_platform.fp8_dtype(),
         block_size=16,
         seq_threshold_3D=seq_threshold_3D,
+        monkeypatch=monkeypatch,
         quant_query=True,
     )
 
