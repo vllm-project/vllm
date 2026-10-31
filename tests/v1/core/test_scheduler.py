@@ -3619,6 +3619,13 @@ def test_kv_connector_records_external_cache_hit_sources(monkeypatch, is_async):
         assert connector_stats is not None
         assert connector_stats.hits_by_source == {}
 
+    # Only the plain request counts as an external cache query.
+    external_stats = scheduler.make_stats().connector_prefix_cache_stats
+    assert external_stats is not None
+    assert external_stats.requests == 1
+    assert external_stats.queries == BLOCK_SIZE * 4
+    assert external_stats.hits == BLOCK_SIZE * 2
+
 
 @pytest.mark.parametrize("is_async", [False, True])
 def test_kv_connector_basic(is_async: bool):
