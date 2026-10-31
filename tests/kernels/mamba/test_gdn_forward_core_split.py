@@ -22,9 +22,11 @@ Both paths are exercised through the REAL ``_forward_core``:
   non-spec tokens in both paths, so it cancels out and only the recurrent split
   is compared).
 
-The Triton/FLA chunk backend is forced so the prefill-only ``chunk_indices``
-must stay consistent with the rebased ``cu_seqlens`` (a stringent, backend
-portable check of the split wiring).
+Each prefill backend consumes its own prefill-only chunk metadata, so the
+rebased ``cu_seqlens`` must stay consistent with it (a stringent check of the
+split wiring). The Triton/FLA and AITER FlyDSL backends also write the prefill
+output straight into ``core_attn_out``, so the split path checks that the
+prefill slice starts after the peeled decodes.
 """
 
 from __future__ import annotations
@@ -36,42 +38,59 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from vllm.platforms import current_platform
-
-if not (
-    current_platform.is_cuda() and current_platform.is_device_capability_family(100)
-):
-    pytest.skip(
-        reason="GDN _forward_core split test uses the CuteDSL prefill backend "
-        "(requires CUDA SM10x).",
-        allow_module_level=True,
-    )
-
-from tests.v1.attention.utils import (  # noqa: E402
+from tests.v1.attention.utils import (
     BatchSpec,
     create_common_attn_metadata,
     create_vllm_config,
 )
-from vllm.config import set_current_vllm_config  # noqa: E402
-from vllm.model_executor.layers.mamba.gdn import qwen_gdn_linear_attn  # noqa: E402
-from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (  # noqa: E402
+from vllm._aiter_ops import rocm_aiter_ops
+from vllm.config import set_current_vllm_config
+from vllm.model_executor.layers.mamba.gdn import qwen_gdn_linear_attn
+from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
     ChunkGatedDeltaRule,
     QwenGatedDeltaNetAttention,
 )
-from vllm.model_executor.layers.mamba.mamba_utils import (  # noqa: E402
+from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
 )
-from vllm.third_party.flash_linear_attention.ops.index import (  # noqa: E402
+from vllm.platforms import current_platform
+from vllm.third_party.flash_linear_attention.ops.index import (
     prepare_chunk_indices,
     prepare_chunk_offsets,
 )
-from vllm.third_party.flash_linear_attention.ops.utils import (  # noqa: E402
+from vllm.third_party.flash_linear_attention.ops.utils import (
     FLA_CHUNK_SIZE,
 )
-from vllm.v1.attention.backends.gdn_attn import (  # noqa: E402
+from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionMetadataBuilder,
 )
-from vllm.v1.kv_cache_interface import MambaSpec  # noqa: E402
+from vllm.v1.kv_cache_interface import MambaSpec
+
+_ON_SM10X = current_platform.is_cuda() and current_platform.is_device_capability_family(
+    100
+)
+BACKENDS = [
+    pytest.param(
+        "cutedsl",
+        marks=pytest.mark.skipif(not _ON_SM10X, reason="CuteDSL needs CUDA SM10x."),
+    ),
+    # The Triton/FLA chunk kernel is unsupported on SM10x.
+    pytest.param(
+        "triton",
+        marks=pytest.mark.skipif(
+            not current_platform.is_cuda_alike() or _ON_SM10X,
+            reason="Triton/FLA GDN prefill needs ROCm or a non-SM10x CUDA GPU.",
+        ),
+    ),
+    pytest.param(
+        "aiter_flydsl",
+        marks=pytest.mark.skipif(
+            not current_platform.is_rocm()
+            or not rocm_aiter_ops.is_gdn_flydsl_prefill_available(),
+            reason="needs ROCm with the AITER FlyDSL GDN prefill kernels.",
+        ),
+    ),
+]
 
 # Small GDN dims; head_k_dim/head_v_dim=128 keeps the chunk/update kernels happy.
 H = 4  # num key heads
@@ -86,19 +105,16 @@ BLOCK_SIZE = 16
 PREFIX = "model.layers.0.linear_attn"
 
 
-def _make_vllm_config():
+def _make_vllm_config(backend: str):
     # A small, ungated GDN model whose config is cached locally; only the config
     # (scheduler/cache/compilation/hf) is used here, never the weights. Inject
-    # linear_key_head_dim=128 and request the CuteDSL prefill backend -- the
-    # supported GDN chunk kernel on Blackwell (the Triton/FLA chunk kernel is
-    # unsupported on SM10x). CuteDSL consumes chunk_indices/chunk_offsets, so
-    # this also exercises the prefill-only chunk-metadata wiring.
+    # linear_key_head_dim=128 and request the prefill backend under test.
     cfg = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B",
         block_size=BLOCK_SIZE,
         hf_config_override={"linear_key_head_dim": K},
     )
-    cfg.additional_config = {"gdn_prefill_backend": "cutedsl"}
+    cfg.additional_config = {"gdn_prefill_backend": backend}
     return cfg
 
 
@@ -141,7 +157,11 @@ def _run_forward_core(layer, meta, mixed_qkv, b, a, num_tokens):
         num_tokens, HV, V, dtype=mixed_qkv.dtype, device=mixed_qkv.device
     )
     ctx = types.SimpleNamespace(attn_metadata={PREFIX: meta})
-    with patch.object(qwen_gdn_linear_attn, "get_forward_context", return_value=ctx):
+    # FLA only writes into a caller's output buffer with grad disabled.
+    with (
+        torch.no_grad(),
+        patch.object(qwen_gdn_linear_attn, "get_forward_context", return_value=ctx),
+    ):
         layer._forward_core(
             mixed_qkv=mixed_qkv.clone(),
             b=b.clone(),
@@ -151,10 +171,12 @@ def _run_forward_core(layer, meta, mixed_qkv, b, a, num_tokens):
     return core_attn_out
 
 
+@pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("state_dtype", [torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("num_decodes,prefill_lens", [(3, [512, 300]), (4, [64, 5])])
 @pytest.mark.parametrize("fresh_prefill", [False, True])
 def test_forward_core_split_matches_unified(
+    backend: str,
     state_dtype: torch.dtype,
     num_decodes: int,
     prefill_lens: list[int],
@@ -162,7 +184,7 @@ def test_forward_core_split_matches_unified(
 ) -> None:
     torch.manual_seed(0)
     device = torch.device("cuda")
-    vllm_config = _make_vllm_config()
+    vllm_config = _make_vllm_config(backend)
 
     # Decode-first batch: D 1-token decodes (with context), then the prefills.
     decode_seq_lens = [64] * num_decodes
@@ -194,7 +216,7 @@ def test_forward_core_split_matches_unified(
     assert meta_split.num_decodes == num_decodes
     assert meta_split.num_prefills == len(prefill_lens)
     assert meta_split.num_decode_tokens == num_decodes
-    assert builder.gdn_prefill_backend == "cutedsl"
+    assert builder.gdn_prefill_backend == backend
 
     num_tokens = sum(query_lens)
 
@@ -202,7 +224,12 @@ def test_forward_core_split_matches_unified(
     # way the builder would for a non-split batch (backend-matched).
     cu_full = meta_split.non_spec_query_start_loc
     assert cu_full is not None
-    if builder.gdn_prefill_backend == "cutedsl":
+    full_ci = full_co = full_aiter = None
+    if backend == "aiter_flydsl":
+        full_aiter = rocm_aiter_ops.build_gdn_flydsl_prefill_metadata(
+            torch.diff(cu_full.cpu()).tolist(), cu_seqlens=cu_full
+        )
+    elif backend == "cutedsl":
         from vllm.model_executor.layers.mamba.ops.gdn_chunk_cutedsl import (
             prepare_metadata_cutedsl,
         )
@@ -224,6 +251,7 @@ def test_forward_core_split_matches_unified(
         ),
         chunk_indices=full_ci,
         chunk_offsets=full_co,
+        aiter_prefill_metadata=full_aiter,
         # Unified path: the chunk kernel processes the full non-spec batch.
         prefill_query_start_loc=meta_split.non_spec_query_start_loc,
         prefill_state_indices=meta_split.non_spec_state_indices_tensor,

@@ -2804,8 +2804,12 @@ class rocm_aiter_ops:
         cu_seqlens: torch.Tensor | None,
         aiter_prefill_metadata: object | None,
         use_qk_l2norm_in_kernel: bool,
+        o: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run GDN prefill through AITER's VK path with the FlyDSL kernels.
+
+        ``o``, when given, must be a contiguous tensor shaped like ``v``; the
+        kernel writes the output into it instead of allocating one.
 
         Every argument AITER takes is named here rather than forwarded as
         ``**kwargs``, so a rename or reordering on the AITER side fails at this
@@ -2825,6 +2829,13 @@ class rocm_aiter_ops:
                 "AITER FlyDSL GDN prepare does not support the runtime input shape, "
                 "dtype, or device."
             )
+        if o is not None and (
+            o.shape != v.shape or o.dtype != q.dtype or not o.is_contiguous()
+        ):
+            raise RuntimeError(
+                "AITER FlyDSL GDN prefill writes the output without strides, so "
+                "o must be contiguous with v's shape and q's dtype."
+            )
         logger.info_once(
             "Dispatching AITER FlyDSL GDN prefill (prepare=flydsl, chunk=flydsl)."
         )
@@ -2832,6 +2843,7 @@ class rocm_aiter_ops:
             q=q,
             k=k,
             v=v,
+            o=o,
             g=g,
             beta=beta,
             initial_state=initial_state,
