@@ -47,6 +47,11 @@ class TranscriptionStreamResponse(OpenAIBaseModel):
     model: str
     choices: list[TranscriptionResponseStreamChoice]
     usage: UsageInfo | None = Field(default=None)
+    duration: float | None = None
+    """The duration of the input audio in seconds.
+
+    Matches the `duration` field of the `verbose_json` response.
+    """
 
 
 class TranscriptionRequest(OpenAIBaseModel):
