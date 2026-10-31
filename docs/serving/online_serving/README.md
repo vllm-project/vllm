@@ -31,6 +31,8 @@ We currently support the following OpenAI APIs:
 
 ## Cohere APIs
 
+- [Cohere Chat API](./cohere.md) (`/cohere/v2/chat`, requires `VLLM_ENABLE_COHERE_API=1`)
+    - Compatible with [Cohere's v2 Chat API](https://docs.cohere.com/reference/chat)
 - [Cohere Embed API](../../models/pooling_models/embed.md#cohere-embed-api) (`/v2/embed`)
     - Compatible with [Cohere's Embed API](https://docs.cohere.com/reference/embed)
     - Works with any [embedding model](../../models/pooling_models/embed.md#supported-models), including multimodal models.
@@ -150,6 +152,8 @@ See the [renderer guide](renderer.md) for setup instructions and examples.
     - Render chat completions
 - [Responses Render API](renderer.md) (`/v1/responses/render`)
     - Render self-contained Responses requests
+- [Anthropic Messages Render API](renderer.md) (`/v1/messages/render`)
+    - Render Anthropic Messages requests
 
 ### Derenderer APIs
 
