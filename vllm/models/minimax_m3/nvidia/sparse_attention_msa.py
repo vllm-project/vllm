@@ -150,7 +150,7 @@ class MiniMaxM3SparseMSADecodeMetadata(MiniMaxM3SparseDecodeMetadata):
 
 @dataclass
 class MiniMaxM3SparseMSAPrefillMetadata(MiniMaxM3SparsePrefillMetadata):
-    # The builder's Q8KV4 prefill split workspace; None off Rubin.
+    # The builder's Q8KV4 prefill split workspace; None off SM10x.
     workspace: "PrefillWorkspace | None" = None
 
 
@@ -181,12 +181,13 @@ class MiniMaxM3SparseMSAMetadataBuilder(MiniMaxM3SparseMetadataBuilder):
         )
         self.msa_cutlass_plan_cache = MSACutlassDecodePlanCache()
         self.msa_cutlass_min_batch_size = _get_msa_cutlass_min_batch_size()
-        # Rubin only: Q8KV4 prefill split partials striped over the memory
-        # locality domains, reserved for the largest batch.
+        # SM10x: Q8KV4 prefill split partials reserved once for the largest
+        # batch (striped over the memory locality domains where the GPU has
+        # several) instead of a ~8 GiB allocation on every prefill step.
         self.prefill_workspace: "PrefillWorkspace | None" = None  # noqa: UP037
         if is_nvfp4_kv_cache(
             self.kv_cache_dtype
-        ) and current_platform.is_device_capability(107):
+        ) and current_platform.is_device_capability_family(100):
             from vllm.third_party.fmha_sm100.prefill_q8kv4 import PrefillWorkspace
 
             self.prefill_workspace = PrefillWorkspace(
