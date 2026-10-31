@@ -31,3 +31,6 @@ steps:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests && pytest -v -s v1/shutdown'
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests && pytest -v -s distributed/test_weight_transfer_torch_dist.py'
