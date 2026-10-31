@@ -104,6 +104,19 @@ By default, a **compatibility hash** is checked during handshake. P and D instan
 - `LBNHC` (token-major, formerly `NHD`) layout is supported but does **not** allow heterogeneous TP head splitting.
 - Experimental `LBHNC` ↔ `LBNHC` permute: enable via `--kv-transfer-config '{"enable_permute_local_kv": true}'`. Not supported with HMA.
 
+### Prefill and decode on different GPU generations
+
+Each instance selects its attention backend for its own GPU, and the backend
+name is part of the compatibility hash. For non-MLA models, compute capability
+10.x GPUs (e.g. B200, B300) default to `FLASHINFER`, while other CUDA GPUs,
+including Hopper, default to `FLASH_ATTN`. A prefill instance on a 10.x GPU and
+a decode instance on a Hopper GPU (or the reverse) therefore fail the handshake
+with `NIXL compatibility hash mismatch` unless both pass the same
+`--attention-backend`, for example `--attention-backend FLASHINFER`.
+
+The hash also includes the `model` argument as passed, so use the same Hugging
+Face ID or the same local path on both instances.
+
 ### Pipeline parallelism
 
 The default (pull) NixlConnector does **not** support
