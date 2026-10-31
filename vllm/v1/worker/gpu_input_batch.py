@@ -995,23 +995,23 @@ class InputBatch:
 
     def make_lora_inputs(
         self, num_scheduled_tokens: np.ndarray, num_sampled_tokens: np.ndarray
-    ) -> tuple[tuple[int, ...], tuple[int, ...], set[LoRARequest]]:
+    ) -> tuple[np.ndarray, np.ndarray, set[LoRARequest]]:
         """Given the num_scheduled_tokens for each request in the batch, return
         datastructures used to activate the current LoRAs.
 
         Returns:
-            1. prompt_lora_mapping: A tuple of size np.sum(num_sampled_tokens)
+            1. prompt_lora_mapping: An array of size np.sum(num_sampled_tokens)
                 where, prompt_lora_mapping[i] is the LoRA id to use for the ith
                 sampled token.
-            2. token_lora_mapping: A tuple of size np.sum(num_scheduled_tokens)
+            2. token_lora_mapping: An array of size np.sum(num_scheduled_tokens)
                 where, token_lora_mapping[i] is the LoRA id to use for ith
                 token.
             3. lora_requests: Set of relevant LoRA requests.
 
         """
         req_lora_mapping = self.request_lora_mapping[: self.num_reqs]
-        prompt_lora_mapping = tuple(req_lora_mapping.repeat(num_sampled_tokens))
-        token_lora_mapping = tuple(req_lora_mapping.repeat(num_scheduled_tokens))
+        prompt_lora_mapping = req_lora_mapping.repeat(num_sampled_tokens)
+        token_lora_mapping = req_lora_mapping.repeat(num_scheduled_tokens)
 
         active_lora_requests: set[LoRARequest] = set(
             self.lora_id_to_lora_request.values()
