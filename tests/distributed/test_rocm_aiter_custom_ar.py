@@ -190,7 +190,10 @@ def tp_all_gather(
             inp.add_(1)
             graph.replay()
             assert torch.equal(out, expected(inp, dim))
-        assert aiter_dims == [0, 0, -1, -1, -1, -1]
+        from vllm.platforms.rocm import get_cdna_version
+
+        expected_dims = [0, 0, -1, -1, -1, -1] if get_cdna_version() == 4 else []
+        assert aiter_dims == expected_dims
 
 
 @pytest.mark.skipif(not is_aiter_found(), reason="AITER is not installed")
