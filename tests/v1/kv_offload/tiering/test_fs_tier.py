@@ -86,6 +86,7 @@ def _make_offloading_spec(
             is_parallelism_agnostic=is_parallelism_agnostic,
         ),
         replicated_layout=replicated_layout,
+        kv_cache_layout="LBNHC",
     )
     spec.blocks_per_chunk = 1
     spec.kv_events_config = OffloadingKVEventsConfig(
