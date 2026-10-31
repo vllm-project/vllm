@@ -367,6 +367,11 @@ class KernelConfig:
     a full FP32 logits copy. Cooperative still requires FP32 logits.
     """
 
+    enable_rtx6000d_bf16: bool = False
+    """Use precompiled CuTe BF16 projections for measured RTX 6000D shapes.
+    Opt-in; other devices, shapes and batches retain the selected backend.
+    Requires CuTe DSL. Does not apply in batch-invariant mode."""
+
     linear_backend: LinearBackend = "auto"
     """Backend for linear layer GEMM kernels. Available options:
 

@@ -240,6 +240,20 @@ class LLBf16Gemm:
             compile_key.bs,
         )
 
+    def is_compiled(self, compile_key: CompileKey) -> bool:
+        if compile_key.backend == "splitk":
+            return (
+                compile_key.split_k,
+                compile_key.num_stages,
+                compile_key.output_dtype,
+            ) in self._splitk_cache
+        return (
+            compile_key.M,
+            compile_key.K,
+            compile_key.bs,
+            compile_key.output_dtype,
+        ) in self._compiled_cache
+
     def compile(self, compile_key: CompileKey) -> None:
         if compile_key.backend == "splitk":
             splitk_cache_key = (

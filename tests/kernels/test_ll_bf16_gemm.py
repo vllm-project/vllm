@@ -106,6 +106,59 @@ SHAPES = [
 SHAPES_SPLITK = [(n, k, d) for n, k, d in SHAPES if k >= 2048]
 
 
+@pytest.mark.parametrize(
+    "n,k", [(4096, 1536), (4096, 4096), (4096, 2048), (6288, 4096), (4096, 8192)]
+)
+@torch.inference_mode()
+def test_rtx6000d_projection_runtime_graph_and_fallback(n, k, monkeypatch):
+    from vllm.model_executor.kernels.linear.cute_dsl import rtx6000d_bf16
+    from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import ll_bf16_gemm_kernel
+
+    props = torch.cuda.get_device_properties(torch.accelerator.current_device_index())
+    if props.name != "NVIDIA RTX 6000D" or props.multi_processor_count != 156:
+        pytest.skip("Requires the measured RTX 6000D SKU")
+    layer = torch.nn.Linear(k, n, bias=False, device="cuda", dtype=torch.bfloat16)
+    layer.prefix = "model.layers.0.self_attn.o_proj"
+    assert rtx6000d_bf16.prepare_rtx6000d_bf16(layer)
+    call = torch.compile(
+        lambda x: torch.ops.vllm.rtx6000d_bf16_linear(x, layer.weight),
+        backend="eager",
+        fullgraph=True,
+        dynamic=True,
+    )
+    # Trace the fallback first; later small batches must still reach CuTe.
+    x8 = torch.randn(8, k, device="cuda", dtype=torch.bfloat16)
+    torch.testing.assert_close(call(x8), F.linear(x8, layer.weight))
+    monkeypatch.setattr(
+        ll_bf16_gemm_kernel,
+        "compile",
+        lambda *args: pytest.fail("Compilation after weight preparation"),
+    )
+    dispatched = []
+    original_dispatch = ll_bf16_gemm_kernel.dispatch
+
+    def record_dispatch(*args, **kwargs):
+        dispatched.append(kwargs.get("M"))
+        return original_dispatch(*args, **kwargs)
+
+    monkeypatch.setattr(ll_bf16_gemm_kernel, "dispatch", record_dispatch)
+    for m in (4, 3, 2, 1):
+        x = torch.randn(m, k, device="cuda", dtype=torch.bfloat16)
+        dispatched.clear()
+        result = call(x)
+        assert m in dispatched
+        ref = _ref(x, layer.weight)
+        assert (result.float() - ref).norm() / ref.norm() < 0.005
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = call(x)
+        x.copy_(torch.randn_like(x))
+        with torch.no_grad():
+            layer.weight.copy_(torch.randn_like(layer.weight))
+        graph.replay()
+        torch.testing.assert_close(captured, call(x), rtol=0, atol=0)
+
+
 # =================================================================
 # Dot-product kernel (M<=4 or K<2048)
 # =================================================================
