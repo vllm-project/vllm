@@ -7,9 +7,14 @@ import pytest
 from vllm.model_executor.kernels.linear import (
     _POSSIBLE_NVFP4_KERNELS,
     CutlassNvFp4LinearKernel,
+    FlashInferAutoNvFp4LinearKernel,
     FlashInferB12xNvFp4LinearKernel,
+    FlashInferCuteDslNvFp4LinearKernel,
     FlashInferCuteDslNvFp4W4A16LinearKernel,
     FlashInferCutlassNvFp4LinearKernel,
+)
+from vllm.model_executor.layers.quantization.compressed_tensors.transform.schemes.linear_qutlass_nvfp4 import (  # noqa: E501
+    QutlassNvFP4LinearMethod,
 )
 from vllm.platforms.interface import PlatformEnum
 
@@ -30,3 +35,19 @@ def test_w4a16_kernel_does_not_precede_w4a4_kernels(w4a4_kernel):
         f"{w4a4_kernel.__name__} must be preferred over "
         f"{FlashInferCuteDslNvFp4W4A16LinearKernel.__name__}"
     )
+
+
+@pytest.mark.parametrize(
+    ("kernel_cls", "backend"),
+    [
+        (FlashInferCutlassNvFp4LinearKernel, "cutlass"),
+        (FlashInferCuteDslNvFp4LinearKernel, "cute-dsl"),
+        (FlashInferAutoNvFp4LinearKernel, "auto"),
+    ],
+)
+def test_qutlass_nvfp4_uses_the_kernel_flashinfer_backend(kernel_cls, backend):
+    """The Qutlass NVFP4 transform runs mm_fp4 with the backend of the layer's
+    kernel; --linear-backend=flashinfer's kernel must map to "auto" instead of
+    failing model loading."""
+    kernel = kernel_cls.__new__(kernel_cls)
+    assert QutlassNvFP4LinearMethod._get_flashinfer_gemm_backend(kernel) == backend
