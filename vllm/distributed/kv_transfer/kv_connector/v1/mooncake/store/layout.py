@@ -275,7 +275,7 @@ class RankLocalStoreLayout(StoreLayout):
         assert len(chunks) == len(shard_ids) and all(
             shard_id == 0 for shard_id in shard_ids
         )
-        base = np.asarray(self.kv_caches_base_addr, dtype=np.int64)
+        base = np.asarray(self.kv_caches_base_addr, dtype=np.uint64)
         length = len(self.block_stride)
         stride = np.asarray(
             [self.block_stride[i % length] for i in range(base.shape[0])],
@@ -294,7 +294,7 @@ class RankLocalStoreLayout(StoreLayout):
             dtype=np.int64,
             count=n,
         )
-        addrs = base[None, :] + bids[:, None] * stride[None, :]
+        addrs = base[None, :] + (bids[:, None] * stride[None, :]).astype(np.uint64)
         block_counts = (spans + self.block_size - 1) // self.block_size
         # A chunk spanning several consecutive blocks also copies the
         # padding between them.
