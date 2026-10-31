@@ -19,6 +19,7 @@ from vllm.lora.layers.column_parallel_linear import (
 )
 from vllm.lora.layers.custom_layer import (
     DeepseekV4CompressorKVScoreWithLoRA,
+    DeepseekV4GroupedWoAWithLoRA,
     Step5FusedQKVIndexerWithLoRA,
     Step5SparseIndexerWWithLoRA,
 )
@@ -35,6 +36,7 @@ from vllm.lora.layers.vocab_parallel_embedding import VocabParallelEmbeddingWith
 __all__ = [
     "BaseLayerWithLoRA",
     "DeepseekV4CompressorKVScoreWithLoRA",
+    "DeepseekV4GroupedWoAWithLoRA",
     "Step5FusedQKVIndexerWithLoRA",
     "Step5SparseIndexerWWithLoRA",
     "VocabParallelEmbeddingWithLoRA",

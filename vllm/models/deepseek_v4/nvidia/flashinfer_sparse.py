@@ -18,7 +18,6 @@ from vllm.models.deepseek_v4.common.ops import (
 )
 from vllm.models.deepseek_v4.nvidia.ops.o_proj import (
     compute_fp8_einsum_recipe,
-    deep_gemm_fp8_o_proj,
     rope_quant_attn_out,
     rope_quant_unsupported_reason,
 )
@@ -212,12 +211,10 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
     def _o_proj(
         self, o: torch.Tensor | QuantizedActivation, positions: torch.Tensor
     ) -> torch.Tensor:
-        return deep_gemm_fp8_o_proj(
+        z = self.wo_a.grouped_forward(
             o,
             positions,
             self.rotary_emb.cos_sin_cache,
-            self.wo_a,
-            self.wo_b,
             n_groups=self.n_local_groups,
             heads_per_group=self.n_local_heads // self.n_local_groups,
             nope_dim=self.nope_head_dim,
@@ -226,6 +223,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
             einsum_recipe=self._einsum_recipe,
             tma_aligned_scales=self._tma_aligned_scales,
         )
+        return self.wo_b(z.flatten(1))
 
     def _alloc_attn_out(
         self, num_tokens: int, hidden_states: torch.Tensor
@@ -242,7 +240,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
         # since every call passes the real per-request seq_lens. The one
         # exception is a draft block running past max_model_len, whose clamped
         # positions it does not reproduce; that only costs those drafts.
-        reason = rope_quant_unsupported_reason(self)
+        reason = rope_quant_unsupported_reason(self, vllm_config)
         self._fuse_rope_quant = reason is None
         if reason is None:
             logger.info_once(
@@ -640,12 +638,10 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
         return _pad_to_supported_q_heads(num_heads)
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
-        return deep_gemm_fp8_o_proj(
+        z = self.wo_a.grouped_forward(
             o,
             positions,
             self.rotary_emb.cos_sin_cache,
-            self.wo_a,
-            self.wo_b,
             n_groups=self.n_local_groups,
             heads_per_group=self.n_local_heads // self.n_local_groups,
             nope_dim=self.nope_head_dim,
@@ -654,6 +650,7 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
             einsum_recipe=self._einsum_recipe,
             tma_aligned_scales=self._tma_aligned_scales,
         )
+        return self.wo_b(z.flatten(1))
 
     def __init__(self, vllm_config: VllmConfig, *args, **kwargs) -> None:
         super().__init__(vllm_config, *args, **kwargs)

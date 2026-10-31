@@ -20,6 +20,7 @@ from vllm.lora.layers import (
     ColumnParallelLinearWithLoRA,
     ColumnParallelLinearWithShardedLoRA,
     DeepseekV4CompressorKVScoreWithLoRA,
+    DeepseekV4GroupedWoAWithLoRA,
     FusedMoE3DWithLoRA,
     FusedMoEWithLoRA,
     LogitsProcessorWithLoRA,
@@ -83,6 +84,7 @@ def get_lora_id():
 # merged/column-parallel wrappers in from_layer().
 _all_lora_classes: tuple[type[BaseLayerWithLoRA], ...] = (
     DeepseekV4CompressorKVScoreWithLoRA,
+    DeepseekV4GroupedWoAWithLoRA,
     Step5FusedQKVIndexerWithLoRA,
     Step5SparseIndexerWWithLoRA,
     VocabParallelEmbeddingWithLoRA,
