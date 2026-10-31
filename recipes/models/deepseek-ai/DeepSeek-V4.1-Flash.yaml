@@ -1067,6 +1067,55 @@ presets:
           - '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[6,12,18,24,30,36,42,48,54,60,66,72,78,84,90,96,102,108,114,120,126,132,138,144,150,156,162,168,174,180,186,192,198,204,210,216,222,228,234,240],"max_cudagraph_capture_size":240}'
           - "--no-enable-prefix-caching"
 
+  mi355x_agentx_tp8:
+    label: "AgentX TP8 conc 1"
+    hardware: mi355x
+    strategy: single_node_tp
+    # Same checkpoint note as mi355x_agentx: the lane served the 0909 launch
+    # checkpoint, and 1017 shares its format and memory layout.
+    variants: [fp8, default]
+    workload: "Agentic (InferenceX AgentX)"
+    description: "TP8 at concurrency 1 with mono decode and resident Engram tables: one sequence at a time and 32768-token prefill chunks, as the TP4 concurrency-1 point, on a nightly that carries mono decode at TP8."
+    source: { label: "InferenceX #4666", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4666", key: "dsv41flash-fp4-mi355x-vllm-agentic-dspark-tp8-c1", revision: fa9d48627d37b236ca6401505da2626bfe469cb2 }
+    image: "vllm/vllm-openai-rocm:nightly-335dd77b09161c5d63139b4e7ae51bb9928305b1@sha256:3c634cc2c51eda7eb840a236b1f09a5ecf6a4b0cb92c4b8486e2158770507291"
+    tp: 8
+    select:
+      frontend: rust
+      features: { spec_decoding: true, text_only: true, encoder_parallel: false }
+    args:
+      - "--max-num-seqs"
+      - "1"
+      - "--max-num-batched-tokens"
+      - "32768"
+      - "--max-cudagraph-capture-size"
+      - "8"
+    env:
+      OMP_NUM_THREADS: "1"
+    json_args:
+      "--engram-config": { cpu_offload: false }
+    points:
+      tp8_c1:
+        label: "1"
+        concurrency: 1
+    runbook: |
+      `--monokernel` runs at TP8 only on builds that carry
+      [vllm-project/vllm#64101](https://github.com/vllm-project/vllm/pull/64101)
+      (merged 2026-10-29); earlier builds refuse it outside TP2 and TP4. The pinned
+      nightly is 17 commits past that merge.
+
+      TP8 mono is a concurrency-1 configuration. #64101 measured one TP8 server at
+      concurrency 4 with 26% lower throughput than two TP4 replicas, so serve TP4 or
+      TP2 replicas, as the `mi355x_agentx` preset does, once more than one request is
+      in flight.
+
+      [InferenceX run 41098938196](https://github.com/SemiAnalysisAI/InferenceX/actions/runs/41098938196)
+      passed its concurrency-1 performance point and GSM8K evaluation at `fa9d48627`.
+      The performance point completed 362 of 373 requests with interactivity p50 696.9
+      and p90 685.5 tokens/s/user and TTFT p50 0.17 s (single run). The evaluation
+      scored 0.972 exact match (strict) over 1319 questions. Throughput runs use
+      DSpark's synthetic golden acceptance length (3.51); the preset keeps real block
+      rejection for ordinary serving and accuracy evaluation.
+
 hardware_notes:
   dgx_station_gb300:
     title: "Weights in Grace memory (UVA offload)"
