@@ -87,6 +87,7 @@ class DeepseekV4CPUIndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
         workspace_size: int,
         max_logits_bytes: int,
         request_offset: int = 0,
+        compressed_logits: bool = False,
     ) -> list[tuple[slice, slice]]:
         # workspace_size/max_logits_bytes are unused: no flat-gather
         # workspace or dense M*N buffer is allocated.
