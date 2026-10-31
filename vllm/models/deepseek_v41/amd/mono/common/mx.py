@@ -15,7 +15,7 @@ from flydsl.expr import rocdl
 from flydsl.expr.typing import T
 
 from vllm.models.deepseek_v41.amd.mono.common.arch import GFX942
-from vllm.models.deepseek_v41.amd.mono.common.ops import CM_NT
+from vllm.models.deepseek_v41.amd.mono.common.ops import CM_NT, rsrc
 
 # gfx942 quantizes to FNUZ with 224: the same bytes as OCP with 448 and a scale
 # code one higher (common/gfx942.py).
@@ -46,15 +46,43 @@ def rcp_pow2(code):
     return ((254 - code) << 23).bitcast(fx.Float32)
 
 
-def scale_index(row, col, cols):
+def scale_index(row, col, cols, sm=False):
     """Byte of e8m0 scale (row, col) in aiter's ``shuffle_scale`` layout:
     ``view(rows/32, 2, 16, cols/8, 2, 4).permute(0, 3, 5, 2, 4, 1)``."""
-    r32, a, b = row // 32, (row // 16) % 2, row % 16
-    c8, d, e = col // 8, (col // 4) % 2, col % 4
+    r32, a, b = udiv(row, 32, sm), umod(udiv(row, 16, sm), 2, sm), umod(row, 16, sm)
+    c8, d, e = udiv(col, 8, sm), umod(udiv(col, 4, sm), 2, sm), umod(col, 4, sm)
     return ((((r32 * (cols // 8) + c8) * 4 + e) * 16 + b) * 2 + d) * 2 + a
 
 
-def fp4_tile_load(r_w, base, rg, k, st, at):
+def udiv(x, d, unsigned=True):
+    if isinstance(x, int) or not unsigned:
+        return x // d
+    if d & (d - 1) == 0:
+        return x >> (d.bit_length() - 1)
+    return fx.Int32(fx.Uint32(x) // d)
+
+
+def umod(x, d, unsigned=True):
+    if isinstance(x, int) or not unsigned:
+        return x % d
+    if d & (d - 1) == 0:
+        return x & (d - 1)
+    return fx.Int32(fx.Uint32(x) % d)
+
+
+OOB_RECORDS = 0x60000000
+OOB_DWORD = 0x1C000000
+
+
+def oob(live, i):
+    return i if live is None else live.select(i, fx.Int32(OOB_DWORD))
+
+
+def oob_rsrc(addr, live):
+    return rsrc(addr) if live is None else rsrc(addr, OOB_RECORDS)
+
+
+def fp4_tile_load(r_w, base, rg, k, st, at, live=None):
     """A lane's 16 B of an FP4 weight's (16, 16)-shuffled 16-row group ``rg``
     (K = ``k``) at 128-k step ``st``: dword ``base`` + the group's 2 k + 256 a
     step + ``at`` (``lane * 4``: 32 fp4, K block lane / 16 of row lane % 16).
@@ -62,7 +90,7 @@ def fp4_tile_load(r_w, base, rg, k, st, at):
     return fx.Vector(
         bo.buffer_load(
             r_w,
-            base + rg * (2 * k) + st * 256 + at,
+            oob(live, base + rg * (2 * k) + st * 256 + at),
             vec_width=4,
             dtype=T.i32,
             cache_modifier=CM_NT,

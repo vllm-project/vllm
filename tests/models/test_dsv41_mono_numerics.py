@@ -391,6 +391,7 @@ def _check_layers(rank: int, tp: int, device) -> None:
     e, sh = moe.experts.routed_experts, moe.shared_experts
     u8 = lambda t: t.view(torch.uint8)  # noqa: E731
     runner = DSV41MonoLayer(tp, rank, get_tp_group().cpu_group, device)
+    generic = DSV41MonoLayer(tp, rank, get_tp_group().cpu_group, device, generic=True)
     gw, bias = moe.gate.weight.float(), moe.gate.e_score_correction_bias.float()
 
     def top6(x):
@@ -399,7 +400,7 @@ def _check_layers(rank: int, tp: int, device) -> None:
         return sc.topk(6, dim=1).indices.sort(1).values
 
     steps = []  # each case's launches, on fixed buffers, for the replay stress
-    for ratio, R, T in ((1, 1, 6), (2, 8, 6)):
+    for ratio, R, T in ((1, 1, 6), (0, 1, 7), (2, 2, 6), (2, 6, 6), (2, 8, 6)):
         with set_current_vllm_config(VllmConfig()):
             rope = build_deepseek_v4_rope(
                 cfg, head_dim=HEAD_DIM, rope_head_dim=ROPE,
@@ -483,15 +484,24 @@ def _check_layers(rank: int, tp: int, device) -> None:
         out = moe_out(xf)
 
         # ---- the whole layer: K1 + K2
-        o = runner.forward(
-            mw, x0, res0, post0, comb0, pre0, s["positions"], s["slot_mapping"],
-            s["swa_cache"], s["swa_indices"], s["swa_lens"], s["token_to_req"],
-            topk_indices=s["topk"], comp_cache=s["comp_cache"],
-            comp_block_table=s["comp_block_table"],
-        )  # fmt: skip
-        off = scratch_layout(M, tp)["normed"][0]
-        normed = runner.scratch(M)[off : off + M * HIDDEN * 2].view(bf).view(M, HIDDEN)
         tag = f"ratio {ratio}, {R} x {T}"
+        res_of = {}
+        tuned = runner.build_key(M, ratio).tuned_front
+        for r in (generic, runner) if tuned else (runner,):
+            o = r.forward(
+                mw, x0, res0, post0, comb0, pre0, s["positions"], s["slot_mapping"],
+                s["swa_cache"], s["swa_indices"], s["swa_lens"], s["token_to_req"],
+                topk_indices=s["topk"], comp_cache=s["comp_cache"],
+                comp_block_table=s["comp_block_table"],
+            )  # fmt: skip
+            b = r.build_key(M, ratio)
+            off = scratch_layout(M, tp, tuned=b.tuned, front=b.tuned_front)["normed"][0]
+            normed = r.scratch(M, b.tuned, b.tuned_front)[off : off + M * HIDDEN * 2]
+            mid = (r.res_mid, r.post_a, r.comb_a, r.pre_a)
+            res_of[r] = [t.clone() for t in (*o, normed, *(t[:M] for t in mid))]
+        if generic in res_of:
+            assert all(map(torch.equal, res_of[runner], res_of[generic])), tag
+        normed = normed.view(bf).view(M, HIDDEN)
         assert _cos(runner.res_mid[:M], res) > 0.99999, tag
         for got, want in (
             (runner.post_a, post),
@@ -516,8 +526,19 @@ def _check_layers(rank: int, tp: int, device) -> None:
         assert tok[same].min() > 0.99, tag
 
         # ---- the FFN launch, from the same unreduced wo_b output
-        f = runner.ffn(mw, part, res, post, comb, attn_pre)
+        # (its seam tuned at TP4 / TP8: bit for bit the generic build's; both
+        # write the generic scratch)
+        off = scratch_layout(M, tp)["normed"][0]
+        ffn_of = {}
+        seam_tuned = runner.build_key(M, 0).tuned_seam  # the FFN launch: ratio 0
+        for r in (generic, runner) if seam_tuned else (runner,):
+            f = r.ffn(mw, part, res, post, comb, attn_pre)
+            normed = r.scratch(M)[off : off + M * HIDDEN * 2]
+            ffn_of[r] = [t.clone() for t in (*f, normed)]
+        if generic in ffn_of:
+            assert all(map(torch.equal, ffn_of[runner], ffn_of[generic])), tag
         torch.testing.assert_close(f[1], res2, rtol=2**-8, atol=1e-6)
+        normed = normed.view(bf).view(M, HIDDEN)
         torch.testing.assert_close(normed, xf, rtol=2**-7, atol=1e-6)
         # TODO: back to 0.9999 / 0.015 with the one above (ROCm/aiter#6548)
         assert _cos(f[0], out) > 0.9998 and _rel(f[0], out) < 0.02, tag
