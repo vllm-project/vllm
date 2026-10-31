@@ -139,6 +139,7 @@ def _split(
     num_prefill_checkpoint_blocks: int = 0,
     max_num_scheduled_tokens: int = 16384,
     num_hash_lookahead_tokens: int = 0,
+    fixed_state_slots: bool = False,
 ) -> int:
     """Call the real `Scheduler._mamba_block_aligned_split` on a stub self."""
     if use_eagle_block_drop is None:
@@ -158,6 +159,7 @@ def _split(
         mamba_prefill_checkpoint_alignment=(
             16 if num_prefill_checkpoint_blocks > 0 else None
         ),
+        mamba_fixed_state_slots=fixed_state_slots,
     )
     return Scheduler._mamba_block_aligned_split(stub, request, num_new_tokens)
 
@@ -218,6 +220,36 @@ def test_partial_checkpoint_resume_stops_at_mamba_block_boundary() -> None:
             num_prefill_checkpoint_blocks=1,
         )
         == MAMBA_BLOCK_SIZE - resume_at % MAMBA_BLOCK_SIZE
+    )
+
+
+@pytest.mark.parametrize(
+    ("prompt_len", "resume_at"),
+    [
+        # Resume inside block 1, the rest of the prompt crosses into block 2.
+        (3602, 1984),
+        # Resume inside block 1, the rest of the prompt stays in it.
+        (3000, 1984),
+        # Block-aligned resume, the rest of the prompt stays in block 2.
+        (4000, 3200),
+        # No resume, the prompt fits in one block.
+        (1000, 0),
+    ],
+)
+def test_fixed_state_slots_checkpoint_does_not_split_short_prefill(
+    prompt_len: int, resume_at: int
+) -> None:
+    """Under fixed state slots the checkpoint never shares a block with the
+    initial state, so a prefill spanning fewer than two Mamba blocks still
+    exports it and runs in one chunk."""
+    (request,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
+    request.num_computed_tokens = resume_at
+    kwargs = dict(use_eagle=False, partial_hit=True, num_prefill_checkpoint_blocks=1)
+
+    assert _split(request, prompt_len - resume_at, **kwargs) < prompt_len - resume_at
+    assert (
+        _split(request, prompt_len - resume_at, fixed_state_slots=True, **kwargs)
+        == prompt_len - resume_at
     )
 
 

@@ -511,6 +511,7 @@ def test_mamba_groups_support_different_state_specs():
     model_state = object.__new__(MambaHybridModelState)
     model_state._mamba_group_ids = []
     model_state._mamba_spec = None
+    model_state.fixed_state_slots = False
     group_ids, representative_spec = model_state._get_mamba_group_info(kv_cache_config)
     assert group_ids == [0, 1]
     assert representative_spec is gdn_spec
@@ -599,6 +600,7 @@ def test_mamba_groups_support_mixed_specs_in_uniform_group():
     model_state = object.__new__(MambaHybridModelState)
     model_state._mamba_group_ids = []
     model_state._mamba_spec = None
+    model_state.fixed_state_slots = False
     group_ids, representative_spec = model_state._get_mamba_group_info(kv_cache_config)
     assert group_ids == [0]
     assert representative_spec is gdn_spec
@@ -661,6 +663,7 @@ def test_v2_align_ctx_binds_request_slot_tables_for_state_copies():
 
     state = object.__new__(MambaHybridModelState)
     state._align_mode = True
+    state.fixed_state_slots = False
     state._mamba_group_ids = []
     state._mamba_spec = None
     state._mamba_state_copy_funcs = _COPY_FUNCS
