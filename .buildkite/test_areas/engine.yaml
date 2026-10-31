@@ -4,6 +4,7 @@ depends_on:
 steps:
 - label: ":nvidia: (H200 MIG 18GB) Engine Core"
   key: engine
+  automatic_shard: true
   timeout_in_minutes: 30
   device: h200_18gb
   source_file_dependencies:
@@ -39,6 +40,7 @@ steps:
     amd:
       label: ":amd: (MI355 DPX) Engine Core"
       dind: false
+      automatic_shard: true
       device: mi355_dpx
       timeout_in_minutes: 40
       depends_on:
