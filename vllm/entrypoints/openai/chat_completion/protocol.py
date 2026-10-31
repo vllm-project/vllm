@@ -52,6 +52,7 @@ from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
     has_non_text_content,
+    normalize_message_reasoning_content,
 )
 from vllm.sampling_params import (
     BeamSearchParams,
@@ -597,9 +598,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             tool_calls = msg.get("tool_calls")
             if tool_calls is not None and not isinstance(tool_calls, list):
                 msg["tool_calls"] = list(tool_calls)
-            reasoning_content = msg.pop("reasoning_content", None)
-            if reasoning_content is not None and msg.get("reasoning") is None:
-                msg["reasoning"] = reasoning_content
+            normalize_message_reasoning_content(msg)
         return data
 
     @model_validator(mode="after")
