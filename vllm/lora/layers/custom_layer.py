@@ -6,13 +6,96 @@
 Add LoRA support for custom layers that require specialized handling here.
 """
 
+from typing import TYPE_CHECKING, cast
+
 import torch
+
+from vllm.distributed import tensor_model_parallel_all_gather
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 
 from .base_linear import BaseLinearLayerWithLoRA
 from .column_parallel_linear import (
     ColumnParallelLinearWithLoRA,
     MergedColumnParallelLinearWithLoRA,
 )
+
+if TYPE_CHECKING:
+    from vllm.models.deepseek_v4.common.grouped_wo_a import DeepseekV4GroupedWoA
+
+
+class DeepseekV4GroupedWoAWithLoRA(ColumnParallelLinearWithLoRA):
+    """Adds each head group's adapter delta to the grouped ``wo_a`` projection.
+
+    All groups share LoRA-A; group ``g`` uses LoRA-B rows
+    ``g * o_lora_rank : (g + 1) * o_lora_rank``.
+    """
+
+    def slice_lora_a(self, lora_a: torch.Tensor) -> torch.Tensor:
+        if not self.lora_config.fully_sharded_loras:
+            return lora_a
+        # Fully sharded LoRA keeps a slice of LoRA-A's rank dim on each rank.
+        shard_size = self.lora_a_stacked[0].shape[2]
+        return lora_a[self.tp_rank * shard_size : (self.tp_rank + 1) * shard_size]
+
+    def grouped_forward(
+        self,
+        o: torch.Tensor | QuantizedActivation,
+        positions: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        *,
+        n_groups: int,
+        heads_per_group: int,
+        nope_dim: int,
+        rope_dim: int,
+        o_lora_rank: int,
+        einsum_recipe: tuple[int, int, int],
+        tma_aligned_scales: bool,
+    ) -> torch.Tensor:
+        assert not isinstance(o, QuantizedActivation), "RopeQuant is off under LoRA"
+        base = cast("DeepseekV4GroupedWoA", self.base_layer)
+        z = base.grouped_forward(
+            o,
+            positions,
+            cos_sin_cache,
+            n_groups=n_groups,
+            heads_per_group=heads_per_group,
+            nope_dim=nope_dim,
+            rope_dim=rope_dim,
+            o_lora_rank=o_lora_rank,
+            einsum_recipe=einsum_recipe,
+            tma_aligned_scales=tma_aligned_scales,
+        )
+        x = base.grouped_input(
+            o,
+            positions,
+            cos_sin_cache,
+            n_groups=n_groups,
+            heads_per_group=heads_per_group,
+            nope_dim=nope_dim,
+            rope_dim=rope_dim,
+        )
+        lora_a = self.lora_a_stacked
+        if self.lora_config.fully_sharded_loras and self.tp_size > 1:
+            lora_a = (tensor_model_parallel_all_gather(lora_a[0], dim=2),)
+        for group in range(n_groups):
+            rows = slice(group * o_lora_rank, (group + 1) * o_lora_rank)
+            group_output = z[:, group].contiguous()
+            self.punica_wrapper.add_lora_linear(
+                group_output,
+                x[:, group].contiguous(),
+                lora_a,
+                (self.lora_b_stacked[0][:, :, rows].contiguous(),),
+                1.0,
+                (o_lora_rank,),
+            )
+            z[:, group] = group_output
+        return z
+
+    @classmethod
+    def can_replace_layer(
+        cls, source_layer, lora_config, packed_modules_list, model_config=None
+    ) -> bool:
+        return type(source_layer).__name__ == "DeepseekV4GroupedWoA"
 
 
 class DeepseekV4CompressorKVScoreWithLoRA(MergedColumnParallelLinearWithLoRA):
