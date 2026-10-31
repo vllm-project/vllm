@@ -208,7 +208,8 @@ class CacheConfig:
     1024-token hybrid-model block) as long as every KV cache group's
     `block_size` is divisible by it, enabling cache hits at boundaries
     inside a physical block. It controls matching granularity only, not how
-    often states are stored.
+    often states are stored. For hybrid attention/mamba models, the block size
+    derived from the mamba state is rounded up to a multiple of it.
 
     This equals to the `hash_block_size` used throughout the KV cache code.
     """
