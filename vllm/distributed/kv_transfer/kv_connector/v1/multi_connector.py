@@ -423,6 +423,9 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             )
         return next(iter(counts), None)
 
+    def reports_failed_recving_before_finished(self) -> bool:
+        return any(c.reports_failed_recving_before_finished() for c in self._connectors)
+
     def build_connector_worker_meta(self) -> KVConnectorWorkerMetadata | None:
         metadata_list: list[KVConnectorWorkerMetadata | None] | None = None
         for i, c in enumerate(self._connectors):
