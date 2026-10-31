@@ -526,7 +526,12 @@ class RocmAttentionImpl(AttentionImpl):
             )
 
     def fused_qk_norm_rope_kvcache_supported(self):
-        return rocm_aiter_ops.is_enabled()
+        # The fused write here always uses the shuffle layout.
+        return rocm_aiter_ops.is_enabled() and (
+            rocm_aiter_ops.qk_norm_rope_shuffle_layout_supported(
+                self.head_size, self.kv_cache_dtype
+            )
+        )
 
     def set_interleaved_v_cache(self):
         # Decode/prefill kernels must read the interleaved V-cache the AITER
@@ -547,6 +552,9 @@ class RocmAttentionImpl(AttentionImpl):
         is_neox: bool,
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
+        v_norm: bool = False,
+        q_out_fp8: torch.Tensor | None = None,
+        q_scale: torch.Tensor | None = None,
     ):
         # kv_cache is logical [num_blocks, 2, block_size, num_kv_heads * head_size]
         # (see forward); the AITER shuffle writer takes one (B, N, H, hs) per side.
@@ -575,6 +583,9 @@ class RocmAttentionImpl(AttentionImpl):
             kv_cache_dtype=self.kv_cache_dtype,
             use_shuffle_layout=use_shuffle_layout,
             return_kv=True,
+            v_norm=v_norm,
+            q_out_fp8=q_out_fp8,
+            q_scale=q_scale,
         )
 
     def fused_rope_kvcache_supported(self):
