@@ -278,34 +278,55 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         """
         expanded_a: list[torch.Tensor | None] = []
         expanded_b: list[torch.Tensor | None] = []
+        if len(lora_a) != len(lora_b):
+            raise ValueError(
+                "Packed LoRA A and B must contain the same number of groups."
+            )
+
+        def find_group_coverage(group_idx: int, slice_idx: int) -> list[list[int]]:
+            if group_idx == len(lora_b):
+                return [[]] if slice_idx == self.n_slices else []
+
+            remaining_groups = len(lora_b) - group_idx - 1
+            max_covered = self.n_slices - slice_idx - remaining_groups
+            candidates: list[int] = []
+            if (b_i := lora_b[group_idx]) is None:
+                candidates = list(range(1, max_covered + 1))
+            else:
+                rows = 0
+                for covered in range(1, max_covered + 1):
+                    rows += self.output_sizes[slice_idx + covered - 1]
+                    if rows == b_i.shape[0]:
+                        candidates.append(covered)
+                        break
+                    if rows > b_i.shape[0]:
+                        break
+
+            solutions: list[list[int]] = []
+            for covered in candidates:
+                for suffix in find_group_coverage(group_idx + 1, slice_idx + covered):
+                    solutions.append([covered, *suffix])
+                    if len(solutions) > 1:
+                        return solutions
+            return solutions
+
+        coverage = find_group_coverage(0, 0)
+        if len(coverage) != 1:
+            reason = "ambiguous" if coverage else "invalid"
+            raise ValueError(
+                f"Packed LoRA group coverage is {reason} for output sizes "
+                f"{self.output_sizes} and B row counts "
+                f"{[None if b is None else b.shape[0] for b in lora_b]}."
+            )
+
         start_idx = 0
-        for a_i, b_i in zip(lora_a, lora_b):
+        for a_i, b_i, covered in zip(lora_a, lora_b, coverage[0]):
             if b_i is None:
-                # Unadapted group member: its row count is unknown (the tensor
-                # is missing), so infer its coverage as the remaining slices.
-                # This is exact for the only layout that reaches this path,
-                # the fused GDN in_proj_qkvz group, whose sole multi-slice
-                # member (in_proj_qkv, Q+K+V) leads and whose only optional
-                # member (in_proj_z) trails.
-                covered = self.n_slices - start_idx
                 for _ in range(covered):
                     expanded_a.append(None)
                     expanded_b.append(None)
                 start_idx += covered
                 continue
-            # Determine which output slices this b_i covers.
-            b_rows, cu_rows, covered = b_i.shape[0], 0, 0
-            for i in range(start_idx, self.n_slices):
-                cu_rows += self.output_sizes[i]
-                if cu_rows == b_rows:
-                    covered = i - start_idx + 1
-                    break
-            else:
-                raise ValueError(
-                    f"Cannot determine how to split lora_b with {b_rows} rows "
-                    f"into {self.n_slices} slices with output sizes "
-                    f"{self.output_sizes} starting from index {start_idx}."
-                )
             # Split b_i into per-slice tensors and replicate a_i for each.
             start = 0
             for j in range(covered):
