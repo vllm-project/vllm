@@ -108,6 +108,8 @@ class FastPrefillHelper:
             not has_prefill
             or batch_desc.cg_mode == CUDAGraphMode.FULL
             or batch_desc.num_ubatches > 1
+            # LoRA metadata describes the full batch, not the logits-only batch.
+            or num_active_loras > 0
         ):
             return None
         buf = self.logits_indices_buf
