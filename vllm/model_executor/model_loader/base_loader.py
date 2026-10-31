@@ -57,7 +57,6 @@ class BaseModelLoader(ABC):
             prefix=prefix,
         )
         log_online_quantization(vllm_config)
-        log_model_inspection(model)
         return model
 
     def get_all_weights(
@@ -125,7 +124,11 @@ class BaseModelLoader(ABC):
             gc.collect()
             torch.accelerator.empty_cache()
 
-        return model.eval()
+        model = model.eval()
+        # Report the resolved quantization kernels, which are selected while
+        # processing the weights above.
+        log_model_inspection(model)
+        return model
 
 
 def log_model_inspection(model: nn.Module) -> None:
