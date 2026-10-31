@@ -136,8 +136,9 @@ def _qwen_gdn_warmup_config(
             norm_weight_dtype=norm.weight.dtype,
             norm_before_gate=bool(norm.norm_before_gate),
             norm_activation=str(norm.activation),
-            a_log=layer.A_log,
-            dt_bias=layer.dt_bias,
+            # Offloading without UVA leaves these on the CPU outside forward.
+            a_log=layer.A_log.to(conv_state.device),
+            dt_bias=layer.dt_bias.to(conv_state.device),
             state_stride_token=int(ssm_state.stride(0)),
             state_dtype=ssm_state.dtype,
             fused_spec_decode=bool(
