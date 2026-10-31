@@ -8,10 +8,13 @@ import torch
 from torch import nn
 
 from vllm import envs
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_pp_group,
+    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
+    tensor_model_parallel_all_reduce,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, SituAndMul
@@ -202,6 +205,7 @@ class KimiMoE(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         layer_idx: int = 0,
+        mega_moe_pool=None,
     ):
         super().__init__()
         hidden_size = config.hidden_size
@@ -324,6 +328,39 @@ class KimiMoE(nn.Module):
             self.routed_expert_up_proj = None
             self.routed_output_transform = None
 
+        vllm_config = get_current_vllm_config()
+        self.use_mega_moe_v2 = vllm_config.kernel_config.moe_backend == "aiter_mega_moe"
+        if self.use_mega_moe_v2:
+            from vllm.model_executor.layers.fused_moe.router.router_factory import (
+                create_fused_moe_router,
+            )
+
+            from .mega_moe_v2 import K3MegaMoEV2Experts
+
+            self.experts = K3MegaMoEV2Experts(
+                vllm_config, config, prefix=f"{prefix}.experts"
+            )
+            self.router = create_fused_moe_router(
+                top_k=num_experts_per_token,
+                global_num_experts=num_experts,
+                renormalize=moe_renormalize,
+                use_grouped_topk=config.use_grouped_topk,
+                num_expert_group=config.num_expert_group,
+                topk_group=config.topk_group,
+                scoring_func=config.moe_router_activation_func,
+                routed_scaling_factor=self.routed_scaling_factor,
+                e_score_correction_bias=self.gate.e_score_correction_bias,
+            )
+            return
+
+        mega_moe_args: dict[str, Any] = {}
+        if mega_moe_pool is not None:
+            from .mega_moe_model import K3TPMoERunner, K3TPRoutedExperts
+
+            mega_moe_args = {
+                "routed_experts_cls": K3TPRoutedExperts,
+                "routed_experts_args": {"mega_moe_pool": mega_moe_pool},
+            }
         self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
             num_experts=num_experts,
@@ -344,7 +381,14 @@ class KimiMoE(nn.Module):
             routed_scaling_factor=self.routed_scaling_factor,
             routed_input_transform=self.routed_expert_down_proj,
             routed_output_transform=self.routed_output_transform,
-            runner_cls=ROCmLatentMoERunner if self.use_latent_moe else None,
+            runner_cls=(
+                K3TPMoERunner
+                if mega_moe_pool is not None
+                else ROCmLatentMoERunner
+                if self.use_latent_moe
+                else None
+            ),
+            **mega_moe_args,
         )
         if self.padded_moe_intermediate_size != moe_intermediate_size:
             w13_weight = getattr(self.experts, "w13_weight", None)
@@ -363,9 +407,41 @@ class KimiMoE(nn.Module):
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_size)
         router_logits, _ = self.gate(hidden_states)
-        final_hidden_states = self.experts(
-            hidden_states=hidden_states, router_logits=router_logits
-        )
+        if self.use_mega_moe_v2:
+            assert self.routed_expert_down_proj is not None
+            assert self.routed_output_transform is not None
+            latent = self.routed_expert_down_proj(hidden_states)[0]
+            weights, ids = self.router.select_experts(
+                hidden_states=latent,
+                router_logits=router_logits,
+                topk_indices_dtype=None,
+                input_ids=None,
+            )
+            # Attention TP replicates tokens; EP processes each token once.
+            # Route before slicing so the existing graph padding mask is preserved.
+            local_rows = (num_tokens + self.tp_size - 1) // self.tp_size
+            padding = local_rows * self.tp_size - num_tokens
+            if padding:
+                latent = torch.nn.functional.pad(latent, (0, 0, 0, padding))
+                weights = torch.nn.functional.pad(weights, (0, 0, 0, padding))
+                ids = torch.nn.functional.pad(ids, (0, 0, 0, padding), value=-1)
+            start = get_tensor_model_parallel_rank() * local_rows
+            latent = self.experts(
+                latent.narrow(0, start, local_rows).contiguous(),
+                weights.narrow(0, start, local_rows).contiguous(),
+                ids.narrow(0, start, local_rows).contiguous(),
+            )
+            latent = tensor_model_parallel_all_gather(latent, dim=0)[:num_tokens]
+            final_hidden_states = self.routed_output_transform(latent)
+            if self.shared_experts is not None:
+                shared = tensor_model_parallel_all_reduce(
+                    self.shared_experts(hidden_states)
+                )
+                final_hidden_states = final_hidden_states + shared
+        else:
+            final_hidden_states = self.experts(
+                hidden_states=hidden_states, router_logits=router_logits
+            )
         return final_hidden_states.view(num_tokens, hidden_size)
 
 
@@ -534,6 +610,7 @@ class KimiDecoderLayer(nn.Module):
         config: KimiLinearConfig,
         vllm_config: VllmConfig,
         prefix: str = "",
+        mega_moe_pool=None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -601,6 +678,7 @@ class KimiDecoderLayer(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.block_sparse_moe",
                 layer_idx=layer_idx,
+                mega_moe_pool=mega_moe_pool,
             )
             self.mlp = self.block_sparse_moe
         else:
@@ -750,6 +828,15 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
 
         config = vllm_config.model_config.hf_text_config
         self.config = config
+        self.use_mega_moe_v2 = vllm_config.kernel_config.moe_backend == "aiter_mega_moe"
+        if self.use_mega_moe_v2:
+            from .mega_moe_v2 import validate_config
+
+            validate_config(vllm_config, config)
+
+        from .mega_moe_model import model_pool
+
+        self.mega_moe_pool = model_pool(vllm_config, config)
 
         self.vocab_size = config.vocab_size
 
@@ -767,6 +854,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
                 config,
                 vllm_config,
                 prefix,
+                mega_moe_pool=self.mega_moe_pool,
             )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
@@ -774,6 +862,16 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             get_layer,
             prefix=f"{prefix}.layers",
         )
+
+        self._megamoe_gluon_layers: tuple[str, ...] = ()
+        if (
+            self.mega_moe_pool is not None or self.use_mega_moe_v2
+        ) and not vllm_config.model_config.enforce_eager:
+            self._megamoe_gluon_layers = tuple(
+                module.mla_attn.mla_attn.layer_name
+                for module in self.modules()
+                if isinstance(module, KimiMLAAttention)
+            )
 
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -848,6 +946,10 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
         step=None,  # specialized_decode's plan
         **kwargs,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        if self._megamoe_gluon_layers:
+            from .mega_moe_model import validate_graph_attention
+
+            validate_graph_attention(self._megamoe_gluon_layers)
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -977,6 +1079,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
                 ckpt_down_proj_name="w2",
                 ckpt_up_proj_name="w3",
                 num_experts=self.config.num_experts,
+                routed_experts_prefix="" if self.use_mega_moe_v2 else "routed_experts",
             )
         else:
             expert_params_mapping = []
@@ -1071,6 +1174,12 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
                     )
                     weight_loader(param, loaded_weight, **kwargs)
             loaded_params.add(name)
+        if self.use_mega_moe_v2:
+            from .mega_moe_v2 import K3MegaMoEV2Experts
+
+            for module in self.modules():
+                if isinstance(module, K3MegaMoEV2Experts):
+                    module.finalize_weights()
         return loaded_params
 
 
