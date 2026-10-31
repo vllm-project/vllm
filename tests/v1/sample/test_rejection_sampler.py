@@ -131,6 +131,34 @@ def create_sampling_metadata(
 
 
 ########################### Tests for Greedy Sampling ###################
+@pytest.mark.parametrize("mode", ["raw_logprobs", "processed_logprobs"])
+def test_spec_decode_uses_unmasked_logits_only_for_raw_scores(mode):
+    device = DEVICE_TYPE
+    raw_logits = torch.tensor([[2.0, 1.0, 0.0], [1.0, 2.0, 3.0]], device=device)
+    masked_logits = raw_logits.clone()
+    masked_logits[:, [0, 2]] = -torch.inf
+    metadata = SpecDecodeMetadata.make_dummy([[1]], device=raw_logits.device)
+    metadata.bonus_logits_indices = torch.tensor([1], device=device, dtype=torch.int32)
+    sampling_metadata = create_sampling_metadata(all_greedy=True)
+    sampling_metadata.max_num_logprobs = 2
+    sampler = RejectionSampler(Sampler(logprobs_mode=mode))
+
+    output = sampler(metadata, None, masked_logits, sampling_metadata, raw_logits)
+
+    torch.testing.assert_close(
+        output.sampled_token_ids,
+        torch.tensor([[1, 1]], device=device, dtype=torch.int32),
+    )
+    assert output.logprobs_tensors is not None
+    scores = output.logprobs_tensors.logprobs[:, 0]
+    expected = (
+        torch.log_softmax(raw_logits, dim=-1)[:, 1]
+        if mode == "raw_logprobs"
+        else torch.zeros(2, device=device)
+    )
+    torch.testing.assert_close(scores, expected)
+
+
 def test_perfect_match(rejection_sampler):
     """Test when output tokens perfectly match speculated tokens."""
     spec_tokens = [[1, 2, 3]]
