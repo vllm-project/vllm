@@ -55,6 +55,53 @@ def test_factory_registered():
     assert cls is ECCPUConnector
 
 
+def test_get_ec_connector_stats_forwards_to_worker(monkeypatch):
+    fake_worker = MagicMock()
+    fake_worker.get_ec_connector_stats.return_value = "stats"
+    monkeypatch.setattr(ECCPUConnector, "_make_worker", lambda self, cfg: fake_worker)
+    c = ECCPUConnector(_cfg(), ECConnectorRole.WORKER)
+
+    assert c.get_ec_connector_stats() == "stats"
+
+
+def test_get_ec_connector_stats_none_for_scheduler_role(monkeypatch):
+    fake_sched = MagicMock()
+    monkeypatch.setattr(ECCPUConnector, "_make_scheduler", lambda self, cfg: fake_sched)
+    c = ECCPUConnector(_cfg(), ECConnectorRole.SCHEDULER)
+
+    assert c.get_ec_connector_stats() is None
+
+
+def test_build_ec_connector_stats_returns_container():
+    from vllm.distributed.ec_transfer.ec_connector.cpu.metrics import (
+        ECCPUConnectorStats,
+    )
+
+    stats = ECCPUConnector.build_ec_connector_stats()
+
+    assert isinstance(stats, ECCPUConnectorStats)
+    assert stats.is_empty()
+
+
+def test_build_prom_metrics_returns_prom_container():
+    from unittest.mock import Mock
+
+    from prometheus_client import Counter, Gauge, Histogram
+
+    from vllm.distributed.ec_transfer.ec_connector.cpu.metrics import (
+        ECCPUConnectorProm,
+    )
+
+    prom = ECCPUConnector.build_prom_metrics(
+        vllm_config=Mock(),
+        metric_types={Gauge: Mock, Counter: Mock, Histogram: Mock},
+        labelnames=["model_name", "engine"],
+        per_engine_labelvalues={0: ["model", "0"]},
+    )
+
+    assert isinstance(prom, ECCPUConnectorProm)
+
+
 def test_request_finished_forwards_to_scheduler(monkeypatch):
     from unittest.mock import MagicMock
 
