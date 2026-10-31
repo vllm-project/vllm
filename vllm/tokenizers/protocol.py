@@ -114,7 +114,7 @@ class TokenizerLike(Protocol):
     def convert_tokens_to_ids(self, tokens: str | list[str]) -> int | list[int]:
         raise NotImplementedError
 
-    def convert_tokens_to_string(self, tokens: list[str]) -> str:
+    def convert_tokens_to_string(self, tokens: Sequence[str | bytes]) -> str:
         raise NotImplementedError
 
     def decode(
@@ -126,5 +126,5 @@ class TokenizerLike(Protocol):
         self,
         ids: Sequence[int],
         skip_special_tokens: bool = False,
-    ) -> list[str]:
+    ) -> list[str | bytes]:
         raise NotImplementedError

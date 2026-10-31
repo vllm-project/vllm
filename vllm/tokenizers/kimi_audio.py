@@ -6,7 +6,7 @@ import contextlib
 import json
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, overload
+from typing import Any, cast, overload
 
 import pybase64
 import tiktoken
@@ -325,16 +325,16 @@ class KimiAudioTokenizer(TokenizerLike):
 
     def convert_ids_to_tokens(
         self, ids: Sequence[int], skip_special_tokens: bool = False
-    ) -> list[str]:
-        tokens = []
+    ) -> list[str | bytes]:
+        tokens: list[str | bytes] = []
         for token_id in ids:
             if skip_special_tokens and token_id in self._added_tokens_decoder:
                 continue
             tokens.append(self._id_to_token.get(token_id, "<|unk|>"))
         return tokens
 
-    def convert_tokens_to_string(self, tokens: list[str]) -> str:
-        token_ids = self.convert_tokens_to_ids(tokens)
+    def convert_tokens_to_string(self, tokens: Sequence[str | bytes]) -> str:
+        token_ids = self.convert_tokens_to_ids(cast(list[str], tokens))
         return self.decode(token_ids, skip_special_tokens=False)
 
     def __call__(
