@@ -69,6 +69,8 @@ def qwen4_exp_qsa_triton_warmup(worker: "Worker") -> None:
         max_num_batched_tokens=runner.max_num_tokens,
     )
     logger.info("Warmed up Qwen4Exp QSA decode kernels: %s.", profiles)
+    if owner.kv_cache_dtype == "nvfp4":
+        return  # the NVFP4 main attention is FlashInfer CUDA, not Triton
 
     from vllm.models.qwen4_exp.nvidia.ops.qsa import (
         warmup_qsa_sparse_paged_attention,
