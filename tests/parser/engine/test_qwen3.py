@@ -18,6 +18,7 @@ from tests.parser.engine.streaming_helpers import (
     collect_tool_arguments,
     simulate_tool_streaming,
 )
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.qwen3 import (
     TOOL_CALL_END,
@@ -149,10 +150,19 @@ class TestNonStreaming:
         [("", "", "Final answer."), ("  Before. ", " Between. ", " After.  ")],
     )
     def test_tool_adapter_preserves_text_after_tool_calls(
-        self, mock_tokenizer, mock_request, before, between, after
+        self, mock_tokenizer, before, between, after
     ):
         """The serving adapter must retain all prose around ordered tool calls."""
         parser = Qwen3EngineToolParser(mock_tokenizer)
+        request = ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "Check the weather and time."}],
+            tools=[
+                {"type": "function", "function": {"name": name}}
+                for name in ("get_weather", "get_time")
+            ],
+            tool_choice="auto",
+        )
         text = (
             f"{before}<tool_call><function=get_weather>"
             "<parameter=city>Tokyo</parameter></function></tool_call>"
@@ -161,7 +171,7 @@ class TestNonStreaming:
             f"{after}"
         )
 
-        result = parser.extract_tool_calls(text, mock_request)
+        result = parser.extract_tool_calls(text, request)
 
         assert result.content == (before + between + after).strip()
         assert result.tools_called
