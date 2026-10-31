@@ -55,8 +55,6 @@ NUM_PREFILL_INSTANCES=${NUM_PREFILL_INSTANCES:-1} # Default to 1
 NUM_DECODE_INSTANCES=${NUM_DECODE_INSTANCES:-1}   # Default to 1
 PREFILLER_TP_SIZE=${PREFILLER_TP_SIZE:-1}
 DECODER_TP_SIZE=${DECODER_TP_SIZE:-1}
-PREFILLER_DCP_SIZE=${PREFILLER_DCP_SIZE:-1}
-DECODER_DCP_SIZE=${DECODER_DCP_SIZE:-1}
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.2}
 BLOCK_SIZE=${BLOCK_SIZE:-128}
 # Comma-separated extra args for vllm serve (e.g. --max-model-len,2048)
@@ -157,7 +155,6 @@ run_tests_for_model() {
     --block-size ${BLOCK_SIZE} \
     --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
     --tensor-parallel-size $PREFILLER_TP_SIZE \
-    --decode-context-parallel-size $PREFILLER_DCP_SIZE \
     --kv-transfer-config '$KV_CONFIG_P'"
     if [[ -n "$VLLM_SERVE_EXTRA_ARGS" ]]; then
       IFS=',' read -r -a extra_args <<< "$VLLM_SERVE_EXTRA_ARGS"
@@ -197,7 +194,6 @@ run_tests_for_model() {
     --block-size ${BLOCK_SIZE} \
     --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
     --tensor-parallel-size $DECODER_TP_SIZE \
-    --decode-context-parallel-size $DECODER_DCP_SIZE \
     --kv-transfer-config '$KV_CONFIG_D'"
     if [[ -n "$VLLM_SERVE_EXTRA_ARGS" ]]; then
       IFS=',' read -r -a extra_args <<< "$VLLM_SERVE_EXTRA_ARGS"
