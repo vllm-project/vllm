@@ -339,13 +339,16 @@ class MuseSpark1xMoE(nn.Module):
         if norm is None:
             return hidden_states
         if self._experts_take_expanded_input and hidden_states.is_contiguous():
+            quant_method = self.experts.routed_experts.quant_method
+            assert isinstance(quant_method, MuseSparkQuarkOCPMXFusedMoE)
+            staged = quant_method.uses_staged_moe(hidden_states.shape[0])
             return fused_rmsnorm_expand(
                 hidden_states,
                 norm.weight if norm.has_weight else None,
                 norm.variance_epsilon,
                 norm.fused_gain_center,
                 norm.applies_weight_before_norm and norm.has_weight,
-                self.top_k,
+                1 if staged else self.top_k,
             )
         return norm(hidden_states)
 
