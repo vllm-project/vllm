@@ -103,6 +103,17 @@ Legend:
 
 ### 🚀 Online Benchmark
 
+The Python `vllm bench serve` client accepts SSE comments, `event:`, `id:`, and
+`retry:` fields on OpenAI-compatible completions, chat completions, and audio
+streams. For each message emitted by the stream handler, it joins multiple
+`data:` lines and accepts `data:` with or without a following space. Events
+without a nonempty data payload are ignored; malformed JSON in the extracted
+payload marks the request as failed. No additional configuration is required.
+
+The stream handler retains early JSON emission: if an HTTP chunk ends after a
+complete JSON value, that value may be emitted before the event's blank-line
+delimiter. Validation of multiline data can therefore depend on chunk boundaries.
+
 <details class="admonition abstract" markdown="1">
 <summary>Show more</summary>
 
