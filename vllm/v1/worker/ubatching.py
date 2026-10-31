@@ -259,12 +259,17 @@ def make_ubatch_contexts(
 # DBO under pure TP: each TP all-reduce is a hand-off point and runs on the comm
 # stream, on a per-microbatch communicator, while the other microbatch computes.
 _TP_UBATCH_COMMS: list | None = None
+# VLLM_DBO_TP_DMA_AR=1 (TP2 only): a microbatch's all-reduce runs as a one-shot
+# INT4 all-reduce over the SDMA copy engines, which needs no CUs while the other
+# microbatch computes; QuickReduce and RCCL are CU kernels that contend with the
+# GEMMs under DBO.
+_DMA_AR = None
 
 
 def init_dbo_tp_comms(parallel_config) -> None:
     """Build the per-microbatch TP communicators and install the all-reduce hook
     (DBO under pure TP only). Collective: every rank calls it in the same order."""
-    global _TP_UBATCH_COMMS
+    global _TP_UBATCH_COMMS, _DMA_AR
     if not parallel_config.dbo_tp_only or _TP_UBATCH_COMMS is not None:
         return
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
@@ -282,6 +287,27 @@ def init_dbo_tp_comms(parallel_config) -> None:
         return
     _TP_UBATCH_COMMS = comms
     parallel_state.set_dbo_tp_all_reduce_hook(_dbo_tp_all_reduce)
+    if envs.VLLM_DBO_TP_DMA_AR:
+        if tp.world_size == 2:
+            from vllm.distributed.device_communicators.dma_all_reduce import (
+                DmaAllReduce,
+            )
+
+            max_mb = envs.VLLM_DBO_TP_DMA_AR_MAX_MB
+            layout = envs.VLLM_DBO_TP_DMA_AR_LAYOUT
+            _DMA_AR = DmaAllReduce(
+                tp.cpu_group, tp.device, max_bytes=max_mb << 20, layout=layout
+            )
+            logger.info(
+                "DBO: microbatch all-reduces up to %d MiB run as one-shot INT4 "
+                "over SDMA (layout %s)",
+                max_mb,
+                layout,
+            )
+        else:
+            logger.warning(
+                "DBO: VLLM_DBO_TP_DMA_AR=1 needs TP 2, got %d; ignored", tp.world_size
+            )
     logger.info(
         "DBO: %d per-microbatch TP communicators for the comm-stream all-reduce",
         len(comms),
@@ -326,7 +352,16 @@ def _dbo_tp_all_reduce(group, input_: torch.Tensor) -> torch.Tensor | None:
     # pin every block until the GPU catches up (out of memory at a 32k step).
     out = torch.empty_like(input_)
     ctx.yield_and_switch_from_compute_to_comm()
-    if qr is not None:
+    # Stream write/wait operations cannot be captured into a graph: QuickReduce
+    # or NCCL/RCCL there.
+    if (
+        _DMA_AR is not None
+        and _DMA_AR.should_reduce(input_)
+        and not torch.cuda.is_current_stream_capturing()
+    ):
+        logger.info_once("DBO: microbatch all-reduces run over SDMA (one-shot INT4)")
+        _DMA_AR.all_reduce(input_, out=out)
+    elif qr is not None:
         qr.quick_all_reduce(input_, out=out)
     else:
         _TP_UBATCH_COMMS[ctx_idx].all_reduce(
