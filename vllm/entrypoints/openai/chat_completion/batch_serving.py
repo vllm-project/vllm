@@ -122,6 +122,10 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         returns one choice per conversation indexed 0, 1, ..., N-1.
         Streaming, tool use, and beam search are not supported.
         """
+        if self.synthetic_output:
+            return self.create_error_response(
+                "Batch Chat Completions are unsupported with synthetic acceptance"
+            )
         tokenizer = self.renderer.tokenizer
         assert tokenizer is not None
         render_result = await self.render_batch_chat_request(request)

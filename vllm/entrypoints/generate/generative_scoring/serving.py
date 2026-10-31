@@ -207,6 +207,15 @@ class ServingGenerativeScoring(BaseServing):
             ErrorResponse if an error occurred.
 
         """
+        vllm_config = getattr(self.engine_client, "vllm_config", None)
+        spec_config = getattr(vllm_config, "speculative_config", None)
+        if (
+            spec_config is not None
+            and spec_config.rejection_sample_method == "synthetic"
+        ):
+            return self.create_error_response(
+                "Generative scoring is unsupported with synthetic acceptance"
+            )
         # Check model
         error_check_ret = await self._check_model(request)  # type: ignore[arg-type]
         if error_check_ret is not None:

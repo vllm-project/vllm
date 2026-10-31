@@ -50,6 +50,17 @@ MM_BEAM_WIDTHS = [2]
 MODELS = ["TinyLlama/TinyLlama-1.1B-Chat-v1.0"]
 
 
+def test_beam_search_rejects_synthetic_acceptance() -> None:
+    llm = LLM.__new__(LLM)
+    llm.llm_engine = Mock()
+    llm.llm_engine.vllm_config.speculative_config.rejection_sample_method = "synthetic"
+
+    with pytest.raises(
+        ValueError, match="Beam search is unsupported with synthetic acceptance"
+    ):
+        llm.beam_search([], BeamSearchParams(beam_width=2, max_tokens=1))
+
+
 @pytest.mark.parametrize(("abort_after", "prompt_token"), [(0, 1), (1, 1), (0, 0)])
 @pytest.mark.parametrize("terminal_logprobs", [None, [], [{11: Logprob(-0.1)}]])
 def test_beam_search_abort_returns_partial_outputs_and_continues_other_prompts(

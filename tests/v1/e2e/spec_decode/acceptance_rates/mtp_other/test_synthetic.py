@@ -37,10 +37,14 @@ def test_synthetic_acceptance_rate(vllm_runner):
         spec_llm = spec_runner.llm
 
         test_prompts = get_test_prompts(mm_enabled=False, num_prompts=50)
-        spec_llm.chat(
+        outputs = spec_llm.chat(
             test_prompts,
             SamplingParams(temperature=0, max_tokens=64, ignore_eos=True),
         )
+        assert len(outputs) == len(test_prompts)
+        for output in outputs:
+            for completion in output.outputs:
+                assert completion.text == "synthetic " * len(completion.token_ids)
 
         metrics = spec_llm.get_metrics()
         acceptance_len = compute_acceptance_len(metrics)
