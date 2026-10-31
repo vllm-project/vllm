@@ -11,8 +11,8 @@ Locking design
 --------------
 There is no explicit lock.  Thread safety is achieved by ownership:
 
-* _lookup_state and _lookup_batch are owned by whichever thread holds the
-  OffloadingManager lock.  lookup(), flush(), and cleanup() read and write
+* _current_state_by_key and _lookup_batch are owned by whichever thread holds
+  the OffloadingManager lock.  lookup(), flush(), and cleanup() read and write
   them directly.  That is usually the scheduler thread, but a tier reached
   through ParentManager -- a peer lookup fanning out from another tier, say --
   can arrive on the tiering manager's tier-poll thread instead.  Both hold
@@ -34,6 +34,9 @@ Results are drained on the first lookup after each flush, at flush(), and
 after worker shutdown. In-flight lookups with no remaining request references
 are retained until their results are drained, allowing new requests to share
 the same probe.
+A resolved absent verdict is not shared with new requests: another instance
+may have written the block to a shared tier since, so a new request starts a
+fresh probe. Requests that already hold the verdict keep it.
 """
 
 import queue
@@ -91,10 +94,12 @@ class AsyncLookupManager(ABC):
     ) -> None:
         self._tier_type = tier_type
 
-        # key → LookupState; scheduler-owned, no lock needed.
-        self._lookup_state: dict[OffloadKey, LookupState] = {}
-        # req_id → keys looked up by that request (reverse index for cleanup).
-        self._req_keys: dict[str, set[OffloadKey]] = {}
+        # key → the current LookupState that new requests may share;
+        # scheduler-owned, no lock needed.
+        self._current_state_by_key: dict[OffloadKey, LookupState] = {}
+        # req_id → key → the state observed by that request. May be older
+        # than the key's current state.
+        self._request_states: dict[str, dict[OffloadKey, LookupState]] = {}
         # Results from an older state must not be applied after cleanup removes
         # and recreates a key.
         self._next_generation = 0
@@ -154,14 +159,17 @@ class AsyncLookupManager(ABC):
             self.drain_results()
             self._need_to_drain = False
         req_id = req_context.req_id
-        state = self._lookup_state.get(key)
+        req_states = self._request_states.setdefault(req_id, {})
+        state = req_states.get(key)
         if state is None:
-            state = LookupState(generation=self._next_generation)
-            self._next_generation += 1
-            self._lookup_state[key] = state
-            self._lookup_batch.append((key, req_context, state.generation))
-        state.request_ids.add(req_id)
-        self._req_keys.setdefault(req_id, set()).add(key)
+            state = self._current_state_by_key.get(key)
+            if state is None or state.result is False:
+                state = LookupState(generation=self._next_generation)
+                self._next_generation += 1
+                self._current_state_by_key[key] = state
+                self._lookup_batch.append((key, req_context, state.generation))
+            state.request_ids.add(req_id)
+            req_states[key] = state
         return state.result
 
     def flush(self) -> None:
@@ -179,7 +187,7 @@ class AsyncLookupManager(ABC):
         self._lookup_batch = []
         in_flight_batch = []
         for key, req_context, generation in batch:
-            state = self._lookup_state.get(key)
+            state = self._current_state_by_key.get(key)
             if state is None or state.generation != generation:
                 continue
             assert state.phase is LookupPhase.PENDING
@@ -189,7 +197,7 @@ class AsyncLookupManager(ABC):
             self._lookup_queue.put(in_flight_batch)
 
     def drain_results(self) -> None:
-        """Apply pending worker results to _lookup_state.
+        """Apply pending worker results to _current_state_by_key.
 
         Called from lookup(), flush(), and shutdown() on the scheduler thread.
         """
@@ -199,11 +207,11 @@ class AsyncLookupManager(ABC):
             except queue.Empty:
                 break
             for key, generation, result in batch:
-                state = self._lookup_state.get(key)
+                state = self._current_state_by_key.get(key)
                 if state is None or state.generation != generation:
                     continue
                 if not state.request_ids:
-                    del self._lookup_state[key]
+                    del self._current_state_by_key[key]
                     continue
                 assert state.phase is LookupPhase.IN_FLIGHT
                 # Each lookup generation is enqueued exactly once. A matching
@@ -225,21 +233,24 @@ class AsyncLookupManager(ABC):
         and forcing it to RESOLVED here would trip the phase asserts in
         flush() / drain_results() on the scheduler thread."""
         for key in keys:
-            state = self._lookup_state.get(key)
+            state = self._current_state_by_key.get(key)
             if state is not None and state.phase is LookupPhase.RESOLVED:
                 state.result = False
 
     def cleanup(self, req_id: str) -> None:
         """Release request references, retaining in-flight lookups.
 
-        Called from the tier's on_request_finished(). Uses the reverse
-        index to visit only keys associated with this request.
+        Called from the tier's on_request_finished(). Visits only the
+        states observed by this request.
         """
-        for key in self._req_keys.pop(req_id, ()):
-            state = self._lookup_state[key]
+        for key, state in self._request_states.pop(req_id, {}).items():
             state.request_ids.discard(req_id)
-            if not state.request_ids and state.phase is not LookupPhase.IN_FLIGHT:
-                del self._lookup_state[key]
+            if (
+                not state.request_ids
+                and state.phase is not LookupPhase.IN_FLIGHT
+                and self._current_state_by_key.get(key) is state
+            ):
+                del self._current_state_by_key[key]
 
     def shutdown(self) -> None:
         """Stop the worker thread and drain completed lookups."""
