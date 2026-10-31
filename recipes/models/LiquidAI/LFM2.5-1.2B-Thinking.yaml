@@ -1,0 +1,180 @@
+meta:
+  title: "LFM2.5 1.2B Thinking"
+  slug: "lfm2.5-1.2b-thinking"
+  provider: "LiquidAI"
+  description: "Liquid AI's 1.2B reasoning model on the LFM2 hybrid conv+attention backbone — <think> chain-of-thought, tool calling, and 32K context on a single small GPU."
+  date_added: 2026-06-25
+  date_updated: 2026-06-24
+  tasks:
+    - text
+  performance_headline: "1.2B hybrid reasoning model with <think> chain-of-thought and tool calling — single small GPU"
+  related_recipes:
+    - LiquidAI/LFM2.5-1.2B-Instruct
+    - LiquidAI/LFM2.5-8B-A1B
+  hardware:
+    h100: verified
+    h200: verified
+    b200: verified
+
+model:
+  model_id: "LiquidAI/LFM2.5-1.2B-Thinking"
+  min_vllm_version: "0.23.0"
+  architecture: dense
+  parameter_count: "1.2B"
+  active_parameters: "1.2B"
+  context_length: 32768
+  base_args: []
+  base_env: {}
+
+features:
+  reasoning:
+    description: "Split the model's <think>…</think> chain-of-thought into a separate reasoning field via vLLM's qwen3 parser"
+    args:
+      - "--reasoning-parser"
+      - "qwen3"
+  tool_calling:
+    description: "Surface LFM2.5's Pythonic tool calls (wrapped in <|tool_call_start|>…<|tool_call_end|>) as OpenAI tool_calls via vLLM's native lfm2 parser"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "lfm2"
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 3
+    description: "Full BF16 — single 8 GB+ NVIDIA GPU with room for KV cache"
+
+compatible_strategies:
+  - single_node_tp
+
+hardware_overrides:
+  # Blackwell (B200) only: route RMSNorm to the bundled oink kernels (measured ~+2.6% on B200,
+  # output identical). Inert (falls back to native) on non-Blackwell GPUs.
+  blackwell:
+    extra_env:
+      VLLM_USE_OINK_OPS: "1"
+strategy_overrides:
+  single_node_tp:
+    tp: 1
+
+guide: |
+  ## Overview
+
+  [LFM2.5-1.2B-Thinking](https://huggingface.co/LiquidAI/LFM2.5-1.2B-Thinking) is the reasoning
+  variant of [Liquid AI's](https://www.liquid.ai/) 1.2B LFM2.5 model, built on the **LFM2 hybrid
+  backbone** (short-range gated convolution blocks interleaved with grouped-query attention). On
+  reasoning-heavy tasks it produces an explicit `<think>…</think>` chain-of-thought before its
+  final answer, so it reasons well above its weight class while still serving on a single small
+  GPU through vLLM's OpenAI-compatible API.
+
+  ### Key Features
+  - **Hybrid backbone**: Gated short convolutions interleaved with grouped-query attention — a smaller KV cache and lower decode latency than a same-size full-attention transformer.
+  - **`<think>` reasoning**: Emits an explicit `<think>…</think>` chain-of-thought on non-trivial problems; vLLM's `qwen3` parser splits it into a separate `reasoning` field.
+  - **32K context**: 32,768-token context window.
+  - **Tool calling**: Pythonic tool calls surfaced as OpenAI `tool_calls` by vLLM's native `lfm2` parser.
+  - **Native vLLM support**: Served via the `Lfm2ForCausalLM` architecture.
+
+  ### Supported Variants
+
+  Dense:
+  - `LiquidAI/LFM2.5-230M` (230M)
+  - `LiquidAI/LFM2.5-350M` (350M)
+  - `LiquidAI/LFM2.5-1.2B-Instruct` (1.2B)
+  - `LiquidAI/LFM2.5-1.2B-Thinking` (1.2B, reasoning)
+  - `LiquidAI/LFM2.5-1.2B-JP` / `LiquidAI/LFM2.5-1.2B-JP-202606` (Japanese)
+  - `LiquidAI/LFM2.5-1.2B-Base` (pretrained base)
+
+  MoE:
+  - `LiquidAI/LFM2.5-8B-A1B` (8B total / ~1B active, also a reasoning model)
+
+  Vision-Language:
+  - `LiquidAI/LFM2.5-VL-450M`, `LiquidAI/LFM2.5-VL-1.6B`
+
+  See the [LFM2.5 usage guide](../../LiquidAI/LFM2.5) for the full family.
+
+  ## Prerequisites
+
+  - **Hardware**: 1× GPU with ≥8 GB VRAM.
+  - **vLLM**: ≥ 0.23.0.
+
+  ### pip (NVIDIA CUDA)
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend auto
+  ```
+
+  ## Deployment Configurations
+
+  ### Quick Start (Single GPU, BF16)
+  Enable the reasoning parser so the chain-of-thought is returned in `reasoning`:
+  ```bash
+  vllm serve LiquidAI/LFM2.5-1.2B-Thinking \
+    --reasoning-parser qwen3
+  ```
+
+  ### Full-Featured Server Launch
+  Reasoning **and** tool calling:
+  ```bash
+  vllm serve LiquidAI/LFM2.5-1.2B-Thinking \
+    --reasoning-parser qwen3 \
+    --enable-auto-tool-choice \
+    --tool-call-parser lfm2 \
+    --host 0.0.0.0 --port 8000
+  ```
+
+  ### Docker (NVIDIA)
+  ```bash
+  docker run -itd --name lfm2.5-thinking \
+    --ipc=host --network host --shm-size 16G --gpus all \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai:latest \
+      --model LiquidAI/LFM2.5-1.2B-Thinking \
+      --reasoning-parser qwen3 \
+      --host 0.0.0.0 --port 8000
+  ```
+
+  ## Client Usage
+
+  ### Reasoning Mode
+  The card recommends a low temperature for the reasoning model — temperature `0.05`, `top_k 50`,
+  `repetition_penalty 1.05`. Do **not** set `max_tokens` — capping it can truncate the
+  chain-of-thought mid-stream.
+  ```python
+  from openai import OpenAI
+  client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+  response = client.chat.completions.create(
+      model="LiquidAI/LFM2.5-1.2B-Thinking",
+      messages=[{"role": "user", "content": "A snail climbs 3 ft up a 20 ft well each day and slides 2 ft back each night. How many days to reach the top?"}],
+      temperature=0.05,
+      extra_body={"top_k": 50, "repetition_penalty": 1.05},
+  )
+  msg = response.choices[0].message
+  print("reasoning:", msg.reasoning)
+  print("answer:", msg.content)
+  ```
+
+  > **Note**: the model opens the `<think>` channel for non-trivial problems; a simple prompt may
+  > be answered directly, in which case `reasoning` is empty. That is expected behavior —
+  > the `qwen3` parser extracts the block whenever it is present.
+
+  ### Tool Calling
+  Add `--enable-auto-tool-choice --tool-call-parser lfm2` at launch, then pass `tools=[…]`; the
+  model can reason about which tool to call before emitting it.
+
+  ### Structured Outputs
+  vLLM's guided decoding constrains output to a JSON schema via `response_format`. The model does
+  not see the schema itself — put semantic instructions in the system prompt.
+
+  ## Configuration Tips
+  - Give reasoning room: leave `max_tokens` unset so the `<think>` block and answer aren't truncated.
+  - Set `--max-model-len` to match your workload (up to 32K).
+  - `--gpu-memory-utilization 0.90–0.95` maximizes KV cache capacity.
+  - Sampling presets are per-request client defaults — don't bake them into `vllm serve`.
+
+  ## References
+  - [Model card](https://huggingface.co/LiquidAI/LFM2.5-1.2B-Thinking)
+  - [LFM2.5 usage guide](../../LiquidAI/LFM2.5)
+  - [Liquid AI](https://www.liquid.ai/)
+  - [vLLM supported models](https://docs.vllm.ai/en/latest/models/supported_models.html)

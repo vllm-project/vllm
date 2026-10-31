@@ -10,6 +10,7 @@ import functools
 import os
 import pickle
 import socket
+import struct
 import sys
 import time
 import uuid
@@ -53,6 +54,78 @@ def ensure_divisibility(numerator, denominator):
     assert numerator % denominator == 0, (
         f"{numerator} is not divisible by {denominator}"
     )
+
+
+# P2P tags [base, base + log2(group size) + 1] are reserved for cpu_all_reduce_.
+_CPU_ALL_REDUCE_TAG_BASE = 27100
+
+
+def cpu_all_reduce_(
+    tensor: torch.Tensor,
+    group: ProcessGroup,
+    timeout: timedelta | None = None,
+) -> torch.Tensor:
+    """Low-latency in-place SUM all-reduce of a small CPU tensor over a gloo group.
+
+    Recursive doubling within power-of-two blocks, then one concurrent exchange
+    between blocks. Results are bitwise identical across ranks. Works with
+    stateless (unregistered) process groups.
+
+    `timeout` bounds each p2p wait; None means no timeout.
+    """
+    world_size = group.size()
+    if world_size == 1:
+        return tensor
+    block_size = world_size & -world_size
+    num_blocks = world_size // block_size
+    if tensor.device.type != "cpu" or not tensor.is_contiguous():
+        torch.distributed.all_reduce(tensor, group=group)
+        return tensor
+
+    timeout = timeout or timedelta(0)
+
+    rank = group.rank()
+    tag = _CPU_ALL_REDUCE_TAG_BASE
+
+    # Recursive doubling within the block (peers stay in the aligned block).
+    if block_size > 1:
+        # This branch applies only to even world sizes.
+        scratch = torch.empty_like(tensor)
+        mask = 1
+        while mask < block_size:
+            peer = rank ^ mask
+            # Wait for both ops before touching either buffer.
+            recv_work = group.recv([scratch], peer, tag)
+            send_work = group.send([tensor], peer, tag)
+            recv_work.wait(timeout)
+            send_work.wait(timeout)
+            tensor.add_(scratch)
+            mask <<= 1
+            tag += 1
+
+    # Exchange block sums with the same lane in every other block at once.
+    if num_blocks > 1:
+        # This branch applies only when world_size is not a power of two.
+        lane, my_block = rank % block_size, rank // block_size
+        block_sums = [
+            tensor if b == my_block else torch.empty_like(tensor)
+            for b in range(num_blocks)
+        ]
+        works = []
+        for b, buf in enumerate(block_sums):
+            if b != my_block:
+                works.append(group.recv([buf], b * block_size + lane, tag))
+        for b in range(num_blocks):
+            if b != my_block:
+                works.append(group.send([tensor], b * block_size + lane, tag))
+        for work in works:
+            work.wait(timeout)
+        # Sum in block order so every rank computes the identical result.
+        total = block_sums[0]
+        for buf in block_sums[1:]:
+            total.add_(buf)
+        tensor.copy_(total)
+    return tensor
 
 
 def divide(numerator, denominator):
@@ -520,13 +593,59 @@ def get_cached_tcp_store_client(host: str, port: int) -> TCPStore:
     return TCPStore(host, port, is_master=False, wait_for_workers=False)
 
 
+def allocate_group_ports(
+    store: Store, key: str, host: str, count: int
+) -> tuple[list[int], list[socket.socket]]:
+    """Bind sockets and publish the ports to *store*.
+
+    Returns ``(ports, sockets)`` with the sockets still open.
+    """
+    socks: list[socket.socket] = []
+    ports: list[int] = []
+    for _ in range(count):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind((host, 0))
+        s.listen()
+        socks.append(s)
+        ports.append(s.getsockname()[1])
+    store.set(key, struct.pack(f"!{count}I", *ports))
+    return ports, socks
+
+
+def fetch_group_ports(store: Store, key: str, count: int) -> list[int]:
+    """Read ports published under *key* by func:`allocate_group_ports`. Blocks until
+    the key is available.
+    """
+    return list(struct.unpack(f"!{count}I", store.get(key)))
+
+
+# Per-process flag: startup (weight load, KV setup, graph capture) is done and
+# the busy loop is about to start. Under FT, gloo groups created before this
+# point are given no cpu timeout, because uneven rank startup would trip it;
+# groups created later (recovery reinit) get the configured timeout.
+_steady_state_entered = False
+
+
+def enter_steady_state() -> None:
+    global _steady_state_entered
+    _steady_state_entered = True
+
+
+def steady_state_entered() -> bool:
+    return _steady_state_entered
+
+
 def get_cpu_distributed_timeout_or_none() -> timedelta | None:
     from vllm.config import get_current_vllm_config_or_none
 
     vllm_config = get_current_vllm_config_or_none()
     if vllm_config is None:
         return None
-    return vllm_config.parallel_config.cpu_distributed_timeout
+    return vllm_config.parallel_config.effective_cpu_distributed_timeout
+
+
+def set_gloo_backend_timeout(group: ProcessGroup, timeout: timedelta) -> None:
+    group._get_backend(torch.device("cpu"))._set_default_timeout(timeout)
 
 
 def get_distributed_timeout_or_none() -> timedelta | None:

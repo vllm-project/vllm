@@ -5,6 +5,7 @@ from io import BytesIO
 from pathlib import Path
 
 import numpy as np
+import pybase64
 import pytest
 from PIL import Image, ImageChops
 
@@ -13,6 +14,8 @@ from vllm.multimodal.image import (
     convert_image_mode,
     normalize_image,
 )
+from vllm.multimodal.media import MediaConnector
+from vllm.multimodal.parse import MultiModalDataParser
 
 pytestmark = pytest.mark.cpu_test
 
@@ -67,6 +70,68 @@ def test_palette_with_trns_to_rgb():
     assert (r, g, b) == (255, 255, 255)
     r, g, b = converted.getpixel((0, 0))
     assert (r, g, b) == (255, 0, 0)
+
+
+def _reopen(image: Image.Image, image_format: str, **save_kwargs) -> Image.Image:
+    buffer = BytesIO()
+    image.save(buffer, image_format, **save_kwargs)
+    return Image.open(buffer)
+
+
+def _rgb_png() -> Image.Image:
+    image = Image.new("RGB", (2, 1), (255, 0, 0))
+    image.putpixel((1, 0), (0, 0, 255))
+    return _reopen(image, "PNG", transparency=(255, 0, 0))
+
+
+def _gif() -> Image.Image:
+    # The transparent index 0 and the opaque index 1 are both black.
+    image = Image.new("P", (2, 1))
+    image.putpalette([0] * 768)
+    image.putpixel((1, 0), 1)
+    return _reopen(image, "GIF", transparency=0)
+
+
+def _rgba_png() -> Image.Image:
+    image = Image.new("RGBA", (2, 1), (255, 0, 0, 0))
+    image.putpixel((1, 0), (0, 0, 255, 255))
+    return _reopen(image, "PNG")
+
+
+@pytest.mark.parametrize(
+    "make_image",
+    [
+        _rgb_png,
+        lambda: _rgb_png().convert("RGB"),
+        _gif,
+        lambda: _gif().convert("RGB"),
+        _rgba_png,
+    ],
+    ids=["rgb_png", "rgb_png_to_rgb", "gif", "gif_to_rgb", "rgba_png"],
+)
+def test_transparency_offline_matches_online(make_image):
+    """A PIL image passed offline and the same image sent online as a PNG
+    end up with the same pixels, matching Pillow's own RGBA conversion.
+
+    After ``convert("RGB")``, Pillow keeps the transparent color in ``info``
+    and saves it as a tRNS chunk, so every pixel of that color is
+    transparent in both pipelines, including opaque GIF pixels that share it.
+    """
+    image = make_image()
+    buffer = BytesIO()
+    image.save(buffer, "PNG")
+    url = f"data:image/png;base64,{pybase64.b64encode(buffer.getvalue()).decode()}"
+
+    parser = MultiModalDataParser()
+    offline = parser.parse_mm_data({"image": image})["image"].get(0)
+    online = parser.parse_mm_data({"image": MediaConnector().fetch_image(url)})
+    online = online["image"].get(0)
+    np.testing.assert_array_equal(np.asarray(offline), np.asarray(online))
+
+    expected = Image.alpha_composite(
+        Image.new("RGBA", image.size, (255, 255, 255, 255)), image.convert("RGBA")
+    ).convert("RGB")
+    np.testing.assert_array_equal(np.asarray(online), np.asarray(expected))
 
 
 def test_l_mode_no_trns_to_rgb():
