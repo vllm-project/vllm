@@ -31,9 +31,9 @@ use vllm_llm::{
 
 use self::convert::{ResponseOptions, prepare_generate_request};
 use self::types::{
-    GenerateLogProb, GenerateLogProbs, GenerateLogProbsContent, GenerateLogprob, GenerateResponse,
-    GenerateResponseChoice, GenerateResponseStreamChoice, GenerateStreamResponse,
-    MultiModalPlaceholders, PerRequestMetrics, PlaceholderRangeInfo,
+    GenerateLogProb, GenerateLogProbs, GenerateLogProbsContent, GenerateLogprob,
+    GenerateOutputMode, GenerateResponse, GenerateResponseChoice, GenerateResponseStreamChoice,
+    GenerateStreamResponse, MultiModalPlaceholders, PerRequestMetrics, PlaceholderRangeInfo,
 };
 pub(crate) use self::types::{GenerateRequest, GenerateSamplingParams};
 pub(crate) use self::validate::validate_request_compat;
@@ -45,9 +45,9 @@ use crate::routes::openai::utils::metrics::{
 };
 use crate::routes::openai::utils::types::Usage;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
-use crate::routes::output_log::{LoggedOutput, log_output};
+use crate::routes::output_log::LoggedOutput;
 use crate::state::AppState;
-use crate::utils::{resolve_request_context, sse_response};
+use crate::utils::{resolve_request_context, sse_response, unix_timestamp};
 
 /// Validate one token-in/token-out request and proxy it into the shared
 /// `vllm-text` stack.
@@ -97,6 +97,7 @@ pub async fn generate(
 
     let api_server_options = state.api_server_options;
     let stream = prepared.stream;
+    let created = unix_timestamp();
     let raw_stream = match state
         .chat
         .text()
@@ -140,6 +141,8 @@ pub async fn generate(
         collect_generate(
             collected,
             prepared.request_id,
+            prepared.response_model,
+            created,
             api_server_options,
             prepared.options,
             mm_placeholders,
@@ -232,9 +235,12 @@ async fn generate_chunk_stream(
 
                 let stop_reason =
                     finish_reason.as_ref().and_then(|reason| reason.as_stop_reason().cloned());
+                // Like Python, the spans cover the whole output on the final chunk only.
+                let weight_versions = output.weight_versions.filter(|_| finish_reason.is_some());
                 let prompt_token_ids = prompt_token_ids.take();
                 y.yield_ok(GenerateStreamResponse {
                     request_id: request_id.clone(),
+                    output_mode: GenerateOutputMode::Tokens,
                     choices: vec![GenerateResponseStreamChoice {
                         index: 0,
                         logprobs,
@@ -247,10 +253,11 @@ async fn generate_chunk_stream(
                             .map(npy_base64)
                             .transpose()?,
                         sampling_mask: output.sampling_mask.map(|mask| mask.rows),
-                        weight_versions: output.weight_versions,
+                        weight_versions,
                     }],
-                    usage: include_continuous_usage
-                        .then(|| Usage::from_token_usage(usage, enable_prompt_tokens_details)),
+                    usage: include_continuous_usage.then(|| {
+                        Usage::from_token_usage(usage, enable_prompt_tokens_details, None)
+                    }),
                     mm_placeholders: prompt_token_ids.as_ref().and_then(|_| mm_placeholders.take()),
                     prompt_token_ids,
                     metrics: None,
@@ -270,8 +277,13 @@ async fn generate_chunk_stream(
     if include_usage {
         y.yield_ok(GenerateStreamResponse {
             request_id,
+            output_mode: GenerateOutputMode::Tokens,
             choices: Vec::new(),
-            usage: Some(Usage::from_token_usage(usage, enable_prompt_tokens_details)),
+            usage: Some(Usage::from_token_usage(
+                usage,
+                enable_prompt_tokens_details,
+                None,
+            )),
             prompt_token_ids: None,
             mm_placeholders: None,
             metrics: spec_decode_metrics.map(|speculative_decoding| PerRequestMetrics {
@@ -289,13 +301,16 @@ async fn generate_chunk_stream(
 fn collect_generate(
     collected: CollectedGenerateOutput,
     request_id: String,
+    response_model: String,
+    created: u64,
     ApiServerOptions {
         enable_log_requests,
+        enable_prompt_tokens_details,
         log_outputs,
         ..
     }: ApiServerOptions,
     ResponseOptions {
-        // Ignored: non-streaming raw generate responses do not include usage.
+        // Ignored: like Python, non-streaming responses always include usage.
         include_usage: _,
         // Ignored: continuous usage is a streaming-only option.
         include_continuous_usage: _,
@@ -352,7 +367,7 @@ fn collect_generate(
     }
     // Like Python, raw generate logs only the output token IDs.
     if log_outputs.logs_complete() && !collected.token_ids.is_empty() {
-        log_output(
+        log_outputs.log(
             LoggedOutput::Response,
             "",
             Some(&collected.token_ids),
@@ -362,6 +377,10 @@ fn collect_generate(
 
     Ok(GenerateResponse {
         request_id,
+        model: response_model,
+        created,
+        usage: Usage::from_token_usage(collected.usage, enable_prompt_tokens_details, None),
+        output_mode: GenerateOutputMode::Tokens,
         choices: vec![GenerateResponseChoice {
             index: 0,
             logprobs,
@@ -585,7 +604,7 @@ mod tests {
     use vllm_engine_core_client::protocol::multimodal::{MmModality, PlaceholderRange};
     use vllm_engine_core_client::protocol::output::{RequestSpecDecodeMetrics, StopReason};
     use vllm_engine_core_client::protocol::sampling_mask::SamplingMask;
-    use vllm_llm::{GeneratePromptInfo, PromptCacheUsage};
+    use vllm_llm::{GeneratePromptInfo, PromptCacheUsage, WeightVersionSpan};
 
     use super::*;
 
@@ -834,6 +853,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn generate_chunk_stream_returns_weight_versions_on_final_chunk_only() {
+        let span = |end| WeightVersionSpan {
+            version: "v1".into(),
+            start: 0,
+            end,
+        };
+        let mut first = stream_output(Some(&[11]), vec![33], None);
+        first.weight_versions = Some(vec![span(1)]);
+        let mut last = stream_output(None, vec![44], Some(FinishReason::Length));
+        last.weight_versions = Some(vec![span(2)]);
+
+        let chunks = collect_chunks(vec![first, last], false, None).await;
+
+        let weight_versions: Vec<_> =
+            chunks.iter().map(|chunk| chunk.choices[0].weight_versions.clone()).collect();
+        assert_eq!(weight_versions, [None, Some(vec![span(2)])]);
+    }
+
+    #[tokio::test]
     async fn generate_chunk_stream_omits_prompt_metadata_by_default() {
         let chunks = collect_chunks(
             vec![
@@ -979,6 +1017,8 @@ mod tests {
         let response = collect_generate(
             output,
             "raw-1".to_string(),
+            "model".to_string(),
+            0,
             ApiServerOptions::default(),
             ResponseOptions::default(),
             Some(MultiModalPlaceholders::from([(
@@ -1085,6 +1125,8 @@ mod tests {
         let response = collect_generate(
             output,
             "raw-metrics".to_string(),
+            "model".to_string(),
+            0,
             ApiServerOptions::default(),
             ResponseOptions::default(),
             None,
@@ -1179,6 +1221,8 @@ mod tests {
         let response = collect_generate(
             output,
             "raw-1".to_string(),
+            "model".to_string(),
+            0,
             ApiServerOptions::default(),
             ResponseOptions {
                 return_token_ids: true,
@@ -1217,6 +1261,8 @@ mod tests {
         let response = collect_generate(
             output_without_payload(vec![9707]),
             "raw-1".to_string(),
+            "model".to_string(),
+            0,
             ApiServerOptions::default(),
             ResponseOptions {
                 include_prompt_logprobs: true,
@@ -1232,6 +1278,8 @@ mod tests {
         collect_generate(
             output_without_payload(vec![9707, 11]),
             "raw-2".to_string(),
+            "model".to_string(),
+            0,
             ApiServerOptions::default(),
             ResponseOptions {
                 include_prompt_logprobs: true,
@@ -1309,6 +1357,8 @@ mod tests {
         let response = collect_generate(
             output,
             "raw-stop".to_string(),
+            "model".to_string(),
+            0,
             ApiServerOptions::default(),
             ResponseOptions::default(),
             None,
@@ -1320,5 +1370,55 @@ mod tests {
             response.choices[0].stop_reason,
             Some(StopReason::TokenId(7))
         );
+    }
+
+    /// Like Python, the non-streaming envelope reports cached prompt tokens
+    /// under `--enable-prompt-tokens-details`, which is what disaggregated
+    /// serving reads from it.
+    #[test]
+    fn collect_generate_reports_cached_prompt_tokens_in_usage() {
+        let output = CollectedGenerateOutput {
+            request_id: "raw-usage".to_string(),
+            prompt_logprobs: None,
+            prompt_token_id_logprobs: None,
+            token_ids: vec![30],
+            logprobs: None,
+            finish_reason: FinishReason::stop_eos(),
+            usage: TokenUsage {
+                prompt_token_count: 4,
+                output_token_count: 1,
+                prompt_cache_usage: PromptCacheUsage {
+                    cached_token_count: 3,
+                    cache_creation_token_count: 1,
+                },
+            },
+            kv_transfer_params: None,
+            ec_transfer_params: None,
+            prompt_token_ids: vec![10, 20, 30, 40],
+            sampling_mask: None,
+            spec_decode_metrics: None,
+            weight_versions: None,
+            routed_experts: None,
+        };
+
+        let response = collect_generate(
+            output,
+            "raw-usage".to_string(),
+            "model".to_string(),
+            0,
+            ApiServerOptions {
+                enable_prompt_tokens_details: true,
+                ..Default::default()
+            },
+            ResponseOptions::default(),
+            None,
+        )
+        .expect("response");
+
+        let usage = serde_json::to_value(&response.usage).expect("usage serializes");
+        assert_eq!(usage["prompt_tokens"], 4);
+        assert_eq!(usage["completion_tokens"], 1);
+        assert_eq!(usage["total_tokens"], 5);
+        assert_eq!(usage["prompt_tokens_details"]["cached_tokens"], 3);
     }
 }
