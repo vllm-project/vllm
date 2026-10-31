@@ -37,6 +37,12 @@ class IrOpPriorityConfig:
     gelu_and_mul_sparse: list[str] = Field(default_factory=list)
     """Priority list for vllm.ir.ops.gelu_and_mul_sparse"""
 
+    rotary_embedding: list[str] = Field(default_factory=list)
+    """Priority list for vllm.ir.ops.rotary_embedding"""
+
+    rotary_embedding_query_only: list[str] = Field(default_factory=list)
+    """Priority list for vllm.ir.ops.rotary_embedding_query_only"""
+
     def compute_hash(self) -> str:
         """Produces a hash unique to the pass configuration.
         Any new fields that affect compilation should be added to the hash.

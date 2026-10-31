@@ -963,25 +963,10 @@ class CompilationConfig:
             )
 
         if (
-            self.pass_config.enable_qk_norm_rope_fusion
-            and "+rotary_embedding" not in self.custom_ops
-        ):
-            # TODO(zhuhaoran): support rope native forward match and remove this.
-            # Linked issue: https://github.com/vllm-project/vllm/issues/28042
-            self.custom_ops.append("+rotary_embedding")
-
-        if (
-            self.pass_config.fuse_rope_kvcache
-            and "+rotary_embedding" not in self.custom_ops
-        ):
-            # TODO(Rohan138): support rope native forward match and remove this.
-            # Linked issue: https://github.com/vllm-project/vllm/issues/28042
-            self.custom_ops.append("+rotary_embedding")
-
-        if (
             self.pass_config.fuse_qk_norm_rope_kvcache
             and "+rotary_embedding" not in self.custom_ops
         ):
+            # MRoPE is not an IR op yet; its fusion still matches the custom op.
             self.custom_ops.append("+rotary_embedding")
 
         if (
@@ -1373,6 +1358,25 @@ class CompilationConfig:
             return f"-{op}" not in self.custom_ops
 
         return f"+{op}" in self.custom_ops
+
+    def uses_rope_kernel(self) -> bool:
+        """Whether RoPE should lower to a kernel instead of Inductor codegen.
+
+        True when the RoPE custom op is enabled or a RoPE fusion pass is on, so
+        RoPE left unfused keeps the kernel. Safe before custom_ops resolution.
+        """
+        pass_config = self.pass_config
+        if (
+            pass_config.enable_qk_norm_rope_fusion
+            or pass_config.fuse_rope_kvcache
+            or pass_config.fuse_qk_norm_rope_kvcache
+        ):
+            return True
+        if self.custom_ops.count("all") + self.custom_ops.count("none") != 1:
+            # custom_ops is resolved in VllmConfig; a bare CompilationConfig
+            # (e.g. platform priority defaults in tests) only has explicit ops.
+            return "+rotary_embedding" in self.custom_ops
+        return self.is_custom_op_enabled("rotary_embedding")
 
     def resolve_cudagraph_mode_and_sizes(
         self,

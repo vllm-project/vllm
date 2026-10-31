@@ -1185,7 +1185,8 @@ class DeepseekV2MLAAttention(nn.Module):
                 cache_config,
                 topk_indices_buffer,
                 f"{prefix}.indexer",
-                is_inplace_rope=self.indexer_rope_emb.enabled(),
+                is_inplace_rope=self.indexer_rope_emb.enabled()
+                and self.indexer_rope_emb.rope_is_inplace,
             )
         else:
             self.indexer_rope_emb = None
