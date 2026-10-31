@@ -59,6 +59,13 @@ def _maybe_dequant(tile):
 
 
 @lru_cache(maxsize=1)
+def fp8_kv_view_is_native() -> bool:
+    """True where Triton loads the FP8 cache as e4m3 (sm_89+, Intel XPU); elsewhere
+    the kernels byte-decode the raw uint8 storage with PTX."""
+    return current_platform.is_xpu() or current_platform.has_device_capability(89)
+
+
+@lru_cache(maxsize=1)
 def _is_sm80() -> bool:
     """True on sm_80 (A100/A30): selects the wide FP8 byte-decode tiles."""
     return current_platform.get_device_capability() == (8, 0)
@@ -819,13 +826,9 @@ def warmup_qsa_sparse_paged_attention(
     head_dim = kv_cache.shape[-1] // 2
     key_cache, value_cache = kv_cache.transpose(1, 2).split(head_dim, dim=-1)
     # An fp8 cache is allocated as uint8 storage; warm the dtype the impl hands
-    # over: an e4m3 view on sm_89+, the raw bytes below.
+    # over: an e4m3 view where it is native, the raw bytes elsewhere.
     is_fp8 = kv_cache.dtype == torch.uint8
-    fp8_dtype = (
-        torch.float8_e4m3fn
-        if current_platform.has_device_capability(89)
-        else torch.uint8
-    )
+    fp8_dtype = torch.float8_e4m3fn if fp8_kv_view_is_native() else torch.uint8
     cache_dtype = fp8_dtype if is_fp8 else key_cache.dtype
     num_kv_heads = key_cache.shape[2]
     group_size = num_query_heads // num_kv_heads
