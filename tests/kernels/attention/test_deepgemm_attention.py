@@ -12,6 +12,7 @@ from vllm.utils.deep_gemm import (
     calc_diff,
     fp8_fp4_mqa_logits,
     fp8_fp4_paged_mqa_logits,
+    get_mqa_logits_metadata,
     get_num_sms,
     get_paged_mqa_logits_metadata,
     mqa_logits_mx_inputs,
@@ -152,6 +153,23 @@ def test_deepgemm_fp8_mqa_logits(layout: str):
         max_seqlen_k,
     )
     assert logits.shape == (seq_len, max_seqlen_k)
+    # Compressed row i holds K positions [ks[i], ke[i]) from column zero; the
+    # kernel leaves the rest unwritten.
+    cols = ks[:, None] + torch.arange(max_seqlen_k, device="cuda")[None, :]
+    valid = cols < ke[:, None]
+    # The SM100 load-balanced kernel, given a schedule, computes the same logits.
+    schedule = get_mqa_logits_metadata(ks, ke, seq_len_kv, num_heads)
+    if schedule is not None:
+        scheduled = fp8_fp4_mqa_logits(
+            (q_fp8, q_scale),
+            (kv_fp8, encode_indexer_scales(kv_sf)),
+            kernel_weights,
+            ks,
+            ke,
+            max_seqlen_k,
+            schedule,
+        )
+        assert torch.equal(scheduled[valid], logits[valid])
     logits = as_fp32_logits(logits, ke - ks)
 
     ref_logits = _ref_fp8_mqa_logits(
@@ -161,9 +179,6 @@ def test_deepgemm_fp8_mqa_logits(layout: str):
         cu_seqlen_ks=ks,
         cu_seqlen_ke=ke,
     )
-    # Compressed row i holds K positions [ks[i], ke[i]) from column zero.
-    cols = ks[:, None] + torch.arange(max_seqlen_k, device="cuda")[None, :]
-    valid = cols < ke[:, None]
     ref_logits = ref_logits.gather(1, cols.clamp(max=seq_len_kv - 1).long())
     ref_logits = ref_logits.masked_fill(~valid, 0)
     logits = logits.masked_fill(~valid, 0)
