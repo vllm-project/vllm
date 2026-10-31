@@ -22,10 +22,7 @@ from vllm.distributed import (
     tensor_model_parallel_reduce_scatter,
 )
 from vllm.distributed.device_communicators import flashinfer_all_reduce
-from vllm.distributed.device_communicators.cuda_communicator import (
-    AITER_TP_ALL_GATHER_MAX_SIZE,
-    CudaCommunicator,
-)
+from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
 from vllm.distributed.parallel_state import GroupCoordinator, TensorMetadata
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
 
@@ -571,7 +568,7 @@ def test_aiter_all_gather_precedes_pynccl(monkeypatch: pytest.MonkeyPatch) -> No
         (6, (7, 6400), -1, None, None),
         (4, (8, 12), 1, None, None),
         (4, (0, 1536), 1, None, None),
-        (4, (AITER_TP_ALL_GATHER_MAX_SIZE // 2 + 8,), 0, None, None),
+        (4, ((1 << 19) + 8,), 0, None, None),
     ],
 )
 def test_rocm_tp_all_gather_uses_aiter(
@@ -581,11 +578,11 @@ def test_rocm_tp_all_gather_uses_aiter(
         return torch.cat([inp + rank for rank in range(world_size)], dim=dim)
 
     aiter_comm = Mock()
-    aiter_comm.should_custom_ag.return_value = True
+    aiter_comm.should_custom_ag.side_effect = lambda inp: inp.nbytes <= 1 << 20
     aiter_comm.all_gather_unreg.side_effect = gather
     communicator = CudaCommunicator.__new__(CudaCommunicator)
     communicator.world_size = world_size
-    communicator.use_aiter_allreduce = True
+    communicator.use_aiter_tp_all_gather = True
     communicator.aiter_ar_comm = aiter_comm
     communicator.pynccl_comm = Mock(disabled=False)
     module = "vllm.distributed.device_communicators"
