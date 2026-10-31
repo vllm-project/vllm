@@ -7,6 +7,8 @@ import logging
 import pytest
 
 from tests.v1.core.utils import create_requests, create_scheduler
+from vllm.config import VllmConfig
+from vllm.engine.arg_utils import EngineArgs
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.structured_output import StructuredOutputManager
@@ -115,6 +117,65 @@ def test_dynamic_sd_rejects_empty_schedule():
         _make_lookup([])
 
 
+def _make_engine_config(
+    schedule: list[tuple[int, int, int]], **engine_kwargs
+) -> VllmConfig:
+    return EngineArgs(
+        model="facebook/opt-125m",
+        speculative_config={
+            "method": "ngram",
+            "num_speculative_tokens": 3,
+            "prompt_lookup_min": 2,
+            "prompt_lookup_max": 3,
+            "num_speculative_tokens_per_batch_size": schedule,
+        },
+        **engine_kwargs,
+    ).create_engine_config()
+
+
+@pytest.mark.parametrize(
+    ("schedule", "match"),
+    [
+        ([(1, 16, 3), (16, 32, 2)], "non-overlapping"),
+        ([(2, 16, 3)], "must start at 1"),
+        ([(1, 16, -1)], "values must be >= 0"),
+        ([(1, 1, 3), (5, 2, 3)], "start must be <= end"),
+    ],
+    ids=["overlapping", "not_starting_at_1", "negative_k", "start_after_end"],
+)
+def test_invalid_schedule_fails_at_config_time(schedule, match):
+    """Rejected while building the engine config, before the model loads."""
+    with pytest.raises(ValueError, match=match):
+        _make_engine_config(schedule)
+
+
+def test_valid_schedule_is_normalized_at_config_time():
+    config = _make_engine_config([(16, 32, 2), (1, 8, 3)])
+
+    assert config.speculative_config is not None
+    assert config.speculative_config.num_speculative_tokens_per_batch_size == [
+        (1, 8, 3),
+        (16, 32, 2),
+    ]
+
+
+def test_invalid_schedule_is_ignored_when_dynamic_sd_is_disabled():
+    """Data parallelism drops the schedule, so it is never validated."""
+    config = _make_engine_config([(2, 16, 3)], data_parallel_size=2)
+
+    assert config.speculative_config is not None
+    assert config.speculative_config.num_speculative_tokens_per_batch_size is None
+
+
+def test_empty_schedule_falls_back_to_static_k(caplog_vllm, disable_log_dedup):
+    with caplog_vllm.at_level(logging.WARNING, logger="vllm"):
+        config = _make_engine_config([])
+
+    assert config.speculative_config is not None
+    assert config.speculative_config.num_speculative_tokens_per_batch_size is None
+    assert "num_speculative_tokens_per_batch_size is empty" in caplog_vllm.text
+
+
 def test_dynamic_sd_requires_schedule_config():
     with pytest.raises(
         ValueError, match="num_speculative_tokens_per_batch_size is required"
@@ -189,7 +250,7 @@ def test_scheduler_falls_back_to_static_k_when_dsd_not_configured():
     assert output.num_spec_tokens_to_schedule == 3
 
 
-def test_dynamic_sd_is_disabled_with_data_parallel(caplog_vllm):
+def test_dynamic_sd_is_disabled_with_data_parallel(caplog_vllm, disable_log_dedup):
     with caplog_vllm.at_level(logging.WARNING, logger="vllm"):
         scheduler = create_scheduler(
             max_num_seqs=256,
