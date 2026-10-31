@@ -582,6 +582,8 @@ class _Mxfp8Linear(nn.Module):
         )
         self.weight = nn.Parameter(w_q, requires_grad=False)
         self.weight_scale = nn.Parameter(w_s.view(n, k // 32), requires_grad=False)
+        # The kernel takes a BF16 input's output dtype from the layer.
+        self.params_dtype = torch.bfloat16
         kernel = FlashInferCutedslMxfp8LinearKernel(Mxfp8LinearLayerConfig((n, k)))
         kernel.process_weights_after_loading(self)
         self.quant_method = SimpleNamespace(kernel=kernel)
