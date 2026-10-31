@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""ROCm paged attention with Inkling's query-dependent relative bias.
+"""Paged attention with Inkling's query-dependent relative bias.
 
 The NVIDIA implementation uses the score-mod hook in tml-fa4.  ROCm Flash
-Attention and AITER do not expose an equivalent hook, so this module implements
-the same operation directly in Triton.  Query heads belonging to one KV head
-are processed together and KV pages are gathered through vLLM's block table.
+Attention, AITER and the XPU backends do not expose an equivalent hook, so
+this module implements the same operation directly in Triton.  Query heads
+belonging to one KV head are processed together and KV pages are gathered
+through vLLM's block table.
 """
 
 from __future__ import annotations
@@ -15,12 +16,21 @@ from typing import cast
 
 import torch
 
-from vllm.models.inkling.amd.ops.rel_attention_decode import (
+from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
+
+from .rel_attention_decode import (
     inkling_rel_attention_split_kv_decode,
     use_split_kv_decode,
 )
-from vllm.platforms.rocm import on_gfx950
-from vllm.triton_utils import tl, triton
+
+# vllm.platforms.rocm queries torch.cuda at import time.
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx950
+else:
+
+    def on_gfx950() -> bool:
+        return False
 
 
 def bucket_max_seqlen_q(max_seqlen_q: int) -> int:
@@ -72,9 +82,9 @@ def inkling_fa4_num_splits(
 ) -> int:
     """Keep the NVIDIA-facing split heuristic as API-compatible metadata.
 
-    The ROCm Triton implementation performs online softmax in one program and
+    The Triton implementation performs online softmax in one program and
     does not consume the result.  Keeping this function unchanged avoids
-    platform-specific scheduling branches in :mod:`inkling.amd.attention`.
+    platform-specific scheduling branches in :mod:`inkling.common.attention`.
     """
     if is_local:
         return 1
@@ -310,7 +320,7 @@ def inkling_fa4_rel_attention(
     """Paged varlen attention with Inkling's relative score modification."""
     del num_splits
     if not causal or window_size[1] not in (0, -1):
-        raise NotImplementedError("Inkling ROCm attention requires causal masking")
+        raise NotImplementedError("Inkling Triton attention requires causal masking")
     if q.ndim != 3 or key_cache.ndim != 4 or value_cache.ndim != 4:
         raise ValueError("expected q [T,H,D] and paged K/V [B,P,Hkv,D]")
     if rel_logits.shape != (q.shape[0], q.shape[1], rel_extent):
@@ -335,7 +345,7 @@ def inkling_fa4_rel_attention(
     ):
         # Import only after the architecture guard. The implementation uses
         # gfx950-only CDNA4 Gluon layouts and async-copy operations.
-        from vllm.models.inkling.amd.ops.gluon.rel_mha_decode_gfx950 import (
+        from vllm.models.inkling.amd.gluon.rel_mha_decode_gfx950 import (
             gluon_rel_mha_decode_gfx950,
         )
 
@@ -360,7 +370,7 @@ def inkling_fa4_rel_attention(
         head_dim=q.shape[2],
         window_left=window_size[0],
     ):
-        from vllm.models.inkling.amd.ops.gluon.rel_mha_extend_gfx950 import (
+        from vllm.models.inkling.amd.gluon.rel_mha_extend_gfx950 import (
             gluon_rel_mha_extend_gfx950,
         )
 
