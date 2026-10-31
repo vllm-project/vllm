@@ -1736,6 +1736,39 @@ def test_data_parallel_rpc_port_has_fixed_default():
     assert ParallelConfig().data_parallel_rpc_port == 29550
 
 
+@pytest.mark.parametrize("env_master_ip", [None, "198.51.100.20"])
+def test_ray_dp_size_one_keeps_master_address(
+    monkeypatch: pytest.MonkeyPatch, env_master_ip: str | None
+) -> None:
+    if env_master_ip is None:
+        monkeypatch.delenv("VLLM_DP_MASTER_IP", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_DP_MASTER_IP", env_master_ip)
+
+    config = ParallelConfig(
+        data_parallel_backend="ray",
+        data_parallel_master_ip="192.0.2.10",
+    )
+
+    assert config.data_parallel_master_ip == "192.0.2.10"
+    assert config.data_parallel_size == 1
+
+
+def test_mp_dp_size_one_uses_spmd_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VLLM_DP_MASTER_IP", "198.51.100.20")
+    monkeypatch.setenv("VLLM_DP_MASTER_PORT", "29501")
+
+    config = ParallelConfig(
+        data_parallel_backend="mp",
+        data_parallel_master_ip="192.0.2.10",
+    )
+
+    assert config.data_parallel_master_ip == "198.51.100.20"
+    assert config.data_parallel_master_port == 29501
+
+
 def test_all2all_backend_has_portable_default():
     assert ParallelConfig().all2all_backend == "allgather_reducescatter"
 

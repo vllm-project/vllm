@@ -1099,8 +1099,8 @@ class ParallelConfig:
                     f"data_parallel_rank ({self.data_parallel_rank})"
                     f" must be in the range [0, {self.data_parallel_size})"
                 )
-        else:
-            # Otherwise fall back to env vars (e.g. for offline SPMD case).
+        elif self.data_parallel_backend != "ray":
+            # Offline SPMD uses env vars; Ray uses the engine-args configuration.
             self.data_parallel_size = envs.VLLM_DP_SIZE
             self.data_parallel_rank = envs.VLLM_DP_RANK
             self.data_parallel_rank_local = envs.VLLM_DP_RANK_LOCAL
