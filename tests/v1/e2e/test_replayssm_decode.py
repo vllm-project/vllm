@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Engine-level parity: ReplaySSM standard decode vs the baseline SSM kernel."""
 
+from functools import partial
+
 import pytest
 
 import vllm.envs as envs
@@ -11,12 +13,14 @@ from vllm.v1.metrics.reader import Counter
 from ...models.utils import check_logprobs_close
 from ...utils import large_gpu_mark, multi_gpu_test
 
-# Mamba2 (Nemotron-3) hybrids.
+# Mamba2 (Nemotron) and GDN (Qwen3.5) hybrids.
 MAMBA2_MODEL = "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16"
+GDN_MODEL = "Qwen/Qwen3.5-4B"
 # FlashInfer 0.7.0's standard SSU cannot compile Nano's DIM=80 configuration.
 MAMBA2_FLASHINFER_MODEL = "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4"
 MODELS = [
     pytest.param(MAMBA2_MODEL, marks=large_gpu_mark(min_gb=40)),
+    pytest.param(GDN_MODEL, marks=large_gpu_mark(min_gb=40)),
 ]
 requires_flashinfer = pytest.mark.skipif(
     not current_platform.is_cuda(), reason="FlashInfer Mamba SSU is CUDA-only"
@@ -41,7 +45,7 @@ FLASHINFER_PROMPTS = [
 
 @pytest.fixture(autouse=True)
 def _use_v1_model_runner_by_default(monkeypatch):
-    # Triton ReplaySSM is V1-only. FlashInfer V2 tests override this locally.
+    # Other Triton models still require V1. V2 tests override this locally.
     with monkeypatch.context() as patch:
         patch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
         envs.disable_envs_cache()
@@ -68,6 +72,7 @@ def _check_replayssm_parity(
         enable_prefix_caching=False,
         tensor_parallel_size=tensor_parallel_size,
         mamba_backend=mamba_backend,
+        additional_config={"gdn_prefill_backend": "triton"},
     )
     with vllm_runner(model_name, **common) as llm:
         if expected_v2 is not None:
@@ -96,8 +101,32 @@ def test_replayssm_decode_matches_baseline(vllm_runner, model_name):
     _check_replayssm_parity(vllm_runner, model_name)
 
 
+@large_gpu_mark(min_gb=40)
+def test_replayssm_gdn_v2_decode_matches_baseline(vllm_runner, monkeypatch):
+    try:
+        with monkeypatch.context() as patch:
+            patch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+            patch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
+            envs.disable_envs_cache()
+            _check_replayssm_parity(
+                partial(
+                    vllm_runner,
+                    compilation_config={"mode": 3, "cudagraph_capture_sizes": [4]},
+                    gpu_memory_utilization=0.8,
+                    max_num_seqs=8,
+                    enable_chunked_prefill=True,
+                    language_model_only=True,
+                ),
+                GDN_MODEL,
+                name_1="replayssm_gdn_v2",
+                expected_v2=True,
+            )
+    finally:
+        envs.disable_envs_cache()
+
+
 @multi_gpu_test(num_gpus=2)
-@pytest.mark.parametrize("model_name", [MAMBA2_MODEL])
+@pytest.mark.parametrize("model_name", [MAMBA2_MODEL, GDN_MODEL])
 def test_replayssm_decode_matches_baseline_tp2(vllm_runner, model_name):
     # Tensor-parallel correctness: ReplaySSM's caches and checkpoint state are
     # sharded per rank, so TP2 decode must still match the baseline at TP2.
@@ -256,6 +285,10 @@ def _check_replayssm_prefix_caching_parity(
         enable_chunked_prefill=True,
         disable_log_stats=False,  # required for llm.get_metrics()
         tensor_parallel_size=tensor_parallel_size,
+        mamba_backend="triton",
+        # GDN prefill JIT-compiles under FlashInfer; the backend is irrelevant
+        # to the decode parity measured here and Triton avoids the JIT.
+        additional_config={"gdn_prefill_backend": "triton"},
     )
     with vllm_runner(model_name, **common) as llm:
         baseline = llm.generate_greedy_logprobs(
@@ -292,7 +325,7 @@ def test_replayssm_prefix_caching_matches_baseline(vllm_runner, model_name):
 
 
 @multi_gpu_test(num_gpus=2)
-@pytest.mark.parametrize("model_name", [MAMBA2_MODEL])
+@pytest.mark.parametrize("model_name", [MAMBA2_MODEL, GDN_MODEL])
 def test_replayssm_prefix_caching_matches_baseline_tp2(vllm_runner, model_name):
     _check_replayssm_prefix_caching_parity(
         vllm_runner, model_name, tensor_parallel_size=2

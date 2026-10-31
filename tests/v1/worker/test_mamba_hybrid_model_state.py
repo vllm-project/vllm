@@ -42,6 +42,7 @@ def test_prepare_attn_forwards_positions(monkeypatch: pytest.MonkeyPatch) -> Non
     state.model_config = SimpleNamespace(max_model_len=8192)
     state._align_mode = False
     state.recoverssm = None
+    state.cache_config = SimpleNamespace(use_replayssm=False, use_kda_recoverssm=False)
 
     positions = torch.tensor([1536], dtype=torch.int64)
     input_batch = SimpleNamespace(
@@ -108,6 +109,7 @@ def test_padded_prompt_tail_builds_as_spec_decode(
     state.model_config = SimpleNamespace(max_model_len=8192)
     state._align_mode = False
     state.recoverssm = None
+    state.cache_config = SimpleNamespace(use_replayssm=False, use_kda_recoverssm=False)
     state.num_accepted_tokens_gpu = torch.ones(4, dtype=torch.int32)
 
     # A verify decode, a padded prompt tail (128 of 129 prompt tokens already
@@ -173,6 +175,7 @@ def _mamba_hybrid_state(num_speculative_tokens: int) -> MambaHybridModelState:
     state.model_config = SimpleNamespace(max_model_len=8192)
     state._align_mode = False
     state.recoverssm = None
+    state.cache_config = SimpleNamespace(use_replayssm=False, use_kda_recoverssm=False)
     # A request that accepted 3 drafts (plus the bonus token) on the previous
     # step; the others have never had a draft accepted.
     state.num_accepted_tokens_gpu = torch.tensor([4, 1, 1], dtype=torch.int32)
@@ -360,6 +363,7 @@ def test_postprocess_state_scalar_with_int32_mapping(
     )
     state._align_mode = False
     state.recoverssm = None
+    state.cache_config = SimpleNamespace(use_replayssm=False, use_kda_recoverssm=False)
     state._mamba_ctx = None
     idx_mapping = torch.tensor([2, -1, 0], dtype=torch.int32, device=GPU_DEVICE)
 
@@ -437,3 +441,45 @@ def test_recoverssm_align_tracks_mixed_batch_state_and_neutralizes_copy_bias(
     assert state._mamba_state_idx_gpu.tolist() == expected_state_indices
     expected_accepted = [9, 1, 9, 2, 9]
     assert state.num_accepted_tokens_gpu.tolist() == expected_accepted
+
+
+@pytest.mark.parametrize("prefill_lengths", [[512, 768, 1024], [1536, 33, 7]])
+def test_replayssm_v2_reanchors_resumed_rows_and_flushes_prompt_tail(
+    monkeypatch, prefill_lengths
+):
+    """V2 batch-order bases must drive wrap, resume and one-token prompt flush."""
+    from tests.v1.attention.test_gdn_metadata_builder import (
+        _create_replayssm_gdn_builder,
+    )
+
+    state = _mamba_hybrid_state(0)
+    state.cache_config.use_replayssm = True
+    batch = _input_batch([1, 1, 1], None, [False, False, True], 4)
+    batch.prefill_len_np = np.array(prefill_lengths, dtype=np.int32)
+    batch.prefill_runs_as_decode_np = np.array([False, False, True])
+    metadata = _prepare_attn_metadata(state, monkeypatch, batch, CUDAGraphMode.FULL)
+    extra = metadata.get_extra_common_attn_kwargs(0, 4)
+    assert extra["replayssm_decode_base_cpu"].tolist() == prefill_lengths + [0]
+
+    seq_lens = [prefill_lengths[0] + 16, prefill_lengths[1] + 1, prefill_lengths[2], 0]
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=seq_lens, query_lens=[1, 1, 1, 0]),
+        BLOCK_SIZE,
+        DEVICE,
+    ).replace(**extra)
+    builder = _create_replayssm_gdn_builder(16, full_cuda_graph=True)
+    result = builder.build(common_prefix_len=0, common_attn_metadata=common)
+    assert result.num_decodes == 4
+    assert result.num_decode_tokens == 3
+    assert result.num_prefills == 0
+    assert result.write_pos_d.tolist() == [15, 0, 0, 0]
+    assert result.is_flush_d.tolist() == [1, 0, 1, 0]
+    assert result.write_pos_d.data_ptr() == builder.decode_write_pos_d.data_ptr()
+
+
+def test_replayssm_v2_metadata_is_absent_for_standard_decode(monkeypatch):
+    state = _mamba_hybrid_state(0)
+    metadata = _prepare_attn_metadata(state, monkeypatch)
+    assert "replayssm_decode_base_cpu" not in (
+        metadata.get_extra_common_attn_kwargs(0, 2)
+    )
