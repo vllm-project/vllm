@@ -1046,3 +1046,244 @@ def draft_philox_gumbel_sample(
         )
         finish_step(step)
     return sampled.view(-1)
+
+
+@triton.jit
+def _synthid_words(
+    block_idx,
+    state_0,
+    state_1,
+    state_2,
+    state_3,
+    key_0,
+    key_1,
+    stream_0,
+    stream_1,
+    BLOCK_SIZE: tl.constexpr,
+):
+    # The stream enters the candidate key as in `_philox_uint32`.
+    groups = block_idx * (BLOCK_SIZE // 4) + tl.arange(0, BLOCK_SIZE // 4)
+    output_0, output_1, output_2, output_3 = _philox_candidate_words(
+        groups, state_0, state_1, state_2, state_3, key_0 ^ stream_1, key_1 ^ stream_0
+    )
+    return tl.interleave(
+        tl.interleave(output_0, output_2),
+        tl.interleave(output_1, output_3),
+    )
+
+
+@triton.jit
+def _row_sum(slot_ptr, values, scale, num_blocks):
+    """Sum `values` over the row's blocks in exact fixed point, so the bits do
+    not depend on arrival order. Each slot counts arrivals from bit 54."""
+    slots = slot_ptr + tl.reshape(tl.arange(0, values.numel), values.shape)
+    values = tl.where(values > 0.0, values * scale, 0.0)  # NaN rows add 0
+    tl.atomic_add(slots, values.to(tl.int64) + (1 << 54), sem="relaxed")
+    done = num_blocks.to(tl.int64) << 54
+    totals = tl.load(slots, volatile=True)
+    while tl.min(totals) < done:
+        totals = tl.load(slots, volatile=True)
+    return totals - done
+
+
+@triton.jit
+def _apply_layer(probs, one_probs, zero_mass, one_mass):
+    """Return probs * (1 - m + g) and m, where one_probs is probs where g = 1.
+
+    For small m, apply the factor as an offset: rounding 1 - m to FP32 would
+    shift every token the same way and the error would build up over layers.
+    """
+    inv_total = 1.0 / (zero_mass + one_mass)
+    mean = one_mass * inv_total
+    offset = mean < 0.5
+    factor = tl.where(offset, -mean, zero_mass * inv_total)
+    return probs * factor + (probs * offset.to(tl.float32) + one_probs), mean
+
+
+@triton.jit(do_not_specialize=["key_0", "key_1", "stream_0", "stream_1", "num_blocks"])
+def _synthid_kernel(
+    output_ptr,
+    output_stride,
+    logits_ptr,
+    logits_stride,
+    contexts_ptr,
+    context_stride,
+    skip_ptr,
+    sync_ptr,  # int64 zeros: [1] tile ticket, then [B, 2 * DEPTH + 4] row slots
+    key_0,
+    key_1,
+    stream_0,
+    stream_1,
+    vocab_size,
+    num_blocks,
+    scale,
+    CONTEXT_WIDTH: tl.constexpr,
+    DEPTH: tl.constexpr,
+    HAS_SKIP: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """Apply every SynthID layer to one vocabulary block kept in registers.
+
+    Each pair of layers sums masses over the row's blocks. Tiles take tickets in
+    start order, so a tile only waits for tiles that run or start once earlier
+    rows finish.
+    """
+    ticket = tl.atomic_add(sync_ptr, 1, sem="relaxed")
+    row = (ticket // num_blocks).to(tl.int64)
+    block_idx = ticket % num_blocks
+    start = block_idx * BLOCK_SIZE
+    offsets = tl.arange(0, BLOCK_SIZE)
+    mask = offsets < vocab_size - start
+    logits_row = logits_ptr + row * logits_stride + start
+    logits = tl.load(logits_row + offsets, mask=mask, other=float("-inf"))
+    logits = logits.to(tl.float32)
+    output_row = output_ptr + row * output_stride + start
+    if HAS_SKIP:  # noqa: SIM102
+        if tl.load(skip_ptr + row):
+            tl.store(output_row + offsets, logits, mask=mask)
+            return
+
+    slots = sync_ptr + 1 + row * (2 * DEPTH + 4)
+    block_max = tl.max(logits, axis=0)
+    # A block of masked tokens (top-k/top-p) adds 0 to every row sum: post its
+    # arrivals without waiting and keep its -inf.
+    if block_max == float("-inf"):
+        tl.atomic_add(slots + 1, 1, sem="release")
+        for chunk in tl.static_range((DEPTH + 1) // 2):
+            tl.atomic_add(
+                slots + 2 + 4 * chunk + tl.arange(0, 4),
+                tl.full([4], 1 << 54, tl.int64),
+                sem="relaxed",
+            )
+        tl.store(output_row + offsets, logits, mask=mask)
+        return
+
+    key_0 = key_0.to(tl.uint32)
+    key_1 = key_1.to(tl.uint32)
+    state_0, state_1, state_2, state_3 = _philox_context_state(
+        contexts_ptr + row * context_stride, key_0, key_1, CONTEXT_WIDTH
+    )
+    words = _synthid_words(
+        block_idx,
+        state_0,
+        state_1,
+        state_2,
+        state_3,
+        key_0,
+        key_1,
+        stream_0.to(tl.uint32),
+        stream_1.to(tl.uint32),
+        BLOCK_SIZE,
+    )
+    # Row max as an order-preserving integer key, so a zero slot is below it.
+    bits = block_max.to(tl.int32, bitcast=True).to(tl.int64)
+    key = tl.where(bits < 0, -1 - bits, bits + (1 << 31))
+    tl.atomic_max(slots, key, sem="relaxed")
+    tl.atomic_add(slots + 1, 1, sem="release")
+    while tl.atomic_add(slots + 1, 0, sem="acquire") < num_blocks:
+        pass
+    key = tl.atomic_max(slots, 0, sem="relaxed")
+    bits = tl.where(key >= 1 << 31, key - (1 << 31), -1 - key)
+    row_max = bits.to(tl.int32).to(tl.float32, bitcast=True)
+    probs = tl.exp(logits - tl.where(row_max == float("-inf"), 0.0, row_max))
+    # Two layers per sync: the row's total and g = 0 masses of layer a, of
+    # layer b and of both give both factors.
+    for chunk in tl.static_range((DEPTH + 1) // 2):
+        zero_a = ((words >> (2 * chunk)) & 1) == 0
+        zero_b = ((words >> (2 * chunk + 1)) & 1) == 0
+        probs_a = tl.where(zero_a, probs, 0.0)
+        masses = tl.join(
+            tl.join(probs, probs_a),
+            tl.join(tl.where(zero_b, probs, 0.0), tl.where(zero_b, probs_a, 0.0)),
+        )
+        sums = tl.sum(masses, axis=0)
+        sums = _row_sum(slots + 2 + 4 * chunk, sums, scale, num_blocks)
+        sums_a, sums_b = tl.split(sums)
+        total, mass_a = tl.split(sums_a)
+        mass_b, mass_ab = tl.split(sums_b)
+        # Masses by the (a, b) g bits, from exact fixed point differences.
+        mass_00 = mass_ab.to(tl.float32)
+        mass_01 = (mass_a - mass_ab).to(tl.float32)
+        mass_10 = (mass_b - mass_ab).to(tl.float32)
+        mass_11 = (total - mass_a - mass_b + mass_ab).to(tl.float32)
+        probs, mean_a = _apply_layer(
+            probs, probs - probs_a, mass_00 + mass_01, mass_10 + mass_11
+        )
+        if 2 * chunk + 1 < DEPTH:
+            # Layer a scales the g = 0 masses by 1 - m and the rest by 2 - m.
+            probs, _ = _apply_layer(
+                probs,
+                tl.where(zero_b, 0.0, probs),
+                mass_00 + 2.0 * mass_10 - mean_a * (mass_00 + mass_10),
+                mass_01 + 2.0 * mass_11 - mean_a * (mass_01 + mass_11),
+            )
+
+    # Fresh offsets and mask: reusing the first ones would keep them live in
+    # registers through every layer.
+    offsets = tl.arange(0, BLOCK_SIZE)
+    mask = start + offsets < vocab_size
+    log_probs = tl.log(probs) - tl.log(total.to(tl.float32) / scale)
+    # Underflow becomes the FP32 min and masked tokens stay -inf, as in the
+    # eager path. Logits only matter where probs is 0 or NaN.
+    logits = tl.load(logits_row + offsets, mask=mask & ~(probs > 0.0), other=0.0)
+    keep = (log_probs > float("-inf")) | (logits == float("-inf"))
+    log_probs = tl.where(keep, log_probs, -3.4028234663852886e38)
+    tl.store(output_row + offsets, log_probs, mask=mask)
+
+
+def synthid_watermark_logits(
+    logits: torch.Tensor,
+    contexts: torch.Tensor,
+    key: int,
+    depth: int,
+    stream: int = 0,
+    skip_mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Return FP32 SynthID-Text log-probs of `logits` [B, V].
+
+    Rows where `skip_mask` [B] is True get `logits` cast to FP32 instead.
+    """
+    assert 1 <= depth <= 32
+    if logits.stride(-1) != 1:
+        logits = logits.contiguous()
+    if contexts.stride(-1) != 1:
+        contexts = contexts.contiguous()
+    num_tokens, vocab_size = logits.shape
+    output = logits.new_empty(num_tokens, vocab_size, dtype=torch.float32)
+    if num_tokens == 0:
+        return output
+    if skip_mask is not None:
+        assert skip_mask.shape == (num_tokens,) and skip_mask.dtype == torch.bool
+        skip_mask = skip_mask.contiguous()
+    # Arrival counts sit above bit 54, so at most 511 blocks per row.
+    block_size = max(2048, triton.next_power_of_2(triton.cdiv(vocab_size, 511)))
+    num_blocks = triton.cdiv(vocab_size, block_size)
+    sync = torch.zeros(
+        1 + num_tokens * (2 * depth + 4), dtype=torch.int64, device=logits.device
+    )
+    _synthid_kernel[(num_tokens * num_blocks,)](
+        output,
+        output.stride(0),
+        logits,
+        logits.stride(0),
+        contexts,
+        contexts.stride(0),
+        skip_mask,
+        sync,
+        key & _UINT32_MASK_VALUE,
+        key >> 32,
+        stream & _UINT32_MASK_VALUE,
+        stream >> 32,
+        vocab_size,
+        num_blocks,
+        # Row sums are at most vocab_size, so they stay below bit 54.
+        float(2 ** (53 - vocab_size.bit_length())),
+        CONTEXT_WIDTH=contexts.shape[-1],
+        DEPTH=depth,
+        HAS_SKIP=skip_mask is not None,
+        BLOCK_SIZE=block_size,
+        num_warps=4,
+        # Fewer registers keep more rows in flight, which hides the syncs.
+        maxnreg=72,
+    )
+    return output
