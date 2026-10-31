@@ -362,6 +362,19 @@ VLM_TEST_SETTINGS = {
         stop_str=["<｜end▁of▁sentence｜>", "<｜begin▁of▁sentence｜>"],
         image_size_factors=[(1.0,), (1.0, 1.0, 1.0), (0.1, 0.5, 1.0)],
     ),
+    "dots_ocr": VLMTestInfo(
+        models=["rednote-hilab/dots.ocr"],
+        test_type=VLMTestType.IMAGE,
+        prompt_formatter=lambda img_prompt: f"<|user|>{img_prompt}<|endofuser|><|assistant|>",  # noqa: E501
+        img_idx_to_prompt=lambda idx: "<|img|><|imgpad|><|endofimg|>",
+        max_model_len=4096,
+        max_num_seqs=2,
+        auto_cls=AutoModelForCausalLM,
+        image_size_factors=[(0.25,)],
+        # TP=2 regression test for the vision tower QKV split in dots_ocr.
+        tensor_parallel_size=2,
+        marks=multi_gpu_marks(num_gpus=2),
+    ),
     "gemma3": VLMTestInfo(
         models=["google/gemma-3-4b-it"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
