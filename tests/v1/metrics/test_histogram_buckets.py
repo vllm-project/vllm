@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Snapshot tests locking the default Prometheus histogram buckets.
+"""Core Prometheus metric registration, recording, and histogram buckets.
 
 The expected lists are deliberately hard-coded literals rather than imports:
 any change to a default bucket boundary must show up as a failing test here.
@@ -12,6 +12,7 @@ import pytest
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.observability import ObservabilityConfig
 from vllm.config.watermarking import WatermarkConfig
+from vllm.v1.engine import EngineCoreOutput, FinishReason
 from vllm.v1.metrics.buckets import (
     BUCKET_FAMILY_KEYS,
     build_1_2_5_buckets,
@@ -19,6 +20,13 @@ from vllm.v1.metrics.buckets import (
 )
 from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
+from vllm.v1.metrics.stats import (
+    FinishedRequestStats,
+    IterationStats,
+    LoRARequestStates,
+    PrefillStats,
+    RequestStateStats,
+)
 
 pytestmark = pytest.mark.cpu_test
 
@@ -329,5 +337,216 @@ def test_watermark_requests_counter_registration(with_config: bool):
         PrometheusStatLogger(config)
         names = {m.name for m in prometheus_client.REGISTRY.collect()}
         assert ("vllm:watermark_requests" in names) == with_config
+    finally:
+        unregister_vllm_metrics()
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_request_counts_and_latencies_by_api_surface(enabled):
+    """Mixed APIs aggregate by default and stay separate only when opted in."""
+    config = build_logger_config(
+        ObservabilityConfig(enable_api_surface_metrics=enabled)
+    )
+    api_surfaces = ("messages", "chat_completions", "completions", "unknown")
+    latency_factors = {
+        "time_to_first_token_seconds": 1,
+        "inter_token_latency_seconds": 2,
+        "e2e_request_latency_seconds": 3,
+        "request_queue_time_seconds": 4,
+        "request_prefill_time_seconds": 5,
+        "request_inference_time_seconds": 6,
+        "request_decode_time_seconds": 7,
+        "request_time_per_output_token_seconds": 8,
+    }
+    expected: dict[tuple[int, str | None], list[float]] = {}
+    expected_counts: dict[tuple[int, str | None, str], int] = {}
+    try:
+        logger = PrometheusStatLogger(config, engine_indexes=[0, 1])
+        for engine_idx in (0, 1):
+            stats = IterationStats(enable_api_surface_metrics=enabled)
+            for index, api_surface in enumerate((*api_surfaces, "unsupported")):
+                value = (engine_idx + 1) * (index + 1) / 10
+                reason = list(FinishReason)[index]
+                normalized = api_surface if api_surface in api_surfaces else "unknown"
+                label = normalized if enabled else None
+                expected.setdefault((engine_idx, label), []).append(value)
+                expected_counts[engine_idx, label, str(reason)] = 1
+                stats.time_to_first_tokens_iter.append((api_surface, value))
+                stats.inter_token_latencies_iter.append((api_surface, 2 * value))
+                stats.finished_requests.append(
+                    FinishedRequestStats(
+                        finish_reason=reason,
+                        api_surface=api_surface,
+                        e2e_latency=3 * value,
+                        queued_time=4 * value,
+                        prefill_time=5 * value,
+                        inference_time=6 * value,
+                        decode_time=7 * value,
+                        mean_time_per_output_token=8 * value,
+                    )
+                )
+            logger.record(None, stats, engine_idx=engine_idx)
+
+        registry = prometheus_client.REGISTRY
+        for (engine_idx, api_surface), values in expected.items():
+            labels = {
+                "model_name": config.model_config.served_model_name,
+                "engine": str(engine_idx),
+            }
+            if api_surface is not None:
+                labels["api_surface"] = api_surface
+            for metric_name, factor in latency_factors.items():
+                assert registry.get_sample_value(
+                    f"vllm:{metric_name}_count", labels
+                ) == len(values)
+                assert registry.get_sample_value(
+                    f"vllm:{metric_name}_sum", labels
+                ) == pytest.approx(factor * sum(values))
+            for reason in FinishReason:
+                assert registry.get_sample_value(
+                    "vllm:request_success_total",
+                    {**labels, "finished_reason": str(reason)},
+                ) == expected_counts.get((engine_idx, api_surface, str(reason)), 0)
+
+        assert {
+            sample.labels["api_surface"]
+            for metric in registry.collect()
+            for sample in metric.samples
+            if "api_surface" in sample.labels
+        } == (set(api_surfaces) if enabled else set())
+        for metric in registry.collect():
+            if metric.name in {"vllm:request_success"} | {
+                f"vllm:{name}" for name in latency_factors
+            }:
+                for sample in metric.samples:
+                    assert set(sample.labels) == (
+                        {"model_name", "engine"}
+                        | ({"api_surface"} if enabled else set())
+                        | (
+                            {"finished_reason"}
+                            if metric.name == "vllm:request_success"
+                            else set()
+                        )
+                        | ({"le"} if sample.name.endswith("_bucket") else set())
+                    )
+    finally:
+        unregister_vllm_metrics()
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_token_metrics_by_api_surface(enabled):
+    """Tokens are attributed during generation, with no cache or decode recount."""
+    config = build_logger_config(
+        ObservabilityConfig(enable_api_surface_metrics=enabled)
+    )
+    config.model_config.served_model_name = "served-alias"
+    api_surfaces = ("messages", "chat_completions", "completions", "unknown")
+    expected: dict[tuple[int, str | None], list[int]] = {}
+    registry = prometheus_client.REGISTRY
+    try:
+        logger = PrometheusStatLogger(config, engine_indexes=[0, 1])
+        for engine_idx in (0, 1):
+            for api_surface in api_surfaces if enabled else (None,):
+                labels = {"model_name": "served-alias", "engine": str(engine_idx)}
+                if api_surface is not None:
+                    labels["api_surface"] = api_surface
+                for metric_name in (
+                    "prompt_tokens",
+                    "generation_tokens",
+                    "prompt_tokens_cached",
+                ):
+                    assert (
+                        registry.get_sample_value(f"vllm:{metric_name}_total", labels)
+                        == 0
+                    )
+        for engine_idx in (0, 1):
+            prefill = IterationStats(enable_api_surface_metrics=enabled)
+            decode = IterationStats(enable_api_surface_metrics=enabled)
+            for index, api_surface in enumerate((*api_surfaces, "unsupported")):
+                value = (engine_idx + 1) * (index + 1)
+                normalized = api_surface if api_surface in api_surfaces else "unknown"
+                label = normalized if enabled else None
+                expected.setdefault((engine_idx, label), []).append(value)
+                req_stats = RequestStateStats(api_surface=api_surface)
+                prefill_stats = PrefillStats()
+                prefill_stats.set(10 * value, 2 * value, 3 * value)
+                for stats, is_prefilling, num_tokens in (
+                    (prefill, True, value),
+                    (decode, False, 2 * value),
+                ):
+                    stats.update_from_output(
+                        EngineCoreOutput(
+                            request_id=api_surface,
+                            new_token_ids=[1] * num_tokens,
+                            prefill_stats=prefill_stats,
+                        ),
+                        engine_core_timestamp=1.0 if is_prefilling else 2.0,
+                        is_prefilling=is_prefilling,
+                        req_stats=req_stats,
+                        lora_states=LoRARequestStates(),
+                        lora_name=None,
+                    )
+                decode.update_from_finished_request(
+                    FinishReason.STOP,
+                    api_surface,
+                    10 * value,
+                    None,
+                    req_stats,
+                    num_cached_tokens=5 * value,
+                )
+
+            logger.record(None, prefill, engine_idx=engine_idx)
+            labels = {
+                "model_name": config.model_config.served_model_name,
+                "engine": str(engine_idx),
+            }
+            if enabled:
+                labels["api_surface"] = "messages"
+            assert registry.get_sample_value(
+                "vllm:generation_tokens_total",
+                labels,
+            ) == sum(expected[engine_idx, "messages" if enabled else None])
+            logger.record(None, decode, engine_idx=engine_idx)
+
+        for (engine_idx, api_surface), values in expected.items():
+            labels = {
+                "model_name": config.model_config.served_model_name,
+                "engine": str(engine_idx),
+            }
+            if api_surface is not None:
+                labels["api_surface"] = api_surface
+            for metric_name, factor in (
+                ("prompt_tokens", 10),
+                ("generation_tokens", 3),
+                ("prompt_tokens_cached", 5),
+            ):
+                assert registry.get_sample_value(
+                    f"vllm:{metric_name}_total", labels
+                ) == factor * sum(values)
+            for source, factor in (
+                ("local_compute", 5),
+                ("local_cache_hit", 2),
+                ("external_kv_transfer", 3),
+            ):
+                assert registry.get_sample_value(
+                    "vllm:prompt_tokens_by_source_total", {**labels, "source": source}
+                ) == factor * sum(values)
+            for metric_name, factor in (
+                ("request_prompt_tokens", 10),
+                ("request_generation_tokens", 3),
+                ("request_prefill_kv_computed_tokens", 5),
+            ):
+                assert registry.get_sample_value(
+                    f"vllm:{metric_name}_count", labels
+                ) == len(values)
+                assert registry.get_sample_value(
+                    f"vllm:{metric_name}_sum", labels
+                ) == factor * sum(values)
+        if not enabled:
+            assert all(
+                "api_surface" not in sample.labels
+                for metric in registry.collect()
+                for sample in metric.samples
+            )
     finally:
         unregister_vllm_metrics()

@@ -74,6 +74,16 @@ def _make_request(
     )
 
 
+def test_conversion_preserves_messages_api_identity_without_exposing_a_field():
+    request = _make_request([{"role": "user", "content": "Hello"}])
+
+    converted = _convert(request)
+
+    assert converted._api_surface == "messages"
+    assert "_api_surface" not in converted.model_dump()
+    assert "_api_surface" not in converted.model_json_schema()["properties"]
+
+
 # ======================================================================
 # _convert_image_source_to_url
 # ======================================================================

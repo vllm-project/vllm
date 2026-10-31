@@ -384,6 +384,7 @@ class CohereServingChatV2(OpenAIServingChat):
         cls._convert_messages(request.messages, openai_messages)
 
         chat_req = cls._build_base_chat_completion(request, openai_messages)
+        chat_req._api_surface = "unknown"
         cls._apply_streaming_options(chat_req, request)
         cls._apply_response_format(chat_req, request)
         cls._apply_tools(chat_req, request)

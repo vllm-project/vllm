@@ -54,6 +54,21 @@
 1. Clicking on a trace will show its spans and their tags. In this demo, each trace has 2 spans. One from the dummy client containing the prompt text and one from vLLM containing metadata about the request.
 ![Spans details](https://i.imgur.com/OPf6CBL.png)
 
+## API attribution
+
+When tracing is enabled, `llm_request` spans include `vllm.api_surface` for
+recognized APIs:
+
+- `messages` for `/v1/messages`
+- `chat_completions` for `/v1/chat/completions`
+- `completions` for `/v1/completions`
+
+For example, a Messages request has `vllm.api_surface=messages` in its span's
+tags in Jaeger. This applies to streaming and non-streaming requests, including
+requests without tools. The attribute is omitted for other API identities.
+Trace attribution is independent of `--enable-api-surface-metrics`, which
+controls Prometheus metric labels.
+
 ## Exporter Protocol
 
 OpenTelemetry supports either `grpc` or `http/protobuf` as the transport protocol for trace data in the exporter.

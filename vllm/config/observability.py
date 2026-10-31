@@ -38,6 +38,12 @@ class ObservabilityConfig:
     otlp_traces_endpoint: str | None = None
     """Target URL to which OpenTelemetry traces will be sent."""
 
+    enable_api_surface_metrics: bool = False
+    """Add api_surface labels to request counts, latencies, and token metrics.
+    Disabled by default to preserve the existing metric schema. Enabling this
+    changes affected series and may require dashboard and alert query updates.
+    API attribution in traces is independent of this setting."""
+
     collect_detailed_traces: list[DetailedTraceModules] | None = None
     """It makes sense to set this only if `--otlp-traces-endpoint` is set. If
     set, it will collect detailed traces for the specified modules. This
