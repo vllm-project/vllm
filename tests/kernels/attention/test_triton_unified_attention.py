@@ -1251,3 +1251,213 @@ def test_softcap_does_not_overflow_on_large_scores() -> None:
     ref = soft_cap * torch.tanh(scores / soft_cap)
     assert torch.isfinite(out).all(), out
     torch.testing.assert_close(out, ref, atol=1e-3, rtol=1e-3)
+
+
+@pytest.mark.parametrize(
+    "case_desc,seq_lens,num_heads,head_size,sliding_window",
+    [
+        # Gemma 4 Global (head_size=512):
+        # 1. Prefill (E2B / E4B geometry)
+        ("hd512_prefill_e2b", [(512, 512)], (8, 1), 512, None),
+        ("hd512_prefill_12b", [(1024, 1024)], (16, 1), 512, None),
+        # 2. Decode (31B geometry)
+        ("hd512_decode", [(1, 2048)] * 4, (32, 4), 512, None),
+        # 3. Mixed batch: 1 prefill + 7 decode (26B-A4B geometry)
+        ("hd512_mixed_batch", [(2048, 2048)] + [(1, 4096)] * 7, (16, 2), 512, None),
+        # Gemma 4 SWA (head_size=256):
+        # 4. SWA prefill (E4B geometry)
+        ("hd256_swa1024_prefill", [(512, 512)], (8, 2), 256, 1024),
+        # 5. SWA decode with W=512, B=1 (3D active)
+        ("hd256_swa512_b1", [(1, 2048)], (8, 1), 256, 512),
+        # 6. SWA decode with W=1024, B=4 (3D active)
+        ("hd256_swa1024_b4", [(1, 2048)] * 4, (16, 8), 256, 1024),
+        # 7. SWA decode with W=1024, B=16 (2D threshold active: 16 * 8 = 128 >= 128)
+        ("hd256_swa1024_b16", [(1, 2048)] * 16, (16, 8), 256, 1024),
+        # 8. MTP short-query: 16 requests with q=4 tokens, ctx=2048, W=1024
+        ("hd256_mtp_q4", [(4, 2048)] * 16, (16, 8), 256, 1024),
+        # 9. Padded decode with seq_len=0 sequence: must not read uninitialized segment
+        ("hd256_swa512_padded_decode", [(0, 0), (1, 2048)], (8, 1), 256, 512),
+    ],
+)
+@torch.inference_mode()
+def test_gemma4_large_head_and_swa_attention(
+    case_desc: str,
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    sliding_window: int | None,
+) -> None:
+    torch.set_default_device(DEVICE_TYPE)
+    set_random_seed(42)
+    dtype = torch.bfloat16
+    block_size = 16
+    num_seqs = len(seq_lens)
+    query_lens = [x[0] for x in seq_lens]
+    kv_lens_list = [x[1] for x in seq_lens]
+    num_query_heads, num_kv_heads = num_heads
+    assert num_query_heads % num_kv_heads == 0
+    max_query_len = max(query_lens)
+    max_kv_len = max(kv_lens_list)
+    window_size = (sliding_window - 1, 0) if sliding_window is not None else (-1, -1)
+    scale = head_size**-0.5
+
+    query = torch.randn(sum(query_lens), num_query_heads, head_size, dtype=dtype)
+    num_blocks_per_req = [
+        (kv_len + block_size - 1) // block_size for kv_len in kv_lens_list
+    ]
+    num_blocks = sum(num_blocks_per_req)
+    key_cache = torch.randn(
+        num_blocks, block_size, num_kv_heads, head_size, dtype=dtype
+    )
+    value_cache = torch.randn_like(key_cache)
+
+    block_tables = torch.zeros(
+        (num_seqs, max(max(num_blocks_per_req), 1)),
+        dtype=torch.int32,
+        device=DEVICE_TYPE,
+    )
+    block_start = 0
+    for req_idx, nb in enumerate(num_blocks_per_req):
+        if nb > 0:
+            block_tables[req_idx, :nb] = torch.arange(
+                block_start, block_start + nb, dtype=torch.int32, device=DEVICE_TYPE
+            )
+            block_start += nb
+
+    cu_query_lens = torch.tensor(
+        [0] + query_lens, dtype=torch.int32, device=DEVICE_TYPE
+    ).cumsum(dim=0, dtype=torch.int32)
+    kv_lens = torch.tensor(kv_lens_list, dtype=torch.int32, device=DEVICE_TYPE)
+
+    output = torch.empty_like(query)
+    seq_threshold_3D = 512
+    num_par_softmax_segments = 16
+    head_size_padded = next_power_of_2(head_size)
+    # Initialize segment buffers with NaN so any uninitialized segment
+    # read fails immediately
+    softmax_segm_output = torch.full(
+        (num_seqs, num_query_heads, num_par_softmax_segments, head_size_padded),
+        float("nan"),
+        dtype=torch.float32,
+    )
+    softmax_segm_max = torch.full(
+        (num_seqs, num_query_heads, num_par_softmax_segments),
+        float("nan"),
+        dtype=torch.float32,
+    )
+    softmax_segm_expsum = torch.full(
+        (num_seqs, num_query_heads, num_par_softmax_segments),
+        float("nan"),
+        dtype=torch.float32,
+    )
+
+    unified_attention(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        out=output,
+        cu_seqlens_q=cu_query_lens,
+        seqused_k=kv_lens,
+        max_seqlen_q=max_query_len,
+        max_seqlen_k=max_kv_len,
+        softmax_scale=scale,
+        causal=True,
+        window_size=window_size,
+        block_table=block_tables,
+        softcap=0,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
+        seq_threshold_3D=seq_threshold_3D,
+        num_par_softmax_segments=num_par_softmax_segments,
+        softmax_segm_output=softmax_segm_output,
+        softmax_segm_max=softmax_segm_max,
+        softmax_segm_expsum=softmax_segm_expsum,
+    )
+
+    ref_output = ref_paged_attn(
+        query=query,
+        key_cache=key_cache,
+        value_cache=value_cache,
+        query_lens=query_lens,
+        kv_lens=kv_lens_list,
+        block_tables=block_tables,
+        scale=scale,
+        sliding_window=sliding_window,
+    )
+
+    torch.testing.assert_close(output.float(), ref_output.float(), atol=2e-2, rtol=2e-2)
+
+
+@torch.inference_mode()
+@pytest.mark.parametrize("mock_smem", [65536, 101376])
+@pytest.mark.parametrize("head_size,sliding_window", [(512, None), (256, 1024)])
+def test_gemma4_smem_fallback_paths(
+    mock_smem: int,
+    head_size: int,
+    sliding_window: int | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    torch.set_default_device(DEVICE_TYPE)
+    set_random_seed(42)
+    dtype = torch.bfloat16
+    block_size = 16
+    seq_lens = [(128, 128)]
+    num_heads = (8, 2)
+    query_lens = [x[0] for x in seq_lens]
+    kv_lens_list = [x[1] for x in seq_lens]
+    num_query_heads, num_kv_heads = num_heads
+    max_query_len = max(query_lens)
+    max_kv_len = max(kv_lens_list)
+    window_size = (sliding_window - 1, 0) if sliding_window is not None else (-1, -1)
+    scale = head_size**-0.5
+
+    query = torch.randn(sum(query_lens), num_query_heads, head_size, dtype=dtype)
+    num_blocks = (max_kv_len + block_size - 1) // block_size
+    key_cache = torch.randn(
+        num_blocks, block_size, num_kv_heads, head_size, dtype=dtype
+    )
+    value_cache = torch.randn_like(key_cache)
+    block_tables = torch.arange(
+        num_blocks, dtype=torch.int32, device=DEVICE_TYPE
+    ).unsqueeze(0)
+    cu_query_lens = torch.tensor([0, 128], dtype=torch.int32, device=DEVICE_TYPE)
+    kv_lens = torch.tensor([128], dtype=torch.int32, device=DEVICE_TYPE)
+    output = torch.empty_like(query)
+
+    monkeypatch.setattr(
+        "vllm.v1.attention.ops.triton_unified_attention._get_device_max_smem",
+        lambda dev_idx: mock_smem,
+    )
+
+    unified_attention(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        out=output,
+        cu_seqlens_q=cu_query_lens,
+        seqused_k=kv_lens,
+        max_seqlen_q=max_query_len,
+        max_seqlen_k=max_kv_len,
+        softmax_scale=scale,
+        causal=True,
+        window_size=window_size,
+        block_table=block_tables,
+        softcap=0,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
+    )
+
+    ref_output = ref_paged_attn(
+        query=query,
+        key_cache=key_cache,
+        value_cache=value_cache,
+        query_lens=query_lens,
+        kv_lens=kv_lens_list,
+        block_tables=block_tables,
+        scale=scale,
+        sliding_window=sliding_window,
+    )
+
+    torch.testing.assert_close(output.float(), ref_output.float(), atol=2e-2, rtol=2e-2)
