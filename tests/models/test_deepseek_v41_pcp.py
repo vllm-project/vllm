@@ -6,6 +6,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 
+from tests.utils import multi_gpu_test
 from vllm.forward_context import ForwardContext, override_forward_context
 from vllm.models.deepseek_v41 import attention as attention_module
 from vllm.models.deepseek_v41.decoder_replay_layers import (
@@ -13,8 +14,6 @@ from vllm.models.deepseek_v41.decoder_replay_layers import (
     ReplayBatch,
 )
 from vllm.models.deepseek_v41.nvidia import model as model_module
-
-from ..utils import multi_gpu_test
 
 
 def _pcp_decode_restore_worker(rank: int, port: int) -> None:
