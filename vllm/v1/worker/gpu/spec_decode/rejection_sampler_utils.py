@@ -172,7 +172,7 @@ def _compute_global_logprobs_and_logsumexp(
     target_log_prob = target_logit - target_lse
     if HAS_DRAFT_LOGITS:
         # draft_logits is stored pre-temperature, so apply scale first.
-        draft_logit = (
+        draft_logit = tl.div_rn(
             tl.load(
                 draft_logits_ptr
                 + tl.maximum(
@@ -183,8 +183,8 @@ def _compute_global_logprobs_and_logsumexp(
                 + token,
                 mask=mask,
                 other=float("-inf"),
-            ).to(tl.float32)
-            / temp
+            ).to(tl.float32),
+            temp,
         )
         draft_lse = _compute_global_logsumexp(
             draft_local_max_ptr,
@@ -304,7 +304,7 @@ def _compute_local_logits_stats_kernel(
         if HAS_DRAFT_LOGITS:
             # Get local draft max and summed exponentials. draft_logits is
             # stored pre-temperature, so apply scale first.
-            draft_logits = (
+            draft_logits = tl.div_rn(
                 tl.load(
                     draft_logits_ptr
                     + tl.maximum(
@@ -315,8 +315,8 @@ def _compute_local_logits_stats_kernel(
                     + block_offsets,
                     mask=mask,
                     other=float("-inf"),
-                ).to(tl.float32)
-                / temp
+                ).to(tl.float32),
+                temp,
             )
             draft_max, draft_sumexp = _compute_max_and_sumexp(draft_logits)
             tl.store(
@@ -929,7 +929,7 @@ def _resample_kernel(
         residual_logits = target_logits
     elif HAS_DRAFT_LOGITS:
         # draft_logits is stored pre-temperature, so apply scale first.
-        draft_logits = (
+        draft_logits = tl.div_rn(
             tl.load(
                 draft_logits_ptr
                 + tl.maximum(
@@ -940,8 +940,8 @@ def _resample_kernel(
                 + block,
                 mask=mask,
                 other=float("-inf"),
-            ).to(tl.float32)
-            / temp
+            ).to(tl.float32),
+            temp,
         )
         target_lse = tl.load(target_rejected_logsumexp_ptr + req_idx)
         draft_lse = tl.load(draft_rejected_logsumexp_ptr + req_idx)
