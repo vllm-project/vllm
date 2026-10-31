@@ -984,6 +984,7 @@ class MessageQueue:
     ):
         """Read from message queue with optional timeout (in seconds)"""
         if self._is_local_reader:
+            deadline = None if timeout is None else time.monotonic() + timeout
             # See ShmTensorArena.flush_releases for what this retires and why.
             if self.tensor_arena is not None:
                 self.tensor_arena.flush_releases()
@@ -1002,6 +1003,9 @@ class MessageQueue:
                         all_buffers.append(buffer if i == 0 else bytearray(buffer))
                     obj = pickle.loads(all_buffers[0], buffers=all_buffers[1:])
             if overflow:
+                timeout = (
+                    None if deadline is None else max(0.0, deadline - time.monotonic())
+                )
                 obj = MessageQueue.recv(self.local_socket, timeout)
         elif self._is_remote_reader:
             obj = MessageQueue.recv(self.remote_socket, timeout)
