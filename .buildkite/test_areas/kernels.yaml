@@ -726,6 +726,7 @@ steps:
   - vllm/config/attention.py
   - vllm/v1/attention/backends/registry.py
   - vllm/_custom_ops.py
+  - vllm/utils/torch_utils.py
   - csrc/fused_minimax_m3_qknorm_rope_kv_insert_kernel.cu
   - csrc/ops.h
   - csrc/torch_bindings.cpp

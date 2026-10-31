@@ -410,6 +410,84 @@ def test_nvfp4_ds_mla_rejects_decode_context_parallelism(dcp_size):
         VllmConfig(**kwargs)
 
 
+@pytest.mark.parametrize(
+    ("model", "cache_dtype", "skip_layers", "draft_dtype", "fp8_prefill", "error"),
+    [
+        ("dense", "nvfp4", False, None, True, None),
+        ("sparse", "nvfp4", False, None, False, "not supported with this MLA"),
+        ("dense", "nvfp4_4over6", False, None, False, "not supported with this MLA"),
+        ("hybrid", "nvfp4", False, None, False, None),
+        ("hybrid", "nvfp4", True, None, False, "skip-layers"),
+        ("dense", "nvfp4", False, "fp8", True, "FP8 prefill"),
+        ("dense", "fp8", False, "nvfp4", True, "FP8 prefill"),
+        ("dense", "nvfp4", False, "fp8", False, None),
+        ("dense", "nvfp4", False, "auto", True, None),
+    ],
+)
+def test_nvfp4_kv_cache_with_mla_config_checks(
+    tmp_path, model, cache_dtype, skip_layers, draft_dtype, fp8_prefill, error
+):
+    # Plain nvfp4 is the dense-MLA layout. Sparse MLA, skip layers on hybrid
+    # MLA, and an MLA draft that mixes nvfp4 and fp8 under FP8 prefill (whose
+    # context workspace is typed by the target's KV dtype) fail at startup.
+    from transformers import DeepseekV2Config
+
+    from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
+
+    mla = dict(
+        vocab_size=1024,
+        hidden_size=256,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        kv_lora_rank=512,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        v_head_dim=128,
+    )
+    hf_configs = {
+        "dense": DeepseekV2Config(architectures=["DeepseekV2ForCausalLM"], **mla),
+        "sparse": DeepseekV2Config(
+            architectures=["DeepseekV2ForCausalLM"], index_topk=2048, **mla
+        ),
+        "hybrid": KimiLinearConfig(
+            architectures=["KimiLinearForCausalLM"],
+            linear_attn_config={"kda_layers": [1], "full_attn_layers": [2]},
+            **mla,
+        ),
+    }
+    model_configs = {}
+    for name in {model, "dense"}:
+        _write_json(tmp_path / name / "config.json", hf_configs[name].to_dict())
+        model_configs[name] = ModelConfig(
+            model=str(tmp_path / name), tokenizer_mode="skip", max_model_len=2048
+        )
+
+    config = VllmConfig(
+        cache_config=CacheConfig(
+            cache_dtype=cache_dtype,
+            kv_cache_dtype_skip_layers=["0"] if skip_layers else [],
+        ),
+        attention_config=AttentionConfig(use_prefill_query_quantization=fp8_prefill),
+        device_config=DeviceConfig(device="cpu"),
+    )
+    config.model_config = model_configs[model]
+    if draft_dtype is not None:
+        config.speculative_config = SpeculativeConfig(
+            method="draft_model",
+            model=str(tmp_path / "dense"),
+            num_speculative_tokens=1,
+            kv_cache_dtype=draft_dtype,
+            target_model_config=config.model_config,
+            target_parallel_config=config.parallel_config,
+        )
+
+    if error is not None:
+        with pytest.raises(ValueError, match=error):
+            config.validate_nvfp4_kv_cache_with_mla()
+    else:
+        config.validate_nvfp4_kv_cache_with_mla()
+
+
 def test_per_request_spec_decode_metrics_requires_spec_decode():
     # The flag only makes sense with speculative decoding configured; enabling
     # it without --speculative-config should fail fast rather than silently

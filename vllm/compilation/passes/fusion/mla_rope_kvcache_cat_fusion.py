@@ -247,6 +247,10 @@ class MLARoPEKVCacheCatFusionPass(VllmFusionPatternMatcherPass):
         attn_layers = get_layers_from_vllm_config(config, MLAAttention)
 
         for _, layer in attn_layers.items():
+            if layer.kv_cache_dtype in ("nvfp4", "fp8_ds_mla", "nvfp4_ds_mla"):
+                # concat_and_cache_mla_rope_fused only writes the plain
+                # per-element layout, not these packed per-token formats.
+                continue
             for is_neox in [False, True]:
                 for use_deepseek_scaling in [False, True]:
                     if RotaryEmbedding.enabled():

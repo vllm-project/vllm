@@ -980,14 +980,18 @@ class Platform:
 
         # Compute attention page size for 1 token
         if model_config.use_mla:
-            attn_page_size_1_token = MLAAttentionSpec(
+            mla_spec = MLAAttentionSpec(
                 block_size=1,
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
                 head_size=model_config.get_head_size(),
                 dtype=kv_cache_dtype,
                 cache_dtype_str=cache_config.cache_dtype,
                 kv_quant_mode=kv_quant_mode,
-            ).page_size_bytes
+            )
+            with set_current_vllm_config(vllm_config):
+                attn_page_size_1_token = backend_cls.customize_spec(
+                    mla_spec
+                ).page_size_bytes
         elif (
             cache_config.cache_dtype.startswith("turboquant_")
             or cache_config.cache_dtype == "ultraquant_4bit"
