@@ -38,7 +38,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
-    _RegionPairs,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     PUSH_REG_NOTIF_PREFIX,
@@ -61,7 +60,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.outputs import KVConnectorOutput
 
-from .utils import create_request, expand_strided_descs, make_nixl_push_scheduler
+from .utils import (
+    create_request,
+    expand_strided_descs,
+    make_nixl_push_scheduler,
+    region_pairs_by_index,
+)
 
 # ----------------------------------------------------------------- #
 #  Helpers / fakes                                                   #
@@ -1060,7 +1064,7 @@ class TestPushWriterNotifs:
         w.dst_num_blocks = {w.engine_id: 8}
         w.dst_region_num_blocks[w.engine_id] = [8]
         w.dst_region_group_ids[w.engine_id] = [0]
-        w._dst_pairs[w.engine_id] = _RegionPairs.by_index(1)
+        w._dst_pairs[w.engine_id] = region_pairs_by_index(1)
         w.nixl_wrapper.make_prepped_xfer.return_value = 101
         w.nixl_wrapper.transfer.side_effect = RuntimeError("submit")
         if release_fails:
@@ -1534,7 +1538,7 @@ class TestPushWriterMlaReplication:
         }
         w._logical_to_kernel_block_ids = lambda block_ids, ratio: block_ids
         w.dst_region_group_ids[engine_id] = [0]
-        w._dst_pairs[engine_id] = _RegionPairs.by_index(1)
+        w._dst_pairs[engine_id] = region_pairs_by_index(1)
         w.dst_xfer_side_handles = {engine_id: {r: 1000 + r for r in d_ranks}}
         w.src_xfer_handles_by_block_size = {16: 2000}
         w._remote_agents = {engine_id: {(0, r): f"agent-{r}" for r in d_ranks}}
@@ -1617,7 +1621,7 @@ class TestPushWriterMlaReplication:
         w._logical_to_kernel_block_ids = lambda block_ids, ratio: block_ids
         w.region_group_ids = [0, 1, 2, 3]
         w.dst_region_group_ids[engine_id] = [0, 1, 2, 3]
-        w._dst_pairs[engine_id] = _RegionPairs.by_index(4, groups=[0, 1, 2, 3])
+        w._dst_pairs[engine_id] = region_pairs_by_index(4, groups=[0, 1, 2, 3])
         w.dst_xfer_side_handles = {engine_id: {0: 1000, 1: 1001}}
         w.src_xfer_handles_by_tp_ratio = {(-2, 16): [2000, 2001]}
 
@@ -1703,7 +1707,7 @@ class TestPushPrefixCaching:
             w.engine_id: [10_000],
         }
         w.dst_region_group_ids = {engine_id: [0], w.engine_id: [0]}
-        w._dst_pairs = {engine_id: _RegionPairs.by_index(1)}
+        w._dst_pairs = {engine_id: region_pairs_by_index(1)}
         w.dst_xfer_side_handles = {engine_id: {0: 5000}}
         w.src_xfer_handles_by_block_size = {16: 2000}
 
@@ -1887,14 +1891,6 @@ def test_pairing_expands_packed_rows_alongside_nonpacked_regions():
     assert metadata.block_strides == [256, 128]
 
 
-def test_pairing_fails_loud_when_remote_omits_layers():
-    # Pairing regions by index here would silently transfer stale KV, so a
-    # peer that does not advertise its layers must fail the handshake instead.
-    worker = _layer_routing_worker([["a"]], {"a": 0})
-    with pytest.raises(RuntimeError, match="did not advertise the layers"):
-        worker._pair_regions(_agent_metadata([], [0xA000], [128]))
-
-
 def test_pairing_keeps_pooled_regions_once():
     worker = _layer_routing_worker(
         [["a", "a.swa"], ["b"]], {"a": 0, "a.swa": 1, "b": 0}
@@ -2039,27 +2035,30 @@ def test_layer_descriptors_pair_layers_across_asymmetric_pp_split(
     ]
 
 
-def test_pairing_rejects_a_peer_missing_local_layers():
-    worker = _layer_routing_worker([["l0"], ["l1"]], {"l0": 0, "l1": 1})
-    metadata = _agent_metadata([["l0"]], [0xA000], [128])
+@pytest.mark.parametrize(
+    ("local_layers", "pp_size", "remote_layers", "error", "match"),
+    [
+        # Pairing by index would silently transfer stale KV, so a peer that
+        # does not advertise its layers must fail the handshake instead.
+        ([["a"]], 2, [], RuntimeError, "did not advertise the layers"),
+        ([["a"], ["b"]], 2, [["a"]], RuntimeError, "does not hold the KV layers"),
+        # Only a PP stage may hold a slice of the peer's layers.
+        ([["a"]], 1, [["a"], ["b"]], RuntimeError, "has no counterpart here"),
+        ([["a"]], 2, [["a"], ["a"]], NotImplementedError, "spans 2 NIXL regions"),
+    ],
+)
+def test_pairing_rejects_unpairable_peers(
+    local_layers, pp_size, remote_layers, error, match
+):
+    worker = _layer_routing_worker(local_layers, {"a": 0, "b": 0}, pp_size=pp_size)
+    num_regions = max(len(remote_layers), 1)
+    metadata = _agent_metadata(
+        remote_layers,
+        [0xA000 + 0x1000 * i for i in range(num_regions)],
+        [128] * num_regions,
+    )
 
-    with pytest.raises(RuntimeError, match="does not hold the KV layers"):
-        worker._pair_regions(metadata)
-
-
-def test_pairing_rejects_extra_peer_layers_without_pp():
-    worker = _layer_routing_worker([["l0"]], {"l0": 0}, pp_size=1)
-    metadata = _agent_metadata([["l0"], ["l1"]], [0xA000, 0xB000], [128, 128])
-
-    with pytest.raises(RuntimeError, match="has no counterpart here"):
-        worker._pair_regions(metadata)
-
-
-def test_pairing_rejects_a_layer_split_differently():
-    worker = _layer_routing_worker([["a"]], {"a": 0})
-    metadata = _agent_metadata([["a"], ["a"]], [0xA000, 0xB000], [128, 128])
-
-    with pytest.raises(NotImplementedError, match="spans 2 NIXL regions"):
+    with pytest.raises(error, match=match):
         worker._pair_regions(metadata)
 
 

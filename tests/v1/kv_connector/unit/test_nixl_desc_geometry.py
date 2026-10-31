@@ -11,6 +11,7 @@ incoming transfer can overwrite a co-resident request's KV or mamba state
 mid-decode (silent corruption of an unrelated request).
 """
 
+import contextlib
 import math
 from collections import defaultdict
 from threading import Event, Lock
@@ -702,6 +703,20 @@ def _make_mla_hybrid_worker(
     return worker
 
 
+def _own_region_pairs(worker) -> bw._RegionPairs:
+    """How a worker pairs its regions with an identical peer's."""
+    metadata = msgspec.msgpack.decode(
+        worker.xfer_handshake_metadata.agent_metadata_bytes, type=NixlAgentMetadata
+    )
+    return worker._pair_regions(metadata)
+
+
+def _own_pairs(worker) -> tuple[list[int], list[int]]:
+    """The (regions, groups) a worker reads when paired with an identical peer."""
+    pairs = _own_region_pairs(worker)
+    return pairs.local, pairs.group
+
+
 @pytest.mark.cpu_test
 @pytest.mark.parametrize("kda_only_tensor", [False, True])
 def test_mla_hybrid_groups_read_only_their_own_regions(kda_only_tensor):
@@ -722,6 +737,7 @@ def test_mla_hybrid_groups_read_only_their_own_regions(kda_only_tensor):
         dst_num_blocks=4,
         block_size_ratio=None,
         physical_blocks_per_logical=1,
+        pairs=_own_pairs(worker),
     )
 
     # 4 blocks per region; each SSM layer has 3 conv + 1 temporal regions.
@@ -778,6 +794,44 @@ def test_nixl_keeps_packed_sparse_mla_manager_block():
 
     assert worker.block_size == 1152
     assert worker._physical_blocks_per_logical_kv_block == 1
+
+
+@pytest.mark.parametrize(
+    "layout,kernel_block_size,raises",
+    [
+        (KVCacheLayout.LBHNC, 384, False),
+        (KVCacheLayout.LBHNC, 64, True),
+        (KVCacheLayout.BLHNC, 64, False),
+    ],
+)
+def test_nixl_compressed_kernel_split(layout, kernel_block_size, raises):
+    """NIXL keeps compressed pages whole or rejects a layer-outer split."""
+    from vllm.config import set_current_vllm_config
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+
+    spec = MLAAttentionSpec(
+        384, num_kv_heads=1, head_size=128, dtype=torch.uint8, tokens_per_state=8
+    )
+    kv_cache_config = KVCacheConfig(2, [], [KVCacheGroupSpec(["summary"], spec)])
+    vllm_config = create_vllm_config(block_size=384)
+    vllm_config.cache_config.kv_cache_layout = layout.name
+    vllm_config.kv_transfer_config.kv_buffer_device = "cpu"
+    backend = MagicMock()
+    backend.get_name.return_value = "TEST"
+    ctx = pytest.raises(NotImplementedError) if raises else contextlib.nullcontext()
+    with (
+        patch.object(bw, "NixlWrapper", _RecordingNixl),
+        patch.object(bw, "get_tensor_model_parallel_rank", return_value=0),
+        patch.object(bw, "get_tensor_model_parallel_world_size", return_value=1),
+        patch.object(bw, "get_current_attn_backends", return_value=[backend]),
+        patch.object(bw, "select_common_block_size", return_value=kernel_block_size),
+        set_current_vllm_config(vllm_config),
+        ctx,
+    ):
+        worker = NixlConnectorWorker(vllm_config, "local-engine", kv_cache_config)
+        worker.shutdown()
 
 
 def _make_remote_meta(
@@ -1502,6 +1556,7 @@ def test_csa_linear_scratch_descs_follow_the_pages_they_overlay():
         dst_num_blocks=2,
         block_size_ratio=None,
         physical_blocks_per_logical=1,
+        pairs=_own_pairs(worker),
     )
     # Scratch group (block 0) now maps to regions 0 and 1 -> descs 0 and 2,
     # where the compressed-page placement gave 4 and 6.
@@ -1517,6 +1572,7 @@ def test_csa_linear_selects_compressed_sparse_compressor_state_and_mamba_regions
         dst_num_blocks=2,
         block_size_ratio=None,
         physical_blocks_per_logical=1,
+        pairs=_own_pairs(worker),
     )
     assert desc_ids.tolist() == [
         1,
@@ -1537,6 +1593,7 @@ def test_csa_linear_selects_compressed_sparse_compressor_state_and_mamba_regions
         dst_num_blocks=2,
         block_size_ratio=None,
         physical_blocks_per_logical=1,
+        pairs=_own_pairs(worker),
     )
     assert mamba_only.tolist() == [9, 11, 13, 15, 17]
 
@@ -1587,6 +1644,9 @@ def test_csa_linear_remote_ple_is_copied_whole():
     )
 
     worker = _make_csa_linear_ple_worker()
+    # Every region pairs, so the peer's SSM and PLE regions keep their indices.
+    pairs = _own_region_pairs(worker)
+    assert pairs.remote_regions == list(range(worker.num_regions))
     metadata = NixlAgentMetadata(
         engine_id="remote",
         agent_metadata=b"agent",
@@ -1611,6 +1671,7 @@ def test_csa_linear_remote_ple_is_copied_whole():
         metadata,
         tp_ratio=-2,
         transfer_info=SimpleNamespace(remote_physical_blocks_per_logical=1),
+        pairs=pairs,
     )
     assert descriptors.shape == (5, 5)
     # PLE run: 2 whole 256-byte pages at 0x10000, 0x10100.
@@ -1622,6 +1683,7 @@ def test_csa_linear_remote_ple_is_copied_whole():
             metadata,
             tp_ratio=-2,
             transfer_info=SimpleNamespace(remote_physical_blocks_per_logical=1),
+            pairs=pairs,
         )
 
 

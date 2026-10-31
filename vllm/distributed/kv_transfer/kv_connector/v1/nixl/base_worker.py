@@ -28,6 +28,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
     EngineTransferInfo,
     TransferTopology,
+    check_compressed_kernel_split,
     get_current_attn_backends,
     get_current_attn_backends_and_specs,
     kv_postprocess_blksize_and_layout_on_receive,
@@ -149,27 +150,9 @@ class _RegionPairs:
     # Whether every paired layer is in the same cache group on both sides.
     groups_match: bool = True
     # Hybrid SSM models: the peer's regions holding SSM state, in the order its
-    # SSM descriptors are built, and its PLE region. None means the local ones.
+    # SSM descriptors are built, and its PLE region (set by _pair_ssm_regions).
     remote_ssm_regions: list[int] | None = None
     remote_ple_region: int | None = None
-
-    @classmethod
-    def by_index(
-        cls,
-        num_regions: int,
-        groups: Sequence[int] | None = None,
-        groups_match: bool = True,
-    ) -> "_RegionPairs":
-        """Region ``i`` of the peer pairs with local region ``i``."""
-        regions = list(range(num_regions))
-        return cls(
-            remote=regions,
-            local=regions,
-            group=list(groups) if groups is not None else [0] * num_regions,
-            remote_regions=regions,
-            partner=regions,
-            groups_match=groups_match,
-        )
 
 
 @dataclass
@@ -203,17 +186,15 @@ class NixlBaseConnectorWorker:
         dst_num_blocks: int,
         block_size_ratio: float | None,
         physical_blocks_per_logical: int,
+        pairs: tuple[Sequence[int], Sequence[int]],
         region_num_blocks: list[int] | None = None,
-        pairs: tuple[Sequence[int], Sequence[int]] | None = None,
         ssm_regions: Sequence[int] | None = None,
     ) -> np.ndarray:
         """Compute NIXL descriptor IDs for given block IDs.
 
         ``pairs`` is ``(regions, keys)``: region ``regions[k]`` is read at
         ``block_ids[keys[k]]``, a cache group's blocks (a region's, for
-        region-mapped transfers). Without it, every region is read at the one
-        cache group's blocks, or, for hybrid SSM models, at the blocks of each
-        group holding a layer in it.
+        region-mapped transfers).
 
         ``ssm_regions`` lists this side's SSM regions in the order its SSM
         descriptors are built; it defaults to the local ones.
@@ -247,12 +228,7 @@ class NixlBaseConnectorWorker:
 
         # All-attention fast path.
         if num_ssm_regions == 0:
-            if pairs is None:
-                assert len(block_ids) == 1, "Reads of several cache groups need pairs"
-                regions: Sequence[int] = range(len(region_num_blocks))
-                keys: Sequence[int] = [0] * len(region_num_blocks)
-            else:
-                regions, keys = pairs
+            regions, keys = pairs
             offsets = region_offsets[np.asarray(regions, dtype=np.int64)]
             keys_array = np.asarray(keys, dtype=np.int64)
             desc_ids = []
@@ -282,32 +258,6 @@ class NixlBaseConnectorWorker:
         # num_fa_descs offset must be computed per-engine since P and D can
         # have different num_blocks (and thus different FA desc counts).
         num_ssm_descs = len(ssm_regions) * ssm_regions_per_layer
-        if pairs is None:
-            # Read every local region at the blocks of each group holding a
-            # layer in it. Hybrid regions are keyed by base address, so some
-            # hold only another group's layers (e.g. KDA-only or scratch-only
-            # tensors); reading them for this group would re-read aliased bytes.
-            default_regions: list[int] = []
-            default_groups: list[int] = []
-            for i in range(len(block_ids)):
-                group_regions = (
-                    self._group_region_indices[i]
-                    if self._group_region_indices
-                    else None
-                )
-                if i == self._ple_group_index:
-                    group_regions = [-1]
-                elif _is_ssm_spec(self._group_spec_types[i]):
-                    group_regions = [
-                        r
-                        for r in ssm_regions
-                        if group_regions is None or r in group_regions
-                    ]
-                elif group_regions is None:
-                    group_regions = list(range(self.num_regions))
-                default_regions.extend(group_regions)
-                default_groups.extend([i] * len(group_regions))
-            pairs = (default_regions, default_groups)
         pair_regions = np.asarray(pairs[0], dtype=np.int64)
         pair_keys = np.asarray(pairs[1], dtype=np.int64)
         sub_descs = np.arange(ssm_regions_per_layer, dtype=np.int64)
@@ -1214,6 +1164,9 @@ class NixlBaseConnectorWorker:
             self.vllm_config, self.kv_cache_config, self.attn_backends
         )
         kernel_block_size = select_common_block_size(self.block_size, backends, specs)
+        check_compressed_kernel_split(
+            self.vllm_config, self.kv_cache_config, kernel_block_size
+        )
         # Number of blocks not accounting for kernel block mismatches
         self._logical_num_blocks = self.num_blocks
         if self.block_size != kernel_block_size:
@@ -1905,8 +1858,7 @@ class NixlBaseConnectorWorker:
                 # Overlaid groups can page the same bytes with different page
                 # sizes (DSv4.1 SWA, indexer and compressor caches), so views at
                 # one address share a region only if their block_len matches.
-                # A packed PP producer keeps one region per layer, so aliases at
-                # one address (a layer and its SWA view) stay distinct.
+                # A packed PP producer keeps one region per layer.
                 region_key = (base_addr, block_len)
                 if region_key in seen_region_keys and not split_packed_rows:
                     region_index = seen_region_keys.index(region_key)
@@ -2200,12 +2152,12 @@ class NixlBaseConnectorWorker:
         nixl_agent_meta: NixlAgentMetadata,
         tp_ratio: int,
         transfer_info: EngineTransferInfo,
-        pairs: _RegionPairs | None = None,
+        pairs: _RegionPairs,
     ) -> np.ndarray:
         """Build remote desc regions (conv sub-projections + ssm) per layer.
         For hetero-TP, each D rank reads only its sub-projection slice from
-        the P rank. The remote SSM and PLE regions come from ``pairs``, or are
-        the local ones without it. Returns Nx5 uint64 strided descs."""
+        the P rank. The remote SSM and PLE regions come from ``pairs``.
+        Returns Nx5 uint64 strided descs."""
         assert nixl_agent_meta.kv_caches_base_addr, (
             "Remote KV cache base addresses must not be empty."
         )
@@ -2229,14 +2181,9 @@ class NixlBaseConnectorWorker:
         strided_descs: list[tuple[int, int, int, int, int]] = []
         # NOTE (ZhanqiuHu): use per-layer block_lens[i], not [0], in case
         # block lengths vary across layers (e.g. MLA).
-        region_indices: Sequence[int] = self._ssm_region_indices or range(
-            len(nixl_agent_meta.kv_caches_base_addr)
-        )
-        ple_region = self._ple_region_index
-        if pairs is not None and pairs.remote_ssm_regions is not None:
-            region_indices = pairs.remote_ssm_regions
-            ple_region = pairs.remote_ple_region
-        for i in region_indices:
+        assert pairs.remote_ssm_regions is not None, "SSM regions were not paired"
+        ple_region = pairs.remote_ple_region
+        for i in pairs.remote_ssm_regions:
             base_addr = nixl_agent_meta.kv_caches_base_addr[i]
             block_stride = (
                 nixl_agent_meta.block_strides[i] * remote_physical_per_logical
@@ -2979,8 +2926,7 @@ class NixlBaseConnectorWorker:
         )
         if (
             (self.dcp_size > 1 or remote_dcp_size > 1)
-            and self.region_group_ids
-            and self.region_group_ids != self.dst_region_group_ids[remote_engine_id]
+            and not self._dst_pairs[remote_engine_id].groups_match
             and (
                 self._physical_blocks_per_logical_kv_block != 1
                 or remote_physical_per_logical != 1
