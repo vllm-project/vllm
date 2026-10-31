@@ -16,6 +16,7 @@ from typing import Any
 import torch
 
 from vllm.distributed.parallel_state import GroupCoordinator, Handle
+from vllm.utils.math_utils import round_up
 
 _ALIGNMENT = 256
 
@@ -26,7 +27,7 @@ def _layout(tensors: dict[str, Any]) -> tuple[dict[str, int], int]:
     end = 0
     for key, value in tensors.items():
         if isinstance(value, torch.Tensor):
-            offsets[key] = -(-end // _ALIGNMENT) * _ALIGNMENT
+            offsets[key] = round_up(end, _ALIGNMENT)
             end = offsets[key] + value.nbytes
     return offsets, end
 
