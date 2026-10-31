@@ -18,9 +18,9 @@ import pytest
 import torch
 
 from vllm.model_executor.model_loader.reload import (
-    finalize_layerwise_reload,
-    initialize_layerwise_reload,
+    finish_reload,
     record_metadata_for_reloading,
+    start_reload,
 )
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.models.mimo_v2 import (
@@ -634,19 +634,21 @@ def test_weight_and_scale_load_on_their_own(
 
 @requires_gpu
 @pytest.mark.parametrize("geometry,tp_size", [("ga", 2), ("ga", 8)])
-def test_reload_equals_cold_start(model_config, geometry, tp_size):
+@pytest.mark.parametrize("mode", ["direct", "layerwise"])
+def test_reload_equals_cold_start(monkeypatch, model_config, geometry, tp_size, mode):
     """A reload with weight and scale in separate calls ends with the bytes a
     cold start on the new checkpoint gives, at the same addresses."""
+    monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
     tp_rank = tp_size - 1
     model = _cold_start(
         geometry, tp_rank, tp_size, _fused_qkv_checkpoint(geometry, 1), model_config
     )
     ptrs = {n: p.data_ptr() for n, p in model.named_parameters()}
     new = _fused_qkv_checkpoint(geometry, 2)
-    initialize_layerwise_reload(model)
+    start_reload(model)
     for item in new.items():
         model.load_weights([item])
-    finalize_layerwise_reload(model, model_config)
+    finish_reload(model, model_config, torch.device("cuda"))
     _assert_same_params(
         model, _cold_start(geometry, tp_rank, tp_size, new, model_config)
     )

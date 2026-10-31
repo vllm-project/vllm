@@ -4,8 +4,8 @@
 
 The weight and its scale load independently (any order, any call, no pairing in
 the model's loader); BF16 rows load as is; post-load processing dequantizes in
-the weight's own storage, so cold start and layerwise reload both end with the
-same bytes at the startup address."""
+the weight's own storage, so cold start, direct reload and layerwise reload all
+end with the same bytes at the startup address."""
 
 import pytest
 import torch
@@ -29,6 +29,10 @@ from vllm.model_executor.model_loader.reload import (
     finalize_layerwise_reload,
     initialize_layerwise_reload,
     record_metadata_for_reloading,
+)
+from vllm.model_executor.model_loader.reload.direct import (
+    begin_direct_reload,
+    finish_direct_reload,
 )
 from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
@@ -229,6 +233,27 @@ def test_pre_processed_weights_are_kept(model_config):
     _assert_runtime(model, runtime)
 
 
+@pytest.mark.parametrize("update", ["fp8", "mixed", "bf16", "left_out"])
+def test_direct_reload_equals_cold_start(monkeypatch, model_config, update):
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
+    old = _checkpoint(5)
+    model = _cold_start(old, model_config)
+    ptrs = _ptrs(model)
+    new = {
+        "fp8": _checkpoint(6),
+        "mixed": _checkpoint(6, bf16_shard=1),
+        "bf16": _bf16(_checkpoint(6)),
+        # dequantized rows are runtime bytes: a reload that skips o keeps it
+        "left_out": {k: v for k, v in _checkpoint(6).items() if k.startswith("qkv_a")},
+    }[update]
+    begin_direct_reload(model)
+    for item in new.items():
+        model.load_weights([item])
+    finish_direct_reload(model, model_config, _DEVICE)
+    _assert_runtime(model, _expected({**old, **new}))
+    assert _ptrs(model) == ptrs
+
+
 @pytest.mark.parametrize("update", ["fp8", "mixed", "bf16"])
 def test_layerwise_reload_equals_cold_start(model_config, update):
     """Every element is loaded, BF16 rows' scales included, so each layer is
@@ -422,6 +447,28 @@ def test_indexer_bf16_rows_of_odd_width(model_config):
     assert torch.all(model.wk_weights_proj.weight_scale_inv == 1)
     process_weights_after_loading(model, model_config, _DEVICE)
     torch.testing.assert_close(model.wk_weights_proj.weight, rows, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("update", ["fp8", "bf16", "left_out"])
+def test_indexer_direct_reload_equals_cold_start(monkeypatch, model_config, update):
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
+    old, old_expected = _indexer_checkpoint(24, "mx")
+    model = _indexer_cold_start(old, model_config)
+    ptrs = _ptrs(model)
+    new, expected = _indexer_checkpoint(25, "mx")
+    if update == "bf16":
+        new = {
+            "wk.weight": expected[:_WK].clone(),
+            "weights_proj.weight": expected[_WK:],
+        }
+    elif update == "left_out":
+        new, expected = {}, old_expected
+    begin_direct_reload(model)
+    for item in new.items():
+        model.load_weights([item])
+    finish_direct_reload(model, model_config, _DEVICE)
+    torch.testing.assert_close(model.wk_weights_proj.weight, expected, rtol=0, atol=0)
+    assert _ptrs(model) == ptrs
 
 
 @pytest.mark.parametrize("layout", ["block", "mx"])
