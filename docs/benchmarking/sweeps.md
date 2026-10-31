@@ -243,6 +243,11 @@ vllm bench sweep plot $EXPERIMENT_DIR \
 !!! tip
     You can use `--dry-run` to preview the figures to be plotted.
 
+!!! important
+    Figure groups must produce distinct filenames after sanitization. For example, labels `case/a` and `case_a` map to the same filename.
+    Plotting rejects such collisions before creating figures, including with `--dry-run`, rather than overwriting one group's output.
+    Groups with no matching rows after `--filter-by` do not cause a collision.
+
 ### Pareto chart
 
 `vllm bench sweep plot_pareto` helps pick configurations that balance per-user and per-GPU throughput.
