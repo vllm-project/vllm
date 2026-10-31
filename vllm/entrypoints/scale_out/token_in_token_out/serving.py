@@ -306,6 +306,11 @@ class ServingTokens(GenerateBaseServing):
             # Deserialize full tensor data and optional metadata-only data.
             # Metadata-only items are valid when ec_transfer_params is set.
             mm_kwargs = mm_kwargs_from_features(features)
+            if any(item is None for items in mm_kwargs.values() for item in items):
+                return self.create_error_response(
+                    "Multimodal features require payload data or metadata. "
+                    "Render with mm_payload='tensors' to include the payload."
+                )
             if error := self._validate_mm_cache_handles(mm_kwargs, features.mm_hashes):
                 return error
 

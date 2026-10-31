@@ -109,6 +109,9 @@ The server returns a 400 for:
 - `output_mode: "derender"` with `stream: true`.
 - `output_mode: "derender"` without `parse_context` on a server with a tool or reasoning parser or with a named `tool_choice` in `parse_context` that matches none of its `tools`. This is checked before generating.
 - An unsupported `output_mode` value.
+- A multimodal feature with neither payload data nor metadata. Render with
+  `mm_payload: "tensors"` to include the payload. Metadata-only inputs require
+  `ec_transfer_params` and the model's position metadata.
 
 For using `output_mode` with separate prefill and decode pools, see [Disaggregated Prefilling](../../features/disagg_prefill.md#generate-api-output-modes).
 

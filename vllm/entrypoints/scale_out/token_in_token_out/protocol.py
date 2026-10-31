@@ -141,8 +141,9 @@ class MultiModalFeatures(BaseModel):
 
     Each value is a list parallel to `mm_hashes[modality]`.  A `str`
     entry is a base64-encoded `MultiModalKwargsItem`; `None` means
-    the item should be resolved from cache.  The entire field is
-    `None` for metadata-only (cache-hit) responses.
+    no full payload is serialized for the item. Generation requires
+    either payload data or `mm_metadata` for each item. The entire field
+    is `None` for layout-only or metadata-only responses.
     """
 
     mm_metadata: dict[str, list[str | None]] | None = None
