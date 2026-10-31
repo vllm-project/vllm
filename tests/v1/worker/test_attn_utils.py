@@ -56,17 +56,18 @@ from vllm.v1.worker.utils import (
 
 
 @pytest.mark.parametrize(
-    ("enabled", "block_size", "main_sizes", "indexer_sizes", "expected"),
+    ("enabled", "block_size", "main_sizes", "indexer_sizes", "expected", "indexer"),
     [
-        (True, 256, [64], [64], 64),
-        (True, 64, [32, 64], [16, 32], 32),
-        (True, 64, [MultipleOf(16)], [32], 32),
-        (True, 64, [64], [32], None),
-        (False, 256, [64], [64], 256),
+        (True, 256, [64], [64], 64, 64),
+        (True, 64, [32, 64], [16, 32], 32, 32),
+        (True, 64, [MultipleOf(16)], [32], 32, 32),
+        (True, 64, [64], [32], None, None),
+        (False, 256, [64], [64], 256, 256),
+        (True, 384, [MultipleOf(32)], [128, 256], 128, 256),
     ],
 )
 def test_get_kv_cache_spec_resolves_hisparse_block_size(
-    monkeypatch, enabled, block_size, main_sizes, indexer_sizes, expected
+    monkeypatch, enabled, block_size, main_sizes, indexer_sizes, expected, indexer
 ):
     """Resolve shared MLA geometry before planning; leave other specs alone."""
     specs = {
@@ -109,7 +110,8 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
         return
 
     resolved = attn_utils.get_kv_cache_spec(config)
-    assert resolved["main"].block_size == resolved["indexer"].block_size == expected
+    assert resolved["main"].block_size == expected
+    assert resolved["indexer"].block_size == indexer
     dense_backend = layers["dense"].get_attn_backend()
     assert resolved["dense"] == customize_attention_spec(dense_backend, specs["dense"])
     assert all(spec.block_size == block_size for spec in specs.values())
@@ -886,7 +888,9 @@ _VLLM_CONFIG = SimpleNamespace(
 )
 
 
-def _packed_group(tokens_per_state, row_bytes, supported_sizes):
+def _packed_group(
+    tokens_per_state, row_bytes, supported_sizes, block_stride_alignment=None
+):
     spec = MLAAttentionSpec(
         block_size=1024,
         num_kv_heads=1,
@@ -894,6 +898,7 @@ def _packed_group(tokens_per_state, row_bytes, supported_sizes):
         dtype=torch.uint8,
         state_content_bytes=row_bytes,
         tokens_per_state=tokens_per_state,
+        block_stride_alignment=block_stride_alignment,
     )
     backend = SimpleNamespace(
         get_builder_cls=lambda: _TableBuilder,
@@ -920,6 +925,52 @@ def test_packed_compressed_group_gets_kernel_block_table():
     table = group.build_metadata(metadata)
     assert table.tolist() == [[0, 1, 2, 3, 10, 11, 12, 13]]
     assert torch.equal(pages[table[0, 4:], 0].flatten(0, 1), manager[2, 0])
+
+
+def test_packed_group_kernel_blocks_with_unaligned_block_stride():
+    """Packed blocks whose spec declares a byte block stride need not be whole
+    kernel pages apart: kernel blocks are numbered in units dividing both the
+    block and page strides."""
+    row, stride_rows = 132, 5 * 64 + 16
+    group = _packed_group(4, row, [128, 256], block_stride_alignment=16)
+    group.create_metadata_builders(_VLLM_CONFIG, "cpu", kernel_block_size=1024)
+
+    backing = torch.arange(3 * stride_rows).repeat_interleave(row)
+    manager = backing.view(3, 1, stride_rows, row)[:, :, :256]
+    pages = map_kv_caches_to_kernel_blocks({"layer.0": manager}, [group])["layer.0"]
+    metadata = create_common_attn_metadata(BatchSpec([2048], [1]), 1024, "cpu")
+    metadata.block_table_tensor = torch.tensor([[0, 2]], dtype=torch.int32)
+    table = group.build_metadata(metadata)
+    assert table.tolist() == [[0, 4, 8, 12, 42, 46, 50, 54]]
+    assert torch.equal(pages[table[0, 4:], 0].flatten(0, 1), manager[2, 0])
+
+
+@pytest.mark.parametrize("block_stride_alignment", [None, MultipleOf(256), 256])
+def test_packed_group_rejects_unaligned_block_stride(block_stride_alignment):
+    """Blocks not whole kernel pages apart are rejected unless the spec declares
+    a byte block stride the kernel page units satisfy."""
+    row, stride_rows = 132, 5 * 64 + 16
+    group = _packed_group(4, row, [128, 256], block_stride_alignment)
+    group.create_metadata_builders(_VLLM_CONFIG, "cpu", kernel_block_size=1024)
+    manager = torch.zeros(3, 1, stride_rows, row, dtype=torch.uint8)[:, :, :256]
+    with pytest.raises(ValueError, match="cannot be split"):
+        map_kv_caches_to_kernel_blocks({"layer.0": manager}, [group])
+
+
+def test_packed_group_rejects_kernel_block_ids_past_int32():
+    """Kernel block ids of a large packed cache must fit the int32 table."""
+    row, stride_rows = 132, 5 * 64 + 16
+    group = _packed_group(4, row, [128, 256], block_stride_alignment=16)
+    group.create_metadata_builders(_VLLM_CONFIG, "cpu", kernel_block_size=1024)
+    num_blocks = 2**31 // 21 + 2
+    manager = torch.empty_strided(
+        (num_blocks, 1, 256, row),
+        (stride_rows * row, 256 * row, row, 1),
+        dtype=torch.uint8,
+        device="meta",
+    )
+    with pytest.raises(ValueError, match="int32"):
+        map_kv_caches_to_kernel_blocks({"layer.0": manager}, [group])
 
 
 def test_split_group_maps_manager_block_table():
