@@ -168,6 +168,14 @@ class RotaryEmbedding(RotaryEmbeddingBase):
         is_neox_style: bool,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """A PyTorch-native implementation of forward()."""
+        # M-RoPE positions can arrive as (3, N) -- e.g. from the MTP drafter
+        # of a multimodal model -- where 3 is the number of rope dimensions,
+        # not tokens. Flattening first inflated num_tokens to 3N and produced
+        # an invalid query view (query.view(3N, -1, head_size)). For text
+        # tokens all rope dimensions carry identical positions, so take the
+        # last row; full multimodal input needs a dedicated path.
+        if positions.dim() == 2:
+            positions = positions[-1]
         positions = positions.flatten()
         num_tokens = positions.shape[0]
         cos_sin = cos_sin_cache.index_select(0, positions)
