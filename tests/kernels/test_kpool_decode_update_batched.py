@@ -34,12 +34,14 @@ from vllm.utils.deep_gemm import mqa_logits_use_mx_scales
 if current_platform.is_rocm():
     from vllm.models.glm5next.amd.ops.kpool_compress import (
         kpool_compress_and_write_cache,
+        kpool_compress_tokens_and_write_cache,
         kpool_decode_update_and_maybe_write_cache_batched,
         kpool_seed_tail_cache,
     )
 else:
     from vllm.models.glm5next.nvidia.ops.kpool_compress import (
         kpool_compress_and_write_cache,
+        kpool_compress_tokens_and_write_cache,
         kpool_decode_update_and_maybe_write_cache_batched,
         kpool_seed_tail_cache,
     )
@@ -668,3 +670,126 @@ def test_batched_matches_reference_fuzz(seed):
     # Random inputs can land the pooled value on a bf16 rounding midpoint,
     # where the kernel and the CPU reference may round apart by one fp8 step.
     _assert_eq(r_ref, r_kern, k_byte_tol=1)
+
+
+def _flat_batch(pool_size, req_lens, seed=0):
+    """Flat multi-request batch; request ``r`` starts at pos 0 and its ``j``-th
+    token completes pool ``j // pool_size`` (slot ``r * PAGE_SIZE + pool``) iff
+    ``j % pool_size == pool_size - 1``."""
+    torch.manual_seed(seed)
+    n = sum(req_lens)
+    k = torch.randn(n, HEAD_DIM, dtype=torch.bfloat16, device="cuda")
+    score = torch.randn(n, HEAD_DIM, dtype=torch.bfloat16, device="cuda")
+    ape = torch.randn(pool_size, HEAD_DIM, dtype=torch.float32, device="cuda")
+    slot_map = torch.full((n,), -1, dtype=torch.int32, device="cuda")
+    start = 0
+    for r, length in enumerate(req_lens):
+        j = torch.arange(length, device="cuda")
+        done = j[j % pool_size == pool_size - 1]
+        slot_map[start + done] = (r * PAGE_SIZE + done // pool_size).to(torch.int32)
+        start += length
+    return k, score, ape, slot_map
+
+
+def _gathered_pools_reference(kv, k, score, ape, slot_map, pool_size):
+    """Pooled writer on explicitly gathered ``[n_pools, pool_size, D]`` rows."""
+    pos = torch.arange(slot_map.shape[0], device="cuda")
+    rows = pos[(slot_map >= 0) & (pos >= pool_size - 1)]
+    offs = torch.arange(pool_size, device="cuda")
+    idx = (rows - (pool_size - 1))[:, None] + offs[None, :]
+    kpool_compress_and_write_cache(
+        kv,
+        k[idx],
+        score[idx],
+        ape,
+        slot_map[rows].to(torch.int64),
+        pool_size=pool_size,
+        head_dim=HEAD_DIM,
+        round_scale=ROUND_SCALE,
+    )
+
+
+@pytest.mark.parametrize("pool_size", [4, 16])
+def test_compress_tokens_matches_gathered_pools(pool_size):
+    """The flat-token writer equals the pooled writer on gathered rows, with a
+    request boundary that is not pool-aligned within the batch, and skips a
+    slot on a row too early to own a full pool."""
+    k, score, ape, slot_map = _flat_batch(pool_size, [23, 41])
+    slot_map[pool_size - 2] = 3 * PAGE_SIZE
+    kv_ref = torch.zeros(4, PAGE_SIZE, HEAD_DIM + 4, dtype=torch.uint8, device="cuda")
+    kv_new = torch.zeros_like(kv_ref)
+    _gathered_pools_reference(kv_ref, k, score, ape, slot_map, pool_size)
+    kpool_compress_tokens_and_write_cache(
+        kv_new, k, score, ape, slot_map, pool_size, HEAD_DIM, round_scale=ROUND_SCALE
+    )
+    assert kv_ref.any()
+    assert torch.equal(kv_new, kv_ref)
+    assert not kv_new[3].any()
+
+
+def test_compress_tokens_short_batch_writes_nothing():
+    """A batch shorter than one pool cannot complete a pool."""
+    pool_size = 4
+    k, score, ape, slot_map = _flat_batch(pool_size, [pool_size - 1])
+    slot_map[-1] = 0
+    kv = torch.zeros(1, PAGE_SIZE, HEAD_DIM + 4, dtype=torch.uint8, device="cuda")
+    kpool_compress_tokens_and_write_cache(
+        kv, k, score, ape, slot_map, pool_size, HEAD_DIM, round_scale=ROUND_SCALE
+    )
+    assert not kv.any()
+
+
+@pytest.mark.parametrize("case", ["strided_features", "unused_slots"])
+def test_pooled_compress_preserves_input_contract(case):
+    """Strided inputs and unused cache slots must not affect returned vectors."""
+    key, score, ape, _ = _flat_batch(
+        POOL_SIZE, [POOL_SIZE], seed=31 if case == "strided_features" else 32
+    )
+    key, score = key.unsqueeze(0), score.unsqueeze(0)
+    loc = torch.zeros(1, device="cuda", dtype=torch.int64)
+    kv = torch.full((1, PAGE_SIZE, HEAD_DIM + 4), 173, device="cuda", dtype=torch.uint8)
+    expected = kpool_compress_and_write_cache(
+        kv, key, score, ape, loc, POOL_SIZE, return_compressed=True, write_cache=False
+    )
+    if case == "strided_features":
+        key = key.repeat_interleave(2, dim=-1)[..., ::2]
+        score = score.repeat_interleave(2, dim=-1)[..., ::2]
+    else:
+        loc.fill_(-1)
+    actual = kpool_compress_and_write_cache(
+        kv, key, score, ape, loc, POOL_SIZE, return_compressed=True, write_cache=False
+    )
+    for value, reference in zip(actual, expected):
+        torch.testing.assert_close(value.float(), reference.float(), rtol=0, atol=0)
+    assert torch.all(kv == 173)
+
+
+@pytest.mark.parametrize("pool_size", [4, 16])
+@pytest.mark.parametrize("writer", ["prefill", "decode"])
+def test_pooling_ignores_leading_negative_infinity_scores(pool_size, writer):
+    """Zero-probability slots must not poison a later finite softmax sum."""
+    torch.manual_seed(29)
+    key = torch.randn(2, pool_size, HEAD_DIM, device="cuda", dtype=torch.bfloat16)
+    score = torch.randn_like(key)
+    ape = torch.randn(pool_size, HEAD_DIM, device="cuda", dtype=torch.float32)
+    results = []
+    for masked_score in (-1e4, -float("inf")):
+        score[:, :2] = masked_score
+        kv = torch.zeros(2, PAGE_SIZE, HEAD_DIM + 4, device="cuda", dtype=torch.uint8)
+        loc = torch.arange(2, device="cuda", dtype=torch.int64) * PAGE_SIZE
+        if writer == "prefill":
+            kpool_compress_and_write_cache(kv, key, score, ape, loc, pool_size)
+        else:
+            pos = torch.arange(pool_size, device="cuda", dtype=torch.int32)
+            pos = pos.expand(2, -1).contiguous()
+            tail_slot = pos + torch.arange(2, device="cuda")[:, None] * pool_size
+            slots = torch.full_like(pos, -1)
+            slots[:, -1] = loc
+            tail = torch.zeros(
+                2, 2, pool_size, HEAD_DIM, device="cuda", dtype=torch.bfloat16
+            )
+            kpool_decode_update_and_maybe_write_cache_batched(
+                kv, tail, tail_slot, key, score, ape, slots, pos, pool_size
+            )
+        results.append(kv)
+    assert torch.equal(*results)
