@@ -23,11 +23,26 @@ from vllm.tool_parsers.abstract_tool_parser import (
 from vllm.tool_parsers.utils import (
     UnexpectedAstError,
     compute_tool_delta,
+    escape_ctrl_chars_in_strings,
     handle_single_tool,
     make_valid_python,
 )
 
 logger = init_logger(__name__)
+
+
+def _parse_newline_separated_calls(text: str) -> list[ast.expr | None]:
+    """Parse newline-separated calls, one per top-level expression."""
+    # Newlines inside strings are escaped first, so stripping indentation
+    # only affects code between calls.
+    lines = escape_ctrl_chars_in_strings(text).split("\n")
+    module = ast.parse("\n".join(line.lstrip() for line in lines))
+    calls: list[ast.expr | None] = []
+    for stmt in module.body:
+        value = stmt.value if isinstance(stmt, ast.Expr) else None
+        # Calls separated by commas on one line parse as a tuple.
+        calls.extend(value.elts if isinstance(value, ast.Tuple) else [value])
+    return calls
 
 
 class Olmo3PythonicToolParser(ToolParser):
@@ -47,7 +62,7 @@ class Olmo3PythonicToolParser(ToolParser):
     # Llama3.2 models more reliable.
 
     TOOL_CALL_REGEX = re.compile(
-        r"\[([a-zA-Z]+\w*\(([a-zA-Z]+\w*=.*,\s*)*([a-zA-Z]+\w*=.*\s)?\),\s*)*([a-zA-Z]+\w*\(([a-zA-Z]+\w*=.*,\s*)*([a-zA-Z]+\w*=.*\s*)?\)\s*)+\]",
+        r"\[([a-zA-Z]+\w*\(\s*([a-zA-Z]+\w*=.*,\s*)*([a-zA-Z]+\w*=.*\s)?\),\s*)*([a-zA-Z]+\w*\(\s*([a-zA-Z]+\w*=.*,\s*)*([a-zA-Z]+\w*=.*\s*)?\)\s*)+\]",
         re.DOTALL,
     )
 
@@ -78,17 +93,13 @@ class Olmo3PythonicToolParser(ToolParser):
         )
         if match:
             model_output = match.group(1).strip()
-        # Make the newline separated function calls into a list.
-        model_output = ", ".join(
-            [line.strip() for line in model_output.splitlines() if line.strip()]
-        )
-        model_output = f"[{model_output}]"
 
         is_tool_call_pattern = False
         try:
             is_tool_call_pattern = (
                 self.TOOL_CALL_REGEX.match(
-                    model_output, timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+                    f"[{model_output}]",
+                    timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS,
                 )
                 is not None
             )
@@ -104,16 +115,13 @@ class Olmo3PythonicToolParser(ToolParser):
             )
 
         try:
-            module = ast.parse(model_output)
-            parsed = getattr(module.body[0], "value", None)
-            if isinstance(parsed, ast.List) and all(
-                isinstance(e, ast.Call) for e in parsed.elts
-            ):
+            calls = _parse_newline_separated_calls(model_output)
+            if calls and all(isinstance(e, ast.Call) for e in calls):
                 return ExtractedToolCallInformation(
                     tools_called=True,
                     tool_calls=[
                         handle_single_tool(e)  # type: ignore
-                        for e in parsed.elts
+                        for e in calls
                     ],
                     content=None,
                 )
@@ -148,27 +156,21 @@ class Olmo3PythonicToolParser(ToolParser):
             if current_text.endswith("</function_calls>"):
                 current_text = current_text[: -len("</function_calls>")]
 
-            valid_and_added_text = make_valid_python(current_text)
+            valid_and_added_text = make_valid_python(
+                escape_ctrl_chars_in_strings(current_text)
+            )
             if valid_and_added_text is None:
                 return None
             valid_text, added_text = valid_and_added_text
 
-            # Make the newline separated function calls into a list.
-            valid_text = ", ".join(
-                [line.strip() for line in valid_text.splitlines() if line.strip()]
-            )
-            valid_text = f"[{valid_text}]"
-            module = ast.parse(valid_text)
-            parsed = getattr(module.body[0], "value", None)
-            if not isinstance(parsed, ast.List) or not all(
-                isinstance(e, ast.Call) for e in parsed.elts
-            ):
+            calls = _parse_newline_separated_calls(valid_text)
+            if not calls or not all(isinstance(e, ast.Call) for e in calls):
                 raise UnexpectedAstError(
                     "Tool output must be a sequence of newline-separated calls"
                 )
             tool_calls = [
                 handle_single_tool(e)  # type: ignore
-                for e in parsed.elts
+                for e in calls
             ]
 
             tool_deltas = []
