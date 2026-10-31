@@ -116,6 +116,8 @@ class StructuredOutputsParams:
     """CAUTION: Should only be set by Processor._validate_structured_output"""
     _backend_was_auto: bool = field(default=False, init=False)
     """CAUTION: Should only be set by Processor._validate_structured_output"""
+    _prefill: str | None = field(default=None, init=False, repr=False)
+    """由聊天前端传入的结构化输出前缀。"""
 
     def __post_init__(self):
         """Validate that some fields are mutually exclusive."""
@@ -1248,6 +1250,14 @@ class SamplingParams(
             )
 
         backend = structured_outputs_config.backend
+        if (
+            self.structured_outputs._prefill is not None
+            and backend == "lm-format-enforcer"
+        ):
+            raise VLLMValidationError(
+                "structured_output_prefill supports the xgrammar, guidance, "
+                "and outlines backends."
+            )
         if _backend := self.structured_outputs._backend:
             # Request-level backend selection is not supported.
             # The values may differ if `params` is reused and was set

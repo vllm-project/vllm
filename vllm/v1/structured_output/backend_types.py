@@ -3,8 +3,13 @@
 
 import enum
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+from transformers import PythonBackend, TokenizersBackend
+
+from vllm.exceptions import VLLMValidationError
 
 if TYPE_CHECKING:
     import torch
@@ -28,8 +33,30 @@ class StructuredOutputOptions(enum.Enum):
 StructuredOutputKey = tuple[StructuredOutputOptions, str]
 
 
+def decode_prefill_tokens(tokenizer: "TokenizerLike", tokens: list[int]) -> str:
+    if isinstance(tokenizer, (PythonBackend, TokenizersBackend)):
+        return tokenizer.decode(
+            tokens, skip_special_tokens=False, clean_up_tokenization_spaces=False
+        )
+    return tokenizer.decode(tokens, skip_special_tokens=False)
+
+
 class StructuredOutputGrammar(ABC):
     """Request-level backend for structured output requests."""
+
+    def accept_prefix(self, prefix: str, tokenizer: "TokenizerLike") -> bool:
+        """消费可以无损表示为 token 的已有文本。"""
+        tokens = tokenizer.encode(prefix, add_special_tokens=False)
+        if decode_prefill_tokens(tokenizer, tokens) != prefix or any(
+            t in tokenizer.all_special_ids for t in tokens
+        ):
+            raise VLLMValidationError(
+                "The structured output prefill cannot be represented exactly "
+                "by this backend's tokenizer."
+            )
+        if len(self.validate_tokens(tokens)) != len(tokens):
+            return False
+        return self.accept_tokens("prefill", tokens)
 
     @abstractmethod
     def accept_tokens(self, request_id: str, tokens: list[int]) -> bool:
@@ -103,6 +130,22 @@ class StructuredOutputBackend(ABC):
     tokenizer: TokenizerLike
     vocab_size: int
 
+    def compile_grammar_with_prefix(
+        self,
+        request_type: StructuredOutputOptions,
+        grammar_spec: str,
+        stop_token_ids: set[int] | None = None,
+        prefix: str | None = None,
+    ) -> StructuredOutputGrammar:
+        grammar = self.compile_grammar(request_type, grammar_spec, stop_token_ids)
+        if prefix and not grammar.accept_prefix(prefix, self.tokenizer):
+            raise VLLMValidationError(
+                "The assistant prefill is not a valid prefix of the structured "
+                "output constraint.",
+                parameter="structured_output_prefill",
+            )
+        return grammar
+
     @abstractmethod
     def compile_grammar(
         self,
@@ -138,3 +181,26 @@ class StructuredOutputBackend(ABC):
     @abstractmethod
     def destroy(self):
         """Backend-specific cleanup."""
+
+
+def create_structured_output_backend(
+    config: "VllmConfig", tokenizer: "TokenizerLike", name: str
+) -> StructuredOutputBackend:
+    from vllm.v1.structured_output.backend_guidance import GuidanceBackend
+    from vllm.v1.structured_output.backend_lm_format_enforcer import (
+        LMFormatEnforcerBackend,
+    )
+    from vllm.v1.structured_output.backend_outlines import OutlinesBackend
+    from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
+
+    backends: dict[
+        str, Callable[[VllmConfig, TokenizerLike, int], StructuredOutputBackend]
+    ] = {
+        "xgrammar": XgrammarBackend,
+        "guidance": GuidanceBackend,
+        "outlines": OutlinesBackend,
+        "lm-format-enforcer": LMFormatEnforcerBackend,
+    }
+    if name not in backends:
+        raise ValueError(f"Unsupported structured output backend: {name}")
+    return backends[name](config, tokenizer, config.model_config.get_vocab_size())

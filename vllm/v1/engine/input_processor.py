@@ -34,6 +34,12 @@ from vllm.utils.diffusion import validate_diffusion_sampling_params
 from vllm.utils.jsontree import json_iter_leaves
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.kv_hints import KvHintsEnvelope
+from vllm.v1.structured_output.backend_types import (
+    StructuredOutputBackend,
+    create_structured_output_backend,
+    decode_prefill_tokens,
+)
+from vllm.v1.structured_output.request import get_structured_output_key
 
 logger = init_logger(__name__)
 
@@ -55,6 +61,7 @@ class InputProcessor:
         self.structured_outputs_config = vllm_config.structured_outputs_config
         self.observability_config = vllm_config.observability_config
         self.diffusion_config = vllm_config.diffusion_config
+        self._prefill_backends: dict[str, StructuredOutputBackend] = {}
         # Load the custom logits processor classes once; the returned callable
         # runs their validate_params hooks per request at admission.
         self.validate_logits_processors_params = (
@@ -89,6 +96,33 @@ class InputProcessor:
 
     def get_tokenizer(self) -> TokenizerLike:
         return self.renderer.get_tokenizer()
+
+    def _validate_structured_output_prefill(
+        self, params: SamplingParams, prompt_token_ids: list[int] | None
+    ) -> None:
+        outputs = params.structured_outputs
+        if outputs is None or outputs._prefill is None:
+            return
+        tokenizer = self.get_tokenizer()
+        if prompt_token_ids is None or not decode_prefill_tokens(
+            tokenizer, prompt_token_ids
+        ).endswith(outputs._prefill):
+            raise VLLMValidationError(
+                "The assistant prefill must match the end of the rendered prompt. "
+                "Check chat template transformations and prompt truncation.",
+                parameter="structured_output_prefill",
+            )
+        name = outputs._backend
+        assert name is not None
+        if name not in self._prefill_backends:
+            self._prefill_backends[name] = create_structured_output_backend(
+                self.vllm_config, tokenizer, name
+            )
+        self._prefill_backends[name].compile_grammar_with_prefix(
+            *get_structured_output_key(outputs),
+            stop_token_ids=params.all_stop_token_ids,
+            prefix=outputs._prefill,
+        )
 
     def _build_logits_processors_params_validator(
         self,
@@ -508,6 +542,7 @@ class InputProcessor:
             )
             if self.tokenizer is not None:
                 sampling_params.update_from_tokenizer(self.tokenizer)
+            self._validate_structured_output_prefill(sampling_params, prompt_token_ids)
             if sampling_params.trace_decode_token_ids:
                 self._normalize_trace_replay_params(sampling_params, prompt_len)
         else:
