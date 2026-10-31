@@ -3,6 +3,7 @@
 
 import time
 from dataclasses import dataclass, field
+from functools import partial
 
 import numpy as np
 import prometheus_client
@@ -26,9 +27,11 @@ class SpecDecodingStats:
     num_spec_tokens: int
     num_drafts: int = 0
     num_draft_tokens: int = 0
+    num_verified_tokens: int = 0
     num_accepted_tokens: int = 0
     num_accepted_tokens_per_pos: list[int] = field(default_factory=list)
     num_draft_tokens_per_pos: list[int] = field(default_factory=list)
+    num_verified_tokens_per_pos: list[int] = field(default_factory=list)
 
     @classmethod
     def new(cls, num_spec_tokens: int) -> "SpecDecodingStats":
@@ -36,12 +39,21 @@ class SpecDecodingStats:
             num_spec_tokens=num_spec_tokens,
             num_accepted_tokens_per_pos=[0] * num_spec_tokens,
             num_draft_tokens_per_pos=[0] * num_spec_tokens,
+            num_verified_tokens_per_pos=[0] * num_spec_tokens,
         )
 
-    def observe_draft(self, num_draft_tokens: int, num_accepted_tokens: int):
+    def observe_draft_stats_per_req(
+        self,
+        num_draft_tokens: int,
+        num_accepted_tokens: int,
+        num_verified_tokens: int,
+    ):
         self.num_drafts += 1
         self.num_draft_tokens += num_draft_tokens
         self.num_accepted_tokens += num_accepted_tokens
+        self.num_verified_tokens += num_verified_tokens
+        for i in range(num_verified_tokens):
+            self.num_verified_tokens_per_pos[i] += 1
         assert num_accepted_tokens <= self.num_spec_tokens
         for i in range(num_accepted_tokens):
             self.num_accepted_tokens_per_pos[i] += 1
@@ -67,6 +79,7 @@ class SpecDecodingLogging:
     def reset(self):
         self.num_drafts: list[int] = []
         self.num_draft_tokens: list[int] = []
+        self.num_verified_tokens: list[int] = []
         self.num_accepted_tokens: list[int] = []
         self.accepted_tokens_per_pos_lists: list[list[int]] = []
         self.last_log_time = time.monotonic()
@@ -74,6 +87,7 @@ class SpecDecodingLogging:
     def observe(self, spec_decoding_stats: SpecDecodingStats):
         self.num_drafts.append(spec_decoding_stats.num_drafts)
         self.num_draft_tokens.append(spec_decoding_stats.num_draft_tokens)
+        self.num_verified_tokens.append(spec_decoding_stats.num_verified_tokens)
         self.num_accepted_tokens.append(spec_decoding_stats.num_accepted_tokens)
         self.accepted_tokens_per_pos_lists.append(
             spec_decoding_stats.num_accepted_tokens_per_pos
@@ -84,6 +98,7 @@ class SpecDecodingLogging:
             return
         num_drafts = np.sum(self.num_drafts)
         num_draft_tokens = np.sum(self.num_draft_tokens)
+        num_verified_tokens = np.sum(self.num_verified_tokens)
         num_accepted_tokens = np.sum(self.num_accepted_tokens)
         draft_throughput = 0
         accepted_throughput = 0
@@ -124,6 +139,7 @@ class SpecDecodingLogging:
             "Drafted throughput: %.2f tokens/s, "
             "Accepted: %d tokens, "
             "Drafted: %d tokens, "
+            "Verified: %d tokens, "
             "Per-position acceptance rate: %s, "
             "Avg Draft acceptance rate: %.1f%%",
             mean_acceptance_length,
@@ -131,6 +147,7 @@ class SpecDecodingLogging:
             draft_throughput,
             num_accepted_tokens,
             num_draft_tokens,
+            num_verified_tokens,
             rates_str,
             draft_acceptance_rate,
         )
@@ -203,6 +220,7 @@ class SpecDecodingProm:
         labelnames: list[str],
         per_engine_labelvalues: dict[int, list[object]],
         is_diffusion: bool = False,
+        registry: prometheus_client.CollectorRegistry | None = None,
     ):
         # Diffusion (dLLM) models reuse the spec-decode counters but expose them
         # under diffusion-native names; the per-position acceptance vector does
@@ -211,6 +229,9 @@ class SpecDecodingProm:
         self.spec_decoding_enabled = speculative_config is not None or is_diffusion
         if not self.spec_decoding_enabled:
             return
+
+        if registry is not None:
+            self._counter_cls = partial(self._counter_cls, registry=registry)
 
         if is_diffusion:
             counter_specs = [
@@ -229,6 +250,10 @@ class SpecDecodingProm:
                 ("vllm:spec_decode_num_drafts", "Number of spec decoding drafts."),
                 ("vllm:spec_decode_num_draft_tokens", "Number of draft tokens."),
                 ("vllm:spec_decode_num_accepted_tokens", "Number of accepted tokens."),
+                (
+                    "vllm:spec_decode_num_verified_tokens",
+                    "Number of draft tokens verified by the target.",
+                ),
             ]
 
         counters = [
@@ -243,25 +268,40 @@ class SpecDecodingProm:
         self.counter_spec_decode_num_drafts = counters[0]
         self.counter_spec_decode_num_draft_tokens = counters[1]
         self.counter_spec_decode_num_accepted_tokens = counters[2]
+        self.counter_spec_decode_num_verified_tokens = (
+            None if is_diffusion else counters[3]
+        )
 
         self.counter_spec_decode_num_accepted_tokens_per_pos: dict[
+            int, list[prometheus_client.Counter]
+        ] = {}
+        self.counter_spec_decode_num_verified_tokens_per_pos: dict[
             int, list[prometheus_client.Counter]
         ] = {}
         if not is_diffusion:
             assert speculative_config is not None
             num_spec_tokens = speculative_config.num_speculative_tokens
             pos_labelnames = labelnames + ["position"]
-            base_counter = self._counter_cls(
+            accepted_counter = self._counter_cls(
                 name="vllm:spec_decode_num_accepted_tokens_per_pos",
                 documentation="Accepted tokens per draft position.",
                 labelnames=pos_labelnames,
             )
-            self.counter_spec_decode_num_accepted_tokens_per_pos = {
-                idx: [
-                    base_counter.labels(*lv, str(pos)) for pos in range(num_spec_tokens)
-                ]
-                for idx, lv in per_engine_labelvalues.items()
-            }
+            verified_counter = self._counter_cls(
+                name="vllm:spec_decode_num_verified_tokens_per_pos",
+                documentation="Verified draft tokens per draft position.",
+                labelnames=pos_labelnames,
+            )
+            self.counter_spec_decode_num_accepted_tokens_per_pos = (
+                create_metric_per_engine_and_pos(
+                    accepted_counter, per_engine_labelvalues, num_spec_tokens
+                )
+            )
+            self.counter_spec_decode_num_verified_tokens_per_pos = (
+                create_metric_per_engine_and_pos(
+                    verified_counter, per_engine_labelvalues, num_spec_tokens
+                )
+            )
 
     def observe(self, spec_decoding_stats: SpecDecodingStats, engine_idx: int = 0):
         if not self.spec_decoding_enabled:
@@ -275,7 +315,27 @@ class SpecDecodingProm:
         self.counter_spec_decode_num_accepted_tokens[engine_idx].inc(
             spec_decoding_stats.num_accepted_tokens
         )
+        if self.counter_spec_decode_num_verified_tokens is not None:
+            self.counter_spec_decode_num_verified_tokens[engine_idx].inc(
+                spec_decoding_stats.num_verified_tokens
+            )
+        for pos, counter in enumerate(
+            self.counter_spec_decode_num_verified_tokens_per_pos.get(engine_idx, [])
+        ):
+            counter.inc(spec_decoding_stats.num_verified_tokens_per_pos[pos])
         for pos, counter in enumerate(
             self.counter_spec_decode_num_accepted_tokens_per_pos.get(engine_idx, [])
         ):
             counter.inc(spec_decoding_stats.num_accepted_tokens_per_pos[pos])
+
+
+def create_metric_per_engine_and_pos(
+    metric: prometheus_client.Counter,
+    per_engine_labelvalues: dict[int, list[object]],
+    num_positions: int,
+) -> dict[int, list[prometheus_client.Counter]]:
+    """Create a labeled metric child for each engine index and position."""
+    return {
+        idx: [metric.labels(*lv, str(pos)) for pos in range(num_positions)]
+        for idx, lv in per_engine_labelvalues.items()
+    }

@@ -322,6 +322,7 @@ fn print_spec_decode_section(stats: &SpecDecodeStats) {
     println!("{:<40} {:<10}", "Drafts:", stats.num_drafts);
     println!("{:<40} {:<10}", "Draft tokens:", stats.draft_tokens);
     println!("{:<40} {:<10}", "Accepted tokens:", stats.accepted_tokens);
+    println!("{:<40} {:<10}", "Verified tokens:", stats.verified_tokens);
     if !stats.per_position_acceptance_rates.is_empty() {
         println!("Per-position acceptance (%):");
         for (i, rate) in stats.per_position_acceptance_rates.iter().enumerate() {

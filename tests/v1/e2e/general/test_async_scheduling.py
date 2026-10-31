@@ -382,6 +382,7 @@ def run_test(
                 acceptance_length = _get_acceptance_length(
                     metrics_before, metrics_after
                 )
+                _check_draft_counts(metrics_before, metrics_after)
                 acceptance_lengths.append(acceptance_length)
                 print(f"ACCEPTANCE RATE {acceptance_length}")
 
@@ -444,6 +445,13 @@ def _get_acceptance_length(before: list[Metric], after: list[Metric]) -> float:
     draft = _get_count(before, after, "vllm:spec_decode_num_drafts")
     accept = _get_count(before, after, "vllm:spec_decode_num_accepted_tokens")
     return 1 + accept / draft if draft > 0 else 1.0
+
+
+def _check_draft_counts(before: list[Metric], after: list[Metric]) -> None:
+    drafted = _get_count(before, after, "vllm:spec_decode_num_draft_tokens")
+    verified = _get_count(before, after, "vllm:spec_decode_num_verified_tokens")
+    accepted = _get_count(before, after, "vllm:spec_decode_num_accepted_tokens")
+    assert drafted >= verified >= accepted, (drafted, verified, accepted)
 
 
 def _get_count(before: list[Metric], after: list[Metric], name: str) -> int:

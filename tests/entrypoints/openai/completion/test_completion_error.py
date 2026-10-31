@@ -256,8 +256,8 @@ def test_completion_per_request_metrics_suppressed_for_multiple_prompts():
 def _spec_decode_metrics() -> RequestSpecDecodeMetrics:
     # Two verify steps: accept 3 drafts, then 1 -> histogram [0, 1, 0, 1].
     m = RequestSpecDecodeMetrics.new(num_spec_tokens=3)
-    m.observe(num_draft_tokens=3, num_accepted=3)
-    m.observe(num_draft_tokens=3, num_accepted=1)
+    m.observe(num_draft_tokens=3, num_accepted=3, num_verified_tokens=3)
+    m.observe(num_draft_tokens=3, num_accepted=1, num_verified_tokens=3)
     return m
 
 

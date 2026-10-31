@@ -364,11 +364,15 @@ class RequestSpecDecodeMetrics:
             also the histogram's upper bound.
         histogram: Dense counts indexed by accepted draft tokens ``j``
             (length ``num_spec_tokens + 1``).
-        num_draft_tokens: Total proposed draft tokens, after the
-            grammar-invalidated (``num_invalid_spec_tokens``) adjustment.
+        num_draft_tokens: Total proposed draft tokens, including
+            grammar-invalid ones.
         per_step_accepted: Ordered accepted-draft count per verify step
             (``detailed`` only; empty otherwise).
         per_step_drafted: Ordered proposed-draft count per verify step
+            (``detailed`` only; empty otherwise).
+        num_verified_tokens: Total draft tokens the target model ran a forward
+            pass on.
+        per_step_verified: Ordered verified-draft count per verify step
             (``detailed`` only; empty otherwise).
     """
 
@@ -377,6 +381,8 @@ class RequestSpecDecodeMetrics:
     num_draft_tokens: int = 0
     per_step_accepted: list[int] = field(default_factory=list)
     per_step_drafted: list[int] = field(default_factory=list)
+    num_verified_tokens: int = 0
+    per_step_verified: list[int] = field(default_factory=list)
 
     @classmethod
     def new(cls, num_spec_tokens: int) -> "RequestSpecDecodeMetrics":
@@ -386,13 +392,19 @@ class RequestSpecDecodeMetrics:
         )
 
     def observe(
-        self, num_draft_tokens: int, num_accepted: int, detailed: bool = False
+        self,
+        num_draft_tokens: int,
+        num_accepted: int,
+        num_verified_tokens: int,
+        detailed: bool = False,
     ) -> None:
         self.histogram[num_accepted] += 1
         self.num_draft_tokens += num_draft_tokens
+        self.num_verified_tokens += num_verified_tokens
         if detailed:
             self.per_step_accepted.append(num_accepted)
             self.per_step_drafted.append(num_draft_tokens)
+            self.per_step_verified.append(num_verified_tokens)
 
     def to_dict(self) -> dict[str, Any]:
         """Payload matching ``SpeculativeDecodingMetrics`` for the response.
@@ -415,10 +427,12 @@ class RequestSpecDecodeMetrics:
             "num_accepted_draft_tokens": num_accepted,
             "num_draft_tokens": self.num_draft_tokens,
             "num_spec_tokens": self.num_spec_tokens,
+            "num_verified_tokens": self.num_verified_tokens,
         }
         if self.per_step_accepted:
             result["per_step_accepted"] = self.per_step_accepted
             result["per_step_drafted"] = self.per_step_drafted
+            result["per_step_verified"] = self.per_step_verified
         return result
 
 

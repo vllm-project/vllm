@@ -106,8 +106,10 @@ pub struct SpeculativeDecodingMetrics {
     pub num_accepted_draft_tokens: u64,
     pub num_draft_tokens: u64,
     pub num_spec_tokens: u64,
+    pub num_verified_tokens: u64,
     pub per_step_accepted: Option<Vec<u64>>,
     pub per_step_drafted: Option<Vec<u64>>,
+    pub per_step_verified: Option<Vec<u64>>,
 }
 
 impl From<RequestSpecDecodeMetrics> for SpeculativeDecodingMetrics {
@@ -135,8 +137,10 @@ impl From<RequestSpecDecodeMetrics> for SpeculativeDecodingMetrics {
             num_accepted_draft_tokens,
             num_draft_tokens: raw.num_draft_tokens,
             num_spec_tokens: raw.num_spec_tokens,
+            num_verified_tokens: raw.num_verified_tokens,
             per_step_accepted: detailed.then_some(raw.per_step_accepted),
             per_step_drafted: detailed.then_some(raw.per_step_drafted),
+            per_step_verified: detailed.then_some(raw.per_step_verified),
         }
     }
 }
@@ -152,8 +156,10 @@ pub struct StreamingSpeculativeDecodingMetrics {
     pub num_accepted_draft_tokens: u64,
     pub num_draft_tokens: u64,
     pub num_spec_tokens: u64,
+    pub num_verified_tokens: u64,
     pub per_step_accepted: Option<Vec<u64>>,
     pub per_step_drafted: Option<Vec<u64>>,
+    pub per_step_verified: Option<Vec<u64>>,
 }
 
 impl From<SpeculativeDecodingMetrics> for StreamingSpeculativeDecodingMetrics {
@@ -166,8 +172,10 @@ impl From<SpeculativeDecodingMetrics> for StreamingSpeculativeDecodingMetrics {
             num_accepted_draft_tokens: metrics.num_accepted_draft_tokens,
             num_draft_tokens: metrics.num_draft_tokens,
             num_spec_tokens: metrics.num_spec_tokens,
+            num_verified_tokens: metrics.num_verified_tokens,
             per_step_accepted: metrics.per_step_accepted,
             per_step_drafted: metrics.per_step_drafted,
+            per_step_verified: metrics.per_step_verified,
         }
     }
 }
