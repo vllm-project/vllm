@@ -4,7 +4,7 @@
 import pytest
 import torch
 
-from vllm import _custom_ops as ops
+from vllm import _cpu_ops as cpu_ops
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.worker.cpu.input_batch import (
@@ -94,7 +94,7 @@ def test_get_prompt_logprobs_token_ids_cpu() -> None:
             10, dtype=torch.int32
         )
 
-    token_ids = ops.get_prompt_logprobs_token_ids_cpu(
+    token_ids = cpu_ops.get_prompt_logprobs_token_ids_cpu(
         num_tokens=6,
         query_start_loc=torch.tensor([0, 3, 5, 6], dtype=torch.int32),
         idx_mapping=torch.tensor([4, 1, 3], dtype=torch.int64),
@@ -143,7 +143,7 @@ def test_prepare_mrope_positions_cpu() -> None:
                 req_state_idx * 1000 + dim * 100 + torch.arange(8, dtype=torch.int32)
             )
 
-    ops.prepare_mrope_positions_cpu(
+    cpu_ops.prepare_mrope_positions_cpu(
         positions,
         prefill_positions,
         prefill_delta=torch.tensor([0, 10, 0, 20, 30], dtype=torch.int32),

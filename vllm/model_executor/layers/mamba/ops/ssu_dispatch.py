@@ -419,9 +419,9 @@ class CPUSSUBackend(MambaSSUBackend):
 
     def __init__(self, mamba_config: MambaConfig):
         super().__init__(mamba_config)
-        from vllm import _custom_ops as ops
+        from vllm import _cpu_ops as cpu_ops
 
-        self._cpp_kernel = ops.selective_state_update_cpu
+        self._cpp_kernel = cpu_ops.selective_state_update_cpu
         logger.info("CPUSSUBackend: using compiled C++ selective_state_update kernel.")
 
     @property

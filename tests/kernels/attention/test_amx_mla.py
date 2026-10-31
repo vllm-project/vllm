@@ -18,7 +18,7 @@ if not torch.cpu._is_amx_tile_supported():
 
 torch.cpu._init_amx()
 
-from vllm import _custom_ops as ops  # noqa: E402
+from vllm import _cpu_ops as cpu_ops  # noqa: E402
 from vllm.utils.torch_utils import set_random_seed  # noqa: E402
 from vllm.v1.attention.backends.mla.amx_mla import (  # noqa: E402
     AMXMLAImpl,
@@ -79,12 +79,12 @@ def test_bmm_cpu_matches_torch_bmm():
     ref = torch.bmm(mat1.float(), mat2.float().transpose(1, 2)).to(DTYPE)
 
     out = torch.empty(n, b, l, dtype=DTYPE)
-    ops.bmm_cpu(out, mat1, mat2, False, None)
+    cpu_ops.bmm_cpu(out, mat1, mat2, False, None)
     torch.testing.assert_close(out, ref, atol=ATOL, rtol=RTOL)
 
     packed = torch.ops._C.convert_weight_packed(mat2.contiguous())
     out_vnni = torch.empty(n, b, l, dtype=DTYPE)
-    ops.bmm_cpu(out_vnni, mat1, packed, True, None)
+    cpu_ops.bmm_cpu(out_vnni, mat1, packed, True, None)
     torch.testing.assert_close(out_vnni, ref, atol=ATOL, rtol=RTOL)
 
 
@@ -98,7 +98,7 @@ def test_concat_and_cache_mla_round_trip():
     k_pe = torch.randn(num_tokens, QK_ROPE_HEAD_DIM, dtype=DTYPE)
     slot_mapping = torch.randperm(num_blocks * block_size)[:num_tokens].to(torch.int64)
 
-    ops.amx_mla_concat_and_cache(kv_c_normed, k_pe, kv_cache, slot_mapping)
+    cpu_ops.amx_mla_concat_and_cache(kv_c_normed, k_pe, kv_cache, slot_mapping)
 
     flat = _flatten_cache(kv_cache)
     read_back = flat[slot_mapping]
@@ -135,7 +135,7 @@ def test_decode_attention_cpu_matches_reference(seq_lens):
     attn_logits = torch.zeros(
         num_seqs, num_heads, 4, KV_LORA_RANK + 1, dtype=torch.float32
     )
-    ops.cpu_mla_decode(
+    cpu_ops.cpu_mla_decode(
         q,
         kv_cache_flat,
         v_buffer,
@@ -211,7 +211,7 @@ def test_extend_attention_cpu_matches_reference(prefix_lens, extend_lens):
     v_buffer = kv_cache_flat[..., :KV_LORA_RANK]
 
     o_extend = torch.empty(total_new_tokens, num_heads, KV_LORA_RANK, dtype=DTYPE)
-    ops.cpu_mla_extend(
+    cpu_ops.cpu_mla_extend(
         q_extend,
         k_extend,
         v_extend,

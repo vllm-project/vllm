@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-from vllm import _custom_ops as ops
+from vllm import _cpu_ops as cpu_ops
 
 
 def mhc_pre_cpu(
@@ -36,7 +36,7 @@ def mhc_pre_cpu(
     outer_shape = residual.shape[:-2]
     x_flat = residual.reshape(-1, hc_mult, hidden_size)
 
-    layer_input, post, comb = ops.hc_pre_fused_cpu(
+    layer_input, post, comb = cpu_ops.hc_pre_fused_cpu(
         x_flat,
         fn,
         hc_scale,
@@ -68,7 +68,7 @@ def mhc_post_cpu(
     post_flat = post_layer_mix.reshape(-1, hc_mult).float()
     comb_flat = comb_res_mix.reshape(-1, hc_mult, hc_mult).float()
 
-    out = ops.hc_post_fused_cpu(x_flat, residual_flat, post_flat, comb_flat)
+    out = cpu_ops.hc_post_fused_cpu(x_flat, residual_flat, post_flat, comb_flat)
     return out.view(*outer_shape, hc_mult, hidden_size)
 
 
@@ -92,5 +92,7 @@ def hc_head_fused_cpu(
     outer_shape = hidden_states.shape[:-2]
     hs_flat = hidden_states.reshape(-1, hc_mult, hidden_size)
 
-    out = ops.hc_head_fused_cpu(hs_flat, hc_fn, hc_scale, hc_base, hc_eps, rms_norm_eps)
+    out = cpu_ops.hc_head_fused_cpu(
+        hs_flat, hc_fn, hc_scale, hc_base, hc_eps, rms_norm_eps
+    )
     return out.view(*outer_shape, hidden_size)

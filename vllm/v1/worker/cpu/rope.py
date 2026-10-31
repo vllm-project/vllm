@@ -5,7 +5,7 @@ from typing import cast
 import torch
 import torch.nn as nn
 
-from vllm import _custom_ops as ops
+from vllm import _cpu_ops as cpu_ops
 from vllm.config import ModelConfig
 from vllm.model_executor.models.interfaces import SupportsMRoPE
 
@@ -93,7 +93,7 @@ class RopeState:
         prefill_lens: torch.Tensor,
         num_computed_tokens: torch.Tensor,
     ) -> None:
-        ops.prepare_mrope_positions_cpu(
+        cpu_ops.prepare_mrope_positions_cpu(
             self.positions,
             self.prefill_positions,
             self.prefill_delta,

@@ -5,7 +5,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-import vllm._custom_ops as ops
+from vllm import _cpu_ops as cpu_ops
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 
@@ -75,7 +75,7 @@ def test_mla_decode_cpu(
         kv_cache.view(bs, seqlen_pad, d)[i, seq_len:] = float("nan")
 
     out_mla = q.new_zeros(bs, h_q, dv)
-    ops.mla_decode_kvcache_cpu(out_mla, q, kv_cache, scale, block_table, seq_lens)
+    cpu_ops.mla_decode_kvcache_cpu(out_mla, q, kv_cache, scale, block_table, seq_lens)
 
     out_ref = q.new_zeros(bs, h_q, dv)
     ref_mla(out_ref, q, kv_cache, scale, block_table, seq_lens)

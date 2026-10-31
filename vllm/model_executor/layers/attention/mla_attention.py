@@ -214,6 +214,7 @@ import torch.nn as nn
 from tqdm import tqdm
 
 import vllm.envs as envs
+from vllm import _cpu_ops as cpu_ops
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
@@ -1074,7 +1075,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 N, B, P = mqa_q_nope.shape
                 L = self.kv_lora_rank
                 mqa_ql_nope = mqa_q_nope.new_empty((N, B, L))
-                ops.bmm_cpu(
+                cpu_ops.bmm_cpu(
                     mqa_ql_nope,
                     mqa_q_nope,
                     self.impl._w_uk_packed,  # type: ignore[attr-defined]
@@ -1424,7 +1425,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         elif self.is_amx_bmm_enabled:
             # bmm_cpu computes out[n] = mat1[n] @ mat2[n]^T against
             # AMXMLAImpl's own (N, V, L) packed W_UV -- same as prefill.
-            ops.bmm_cpu(
+            cpu_ops.bmm_cpu(
                 out.transpose(0, 1),
                 x,
                 self.impl._w_uv_packed,  # type: ignore[attr-defined]
