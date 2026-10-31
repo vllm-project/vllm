@@ -5,7 +5,7 @@
 One kernel does Q RoPE, sparse attention, the inverse RoPE of the output and
 its FP8 cast, and writes straight into the buffer ``wo_a`` consumes. So the
 layer declares ``accepts_unnormed_unroped_query`` -- the kernel RoPEs Q itself,
-leaving the fused KV insert only the zero-pad to the kernel's head count -- and
+leaving Q only the zero-pad to the kernel's head count -- and
 its ``_alloc_attn_out`` / ``_o_proj`` pair speaks QuantizedActivation instead
 of bf16, since the output needs no rotation or quantization here.
 
@@ -282,7 +282,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
             return
 
         assert isinstance(attn_metadata, dict)
-        # q was zero-padded to the kernel's head count by the fused KV insert.
+        # _fused_qnorm_rope_kv_insert zero-padded q to the kernel's head count.
         assert q.shape[1] == self.padded_heads
         flashmla_metadata = cast(
             DeepseekV4FlashMLAMetadata | None,
