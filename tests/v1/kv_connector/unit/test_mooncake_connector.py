@@ -24,6 +24,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import (
     mooncake_connector,
     mooncake_utils,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.dcp_mapping import (
+    _filter_dcp_block_ids,
+    _get_decode_ranks_for_prefill,
+    _get_prefill_rank_groups,
+    _get_prefill_ranks_for_decode,
+    _validate_dcp_group_block_sizes,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
     _SHARED_REGION_GROUP_ID,
     KVConnectorRole,
@@ -43,9 +50,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     _coalesce_contiguous_transfer_regions,
     _compute_sender_transfer_plan,
     _contiguous_runs,
-    _filter_dcp_block_ids,
-    _get_decode_ranks_for_prefill,
-    _get_prefill_ranks_for_decode,
     _has_opaque_packed_row,
     _normalize_paired_block_order,
     _pp_mismatch_hides_packed_layers,
@@ -449,7 +453,6 @@ async def test_build_transfer_params_filters_dcp_blocks():
         registered_layer_names=["model.layers.0.self_attn"],
         registered_layer_indices=[0],
         remote_dcp_size=1,
-        remote_block_size=16,
     )
 
     (
@@ -523,7 +526,6 @@ async def test_build_transfer_params_returns_empty_for_unowned_dcp_blocks():
         registered_layer_names=["model.layers.0.self_attn"],
         registered_layer_indices=[0],
         remote_dcp_size=1,
-        remote_block_size=16,
     )
 
     (
@@ -1036,6 +1038,16 @@ async def test_bootstrap_server(bootstrap_server: MooncakeBootstrapServer):
         assert response.status_code == 200
         assert response.json() == {"status": "ok"}
 
+    # DCP topology must agree across workers in the same engine.
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{base_url}/register", json=dict(payload2, dcp_size=4)
+        )
+        assert response.status_code == 400
+        assert "DCP size mismatch" in response.text
+        response = await client.get(f"{base_url}/query")
+        assert response.json()["0"]["dcp_size"] == 2
+
     # Test failure: same ranks, conflicting address
     payload1_conflict = dict(payload1, addr="tcp://9.9.9.9:9999")
     async with httpx.AsyncClient() as client:
@@ -1102,6 +1114,7 @@ def _make_local_register_worker_stub():
         engine_id="eng-1",
         dp_rank=0,
         tp_rank=0,
+        dcp_size=1,
         pp_rank=0,
     )
 
@@ -1114,6 +1127,7 @@ def _make_register_worker_stub():
         engine_id="eng-1",
         dp_rank=0,
         tp_rank=0,
+        dcp_size=1,
         pp_rank=0,
     )
 
@@ -3653,140 +3667,18 @@ def test_sleep_unregisters_and_restores_kv_caches():
         reg.assert_called_once_with([raw.data_ptr()], [raw.nbytes])
 
 
-@pytest.mark.asyncio
-@patch(
-    "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
-    "mooncake_connector.TransferEngine",
-    FakeMooncakeWrapper,
-)
-async def test_kv_producer_dcp_uses_effective_tp_for_offsets(monkeypatch):
-    """DCP transfer planning should slice by TP//DCP, not physical TP."""
-    P_TP_SIZE = 4
-    P_TP_RANK = 2
-    P_DCP_SIZE = 2
-    D_TP_SIZE = 1
-    D_TP_RANK = 0
-    D_DCP_SIZE = 1
-    LOCAL_BLOCK_LEN = 4096
-    REMOTE_BLOCK_LEN = LOCAL_BLOCK_LEN * 2
-
-    monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
-    vllm_config = create_vllm_config(
-        kv_connector="MooncakeConnector", kv_role="kv_producer"
-    )
-
-    with set_current_vllm_config(vllm_config), patch_worker_dependencies():
-        prefill_connector = MooncakeConnector(
-            vllm_config,
-            KVConnectorRole.WORKER,
-            _make_test_kv_cache_config(),
-        )
-        prefill_worker = prefill_connector.connector_worker
-
-        prefill_worker.tp_rank = P_TP_RANK
-        prefill_worker.tp_size = P_TP_SIZE
-        prefill_worker.dcp_size = P_DCP_SIZE
-        prefill_worker.use_mla = False
-        prefill_worker._total_num_kv_heads = 2
-        prefill_worker._tp_size[prefill_worker.engine_id] = P_TP_SIZE
-        prefill_worker._dcp_size[prefill_worker.engine_id] = P_DCP_SIZE
-        prefill_worker.transfer_topo.tp_rank = P_TP_RANK
-        prefill_worker.transfer_topo.tp_size = P_TP_SIZE
-
-        prefill_worker.block_size = 16
-        prefill_worker.kv_caches_base_addr = [0x1000]
-        prefill_worker.block_len_per_layer = [LOCAL_BLOCK_LEN]
-        prefill_worker.kv_block_len_per_layer = [LOCAL_BLOCK_LEN]
-        prefill_worker.registered_layer_names = ["model.layers.0.self_attn"]
-        prefill_worker.registered_layer_indices = [0]
-
-        origin_sender_loop = prefill_worker.sender_loop
-        prefill_worker.sender_loop = asyncio.get_event_loop()
-
-        transfer_id = "xfer-dcp-1"
-        local_block_ids = [[10]]
-        send_meta = SendBlockMeta(
-            p_req_id="p-req-dcp-1",
-            transfer_id=transfer_id,
-            local_block_ids=local_block_ids,
-            ready=asyncio.Event(),
-        )
-        prefill_worker.reqs_need_send[transfer_id] = send_meta
-        send_meta.ready.set()
-
-        xfer_meta = MooncakeXferMetadata(
-            remote_hostname="consumer-host",
-            remote_port=54321,
-            remote_tp_size=D_TP_SIZE,
-            remote_tp_rank=D_TP_RANK,
-            req_blocks={"d-req-dcp-1": (transfer_id, [[20, 21]])},
-            kv_caches_base_addr=[0x2000],
-            block_lens=[REMOTE_BLOCK_LEN],
-            kv_block_lens=[REMOTE_BLOCK_LEN],
-            registered_layer_names=["model.layers.0.self_attn"],
-            registered_layer_indices=[0],
-            remote_dcp_size=D_DCP_SIZE,
-            remote_block_size=prefill_worker.block_size,
-        )
-
-        mock_socket = AsyncMock(spec=zmq.asyncio.Socket)
-        mock_socket.send_multipart = AsyncMock()
-        identity = b"consumer-dcp"
-
-        with patch.object(prefill_worker, "_send_blocks", return_value=0) as mock_send:
-            await prefill_worker.send_kv_to_decode(identity, mock_socket, xfer_meta)
-
-        mock_send.assert_called_once()
-        _, src_ptrs, dst_ptrs, lengths = mock_send.call_args[0]
-        assert src_ptrs == [0x1000 + 10 * LOCAL_BLOCK_LEN]
-        assert dst_ptrs == [0x2000 + 20 * REMOTE_BLOCK_LEN + LOCAL_BLOCK_LEN]
-        assert lengths == [LOCAL_BLOCK_LEN]
-
-        mock_socket.send_multipart.assert_called_once()
-        _, sent_payload = mock_socket.send_multipart.call_args[0][0]
-        response = prefill_worker._xfer_resp_decoder.decode(sent_payload)
-        assert response.status == MooncakeXferResponseStatus.FINISH
-        assert response.ok_reqs == ["d-req-dcp-1"]
-
-        prefill_worker.sender_loop = origin_sender_loop
-        prefill_worker.shutdown()
-
-
-@pytest.mark.cpu_test
-def test_get_prefill_ranks_for_decode_dcp_ratios():
-    """DCP rank routing should follow modulo mapping up to dcp16."""
-
-    def route(d_dcp_size: int, p_dcp_size: int, rank: int = 0):
-        return _get_prefill_ranks_for_decode(
-            d_tp_rank=rank,
-            d_tp_size=d_dcp_size,
-            d_dcp_size=d_dcp_size,
-            p_tp_size=p_dcp_size,
-            p_dcp_size=p_dcp_size,
-            total_num_kv_heads=1,
-            is_mla=True,
-        )
-
-    assert route(1, 8) == list(range(8))
-    assert route(8, 1, rank=0) == [0]
-    assert route(8, 1, rank=7) == [0]
-    assert route(4, 8, rank=0) == [0, 4]
-    assert route(4, 8, rank=3) == [3, 7]
-    assert route(8, 4, rank=0) == [0]
-    assert route(8, 4, rank=7) == [3]
-    assert route(1, 16) == list(range(16))
-    assert route(16, 1, rank=15) == [0]
-
-
 @pytest.mark.parametrize(
     ("d_tp_rank", "d_tp_size", "d_dcp_size", "p_tp_size", "p_dcp_size", "expected"),
     [
         (0, 1, 1, 8, 8, list(range(8))),
+        (0, 8, 8, 1, 1, [0]),
         (7, 8, 8, 1, 1, [0]),
         (0, 4, 4, 8, 8, [0, 4]),
         (3, 4, 4, 8, 8, [3, 7]),
         (0, 8, 8, 4, 4, [0]),
         (7, 8, 8, 4, 4, [3]),
+        (0, 1, 1, 16, 16, list(range(16))),
+        (15, 16, 16, 1, 1, [0]),
     ],
 )
 @pytest.mark.cpu_test
@@ -3805,123 +3697,6 @@ def test_get_prefill_ranks_for_decode_mla_cases(
             d_dcp_size=d_dcp_size,
             p_tp_size=p_tp_size,
             p_dcp_size=p_dcp_size,
-            total_num_kv_heads=1,
-            is_mla=True,
-        )
-        == expected
-    )
-
-
-@pytest.mark.parametrize(
-    (
-        "d_tp_rank",
-        "d_tp_size",
-        "d_dcp_size",
-        "p_tp_size",
-        "p_dcp_size",
-        "num_kv_heads",
-        "expected",
-    ),
-    [
-        # Same TP/head groups: D keeps full blocks, P splits each head group by DCP.
-        (0, 16, 1, 16, 4, 4, [0, 1, 2, 3]),
-        (3, 16, 1, 16, 4, 4, [0, 1, 2, 3]),
-        (4, 16, 1, 16, 4, 4, [4, 5, 6, 7]),
-        # D queries every P replica for completion; only the first sends data.
-        (5, 16, 4, 16, 1, 4, [4, 5, 6, 7]),
-        # Same TP/head groups and same DCP: point-to-point by dcp rank.
-        (6, 16, 4, 16, 4, 4, [6]),
-        # P has a larger DCP size: one D slice maps to multiple finer P slices.
-        (5, 16, 4, 32, 8, 4, [9, 13]),
-        # D has a larger DCP size: multiple D slices map to the same coarser P slice.
-        (13, 32, 8, 16, 4, 4, [5]),
-        # TP does not fully split KV heads on D; one D rank maps to
-        # multiple P head groups.
-        (0, 4, 1, 16, 2, 8, [0, 1, 2, 3]),
-        (3, 4, 1, 16, 2, 8, [12, 13, 14, 15]),
-        # D has more KV-head groups than P; adjacent D groups share one P group.
-        (0, 8, 2, 2, 1, 4, [0]),
-        (2, 8, 2, 2, 1, 4, [0]),
-        (4, 8, 2, 2, 1, 4, [1]),
-    ],
-)
-@pytest.mark.cpu_test
-def test_get_prefill_ranks_for_decode_gqa_and_heterogeneous_tp(
-    d_tp_rank: int,
-    d_tp_size: int,
-    d_dcp_size: int,
-    p_tp_size: int,
-    p_dcp_size: int,
-    num_kv_heads: int,
-    expected: list[int],
-):
-    assert (
-        _get_prefill_ranks_for_decode(
-            d_tp_rank=d_tp_rank,
-            d_tp_size=d_tp_size,
-            d_dcp_size=d_dcp_size,
-            p_tp_size=p_tp_size,
-            p_dcp_size=p_dcp_size,
-            total_num_kv_heads=num_kv_heads,
-            is_mla=False,
-        )
-        == expected
-    )
-
-
-@pytest.mark.parametrize(
-    (
-        "p_tp_rank",
-        "p_tp_size",
-        "p_dcp_size",
-        "d_tp_size",
-        "d_dcp_size",
-        "num_kv_heads",
-        "is_mla",
-        "expected",
-    ),
-    [
-        # D keeps full MLA blocks, P splits them across all DCP ranks.
-        (0, 8, 8, 1, 1, 1, True, [0]),
-        (7, 8, 8, 1, 1, 1, True, [0]),
-        # P keeps a full MLA block, all D DCP ranks query the same P rank.
-        (0, 1, 1, 8, 8, 1, True, list(range(8))),
-        # GQA same TP/head groups: each P DCP rank serves all D replicas
-        # of that KV-head group when D does not use DCP.
-        (0, 16, 4, 16, 1, 4, False, [0, 1, 2, 3]),
-        (4, 16, 4, 16, 1, 4, False, [4, 5, 6, 7]),
-        # GQA DCP size differs: finer P slices can serve the same D rank.
-        (9, 32, 8, 16, 4, 4, False, [5]),
-        (13, 32, 8, 16, 4, 4, False, [5]),
-        # Coarser P slices can be queried by multiple finer D ranks.
-        (5, 16, 4, 32, 8, 4, False, [9, 13]),
-        # D TP does not fully split KV heads; one D rank maps to multiple
-        # P KV-head groups and each matching P rank expects that D rank.
-        (0, 16, 2, 4, 1, 8, False, [0]),
-        (3, 16, 2, 4, 1, 8, False, [0]),
-        (12, 16, 2, 4, 1, 8, False, [3]),
-    ],
-)
-@pytest.mark.cpu_test
-def test_get_decode_ranks_for_prefill_inverse_mapping(
-    p_tp_rank: int,
-    p_tp_size: int,
-    p_dcp_size: int,
-    d_tp_size: int,
-    d_dcp_size: int,
-    num_kv_heads: int,
-    is_mla: bool,
-    expected: list[int],
-):
-    assert (
-        _get_decode_ranks_for_prefill(
-            p_tp_rank=p_tp_rank,
-            p_tp_size=p_tp_size,
-            p_dcp_size=p_dcp_size,
-            d_tp_size=d_tp_size,
-            d_dcp_size=d_dcp_size,
-            total_num_kv_heads=num_kv_heads,
-            is_mla=is_mla,
         )
         == expected
     )
@@ -4096,20 +3871,11 @@ async def test_receive_kv_routes_metadata_by_dcp_rank_modulo():
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    "p_tp,p_dcp,d_tp,d_dcp,heads,mla",
-    [
-        (4, 2, 2, 2, 1, True),  # MLA must shard all TP replicas.
-        (8, 2, 8, 2, 2, False),  # GQA leaves redundant replicas inside DCP.
-        (4, 4, 6, 6, 1, True),  # DCP ratios must divide each other.
-        (4, 0, 4, 4, 1, True),
-        (3, 1, 8, 2, 4, False),  # Incompatible head partition.
-    ],
+    "p_tp,p_dcp,d_tp,d_dcp", [(4, 2, 2, 2), (4, 4, 6, 6), (4, 0, 4, 4)]
 )
-def test_dcp_routing_rejects_unsupported_topologies(
-    p_tp, p_dcp, d_tp, d_dcp, heads, mla
-):
+def test_dcp_routing_rejects_unsupported_topologies(p_tp, p_dcp, d_tp, d_dcp):
     with pytest.raises(ValueError):
-        _get_prefill_ranks_for_decode(0, d_tp, d_dcp, p_tp, p_dcp, heads, mla)
+        _get_prefill_ranks_for_decode(0, d_tp, d_dcp, p_tp, p_dcp)
 
 
 @pytest.mark.cpu_test
@@ -4147,31 +3913,6 @@ def test_dcp_block_mapping_rejects_partial_prefix_block(tokens):
 
 
 @pytest.mark.cpu_test
-@pytest.mark.parametrize(
-    "p_tp,p_dcp,d_tp,d_dcp,heads,mla",
-    [
-        (8, 1, 8, 8, 1, True),
-        (16, 1, 16, 4, 4, False),
-        (8, 8, 4, 4, 1, True),
-        (16, 4, 4, 1, 4, False),
-    ],
-)
-def test_dcp_completion_covers_every_producer_replica(
-    p_tp, p_dcp, d_tp, d_dcp, heads, mla
-):
-    pairs = {
-        (p, d)
-        for d in range(d_tp)
-        for p in _get_prefill_ranks_for_decode(d, d_tp, d_dcp, p_tp, p_dcp, heads, mla)
-    }
-    assert {p for p, _ in pairs} == set(range(p_tp))
-    for p in range(p_tp):
-        assert set(
-            _get_decode_ranks_for_prefill(p, p_tp, p_dcp, d_tp, d_dcp, heads, mla)
-        ) == {d for producer, d in pairs if producer == p}
-
-
-@pytest.mark.cpu_test
 @pytest.mark.parametrize("include_layout", [False, True])
 def test_dcp_metadata_roundtrip_preserves_prefix_and_layout_id(include_layout):
     meta = MooncakeXferMetadata(
@@ -4184,8 +3925,12 @@ def test_dcp_metadata_roundtrip_preserves_prefix_and_layout_id(include_layout):
         block_lens=[256] if include_layout else [],
         kv_block_lens=[256] if include_layout else [],
         layout_id=42,
+        remote_pp_size=2,
+        remote_pp_rank=1,
         remote_dcp_size=4,
-        remote_block_size=16,
+        remote_interleave_size=16,
+        remote_group_block_sizes=[16, 8],
+        remote_group_dcp_sharded=[True, False],
         req_num_computed_tokens={"request": 64},
     )
     decoded = msgspec.msgpack.decode(
@@ -4194,6 +3939,9 @@ def test_dcp_metadata_roundtrip_preserves_prefix_and_layout_id(include_layout):
     assert decoded == meta
     assert decoded.req_blocks["request"] == ("transfer", [[7, 9]])
     assert decoded.req_num_computed_tokens["request"] == 64
+    assert decoded.remote_group_block_sizes == [16, 8]
+    assert decoded.remote_interleave_size == 16
+    assert decoded.remote_group_dcp_sharded == [True, False]
 
 
 @pytest.mark.cpu_test
@@ -4214,3 +3962,356 @@ def test_mooncake_metadata_accepts_existing_non_dcp_wire_format():
     assert decoded.req_blocks["request"] == ("transfer", [[7, 9]])
     assert decoded.req_num_computed_tokens == {}
     assert decoded.remote_dcp_size == 1
+    assert decoded.remote_pp_rank is None
+    assert decoded.remote_group_block_sizes == []
+    assert decoded.remote_group_dcp_sharded == []
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "block_sizes,sharded,dcp_size,interleave",
+    [
+        ((16, 8, 16), (True, False, True), 4, 16),
+        ((8, 32), (False, False), 4, 16),
+        ((16, 32), (True, True), 1, 1),
+        ((), (), 4, 16),
+    ],
+)
+def test_dcp_group_sizes_respect_sequence_sharding(
+    block_sizes, sharded, dcp_size, interleave
+):
+    assert (
+        _validate_dcp_group_block_sizes(block_sizes, sharded, dcp_size, interleave)
+        is None
+    )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("block_size", [8, 32])
+def test_dcp_group_sizes_reject_non_block_aligned_sharding(block_size):
+    with pytest.raises(ValueError, match="transfer group 1 requires"):
+        _validate_dcp_group_block_sizes((8, block_size), (False, True), 4, 16)
+
+
+@pytest.mark.cpu_test
+def test_dcp_group_sizes_reject_incomplete_group_metadata():
+    with pytest.raises(ValueError, match="metadata lengths must match"):
+        _validate_dcp_group_block_sizes((16, 16), (True,), 4, 16)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "sharded,expected",
+    [
+        ((True, False, True), {1: (0, 2), 2: (1,), 3: (0, 1, 2)}),
+        ((True, True), {1: (0, 1), 3: (0, 1)}),
+        ((False, False), {2: (0, 1), 3: (0, 1)}),
+        ((), {2: (), 3: ()}),
+    ],
+)
+def test_dcp_peer_groups_union_preserves_each_group(sharded, expected):
+    assert (
+        _get_prefill_rank_groups(
+            d_tp_rank=1,
+            d_tp_size=2,
+            d_dcp_size=2,
+            p_tp_size=4,
+            p_dcp_size=4,
+            group_dcp_sharded=sharded,
+            non_dcp_ranks=[2, 3],
+        )
+        == expected
+    )
+
+
+@pytest.mark.cpu_test
+def test_dcp_peer_groups_keep_completion_only_producer_replicas():
+    assert _get_prefill_rank_groups(
+        d_tp_rank=1,
+        d_tp_size=4,
+        d_dcp_size=4,
+        p_tp_size=4,
+        p_dcp_size=1,
+        group_dcp_sharded=(True, False),
+        non_dcp_ranks=[1],
+    ) == {0: (0,), 1: (0, 1), 2: (0,), 3: (0,)}
+
+
+@pytest.mark.cpu_test
+def test_dcp_peer_groups_preserve_legacy_routing_when_dcp_disabled():
+    assert _get_prefill_rank_groups(
+        d_tp_rank=1,
+        d_tp_size=2,
+        d_dcp_size=1,
+        p_tp_size=4,
+        p_dcp_size=1,
+        group_dcp_sharded=(True, False),
+        non_dcp_ranks=[2, 3],
+    ) == {2: (0, 1), 3: (0, 1)}
+
+
+@pytest.mark.cpu_test
+def test_dcp_peer_groups_reject_unsupported_sharded_topology():
+    with pytest.raises(ValueError, match="must be 1 or TP size"):
+        _get_prefill_rank_groups(
+            d_tp_rank=0,
+            d_tp_size=4,
+            d_dcp_size=4,
+            p_tp_size=4,
+            p_dcp_size=2,
+            group_dcp_sharded=(False, True),
+            non_dcp_ranks=[0],
+        )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("flags", [(), (True,), (False,), (True, False)])
+@pytest.mark.parametrize(
+    "p_tp,p_dcp,d_tp,d_dcp",
+    [(4, 1, 4, 4), (4, 4, 4, 1), (4, 4, 2, 2), (2, 2, 4, 4), (4, 1, 2, 1)],
+)
+def test_dcp_producer_group_union_matches_actual_consumer_peers(
+    flags, p_tp, p_dcp, d_tp, d_dcp
+):
+    def legacy_peers(rank, local_tp, remote_tp):
+        if local_tp >= remote_tp:
+            return [rank // (local_tp // remote_tp)]
+        ratio = remote_tp // local_tp
+        return list(range(rank * ratio, (rank + 1) * ratio))
+
+    incoming = {p: [] for p in range(p_tp)}
+    for d in range(d_tp):
+        peers = _get_prefill_rank_groups(
+            d_tp_rank=d,
+            d_tp_size=d_tp,
+            d_dcp_size=d_dcp,
+            p_tp_size=p_tp,
+            p_dcp_size=p_dcp,
+            group_dcp_sharded=flags,
+            non_dcp_ranks=legacy_peers(d, d_tp, p_tp),
+        )
+        for p in peers:
+            incoming[p].append(d)
+    assert all(incoming.values()), "Every producer must receive a completion ACK"
+    for p, expected in incoming.items():
+        assert (
+            _get_decode_ranks_for_prefill(
+                p,
+                p_tp,
+                p_dcp,
+                d_tp,
+                d_dcp,
+                group_dcp_sharded=flags,
+                non_dcp_ranks=legacy_peers(p, p_tp, d_tp),
+            )
+            == expected
+        )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("unsharded_arrival", range(5))
+def test_dcp_pp_completion_waits_for_four_sharded_and_one_replicated_pull(
+    unsharded_arrival,
+):
+    send = SendBlockMeta("p", "transfer", [[1]], asyncio.Event())
+    counts = [
+        len(
+            _get_decode_ranks_for_prefill(
+                0, 4, 1, 4, 4, group_dcp_sharded=flags, non_dcp_ranks=[0]
+            )
+        )
+        for flags in ((True,), (False,))
+    ]
+    assert counts == [4, 1]
+    stages = [0] * unsharded_arrival + [1] + [0] * (4 - unsharded_arrival)
+    for index, stage in enumerate(stages):
+        send.update_need_send(counts[stage], pp_count=2, pp_rank=stage)
+        assert send.mark_sent() is (index == 4)
+    assert send.need_send == send.sent == 5
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("stage,count", [(0, 4), (1, 1)])
+def test_dcp_pp_completion_keeps_blocks_until_other_stage_appears(stage, count):
+    send = SendBlockMeta("p", "transfer", [[1]], asyncio.Event())
+    for _ in range(count):
+        send.update_need_send(count, pp_count=2, pp_rank=stage)
+        assert not send.mark_sent()
+    assert send.need_send == 0
+
+
+@pytest.mark.cpu_test
+def test_dcp_pp_completion_does_not_count_failed_transfer():
+    send = SendBlockMeta("p", "transfer", [[1]], asyncio.Event())
+    send.update_need_send(4, pp_count=2, pp_rank=0)
+    send.update_need_send(1, pp_count=2, pp_rank=1)
+    # Only successful transfers call mark_sent in send_kv_to_decode.
+    for _ in range(4):
+        assert not send.mark_sent()
+    assert send.sent == 4 < send.need_send
+
+
+@pytest.mark.cpu_test
+def test_send_completion_preserves_legacy_pp_fanout():
+    send = SendBlockMeta("p", "transfer", [[1]], asyncio.Event())
+    send.update_need_send(2, pp_count=3)
+    assert send.need_send == 6
+    assert [send.mark_sent() for _ in range(6)] == [False] * 5 + [True]
+
+
+@pytest.mark.cpu_test
+def test_dcp_pp_completion_rejects_inconsistent_stage_fanout():
+    send = SendBlockMeta("p", "transfer", [[1]], asyncio.Event())
+    send.update_need_send(4, pp_count=2, pp_rank=0)
+    with pytest.raises(ValueError, match="fanout changed"):
+        send.update_need_send(1, pp_count=2, pp_rank=0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("invalid_field", "expected_error"),
+    [
+        ("negative_prefix", "physical block boundary"),
+        ("partial_prefix", "physical block boundary"),
+        ("block_size", "group block sizes"),
+        ("sharding", "DCP sharding"),
+    ],
+)
+async def test_dcp_transfer_rejects_invalid_pull_before_building_descriptors(
+    invalid_field, expected_error
+):
+    worker, config, regions, _ = _register_sliced_packed_mla([0])
+    block_size = config.transfer_groups[0].kv_cache_spec.block_size
+    overrides = dict(
+        remote_tp_size=2,
+        remote_dcp_size=2,
+        remote_group_block_sizes=[block_size],
+        remote_group_dcp_sharded=[True],
+        req_num_computed_tokens={"d-req": 0},
+    )
+    if invalid_field == "negative_prefix":
+        overrides["req_num_computed_tokens"] = {"d-req": -1}
+    elif invalid_field == "partial_prefix":
+        overrides["req_num_computed_tokens"] = {"d-req": 1}
+    elif invalid_field == "block_size":
+        overrides["remote_group_block_sizes"] = [block_size * 2]
+    elif invalid_field == "sharding":
+        overrides["remote_group_dcp_sharded"] = [False]
+    meta = _xfer_meta(regions, {"d-req": ("xfer", [[0]])}, **overrides)
+    send_meta = SendBlockMeta(
+        p_req_id="p-req",
+        transfer_id="xfer",
+        local_block_ids=[[0, 1]],
+        ready=asyncio.Event(),
+    )
+    src, dst, lengths, failed, error = await worker._build_transfer_params(
+        [("d-req", send_meta)], meta, regions, regions
+    )
+    assert (src, dst, lengths, failed) == ([], [], [], ["d-req"])
+    assert expected_error in error
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "p_tp,p_dcp,d_tp,d_dcp",
+    [
+        (4, 1, 4, 4),
+        (4, 4, 4, 1),
+        (4, 4, 2, 2),
+        (2, 2, 4, 4),
+        (1, 1, 4, 4),
+        (4, 4, 1, 1),
+        (4, 1, 2, 1),
+    ],
+)
+@pytest.mark.parametrize("prefix_blocks", [0, 1, 3])
+@pytest.mark.parametrize("flags", [(True, True), (True, False), (False, True)])
+def test_mla_dcp_group_payload_arrives_once(
+    p_tp, p_dcp, d_tp, d_dcp, prefix_blocks, flags
+):
+    """Compose routing, block ownership and sender planning; copy actual bytes.
+
+    The two payload widths represent latent KV and a separate DSA index cache.
+    This exercises descriptor mathematics, not a running Mooncake worker.
+    """
+
+    def payload(group, position, width):
+        return bytes((group * 61 + position * 7 + j) % 256 for j in range(width))
+
+    stop = 11
+    for d_rank in range(d_tp):
+        if d_tp >= p_tp:
+            legacy_peers = [d_rank // (d_tp // p_tp)]
+        else:
+            ratio = p_tp // d_tp
+            legacy_peers = list(range(d_rank * ratio, (d_rank + 1) * ratio))
+        peers = _get_prefill_rank_groups(
+            d_tp_rank=d_rank,
+            d_tp_size=d_tp,
+            d_dcp_size=d_dcp,
+            p_tp_size=p_tp,
+            p_dcp_size=p_dcp,
+            group_dcp_sharded=flags,
+            non_dcp_ranks=legacy_peers,
+        )
+        for group, sharded in enumerate(flags):
+            p_size, d_size = (p_dcp, d_dcp) if sharded else (1, 1)
+            first = prefix_blocks + (d_rank % d_size - prefix_blocks) % d_size
+            wanted = list(range(first, stop, d_size))
+            d_ids = [3 * i + 2 for i in range(len(wanted))]
+            width = (64, 32)[group]
+            destination = bytearray((max(d_ids, default=0) + 1) * width)
+            writes = dict.fromkeys(d_ids, 0)
+            expected = {
+                block: payload(group, pos, width) for block, pos in zip(d_ids, wanted)
+            }
+            for p_rank, groups in peers.items():
+                if group not in groups:
+                    continue
+                positions = list(range(p_rank % p_size, stop, p_size))
+                p_ids = [2 * i + 1 for i in range(len(positions))]
+                source = bytearray((max(p_ids, default=0) + 1) * width)
+                for block, pos in zip(p_ids, positions):
+                    source[block * width : (block + 1) * width] = payload(
+                        group, pos, width
+                    )
+                if sharded and (p_dcp > 1 or d_dcp > 1):
+                    local_ids, remote_ids = _filter_dcp_block_ids(
+                        p_ids,
+                        d_ids,
+                        p_rank % p_size,
+                        p_size,
+                        d_rank % d_size,
+                        d_size,
+                        prefix_blocks * 16,
+                        16,
+                    )
+                else:
+                    local_ids, remote_ids = (p_ids[-len(d_ids) :], d_ids)
+                send, src_offset, dst_offset, length = _compute_sender_transfer_plan(
+                    p_rank,
+                    p_tp,
+                    d_rank,
+                    d_tp,
+                    width,
+                    width,
+                    True,
+                    local_dcp_size=p_size,
+                    remote_dcp_size=d_size,
+                )
+                if not send:
+                    continue
+                for src, dst in zip(local_ids, remote_ids):
+                    src_addr, dst_addr = (
+                        src * width + src_offset,
+                        dst * width + dst_offset,
+                    )
+                    destination[dst_addr : dst_addr + length] = source[
+                        src_addr : src_addr + length
+                    ]
+                    writes[dst] += 1
+            assert writes == dict.fromkeys(d_ids, 1)
+            for block in d_ids:
+                assert (
+                    destination[block * width : (block + 1) * width] == expected[block]
+                )
