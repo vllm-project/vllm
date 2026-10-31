@@ -52,6 +52,17 @@ from vllm.utils.torch_utils import set_random_seed
 DEVICE = current_platform.device_type
 
 
+@pytest.fixture
+def ieee_fp32_matmul():
+    """Keep FP32 references from using reduced-precision TF32 matmuls."""
+    previous = torch.get_float32_matmul_precision()
+    try:
+        torch.set_float32_matmul_precision("highest")
+        yield
+    finally:
+        torch.set_float32_matmul_precision(previous)
+
+
 @pytest.mark.parametrize(
     "tp,ep,hidden,hc,multicast,expected",
     [
@@ -225,6 +236,7 @@ def test_hc_collapse_before_gather_is_bitwise_equal(num_tokens, tp_size):
 @pytest.mark.parametrize("entry", ["broadcast", "identity", "carried"])
 @pytest.mark.parametrize("use_deep_gemm", [False, True])
 @pytest.mark.parametrize("fused_norm", [False, True])
+@pytest.mark.usefixtures("ieee_fp32_matmul")
 def test_deepseek_v41_mhc_pre_delayed(
     num_tokens,
     sinkhorn_repeat,
@@ -400,6 +412,7 @@ def mhc_fused_post_pre_delayed_ref(
 @pytest.mark.parametrize("num_tokens", [0, 1, 8, 128])
 @pytest.mark.parametrize("hidden_size", [4096, 7168])
 @pytest.mark.parametrize("carried", [False, True])
+@pytest.mark.usefixtures("ieee_fp32_matmul")
 def test_deepseek_v41_mhc_fused_post_pre_delayed(num_tokens, hidden_size, carried):
     """Fold the post block into the delayed pre without changing its outputs."""
     set_random_seed(0)
@@ -1038,6 +1051,7 @@ def _torch_hc_prenorm_gemm(
         (2048, 7168),
     ],
 )
+@pytest.mark.usefixtures("ieee_fp32_matmul")
 def test_hc_prenorm_gemm_tilelang(num_tokens, hidden_size):
     torch.set_default_device(DEVICE)
     set_random_seed(0)
@@ -1099,7 +1113,7 @@ def test_mhc_post_tilelang(num_tokens, hidden_size, hc_mult):
 @pytest.mark.parametrize("num_tokens", [1, 4, 8, 128])
 @pytest.mark.parametrize("hidden_size", [4096, 7168])
 @pytest.mark.parametrize("hc_mult", [4])
-def test_mhc_fused_post_pre(num_tokens, hidden_size, hc_mult):
+def test_mhc_fused_post_pre(num_tokens, hidden_size, hc_mult, ieee_fp32_matmul):
     torch.set_default_device(DEVICE)
     set_random_seed(0)
 
