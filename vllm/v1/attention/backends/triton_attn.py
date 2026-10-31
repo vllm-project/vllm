@@ -731,6 +731,7 @@ class TritonAttentionImpl(AttentionImpl):
             mm_prefix_clamp_sliding_window=getattr(
                 layer, "mm_prefix_clamp_sliding_window", False
             ),
+            prefill_tile=True,
         )
 
         return output
