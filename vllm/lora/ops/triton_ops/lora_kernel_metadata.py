@@ -32,6 +32,10 @@ class LoRAKernelMeta:
     # it as a dynamic value rather than baking it as a constant at trace time.
     # This follows the same pattern as no_lora_flag_cpu above.
     num_active_loras_cpu: torch.Tensor
+    
+    # Maximum number of tokens assigned to any active LoRA in the
+    # current forward pass. Kept on CPU for dynamic kernel launch metadata.
+    max_tokens_per_lora_cpu: torch.Tensor
 
     # Default num_active_loras value (max_loras + 1) as a CPU tensor,
     # used when specialize_active_lora is False to avoid allocating a
@@ -68,6 +72,10 @@ class LoRAKernelMeta:
         num_tokens_per_lora = torch.zeros(
             max_loras + 1, dtype=torch.int32, device=device
         )
+        
+        max_tokens_per_lora_cpu = torch.tensor(
+            [0], dtype=torch.int32, device="cpu"
+        )
 
         # +2 for this because, the first index is always 0.
         # using running example, lora_token_start_loc
@@ -91,6 +99,7 @@ class LoRAKernelMeta:
             lora_token_start_loc=lora_token_start_loc,
             no_lora_flag_cpu=no_lora_flag_cpu,
             num_active_loras_cpu=num_active_loras_cpu,
+            max_tokens_per_lora_cpu=max_tokens_per_lora_cpu,
             default_num_active_loras_cpu=default_num_active_loras_cpu,
             captured_lora_counts=sorted(captured_lora_counts)
             if captured_lora_counts
@@ -103,6 +112,7 @@ class LoRAKernelMeta:
         self.lora_token_start_loc.fill_(0)
         self.no_lora_flag_cpu.fill_(False)
         self.num_active_loras_cpu.fill_(0)
+        self.max_tokens_per_lora_cpu.fill_(0)
 
     def prepare_tensors(self, token_lora_mapping: torch.Tensor) -> None:
         """Prepare kernel metadata tensors for the current forward pass.
@@ -142,6 +152,9 @@ class LoRAKernelMeta:
         lora_ids, num_tokens_per_lora = torch.unique(
             token_lora_mapping, sorted=True, return_counts=True
         )
+        active_token_counts = num_tokens_per_lora[lora_ids != -1]
+        if active_token_counts.numel() > 0:
+            self.max_tokens_per_lora_cpu[0] = active_token_counts.max()
         self.active_lora_ids[: lora_ids.size(0)].copy_(lora_ids, non_blocking=True)
         self.num_tokens_per_lora[: num_tokens_per_lora.size(0)].copy_(
             num_tokens_per_lora, non_blocking=True
@@ -176,6 +189,7 @@ class LoRAKernelMeta:
         torch.Tensor,
         torch.Tensor,
         torch.Tensor,
+        torch.Tensor,
     ]:
         """This function returns the kernel metadata required for the current
         forward pass execution of the kernel. The function returns all the
@@ -202,4 +216,5 @@ class LoRAKernelMeta:
             self.active_lora_ids,
             self.no_lora_flag_cpu,
             num_active_loras,
+            self.max_tokens_per_lora_cpu,
         )
