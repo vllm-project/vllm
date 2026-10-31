@@ -404,3 +404,60 @@ def test_weight_views_reject_every_mismatch():
     assert "layer 5: routed_scaling_factor 2.0" in reasons
     assert any(r.startswith("layer 5: MoE backend must be") for r in reasons)
     assert moe.E == 896
+
+
+@pytest.mark.parametrize(
+    "rows, padding, accepted",
+    [(6288, 4, True), (6400, 116, True), (6416, 4, False), (6284, 0, False)],
+)
+def test_in_proj_alignment_padding_is_accepted(rows, padding, accepted):
+    """The kernel reads the first NPROJ in_proj rows, so alignment padding past
+    them is fine; real rows past them, or too few rows, are not."""
+    pytest.importorskip("flydsl")
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import kda
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.stages import moe
+
+    def meta(*shape, dtype=torch.float32):
+        return torch.empty(shape, dtype=dtype, device="meta")
+
+    none = SimpleNamespace(weight=None)
+    qm = SimpleNamespace(
+        mxfp4_backend=Mxfp4MoeBackend.AITER_MXFP4_BF16, is_k3_situ_aiter=True
+    )
+    mlp = SimpleNamespace(
+        use_latent_moe=True,
+        shared_experts=SimpleNamespace(gate_up_proj=none, down_proj=none),
+        routed_scaling_factor=1.0,
+        experts=SimpleNamespace(quant_method=qm),
+        gate=SimpleNamespace(weight=None, e_score_correction_bias=None),
+        routed_expert_down_proj=none,
+        routed_expert_norm=none,
+        routed_expert_up_proj=none,
+        routed_output_transform=None,
+    )
+    attn = SimpleNamespace(
+        local_num_heads=kda.NH,
+        head_dim=kda.HD,
+        conv_size=4,
+        in_proj_padding=padding,
+        in_proj_qkvgfab=SimpleNamespace(
+            weight=meta(rows, moe.HIDDEN, dtype=torch.bfloat16)
+        ),
+        f_b_proj=none,
+        o_norm=none,
+        o_proj=none,
+        conv1d=SimpleNamespace(weight=meta(kda.QKV, 4)),
+        A_log=meta(kda.NH),
+        dt_bias=meta(kda.PROJ),
+    )
+    layer = SimpleNamespace(mlp=mlp, self_attn=attn)
+    for norm in ("mlp_res_norm", "mlp_res_proj", "post_attention_layernorm",
+                 "input_layernorm", "self_attention_res_norm",
+                 "self_attention_res_proj"):  # fmt: skip
+        setattr(layer, norm, none)
+    model = SimpleNamespace(
+        config=_k3_text_config(), layers=[layer] * 93, start_layer=0, end_layer=93
+    )
+    in_proj = [r for r in weight_reasons(model) if "in_proj" in r]
+    assert not in_proj if accepted else in_proj

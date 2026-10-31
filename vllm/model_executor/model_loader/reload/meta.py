@@ -56,6 +56,9 @@ def materialize_meta_tensor(meta_tensor: torch.Tensor) -> torch.Tensor:
         dtype=meta_tensor.dtype,
         requires_grad=False,
     )
+    # Initialization on meta does not preserve storage for unloaded padding.
+    if get_tensor_load_numel(meta_tensor) < meta_tensor.numel():
+        tensor.zero_()
     tensor.__class__ = meta_tensor.__class__
     tensor.__dict__ = meta_tensor.__dict__.copy()
     return tensor
