@@ -164,10 +164,12 @@ steps:
   - vllm/models/minimax_m3/amd/
   - tests/models/minimax_m3/amd_specialized_decode/
   - tests/models/minimax_m3/test_index_cache_overrides.py
+  - tests/models/minimax_m3/test_xlayer_allreduce_fusion.py
   - vllm/model_executor/models/config.py
   commands:
   - pytest -v -s models/minimax_m3/amd_specialized_decode
   - pytest -v -s models/minimax_m3/test_index_cache_overrides.py
+  - pytest -v -s models/minimax_m3/test_xlayer_allreduce_fusion.py
 
 - label: ":nvidia: (B200) Inkling"
   key: inkling-unit-tests-b200
