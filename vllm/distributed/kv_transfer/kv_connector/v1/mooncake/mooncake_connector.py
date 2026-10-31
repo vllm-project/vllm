@@ -1382,6 +1382,8 @@ class MooncakeConnectorWorker:
 
         self._remote_agents: dict[EngineId, dict[int, dict[int, str]]] = {}
         self._pending_bootstrap_queries: dict[str, asyncio.Event] = {}
+        self._pending_lease_heartbeats: dict[EngineId, LeaseHeartbeat] = {}
+        self._lease_heartbeat_tasks: dict[EngineId, asyncio.Task] = {}
         self.side_channel_port: int = 0  # we will bind it in register_kv_caches()
         self.engine_id: EngineId = engine_id
         self.tp_rank = get_tensor_model_parallel_rank()
@@ -2982,11 +2984,26 @@ class MooncakeConnectorWorker:
             if send_meta:
                 assert not send_meta.ready.is_set()
 
+    async def _drain_lease_heartbeats(self, remote_engine_id: EngineId):
+        try:
+            while remote_engine_id in self._pending_lease_heartbeats:
+                heartbeat = self._pending_lease_heartbeats.pop(remote_engine_id)
+                await self._send_lease_heartbeat(remote_engine_id, heartbeat)
+        finally:
+            self._pending_lease_heartbeats.pop(remote_engine_id, None)
+            self._lease_heartbeat_tasks.pop(remote_engine_id, None)
+
     async def _send_lease_heartbeats(
         self, lease_heartbeats: dict[EngineId, LeaseHeartbeat]
     ):
         for remote_engine_id, heartbeat in lease_heartbeats.items():
-            asyncio.create_task(self._send_lease_heartbeat(remote_engine_id, heartbeat))
+            # Scheduler metadata contains a full snapshot, not an incremental
+            # update. Keep only the latest while a renewal is in flight.
+            self._pending_lease_heartbeats[remote_engine_id] = heartbeat
+            if remote_engine_id not in self._lease_heartbeat_tasks:
+                self._lease_heartbeat_tasks[remote_engine_id] = asyncio.create_task(
+                    self._drain_lease_heartbeats(remote_engine_id)
+                )
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
         if not self.is_kv_producer and metadata.reqs_to_recv:
