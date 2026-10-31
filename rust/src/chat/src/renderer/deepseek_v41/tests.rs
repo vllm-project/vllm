@@ -477,3 +477,128 @@ fn joins_assistant_text_parts_with_reference_separator() {
         answer two<｜end▁of▁sentence｜><｜User｜>next<｜Assistant｜></think>"#]]
     .assert_eq(&render(&request));
 }
+
+fn final_assistant_request(content: &str, mode: GenerationPromptMode) -> ChatRequest {
+    let mut request = ChatRequest {
+        messages: vec![
+            ChatMessage::user("question"),
+            ChatMessage::assistant_text(content),
+        ],
+        ..ChatRequest::for_test()
+    };
+    request.chat_options.generation_prompt_mode = mode;
+    request
+}
+
+#[test]
+fn final_assistant_starts_new_turn_when_generation_prompt_enabled() {
+    let rendered = [false, true].map(|thinking| {
+        let mut request =
+            final_assistant_request("answer", GenerationPromptMode::StartNewAssistant);
+        request
+            .chat_options
+            .template_kwargs
+            .insert("thinking".into(), Value::Bool(thinking));
+        render(&request)
+    });
+
+    expect![[r#"
+        [
+            "<｜begin▁of▁sentence｜><｜User｜>question<｜Assistant｜></think>answer<｜end▁of▁sentence｜><｜Assistant｜></think>",
+            "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>question<｜Assistant｜><think></think>answer<｜end▁of▁sentence｜><｜Assistant｜><think>",
+        ]
+    "#]]
+    .assert_debug_eq(&rendered);
+}
+
+#[test]
+fn final_assistant_prefill_continuation_and_closed_history_are_unchanged() {
+    let rendered = [
+        GenerationPromptMode::ContinueFinalAssistant,
+        GenerationPromptMode::NoGenerationPrompt,
+    ]
+    .map(|mode| render(&final_assistant_request("```python\ndef fib(n):", mode)));
+
+    expect![[r#"
+        [
+            "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>question<｜Assistant｜><think></think>```python\ndef fib(n):",
+            "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>question<｜Assistant｜><think></think>```python\ndef fib(n):<｜end▁of▁sentence｜>",
+        ]
+    "#]]
+    .assert_debug_eq(&rendered);
+}
+
+#[test]
+fn continuing_reasoning_only_final_assistant_keeps_thinking_open() {
+    let reasoning = || AssistantContentBlock::Reasoning {
+        text: "Let me consider ".into(),
+    };
+    let rendered = [
+        // Reasoning only: `<think>` stays open.
+        vec![reasoning()],
+        // With content or tool calls, the thinking block is closed as before.
+        vec![
+            reasoning(),
+            AssistantContentBlock::Text {
+                text: "The answer is ".into(),
+            },
+        ],
+        vec![
+            reasoning(),
+            AssistantContentBlock::ToolCall(AssistantToolCall {
+                id: "call-1".to_string(),
+                name: "lookup".to_string(),
+                arguments: "{}".to_string(),
+            }),
+        ],
+    ]
+    .map(|content| {
+        let mut request = ChatRequest {
+            messages: vec![
+                ChatMessage::user("question"),
+                ChatMessage::assistant_blocks(content),
+            ],
+            ..ChatRequest::for_test()
+        };
+        request.chat_options.generation_prompt_mode = GenerationPromptMode::ContinueFinalAssistant;
+        render(&request)
+    });
+
+    expect![[r#"
+        [
+            "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>question<｜Assistant｜><think>Let me consider ",
+            "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>question<｜Assistant｜><think>Let me consider </think>The answer is ",
+            "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>question<｜Assistant｜><think>Let me consider </think>\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"lookup\">\n\n</｜DSML｜ invoke>\n</｜DSML｜ calls>",
+        ]
+    "#]]
+    .assert_debug_eq(&rendered);
+}
+
+#[test]
+fn reasoning_only_final_assistant_is_closed_without_continuation() {
+    let rendered = [
+        GenerationPromptMode::StartNewAssistant,
+        GenerationPromptMode::NoGenerationPrompt,
+    ]
+    .map(|mode| {
+        let mut request = ChatRequest {
+            messages: vec![
+                ChatMessage::user("question"),
+                ChatMessage::assistant_blocks(vec![AssistantContentBlock::Reasoning {
+                    text: "Let me consider ".into(),
+                }]),
+            ],
+            ..ChatRequest::for_test()
+        };
+        request.chat_options.generation_prompt_mode = mode;
+        render(&request)
+    });
+
+    expect![[r#"
+        [
+            "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>question<｜Assistant｜><think>Let me consider </think><｜end▁of▁sentence｜><｜Assistant｜><think>",
+            "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>question<｜Assistant｜><think>Let me consider </think><｜end▁of▁sentence｜>",
+        ]
+    "#]]
+    .assert_debug_eq(&rendered);
+}
