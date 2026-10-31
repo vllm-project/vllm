@@ -218,6 +218,18 @@ KV_FETCH_STAGES = (
     KV_FETCH_COMPLETED_WAITING,
 )
 
+KV_CACHE_BLOCK_STATES = (
+    "active_shared",
+    "active_private",
+    "loading_kv",
+    "held_for_send",
+    "waiting_hold",
+    "pending_free",
+    "unattributed",
+    "cached_evictable",
+    "empty_free",
+)
+
 
 @dataclass
 class SchedulerStats:
@@ -242,6 +254,8 @@ class SchedulerStats:
     connector_prefix_cache_stats: PrefixCacheStats | None = None
 
     kv_cache_eviction_events: list[KVCacheEvictionEvent] = field(default_factory=list)
+    # None means no new sample; the gauge keeps its last value.
+    kv_cache_blocks_by_state: dict[str, int] | None = None
 
     spec_decoding_stats: SpecDecodingStats | None = None
     kv_connector_stats: dict[str, Any] | None = None
