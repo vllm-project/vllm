@@ -71,4 +71,5 @@ def make_offloading_config(
             is_parallelism_agnostic=is_parallelism_agnostic,
         ),
         replicated_layout=replicated_layout,
+        canonical_layout=bool(normalized_extra_config.get("canonical_layout", False)),
     )

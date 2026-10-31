@@ -46,6 +46,7 @@ def _all_workers_barrier() -> None:
 
 class CPUOffloadingSpec(OffloadingSpec):
     BLOCK_SIZE_ALIGNMENT = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    _supports_canonical_layout = False
 
     @classmethod
     def build_metric_definitions(
@@ -96,6 +97,13 @@ class CPUOffloadingSpec(OffloadingSpec):
 
     def __init__(self, config: OffloadingConfig):
         super().__init__(config)
+
+        if config.canonical_layout and not self._supports_canonical_layout:
+            raise ValueError(
+                "canonical_layout is not supported by CPUOffloadingSpec. "
+                "Set spec_name to TieringOffloadingSpec or remove "
+                "canonical_layout from kv_connector_extra_config."
+            )
 
         cpu_bytes_to_use = self.extra_config.get("cpu_bytes_to_use")
         if not cpu_bytes_to_use:
