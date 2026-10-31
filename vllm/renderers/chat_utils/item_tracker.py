@@ -207,11 +207,13 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         self,
         model_config: ModelConfig,
         media_io_kwargs: dict[str, dict[str, Any]] | None = None,
+        defer_uuid_media_fetching: bool = False,
     ):
         super().__init__()
 
         self._model_config = model_config
         self._media_io_kwargs = media_io_kwargs
+        self._defer_uuid_media_fetching = defer_uuid_media_fetching
 
         self._items_by_modality = defaultdict[str, list[_T]](list)
         # Track original modality for each vision_chunk item (image or video)
@@ -265,6 +267,10 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
     @property
     def video_processor_name(self) -> str | None:
         return get_video_processor_cls_name(self.model_config)
+
+    def url_to_fetch(self, url: str | None, uuid: str | None) -> str | None:
+        """Return `url`, or `None` if fetching media with a UUID is deferred."""
+        return None if self._defer_uuid_media_fetching and uuid is not None else url
 
     def add(self, modality: ModalityStr, item: _T) -> str | None:
         """Add a multi-modal item to the current prompt and returns the
