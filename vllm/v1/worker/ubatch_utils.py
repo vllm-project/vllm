@@ -143,6 +143,9 @@ def check_ubatch_thresholds(
     if not config.use_ubatching:
         return False
     if uniform_decode:
+        # Decode-only batches are microbatched only when DBO covers all batches.
+        if config.dbo_scope == "prefill":
+            return False
         return num_tokens >= config.dbo_decode_token_threshold
     else:
         return num_tokens >= config.dbo_prefill_token_threshold
