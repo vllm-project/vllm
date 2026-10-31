@@ -19,6 +19,7 @@ import pytest
 import torch
 
 from vllm.config import KVTransferConfig, VllmConfig
+from vllm.config.kv_transfer import KVRole
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
@@ -31,7 +32,7 @@ from .utils import create_vllm_config
 
 def _make_vllm_config(
     kv_connector: str = "FlexKVConnectorV1",
-    kv_role: str = "kv_both",
+    kv_role: KVRole = "kv_both",
 ) -> VllmConfig:
     """Return a minimal VllmConfig with a KVTransferConfig attached."""
     vllm_config = create_vllm_config(block_size=16, max_num_batched_tokens=512)
@@ -57,14 +58,12 @@ def _make_flexkv_module(
     adapter_mod = types.ModuleType("flexkv.integration.vllm.vllm_v1_adapter")
 
     # Make FlexKVConnectorV1Impl() return our mock instance.
-    # The "# type: ignore" markers below are needed because ModuleType does
-    # not declare these attributes statically; they are set dynamically.
     FlexKVConnectorV1ImplCls = MagicMock(return_value=impl_mock)
-    adapter_mod.FlexKVConnectorV1Impl = FlexKVConnectorV1ImplCls  # type: ignore
+    adapter_mod.FlexKVConnectorV1Impl = FlexKVConnectorV1ImplCls  # type: ignore[attr-defined]
 
-    flexkv_mod.integration = integration_mod  # type: ignore
-    integration_mod.vllm = vllm_mod  # type: ignore
-    vllm_mod.vllm_v1_adapter = adapter_mod  # type: ignore
+    flexkv_mod.integration = integration_mod  # type: ignore[attr-defined]
+    integration_mod.vllm = vllm_mod  # type: ignore[attr-defined]
+    vllm_mod.vllm_v1_adapter = adapter_mod  # type: ignore[attr-defined]
 
     return flexkv_mod, adapter_mod
 

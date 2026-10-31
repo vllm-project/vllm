@@ -113,6 +113,53 @@ class RequestOutputCollector:
             self._input_stream_task = None
 
 
+def _is_chunk_boundary(
+    output: RequestOutput | PoolingRequestOutput | Exception | None,
+) -> bool:
+    """Whether the output marks the end of a streaming-input chunk: a
+    finish_reason on a request that has not finished."""
+    return (
+        isinstance(output, RequestOutput)
+        and not output.finished
+        and any(completion.finished() for completion in output.outputs)
+    )
+
+
+class StreamingInputOutputCollector(RequestOutputCollector):
+    """Collector for streaming-input requests. Doesn't merge across input
+    chunk boundaries (a finish_reason on a non-finished output)."""
+
+    def __init__(self, output_kind: RequestOutputKind, request_id: str):
+        super().__init__(output_kind, request_id)
+        self._backlog: deque[RequestOutput] = deque()
+
+    def put(self, output: RequestOutput | PoolingRequestOutput | Exception) -> None:
+        if isinstance(output, Exception):
+            self._backlog.clear()
+        elif self._backlog or _is_chunk_boundary(self.output):
+            assert isinstance(output, RequestOutput)
+            if self._backlog and not _is_chunk_boundary(self._backlog[-1]):
+                self._backlog[-1].add(output, aggregate=self.aggregate)
+            else:
+                self._backlog.append(output)
+            return
+        super().put(output)
+
+    async def get(self) -> RequestOutput | PoolingRequestOutput:
+        output = await super().get()
+        if self._backlog:
+            self.output = self._backlog.popleft()
+            self.ready.set()
+        return output
+
+    def get_nowait(self) -> RequestOutput | PoolingRequestOutput | None:
+        output = super().get_nowait()
+        if self._backlog:
+            self.output = self._backlog.popleft()
+            self.ready.set()
+        return output
+
+
 @dataclass
 class OutputProcessorOutput:
     request_outputs: list[RequestOutput | PoolingRequestOutput]
@@ -321,6 +368,14 @@ class RequestState:
             # Only the final output is required in FINAL_ONLY mode.
             return None
 
+        if pooling_output is not None:
+            return self._new_request_output(
+                self.external_req_id,
+                [self._new_pooling_output(pooling_output)],
+                finished,
+                error=error,
+            )
+
         if self.stream_interval > 1:
             assert self.detokenizer is not None
 
@@ -345,14 +400,6 @@ class RequestState:
                 self.sent_tokens_offset = self.detokenizer.num_output_tokens()
 
         external_req_id = self.external_req_id
-
-        if pooling_output is not None:
-            return self._new_request_output(
-                external_req_id,
-                [self._new_pooling_output(pooling_output)],
-                finished,
-                error=error,
-            )
 
         output = self._new_completion_output(new_token_ids, finish_reason, stop_reason)
 
@@ -714,6 +761,16 @@ class OutputProcessor:
                 # Ignore output for already-aborted request.
                 continue
 
+            error = engine_core_output.error
+            if error is not None and req_state.queue is not None:
+                # Rejected on arrival, e.g. by a paused engine; nothing was run.
+                req_state.queue.put(error.to_exception())
+                self._finish_request(req_state)
+                if req_state.streaming_input:
+                    # Input chunks sent since may re-create the session.
+                    reqs_to_abort.append(req_id)
+                continue
+
             # 1) Compute stats for this iteration.
             self._update_stats_from_output(
                 req_state, engine_core_output, engine_core_timestamp, iteration_stats
@@ -868,8 +925,10 @@ class OutputProcessor:
 
         # Remove parent request if applicable.
         parent_req = req_state.parent_req
-        if parent_req and not parent_req.child_requests:
-            self.parent_requests.pop(parent_req.request_id, None)
+        if parent_req:
+            parent_req.child_requests.discard(req_id)
+            if not parent_req.child_requests:
+                self.parent_requests.pop(parent_req.request_id, None)
         self._update_admission_stats()
 
     def _update_admission_stats(self) -> None:

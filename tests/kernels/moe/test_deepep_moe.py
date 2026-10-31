@@ -262,6 +262,7 @@ def deep_ep_moe_impl(
         if low_latency_mode:
             # Reusing one buffer leaves it dirty; the low-latency kernels need
             # the zero-initialized regions reset before each dispatch.
+            assert isinstance(mk.prepare_finalize, DeepEPLLPrepareAndFinalize)
             mk.prepare_finalize.buffer.clean_low_latency_buffer(
                 MAX_TOKENS_PER_RANK,
                 hidden_size,

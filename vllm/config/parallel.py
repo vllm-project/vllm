@@ -15,6 +15,7 @@ from torch.distributed import ProcessGroup, ReduceOp, Store
 import vllm.envs as envs
 from vllm.config.fault_tolerance import FaultToleranceConfig
 from vllm.config.utils import config
+from vllm.distributed.utils import cpu_all_reduce_
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_ports_list
@@ -23,7 +24,6 @@ if TYPE_CHECKING:
     from ray.runtime_env import RuntimeEnv
     from ray.util.placement_group import PlacementGroup
 
-    from vllm.config.fault_tolerance import FaultToleranceConfig
     from vllm.v1.executor import Executor
 else:
     RuntimeEnv = Any
@@ -39,7 +39,7 @@ DataParallelBackend = Literal["ray", "mp"]
 EPLBPolicyOption = Literal["default"]
 DCPCommBackend = Literal["ag_rs", "a2a"]
 EPLBCommunicatorBackend = Literal[
-    "torch_nccl", "torch_gloo", "torch_xccl", "nixl", "pynccl"
+    "torch_nccl", "torch_gloo", "torch_xccl", "nixl", "pynccl", "symm_mem"
 ]
 All2AllBackend = Literal[
     "naive",
@@ -73,8 +73,13 @@ class EPLBConfig:
     of the last `lb_window_size` steps will be used for rearranging experts.
     """
 
-    num_redundant_experts: int = Field(default=0, ge=0)
-    """Number of redundant experts to use for expert parallelism."""
+    num_redundant_experts: int = Field(default=None, ge=0)  # type: ignore[assignment]
+    """Number of redundant experts to use for expert parallelism.
+    If None (default), the minimum valid value will be computed automatically
+    based on the number of logical experts and the expert parallel size.
+    The value will be rounded up to the nearest multiple of the expert parallel
+    size.
+    """
 
     log_balancedness: bool = False
     """
@@ -101,6 +106,8 @@ class EPLBConfig:
     - "torch_xccl": Use torch.distributed XCCL device P2P on XPU
     - "nixl": Use NIXL with staged send/recv buffers
     - "pynccl": Use PyNccl send/recv
+    - "symm_mem": Push expert rows over CUDA symmetric memory; needs all EP
+      ranks in one NVLink domain (MNNVL across nodes)
     - None: Auto-select backend ("torch_xccl" on XPU, prefers "nixl" 
       on CUDA, falls back to "torch_gloo")
     """
@@ -183,7 +190,7 @@ class ParallelConfig:
     """Whether the deployed model is MoE (if known)."""
     enable_hc_sp: bool = False
     """Enable sequence parallelism for HyperConnection (HC) computation.
-    Currently supported by Qwen4Exp on CUDA with TP>1 and PP=1 (ignored when TP=1).
+    Currently supported by Qwen4Exp on CUDA/ROCm with TP>1 and PP=1 (ignored when TP=1).
     Does not change MoE parallelism. MoE SP may enable HC SP independently of this flag.
     """
     enable_expert_parallel: bool = False
@@ -325,15 +332,31 @@ class ParallelConfig:
     nnodes: int = Field(default=1, ge=1)
     """num of nodes for multi-node distributed
     inference when distributed_executor_backend is mp."""
-    numa_bind: bool = False
+    numa_bind: bool | None = None
     """Enable NUMA binding for GPU worker subprocesses.
 
-    By default, workers are pinned to their GPU's NUMA-local CPUs and
-    memory; on PCT-capable Xeons they also auto-bind to the SKU's
-    PCT priority cores.
+    Workers are pinned to their GPU's NUMA-local CPUs; on PCT-capable
+    Xeons they also auto-bind to the SKU's PCT priority cores.
+
+    If None (default), vLLM binds only when the environment supports it
+    (multiple NUMA nodes, `numactl` installed, unrestricted CPU affinity,
+    a default NUMA memory policy, and the `spawn` start method with an
+    mp/uni executor and mp DP, including PCP).
+    Ray, external launchers and device-ID remapping are excluded
+    from automatic binding. Automatic mode prefers GPU-local memory but
+    permits allocations on other nodes. Unsupported environments start
+    unbound. With `True`, strict memory binding may override an existing
+    policy, and a missing `numactl` or undetectable GPU-to-NUMA topology is
+    a startup error; `False` disables binding.
     """
+    _numa_bind_auto: bool = Field(default=False, repr=False)
+    """Internal launch decision: use soft memory preference in spawned children."""
     numa_bind_nodes: list[int] | None = None
     """NUMA node to bind each GPU worker to.
+
+    Setting this list implies explicit `numa_bind=True` and requests strict
+    `--membind`, not automatic soft memory preference. It cannot be combined
+    with `numa_bind=False`.
 
     Specify one NUMA node per visible GPU, for example `[0, 0, 1, 1]`
     for a 4-GPU system with GPUs 0-1 on NUMA node 0 and GPUs 2-3 on
@@ -343,6 +366,10 @@ class ParallelConfig:
     """
     numa_bind_cpus: list[str] | None = None
     """Optional CPU lists to bind each GPU worker to.
+
+    Setting this list implies explicit `numa_bind=True` and requests strict
+    `--membind`, not CPU-only binding or automatic soft memory preference.
+    It cannot be combined with `numa_bind=False`.
 
     Specify one CPU list per visible GPU, for example
     `["0-3", "4-7", "8-11", "12-15"]`. When set, vLLM uses
@@ -464,7 +491,7 @@ class ParallelConfig:
 
     enable_fault_tolerance: bool = False
     """Enable fault tolerance for detailed error recovery,
-    such as scaling down fault DPEngineCore.
+    such as scaling down faulty DPEngineCores.
     """
 
     fault_tolerance_config: FaultToleranceConfig = Field(
@@ -552,12 +579,12 @@ class ParallelConfig:
                 "data_parallel_external_lb can only be set when data_parallel_size > 1"
             )
 
-        if not self.numa_bind and (
-            self.numa_bind_nodes is not None or self.numa_bind_cpus is not None
-        ):
-            raise ValueError(
-                "numa_bind_nodes and numa_bind_cpus require numa_bind=True."
-            )
+        if self.numa_bind_nodes is not None or self.numa_bind_cpus is not None:
+            if self.numa_bind is False:
+                raise ValueError(
+                    "NUMA binding lists cannot be combined with numa_bind=False."
+                )
+            self.numa_bind = True
 
         if self.enable_eplb:
             if not current_platform.is_cuda_alike() and not current_platform.is_xpu():
@@ -581,14 +608,17 @@ class ParallelConfig:
                     f"PCP={self.prefill_context_parallel_size}, "
                     f"DP={self.data_parallel_size}."
                 )
-        else:
-            if self.eplb_config.num_redundant_experts != 0:
+
+        if not self.enable_eplb:
+            if self.eplb_config.num_redundant_experts not in (None, 0):
                 raise ValueError(
                     "num_redundant_experts is set to "
                     f"{self.eplb_config.num_redundant_experts} but EPLB is not "
                     "enabled. Either enable EPLB or unset "
                     "num_redundant_experts."
                 )
+            # Only EPLB needs the model's expert count to pick a default.
+            self.eplb_config.num_redundant_experts = 0
 
         tp = self.tensor_parallel_size
         pcp = self.prefill_context_parallel_size
@@ -606,6 +636,40 @@ class ParallelConfig:
             )
 
         return self
+
+    def compute_eplb_num_redundant_experts(self, num_logical_experts: int) -> None:
+        """Compute and set num_redundant_experts if not explicitly specified.
+
+        This method should be called after ParallelConfig is initialized and
+        when the number of logical experts is known (from ModelConfig).
+
+        Args:
+            num_logical_experts: The number of logical experts from the model.
+
+        """
+        if self.eplb_config.num_redundant_experts is not None:
+            # Already explicitly set, don't override
+            return
+
+        if self.enable_eplb:
+            # The EP group spans the TP x PCP x DP ranks.
+            ep_size = (
+                self.tensor_parallel_size
+                * self.prefill_context_parallel_size
+                * self.data_parallel_size
+            )
+            # Ensure (num_logical_experts + num_redundant_experts) is
+            # divisible by ep_size, supporting non-standard ep_size values
+            min_redundant = (ep_size - num_logical_experts % ep_size) % ep_size
+            self.eplb_config.num_redundant_experts = min_redundant
+            logger.info_once(
+                "EPLB num_redundant_experts not specified, "
+                "defaulting to minimum valid value: %d "
+                "(num_logical_experts=%d, ep_size=%d)",
+                min_redundant,
+                num_logical_experts,
+                ep_size,
+            )
 
     def set_dcp_defaults(
         self,
@@ -659,6 +723,18 @@ class ParallelConfig:
     def cpu_distributed_timeout(self) -> timedelta | None:
         seconds = self.cpu_distributed_timeout_seconds
         return timedelta(seconds=seconds) if seconds is not None else None
+
+    @property
+    def effective_cpu_distributed_timeout(self) -> timedelta | None:
+        """The timeout cpu groups operate with right now: the configured
+        value, except under FT before steady state, where group timeouts
+        are deferred because uneven rank startup would trip them."""
+        if self.enable_fault_tolerance:
+            from vllm.distributed.utils import steady_state_entered
+
+            if not steady_state_entered():
+                return None
+        return self.cpu_distributed_timeout
 
     def get_next_dp_init_port(self) -> int:
         """We might need to initialize process groups in multiple
@@ -727,6 +803,10 @@ class ParallelConfig:
             stateless_init_torch_distributed_process_group,
         )
 
+        # Under FT, startup-created groups get no configured timeout: uneven
+        # rank startup would trip it. The sentinel applies it after startup.
+        timeout = self.effective_cpu_distributed_timeout
+
         max_retries = 5
         last_exc: Exception | None = None
         for _ in range(max_retries):
@@ -741,7 +821,7 @@ class ParallelConfig:
                     backend="gloo",
                     return_store=return_store,
                     listen_socket=listen_socket,
-                    timeout=self.cpu_distributed_timeout,
+                    timeout=timeout,
                 )
             except DistNetworkError as e:
                 # We only want to retry when the root cause is EADDRINUSE.
@@ -865,9 +945,8 @@ class ParallelConfig:
         aggregated_has_unfinished = bool(tensor.item())
         return aggregated_has_unfinished
 
-    @staticmethod
     def sync_dp_state(
-        dp_group: ProcessGroup, has_unfinished: bool, pending_pause: bool
+        self, dp_group: ProcessGroup, has_unfinished: bool, pending_pause: bool
     ) -> tuple[bool, bool]:
         """Combined all-reduce for DP state synchronization.
 
@@ -887,7 +966,7 @@ class ParallelConfig:
         tensor = torch.tensor(
             [int(has_unfinished), int(pending_pause)], dtype=torch.int32, device="cpu"
         )
-        torch.distributed.all_reduce(tensor, op=ReduceOp.SUM, group=dp_group)
+        cpu_all_reduce_(tensor, dp_group, timeout=self.cpu_distributed_timeout)
         dp_size = dp_group.size()
         pause_count = tensor[1].item()
         has_unfinished_global = tensor[0].item() > 0 or pause_count % dp_size != 0
@@ -949,6 +1028,7 @@ class ParallelConfig:
             # NUMA node in numa_bind_nodes (see vllm/utils/numa_utils.py
             # `_get_numa_node`), which would otherwise diverge the DP hash.
             "numa_bind",
+            "_numa_bind_auto",
             "numa_bind_nodes",
             "numa_bind_cpus",
             "assigned_physical_gpu_ids",
@@ -979,11 +1059,11 @@ class ParallelConfig:
                     "Elastic EP is not supported with pipeline parallelism "
                     f"(pipeline_parallel_size={self.pipeline_parallel_size})."
                 )
-            if self.data_parallel_external_lb or self.data_parallel_hybrid_lb:
+            if self.data_parallel_hybrid_lb:
                 raise NotImplementedError(
-                    "Elastic EP is not compatible with data_parallel_external_lb "
-                    "or data_parallel_hybrid_lb. Elastic EP relies on a single API "
-                    "server and core client to coordinate scale up/down."
+                    "Elastic EP is not compatible with data_parallel_hybrid_lb. "
+                    "Elastic EP supports a single API server/core client path "
+                    "or data_parallel_external_lb, but not hybrid load balancing."
                 )
             if self.eplb_config.use_async:
                 from vllm.distributed.nixl_utils import is_nixl_available

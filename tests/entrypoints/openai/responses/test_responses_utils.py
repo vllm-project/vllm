@@ -153,6 +153,7 @@ class TestResponsesUtils:
         message = messages[0]
         assert message["role"] == "assistant"
         assert message["reasoning"] == "Leroy Jenkins"
+        assert message["tool_calls"] is not None
         assert message["tool_calls"][0]["id"] == "call_123"
         assert message["tool_calls"][0]["function"]["name"] == "python"
         assert (
@@ -886,6 +887,7 @@ class TestConstructChatMessagesCombinePolicy:
         if expected_tool_call_ids is None:
             assert "tool_calls" not in messages[0]
         else:
+            assert messages[0]["tool_calls"] is not None
             assert [tool_call["id"] for tool_call in messages[0]["tool_calls"]] == (
                 expected_tool_call_ids
             )

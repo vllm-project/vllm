@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
+from vllm.v1.kv_cache_interface import MambaSpec, SlidingWindowSpec
 from vllm.v1.metrics.stats import KV_FETCH_STAGES
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
@@ -136,6 +137,7 @@ def test_basic_lifecycle():
     scheduled_req = scheduler_output.scheduled_new_reqs[0]
     num_scheduled_tokens = scheduler_output.num_scheduled_tokens[request_id]
     num_computed_tokens = scheduled_req.num_computed_tokens
+    assert scheduled_req.prompt_token_ids is not None
     total_prompt_tokens = len(scheduled_req.prompt_token_ids)
     assert num_scheduled_tokens == total_prompt_tokens - num_computed_tokens
 
@@ -655,6 +657,7 @@ def test_p_side_chunked_prefill_mamba(mock_platform):
     # ── Step 1: first chunk ──
     scheduler_output = scheduler.schedule()
 
+    assert request.prompt_token_ids is not None
     assert len(request.prompt_token_ids) == NUM_TOKENS - 1
     assert request.max_tokens == 1
     assert scheduler_output.num_scheduled_tokens[request_id] == BATCH_SIZE
@@ -790,8 +793,10 @@ def test_async_load_reserves_blocks_for_promotion_margin(
     full_group.kv_cache_spec = replace(full_group.kv_cache_spec, block_size=block_size)
     if swa_enabled:
         sliding_group = kv_cache_config.kv_cache_groups[-1]
+        sliding_spec = sliding_group.kv_cache_spec
+        assert isinstance(sliding_spec, SlidingWindowSpec)
         sliding_group.kv_cache_spec = replace(
-            sliding_group.kv_cache_spec,
+            sliding_spec,
             page_size_padded=full_group.kv_cache_spec.page_size_bytes,
         )
     scheduler = create_scheduler(
@@ -865,8 +870,10 @@ def test_async_load_does_not_double_reserve_mamba_spec_blocks(
         num_blocks=num_blocks,
     )
     mamba_group = kv_cache_config.kv_cache_groups[-1]
+    mamba_spec = mamba_group.kv_cache_spec
+    assert isinstance(mamba_spec, MambaSpec)
     mamba_group.kv_cache_spec = replace(
-        mamba_group.kv_cache_spec,
+        mamba_spec,
         block_size=mamba_block_size,
         num_speculative_blocks=num_spec_tokens,
     )

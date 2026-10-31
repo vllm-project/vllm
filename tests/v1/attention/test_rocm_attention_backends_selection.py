@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from vllm.config.attention import AttentionConfig
+from vllm.config.parallel import ParallelConfig
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import AttentionSelectorConfig
@@ -71,6 +72,7 @@ def test_deepseek_v41_rocm_accepts_legacy_backend_alias(backend_name, expect_war
 
     config = SimpleNamespace(
         attention_config=AttentionConfig(backend=backend_name),
+        parallel_config=ParallelConfig(),
     )
 
     with patch.object(dsv41_model.logger, "warning_once") as warning_once:
@@ -339,7 +341,9 @@ def test_segmented_attention_forward_uses_dedicated_dispatch(monkeypatch):
     assert dispatch.call_args.kwargs["key_cache"].shape == (2, 16, 2, 128)
 
 
-def test_aiter_unified_attention_capture_preserves_query_start_locations():
+def test_aiter_unified_attention_capture_preserves_query_start_locations(
+    monkeypatch: pytest.MonkeyPatch,
+):
     from vllm.v1.attention.backends.rocm_aiter_unified_attn import (
         RocmAiterUnifiedAttentionMetadataBuilder,
     )
@@ -347,7 +351,8 @@ def test_aiter_unified_attention_capture_preserves_query_start_locations():
     builder = object.__new__(RocmAiterUnifiedAttentionMetadataBuilder)
     metadata = MagicMock()
     metadata.seq_lens = torch.tensor([1048576, 524288], dtype=torch.int32)
-    builder.build = MagicMock(return_value=metadata)
+    build = MagicMock(return_value=metadata)
+    monkeypatch.setattr(builder, "build", build)
     common = MagicMock()
     expected_query_start_loc = torch.tensor([0, 2, 5], dtype=torch.int32)
     common.query_start_loc = expected_query_start_loc.clone()
@@ -355,7 +360,7 @@ def test_aiter_unified_attention_capture_preserves_query_start_locations():
 
     actual = builder.build_for_cudagraph_capture(common)
 
-    builder.build.assert_called_once_with(0, common)
+    build.assert_called_once_with(0, common)
     assert actual is metadata
     assert torch.equal(actual.seq_lens, torch.ones_like(actual.seq_lens))
     assert actual.query_start_loc is common.query_start_loc
