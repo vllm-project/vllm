@@ -4,6 +4,8 @@ import argparse
 import contextlib
 import json
 import multiprocessing
+import os
+import signal
 import threading
 import time
 import weakref
@@ -269,6 +271,13 @@ class APIServerProcessManager:
             listeners,
         )
 
+    def stop_accepting(self) -> None:
+        """Make the live API servers stop accepting new connections (SIGUSR1)."""
+        for proc in self.processes:
+            if proc.pid is not None and proc.is_alive():
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(proc.pid, signal.SIGUSR1)
+
     def shutdown(self, timeout: float | None = None) -> None:
         """Shutdown API server processes with configurable timeout"""
         if self._finalizer.detach() is not None:
@@ -523,6 +532,9 @@ def run_api_server_worker_proc(
     # Set process title and process-specific log metadata.
     set_process_title("APIServer", str(server_index))
     decorate_logs()
+
+    # Ignore the launcher's stop-accepting signal until serve_http handles it.
+    signal.signal(signal.SIGUSR1, signal.SIG_IGN)
 
     uvloop.run(
         run_server_worker(listen_address, sock, args, client_config, **uvicorn_kwargs)
