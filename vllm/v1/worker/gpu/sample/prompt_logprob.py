@@ -318,13 +318,10 @@ def compute_prompt_logprobs_with_chunking(
         if num_tokens <= CHUNK_SIZE:
             logprob_token_ids = result.logprob_token_ids.to(torch.int32)
             return logprob_token_ids, result.logprobs, result.selected_token_ranks
-
         if token_ids is None:
-            width = result.logprobs.shape[1]
-            token_ids = prompt_token_ids.new_empty(
-                (num_tokens, width), dtype=torch.int32
-            )
-            scores = result.logprobs.new_empty((num_tokens, width))
+            size = num_tokens, result.logprobs.shape[1]
+            token_ids = prompt_token_ids.new_empty(size, dtype=torch.int32)
+            scores = result.logprobs.new_empty(size)
             ranks = result.selected_token_ranks.new_empty(num_tokens)
         assert scores is not None and ranks is not None
         token_ids[start_idx:end_idx] = result.logprob_token_ids
