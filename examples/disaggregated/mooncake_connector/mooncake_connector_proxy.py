@@ -278,7 +278,7 @@ async def send_request_to_service(
     await response.aclose()
 
 
-async def stream_service_response(
+async def open_decode_response(
     prefill_client_info: dict,
     prefill_dp_rank: int,
     decode_client_info: dict,
@@ -286,7 +286,7 @@ async def stream_service_response(
     req_data: dict,
     request_id: str,
 ):
-    """Asynchronously stream response from a service using a client from the pool."""
+    """Open a streaming response using a client from the pool."""
     headers = {
         "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
         "X-Request-Id": request_id,
@@ -300,12 +300,9 @@ async def stream_service_response(
         "transfer_id": f"xfer-{request_id}",
     }
 
-    async with decode_client_info["client"].stream(
-        "POST", endpoint, json=req_data, headers=headers
-    ) as response:
-        response.raise_for_status()
-        async for chunk in response.aiter_bytes():
-            yield chunk
+    client = decode_client_info["client"]
+    request = client.build_request("POST", endpoint, json=req_data, headers=headers)
+    return await client.send(request, stream=True)
 
 
 async def _handle_completions(api: str, request: Request):
@@ -328,22 +325,35 @@ async def _handle_completions(api: str, request: Request):
 
         decode_client_info = get_next_client(request.app, "decode")
 
-        # Stream response from decode service
-        async def generate_stream():
-            async for chunk in stream_service_response(
-                prefill_client_info,
-                prefill_dp_rank,
-                decode_client_info,
-                api,
-                req_data,
-                request_id=request_id,
-            ):
-                yield chunk
-
-        media_type = (
-            "text/event-stream" if req_data.get("stream") else "application/json"
+        response = await open_decode_response(
+            prefill_client_info,
+            prefill_dp_rank,
+            decode_client_info,
+            api,
+            req_data,
+            request_id=request_id,
         )
-        return StreamingResponse(generate_stream(), media_type=media_type)
+
+        async def generate_stream():
+            try:
+                async for chunk in response.aiter_bytes():
+                    yield chunk
+            finally:
+                await response.aclose()
+
+        content_type = response.headers.get("content-type")
+        response_headers = {"content-type": content_type} if content_type else None
+        media_type = None
+        if content_type is None:
+            media_type = (
+                "text/event-stream" if req_data.get("stream") else "application/json"
+            )
+        return StreamingResponse(
+            generate_stream(),
+            status_code=response.status_code,
+            headers=response_headers,
+            media_type=media_type,
+        )
 
     except Exception as e:
         import sys
