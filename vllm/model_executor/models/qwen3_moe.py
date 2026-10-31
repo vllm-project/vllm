@@ -433,6 +433,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
 
 @support_torch_compile
 class Qwen3MoeModel(nn.Module, EagleModelMixin):
+    supports_aux_hidden_states_over_pp = True
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_stacked={
             # weight_name: (param_name, shard_id)
@@ -502,9 +503,17 @@ class Qwen3MoeModel(nn.Module, EagleModelMixin):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        aux_hidden_states = self._maybe_add_hidden_state(
-            [], self.start_layer, hidden_states, residual
-        )
+        remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
+
+        aux_hidden_states: list[torch.Tensor] = []
+        # A later stage's start_layer tap was already taken by the previous stage.
+        if get_pp_group().is_first_rank:
+            self._maybe_add_hidden_state(
+                aux_hidden_states, self.start_layer, hidden_states, residual
+            )
+            # Preserve the entry tap before in-place residual updates.
+            if aux_hidden_states:
+                aux_hidden_states[0] = aux_hidden_states[0].clone()
         for layer_idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
@@ -516,10 +525,15 @@ class Qwen3MoeModel(nn.Module, EagleModelMixin):
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
+                {
+                    "hidden_states": hidden_states,
+                    "residual": residual,
+                    **self.pack_local_aux_hidden_states(aux_hidden_states),
+                }
             )
         hidden_states, _ = self.norm(hidden_states, residual)
 
+        aux_hidden_states = remote_aux + aux_hidden_states
         # Return auxiliary hidden states if collected
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
