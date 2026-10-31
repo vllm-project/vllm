@@ -22,16 +22,13 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.config import VllmConfig
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.layers.quantization.online.base import OnlineQuantizationConfig
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerTensorOnlineLinearMethod,
 )
-from vllm.model_executor.model_loader.reload import (
-    direct,
-    finish_reload,
-    start_reload,
-)
+from vllm.model_executor.model_loader.reload import finish_reload, start_reload
 from vllm.model_executor.model_loader.reload.direct import (
     begin_direct_reload,
     direct_reload_pending,
@@ -39,7 +36,6 @@ from vllm.model_executor.model_loader.reload.direct import (
 )
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.offloader import UVAOffloader
 from vllm.model_executor.utils import replace_parameter, retire_parameter
 
 _MODEL_CONFIG = SimpleNamespace(
@@ -301,53 +297,6 @@ class TestRefusals:
             begin_direct_reload(model)
         _assert_same(_state(model), before, addresses=True)
 
-    def test_draft_lm_head_quantization_refused(self, monkeypatch):
-        # the quantized draft lm_head would be written into the target's
-        spec = SimpleNamespace(draft_lm_head_quantization="fp8")
-        config = SimpleNamespace(
-            model_config=None,
-            speculative_config=spec,
-            lora_config=None,
-            quant_config=None,
-        )
-        monkeypatch.setattr(direct, "get_current_vllm_config_or_none", lambda: config)
-        with pytest.raises(RuntimeError, match="draft_lm_head_quantization"):
-            _cold_start(_checkpoint())
-
-    def test_torchao_refused(self, monkeypatch):
-        # its load_weights runs a layerwise reload
-        model_config = SimpleNamespace(quantization="torchao")
-        config = SimpleNamespace(
-            model_config=model_config,
-            speculative_config=None,
-            lora_config=None,
-            quant_config=None,
-        )
-        monkeypatch.setattr(direct, "get_current_vllm_config_or_none", lambda: config)
-        with pytest.raises(RuntimeError, match="torchao"):
-            _cold_start(_checkpoint())
-
-    def test_lora_refused(self, monkeypatch):
-        # LoRA wrappers forward `quant_method`: a rerun would process twice
-        config = SimpleNamespace(
-            model_config=None,
-            speculative_config=None,
-            lora_config=object(),
-            quant_config=None,
-        )
-        monkeypatch.setattr(direct, "get_current_vllm_config_or_none", lambda: config)
-        with pytest.raises(RuntimeError, match="LoRA"):
-            _cold_start(_checkpoint())
-
-    def test_weight_offloading_refused(self, monkeypatch):
-        # offloaded parameters get new storage on every post-load processing
-        offloader = object.__new__(UVAOffloader)
-        monkeypatch.setattr(
-            "vllm.model_executor.offloader.get_offloader", lambda: offloader
-        )
-        with pytest.raises(RuntimeError, match="weight offloading"):
-            _cold_start(_checkpoint())
-
     def test_online_quantization_refused(self, monkeypatch):
         # finish clears the guard that keeps online quantization from
         # quantizing its converted bytes again
@@ -359,23 +308,6 @@ class TestRefusals:
             self.proj.quant_method = online
 
         monkeypatch.setattr(_ToyModel, "__init__", with_online_layer)
-        with pytest.raises(RuntimeError, match="online quantization"):
-            _cold_start(_checkpoint())
-
-    @pytest.mark.parametrize("composed", [False, True])
-    def test_online_quantization_config_refused(self, monkeypatch, composed):
-        # an online config, alone or on top of a checkpoint config
-        online = object.__new__(OnlineQuantizationConfig)
-        quant_config = (
-            SimpleNamespace(online_quantization_config=online) if composed else online
-        )
-        config = SimpleNamespace(
-            model_config=None,
-            speculative_config=None,
-            lora_config=None,
-            quant_config=quant_config,
-        )
-        monkeypatch.setattr(direct, "get_current_vllm_config_or_none", lambda: config)
         with pytest.raises(RuntimeError, match="online quantization"):
             _cold_start(_checkpoint())
 
@@ -541,3 +473,108 @@ def test_replace_parameter_keeps_the_target_checkpoint_layout():
     layout = model.proj.weight._ckpt_layout
     replace_parameter(model.proj, "weight", model.mimo.weight)
     assert model.proj.weight._ckpt_layout == layout
+
+
+def _config(**overrides) -> SimpleNamespace:
+    offload = SimpleNamespace(
+        offload_backend="auto",
+        prefetch=SimpleNamespace(offload_group_size=0),
+        uva=SimpleNamespace(cpu_offload_gb=0),
+    )
+    fields = dict(
+        offload_config=offload,
+        model_config=SimpleNamespace(quantization=None),
+        quant_config=None,
+        lora_config=None,
+        speculative_config=None,
+        weight_transfer_config=None,
+    )
+    return SimpleNamespace(**(fields | overrides))
+
+
+_ONLINE = object.__new__(OnlineQuantizationConfig)
+
+
+@pytest.mark.parametrize(
+    "mode,overrides,match",
+    [
+        ("direct", {}, None),
+        ("layerwise", {"lora_config": object()}, None),
+        (
+            "direct",
+            {
+                "offload_config": SimpleNamespace(
+                    offload_backend="uva",
+                    prefetch=SimpleNamespace(offload_group_size=0),
+                    uva=SimpleNamespace(cpu_offload_gb=0),
+                )
+            },
+            "weight offloading",
+        ),
+        (
+            "direct",
+            {
+                "offload_config": SimpleNamespace(
+                    offload_backend="auto",
+                    prefetch=SimpleNamespace(offload_group_size=2),
+                    uva=SimpleNamespace(cpu_offload_gb=0),
+                )
+            },
+            "weight offloading",
+        ),
+        (
+            "direct",
+            {
+                "offload_config": SimpleNamespace(
+                    offload_backend="auto",
+                    prefetch=SimpleNamespace(offload_group_size=0),
+                    uva=SimpleNamespace(cpu_offload_gb=1),
+                )
+            },
+            "weight offloading",
+        ),
+        (
+            "direct",
+            {"model_config": SimpleNamespace(quantization="torchao")},
+            "torchao",
+        ),
+        ("direct", {"quant_config": _ONLINE}, "online quantization"),
+        (
+            "direct",
+            {"quant_config": SimpleNamespace(online_quantization_config=_ONLINE)},
+            "online quantization",
+        ),
+        ("direct", {"lora_config": object()}, "LoRA"),
+        (
+            "direct",
+            {"speculative_config": SimpleNamespace(draft_lm_head_quantization="fp8")},
+            "draft_lm_head_quantization",
+        ),
+        (
+            "direct",
+            {"weight_transfer_config": SimpleNamespace(backend="sharded_rdt")},
+            "sharded_rdt",
+        ),
+    ],
+    ids=[
+        "defaults",
+        "layerwise-lora",
+        "offload-backend",
+        "offload-prefetch",
+        "offload-uva",
+        "torchao",
+        "online-config",
+        "online-composed",
+        "lora",
+        "draft-lm-head-quant",
+        "sharded-rdt",
+    ],
+)
+def test_verify_direct_reload_compat(monkeypatch, mode, overrides, match):
+    monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
+    config = _config(**overrides)
+    if match is None:
+        VllmConfig._verify_direct_reload_compat(config)
+    else:
+        with pytest.raises(ValueError, match=match):
+            VllmConfig._verify_direct_reload_compat(config)

@@ -18,7 +18,7 @@ from collections.abc import Iterator
 import torch
 
 import vllm.envs as envs
-from vllm.config import ModelConfig, get_current_vllm_config_or_none
+from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.utils import (
@@ -89,50 +89,17 @@ def _loadable_tensors(model: torch.nn.Module) -> Iterator[tuple[str, torch.Tenso
             yield (f"{module_name}.{name}" if module_name else name), tensor
 
 
-def _check_supported(model: torch.nn.Module) -> None:
+def _check_supported_modules(model: torch.nn.Module) -> None:
+    # config-level refusals: VllmConfig._verify_direct_reload_compat
     from vllm.model_executor.layers.quantization.humming import (
         HummingLinearMethod,
         HummingMoEMethod,
-    )
-    from vllm.model_executor.layers.quantization.online.base import (
-        OnlineQuantizationConfig,
     )
     from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
     from vllm.model_executor.layers.quantization.online.moe_base import (
         OnlineMoEMethodBase,
     )
-    from vllm.model_executor.offloader import NoopOffloader, get_offloader
 
-    offloader = get_offloader()
-    if not isinstance(offloader, NoopOffloader):
-        # CPU/UVA offload gives parameters new storage on every post-load
-        # processing; prefetch offload shares one buffer between layers
-        raise RuntimeError(
-            f"direct reload: weight offloading is not supported "
-            f"({type(offloader).__name__})"
-        )
-    config = get_current_vllm_config_or_none()
-    model_config = config.model_config if config is not None else None
-    if model_config is not None and model_config.quantization == "torchao":
-        # its load_weights runs a layerwise reload, and its post-load
-        # processing replaces the weight parameter
-        raise RuntimeError("direct reload: torchao quantization is not supported")
-    quant_config = config.quant_config if config is not None else None
-    if isinstance(quant_config, OnlineQuantizationConfig) or (
-        getattr(quant_config, "online_quantization_config", None) is not None
-    ):
-        # `finish` clears the guard that keeps online quantization from
-        # quantizing its already-quantized bytes again
-        raise RuntimeError("direct reload: online quantization is not supported")
-    if config is not None and config.lora_config is not None:
-        # LoRA wraps layers after cold start; their wrappers forward
-        # `quant_method`, so a rerun would process each base layer twice
-        raise RuntimeError("direct reload: LoRA is not supported")
-    spec = config.speculative_config if config is not None else None
-    if spec is not None and spec.draft_lm_head_quantization is not None:
-        # after `begin` the draft's quantized lm_head is a view of the target
-        # lm_head's storage: post-load processing would write it there
-        raise RuntimeError("direct reload: draft_lm_head_quantization is not supported")
     for name, module in model.named_modules():
         method = getattr(module, "quant_method", None)
         # also without an online config (experts_int8); fused shared experts
@@ -158,7 +125,7 @@ def record_checkpoint_layout(model: torch.nn.Module) -> None:
     Runs once; reloads reuse the cold-start record."""
     if hasattr(model, "_ckpt_param_names") or is_weights_pre_processed():
         return  # pre-processed weights are already in runtime layout
-    _check_supported(model)
+    _check_supported_modules(model)
     # a model owns the tensors it records first; `begin` refuses a shared one
     # (a target lm_head in a draft) whose post-load processing re-laid it out
     model._ckpt_owner = object()  # tags owned tensors (ids of freed ones recur)
