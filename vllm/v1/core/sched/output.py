@@ -150,6 +150,9 @@ class CachedRequestData:
     new_block_ids: list[tuple[list[int], ...] | None]
     num_computed_tokens: list[int]
     num_output_tokens: list[int]
+    # Requests whose completed prompt logprobs were dropped with a stale
+    # output; the runner must re-register the requirement (#61490).
+    redo_prompt_logprobs_req_ids: set[str] = field(default_factory=set)
 
     # Version of dataclass repr with token IDs obfuscated.
     def anon_repr(self) -> str:
