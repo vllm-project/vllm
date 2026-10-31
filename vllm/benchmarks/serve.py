@@ -49,6 +49,7 @@ from vllm.benchmarks.lib.endpoint_request_func import (
     POOLING_BACKENDS,
     RequestFuncInput,
     RequestFuncOutput,
+    _get_headers,
     async_request_profile,
 )
 from vllm.benchmarks.lib.ready_checker import wait_for_endpoint
@@ -174,6 +175,7 @@ async def get_first_model_from_server(
 ) -> tuple[str, str]:
     """Fetch the first model from the server's /v1/models endpoint."""
     models_url = f"{base_url}/v1/models"
+    headers = _get_headers() | (headers or {})
     connector = aiohttp.TCPConnector(ssl=ssl_context)
     async with aiohttp.ClientSession(connector=connector) as session:
         try:
