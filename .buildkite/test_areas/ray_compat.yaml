@@ -4,7 +4,6 @@ depends_on:
 steps:
 - label: ":nvidia: (H200 MIG 18GB) Ray Dependency Compatibility Check"
   key: ray-dependency-compatibility-check
-  automatic_shard: true
   # Informational only — does not block the pipeline.
   # If this fails, it means the PR introduces a dependency that
   # conflicts with Ray's dependency constraints.
@@ -19,7 +18,6 @@ steps:
   - bash /vllm-workspace/.buildkite/scripts/check-ray-compatibility.sh
   mirror:
     amd:
-      automatic_shard: true
       label: ":amd: (MI355 DPX) Ray Dependency Compatibility Check"
       dind: false
       device: mi355_dpx
