@@ -13,6 +13,7 @@ if not torch.cuda.is_available():
     pytest.skip("CUDA required for sampler flag tests", allow_module_level=True)
 
 from vllm.sampling_params import SamplingParams
+from vllm.v1.worker.gpu.sample import sampler as sampler_module
 from vllm.v1.worker.gpu.sample.logits_processor import (
     LogitsContext,
     LogitsProcessor,
@@ -30,7 +31,10 @@ class MockReasoningConfig:
     natural_reasoning_end_token_ids = [91]
 
 
-def _make_sampler(custom_logits_processors: Sequence[LogitsProcessor] = ()) -> Sampler:
+def _make_sampler(
+    custom_logits_processors: Sequence[LogitsProcessor] = (),
+    use_fp64_gumbel: bool = False,
+) -> Sampler:
     req_states = RequestState(
         max_num_reqs=4,
         max_model_len=64,
@@ -45,6 +49,7 @@ def _make_sampler(custom_logits_processors: Sequence[LogitsProcessor] = ()) -> S
         vocab_size=VOCAB_SIZE,
         device=DEVICE,
         req_states=req_states,
+        use_fp64_gumbel=use_fp64_gumbel,
         custom_logits_processors=custom_logits_processors,
     )
 
@@ -131,6 +136,35 @@ def test_has_topp_only_rows():
     # The kernel compares top_k against the logits width, so a top_k at or
     # above a narrower logits width counts as no top-k.
     assert has_topp_only_rows([0], vocab_size=10)
+
+
+def test_fp64_gumbel_bypasses_flashinfer_sampler(monkeypatch: pytest.MonkeyPatch):
+    """FlashInfer draws fp32 noise, so an unseeded top-p request, which would
+    otherwise use the fused FlashInfer sampler, must use fp64 Gumbel sampling."""
+
+    def flashinfer_sample(*args, **kwargs):
+        raise AssertionError("FlashInfer sampler used despite use_fp64_gumbel")
+
+    monkeypatch.setattr(sampler_module, "flashinfer_sampler_supported", lambda: True)
+    monkeypatch.setattr(sampler_module, "flashinfer_sample", flashinfer_sample)
+    sampler = _make_sampler(use_fp64_gumbel=True)
+    sampler.add_request(0, SamplingParams(top_p=0.9))
+    sampler.apply_staged_writes()
+
+    idx_mapping = torch.zeros(1, dtype=torch.int32, device=DEVICE)
+    zeros = torch.zeros(1, dtype=torch.int32, device=DEVICE)
+    sampled, _ = sampler.sample(
+        torch.randn(1, VOCAB_SIZE, device=DEVICE),
+        expanded_idx_mapping=idx_mapping,
+        idx_mapping=idx_mapping,
+        idx_mapping_np=np.zeros(1, dtype=np.intp),
+        pos=zeros,
+        input_ids=zeros,
+        expanded_local_pos=zeros,
+        seq_lens_upper_bound_np=np.ones(1, dtype=np.int64),
+    )
+
+    assert sampled.shape == (1,)
 
 
 def test_logits_processing_cache_only_checks_active_requests():
