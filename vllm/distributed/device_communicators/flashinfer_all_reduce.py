@@ -87,12 +87,15 @@ def _get_standalone_max_size(
     group: ProcessGroup,
 ) -> int | None:
     tuned_max_size = _get_tuned_standalone_max_size(world_size, backend, group)
-    default_max_size_mb = (
-        PassConfig.default_fi_allreduce_fusion_max_size_mb().get(world_size)
+    default_max_size_mb = PassConfig.default_fi_allreduce_fusion_max_size_mb().get(
+        world_size
     )
     explicit_max_size = _get_explicit_standalone_max_size(world_size)
 
+    # An explicit size changes the cutoff, not FlashInfer topology support.
     if explicit_max_size is not None:
+        if tuned_max_size is None and not default_max_size_mb:
+            return None
         return explicit_max_size
     if tuned_max_size is not None:
         return tuned_max_size
@@ -105,11 +108,17 @@ def _get_standalone_workspace_floor(
     group: ProcessGroup,
 ) -> int | None:
     tuned_max_size = _get_tuned_standalone_max_size(world_size, backend, group)
+    default_max_size_mb = PassConfig.default_fi_allreduce_fusion_max_size_mb().get(
+        world_size
+    )
     explicit_max_size = _get_explicit_standalone_max_size(world_size)
 
-    # Preserve the historical no-override workspace floor exactly.
+    # Preserve the historical no-override workspace floor exactly. An override
+    # still cannot enable an unsupported topology.
     if explicit_max_size is None:
         return tuned_max_size
+    if tuned_max_size is None and not default_max_size_mb:
+        return None
     return explicit_max_size
 
 
