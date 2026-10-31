@@ -46,6 +46,7 @@ from vllm.models.deepseek_v41.nvidia.ops.mega_mhc import (
     is_mega_mhc_supported,
     mhc_shifted_post_pre_deep_gemm,
 )
+from vllm.models.deepseek_v41.nvidia.ops.mhc import hc_expand
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -1910,20 +1911,15 @@ def test_hc_expand_preserves_bits_in_eager_and_graph(
 
     def check(actual):
         expected = x.unsqueeze(1).expand(-1, hc_mult, -1).contiguous()
-        assert actual.shape == expected.shape and actual.dtype == expected.dtype
+        assert actual.shape == expected.shape and actual.dtype == x.dtype
         assert actual.is_contiguous()
         if actual.numel():
             assert torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
 
-    check(torch.ops.vllm.hc_expand_triton(x, hc_mult))
+    check(hc_expand(x, hc_mult))
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        captured = torch.ops.vllm.hc_expand_triton(x, hc_mult)
+        captured = hc_expand(x, hc_mult)
     x.copy_(torch.randn_like(x))
     graph.replay()
     check(captured)
-
-
-def test_hc_expand_custom_op_supports_compile():
-    x = torch.randn(3, 129, dtype=torch.bfloat16, device=DEVICE)[:, 1:]
-    torch.library.opcheck(torch.ops.vllm.hc_expand_triton.default, (x, 4))
