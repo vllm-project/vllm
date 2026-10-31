@@ -707,7 +707,10 @@ class CompilationConfig:
     or 1024 on data center Blackwell GPUs. This avoids OOM in tight memory
     scenarios with small max_num_seqs, and limits capture of large graphs that
     increase startup time and memory usage. Uniform decode sizes are appended
-    only within this default ceiling.
+    only within this default ceiling. For Qwen3.5 models on breakable CUDA
+    graphs, when the ceiling is the platform default, prefill sizes above it
+    are also captured (every 64 tokens up to 2048, at most
+    max_num_batched_tokens).
     """
 
     dynamic_shapes_config: DynamicShapesConfig = field(
