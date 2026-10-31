@@ -564,7 +564,8 @@ class CompilationConfig:
 
     decoder_replay_cudagraph_capture_sizes: list[int] = field(default_factory=list)
     """Decoder replay CUDA graph sizes for YOCO models (e.g. DeepSeek-V4.1), at
-    most max_num_batched_tokens. If empty: multiples of sliding_window up to
+    most max_num_batched_tokens. If empty: the powers of two below
+    sliding_window, then multiples of sliding_window up to
     min(max_cudagraph_capture_size, max_num_seqs * sliding_window), coarser past
     16 * sliding_window. Larger replay batches run eagerly."""
 
