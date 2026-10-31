@@ -82,7 +82,32 @@ def get_group_id(key: BlockHashWithGroupId) -> int:
 def maybe_convert_block_hash(hash_bytes: BlockHash) -> ExternalBlockHash:
     if not envs.VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES:
         return hash_bytes
-    return int.from_bytes(hash_bytes, byteorder="big") & ((1 << 64) - 1)
+    # The low 64 bits of the big-endian integer are its last 8 bytes.
+    return int.from_bytes(hash_bytes[-8:], byteorder="big")
+
+
+def group_external_block_hashes(
+    keys: Iterable[BlockHashWithGroupId],
+) -> dict[int, list[ExternalBlockHash]]:
+    """The external hashes of `keys` grouped by KV cache group id, in key order.
+
+    Equivalent to `maybe_convert_block_hash(get_block_hash(key))` per key, but
+    slices the packed key directly: eviction runs this once per cached block.
+    """
+    use_int_hashes = envs.VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES
+    hashes_by_group: dict[bytes, list[ExternalBlockHash]] = {}
+    for key in keys:
+        group = key[-4:]
+        hashes = hashes_by_group.get(group)
+        if hashes is None:
+            hashes = hashes_by_group[group] = []
+        hashes.append(
+            int.from_bytes(key[-12:-4], "big") if use_int_hashes else key[:-4]
+        )
+    return {
+        int.from_bytes(group, "big"): hashes
+        for group, hashes in hashes_by_group.items()
+    }
 
 
 logger = init_logger(__name__)
