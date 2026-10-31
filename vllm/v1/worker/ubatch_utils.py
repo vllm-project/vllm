@@ -137,6 +137,23 @@ def get_num_ubatches(parallel_config: ParallelConfig) -> int:
     return parallel_config.num_ubatches if parallel_config.use_ubatching else 1
 
 
+def select_num_ubatches(
+    config: ParallelConfig, min_num_tokens: int, uniform_decode: bool
+) -> int:
+    """Use three microbatches only when each meets the DBO token threshold.
+
+    The inputs must be agreed across DP ranks.
+    """
+    if config.dbo_ubatch_capacity == 2:
+        return get_num_ubatches(config)
+    threshold = (
+        config.dbo_decode_token_threshold
+        if uniform_decode
+        else config.dbo_prefill_token_threshold
+    )
+    return 3 if min_num_tokens >= 3 * threshold else 2
+
+
 def check_ubatch_thresholds(
     config: ParallelConfig, num_tokens: int, uniform_decode: bool
 ) -> bool:

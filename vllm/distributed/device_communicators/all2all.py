@@ -286,17 +286,21 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
         return kwargs
 
     def get_handle(self, kwargs):
-        assert len(kwargs) == 0, (
-            "DeepEPHTAll2AllManager expects no arguments. All the required "
-            "args are computed in the Manager itself."
-        )
-
+        """`ubatch_id` > 0 selects another independently allocated buffer."""
+        assert set(kwargs) <= {"ubatch_id"}, kwargs
         import deep_ep  # type: ignore[import-not-found]
 
         buffer_kwargs = self._make_all2all_kwargs()
+        if ubatch_id := kwargs.get("ubatch_id", 0):
+            assert not self.internode, "Per-microbatch buffers are intranode only"
+            buffer_kwargs["ubatch_id"] = ubatch_id
         logger.debug("DeepEP all2all args %s", buffer_kwargs)
+
+        def make_buffer(*, ubatch_id=0, **native_kwargs):
+            return deep_ep.Buffer(**native_kwargs)
+
         handle: deep_ep.Buffer = self.handle_cache.get_or_create(
-            buffer_kwargs, deep_ep.Buffer
+            buffer_kwargs, make_buffer
         )
         return handle
 
