@@ -292,3 +292,58 @@ async def test_get_bytes_allows_body_within_limit(
     finally:
         if connection._async_client is not None:
             await connection._async_client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("always_incomplete", [False, True], ids=["recover", "exhaust"])
+async def test_get_bytes_retries_incomplete_response(
+    monkeypatch: pytest.MonkeyPatch,
+    local_media_server: str,
+    use_async: bool,
+    always_incomplete: bool,
+) -> None:
+    monkeypatch.setattr(envs, "VLLM_MEDIA_FETCH_MAX_RETRIES", 2)
+    monkeypatch.setattr("vllm.connections.time.sleep", lambda _: None)
+    monkeypatch.setattr("vllm.connections.asyncio.sleep", AsyncMock())
+    attempts = 0
+    serve_complete_response = _MediaHandler.do_GET
+
+    def serve_response(handler: _MediaHandler) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1 or always_incomplete:
+            handler.send_response(200)
+            handler.send_header("Content-Length", str(len(_SMALL_BODY)))
+            handler.end_headers()
+            handler.wfile.write(_SMALL_BODY[:_CHUNK_SIZE])
+            handler.close_connection = True
+        else:
+            serve_complete_response(handler)
+
+    monkeypatch.setattr(_MediaHandler, "do_GET", serve_response)
+    connection = HTTPConnection()
+    url = f"{local_media_server}/small"
+
+    async def download() -> bytes:
+        if use_async:
+            return await connection.async_get_bytes(url, timeout=2)
+        return connection.get_bytes(url, timeout=2)
+
+    try:
+        if always_incomplete:
+            error_type = (
+                aiohttp.ClientPayloadError
+                if use_async
+                else requests.exceptions.ChunkedEncodingError
+            )
+            with pytest.raises(error_type):
+                await download()
+        else:
+            assert await download() == _SMALL_BODY
+        assert attempts == 2
+    finally:
+        if connection._async_client is not None:
+            await connection._async_client.close()
+        if connection._sync_client is not None:
+            connection._sync_client.close()
