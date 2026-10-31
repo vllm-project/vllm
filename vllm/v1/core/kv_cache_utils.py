@@ -85,6 +85,27 @@ def maybe_convert_block_hash(hash_bytes: BlockHash) -> ExternalBlockHash:
     return int.from_bytes(hash_bytes, byteorder="big") & ((1 << 64) - 1)
 
 
+def maybe_convert_block_hashes(
+    hashes: Iterable[BlockHash],
+) -> list[ExternalBlockHash]:
+    """Batched `maybe_convert_block_hash` that reads the env var once."""
+    if not envs.VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES:
+        return list(hashes)
+    mask = (1 << 64) - 1
+    return [int.from_bytes(h, byteorder="big") & mask for h in hashes]
+
+
+def has_block_hash_extra_keys(request: Request) -> bool:
+    """Whether `generate_block_hash_extra_keys` can return keys for any block
+    of `request`; when False it returns None for every block."""
+    return bool(
+        request.lora_request
+        or request.mm_features
+        or request.cache_salt
+        or request.prompt_embeds is not None
+    )
+
+
 logger = init_logger(__name__)
 
 # The hash seed for the first block of any prefix block sequence.
