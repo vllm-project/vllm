@@ -2561,12 +2561,6 @@ def test_fp8_paged_mqa_logits_triton_matches_torch_ref() -> None:
 @requires_split_decode_arch
 @torch.inference_mode()
 def test_fp8_paged_mqa_logits_balanced_matches_per_row() -> None:
-    """One long row among short ones: the balanced grid matches the per-row grid.
-
-    Only visible key positions are compared; both kernels leave the tail
-    unspecified. The first result is cloned because both calls share the
-    workspace buffer.
-    """
     from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
     from vllm.v1.worker.workspace import init_workspace_manager
 

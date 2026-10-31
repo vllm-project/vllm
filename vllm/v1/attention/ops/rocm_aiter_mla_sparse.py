@@ -653,13 +653,6 @@ def _fp8_paged_mqa_logits_decode_balanced_kernel(
     CTX_PER_ROW: tl.constexpr,
     BLOCK_B: tl.constexpr,
 ):
-    """Persistent grid: each program takes an equal share of all rows' tiles.
-
-    The per-row grid gives every row the same number of CTAs, so one long
-    context sets the step time. Tile ownership depends only on lengths loaded
-    in the kernel, so the launch grid stays CUDA-graph safe. A position is
-    written by one program, with the same per-tile math as the per-row kernel.
-    """
     tl.static_assert(HEAD_SIZE % 4 == 0)
     rows = tl.arange(0, BLOCK_B)
     b_idx = rows // NEXT_N
@@ -767,11 +760,10 @@ def rocm_fp8_paged_mqa_logits_triton(
         ((batch_size * next_n, max_model_len), torch.float32),
     )
 
-    # Memory-bound over the KV range. The balanced grid gives every program an
-    # equal share of all rows' tiles, so one long context does not keep a fixed
-    # CTA count busy while short rows go idle. Above 4096 rows the prefix sum
-    # no longer fits the launch this path allows, and the per-row grid is used.
-    # That grid's split count is static at launch, so it stays CUDA-graph-safe.
+    # Memory-bound over the KV range: split each row's keys across programs so
+    # few-row / long-context launches still fill the GPU. Cap splits at the
+    # device CU count (304 on gfx942, 256 on gfx950) rather than a gfx950-sized
+    # constant. All terms are static at launch, so the grid stays CUDA-graph-safe.
     rows = batch_size * next_n
     if balanced is None:
         balanced = envs.VLLM_ROCM_DSV41_BALANCED_DECODE_INDEXER
