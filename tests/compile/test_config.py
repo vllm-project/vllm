@@ -469,7 +469,7 @@ def test_should_split():
         "expected_max_size",
     ),
     [
-        (None, None, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 256),
+        (None, None, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 512),
         ([1, 2, 4], 4, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 4),
         (
             [1, 2, 4],
@@ -598,7 +598,7 @@ def test_default_cudagraph_capture_sizes_cover_off_stride_max_num_seqs(
 @pytest.mark.parametrize(
     ("max_num_seqs", "num_speculative_tokens", "widest_is_captured"),
     [
-        # No speculation: the 2x headroom under the platform ceiling, unchanged.
+        # No speculation: the 512-token floor under the platform ceiling.
         (8, 0, True),
         (32, 0, True),
         # Speculating, but the widest decode batch still fits under the ceiling.
@@ -644,7 +644,7 @@ def test_default_cudagraph_capture_size_respects_platform_ceiling(
         1024 if current_platform.is_device_capability_family(100) else 512
     )
     token_grid_max = min(
-        max_num_seqs * decode_query_len * 2,
+        max(max_num_seqs * decode_query_len * 2, 512),
         default_max_graph_size,
     )
     widest_uniform_decode = max_num_seqs * decode_query_len
@@ -753,12 +753,11 @@ def test_real_vllm_config_caps_widest_ngram_decode_batch():
 
 
 @pytest.mark.parametrize("max_num_seqs", [8, 32, 256, 300, 512, 600, 1024, 2048])
-def test_default_cudagraph_capture_size_unchanged_without_speculation(max_num_seqs):
-    """Without speculation the default must reproduce the historical formula.
+def test_default_cudagraph_capture_size_without_speculation(max_num_seqs):
+    """Without speculation the default is `min(max(max_num_seqs * 2, 512), ceiling)`.
 
-    The platform ceiling bounds a request count, and without speculation a
-    request is one token, so `min(max_num_seqs, ceiling) * 1` can never lift it.
-    The result must match `min(max_num_seqs * 2, ceiling)` bit for bit.
+    The 512-token floor keeps short prefills in CUDA graphs at small
+    `max_num_seqs`, where `max_num_seqs * 2` alone would send them to eager mode.
     """
     compilation_config = CompilationConfig(
         cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
@@ -781,9 +780,36 @@ def test_default_cudagraph_capture_size_unchanged_without_speculation(max_num_se
         1024 if current_platform.is_device_capability_family(100) else 512
     )
     assert compilation_config.max_cudagraph_capture_size == min(
-        max_num_seqs * 2,
+        max(max_num_seqs * 2, 512),
         default_max_graph_size,
     )
+
+
+def test_default_capture_sizes_include_compile_sizes():
+    """An explicit compile size inside the default capture range is captured.
+
+    The dispatcher rejects a compile size that padding would change, so 100 at
+    `max_num_seqs=8` must be a capture size once the 512-token floor applies.
+    """
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE, compile_sizes=[100, 4096]
+    )
+    config = _mock_config_for_cudagraph_sizes(
+        max_num_seqs=8,
+        num_speculative_tokens=0,
+        max_num_batched_tokens=8192,
+        compilation_config=compilation_config,
+    )
+
+    with patch.object(
+        current_platform,
+        "is_device_capability_family",
+        return_value=False,
+    ):
+        VllmConfig._set_cudagraph_sizes(config)
+
+    assert 100 in compilation_config.cudagraph_capture_sizes
+    assert compilation_config.cudagraph_capture_sizes[-1] == 512
 
 
 def test_single_speculative_token_does_not_raise_default_capture_size():
