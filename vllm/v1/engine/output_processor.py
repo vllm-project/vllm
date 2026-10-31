@@ -829,7 +829,7 @@ class OutputProcessor:
                     finish_reason = FinishReason.STOP
                     stop_reason = stop_string
                     self._trim_surplus_tokens(
-                        req_state, engine_core_output, num_prev_tokens
+                        req_state, engine_core_output, num_prev_tokens, iteration_stats
                     )
 
                 if engine_core_output.new_sampling_mask is not None:
@@ -895,7 +895,10 @@ class OutputProcessor:
 
     @staticmethod
     def _trim_surplus_tokens(
-        req_state: RequestState, output: EngineCoreOutput, num_prev_tokens: int
+        req_state: RequestState,
+        output: EngineCoreOutput,
+        num_prev_tokens: int,
+        iteration_stats: IterationStats | None,
     ) -> None:
         """Drop new tokens generated past a stop string matched by the
         detokenizer, e.g. when multiple tokens are accepted in one step."""
@@ -905,6 +908,11 @@ class OutputProcessor:
         if num_dropped <= 0:
             return
         del output.new_token_ids[num_kept:]
+        # The stats for this step were counted before the stop string matched.
+        if iteration_stats is not None:
+            assert req_state.stats is not None
+            iteration_stats.num_generation_tokens -= num_dropped
+            req_state.stats.num_generation_tokens -= num_dropped
         if output.new_logprobs is not None:
             output.new_logprobs = output.new_logprobs.slice_request(0, num_kept)
         if output.new_sampling_mask is not None:
