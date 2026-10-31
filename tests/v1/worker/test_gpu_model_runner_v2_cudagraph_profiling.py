@@ -65,6 +65,7 @@ def _make_profiling_runner(
         needs_capture, num_full_descs, piecewise_only
     )
     runner.vllm_config = SimpleNamespace()
+    runner.kv_caches = []
     runner.model_state = SimpleNamespace(
         supports_mm_inputs=encoder_only,
         encoder_runner=SimpleNamespace(has_cudagraph=lambda: encoder_only),
@@ -202,6 +203,27 @@ def test_profile_cudagraph_memory_piecewise_or_encoder_returns_measured(
     assert result == captured_bytes
     assert runner.events == ["init", "capture", "teardown"]
     assert _FakePlatform._global_graph_pool == GLOBAL_POOL
+
+
+def test_profile_cudagraph_memory_measures_kv_cache_init_apart(monkeypatch):
+    """What the KV cache init allocates beside the cache is measured apart from
+    the graph estimate, and a cache shared by two layers is excluded once."""
+    _patch_module(monkeypatch)
+    mib = 1 << 20
+    kv_cache = torch.empty(3 * mib, dtype=torch.uint8)
+    free = iter([100 * mib, (100 - 3 - 7) * mib])
+    monkeypatch.setattr(
+        cgu.torch.accelerator, "get_memory_info", lambda: (next(free), 0)
+    )
+
+    def _init(r):
+        r.kv_caches = [kv_cache, kv_cache[:mib]]
+
+    monkeypatch.setattr(cgu, "_init_minimal_kv_cache_for_profiling", _init)
+    runner = _make_profiling_runner(CUDAGraphMode.FULL, captured_bytes=5 * mib)
+
+    assert cgu.profile_cudagraph_memory(runner) == 5 * mib
+    assert runner.kv_cache_init_memory == 7 * mib
 
 
 @pytest.mark.parametrize("encoder_only", [False, True])
