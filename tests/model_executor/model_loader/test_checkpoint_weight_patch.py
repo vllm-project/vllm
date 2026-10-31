@@ -108,3 +108,97 @@ def test_dense_and_sparse_patches_follow_packed_tp_loader():
     )
     assert no_local_weight_loaded == set()
     assert torch.equal(no_local_weight_model.weight, torch.tensor([1.0]))
+
+
+def _tied_embedding_model(vocab: int, hidden: int, *, dtype: torch.dtype):
+    from types import SimpleNamespace
+
+    from vllm.distributed import parallel_state
+    from vllm.model_executor.layers.vocab_parallel_embedding import (
+        ParallelLMHead,
+        VocabParallelEmbedding,
+    )
+    from vllm.model_executor.models.utils import AutoWeightsLoader
+
+    class Inner(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embed_tokens = VocabParallelEmbedding(
+                vocab, hidden, params_dtype=dtype
+            )
+
+    class TiedModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = Inner()
+            self.lm_head = ParallelLMHead(vocab, hidden, params_dtype=dtype)
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
+
+        def load_weights(self, weights):
+            return AutoWeightsLoader(self).load_weights(weights)
+
+    return TiedModel, SimpleNamespace(rank_in_group=0, world_size=1), parallel_state
+
+
+def test_tied_embedding_patches_survive_default_chunking(monkeypatch):
+    """Regression for #60151: tied alias + canonical must not fail when
+    chunking splits them across load_weights calls."""
+    vocab, hidden = 2048, 1024
+    TiedModel, tp, parallel_state = _tied_embedding_model(
+        vocab, hidden, dtype=torch.bfloat16
+    )
+    monkeypatch.setattr(parallel_state, "_TP", tp)
+
+    def make_patches():
+        numel = vocab * hidden
+        indices = torch.arange(0, numel, 17)
+        values = torch.ones(indices.numel(), dtype=torch.bfloat16)
+        return [
+            CheckpointWeightPatch(
+                name,
+                (vocab, hidden),
+                torch.bfloat16,
+                values.clone(),
+                indices.clone(),
+            )
+            for name in ("lm_head.weight", "model.embed_tokens.weight")
+        ]
+
+    model = TiedModel().requires_grad_(False)
+    load_checkpoint_weight_patches(model, make_patches(), max_chunk_bytes=4 << 30)
+
+    model = TiedModel().requires_grad_(False)
+    loaded = load_checkpoint_weight_patches(
+        model, make_patches(), max_chunk_bytes=1 << 20
+    )
+    assert "model.embed_tokens.weight" in loaded
+    assert torch.count_nonzero(model.model.embed_tokens.weight) > 0
+
+
+def test_tied_alias_only_patch_loads_under_canonical_name(monkeypatch):
+    vocab, hidden = 128, 32
+    TiedModel, tp, parallel_state = _tied_embedding_model(
+        vocab, hidden, dtype=torch.float32
+    )
+    monkeypatch.setattr(parallel_state, "_TP", tp)
+
+    indices = torch.tensor([0, 1, 2], dtype=torch.int64)
+    values = torch.tensor([3.0, 4.0, 5.0])
+    model = TiedModel().requires_grad_(False)
+    loaded = load_checkpoint_weight_patches(
+        model,
+        [
+            CheckpointWeightPatch(
+                "lm_head.weight",
+                (vocab, hidden),
+                torch.float32,
+                values,
+                indices,
+            )
+        ],
+    )
+    assert loaded == {"model.embed_tokens.weight"}
+    flat = model.model.embed_tokens.weight.detach().flatten()
+    assert flat[0].item() == 3.0
+    assert flat[1].item() == 4.0
+    assert flat[2].item() == 5.0
