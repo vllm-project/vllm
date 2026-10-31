@@ -41,7 +41,12 @@ from vllm.triton_utils import tl, tldevice, triton
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import aux_stream
 
-from ..common.weights import copy_into_slots, deinterleave_into, write_loader
+from ..common.weights import (
+    copy_into_slots,
+    copy_padded,
+    deinterleave_into,
+    write_loader,
+)
 from ..configs import InklingModelConfig
 
 if TYPE_CHECKING:
@@ -633,7 +638,7 @@ class InklingMoE(nn.Module):
                 param.weight_loader(
                     param,
                     weight[gid].narrow(1, tp_rank * shard, shard),
-                    lambda p, w, lid=lid: p.data[lid].copy_(w),
+                    copy_padded(lid, shard),
                 )
         return [f"experts.routed_experts.{key}"]
 
