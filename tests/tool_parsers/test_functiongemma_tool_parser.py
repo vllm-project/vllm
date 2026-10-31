@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-import re
 from unittest.mock import MagicMock
 
 import pytest
+import regex as re
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.tool_parsers.functiongemma_tool_parser import FunctionGemmaToolParser
@@ -139,7 +139,9 @@ TEMPLATE_ARGS = {
     "snooze": {"minutes": 5},
 }
 
-_TAG_RE = re.compile(r"(<start_function_call>|<end_function_call>)")
+_START = "<start_function_call>"
+_END = "<end_function_call>"
+_TAG_RE = re.compile(f"({_START}|{_END})")
 
 
 def _chunks(text: str, size: int) -> list[str]:
@@ -157,10 +159,14 @@ def _chunks(text: str, size: int) -> list[str]:
 
 
 def _stream(parser, request, text: str, size: int) -> list[tuple[str, dict]]:
+    return _stream_deltas(parser, request, _chunks(text, size))
+
+
+def _stream_deltas(parser, request, deltas: list[str]) -> list[tuple[str, dict]]:
     """Reassemble streamed tool calls as a client would: by index."""
     previous = ""
     calls: dict[int, dict] = {}
-    for i, chunk in enumerate(_chunks(text, size), start=1):
+    for i, chunk in enumerate(deltas, start=1):
         current = previous + chunk
         delta = parser.extract_tool_calls_streaming(
             previous, current, chunk, [], [i], [i], request
@@ -209,6 +215,40 @@ class TestTemplateArgumentTypes:
             ("get_weather", {"location": "San Francisco", "unit": "celsius"}),
             ("set_alarm", {"hour": 7, "snooze": {"minutes": 5}}),
         ]
+
+    @pytest.mark.parametrize(
+        "first_call_deltas",
+        [
+            ["city:<escape>Paris<escape>", "}", _END + _START],
+            ["city:<escape>Paris<escape>", "}" + _END + _START],
+            ["city:<escape>Paris<escape>}" + _END + _START],
+        ],
+    )
+    def test_streaming_closes_call_when_next_starts_in_same_delta(
+        self, parser, mock_request, first_call_deltas
+    ):
+        """Deltas merge when the client falls behind the engine, so one call's
+        end tag can share a delta with the next call's start tag."""
+        deltas = [
+            _START,
+            "call:get_weather{",
+            *first_call_deltas,
+            "call:get_time{",
+            "tz:<escape>UTC<escape>",
+            "}",
+            _END,
+        ]
+        assert _stream_deltas(parser, mock_request, deltas) == [
+            ("get_weather", {"city": "Paris"}),
+            ("get_time", {"tz": "UTC"}),
+        ]
+
+    @pytest.mark.parametrize("size", [1, 1000])
+    def test_streaming_call_without_arguments_sends_empty_object(
+        self, parser, mock_request, size
+    ):
+        text = f"{_START}call:get_time{{}}{_END}"
+        assert _stream(parser, mock_request, text, size) == [("get_time", {})]
 
     def test_escaped_strings_keep_delimiters(self, parser):
         args = "note:<escape>a, b: {c} [d]<escape>,count:2"

@@ -280,6 +280,20 @@ class FunctionGemmaToolParser(ToolParser):
             ]
         )
 
+    def _close_tool_call(self, current_text: str) -> DeltaMessage | None:
+        """Stream what is left of the current call, including its closing brace."""
+        if not 0 <= self.current_tool_id < len(self.prev_tool_call_arr):
+            return None
+        all_calls = self.tool_call_regex.findall(current_text)
+        args = {}
+        if self.current_tool_id < len(all_calls):
+            match = all_calls[self.current_tool_id]
+            if match[0]:
+                args = self._parse_arguments(match[1])
+        if args or self.current_tool_name_sent:
+            return self._stream_arguments(args, final=True)
+        return None
+
     def _buffer_delta_text(self, delta_text: str) -> str:
         """Buffer incoming delta text to handle multi-token special sequences."""
         potential_start = "<start_function_call>"
@@ -329,12 +343,17 @@ class FunctionGemmaToolParser(ToolParser):
 
             # Starting a new function call
             if start_count > prev_start_count and start_count > end_count:
+                closing = (
+                    self._close_tool_call(current_text)
+                    if end_count > prev_end_count
+                    else None
+                )
                 self.current_tool_id += 1
                 self.current_tool_name_sent = False
                 self.streamed_args_for_tool.append("")
                 self.prev_tool_call_arr.append({})
                 logger.debug("Starting new tool call %d", self.current_tool_id)
-                return None
+                return closing
 
             # In the middle of a function call
             if start_count > end_count:
@@ -382,19 +401,7 @@ class FunctionGemmaToolParser(ToolParser):
 
             # Function call just ended
             if end_count > prev_end_count:
-                if self.current_tool_id >= 0 and self.current_tool_id < len(
-                    self.prev_tool_call_arr
-                ):
-                    all_calls = self.tool_call_regex.findall(current_text)
-                    args = {}
-                    if self.current_tool_id < len(all_calls):
-                        match = all_calls[self.current_tool_id]
-                        if match[0]:
-                            args = self._parse_arguments(match[1])
-
-                    if args:
-                        return self._stream_arguments(args, final=True)
-                return None
+                return self._close_tool_call(current_text)
 
             if delta_text:
                 return DeltaMessage(content=delta_text)
