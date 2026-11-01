@@ -29,10 +29,7 @@ import regex as re
 # move the fixes are not enforced because "tests" claims every file below it.
 SILENT_GROUPS = [
     "tests/benchmarks",
-    "tests/compile/correctness_e2e",
-    "tests/compile/fullgraph",
-    "tests/compile/fusions_e2e",
-    "tests/compile/passes",
+    "tests/compile",
     "tests/config",
     "tests/entrypoints/anthropic",
     "tests/entrypoints/generate",
@@ -101,7 +98,6 @@ SILENT_GROUPS = [
 # from "skip" to "silent", move its directory to SILENT_GROUPS.
 SEPARATE_GROUPS = [
     "tests",
-    "tests/compile",
     "tests/distributed",
     "tests/models",
     "tests/v1",

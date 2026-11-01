@@ -33,7 +33,7 @@ class MyWrapper(TorchCompileWithNoGuardsWrapper):
         self.model = model
         super().__init__()
 
-    def forward(self, x: torch.Tensor):  # type: ignore[override]
+    def forward(self, x: torch.Tensor):
         # this is the function to be compiled
         return self.model(x)
 
