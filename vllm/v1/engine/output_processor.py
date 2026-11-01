@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 import torch
 
+from vllm import envs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
     STREAM_FINISHED,
@@ -286,11 +287,15 @@ class RequestState:
         if sampling_params := request.sampling_params:
             # In a remote prefill scenario, report cached tokens
             # as cache hit rate on the remote P worker.
-            if sampling_params.extra_args:
+            if envs.VLLM_TRUST_REMOTE_PREFILL_CACHED_TOKENS and isinstance(
+                sampling_params.extra_args, dict
+            ):
                 kv_transfer_params = sampling_params.extra_args.get(
                     "kv_transfer_params"
                 )
-                if kv_transfer_params and kv_transfer_params.get("do_remote_prefill"):
+                if isinstance(kv_transfer_params, dict) and kv_transfer_params.get(
+                    "do_remote_prefill"
+                ):
                     cached = kv_transfer_params.get("remote_prefill_cached_tokens")
                     if isinstance(cached, int):
                         remote_prefill_cached_tokens = cached

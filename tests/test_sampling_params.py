@@ -280,3 +280,21 @@ def test_extra_args_preserves_custom_objects_and_shared_containers():
     params = SamplingParams(extra_args=extra_args)
     assert params.extra_args["first"][0] is custom
     assert params.extra_args["first"] is params.extra_args["second"]
+
+
+@pytest.mark.parametrize("cached", [999999, 5, 0, -1, None, True, "5"])
+@pytest.mark.parametrize("do_remote_prefill", [True, False])
+def test_remote_cache_accounting_requires_trusted_backend(
+    cached, do_remote_prefill, monkeypatch
+):
+    monkeypatch.delenv("VLLM_TRUST_REMOTE_PREFILL_CACHED_TOKENS", raising=False)
+    extra_args = {
+        "kv_transfer_params": {
+            "do_remote_prefill": do_remote_prefill,
+            "remote_prefill_cached_tokens": cached,
+        }
+    }
+    with pytest.raises(VLLMValidationError, match="trusted P/D backend"):
+        SamplingParams(extra_args=extra_args)
+    monkeypatch.setenv("VLLM_TRUST_REMOTE_PREFILL_CACHED_TOKENS", "1")
+    assert SamplingParams(extra_args=extra_args).extra_args == extra_args

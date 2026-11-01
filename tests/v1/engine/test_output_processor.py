@@ -217,17 +217,21 @@ def test_incremental_detokenization(
 
 
 @pytest.mark.parametrize("do_remote_prefill", [True, False])
-def test_remote_prefill_cached_tokens_override(do_remote_prefill: bool):
+@pytest.mark.parametrize("trusted,cached", [(True, 5), (False, 5), (False, 999999)])
+def test_remote_prefill_cached_tokens_override(
+    do_remote_prefill: bool, trusted: bool, cached: int, monkeypatch
+):
     """P/D disaggregation: num_cached_tokens should report the P worker's
     cache hits (passed via kv_transfer_params) instead of the local count,
     which sees the KVs pulled from the remote prefill as a ~100% hit.
     """
     output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    monkeypatch.setenv("VLLM_TRUST_REMOTE_PREFILL_CACHED_TOKENS", "1")
 
     prompt_tokens = [1, 2, 3, 4, 5, 6, 7, 8]
     kv_transfer_params = {
         "do_remote_prefill": do_remote_prefill,
-        "remote_prefill_cached_tokens": 5,
+        "remote_prefill_cached_tokens": cached,
     }
     request = EngineCoreRequest(
         request_id="request-0-int",
@@ -244,6 +248,8 @@ def test_remote_prefill_cached_tokens_override(do_remote_prefill: bool):
         ),
         pooling_params=None,
     )
+    # Exercise sink protection even if admission was bypassed.
+    monkeypatch.setenv("VLLM_TRUST_REMOTE_PREFILL_CACHED_TOKENS", str(int(trusted)))
     output_processor.add_request(request, prompt=None)
 
     prefill_stats = PrefillStats()
@@ -262,8 +268,8 @@ def test_remote_prefill_cached_tokens_override(do_remote_prefill: bool):
         ]
     )
     request_output = processed.request_outputs[0]
-    if do_remote_prefill:
-        assert request_output.num_cached_tokens == 5
+    if trusted and do_remote_prefill:
+        assert request_output.num_cached_tokens == cached
     else:
         assert request_output.num_cached_tokens == len(prompt_tokens) - 1
 

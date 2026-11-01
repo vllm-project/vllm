@@ -95,6 +95,7 @@ impl Error {
             // An empty tokenized prompt detected later, at request prepare
             // time, surfaces through the transparent Llm wrapper.
             | Self::Llm(LlmError::EmptyPromptTokenIds { .. })
+            | Self::Llm(LlmError::UntrustedRemotePrefillCachedTokens)
             | Self::Llm(LlmError::EngineCoreClient(
                 EngineCoreError::InvalidDataParallelRank { .. },
             ))
@@ -108,6 +109,7 @@ impl Error {
     pub fn param(&self) -> Option<&'static str> {
         match self {
             Self::PromptTooLong { .. } | Self::PromptFillsContext { .. } => Some("input_tokens"),
+            Self::Llm(LlmError::UntrustedRemotePrefillCachedTokens) => Some("kv_transfer_params"),
             _ => None,
         }
     }

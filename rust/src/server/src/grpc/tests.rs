@@ -674,6 +674,51 @@ async fn h2_unresponsive_peer_closed_within(addr: &str, wait: Duration) -> bool 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn untrusted_remote_cache_accounting_returns_invalid_argument() {
+    let (mut client, server_task, engine_task) =
+        grpc_test_server(b"engine-untrusted-cache", default_stream_output_specs()).await;
+    for cached in [999999.0, 5.0] {
+        let kv_transfer_params = prost_types::Struct {
+            fields: BTreeMap::from([
+                (
+                    "do_remote_prefill".to_string(),
+                    prost_types::Value {
+                        kind: Some(prost_types::value::Kind::BoolValue(true)),
+                    },
+                ),
+                (
+                    "remote_prefill_cached_tokens".to_string(),
+                    prost_types::Value {
+                        kind: Some(prost_types::value::Kind::NumberValue(cached)),
+                    },
+                ),
+            ]),
+        };
+        for stream in [false, true] {
+            let request = pb::GenerateRequest {
+                model: "test-model".to_string(),
+                prompt: Some(pb::generate_request::Prompt::Text("hello".to_string())),
+                kv: Some(pb::KvCacheParameters {
+                    kv_transfer_params: Some(kv_transfer_params.clone()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let status = if stream {
+                client.generate_stream(request).await.unwrap_err()
+            } else {
+                client.generate(request).await.unwrap_err()
+            };
+            assert_eq!(status.code(), tonic::Code::InvalidArgument);
+            assert!(status.message().contains("trusted P/D backend"));
+        }
+    }
+    server_task.abort();
+    drop(engine_task);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn unary_generate_returns_collected_text() {
     let (mut client, server_task, engine_task) =
         grpc_test_server(b"engine-grpc-unary", default_stream_output_specs()).await;
