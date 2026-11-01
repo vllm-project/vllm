@@ -78,7 +78,7 @@ pub async fn chat_completions(
 }
 
 pub(crate) enum ChatCompletionOutput<S> {
-    Full(ChatCompletionResponse),
+    Full(Box<ChatCompletionResponse>),
     Stream(S),
 }
 
@@ -151,7 +151,7 @@ pub(crate) async fn create_chat_completion(
         .instrument(request_span.clone())
         .await?;
 
-        Ok(ChatCompletionOutput::Full(response))
+        Ok(ChatCompletionOutput::Full(Box::new(response)))
     }
 }
 
