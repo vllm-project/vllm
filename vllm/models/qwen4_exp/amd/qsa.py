@@ -10,10 +10,12 @@ import torch
 from torch import nn
 from transformers import Qwen4ExpTextConfig
 
+import vllm.envs as envs
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheConfig, CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.attention import (
     set_default_quant_scales,
 )
@@ -86,6 +88,8 @@ _OCTAVE_WINDOW = 64
 # The MTP draft layer copies from recent context and loses ~15% of its accepted
 # tokens per step when positions 64-1000 back are read at 3 bits.
 _OCTAVE_DRAFT_WINDOW = rocm_octave.MAX_EXACT_WINDOW
+
+logger = init_logger(__name__)
 
 
 class Qwen4ExpQSAMetadataBuilder(FlashAttentionMetadataBuilder):
@@ -384,6 +388,20 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
 
         from .ops.qsa import qsa_sparse_paged_attention
 
+        if envs.VLLM_QSA_DENSE_PREFILL and self._selects_everything(
+            attn_metadata, layer.indexer.token_topk
+        ):
+            self._dense_prefill(
+                query[:num_tokens],
+                key_cache,
+                value_cache,
+                attn_metadata,
+                output[:num_tokens],
+            )
+            if not envs.VLLM_QSA_DENSE_CHECK:
+                return output
+            dense = output[:num_tokens].clone()
+            output.zero_()
         qsa_sparse_paged_attention(
             query[:num_tokens],
             key_cache,
@@ -393,7 +411,56 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
             token_to_req,
             output[:num_tokens],
         )
+        if (
+            envs.VLLM_QSA_DENSE_PREFILL
+            and envs.VLLM_QSA_DENSE_CHECK
+            and (self._selects_everything(attn_metadata, layer.indexer.token_topk))
+        ):
+            ref = output[:num_tokens].float()
+            err = ((dense.float() - ref).norm() / ref.norm()).item()
+            logger.info("QSA dense prefill check: rel err %.2e", err)
         return output
+
+    @staticmethod
+    def _selects_everything(attn_metadata: FlashAttentionMetadata, budget: int) -> bool:
+        """Every request starts at position 0 and fits in the selection budget,
+        so the sparse selection is the whole causal prefix."""
+        ok = getattr(attn_metadata, "_qsa_selects_everything", None)
+        if ok is None:
+            qsl = attn_metadata.query_start_loc
+            q_lens = qsl[1:] - qsl[:-1]
+            ok = attn_metadata.max_seq_len <= budget and torch.equal(
+                q_lens, attn_metadata.seq_lens[: q_lens.numel()]
+            )
+            attn_metadata._qsa_selects_everything = ok
+        return ok
+
+    def _dense_prefill(
+        self,
+        query: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        attn_metadata: FlashAttentionMetadata,
+        out: torch.Tensor,
+    ) -> None:
+        from aiter import flash_attn_varlen_func
+
+        slots = attn_metadata.slot_mapping[: query.shape[0]].long()
+        block_size = key_cache.shape[1]
+        blocks, offsets = slots // block_size, slots % block_size
+        qsl = attn_metadata.query_start_loc
+        flash_attn_varlen_func(
+            query,
+            key_cache[blocks, offsets],
+            value_cache[blocks, offsets],
+            qsl,
+            qsl,
+            attn_metadata.max_query_len,
+            attn_metadata.max_query_len,
+            softmax_scale=self.scale,
+            causal=True,
+            out=out,
+        )
 
 
 class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):

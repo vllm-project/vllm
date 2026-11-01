@@ -135,6 +135,8 @@ if TYPE_CHECKING:
     VLLM_MXFP4_EMULATION_DEQUANT_AT_LOAD: bool = False
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
     VLLM_ROCM_USE_AITER: bool = False
+    VLLM_QSA_DENSE_PREFILL: bool = False
+    VLLM_QSA_DENSE_CHECK: bool = False
     VLLM_ROCM_USE_AITER_CUSTOM_AR: bool = True
     VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE: str = "fp32"
     VLLM_ROCM_MUSE_MOE_ONLINE_QUANT: str = ""
@@ -1266,6 +1268,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "VLLM_ROCM_USE_AITER": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in ("true", "1")
+    ),
+    # Qwen4Exp QSA: when every request is a fresh prefill that fits in the
+    # indexer budget (the selection is the whole causal prefix), run dense
+    # causal attention with AITER's FlashAttention instead of the sparse path.
+    "VLLM_QSA_DENSE_PREFILL": lambda: (
+        os.getenv("VLLM_QSA_DENSE_PREFILL", "0").lower() in ("true", "1")
+    ),
+    # Also run the sparse path and log the relative difference.
+    "VLLM_QSA_DENSE_CHECK": lambda: (
+        os.getenv("VLLM_QSA_DENSE_CHECK", "0").lower() in ("true", "1")
     ),
     # Use AITER's CustomAllreduce as the custom-allreduce backend inside vLLM's
     # CudaCommunicator on ROCm. Also enables AITER AG/RS for DP communication.
