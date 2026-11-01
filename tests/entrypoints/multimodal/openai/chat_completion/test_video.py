@@ -2,11 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import openai
+import pybase64
 import pytest
 import pytest_asyncio
+from PIL import Image
 
+from tests.multimodal.utils import create_video_from_image
 from tests.utils import RemoteOpenAIServer
 from vllm.assets.base import VLLM_S3_BUCKET_URL
 from vllm.multimodal.utils import encode_video_url, fetch_video
@@ -155,6 +160,34 @@ def dummy_messages_from_video_url(
             ],
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_video_reference_script_returns_bad_request(client: openai.AsyncOpenAI):
+    """A video upload must not decode another file from the server's cwd."""
+    with TemporaryDirectory(dir=Path.cwd()) as directory:
+        path = Path(directory)
+        image_path = path / "image.png"
+        video_path = path / "private.avi"
+        Image.new("RGB", (32, 32), "blue").save(image_path)
+        create_video_from_image(
+            str(image_path), str(video_path), num_frames=8, fps=8, fourcc="MJPG"
+        )
+        relative_path = video_path.relative_to(Path.cwd()).as_posix()
+        script = f"ffconcat version 1.0\nfile '{relative_path}'\nduration 1\n"
+        video_url = (
+            "data:video/mp4;base64," + pybase64.b64encode(script.encode()).decode()
+        )
+
+        with pytest.raises(
+            openai.BadRequestError, match="playlists and stream descriptions"
+        ):
+            await client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=dummy_messages_from_video_url(video_url),
+                max_completion_tokens=1,
+                temperature=0.0,
+            )
 
 
 @pytest.mark.asyncio

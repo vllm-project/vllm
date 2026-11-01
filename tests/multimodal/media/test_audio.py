@@ -16,6 +16,7 @@ from vllm.multimodal.media import AudioMediaIO
 from vllm.multimodal.media import audio as audio_module
 from vllm.multimodal.media.audio import (
     load_audio,
+    load_audio_pyav,
     load_audio_soundfile,
     load_audio_torchcodec,
 )
@@ -73,6 +74,22 @@ def test_audio_media_io_load_file(audio_assets: AudioTestAssets):
     out = audio_io.load_file(path)
     assert isinstance(out[0], np.ndarray)
     assert out[1] == 16000
+
+
+@pytest.mark.parametrize("loader", [load_audio, load_audio_pyav, load_audio_torchcodec])
+@pytest.mark.parametrize("source_type", ["buffer", "file"])
+def test_audio_reference_script_rejected(tmp_path, monkeypatch, loader, source_type):
+    """A valid local WAV must not be readable through a concat script."""
+    monkeypatch.chdir(tmp_path)
+    sf.write("private.wav", np.zeros(800, dtype=np.float32), 8000)
+    data = b"ffconcat version 1.0\nfile 'private.wav'\n"
+    if source_type == "buffer":
+        source = BytesIO(data)
+    else:
+        source = tmp_path / "audio.wav"
+        source.write_bytes(data)
+    with pytest.raises(ValueError, match="playlists and stream descriptions"):
+        loader(source, sr=None)
 
 
 def test_audio_media_io_encode_base64(dummy_audio):

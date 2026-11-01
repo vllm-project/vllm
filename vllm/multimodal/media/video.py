@@ -13,6 +13,7 @@ from PIL import Image
 
 from vllm import envs
 from vllm.logger import init_logger
+from vllm.multimodal.media_utils import validate_media_bytes
 from vllm.utils.serial_utils import tensor2base64
 from vllm.utils.sparse_utils import (
     check_sparse_tensor_invariants_threadsafe,
@@ -121,6 +122,7 @@ class VideoMediaIO(MediaIO[MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]]
     def load_bytes(
         self, data: bytes
     ) -> MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]:
+        validate_media_bytes(data)
         video = self.video_loader.load_bytes(
             data, num_frames=self.num_frames, **self.kwargs
         )
