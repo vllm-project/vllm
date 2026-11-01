@@ -10,6 +10,7 @@ from torch import nn
 
 from vllm.model_executor.layers.fused_moe.expert_substitution import (
     APPROX_VALUE_SUFFIX,
+    VALUES_SUFFIX,
     ConstantExpertSubstitution,
     decoder_layer_index,
     get_expert_substitution_spec,
@@ -46,6 +47,13 @@ def _parse_approx_value_name(name: str) -> tuple[int, int] | None:
     return layer_idx, int(expert_id)
 
 
+def _parse_values_name(name: str) -> int | None:
+    """Return the layer index of a packed ``values`` tensor name, if any."""
+    if not name.endswith(VALUES_SUFFIX):
+        return None
+    return decoder_layer_index(name.removesuffix(VALUES_SUFFIX))
+
+
 def as_expert_substitution_model(model_cls: type[_T], model_config: Any) -> type[_T]:
     """Load constant expert values at the ``load_weights`` boundary.
 
@@ -79,6 +87,16 @@ def as_expert_substitution_model(model_cls: type[_T], model_config: Any) -> type
                 for name, loaded_weight in weights:
                     targets = value_names.get(name)
                     if targets is None:
+                        values_layer = _parse_values_name(name)
+                        if values_layer in self._expert_substitutions:
+                            param_name, substitution = self._expert_substitutions[
+                                values_layer
+                            ]
+                            substitution.load_all_values(
+                                substitution.values, loaded_weight
+                            )
+                            loaded_substitutions.add(param_name)
+                            continue
                         key = _parse_approx_value_name(name)
                         if key is None or key[0] not in self._expert_substitutions:
                             yield name, loaded_weight

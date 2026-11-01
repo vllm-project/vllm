@@ -127,6 +127,58 @@ def test_compressed_tensors_accepts_preordered_weights(actorder):
     )
 
 
+def _moe_sparsity_config(counts, method="prune"):
+    return {
+        "method": method,
+        "num_experts": counts,
+    }
+
+
+def test_compressed_tensors_parses_moe_sparsity_config():
+    config = CompressedTensorsConfig.from_config(
+        {
+            **_compressed_tensors_actorder_config(None),
+            "moe_sparsity_config": _moe_sparsity_config([231, 256, None]),
+        }
+    )
+    assert config.get_num_experts_for_layer(0) == 231
+    assert config.get_num_experts_for_layer(1) == 256
+    # Dense layers keep the model config's expert count.
+    assert config.get_num_experts_for_layer(2) is None
+    # Layers beyond the recorded list (e.g. MTP drafts) do too.
+    assert config.get_num_experts_for_layer(3) is None
+
+
+def test_compressed_tensors_without_moe_sparsity_config():
+    config = CompressedTensorsConfig.from_config(
+        _compressed_tensors_actorder_config(None)
+    )
+    assert config.expert_counts_per_layer is None
+    assert config.get_num_experts_for_layer(0) is None
+
+
+@pytest.mark.parametrize("method", ["novice", None])
+def test_compressed_tensors_rejects_unsupported_moe_sparsity_method(method):
+    with pytest.raises(ValueError, match="unsupported moe_sparsity_config.method"):
+        CompressedTensorsConfig.from_config(
+            {
+                **_compressed_tensors_actorder_config(None),
+                "moe_sparsity_config": _moe_sparsity_config([4], method=method),
+            }
+        )
+
+
+@pytest.mark.parametrize("counts", [[], [0], [True], ["4"], [4, 0]])
+def test_compressed_tensors_rejects_malformed_moe_sparsity_counts(counts):
+    with pytest.raises(ValueError, match="moe_sparsity_config.num_experts"):
+        CompressedTensorsConfig.from_config(
+            {
+                **_compressed_tensors_actorder_config(None),
+                "moe_sparsity_config": _moe_sparsity_config(counts),
+            }
+        )
+
+
 @pytest.mark.parametrize(
     "model_args",
     [
