@@ -301,9 +301,16 @@ def test_parse_delta_reasoning_only_thinking_disabled(tokenizer, request_obj):
     assert len(tool_calls) == 0
 
 
-def test_parse_delta_finished_no_flush_without_tool_call_delta(tokenizer, request_obj):
-    """When finished=True but the final parse_delta produces no
-    tool-call delta, unstreamed args are not flushed."""
+def test_parse_delta_finished_flushes_without_tool_call_delta(tokenizer, request_obj):
+    """When finished=True, unstreamed args are flushed even if the final
+    parse_delta produces no tool-call delta of its own.
+
+    A truncated stream normally ends on a chunk that carries no tool-call
+    content -- the newline the chat template puts after the closing argument
+    tag -- so keying the flush on the final delta having tool_calls would
+    silently drop the withheld tail and leave the client with an unterminated
+    arguments fragment.
+    """
     parser = make_parser(tokenizer, reasoning=False, tool=True)
 
     results = stream_text(
@@ -314,14 +321,19 @@ def test_parse_delta_finished_no_flush_without_tool_call_delta(tokenizer, reques
 
     streamed = parser._tool_parser.streamed_args_for_tool[0]
     assert len(streamed) > 5
+    remainder = streamed[-5:]
     parser._tool_parser.streamed_args_for_tool[0] = streamed[:-5]
 
-    # Prevent normal extraction from catching the gap — without a
-    # tool-call delta to merge into, the flush is skipped.
+    # Prevent normal extraction from catching the gap: the flush must emit the
+    # remainder on its own.
     parser._tool_parser.extract_tool_calls_streaming = lambda *a, **kw: None
 
     flush_result = parser.parse_delta("", [], request_obj, finished=True)
-    assert flush_result is None or flush_result.tool_calls is None
+    assert flush_result is not None
+    assert flush_result.tool_calls
+    last = flush_result.tool_calls[-1]
+    assert last.function is not None
+    assert last.function.arguments == remainder
 
 
 def test_parse_delta_finished_no_extra_args_when_fully_streamed(tokenizer, request_obj):
