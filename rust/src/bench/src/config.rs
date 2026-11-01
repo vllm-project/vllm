@@ -627,11 +627,11 @@ impl BenchConfig {
                     .into(),
             ));
         }
-        if let Some(len) = args.hf_output_len
-            && len == 0
+        if args.hf_output_len == Some(0)
+            || (args.dataset_name == DatasetName::Hf && args.output_len == Some(0))
         {
             return Err(BenchError::Config(
-                "--hf-output-len must be at least 1".into(),
+                "--hf-output-len and --output-len must be at least 1 for --dataset-name hf".into(),
             ));
         }
 
@@ -779,7 +779,7 @@ impl BenchConfig {
                 .unwrap_or(args.prefix_repetition_output_len),
             random_cache_hit_fraction: args.random_cache_hit_fraction,
             random_cache_ratio: args.random_cache_ratio,
-            sharegpt_output_len: args.sharegpt_output_len,
+            sharegpt_output_len: args.output_len.or(args.sharegpt_output_len),
             no_oversample: args.no_oversample,
             disable_shuffle: args.disable_shuffle,
             num_prompts: args.num_prompts,
@@ -838,7 +838,7 @@ impl BenchConfig {
             speed_bench_output_len: args.speed_bench_output_len,
             hf_split: args.hf_split.clone(),
             hf_subset: args.hf_subset.clone(),
-            hf_output_len: args.hf_output_len,
+            hf_output_len: args.output_len.or(args.hf_output_len),
             hf_text_column: args.hf_text_column.clone(),
             self_timed,
             timed_trace_chunk_hash_size: args.timed_trace_chunk_hash_size,
@@ -1102,6 +1102,75 @@ mod tests {
             "--model",
             "test-model",
         ]
+    }
+
+    #[test]
+    fn test_output_len_maps_to_sharegpt_and_hf() {
+        let config = |args: &[&str]| {
+            let mut argv = vec!["vllm-bench", "--model", "test-model"];
+            argv.extend_from_slice(args);
+            BenchConfig::from_args(&parse_args(argv)).unwrap()
+        };
+        let sharegpt = ["--dataset-name", "sharegpt", "--dataset-path", "data.json"];
+        let hf = ["--dataset-name", "hf", "--dataset-path", "org/data"];
+
+        assert_eq!(config(&sharegpt).sharegpt_output_len, None);
+        assert_eq!(config(&hf).hf_output_len, None);
+        assert_eq!(
+            config(&[&sharegpt[..], &["--output-len", "32"]].concat()).sharegpt_output_len,
+            Some(32)
+        );
+        assert_eq!(
+            config(&[&hf[..], &["--output-len", "32"]].concat()).hf_output_len,
+            Some(32)
+        );
+        // The dataset-specific flags still work on their own.
+        assert_eq!(
+            config(&[&sharegpt[..], &["--sharegpt-output-len", "16"]].concat()).sharegpt_output_len,
+            Some(16)
+        );
+        assert_eq!(
+            config(&[&hf[..], &["--hf-output-len", "16"]].concat()).hf_output_len,
+            Some(16)
+        );
+        // Like Python and the other datasets, --output-len wins over both.
+        assert_eq!(
+            config(
+                &[
+                    &sharegpt[..],
+                    &["--output-len", "32", "--sharegpt-output-len", "16"]
+                ]
+                .concat()
+            )
+            .sharegpt_output_len,
+            Some(32)
+        );
+        assert_eq!(
+            config(&[&hf[..], &["--output-len", "32", "--hf-output-len", "16"]].concat())
+                .hf_output_len,
+            Some(32)
+        );
+    }
+
+    #[test]
+    fn test_hf_rejects_zero_output_len() {
+        let hf_args = |flag| {
+            vec![
+                "vllm-bench",
+                "--model",
+                "test-model",
+                "--dataset-name",
+                "hf",
+                "--dataset-path",
+                "org/data",
+                flag,
+                "0",
+            ]
+        };
+        for flag in ["--output-len", "--hf-output-len"] {
+            let err = BenchConfig::from_args(&parse_args(hf_args(flag))).err().unwrap();
+            assert!(err.to_string().contains("must be at least 1"), "{err}");
+        }
     }
 
     #[test]
