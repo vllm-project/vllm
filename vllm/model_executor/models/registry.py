@@ -261,6 +261,11 @@ _EMBEDDING_MODELS = {
         "llava_next",
         "LlavaNextForConditionalGeneration",
     ),
+    # Like Terratorch, a raw-input model served through the "plugin" task
+    "Nemotron3DiarizationForAudioFrameClassification": (
+        "nemotron3_diarization",
+        "Nemotron3DiarizationForAudioFrameClassification",
+    ),
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
     "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration"),
     "SiglipModel": ("siglip", "SiglipEmbeddingModel"),

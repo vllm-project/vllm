@@ -930,6 +930,16 @@ class Nemotron3_5TranscribeForConditionalGenerationConfig(VerifyAndUpdateConfig)
         )
 
 
+class Nemotron3DiarizationForAudioFrameClassificationConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        # The forward syncs with the host at every chunk of a recording, so it
+        # cannot be captured in a CUDA graph.
+        if not model_config.enforce_eager:
+            logger.info("Nemotron-3-Diarization runs in eager mode.")
+            model_config.enforce_eager = True
+
+
 class NomicBertModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -1324,6 +1334,9 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "NemotronH_Omni_Reasoning_V3": NemotronHNanoVLV2Config,
     "Nemotron3_5TranscribeForConditionalGeneration": (
         Nemotron3_5TranscribeForConditionalGenerationConfig
+    ),
+    "Nemotron3DiarizationForAudioFrameClassification": (
+        Nemotron3DiarizationForAudioFrameClassificationConfig
     ),
     "NomicBertModel": NomicBertModelConfig,
     "Qwen2ForProcessRewardModel": Qwen2ForProcessRewardModelConfig,

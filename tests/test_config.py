@@ -1121,10 +1121,29 @@ def test_v2_model_runner_heterogeneous_vocab_draft_falls_back_to_v1(
 def test_v2_model_runner_supports_custom_logits_processors():
     config = VllmConfig()
     config.model_config = cast(
-        ModelConfig, SimpleNamespace(logits_processors=["a.b:C"])
+        ModelConfig,
+        SimpleNamespace(
+            logits_processors=["a.b:C"], is_multimodal_raw_input_only_model=False
+        ),
     )
 
     assert config._get_v2_model_runner_unsupported_features() == []
+
+
+@pytest.mark.parametrize("raw_input_only", [False, True])
+def test_v2_model_runner_raw_input_only_model_falls_back_to_v1(raw_input_only):
+    """Model Runner V2 does not pass raw multimodal inputs to the model, so
+    raw-input-only models (e.g. Terratorch) must stay on V1."""
+    config = VllmConfig()
+    config.model_config = cast(
+        ModelConfig,
+        SimpleNamespace(is_multimodal_raw_input_only_model=raw_input_only),
+    )
+
+    expected = ["raw-input-only multimodal models"]
+    assert config._get_v2_model_runner_unsupported_features() == (
+        expected if raw_input_only else []
+    )
 
 
 @pytest.mark.parametrize(

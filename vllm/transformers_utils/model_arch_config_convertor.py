@@ -499,6 +499,12 @@ class TerratorchModelArchConfigConvertor(ModelArchConfigConvertorBase):
         return 0
 
 
+class Nemotron3DiarizationModelArchConfigConvertor(TerratorchModelArchConfigConvertor):
+    def get_vocab_size(self) -> int:
+        # The model reads audio only; its prompt is the placeholder token [0].
+        return 1
+
+
 class Zamba2ModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def get_head_size(self) -> int:
         return getattr(self.hf_text_config, "attention_head_dim", 0)
@@ -874,6 +880,7 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "mimo_v2_omni_mtp": MimoV2MTPModelArchConfigConvertor,
     "moss_audio": MossAudioModelArchConfigConvertor,
     "nemotron-nas": NemotronNasModelArchConfigConvertor,
+    "nemotron3_diarization": Nemotron3DiarizationModelArchConfigConvertor,
     "bailing_hybrid_v3_mtp": BailingHybridV3MTPModelArchConfigConvertor,
     "pangu_ultra_moe_mtp": PanguUltraMoeMTPModelArchConfigConvertor,
     "qwen3_5": Qwen3_5ModelArchConfigConvertor,
