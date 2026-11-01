@@ -20,6 +20,7 @@ from vllm.utils.torch_utils import (
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
+    AttentionLayer,
     AttentionType,
     MultipleOf,
 )
@@ -1463,6 +1464,44 @@ class FlashAttentionImpl(AttentionImpl):
             self.kv_cache_dtype,
             layer._k_scale,
             layer._v_scale,
+        )
+
+    def fused_rope_kvcache_q_out_supported(self) -> bool:
+        return (
+            current_platform.is_cuda()
+            and self.attn_type == AttentionType.DECODER
+            and self.dcp_world_size == 1
+            and self.kv_quant_mode == KVQuantMode.NONE
+        )
+
+    def do_rope_and_kv_cache_update_q_out(
+        self,
+        layer: AttentionLayer,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        query_out: torch.Tensor,
+        positions: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        is_neox: bool,
+        kv_cache: torch.Tensor,
+        layer_slot_mapping: torch.Tensor,
+    ) -> None:
+        from vllm import _custom_ops as ops
+
+        # (B, H, N, 2*D) -> ((B, N, H, D), (B, N, H, D))
+        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
+        ops.fused_rope_and_reshape_cache_flash_q_out(
+            query,
+            key,
+            value,
+            query_out,
+            positions,
+            cos_sin_cache,
+            is_neox,
+            key_cache,
+            value_cache,
+            layer_slot_mapping,
         )
 
     def _forward_with_dcp(

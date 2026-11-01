@@ -501,6 +501,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")
     list(APPEND VLLM_STABLE_EXT_SRC
+      "csrc/rope_kvcache_fusion_kernels.cu"
       "csrc/hisparse_kernels.cu"
       "csrc/attention/dcp_utils/dcp_direct_a2a_lse_reduce.cu"
       "csrc/attention/dcp_utils/dcp_direct_kv_gather.cu"
