@@ -152,6 +152,11 @@ class PassConfig:
     kernel. Supersedes both enable_qk_norm_rope_fusion and fuse_rope_kvcache
     for layers that support it. Auto-enabled at O2+ on ROCm for models
     with QK-norm (e.g. Qwen3-MoE and Qwen3-VL-class architectures)."""
+    fuse_norm_mxfp4_quant: bool = False
+    """Also fold the MXFP4 dense activation quant into the preceding AITER
+    RMSNorm when fuse_norm_quant is on. Off at every optimization level: the
+    fused kernel reduces the norm in a different order, so some fp4 values
+    differ from the unfused path."""
 
     rope_kvcache_fusion_max_token_num: int = 256
     """The threshold for ROCm AITER RoPE+KVCache fusion e.g. for small batch decode.
@@ -291,6 +296,12 @@ class PassConfig:
                 "The fusion will be disabled."
             )
             self.fuse_qk_norm_rope_kvcache = False
+        if self.fuse_norm_mxfp4_quant and not current_platform.is_rocm():
+            logger.warning_once(
+                "RMSNorm + MXFP4 quant fusion requires ROCm with AITER. "
+                "The fusion will be disabled."
+            )
+            self.fuse_norm_mxfp4_quant = False
         if self.fuse_rope_kvcache_cat_mla and not current_platform.is_cuda_alike():
             logger.warning_once(
                 "MLA KV cache update with RoPE fusion enabled but the "
