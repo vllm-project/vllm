@@ -12,10 +12,12 @@ steps:
   source_file_dependencies:
   - vllm/distributed
   - "!vllm/distributed/kv_transfer/"
+  - vllm/model_executor/layers/logits_processor.py
   - tests/distributed
   commands:
   - pytest -v -s distributed/test_localization.py
   - pytest -v -s distributed/test_comm_ops.py
+  - pytest -v -s distributed/test_vocab_parallel_logits_gather.py
   - pytest -v -s distributed/test_cpu_all_reduce.py
   - pytest -v -s distributed/test_flashinfer_all_reduce.py
   - pytest -v -s distributed/test_shm_broadcast.py
