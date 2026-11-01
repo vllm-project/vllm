@@ -22,7 +22,13 @@ class DSparkSpeculatorConfig(DFlashSpeculatorConfig):
     speculator_class = (
         "vllm.v1.worker.gpu.spec_decode.dspark.speculator.DSparkSpeculator"
     )
-    supported_options = frozenset({"dspark_draft_topk", "draft_lm_head_quantization"})
+    supported_options = frozenset(
+        {
+            "dspark_draft_topk",
+            "dspark_tp_markov_sampling",
+            "draft_lm_head_quantization",
+        }
+    )
     uses_separate_workspace_lane = True
     # DSpark predicts acceptance with its own confidence head.
     adaptive_verification_uses_draft_logits = False
