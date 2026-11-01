@@ -60,7 +60,7 @@ def _maybe_dequant(tile):
 
 @lru_cache(maxsize=1)
 def _is_sm80() -> bool:
-    """True on sm_80 (A100/A30): selects the wide FP8 byte-decode tiles."""
+    """True on sm_80 (A100/A30): selects the sm_80 launch configs."""
     return current_platform.get_device_capability() == (8, 0)
 
 
@@ -1103,7 +1103,8 @@ def qsa_compress_groups_with_ratio(
         HEAD_DIM=raw_keys.shape[2],
         LOAD_ROPE_POSITIONS=load_rope_positions,
         BLOCK_D=triton.next_power_of_2(raw_keys.shape[2]),
-        num_warps=4,
+        # One warp per row measured faster on A100; other GPUs keep four.
+        num_warps=1 if _is_sm80() else 4,
     )
     return pooled, first_positions
 
