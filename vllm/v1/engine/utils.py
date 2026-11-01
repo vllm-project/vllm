@@ -239,6 +239,25 @@ def _configure_uniproc_startup_threads(
         yield
 
 
+def _wait_for_engine_processes(
+    processes: Sequence[BaseProcess],
+    stopped: threading.Event,
+    expected_shutdown: threading.Event,
+) -> str | None:
+    """Return the first unexpected exit, allowing planned clean sibling exits."""
+    pending = {proc.sentinel: proc for proc in processes}
+    while pending and not stopped.is_set():
+        ready = connection.wait(list(pending), timeout=1)
+        if stopped.is_set():
+            break
+        for sentinel in ready:
+            proc = pending.pop(cast(int, sentinel))
+            proc.join()
+            if not expected_shutdown.is_set() or proc.exitcode != 0:
+                return proc.name
+    return None
+
+
 class CoreEngineProcManager:
     """Utility class to handle creation, readiness, and shutdown
     of background processes used by the AsyncLLM and LLMEngine.
@@ -294,6 +313,8 @@ class CoreEngineProcManager:
 
         self._finalizer = weakref.finalize(self, shutdown, self.processes)
         self.manager_stopped = threading.Event()
+        self._expected_shutdown = threading.Event()
+        self.retired = False
         self.failed_proc_name: str | None = None
         self._coord_store: object | None = None
 
@@ -353,22 +374,20 @@ class CoreEngineProcManager:
                 )
             shutdown(self.processes, timeout=process_timeout)
 
+    def expect_shutdown(self) -> None:
+        """Allow every owned engine to finish its committed retirement."""
+        self._expected_shutdown.set()
+
     def monitor_engine_liveness(self) -> None:
-        """Monitor engine core process liveness."""
-        sentinel_to_proc = {proc.sentinel: proc for proc in self.processes}
-        sentinels = set(sentinel_to_proc.keys())
-
-        while sentinels and not self.manager_stopped.is_set():
-            died_sentinels = connection.wait(sentinels, timeout=1)
-
-            for sentinel in died_sentinels:
-                proc = sentinel_to_proc.pop(cast(int, sentinel))
-                exitcode = proc.exitcode
-                if exitcode != 0 and not self.manager_stopped.is_set():
-                    self.failed_proc_name = proc.name
-            if died_sentinels:
-                break
-
+        """Monitor unexpected failures without interrupting planned retirement."""
+        self.failed_proc_name = _wait_for_engine_processes(
+            self.processes, self.manager_stopped, self._expected_shutdown
+        )
+        self.retired = (
+            self._expected_shutdown.is_set()
+            and self.failed_proc_name is None
+            and not self.manager_stopped.is_set()
+        )
         self.shutdown()
 
     def sentinels(self) -> list:
@@ -1421,6 +1440,21 @@ def wait_for_engine_startup(
         and not parallel_config.data_parallel_external_lb
     )
 
+    bootstrap_server = None
+    if (
+        parallel_config.uses_external_elastic_ep
+        and parallel_config.data_parallel_rank == 0
+    ):
+        from vllm.distributed.elastic_ep.bootstrap import (
+            ExternalElasticEPBootstrapServer,
+        )
+
+        bootstrap_server = ExternalElasticEPBootstrapServer(
+            parallel_config.data_parallel_size,
+            [int.from_bytes(engine.identity, "little") for engine in core_engines],
+            scale_up=False,
+        )
+
     # 1. Engine processes
     if isinstance(launch.engine_manager, CoreEngineProcManager):
         for sentinel in launch.engine_manager.sentinels():
@@ -1483,13 +1517,32 @@ def wait_for_engine_startup(
 
         # Receive HELLO and READY messages from the input socket.
         eng_identity, ready_msg_bytes = handshake_socket.recv_multipart()
+        msg = msgspec.msgpack.decode(ready_msg_bytes)
+        if msg["status"] == "BOOTSTRAP":
+            if bootstrap_server is None:
+                error = "This listener does not support automatic Elastic EP bootstrap"
+            else:
+                bootstrap_server.reply(
+                    handshake_socket,
+                    eng_identity,
+                    msg,
+                    available_ranks={
+                        int.from_bytes(engine.identity, "little")
+                        for engine in core_engines
+                        if not engine.local and engine.state == CoreEngineState.NEW
+                    },
+                )
+                continue
+            handshake_socket.send_multipart(
+                (eng_identity, msgspec.msgpack.encode({"error": error}))
+            )
+            continue
         eng_index = int.from_bytes(eng_identity, "little")
         engine = next((e for e in core_engines if e.identity == eng_identity), None)
         if engine is None:
             raise RuntimeError(
                 f"Message from engine with unexpected data parallel rank: {eng_index}"
             )
-        msg = msgspec.msgpack.decode(ready_msg_bytes)
         status, local, headless = msg["status"], msg["local"], msg["headless"]
         if local != engine.local:
             raise RuntimeError(
@@ -1515,6 +1568,14 @@ def wait_for_engine_startup(
                 )
 
         if status == "HELLO" and engine.state == CoreEngineState.NEW:
+            if bootstrap_server is not None:
+                try:
+                    bootstrap_server.validate(eng_index, msg.get("bootstrap"))
+                except ValueError as error:
+                    handshake_socket.send_multipart(
+                        (eng_identity, msgspec.msgpack.encode({"error": str(error)}))
+                    )
+                    continue
             # Send init message with DP config info.
             parallel_config_payload: dict[str, int | str | list[int]] = {}
             if coordinated_dp and not (
