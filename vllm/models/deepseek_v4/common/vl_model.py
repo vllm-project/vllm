@@ -48,7 +48,7 @@ from .mm_preprocess import (
     DeepseekV4VLProcessingInfo,
     image_sentinel_mask,
 )
-from .vision import DeepseekV4Aligner, DeepseekV4ViT
+from .vision import DeepseekV4Aligner, DeepseekV4ViT, encode_images
 
 
 def _make_deepseek_v4_vl_weights_mapper(
@@ -201,20 +201,6 @@ class DeepseekV4ForConditionalGeneration(
             "perm": perm,
         }
 
-    def _encode_image(
-        self,
-        patches: torch.Tensor,
-        n_vit_h: int,
-        n_vit_w: int,
-        perm: torch.Tensor,
-    ) -> torch.Tensor:
-        assert self.vision is not None and self.aligner is not None
-        image_embeds = self.aligner(
-            self.vision(patches, n_vit_h, n_vit_w), n_vit_h, n_vit_w
-        )
-        # Reorder into the N-layout block order used in the prompt.
-        return image_embeds[perm.to(image_embeds.device)]
-
     def _process_image_input(
         self,
         patches: torch.Tensor,
@@ -225,25 +211,15 @@ class DeepseekV4ForConditionalGeneration(
         assert self.vision is not None and self.aligner is not None
         patches = patches.to(self.aligner.w1.weight.dtype)
 
-        embeds: list[torch.Tensor] = []
-        vit_offset = 0
-        llm_offset = 0
-        for (n_vit_h, n_vit_w), (n_llm_h, n_llm_w) in zip(
-            vit_grid.tolist(), llm_grid.tolist(), strict=True
-        ):
-            n_vit = n_vit_h * n_vit_w
-            n_llm = n_llm_h * n_llm_w
-            embeds.append(
-                self._encode_image(
-                    patches[vit_offset : vit_offset + n_vit],
-                    n_vit_h,
-                    n_vit_w,
-                    perm[llm_offset : llm_offset + n_llm],
-                )
-            )
-            vit_offset += n_vit
-            llm_offset += n_llm
-        return tuple(embeds)
+        image_embeds = encode_images(
+            self.vision, self.aligner, patches, vit_grid.tolist()
+        )
+        # Reorder into the N-layout block order used in the prompt.
+        perms = perm.to(patches.device).split(llm_grid.prod(-1).tolist())
+        return tuple(
+            embeds[image_perm]
+            for embeds, image_perm in zip(image_embeds, perms, strict=True)
+        )
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
