@@ -2060,3 +2060,56 @@ def test_weight_version_spans(output_kind: RequestOutputKind, steps, expected):
     final = queue.get_nowait()
     assert final is not None and final.finished
     assert final.outputs[0].weight_versions == [WeightVersionSpan(*s) for s in expected]
+
+
+@pytest.mark.parametrize("abort_by", ["internal", "external"])
+def test_abort_parallel_sampling_request(abort_by: str, dummy_test_vectors):
+    output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=True)
+    n = 3
+    parent_request = EngineCoreRequest(
+        request_id="request-0",
+        external_req_id="external-0",
+        prompt_token_ids=dummy_test_vectors.prompt_tokens[0],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(n=n),
+        pooling_params=None,
+    )
+    parent_req = ParentRequest(parent_request)
+
+    child_req_ids = []
+    for idx in range(n):
+        child_req_id, child_params = parent_req.get_child_info(idx)
+        child_req_ids.append(child_req_id)
+        child_request = EngineCoreRequest(
+            request_id=child_req_id,
+            external_req_id="external-0",
+            prompt_token_ids=dummy_test_vectors.prompt_tokens[0],
+            mm_features=None,
+            arrival_time=0,
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
+            sampling_params=child_params,
+            pooling_params=None,
+        )
+        queue = RequestOutputCollector(
+            output_kind=child_params.output_kind, request_id=child_req_id
+        )
+        output_processor.add_request(
+            child_request, None, parent_req=parent_req, request_index=idx, queue=queue
+        )
+
+    assert output_processor.parent_requests
+
+    if abort_by == "internal":
+        output_processor.abort_requests(child_req_ids, internal=True)
+    else:
+        output_processor.abort_requests(["external-0"], internal=False)
+
+    assert not output_processor.parent_requests
+    assert not output_processor.request_states
+    assert not output_processor.external_req_ids
