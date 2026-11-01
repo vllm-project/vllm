@@ -782,6 +782,43 @@ def test_max_load_tokens_rounds_down_without_partial_tail():
     assert scheduler.get_num_new_matched_tokens(request, 0) == (16, True)
 
 
+def test_b1_max_load_tokens_preserves_aligned_sliding_window_chunk(request_runner):
+    block_size = 4
+    blocks_per_chunk = 4
+    tokens_per_chunk = block_size * blocks_per_chunk
+    spec_kwargs: dict[str, Any] = dict(
+        block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
+    )
+    kv_cache_groups = [
+        KVCacheGroupSpec(["full"], FullAttentionSpec(**spec_kwargs)),
+        KVCacheGroupSpec(
+            ["sliding"],
+            SlidingWindowSpec(
+                **spec_kwargs,
+                sliding_window=2 * tokens_per_chunk,
+            ),
+        ),
+    ]
+    runner = request_runner(
+        block_size=block_size,
+        blocks_per_chunk=blocks_per_chunk,
+        num_gpu_blocks=100,
+        async_scheduling=False,
+        kv_cache_groups=kv_cache_groups,
+    )
+    runner.new_request(
+        token_ids=[0] * (2 * tokens_per_chunk + 1),
+        kv_transfer_params={"max_load_tokens": tokens_per_chunk},
+    )
+    request = runner.scheduler.requests[str(runner.req_id)]
+    runner.manager.lookup.return_value = LookupResult.HIT
+
+    assert runner.connector_scheduler.get_num_new_matched_tokens(request, 0) == (
+        tokens_per_chunk,
+        True,
+    )
+
+
 @pytest.mark.parametrize("value", ["8", 8.5, -1, True])
 def test_invalid_max_load_tokens_is_ignored(value):
     scheduler = _make_partial_tail_scheduler()
