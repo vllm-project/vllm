@@ -17,7 +17,10 @@ import torch
 from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     UnquantizedMoeBackend,
 )
-from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+from vllm.model_executor.layers.fused_moe.routed_experts import (
+    RoutedExperts,
+    _initial_padding_value,
+)
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
@@ -147,9 +150,9 @@ class TestSplitPadding:
     def test_no_narrowing_when_shapes_match(self):
         expert_data = torch.zeros(1024, 1024)
         loaded_weight = torch.randn(1024, 1024)
-        result = RoutedExperts._split_padding(expert_data, loaded_weight, hidden_dim=0)[
-            0
-        ]
+        result, _ = RoutedExperts._split_padding(
+            expert_data, loaded_weight, hidden_dim=0
+        )
         assert result.shape == loaded_weight.shape
         assert result.data_ptr() == expert_data.data_ptr()
 
@@ -157,18 +160,18 @@ class TestSplitPadding:
         # w2: (hidden_size, intermediate_size) - hidden_size padded at dim 0
         expert_data = torch.zeros(3072, 1024)
         loaded_weight = torch.randn(2688, 1024)
-        result = RoutedExperts._split_padding(expert_data, loaded_weight, hidden_dim=0)[
-            0
-        ]
+        result, _ = RoutedExperts._split_padding(
+            expert_data, loaded_weight, hidden_dim=0
+        )
         assert result.shape == (2688, 1024)
 
     def test_narrow_w13_hidden_dim(self):
         # w1/w3: (intermediate_size, hidden_size) - hidden_size padded at dim 1
         expert_data = torch.zeros(2048, 3072)
         loaded_weight = torch.randn(2048, 2688)
-        result = RoutedExperts._split_padding(expert_data, loaded_weight, hidden_dim=1)[
-            0
-        ]
+        result, _ = RoutedExperts._split_padding(
+            expert_data, loaded_weight, hidden_dim=1
+        )
         assert result.shape == (2048, 2688)
 
     def test_narrow_transposed_w2(self):
@@ -176,36 +179,36 @@ class TestSplitPadding:
         expert_data = torch.zeros(1024, 3072)
         loaded_weight = torch.randn(1024, 2688)
         hidden_dim = RoutedExperts._get_hidden_dim(shard_dim=0, ndim=2)
-        result = RoutedExperts._split_padding(
+        result, _ = RoutedExperts._split_padding(
             expert_data, loaded_weight, hidden_dim=hidden_dim
-        )[0]
+        )
         assert result.shape == (1024, 2688)
 
     def test_narrow_3d_full_load(self):
         # 3D tensor for full_load path: w2 (num_experts, hidden_size, intermediate)
         expert_data = torch.zeros(8, 3072, 1024)
         loaded_weight = torch.randn(8, 2688, 1024)
-        result = RoutedExperts._split_padding(expert_data, loaded_weight, hidden_dim=1)[
-            0
-        ]
+        result, _ = RoutedExperts._split_padding(
+            expert_data, loaded_weight, hidden_dim=1
+        )
         assert result.shape == (8, 2688, 1024)
 
     def test_narrow_1d_scale(self):
         # 1D scale tensor: per-channel w2 scale (hidden_size,)
         expert_data = torch.zeros(3072)
         loaded_weight = torch.randn(2688)
-        result = RoutedExperts._split_padding(expert_data, loaded_weight, hidden_dim=0)[
-            0
-        ]
+        result, _ = RoutedExperts._split_padding(
+            expert_data, loaded_weight, hidden_dim=0
+        )
         assert result.shape == (2688,)
 
     def test_scalar_weight_no_op(self):
         # 0-dim tensor should be a no-op
         expert_data = torch.zeros(3072)
         loaded_weight = torch.tensor(1.0)
-        result = RoutedExperts._split_padding(expert_data, loaded_weight, hidden_dim=0)[
-            0
-        ]
+        result, _ = RoutedExperts._split_padding(
+            expert_data, loaded_weight, hidden_dim=0
+        )
         # ndim == 0, so no narrowing
         assert result.shape == (3072,)
 
@@ -213,9 +216,9 @@ class TestSplitPadding:
         # Guard: don't narrow if loaded_weight is larger than expert_data
         expert_data = torch.zeros(2688, 1024)
         loaded_weight = torch.randn(3072, 1024)
-        result = RoutedExperts._split_padding(expert_data, loaded_weight, hidden_dim=0)[
-            0
-        ]
+        result, _ = RoutedExperts._split_padding(
+            expert_data, loaded_weight, hidden_dim=0
+        )
         assert result.shape == (2688, 1024)
         assert result.data_ptr() == expert_data.data_ptr()
 
@@ -223,9 +226,9 @@ class TestSplitPadding:
         # Negative hidden_dim should be a safe no-op (0 <= check)
         expert_data = torch.zeros(3072, 1024)
         loaded_weight = torch.randn(2688, 1024)
-        result = RoutedExperts._split_padding(
+        result, _ = RoutedExperts._split_padding(
             expert_data, loaded_weight, hidden_dim=-1
-        )[0]
+        )
         # -1 fails the 0 <= check, so no narrowing
         assert result.shape == (3072, 1024)
         assert result.data_ptr() == expert_data.data_ptr()
@@ -235,9 +238,9 @@ class TestSplitPadding:
         # even when other dimensions also differ
         expert_data = torch.zeros(3072, 2048)
         loaded_weight = torch.randn(2688, 1024)
-        result = RoutedExperts._split_padding(expert_data, loaded_weight, hidden_dim=0)[
-            0
-        ]
+        result, _ = RoutedExperts._split_padding(
+            expert_data, loaded_weight, hidden_dim=0
+        )
         # Only dim 0 (hidden) should be narrowed; dim 1 stays at 2048
         assert result.shape == (2688, 2048)
 
@@ -245,9 +248,9 @@ class TestSplitPadding:
         # Verify narrowing returns a view (writes go to original tensor)
         expert_data = torch.zeros(3072, 1024)
         loaded_weight = torch.randn(2688, 1024)
-        result = RoutedExperts._split_padding(expert_data, loaded_weight, hidden_dim=0)[
-            0
-        ]
+        result, _ = RoutedExperts._split_padding(
+            expert_data, loaded_weight, hidden_dim=0
+        )
         result.copy_(loaded_weight)
         # The first 2688 rows of expert_data should now have loaded_weight
         assert torch.equal(expert_data[:2688, :], loaded_weight)
@@ -320,9 +323,9 @@ class TestWeightLoadingWithPaddedHiddenSize:
 
         # w2 non-transposed: shard_dim=1, hidden_dim=0
         hidden_dim = RoutedExperts._get_hidden_dim(shard_dim=1, ndim=2)
-        expert_data = RoutedExperts._split_padding(
+        expert_data, _ = RoutedExperts._split_padding(
             expert_data_full, loaded_weight, hidden_dim=hidden_dim
-        )[0]
+        )
         expert_data.copy_(loaded_weight)
 
         assert torch.equal(expert_data_full[:original_hidden, :], loaded_weight)
@@ -343,9 +346,9 @@ class TestWeightLoadingWithPaddedHiddenSize:
 
         # w1 non-transposed: shard_dim=0, hidden_dim=1
         hidden_dim = RoutedExperts._get_hidden_dim(shard_dim=0, ndim=2)
-        expert_data = RoutedExperts._split_padding(
+        expert_data, _ = RoutedExperts._split_padding(
             expert_data_full, loaded_weight, hidden_dim=hidden_dim
-        )[0]
+        )
         expert_data.copy_(loaded_weight)
 
         assert torch.equal(expert_data_full[:, :original_hidden], loaded_weight)
@@ -365,9 +368,9 @@ class TestWeightLoadingWithPaddedHiddenSize:
         loaded_weight = torch.randn(intermediate, original_hidden)
 
         hidden_dim = RoutedExperts._get_hidden_dim(shard_dim=0, ndim=2)
-        expert_data = RoutedExperts._split_padding(
+        expert_data, _ = RoutedExperts._split_padding(
             expert_data_full, loaded_weight, hidden_dim=hidden_dim
-        )[0]
+        )
         expert_data.copy_(loaded_weight)
 
         assert torch.equal(expert_data_full[:, :original_hidden], loaded_weight)
@@ -381,9 +384,9 @@ class TestWeightLoadingWithPaddedHiddenSize:
         loaded_weight = torch.randn(hidden, intermediate)
 
         hidden_dim = RoutedExperts._get_hidden_dim(shard_dim=1, ndim=2)
-        expert_data = RoutedExperts._split_padding(
+        expert_data, _ = RoutedExperts._split_padding(
             expert_data_full, loaded_weight, hidden_dim=hidden_dim
-        )[0]
+        )
         expert_data.copy_(loaded_weight)
 
         assert torch.equal(expert_data_full, loaded_weight)
@@ -402,12 +405,12 @@ class TestWeightLoadingWithPaddedHiddenSize:
 
         shard_dim = 1
         hidden_dim = RoutedExperts._get_hidden_dim(shard_dim=shard_dim, ndim=2)
-        expert_data = RoutedExperts._split_padding(
+        expert_data, _ = RoutedExperts._split_padding(
             expert_data_full,
             loaded_weight,
             hidden_dim=hidden_dim,
             shard_dim=shard_dim,
-        )[0]
+        )
         expert_data.copy_(loaded_weight)
 
         assert torch.equal(
@@ -467,6 +470,9 @@ class TestPaddingFilledByPostProcessing:
             (torch.zeros(3, 8, 6), None, 0.0),
             (torch.ones(3, 8, 6), None, 1.0),  # e.g. unit block scales
             (torch.randn(3, 8, 6), None, 0.0),  # uninitialized
+            (torch.full((3, 8, 6), 2.0), None, 0.0),  # constant, not ones
+            # uninitialized storage of a freed all-ones bool tensor
+            (torch.ones(3, 8, 24, dtype=torch.uint8).view(torch.float32), None, 0.0),
             (torch.ones(3, 8, 6), 2.0, 2.0),  # declared in create_weights
         ],
     )
@@ -483,6 +489,19 @@ class TestPaddingFilledByPostProcessing:
             assert torch.equal(w13[:, half, :5], loaded.expand(3, 3, 5))
         for padding in (w13[:, 3], w13[:, 7], w13[:, :, 5]):
             assert torch.all(padding == expected)
+
+    @pytest.mark.parametrize(
+        "init,expected",
+        [
+            (torch.ones(4, dtype=torch.float8_e4m3fn), 1),
+            (torch.ones(4, dtype=torch.bfloat16), 1),
+            (torch.ones(4, dtype=torch.uint8), 0),  # bytes of a bool True
+            (torch.ones(4, dtype=torch.uint8).view(torch.float8_e4m3fn), 0),
+            (torch.ones(4, device="meta"), 0),
+        ],
+    )
+    def test_initial_padding_value(self, init, expected):
+        assert _initial_padding_value(init) == expected
 
     def test_fill_only_once_per_load(self):
         layer = self._Experts(torch.zeros(2, 8, 6))

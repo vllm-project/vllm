@@ -40,17 +40,20 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-def _constant_value(t: torch.Tensor) -> float:
-    """``t``'s value if every element holds the same bytes, else 0."""
-    if t.is_meta or t.numel() == 0:
+def _initial_padding_value(t: torch.Tensor) -> float:
+    """1 if ``t`` was created with ones (e.g. unit scales), else 0.
+
+    Only the bytes of 1.0 count: a ``torch.empty`` tensor may hold any constant
+    (e.g. a freed all-0x01 bool buffer), which must not become its padding."""
+    if t.is_meta or t.numel() == 0 or not t.is_floating_point():
         return 0
-    flat = t.detach().reshape(-1)
-    raw = flat.view(torch.uint8).view(-1, t.element_size())
+    one = torch.ones(1).to(t.dtype).view(torch.uint8).to(t.device)
+    raw = t.detach().reshape(-1).view(torch.uint8).view(-1, t.element_size())
     chunk = 1 << 26
     for start in range(0, raw.shape[0], chunk):
-        if not bool((raw[start : start + chunk] == raw[:1]).all()):
+        if not bool((raw[start : start + chunk] == one).all()):
             return 0
-    return flat[:1].float().item()
+    return 1
 
 
 def _index_expert_mapping(
@@ -607,14 +610,14 @@ class RoutedExperts(PluggableLayer):
     def _record_padding_values(self) -> None:
         """Remember the value each parameter's padding is created with, so
         every load fills it with the same value: a ``padding_value`` attribute
-        set in ``create_weights``, else the initial value if constant (e.g.
-        unit scales), else 0 (uninitialized or meta)."""
+        set in ``create_weights``, else 1 if created with ones (e.g. unit
+        scales), else 0 (zeros, uninitialized or meta)."""
         values = {}
         for name, param in self._parameters.items():
             if param is None:
                 continue
             value = getattr(param, "padding_value", None)
-            values[name] = _constant_value(param) if value is None else value
+            values[name] = _initial_padding_value(param) if value is None else value
         self._padding_values = values
 
     def _load_w13(

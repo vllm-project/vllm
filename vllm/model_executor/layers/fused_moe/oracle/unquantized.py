@@ -402,7 +402,11 @@ def _zero_intermediate_padding(
     w13_weight: torch.Tensor,
     w2_weight: torch.Tensor,
 ) -> None:
-    """Zero intermediate padding; reloads rewrite only the checkpoint slices."""
+    """Zero intermediate padding; reloads rewrite only the checkpoint slices.
+
+    The sharded-RDT baked replay relies on this: it bakes padded unquantized
+    MoE (``weight_loader_numel`` excludes padding) and runs no loaders, so
+    nothing is marked for `fill_padding`."""
     unpadded = moe_config.intermediate_size_per_partition_unpadded
     assert unpadded is not None
     padded = moe_config.intermediate_size_per_partition

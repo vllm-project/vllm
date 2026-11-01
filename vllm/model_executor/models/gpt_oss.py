@@ -778,6 +778,27 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 pcp_rank=get_pcp_group().rank_in_group,
             )
 
+        def _copy_to_padded_expert(
+            fused_name: str,
+            param: torch.nn.Parameter,
+            expert_id: int | None,
+            loaded_weight: torch.Tensor,
+            shard_dim: int | None = None,
+        ) -> None:
+            """Copy into the leading slice of ``param[expert_id]`` (of every
+            expert if ``expert_id`` is None), recording the padding left out
+            for `fill_padding`."""
+            experts = self.get_submodule(fused_name.rpartition(".")[0])
+            first = int(expert_id is None)
+            expert_data = experts._narrow_and_mark_padding(
+                param,
+                param.data if expert_id is None else param.data[expert_id],
+                loaded_weight,
+                hidden_dim=first,
+                shard_dim=None if shard_dim is None else shard_dim + first,
+            )
+            expert_data.copy_(loaded_weight)
+
         def _is_mxfp4(weight_dtype: str | None) -> bool:
             """Return True for any MXFP4 weight-dtype variant.
 
@@ -949,10 +970,9 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 # direct load here.
                 assert fused_name is not None
                 param = params_dict[fused_name]
-                expert_data = param.data[expert_id]
-                dim1 = sliced_weight.shape[0]
-                dim2 = sliced_weight.shape[1]
-                expert_data.data[:dim1, :dim2].copy_(sliced_weight)
+                _copy_to_padded_expert(
+                    fused_name, param, expert_id, sliced_weight, shard_dim=1
+                )
                 loaded_params.add(fused_name)
                 continue
 
@@ -1079,9 +1099,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 # direct load here.
                 assert fused_name is not None
                 param = params_dict[fused_name]
-                expert_data = param.data[expert_id]
-                dim1 = sliced_weight.shape[0]
-                expert_data.data[:dim1].copy_(sliced_weight)
+                _copy_to_padded_expert(fused_name, param, expert_id, sliced_weight)
                 loaded_params.add(fused_name)
                 continue
 
