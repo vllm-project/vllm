@@ -353,6 +353,64 @@ def marlin_moe_padded_intermediate(intermediate_size: int, group_size: int = -1)
     return padded
 
 
+def explain_moe_marlin_unsupported(
+    config: FusedMoEConfig,
+    group_size: int,
+    allow_tile_padding: bool = False,
+) -> str | None:
+    """Explain why the fused MoE Marlin kernel cannot serve ``config``.
+
+    Returns ``None`` when the config is supported, otherwise a message naming
+    the rule, the offending values and the way out. This is the single source
+    of truth for Marlin MoE shape support; ``check_moe_marlin_supports_config``
+    is the boolean view of it.
+    """
+    if current_platform.is_rocm():
+        return "the fused MoE Marlin kernel is not available on ROCm"
+
+    if group_size not in [-1, 32, 64, 128]:
+        return (
+            f"Marlin supports group_size -1, 32, 64 or 128, but this "
+            f"checkpoint was quantized with group_size {group_size}."
+        )
+
+    hidden_size = config.hidden_dim
+    # The layer has not rounded intermediate_size yet; use the stable unpadded
+    # size. gate-up needs n=2*intermediate % 128, down needs k=intermediate % 64.
+    intermediate_size_per_partition = config.intermediate_size_per_partition_unpadded
+    assert intermediate_size_per_partition is not None
+
+    if hidden_size % 128 != 0:
+        return (
+            f"Marlin requires the MoE hidden size ({hidden_size}) to be "
+            f"divisible by 128. hidden_size is the MoE I/O extent and is never "
+            f"padded."
+        )
+
+    if group_size > 0 and intermediate_size_per_partition % group_size != 0:
+        return (
+            f"Marlin WNA16 MoE with group quantization requires the MoE "
+            f"intermediate size per tensor-parallel partition "
+            f"({intermediate_size_per_partition}) to be divisible by "
+            f"group_size ({group_size}). Quantization scale groups would "
+            f"otherwise straddle a TP shard boundary. This is a correctness "
+            f"rule, not a tile-alignment one, so tile padding cannot repair "
+            f"it. Use a tensor-parallel size that splits the intermediate "
+            f"size into whole groups, or enable expert parallelism with "
+            f"--enable-expert-parallel."
+        )
+
+    tile = max(64, group_size)
+    if not allow_tile_padding and intermediate_size_per_partition % tile != 0:
+        return (
+            f"Marlin requires the MoE intermediate size per tensor-parallel "
+            f"partition ({intermediate_size_per_partition}) to be divisible "
+            f"by {tile} for thread-tile alignment."
+        )
+
+    return None
+
+
 def check_moe_marlin_supports_config(
     config: FusedMoEConfig,
     group_size: int,
@@ -365,26 +423,12 @@ def check_moe_marlin_supports_config(
     marlin_moe_padded_intermediate), so only a group straddling the padded
     boundary stays unsupported. hidden_size is the MoE I/O extent and is never
     padded.
-    """
-    if current_platform.is_rocm():
-        return False
-    hidden_size = config.hidden_dim
-    # The layer has not rounded intermediate_size yet; use the stable unpadded
-    # size. gate-up needs n=2*intermediate % 128, down needs k=intermediate % 64.
-    intermediate_size_per_partition = config.intermediate_size_per_partition_unpadded
-    assert intermediate_size_per_partition is not None
 
-    if allow_tile_padding:
-        supports_shape = hidden_size % 128 == 0 and (
-            group_size <= 0 or intermediate_size_per_partition % group_size == 0
-        )
-    else:
-        supports_shape = (
-            hidden_size % 128 == 0
-            and intermediate_size_per_partition % max(64, group_size) == 0
-        )
-    supports_group_size = group_size in [-1, 32, 64, 128]
-    return supports_shape and supports_group_size
+    See ``explain_moe_marlin_unsupported`` for the reason behind a ``False``.
+    """
+    return (
+        explain_moe_marlin_unsupported(config, group_size, allow_tile_padding) is None
+    )
 
 
 def check_moe_marlin_supports_layer(
