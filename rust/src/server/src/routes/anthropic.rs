@@ -55,6 +55,15 @@ enum Message {
     Assistant { content: TextContent },
 }
 
+impl From<Message> for ChatMessage {
+    fn from(message: Message) -> Self {
+        match message {
+            Message::User { content } => Self::user(content.into_content()),
+            Message::Assistant { content } => Self::assistant_text(content.into_text(false)),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, serde::Serialize)]
 #[serde(untagged)]
 enum TextContent {
@@ -129,14 +138,7 @@ impl MessagesRequest {
                 messages.push(ChatMessage::system(text));
             }
         }
-        for message in self.messages {
-            messages.push(match message {
-                Message::User { content } => ChatMessage::user(content.into_content()),
-                Message::Assistant { content } => {
-                    ChatMessage::assistant_text(content.into_text(false))
-                }
-            });
-        }
+        messages.extend(self.messages.into_iter().map(ChatMessage::from));
         let continuation = matches!(messages.last(), Some(ChatMessage::Assistant { content })
             if content.iter().any(|b| matches!(b, AssistantContentBlock::Text { text } if !text.is_empty())));
         let request = ChatRequest {
