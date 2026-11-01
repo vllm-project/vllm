@@ -3,7 +3,6 @@
 
 use crate::backends::RequestFuncOutput;
 use crate::config::GoodputConfig;
-use crate::datasets::SampleRequest;
 use crate::metrics::{BenchmarkMetrics, MultiTurnMetrics};
 use crate::multi_turn::ConversationOutput;
 
@@ -27,7 +26,6 @@ fn log_failed_requests(outputs: &[RequestFuncOutput]) {
 ///
 /// Mirrors Python's `calculate_metrics()` from serve.py:392-599.
 pub fn calculate_metrics(
-    input_requests: &[SampleRequest],
     outputs: &[RequestFuncOutput],
     dur_s: f64,
     selected_percentiles: &[f64],
@@ -44,7 +42,7 @@ pub fn calculate_metrics(
     let mut ttfts: Vec<f64> = Vec::new();
     let mut e2els: Vec<f64> = Vec::new();
 
-    for (i, output) in outputs.iter().enumerate() {
+    for output in outputs.iter() {
         if output.success {
             let output_len = if output.output_tokens > 0 {
                 output.output_tokens
@@ -57,7 +55,7 @@ pub fn calculate_metrics(
             };
 
             actual_output_lens.push(output_len);
-            total_input += input_requests[i].prompt_len;
+            total_input += output.prompt_len;
 
             if output_len > 1 {
                 let latency_minus_ttft = output.latency - output.ttft;
@@ -283,7 +281,6 @@ fn percentiles_from_sorted(sorted: &[f64], percentiles: &[f64]) -> Vec<(f64, f64
 ///
 /// Mirrors Python's `calculate_metrics_for_embeddings()` from serve.py.
 /// Key differences from `calculate_metrics()`:
-/// - Uses `output.prompt_len` (server-reported) instead of `input_requests[i].prompt_len`
 /// - Only computes E2EL (no TTFT/TPOT/ITL since pooling is non-streaming)
 /// - `total_output` is 0 (pooling produces no output tokens)
 /// - `total_token_throughput` = `total_input / dur_s` (input tokens only)
@@ -380,7 +377,7 @@ pub fn calculate_embedding_metrics(
 
 /// Calculate multi-turn benchmark metrics with per-turn breakdown.
 ///
-/// 1. Flatten all turns into SampleRequest/RequestFuncOutput pairs → overall metrics
+/// 1. Flatten all turns' outputs → overall metrics
 /// 2. Group by turn_index → per-turn metrics
 /// 3. Conversation-level stats
 pub fn calculate_multi_turn_metrics(
@@ -391,24 +388,15 @@ pub fn calculate_multi_turn_metrics(
     max_turn_count: usize,
 ) -> MultiTurnMetrics {
     // Flatten all turns for overall metrics
-    let mut all_requests: Vec<SampleRequest> = Vec::new();
     let mut all_outputs: Vec<RequestFuncOutput> = Vec::new();
 
     for conv in conversation_outputs {
         for turn in &conv.turns {
-            all_requests.push(SampleRequest {
-                prompt: std::sync::Arc::from(""),
-                prompt_len: turn.request_output.prompt_len,
-                expected_output_len: turn.request_output.output_tokens,
-                request_id: None,
-                ..Default::default()
-            });
             all_outputs.push(turn.request_output.clone());
         }
     }
 
     let (overall, _) = calculate_metrics(
-        &all_requests,
         &all_outputs,
         dur_s,
         selected_percentiles,
@@ -419,25 +407,16 @@ pub fn calculate_multi_turn_metrics(
     // Per-turn breakdown
     let mut per_turn: Vec<BenchmarkMetrics> = Vec::new();
     for turn_idx in 0..max_turn_count {
-        let mut turn_requests: Vec<SampleRequest> = Vec::new();
         let mut turn_outputs: Vec<RequestFuncOutput> = Vec::new();
 
         for conv in conversation_outputs {
             if let Some(turn) = conv.turns.get(turn_idx) {
-                turn_requests.push(SampleRequest {
-                    prompt: std::sync::Arc::from(""),
-                    prompt_len: turn.request_output.prompt_len,
-                    expected_output_len: turn.request_output.output_tokens,
-                    request_id: None,
-                    ..Default::default()
-                });
                 turn_outputs.push(turn.request_output.clone());
             }
         }
 
         if !turn_outputs.is_empty() {
             let (turn_metrics, _) = calculate_metrics(
-                &turn_requests,
                 &turn_outputs,
                 dur_s,
                 selected_percentiles,
@@ -507,6 +486,26 @@ mod tests {
         let data: Vec<f64> = (0..100).map(|i| i as f64).collect();
         let p99 = percentile_sorted(&data, 99.0);
         assert!((p99 - 98.01).abs() < 0.1);
+    }
+
+    /// Input-token totals come from each output's `prompt_len` (server-reported
+    /// via `usage.prompt_tokens`), not the client-side request estimate.
+    /// Mirrors Python's `serve.py`.
+    #[test]
+    fn test_total_input_uses_output_prompt_len() {
+        let outputs = vec![
+            RequestFuncOutput {
+                success: true,
+                prompt_len: 128,
+                output_tokens: 3,
+                ..Default::default()
+            };
+            2
+        ];
+
+        let (metrics, _) = calculate_metrics(&outputs, 1.0, &[], false, &GoodputConfig::default());
+
+        assert_eq!(metrics.total_input, 256);
     }
 
     #[test]

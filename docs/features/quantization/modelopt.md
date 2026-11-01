@@ -49,12 +49,23 @@ module prefix and decoder layer indices before constructing quantized layers.
     use `--linear-backend flashinfer_trtllm` to select FlashInfer's TensorRT-LLM
     GEMM backend.
 
+For Muse Spark NVFP4 on NVIDIA, the prepared-input FlashInfer TRT-LLM path
+skips CUDA-graph padding rows when routing runs outside the expert kernel.
+The router writes expert IDs of `-1` and zero weights in its existing fused
+kernel. This requires a padding mask matching the routed token layout;
+other dispatch paths retain their backend-specific behavior.
+Set `VLLM_MOE_SKIP_PADDING=0` before starting the engine to disable this
+optimization for comparisons.
+
 ## Benchmarking with dummy weights
 
 For performance experiments with random weights, use `--load-format dummy`.
 ModelOpt NVFP4 MoE layers initialize positive quantization scales with matching
 gate/up global scales, including for FlashInfer MegaMoE
 (`--moe-backend flashinfer_moe_ep_cutedsl`).
+Muse Spark's NVIDIA `deep_gemm_mega_moe` backend also supports dummy loading:
+it initializes valid NVFP4 scales and finalizes its expert weights and residual
+constants before the first forward. Enable expert parallelism for this backend.
 Dummy weights are for benchmarking, not model quality evaluation. Normal
 checkpoint loading uses the checkpoint's scales.
 

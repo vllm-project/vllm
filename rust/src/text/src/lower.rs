@@ -1693,6 +1693,15 @@ mod tests {
         assert_eq!(result.unwrap(), 100);
     }
 
+    /// Shared lowering only clamps, even a budget above the whole context
+    /// window: `/inference/v1/generate` accepts it like Python, while chat and
+    /// completions reject it in their HTTP handlers.
+    #[test]
+    fn resolve_max_tokens_caps_budget_above_model_len() {
+        let result = resolve_max_tokens(Some(1000), None, 200, 100);
+        assert_eq!(result.unwrap(), 100);
+    }
+
     #[test]
     fn lower_text_request_preserves_non_streaming_request_metadata() {
         let mut request = sample_request();
