@@ -28,6 +28,10 @@ AITER_MODEL_LIST = [
     "Qwen/Qwen3-8B",
 ]
 
+# The HF reference does not depend on use_rocm_aiter or use_prompt_embeds, so
+# each model loads in HF once per module instead of once per combination.
+_HF_REFERENCE: dict[tuple, tuple[list, list[torch.Tensor]]] = {}
+
 
 # @maybe_test_rocm_aiter
 @pytest.mark.parametrize(
@@ -147,30 +151,30 @@ def test_models(
             "def add(a, b):\n    return a + b\n\ndef sub(a, b):\n    return a - "
         )
 
-    with hf_runner(
-        model,
-        revision=model_info.revision,
-        trust_remote_code=model_info.trust_remote_code,
-    ) as hf_model:
-        hf_outputs = hf_model.generate_greedy_logprobs_limit(
-            example_prompts,
-            max_tokens,
-            num_logprobs,
-            # Domyn's remote code decodes with torch varlen_attn, whose ROCm
-            # causal mask is top-left aligned when max_q < max_k:
-            # https://github.com/pytorch/pytorch/pull/201930
-            use_cache=not (
-                current_platform.is_rocm() and model == "domyn/Domyn-Edge-Base"
-            ),
-        )
-
-        prompt_embeds: list[torch.Tensor] | None = [] if use_prompt_embeds else None
-
-        for prompt in example_prompts:
-            token_ids = hf_model.tokenizer(prompt, return_tensors="pt").input_ids.to(
-                hf_model.model.device
+    hf_key = (model, tuple(example_prompts), max_tokens, num_logprobs)
+    if hf_key not in _HF_REFERENCE:
+        with hf_runner(
+            model,
+            revision=model_info.revision,
+            trust_remote_code=model_info.trust_remote_code,
+        ) as hf_model:
+            hf_outputs = hf_model.generate_greedy_logprobs_limit(
+                example_prompts,
+                max_tokens,
+                num_logprobs,
+                # Domyn's remote code decodes with torch varlen_attn, whose ROCm
+                # causal mask is top-left aligned when max_q < max_k:
+                # https://github.com/pytorch/pytorch/pull/201930
+                use_cache=not (
+                    current_platform.is_rocm() and model == "domyn/Domyn-Edge-Base"
+                ),
             )
-            if prompt_embeds is not None:
+
+            hf_embeds: list[torch.Tensor] = []
+            for prompt in example_prompts:
+                token_ids = hf_model.tokenizer(
+                    prompt, return_tensors="pt"
+                ).input_ids.to(hf_model.model.device)
                 # Retained prompt values must not keep reference weights alive.
                 with torch.no_grad():
                     embed = hf_model.model.get_input_embeddings()(token_ids)
@@ -181,7 +185,11 @@ def test_models(
                     config = hf_model.model.config
                     embed = embed * config.scale_emb
 
-                prompt_embeds.append(embed.squeeze(0))
+                hf_embeds.append(embed.squeeze(0).cpu())
+        _HF_REFERENCE[hf_key] = (hf_outputs, hf_embeds)
+
+    hf_outputs, hf_embeds = _HF_REFERENCE[hf_key]
+    prompt_embeds = hf_embeds if use_prompt_embeds else None
 
     vllm_kwargs = {}
     if (
