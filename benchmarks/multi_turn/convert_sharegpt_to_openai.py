@@ -32,7 +32,7 @@ def content_is_valid(
     if max_content_len and len(content) > max_content_len:
         return False
 
-    return has_non_english_chars(content)
+    return not has_non_english_chars(content)
 
 
 def print_stats(
