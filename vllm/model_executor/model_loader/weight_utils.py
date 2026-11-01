@@ -51,7 +51,10 @@ from vllm.model_executor.model_loader.ep_weight_filter import (
 from vllm.platforms import current_platform
 from vllm.tracing import instrument
 from vllm.transformers_utils.repo_utils import hf_api, hf_fs
-from vllm.utils.cpu_resource_utils import get_available_memory
+from vllm.utils.cpu_resource_utils import (
+    get_available_memory,
+    get_numa_available_memory,
+)
 from vllm.utils.import_utils import PlaceholderModule
 
 try:
@@ -968,6 +971,28 @@ def _get_checkpoints_size_bytes(files: list[str]) -> int:
     return sum(os.path.getsize(f) for f in files)
 
 
+def _warn_if_checkpoint_exceeds_numa_binding(total_bytes: int) -> None:
+    """Warn before MPOL_BIND turns an oversized checkpoint into a SIGKILL."""
+    numa_memory = get_numa_available_memory()
+    if numa_memory is None:
+        return
+    nodes, available = numa_memory
+    if total_bytes <= available:
+        return
+    logger.warning_once(
+        "Checkpoint size (%.2f GiB) exceeds the memory available on the NUMA "
+        "node(s) this process is bound to (%s: %.2f GiB). MPOL_BIND does not "
+        "fall back to other nodes, so if these weights are held in RAM the "
+        "allocation will not spill -- it will be OOM-killed with no further "
+        "message. To resolve: bind to more nodes (`numactl --membind=...` or "
+        "`--interleave=all`), or set VLLM_CPU_OMP_THREADS_BIND to CPUs on a "
+        "single node so that memory and threads agree.",
+        total_bytes / 1024**3,
+        ",".join(str(node) for node in nodes),
+        available / 1024**3,
+    )
+
+
 def _get_fs_type(files: list[str]) -> str:
     """Get the filesystem type of the first file in *files* (Linux only)."""
     if not files:
@@ -1129,6 +1154,7 @@ def safetensors_weights_iterator(
         total_bytes / 1024**3,
         avail_bytes / 1024**3,
     )
+    _warn_if_checkpoint_exceeds_numa_binding(total_bytes)
 
     should_prefetch = safetensors_load_strategy == "prefetch"
     if safetensors_load_strategy is None:
