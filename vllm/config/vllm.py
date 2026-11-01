@@ -456,7 +456,9 @@ class VllmConfig:
     performance_mode: PerformanceMode = "balanced"
     """Performance mode for runtime behavior, 'balanced' is the default.
     'interactivity' favors low end-to-end per-request latency at small batch
-    sizes (fine-grained CUDA graphs, latency-oriented kernels).
+    sizes (fine-grained CUDA graphs, latency-oriented kernels, programmatic
+    dependent launch for the Inductor-generated Triton kernels on Hopper and
+    newer).
     'throughput' favors aggregate tokens/sec at high concurrency (larger CUDA
     graphs, more aggressive batching, throughput-oriented kernels)."""
 
@@ -1881,6 +1883,9 @@ class VllmConfig:
                 and self.compilation_config.backend == "inductor"
             )
 
+        # Needs the final compilation mode and backend (resolved just above).
+        self._apply_interactivity_inductor_pdl()
+
         if all(s not in self.compilation_config.custom_ops for s in ("all", "none")):
             if (
                 self.compilation_config.backend == "inductor"
@@ -3069,6 +3074,42 @@ class VllmConfig:
             return
 
         mm_config.validate_mm_processor_device(self.ec_transfer_config)
+
+    def _apply_interactivity_inductor_pdl(self) -> None:
+        """In 'interactivity' mode, launch the Inductor-generated Triton kernels
+        with programmatic dependent launch (PDL) on GPUs that support it.
+
+        PDL lets each generated kernel start while its predecessor drains,
+        which removes most of the launch gap between the small kernels of a
+        decode step. An explicit ``inductor_compile_config["triton.enable_pdl"]``
+        or a ``TORCHINDUCTOR_ENABLE_PDL`` environment variable (Inductor's own
+        switch, read by the workers) wins over this default.
+        """
+        if self.performance_mode != "interactivity":
+            return
+        compilation_config = self.compilation_config
+        if (
+            compilation_config.mode != CompilationMode.VLLM_COMPILE
+            or compilation_config.backend != "inductor"
+        ):
+            return
+        inductor_config = compilation_config.inductor_compile_config
+        if (
+            "triton.enable_pdl" in inductor_config
+            or "TORCHINDUCTOR_ENABLE_PDL" in os.environ
+        ):
+            return
+        # NVML-based check: this runs in the frontend process, which must not
+        # initialize CUDA. Inductor itself skips PDL codegen on ROCm.
+        if not (
+            current_platform.is_cuda() and current_platform.has_device_capability(90)
+        ):
+            return
+        inductor_config["triton.enable_pdl"] = True
+        logger.info_once(
+            "Enabling PDL for Inductor-generated Triton kernels "
+            "('interactivity' performance mode)."
+        )
 
     def _limit_max_model_len_to_draft(self) -> None:
         """Lower max_model_len to the draft model's when the V2 model runner
