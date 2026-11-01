@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import hashlib
+import string
 from collections.abc import Sequence
 from functools import cached_property
 from pathlib import Path
@@ -84,34 +86,34 @@ def maybe_serialize_tool_calls(request: "MistralChatCompletionRequest"):
             request.messages[i]["tool_calls"] = validated_tool_calls
 
 
-def truncate_tool_call_ids(request: "MistralChatCompletionRequest"):
-    """Truncates tool call IDs for Mistral's ID requirements."""
-    for i, message in enumerate(request.messages):
-        if message.get("role") == "assistant":
-            tool_calls = message.get("tool_calls", [])
-            for tool_call in tool_calls:
-                if len(tool_call["id"]) > 9:
-                    logger.warning(
-                        "Truncating tool call ID: %s to %s",
-                        tool_call["id"],
-                        tool_call["id"][-9:],
-                    )
-                    tool_call["id"] = tool_call["id"][-9:]
+_BASE62 = string.digits + string.ascii_letters
 
-            request.messages[i]["tool_calls"] = tool_calls
+
+def _to_mistral_tool_call_id(tool_call_id: str) -> str:
+    """Map any tool call ID to the 9-char alphanumeric form Mistral requires.
+
+    Valid IDs are kept. Others are hashed rather than truncated, so the mapping
+    stays consistent between a call and its result and distinct IDs sharing a
+    suffix (or too short / non-alphanumeric ones) do not collide or fail.
+    """
+    if len(tool_call_id) == 9 and tool_call_id.isascii() and tool_call_id.isalnum():
+        return tool_call_id
+    digest = int.from_bytes(hashlib.sha256(tool_call_id.encode()).digest()[:8], "big")
+    return "".join(_BASE62[(digest // 62**i) % 62] for i in range(9))
+
+
+def normalize_tool_call_ids(request: "MistralChatCompletionRequest"):
+    """Rewrite tool call IDs to satisfy Mistral's ID requirements."""
+    for message in request.messages:
+        if message.get("role") == "assistant":
+            for tool_call in message.get("tool_calls") or []:
+                if isinstance(tool_call.get("id"), str):
+                    tool_call["id"] = _to_mistral_tool_call_id(tool_call["id"])
 
         elif message.get("role") in {"tool_results", "tool"}:
-            if "tool_call_id" in message:
-                tool_call_id = message["tool_call_id"]
-
-                if len(tool_call_id) > 9:
-                    logger.warning(
-                        "Truncating tool_call_id: %s to %s",
-                        tool_call_id,
-                        tool_call_id[-9:],
-                    )
-                    tool_call_id = tool_call_id[-9:]
-                request.messages[i]["tool_call_id"] = tool_call_id
+            tool_call_id = message.get("tool_call_id")
+            if isinstance(tool_call_id, str):
+                message["tool_call_id"] = _to_mistral_tool_call_id(tool_call_id)
 
 
 def _validate_apply_chat_template_args(
