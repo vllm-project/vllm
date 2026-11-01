@@ -4,7 +4,7 @@ meta:
   provider: "Qwen"
   description: "Multimodal MoE model with gated delta networks architecture, 397B total / 17B active parameters, up to 262K context"
   date_added: 2026-02-16
-  date_updated: 2026-10-07
+  date_updated: 2026-10-27
   tasks:
     - multimodal
     - text
@@ -265,132 +265,61 @@ strategy_overrides:
       env:
         VLLM_SSM_CONV_STATE_LAYOUT: "DS"
 
+
+notes:
+  - title: "MTP on ROCm: use an FP8 KV cache"
+    when: { hardware: [amd], features: [spec_decoding] }
+    body: |
+      MTP runs on ROCm with vLLM 0.31.0. Pair it with `--kv-cache-dtype fp8`:
+      with the default KV cache its speedup fades as the prompt grows.
+
+troubleshooting:
+  - title: "assert num_cache_lines >= batch"
+    when: { hardware: [nvidia, amd] }
+    body: |
+      The CUDA graph capture size is larger than the Mamba cache. Reduce
+      `--max-cudagraph-capture-size` (default 512); see
+      [vllm#34571](https://github.com/vllm-project/vllm/pull/34571).
+
+  - title: "Prefix caching is experimental"
+    body: |
+      Prefix caching for the Mamba cache runs in the experimental "align" mode.
+
+  - title: "Out of memory with Encoder Parallel"
+    when: { features: [encoder_parallel] }
+    body: |
+      `--mm-encoder-tp-mode data` places a copy of the vision encoder on every
+      GPU, which takes extra memory. If the server runs out of memory, lower
+      `--gpu-memory-utilization`.
+
 guide: |
   ## Overview
 
   [Qwen3.5](https://huggingface.co/Qwen/Qwen3.5-397B-A17B) is a multimodal mixture-of-experts model featuring a gated delta networks architecture with 397B total parameters and 17B active parameters. This guide covers how to efficiently deploy and serve the model across different hardware configurations and workload profiles using vLLM.
 
-  ## Prerequisites
+  ## Verified configurations
 
-  ### Pip Install
+  These configurations were verified on 8x H200, 8x MI300X/MI355X and GB200. On
+  H200 and MI300X/MI355X they used the official FP8 checkpoint
+  [Qwen/Qwen3.5-397B-A17B-FP8](https://huggingface.co/Qwen/Qwen3.5-397B-A17B-FP8).
 
-  #### NVIDIA
-  ```bash
-  uv venv
-  source .venv/bin/activate
-  uv pip install -U vllm --torch-backend=auto
-  ```
+  | Workload | Hardware | Checkpoint | Parallelism | Other settings |
+  |---|---|---|---|---|
+  | Throughput, text only | 8x H200, 8x MI300X/MI355X | FP8 | DP8 + EP | `--language-model-only`, `--enable-prefix-caching` |
+  | Throughput, multimodal | 8x H200, 8x MI300X/MI355X | FP8 | DP8 + EP | `--mm-encoder-tp-mode data`, `--mm-processor-cache-type shm`, `--enable-prefix-caching` |
+  | Latency | 8x H200, 8x MI300X/MI355X | FP8 | TP8 | MTP-1, prefix caching off |
+  | Throughput, text only | GB200 (4 GPUs) | [NVFP4](https://huggingface.co/nvidia/Qwen3.5-397B-A17B-NVFP4) | DP4 + EP | `--language-model-only`, `--enable-prefix-caching` |
+  | Throughput, text only | MI355X | FP8 | TP2 + EP | `--language-model-only`, `--enable-prefix-caching` |
 
-  #### AMD
-  > Note: The vLLM wheel for ROCm requires Python 3.12, ROCm 7.0, and glibc >= 2.35. If your environment does not meet these requirements, please use the Docker-based setup. Supported GPUs: MI300X, MI325X, MI355X.
-  ```bash
-  uv venv --python 3.12
-  source .venv/bin/activate
-  uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm
-  ```
+  `--language-model-only` skips loading the vision encoder and frees memory for KV
+  cache. For multimodal workloads, `--mm-encoder-tp-mode data` runs the vision
+  encoder data-parallel and `--mm-processor-cache-type shm` caches preprocessed
+  multimodal inputs in shared memory. MTP-1 lowers time per output token with a
+  high acceptance rate, but speculative tokens take KV cache capacity, so
+  throughput drops under high concurrency; tune `num_speculative_tokens` (1-5) to
+  the workload.
 
-  ### Docker
-
-  #### NVIDIA
-  ```bash
-  docker run --gpus all \
-    -p 8000:8000 \
-    --ipc=host \
-    -v ~/.cache/huggingface:/root/.cache/huggingface \
-    vllm/vllm-openai Qwen/Qwen3.5-397B-A17B \
-      --tensor-parallel-size 8 \
-      --reasoning-parser qwen3 \
-      --enable-prefix-caching
-  ```
-  For Blackwell GPUs, use `vllm/vllm-openai:cu130-nightly`.
-
-  #### AMD
-  ```bash
-  docker run --device=/dev/kfd --device=/dev/dri \
-    --security-opt seccomp=unconfined \
-    --group-add video \
-    --ipc=host \
-    -p 8000:8000 \
-    -v ~/.cache/huggingface:/root/.cache/huggingface \
-    vllm/vllm-openai-rocm:latest \
-    Qwen/Qwen3.5-397B-A17B-FP8 \
-    --tensor-parallel-size 8 \
-    --reasoning-parser qwen3 \
-    --enable-prefix-caching
-  ```
-
-  ## Deployment Configurations
-
-  The configurations below have been verified on 8x H200 GPUs and 8x MI300X/MI355X GPUs. We recommend using the official FP8 checkpoint [Qwen/Qwen3.5-397B-A17B-FP8](https://huggingface.co/Qwen/Qwen3.5-397B-A17B-FP8) for optimal serving efficiency.
-
-  ### Throughput-Focused (Text-Only)
-
-  For maximum text throughput under high concurrency, use `--language-model-only` to skip loading the vision encoder and free up memory for KV cache, and enable Expert Parallelism.
-
-  ```bash
-  vllm serve Qwen/Qwen3.5-397B-A17B-FP8 \
-    -dp 8 \
-    --enable-expert-parallel \
-    --language-model-only \
-    --reasoning-parser qwen3 \
-    --enable-prefix-caching
-  ```
-
-  ### Throughput-Focused (Multimodal)
-
-  For multimodal workloads, use `--mm-encoder-tp-mode data` for data-parallel vision encoding and `--mm-processor-cache-type shm` for shared-memory caching of preprocessed multimodal inputs.
-
-  ```bash
-  vllm serve Qwen/Qwen3.5-397B-A17B-FP8 \
-    -dp 8 \
-    --enable-expert-parallel \
-    --mm-encoder-tp-mode data \
-    --mm-processor-cache-type shm \
-    --reasoning-parser qwen3 \
-    --enable-prefix-caching
-  ```
-
-  To enable tool calling, add `--enable-auto-tool-choice --tool-call-parser qwen3_coder` to the serve command.
-
-  ### Latency-Focused
-
-  For latency-sensitive workloads at low concurrency, enable MTP-1 speculative decoding and disable prefix caching. MTP-1 reduces time-per-output-token (TPOT) with a high acceptance rate, at the cost of lower throughput under load.
-
-  > Note (AMD): MTP runs on ROCm with vLLM 0.31.0 (verified with the single-GPU MXFP4 setup below). On ROCm,
-  > pair it with `--kv-cache-dtype fp8`: with the default KV cache its speedup fades as the prompt grows.
-
-  ```bash
-  vllm serve Qwen/Qwen3.5-397B-A17B-FP8 \
-    --tensor-parallel-size 8 \
-    --speculative-config '{"method": "mtp", "num_speculative_tokens": 1}' \
-    --reasoning-parser qwen3
-  ```
-
-  ### GB200 Deployment
-
-  We recommend using the NVFP4 checkpoint [nvidia/Qwen3.5-397B-A17B-NVFP4](https://huggingface.co/nvidia/Qwen3.5-397B-A17B-NVFP4) for optimal serving efficiency on GB200 nodes.
-
-  ```bash
-  vllm serve nvidia/Qwen3.5-397B-A17B-NVFP4 \
-    -dp 4 \
-    --enable-expert-parallel \
-    --language-model-only \
-    --reasoning-parser qwen3 \
-    --enable-prefix-caching
-  ```
-
-  ### MI355X Deployment
-
-  ```bash
-  vllm serve Qwen/Qwen3.5-397B-A17B-FP8 \
-    -tp 2 \
-    --enable-expert-parallel \
-    --language-model-only \
-    --reasoning-parser qwen3 \
-    --enable-prefix-caching
-  ```
-
-  ### Single MI350X / MI355X (MXFP4)
+  ## Single MI350X / MI355X (MXFP4)
 
   AMD's MXFP4 checkpoint [amd/Qwen3.5-397B-A17B-MXFP4](https://huggingface.co/amd/Qwen3.5-397B-A17B-MXFP4) (239 GB)
   fits one 288 GB MI350X or MI355X: pick the **MXFP4 (W4A4)** variant above. It sets three things vLLM does not
@@ -398,15 +327,6 @@ guide: |
   the auto-selected `ROCM_ATTN`, whose decode slows down as the context grows on this hybrid model; and
   `--max-num-seqs 64`, because the default (1024) is more than the ~296 Mamba cache blocks a single GPU leaves,
   and the server would refuse to start.
-
-  ```bash
-  VLLM_ROCM_USE_AITER=1 vllm serve amd/Qwen3.5-397B-A17B-MXFP4 \
-    --tensor-parallel-size 1 \
-    --attention-backend ROCM_AITER_FA \
-    --max-num-seqs 64 \
-    --trust-remote-code \
-    --reasoning-parser qwen3
-  ```
 
   Single-stream decode in tokens/s at ~200 / ~2k / ~12k / ~30k prompt tokens (128 output tokens), one GPU,
   `vllm/vllm-openai-rocm:v0.31.0`:
@@ -445,6 +365,8 @@ guide: |
       base_url="http://localhost:8000/v1",
       timeout=3600
   )
+  # The server's model name is the checkpoint it runs: the selected variant's.
+  model = client.models.list().data[0].id
 
   messages = [
       {
@@ -466,7 +388,7 @@ guide: |
 
   start = time.time()
   response = client.chat.completions.create(
-      model="Qwen/Qwen3.5-397B-A17B",
+      model=model,
       messages=messages,
       max_tokens=2048
   )
@@ -474,22 +396,11 @@ guide: |
   print(f"Generated text: {response.choices[0].message.content}")
   ```
 
-  ## Troubleshooting
+  Qwen3.5 thinks before it answers. To turn thinking off for one request, pass
+  `extra_body={"chat_template_kwargs": {"enable_thinking": False}}`; for every
+  request, start the server with
+  `--default-chat-template-kwargs '{"enable_thinking": false}'`.
 
-  **CUDA graph / Mamba cache size error**
-
-  You may encounter:
-  ```
-  assert num_cache_lines >= batch
-  ```
-  This occurs because the CUDA graph capture size is larger than the Mamba cache size. Reduce `--max-cudagraph-capture-size` (default is 512). See https://github.com/vllm-project/vllm/pull/34571 for details.
-
-  **Configuration tips**
-
-  - **Disable Reasoning**: Add `--reasoning-parser qwen3 --default-chat-template-kwargs '{"enable_thinking": false}'` to disable reasoning mode via command-line parameters.
-  - **Prefix Caching**: Prefix caching for Mamba cache "align" mode is currently experimental.
-  - **Multi-token Prediction**: MTP-1 reduces per-token latency but degrades throughput under high concurrency because speculative tokens consume KV cache capacity. Adjust `num_speculative_tokens` (1-5) based on your use case.
-  - **Encoder Data Parallelism**: `--mm-encoder-tp-mode data` deploys the vision encoder in a data-parallel fashion. This consumes additional memory and may require adjustment of `--gpu-memory-utilization`.
   ## References
 
   - Model card: https://huggingface.co/Qwen/Qwen3.5-397B-A17B
