@@ -956,7 +956,8 @@ def test_v41_nvfp4_gather_decodes_every_code_and_scale():
     reason="The V4.1 records are SM100-only",
 )
 @pytest.mark.parametrize("record", ["swa_fp8", "compressed_fp8", "compressed_fp4"])
-def test_v41_cache_writers_match_flashmla_decode(record: str):
+@pytest.mark.parametrize("padding", [32, 33])
+def test_v41_cache_writers_match_flashmla_decode(record: str, padding: int):
     """FlashMLA and vLLM's gathers read back the token a V4.1 writer put mid
     page in a padded block, so all agree on the interleaved record layout."""
     import vllm.v1.attention.ops.flashmla as fm
@@ -977,8 +978,8 @@ def test_v41_cache_writers_match_flashmla_decode(record: str):
     # cos = 1, sin = 0: RoPE is the identity, so the cache should hold `kv`.
     cos_sin = torch.zeros(slot + 1, 64, device=device)
     cos_sin[:, :32] = 1
-    # Padded like a packed block: a multiple of the record and of 512 B.
-    cache = torch.zeros(2, block_size + 32, bytes_per_token, dtype=torch.uint8)
+    # An odd number of MXFP8 rows gives a 16B, not 32B, block-stride alignment.
+    cache = torch.zeros(2, block_size + padding, bytes_per_token, dtype=torch.uint8)
     cache = cache.to(device)[:, :block_size]
     if record == "swa_fp8":
         torch.ops._C.fused_deepseek_v4_kv_rope_insert(
