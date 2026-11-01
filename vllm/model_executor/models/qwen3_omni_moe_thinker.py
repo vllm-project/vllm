@@ -1889,6 +1889,9 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
                 "max_seqlen",
                 "sequence_lengths",
             ],
+            padding_logics=MMEncoderAttention.get_cu_seqlens_padding_logics(
+                self.visual.attn_backend, "cu_seqlens"
+            ),
             # The vision encoder concatenates the deepstack features with
             # the main features along the hidden dim.
             out_hidden_size=self.visual_dim + self.multiscale_dim,
