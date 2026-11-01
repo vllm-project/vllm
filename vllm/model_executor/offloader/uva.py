@@ -124,6 +124,11 @@ class UVAOffloader(BaseOffloader):
             self.cpu_offload_bytes += p.data.numel() * p.data.element_size()
             offloaded_parameters = True
 
+        if offloaded_parameters:
+            # Return the freed accelerator blocks to the device. Per module rather
+            # than after the loop: `make_layers` builds the next module lazily.
+            torch.accelerator.empty_cache()
+
         if offloaded_parameters and not self.uva_offloading:
             original_forward = module.forward
 
