@@ -13,8 +13,7 @@ The MiniMax-M3-preview config selects a single set of branches:
 """
 
 import contextlib
-import functools
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -52,9 +51,10 @@ from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
     MegaMoEActivation,
 )
 from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import (
+    NvFp4PerTokenInputHandoff,
+    TrtLlmNvFp4ExpertsBase,
     TrtLlmNvFp4ExpertsModular,
     TrtLlmNvFp4ExpertsMonolithic,
-    prequantized_nvfp4_per_token_input,
 )
 from vllm.model_executor.layers.fused_moe.moe_output import (
     MoEOutput,
@@ -77,9 +77,6 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    quantize_nvfp4_per_token_input,
-)
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_e4m3_quantize,
 )
@@ -137,7 +134,11 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.flashinfer import is_flashinfer_autotuning
-from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
+from vllm.utils.torch_utils import (
+    aux_stream,
+    current_stream,
+    kv_cache_dtype_str_to_dtype,
+)
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -531,8 +532,10 @@ class MiniMaxM3MoE(nn.Module):
             out_dtype=torch.float32,
             prefix=f"{prefix}.gate",
         )
-        # Side stream for the routed experts' input quantization (see _gate).
-        self._input_quant_stream: torch.cuda.Stream | None = None
+        # The routed experts' input is quantized on the aux stream (see _route).
+        self._input_quant_stream = aux_stream() if current_platform.is_cuda() else None
+        if self._input_quant_stream is not None:
+            self._input_quant_events = (torch.cuda.Event(), torch.cuda.Event())
 
         self.shared_experts: MiniMaxM3MLP | None = None
         if self.use_mega_moe:
@@ -665,54 +668,71 @@ class MiniMaxM3MoE(nn.Module):
             and self.experts.moe_config.should_defer_moe_finalize(num_tokens)
         )
 
-    @functools.cached_property
-    def _prequantizes_input(self) -> bool:
-        """Whether the routed experts quantize their own input to NVFP4 per
-        token (TRTLLM-Gen, no all-to-all dispatch), so that quantization can
-        run ahead of the MoE call."""
-        if self.use_mega_moe or not current_platform.is_cuda():
-            return False
-        quant_method = self.experts.routed_experts.quant_method
-        experts_cls = getattr(quant_method, "experts_cls", None)
-        parallel_config = self.experts.moe_config.moe_parallel_config
-        return (
-            experts_cls in (TrtLlmNvFp4ExpertsMonolithic, TrtLlmNvFp4ExpertsModular)
-            and not parallel_config.use_all2all_kernels
-            and getattr(quant_method, "moe_kernel", None) is not None
-            and quant_method.moe_kernel.fused_experts.expects_unquantized_inputs
-        )
-
-    def _gate(
+    def _routed_input_handoff(
         self, hidden_states: torch.Tensor
-    ) -> tuple[torch.Tensor, contextlib.AbstractContextManager]:
-        """Router logits, and a context for the MoE call.
+    ) -> NvFp4PerTokenInputHandoff | None:
+        """The routed experts' NVFP4 input handoff if they quantize their input
+        per token themselves (TRTLLM-Gen) and receive ``hidden_states``
+        unchanged: no dispatch, all-gather, input transform or padding. Not
+        with dual-batch overlap, whose micro-batch threads would share this
+        layer's events and handoff. Checked per call: a weight reload may
+        rebuild a different kernel."""
+        if self.use_mega_moe or self._input_quant_stream is None:
+            return None
+        runner = self.experts
+        moe_kernel = getattr(runner.routed_experts.quant_method, "moe_kernel", None)
+        if moe_kernel is None:
+            return None
+        fused_experts = moe_kernel.fused_experts
+        moe_config = runner.moe_config
+        if (
+            not isinstance(fused_experts, TrtLlmNvFp4ExpertsBase)
+            or not fused_experts.expects_unquantized_inputs
+            or hidden_states.dtype != torch.bfloat16
+            or hidden_states.shape[-1] != moe_config.hidden_dim
+            or moe_config.moe_parallel_config.use_all2all_kernels
+            or runner.do_naive_dispatch_combine
+            or moe_config.pcp_size > 1
+            or runner.routed_input_transform is not None
+            or runner.enable_dbo
+        ):
+            return None
+        return fused_experts.input_handoff
+
+    @contextlib.contextmanager
+    def _route(self, hidden_states: torch.Tensor) -> Iterator[torch.Tensor]:
+        """Yield the router logits; run the MoE call inside the block.
 
         The router GEMM and the routed experts' NVFP4 input quantization both
         read only ``hidden_states``, yet the experts quantize after routing. So
-        quantize on a side stream while the router GEMM runs and hand the
-        result to the experts. Every use of the side stream first waits for
-        the current stream, so the caching allocator never reuses a block that
-        the MoE call still reads.
+        quantize on the aux stream while the router GEMM runs and hand the
+        result to the experts for the block.
         """
-        if not self._prequantizes_input or hidden_states.dtype != torch.bfloat16:
-            return self.gate(hidden_states)[0], contextlib.nullcontext()
-        if self._input_quant_stream is None:
-            self._input_quant_stream = torch.cuda.Stream()
+        handoff = self._routed_input_handoff(hidden_states)
+        if handoff is None:
+            yield self.gate(hidden_states)[0]
+            return
         stream = self._input_quant_stream
-        stream.wait_stream(torch.cuda.current_stream())
+        assert stream is not None
+        main_stream = current_stream()
+        fork, join = self._input_quant_events
+        fork.record(main_stream)
         with torch.cuda.stream(stream):
-            quantized = quantize_nvfp4_per_token_input(hidden_states)
+            fork.wait(stream)
+            quantized = handoff.quantize(hidden_states)
+            join.record(stream)
         router_logits, _ = self.gate(hidden_states)
-        torch.cuda.current_stream().wait_stream(stream)
-        return router_logits, prequantized_nvfp4_per_token_input(
-            hidden_states, quantized
-        )
+        join.wait(main_stream)
+        # Allocated on the aux stream, read on the main one.
+        for t in quantized:
+            t.record_stream(main_stream)
+        with handoff.provide(hidden_states, quantized):
+            yield router_logits
 
     def forward_unfinalized(self, hidden_states: torch.Tensor) -> MoEOutput:
         """`forward` with the routed top-k reduction and all-reduce left open."""
-        router_logits, prequantized = self._gate(hidden_states)
         # The runner's custom op returns tensors only, so run its body directly.
-        with prequantized:
+        with self._route(hidden_states) as router_logits:
             shared_output, routed = _unpack(
                 self.experts._forward_impl(hidden_states, router_logits, hidden_states)
             )
@@ -727,8 +747,7 @@ class MiniMaxM3MoE(nn.Module):
             return self._forward_mega_moe(hidden_states)
 
         # router_logits: (num_tokens, n_experts); GateLinear casts to fp32.
-        router_logits, prequantized = self._gate(hidden_states)
-        with prequantized:
+        with self._route(hidden_states) as router_logits:
             final_hidden_states = self.experts(
                 hidden_states=hidden_states, router_logits=router_logits
             )
