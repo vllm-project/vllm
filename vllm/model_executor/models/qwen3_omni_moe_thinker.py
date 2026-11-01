@@ -514,22 +514,21 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
 
         # (batch, channels, freq, time) -> (batch, time, channels*freq)
         b, c, f, t = padded_embed.size()
-        padded_embed = self.conv_out(
-            padded_embed.permute(0, 3, 1, 2).contiguous().view(b, t, c * f)
-        )
-
-        # Add positional embedding
-        positional_embedding = (
-            self.positional_embedding.positional_embedding[: padded_embed.shape[1], :]
-            .unsqueeze(0)
-            .to(padded_embed.dtype)
-        )
-        padded_embed = padded_embed + positional_embedding
+        padded_embed = padded_embed.permute(0, 3, 1, 2).contiguous().view(b, t, c * f)
 
         with gpu_sync_allowed():
-            hidden_states = padded_embed[padded_mask_after_cnn]
+            chunk_indices, position_indices = padded_mask_after_cnn.nonzero(
+                as_tuple=True
+            )
             # Use tolist() for efficient batch conversion from tensor to Python.
             aftercnn_lens_list = aftercnn_lens.tolist()
+
+        # Tower LoRA mappings contain only valid rows, not chunk padding.
+        hidden_states = self.conv_out(padded_embed[chunk_indices, position_indices])
+        positional_embedding = self.positional_embedding.positional_embedding[
+            position_indices
+        ].to(hidden_states.dtype)
+        hidden_states = hidden_states + positional_embedding
 
         # Compute cumulative sequence lengths for chunked attention
         cu_chunk_lens = [0]
