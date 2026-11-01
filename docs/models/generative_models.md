@@ -30,7 +30,7 @@ except that tokenization and detokenization are also performed automatically.
 ```python
 from vllm import LLM
 
-llm = LLM(model="facebook/opt-125m")
+llm = LLM(model="Qwen/Qwen3-0.6B")
 outputs = llm.generate("Hello, my name is")
 
 for output in outputs:
@@ -45,7 +45,7 @@ For example, you can use greedy sampling by setting `temperature=0`:
 ```python
 from vllm import LLM, SamplingParams
 
-llm = LLM(model="facebook/opt-125m")
+llm = LLM(model="Qwen/Qwen3-0.6B")
 params = SamplingParams(temperature=0)
 outputs = llm.generate("Hello, my name is", params)
 
@@ -70,7 +70,7 @@ For example, to search using 5 beams and output at most 50 tokens:
 from vllm import LLM
 from vllm.sampling_params import BeamSearchParams
 
-llm = LLM(model="facebook/opt-125m")
+llm = LLM(model="Qwen/Qwen3-0.6B")
 params = BeamSearchParams(beam_width=5, max_tokens=50)
 outputs = llm.beam_search([{"prompt": "Hello, my name is "}], params)
 
