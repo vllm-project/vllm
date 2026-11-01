@@ -1305,13 +1305,15 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
 
         from vllm._aiter_ops import rocm_aiter_ops
 
+        # New tensors, not `.data` rebinds: `_setup_kernel` writes them into
+        # the params' storage, which captured CUDA graphs read across reloads.
         s0, s1, _ = w13_weight_scale.shape
-        w13_weight_scale.data = e8m0_shuffle(w13_weight_scale.view(s0 * s1, -1)).view(
+        w13_weight_scale = e8m0_shuffle(w13_weight_scale.view(s0 * s1, -1)).view(
             s0, s1, -1
         )
 
         s0, s1, _ = w2_weight_scale.shape
-        w2_weight_scale.data = e8m0_shuffle(w2_weight_scale.view(s0 * s1, -1)).view(
+        w2_weight_scale = e8m0_shuffle(w2_weight_scale.view(s0 * s1, -1)).view(
             s0, s1, -1
         )
 
@@ -1355,26 +1357,28 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             .contiguous()
             .view(e, n, k)
         )
-        w13_weight_scale.data = (
+        # New tensors, not `.data` rebinds: `_setup_kernel` writes them into
+        # the params' storage, which captured CUDA graphs read across reloads.
+        w13_scale = (
             w13_weight_scale.data.view(e, n // 2, 2, -1)
             .permute(0, 2, 1, 3)
             .contiguous()
             .view(e, n, -1)
         )
 
-        # View as native FP4 dtype for AITER shuffle
-        w13_weight.data = w13_weight.data.view(torch.float4_e2m1fn_x2)
-        w2_weight.data = w2_weight.data.view(torch.float4_e2m1fn_x2)
-
-        # Shuffle weights and scales for AITER CK kernel layout
-        w13_weight.data = rocm_aiter_ops.shuffle_weight_a16w4(w13_weight, 16, True)
+        # Shuffle weights (as native FP4) and scales for AITER CK kernel layout
+        w13 = rocm_aiter_ops.shuffle_weight_a16w4(
+            w13_weight.data.view(torch.float4_e2m1fn_x2), 16, True
+        )
         shuffled_w13_scale = rocm_aiter_ops.shuffle_scale_a16w4(
-            w13_weight_scale.view(-1, w13_weight_scale.shape[-1]),
+            w13_scale.view(-1, w13_scale.shape[-1]),
             num_experts,
             True,
         )
 
-        w2_weight.data = rocm_aiter_ops.shuffle_weight_a16w4(w2_weight, 16, False)
+        w2 = rocm_aiter_ops.shuffle_weight_a16w4(
+            w2_weight.data.view(torch.float4_e2m1fn_x2), 16, False
+        )
         shuffled_w2_scale = rocm_aiter_ops.shuffle_scale_a16w4(
             w2_weight_scale.view(-1, w2_weight_scale.shape[-1]),
             num_experts,
@@ -1390,12 +1394,12 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
                 .view(-1, n)
             )
 
-        w13_weight.is_shuffled = True
-        w2_weight.is_shuffled = True
+        w13.is_shuffled = True
+        w2.is_shuffled = True
 
         return (
-            w13_weight,
-            w2_weight,
+            w13,
+            w2,
             shuffled_w13_scale,
             shuffled_w2_scale,
             w13_bias,
