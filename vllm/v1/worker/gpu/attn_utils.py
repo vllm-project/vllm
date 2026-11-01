@@ -253,6 +253,10 @@ def init_attn_backend(
             # counts (e.g. a spec-decode draft head and its target) get separate
             # metadata builders.
             num_heads_q = getattr(attn_layers[layer_name], "num_heads", 0)
+            if isinstance(layer_kv_cache_spec, AttentionSpec):
+                layer_kv_cache_spec = replace(
+                    layer_kv_cache_spec, num_query_heads=num_heads_q or None
+                )
             key = (attn_backend.full_cls_name(), layer_kv_cache_spec, num_heads_q)
             if key not in group_map:
                 group_map[key] = AttentionGroup(
