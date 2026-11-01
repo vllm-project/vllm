@@ -303,6 +303,7 @@ def deepseek_v4_config(thinking: bool = False) -> ParserEngineConfig:
         arg_structural_chars=frozenset(">"),
         arg_value_extender=_dsml_arg_value_extender,
         strip_content_whitespace_with_tools=False,
+        drop_whitespace_only_content_after_nonws=True,
         tool_args_json=False,
     )
 
