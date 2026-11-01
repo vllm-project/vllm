@@ -134,7 +134,9 @@ def test_dummy_data_generation(mock_ctx):
     assert len(dummy_data["audio"]) == 2
 
     expected_len = 60 * 16000
-    assert len(dummy_data["audio"][0]) == expected_len
+    audio_data = dummy_data["audio"]
+    assert isinstance(audio_data, list)
+    assert len(audio_data[0]) == expected_len
 
 
 def test_audio_token_count_matches_hf_processor_math():

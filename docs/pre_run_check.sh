@@ -29,7 +29,7 @@ DOCS_PATHS=(
   requirements/docs.txt       # Affects build process
   requirements/docs.in        # Affects build process
 )
-if git diff --quiet origin/main -- "${DOCS_PATHS[@]}"; then
+if git diff --quiet origin/main...HEAD -- "${DOCS_PATHS[@]}"; then
   echo "No docs-affecting files changed vs origin/main; cancelling build."
   # See https://docs.readthedocs.com/platform/latest/guides/build/skip-build.html for info on exit code
   exit 183
