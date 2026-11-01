@@ -40,6 +40,7 @@ steps:
   timeout_in_minutes: 25
   device: h200_35gb
   source_file_dependencies:
+    - vllm/config/
     - vllm/v1/spec_decode/
     - vllm/v1/worker/gpu/spec_decode/
     - tests/v1/e2e/spec_decode/
@@ -55,6 +56,7 @@ steps:
       depends_on:
       - image-build-amd
       source_file_dependencies:
+      - vllm/config/
       - vllm/v1/spec_decode/
       - vllm/v1/worker/gpu/spec_decode/
       - vllm/model_executor/model_loader/

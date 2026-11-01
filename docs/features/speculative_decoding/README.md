@@ -179,6 +179,39 @@ only apply to model-based methods such as `draft_model`, `mtp`, `eagle3`, and
 
 ### Method-specific keys
 
+#### First-draft prefill CUDA graphs (V2)
+
+`draft_prefill_cudagraph_max_tokens` limits the configured PIECEWISE capture
+sizes for the first draft pass, independently of the target. The default
+`None` shares the target's sizes. Larger first-draft inputs use eager execution;
+target graphs, FULL decode graphs, and later draft-step graphs are unchanged.
+
+This option supports the V2 EAGLE/EAGLE3, single-module MTP, and Gemma 4
+speculators. Other methods, including multi-module MTP and DFlash, reject it.
+V1 also rejects it, including when automatic runner selection falls back to V1.
+With NONE or FULL-only graph modes it has no effect and logs a startup warning.
+
+For example, keep target captures through 256 tokens and first-draft
+PIECEWISE captures through 64 tokens:
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve Qwen/Qwen3-8B \
+  --max-num-seqs 2 --max-num-batched-tokens 256 \
+  --compilation-config '{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8,16,32,64,128,256]}' \
+  --speculative-config '{"method":"eagle3","model":"inference-optimization/Qwen3-8B-from-Qwen3-8B_regen-speculators.eagle3-qwen3arch-ckpt1","num_speculative_tokens":3,"draft_prefill_cudagraph_max_tokens":64}'
+```
+
+The positive integer ceiling must be at least
+`max_num_seqs * (num_speculative_tokens + 1)` to retain FULL decode coverage.
+It filters existing sizes and does not insert a new size at the ceiling.
+Startup fails if no configured size fits. Rounded FULL decode descriptors
+can exceed the last retained PIECEWISE size and remain available.
+
+Fewer draft captures trade graph coverage for eager execution. Memory savings
+depend on the workload and shared graph pool; the option does not guarantee
+more KV capacity or faster serving. It does not change attention semantics,
+sampling, or the numerical guarantees described below.
+
 #### N-gram
 
 | Key | Type | Default | Meaning |

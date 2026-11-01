@@ -8,15 +8,26 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from transformers import LlamaConfig
 
 from vllm.config import (
     CompilationConfig,
     CUDAGraphMode,
+    ModelConfig,
     ParallelConfig,
     SchedulerConfig,
+    SpeculativeConfig,
     VllmConfig,
+    set_current_vllm_config,
+)
+from vllm.distributed import (
+    cleanup_dist_env_and_memory,
+    init_distributed_environment,
+    initialize_model_parallel,
 )
 from vllm.distributed.device_communicators import pynccl_allocator
+from vllm.platforms import current_platform
+from vllm.utils.network_utils import get_open_port
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import cudagraph_utils as gpu_cudagraph_utils
 from vllm.v1.worker.gpu import dp_utils
@@ -24,6 +35,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
+from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
 from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import (
     cudagraph_utils as spec_cudagraph_utils,
 )
@@ -478,6 +490,7 @@ def test_draft_prefill_matches_shared_target_metadata_shape(
     decode_eligible,
     dp_size,
     peer_query_len,
+    eagle_graph_config,
 ):
     """Draft prefill must reuse the target's padded request layout, even after AV."""
     target = _make_spec_decode_manager(
@@ -522,6 +535,9 @@ def test_draft_prefill_matches_shared_target_metadata_shape(
     hidden_states = torch.zeros(target_desc.num_tokens, 1)
     speculator = SimpleNamespace(
         vllm_config=target.vllm_config,
+        speculative_config=eagle_graph_config(
+            k=3, adaptive=adaptive
+        ).speculative_config,
         device=torch.device("cpu"),
         num_speculative_steps=3,
         enable_adaptive_verification=adaptive,
@@ -769,3 +785,190 @@ def test_divisor_query_len_dispatch_is_unchanged(
         assert desc.cg_mode == CUDAGraphMode.FULL, num_tokens
         assert desc.num_tokens == expected, num_tokens
         assert desc.num_reqs == expected // decode_query_len, num_tokens
+
+
+@pytest.fixture
+def eagle_graph_config(tmp_path, monkeypatch):
+    """Real config/speculator constructors; only the external pool API is fake."""
+    pool_owner = type(current_platform)
+    original_pool = pool_owner._global_graph_pool
+    for name, layers, arch in (
+        ("target", 4, "LlamaForCausalLM"),
+        ("draft", 1, "LlamaForCausalLMEagle3"),
+    ):
+        LlamaConfig(
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=layers,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            vocab_size=128,
+            max_position_embeddings=512,
+            architectures=[arch],
+        ).save_pretrained(tmp_path / name)
+    monkeypatch.setattr(
+        getattr(torch, current_platform.device_type),
+        "graph_pool_handle",
+        lambda: (0, 0),
+        raising=False,
+    )
+    with set_current_vllm_config(VllmConfig()):
+        init_distributed_environment(
+            world_size=1,
+            rank=0,
+            distributed_init_method=f"tcp://127.0.0.1:{get_open_port()}",
+            local_rank=0,
+            backend="gloo",
+        )
+        initialize_model_parallel(1, 1, backend="gloo")
+
+    def create(
+        cap=None, k=2, adaptive=False, dynamic=False, sizes=None, parallel=False
+    ):
+        sizes = sizes or list(range(8, 257, 8))
+        target = ModelConfig(
+            model=str(tmp_path / "target"),
+            skip_tokenizer_init=True,
+            dtype="float32",
+            max_model_len=512,
+        )
+        spec = SpeculativeConfig(
+            method="eagle3",
+            model=str(tmp_path / "draft"),
+            target_model_config=target,
+            target_parallel_config=ParallelConfig(),
+            num_speculative_tokens=k,
+            parallel_drafting=parallel,
+            enable_adaptive_verification=adaptive,
+            num_speculative_tokens_per_batch_size=(
+                [(1, 15, k), (16, 30, 1)] if dynamic else None
+            ),
+            **({"draft_prefill_cudagraph_max_tokens": cap} if cap is not None else {}),
+        )
+        config = VllmConfig()
+        config.model_config = target
+        config.speculative_config = spec
+        config.scheduler_config = SchedulerConfig.default_factory(
+            max_num_seqs=30, max_num_batched_tokens=max(sizes), max_model_len=512
+        )
+        # CPU platform setup disables graphs. Install the typed planning input
+        # afterward; neither model loading nor graph capture is exercised here.
+        config.compilation_config = CompilationConfig(
+            cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+            cudagraph_capture_sizes=sizes,
+            max_cudagraph_capture_size=max(sizes),
+        )
+        return config
+
+    try:
+        yield create
+    finally:
+        cleanup_dist_env_and_memory()
+        # Restore the external pool handle cached while its host API was stubbed.
+        pool_owner._global_graph_pool = original_pool
+
+
+def _init_eagle_graph_managers(config, mode=CUDAGraphMode.FULL_AND_PIECEWISE):
+    with set_current_vllm_config(config):
+        speculator = EagleSpeculator(config, torch.device("cpu"))
+        speculator.init_cudagraph_manager(mode)
+    return speculator
+
+
+@pytest.mark.parametrize(
+    "k,adaptive,dynamic", [(2, False, False), (4, False, True), (4, True, False)]
+)
+def test_draft_prefill_ceiling_preserves_rounded_full_graphs(
+    eagle_graph_config, k, adaptive, dynamic
+):
+    """A cap between grid points must retain FULL graphs rounded above that grid."""
+    cap = 30 * (k + 1)
+    default = _init_eagle_graph_managers(
+        eagle_graph_config(k=k, adaptive=adaptive, dynamic=dynamic)
+    )
+    config = eagle_graph_config(cap, k, adaptive, dynamic)
+    original_sizes = list(config.compilation_config.cudagraph_capture_sizes)
+    limited = _init_eagle_graph_managers(config)
+    first = limited.prefill_cudagraph_manager
+    assert first.vllm_config is not config
+    assert first.compilation_config is not config.compilation_config
+    assert first.compilation_config.cudagraph_capture_sizes == [
+        n for n in original_sizes if n <= cap
+    ]
+    assert config.compilation_config.cudagraph_capture_sizes == original_sizes
+    assert limited.decode_cudagraph_manager.vllm_config is config
+    assert (
+        first._capture_descs[CUDAGraphMode.FULL]
+        == (default.prefill_cudagraph_manager._capture_descs[CUDAGraphMode.FULL])
+    )
+    assert limited.decode_cudagraph_manager._capture_descs == (
+        default.decode_cudagraph_manager._capture_descs
+    )
+    assert (
+        max(d.num_tokens for d in first._capture_descs[CUDAGraphMode.PIECEWISE]) <= cap
+    )
+    if k == 2:
+        assert any(d.num_tokens == 90 for d in first._capture_descs[CUDAGraphMode.FULL])
+        assert max(first.compilation_config.cudagraph_capture_sizes) == 88
+
+
+@pytest.mark.parametrize(
+    "mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL, CUDAGraphMode.FULL_DECODE_ONLY]
+)
+def test_draft_prefill_ceiling_inactive_modes_keep_config(eagle_graph_config, mode):
+    config = eagle_graph_config(cap=90)
+    speculator = _init_eagle_graph_managers(config, mode)
+    assert speculator.prefill_cudagraph_manager.vllm_config is config
+    assert speculator.decode_cudagraph_manager.vllm_config is config
+
+
+def test_draft_prefill_ceiling_default_ownership_and_hash(eagle_graph_config):
+    config = eagle_graph_config()
+    speculator = _init_eagle_graph_managers(config)
+    assert speculator.prefill_cudagraph_manager.vllm_config is config
+    assert config.speculative_config.compute_hash() != (
+        eagle_graph_config(cap=90).speculative_config.compute_hash()
+    )
+    assert eagle_graph_config(cap=90).speculative_config.compute_hash() != (
+        eagle_graph_config(cap=96).speculative_config.compute_hash()
+    )
+
+
+def test_draft_prefill_ceiling_retains_target_8320(eagle_graph_config):
+    config = eagle_graph_config(cap=4224, k=3, sizes=[4, 128, 4096, 4224, 8192, 8320])
+    first = _init_eagle_graph_managers(config).prefill_cudagraph_manager
+    assert first.compilation_config.cudagraph_capture_sizes == [4, 128, 4096, 4224]
+    assert first.compilation_config.max_cudagraph_capture_size == 8320
+    assert config.compilation_config.cudagraph_capture_sizes[-1] == 8320
+
+
+@pytest.mark.parametrize("forced", [True, False])
+def test_draft_prefill_ceiling_rejects_v1(eagle_graph_config, monkeypatch, forced):
+    config = eagle_graph_config(cap=90, parallel=not forced)
+    if forced:
+        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    else:
+        # Parallel EAGLE drafting is supported by V1, so auto-selection falls
+        # back to it. The ceiling must still be rejected instead of ignored.
+        monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    with pytest.raises(ValueError, match="draft prefill CUDA graph ceiling"):
+        VllmConfig(
+            model_config=config.model_config,
+            speculative_config=config.speculative_config,
+            scheduler_config=config.scheduler_config,
+            compilation_config=config.compilation_config,
+        )
+
+
+@pytest.mark.parametrize(
+    "cap,match",
+    [
+        (0, "greater than 0"),
+        (-1, "greater than 0"),
+        (89, "preserve FULL"),
+        (90, "No configured"),
+    ],
+)
+def test_draft_prefill_ceiling_rejects_invalid_budget(eagle_graph_config, cap, match):
+    with pytest.raises(ValueError, match=match):
+        _init_eagle_graph_managers(eagle_graph_config(cap=cap, sizes=[128, 256]))
