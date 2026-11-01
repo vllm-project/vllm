@@ -471,6 +471,12 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub enable_request_id_headers: bool,
 
+    /// If set to True, log the stack trace of error responses. Defaults to
+    /// `VLLM_SERVER_DEV_MODE`.
+    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
+    #[serde(default)]
+    pub log_error_stack: Option<bool>,
+
     /// Register the scale-out `/inference/v1/generate` endpoint.
     #[arg(
         long,
@@ -574,6 +580,19 @@ pub struct SharedRuntimeArgs {
     )]
     #[serde(skip)]
     pub skip_model_name_validation: bool,
+
+    /// Set only through `VLLM_SERVER_DEV_MODE`. Used as the default of
+    /// `--log-error-stack`.
+    #[arg(
+        long,
+        hide = true,
+        env = "VLLM_SERVER_DEV_MODE",
+        action = ArgAction::Set,
+        value_parser = parse_int_flag,
+        default_value = "0"
+    )]
+    #[serde(skip)]
+    pub server_dev_mode: bool,
 
     /// The model name(s) used in the API. If multiple names are provided, the
     /// server will respond to any of the provided names. The model name in the
@@ -758,6 +777,10 @@ impl SharedRuntimeArgs {
         }
         if let Some(value) = lookup("VLLM_SKIP_MODEL_NAME_VALIDATION") {
             self.skip_model_name_validation = parse_truthy_flag(&value)?;
+        }
+        if let Some(value) = lookup("VLLM_SERVER_DEV_MODE") {
+            self.server_dev_mode = parse_int_flag(&value)
+                .map_err(|error| format!("invalid VLLM_SERVER_DEV_MODE: {error}"))?;
         }
         Ok(())
     }
@@ -947,6 +970,7 @@ impl SharedRuntimeArgs {
             default_return_tokens_as_token_ids: self.return_tokens_as_token_ids,
             enable_per_request_metrics: self.enable_per_request_metrics,
             enable_request_id_headers: self.enable_request_id_headers,
+            log_error_stack: self.log_error_stack.unwrap_or(self.server_dev_mode),
             enable_scale_out: self.enable_scale_out,
             enable_tokenizer_info_endpoint: self.enable_tokenizer_info_endpoint,
             skip_model_name_validation: self.skip_model_name_validation,
