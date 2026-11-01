@@ -63,11 +63,24 @@ SM121_SKINNY_GEMM_PLANS: dict[tuple[int, int], SkinnyGemmPlan] = {
 
 # SM90, keyed by capability (9, 0) so it also selects H100 / H800 / H20; every
 # entry was measured on an H200 (132 SMs, 4.8 TB/s) only. TP=1 local shapes of
-# dense Qwen3 / Llama-3.1 models. Every 4-token entry was also checked inside
+# dense Qwen3 / Llama-3.1 models, plus the two BF16 projections of the Qwen3.5 /
+# 3.6 MoE models. Every 4-token entry was also checked inside
 # a running model (nsys, 4 concurrent requests); 4-token cells that win in
 # isolation but lose there are left out. static_k entries have no k_unroll:
 # the static path is fully unrolled.
 SM90_SKINNY_GEMM_PLANS: dict[tuple[int, int], SkinnyGemmPlan] = {
+    # Qwen3.5 / 3.6 MoE shared-expert gate (one output).
+    (1, 2048): {
+        1: SkinnyGemmConfig(1, 256, 1, vector_width=4, static_k=2048),
+        2: SkinnyGemmConfig(2, 256, 1, vector_width=4, static_k=2048),
+        4: SkinnyGemmConfig(4, 256, 1),
+    },
+    # Qwen3.5 / 3.6 MoE GDN fused b/a projection.
+    (64, 2048): {
+        1: SkinnyGemmConfig(1, 256, 1),
+        2: SkinnyGemmConfig(2, 256, 1),
+        4: SkinnyGemmConfig(4, 256, 1, k_unroll=4),
+    },
     # Qwen3-4B attention output projection.
     (2560, 4096): {
         1: SkinnyGemmConfig(1, 128, 1, vector_width=4, static_k=4096),

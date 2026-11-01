@@ -606,13 +606,19 @@ def maybe_use_skinny_gemm(layer: torch.nn.Module) -> None:
     if weight.ndim != 2:
         return
 
+    plan = None
     if (
         not envs.VLLM_BATCH_INVARIANT
         and weight.dtype == torch.bfloat16
         and getattr(layer, "bias", None) is None
-        and get_skinny_gemm_plan(*weight.shape) is not None
     ):
+        plan = get_skinny_gemm_plan(*weight.shape)
+    if plan is not None:
         layer.use_skinny_gemm = True
+        # Eager forward passes read the plan from the layer (see
+        # cuda_unquantized_gemm) instead of paying a custom-op dispatch at
+        # every token count.
+        layer.skinny_gemm_plan = plan
 
 
 def cuda_unquantized_gemm(
@@ -621,15 +627,29 @@ def cuda_unquantized_gemm(
     weight: torch.Tensor,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    # The op picks the config from the token count at runtime, so the choice
-    # stays out of the compiled graph.
     if (
         bias is None
         and getattr(layer, "use_skinny_gemm", False)
         and x.is_cuda
         and x.dim() == 2
     ):
-        return torch.ops.vllm.cuda_skinny_unquantized_gemm(x, weight)
+        if torch.compiler.is_compiling():
+            # The op picks the config from the token count at runtime, so
+            # the choice stays out of the compiled graph.
+            return torch.ops.vllm.cuda_skinny_unquantized_gemm(x, weight)
+        # Eager (models without torch.compile, e.g. Qwen3.5): decide here. An
+        # unplanned token count then costs nothing over F.linear; the custom
+        # op would add ~5 us of host time per call (plan lookup + dispatch),
+        # which is visible on a model that launches ~1000 kernels per step.
+        config = layer.skinny_gemm_plan.get(x.shape[0])
+        if config is not None:
+            from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
+                row_stride_ok,
+                shape_dynamic_skinny_gemm,
+            )
+
+            if row_stride_ok(x, config):
+                return shape_dynamic_skinny_gemm(x, weight, config)
     return torch.nn.functional.linear(x, weight, bias)
 
 

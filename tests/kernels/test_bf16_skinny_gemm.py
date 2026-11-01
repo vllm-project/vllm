@@ -1115,6 +1115,9 @@ def test_maybe_use_skinny_gemm(
     maybe_use_skinny_gemm(layer)
 
     assert getattr(layer, "use_skinny_gemm", False) is expected
+    if expected:
+        # The eager dispatch reads the plan from the layer.
+        assert layer.skinny_gemm_plan == plans[(n, k)]
 
 
 _PLAN_RUN_CASES = [
