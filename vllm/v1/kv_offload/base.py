@@ -157,6 +157,9 @@ class StoreTrigger(Enum):
 
     # The chunks are complete. The eager store.
     ON_COMPUTE = auto()
+    # The KV cache manager hands off a state block that is about to be reused.
+    # The source is short-lived, so the store cannot be postponed.
+    ON_HANDOFF = auto()
 
 
 class OffloadPolicy(Enum):

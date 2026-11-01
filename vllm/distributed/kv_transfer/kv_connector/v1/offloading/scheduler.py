@@ -35,6 +35,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.state import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers import (
     OnComputeStoreHandler,
+    OnHandoffStoreHandler,
     StoreTriggerHandler,
 )
 from vllm.logger import init_logger
@@ -302,10 +303,13 @@ class OffloadingConnectorScheduler:
             },
         )
 
+        handler_classes: list[type[StoreTriggerHandler]] = []
+        if self.config.supports_handoff:
+            handler_classes.append(OnHandoffStoreHandler)
+        handler_classes.append(OnComputeStoreHandler)
         self._store_handlers: dict[StoreTrigger, StoreTriggerHandler] = {
-            StoreTrigger.ON_COMPUTE: OnComputeStoreHandler(
-                self.config, self._events_tracker
-            )
+            handler_cls.trigger: handler_cls(self.config, self._events_tracker)
+            for handler_cls in handler_classes
         }
 
     # Holds the manager lock for the current schedule(), or None between steps.

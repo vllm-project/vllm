@@ -55,6 +55,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.state import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers import (
     OnComputeStoreHandler,
+    OnHandoffStoreHandler,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
@@ -373,14 +374,18 @@ def _on_compute(scheduler: OffloadingConnectorScheduler) -> OnComputeStoreHandle
     return handler
 
 
+def _on_handoff(scheduler: OffloadingConnectorScheduler) -> OnHandoffStoreHandler:
+    handler = scheduler._store_handlers[StoreTrigger.ON_HANDOFF]
+    assert isinstance(handler, OnHandoffStoreHandler)
+    return handler
+
+
 def _partial_tail_store_jobs(
     scheduler: OffloadingConnectorScheduler, scheduler_output: Any
 ) -> dict[int, TransferJob]:
-    handler = _on_compute(scheduler)
-    sink = scheduler_module._StoreJobSink(scheduler, StoreTrigger.ON_COMPUTE)
-    handler._build_partial_tail_store_jobs(
-        scheduler_output, scheduler._req_status, sink
-    )
+    handler = _on_handoff(scheduler)
+    sink = scheduler_module._StoreJobSink(scheduler, StoreTrigger.ON_HANDOFF)
+    handler.build_store_jobs(scheduler_output, scheduler._req_status, sink)
     return sink.jobs
 
 
@@ -389,7 +394,7 @@ def _store_jobs(
 ) -> dict[int, TransferJob]:
     handler = _on_compute(scheduler)
     sink = scheduler_module._StoreJobSink(scheduler, StoreTrigger.ON_COMPUTE)
-    handler._build_chunk_store_jobs(scheduler_output, scheduler._req_status, sink)
+    handler.build_store_jobs(scheduler_output, scheduler._req_status, sink)
     return sink.jobs
 
 
@@ -513,15 +518,33 @@ def test_aligned_boundary_store_maps_sparse_group_id_to_dense_transfer_slot():
         lambda keys, req_context, trigger: (generate_store_output(keys))
     )
 
-    handler = _on_compute(scheduler)
-    sink = scheduler_module._StoreJobSink(scheduler, StoreTrigger.ON_COMPUTE)
+    handler = _on_handoff(scheduler)
+    sink = scheduler_module._StoreJobSink(scheduler, StoreTrigger.ON_HANDOFF)
     handler._build_aligned_boundary_store_jobs(
         {"req": [(1, 98, 16)]}, scheduler._req_status, sink
     )
-    [job] = sink.jobs.values()
+    [job_id] = sink.jobs
+    job = sink.jobs[job_id]
     assert isinstance(job.src_spec, GPULoadStoreSpec)
     assert job.src_spec.group_sizes == [1]
     assert job.src_spec.block_indices == [0]
+    assert scheduler._job_statuses[job_id].trigger is StoreTrigger.ON_HANDOFF
+
+
+def test_handoff_handler_runs_before_the_selected_trigger():
+    scheduler = _make_partial_tail_scheduler()
+    assert list(scheduler._store_handlers) == [
+        StoreTrigger.ON_HANDOFF,
+        StoreTrigger.ON_COMPUTE,
+    ]
+    _make_partial_tail_request(scheduler)
+    req_status = scheduler._req_status["req"]
+    assert _on_handoff(scheduler).first_live_chunk_idx(req_status, 1) is None
+
+
+def test_handoff_handler_is_absent_without_handoffs(request_runner):
+    runner = request_runner(block_size=4, num_gpu_blocks=32, async_scheduling=False)
+    assert list(runner.connector_scheduler._store_handlers) == [StoreTrigger.ON_COMPUTE]
 
 
 @pytest.mark.parametrize("cow_reuse", [False, True])
@@ -790,8 +813,8 @@ def test_sparse_group_miss_registers_shared_prefix_junction():
     scheduler.manager.prepare_store.side_effect = (
         lambda keys, req_context, trigger: generate_store_output(keys)
     )
-    sink = scheduler_module._StoreJobSink(scheduler, StoreTrigger.ON_COMPUTE)
-    _on_compute(scheduler)._build_aligned_boundary_store_jobs(
+    sink = scheduler_module._StoreJobSink(scheduler, StoreTrigger.ON_HANDOFF)
+    _on_handoff(scheduler)._build_aligned_boundary_store_jobs(
         {"req": [(1, 77, 16)]}, scheduler._req_status, sink
     )
     [job_id] = sink.jobs
@@ -3807,7 +3830,7 @@ def test_fence_at_update_state_after_alloc(request_runner):
 def test_fence_at_build_store_jobs(request_runner):
     """A new prefill (no load -> update_state_after_alloc returns early)
     reusing a finished request's pending-store block is flushed by
-    _build_chunk_store_jobs's fence."""
+    build_store_jobs's fence."""
     runner = request_runner(
         blocks_per_chunk=1,
         block_size=4,
@@ -4717,7 +4740,7 @@ def test_request_level_supply_covers_consumer_demand(
     """A REQUEST_LEVEL producer must offer every key a consumer will demand.
 
     Same relation as `test_sliding_window_demand_is_store_reachable`, but at
-    the level where the key set is really built: `_build_chunk_store_jobs` prunes
+    the level where the key set is really built: `build_store_jobs` prunes
     chunks with a null GPU block and unreachable SWA chunks, while the demand
     comes from an independent scan.
     """
