@@ -14,6 +14,13 @@ vLLM implements the Anthropic Messages API, which is the same API that Claude Co
 
 This means any model served by vLLM with proper tool calling support can act as a drop-in replacement for Claude models in Claude Code.
 
+## Rust frontend support
+
+The Rust frontend currently supports `/v1/messages/count_tokens` for text
+conversations with a top-level system prompt. Other content types and request
+options return an error. `/v1/messages` generation is not implemented yet.
+Use `VLLM_USE_RUST_FRONTEND=0` for the Claude Code workflow below.
+
 ## Requirements
 
 Claude Code requires a model with strong tool calling capabilities. The model must support the OpenAI-compatible tool calling API. See [Tool Calling](../../features/tool_calling.md) for details on enabling tool calling for your model.

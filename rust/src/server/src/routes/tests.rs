@@ -878,7 +878,6 @@ async fn unimplemented_python_routes_return_not_implemented() {
 
     for (method, uri) in [
         ("POST", "/v1/messages"),
-        ("POST", "/v1/messages/count_tokens"),
         ("POST", "/v1/chat/completions/batch"),
         ("POST", "/v1/decisions"),
         ("POST", "/v1/systemone"),
@@ -10638,4 +10637,58 @@ async fn log_outputs_disabled_logs_nothing() {
     .await;
 
     assert_eq!(logs, "");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn anthropic_text_count_matches_chat_tokenization() {
+    let mut app = test_app().await;
+    let mut counts = Vec::new();
+    for (uri, body) in [
+        (
+            "/v1/messages/count_tokens",
+            json!({"model": "Qwen/Qwen1.5-0.5B-Chat",
+            "system": [{"type": "text", "text": "Be precise."}],
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "Hello"}, {"type": "text", "text": " world"}]}]}),
+        ),
+        (
+            "/tokenize",
+            json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "messages": [
+            {"role": "system", "content": "Be precise."}, {"role": "user", "content": "Hello world"}]}),
+        ),
+    ] {
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(status, StatusCode::OK, "{body:?}");
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        counts.push(body.get("input_tokens").or_else(|| body.get("count")).unwrap().clone());
+    }
+    assert_eq!(counts[0], counts[1]);
+    assert!(counts[0].as_u64().unwrap() > 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn anthropic_count_rejects_unsupported_content_with_anthropic_error() {
+    let mut app = test_app().await;
+    let response = app.call(Request::builder().method("POST").uri("/v1/messages/count_tokens")
+        .header("content-type", "application/json").body(Body::from(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat", "messages": [{"role": "user", "content": [{"type": "document", "source": {}}]}]
+        }).to_string())).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(body["type"], "error");
+    assert_eq!(body["error"]["type"], "invalid_request_error");
 }
