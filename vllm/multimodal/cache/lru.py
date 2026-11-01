@@ -138,5 +138,9 @@ class LruKeyReplicatedReceiverCache(BaseMultiModalReceiverCache):
         self._cache.touch(mm_hash)
 
     @override
+    def invalidate(self, mm_hash: str) -> None:
+        self._cache.pop(mm_hash, None)
+
+    @override
     def clear_cache(self) -> None:
         self._cache.clear()
