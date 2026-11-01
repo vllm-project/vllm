@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A layer that samples the next tokens from the model's outputs."""
 
+from collections.abc import Callable
+
 import torch
 import torch.nn as nn
 
@@ -132,9 +134,11 @@ class Sampler(nn.Module):
         sampling_metadata: SamplingMetadata,
         predict_bonus_token: bool = False,
         logprobs_mode_override: LogprobsMode | None = None,
-        raw_logits: torch.Tensor | None = None,
+        apply_grammar: Callable[[torch.Tensor], None] | None = None,
     ) -> SamplerOutput:
-        if mixed_sample_eligible(sampling_metadata, predict_bonus_token):
+        if apply_grammar is None and mixed_sample_eligible(
+            sampling_metadata, predict_bonus_token
+        ):
             return SamplerOutput(
                 sampled_token_ids=_aiter_raw_fused_sample(logits, sampling_metadata),
                 logprobs_tensors=None,
@@ -147,17 +151,18 @@ class Sampler(nn.Module):
         num_logprobs = sampling_metadata.max_num_logprobs
         raw_logprobs: torch.Tensor | None = None
         if num_logprobs is not None or sampling_metadata.logprob_token_ids:
-            score_logits = logits if raw_logits is None else raw_logits
             if logprobs_mode == "raw_logprobs":
-                raw_logprobs = self.compute_logprobs(score_logits)
+                raw_logprobs = self.compute_logprobs(logits)
             elif logprobs_mode == "raw_logits":
-                if score_logits.dtype == torch.float32:
-                    raw_logprobs = score_logits.clone()
+                if logits.dtype == torch.float32:
+                    raw_logprobs = logits.clone()
                 else:
-                    raw_logprobs = score_logits.to(torch.float32)
+                    raw_logprobs = logits.to(torch.float32)
 
         # Use float32 for the logits.
         logits = logits.to(torch.float32)
+        if apply_grammar is not None:
+            apply_grammar(logits)
 
         logits = self.apply_logits_processors(
             logits, sampling_metadata, predict_bonus_token
