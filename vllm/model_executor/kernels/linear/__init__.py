@@ -236,6 +236,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.xpu import (
     XPUFp8BlockScaledMMKernel,
     XPUW8A8FP8LinearKernel,
     XPUW8A16FP8LinearKernel,
+    xpu_has_native_fp8,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.zentorch import (
     ZentorchInt8ScaledMMLinearKernel,
@@ -806,6 +807,15 @@ def init_fp8_linear_kernel(
                 scaled_mm_linear_kernel_config,
                 "fp8_w8a8",
             )
+        elif (
+            force_kernel is None
+            and current_platform.is_xpu()
+            and _get_linear_backend(quantization="fp8_w8a8") == "auto"
+            and xpu_has_native_fp8()
+        ):
+            # Prefer native FP8 GEMMs over the weight-only default. If W8A8
+            # can't implement the layer, selection falls back to the list order.
+            force_kernel = XPUW8A8FP8LinearKernel
 
         kernel_type = choose_scaled_mm_linear_kernel(
             config=scaled_mm_linear_kernel_config,
