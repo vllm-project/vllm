@@ -497,6 +497,12 @@ class Scheduler(SchedulerInterface):
             {} if self.log_stats and self.connector is not None else None
         )
         self._kv_fetch_counts: dict[str, int] = dict.fromkeys(KV_FETCH_STAGES, 0)
+        # Number of KV cache block copies (copy-on-write) in the most recent
+        # schedule() step. Each copy corresponds to one source block duplicated
+        # into a fresh destination block (e.g. for a partial prefix cache hit
+        # in a forked sequence). Reset to 0 on every schedule() call; consumed
+        # by make_stats() to surface a per-step count.
+        self._last_step_cow_blocks: int = 0
 
     def _drafts_unused(
         self, request: Request, num_computed_tokens: int, num_new_tokens: int
@@ -1697,6 +1703,10 @@ class Scheduler(SchedulerInterface):
         kv_cache_block_copies, cow_retained_blocks = (
             self.kv_cache_manager.take_kv_cache_block_copies()
         )
+        # Per-step count of KV block copies issued by copy-on-write. This is a
+        # delta for this schedule() step; make_stats() surfaces it and the
+        # Prometheus logger accumulates it into a monotonic counter.
+        self._last_step_cow_blocks = len(kv_cache_block_copies)
         if kv_cache_block_copies:
             # The copies run with this step's execution; the first non-empty
             # step at or after it gets seq `sched_step_seq + 1` (0-token steps
@@ -3281,6 +3291,7 @@ class Scheduler(SchedulerInterface):
             num_waiting_reqs=num_waiting - num_deferred,
             num_skipped_waiting_reqs=num_deferred,
             num_kv_fetch_reqs_by_stage=self._kv_fetch_counts.copy(),
+            num_cow_blocks=self._last_step_cow_blocks,
             kv_cache_usage=self.kv_cache_manager.usage,
             prefix_cache_stats=prefix_cache_stats,
             connector_prefix_cache_stats=connector_prefix_cache_stats,
