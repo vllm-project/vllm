@@ -352,3 +352,52 @@ def test_flashinfer_b12x_moe_relu2(
 
 if __name__ == "__main__":
     test_flashinfer_b12x_moe(16, 128, 256, 8, 2, torch.bfloat16)
+
+
+@torch.inference_mode()
+def test_flashinfer_b12x_moe_shares_buffers_across_layers(workspace_init):
+    """Identically-shaped FlashInferB12xExperts (one per MoE layer) must
+    share one set of B12xMoEWrapper workspaces and output buffer instead
+    of allocating a copy per layer; a different shape gets its own set."""
+    e, topk, k = 8, 2, 256
+    with set_current_vllm_config(
+        VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
+    ):
+
+        def make_experts(n: int) -> FlashInferB12xExperts:
+            ones_e = torch.ones(e, device="cuda", dtype=torch.float32)
+            quant_config = nvfp4_moe_quant_config(
+                g1_alphas=ones_e,
+                g2_alphas=ones_e,
+                a1_gscale=ones_e,
+                a2_gscale=ones_e,
+                w1_scale=torch.ones(e, 2 * n, k // 16, device="cuda"),
+                w2_scale=torch.ones(e, k, n // 16, device="cuda"),
+            )
+            moe_config = make_dummy_moe_config(
+                num_experts=e,
+                experts_per_token=topk,
+                hidden_dim=k,
+                intermediate_size=n,
+                in_dtype=torch.bfloat16,
+            )
+            experts = FlashInferB12xExperts(
+                moe_config=moe_config, quant_config=quant_config
+            )
+            experts._ensure_wrapper()
+            return experts
+
+        layer0, layer1, other_shape = (
+            make_experts(128),
+            make_experts(128),
+            make_experts(256),
+        )
+        w0, w1, w2 = layer0._wrapper, layer1._wrapper, other_shape._wrapper
+
+        assert w0._static_workspace is not None
+        assert w1._static_workspace is w0._static_workspace
+        assert w1._dynamic_workspace is w0._dynamic_workspace
+        assert w1._moe_output is w0._moe_output
+
+        assert w2._static_workspace is not w0._static_workspace
+        assert w2._moe_output is not w0._moe_output
