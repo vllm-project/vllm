@@ -74,6 +74,7 @@ except ImportError:
 
 
 _MAX_TERMINAL_TRANSFER_IDS = 4096
+_NATIVE_WAIT_SLICE_S = 0.01
 
 
 WriteGeometryKey = tuple[tuple[int, ...], tuple[int, ...], torch.dtype]
@@ -911,25 +912,42 @@ class MoRIIOWrapper:
             self._poll_transfers_until_done(transfers_to_wait, fail_fast)
             return
 
-        # wait_all waits on every status until the deadline; a failure does not
-        # end it early, so fail_fast only applies to the polling fallback.
-        # Zero means a nonblocking progress call in Mori, not an immediate
-        # deadline. Round up so even sub-millisecond waits remain blocking.
-        timeout_ms = ceil(self._transfer_timeout * 1000)
-        result = wait_all(transfers_to_wait, timeout_ms=timeout_ms)
-        if result != StatusCode.SUCCESS:
-            details = [
-                f"{status.Message()} (code={status.Code()})"
-                for status in transfers_to_wait
-                if status.Failed()
-            ]
-            if not details and result in (StatusCode.INIT, StatusCode.IN_PROGRESS):
-                details.append(
-                    f"RDMA transfer timed out after {self._transfer_timeout:g}s"
-                )
-            raise TransferError(
-                f"MoRIIO batch wait failed ({result}): " + "; ".join(details)
-            )
+        # On MoRI's xgmi backend a bounded wait_all polls each status once and
+        # then sleeps until its deadline.
+        remaining = self._transfer_timeout
+        deadline = time.monotonic() + remaining
+        while True:
+            # Zero means a nonblocking progress call in Mori, not an immediate
+            # deadline. Round up so even sub-millisecond waits remain blocking.
+            slice_ms = ceil(min(remaining, _NATIVE_WAIT_SLICE_S) * 1000)
+            result = wait_all(transfers_to_wait, timeout_ms=slice_ms)
+            if result == StatusCode.SUCCESS:
+                return
+            state = self.poll_transfer_batch(transfers_to_wait)
+            if state is TransferBatchState.DONE:
+                return
+            if state is TransferBatchState.FAILED:
+                if fail_fast or all(
+                    status.Succeeded() or status.Failed()
+                    for status in transfers_to_wait
+                ):
+                    break
+            elif result not in (StatusCode.INIT, StatusCode.IN_PROGRESS):
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+
+        details = [
+            f"{status.Message()} (code={status.Code()})"
+            for status in transfers_to_wait
+            if status.Failed()
+        ]
+        if not details and result in (StatusCode.INIT, StatusCode.IN_PROGRESS):
+            details.append(f"RDMA transfer timed out after {self._transfer_timeout:g}s")
+        raise TransferError(
+            f"MoRIIO batch wait failed ({result}): " + "; ".join(details)
+        )
 
     def _poll_transfers_until_done(
         self, transfers_to_wait: list[Any], fail_fast: bool = True
