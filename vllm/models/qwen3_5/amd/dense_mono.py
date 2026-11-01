@@ -35,6 +35,7 @@ from torch import nn
 
 import vllm.envs as envs
 from vllm.compilation.decorators import support_torch_compile
+from vllm.config import CUDAGraphMode
 from vllm.distributed import get_pp_group, get_tp_group
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
@@ -1159,6 +1160,15 @@ class DenseMono:
         """Returns the hidden states when this step is pure decode within a
         kernel cap, else None so the compiled stock model runs."""
         if self.graph is None or intermediate_tensors is not None:
+            return None
+        # A piecewise-cudagraph step runs the compiled stock model, whose graph
+        # for this width is captured by such a step: taken over here, prefill
+        # and mixed steps of the width would find it missing. Pure decode runs
+        # under FULL cudagraphs or eagerly.
+        if (
+            is_forward_context_available()
+            and get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
+        ):
             return None
         rows = positions.shape[-1]
         if not self._pure_decode(rows):
