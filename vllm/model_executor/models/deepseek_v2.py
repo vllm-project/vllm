@@ -63,7 +63,6 @@ from vllm.model_executor.layers.fused_moe.shared_expert_fusion import (
     maybe_build_shared_expert_fusion,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
-    is_model_fused_shared_expert_compatible,
     resolve_layer_fused_shared_expert,
 )
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
@@ -101,6 +100,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     extract_layer_index,
+    get_fused_shared_expert_layers,
     sequence_parallel_chunk,
 )
 from vllm.platforms import current_platform
@@ -1551,10 +1551,10 @@ class DeepseekV2Model(nn.Module):
             prefix=f"{prefix}.layers",
         )
 
-        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
-            self.layers,
+        self.fused_shared_expert_layers = get_fused_shared_expert_layers(
+            self,
             DeepseekV2MoE,
-            "mlp",
+            enable_eplb=vllm_config.parallel_config.enable_eplb,
         )
 
         if get_pp_group().is_last_rank:
@@ -1672,9 +1672,6 @@ class DeepseekV2Model(nn.Module):
         # expert lands in is by construction the one the router will send
         # tokens to.
         ep_shared_fusion = _find_shared_expert_fusion(self)
-        fuse_shared_into_experts = (
-            self.is_fused_shared_expert_enabled or ep_shared_fusion is not None
-        )
         stacked_params_mapping: list[tuple[str, str, int | str]] = [
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "gate_proj", 0),
@@ -1712,12 +1709,9 @@ class DeepseekV2Model(nn.Module):
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
+            # NOTE: global despite per-layer FSE; non-fused layers skip the extras.
             num_experts=self.config.n_routed_experts
-            + (
-                self.config.n_shared_experts
-                if self.is_fused_shared_expert_enabled
-                else 0
-            ),
+            + (self.config.n_shared_experts if self.fused_shared_expert_layers else 0),
             num_redundant_experts=self.num_redundant_experts,
         )
 
@@ -1742,8 +1736,14 @@ class DeepseekV2Model(nn.Module):
             ):
                 continue  # this layer has no indexer; drop its checkpoint weights
 
-            is_fusion_moe_shared_experts_layer = fuse_shared_into_experts and (
-                "mlp.shared_experts" in name
+            # Only parse the layer index when FSE is enabled; the EP-dispatched
+            # shared expert (VLLM_FUSE_SHARED_EXPERTS) takes the same load path.
+            is_fusion_moe_shared_experts_layer = "mlp.shared_experts" in name and (
+                ep_shared_fusion is not None
+                or (
+                    bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())
+                    and extract_layer_index(name) in self.fused_shared_expert_layers
+                )
             )
 
             if _try_load_fp8_indexer_wk(

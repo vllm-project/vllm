@@ -14,7 +14,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils.math_utils import round_up
+from vllm.utils.math_utils import round_down, round_up
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 logger = init_logger(__name__)
@@ -28,6 +28,10 @@ def _compute_bytes(shape: tuple[int, ...], dtype: torch.dtype) -> int:
 # Constants
 _MB = 1024**2
 _GiB = 1024**3
+# Every view starts at a multiple of this, the alignment cudaMalloc guarantees,
+# so kernels see the same alignment as on a standalone allocation. Head views
+# also end on it, so a retained span aligned down to it never overlaps them.
+_VIEW_ALIGNMENT = 256
 
 # Global workspace manager instance
 _manager: "WorkspaceManager | None" = None
@@ -72,6 +76,11 @@ class WorkspaceManager:
         )
         self._persistent_resources: list[dict[Hashable, object]] = [
             {} for _ in self._current_workspaces
+        ]
+        # Per slot, (key, start) of the tail span get_retained last handed out;
+        # cleared when a scratch request reaches into it or on reallocation.
+        self._retained: list[tuple[Hashable, int] | None] = [
+            None for _ in self._current_workspaces
         ]
         self._locked: bool = False
 
@@ -191,13 +200,17 @@ class WorkspaceManager:
 
         """
         actual_bytes = [_compute_bytes(s, d) for s, d in shapes_and_dtypes]
-        aligned_bytes = [round_up(actual, 256) for actual in actual_bytes]
+        aligned_bytes = [round_up(actual, _VIEW_ALIGNMENT) for actual in actual_bytes]
         total_bytes = sum(aligned_bytes)
 
         # Calculate cumulative offsets using itertools.accumulate
         offsets = list(accumulate([0] + aligned_bytes[:-1]))
 
         current_workspace = self._ensure_workspace_size(total_bytes)
+        workspace_id = self._get_workspace_id()
+        retained = self._retained[workspace_id]
+        if retained is not None and total_bytes > retained[1]:
+            self._retained[workspace_id] = None
 
         return [
             current_workspace[offsets[i] : offsets[i] + actual_bytes[i]]
@@ -205,6 +218,37 @@ class WorkspaceManager:
             .reshape(shapes_and_dtypes[i][0])
             for i in range(len(shapes_and_dtypes))
         ]
+
+    def get_retained(
+        self, key: Hashable, shape: tuple[int, ...], dtype: torch.dtype
+    ) -> tuple[torch.Tensor, bool]:
+        """Get a scratch view at the end of the workspace that can outlive requests.
+
+        ``get_simultaneous`` hands out views from the start of the workspace, so
+        requests smaller than the workspace leave its end alone. This view spans
+        the last bytes of the workspace, and the returned flag says whether they
+        still hold what the previous ``get_retained`` left there: that call used
+        the same key and size, no ``get_simultaneous`` request since reached into
+        the span, and the workspace was not reallocated in between. What the
+        bytes mean is the caller's to track; only the latest key is remembered.
+
+        Args:
+            key: Identifies the caller; another key's call takes the span over.
+            shape: Shape of the view.
+            dtype: Dtype of the view.
+
+        Returns:
+            The view and whether its contents are intact.
+
+        """
+        num_bytes = _compute_bytes(shape, dtype)
+        workspace_id = self._get_workspace_id()
+        current_workspace = self._ensure_workspace_size(num_bytes)
+        start = round_down(current_workspace.numel() - num_bytes, _VIEW_ALIGNMENT)
+        intact = self._retained[workspace_id] == (key, start)
+        self._retained[workspace_id] = (key, start)
+        view = current_workspace[start : start + num_bytes].view(dtype).reshape(shape)
+        return view, intact
 
     def _ensure_workspace_size(self, required_bytes: int) -> torch.Tensor:
         """Ensure workspace is allocated and large enough, return current workspace.
@@ -252,6 +296,7 @@ class WorkspaceManager:
             # Resizing all ubatches here would orphan the other ubatch's
             # old tensor when it still holds views into it (DBO leak).
             self._current_workspaces[workspace_id] = None
+            self._retained[workspace_id] = None
             del current_workspace
             # Release the freed segment back to CUDA so the caching
             # allocator can reuse the GPU memory for the larger

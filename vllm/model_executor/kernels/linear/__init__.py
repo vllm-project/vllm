@@ -836,6 +836,9 @@ def fp8_scaled_mm_is_batch_invariant(
     kernel: FP8ScaledMMLinearKernel | Fp8BlockScaledMMLinearKernel,
 ) -> bool:
     """Whether a row's output from the kernel is independent of the other rows."""
+    # Weight-only here, and Humming honors VLLM_BATCH_INVARIANT itself.
+    if isinstance(kernel, HummingFP8ScaledMMLinearKernel):
+        return True
     if not isinstance(
         kernel, (CutlassFP8ScaledMMLinearKernel, TritonFP8ScaledMMLinearKernel)
     ):
@@ -1205,7 +1208,15 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
     force_kernel: type[NvFp4LinearKernel] | None = None
     quantization = "nvfp4_w4a16" if use_a16 else "nvfp4_w4a4"
     linear_backend = _get_linear_backend(quantization=quantization)
-    if envs.VLLM_BATCH_INVARIANT:
+    if envs.VLLM_BATCH_INVARIANT and use_a16:
+        if linear_backend not in ("auto", "humming"):
+            logger.warning_once(
+                "VLLM_BATCH_INVARIANT overrides --linear-backend=%s; using the "
+                "Humming backend for deterministic W4A16 execution.",
+                linear_backend,
+            )
+        force_kernel = HummingNvFp4LinearKernel
+    elif envs.VLLM_BATCH_INVARIANT:
         bi_supported, reason = CutlassNvFp4LinearKernel.is_supported()
         if bi_supported:
             if linear_backend not in ("auto", "cutlass"):
@@ -1319,8 +1330,8 @@ def register_linear_kernel(
     Args:
         kernel_class (type): The kernel class to register.
         platform (PlatformEnum): The platform for which this kernel is applicable.
-        kernel_type (str): The type of the kernel, either "mp", "int8", or "fp8".
-            Defaults to "mp".
+        kernel_type (str): The type of the kernel, either "mp", "int8", "fp8",
+            "fp8_block", "mxfp8", "nvfp4", "mxfp4" or "mxfp6". Defaults to "mp".
 
     Raises:
         ValueError: If the kernel_type is not recognized.
@@ -1338,6 +1349,10 @@ def register_linear_kernel(
         if platform not in _POSSIBLE_FP8_KERNELS:
             _POSSIBLE_FP8_KERNELS[platform] = []
         _POSSIBLE_FP8_KERNELS[platform].append(kernel_class)
+    elif kernel_type == "fp8_block":
+        if platform not in _POSSIBLE_FP8_BLOCK_KERNELS:
+            _POSSIBLE_FP8_BLOCK_KERNELS[platform] = []
+        _POSSIBLE_FP8_BLOCK_KERNELS[platform].append(kernel_class)
     elif kernel_type == "mxfp8":
         if platform not in _POSSIBLE_MXFP8_KERNELS:
             _POSSIBLE_MXFP8_KERNELS[platform] = []
