@@ -151,6 +151,17 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         needs_video_metadata=True,
         marks=[pytest.mark.core_model],
     ),
+    "qwen2_5_omni": VitCudagraphTestConfig(
+        model="Qwen/Qwen2.5-Omni-3B",
+        image_prompt=qwen_vl_chat_template(
+            "<|vision_bos|><|IMAGE|><|vision_eos|>What is in this image?"
+        ),
+        video_prompt=qwen_vl_chat_template(
+            "<|vision_bos|><|VIDEO|><|vision_eos|>Describe this video in one sentence."
+        ),
+        needs_video_metadata=True,
+        marks=[pytest.mark.core_model],
+    ),
     "kimi_vl": VitCudagraphTestConfig(
         model="moonshotai/Kimi-VL-A3B-Instruct",
         modalities=["image"],
