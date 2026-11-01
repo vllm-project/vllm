@@ -10,7 +10,12 @@ from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 from vllm import PoolingParams
+from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.entrypoints.openai.models.protocol import BaseModelPath
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.pooling import factories
+from vllm.entrypoints.pooling.embed.protocol import EmbeddingCompletionRequest
+from vllm.entrypoints.pooling.embed.serving import ServingEmbedding
 from vllm.entrypoints.pooling.factories import init_pooling_io_processors
 from vllm.entrypoints.pooling.pooling.io_processor import (
     PluginWithIOProcessorPlugins,
@@ -20,6 +25,55 @@ from vllm.entrypoints.pooling.token_embed.serving import ServingTokenEmbedding
 from vllm.entrypoints.serve.exception_handling.register import init_exception_handler
 from vllm.exceptions import VLLMValidationError
 from vllm.pooling_params import LateChunkingParams
+from vllm.renderers import renderer_from_config
+from vllm.renderers.chat_utils import ChatTemplateConfig
+from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.input_processor import InputProcessor
+
+
+@pytest.fixture(scope="module", params=["fcfs", "priority"])
+def priority_pooling_serving(request):
+    model = "Qwen/Qwen3-Embedding-0.6B"
+    config = AsyncEngineArgs(
+        model=model,
+        runner="pooling",
+        max_model_len=128,
+        enforce_eager=True,
+        scheduling_policy=request.param,
+    ).create_engine_config()
+    renderer = renderer_from_config(config)
+    engine = MagicMock(spec=AsyncLLM)
+    engine.vllm_config = config
+    engine.model_config = config.model_config
+    engine.renderer = renderer
+    engine.input_processor = InputProcessor(config, renderer)
+    models = OpenAIServingModels(engine, [BaseModelPath(name=model, model_path=model)])
+    yield ServingEmbedding(
+        engine,
+        models,
+        request_logger=None,
+        chat_template_config=ChatTemplateConfig(),
+    )
+    renderer.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("priority", [5, -5, 0])
+async def test_pooling_priority_requires_priority_scheduling(
+    priority_pooling_serving, priority
+):
+    """Reject unsupported priorities before pooling preprocessing."""
+    serving = priority_pooling_serving
+    request = EmbeddingCompletionRequest(input="Hi", priority=priority)
+    policy = serving.vllm_config.scheduler_config.policy
+    if policy == "fcfs" and priority != 0:
+        with pytest.raises(VLLMValidationError) as exc_info:
+            await serving._init_ctx(serving.io_processor, request)
+        assert exc_info.value.parameter == "priority"
+        assert exc_info.value.value == priority
+    else:
+        ctx = await serving._init_ctx(serving.io_processor, request)
+        assert ctx.priorities == priority
 
 
 def _bge_m3_config(io_processor_plugin=None):

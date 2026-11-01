@@ -10,8 +10,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from starlette.requests import Request
 
+from vllm.config import SchedulerConfig, VllmConfig
 from vllm.config.multimodal import MultiModalConfig
+from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
+from vllm.entrypoints.generate.base.serving import GenerateBaseServing
 from vllm.entrypoints.openai.completion.protocol import (
     CompletionRequest,
     CompletionResponse,
@@ -25,11 +28,13 @@ from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput, WeightVersionSpan
+from vllm.renderers import renderer_from_config
 from vllm.renderers.deepseek_v4 import DeepseekV4Renderer
 from vllm.renderers.hf import HfRenderer
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.metrics.stats import RequestSpecDecodeMetrics, RequestStateStats
 
 MODEL_NAME = "openai-community/gpt2"
@@ -48,6 +53,56 @@ BASE_MODEL_PATHS = [
     BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME),
     BaseModelPath(name=MODEL_NAME_SHORT, model_path=MODEL_NAME_SHORT),
 ]
+
+
+@pytest.fixture(scope="module", params=["fcfs", "priority"])
+def priority_serving(request):
+    config = AsyncEngineArgs(
+        model="Qwen/Qwen3-0.6B",
+        max_model_len=128,
+        enforce_eager=True,
+        scheduling_policy=request.param,
+    ).create_engine_config()
+    renderer = renderer_from_config(config)
+    engine = MagicMock(spec=AsyncLLM)
+    engine.vllm_config = config
+    engine.model_config = config.model_config
+    engine.renderer = renderer
+    engine.input_processor = InputProcessor(config, renderer)
+    models = OpenAIServingModels(engine, BASE_MODEL_PATHS)
+    yield GenerateBaseServing(engine, models, request_logger=None)
+    renderer.shutdown()
+
+
+@pytest.mark.parametrize(
+    "body_priority,header,effective_priority",
+    [
+        (5, None, 5),
+        (-5, None, -5),
+        (0, "7", 7),
+        (0, None, 0),
+        (5, "0", 0),
+        (0, "invalid", 0),
+        (5, "invalid", 5),
+    ],
+)
+def test_effective_priority_requires_priority_scheduling(
+    priority_serving, body_priority, header, effective_priority
+):
+    """Validate header precedence and the documented scheduling-policy contract."""
+    request = CompletionRequest(model=MODEL_NAME, prompt="Hi", priority=body_priority)
+    headers = [] if header is None else [(b"x-vllm-priority", header.encode())]
+    raw_request = Request({"type": "http", "headers": headers})
+    policy = priority_serving.engine_client.vllm_config.scheduler_config.policy
+    if policy == "fcfs" and effective_priority != 0:
+        with pytest.raises(VLLMValidationError) as exc_info:
+            priority_serving._get_priority(request, raw_request)
+        assert exc_info.value.parameter == "priority"
+        assert exc_info.value.value == effective_priority
+    else:
+        assert (
+            priority_serving._get_priority(request, raw_request) == effective_priority
+        )
 
 
 @dataclass
@@ -160,6 +215,11 @@ def _make_metrics_request_output(
 async def test_beam_search_preserves_request_priority(header):
     """Body and header priority survive every beam expansion."""
     engine = MagicMock(spec=AsyncLLM)
+    engine.vllm_config = VllmConfig(
+        scheduler_config=SchedulerConfig(
+            max_model_len=100, is_encoder_decoder=False, policy="priority"
+        )
+    )
     engine.errored = False
     engine.model_config = MockModelConfig()
     engine.input_processor = MagicMock()

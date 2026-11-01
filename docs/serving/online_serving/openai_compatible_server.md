@@ -125,6 +125,7 @@ The Completions, Chat Completions, and Responses APIs also support the
 `X-Vllm-Priority` request header. Its value must be an integer and overrides
 the `priority` value in the JSON request body. Non-zero priorities require the
 server to use priority scheduling.
+The default `fcfs` policy rejects a non-zero effective priority with HTTP 400. Start the server with `--scheduling-policy priority` to use non-zero priorities.
 
 ```python
 completion = client.chat.completions.create(
