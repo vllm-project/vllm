@@ -918,7 +918,8 @@ def _get_packed_kv_cache_groups(
     per page size) and split into groups covering the same number of pattern
     repeats (picked by ``_approximate_gcd`` to minimize padding), so all
     groups pack into the same per-block layout. Mamba buckets are additionally
-    split to fit the block the attention buckets already need.
+    split to fit the block the attention buckets already need plus one state,
+    which widens the block only if that saves a group.
     Returns None when the layout is not block-outermost or all layers already
     share one page size.
     """
@@ -1011,10 +1012,11 @@ def _get_packed_kv_cache_groups(
     groups = []
     for spec, page_size_layers, balanced in bucketed:
         num_groups = num_groups_for(spec, balanced)
-        # Cap a state group at the states a block already fits rather than let
-        # it widen the block.
+        # Cap a state group at the states a block already fits, plus one for Mamba.
         if anchor_bytes and is_state_bucket(spec):
             states_per_block = max(anchor_bytes // spec.first_spec.page_size_bytes, 1)
+            if isinstance(spec.first_spec, MambaSpec):
+                states_per_block += 1
             num_groups = max(
                 num_groups, cdiv(len(spec.kv_cache_specs), states_per_block)
             )
