@@ -204,6 +204,7 @@ class RequestState:
         temperature: float | None = None,
         stream_input: bool = False,
         remote_prefill_cached_tokens: int | None = None,
+        synthetic_output: bool = False,
     ):
         self.request_id = request_id
         self.external_req_id = external_req_id
@@ -220,6 +221,7 @@ class RequestState:
         )
         self.logprobs_processor = logprobs_processor
         self.detokenizer = detokenizer
+        self.synthetic_output = synthetic_output
         self.max_tokens_param = max_tokens_param
         self.top_p = top_p
         self.n = n
@@ -281,6 +283,7 @@ class RequestState:
         queue: RequestOutputCollector | None,
         log_stats: bool,
         stream_interval: int,
+        synthetic_output: bool = False,
     ) -> "RequestState":
         remote_prefill_cached_tokens = None
         if sampling_params := request.sampling_params:
@@ -345,6 +348,7 @@ class RequestState:
             stream_interval=stream_interval,
             stream_input=request.resumable,
             remote_prefill_cached_tokens=remote_prefill_cached_tokens,
+            synthetic_output=synthetic_output and tokenizer is not None,
         )
         if state.stats is not None and sampling_params is not None:
             state.stats.is_watermarked = bool(sampling_params.watermarking)
@@ -487,6 +491,8 @@ class RequestState:
         text = self.detokenizer.get_next_output_text(finished, delta)
         if not delta:
             token_ids = self.detokenizer.output_token_ids
+        if self.synthetic_output:
+            text = "synthetic " * len(token_ids)
 
         # Prepare logprobs, based on delta mode
         logprobs = self.logprobs_processor.logprobs
@@ -559,6 +565,7 @@ class OutputProcessor:
         stream_interval: int = 1,
         tracing_enabled: bool = False,
         admission_stats: "SharedAdmissionStats | None" = None,
+        synthetic_output: bool = False,
     ):
         self.log_stats = log_stats
         self.tokenizer = tokenizer
@@ -569,6 +576,7 @@ class OutputProcessor:
         self.lora_states = LoRARequestStates(log_stats)
         self.tracing_enabled = tracing_enabled
         self.admission_stats = admission_stats
+        self.synthetic_output = synthetic_output
 
     def get_num_unfinished_requests(self):
         return len(self.request_states)
@@ -683,6 +691,7 @@ class OutputProcessor:
             queue=queue,
             log_stats=self.log_stats,
             stream_interval=self.stream_interval,
+            synthetic_output=self.synthetic_output,
         )
         self.request_states[request_id] = req_state
         if parent_req:

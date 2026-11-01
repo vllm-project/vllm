@@ -35,5 +35,12 @@ async def realtime_endpoint(websocket: WebSocket):
     app = websocket.app
     serving = app.state.openai_serving_realtime
 
+    if serving.synthetic_output:
+        await websocket.close(
+            code=1008,
+            reason="Realtime transcription is unsupported with synthetic acceptance",
+        )
+        return
+
     connection = RealtimeConnection(websocket, serving)
     await connection.handle_connection()
