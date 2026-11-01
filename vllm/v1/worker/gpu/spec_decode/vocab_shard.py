@@ -40,6 +40,7 @@ import torch
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
+from vllm.v1.worker.gpu.buffer_utils import UvaBuffer
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     RESAMPLE_BLOCK_SIZE,
     VOCAB_BLOCK_SIZE,
@@ -50,8 +51,9 @@ logger = init_logger(__name__)
 # Exchanges per verification step get distinct tags below this.
 _TAGS_PER_STEP = 32
 _TAG_STRIDE = tl.constexpr(_TAGS_PER_STEP)
-# Bounded spin, a few seconds, so that a missing peer cannot hang the GPU. A
-# timeout is counted in `errors`, and `check_exchange` raises.
+# Bounded spin, about 2 s per poll on GB300 (0.24 us per iteration), so that a
+# missing peer cannot hang the GPU. A timeout sets a flag in pinned host memory,
+# and `check_exchange` raises at the next step.
 _SPIN_LIMIT = 1 << 23
 _BLK = 256
 
@@ -120,7 +122,7 @@ def _half(epoch_ptr, half_words):
 
 
 @triton.jit
-def _poll(p, m, tag, err_ptr, SPIN_LIMIT: tl.constexpr):
+def _poll(p, m, tag, timed_out_ptr, SPIN_LIMIT: tl.constexpr):
     w = tl.load(p, mask=m, other=0, volatile=True)
     bad = tl.sum((m & ((w >> 32) != tag)).to(tl.int32), axis=0)
     it = 0
@@ -129,7 +131,7 @@ def _poll(p, m, tag, err_ptr, SPIN_LIMIT: tl.constexpr):
         bad = tl.sum((m & ((w >> 32) != tag)).to(tl.int32), axis=0)
         it += 1
     if bad > 0:
-        tl.atomic_add(err_ptr, 1)
+        tl.store(timed_out_ptr, 1)
     # Consumed. The slot's next word comes after this rank's next push.
     tl.store(p, 0, mask=m)
     return (w & 0xFFFFFFFF).to(tl.int32)
@@ -180,7 +182,7 @@ def _pull_kernel(
     slot_words,
     epoch_ptr,
     k,
-    err_ptr,
+    timed_out_ptr,  # int32 [1], pinned host memory (UVA)
     SPIN_LIMIT: tl.constexpr,
     BLK: tl.constexpr,
 ):
@@ -196,7 +198,7 @@ def _pull_kernel(
         + r * region_cols
         + cols
     )
-    v = _poll(p, m, _tag(epoch_ptr, k), err_ptr, SPIN_LIMIT)
+    v = _poll(p, m, _tag(epoch_ptr, k), timed_out_ptr, SPIN_LIMIT)
     tl.store(dst_ptr + s * dst_slot_stride + r * dst_stride + cols, v, mask=m)
 
 
@@ -215,7 +217,7 @@ def _owned_logits_kernel(
     local_offset,  # local column of the first owned column
     epoch_ptr,
     k,
-    err_ptr,
+    timed_out_ptr,  # int32 [1], pinned host memory (UVA)
     PACK: tl.constexpr,  # columns per pushed word
     SPIN_LIMIT: tl.constexpr,
     BLK: tl.constexpr,
@@ -235,7 +237,7 @@ def _owned_logits_kernel(
         rm = m & (rcols >= 0)
         word = rcols // PACK
         p = buf_ptr + _half(epoch_ptr, half_words) + region + r * region_cols + word
-        v = _poll(p, rm, _tag(epoch_ptr, k), err_ptr, SPIN_LIMIT)
+        v = _poll(p, rm, _tag(epoch_ptr, k), timed_out_ptr, SPIN_LIMIT)
         if PACK == 2:
             bits = ((v >> ((rcols % 2) * 16)) & 0xFFFF).to(tl.int16)
             y = bits.to(local_ptr.dtype.element_ty, bitcast=True).to(tl.float32)
@@ -776,6 +778,8 @@ class VocabShard:
         try:
             import torch.distributed._symmetric_memory as symm_mem
 
+            # Exchange timeouts, flagged by the kernels straight into host memory.
+            self.timed_out = UvaBuffer(1, torch.int32)
             buf = symm_mem.empty(2 * self.half_words, dtype=torch.int64, device=device)
         except Exception as e:  # e.g. no symmetric memory on this platform
             error = e
@@ -797,19 +801,14 @@ class VocabShard:
         )
         # Device-side step counter: tags must change on every graph replay.
         self.epoch = torch.zeros(1, dtype=torch.int64, device=device)
-        # Exchange timeouts, copied to the host after every step.
-        self.errors = torch.zeros(1, dtype=torch.int32, device=device)
-        self._errors_host = torch.zeros(
-            1, dtype=torch.int32, device="cpu", pin_memory=True
-        )
         torch.accelerator.synchronize()
         torch.distributed.barrier(group=self.group.cpu_group)
         return None
 
     def check_exchange(self) -> None:
         """Raise if an exchange of an earlier step timed out waiting for a
-        peer. Reads the host copy, so it does not synchronize."""
-        if self._errors_host.item():
+        peer. Reads host memory, so it does not synchronize."""
+        if self.timed_out.np[0]:
             raise RuntimeError(
                 "Vocab-sharded verification timed out waiting for a TP peer; "
                 "the tokens of that step are invalid. Disable "
@@ -824,7 +823,6 @@ class VocabShard:
 
     def end_step(self) -> None:
         self.epoch.add_(1)
-        self._errors_host.copy_(self.errors, non_blocking=True)
 
     def _region(self, words: int, reuse: int | None = None) -> tuple[int, int]:
         """A region of this step (fresh, or ``reuse``) and a fresh tag.
@@ -906,7 +904,7 @@ class VocabShard:
             slot_words,
             self.epoch,
             k,
-            self.errors,
+            self.timed_out.uva(),
             SPIN_LIMIT=_SPIN_LIMIT,
             BLK=_BLK,
         )
@@ -993,7 +991,7 @@ class VocabShard:
                 self.col_start - self.tp_start,
                 self.epoch,
                 k,
-                self.errors,
+                self.timed_out.uva(),
                 PACK=pack,
                 SPIN_LIMIT=_SPIN_LIMIT,
                 BLK=1024,
