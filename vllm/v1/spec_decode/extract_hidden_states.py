@@ -15,7 +15,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
 from vllm.v1.attention.backend import AttentionMetadataBuilder, CommonAttentionMetadata
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
-from vllm.v1.utils import CpuGpuBuffer
+from vllm.v1.spec_decode.utils import DoubleBufferedCpuGpuBuffer
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
@@ -57,7 +57,7 @@ class ExtractHiddenStatesProposer:
             vllm_config.scheduler_config.max_num_batched_tokens + max_batch_size
         )
 
-        self.backup_next_token_ids = CpuGpuBuffer(
+        self.backup_next_token_ids = DoubleBufferedCpuGpuBuffer(
             max_batch_size, dtype=torch.int32, device=device
         )
 
@@ -328,12 +328,16 @@ class ExtractHiddenStatesProposer:
         """
         # Precompute backup token IDs for discarded requests.
         num_reqs = gpu_input_batch.num_reqs
+        backup = self.backup_next_token_ids.acquire()
         for i in range(num_reqs):
-            self.backup_next_token_ids.np[i] = requests[
-                gpu_input_batch.req_ids[i]
-            ].get_token_id(gpu_input_batch.num_tokens_no_spec[i] - 1)
+            backup.np[i] = requests[gpu_input_batch.req_ids[i]].get_token_id(
+                gpu_input_batch.num_tokens_no_spec[i] - 1
+            )
         self.backup_next_token_ids.copy_to_gpu(num_reqs)
-        backup_tokens_gpu = self.backup_next_token_ids.gpu[:num_reqs]
+        # The backup token can be -1 (async-scheduling placeholder).
+        backup_tokens_gpu = backup.gpu[:num_reqs].clamp(
+            0, gpu_input_batch.vocab_size - 1
+        )
 
         assert discard_request_mask.dtype == torch.bool
 
