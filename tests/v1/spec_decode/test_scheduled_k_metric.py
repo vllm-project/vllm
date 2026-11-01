@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import prometheus_client
 import pytest
+
 from vllm.v1.spec_decode.metrics import SpecDecodingProm
 
 
