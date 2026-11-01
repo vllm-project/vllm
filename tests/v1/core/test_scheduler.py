@@ -2940,6 +2940,66 @@ def test_scheduled_k_absent_when_requests_are_held_but_not_scheduled():
     assert _scheduled_k(scheduler) is None
 
 
+def test_scheduled_k_sizes_drafts_verified_in_the_next_step():
+    """The K a step selects is the draft length proposed in that step.
+
+    Those drafts are verified in the next step, so the spec decode stats for
+    them land one step later, whatever K that step selects. A step that selects
+    K=0 proposes no drafts, so the step after it verifies none.
+    """
+    scheduler = create_scheduler(
+        num_speculative_tokens=3,
+        num_speculative_tokens_per_batch_size=DYNAMIC_SD_SCHEDULE,
+    )
+    requests = create_requests(num_requests=2, num_tokens=1)
+    for request in requests:
+        scheduler.add_request(request)
+
+    def step(drafts: list[int]):
+        output = scheduler.schedule()
+        req_ids = list(output.num_scheduled_tokens)
+        model_runner_output = ModelRunnerOutput(
+            req_ids=req_ids,
+            req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
+            sampled_token_ids=[[0]] * len(req_ids),
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        )
+        stats = scheduler.update_from_output(output, model_runner_output)[
+            0
+        ].scheduler_stats
+        if drafts:
+            scheduler.update_draft_token_ids(
+                DraftTokenIds(req_ids, [drafts] * len(req_ids))
+            )
+        return stats
+
+    # Two requests select K=2; the drafter proposes 2 tokens per request.
+    stats = step(drafts=[7, 8])
+    assert stats.spec_decode_scheduled_k == 2
+    assert stats.spec_decoding_stats is None
+
+    # The next step verifies those drafts and proposes again.
+    stats = step(drafts=[7, 8])
+    assert stats.spec_decode_scheduled_k == 2
+    assert stats.spec_decoding_stats.num_drafts == 2
+    assert stats.spec_decoding_stats.num_draft_tokens == 4
+
+    # With one request left the step selects K=0 but still verifies the
+    # drafts proposed under K=2.
+    scheduler.finish_requests(requests[1].request_id, RequestStatus.FINISHED_ABORTED)
+    stats = step(drafts=[])
+    assert stats.spec_decode_scheduled_k == 0
+    assert stats.spec_decoding_stats.num_drafts == 1
+    assert stats.spec_decoding_stats.num_draft_tokens == 2
+
+    # Nothing was proposed under K=0, so nothing is verified.
+    stats = step(drafts=[])
+    assert stats.spec_decode_scheduled_k == 0
+    assert stats.spec_decoding_stats is None
+
+
 def test_per_request_spec_decode_acceptance_disabled_by_default():
     scheduler = create_scheduler(num_speculative_tokens=3)
     assert scheduler.spec_decode_metrics_level == "none"

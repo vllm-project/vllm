@@ -69,6 +69,17 @@ VLLM_USE_V2_MODEL_RUNNER=0 vllm serve meta-llama/Llama-3.1-8B-Instruct \
 
 ```
 
+## Observing the schedule
+
+`vllm:spec_decode_scheduled_steps_total` counts scheduler steps that scheduled
+request work, labelled by the K the schedule selected (`num_spec_tokens`),
+including 0. K is the draft length requested from the drafter in that step; the
+next step verifies those drafts. A step that selects K=0 requests no drafts, so
+it does not appear in the per-request spec-decode counters such as
+`vllm:spec_decode_num_drafts_total` (see
+[acceptance metrics](acceptance_metrics.md)). Those count per request, while this
+counter counts scheduler steps, so the two do not reconcile.
+
 ## Limitations
 
 * Tested with Eagle, Eagle-3, and DFlash. Other SD methods may or may not work out of the box

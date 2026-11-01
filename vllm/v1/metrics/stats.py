@@ -244,12 +244,12 @@ class SchedulerStats:
     kv_cache_eviction_events: list[KVCacheEvictionEvent] = field(default_factory=list)
 
     spec_decoding_stats: SpecDecodingStats | None = None
-    # K the dynamic-SD schedule selected for this step, or None when dynamic SD
-    # is not in use or when the step scheduled no request work. Recorded
-    # separately from spec_decoding_stats because that is only built for steps
-    # that produced draft tokens, so steps the schedule sends to K=0 leave no
-    # trace in it. A step that scheduled nothing never consults the schedule,
-    # so it is not an observation of a selected K.
+    # K the dynamic-SD schedule selected for this step: the number of draft
+    # tokens requested from the drafter in this step, which the next step
+    # verifies. None when dynamic SD is not in use or when the step scheduled
+    # no request work, since such a step never consults the schedule.
+    # spec_decoding_stats counts per request the drafts a step verifies, so a
+    # step that selects K=0 leaves no trace there.
     spec_decode_scheduled_k: int | None = None
     kv_connector_stats: dict[str, Any] | None = None
     ec_connector_stats: dict[str, Any] | None = None

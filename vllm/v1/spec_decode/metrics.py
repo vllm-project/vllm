@@ -271,8 +271,8 @@ class SpecDecodingProm:
                 name="vllm:spec_decode_scheduled_steps",
                 documentation=(
                     "Dynamic-SD scheduler steps that scheduled request work, by "
-                    "the number of speculative tokens the schedule selected, "
-                    "including 0."
+                    "the number of draft tokens the schedule requested from the "
+                    "drafter in that step, including 0."
                 ),
                 labelnames=k_labelnames,
             )
@@ -287,12 +287,14 @@ class SpecDecodingProm:
     def observe_scheduled_k(self, scheduled_k: int, engine_idx: int = 0):
         """Record the K the dynamic-SD schedule selected for one step.
 
-        Only steps that scheduled request work are observations: the schedule
-        is consulted per scheduled batch, so a step that scheduled nothing
-        carries the default K rather than a selected one.
+        K is the draft length requested from the drafter in that step; the
+        drafts are verified in the next step. Only steps that scheduled request
+        work are observations: the schedule is consulted per scheduled batch, so
+        a step that scheduled nothing carries the default K rather than a
+        selected one.
 
-        Steps the schedule sends to K=0 produce no drafts, so they are absent
-        from every other spec-decode counter; without this one a schedule that
+        A step that selects K=0 requests no drafts, so the per-request
+        spec-decode counters never see it; without this counter a schedule that
         has stopped speculating is indistinguishable from one that is not
         configured."""
         if not self.spec_decoding_enabled:
