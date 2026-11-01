@@ -705,13 +705,13 @@ class SpeculativeConfig:
     top-k base-logit candidates. Requires draft tensor parallel size 1."""
 
     dspark_tp_markov_sampling: bool | None = None
-    """For DSpark drafting with tensor parallelism, run the sequential Markov
-    sampling loop vocab-parallel: each TP rank computes the Markov bias and the
-    Gumbel sample for its share of the vocabulary, and the ranks exchange
-    per-block maxima over symmetric memory. The drafted tokens and cached
-    draft logits are the same as the replicated loop's. Needs CUDA symmetric
-    memory and probabilistic drafting over the full vocabulary; otherwise the
-    replicated loop runs."""
+    """Experimental. For DSpark drafting with tensor parallelism, run the
+    sequential Markov sampling loop vocab-parallel: each TP rank computes the
+    Markov bias and the Gumbel sample for its share of the vocabulary, and the
+    ranks exchange per-block maxima over symmetric memory. The drafted tokens
+    and cached draft logits are the same as the replicated loop's. Needs CUDA
+    symmetric memory between the TP ranks and probabilistic drafting over the
+    full vocabulary; otherwise the replicated loop runs."""
 
     xpress_topc: int | None = Field(default=None, ge=0)
     """For XPress drafting, score each Jacobi pass only on the drafter's top-C

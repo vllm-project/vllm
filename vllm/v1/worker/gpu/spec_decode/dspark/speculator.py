@@ -111,20 +111,22 @@ class DSparkSpeculator(DFlashSpeculator):
             self._try_enable_tp_markov_sampling()
 
     def _try_enable_tp_markov_sampling(self) -> None:
-        # Every TP rank reaches the same decision (the checks follow from the
-        # config or are agreed collectively): the sampler's setup is collective.
-        reason = TPMarkovSampler.unsupported_reason(self)
-        if reason is None:
-            reason = TPMarkovSampler.inexact_projection_reason(self)
-        if reason is not None:
+        # Collective: every TP rank reaches the same decision.
+        sampler, reason = TPMarkovSampler.create(self)
+        if sampler is None:
             logger.warning(
                 "dspark_tp_markov_sampling is ignored because %s; the Markov "
                 "loop runs replicated on every TP rank.",
                 reason,
             )
             return
-        self._tp_markov_sampler = TPMarkovSampler(self)
+        self._tp_markov_sampler = sampler
         logger.info("DSpark Markov sampling is vocab-parallel over TP.")
+
+    def propose(self, *args, **kwargs) -> torch.Tensor:
+        if self._tp_markov_sampler is not None:
+            self._tp_markov_sampler.check_exchange()
+        return super().propose(*args, **kwargs)
 
     def _try_enable_sharded_sequential_sampling(self) -> None:
         tp_size = get_tp_group().world_size
@@ -275,7 +277,6 @@ class DSparkSpeculator(DFlashSpeculator):
             and num_reqs <= self._tp_markov_sampler.max_reqs
         ):
             self._tp_markov_sampler.sample(
-                self,
                 num_reqs,
                 base_logits,
                 self.sample_idx_mapping[:num_sample].view(num_reqs, n_spec),
