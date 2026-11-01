@@ -101,6 +101,10 @@ Legend:
 
 ## Examples
 
+### Reference-replay oracle benchmark
+
+The [oracle benchmark](../../benchmarks/README.md#reference-replay-oracle-benchmark-benchmark_spec_decode_oraclepy) compares baseline, reference-replay, ngram, and EAGLE3 throughput. The oracle proposes tokens from a saved target-model output. If the output diverges, it finds the last three output tokens in the reference and chooses the match whose end is nearest to the current output length. Ties favor the earlier match. Use `--strict` to disable this heuristic. The result is a performance reference for that setup, not a theoretical upper bound.
+
 ### 🚀 Online Benchmark
 
 <details class="admonition abstract" markdown="1">
