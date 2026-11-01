@@ -11,6 +11,7 @@ import json
 import os
 import uuid
 from pathlib import Path
+from typing import Any
 
 import aiohttp
 import msgspec
@@ -30,6 +31,7 @@ from vllm.distributed.ec_transfer.ec_connector.cpu.protocol import (
 )
 from vllm.multimodal.utils import encode_image_url
 from vllm.platforms import current_platform
+from vllm.utils.network_utils import get_open_ports_list
 
 MODEL = os.environ.get("MODEL", "Qwen/Qwen2.5-VL-3B-Instruct")
 
@@ -40,6 +42,7 @@ def servers():
     if not current_platform.is_cuda() or current_platform.device_count() < 2:
         pytest.skip("Requires two CUDA GPUs")
     devices = os.environ.get("CUDA_VISIBLE_DEVICES", "0,1").split(",")
+    encoder_port, failure_port = get_open_ports_list(2)
     common = [
         "--host",
         "127.0.0.1",
@@ -62,6 +65,10 @@ def servers():
                 "ec_connector_extra_config": {
                     "ec_enable_nixl": True,
                     "ec_cpu_bytes": 64 << 20,
+                    "ec_allowed_peers": [
+                        f"127.0.0.1:{encoder_port}",
+                        f"127.0.0.1:{failure_port}",
+                    ],
                 },
             }
         )
@@ -76,7 +83,11 @@ def servers():
                 "--ec-transfer-config",
                 config("ec_producer"),
             ],
-            env_dict={"CUDA_VISIBLE_DEVICES": devices[0]},
+            env_dict={
+                "CUDA_VISIBLE_DEVICES": devices[0],
+                "VLLM_EC_SIDE_CHANNEL_HOST": "127.0.0.1",
+                "VLLM_EC_SIDE_CHANNEL_PORT": str(encoder_port),
+            },
         ) as encoder,
         RemoteOpenAIServer(
             MODEL,
@@ -85,7 +96,7 @@ def servers():
             env_dict={"CUDA_VISIBLE_DEVICES": devices[1]},
         ) as consumer,
     ):
-        yield encoder, consumer
+        yield encoder, consumer, failure_port
 
 
 async def _post(session, server, body):
@@ -93,11 +104,11 @@ async def _post(session, server, body):
         return r.status, await r.json()
 
 
-async def _encode(session, encoder):
+async def _encode(session, encoder, *, use_uuid=True):
     image = Image.open(Path(__file__).with_name("hato.jpg")).convert("RGB")
     image.thumbnail((224, 224))
     item_uuid = uuid.uuid4().hex  # Avoid both EC and processor cache hits.
-    body = {
+    body: dict[str, Any] = {
         "model": MODEL,
         "messages": [
             {
@@ -116,11 +127,15 @@ async def _encode(session, encoder):
         "temperature": 0,
         "chat_template_kwargs": {"enable_thinking": False},
     }
+    if not use_uuid:
+        del body["messages"][0]["content"][0]["uuid"]
     status, result = await _post(session, encoder, body)
     assert status == 200, result
     params = result["ec_transfer_params"]
     assert len(params) == 1, params
     ((mm_hash, handle),) = params.items()
+    if not use_uuid:
+        item_uuid = mm_hash
     assert handle["metadata"] and handle["peer_host"] and handle["size_bytes"] > 0
     rewritten = rewrite_for_decode(
         body,
@@ -145,7 +160,7 @@ async def _encode(session, encoder):
 @pytest.mark.parametrize("local_image", [False, True], ids=["metadata-only", "pixels"])
 async def test_missing_remote_encoding_is_request_scoped(servers, local_image):
     """A terminal NACK must preserve local fallback and subsequent serving."""
-    encoder, consumer = servers
+    encoder, consumer, failure_port = servers
     timeout = aiohttp.ClientTimeout(total=120)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         original, rewritten, mm_hash = await _encode(session, encoder)
@@ -156,7 +171,8 @@ async def test_missing_remote_encoding_is_request_scoped(servers, local_image):
         # needed to make the consumer receive NACK_MISSING.
         with zmq.asyncio.Context() as ctx, ctx.socket(zmq.ROUTER) as router:
             router.setsockopt(zmq.LINGER, 0)
-            port = router.bind_to_random_port("tcp://127.0.0.1")
+            port = failure_port
+            router.bind(f"tcp://127.0.0.1:{port}")
             request["ec_transfer_params"][mm_hash].update(
                 peer_host="127.0.0.1", peer_port=port
             )
@@ -198,3 +214,30 @@ async def test_missing_remote_encoding_is_request_scoped(servers, local_image):
         status, result = await _post(session, consumer, healthy)
         assert status == 200, result
         assert result["choices"][0]["message"]["content"], result
+
+
+@pytest.mark.asyncio
+async def test_unapproved_producer_is_not_contacted(servers):
+    """A valid image hash and tensor shape cannot authorize a new producer."""
+    encoder, consumer, _ = servers
+    timeout = aiohttp.ClientTimeout(total=120)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        original, rewritten, mm_hash = await _encode(session, encoder, use_uuid=False)
+        original["cache_salt"] = uuid.uuid4().hex
+        with zmq.Context() as ctx, ctx.socket(zmq.ROUTER) as router:
+            router.setsockopt(zmq.LINGER, 0)
+            port = router.bind_to_random_port("tcp://127.0.0.1")
+            for request, expected_status in ((rewritten, 500), (original, 200)):
+                request["ec_transfer_params"][mm_hash].update(
+                    peer_host="127.0.0.1", peer_port=port
+                )
+                status, result = await _post(session, consumer, request)
+                assert status == expected_status, result
+                assert not router.getsockopt(zmq.EVENTS) & zmq.POLLIN
+
+        del original["ec_transfer_params"]
+        original["cache_salt"] = uuid.uuid4().hex
+        status, result = await _post(session, consumer, original)
+        assert status == 200, result
+        async with session.get(consumer.url_for("health")) as health:
+            assert health.status == 200
