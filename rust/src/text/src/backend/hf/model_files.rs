@@ -185,6 +185,12 @@ fn materialize_config(
     Ok(file.into_temp_path())
 }
 
+/// Appended to tokenizer-not-found errors for repos that ship only the slow BPE
+/// tokenizer files, such as `Qwen/Qwen3-ASR-1.7B`.
+const SLOW_BPE_TOKENIZER_HINT: &str = ". Found `vocab.json` and `merges.txt` but no \
+     `tokenizer.json`; generate one with transformers \
+     (`AutoTokenizer.from_pretrained(<model>).save_pretrained(<dir>)`) and pass `--tokenizer <dir>`";
+
 /// The file a cached snapshot must contain to be used for a source.
 #[derive(Debug, Clone, Copy)]
 enum RequiredFile {
@@ -238,9 +244,15 @@ impl SourceFiles {
             return Ok(snapshot);
         }
         if is_hf_hub_offline() {
+            let hint = match required {
+                RequiredFile::Tokenizer => cached_snapshot_dir(&cache, &repo)
+                    .map(Self::Dir)
+                    .map_or("", |snapshot| snapshot.slow_bpe_tokenizer_hint()),
+                RequiredFile::Config | RequiredFile::Nothing => "",
+            };
             return Err(Error::Tokenizer(format!(
                 "model '{model_id}' at revision '{}' has no {required} in cache '{}' \
-                 and HF_HUB_OFFLINE is enabled",
+                 and HF_HUB_OFFLINE is enabled{hint}",
                 repo.revision(),
                 cache.path().display(),
             )));
@@ -306,10 +318,24 @@ impl SourceFiles {
         }
     }
 
+    /// Return [`SLOW_BPE_TOKENIZER_HINT`] if this source ships `vocab.json` and
+    /// `merges.txt`, checked without downloading them; otherwise an empty string.
+    fn slow_bpe_tokenizer_hint(&self) -> &'static str {
+        let has = |filename: &str| match self {
+            Self::Dir(dir) => dir.join(filename).is_file(),
+            Self::Remote { siblings, .. } => siblings.contains(filename),
+        };
+        if has("vocab.json") && has("merges.txt") {
+            SLOW_BPE_TOKENIZER_HINT
+        } else {
+            ""
+        }
+    }
+
     /// Select the tokenizer source from the files found by [`Self::tokenizer_file`].
     async fn tokenizer(&self, tokenizer_config: &HfTokenizerConfig) -> Result<TokenizerSource> {
         let Some(tokenizer_path) = self.tokenizer_file().await? else {
-            return Err(Error::Tokenizer(match self {
+            let message = match self {
                 Self::Dir(dir) => format!(
                     "local model directory '{}' does not contain a supported tokenizer file \
                      (tokenizer.json, tiktoken.model, or *.tiktoken)",
@@ -319,7 +345,11 @@ impl SourceFiles {
                     "model '{model_id}' does not expose a supported tokenizer file \
                      (tokenizer.json, tiktoken.model, or *.tiktoken) on Hugging Face"
                 ),
-            }));
+            };
+            return Err(Error::Tokenizer(format!(
+                "{message}{}",
+                self.slow_bpe_tokenizer_hint()
+            )));
         };
         if tokenizer_path.ends_with("tekken.json") {
             return Ok(TokenizerSource::Tekken(tokenizer_path));
@@ -657,6 +687,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn slow_bpe_tokenizer_files_get_a_tokenizer_json_hint() {
+        let dir = tempdir().unwrap();
+        for file in ["vocab.json", "merges.txt", "config.json"] {
+            fs::write(dir.path().join(file), "{}").unwrap();
+        }
+
+        let error = ResolvedModelFiles::new(dir.path().to_str().unwrap(), None).await.unwrap_err();
+        let message = thiserror_ext::AsReport::as_report(&error).to_string();
+        assert!(
+            message.contains("Found `vocab.json` and `merges.txt`"),
+            "{message}"
+        );
+        assert!(message.contains("--tokenizer <dir>"), "{message}");
+    }
+
+    #[tokio::test]
     async fn model_without_tokenizer_resolves_with_tokenizer_and_config_sources() {
         let model = tempdir().unwrap();
         fs::write(model.path().join("model.gguf"), "").unwrap();
@@ -671,6 +717,7 @@ mod tests {
             message.contains("does not contain a supported tokenizer file"),
             "{message}"
         );
+        assert!(!message.contains("vocab.json"), "{message}");
 
         let files = ResolvedModelFiles::from_sources(&ModelFileSources {
             model: source(model.path(), None),
@@ -752,6 +799,14 @@ mod tests {
             let message = thiserror_ext::AsReport::as_report(&error).to_string();
             assert!(message.contains("HF_HUB_OFFLINE is enabled"), "{message}");
             assert!(message.contains("revision 'missing'"), "{message}");
+            assert!(!message.contains("vocab.json"), "{message}");
+
+            let error = ResolvedModelFiles::new("test/slow", Some("release")).await.unwrap_err();
+            let message = thiserror_ext::AsReport::as_report(&error).to_string();
+            assert!(
+                message.contains("Found `vocab.json` and `merges.txt`"),
+                "{message}"
+            );
 
             // A weights-only snapshot serves the model once tokenizer and config come from elsewhere.
             let sources = ModelFileSources {
@@ -786,6 +841,8 @@ mod tests {
             ("models--test--model", "tokenizer.json"),
             ("models--test--weights", "model.gguf"),
             ("models--test--config", "config.json"),
+            ("models--test--slow", "vocab.json"),
+            ("models--test--slow", "merges.txt"),
         ] {
             let repo = cache.join(repo);
             fs::create_dir_all(repo.join("refs")).unwrap();
