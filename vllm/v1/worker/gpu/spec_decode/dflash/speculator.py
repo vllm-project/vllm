@@ -6,10 +6,11 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig, replace
+from vllm.config import VllmConfig, get_layers_from_vllm_config, replace
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
@@ -33,6 +34,27 @@ from vllm.v1.worker.gpu.spec_decode.utils import get_parallel_drafting_token_id
 from vllm.v1.worker.utils import AttentionGroup
 
 logger = init_logger(__name__)
+
+
+def _disable_aot_schedule_for_sliding_window_drafts(
+    vllm_config: VllmConfig, attn_groups: list[list[AttentionGroup]]
+) -> None:
+    for groups in attn_groups:
+        for group in groups:
+            builder = group.get_metadata_builder()
+            if getattr(builder, "aot_schedule", False) and (
+                get_kv_cache_spec_sliding_window(builder.kv_cache_spec)
+                or any(
+                    getattr(impl, "sliding_window", None) not in (None, (-1, -1))
+                    for layer in get_layers_from_vllm_config(
+                        vllm_config, Attention, group.layer_names
+                    ).values()
+                    for impl in layer.impl.get_impl_variants()
+                )
+            ):
+                # Full allocation can merge the target's window into the spec;
+                # the draft implementations retain their computation windows.
+                builder.aot_schedule = False  # type: ignore[attr-defined]
 
 
 class DFlashSpeculator(DraftModelSpeculator):
@@ -262,15 +284,9 @@ class DFlashSpeculator(DraftModelSpeculator):
         # FlashAttention's AOT split schedule is wrong for a windowed drafter,
         # and `_get_sliding_window_configs` leaves it on or off depending on
         # whether the target also runs FlashAttention. Decide it here instead.
-        for groups in self.attn_groups:
-            for group in groups:
-                builder = group.get_metadata_builder()
-                if getattr(
-                    builder, "aot_schedule", False
-                ) and get_kv_cache_spec_sliding_window(builder.kv_cache_spec):
-                    # `aot_schedule` belongs to FlashAttention's builder, not
-                    # to the base class this loop is typed against.
-                    builder.aot_schedule = False  # type: ignore[attr-defined]
+        _disable_aot_schedule_for_sliding_window_drafts(
+            self.vllm_config, self.attn_groups
+        )
 
         self.draft_kv_cache_group_ids = [
             gid for gid, g in enumerate(self.attn_groups) if g
