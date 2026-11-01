@@ -22,6 +22,8 @@ from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
 class CutlassNvFp4LinearKernel(NvFp4LinearKernel):
     """NVFP4 GEMM via the vLLM CUTLASS kernel."""
 
+    supports_partial_sum_dtype = True
+
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -50,7 +52,9 @@ class CutlassNvFp4LinearKernel(NvFp4LinearKernel):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         output_size = layer.output_size_per_partition
-        output_dtype = x.dtype
+        # RowParallelLinear may ask for FP16 partial sums
+        # (VLLM_TP_FP16_PARTIAL_SUMS); the SM100/SM120 kernels write FP16 or BF16.
+        output_dtype = getattr(layer, "partial_sum_dtype", None) or x.dtype
         output_shape = [*x.shape[:-1], output_size]
         weights_padding_bytes = nvfp4_weight_padding_bytes(layer)
 
@@ -62,17 +66,23 @@ class CutlassNvFp4LinearKernel(NvFp4LinearKernel):
             padded_n=x.shape[-1] + weights_padding_bytes * 2,
         )
 
+        alpha = layer.alpha
+        partial_sum_scale = getattr(layer, "partial_sum_scale", 1.0)
+        if output_dtype != x.dtype and partial_sum_scale != 1.0:
+            alpha = alpha * partial_sum_scale
         out = cutlass_scaled_fp4_mm(
             x_fp4,
             layer.weight,
             x_blockscale,
             layer.weight_scale,
-            layer.alpha,
+            alpha,
             output_dtype,
         )
 
         out = slice_nvfp4_output(out, output_size)
 
         if bias is not None:
-            out = out + bias
+            if output_dtype != x.dtype and partial_sum_scale != 1.0:
+                bias = bias * partial_sum_scale
+            out = out + bias.to(out.dtype)
         return out.view(*output_shape)
