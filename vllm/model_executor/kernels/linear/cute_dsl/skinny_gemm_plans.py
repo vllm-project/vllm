@@ -203,9 +203,9 @@ SKINNY_FP8_GEMM_PLANS_BY_CAPABILITY: dict[
 
 # Grouped W8A16 kernel for the routed experts of a block-FP8 MoE layer
 # (skinny_fp8_moe_gemm.py), keyed by the (N, K) of one expert's weight and the
-# token count. One activation row per CTA; measured on H200 (Qwen3.6-35B-A3B,
-# 256 experts, top-8) with the experts' weights cold, against the Triton fused
-# MoE path at the same token counts.
+# token count. One activation row per CTA; measured on H200 with the experts'
+# weights cold (16 rotating expert sets), against the Triton fused MoE path at
+# the same token counts.
 SM90_SKINNY_FP8_MOE_GEMM_PLANS: dict[tuple[int, int], SkinnyFp8GemmPlan] = {
     # Qwen3.5/3.6-35B-A3B experts: gate_up (2 x 512, 2048), down (2048, 512).
     (1024, 2048): {
@@ -217,6 +217,17 @@ SM90_SKINNY_FP8_MOE_GEMM_PLANS: dict[tuple[int, int], SkinnyFp8GemmPlan] = {
         1: SkinnyGemmConfig(1, 64, 8),
         2: SkinnyGemmConfig(1, 32, 32),
         4: SkinnyGemmConfig(1, 32, 16, vector_width=16),
+    },
+    # Qwen3-30B-A3B experts: gate_up (2 x 768, 2048), down (2048, 768).
+    (1536, 2048): {
+        1: SkinnyGemmConfig(1, 64, 8),
+        2: SkinnyGemmConfig(1, 32, 16, vector_width=16),
+        4: SkinnyGemmConfig(1, 32, 8, vector_width=16),
+    },
+    (2048, 768): {
+        1: SkinnyGemmConfig(1, 32, 8),
+        2: SkinnyGemmConfig(1, 32, 16),
+        4: SkinnyGemmConfig(1, 32, 8),
     },
 }
 
