@@ -168,6 +168,12 @@ def test_register_speculative_method(register):
         (_qualname(DummySpeculator), {}, TypeError, "must be a subclass of"),
         (NoSpeculatorClassConfig, {}, ValueError, "must set speculator_class"),
         (DummySpeculatorConfig, {"dspark_draft_topk": 4}, ValueError, "not supported"),
+        (
+            DummySpeculatorConfig,
+            {"draft_prefill_cudagraph_max_tokens": 32},
+            ValueError,
+            "not supported",
+        ),
     ],
 )
 def test_custom_speculator_validation(register, config, kwargs, error, match):

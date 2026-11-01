@@ -105,6 +105,7 @@ _QWEN3_OMNI_DSPARK_ARCHITECTURE = "Qwen3OmniDSparkModel"
 _METHOD_SPECIFIC_OPTIONS = (
     "dspark_draft_topk",
     "draft_lm_head_quantization",
+    "draft_prefill_cudagraph_max_tokens",
     "index_share_for_mtp_iteration",
     "xpress_topc",
     "speculator_options",
@@ -447,6 +448,15 @@ class SpeculativeConfig:
 
     enforce_eager: bool | None = None
     """Override the default enforce_eager from model_config"""
+    draft_prefill_cudagraph_max_tokens: int | None = Field(default=None, gt=0)
+    """Optional token ceiling for first-draft PIECEWISE CUDA graphs with the
+    V2 EAGLE/EAGLE3, single-module MTP, and Gemma4 speculators. Larger first
+    passes run eagerly; target and later draft graphs are unchanged. The cap
+    must be at least max_num_seqs * (num_speculative_tokens + 1). It filters
+    the configured capture sizes, without adding a size at the ceiling.
+    None (default) uses the target's capture sizes. NONE/FULL-only modes
+    ignore the cap with a startup warning. Other speculators and V1 reject it.
+    """
     # General speculative decoding control
     num_speculative_tokens: int = Field(default=None, gt=0)  # type: ignore[assignment]
     """The number of speculative tokens, if provided. It will default to the
@@ -729,6 +739,13 @@ class SpeculativeConfig:
         the final hidden states.
         """
         factors: list[Any] = []
+        if self.draft_prefill_cudagraph_max_tokens is not None:
+            factors.append(
+                (
+                    "draft_prefill_cudagraph_max_tokens",
+                    self.draft_prefill_cudagraph_max_tokens,
+                )
+            )
         # Eagle3 and extract_hidden_states affect the computation graph because
         # they return intermediate hidden states in addition to the final hidden state.
         uses_aux_hidden_states = self.uses_aux_hidden_states
