@@ -56,9 +56,18 @@ unrecognized tensors through unchanged."""
 
 @dataclass(frozen=True)
 class StageLocalTransform:
-    """A weights transform that keeps every weight in the layer it came from,
-    so `AutoWeightsLoader` can drop the weights of layers on other pipeline
-    stages before running it."""
+    """Marks a weights transform that is safe to run on one pipeline stage's
+    weights only.
+
+    When every transform is wrapped, `AutoWeightsLoader` drops a raw weight
+    before the transforms if its mapped name falls in a layer this rank skips.
+    Wrap a transform only if:
+
+    - dropping one layer's inputs leaves every other layer's outputs unchanged
+      (no max over all weights, no merging weights across layers), and
+    - each output's mapped name falls in the same layer as the mapped names of
+      the inputs it was built from.
+    """
 
     transform: WeightsTransformFn
 
