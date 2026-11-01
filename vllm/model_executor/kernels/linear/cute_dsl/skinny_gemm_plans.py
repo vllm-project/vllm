@@ -201,6 +201,49 @@ SKINNY_FP8_GEMM_PLANS_BY_CAPABILITY: dict[
 }
 
 
+# Grouped W8A16 kernel for the routed experts of a block-FP8 MoE layer
+# (skinny_fp8_moe_gemm.py), keyed by the (N, K) of one expert's weight and the
+# token count. One activation row per CTA; measured on H200 (Qwen3.6-35B-A3B,
+# 256 experts, top-8) with the experts' weights cold, against the Triton fused
+# MoE path at the same token counts.
+SM90_SKINNY_FP8_MOE_GEMM_PLANS: dict[tuple[int, int], SkinnyFp8GemmPlan] = {
+    # Qwen3.5/3.6-35B-A3B experts: gate_up (2 x 512, 2048), down (2048, 512).
+    (1024, 2048): {
+        1: SkinnyGemmConfig(1, 64, 8, vector_width=16),
+        2: SkinnyGemmConfig(1, 32, 8, vector_width=16),
+        4: SkinnyGemmConfig(1, 32, 8, vector_width=16),
+    },
+    (2048, 512): {
+        1: SkinnyGemmConfig(1, 64, 8),
+        2: SkinnyGemmConfig(1, 32, 32),
+        4: SkinnyGemmConfig(1, 32, 16, vector_width=16),
+    },
+}
+
+# Token counts above this take the Triton fused MoE path.
+SKINNY_FP8_MOE_MAX_TOKENS = 4
+
+SKINNY_FP8_MOE_GEMM_PLANS_BY_CAPABILITY: dict[
+    tuple[int, int], dict[tuple[int, int], SkinnyFp8GemmPlan]
+] = {
+    (9, 0): SM90_SKINNY_FP8_MOE_GEMM_PLANS,
+}
+
+
+def get_skinny_fp8_moe_gemm_plan(n: int, k: int) -> SkinnyFp8GemmPlan | None:
+    """Return the token-count plan for one expert's ``(N, K)`` block-FP8 weight."""
+    from vllm.model_executor.kernels.linear.cute_dsl.skinny_fp8_moe_gemm import (
+        shape_dynamic_skinny_fp8_moe_gemm,
+    )
+
+    plans = SKINNY_FP8_MOE_GEMM_PLANS_BY_CAPABILITY.get(
+        current_platform.get_device_capability()
+    )
+    if plans is None or not shape_dynamic_skinny_fp8_moe_gemm.is_available():
+        return None
+    return plans.get((n, k))
+
+
 def get_skinny_fp8_gemm_plan(n: int, k: int) -> SkinnyFp8GemmPlan | None:
     """Return the token-count plan for an ``(N, K)`` block-FP8 weight."""
     plans = SKINNY_FP8_GEMM_PLANS_BY_CAPABILITY.get(
