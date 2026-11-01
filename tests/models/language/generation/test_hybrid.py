@@ -40,6 +40,7 @@ HYBRID_MODELS = [
     "ibm-granite/granite-4.0-tiny-preview",
     "tiiuae/Falcon-H1-0.5B-Base",
     "LiquidAI/LFM2-1.2B",
+    "LiquidAI/LFM3-1.7B",
     "tiny-random/qwen3-next-moe",
 ]
 
