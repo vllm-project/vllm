@@ -96,9 +96,12 @@ def test_skinny_fp8_moe_gemm_matches_reference(
     assert out.shape == (ids.numel(), n) and out.dtype == torch.bfloat16
     torch.testing.assert_close(out.float(), ref, atol=1e-2, rtol=1e-2)
 
-    # Padded pairs (expert id -1, as in warmup and profiling runs) give zeros.
+    # Padded pairs (expert id -1, as in warmup and profiling runs) and ids
+    # outside the stack give zeros.
     padded_ids = topk_ids.clone()
     padded_ids[0, 0] = -1
+    if top_k > 1:
+        padded_ids[0, 1] = num_experts
     out = shape_dynamic_skinny_fp8_moe_gemm(
         a,
         weight,
@@ -108,8 +111,8 @@ def test_skinny_fp8_moe_gemm_matches_reference(
         config,
         a_per_token=a_per_token,
     )
-    assert torch.all(out[0] == 0)
-    torch.testing.assert_close(out[1:].float(), ref[1:], atol=1e-2, rtol=1e-2)
+    assert torch.all(out[:2] == 0)
+    torch.testing.assert_close(out[2:].float(), ref[2:], atol=1e-2, rtol=1e-2)
 
 
 @torch.inference_mode()
@@ -134,6 +137,10 @@ def test_skinny_fp8_moe_gemm_rejects_bad_inputs() -> None:
     )
     assert not can_use_skinny_fp8_moe_gemm(
         a, weight, scale, topk_ids, SkinnyGemmConfig(2, 64, 8), **ok
+    )
+    # Routing weights must be FP32 with the ids' shape.
+    assert not can_use_skinny_fp8_moe_gemm(
+        a, weight, scale, topk_ids, config, topk_weights=torch.ones_like(a[:, :2]), **ok
     )
     with pytest.raises(ValueError):
         shape_dynamic_skinny_fp8_moe_gemm(
