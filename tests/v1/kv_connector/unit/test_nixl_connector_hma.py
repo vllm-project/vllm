@@ -1669,7 +1669,7 @@ def test_mamba_n1_p_side_truncation():
     assert req.num_prompt_tokens == original_len - 1
     assert req.max_tokens == 1
     assert req.kv_transfer_params is not None
-    assert req.kv_transfer_params["_p_side_truncated"] is True
+    assert req._p_side_truncated is True
 
     count, is_async = sched.get_num_new_matched_tokens(req, num_computed_tokens=0)
 

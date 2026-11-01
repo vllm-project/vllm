@@ -1356,6 +1356,7 @@ def test_register_kv_caches_allows_hma_divergent_block_size():
 def _mk_request(prompt, max_tokens=64, params=None):
     return SimpleNamespace(
         kv_transfer_params={} if params is None else params,
+        _p_side_truncated=False,
         num_prompt_tokens=len(prompt),
         prompt_token_ids=list(prompt),
         prompt_embeds=None,
@@ -1373,7 +1374,7 @@ def test_truncate_mamba_request_pops_last_token_and_caps_tokens():
     assert req._all_token_ids == [10, 11, 12, 13]
     assert req.num_prompt_tokens == 4  # N-1 accounting
     assert req.max_tokens == 1
-    assert req.kv_transfer_params["_p_side_truncated"] is True
+    assert req._p_side_truncated is True
 
 
 def test_truncate_mamba_request_is_idempotent_across_reschedule():
@@ -1393,7 +1394,7 @@ def test_truncate_mamba_request_noop_for_single_token_prompt():
     sched._truncate_mamba_request_for_prefill(req)
     assert req.num_prompt_tokens == 1
     assert req.prompt_token_ids == [10]
-    assert "_p_side_truncated" not in req.kv_transfer_params
+    assert req._p_side_truncated is False
 
 
 # --------------------------------------------------------------------------
@@ -1564,7 +1565,7 @@ def test_on_new_request_truncates_producer_prompt():
     # Producer stops at h(N-1): the last prompt token was dropped.
     assert req.num_prompt_tokens == 4
     assert req.max_tokens == 1
-    assert req.kv_transfer_params["_p_side_truncated"] is True
+    assert req._p_side_truncated is True
 
 
 def test_on_new_request_is_noop_without_mamba_or_on_decode():
