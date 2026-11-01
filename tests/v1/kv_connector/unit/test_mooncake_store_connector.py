@@ -881,6 +881,55 @@ def test_completed_block_leaves_no_pending_state_behind():
     assert accumulator.pop_ready_events() == []
 
 
+def test_tokens_from_a_later_report_replace_a_tokenless_payload():
+    """A rank can store a block before its request's token ids are known and
+    report it first. The report that completes the block's coverage carries the
+    tokens, and the announcement must use them so a consumer can match the
+    block to tokens.
+    """
+    connector = _make_scheduler_connector()
+    without_tokens = BlockStored(
+        block_hashes=[b"block"],
+        parent_block_hash=None,
+        token_ids=[],
+        block_size=16,
+        lora_id=None,
+        medium="cpu",
+        lora_name=None,
+        group_idx=0,
+    )
+    with_tokens = _make_block_stored(b"block", group_idx=0)
+    required = {0: [_namespace(0, tp_rank=0), _namespace(0, tp_rank=1)]}
+
+    assert _contribute(connector, without_tokens, required[0][:1], required) == []
+    assert _contribute(connector, with_tokens, required[0][1:], required) == [
+        with_tokens
+    ]
+
+
+def test_a_completing_report_with_tokens_replaces_a_tokenless_payload():
+    """A step container that completes a block's coverage arrives with the event
+    already released; when the payload an earlier step held has no token ids,
+    the container's own copy must be announced.
+    """
+    connector = _make_scheduler_connector()
+    without_tokens = BlockStored(
+        block_hashes=[b"block"],
+        parent_block_hash=None,
+        token_ids=[],
+        block_size=16,
+        lora_id=None,
+        medium="cpu",
+        lora_name=None,
+        group_idx=0,
+    )
+    with_tokens = _make_block_stored(b"block", group_idx=0)
+    required = {0: [_namespace(0, tp_rank=0), _namespace(0, tp_rank=1)]}
+
+    assert _contribute(connector, without_tokens, required[0][:1], required) == []
+    assert _contribute(connector, with_tokens, required[0], required) == [with_tokens]
+
+
 def test_pending_coverage_is_capped_and_drops_the_oldest_block(monkeypatch):
     """A block whose coverage never completes must not pin its payload for the
     process lifetime: at the ceiling the oldest waiting block is dropped without

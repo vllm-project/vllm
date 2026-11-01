@@ -94,8 +94,11 @@ class MooncakeStoreKVEvents(KVConnectorKVEvents):
     Coverage accumulates across engine steps and is retained until the block is
     released, so stores that land in different steps still announce the block
     once, after the last namespace reports. Repeated reports of a block add
-    coverage only: the payload announced is the first one seen, and the block is
-    announced once per residency epoch, which ``AllBlocksCleared`` ends.
+    coverage only: the payload announced is the one the accumulator holds for
+    the block, and a report that carries token ids replaces a held payload that
+    has none. A block is announced once per residency epoch, which
+    ``AllBlocksCleared`` ends, for as long as the released ledger below still
+    remembers it.
 
     Both ledgers are capped so that an accumulator that lives for the whole
     process cannot grow without bound. A block whose coverage never completes is
@@ -231,6 +234,11 @@ class MooncakeStoreKVEvents(KVConnectorKVEvents):
             pending = _PendingResidency(event, set())
             self._pending[key] = pending
             self._cap_pending()
+        elif not pending.event.token_ids and event.token_ids:
+            # A report that stores the block before its request's token ids are
+            # known can reach the accumulator first; the later report carries
+            # them, and the announcement must not go out without them.
+            pending.event = event
         pending.covered |= namespaces
         if probe_set <= pending.covered:
             del self._pending[key]
@@ -240,15 +248,20 @@ class MooncakeStoreKVEvents(KVConnectorKVEvents):
         """Announce one block for the rest of this residency epoch.
 
         The payload announced is the one this accumulator already holds for the
-        block, when it holds one: a completing report can be a step container
-        carrying the block released with no token ids of its own, and announcing
-        that instead would publish a block a consumer cannot match to tokens.
+        block, when it holds one, unless that payload has no token ids and the
+        event being released has them: a completing report can be a step
+        container carrying the block released with no token ids of its own, and
+        announcing a tokenless payload would publish a block a consumer cannot
+        match to tokens.
         """
         if key in self._released:
             return
-        pending = self._pending.pop(key, None)
+        held = self._pending.pop(key, None)
         self._remember_released(key)
-        self._ready.append(pending.event if pending is not None else event)
+        payload = held.event if held is not None else event
+        if not payload.token_ids and event.token_ids:
+            payload = event
+        self._ready.append(payload)
 
     def _remember_released(self, key: BlockKey) -> None:
         """Keep a released block from being announced again this epoch."""
