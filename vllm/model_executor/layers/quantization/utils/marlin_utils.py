@@ -182,8 +182,9 @@ def verify_marlin_supports_shape(
             f"Weight output_size_per_partition = "
             f"{output_size_per_partition} is not divisible by "
             f" min_thread_n = {GPTQ_MARLIN_MIN_THREAD_N}. "
-            "Consider reducing tensor_parallel_size or running "
-            "with --quantization gptq."
+            "Consider reducing tensor_parallel_size so that the "
+            "per-partition weight dimension is a multiple of the "
+            f"Marlin thread-tile size ({GPTQ_MARLIN_MIN_THREAD_N})."
         )
 
     # Validate input_size_per_partition
@@ -192,8 +193,9 @@ def verify_marlin_supports_shape(
             f"Weight input_size_per_partition = "
             f"{input_size_per_partition} is not divisible "
             f"by min_thread_k = {GPTQ_MARLIN_MIN_THREAD_K}. "
-            "Consider reducing tensor_parallel_size or running "
-            "with --quantization gptq."
+            "Consider reducing tensor_parallel_size so that the "
+            "per-partition weight dimension is a multiple of the "
+            f"Marlin thread-tile size ({GPTQ_MARLIN_MIN_THREAD_K})."
         )
 
     if group_size < input_size:
