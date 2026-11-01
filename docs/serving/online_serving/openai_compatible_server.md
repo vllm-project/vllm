@@ -176,6 +176,8 @@ Code example: [examples/basic/online_serving/openai_chat_completion_client.py](.
 
 With `--enable-prompt-tokens-details`, `/v1/chat/completions/batch` sums `cached_tokens`, `created_cache_tokens` and per-modality `multimodal_tokens` across conversations in `usage.prompt_tokens_details`; an unreported cache count makes that total `null`, and disabling the flag leaves the details `null`.
 
+With `--reasoning-parser`, `/v1/chat/completions/batch` sums `reasoning_tokens` across conversations in `usage.completion_tokens_details`, as `/v1/chat/completions` does for one conversation, also when `include_reasoning` is `false`.
+
 #### Extra parameters
 
 The following [sampling parameters](../../api/README.md#inference-parameters) are supported.
