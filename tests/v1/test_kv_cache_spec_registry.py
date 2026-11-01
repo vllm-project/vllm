@@ -46,6 +46,14 @@ from vllm.v1.kv_cache_spec_registry import (
 )
 
 
+@pytest.mark.parametrize("spec_type", [FullAttentionSpec, MLAAttentionSpec])
+def test_transfer_region_export_is_opt_in(spec_type: type[FullAttentionSpec]) -> None:
+    """Standard specs keep their existing registration until a backend opts in."""
+    spec = spec_type(block_size=4, num_kv_heads=1, head_size=8, dtype=torch.float32)
+    cache = torch.zeros((2, 1, 4, 16))
+    assert spec.get_kv_cache_transfer_regions(cache) is None
+
+
 def make_vllm_config() -> VllmConfig:
     return VllmConfig(
         cache_config=CacheConfig(
