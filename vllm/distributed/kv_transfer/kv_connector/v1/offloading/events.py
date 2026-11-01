@@ -6,8 +6,8 @@ The OffloadingManager identifies an offloaded chunk only by its OffloadKey,
 so its raw events carry no token ids, parent hash, or block size. For complete
 chunks, :class:`OffloadingEventsTracker` builds ``BlockStored`` from the
 originating request carried by the raw event. A store may describe multiple
-blocks, while a removal names the offloaded chunk key; consumers track the
-chunk-to-block mapping. Partial tails still use captured metadata. Opt-in via
+blocks, and removals still expand to those block hashes using captured
+metadata. Partial tails also use captured metadata. Opt-in via
 ``kv_connector_extra_config["self_describing_kv_events"]``; inert unless
 KV cache events are enabled. See the PR description for the full design.
 
@@ -155,7 +155,7 @@ def _as_state_checkpoint(meta: _OffloadEventMetadata) -> _OffloadEventMetadata:
 
 
 class OffloadingEventsTracker:
-    """Builds complete stores from request context and emits chunk-key removals.
+    """Builds complete stores from request context and expands removals.
 
     The scheduler calls :meth:`record_store` from ``_build_store_jobs`` and
     :meth:`record_lookup` for allocated primary-tier hits while the ``Request`` is
@@ -563,10 +563,24 @@ class OffloadingEventsTracker:
                 meta.active_residencies &= residency_mask
             if event.metadata_only:
                 continue
-            group_idx = get_offload_group_idx(key)
-            by_group.setdefault(group_idx, []).append(
-                maybe_convert_block_hash(BlockHash(get_offload_block_hash(key)))
-            )
+            if meta is not None:
+                group_idx = meta.group_idx
+                by_group.setdefault(group_idx, []).extend(
+                    maybe_convert_block_hash(h) for h in meta.block_hashes
+                )
+            else:
+                if self.self_describing_enabled:
+                    logger.warning_once(
+                        "OffloadingEventsTracker: no event metadata for "
+                        "offload key during BlockRemoved emission; emitting a "
+                        "placeholder removal. Expected if the matching store "
+                        "used the legacy placeholder payload; otherwise "
+                        "indicates missing store metadata."
+                    )
+                group_idx = get_offload_group_idx(key)
+                by_group.setdefault(group_idx, []).append(
+                    maybe_convert_block_hash(BlockHash(get_offload_block_hash(key)))
+                )
 
         for group_idx, hashes in by_group.items():
             yield BlockRemoved(

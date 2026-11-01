@@ -2128,7 +2128,7 @@ def test_abort_before_hit_uses_placeholder_then_later_hit_heals_removal(
     [event] = runner.connector_scheduler.take_events()
     assert isinstance(event, BlockRemoved)
     assert event.medium == MEDIUM_CPU
-    assert len(event.block_hashes) == 1
+    assert len(event.block_hashes) == 2
     assert key not in tracker._pending_event_metadata
 
 
