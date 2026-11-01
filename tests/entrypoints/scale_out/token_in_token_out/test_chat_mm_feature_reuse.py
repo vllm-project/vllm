@@ -355,9 +355,7 @@ def test_preprocess_chat_harmony_drops_ids_with_features(monkeypatch):
 
     tokens_input = MagicMock(side_effect=_tokens_input)
     render_for_completion = MagicMock(return_value=[8, 9])
-    monkeypatch.setattr(
-        "vllm.renderers.online_renderer.tokens_input", tokens_input
-    )
+    monkeypatch.setattr("vllm.renderers.online_renderer.tokens_input", tokens_input)
     monkeypatch.setattr(
         "vllm.renderers.online_renderer.render_for_completion",
         render_for_completion,

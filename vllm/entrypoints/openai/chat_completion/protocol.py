@@ -1077,20 +1077,20 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if not isinstance(data, dict):
             return data
         kv_transfer_params = data.get("kv_transfer_params")
+        # With prompt_features forwarded alongside the ids, the renderer's
+        # reuse path builds the engine input from both, so the ids are kept
+        # for media requests too; without it they are dropped here.
         if (
             isinstance(kv_transfer_params, dict)
             and kv_transfer_params.get("prompt_token_ids") is not None
             and has_non_text_content(data.get("messages"))
+            and kv_transfer_params.get("prompt_features") is None
         ):
-            if kv_transfer_params.get("prompt_features") is None:
-                logger.debug(
-                    "Ignoring kv_transfer_params['prompt_token_ids']: "
-                    "messages have non-text content and are rendered instead."
-                )
-                kv_transfer_params.pop("prompt_token_ids")
-            # With prompt_features forwarded alongside the ids, the
-            # renderer's reuse path builds the engine input from both, so
-            # the ids are kept for media requests too.
+            logger.debug(
+                "Ignoring kv_transfer_params['prompt_token_ids']: "
+                "messages have non-text content and are rendered instead."
+            )
+            kv_transfer_params.pop("prompt_token_ids")
         return data
 
     @model_validator(mode="before")

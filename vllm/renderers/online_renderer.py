@@ -174,13 +174,14 @@ def _reused_prompt_token_ids(
     features: MultiModalFeatures | None = None
     if features_raw is not None:
         # Lazy import: the token-in/token-out protocol sits above the
-        # renderers in the entrypoints layer.
+        # renderers in the entrypoints layer. Aliased so the local binding
+        # does not shadow the TYPE_CHECKING name in annotations (F823).
         from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
-            MultiModalFeatures,
+            MultiModalFeatures as _MultiModalFeatures,
         )
 
         try:
-            features = MultiModalFeatures.model_validate(features_raw)
+            features = _MultiModalFeatures.model_validate(features_raw)
         except Exception as e:
             raise VLLMValidationError(
                 f"`kv_transfer_params['prompt_features']` is invalid: {e}",
@@ -864,9 +865,7 @@ class OnlineRenderer:
                     reuse_features,
                     cache_salt=getattr(request, "cache_salt", None),
                     mm_cache=renderer.mm_processor_cache,
-                    ec_transfer_params=getattr(
-                        request, "ec_transfer_params", None
-                    ),
+                    ec_transfer_params=getattr(request, "ec_transfer_params", None),
                 )
             except ValueError as e:
                 raise VLLMValidationError(

@@ -211,17 +211,13 @@ def engine_input_from_features(
     mm_kwargs = mm_kwargs_from_features(features)
     if mm_cache is not None:
         for modality, items in mm_kwargs.items():
-            for mm_hash, item in zip(
-                features.mm_hashes[modality], items, strict=True
-            ):
+            for mm_hash, item in zip(features.mm_hashes[modality], items, strict=True):
                 if item is not None:
                     mm_cache.validate_input_item(item, mm_hash)
 
     # Convert PlaceholderRangeInfo → PlaceholderRange per modality.
     mm_placeholders: MultiModalPlaceholders = {
-        modality: [
-            PlaceholderRange(offset=p.offset, length=p.length) for p in ranges
-        ]
+        modality: [PlaceholderRange(offset=p.offset, length=p.length) for p in ranges]
         for modality, ranges in features.mm_placeholders.items()
     }
 
