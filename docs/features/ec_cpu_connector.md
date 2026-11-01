@@ -49,9 +49,25 @@ Consumer — pulls encodings named in a request's `ec_transfer_params` before fa
 vllm serve <model> --ec-transfer-config '{
   "ec_connector": "ECCPUConnector",
   "ec_role": "ec_consumer",
-  "ec_connector_extra_config": {"ec_enable_nixl": true, "ec_cpu_bytes": 1073741824}
+  "ec_connector_extra_config": {
+    "ec_enable_nixl": true,
+    "ec_cpu_bytes": 1073741824,
+    "ec_allowed_peers": ["encoder.internal:5601"]
+  }
 }'
 ```
+
+Consumers require `ec_allowed_peers`, an exact allowlist of trusted producer
+`host:port` strings. The default is empty: no remote reads are permitted.
+Set it on consumers (including `ec_both` instances) to the addresses advertised
+by your producers. Requests cannot extend this server-side allowlist. An
+unapproved peer is never contacted; requests retaining local media use local
+encoding, while metadata-only requests fail. Local CPU offload is unaffected.
+
+The allowlist authorizes producer endpoints; it does not authenticate their
+transport or verify embedding contents. Keep the producer hosts, DNS, and
+inter-node network trusted and isolated, and restrict client-supplied routing
+metadata at your gateway. A compromised allowed producer remains trusted.
 
 ### Orchestration flow
 
@@ -95,6 +111,7 @@ EC transfer is configured via `--ec-transfer-config` (CLI) or the `ec_transfer_c
 | Key | Type | Required | Description |
 | --- | --- | --- | --- |
 | `ec_enable_nixl` | `bool` | No (default `false`) | Enables NIXL P2P transfer in addition to local CPU offload. Omitted or `false` imports no NIXL/ZMQ. Extra config is not type coerced, so a string value is parsed: `"true"`, `"1"`, `"yes"` enable it, anything else does not. |
+| `ec_allowed_peers` | `list[str]` | No (default `[]`) | Exact trusted producer `host:port` strings for consumer NIXL reads. No wildcards or DNS alias expansion. An empty list denies all remote reads. |
 | `consumer_ack_timeout_s` | `float` | No (default `2.0`) | How long a consumer waits for an `XferAck` before giving up on a read. The producer answers `XferReq`s from its own scheduler step, so its reply latency scales with the encoder's `--max-num-batched-tokens`: a loaded encoder whose steps run longer than this makes consumers abandon reads the producer is about to grant. Raise it for large encoder batches. |
 | `ec_cpu_bytes` | `int` | Yes | Total size, in bytes, of the shared CPU mmap region. `ECCPUConnector` raises `ValueError` if unset. Block count = `ec_cpu_bytes // block_size_bytes`, where each block holds one LLM input-embedding vector. Entries allocate enough blocks for their modality-specific output shape, including visual DeepStack features. |
 
