@@ -115,10 +115,11 @@ class StoreTriggerHandler(ABC):
         return
 
     @abstractmethod
-    def first_pending_chunk_idx(
+    def first_live_chunk_idx(
         self, req_status: RequestOffloadState, config_idx: int
-    ) -> int:
-        """The first chunk of a group that this handler can still store.
+    ) -> int | None:
+        """The first chunk of a group whose GPU block ids this handler may
+        still read.
 
         The scheduler zeroes stale sliding-window block ids only from the
         lowest of these chunks on.
@@ -126,6 +127,10 @@ class StoreTriggerHandler(ABC):
         Args:
             req_status: the request that holds the group.
             config_idx: the index of the group in the offloading config.
+
+        Returns:
+            The first live chunk, or None if this handler reads no chunks of
+            the request.
 
         """
 

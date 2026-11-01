@@ -94,9 +94,9 @@ class OnComputeStoreHandler(StoreTriggerHandler):
         self._next_stored_chunk_idxs.clear()
 
     @override
-    def first_pending_chunk_idx(
+    def first_live_chunk_idx(
         self, req_status: RequestOffloadState, config_idx: int
-    ) -> int:
+    ) -> int | None:
         next_idxs = self._next_stored_chunk_idxs.get(req_status.req.request_id)
         return 0 if next_idxs is None else next_idxs[config_idx]
 
