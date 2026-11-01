@@ -2491,6 +2491,7 @@ class Scheduler(SchedulerInterface):
                 if (
                     new_token_ids
                     and sampling_masks is not None
+                    and request.sampling_params is not None
                     and request.sampling_params.return_aux_outputs
                 ):
                     new_sampling_mask = sampling_masks.slice_request(
