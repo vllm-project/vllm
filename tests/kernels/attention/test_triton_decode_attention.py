@@ -6,6 +6,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.ops import triton_decode_attention as tda
 from vllm.v1.attention.ops.triton_decode_attention import decode_attention_fwd
 
 pytestmark = pytest.mark.skip_global_cleanup
@@ -395,3 +396,92 @@ def test_decode_attention_int64_logits_offset(B, H_Q, H_KV, D_QK, D_V, is_mla):
     # Same compute order; the last request only differs in its logits offset.
     assert torch.equal(o[-1:], o_last)
     assert torch.equal(lse[-1:], lse_last)
+
+
+class _GroupedStage1Spy:
+    """Records USE_TD and the TTIR of each grouped stage-1 launch."""
+
+    def __init__(self, kernel):
+        self.kernel = kernel
+        self.launches: list[tuple[bool, str]] = []
+
+    def __getitem__(self, grid):
+        launch = self.kernel[grid]
+
+        def run(*args, **kwargs):
+            compiled = launch(*args, **kwargs)
+            self.launches.append((kwargs["USE_TD"], compiled.asm["ttir"]))
+            return compiled
+
+        return run
+
+
+@pytest.mark.parametrize(
+    "H_Q,D_QK,D_V",
+    [
+        (32, 576, 512),  # two head blocks
+        (8, 576, 512),  # rows past q_head_num
+        (16, 288, 256),
+    ],
+)
+@pytest.mark.parametrize("kv_dtype", [torch.bfloat16, torch.float8_e4m3fn])
+def test_decode_attention_mla_tensor_descriptor(monkeypatch, H_Q, D_QK, D_V, kv_dtype):
+    """VLLM_TRITON_USE_TD selects the Q tensor-descriptor load of the MLA
+    grouped kernel (unset = on for XPU only), and it gives the same bits as the
+    pointer load: only the Q load differs, the math is unchanged."""
+    torch.manual_seed(0)
+    B, PAGE_SIZE, num_pages, seq_len, num_kv_splits = 3, 16, 1024, 1027, 8
+    dtype = torch.bfloat16
+    q = torch.randn(B, H_Q, D_QK, dtype=dtype, device=DEVICE_TYPE)
+    k = torch.randn(num_pages, PAGE_SIZE, 1, D_QK, dtype=dtype, device=DEVICE_TYPE)
+    k_scale = v_scale = torch.tensor(1.0, device=DEVICE_TYPE)
+    if kv_dtype != dtype:
+        k, k_scale = _quantize_to_fp8(k)
+        v_scale = k_scale
+    req_to_page = torch.randint(
+        0, num_pages, (B, cdiv(seq_len, PAGE_SIZE)), device=DEVICE_TYPE
+    )
+    b_seq_len = torch.full((B,), seq_len, device=DEVICE_TYPE)
+
+    def run(td_env):
+        o = torch.zeros(B, H_Q, D_V, dtype=dtype, device=DEVICE_TYPE)
+        lse = torch.zeros(B, H_Q, dtype=dtype, device=DEVICE_TYPE)
+        attn_logits = torch.empty(
+            (B, H_Q, num_kv_splits, D_V + 1), dtype=torch.float32, device=DEVICE_TYPE
+        )
+        spy = _GroupedStage1Spy(tda._fwd_grouped_kernel_stage1)
+        with monkeypatch.context() as m:
+            if td_env is None:
+                m.delenv("VLLM_TRITON_USE_TD", raising=False)
+            else:
+                m.setenv("VLLM_TRITON_USE_TD", td_env)
+            m.setattr(tda, "_fwd_grouped_kernel_stage1", spy)
+            decode_attention_fwd(
+                q,
+                k,
+                k[..., :D_V],
+                o,
+                lse,
+                req_to_page,
+                b_seq_len,
+                attn_logits,
+                num_kv_splits,
+                1.0 / (D_QK**0.5),
+                PAGE_SIZE,
+                k_scale=k_scale,
+                v_scale=v_scale,
+                is_mla=True,
+            )
+        assert len(spy.launches) == 1
+        use_td, ttir = spy.launches[0]
+        assert ("tt.descriptor_load" in ttir) == use_td
+        return use_td, o, lse
+
+    is_xpu = current_platform.is_xpu()
+    td_off, *ref = run("0")
+    assert not td_off
+    for td_env in ("1", None):
+        use_td, *out = run(td_env)
+        assert use_td == is_xpu
+        for actual, expected in zip(out, ref):
+            assert torch.equal(actual, expected)
