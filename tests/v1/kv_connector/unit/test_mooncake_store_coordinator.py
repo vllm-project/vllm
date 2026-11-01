@@ -37,6 +37,7 @@ def _make_coord(
     use_eagle=False,
     retention_interval=None,
     enable_partial_hash_hits=False,
+    num_hash_lookahead_tokens=0,
 ):
     """Construct a coordinator using the natural LCM of group block sizes as
     the scheduler block size — mirrors ``resolve_kv_cache_block_sizes`` for
@@ -50,6 +51,7 @@ def _make_coord(
         use_eagle=use_eagle,
         retention_interval=retention_interval,
         enable_partial_hash_hits=enable_partial_hash_hits,
+        num_hash_lookahead_tokens=num_hash_lookahead_tokens,
     )
 
 
@@ -730,9 +732,10 @@ def test_lookahead_lookup_and_store_masks_match():
             is_eagle_group=True,
         ),
     ]
-    coord = _make_coord(groups, hash_block_size=16, use_eagle=True)
+    coord = _make_coord(
+        groups, hash_block_size=16, use_eagle=True, num_hash_lookahead_tokens=2
+    )
 
-    coord.num_hash_lookahead_tokens = 2
     store_masks = coord.store_mask(128)
     lookup_masks = coord.lookup_mask(128)
 

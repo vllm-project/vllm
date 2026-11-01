@@ -101,11 +101,10 @@ def _partial_tail_non_mamba_puts(
     hash_block_size = coord.hash_block_size
     # Core drops the Mamba checkpoint whenever EAGLE block drop is on, whichever
     # groups carry the eagle flag.
-    drop_eagle_block = coord.use_eagle and not coord.num_hash_lookahead_tokens
     boundary = get_mamba_prefill_checkpoint_position(
         prompt_tokens,
         hash_block_size,
-        drop_eagle_block,
+        coord.use_eagle,
         coord.num_hash_lookahead_tokens,
     )
     # Any other sub-block Mamba hand-off is a shared-prefix junction. Its
@@ -121,9 +120,7 @@ def _partial_tail_non_mamba_puts(
     for group_id, block_size in enumerate(block_sizes):
         if group_id in coord.mamba_group_ids:
             continue
-        proof_end = boundary
-        if drop_eagle_block:
-            proof_end += coord.eagle_proof_margin_by_group.get(group_id, 0)
+        proof_end = boundary + coord.eagle_proof_margin_by_group.get(group_id, 0)
         if proof_end > completed or proof_end // hash_block_size > num_hashes:
             continue
         group_blocks = req_meta.block_ids[group_id]

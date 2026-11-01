@@ -1421,8 +1421,9 @@ def test_partial_tail_follows_lookahead_checkpoint(
             ),
         ),
     ]
-    coord = MooncakeStoreCoordinator(groups, 16, 4, use_eagle=True)
-    coord.num_hash_lookahead_tokens = num_lookahead
+    coord = MooncakeStoreCoordinator(
+        groups, 16, 4, use_eagle=True, num_hash_lookahead_tokens=num_lookahead
+    )
     req_meta = ReqMeta(
         req_id="req-0",
         token_len_chunk=0,

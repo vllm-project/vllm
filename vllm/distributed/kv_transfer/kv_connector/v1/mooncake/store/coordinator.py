@@ -116,7 +116,9 @@ class MooncakeStoreCoordinator:
         self.lcm_block_size = scheduler_block_size
         # Core's decision: whether hits land on the hash unit, below the block.
         self.enable_partial_hash_hits = enable_partial_hash_hits
-        self.use_eagle = use_eagle
+        # Lookahead hashes key the drafter's KV past each block, so no group
+        # drops its trailing block.
+        self.use_eagle = use_eagle and not num_hash_lookahead_tokens
         self.num_hash_lookahead_tokens = num_hash_lookahead_tokens
         # Mirror vLLM core's KVCacheCoordinator.retention_interval.
         self.retention_interval = retention_interval
@@ -180,16 +182,17 @@ class MooncakeStoreCoordinator:
             assert manager_cls is not None, (
                 f"No manager registered for KVCacheSpec {spec}"
             )
+            drops_eagle_block = g.is_eagle_group and not self.num_hash_lookahead_tokens
             for idx, group in enumerate(attention_groups):
                 if group.spec == spec:
                     assert manager_cls is group.manager_cls
                     group.group_ids.append(i)
-                    if g.is_eagle_group and not group.use_eagle:
+                    if drops_eagle_block and not group.use_eagle:
                         attention_groups[idx] = group._replace(use_eagle=True)
                     break
             else:
                 attention_groups.append(
-                    StoreSpecGroup(spec, [i], manager_cls, g.is_eagle_group)
+                    StoreSpecGroup(spec, [i], manager_cls, drops_eagle_block)
                 )
         # Full attention first (matches upstream convergence ordering).
         attention_groups.sort(key=lambda g: not isinstance(g.spec, FullAttentionSpec))
@@ -310,7 +313,6 @@ class MooncakeStoreCoordinator:
         num_prompt_tokens: int | None,
         exclude_mamba: bool = False,
     ) -> tuple[list[bool] | None, ...]:
-        apply_eagle = not self.num_hash_lookahead_tokens
         mask_alignment = (
             self.hash_block_size
             if self.enable_partial_hash_hits
@@ -326,7 +328,7 @@ class MooncakeStoreCoordinator:
             else replay_boundaries(
                 num_prompt_tokens,
                 self.lcm_block_size,
-                use_eagle=apply_eagle and bool(self.eagle_group_ids),
+                use_eagle=bool(self.eagle_group_ids),
             )
         )
         masks: list[list[bool] | None] = []
@@ -339,7 +341,7 @@ class MooncakeStoreCoordinator:
                 continue
             manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
             assert manager_cls is not None
-            use_eagle = apply_eagle and g_idx in self.eagle_group_ids
+            use_eagle = g_idx in self.eagle_group_ids
             mask = manager_cls.reachable_block_mask(
                 start_block=start_block,
                 end_block=end_block,
@@ -365,7 +367,6 @@ class MooncakeStoreCoordinator:
         apply_eagle: bool = True,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         """Converge registered managers' hits as in HybridKVCacheCoordinator."""
-        apply_eagle = apply_eagle and not self.num_hash_lookahead_tokens
         alignment_tokens = (
             self.hash_block_size
             if self.enable_partial_hash_hits
