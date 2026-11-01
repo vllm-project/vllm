@@ -10,6 +10,7 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import (
     TORCH_DTYPE_TO_ARRAY_TYPECODE,
@@ -22,8 +23,11 @@ logger = init_logger(__name__)
 # concurrent in-flight steps (engine batch_queue_size).
 _DEFAULT_MAX_CONCURRENCY = 2
 
-# Elements copied per program in `_apply_write_kernel`.
+# Elements copied per program per iteration in `_apply_write_kernel`.
 _WRITE_BLOCK_SIZE = 1024
+# Program caps per write and in total; longer writes loop over chunks.
+_MAX_WRITE_PROGRAMS = 1024
+_MAX_TOTAL_WRITE_PROGRAMS = 2048
 
 # Staged by reference rather than copied; see StagedWriteTensor.stage_write.
 _BUFFER_TYPES = (np.ndarray, array.array)
@@ -249,7 +253,7 @@ class StagedWriteTensor:
         )
 
         # Write diffs to the GPU buffer
-        _apply_write_kernel[(n, _num_write_chunks(self._staged_write_max_len))](
+        _apply_write_kernel[_write_grid(n, self._staged_write_max_len)](
             self.gpu,
             self.gpu.stride(0),
             indices_uva,
@@ -332,7 +336,7 @@ class FusedStagedWriter:
         cu_lens_uva = self.cu_lens.copy_to_uva(cu_lens)
         contents_uva = self.contents.copy_chunks_to_uva(contents, content_base)
 
-        _apply_write_kernel[(len(group_ids), _num_write_chunks(max_len))](
+        _apply_write_kernel[_write_grid(len(group_ids), max_len)](
             output_ptrs,
             output_strides,
             indices_uva,
@@ -347,9 +351,12 @@ class FusedStagedWriter:
             t.clear_staged_writes()
 
 
-def _num_write_chunks(max_len: int) -> int:
-    # One program per _WRITE_BLOCK_SIZE-element chunk.
-    return max(triton.cdiv(max_len, _WRITE_BLOCK_SIZE), 1)
+def _write_grid(num_writes: int, max_len: int) -> tuple[int, int]:
+    # One program per chunk, capped so a long write in a large batch doesn't
+    # blow up the grid. The kernel strides over chunks, so any size is correct.
+    num_chunks = cdiv(max_len, _WRITE_BLOCK_SIZE)
+    max_programs = min(_MAX_WRITE_PROGRAMS, _MAX_TOTAL_WRITE_PROGRAMS // num_writes)
+    return num_writes, max(min(num_chunks, max_programs), 1)
 
 
 @triton.jit
@@ -383,10 +390,12 @@ def _apply_write_kernel(
         row_stride = output_stride
     row_ptr += row_idx * row_stride + start_idx
 
-    block = tl.program_id(1) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = block < content_len
-    content = tl.load(write_contents_ptr + cu_start + block, mask=mask)
-    tl.store(row_ptr + block, content, mask=mask)
+    chunk_stride = tl.num_programs(1) * BLOCK_SIZE
+    for i in range(tl.program_id(1) * BLOCK_SIZE, content_len, chunk_stride):
+        block = i + tl.arange(0, BLOCK_SIZE)
+        mask = block < content_len
+        content = tl.load(write_contents_ptr + cu_start + block, mask=mask)
+        tl.store(row_ptr + block, content, mask=mask)
 
 
 @triton.jit
