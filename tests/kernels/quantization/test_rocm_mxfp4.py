@@ -640,21 +640,25 @@ def test_aiter_fp4_gemm_skinny_shapes(M, N, K):
     )
 
 
+ASM_FP4_SCALE_SHAPE_RULES = [
+    ((2560, 80), True),  # shared_expert gate/up_proj (in=2560 -> sn=80)
+    ((1280, 80), True),  # gate/up_proj under TP=2 (out sharded)
+    ((2560, 8), True),  # minimal aligned columns
+    ((160, 8), True),  # fewest rows and columns ASM takes
+    ((160, 160), True),  # fewest rows, Qwen3.8 hidden size 5120
+    ((2560, 20), False),  # shared_expert down_proj (in=640 -> sn=20)
+    ((2560, 10), False),  # down_proj under TP=2 (in 640->320 -> sn=10)
+    ((30, 8), False),  # rows not a multiple of 32
+    ((32, 8), False),  # aligned, but 128 rows or fewer
+    ((96, 160), False),  # Qwen3.8 TP1 GDN in_proj_ba
+    ((128, 160), False),  # aligned, but 128 rows or fewer
+]
+
+
 @pytest.mark.skipif(not on_gfx950(), reason="gfx950 ROCm only")
-@pytest.mark.parametrize(
-    ("shape", "supported"),
-    [
-        ((2560, 80), True),  # shared_expert gate/up_proj (in=2560 -> sn=80)
-        ((1280, 80), True),  # gate/up_proj under TP=2 (out sharded)
-        ((2560, 8), True),  # minimal aligned columns
-        ((32, 8), True),  # minimal aligned rows and columns
-        ((2560, 20), False),  # shared_expert down_proj (in=640 -> sn=20)
-        ((2560, 10), False),  # down_proj under TP=2 (in 640->320 -> sn=10)
-        ((30, 8), False),  # rows not a multiple of 32
-    ],
-)
+@pytest.mark.parametrize(("shape", "supported"), ASM_FP4_SCALE_SHAPE_RULES)
 def test_asm_fp4_scale_swizzle_supported_shape_rules(shape, supported):
-    """The ASM swizzle needs rows % 32 == 0 and columns % 8 == 0."""
+    """ASM needs at least 160 rows, rows % 32 == 0 and columns % 8 == 0."""
     from vllm.model_executor.kernels.linear.mxfp4.aiter import (
         _asm_fp4_scale_swizzle_supported,
     )
