@@ -1,0 +1,637 @@
+meta:
+  title: "Qwen3.6-27B"
+  slug: "Qwen3.6-27b"
+  provider: "Qwen"
+  description: "Qwen3.6 dense multimodal model (27B) with gated delta networks hybrid attention, MTP, and 262K context"
+  date_added: 2026-04-22
+  date_updated: 2026-10-12
+  tasks:
+    - multimodal
+    - text
+  performance_headline: "Qwen3.6 flagship dense — single-GPU FP8, 2x GPU BF16, 2-4x Intel Arc Pro B60/B70 BF16, Ascend 910C TP2+DP8, or Ascend 950DT TP1+DP8"
+  related_recipes:
+    - "Qwen/Qwen3.6-35B-A3B"
+  hardware:
+    dgx_spark_gb10: verified
+    rtx_pro_6000: verified
+    dgx_station_gb300: verified
+    rtx_5090: verified
+    ascend_950dt: verified
+    ascend_910c: verified
+    arc_pro_b60: verified
+    arc_pro_b70: verified
+    mi300x: verified
+
+model:
+  model_id: "Qwen/Qwen3.6-27B"
+  min_vllm_version: "0.17.0"
+  default_frontend: rust
+  architecture: dense
+  parameter_count: "27B"
+  active_parameters: "27B"
+  context_length: 262144
+  docker_image:
+    # The AMD numbers in the guide were measured on this tag (2026-10-12).
+    amd: "vllm/vllm-openai-rocm:v0.31.0"
+  base_args:
+    - "--trust-remote-code"
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "Enable automatic tool choice with Qwen3 Coder parser"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "qwen3_coder"
+  reasoning:
+    description: "Enable chain-of-thought reasoning with Qwen3 parser"
+    args:
+      - "--reasoning-parser"
+      - "qwen3"
+  spec_decoding:
+    description: "Speculative decoding — pick native MTP or the Ascend MTP mode."
+    default_mode: mtp
+    modes:
+      mtp:
+        label: "MTP"
+        description: "Native MTP head, 3 draft tokens."
+        variants: [default, fp8, nvfp4, redhat_fp8]
+        args:
+          - "--speculative-config"
+          - '{"method":"mtp","num_speculative_tokens":3}'
+        hardware_overrides:
+          # GB10 is decode-bound at low concurrency, so a deeper draft pays off.
+          dgx_spark_gb10:
+            args:
+              - "--speculative-config"
+              - '{"method":"mtp","num_speculative_tokens":5}'
+      qwen3_5_mtp:
+        label: "MTP (Ascend)"
+        description: "MTP mode documented for vLLM Ascend."
+        variants: [ascend_w8a8_mxfp8, ascend_w8a8]
+        args:
+          - "--speculative-config"
+          - '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}'
+  text_only:
+    description: "Skip loading the vision encoder for text-only workloads — frees VRAM for KV cache. Mutually exclusive with encoder_parallel."
+    args:
+      - "--language-model-only"
+  encoder_parallel:
+    description: "Run the vision encoder in data-parallel mode — avoids TP comm overhead on the small encoder. Mutually exclusive with text_only."
+    args:
+      - "--mm-encoder-tp-mode"
+      - "data"
+  long_context:
+    description: "YaRN RoPE scaling past the native 262,144-token window to ~1,010,000 tokens. Static YaRN holds the scaling factor constant regardless of input length, so leave this off unless you actually serve long prompts; for ~524K, halve the factor to 2.0."
+    args:
+      - "--hf-overrides"
+      - '{"text_config": {"rope_parameters": {"mrope_interleaved": true, "mrope_section": [11, 11, 10], "rope_type": "yarn", "rope_theta": 10000000, "partial_rotary_factor": 0.25, "factor": 4.0, "original_max_position_embeddings": 262144}}}'
+      - "--max-model-len"
+      - "1010000"
+    env:
+      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+
+opt_in_features:
+  - spec_decoding
+  - text_only
+  - long_context
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 65
+    description: "Full precision BF16 — fits on 1x H200, 2x H100, 4x Intel Arc Pro B60, 2x Intel Arc Pro B70, or an Ascend A3 node (TP2+DP8)"
+    tp:
+      ascend_910c: 2
+    hardware_overrides:
+      rtx_pro_6000:
+        extra_args:
+          - "--max-num-seqs"
+          - "8"
+      ascend_910c:
+        docker_image: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:v0.23.0-a3"
+        extra_args:
+          - "--data-parallel-size"
+          - "8"
+          - "--served-model-name"
+          - "qwen3.6"
+          - "--max-num-seqs"
+          - "32"
+          - "--max-model-len"
+          - "133000"
+          - "--max-num-batched-tokens"
+          - "16384"
+          - "--gpu-memory-utilization"
+          - "0.90"
+          - "--no-enable-prefix-caching"
+          - "--compilation-config"
+          - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+          - "--async-scheduling"
+        extra_env:
+          VLLM_USE_MODELSCOPE: "True"
+          PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+          HCCL_BUFFSIZE: "512"
+          OMP_PROC_BIND: "false"
+          OMP_NUM_THREADS: "1"
+          TASK_QUEUE_ENABLE: "1"
+  fp8:
+    model_id: "Qwen/Qwen3.6-27B-FP8"
+    precision: fp8
+    vram_minimum_gb: 33
+    description: "Qwen official FP8 checkpoint — single 40 GB GPU"
+    extra_args:
+      - "--max-num-seqs"
+      - "512"
+    hardware_overrides:
+      dgx_spark_gb10:
+        extra_env:
+          VLLM_USE_DEEP_GEMM: "0"
+      rtx_pro_6000:
+        extra_env:
+          VLLM_USE_DEEP_GEMM: "0"
+  nvfp4:
+    model_id: "nvidia/Qwen3.6-27B-NVFP4"
+    precision: nvfp4
+    vram_minimum_gb: 27
+    tp: 1
+    # SM120 GPUs only reach FlashInfer's XQA decode kernel from 0.28.0.
+    min_vllm_version: "0.28.0"
+    nightly_required: true
+    description: "NVIDIA ModelOpt NVFP4 checkpoint — MLP linears quantized to NVFP4, attention linears and KV cache in FP8. Single Blackwell GPU, including DGX Spark."
+    hardware_overrides:
+      dgx_station_gb300:
+        extra_args:
+          - "--kv-cache-dtype"
+          - "fp8"
+          - "--attention-backend"
+          - "flashinfer"
+          - "--gpu-memory-utilization"
+          - "0.92"
+          - "--max-model-len"
+          - "262144"
+          - "--max-num-batched-tokens"
+          - "8192"
+          - "--enable-chunked-prefill"
+          - "--enable-prefix-caching"
+          - "--load-format"
+          - "fastsafetensors"
+          - "--async-scheduling"
+      dgx_spark_gb10:
+        extra_args:
+          - "--kv-cache-dtype"
+          - "fp8"
+          - "--attention-backend"
+          - "flashinfer"
+          # GB10 shares 128 GB with the CPU, so leave half the pool to the host.
+          - "--gpu-memory-utilization"
+          - "0.5"
+          - "--max-model-len"
+          - "262144"
+          - "--max-num-seqs"
+          - "8"
+          - "--max-num-batched-tokens"
+          - "8192"
+          - "--enable-chunked-prefill"
+          - "--enable-prefix-caching"
+          - "--load-format"
+          - "fastsafetensors"
+          - "--async-scheduling"
+      rtx_pro_6000:
+        extra_args:
+          - "--kv-cache-dtype"
+          - "fp8"
+          - "--attention-backend"
+          - "flashinfer"
+          - "--gpu-memory-utilization"
+          - "0.9"
+          - "--max-model-len"
+          - "262144"
+          - "--max-num-seqs"
+          - "8"
+          - "--max-num-batched-tokens"
+          - "8192"
+          - "--enable-chunked-prefill"
+          - "--enable-prefix-caching"
+          - "--load-format"
+          - "fastsafetensors"
+          - "--async-scheduling"
+      rtx_5090:
+        extra_args:
+          - "--kv-cache-dtype"
+          - "fp8"
+          - "--attention-backend"
+          - "FLASHINFER"
+          - "--attention-config"
+          - '{"use_trtllm_attention": true}'
+          - "--gpu-memory-utilization"
+          - "0.93"
+          # 32 GB leaves ~9 GB for KV cache after the NVFP4 weights.
+          - "--max-model-len"
+          - "36608"
+          - "--max-num-seqs"
+          - "8"
+          - "--max-num-batched-tokens"
+          - "4096"
+          - "--gpu-memory-utilization"
+          - "0.95"
+          - "--enable-chunked-prefill"
+          - "--enable-prefix-caching"
+          - "--async-scheduling"
+          - "--skip-mm-profiling"
+        extra_env:
+          VLLM_HAS_FLASHINFER_CUBIN: "1"  
+  redhat_fp8:
+    model_id: "RedHatAI/Qwen3.6-27B-FP8"
+    precision: fp8
+    label: "FP8 (RedHat)"
+    vram_minimum_gb: 33
+    description: "RedHatAI FP8 dynamic quantization"
+  ascend_w8a8_mxfp8:
+    model_id: "Eco-Tech/Qwen3.6-27B-w8a8-mxfp8"
+    precision: mxfp8
+    label: "W8A8 (Ascend)"
+    vram_minimum_gb: 34
+    supported_hardware: [ascend_950dt]
+    tp: 1
+    min_vllm_version: "0.23.0"
+    default_modes:
+      spec_decoding: qwen3_5_mtp
+    extra_args:
+      - "--distributed-executor-backend"
+      - "mp"
+      - "--data-parallel-size"
+      - "8"
+      - "--quantization"
+      - "ascend"
+      - "--served-model-name"
+      - "qwen3.6"
+      - "--max-num-seqs"
+      - "32"
+      - "--max-model-len"
+      - "262144"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--gpu-memory-utilization"
+      - "0.90"
+      - "--no-enable-prefix-caching"
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--additional-config"
+      - '{"enable_cpu_binding":true}'
+    extra_env:
+      VLLM_USE_MODELSCOPE: "True"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      HCCL_BUFFSIZE: "512"
+      OMP_PROC_BIND: "false"
+      OMP_NUM_THREADS: "1"
+      TASK_QUEUE_ENABLE: "1"
+    hardware_overrides:
+      ascend_950dt:
+        docker_image: "quay.io/ascend/vllm-ascend:v0.23.0-a5"
+  ascend_w8a8:
+    model_id: "Eco-Tech/Qwen3.6-27B-w8a8"
+    precision: int8
+    label: "W8A8 (Ascend A3)"
+    vram_minimum_gb: 33
+    supported_hardware: [ascend_910c]
+    tp: 2
+    min_vllm_version: "0.23.0"
+    default_modes:
+      spec_decoding: qwen3_5_mtp
+    extra_args:
+      - "--data-parallel-size"
+      - "8"
+      - "--quantization"
+      - "ascend"
+      - "--served-model-name"
+      - "qwen3.6"
+      - "--max-num-seqs"
+      - "32"
+      - "--max-model-len"
+      - "133000"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--gpu-memory-utilization"
+      - "0.90"
+      - "--no-enable-prefix-caching"
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--additional-config"
+      - '{"enable_cpu_binding":true}'
+      - "--async-scheduling"
+    extra_env:
+      VLLM_USE_MODELSCOPE: "True"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      HCCL_BUFFSIZE: "512"
+      OMP_PROC_BIND: "false"
+      OMP_NUM_THREADS: "1"
+      TASK_QUEUE_ENABLE: "1"
+    hardware_overrides:
+      ascend_910c:
+        docker_image: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:v0.23.0-a3"
+    description: "ModelSlim INT8 W8A8 checkpoint for one Atlas 800 A3 node (16x Ascend 910C), using TP2+DP8. Requires --quantization ascend."
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+hardware_overrides:
+  amd:
+    # AITER is opt-in on ROCm and the image does not set it. Without these two the
+    # server auto-selects ROCM_ATTN, which cannot use its native kernel for this
+    # model (head size 256, 784-token hybrid blocks) and falls back to a Triton
+    # path whose single-stream decode drops ~5x from ~200 to ~32k prompt tokens.
+    # ROCM_AITER_FA stays flat across context on MI300X and is also the backend
+    # #1082 moved to for gfx950 on v0.31.0. Verified 2026-10-12 on one MI300X
+    # (see the AMD section of the guide).
+    extra_args:
+      - "--attention-backend"
+      - "ROCM_AITER_FA"
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+  xpu:
+    extra_args:
+      - "--enforce-eager"
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  [Qwen3.6-27B](https://huggingface.co/Qwen/Qwen3.6-27B) is the flagship dense
+  model of the Qwen3.6 family. It uses the same gated delta networks hybrid
+  attention as its MoE siblings, supports vision+text input, and natively serves
+  262K context. MTP (multi-token prediction) is supported out of the box for
+  low-latency decoding.
+
+  ## Prerequisites
+
+  - **vLLM version:** >= 0.17.0
+  - **NVFP4 vLLM version:** >= 0.28.0 (currently nightly). 0.24.0 loads the
+    checkpoint, but FlashInfer only selects its XQA decode kernel on SM120
+    GPUs from 0.28.0.
+  - **Hardware (BF16):** 1x H200, 2x H100, 4x Intel Arc Pro B60, 2x Intel Arc Pro B70
+  - **Hardware (FP8):** single 40 GB GPU (H100/H200/L40S)
+  - **Hardware (Int4):** single 24 GB GPU
+  - **Hardware (NVFP4):** single NVIDIA Blackwell GPU (B200/B300/GB10 DGX Spark)
+  - **Hardware (AMD):** 1x MI300X (BF16 fits one 192 GB GPU)
+
+  ### Install vLLM
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend=auto
+  ```
+
+  ### Docker
+  ```bash
+  docker pull vllm/vllm-openai-xpu:latest  # Intel XPU (B60 / B70)
+  ```
+
+  ## Launching the Server
+
+  ### Single-GPU FP8
+
+  ```bash
+  vllm serve Qwen/Qwen3.6-27B-FP8 \
+    --max-model-len 262144 \
+    --reasoning-parser qwen3
+  ```
+
+  ### BF16 on 2xH100 (TP2)
+
+  ```bash
+  vllm serve Qwen/Qwen3.6-27B \
+    --tensor-parallel-size 2 \
+    --max-model-len 262144 \
+    --reasoning-parser qwen3
+  ```
+
+  ### MTP speculative decoding
+
+  ```bash
+  vllm serve Qwen/Qwen3.6-27B-FP8 \
+    --speculative-config '{"method": "mtp", "num_speculative_tokens": 1}' \
+    --reasoning-parser qwen3
+  ```
+
+  ### Text-only (skip vision encoder)
+
+  ```bash
+  vllm serve Qwen/Qwen3.6-27B-FP8 \
+    --language-model-only \
+    --reasoning-parser qwen3 \
+    --enable-prefix-caching
+  ```
+
+  ### NVFP4 on Blackwell
+
+  The [`nvidia/Qwen3.6-27B-NVFP4`](https://huggingface.co/nvidia/Qwen3.6-27B-NVFP4)
+  checkpoint is NVIDIA's ModelOpt re-quantization: MLP linears drop to NVFP4
+  (W4A16) while the attention linears and KV cache stay FP8, so the ~22 GB
+  weights fit a single Blackwell GPU. vLLM auto-detects the ModelOpt
+  quantization from the checkpoint, so no `--quantization` flag is needed, but
+  it does need vLLM 0.28.0+ (currently nightly) for FlashInfer's XQA decode path
+  on SM120. NVIDIA reports near-lossless accuracy versus the FP8 baseline.
+
+  Select the NVFP4 variant in the command builder above and switch the hardware
+  pill for the validated single-node launch on DGX Spark (GB10), DGX Station
+  (GB300), RTX PRO 6000 or RTX 5090. Memory utilization, context length, batch
+  size, attention backend and MTP depth all differ per box and are encoded per
+  hardware, so the generated command is the tested one.
+
+  #### **2× DGX Spark (TP2)**
+
+  Two Sparks joined over ConnectX is the one layout the builder can't render, so
+  it is spelled out here. Download the checkpoint on all nodes. Start the worker
+  node first and then the head node — the head coordinates the others, so they
+  need to be ready to connect when it comes up.
+
+  ```bash
+  # COMMON variables example values — same on all nodes
+  export HEAD_IP="<node1-connectx-ip>"   # The ConnectX IP of Node1 (Head Node)
+  export ETH_IF="enp1s0f1np1"            # CX7 ethernet interface which is UP
+  export IB_IF="rocep1s0f1,roceP2p1s0f1" # BOTH matching RoCE interfaces
+  export MASTER_PORT=29501               # Free port on the Head Node
+  export CONTAINER_NAME=vllm_node
+  export IMAGE="vllm/vllm-openai:nightly"
+  ```
+
+  ```bash
+  # Head Node
+  docker run --privileged --ulimit nofile=1048576:1048576 --ipc=host \
+    --gpus all --rm --network host --name "$CONTAINER_NAME" --entrypoint="" \
+    -e MN_IF_NAME="$ETH_IF" \
+    -e UCX_NET_DEVICES="$ETH_IF" \
+    -e NCCL_SOCKET_IFNAME="$ETH_IF" \
+    -e NCCL_IB_HCA="$IB_IF" \
+    -e NCCL_IB_DISABLE=0 \
+    -e OMPI_MCA_btl_tcp_if_include="$ETH_IF" \
+    -e GLOO_SOCKET_IFNAME="$ETH_IF" \
+    -e TP_SOCKET_IFNAME="$ETH_IF" \
+    -e NCCL_IGNORE_CPU_AFFINITY=1 \
+    -e VLLM_FLOAT32_MATMUL_PRECISION=high \
+    -e HEAD_IP="$HEAD_IP" \
+    -e MASTER_PORT="$MASTER_PORT" \
+    -v "$HOME/.cache/huggingface:/root/.cache/huggingface" \
+    "$IMAGE" vllm serve nvidia/Qwen3.6-27B-NVFP4 \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --trust-remote-code \
+    --kv-cache-dtype fp8 \
+    --attention-backend flashinfer \
+    --gpu-memory-utilization 0.5 \
+    --max-model-len 262144 \
+    --max-num-seqs 8 \
+    --max-num-batched-tokens 8192 \
+    --enable-chunked-prefill \
+    --async-scheduling \
+    --enable-prefix-caching \
+    --speculative-config '{"method":"mtp","num_speculative_tokens":5,"draft_tensor_parallel_size":2}' \
+    --load-format fastsafetensors \
+    --reasoning-parser qwen3 \
+    --tool-call-parser qwen3_coder \
+    --enable-auto-tool-choice \
+    --tensor-parallel-size 2 \
+    --nnodes 2 \
+    --node-rank 0 \
+    --master-addr "$HEAD_IP" \
+    --master-port "$MASTER_PORT"
+
+  # Worker node
+  docker run --privileged --ulimit nofile=1048576:1048576 --ipc=host \
+    --gpus all --rm --network host --name "$CONTAINER_NAME" --entrypoint="" \
+    -e MN_IF_NAME="$ETH_IF" \
+    -e UCX_NET_DEVICES="$ETH_IF" \
+    -e NCCL_SOCKET_IFNAME="$ETH_IF" \
+    -e NCCL_IB_HCA="$IB_IF" \
+    -e NCCL_IB_DISABLE=0 \
+    -e OMPI_MCA_btl_tcp_if_include="$ETH_IF" \
+    -e GLOO_SOCKET_IFNAME="$ETH_IF" \
+    -e TP_SOCKET_IFNAME="$ETH_IF" \
+    -e NCCL_IGNORE_CPU_AFFINITY=1 \
+    -e VLLM_FLOAT32_MATMUL_PRECISION=high \
+    -e HEAD_IP="$HEAD_IP" \
+    -e MASTER_PORT="$MASTER_PORT" \
+    -v "$HOME/.cache/huggingface:/root/.cache/huggingface" \
+    "$IMAGE" vllm serve nvidia/Qwen3.6-27B-NVFP4 \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --trust-remote-code \
+    --kv-cache-dtype fp8 \
+    --attention-backend flashinfer \
+    --gpu-memory-utilization 0.5 \
+    --max-model-len 262144 \
+    --max-num-seqs 8 \
+    --max-num-batched-tokens 8192 \
+    --enable-chunked-prefill \
+    --async-scheduling \
+    --enable-prefix-caching \
+    --speculative-config '{"method":"mtp","num_speculative_tokens":5,"draft_tensor_parallel_size":2}' \
+    --load-format fastsafetensors \
+    --reasoning-parser qwen3 \
+    --tool-call-parser qwen3_coder \
+    --enable-auto-tool-choice \
+    --tensor-parallel-size 2 \
+    --nnodes 2 \
+    --node-rank 1 \
+    --master-addr "$HEAD_IP" \
+    --master-port "$MASTER_PORT" \
+    --headless
+  ```
+
+
+  ### AMD (MI300X, single GPU, BF16)
+
+  BF16 fits one MI300X. Two settings matter on ROCm and neither is on by default:
+  `VLLM_ROCM_USE_AITER=1` and an explicit attention backend. The auto-selected
+  `ROCM_ATTN` cannot use its native kernel for this model and its decode slows
+  sharply as the prompt grows; `ROCM_AITER_FA` stays flat.
+
+  ```bash
+  VLLM_ROCM_USE_AITER=1 vllm serve Qwen/Qwen3.6-27B \
+    --attention-backend ROCM_AITER_FA \
+    --enable-auto-tool-choice --tool-call-parser qwen3_coder \
+    --reasoning-parser qwen3
+  ```
+
+  MTP works with the same flags (add the **Speculative decoding** feature above).
+  Single-stream decode (tokens/s at ~200 / ~2k / ~12k / ~32k prompt tokens, 512
+  output tokens, prefix caching on, which is the default), measured 2026-10-12 on
+  one MI300X with `vllm/vllm-openai-rocm:v0.31.0`:
+
+  | | MI300X |
+  |---|---|
+  | image defaults (`ROCM_ATTN`) | 66 / 56 / 27 / 13 |
+  | AITER + `ROCM_AITER_UNIFIED_ATTN` | 66 / 66 / 60 / 49 |
+  | AITER + `ROCM_AITER_FA` | 67 / 67 / 65 / 62 |
+  | + MTP (`num_speculative_tokens: 3`) | 139 / 176 / 168 / 157 |
+
+  The synthetic prompts are repetitive, which flatters MTP; on real coding-agent
+  requests (10-25k-token contexts) decode averaged 27 tok/s with image defaults,
+  68 with `ROCM_AITER_FA` and 161 with MTP added. GSM8K (first 250 test
+  questions, greedy, thinking off) is unchanged: 0.952 image defaults, 0.952
+  `ROCM_AITER_FA`, 0.964 `ROCM_AITER_UNIFIED_ATTN`, 0.964 `ROCM_AITER_FA` + MTP.
+
+  ### Docker (Intel XPU B60 / B70)
+
+  Validated on 4× Intel Arc Pro B60 or 2x Intel Arc Pro B70 (B60 24 GB, B70 32 GB per card) with the
+  official vLLM XPU image `vllm/vllm-openai-xpu:latest`.
+
+  ```bash
+  docker run --device /dev/dri \
+    -v /dev/dri/by-path:/dev/dri/by-path --shm-size=16g \
+    --privileged --ipc=host -p 8000:8000 \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai-xpu:latest \
+    Qwen/Qwen3.6-27B \
+    --reasoning-parser qwen3 \
+    --tensor-parallel-size 4 \
+    --max-model-len 8192 \
+    --enforce-eager
+  ```
+
+  ## Processing Ultra-Long Texts
+
+  Qwen3.6-27B natively supports `262,144` tokens. To serve longer inputs, turn on the
+  **Long Context** feature above: it applies the model card's YaRN RoPE
+  configuration via `--hf-overrides` and raises `--max-model-len` to ~1,010,000 tokens.
+  Static YaRN holds the scaling factor constant regardless of input length, so
+  leave it off unless you actually serve long prompts; for a ~524K workload,
+  halve the card's `factor` to `2.0`.
+
+  See the [model card](https://huggingface.co/Qwen/Qwen3.6-27B#processing-ultra-long-texts) for the full parameter reference.
+
+  ## Client Usage
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
+  resp = client.chat.completions.create(
+      model="Qwen/Qwen3.6-27B",
+      messages=[{"role": "user", "content": "Write a haiku about gated delta networks."}],
+      max_tokens=256,
+  )
+  print(resp.choices[0].message.content)
+  ```
+
+  ## Troubleshooting
+
+  - **CUDA graph / Mamba cache size error:** reduce `--max-cudagraph-capture-size`
+    (default 512). See [vLLM PR #34571](https://github.com/vllm-project/vllm/pull/34571).
+  - **Disable reasoning:** add `--default-chat-template-kwargs '{"enable_thinking": false}'`.
+  - **Prefix Caching (Mamba):** currently experimental in "align" mode.
+
+  ## References
+
+  - [Model card](https://huggingface.co/Qwen/Qwen3.6-27B)
+  - [FP8 checkpoint](https://huggingface.co/Qwen/Qwen3.6-27B-FP8)
+  - [GPTQ-Int4 checkpoint](https://huggingface.co/Qwen/Qwen3.6-27B-GPTQ-Int4)
+  - [NVIDIA NVFP4 checkpoint](https://huggingface.co/nvidia/Qwen3.6-27B-NVFP4)
+  - [Ascend W8A8 checkpoint](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-27B-w8a8-mxfp8)
+  - [Ascend A3 W8A8 checkpoint](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-27B-w8a8)
+  - [vLLM Ascend tutorial](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/Qwen3.5-27B-Qwen3.6-27B.html)
+  - [Qwen3.6-35B-A3B recipe](../Qwen3.6-35B-A3B)

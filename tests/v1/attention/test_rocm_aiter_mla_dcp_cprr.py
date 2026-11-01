@@ -30,23 +30,6 @@ NATIVE = rocm_aiter_mla._NATIVE_CPRR_HEADS
 MIN_QLEN = rocm_aiter_mla._MIN_CPRR_QLEN
 
 
-def test_dcp_verify_env_defaults_to_auto(monkeypatch):
-    monkeypatch.delenv("VLLM_ROCM_AITER_MLA_DCP_VERIFY", raising=False)
-    assert rocm_aiter_mla.envs.VLLM_ROCM_AITER_MLA_DCP_VERIFY == "auto"
-
-
-@pytest.mark.parametrize("route", ["auto", "asm", "segmented"])
-def test_dcp_verify_env_accepts_routes(monkeypatch, route):
-    monkeypatch.setenv("VLLM_ROCM_AITER_MLA_DCP_VERIFY", route)
-    assert route == rocm_aiter_mla.envs.VLLM_ROCM_AITER_MLA_DCP_VERIFY
-
-
-def test_dcp_verify_env_rejects_unknown_route(monkeypatch):
-    monkeypatch.setenv("VLLM_ROCM_AITER_MLA_DCP_VERIFY", "unknown")
-    with pytest.raises(ValueError, match="Invalid value"):
-        _ = rocm_aiter_mla.envs.VLLM_ROCM_AITER_MLA_DCP_VERIFY
-
-
 # --------------------------------------------------------------------------
 # _asm_dcp_verify_heads -- which head count the cprr kernel runs at
 # --------------------------------------------------------------------------
@@ -127,13 +110,13 @@ def test_route_needs_gfx950(monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# AiterMLAMetadataBuilder -- the route the env value resolves to
+# AiterMLAMetadataBuilder -- the route the builder selects
 # --------------------------------------------------------------------------
 
 DCP = 8
 
 
-def _build(monkeypatch, route, gathered_heads, segmented_supported=True):
+def _build(monkeypatch, gathered_heads, segmented_supported=True):
     """Run the real builder __init__ on CPU at TP8/DCP8 with speculative decoding.
 
     Stubs only what needs a GPU, AITER, or a DCP group, so the route decision
@@ -142,6 +125,13 @@ def _build(monkeypatch, route, gathered_heads, segmented_supported=True):
 
     def init_common_builder(self, *args, **kwargs):
         self.num_heads = gathered_heads // DCP
+        self.q_data_type = torch.bfloat16
+        self.mla_dims = SimpleNamespace(
+            kv_lora_rank=512,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            v_head_dim=128,
+        )
         self.dcp_world_size = DCP
         self.reorder_batch_threshold = 5
 
@@ -154,6 +144,11 @@ def _build(monkeypatch, route, gathered_heads, segmented_supported=True):
         lambda *args: segmented_supported,
     )
     monkeypatch.setattr(rocm_aiter_mla, "_fp8_mla_prefill_supported", lambda: False)
+    # These cases pick between cprr and segmented. On a gfx942 runner the real
+    # arch would add the Triton verify route, which this stub cannot build.
+    import vllm.platforms.rocm as rocm
+
+    monkeypatch.setattr(rocm, "on_gfx942", lambda: False)
     monkeypatch.setattr(
         rocm_aiter_mla, "get_dcp_group", lambda: SimpleNamespace(rank_in_group=0)
     )
@@ -172,11 +167,6 @@ def _build(monkeypatch, route, gathered_heads, segmented_supported=True):
             ),
         ),
     )
-    if route is None:
-        monkeypatch.delenv("VLLM_ROCM_AITER_MLA_DCP_VERIFY", raising=False)
-    else:
-        monkeypatch.setenv("VLLM_ROCM_AITER_MLA_DCP_VERIFY", route)
-
     config = SimpleNamespace(
         speculative_config=SimpleNamespace(num_speculative_tokens=4),
         parallel_config=SimpleNamespace(
@@ -197,53 +187,38 @@ def _build(monkeypatch, route, gathered_heads, segmented_supported=True):
     )
 
 
-@pytest.mark.parametrize("route", [None, "auto", "AUTO"])
-def test_auto_selects_cprr_for_k3_gathered_heads(on_gfx950, monkeypatch, route):
-    """K3 at TP8/DCP8 gathers 96 heads; auto must take cprr padded to 128."""
-    builder = _build(monkeypatch, route, gathered_heads=96)
+def test_selects_cprr_for_k3_gathered_heads(on_gfx950, monkeypatch):
+    """K3 at TP8/DCP8 gathers 96 heads; the builder must take cprr padded to 128."""
+    builder = _build(monkeypatch, gathered_heads=96)
     assert builder._asm_dcp_verify
     assert builder._asm_dcp_verify_heads == 128
     assert builder._num_attention_heads == 128
 
 
-def test_auto_falls_back_to_segmented_above_largest_native(on_gfx950, monkeypatch):
-    builder = _build(monkeypatch, "auto", gathered_heads=256)
-    assert not builder._asm_dcp_verify
-    assert builder._supports_segmented_dcp_verify
-
-
-def test_auto_without_any_route_names_the_missing_segmented_build(
-    on_gfx950, monkeypatch
+@pytest.mark.parametrize(
+    "gfx950,gathered_heads",
+    [
+        (True, 256),  # above the largest native cprr kernel
+        (False, 96),  # cprr kernels exist only on gfx950
+    ],
+)
+def test_falls_back_to_segmented_when_cprr_cannot_serve(
+    monkeypatch, gfx950, gathered_heads
 ):
-    with pytest.raises(ValueError) as exc:
-        _build(monkeypatch, "auto", gathered_heads=256, segmented_supported=False)
-    assert "VLLM_ROCM_AITER_MLA_DCP_VERIFY=auto" in str(exc.value)
-    assert "lacks segmented MLA decode" in str(exc.value)
-
-
-@pytest.mark.parametrize("route", ["asm", "ASM"])
-def test_explicit_asm_is_case_insensitive(on_gfx950, monkeypatch, route):
-    """env_with_choices returns the raw string; ASM used to mean segmented."""
-    assert _build(monkeypatch, route, gathered_heads=96)._asm_dcp_verify
-
-
-def test_explicit_asm_refuses_unservable_heads(on_gfx950, monkeypatch):
-    with pytest.raises(ValueError) as exc:
-        _build(monkeypatch, "ASM", gathered_heads=256)
-    assert "VLLM_ROCM_AITER_MLA_DCP_VERIFY=asm" in str(exc.value)
-    assert "Set VLLM_ROCM_AITER_MLA_DCP_VERIFY=segmented" in str(exc.value)
-
-
-@pytest.mark.parametrize("route", ["segmented", "SEGMENTED"])
-def test_explicit_segmented_never_selects_cprr(on_gfx950, monkeypatch, route):
-    assert not _build(monkeypatch, route, gathered_heads=96)._asm_dcp_verify
-
-
-def test_auto_off_gfx950_stays_segmented(monkeypatch):
+    """Decode must keep the gathered head count, not cprr's padded one."""
     import vllm.platforms.rocm as rocm
 
-    monkeypatch.setattr(rocm, "on_gfx950", lambda: False)
-    assert not _build(monkeypatch, "auto", gathered_heads=96)._asm_dcp_verify
+    monkeypatch.setattr(rocm, "on_gfx950", lambda: gfx950)
+    builder = _build(monkeypatch, gathered_heads=gathered_heads)
+    assert not builder._asm_dcp_verify
+    assert builder._num_attention_heads == gathered_heads
+
+
+def test_without_any_route_names_the_missing_segmented_build(on_gfx950, monkeypatch):
+    with pytest.raises(ValueError) as exc:
+        _build(monkeypatch, gathered_heads=256, segmented_supported=False)
+    assert "256 DCP-gathered heads" in str(exc.value)
+    assert "lacks segmented MLA decode" in str(exc.value)
 
 
 # --------------------------------------------------------------------------
@@ -257,25 +232,46 @@ def test_min_cprr_qlen_is_above_two():
 
 
 @pytest.mark.parametrize(
-    "supports,causal,qlen,asm,expected",
+    "segmented,triton,causal,qlen,asm,expected",
     [
-        (True, True, 1, True, Route.PLAIN),
-        (True, True, 2, True, Route.SEGMENTED),
-        (True, True, 3, True, Route.CPRR),
-        (True, True, 4, True, Route.CPRR),
-        (True, True, 4, False, Route.SEGMENTED),
-        (True, False, 2, True, Route.PLAIN),
-        (True, False, 4, False, Route.PLAIN),
-        (False, True, 3, True, Route.CPRR),
+        (True, False, True, 1, True, Route.PLAIN),
+        (True, False, True, 2, True, Route.SEGMENTED),
+        (True, False, True, 3, True, Route.CPRR),
+        (True, False, True, 4, True, Route.CPRR),
+        (True, False, True, 4, False, Route.SEGMENTED),
+        (True, False, False, 2, True, Route.PLAIN),
+        (True, False, False, 4, False, Route.PLAIN),
+        (False, False, True, 3, True, Route.CPRR),
+        # gfx942: no cprr and no segmented, so causal verify goes to Triton.
+        (False, True, True, 1, False, Route.PLAIN),
+        (False, True, True, 2, False, Route.TRITON),
+        (False, True, True, 4, False, Route.TRITON),
+        (False, True, False, 4, False, Route.PLAIN),
+        # cprr still wins at or above its qlen floor.
+        (False, True, True, 4, True, Route.CPRR),
+        (False, True, True, 2, True, Route.TRITON),
     ],
 )
-def test_dcp_decode_route(supports, causal, qlen, asm, expected):
-    assert _select_route(supports, causal, qlen, asm) is expected
+def test_dcp_decode_route(segmented, triton, causal, qlen, asm, expected):
+    route = _select_route(
+        supports_segmented=segmented,
+        supports_triton=triton,
+        causal=causal,
+        max_qo_len=qlen,
+        asm_selected=asm,
+    )
+    assert route is expected
 
 
 def test_causal_multi_token_batch_without_a_valid_route_fails():
     with pytest.raises(RuntimeError, match="requires either segmented MLA"):
-        _select_route(False, True, 2, True)
+        _select_route(
+            supports_segmented=False,
+            supports_triton=False,
+            causal=True,
+            max_qo_len=2,
+            asm_selected=True,
+        )
 
 
 # Kernel numerics live in test_rocm_aiter_mla_dcp_cprr_numerics.py, which runs

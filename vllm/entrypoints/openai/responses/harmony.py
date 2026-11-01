@@ -433,7 +433,7 @@ def _parse_message_no_recipient(
         # See: https://cookbook.openai.com/articles/openai-harmony
         return [_parse_final_message(message, incomplete=incomplete)]
 
-    raise ValueError(f"Unknown channel: {message.channel}")
+    raise VLLMValidationError(f"Unknown channel: {message.channel}")
 
 
 # ---------------------------------------------------------------------------

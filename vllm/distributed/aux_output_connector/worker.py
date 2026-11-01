@@ -88,7 +88,6 @@ class AuxOutputWorkerConnector:
         *,
         vllm_config: VllmConfig,
         model: torch.nn.Module,
-        kv_cache_config: KVCacheConfig,
     ) -> None:
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         capturer = RoutedExpertsCapturer(
@@ -96,6 +95,7 @@ class AuxOutputWorkerConnector:
         )
         bind_routed_experts_capturer(model, capturer)
         self._capturer = capturer
+        self._vllm_config = vllm_config
         self._store: BackgroundBlockObjectStore | None = None
         self._buffer: RoutedExpertsBuffer | None = None
         self._requests: dict[str, _WorkerRequestState] = {}
@@ -107,11 +107,15 @@ class AuxOutputWorkerConnector:
         self._pending_outputs: list[PendingAuxOutput] = []
         self._lock = Lock()
         self._max_concurrent_batches = vllm_config.max_concurrent_batches
+
+    def initialize_output_storage(self, kv_cache_config: KVCacheConfig) -> None:
+        """Create the output data plane once the KV cache layout is resolved."""
         # Every TP rank participates in capture collectives, but only the
         # executor output rank owns the auxiliary output data plane.
         if not get_tp_group().is_first_rank:
             return
 
+        vllm_config = self._vllm_config
         shape_per_token = self._capturer.shape_per_token
         dtype: np.dtype[Any] = np.dtype(self._capturer.output_dtype_name)
         scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
@@ -131,7 +135,7 @@ class AuxOutputWorkerConnector:
             shape_per_token,
             hash_block_size,
             vllm_config.scheduler_config.max_num_seqs,
-            max_num_batched_tokens,
+            vllm_config.scheduler_config.max_num_batched_tokens,
             vllm_config.max_concurrent_batches,
         )
 
@@ -346,7 +350,11 @@ class AuxOutputWorkerConnector:
             "auxiliary output metadata generation moved backwards"
         )
         with self._lock:
-            release_keys: list[str] = []
+            namespace = str(self._generation)
+            hashes = metadata.retained_block_hashes or ()
+            retained_keys = routed_experts_keys(hashes, namespace)
+            hashes = metadata.released_block_hashes or ()
+            release_keys = routed_experts_keys(hashes, namespace)
             if metadata.generation > self._generation:
                 # A generation change follows a prefix-cache reset, which the
                 # scheduler only performs once all model output is consumed.
@@ -374,7 +382,6 @@ class AuxOutputWorkerConnector:
             block_batches: list[
                 tuple[_WorkerRequestState, list[tuple[int, np.ndarray]]]
             ] = []
-            retained_keys: list[str] = []
             for request_id, block_hashes in metadata.block_hashes.items():
                 state = self._requests[request_id]
                 keys = routed_experts_keys(block_hashes, str(self._generation))
@@ -403,10 +410,6 @@ class AuxOutputWorkerConnector:
 
 
 def get_aux_output_connector(
-    model: torch.nn.Module, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
+    model: torch.nn.Module, vllm_config: VllmConfig
 ) -> AuxOutputWorkerConnector:
-    return AuxOutputWorkerConnector(
-        model=model,
-        kv_cache_config=kv_cache_config,
-        vllm_config=vllm_config,
-    )
+    return AuxOutputWorkerConnector(model=model, vllm_config=vllm_config)

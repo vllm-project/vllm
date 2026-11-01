@@ -1,23 +1,32 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Benchmark the HY V4 Triton iHC pre/post kernels against eager PyTorch."""
+"""Benchmark HY V4 Triton iHC kernels on CUDA or ROCm against eager PyTorch."""
 
 import os
 import subprocess
 from functools import partial
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 from statistics import median
 
 import torch
 import torch.nn.functional as F
 
 import vllm
-from vllm.models.hy_v4.nvidia.triton_ihc import (
-    triton_ihc_post,
-    triton_ihc_pre,
-)
+from vllm.platforms import current_platform
 from vllm.triton_utils import triton
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+if current_platform.is_rocm():
+    from vllm.models.hy_v4.amd.triton_ihc import (
+        triton_ihc_post,
+        triton_ihc_post_pre_rms_norm,
+        triton_ihc_pre,
+    )
+else:
+    from vllm.models.hy_v4.nvidia.triton_ihc import (
+        triton_ihc_post,
+        triton_ihc_pre,
+    )
 
 
 def eager_pre(
@@ -51,20 +60,88 @@ def eager_post(
     )
 
 
-def _timer(method: str):
-    if method == "cupti":
-        from flashinfer.testing import bench_gpu_time_with_cupti
+def eager_post_pre_rms_norm(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    attn_post: torch.Tensor,
+    weight: torch.Tensor,
+    scale: torch.Tensor,
+    base: torch.Tensor,
+    norm_weight: torch.Tensor,
+    magnitude: float,
+    hc_eps: float,
+    norm_eps: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    y = eager_post(x, residual, attn_post)
+    output, post = eager_pre(y, weight, scale, base, magnitude, hc_eps, norm_eps)
+    output_float = output.float()
+    output = (
+        output_float
+        * torch.rsqrt(output_float.square().mean(-1, keepdim=True) + norm_eps)
+        * norm_weight
+    ).to(output.dtype)
+    return output, post, y
 
+
+def _timer(method: str):
+    """Return the explicitly requested GPU timer or fail if unavailable."""
+    if method == "torch_event":
+        return _torch_event_timer
+
+    if current_platform.is_rocm():
+        raise RuntimeError(
+            f"timing method {method!r} is CUDA-only; use --method torch_event on ROCm"
+        )
+
+    if method == "cupti":
+        try:
+            from flashinfer.testing import bench_gpu_time_with_cupti
+        except ImportError as error:
+            raise RuntimeError(
+                "timing method 'cupti' requires flashinfer-python with "
+                "bench_gpu_time_with_cupti"
+            ) from error
         return partial(
             bench_gpu_time_with_cupti,
             use_cuda_graph=True,
             cold_l2_cache=True,
         )
     if method == "cudagraph":
-        from flashinfer.testing import bench_gpu_time_with_cudagraph
-
+        try:
+            from flashinfer.testing import bench_gpu_time_with_cudagraph
+        except ImportError as error:
+            raise RuntimeError(
+                "timing method 'cudagraph' requires flashinfer-python with "
+                "bench_gpu_time_with_cudagraph"
+            ) from error
         return partial(bench_gpu_time_with_cudagraph, cold_l2_cache=True)
     raise ValueError(f"unknown timing method: {method}")
+
+
+def _torch_event_timer(fn):
+    for _ in range(10):
+        fn()
+    torch.accelerator.synchronize()
+    start = torch.Event(enable_timing=True)
+    end = torch.Event(enable_timing=True)
+    start.record()
+    for _ in range(20):
+        fn()
+    end.record()
+    end.synchronize()
+    return [start.elapsed_time(end) / 20]
+
+
+def _git_metadata(arguments: list[str], *, empty: str) -> str:
+    result = subprocess.run(
+        ["git", *arguments],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return "<unknown>"
+    return result.stdout.strip() or empty
 
 
 @torch.inference_mode()
@@ -85,30 +162,39 @@ def run_benchmark(
     )
     scale = torch.randn(2, device=device, dtype=torch.float32) * 0.01
     base = torch.randn(2 * hc_mult, device=device, dtype=torch.float32)
+    norm_weight = torch.randn(hidden_size, device=device, dtype=torch.float32)
     timer = _timer(method)
-
     properties = torch.cuda.get_device_properties(device)
-    git_branch = subprocess.run(
-        ["git", "branch", "--show-current"],
-        check=False,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    git_commit = subprocess.run(
-        ["git", "rev-parse", "--short", "HEAD"],
-        check=False,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    print(f"device: {properties.name}")
+    git_branch = _git_metadata(["branch", "--show-current"], empty="<detached>")
+    git_commit = _git_metadata(["rev-parse", "--short", "HEAD"], empty="<unknown>")
+    device_name = (
+        current_platform.get_device_name()
+        if current_platform.is_rocm()
+        else properties.name
+    )
+    platform_description = (
+        f"HIP: {torch.version.hip}"
+        if current_platform.is_rocm()
+        else f"CUDA: {torch.version.cuda}"
+    )
+    print(f"device: {device_name}")
     print(f"branch: {git_branch}; commit: {git_commit}")
     print(
-        f"vllm: {vllm.__version__}; torch: {torch.__version__}; "
-        f"CUDA: {torch.version.cuda}"
+        f"vllm: {vllm.__version__}; torch: {torch.__version__}; {platform_description}"
     )
+    if method == "torch_event":
+        flashinfer_version = "not used"
+        event_backend = "HIP" if current_platform.is_rocm() else "CUDA"
+        time_description = f"method: PyTorch {event_backend} events; cache: warm"
+    else:
+        try:
+            flashinfer_version = version("flashinfer-python")
+        except PackageNotFoundError:
+            flashinfer_version = "unavailable"
+        time_description = f"method: {method}; cache: cold L2"
     print(
-        f"triton: {triton.__version__}; flashinfer: {version('flashinfer-python')}; "
-        f"dtype: {dtype}; method: {method}; cache: cold L2"
+        f"triton: {triton.__version__}; flashinfer: {flashinfer_version}; "
+        f"dtype: {dtype}; {time_description}"
     )
     print(
         "env: VLLM_ENABLE_HPC_OPS="
@@ -145,8 +231,7 @@ def run_benchmark(
             atol=0,
             rtol=0,
         )
-
-        benchmarks = (
+        benchmarks = [
             (
                 "pre",
                 partial(eager_pre, x, weight, scale, base, 2.0, 1e-6, 1e-5),
@@ -164,7 +249,73 @@ def run_benchmark(
                 partial(triton_ihc_post, block_output, residual, post),
                 block_output.nbytes + residual.nbytes + post.nbytes + residual.nbytes,
             ),
-        )
+        ]
+        if current_platform.is_rocm():
+            fused_expected = eager_post_pre_rms_norm(
+                block_output,
+                residual,
+                post,
+                weight,
+                scale,
+                base,
+                norm_weight,
+                2.0,
+                1e-6,
+                1e-5,
+            )
+            fused_actual = triton_ihc_post_pre_rms_norm(
+                block_output,
+                residual,
+                post,
+                weight,
+                scale,
+                base,
+                norm_weight,
+                2.0,
+                1e-6,
+                1e-5,
+            )
+            for actual, expected in zip(fused_actual, fused_expected):
+                torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+            benchmarks.append(
+                (
+                    "fused",
+                    partial(
+                        eager_post_pre_rms_norm,
+                        block_output,
+                        residual,
+                        post,
+                        weight,
+                        scale,
+                        base,
+                        norm_weight,
+                        2.0,
+                        1e-6,
+                        1e-5,
+                    ),
+                    partial(
+                        triton_ihc_post_pre_rms_norm,
+                        block_output,
+                        residual,
+                        post,
+                        weight,
+                        scale,
+                        base,
+                        norm_weight,
+                        2.0,
+                        1e-6,
+                        1e-5,
+                    ),
+                    block_output.nbytes
+                    + residual.nbytes
+                    + post.nbytes
+                    + weight.nbytes
+                    + scale.nbytes
+                    + base.nbytes
+                    + norm_weight.nbytes
+                    + sum(tensor.nbytes for tensor in fused_expected),
+                )
+            )
         for op_name, eager_fn, triton_fn, logical_bytes in benchmarks:
             eager_us = median(timer(eager_fn)) * 1e3
             triton_us = median(timer(triton_fn)) * 1e3
@@ -189,7 +340,15 @@ if __name__ == "__main__":
     )
     parser.add_argument("--hidden-size", type=int, choices=[4096, 6144], default=6144)
     parser.add_argument("--dtype", choices=["float16", "bfloat16"], default="bfloat16")
-    parser.add_argument("--method", choices=["cupti", "cudagraph"], default="cupti")
+    parser.add_argument(
+        "--method",
+        choices=["torch_event", "cupti", "cudagraph"],
+        default="torch_event" if current_platform.is_rocm() else "cupti",
+        help=(
+            "timing backend; cupti/cudagraph require flashinfer-python on CUDA, "
+            "while torch_event uses warm-cache PyTorch GPU events"
+        ),
+    )
     args = parser.parse_args()
     run_benchmark(
         args.token_counts,

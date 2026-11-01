@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Backend for GatedDeltaNet attention."""
 
+import math
 from dataclasses import dataclass, replace
 from typing import Literal
 
@@ -19,6 +20,7 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    max_decode_query_len,
 )
 from vllm.v1.attention.backends.utils import (
     NULL_BLOCK_ID,
@@ -26,7 +28,48 @@ from vllm.v1.attention.backends.utils import (
     mamba_get_block_table_tensor,
     split_decodes_and_prefills,
 )
-from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
+
+# FlashInfer's GDN prefill emits states every N tokens, N a multiple of its
+# 64-token chunk, so checkpoint offsets must be multiples of 64.
+FLASHINFER_GDN_CHECKPOINT_ALIGNMENT = 64
+
+
+def plan_flashinfer_checkpoints(
+    offsets: list[int], query_lens: list[int]
+) -> tuple[int, list[int], list[int]]:
+    """Lay out internal checkpoints as FlashInfer GDN prefill emits them.
+
+    Args:
+        offsets: Checkpoint offset into each checkpoint row's query, 0 for
+            none. The last ``len(query_lens)`` rows are the prefill kernel's.
+        query_lens: Query length of each sequence the prefill kernel runs.
+
+    Returns:
+        ``(every_n_tokens, cu_starts, rows)``: the stride shared by every
+        checkpoint in the batch, cumulative per-sequence checkpoint counts,
+        and the index of each checkpoint row's state among the emitted ones.
+
+    """
+    every_n_tokens = math.gcd(*offsets)
+    cu_starts = [0]
+    for query_len in query_lens:
+        cu_starts.append(cu_starts[-1] + query_len // every_n_tokens)
+    first = len(offsets) - len(query_lens)
+    rows = [0] * len(offsets)
+    for i, offset in enumerate(offsets[first:]):
+        if offset:
+            rows[first + i] = cu_starts[i] + offset // every_n_tokens - 1
+    return every_n_tokens, cu_starts, rows
+
+
+@dataclass
+class GDNFlashInferCheckpointPlan:
+    every_n_tokens: int
+    num_checkpoints: int
+    cu_starts: torch.Tensor
+    # Per checkpoint row, its state among the ``num_checkpoints`` emitted.
+    rows: torch.Tensor
 
 
 class GDNAttentionBackend(AttentionBackend):
@@ -42,6 +85,10 @@ class GDNAttentionBackend(AttentionBackend):
     def is_ssm(cls) -> bool:
         return True
 
+    @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        return True
+
 
 @dataclass
 class GDNAttentionMetadata:
@@ -54,6 +101,7 @@ class GDNAttentionMetadata:
     num_actual_tokens: int
 
     checkpoint: MambaPrefillCheckpointMetadata | None = None
+    flashinfer_checkpoint_plan: GDNFlashInferCheckpointPlan | None = None
     has_initial_state: torch.Tensor | None = None
 
     spec_query_start_loc: torch.Tensor | None = None  # shape: [num_spec_decodes + 1,]
@@ -92,6 +140,15 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
     kv_cache_spec: MambaSpec
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
 
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> int | None:
+        del kv_cache_spec
+        return max_decode_query_len(vllm_config)
+
     reorder_batch_threshold: int = 1
 
     def __init__(
@@ -104,6 +161,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.compilation_config = vllm_config.compilation_config
         self.speculative_config = vllm_config.speculative_config
+        self._adaptive_verification = bool(
+            self.speculative_config
+            and self.speculative_config.enable_adaptive_verification
+        )
         self.checkpoint_builder = MambaPrefillCheckpointBuilder(
             vllm_config, kv_cache_spec
         )
@@ -112,10 +173,18 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         )
 
         self.gdn_prefill_backend: Literal[
-            "triton", "flashinfer", "cutedsl", "aiter_flydsl"
+            "triton", "flashinfer", "cutedsl", "aiter_flydsl", "sycl"
         ]
         _, self.gdn_prefill_backend = _resolve_gdn_prefill_backend(vllm_config)
         self._check_chunk_metadata_override(type(self), self.gdn_prefill_backend)
+        # Only the Qwen GDN layer opts in on FlashInfer; KDA layers sharing this
+        # backend export checkpoints their own way.
+        checkpoint_alignment = kv_cache_spec.prefill_checkpoint_alignment
+        self.plan_flashinfer_checkpoints = (
+            self.gdn_prefill_backend == "flashinfer"
+            and checkpoint_alignment is not None
+            and checkpoint_alignment % FLASHINFER_GDN_CHECKPOINT_ALIGNMENT == 0
+        )
 
         if self.speculative_config:
             assert self.speculative_config.num_speculative_tokens is not None
@@ -347,7 +416,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             non_spec_sequence_masks_cpu = ~spec_sequence_masks_cpu
             query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
             spec_query_lens_cpu = query_lens_cpu[spec_sequence_masks_cpu]
-            if spec_query_lens_cpu.numel() > 0:
+            if spec_query_lens_cpu.numel() > 0 and not self._adaptive_verification:
                 first_spec_sequence_length = int(spec_query_lens_cpu[0])
                 if first_spec_sequence_length > 0 and bool(
                     torch.all(spec_query_lens_cpu == first_spec_sequence_length)
@@ -495,7 +564,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                         cu_seqlens=prefill_query_start_loc,
                     )
                 )
-            else:
+            elif self.gdn_prefill_backend != "flashinfer":
+                # FlashInfer's chunk kernel consumes cu_seqlens directly and
+                # never reads chunk_indices/chunk_offsets, so skip the FLA
+                # metadata (CPU compute + H2D copies) entirely.
                 chunk_indices, chunk_offsets = self._build_chunk_metadata(
                     prefill_query_start_loc,
                     prefill_query_start_loc_cpu,
@@ -527,6 +599,25 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             if spec_sequence_masks_cpu is not None:
                 request_rows = (~spec_sequence_masks_cpu).nonzero().flatten().tolist()
             checkpoint = self.checkpoint_builder.build(m, request_rows)
+
+        flashinfer_checkpoint_plan: GDNFlashInferCheckpointPlan | None = None
+        if checkpoint is not None and self.plan_flashinfer_checkpoints:
+            assert checkpoint.offsets is not None
+            assert checkpoint.query_lens is not None
+            # The prefill kernel runs the trailing checkpoint rows.
+            num_prefill_rows = prefill_query_start_loc_cpu.shape[0] - 1
+            every_n_tokens, cu_starts, rows = plan_flashinfer_checkpoints(
+                checkpoint.offsets, checkpoint.query_lens[-num_prefill_rows:]
+            )
+            plan = async_tensor_h2d(
+                cu_starts + rows, query_start_loc.device, torch.int64
+            )
+            flashinfer_checkpoint_plan = GDNFlashInferCheckpointPlan(
+                every_n_tokens=every_n_tokens,
+                num_checkpoints=cu_starts[-1],
+                cu_starts=plan[: len(cu_starts)],
+                rows=plan[len(cu_starts) :],
+            )
 
         # Function code counted on either presency non-spec decode or spec decode,
         # but not both.
@@ -606,6 +697,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             num_spec_decode_tokens=num_spec_decode_tokens,
             num_actual_tokens=m.num_actual_tokens,
             checkpoint=checkpoint,
+            flashinfer_checkpoint_plan=flashinfer_checkpoint_plan,
             has_initial_state=has_initial_state,
             chunk_indices=chunk_indices,
             chunk_offsets=chunk_offsets,

@@ -14,13 +14,20 @@ from collections import OrderedDict
 
 
 class CacheEntry:
-    """A single cache entry. Read `.block_ids` and `.ready` freely;
-    mutations only through EmbeddingCache methods."""
+    """A single cache entry. Read `.block_ids`, `.shape` and `.ready` freely;
+    mutations only through EmbeddingCache methods.
 
-    __slots__ = ("block_ids", "_pin_count")
+    `shape` is the encoder output the blocks hold, so a load can restore it
+    without knowing how wide this model's encoder output is.
+    """
 
-    def __init__(self, block_ids: tuple[int, ...]) -> None:
+    __slots__ = ("block_ids", "shape", "_pin_count")
+
+    def __init__(
+        self, block_ids: tuple[int, ...], shape: tuple[int, int] | None = None
+    ) -> None:
         self.block_ids = block_ids
+        self.shape = shape
         self._pin_count = -1  # not ready
 
     @property
@@ -76,7 +83,9 @@ class EmbeddingCache:
         with self._lock:
             return len(self._entries) != len(self._entries_free_list)
 
-    def alloc(self, key: str, n_blocks: int) -> CacheEntry | None:
+    def alloc(
+        self, key: str, n_blocks: int, shape: tuple[int, int] | None = None
+    ) -> CacheEntry | None:
         """Allocate *n_blocks* for *key*, evicting as needed.
 
         The entry starts not-ready. Returns None if there is not enough
@@ -97,7 +106,7 @@ class EmbeddingCache:
             # in the free list when it is evicted, and lets consumers detect
             # which of an entry's blocks are adjacent.
             block_ids = tuple(sorted(self._free_blocks.pop() for _ in range(n_blocks)))
-            entry = CacheEntry(block_ids)
+            entry = CacheEntry(block_ids, shape)
             self._entries[key] = entry
             return entry
 

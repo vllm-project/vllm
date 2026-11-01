@@ -3,6 +3,8 @@
 
 import inspect
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
+from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 
 import regex as re
@@ -84,11 +86,23 @@ class QuantizeMethodBase(ABC):
         """
         return
 
-    def dequantize_weight(self, layer: nn.Module) -> torch.Tensor:
-        """Materialize a serialized quantized weight for requantization."""
+    def dequantize_weight(
+        self, layer: nn.Module
+    ) -> torch.Tensor | Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
+        """Materialize a serialized quantized weight for requantization.
+
+        Args:
+            layer: Layer holding the serialized weights.
+
+        Returns:
+            The dequantized weight for linear layers. For MoE layers, an
+            iterator of ``(experts, w13, w2)`` over groups of experts.
+
+        """
         raise NotImplementedError(
             f"The quantization method {type(self)} does not implement "
-            "dequantize_weight. Please open an issue."
+            "dequantize_weight, so re-quantization from this checkpoint is "
+            "not supported. Please open an issue."
         )
 
 
@@ -302,25 +316,39 @@ def resolve_quant_method(
         UnquantizedLinearMethod,
     )
     from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
+    from vllm.model_executor.layers.quantization.online.moe_base import (
+        OnlineMoEMethodBase,
+    )
+    from vllm.model_executor.layers.quantization.online.requantization import (
+        requantization_source_scope,
+    )
 
-    base_quant_method = quant_config.get_quant_method(layer, prefix)
-    if quant_config.online_quantization_config is None:
-        # No online configuration: retain the checkpoint method.
-        return base_quant_method
+    online_config = quant_config.online_quantization_config
     # Online quantization currently supports only LinearBase and RoutedExperts.
     # Embeddings and ParallelLMHead retain their checkpoint quantization method.
-    if not isinstance(layer, (LinearBase, RoutedExperts)):
+    is_online_supported_layer = isinstance(layer, (LinearBase, RoutedExperts))
+
+    online_target = None
+    if online_config is not None and is_online_supported_layer:
+        online_config.packed_modules_mapping = quant_config.packed_modules_mapping
+        online_target = online_config.resolve_quant_method_cls(type(layer), prefix)
+
+    # The checkpoint method of requantized experts is only a dequantization source.
+    with (
+        requantization_source_scope()
+        if online_target is not None and isinstance(layer, RoutedExperts)
+        else nullcontext()
+    ):
+        base_quant_method = quant_config.get_quant_method(layer, prefix)
+    if online_config is None:
+        # No online configuration: retain the checkpoint method.
+        return base_quant_method
+    if not is_online_supported_layer:
         # Online quantization only supports linear and routed MoE layers.
         return base_quant_method
 
-    quant_config.online_quantization_config.packed_modules_mapping = (
-        quant_config.packed_modules_mapping
-    )
     checkpoint_is_quantized = base_quant_method is not None and not isinstance(
         base_quant_method, (UnquantizedLinearMethod, UnquantizedFusedMoEMethod)
-    )
-    online_target = quant_config.online_quantization_config.resolve_quant_method_cls(
-        type(layer), prefix
     )
 
     if checkpoint_is_quantized:
@@ -328,20 +356,13 @@ def resolve_quant_method(
             # The checkpoint quant method is applied as there is no online override.
             return base_quant_method
 
-        if isinstance(layer, RoutedExperts):
-            raise NotImplementedError(
-                "Requantizing checkpoint-quantized MoE layers is not supported."
-            )
-
-        online_quant_method = quant_config.online_quantization_config.get_quant_method(
-            layer, prefix
-        )
+        online_quant_method = online_config.get_quant_method(layer, prefix)
 
         assert base_quant_method is not None and not isinstance(
             base_quant_method, (UnquantizedLinearMethod, UnquantizedFusedMoEMethod)
         )
 
-        assert isinstance(online_quant_method, OnlineLinearBase)
+        assert isinstance(online_quant_method, (OnlineLinearBase, OnlineMoEMethodBase))
         online_quant_method.set_requantization_source(base_quant_method)
 
         # The online method dequantizes the checkpoint method before requantizing.
@@ -352,4 +373,4 @@ def resolve_quant_method(
         return base_quant_method
 
     # Quantize an unquantized layer with the online method.
-    return quant_config.online_quantization_config.get_quant_method(layer, prefix)
+    return online_config.get_quant_method(layer, prefix)

@@ -104,6 +104,8 @@ When adding or modifying tests, consider both the coverage and the effectiveness
 
 Assess whether the included test cases are meaningful, concise, and maintainable. Testing should not be exhaustive: local validation is typically sufficient to ensure a baseline correctness of the change. Contributed tests should focus exclusively on areas that are deemed prone to errors, regressions, or complex interactions within the codebase. Recommend deletion of redundant, trivial, or otherwise unnecessary tests: this is one of the most common complaints raised during code reviews.
 
+Check added and changed tests against [`tests/AGENTS.md`](../../../tests/AGENTS.md). For reproducible bugs, the PR must show the new test failing without the fix and passing with it.
+
 Verify that testing actually exercises the new path, rather than passing through an unchanged path or fallback. Ensure added speculative decoding correctness tests assert nonzero acceptance rate, selection tests identify the desired backend, etc.
 
 Aim to write tests that are meaningful, targeted, and maintainable. Avoid redundant or trivial tests that do not contribute to the overall reliability of the test suite. Avoid using mock objects, especially when highly coupled with internal logic.
@@ -135,7 +137,7 @@ For bug fixes, there is no need to include details of the original bug and expla
 
 #### 3.2: Documentation and Examples
 
-Ensure that any new features, changes, or public APIs are properly documented. This includes updating relevant documentation files under `docs/` and providing usage examples where applicable. Refer to `supported_models.md` for new models and `examples/` for usage examples.
+User-visible changes need docs in the same PR, placed and checked per [Documenting User-Visible Changes](../../../docs/contributing/README.md#documenting-user-visible-changes); missing or unfindable docs are blocking. Add usage examples under `examples/` where applicable.
 
 #### 3.3: Helper Functions
 

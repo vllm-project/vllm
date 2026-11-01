@@ -155,7 +155,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         # mark its own cached lookup verdicts False (see get_finished_jobs).
         self._load_job_keys: dict[JobId, list[OffloadKey]] = {}
 
-        agent_config = nixl_agent_config(backends=[])
+        agent_config = nixl_agent_config(backends=[], capture_telemetry=True)
         self._agent = nixl_agent("ObjAgent", agent_config)
         obj_config = ObjStoreConfig(**store_config)
         params = {**obj_config.to_nixl_params(), "num_threads": str(io_threads)}
@@ -170,7 +170,10 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         root_dir = f"{prefix}/" if prefix else ""
         # Opt in; FileMapper enables it only for a parallelism-invariant block.
         self._file_mapper = FileMapper.from_offloading_spec(
-            root_dir, offloading_spec, parallel_agnostic=True
+            root_dir,
+            offloading_spec,
+            blocks_per_file=offloading_spec.blocks_per_chunk,
+            parallel_agnostic=True,
         )
         self._next_obj_dev_id: int = 1  # dev_id=0 is reserved for _exists() probes
 
@@ -334,8 +337,18 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
 
             transfer_time = None
             if success:
-                telemetry = self._agent.get_xfer_telemetry(entry.xfer_handle)
-                transfer_time = telemetry.xferDuration / 1e6
+                # Telemetry is optional: some NIXL builds are compiled without
+                # it and raise here. A metrics failure must not fail a transfer
+                # that already completed.
+                try:
+                    telemetry = self._agent.get_xfer_telemetry(entry.xfer_handle)
+                except Exception:
+                    logger.warning_once(
+                        "NIXL transfer telemetry is unavailable; offload "
+                        "transfer timings will be omitted."
+                    )
+                else:
+                    transfer_time = telemetry.xferDuration / 1e6
 
             try:
                 self._agent.release_xfer_handle(entry.xfer_handle)

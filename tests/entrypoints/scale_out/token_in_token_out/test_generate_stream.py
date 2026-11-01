@@ -37,6 +37,7 @@ from vllm.multimodal.inputs import (
 )
 from vllm.outputs import CompletionOutput, RequestOutput, SamplingMask
 from vllm.renderers import renderer_from_config
+from vllm.renderers.online_derenderer import OnlineDerenderer
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -122,6 +123,7 @@ def _build_serving_tokens(engine: AsyncLLM, **kwargs) -> ServingTokens:
         engine,
         models,
         online_renderer=online_renderer,
+        online_derenderer=MagicMock(spec=OnlineDerenderer),
         request_logger=None,
         **kwargs,
     )
@@ -139,6 +141,7 @@ def _make_request_output(
     request_id: str,
     token_ids: list[int],
     finish_reason: str | None = None,
+    stop_reason: int | str | None = None,
     finished: bool = False,
     prompt_token_ids: list[int] | None = None,
     logprobs: list[dict[int, Any] | None] | None = None,
@@ -160,6 +163,7 @@ def _make_request_output(
                 cumulative_logprob=None,
                 logprobs=logprobs,
                 finish_reason=finish_reason,
+                stop_reason=stop_reason,
                 spec_decode_metrics=spec_decode_metrics,
             )
         ],
@@ -376,6 +380,71 @@ async def test_stream_basic():
     assert data_chunks[1]["choices"][0]["token_ids"] == [20, 30]
     assert data_chunks[2]["choices"][0]["token_ids"] == [40]
     assert data_chunks[2]["choices"][0]["finish_reason"] == "stop"
+
+
+@pytest.mark.asyncio
+async def test_non_stream_reports_engine_stop_reason():
+    """The matched stop token id from the engine lands on the choice."""
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1",
+            token_ids=[10, 42],
+            finish_reason="stop",
+            stop_reason=42,
+            finished=True,
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=10),
+        model=MODEL_NAME,
+        stream=False,
+    )
+
+    response = await serving.serve_tokens(request)
+    choice = response.model_dump()["choices"][0]
+    assert choice["finish_reason"] == "stop"
+    assert choice["stop_reason"] == 42
+
+
+@pytest.mark.asyncio
+async def test_stream_reports_engine_stop_reason_on_final_chunk():
+    """A matched stop string is reported with finish_reason and null before."""
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output("req-1", token_ids=[10])
+        yield _make_request_output(
+            "req-1",
+            token_ids=[20],
+            finish_reason="stop",
+            stop_reason="done",
+            finished=True,
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=10),
+        model=MODEL_NAME,
+        stream=True,
+    )
+
+    response = await serving.serve_tokens(request)
+    parsed = _parse_sse_chunks([chunk async for chunk in response])
+    data_chunks = [c for c in parsed if c != "[DONE]"]
+    assert len(data_chunks) == 2
+
+    assert data_chunks[0]["choices"][0]["stop_reason"] is None
+    assert data_chunks[1]["choices"][0]["finish_reason"] == "stop"
+    assert data_chunks[1]["choices"][0]["stop_reason"] == "done"
 
 
 @pytest.mark.asyncio
