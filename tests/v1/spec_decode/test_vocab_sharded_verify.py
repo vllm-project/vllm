@@ -4,21 +4,25 @@
 rejection sampler on owned blocks give the full-vocabulary results."""
 
 import queue
-from types import SimpleNamespace
 
 import pytest
 import torch
 import torch.multiprocessing as mp
 
+from tests.utils import multi_gpu_test
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.distributed.parallel_state import (
+    get_tp_group,
     init_distributed_environment,
     initialize_model_parallel,
 )
-from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
+from vllm.v1.worker.gpu.spec_decode import vocab_shard as vocab_shard_mod
+from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
+from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import rejection_sample
+from vllm.v1.worker.gpu.spec_decode.vocab_shard import VocabShard
 
 N_SPEC = 7
 MAX_REQS = 40
@@ -67,6 +71,9 @@ def _logits(regime: str, n: int, v: int, g, device) -> torch.Tensor:
         x[:, 7] = 30.0
     elif regime == "flat":
         x = (x * 0.05).bfloat16().float()
+    elif regime == "masked_rows":
+        x = (x * 3).bfloat16().float()
+        x[::3] = float("-inf")  # rows without a finite logit
     return x.contiguous()
 
 
@@ -79,14 +86,18 @@ def _rejection_inputs(num_reqs, vocab, g, device, greedy_rows=True):
     expanded_local_pos = torch.arange(N_SPEC + 1, device=device, dtype=torch.int32)
     expanded_local_pos = expanded_local_pos.repeat(num_reqs)
     pos = torch.randint(10, 1 << 20, (num_logits,), device=device, generator=g)
-    draft_logits = (
+    draft_logits = DraftLogitsCache(
+        MAX_REQS, N_SPEC, vocab, dtype=torch.bfloat16, fill=0.0, device=device
+    )
+    draft_logits.values.copy_(
         torch.randn(MAX_REQS, N_SPEC, vocab, device=device, generator=g) * 2
-    ).bfloat16()
+    )
     target = (torch.randn(num_logits, vocab, device=device, generator=g) * 2).float()
     # Correlate target and draft so that drafts are often accepted.
     tgt_view = target.view(num_reqs, N_SPEC + 1, vocab)
-    tgt_view[:, :N_SPEC] += draft_logits[idx_mapping.long()].float()
-    draft_tokens = draft_logits[idx_mapping.long()].float().argmax(-1)
+    draft_values = draft_logits.values[idx_mapping.long()].float()
+    tgt_view[:, :N_SPEC] += draft_values
+    draft_tokens = draft_values.argmax(-1)
     draft_sampled = torch.zeros(num_logits, dtype=torch.int64, device=device)
     draft_sampled.view(num_reqs, N_SPEC + 1)[:, 1:] = draft_tokens
     draft_sampled.view(num_reqs, N_SPEC + 1)[:, 0] = torch.randint(
@@ -113,22 +124,7 @@ def _rejection_inputs(num_reqs, vocab, g, device, greedy_rows=True):
     )
 
 
-def _draft_cache(values: torch.Tensor):
-    try:
-        from vllm.v1.worker.gpu.spec_decode.draft_logits import (  # noqa: F401
-            DraftLogitsCache,
-        )
-    except ImportError:  # older layout: rejection_sample takes the tensor
-        return values
-    return SimpleNamespace(values=values, row_mapping=None)
-
-
 def _worker(local_rank, world_size, port, vocab, q):
-    from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
-        rejection_sample,
-    )
-    from vllm.v1.worker.gpu.spec_decode.vocab_shard import VocabShard
-
     config = VllmConfig(parallel_config=ParallelConfig(tensor_parallel_size=world_size))
     with set_current_vllm_config(config):
         device = torch.device(f"cuda:{local_rank}")
@@ -144,46 +140,71 @@ def _worker(local_rank, world_size, port, vocab, q):
         )
         init_distributed_environment()
         initialize_model_parallel(tensor_model_parallel_size=world_size)
+        cpu_group = get_tp_group().cpu_group
         local = -(-vocab // (64 * world_size)) * 64
-        try:
-            vs = VocabShard(vocab, local, MAX_REQS * (N_SPEC + 1), MAX_REQS, device)
-        except RuntimeError as e:  # no symmetric memory
-            q.put(f"symmetric memory is unavailable: {e}")
-            return
+        shards: dict[torch.dtype, VocabShard] = {}
+        for dtype in (torch.bfloat16, torch.float32):
+            shard, reason = VocabShard.create(
+                vocab, local, MAX_REQS * (N_SPEC + 1), MAX_REQS, dtype, device
+            )
+            if shard is None:
+                if local_rank == 0:
+                    q.put(f"vocab-sharded verification falls back: {reason}")
+                return
+            shards[dtype] = shard
+        vs = shards[torch.float32]
         c0, c1 = vs.col_start, vs.col_end
         r = vs.rank
 
-        # 1. Owned columns from the TP shards.
-        for rows, dtype in (
-            (1, torch.bfloat16),
-            (37, torch.bfloat16),
-            (64, torch.float32),
-        ):
+        # 1. Owned columns from the TP shards; also with an odd shard size, so
+        # that a pushed bf16 word holds the last column of one kernel tile and
+        # the first of the next, and with a late peer at epochs where a 31-bit
+        # tag would wrap or be 0.
+        odd, reason = VocabShard.create(
+            vocab, local + 1, 64, 8, torch.bfloat16, device, verify=False
+        )
+        assert odd is not None, reason
+        cases = [(shards[torch.bfloat16], 1, 0), (shards[torch.bfloat16], 37, 0)]
+        cases += [(vs, 64, 0), (odd, 64, 0)]
+        cases += [(vs, 8, e) for e in (0x7FFFFFFF // 32, 1 << 26, (1 << 32) + 5)]
+        for shard, rows, epoch in cases:
+            n_local = shard.local_vocab_size
             g = torch.Generator(device=device).manual_seed(rows)
-            full = torch.randn(rows, local * world_size, device=device, generator=g)
-            full = full.to(dtype)
-            vs.begin_step()
-            own = vs.owned_logits(full[:, r * local : (r + 1) * local])
-            vs.end_step()
-            assert torch.equal(own, full[:, c0:c1].float()), (rows, dtype)
+            full = torch.randn(rows, n_local * world_size, device=device, generator=g)
+            full = full.to(shard.logits_dtype)
+            if epoch:
+                shard.epoch.fill_(epoch)
+                torch.accelerator.synchronize()
+                torch.distributed.barrier(group=cpu_group)
+                if r != 0:
+                    torch.cuda._sleep(1 << 28)  # rank 0 reads first
+            shard.begin_step()
+            own = shard.owned_logits(full[:, r * n_local : (r + 1) * n_local])
+            shard.end_step()
+            expected = full[:, shard.col_start : shard.col_end].float()
+            assert torch.equal(own, expected), (rows, shard.logits_dtype, epoch)
 
         # 2. Exact top-p.
-        for ri, regime in enumerate(("lm", "ties", "masked", "peaked", "flat")):
+        regimes = ("lm", "ties", "masked", "peaked", "flat", "masked_rows")
+        for ri, regime in enumerate(regimes):
             for rows in (1, 8, 64, 200):
                 g = torch.Generator(device=device).manual_seed(1000 * ri + rows)
                 x = _logits(regime, rows, vocab, g, device)
                 p = torch.rand(rows, device=device, generator=g) * 0.98 + 0.01
                 if rows > 4:
                     p[::5] = 1.0
+                    p[1::5] = 0.9999
+                    p[2::5] = 1.0 - 1e-7
                 ref, band = _topp_reference(x, p)
-                got = None
-                for _ in range(2):  # deterministic
+                runs = []
+                for _ in range(2):
                     own = x[:, c0:c1].clone()
                     vs.begin_step()
                     vs.top_p(own, p)
                     vs.end_step()
-                    assert got is None or torch.equal(own, got)
-                    got = own
+                    runs.append(own)
+                got = runs[0]
+                assert torch.equal(runs[1], got)  # deterministic
                 kept = got > float("-inf")
                 finite = x[:, c0:c1] > float("-inf")
                 diff = (kept != (ref[:, c0:c1] & finite)).any(1)
@@ -203,7 +224,7 @@ def _worker(local_rank, world_size, port, vocab, q):
                     synthetic_conditional_rates=rates if mode == "synthetic" else None,
                 )
                 args = (
-                    _draft_cache(inp["draft_logits"]),
+                    inp["draft_logits"],
                     inp["draft_sampled"],
                     inp["cu"],
                     inp["pos"],
@@ -229,15 +250,24 @@ def _worker(local_rank, world_size, port, vocab, q):
                 )
                 assert torch.equal(ref_s[valid], got_s[valid]), (mode, num_reqs)
         torch.accelerator.synchronize()
-        assert vs.errors.item() == 0
+        for shard in (*shards.values(), odd):
+            shard.check_exchange()
+
+        # 4. A peer that never writes: the exchange times out and is reported.
+        torch.distributed.barrier(group=cpu_group)
+        if r == 0:
+            with pytest.MonkeyPatch.context() as m:
+                m.setattr(vocab_shard_mod, "_SPIN_LIMIT", 1 << 10)
+                vs.begin_step()
+                vs.allgather_slots(torch.zeros(4, 2, device=device))
+                vs.end_step()
+                torch.accelerator.synchronize()
+            with pytest.raises(RuntimeError, match="timed out"):
+                vs.check_exchange()
+        torch.distributed.barrier(group=cpu_group)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="needs CUDA")
-@pytest.mark.parametrize("world_size", [2, 4])
-@pytest.mark.parametrize("vocab", [200064, 151936])
-def test_vocab_sharded_verification(world_size, vocab):
-    if world_size > torch.accelerator.device_count():
-        pytest.skip("Not enough GPUs to run the test.")
+def _run(world_size: int, vocab: int):
     q = mp.get_context("spawn").Queue()
     mp.spawn(_worker, args=(world_size, get_open_port(), vocab, q), nprocs=world_size)
     try:
@@ -248,3 +278,15 @@ def test_vocab_sharded_verification(world_size, vocab):
         cleanup_dist_env_and_memory()
     if val is not None:
         pytest.skip(val)
+
+
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize("vocab", [200064, 151936])
+def test_vocab_sharded_verification_tp2(vocab):
+    _run(2, vocab)
+
+
+@multi_gpu_test(num_gpus=4)
+@pytest.mark.parametrize("vocab", [200064, 151936])
+def test_vocab_sharded_verification_tp4(vocab):
+    _run(4, vocab)

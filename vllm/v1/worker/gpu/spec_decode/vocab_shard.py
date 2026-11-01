@@ -27,33 +27,40 @@ Exchanges push 8-byte words ``[tag | 32-bit payload]`` into every peer's
 symmetric memory buffer, and readers poll for the tag (NCCL's LL protocol), so
 no fence or flag is needed. Every verification step uses its own tag epoch and
 alternates between two buffer halves, so a rank never overwrites words a slower
-peer has yet to read.
+peer has yet to read. Tags are never 0 and readers clear the words they
+consume, so a slot only ever holds 0 or the word being waited for.
 """
 
 from __future__ import annotations
+
+import math
 
 import torch
 
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
+from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
+    RESAMPLE_BLOCK_SIZE,
+    VOCAB_BLOCK_SIZE,
+)
 
 logger = init_logger(__name__)
 
-# The rejection sampler's statistics and resampling block sizes.
-VOCAB_BLOCK_SIZE = 8192
-RESAMPLE_BLOCK_SIZE = 1024
 # Exchanges per verification step get distinct tags below this.
 _TAGS_PER_STEP = 32
-# Bounded spin (about a second) so a missing peer cannot hang the GPU; a
-# timeout is counted in `errors`.
-_SPIN_LIMIT = 1 << 24
+_TAG_STRIDE = tl.constexpr(_TAGS_PER_STEP)
+# Bounded spin, a few seconds, so that a missing peer cannot hang the GPU. A
+# timeout is counted in `errors`, and `check_exchange` raises.
+_SPIN_LIMIT = 1 << 23
 _BLK = 256
 
 # Top-p: token masses exp(x - max) in fixed point with this many fraction bits.
 # Tokens more than _TOPP_RANGE below the row max have mass 0 and are skipped.
 _TOPP_FRAC_BITS = 40
+_TOPP_SCALE = tl.constexpr(float(1 << _TOPP_FRAC_BITS))
 _TOPP_RANGE = 28.0
+assert math.exp(-_TOPP_RANGE) * (1 << _TOPP_FRAC_BITS) < 1.0
 _TOPP_BINS = 256
 # Tokens of the first round's boundary bin kept per row for the later rounds
 # (more: those rounds scan the whole row).
@@ -93,7 +100,7 @@ def vocab_shard_unsupported_reason(
 
 # ----------------------------------------------------------------------------
 # LL exchange kernels. A word is [31-bit tag | 32-bit payload]; the tag of
-# exchange k in step `epoch` is (epoch * _TAGS_PER_STEP + k) & 0x7FFFFFFF.
+# exchange k in step `epoch` is never 0, so a zeroed word never matches.
 
 
 @triton.jit
@@ -103,7 +110,8 @@ def _peer(ptrs, d):
 
 @triton.jit
 def _tag(epoch_ptr, k):
-    return (tl.load(epoch_ptr).to(tl.int64) * 32 + k) & 0x7FFFFFFF
+    e = tl.load(epoch_ptr).to(tl.int64) * _TAG_STRIDE + k
+    return e % 0x7FFFFFFF + 1
 
 
 @triton.jit
@@ -122,10 +130,14 @@ def _poll(p, m, tag, err_ptr, SPIN_LIMIT: tl.constexpr):
         it += 1
     if bad > 0:
         tl.atomic_add(err_ptr, 1)
+    # Consumed. The slot's next word comes after this rank's next push.
+    tl.store(p, 0, mask=m)
     return (w & 0xFFFFFFFF).to(tl.int32)
 
 
-@triton.jit
+@triton.jit(
+    do_not_specialize=["col_a", "col_b", "region", "region_cols", "slot_words", "k"]
+)
 def _push_kernel(
     src_ptr,  # int32 [rows, src_stride]
     src_stride,
@@ -155,7 +167,7 @@ def _push_kernel(
         tl.store(_peer(buf_ptrs, DST) + off, w, mask=m)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["region", "region_cols", "ncols", "slot_words", "k"])
 def _pull_kernel(
     buf_ptr,  # int64: this rank's buffer
     half_words,
@@ -188,7 +200,7 @@ def _pull_kernel(
     tl.store(dst_ptr + s * dst_slot_stride + r * dst_stride + cols, v, mask=m)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["region", "k"])
 def _owned_logits_kernel(
     out_ptr,  # fp32 [rows, num_cols]: the owned columns
     out_stride,
@@ -209,14 +221,16 @@ def _owned_logits_kernel(
     BLK: tl.constexpr,
 ):
     r = tl.program_id(0).to(tl.int64)
-    cols = tl.program_id(1) * BLK + tl.arange(0, BLK)
-    m = cols < num_cols
+    # Shifted so that the columns of a pushed word are read (and the word
+    # cleared) by one program.
+    cols = tl.program_id(1) * BLK - num_local % PACK + tl.arange(0, BLK)
+    m = (cols >= 0) & (cols < num_cols)
     x = tl.load(
         local_ptr + r * local_stride + local_offset + cols,
         mask=m & (cols < num_local),
         other=0.0,
     ).to(tl.float32)
-    if (tl.program_id(1) + 1) * BLK > num_local:
+    if (tl.program_id(1) + 1) * BLK - num_local % PACK > num_local:
         rcols = cols - num_local
         rm = m & (rcols >= 0)
         word = rcols // PACK
@@ -231,7 +245,7 @@ def _owned_logits_kernel(
     tl.store(out_ptr + r * out_stride + cols, x.to(out_ptr.dtype.element_ty), mask=m)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_logits"])
 def _token_logits_kernel(
     out_ptr,  # fp32 [num_logits, 2]
     target_ptr,  # [num_logits, num_cols]: owned processed target logits
@@ -273,7 +287,7 @@ def _token_logits_kernel(
     tl.store(out_ptr + i * 2 + 1, d, mask=m)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["n"])
 def _max_slots_kernel(
     out_ptr,  # fp32 [n]
     src_ptr,  # fp32 [WORLD, n]
@@ -317,7 +331,7 @@ def _okey(x):
 @triton.jit
 def _mass(x, mx):
     e = tl.exp2((x - mx) * 1.4426950408889634)
-    return (e * 1099511627776.0).to(tl.int64)  # 2^40, truncated
+    return (e * _TOPP_SCALE).to(tl.int64)  # truncated
 
 
 @triton.jit
@@ -646,7 +660,8 @@ def _topp_mask_kernel(
 class VocabShard:
     """This rank's owned vocabulary range, and the exchanges over the TP group.
 
-    All exchanges of one verification step must be issued between
+    Build it with `create`, which falls back (returns no shard) on every TP
+    rank alike. All exchanges of one verification step must be issued between
     `begin_step` and `end_step`, in the same order on every rank.
     """
 
@@ -656,12 +671,11 @@ class VocabShard:
         local_vocab_size: int,
         max_num_logits: int,
         max_num_reqs: int,
-        device: torch.device,
+        logits_dtype: torch.dtype,
         verify: bool = True,
     ):
-        """``verify=False``: only `owned_logits` is used (smaller buffer)."""
-        import torch.distributed._symmetric_memory as symm_mem
-
+        """``logits_dtype``: of the lm_head shards passed to `owned_logits`.
+        ``verify=False``: only `owned_logits` is used (smaller buffer)."""
         group = get_tp_group()
         self.group = group
         self.world = group.world_size
@@ -688,19 +702,24 @@ class VocabShard:
         self.num_send = max(0, left_end - self.tp_start) if self.rank > 0 else 0
         self.max_num_logits = max_num_logits
         self.max_num_reqs = max_num_reqs
-
-        # Words per buffer half: the largest step (bounded per region below).
-        n, w = max_num_logits, self.world
+        assert logits_dtype.itemsize in (2, 4)
+        self.logits_dtype = logits_dtype
+        # Words per row of the boundary-column exchange: every rank sizes it
+        # the same way, for the widest one (two 16-bit columns per word).
         sliver = max(
             max(
                 0,
-                vocab_shard_range(vocab_size, w, r)[1]
+                vocab_shard_range(vocab_size, self.world, r)[1]
                 - min(vocab_size, (r + 1) * local_vocab_size),
             )
-            for r in range(w)
+            for r in range(self.world)
         )
+        self.recv_words = max(1, triton.cdiv(sliver, 4 // logits_dtype.itemsize))
+
+        # Words per buffer half: the largest step (bounded per region below).
+        n, w = max_num_logits, self.world
         nsp = _tie_splits(n)
-        words = n * sliver  # owned columns from the right neighbour
+        words = n * self.recv_words  # owned columns from the right neighbour
         words += (
             0
             if not verify
@@ -716,20 +735,86 @@ class VocabShard:
             )
         )
         self.half_words = words + 64
-        self.buf = symm_mem.empty(2 * self.half_words, dtype=torch.int64, device=device)
-        self.buf.zero_()
-        self._handle = symm_mem.rendezvous(self.buf, group.device_group.group_name)
-        self.buf_ptrs = torch.tensor(
-            list(self._handle.buffer_ptrs), dtype=torch.int64, device=device
-        )
-        # Tags never match a zeroed word: the first epoch is 1.
-        self.epoch = torch.ones(1, dtype=torch.int32, device=device)
-        # Exchange timeouts (expected to stay 0).
-        self.errors = torch.zeros(1, dtype=torch.int32, device=device)
         self._offset = 0
         self._k = 0
+
+    @classmethod
+    def create(
+        cls,
+        vocab_size: int,
+        local_vocab_size: int,
+        max_num_logits: int,
+        max_num_reqs: int,
+        logits_dtype: torch.dtype,
+        device: torch.device,
+        verify: bool = True,
+    ) -> tuple[VocabShard | None, str | None]:
+        """The shard, or None and the reason it cannot run. Collective over the
+        TP group; every rank gets the same outcome."""
+        shard = cls(
+            vocab_size,
+            local_vocab_size,
+            max_num_logits,
+            max_num_reqs,
+            logits_dtype,
+            verify,
+        )
+        reason = shard._init_exchange(device)
+        return (None, reason) if reason is not None else (shard, None)
+
+    def _any_rank(self, failed: bool) -> bool:
+        flag = torch.tensor([int(failed)], dtype=torch.int64)
+        torch.distributed.all_reduce(
+            flag, op=torch.distributed.ReduceOp.MAX, group=self.group.cpu_group
+        )
+        return bool(flag.item())
+
+    def _init_exchange(self, device: torch.device) -> str | None:
+        """Allocate the exchange buffer in symmetric memory, or return why that
+        failed on some TP rank."""
+        error: Exception | None = None
+        try:
+            import torch.distributed._symmetric_memory as symm_mem
+
+            buf = symm_mem.empty(2 * self.half_words, dtype=torch.int64, device=device)
+        except Exception as e:  # e.g. no symmetric memory on this platform
+            error = e
+        if not self._any_rank(error is not None):
+            # Collective; agreed on above so that no rank waits for a peer
+            # that failed to allocate.
+            try:
+                handle = symm_mem.rendezvous(buf, self.group.device_group.group_name)
+            except Exception as e:  # e.g. the peers are not P2P reachable
+                error = e
+        if self._any_rank(error is not None):
+            return f"symmetric memory is unavailable ({error or 'on a peer rank'})"
+
+        self.buf = buf
+        self.buf.zero_()  # a zeroed word matches no tag
+        self._handle = handle
+        self.buf_ptrs = torch.tensor(
+            list(handle.buffer_ptrs), dtype=torch.int64, device=device
+        )
+        # Device-side step counter: tags must change on every graph replay.
+        self.epoch = torch.zeros(1, dtype=torch.int64, device=device)
+        # Exchange timeouts, copied to the host after every step.
+        self.errors = torch.zeros(1, dtype=torch.int32, device=device)
+        self._errors_host = torch.zeros(
+            1, dtype=torch.int32, device="cpu", pin_memory=True
+        )
         torch.accelerator.synchronize()
-        torch.distributed.barrier(group=group.cpu_group)
+        torch.distributed.barrier(group=self.group.cpu_group)
+        return None
+
+    def check_exchange(self) -> None:
+        """Raise if an exchange of an earlier step timed out waiting for a
+        peer. Reads the host copy, so it does not synchronize."""
+        if self._errors_host.item():
+            raise RuntimeError(
+                "Vocab-sharded verification timed out waiting for a TP peer; "
+                "the tokens of that step are invalid. Disable "
+                "speculative_config.vocab_sharded_verification if this recurs."
+            )
 
     # -- step bookkeeping ----------------------------------------------------
 
@@ -739,6 +824,7 @@ class VocabShard:
 
     def end_step(self) -> None:
         self.epoch.add_(1)
+        self._errors_host.copy_(self.errors, non_blocking=True)
 
     def _region(self, words: int, reuse: int | None = None) -> tuple[int, int]:
         """A region of this step (fresh, or ``reuse``) and a fresh tag.
@@ -748,19 +834,18 @@ class VocabShard:
         ranks, i.e. after all of them pushed it, i.e. after they were done with
         the exchange before it."""
         k = self._k
-        assert k < _TAGS_PER_STEP
+        if k >= _TAGS_PER_STEP:
+            raise RuntimeError("too many vocab shard exchanges in one step")
         self._k += 1
         if reuse is not None:
             return reuse, k
-        off = self._offset
-        assert off + words <= self.half_words, "vocab shard exchange buffer overflow"
-        self._offset += words
-        return off, k
+        return self.reserve(words), k
 
     def reserve(self, words: int) -> int:
         """A region of this step for `allgather_slots(reuse=...)`."""
         off = self._offset
-        assert off + words <= self.half_words, "vocab shard exchange buffer overflow"
+        if off + words > self.half_words:
+            raise RuntimeError("vocab shard exchange buffer overflow")
         self._offset += words
         return off
 
@@ -864,25 +949,13 @@ class VocabShard:
         TP shards are ``local_logits`` ([rows, local_vocab_size]), as ``dtype``
         (the values are exact in fp32 or the logits' own dtype)."""
         assert local_logits.shape[1] == self.local_vocab_size
+        assert local_logits.dtype == self.logits_dtype
+        assert local_logits.stride(1) == 1
         rows = local_logits.shape[0]
-        esize = local_logits.element_size()
-        assert esize in (2, 4) and local_logits.stride(1) == 1
-        pack = 4 // esize
-        # Every rank sizes the region the same way: the widest exchange.
-        region_cols = (
-            max(
-                triton.cdiv(
-                    max(
-                        0,
-                        vocab_shard_range(self.vocab_size, self.world, r)[1]
-                        - min(self.vocab_size, (r + 1) * self.local_vocab_size),
-                    ),
-                    pack,
-                )
-                for r in range(self.world)
-            )
-            or 1
-        )
+        if rows > self.max_num_logits:
+            raise RuntimeError("too many rows for the vocab shard exchange")
+        pack = 4 // local_logits.element_size()
+        region_cols = self.recv_words
         region, k = self._region(rows * region_cols)
         if self.num_send > 0:
             src = local_logits
@@ -905,7 +978,8 @@ class VocabShard:
         out = torch.empty(rows, self.num_cols, dtype=dtype, device=local_logits.device)
         if rows > 0:
             num_local = self.num_cols - self.num_recv
-            _owned_logits_kernel[(rows, triton.cdiv(self.num_cols, 1024))](
+            grid = (rows, triton.cdiv(self.num_cols + num_local % pack, 1024))
+            _owned_logits_kernel[grid](
                 out,
                 out.stride(0),
                 local_logits,
