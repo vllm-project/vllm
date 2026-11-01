@@ -209,10 +209,13 @@ class Nemotron3DiarizationForAudioFrameClassification(
         # Transformers computes the RoPE frequencies on the CPU. Computing them on
         # the GPU, where the model is built, shifts the logits by up to ~2e-3.
         rotary_emb = self.model.model.audio_tower.rotary_emb
-        with torch.device("cpu"):
-            inv_freq, _ = rotary_emb.compute_default_rope_parameters(rotary_emb.config)
-        rotary_emb.inv_freq.copy_(inv_freq)
-        rotary_emb.original_inv_freq.copy_(inv_freq)
+        if rotary_emb.rope_type == "default":
+            with torch.device("cpu"):
+                inv_freq, _ = rotary_emb.compute_default_rope_parameters(
+                    rotary_emb.config
+                )
+            rotary_emb.inv_freq.copy_(inv_freq)
+            rotary_emb.original_inv_freq.copy_(inv_freq)
 
         self.pooler = Nemotron3DiarizationPooler()
 
@@ -238,6 +241,7 @@ class Nemotron3DiarizationForAudioFrameClassification(
     ) -> torch.Tensor:
         if input_features is None:
             # No recording in this step: the output still needs a batch dimension
+            self.pooler.num_frames = None
             return positions.new_zeros(
                 (positions.shape[0], 0, self.num_speakers), dtype=self.model.dtype
             )

@@ -37,6 +37,20 @@ def test_out_of_vocab_token_skip_tokenizer_init(vllm_runner):
         runner.llm.generate({"prompt_token_ids": [999999]})
 
 
+def test_raw_input_only_model_requires_mm_data(vllm_runner):
+    # A prompt without multimodal data would give such a model nothing to run on,
+    # so it must be rejected before it reaches the engine.
+    with (
+        vllm_runner(
+            "nvidia/Nemotron-3-Diarization",
+            runner="pooling",
+            skip_tokenizer_init=True,
+        ) as runner,
+        pytest.raises(VLLMValidationError, match="must include `multi_modal_data`"),
+    ):
+        runner.llm.encode({"prompt_token_ids": [0]}, pooling_task="plugin")
+
+
 def test_require_mm_embeds(vllm_runner):
     with (
         vllm_runner(

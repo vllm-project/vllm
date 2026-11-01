@@ -519,6 +519,10 @@ segments = processor.extract_speaker_dict(output.outputs.data[None])[0]
 # [{'Start': <seconds>, 'End': <seconds>, 'Speaker': <index>}, ...]
 ```
 
+A step runs up to `max_num_seqs` recordings, and the features of all of them sit
+on the GPU together: about 200 MB per hour of audio in fp32. For long recordings,
+lower `max_num_seqs` to bound this memory.
+
 Streaming sessions, which carry the speaker cache from one request to the next,
 and the online Pooling API are not supported yet. See
 [examples/pooling/plugin/nemotron3_diarization_offline.py](../../../examples/pooling/plugin/nemotron3_diarization_offline.py)

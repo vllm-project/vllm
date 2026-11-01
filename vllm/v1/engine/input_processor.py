@@ -670,4 +670,14 @@ class InputProcessor:
         if encoder_input is not None:
             self._validate_model_input(encoder_input, prompt_type="encoder")
 
+        if (
+            self.model_config.is_multimodal_raw_input_only_model
+            and decoder_input["type"] != "multimodal"
+        ):
+            raise VLLMValidationError(
+                "This model reads only its multimodal input, so the prompt "
+                "must include `multi_modal_data`.",
+                parameter="multi_modal_data",
+            )
+
         self._validate_model_input(decoder_input, prompt_type="decoder")
