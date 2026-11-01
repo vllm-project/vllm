@@ -84,9 +84,8 @@ class MarlinLinearKernel(MPLinearKernel):
 
         if c.act_type == torch.float8_e4m3fn:
             ops.marlin_int4_fp8_preprocess(getattr(layer, self.w_q_name), inplace=True)
-            getattr(layer, self.w_s_name).data = (
-                getattr(layer, self.w_s_name).data * 512
-            )
+            # in place: a new tensor would move the scales on a direct reload
+            getattr(layer, self.w_s_name).data.mul_(512)
 
         size_k, size_n = c.partition_weight_shape
         padded_n, padded_k = marlin_padded_nk(size_n, size_k, c.group_size)
@@ -135,10 +134,7 @@ class MarlinLinearKernel(MPLinearKernel):
 
             if c.act_type == torch.int8 and num_groups > 1:
                 x.data, input_global_scale = marlin_act_int8_process_scales(x.data)
-                layer.register_parameter(
-                    "input_global_scale",
-                    torch.nn.Parameter(input_global_scale, requires_grad=False),
-                )
+                replace_parameter(layer, "input_global_scale", input_global_scale)
             else:
                 layer.input_global_scale = None
             return x
