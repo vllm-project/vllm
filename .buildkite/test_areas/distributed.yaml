@@ -81,6 +81,23 @@ steps:
       - pytest -v -s distributed/test_sharded_rdt_producer.py
       - pytest -v -s distributed/test_sharded_rdt_trainer.py
 
+- label: ":nvidia: (L4) Ray DP Single Rank"
+  key: ray-dp-single-rank
+  timeout_in_minutes: 20
+  working_dir: "/vllm-workspace/tests"
+  device: l4
+  num_devices: 1
+  source_file_dependencies:
+  - vllm/config/
+  - vllm/engine/
+  - vllm/entrypoints/
+  - vllm/v1/engine/
+  - vllm/v1/executor/
+  - tests/utils.py
+  - tests/v1/distributed/test_ray_dp.py
+  commands:
+  - pytest -v -s v1/distributed/test_ray_dp.py
+
 - label: ":nvidia: (L4) Distributed DP Basic"
   key: distributed-dp-tests-2-gpus
   automatic_shard: true
