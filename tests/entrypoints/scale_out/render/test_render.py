@@ -9,10 +9,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
+import numpy as np
 import orjson
 import pytest
 import pytest_asyncio
 from fastapi.responses import JSONResponse
+from PIL import Image
 
 from tests.utils import RemoteLaunchRenderServer
 from vllm.entrypoints.anthropic.protocol import (
@@ -35,6 +37,7 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
 )
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import create_json_response
+from vllm.multimodal.utils import encode_image_url, encode_video_url
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import SamplingParams
 
@@ -1081,3 +1084,66 @@ async def test_tokenize_matches_chat_render_for_gpt_oss(gpt_oss_server):
 
     assert render.status_code == tokenize.status_code == 200
     assert tokenize.json()["tokens"] == render.json()["token_ids"]
+
+
+_IMAGE_PART = {
+    "type": "image_url",
+    "image_url": {"url": encode_image_url(Image.new("RGB", (224, 224)))},
+}
+_VIDEO_PART = {
+    "type": "video_url",
+    "video_url": {"url": encode_video_url(np.zeros((8, 224, 224, 3), dtype=np.uint8))},
+}
+
+
+def _render_mm_payloads(
+    remote_server: RemoteLaunchRenderServer,
+    model: str,
+    content: list[dict],
+) -> dict[str, httpx.Response]:
+    return {
+        mm_payload: httpx.post(
+            remote_server.url_for("v1/chat/completions/render"),
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": content}],
+                "mm_payload": mm_payload,
+            },
+            timeout=120,
+        )
+        for mm_payload in ("tensors", "metadata", "none")
+    }
+
+
+@pytest.mark.parametrize("content", [[_IMAGE_PART], [_IMAGE_PART, _VIDEO_PART]])
+def test_chat_render_metadata_payload_omits_tensors_only(content):
+    model = "Qwen/Qwen2-VL-2B-Instruct"
+    with RemoteLaunchRenderServer(model, []) as remote_server:
+        responses = _render_mm_payloads(remote_server, model, content)
+
+    assert {r.status_code for r in responses.values()} == {HTTPStatus.OK}
+    tensors = responses["tensors"].json()
+    metadata = responses["metadata"].json()
+    assert metadata["token_ids"] == tensors["token_ids"]
+    assert metadata["features"]["kwargs_data"] is None
+    assert metadata["features"]["mm_metadata"] is not None
+    for key in ("mm_hashes", "mm_placeholders", "mm_metadata"):
+        assert metadata["features"][key] == tensors["features"][key]
+    assert responses["none"].json()["features"]["mm_metadata"] is None
+
+
+def test_chat_render_modality_without_metadata_nulls_mm_metadata():
+    """LLaVA-OneVision has `keep_on_cpu` image fields but none for video."""
+    model = "llava-hf/llava-onevision-qwen2-7b-ov-hf"
+    with RemoteLaunchRenderServer(model, []) as remote_server:
+        responses = _render_mm_payloads(
+            remote_server, model, [_IMAGE_PART, _VIDEO_PART]
+        )
+
+    assert {r.status_code for r in responses.values()} == {HTTPStatus.OK}
+    assert set(responses["tensors"].json()["features"]["kwargs_data"]) == {
+        "image",
+        "video",
+    }
+    for response in responses.values():
+        assert response.json()["features"]["mm_metadata"] is None
