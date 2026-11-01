@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import re
 from collections.abc import Callable, Iterable
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, cast, overload
@@ -60,6 +61,24 @@ def _index_expert_mapping(
         if expert_key.isdecimal():
             mapping_by_expert.setdefault(expert_key, []).append(entry)
     return mapping_by_expert
+
+
+_PER_EXPERT_GATE_UP = re.compile(r"(?:^|\.)\d+\.gate_up_proj\.")
+
+
+def _unstack_per_expert_gate_up(name: str, tensor: torch.Tensor) -> str:
+    """Restore ``gate_proj``/``up_proj`` for a per-expert half-tensor.
+
+    Model mappers with ``orig_to_new_stacked`` (e.g. ``LlamaModel``) rename
+    ``experts.E.gate_proj``/``up_proj`` to ``experts.E.gate_up_proj`` and tag
+    the tensor with ``shard_id`` 0/1. A per-expert ``gate_up_proj`` is then
+    read as a fused [gate; up] block and chunked in half, so ``up`` silently
+    overwrites ``gate``. Genuine fused checkpoint tensors carry no shard_id.
+    """
+    shard_id = getattr(tensor, "shard_id", None)
+    if shard_id not in (0, 1) or not _PER_EXPERT_GATE_UP.search(name):
+        return name
+    return name.replace("gate_up_proj", ("gate_proj", "up_proj")[shard_id], 1)
 
 
 class FusedMoeWeightScaleSupported(Enum):
@@ -1008,6 +1027,7 @@ class RoutedExperts(PluggableLayer):
         mapping_by_expert = _index_expert_mapping(expert_mapping)
 
         for expert_name, loaded_weight in weights:
+            expert_name = _unstack_per_expert_gate_up(expert_name, loaded_weight)
             qual_name = f"{self.layer_name}.{expert_name}"
             expert_key = qual_name.partition("experts.")[2].partition(".")[0]
             named_expert = (
