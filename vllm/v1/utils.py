@@ -23,7 +23,11 @@ from typing import (
 )
 
 import torch
-import uvloop
+
+try:
+    import uvloop
+except ImportError:
+    import asyncio as uvloop
 from torch.autograd.profiler import record_function
 
 import vllm.envs as envs
