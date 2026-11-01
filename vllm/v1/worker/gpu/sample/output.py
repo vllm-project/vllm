@@ -9,6 +9,7 @@ from typing import NamedTuple
 import numpy as np
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors, SamplingMaskLists
 
@@ -99,6 +100,36 @@ class SamplingMaskTensors(NamedTuple):
 
     @classmethod
     def from_logits(
+        cls,
+        logits: torch.Tensor,
+        cu_num_logits: torch.Tensor,
+        num_sampled_tokens: torch.Tensor,
+        max_num_kept: int,
+        rows_per_request: int = 1,
+    ) -> SamplingMaskTensors:
+        """Capture the finite-logit support of every row with a sampled token."""
+        if current_platform.is_xpu():
+            _, vocab_size = logits.shape
+            token_ids, packed_mask, counts = torch.ops._xpu_C.compact_sampling_mask(
+                logits,
+                cu_num_logits,
+                num_sampled_tokens,
+                max_num_kept,
+                MAX_COMPACT_SUPPORT,
+                rows_per_request,
+            )
+            return cls(token_ids, packed_mask, counts, vocab_size, rows_per_request)
+        else:
+            return cls._from_logits_triton(
+                logits,
+                cu_num_logits,
+                num_sampled_tokens,
+                max_num_kept,
+                rows_per_request,
+            )
+
+    @classmethod
+    def _from_logits_triton(
         cls,
         logits: torch.Tensor,
         cu_num_logits: torch.Tensor,
