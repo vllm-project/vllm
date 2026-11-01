@@ -120,6 +120,8 @@ class Fp8DequantWeightParameter(ModelWeightParameter):
     def dequantize(self, scale_inv: torch.Tensor, block_size: list[int]) -> None:
         """Dequantize the FP8 rows in place. Every row then holds runtime
         bytes, so a later reload that leaves this weight out keeps them."""
+        if not self.fp8_rows.any():  # host flags: no device sync
+            return
         runtime = self.data
         fp8 = self.fp8_view().view(torch.uint8)
         block_n, block_k = block_size
@@ -271,7 +273,7 @@ class Fp8DequantLinearMethod(UnquantizedLinearMethod):
             self.weight_block_size,
             weight_loader,
         )
-        # never loaded: `dequantize` rejects FP8 rows whose scale is missing
+        # until loaded: `dequantize` rejects FP8 rows whose scale is missing
         scale.data.fill_(FP8_SCALE_SENTINEL)
         if self.any_scale_layout:
             # the sparse-attention indexer's fused wk_weights_proj
@@ -287,6 +289,9 @@ class Fp8DequantLinearMethod(UnquantizedLinearMethod):
         # pre-processed weights (weight cache) are runtime BF16 already
         if not is_weights_pre_processed():
             layer.weight.dequantize(layer.weight_scale_inv, self.weight_block_size)
+            # in place, for the next direct reload: FP8 rows it sends without
+            # their scale are rejected, not dequantized with this one
+            layer.weight_scale_inv.data.fill_(FP8_SCALE_SENTINEL)
         retire_parameter(layer, "weight_scale_inv")
         super().process_weights_after_loading(layer)
 

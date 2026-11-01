@@ -816,8 +816,10 @@ class _Fp8RowScalesLinearMethod(Fp8LinearMethod):
 def _process_row_scales(layer: nn.Module) -> None:
     """Turn a fused qkv_proj's row scales into block scales in place (see
     `_Fp8RowScalesLinearMethod`)."""
-    # set by the scale's loader; None: no scale was loaded (dummy weights)
+    # set by `_load_fused_fp8_qkv`; requantize None: no scale loaded (dummy weights)
     requantize = layer.__dict__.pop("requantize_rows", None)
+    if layer.__dict__.pop("fp8_weight_loaded", False) and requantize is None:
+        raise ValueError("FP8 weight rows were loaded without their weight_scale_inv")
     row_scales = layer.weight_scale_inv
     block = layer.weight_block_size[0]
     if requantize is None:
@@ -878,8 +880,10 @@ def _load_fused_fp8_qkv(
                 "of [Q | K | V] rows."
             )
         tensor = _gather_rows(tensor, rows)
-    else:
         # loader state for PWAL (RFC #64418 sec. 5 rule 3 exception): load, never copy
+        layer.fp8_weight_loaded = True
+    else:
+        # loader state for PWAL, as above
         tensor, layer.requantize_rows = _fused_qkv_row_scales(
             tensor, *geometry, rows, tp_size, ckpt_tp, block, kv_chunk_rows
         )

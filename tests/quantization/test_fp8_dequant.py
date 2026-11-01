@@ -265,6 +265,19 @@ def test_direct_reload_equals_cold_start(monkeypatch, model_config, update):
     assert _ptrs(model) == ptrs
 
 
+def test_direct_reload_rejects_fp8_rows_without_scale(monkeypatch, model_config):
+    """FP8 rows a reload sends without their scale are not dequantized with
+    the previous load's scale."""
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
+    model = _cold_start(_checkpoint(7), model_config)
+    new = _checkpoint(8)
+    del new["qkv_a.1.weight_scale_inv"]
+    begin_direct_reload(model)
+    model.load_weights(new.items())
+    with pytest.raises(ValueError, match="without their weight_scale_inv"):
+        finish_direct_reload(model, model_config, _DEVICE)
+
+
 @pytest.mark.parametrize("update", ["fp8", "mixed", "bf16"])
 def test_layerwise_reload_equals_cold_start(model_config, update):
     """Every element is loaded, BF16 rows' scales included, so each layer is

@@ -447,16 +447,9 @@ def test_wrong_chunk_count_is_detected():
     assert _relative_l2(_dequantize(*wrong), expected) > 5 * TOL
 
 
-def test_load_weights_pairs_split_fp8_qkv_proj_and_skips_absent_layers(monkeypatch):
-    """Through ``MiMoV2Model.load_weights``: a layer's fused fp8 ``qkv_proj``
-    weight and scale arriving in separate calls still load; the pair for a
-    layer the instance does not have (checkpoint deeper than
-    ``num_hidden_layers``) is skipped."""
-    from vllm.model_executor.models import mimo_v2
-
-    monkeypatch.setattr(mimo_v2, "get_tensor_model_parallel_rank", lambda: 0)
-    monkeypatch.setattr(mimo_v2, "get_tensor_model_parallel_world_size", lambda: 1)
-
+def _tp1_checkpoint_and_attn():
+    """A fused fp8 qkv_proj checkpoint and a TP-1 attention module (CPU,
+    without a quant method) holding its rows and row scales."""
     num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp = GEOMETRIES["ga"]
     rows_per_chunk = _chunk_rows(num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp)
     truth = torch.randn(ckpt_tp * rows_per_chunk, COLS)
@@ -477,6 +470,21 @@ def test_load_weights_pairs_split_fp8_qkv_proj_and_skips_absent_layers(monkeypat
     attn.qkv_proj.weight_scale_inv = torch.nn.Parameter(
         torch.empty(rows, scale.shape[1]), requires_grad=False
     )
+    return truth, weight, scale, attn
+
+
+def test_load_weights_pairs_split_fp8_qkv_proj_and_skips_absent_layers(monkeypatch):
+    """Through ``MiMoV2Model.load_weights``: a layer's fused fp8 ``qkv_proj``
+    weight and scale arriving in separate calls still load; the pair for a
+    layer the instance does not have (checkpoint deeper than
+    ``num_hidden_layers``) is skipped."""
+    from vllm.model_executor.models import mimo_v2
+
+    monkeypatch.setattr(mimo_v2, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(mimo_v2, "get_tensor_model_parallel_world_size", lambda: 1)
+
+    truth, weight, scale, attn = _tp1_checkpoint_and_attn()
+    num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp = GEOMETRIES["ga"]
     layer = torch.nn.Module()
     layer.self_attn = attn
 
@@ -506,6 +514,21 @@ def test_load_weights_pairs_split_fp8_qkv_proj_and_skips_absent_layers(monkeypat
     )
     got = _dequantize(attn.qkv_proj.weight.data, attn.qkv_proj.weight_scale_inv.data)
     assert _relative_l2(got, expected) <= TOL
+
+
+@pytest.mark.parametrize("loaded", ["weight", "nothing"])
+def test_missing_scale_is_rejected(loaded):
+    """An fp8 weight loaded without its scale is not processed with whatever
+    the row scales hold; with neither loaded (dummy weights) it is."""
+    from vllm.model_executor.models.mimo_v2 import _load_fused_fp8_qkv
+
+    _, weight, _, attn = _tp1_checkpoint_and_attn()
+    if loaded == "weight":
+        _load_fused_fp8_qkv(attn, "weight", weight, 0, 1, GEOMETRIES["ga"][4])
+        with pytest.raises(ValueError, match="without their weight_scale_inv"):
+            _process_row_scales(attn.qkv_proj)
+    else:
+        _process_row_scales(attn.qkv_proj)
 
 
 @pytest.mark.parametrize("tp_size", [4, 8])
@@ -708,3 +731,14 @@ def test_reload_equals_cold_start(monkeypatch, model_config, geometry, tp_size, 
         model, _cold_start(geometry, tp_rank, tp_size, new, model_config)
     )
     assert {n: p.data_ptr() for n, p in model.named_parameters()} == ptrs
+
+
+@requires_gpu
+def test_direct_reload_rejects_weight_without_scale(monkeypatch, model_config):
+    """The previous load's scales are not reused for a new fp8 weight."""
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
+    model = _cold_start("ga", 1, 2, _fused_qkv_checkpoint("ga", 3), model_config)
+    start_reload(model)
+    model.load_weights([("weight", _fused_qkv_checkpoint("ga", 4)["weight"])])
+    with pytest.raises(ValueError, match="without their weight_scale_inv"):
+        finish_reload(model, model_config, torch.device("cuda"))
