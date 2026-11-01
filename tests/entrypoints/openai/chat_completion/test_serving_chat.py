@@ -718,6 +718,28 @@ async def _collect_metrics_stream_chunks(
     return chunks
 
 
+def test_chat_logprobs_dropped_when_misaligned():
+    """With fewer logprob positions than tokens the alignment is unknown, so the
+    output gets no logprobs instead of an IndexError or misattributed values."""
+    serving = OpenAIServingChat.__new__(OpenAIServingChat)
+    serving.return_tokens_as_token_ids = False
+    tokenizer = MagicMock()
+    tokenizer.decode.return_value = "t"
+
+    # Token 11's row is missing, so token 11 would line up with token 12's row.
+    logprobs = serving._create_chat_logprobs(
+        token_ids=[10, 11, 12],
+        top_logprobs=[
+            {10: Logprob(logprob=-0.1, decoded_token="a")},
+            {12: Logprob(logprob=-0.3), 11: Logprob(logprob=-2.0)},
+        ],
+        tokenizer=tokenizer,
+    )
+
+    assert logprobs.content is not None
+    assert [entry.logprob for entry in logprobs.content] == [-9999.0] * 3
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("raw", [False, True])
 async def test_streaming_chunks_keep_usage_and_metadata(raw):
