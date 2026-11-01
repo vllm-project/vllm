@@ -861,11 +861,19 @@ async def test_text_mode_rejected_when_tokens_only(client):
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(
-    envs.VLLM_USE_RUST_FRONTEND,
-    reason="the Rust frontend does not serve /inference/v1/abort_requests",
+@pytest.mark.parametrize(
+    "output_mode",
+    [
+        "tokens",
+        pytest.param(
+            "text",
+            marks=pytest.mark.skipif(
+                envs.VLLM_USE_RUST_FRONTEND,
+                reason="output_mode=text is not supported by the Rust frontend",
+            ),
+        ),
+    ],
 )
-@pytest.mark.parametrize("output_mode", ["tokens", "text"])
 async def test_stream_delivers_abort_finish_chunk(
     client, tokenizer, messages, output_mode
 ):
@@ -900,7 +908,9 @@ async def test_stream_delivers_abort_finish_chunk(
                 aborted = True
 
     assert aborted
-    assert {chunk["output_mode"] for chunk in chunks} == {output_mode}
+    # Rust's token-only stream does not serialize output_mode.
+    if not envs.VLLM_USE_RUST_FRONTEND:
+        assert {chunk["output_mode"] for chunk in chunks} == {output_mode}
     final_choice = chunks[-1]["choices"][0]
     assert final_choice["finish_reason"] == "abort"
     generated = sum(len(chunk["choices"][0]["token_ids"] or []) for chunk in chunks)
@@ -908,10 +918,6 @@ async def test_stream_delivers_abort_finish_chunk(
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(
-    envs.VLLM_USE_RUST_FRONTEND,
-    reason="the Rust frontend does not serve /inference/v1/abort_requests",
-)
 async def test_abort_requests_is_served_without_tokens_only(client):
     resp = await client.post(
         ABORT_ENDPOINT, json={"request_ids": ["generate-tokens-unknown"]}
