@@ -34,6 +34,22 @@ steps:
       depends_on:
       - image-build-amd
 
+- label: ":nvidia: (B200) V1 Spec Decode DSpark TP Markov"
+  key: v1-spec-decode-dspark-tp-markov-2xb200
+  timeout_in_minutes: 20
+  device: b200-k8s
+  num_devices: 2
+  source_file_dependencies:
+    - vllm/v1/worker/gpu/spec_decode/dspark/
+    - vllm/v1/worker/gpu/sample/gumbel.py
+    - vllm/model_executor/layers/logits_processor.py
+    - vllm/model_executor/layers/vocab_parallel_embedding.py
+    - vllm/model_executor/models/qwen3_dspark.py
+    - tests/v1/spec_decode/test_dspark_tp_markov.py
+  commands:
+    # Vocab-parallel Markov sampling needs TP >= 2 over symmetric memory.
+    - pytest -v -s v1/spec_decode/test_dspark_tp_markov.py
+
 - label: ":nvidia: (H200 MIG 35GB) Spec Decode Eagle 1: DeepSeek + Qwen"
   key: spec-decode-eagle-1-deepseek-qwen
   automatic_shard: true
