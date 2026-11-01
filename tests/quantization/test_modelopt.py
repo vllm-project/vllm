@@ -55,6 +55,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import get_quant_config
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 
 @pytest.fixture(scope="function", autouse=True)
@@ -1562,7 +1563,8 @@ def test_modelopt_block_quant_dense_loading_preserves_whole_blocks(
             }
         }
     )
-    method = config.get_quant_method(MagicMock(spec=LinearBase), prefix)
+    with set_default_torch_dtype(torch.bfloat16):
+        method = config.get_quant_method(MagicMock(spec=LinearBase), prefix)
     assert isinstance(method, ModelOptBlockQuantLinearMethod)
     layer = torch.nn.Module()
     n, k = (128, 256) if parallel == "row" else (64, 512)
@@ -1680,3 +1682,255 @@ def test_modelopt_block_quant_loads_expert_blocks_with_aligned_tp_slices(
             "w2",
             0,
         )
+
+
+_requires_sm80 = pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.has_device_capability(80)),
+    reason="Triton block kernels need NVIDIA SM80+",
+)
+
+
+@_requires_sm80
+@pytest.mark.parametrize(
+    "b12x,backend,codec,dtype,expected",
+    [
+        (True, "auto", "iq2_xxs", torch.bfloat16, "b12x"),
+        (True, "triton", "iq2_xxs", torch.bfloat16, "triton"),
+        (True, "auto", "iq2_xxs", torch.float16, "triton"),
+        (True, "b12x", "q8_0", torch.float16, "error"),
+        (False, "auto", "iq2_xxs", torch.bfloat16, "triton"),
+        (False, "auto", "q8_0", torch.float16, "triton"),
+        (False, "triton", "q8_0", torch.bfloat16, "triton"),
+        (False, "auto", "q8_0", torch.float32, "error"),
+        (False, "b12x", "iq2_xxs", torch.bfloat16, "error"),
+        (False, "marlin", "iq2_xxs", torch.bfloat16, "error"),
+        (False, "auto", "iq2_xs", torch.bfloat16, "error"),
+    ],
+)
+def test_modelopt_block_quant_backend_selection(
+    monkeypatch, b12x, backend, codec, dtype, expected
+):
+    """b12x stays the SM12x BF16 default; elsewhere IQ2_XXS / Q8_0 take Triton,
+    and unsupported requests fail at construction."""
+    import vllm.utils.b12x as b12x_utils
+    from vllm.config import KernelConfig
+    from vllm.model_executor.layers.fused_moe.b12x import B12xExperts
+    from vllm.model_executor.layers.quantization.modelopt_block_quant import (
+        ModelOptBlockQuantLinearMethod,
+        ModelOptBlockQuantMoEMethod,
+    )
+
+    monkeypatch.setattr(B12xExperts, "_supports_current_device", lambda: b12x)
+    monkeypatch.setattr(
+        b12x_utils,
+        "get_b12x_blockscaled",
+        lambda: (
+            SimpleNamespace(BlockQuantLinearWeight=object, is_supported=lambda: True)
+            if b12x
+            else None
+        ),
+    )
+    moe_config = _iq2_xs_moe_config()
+    moe_config.moe_backend = backend
+    moe_config.in_dtype = dtype
+    builders = (
+        lambda: ModelOptBlockQuantMoEMethod(moe_config, codec=codec),
+        lambda: ModelOptBlockQuantLinearMethod(codec),
+    )
+    vllm_config = VllmConfig(kernel_config=KernelConfig(linear_backend=backend))
+    with set_current_vllm_config(vllm_config), set_default_torch_dtype(dtype):
+        for build in builders:
+            if expected == "error":
+                with pytest.raises(ValueError, match=f"ModelOpt {codec.upper()}"):
+                    build()
+            else:
+                assert build().use_triton == (expected == "triton")
+
+
+def _make_tiny_modelopt_block_model(tmp_path):
+    def recipe(codec):
+        return {
+            "quant_algo": codec.upper(),
+            "group_size": 256 if codec == "iq2_xxs" else 32,
+            "block_payload_bytes": 66 if codec == "iq2_xxs" else 34,
+            "packing": "ggml",
+        }
+
+    mixer = "model.layers.2.mixer"
+    layers = {
+        f"model.layers.1.mixer.{p}": recipe("iq2_xxs")
+        for p in ("q_proj", "k_proj", "v_proj", "o_proj")
+    }
+    layers[f"{mixer}.experts"] = recipe("iq2_xxs")
+    for p in ("shared_experts.up_proj", "shared_experts.down_proj"):
+        layers[f"{mixer}.{p}"] = recipe("q8_0")
+    for p in ("fc1_latent_proj", "fc2_latent_proj"):
+        layers[f"{mixer}.{p}"] = recipe("q8_0")
+    layers["lm_head"] = recipe("q8_0")
+    layers["model.embed_tokens"] = recipe("q8_0")
+    config = {
+        "architectures": ["NemotronHForCausalLM"],
+        "model_type": "nemotron_h",
+        "torch_dtype": "bfloat16",
+        "vocab_size": 4096,
+        "hidden_size": 4096,
+        "hybrid_override_pattern": "M*E",
+        "num_hidden_layers": 3,
+        "num_attention_heads": 32,
+        "num_key_value_heads": 2,
+        "head_dim": 128,
+        "max_position_embeddings": 4096,
+        "intermediate_size": 8192,
+        "mamba_num_heads": 64,
+        "mamba_head_dim": 64,
+        "ssm_state_size": 64,
+        "n_groups": 1,
+        "conv_kernel": 4,
+        "chunk_size": 128,
+        "expand": 1,
+        "mamba_hidden_act": "silu",
+        "use_conv_bias": True,
+        "use_bias": False,
+        "mlp_bias": False,
+        "mlp_hidden_act": "relu2",
+        "layer_norm_epsilon": 1e-5,
+        "n_routed_experts": 16,
+        "num_experts_per_tok": 4,
+        "moe_intermediate_size": 1024,
+        "n_shared_experts": 1,
+        "moe_shared_expert_intermediate_size": 2048,
+        "moe_latent_size": 1024,
+        "routed_scaling_factor": 2.5,
+        "n_group": 1,
+        "topk_group": 1,
+        "norm_topk_prob": True,
+        "tie_word_embeddings": False,
+        "eos_token_id": 2,
+        "bos_token_id": 1,
+        "pad_token_id": 0,
+        "quantization_config": {
+            "quant_method": "modelopt",
+            "quant_algo": "MIXED_PRECISION",
+            "kv_cache_quant_algo": None,
+            "ignore": [],
+            "quantized_layers": layers,
+        },
+    }
+    (tmp_path / "config.json").write_text(json.dumps(config))
+
+    def finite_scales(model):
+        """Dummy loading gives random fp16 block scales; make them small."""
+        with torch.no_grad():
+            for name, p in model.named_parameters():
+                if name.endswith("weight_scale"):
+                    g = torch.Generator(device=p.device).manual_seed(len(name))
+                    p.copy_(torch.rand(p.shape, device=p.device, generator=g) * 1e-3)
+                    p.add_(2e-4)
+            from vllm.model_executor.layers.quantization import (
+                modelopt_block_quant_triton as block_kernels,
+            )
+
+            for module in model.modules():
+                if getattr(module, "weight_bf16", None) is not None:
+                    module.weight_bf16.copy_(
+                        block_kernels.dequantize_blocks(
+                            module.weight,
+                            module.weight_scale,
+                            module.iq2_lut,
+                            module.quant_method.codec,
+                        )
+                    )
+        return sum(
+            getattr(m.quant_method, "use_triton", False)
+            for m in model.modules()
+            if hasattr(m, "quant_method")
+        )
+
+    return finite_scales
+
+
+@_requires_sm80
+@pytest.mark.parametrize("dtype", ["bfloat16", "half"])
+def test_modelopt_block_triton_tiny_nemotron_h(tmp_path, vllm_runner, dtype):
+    """Compiled and eager block-quantized Nemotron-H agree in logprobs."""
+    from tests.models.utils import check_logprobs_close
+    from vllm import SamplingParams
+
+    finite_scales = _make_tiny_modelopt_block_model(tmp_path)
+    prompts = [list(range(3 + i, 40 + 7 * i)) for i in range(3)]
+    params = SamplingParams(temperature=0, max_tokens=12, logprobs=5, ignore_eos=True)
+    outputs = []
+    for compiled in (False, True):
+        with vllm_runner(
+            str(tmp_path),
+            load_format="dummy",
+            dtype=dtype,
+            skip_tokenizer_init=True,
+            max_model_len=256,
+            max_num_seqs=4,
+            max_num_batched_tokens=256,
+            enable_chunked_prefill=True,
+            gpu_memory_utilization=0.3,
+            linear_backend="triton",
+            moe_backend="triton",
+            enforce_eager=not compiled,
+            compilation_config={"cudagraph_capture_sizes": [1, 2, 4]},
+        ) as llm:
+            assert llm.apply_model(finite_scales) == [9]
+            outputs.append(llm.generate_w_logprobs(prompts, params))
+    check_logprobs_close(
+        outputs_0_lst=outputs[0],
+        outputs_1_lst=outputs[1],
+        name_0="eager",
+        name_1="compiled",
+    )
+
+
+@_requires_sm80
+def test_modelopt_block_triton_dense_cache_matches_uncached(tmp_path, vllm_runner):
+    """Loaded BF16 caches preserve outputs of the packed checkpoint closely.
+
+    Compare on the same model and execution mode so dummy-model sensitivity
+    to eager versus compiled Mamba execution does not confound cache parity.
+    """
+    from tests.models.utils import check_logprobs_close
+    from vllm import SamplingParams
+
+    finite_scales = _make_tiny_modelopt_block_model(tmp_path)
+    prompts = [list(range(3 + i, 30 + 3 * i)) for i in range(8)]
+    params = SamplingParams(temperature=0, max_tokens=12, logprobs=5, ignore_eos=True)
+
+    def clear_caches(model):
+        count = 0
+        for module in model.modules():
+            if getattr(module, "weight_bf16", None) is not None:
+                module.weight_bf16 = None
+                count += 1
+        return count
+
+    with vllm_runner(
+        str(tmp_path),
+        load_format="dummy",
+        skip_tokenizer_init=True,
+        max_model_len=256,
+        max_num_seqs=8,
+        max_num_batched_tokens=256,
+        enable_chunked_prefill=True,
+        enable_prefix_caching=False,
+        gpu_memory_utilization=0.2,
+        linear_backend="triton",
+        moe_backend="triton",
+        kernel_config={"modelopt_iq2_dense_cache": True},
+        enforce_eager=True,
+    ) as llm:
+        assert llm.apply_model(finite_scales) == [9]
+        cached = llm.generate_w_logprobs(prompts, params)
+        assert llm.apply_model(clear_caches)[0] > 0
+        uncached = llm.generate_w_logprobs(prompts, params)
+    check_logprobs_close(
+        outputs_0_lst=cached,
+        outputs_1_lst=uncached,
+        name_0="cached",
+        name_1="uncached",
+    )
+    assert all(len(a[0]) == len(b[0]) for a, b in zip(cached, uncached))
