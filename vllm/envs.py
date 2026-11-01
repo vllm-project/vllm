@@ -159,6 +159,10 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
+    VLLM_MINIMAX_M3_VIT_SP: bool = False
+    VLLM_MINIMAX_M3_VIT_SP_ROWS: str = "512,768,1024,1280,1536,2048,2560,3072,4224,5120"
+    VLLM_MINIMAX_M3_VIT_SP_MAX_ITEMS: int = 1
+    VLLM_MINIMAX_M3_VIT_SP_MIN_PATCHES: int = 2048
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
@@ -1433,6 +1437,25 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_TRITON_GEMM": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_TRITON_GEMM", "True").lower() in ("true", "1")
+    ),
+    # MiniMax-M3 with --mm-encoder-tp-mode data: encode a batch of few large
+    # images sequence-parallel across the TP ranks (split by patch rows, one
+    # all-gather per layer, CUDA graphs per row bucket) instead of whole images
+    # on single ranks.
+    "VLLM_MINIMAX_M3_VIT_SP": lambda: (
+        os.getenv("VLLM_MINIMAX_M3_VIT_SP", "False").lower() in ("true", "1")
+    ),
+    # Per-rank patch-row buckets (comma separated) that get a CUDA graph.
+    "VLLM_MINIMAX_M3_VIT_SP_ROWS": lambda: os.getenv(
+        "VLLM_MINIMAX_M3_VIT_SP_ROWS", "512,768,1024,1280,1536,2048,2560,3072,4224,5120"
+    ),
+    # At most this many images in the batch for the sequence-parallel path.
+    "VLLM_MINIMAX_M3_VIT_SP_MAX_ITEMS": lambda: int(
+        os.getenv("VLLM_MINIMAX_M3_VIT_SP_MAX_ITEMS", "1")
+    ),
+    # At least this many patches in the batch for the sequence-parallel path.
+    "VLLM_MINIMAX_M3_VIT_SP_MIN_PATCHES": lambda: int(
+        os.getenv("VLLM_MINIMAX_M3_VIT_SP_MIN_PATCHES", "2048")
     ),
     # use rocm skinny gemms
     "VLLM_ROCM_USE_SKINNY_GEMM": lambda: (

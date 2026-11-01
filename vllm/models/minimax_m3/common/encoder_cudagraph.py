@@ -268,6 +268,159 @@ class MiniMaxM3EncoderCudaGraphMixin(SupportsEncoderCudaGraph):
         # Remaining keys are consumed as encoder_metadata.
         return self.vision_tower(pixel_values, grid_thw=None, encoder_metadata=inputs)
 
+    # ── Sequence-parallel ViT (opt-in, with --mm-encoder-tp-mode data) ────
+    #
+    # Data-parallel mode encodes each image whole on one rank, so a step with
+    # one image keeps the other TP ranks waiting for it. With
+    # VLLM_MINIMAX_M3_VIT_SP=1, a batch of at most VLLM_MINIMAX_M3_VIT_SP_MAX_ITEMS
+    # images with at least VLLM_MINIMAX_M3_VIT_SP_MIN_PATCHES patches is instead
+    # split by patch rows across the TP ranks: every rank runs its rows through
+    # the whole tower and all-gathers the attention input once per layer (bf16,
+    # lossless). One CUDA graph per per-rank row bucket
+    # (VLLM_MINIMAX_M3_VIT_SP_ROWS); batches that fit no bucket keep the
+    # data-parallel path.
+
+    @staticmethod
+    def _encoder_sp_settings() -> dict[str, Any] | None:
+        import vllm.envs as envs
+
+        if not envs.VLLM_MINIMAX_M3_VIT_SP:
+            return None
+        rows = envs.VLLM_MINIMAX_M3_VIT_SP_ROWS
+        return {
+            "rows": [int(r) for r in rows.split(",") if r.strip()],
+            "max_items": envs.VLLM_MINIMAX_M3_VIT_SP_MAX_ITEMS,
+            "min_patches": envs.VLLM_MINIMAX_M3_VIT_SP_MIN_PATCHES,
+        }
+
+    def get_encoder_sp_rows(self) -> list[int]:
+        from vllm.distributed import get_tensor_model_parallel_world_size
+
+        settings = self._encoder_sp_settings()
+        if settings is None or get_tensor_model_parallel_world_size() == 1:
+            return []
+        group = self.vision_tower.spatial_merge_size**2
+        return sorted({r for r in settings["rows"] if r > 0 and r % group == 0})
+
+    def prepare_encoder_sp_buffers(
+        self, rows: int, device: torch.device
+    ) -> dict[str, Any]:
+        from vllm.distributed import (
+            get_tensor_model_parallel_rank,
+            get_tensor_model_parallel_world_size,
+        )
+        from vllm.models.minimax_m3.common.vision_tower import MiniMaxVLSPMeta
+
+        settings = self._encoder_sp_settings()
+        assert settings is not None
+        tp = get_tensor_model_parallel_world_size()
+        vm = self.vision_tower.vision_model
+        emb = vm.embeddings
+        patch_dim = emb.num_channels * emb.temporal_patch_size * emb.patch_size**2
+        merge = vm.spatial_merge_size
+        cos0, _ = vm.mrope_setup(
+            vm.inv_freq_t, vm.inv_freq_h, vm.inv_freq_w, [[1, merge, merge]], merge
+        )
+        planes = (cos0.shape[0], tp * rows, cos0.shape[2])
+        # A rank's rows can touch one more image than the batch holds whole.
+        segments = max(settings["max_items"], 1) + 1
+        sp = MiniMaxVLSPMeta(
+            rows=rows,
+            q_start=get_tensor_model_parallel_rank() * rows,
+            cu_q=torch.zeros(segments + 1, dtype=torch.int32, device=device),
+            cu_k=torch.zeros(segments + 1, dtype=torch.int32, device=device),
+            max_q=rows,
+            max_k=tp * rows,
+        )
+        return {
+            "pixel_values": torch.zeros(
+                rows, patch_dim, device=device, dtype=self.vision_tower.dtype
+            ),
+            "rotary_cos": torch.zeros(planes, dtype=cos0.dtype, device=device),
+            "rotary_sin": torch.zeros(planes, dtype=cos0.dtype, device=device),
+            "sp": sp,
+        }
+
+    def encoder_sp_forward(self, buffers: dict[str, Any]) -> torch.Tensor:
+        return self.vision_tower.forward_sp(
+            buffers["pixel_values"],
+            buffers["rotary_cos"],
+            buffers["rotary_sin"],
+            buffers["sp"],
+        )
+
+    def encoder_sp_execute(
+        self, mm_kwargs: dict[str, Any], sp_graphs: dict[int, Any]
+    ) -> list[torch.Tensor] | None:
+        """Replay the sequence-parallel graph for this batch, or return None."""
+        from vllm.distributed import (
+            get_tensor_model_parallel_rank,
+            get_tensor_model_parallel_world_size,
+            tensor_model_parallel_all_gather,
+        )
+
+        settings = self._encoder_sp_settings()
+        if settings is None or not sp_graphs:
+            return None
+        grids = self._get_grid_thw_list(mm_kwargs)
+        if not grids or len(grids) > settings["max_items"]:
+            return None
+        vm = self.vision_tower.vision_model
+        limited = vm._apply_max_frames_limit(grids)
+        lens = [t * h * w for t, h, w in limited]
+        total = sum(lens)
+        if total < settings["min_patches"]:
+            return None
+        tp = get_tensor_model_parallel_world_size()
+        rows = min((r for r in sp_graphs if r * tp >= total), default=None)
+        if rows is None:
+            return None
+        graph, buffers, output = sp_graphs[rows]
+        sp = buffers["sp"]
+
+        # Every decision above uses only the batch's grids, so all ranks agree.
+        rank = get_tensor_model_parallel_rank()
+        start = min(rank * rows, total)
+        end = min(start + rows, total)
+        cu = [0]
+        for n in lens:
+            cu.append(cu[-1] + n)
+        cu_q, cu_k = [0], []
+        for i in range(len(lens)):
+            lo, hi = max(cu[i], start), min(cu[i + 1], end)
+            if hi > lo:
+                if not cu_k:
+                    cu_k.append(cu[i])
+                cu_q.append(cu_q[-1] + hi - lo)
+                cu_k.append(cu[i + 1])
+        if not cu_k:
+            cu_k = [total]
+        slots = sp.cu_q.shape[0]
+        cu_q += [cu_q[-1]] * (slots - len(cu_q))
+        cu_k += [cu_k[-1]] * (slots - len(cu_k))
+        device = sp.cu_q.device
+        sp.cu_q.copy_(torch.tensor(cu_q, dtype=torch.int32), non_blocking=True)
+        sp.cu_k.copy_(torch.tensor(cu_k, dtype=torch.int32), non_blocking=True)
+
+        pixel_values = self._get_pixel_values(mm_kwargs)
+        local = end - start
+        if local > 0:
+            buffers["pixel_values"][:local].copy_(pixel_values[start:end])
+        if local < rows:
+            buffers["pixel_values"][local:].zero_()
+        cos, sin = vm.mrope_setup(
+            vm.inv_freq_t, vm.inv_freq_h, vm.inv_freq_w, limited, vm.spatial_merge_size
+        )
+        buffers["rotary_cos"][:, :total].copy_(cos.to(device))
+        buffers["rotary_sin"][:, :total].copy_(sin.to(device))
+
+        graph.replay()
+
+        merged = tensor_model_parallel_all_gather(output, dim=0)
+        group = vm.spatial_merge_size**2
+        sizes = [t * h * w // group for t, h, w in grids]
+        return list(merged[: total // group].split(sizes))
+
     def encoder_eager_forward(
         self,
         mm_kwargs: dict[str, Any],
