@@ -369,7 +369,6 @@ class FlexAttentionMetadata:
     max_seq_len: int
     seq_lens: torch.Tensor
     block_table: torch.Tensor
-    slot_mapping: torch.Tensor
 
     # Block info
     total_cache_tokens: int
@@ -1011,7 +1010,6 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         seq_lens = common_attn_metadata.seq_lens
         block_table_tensor = common_attn_metadata.block_table_tensor
-        slot_mapping = common_attn_metadata.slot_mapping
         num_blocks_per_seq = cdiv(seq_lens, self.block_size)
 
         block_size = self.kv_cache_spec.block_size
@@ -1102,7 +1100,6 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             max_seq_len=max_seq_len,
             seq_lens=self.persistent_seq_lens,
             block_table=block_table_tensor,
-            slot_mapping=slot_mapping,
             block_size=block_size,
             max_possible_sequence_length=max_possible_seq_len,
             num_reqs=num_reqs,
