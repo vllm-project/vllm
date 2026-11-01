@@ -396,6 +396,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         # Initialize at least one MoE layer
         hf_overrides={"num_hidden_layers": 4},
     ),
+    "Lfm3ForCausalLM": _HfExamplesInfo("LiquidAI/LFM3-1.7B", trust_remote_code=True),
     "LlamaForCausalLM": _HfExamplesInfo(
         "meta-llama/Llama-3.2-1B-Instruct",
         extras={
