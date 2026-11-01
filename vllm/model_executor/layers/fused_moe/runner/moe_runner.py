@@ -214,6 +214,102 @@ direct_register_custom_op(
 )
 
 
+# Register a decomposition for moe_forward_shared to expand UnfinalizedMoEOutput
+# into its components when defer_moe_finalize is enabled. This allows the
+# pattern matcher to see the unfinalized structure in the FX graph.
+try:
+    from torch._ops import register_decomposition
+
+    @register_decomposition(torch.ops.vllm.moe_forward_shared)
+    def _moe_forward_shared_decomposition(
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        shared_experts_input: torch.Tensor | None,
+        input_ids: torch.Tensor | None,
+        layer_name: str | object,  # LayerName or str
+        hidden_dim_unpadded: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # Call the fake implementation to get the base outputs
+        shared_out, fused_out = _moe_forward_shared_fake(
+            hidden_states, router_logits, shared_experts_input, input_ids,
+            layer_name, hidden_dim_unpadded
+        )
+
+        # Check if the layer has defer_moe_finalize enabled
+        # We need to resolve the layer_name to get the actual layer
+        from vllm.config import get_current_vllm_config
+        from vllm.forward_context import get_forward_context
+        from vllm.utils.torch_utils import _USE_LAYERNAME, LayerName
+
+        try:
+            vllm_config = get_current_vllm_config()
+            if vllm_config is not None and hasattr(vllm_config, 'compilation_config'):
+                compilation_config = vllm_config.compilation_config
+                if hasattr(compilation_config, 'static_forward_context'):
+                    # Resolve layer_name to string
+                    if _USE_LAYERNAME and isinstance(layer_name, LayerName):
+                        layer_name_str = layer_name.value
+                    elif hasattr(layer_name, 'value'):
+                        layer_name_str = layer_name.value
+                    else:
+                        layer_name_str = str(layer_name)
+
+                    # Handle "from_forward_context" case
+                    if layer_name_str == "from_forward_context":
+                        forward_context = get_forward_context()
+                        if (forward_context is not None
+                            and forward_context.all_moe_layers is not None
+                            and forward_context.moe_layer_index
+                            < len(forward_context.all_moe_layers)):
+                            layer_name_str = (
+                                forward_context.all_moe_layers
+                                [forward_context.moe_layer_index]
+                            )
+
+                    layer = compilation_config.static_forward_context.get(
+                        layer_name_str)
+                    if layer is not None and hasattr(layer, 'moe_config'):
+                        moe_config = layer.moe_config
+                        # Check if we should defer finalize for this call
+                        # We need num_tokens which is hidden_states.shape[0]
+                        num_tokens = hidden_states.shape[0]
+                        if (moe_config.should_defer_moe_finalize(num_tokens)
+                            and isinstance(fused_out, torch.Tensor)):
+                            # Construct a fake UnfinalizedMoEOutput from the fused_out
+                            # The fused_out shape is [num_tokens, hidden_dim] or similar
+                            # For the fake, we create dummy tensors with the right shapes
+                            num_permuted_rows = num_tokens * layer.moe_config.experts_per_token
+                            hidden_dim = fused_out.shape[-1]
+                            top_k = layer.moe_config.experts_per_token
+
+                            gemm2_permuted = torch.empty(
+                                (num_permuted_rows, hidden_dim),
+                                dtype=fused_out.dtype, device=fused_out.device)
+                            expert_weights = torch.empty(
+                                (num_tokens, top_k),
+                                dtype=fused_out.dtype, device=fused_out.device)
+                            expanded_idx_to_permuted_idx = torch.empty(
+                                (num_tokens, top_k),
+                                dtype=torch.int32, device=fused_out.device)
+
+                            unfinalized = UnfinalizedMoEOutput(
+                                gemm2_permuted=gemm2_permuted,
+                                expert_weights=expert_weights,
+                                expanded_idx_to_permuted_idx=expanded_idx_to_permuted_idx,
+                                route_major=True,
+                            )
+                            return shared_out, unfinalized
+        except Exception:
+            # If anything fails, fall back to the original fake output
+            pass
+
+        return shared_out, fused_out
+
+except Exception:
+    # Decomposition registration failed (e.g., torch version too old)
+    pass
+
+
 def _unpack(
     result: torch.Tensor
     | UnfinalizedMoEOutput
@@ -757,12 +853,27 @@ class MoERunner(MoERunnerInterface):
 
         # Extract outputs from result
         shared_output, fused_output = _unpack(result)
-        fused_output = cast(torch.Tensor, fused_output)
+
+        # Handle UnfinalizedMoEOutput for FlashInfer fusion path
+        # When defer_moe_finalize is enabled, the kernel returns UnfinalizedMoEOutput
+        # containing the components needed for fused finalize+add+AR+RMSNorm.
+        # We extract the components and create a placeholder "finalized" tensor
+        # so the FX graph has the right structure for pattern matching.
+        from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
+        if isinstance(fused_output, UnfinalizedMoEOutput):
+            unfinalized = fused_output
+            # Use gemm2_permuted as the placeholder for the finalized output
+            # The pattern matcher will replace the finalize+add+AR+RMSNorm sequence
+            # with the FlashInfer fused kernel
+            fused_output = unfinalized.gemm2_permuted
+            # Mark that we're on the deferred finalize path
+            fused_output_is_reduced = False
+        else:
+            fused_output = cast(torch.Tensor, fused_output)
+            fused_output_is_reduced = self._fused_output_is_reduced
 
         if og_hidden_dim_pre_xform is not None:
             fused_output = fused_output[..., :og_hidden_dim_pre_xform]
-
-        fused_output_is_reduced = self._fused_output_is_reduced
 
         # Latent routed output has to be reduced before output transform,
         # because the transform may include non-linear normalization.
