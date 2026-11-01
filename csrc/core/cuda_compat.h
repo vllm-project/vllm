@@ -43,6 +43,13 @@ struct Utils {
   #define VLLM_LDG(arg) *(arg)
 #endif
 
+// Abort the kernel; the context is unusable afterwards.
+#ifndef USE_ROCM
+  #define VLLM_DEVICE_TRAP() __trap()
+#else
+  #define VLLM_DEVICE_TRAP() abort()
+#endif
+
 #ifndef USE_ROCM
   #define VLLM_SHFL_XOR_SYNC(var, lane_mask) \
     __shfl_xor_sync(uint32_t(-1), var, lane_mask)
