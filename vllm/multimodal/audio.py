@@ -3,6 +3,7 @@
 import math
 from dataclasses import dataclass
 from enum import Enum
+from fractions import Fraction
 from functools import lru_cache
 from typing import Literal
 
@@ -180,6 +181,34 @@ def normalize_audio(
 # Audio Resampling
 # ============================================================
 
+_MAX_TORCHAUDIO_KERNEL_ELEMS = 1 << 24
+
+
+def _polyphase_kernel_elems(orig_sr: int, target_sr: int) -> int:
+    gcd = math.gcd(orig_sr, target_sr)
+    return (orig_sr // gcd) * (target_sr // gcd)
+
+
+def _bounded_resample_rates(
+    orig_sr: int,
+    target_sr: int,
+    *,
+    max_kernel_elems: int = _MAX_TORCHAUDIO_KERNEL_ELEMS,
+) -> tuple[int, int]:
+    """Return rates whose reduced product fits ``max_kernel_elems``."""
+    if orig_sr < 1 or target_sr < 1:
+        raise ValueError(
+            f"Sample rates must be positive integers, got orig_sr={orig_sr}, "
+            f"target_sr={target_sr}."
+        )
+    if _polyphase_kernel_elems(orig_sr, target_sr) <= max_kernel_elems:
+        return orig_sr, target_sr
+    gcd = math.gcd(orig_sr, target_sr)
+    orig_p, target_p = orig_sr // gcd, target_sr // gcd
+    den_cap = max(1, int(math.sqrt(max_kernel_elems * target_p / orig_p)))
+    approx = Fraction(orig_p, target_p).limit_denominator(den_cap)
+    return approx.numerator, approx.denominator
+
 
 def resample_audio_pyav(
     audio: npt.NDArray[np.floating],
@@ -320,6 +349,7 @@ def resample_audio_torchaudio(
     """
     orig_sr_int = int(round(orig_sr))
     target_sr_int = int(round(target_sr))
+    orig_sr_int, target_sr_int = _bounded_resample_rates(orig_sr_int, target_sr_int)
 
     if orig_sr_int == target_sr_int:
         return audio
