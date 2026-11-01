@@ -399,6 +399,9 @@ vLLM provides optional gRPC `Inference` and `Control` services on a separate TCP
 
 **Warning:** The gRPC interface is **insecure by default** — it does not implement authentication, authorization, or encryption. It should be considered a private, internal interface intended for use only between co-located services within a trusted network. Do not expose the gRPC port to the public internet or untrusted clients. If you enable the gRPC interface, protect it via network-level access controls such as firewall rules, network segmentation, or deployment on an isolated private network.
 
+The Python gRPC server does not support API key authentication. It exits at
+startup if `--api-key` or `VLLM_API_KEY` is set.
+
 ### Security Implications
 
 An attacker who can reach the gRPC port can:

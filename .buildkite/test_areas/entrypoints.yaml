@@ -36,6 +36,7 @@ steps:
   - tests/entrypoints/launchers
   - tests/entrypoints/common
   commands:
+  - uv pip install --system 'smg-grpc-servicer[vllm] >= 0.5.2'
   - pytest -v -s entrypoints/unit_tests
   - pytest -v -s entrypoints/launchers
   - pytest -v -s entrypoints/common

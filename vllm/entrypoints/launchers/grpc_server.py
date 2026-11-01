@@ -44,6 +44,7 @@ import uvloop
 
 from vllm import envs
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.entrypoints.common.cli_args import validate_grpc_auth_args
 from vllm.entrypoints.common.startup import log_version_and_model
 from vllm.logger import configure_logging_from_args, init_logger
 from vllm.usage.usage_lib import UsageContext
@@ -165,6 +166,7 @@ async def serve_grpc(args: argparse.Namespace):
         args: Parsed command line arguments
 
     """
+    validate_grpc_auth_args(args)
     log_version_and_model(logger, VLLM_VERSION, args.model)
     logger.info("vLLM gRPC server args: %s", args)
 
@@ -286,8 +288,7 @@ async def serve_grpc(args: argparse.Namespace):
         logger.info("Shutdown complete")
 
 
-def main():
-    """Main entry point for python -m vllm.entrypoints.launchers.grpc_server."""
+def _build_arg_parser() -> FlexibleArgumentParser:
     parser = FlexibleArgumentParser(
         description="vLLM gRPC Server",
     )
@@ -305,7 +306,12 @@ def main():
         default=50051,
         help="Port to bind gRPC server to",
     )
-    parser = AsyncEngineArgs.add_cli_args(parser)
+    return AsyncEngineArgs.add_cli_args(parser)
+
+
+def main():
+    """Main entry point for python -m vllm.entrypoints.launchers.grpc_server."""
+    parser = _build_arg_parser()
 
     args = parser.parse_args()
     configure_logging_from_args(args)

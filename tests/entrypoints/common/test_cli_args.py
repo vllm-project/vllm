@@ -9,6 +9,8 @@ import pytest
 import vllm.entrypoints.common.cli_args as cli_args_module
 from tests.utils import VLLM_PATH
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.entrypoints.cli.launch import LaunchSubcommand
+from vllm.entrypoints.cli.serve import ServeSubcommand
 from vllm.entrypoints.common.cli_args import (
     make_arg_parser,
     validate_parsed_serve_args,
@@ -186,6 +188,7 @@ def test_multiple_valid_inputs(serve_parser):
         (50051, []),
         (0, ["--port", "0"]),
         (50051, ["--port", "50051", "--uds", "/tmp/vllm.sock"]),
+        (50051, ["--api-key", "secret"]),
     ],
 )
 def test_rust_grpc_port_accepts_frontend_launch(
@@ -207,7 +210,7 @@ def test_rust_grpc_port_accepts_frontend_launch(
             *extra_args,
         ]
     )
-    validate_parsed_serve_args(args)
+    ServeSubcommand().validate(args)
     assert args.grpc_port == port
 
 
@@ -237,7 +240,7 @@ def test_rust_grpc_port_rejects_incompatible_launch(
         else "--grpc-port"
     )
     with pytest.raises(ValueError, match=error):
-        validate_parsed_serve_args(args)
+        ServeSubcommand().validate(args)
 
 
 def test_rust_grpc_port_requires_serve_subcommand(monkeypatch):
@@ -247,6 +250,37 @@ def test_rust_grpc_port_requires_serve_subcommand(monkeypatch):
     args = parser.parse_args(["--grpc-port", "50051"])
     with pytest.raises(ValueError, match="--grpc-port requires"):
         validate_parsed_serve_args(args)
+
+
+def test_grpc_rejects_api_key_flag(serve_parser):
+    args = serve_parser.parse_args(["--grpc", "--api-key", "secret"])
+    with pytest.raises(ValueError, match="does not support authentication"):
+        ServeSubcommand().validate(args)
+
+
+def test_grpc_rejects_api_key_environment(serve_parser, monkeypatch):
+    monkeypatch.setenv("VLLM_API_KEY", "secret")
+    args = serve_parser.parse_args(["--grpc"])
+    with pytest.raises(ValueError, match="does not support authentication"):
+        ServeSubcommand().validate(args)
+
+
+def test_grpc_rejects_api_key_from_config(serve_parser, tmp_path):
+    config = tmp_path / "config.yaml"
+    config.write_text("api_key:\n  - secret\n")
+    args = serve_parser.parse_args(["dummy", "--grpc", "--config", str(config)])
+    with pytest.raises(ValueError, match="api_key in the config file"):
+        ServeSubcommand().validate(args)
+
+
+def test_launch_render_does_not_treat_grpc_flag_as_python_grpc(
+    launch_render_parser,
+):
+    args = launch_render_parser.parse_args(
+        ["launch", "render", "--grpc", "--api-key", "secret"]
+    )
+    LaunchSubcommand().validate(args)
+    assert args.api_key == ["secret"]
 
 
 def test_enable_auto_choice_fails_without_tool_call_parser(serve_parser):
