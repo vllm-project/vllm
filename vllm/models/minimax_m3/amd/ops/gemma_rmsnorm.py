@@ -239,3 +239,101 @@ def _gemma_fused_add_rmsnorm(
         num_warps=_num_warps(block_n),
     )
     return out, scale, res_out.reshape(orig_shape)
+
+
+# Fused add + Gemma RMSNorm with a per-token FP8 epilogue, for a consumer that takes a
+# per-token FP8 activation (e.g. the per-token FP8 GEMM of qkv_proj).
+@triton.jit
+def _gemma_fused_add_rmsnorm_fp8_token_kernel(
+    x_ptr,
+    res_ptr,
+    w_ptr,
+    out_ptr,
+    res_out_ptr,
+    scale_ptr,
+    n_cols,
+    stride_xrow,
+    stride_xcol,
+    stride_rrow,
+    stride_rcol,
+    eps,
+    BLOCK_N: tl.constexpr,
+    FP8_MAX: tl.constexpr,
+    TINY: tl.constexpr,
+):
+    row = tl.program_id(0)
+    cols = tl.arange(0, BLOCK_N)
+    mask = cols < n_cols
+    x = tl.load(
+        x_ptr + row * stride_xrow + cols * stride_xcol, mask=mask, other=0.0
+    ).to(tl.float32)
+    r = tl.load(
+        res_ptr + row * stride_rrow + cols * stride_rcol, mask=mask, other=0.0
+    ).to(tl.float32)
+    s = x + r
+    tl.store(
+        res_out_ptr + row * n_cols + cols,
+        s.to(res_out_ptr.dtype.element_ty),
+        mask=mask,
+    )
+    var = tl.sum(s * s, axis=0) / n_cols
+    rstd = 1.0 / tl.sqrt(var + eps)
+    w = tl.load(w_ptr + cols, mask=mask, other=0.0).to(tl.float32)
+    # AITER's dynamic_per_token_scaled_quant on the input-dtype normed row:
+    # scale = amax * (1 / FP8_MAX), values multiplied by the reciprocal. A zero row
+    # gets scale 0 and zero values (no 0 * inf).
+    y = (s * rstd * (1.0 + w)).to(x_ptr.dtype.element_ty).to(tl.float32)
+    amax = tl.max(tl.abs(y), axis=0)
+    scale = amax * (1.0 / FP8_MAX)
+    q = y * (1.0 / tl.maximum(scale, TINY))
+    q = tl.minimum(tl.maximum(q, -FP8_MAX), FP8_MAX)
+    tl.store(
+        out_ptr + row * n_cols + cols,
+        q.to(out_ptr.dtype.element_ty),
+        mask=mask,
+    )
+    tl.store(scale_ptr + row, scale)
+
+
+def gemma_fused_add_rmsnorm_fp8_token(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+    fp8_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """``gemma_fused_add_rmsnorm`` with the normed output quantized to FP8 per token.
+
+    Returns ``(x_q, x_scale, residual_out)``: ``x_q`` ``fp8_dtype`` ``[M, N]`` and
+    ``x_scale`` float32 ``[M, 1]`` (the layout AITER's per-token quant returns), with
+    the leading dims of ``x`` flattened into ``M``; ``residual_out`` has the shape
+    of ``x``.
+    """
+    orig_shape = x.shape
+    n = orig_shape[-1]
+    x2 = x.reshape(-1, n)
+    r2 = residual.reshape(-1, n)
+    m = x2.shape[0]
+    out = torch.empty((m, n), dtype=fp8_dtype, device=x.device)
+    scale = torch.empty((m, 1), dtype=torch.float32, device=x.device)
+    res_out = torch.empty((m, n), dtype=x.dtype, device=x.device)
+    block_n = triton.next_power_of_2(n)
+    _gemma_fused_add_rmsnorm_fp8_token_kernel[(m,)](
+        x2,
+        r2,
+        weight,
+        out,
+        res_out,
+        scale,
+        n,
+        x2.stride(0),
+        x2.stride(1),
+        r2.stride(0),
+        r2.stride(1),
+        eps,
+        BLOCK_N=block_n,
+        FP8_MAX=float(torch.finfo(fp8_dtype).max),
+        TINY=float(torch.finfo(torch.float32).tiny),
+        num_warps=_num_warps(block_n),
+    )
+    return out, scale, res_out.reshape(orig_shape)

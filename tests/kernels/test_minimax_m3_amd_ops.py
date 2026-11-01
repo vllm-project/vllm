@@ -8,6 +8,8 @@ tests assert the two agree within tolerance:
   * Gemma RMSNorm (plain + fused-add-residual)  -> fp32 PyTorch normalize
   * Fused-add Gemma RMSNorm + MXFP8 epilogue     -> norm, then mxfp8_e4m3_quantize
                                                    (bitwise)
+  * Fused-add Gemma RMSNorm + per-token FP8      -> norm, then per-token FP8 quant
+    epilogue
   * SwiGLU-OAI (split layout)                    -> fp32 PyTorch elementwise
   * Fused MXFP8 activation quant (Triton)        -> _mxfp8_e4m3_quantize_torch
   * Native MXFP8 linear (dot_scaled)             -> dequant-to-bf16 @ matmul
@@ -55,6 +57,7 @@ from vllm.models.minimax_m3.amd.model import (  # noqa: E402
 )
 from vllm.models.minimax_m3.amd.ops import (  # noqa: E402
     gemma_fused_add_rmsnorm,
+    gemma_fused_add_rmsnorm_fp8_token,
     gemma_fused_add_rmsnorm_mxfp8,
     gemma_rmsnorm,
     swiglu_oai_quantize_mxfp8,
@@ -211,6 +214,48 @@ def test_gemma_fused_add_rmsnorm_mxfp8_bitwise_eq_unfused(n, dtype):
     assert torch.equal(got_q.view(torch.uint8), ref_q.view(torch.uint8))
     assert torch.equal(got_scale, ref_scale)
     assert torch.equal(got_res, ref_res)
+
+
+def _ref_per_token_fp8(x: torch.Tensor, fp8_dtype: torch.dtype):
+    """Per-token symmetric FP8 quant as AITER's dynamic_per_token_scaled_quant does
+    it: scale = amax * (1 / FP8_MAX), values multiplied by the reciprocal."""
+    fp8_max = torch.finfo(fp8_dtype).max
+    xf = x.float()
+    scale = xf.abs().amax(dim=-1, keepdim=True) * (1.0 / fp8_max)
+    q = xf * (1.0 / scale.clamp(min=torch.finfo(torch.float32).tiny))
+    return q.clamp(-fp8_max, fp8_max).to(fp8_dtype), scale
+
+
+@pytest.mark.parametrize("m", [1, 7, 64, 2069])
+@pytest.mark.parametrize("n", [3072, 6144])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@torch.inference_mode()
+def test_gemma_fused_add_rmsnorm_fp8_token_matches_unfused(m, n, dtype):
+    """The per-token FP8 epilogue matches ``gemma_fused_add_rmsnorm`` followed by a
+    per-token FP8 quant: same residual and scales, FP8 values different in at most
+    1 in 10,000 elements (rounding of the reciprocal)."""
+    fp8 = current_platform.fp8_dtype()
+    torch.manual_seed(0)
+    w = torch.randn(n, device=DEVICE, dtype=dtype) * 0.5
+    x = torch.randn(m, n, device=DEVICE, dtype=dtype) * 2.0
+    res = torch.randn(m, n, device=DEVICE, dtype=dtype) * 8.0
+    x[:, :16] *= 40.0  # outlier channels
+    if m > 1:
+        x[m // 2] = 0
+        res[m // 2] = 0  # an all-zero row (padding): scale 0, values 0
+
+    got_q, got_scale, got_res = gemma_fused_add_rmsnorm_fp8_token(x, res, w, EPS, fp8)
+    normed, ref_res = gemma_fused_add_rmsnorm(x, res, w, EPS)
+    ref_q, ref_scale = _ref_per_token_fp8(normed, fp8)
+
+    assert got_q.shape == (m, n) and got_q.dtype == fp8
+    assert got_scale.shape == (m, 1) and got_scale.dtype == torch.float32
+    assert torch.equal(got_res, ref_res)
+    assert (got_scale == ref_scale).float().mean().item() >= 0.999
+    torch.testing.assert_close(got_scale, ref_scale, rtol=1e-2, atol=0)
+    assert not got_q.float().isnan().any()
+    differ = (got_q.view(torch.uint8) != ref_q.view(torch.uint8)).sum().item()
+    assert differ <= max(1, m * n // 10000)
 
 
 # --------------------------------------------------------------------------- #

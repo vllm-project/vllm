@@ -159,6 +159,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
+    VLLM_MINIMAX_M3_FUSE_NORM_FP8: bool = False
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
@@ -1433,6 +1434,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_TRITON_GEMM": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_TRITON_GEMM", "True").lower() in ("true", "1")
+    ),
+    # MiniMax-M3 on ROCm: when qkv_proj takes a per-token FP8 activation (FP8
+    # attention checkpoints), quantize it in the fused add + input RMSNorm kernel
+    # instead of a separate per-token quant of the BF16 norm output.
+    "VLLM_MINIMAX_M3_FUSE_NORM_FP8": lambda: (
+        os.getenv("VLLM_MINIMAX_M3_FUSE_NORM_FP8", "False").lower() in ("true", "1")
     ),
     # use rocm skinny gemms
     "VLLM_ROCM_USE_SKINNY_GEMM": lambda: (

@@ -67,7 +67,10 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.modelopt import ModelOptMxFp8Config
-from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8DynamicTokenSym,
+    kMxfp8Dynamic,
+)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -112,6 +115,7 @@ from vllm.models.minimax_m3.amd.indexer_nvfp4 import (
 from vllm.models.minimax_m3.amd.mono.envs import envs as mono_envs
 from vllm.models.minimax_m3.amd.ops import (
     gemma_fused_add_rmsnorm,
+    gemma_fused_add_rmsnorm_fp8_token,
     gemma_fused_add_rmsnorm_mxfp8,
     gemma_rmsnorm,
     swiglu_oai_split,
@@ -1483,6 +1487,15 @@ def _can_fuse_input_norm_mxfp8(qkv_proj: nn.Module) -> bool:
     ) and kernel.supports_quantized_input(qkv_proj)
 
 
+def _can_fuse_input_norm_fp8(qkv_proj: nn.Module) -> bool:
+    """Whether ``input_layernorm`` can hand ``qkv_proj`` a per-token FP8 activation:
+    VLLM_MINIMAX_M3_FUSE_NORM_FP8=1 and qkv_proj's FP8 kernel consumes
+    ``kFp8DynamicTokenSym`` (e.g. AITER's preshuffled per-token FP8 GEMM)."""
+    if not envs.VLLM_MINIMAX_M3_FUSE_NORM_FP8 or envs.VLLM_BATCH_INVARIANT:
+        return False
+    return get_input_quant_key(qkv_proj) == kFp8DynamicTokenSym
+
+
 class MiniMaxM3DecoderLayer(nn.Module):
     def __init__(
         self,
@@ -1559,6 +1572,15 @@ class MiniMaxM3DecoderLayer(nn.Module):
         self.fuse_input_norm_mxfp8 = _can_fuse_input_norm_mxfp8(self.self_attn.qkv_proj)
         if self.fuse_input_norm_mxfp8:
             logger.info_once("Fusing input_layernorm with qkv_proj's MXFP8 input quant")
+        # FP8 attention checkpoints: per-token FP8 instead of MXFP8.
+        self.fuse_input_norm_fp8 = (
+            not self.fuse_input_norm_mxfp8
+            and _can_fuse_input_norm_fp8(self.self_attn.qkv_proj)
+        )
+        if self.fuse_input_norm_fp8:
+            logger.info_once(
+                "Fusing input_layernorm with qkv_proj's per-token FP8 input quant"
+            )
 
     def forward(
         self,
@@ -1580,6 +1602,21 @@ class MiniMaxM3DecoderLayer(nn.Module):
             )
             attn_input = QuantizedActivation(
                 x_q, x_scale, hidden_states.dtype, hidden_states.shape, kMxfp8Dynamic
+            )
+        elif self.fuse_input_norm_fp8:
+            x_q, x_scale, residual = gemma_fused_add_rmsnorm_fp8_token(
+                hidden_states,
+                residual,
+                self.input_layernorm.weight,
+                self.input_layernorm.variance_epsilon,
+                kFp8DynamicTokenSym.dtype,
+            )
+            attn_input = QuantizedActivation(
+                x_q,
+                x_scale,
+                hidden_states.dtype,
+                hidden_states.shape,
+                kFp8DynamicTokenSym,
             )
         else:
             attn_input, residual = self.input_layernorm(hidden_states, residual)
