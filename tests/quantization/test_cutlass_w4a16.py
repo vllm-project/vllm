@@ -14,7 +14,7 @@ import torch
 
 from vllm.platforms import current_platform
 
-if not current_platform.has_device_capability(90) or current_platform.is_rocm():
+if not current_platform.is_device_capability(90) or current_platform.is_rocm():
     pytest.skip(
         "Machete W4A16 requires Hopper (sm_90).",
         allow_module_level=True,
