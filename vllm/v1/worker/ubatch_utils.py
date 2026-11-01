@@ -320,6 +320,11 @@ def _make_metadata_with_slice(
 
     block_table_tensor = attn_metadata.block_table_tensor[request_slice]
     slot_mapping = attn_metadata.slot_mapping[token_slice]
+    positions = (
+        attn_metadata.positions[token_slice]
+        if attn_metadata.positions is not None
+        else None
+    )
 
     positions = attn_metadata.positions
     if positions is not None:
