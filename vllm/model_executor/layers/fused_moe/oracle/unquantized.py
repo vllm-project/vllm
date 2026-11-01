@@ -232,8 +232,47 @@ def select_unquantized_moe_backend(
         return UnquantizedMoeBackend.OOT, None
 
     if moe_config.is_lora_enabled:
-        if _trtllm_bf16_lora_supported(moe_config):
+        runner_backend = moe_config.moe_backend
+        if runner_backend == "triton":
+            logger.info_once("Using TRITON Unquantized MoE LoRA backend")
+            return UnquantizedMoeBackend.TRITON, backend_to_kernel_cls(
+                UnquantizedMoeBackend.TRITON
+            )[0]
+
+        if runner_backend == "flashinfer_trtllm":
             from vllm.model_executor.layers.fused_moe.experts.trtllm_lora_moe import (
+                TrtLlmBf16LoRAExperts,
+            )
+
+            supported, reason = TrtLlmBf16LoRAExperts.is_supported_config(
+                TrtLlmBf16LoRAExperts,
+                moe_config,
+                None,
+                None,
+                mk.FusedMoEActivationFormat.Standard,
+            )
+            if not supported:
+                raise ValueError(
+                    f"Unquantized MoE backend FlashInfer TRTLLM does not "
+                    f"support the deployment configuration since {reason}."
+                )
+            if moe_config.intermediate_size_per_partition % 128 != 0:
+                raise ValueError(
+                    "Unquantized MoE backend FlashInfer TRTLLM does not "
+                    "support intermediate_size_per_partition not divisible by 128."
+                )
+            logger.info_once(
+                "Using TrtLlmBf16LoRAExperts Unquantized MoE LoRA backend "
+                "(TrtLlmBf16LoRAExperts)."
+            )
+            return UnquantizedMoeBackend.FLASHINFER_TRTLLM, TrtLlmBf16LoRAExperts
+
+        if runner_backend in (
+            "auto",
+            "humming",
+            "marlin",
+        ) and _trtllm_bf16_lora_supported(moe_config):
+            from vllm.model_executor.layers.fused_moe.experts.trtllm_lora_moe import (  # noqa: E501
                 TrtLlmBf16LoRAExperts,
             )
 
@@ -242,6 +281,7 @@ def select_unquantized_moe_backend(
                 "(TrtLlmBf16LoRAExperts)."
             )
             return UnquantizedMoeBackend.FLASHINFER_TRTLLM, TrtLlmBf16LoRAExperts
+
         logger.info_once("Using TRITON Unquantized MoE LoRA backend")
         return UnquantizedMoeBackend.TRITON, backend_to_kernel_cls(
             UnquantizedMoeBackend.TRITON
