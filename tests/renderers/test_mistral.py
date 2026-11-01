@@ -229,3 +229,31 @@ async def test_renderer_treats_developer_role_as_system():
     assert developer_prompt == system_prompt
     # Ensure original messages list was not mutated
     assert developer_messages == make_messages("developer")
+
+
+def test_mid_chat_developer_preserves_native_system_message_grouping():
+    """Role normalization must preserve Mistral's native mid-chat grouping."""
+    tokenizer = MistralTokenizer.from_pretrained(MODEL_NAME)
+    messages = [
+        {"role": "user", "content": "First question."},
+        {"role": "developer", "content": "Answer briefly."},
+        {"role": "user", "content": "Second question."},
+    ]
+    system_messages = [
+        messages[0].copy(),
+        {"role": "system", "content": "Answer briefly."},
+        messages[2].copy(),
+    ]
+    expected = tokenizer.apply_chat_template(system_messages)
+    actual = safe_apply_chat_template(tokenizer, messages)
+
+    assert actual == expected
+    rendered = tokenizer.mistral.decode(
+        actual, special_token_policy=SpecialTokenPolicy.KEEP
+    )
+    assert rendered.count("[INST]") == 2
+    assert messages == [
+        {"role": "user", "content": "First question."},
+        {"role": "developer", "content": "Answer briefly."},
+        {"role": "user", "content": "Second question."},
+    ]
