@@ -64,6 +64,8 @@ def tokenizer():
         (1, 2),
         (5, 7),
         (6, 20),
+        # whole tool calls in one delta
+        (1000, 1000),
     ],
 )
 def test_tool_call_parser_complex(min_chunk: int, max_chunk: int, tokenizer):

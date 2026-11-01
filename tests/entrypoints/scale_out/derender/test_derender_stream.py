@@ -2780,3 +2780,58 @@ async def test_stream_parsed_missing_prompt_token_ids_rejected(parser_client):
     )
     assert resp.status_code == 400
     assert "prompt_token_ids" in resp.json()["error"]["message"]
+
+
+GRANITE4_MODEL = "ibm-granite/granite-4.0-h-tiny"
+
+
+@pytest.fixture(scope="module")
+def granite4_server():
+    args = ["--enable-auto-tool-choice", "--tool-call-parser", "granite4"]
+    with RemoteLaunchRenderServer(GRANITE4_MODEL, args) as remote_server:
+        yield remote_server
+
+
+@pytest.mark.asyncio
+async def test_stream_parsed_granite4_content_after_whole_tool_call_chunk(
+    granite4_server,
+):
+    """Text before a tool call is streamed when the previous tool call
+    arrived whole in one chunk (a multi-token engine step)."""
+    tokenizer = get_tokenizer(GRANITE4_MODEL)
+    first_ids = tokenizer.encode(
+        '<tool_call>{"name": "get_weather", "arguments": {"city": "Paris"}}'
+        "</tool_call>",
+        add_special_tokens=False,
+    )
+    rest_ids = tokenizer.encode(
+        ' Now Rome.<tool_call>{"name": "get_weather", "arguments": {"city": "Rome"}}'
+        "</tool_call>",
+        add_special_tokens=False,
+    )
+    chat_request = {
+        "model": GRANITE4_MODEL,
+        "messages": [{"role": "user", "content": "Weather in Paris, then Rome?"}],
+        "tools": _PARSER_TOOLS,
+        "tool_choice": "auto",
+    }
+
+    async with httpx.AsyncClient(
+        base_url=granite4_server.url_for(""), timeout=60.0
+    ) as client:
+        resp = await client.post("/v1/chat/completions/render", json=chat_request)
+        assert resp.status_code == 200, resp.text
+        prompt_token_ids = resp.json()["token_ids"]
+        streamed = await stream_chat_derender(
+            client,
+            first_ids + rest_ids,
+            [len(first_ids), len(rest_ids)],
+            chat_request,
+            len(prompt_token_ids),
+            prompt_token_ids,
+        )
+
+    assert streamed["content"] == " Now Rome."
+    assert [
+        (tc["name"], json.loads(tc["arguments"])) for tc in streamed["tool_calls"]
+    ] == [("get_weather", {"city": "Paris"}), ("get_weather", {"city": "Rome"})]
