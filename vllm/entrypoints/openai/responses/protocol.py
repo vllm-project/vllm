@@ -770,6 +770,12 @@ class ResponsesRequest(OpenAIBaseModel):
                     processed_input.append(item)
                     continue
 
+                if not content:
+                    raise VLLMValidationError(
+                        "Assistant message content must not be empty.",
+                        parameter="input",
+                    )
+
                 original_item = item
                 item = dict(item)
                 if "id" not in item:

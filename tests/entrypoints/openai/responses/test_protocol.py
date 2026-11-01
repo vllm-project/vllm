@@ -72,3 +72,29 @@ def test_malformed_tools_rejected_by_field_validation(tools) -> None:
     AttributeError inside the custom-format validator (500)."""
     with pytest.raises(ValidationError):
         ResponsesRequest(input="hi", tools=tools)
+
+
+def test_assistant_message_empty_content_rejected() -> None:
+    """An assistant message with an empty content list is rejected with a 400,
+    instead of passing validation and crashing render with IndexError (500)."""
+    with pytest.raises(VLLMValidationError) as exc_info:
+        ResponsesRequest(
+            input=[
+                {"role": "user", "content": "hi"},
+                {"type": "message", "role": "assistant", "content": []},
+            ]
+        )
+    assert exc_info.value.parameter == "input"
+
+    # Non-empty assistant messages still validate.
+    request = ResponsesRequest(
+        input=[
+            {"role": "user", "content": "hi"},
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "hello"}],
+            },
+        ]
+    )
+    assert len(request.input) == 2
