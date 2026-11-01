@@ -52,7 +52,10 @@ def make_offloading_config(
         extra_config=normalized_extra_config,
         engine_id=engine_id,
         model=OffloadingModelConfig(
-            name="test-model", dtype="float16", max_model_len=max_model_len
+            name="test-model",
+            dtype="float16",
+            max_model_len=max_model_len,
+            config_hash="test-model-config",
         ),
         cache=OffloadingCacheConfig(
             tokens_per_hash=tokens_per_hash,

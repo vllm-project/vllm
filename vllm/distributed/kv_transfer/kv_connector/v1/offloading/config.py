@@ -300,6 +300,7 @@ def build_offloading_config(
             name=vllm_config.model_config.model,
             dtype=str(cache_dtype).removeprefix("torch."),
             max_model_len=vllm_config.model_config.max_model_len,
+            config_hash=kv_cache_config.model_config_hash,
         ),
         cache=OffloadingCacheConfig(
             tokens_per_hash=tokens_per_hash,

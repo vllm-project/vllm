@@ -29,6 +29,8 @@ class OffloadingModelConfig:
     dtype: str
     # Longest request the engine accepts, in tokens. 0 when not known.
     max_model_len: int = 0
+    # Model configuration identity frozen before model construction.
+    config_hash: str | None = None
 
 
 @dataclass(frozen=True)
