@@ -46,6 +46,10 @@ def init_entrypoints_middleware(
 
         app.add_middleware(ScalingMiddleware)
 
+        from vllm.entrypoints.serve.pd_role.middleware import PDRoleMiddleware
+
+        app.add_middleware(PDRoleMiddleware)
+
     if "realtime" in supported_tasks:
         # Add WebSocket metrics middleware
         from vllm.entrypoints.speech_to_text.realtime.metrics import (
