@@ -217,6 +217,9 @@ class DeepseekV32Attention(MLAAttention):
             topk_indices_buffer=topk_indices_buffer,
             index_group_builder=index_group_builder,
             attn_backend=attn_backend,
+            # MTP draft steps reuse top-k rows by token slot, which ShardQ's
+            # compact per-rank rows would break.
+            shardq_eligible=not is_mtp_layer,
         )
 
         self.num_local_heads = num_local_heads
@@ -234,11 +237,6 @@ class DeepseekV32Attention(MLAAttention):
         )
         self._dense_mha_metadata_layer_name = (
             self.layer_name if enable_short_prefill_scoring_skip else ""
-        )
-        # MTP draft steps reuse top-k rows by token slot, which ShardQ's
-        # compact per-rank rows would break.
-        self.set_use_shardq(
-            not is_mtp_layer, indexer.k_cache if indexer is not None else None
         )
 
         fp8_attention = is_quantized_kv_cache(self.kv_cache_dtype)

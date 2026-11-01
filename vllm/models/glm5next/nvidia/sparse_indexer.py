@@ -696,9 +696,6 @@ class SparseAttnIndexerKpool(CustomOp):
     `custom_ops` in `CompilationConfig` to enable the platform specific path.
     """
 
-    # Follows a ShardQ split (see MLAAttention.use_shardq).
-    supports_shardq = True
-
     def __init__(
         self,
         k_cache,

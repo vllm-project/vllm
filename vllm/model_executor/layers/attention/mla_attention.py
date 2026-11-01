@@ -463,6 +463,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         topk_indices_buffer: torch.Tensor | None = None,
         index_group_builder: "SparseMLAIndexGroupBuilder | None" = None,
         non_causal_multi_token_decode: bool = False,
+        shardq_eligible: bool = False,
         sliding_window: int | None = None,
         prefill_backend_cls: type[MLAPrefillBackend] | None = None,
         **extra_impl_args,
@@ -597,15 +598,27 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             **extra_impl_args,
         )
         self.impl = impl  # type: ignore[assignment]
-        # DeepseekV32Attention runs its indexer itself and opts in on its own.
-        indexer_op = getattr(indexer, "indexer_op", None)
-        self.use_shardq = False
-        if (
-            use_sparse
-            and indexer_op is not None
-            and getattr(indexer_op, "supports_shardq", False)
-        ):
-            self.set_use_shardq(True, indexer_op.k_cache)
+        # ShardQ (see vllm.v1.attention.ops.shardq), if the impl supports it.
+        self.use_shardq = shardq_eligible and getattr(impl, "use_shardq", False)
+        if self.use_shardq:
+            vllm_config = get_current_vllm_config()
+            dtype = vllm_config.model_config.dtype
+            fp8_query = (
+                is_quantized_kv_cache(self.kv_cache_dtype)
+                and self.impl.supports_quant_query_input
+            )
+            allocate_shardq_buffers(
+                vllm_config,
+                self.num_heads,
+                self.kv_lora_rank + self.qk_rope_head_dim,
+                self.kv_lora_rank,
+                current_platform.fp8_dtype() if fp8_query else dtype,
+                dtype,
+            )
+            # The indexer follows the split (skip-topk layers have none).
+            indexer_op = getattr(indexer, "indexer_op", None)
+            if indexer_op is not None:
+                indexer_op.k_cache.use_shardq = True
         index_group = getattr(impl, "index_group", None)
         self.hisparse_cache = (
             index_group.cache(cast(Any, impl).index_group_index)
@@ -1234,28 +1247,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         if self.use_pcp and output_padded.shape[0] > num_actual_toks:
             output_padded[num_actual_toks:].zero_()
         return output_padded
-
-    def set_use_shardq(self, enable: bool, indexer_k_cache: nn.Module | None) -> None:
-        """Use ShardQ (see vllm.v1.attention.ops.shardq) if ``enable`` and the
-        impl supports it, with ``indexer_k_cache``'s indexer following it."""
-        self.use_shardq = enable and getattr(self.impl, "use_shardq", False)
-        if self.use_shardq:
-            vllm_config = get_current_vllm_config()
-            dtype = vllm_config.model_config.dtype
-            fp8_query = (
-                is_quantized_kv_cache(self.kv_cache_dtype)
-                and self.impl.supports_quant_query_input
-            )
-            allocate_shardq_buffers(
-                vllm_config,
-                self.num_heads,
-                self.kv_lora_rank + self.qk_rope_head_dim,
-                self.kv_lora_rank,
-                current_platform.fp8_dtype() if fp8_query else dtype,
-                dtype,
-            )
-        if indexer_k_cache is not None:
-            indexer_k_cache.use_shardq = self.use_shardq
 
     def _use_sparse_mha(self, attn_metadata: "MLACommonMetadata") -> bool:
         if self.hisparse_cache is not None:
