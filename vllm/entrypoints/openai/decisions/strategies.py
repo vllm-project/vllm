@@ -229,7 +229,7 @@ def reply_label_ids(
     ids: list[int] = []
     for label in labels:
         extended = tokenizer.encode(text + label, add_special_tokens=False)
-        if extended[:-1] != tail or extended[-1] in ids:
+        if not extended or extended[:-1] != tail or extended[-1] in ids:
             raise ValueError(
                 f"label {label!r} is not one distinct token after this model's "
                 "chat prompt"
