@@ -507,16 +507,12 @@ class OffloadingEventsTracker:
                 if self.self_describing_enabled and event.req_context is not None
                 else None
             )
-            if meta is None:
-                # Temporary fallback for partial tails and request-less stores.
-                # Remove it when those paths use request context as well.
-                meta = self._pending_event_metadata.get(key)
-            if event.removal_expected:
-                # The old snapshot still tracks residency even when the payload
-                # above came from the request context.
-                saved_meta = self._pending_event_metadata.get(key)
-                if saved_meta is not None:
-                    saved_meta.active_residencies |= residency_bit
+            saved_meta = self._pending_event_metadata.get(key)
+            # Temporary fallback for partial tails and request-less stores.
+            # Remove it when those paths use request context as well.
+            meta = meta if meta is not None else saved_meta
+            if saved_meta is not None and event.removal_expected:
+                saved_meta.active_residencies |= residency_bit
             if meta is None:
                 if self.self_describing_enabled:
                     # Expected for unsupported shapes; warn once only.
