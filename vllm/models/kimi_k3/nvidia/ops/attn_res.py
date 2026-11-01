@@ -19,14 +19,29 @@ from vllm.triton_utils import tl, triton
 def get_attn_res_triton_warmup_profiles(
     max_blocks: int,
 ) -> tuple[tuple[int, bool, int, bool], ...]:
-    """Return the small-batch profiles that bypass the native kernel."""
+    """Return the small-batch profiles that bypass the native kernel.
+
+    Emits the smallest superset of the runtime keys KimiDecoderLayer feeds to
+    attn_res(). The native kernel requires num_blocks > 0 and block_write_idx
+    < 0 (attn_res.py dispatch), so the first attn-res block always runs on
+    Triton and its keys must be pre-compiled:
+      - layer 0 (no delta, block-write): (0, False, 0, True)
+      - later block-write layers:        (k, True, k, True), k >= 1
+      - no-write paths (post-attn, and pre-attn of non-block-write layers):
+                                         (n, False, -1, True), (n, True, -1, True)
+      - final output pre-norm:           (max_blocks, True, -1, False)
+    """
     profiles = [
-        (num_blocks, False, -1, True) for num_blocks in range(2, max_blocks + 1)
+        (num_blocks, False, -1, True) for num_blocks in range(1, max_blocks + 1)
     ]
     profiles.extend(
-        (block_write_idx, True, block_write_idx, True)
-        for block_write_idx in range(2, max_blocks)
+        (num_blocks, True, -1, True) for num_blocks in range(1, max_blocks + 1)
     )
+    profiles.extend(
+        (block_write_idx, True, block_write_idx, True)
+        for block_write_idx in range(1, max_blocks)
+    )
+    profiles.append((0, False, 0, True))
     profiles.append((max_blocks, True, -1, False))
     return tuple(profiles)
 
