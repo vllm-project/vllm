@@ -57,6 +57,14 @@ other dispatch paths retain their backend-specific behavior.
 Set `VLLM_MOE_SKIP_PADDING=0` before starting the engine to disable this
 optimization for comparisons.
 
+### GDN prefill gate precision
+
+FlashInfer GDN prefill uses CUDA libdevice exponentiation for the final gate
+inside fused preparation. This automatic behavior preserves the previous
+Torch-compatible gate rounding without a separate Torch launch. It also applies
+to ModelOpt NVFP4 models such as Qwen3.8-Flash-Next and is not limited to SM120.
+Prefill backends that consume log gates keep their existing preparation.
+
 ## Benchmarking with dummy weights
 
 For performance experiments with random weights, use `--load-format dummy`.
