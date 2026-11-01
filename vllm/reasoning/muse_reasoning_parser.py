@@ -318,7 +318,12 @@ class MuseReasoningParser(ReasoningParser):
         ``DelegatingParser.finalize_generation`` calls this when
         ``reasoning_ended`` is still False. Returns only the channel-classified
         ``to=user`` body, and only the portion not already streamed.
+
+        Output without any ``<|message|>`` (a token cap inside the channel
+        header, or an unframed answer) is content, as in ``extract_reasoning``.
         """
+        if "<|message|>" not in previous_text:
+            return previous_text[len(self._emitted_content) :] or None
         _, content_body = self._classify_bodies(previous_text)
         remainder = content_body[len(self._emitted_content) :]
         return remainder or None
