@@ -200,6 +200,8 @@ class OffloadingEvent:
     removal_expected: bool = False
     # Failed allocations release metadata without announcing a public eviction.
     metadata_only: bool = False
+    # Originating request context for a stored event.
+    req_context: ReqContext | None = field(default=None, repr=False, compare=False)
 
 
 """
@@ -214,11 +216,6 @@ The class provides the following primitives:
         The given blocks will be protected from eviction.
         This function returns a LoadSpec which encapsulates
         information required for performing the load.
-    touch() - marks the give blocks as recently used. Can be used
-        to track block's LRU. This function is separated from the
-        prepare_load function to allow setting block recency even
-        for blocks which do not need reading from the cache, such as
-        blocks that are cached by the GPU prefix cache.
     complete_load() - mark blocks which were previously prepared to be
         loaded as done loading. This is to re-allow their eviction.
     prepare_store() - prepare the given blocks to be written.
@@ -375,17 +372,6 @@ class OffloadingManager(ABC):
 
         """
         pass
-
-    def touch(self, keys: Collection[OffloadKey], req_context: ReqContext):
-        """Mark the given blocks as recently used.
-        This could in practice mean moving them to the end of an LRU list.
-
-        Args:
-            keys: the keys identifying the blocks.
-            req_context: per-request context (e.g. kv_transfer_params).
-
-        """
-        return
 
     def complete_load(self, keys: Collection[OffloadKey], req_context: ReqContext):
         """Marks previous blocks that were prepared to load as done loading.

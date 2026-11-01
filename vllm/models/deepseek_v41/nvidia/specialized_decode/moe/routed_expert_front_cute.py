@@ -74,7 +74,8 @@ from cutlass import Float32, Int32, Int64, Uint8, Uint32
 from cutlass._mlir.dialects import llvm
 from cutlass.cutlass_dsl import T, dsl_user_op
 
-from ...ops.cute_dsl.primitives import load_global_u32x4
+from vllm.models.common.ops.moe_tail_fusion.primitives import load_global_u32x4
+
 from .routed_expert_route_cute import (
     MAX_EXPERTS,
     WORDS,
