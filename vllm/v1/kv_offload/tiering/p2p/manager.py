@@ -493,27 +493,35 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         no session has bound the id yet, this is a no-op: parked batches
         in `_unbound_stores` are left in place and cleaned up only by
         `_reap_unbound_stores` after `_unbound_store_timeout_s`.
+
+        A symmetric request may carry both roles. Clean up each role
+        independently so the consumer-side return path cannot skip the
+        decoder-side server session.
         """
         source = req_context.get_state(P2PSourceInfo)
         dest = req_context.get_state(P2PDestInfo)
-        kv_request_id = source.kv_request_id if source is not None else None
-        if kv_request_id is None and dest is not None:
-            kv_request_id = dest.kv_request_id
-        if not kv_request_id:
+        source_id = source.kv_request_id if source is not None else None
+        dest_id = dest.kv_request_id if dest is not None else None
+        if source_id is None and dest_id is None:
             return
-        self._failed_req_ids.discard(kv_request_id)
+        if source_id is not None:
+            self._failed_req_ids.discard(source_id)
+        if dest_id is not None and dest_id != source_id:
+            self._failed_req_ids.discard(dest_id)
 
+        source_session = None
         if source is not None:
-            session = self._sessions.get(source.peer_id)
-            if session is not None:
-                session.finish_request(kv_request_id)
-            return
+            source_session = self._sessions.get(source.peer_id)
+            if source_session is not None:
+                source_session.finish_request(source.kv_request_id)
 
-        # Prefiller-side finish: identify the session via kv_request_id.
-        session = self._kv_to_session.pop(kv_request_id, None)
-        if session is not None:
-            session.finish_request(kv_request_id)
-            return
+        if dest_id is not None:
+            # Prefiller-side finish: identify the session via kv_request_id.
+            dest_session = self._kv_to_session.pop(dest_id, None)
+            if dest_session is not None and not (
+                dest_session is source_session and dest_id == source_id
+            ):
+                dest_session.finish_request(dest_id)
 
     @override
     def submit_store(self, job_metadata: TransferJob) -> None:
