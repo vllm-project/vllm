@@ -9,9 +9,10 @@ from typing import cast
 import pytest
 import torch
 from tokenizers import Tokenizer, models, pre_tokenizers, processors
-from transformers import TokenizersBackend
+from transformers import BertConfig, TokenizersBackend
 
 from vllm import PoolingParams, TokensPrompt
+from vllm.config import ModelConfig, VllmConfig
 from vllm.entrypoints.pooling.scoring.io_processor import (
     BiEncoderIOProcessor,
     CrossEncoderIOProcessor,
@@ -28,6 +29,8 @@ from vllm.entrypoints.pooling.typing import (
 from vllm.model_executor.models.jina_vl import JinaVLForSequenceClassification
 from vllm.outputs import PoolingOutput, PoolingRequestOutput, RequestError
 from vllm.renderers import TokenizeParams
+from vllm.renderers.chat_utils import ChatTemplateConfig
+from vllm.renderers.hf import HfRenderer
 from vllm.tokenizers import TokenizerLike
 
 pytestmark = pytest.mark.skip_global_cleanup
@@ -74,6 +77,88 @@ def llm_reranker_processor() -> CrossEncoderIOProcessor:
     processor.saved_chat_template = None
     processor.saved_chat_template_kwargs = {}
     return processor
+
+
+@pytest.fixture
+def pair_processor(tmp_path):
+    vocab = {"[UNK]": 0, "[CLS]": 1, "[SEP]": 2, "a": 3, "bc": 4}
+    backend = Tokenizer(models.WordPiece(vocab, unk_token="[UNK]"))
+    backend.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
+    backend.post_processor = processors.TemplateProcessing(
+        single="[CLS] $A [SEP]",
+        pair="[CLS] $A [SEP] $B:1 [SEP]:1",
+        special_tokens=[("[CLS]", 1), ("[SEP]", 2)],
+    )
+    tokenizer = TokenizersBackend(
+        tokenizer_object=backend,
+        unk_token="[UNK]",
+        pad_token="[UNK]",
+        cls_token="[CLS]",
+        sep_token="[SEP]",
+        model_input_names=["input_ids", "token_type_ids", "attention_mask"],
+    )
+    tokenizer.save_pretrained(tmp_path)
+    BertConfig(
+        architectures=["BertForSequenceClassification"],
+        vocab_size=len(vocab),
+        hidden_size=8,
+        num_hidden_layers=1,
+        num_attention_heads=1,
+        intermediate_size=16,
+        num_labels=1,
+    ).save_pretrained(tmp_path)
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path), runner="pooling", dtype="float32", max_model_len=32
+        )
+    )
+    renderer = HfRenderer(config, tokenizer)
+    try:
+        yield CrossEncoderIOProcessor(config, renderer, ChatTemplateConfig())
+    finally:
+        renderer.shutdown()
+
+
+@pytest.mark.parametrize("padding", [None, 12])
+@pytest.mark.parametrize(
+    "side,limit,expected,document_span",
+    [
+        (None, 7, [1, 3, 3, 2, 4, 4, 2], (4, 7)),
+        ("left", 7, [1, 2, 4, 4, 4, 4, 2], (2, 7)),
+        ("right", 7, [1, 3, 3, 3, 2, 4, 2], (5, 7)),
+        ("left", 3, [1, 2, 2], (2, 3)),
+        ("right", 3, [1, 2, 2], (2, 3)),
+        ("left", 20, [1, 3, 3, 3, 2, 4, 4, 4, 4, 2], (5, 10)),
+        ("right", 20, [1, 3, 3, 3, 2, 4, 4, 4, 4, 2], (5, 10)),
+    ],
+)
+def test_pair_truncation_preserves_segment_alignment(
+    pair_processor, padding, side, limit, expected, document_span
+):
+    """Pair delimiters and document segments survive truncation followed by padding."""
+    result = pair_processor.render(
+        ScoringRenderParams(
+            data_1="a a a",
+            data_2="bc bc bc bc",
+            chat_template=None,
+            max_tokens_per_query=0,
+            max_tokens_per_doc=0,
+            tok_params=TokenizeParams(
+                max_total_tokens=32,
+                truncate_prompt_tokens=limit,
+                truncation_side=side,
+                pad_prompt_tokens=padding,
+            ),
+            prompt_extras=None,
+            skip_mm_cache=False,
+            params=PoolingParams(task="classify"),
+            lora_requests=None,
+            priorities=0,
+        )
+    )
+    expected = expected + [0] * max(0, (padding or 0) - len(expected))
+    assert result["prompts"]["prompt_token_ids"] == expected
+    assert result["params"].extra_kwargs["compressed_token_type_ids"] == document_span
 
 
 def test_llm_reranker_tokenization_is_independent_of_nonbinding_doc_limit(

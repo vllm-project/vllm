@@ -160,6 +160,49 @@ print(f"Score: {score}")
 
 A code example can be found here: [examples/basic/offline_inference/score.py](../../../examples/basic/offline_inference/score.py)
 
+### Truncating cross-encoder pairs
+
+For cross-encoders that tokenize the query and document as a pair, such as BERT,
+set `truncate_prompt_tokens` and `truncation_side` in `LLM.score`'s
+`tokenization_kwargs` to choose which end of the combined content to keep:
+
+```python
+from vllm import LLM
+
+llm = LLM(model="cross-encoder/ms-marco-TinyBERT-L2-v2", runner="pooling")
+(output,) = llm.score(
+    "What is the capital of France? " * 5,
+    "The capital of France is Paris. " * 8,
+    tokenization_kwargs={
+        "truncate_prompt_tokens": 16,
+        "truncation_side": "left",
+    },
+)
+```
+
+- `"left"` keeps the tail of the query and document content in their combined
+  order; `"right"` keeps the beginning. Either can remove all content from one
+  member of the pair. This is different from Hugging Face's `longest_first`
+  strategy, which removes tokens from the longer member of the pair.
+- The limit includes the tokenizer-added special tokens. When the limit fits
+  those tokens, explicit truncation preserves the pair delimiters, such as
+  BERT's `[CLS] query [SEP] document [SEP]`, and the corresponding segment IDs.
+- Omitting `truncation_side` keeps the tokenizer's existing truncation behavior.
+  Omitting `truncate_prompt_tokens` disables this truncation. A limit of `-1`
+  uses the model's maximum input length.
+- `max_tokens_per_query` and `max_tokens_per_doc` apply to each input before the
+  pair is composed and the combined limit is applied.
+
+This delimiter preservation applies to tokenizer-generated pairs, not score
+templates. An empty document retains the tokenizer's single-input behavior.
+With `add_special_tokens=False`, there are no added delimiters to preserve.
+Zero or positive limits smaller than the number of added special tokens retain
+the existing slicing behavior; they do not guarantee a complete pair structure.
+Use a limit that accommodates the special tokens and the content your model needs.
+
+For the [Score API](#score-api) and [Rerank API](#cohere-rerank-api), pass
+`truncate_prompt_tokens` and `truncation_side` as request fields.
+
 ## Online Serving
 
 ### Score API
