@@ -19,8 +19,7 @@ from utils import (
 
 import vllm.envs as envs
 from vllm import LLM, SamplingParams
-from vllm.inputs import TokensPrompt
-from vllm.platforms import current_platform
+from vllm.transformers_utils.config import get_config
 
 
 @skip_unsupported
@@ -732,7 +731,19 @@ def test_decode_logprobs_match_prefill_logprobs(
 
     This ensures that the logprobs from decode are consistent with what
     we would get if we ran prefill on each prefix.
+
+    Skipped for GraniteSWA models: sliding-window KV-cache eviction
+    during decode produces different attention windows than chunked
+    prefill; bitwise logprob match is not expected.
     """
+    _cfg = get_config(TEST_MODEL, trust_remote_code=False)
+    _model_type = getattr(_cfg, "model_type", "")
+    if _model_type == "granite_swa":
+        pytest.skip(
+            "GraniteSWA sliding-window decode and chunked prefill use "
+            "different attention windows; bitwise logprob match is not "
+            "expected."
+        )
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
     tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "1"))
