@@ -27,6 +27,7 @@ from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.metrics.perf import PerfMetricsLogging, PerfMetricsProm
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import (
+    KV_CACHE_BLOCK_STATES,
     KV_FETCH_STAGES,
     CachingMetrics,
     IterationStats,
@@ -1078,10 +1079,33 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.histogram_kv_block_reuse_gap = create_metric_per_engine(
                 histogram_kv_block_reuse_gap, per_engine_labelvalues
             )
+
+            gauge_kv_cache_blocks_by_state = self._gauge_cls(
+                name="vllm:kv_cache_blocks_by_state",
+                documentation=(
+                    "Number of KV cache blocks per exclusive state (active_shared, "
+                    "active_private, loading_kv, held_for_send, waiting_hold, "
+                    "pending_free, unattributed, cached_evictable, empty_free); "
+                    "states sum to num_gpu_blocks - 1. Counted every 10 seconds "
+                    "and when idle; see docs/design/metrics.md."
+                ),
+                multiprocess_mode="mostrecent",
+                labelnames=labelnames + ["state"],
+            )
+            self.gauge_kv_cache_blocks_by_state: dict[str, dict[int, Gauge]] = {}
+            for state in KV_CACHE_BLOCK_STATES:
+                per_engine_labelvalues_with_state = {
+                    idx: labelvalues + [state]
+                    for idx, labelvalues in per_engine_labelvalues.items()
+                }
+                self.gauge_kv_cache_blocks_by_state[state] = create_metric_per_engine(
+                    gauge_kv_cache_blocks_by_state, per_engine_labelvalues_with_state
+                )
         else:
             self.histogram_kv_block_lifetime = {}
             self.histogram_kv_block_idle_before_evict = {}
             self.histogram_kv_block_reuse_gap = {}
+            self.gauge_kv_cache_blocks_by_state = {}
 
         #
         # LoRA metrics
@@ -1220,6 +1244,11 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                     idle_hist.observe(event.idle_seconds)
                     for gap in event.reuse_gaps_seconds:
                         reuse_hist.observe(gap)
+
+            block_states = scheduler_stats.kv_cache_blocks_by_state
+            if block_states is not None:
+                for state, gauges in self.gauge_kv_cache_blocks_by_state.items():
+                    gauges[engine_idx].set(block_states.get(state, 0))
 
             if self.gauge_lora_info is not None:
                 running_lora_adapters = ",".join(
