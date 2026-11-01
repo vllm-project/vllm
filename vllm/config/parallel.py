@@ -637,7 +637,14 @@ class ParallelConfig:
         if pcp == 1:
             # DCP reuses the TP ranks when PCP is disabled.
             if tp % dcp != 0:
-                raise ValueError(f"tp_size={tp} must be divisible by dcp_size={dcp}.")
+                valid_dcp_sizes = [size for size in range(1, tp + 1) if tp % size == 0]
+                raise ValueError(
+                    f"tp_size={tp} must be divisible by dcp_size={dcp}. "
+                    f"For TP={tp}, PCP={pcp}, topology-compatible "
+                    "--decode-context-parallel-size values are "
+                    f"{valid_dcp_sizes}. Model and attention backend "
+                    "constraints may further restrict these values."
+                )
         elif dcp not in (1, pcp, tp * pcp):
             raise ValueError(
                 "When PCP is enabled, DCP must be disabled, span the PCP "

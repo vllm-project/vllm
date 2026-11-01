@@ -4631,3 +4631,58 @@ def test_hybrid_layer_counts_sparse_attention_as_attention(
             )
             == len(layer_types) - expected_attention
         )
+
+
+@pytest.mark.parametrize(
+    "tp,dcp,values",
+    [(1, 8, "[1]"), (4, 3, "[1, 2, 4]"), (6, 4, "[1, 2, 3, 6]")],
+)
+def test_invalid_dcp_reports_topology_compatible_values(tp, dcp, values):
+    """Invalid DCP must fail with a remedy, without silently changing topology."""
+    with pytest.raises(ValidationError) as exc:
+        ParallelConfig(tensor_parallel_size=tp, decode_context_parallel_size=dcp)
+    message = str(exc.value)
+    assert f"tp_size={tp} must be divisible by dcp_size={dcp}" in message
+    assert (
+        f"topology-compatible --decode-context-parallel-size values are {values}"
+        in message
+    )
+    assert "Model and attention backend constraints may further restrict" in message
+
+
+@pytest.mark.parametrize("dcp", [1, 2, 4])
+def test_dcp_diagnostics_preserve_explicit_topology(dcp):
+    config = ParallelConfig(tensor_parallel_size=4, decode_context_parallel_size=dcp)
+    assert config.tensor_parallel_size == 4
+    assert config.prefill_context_parallel_size == 1
+    assert config.decode_context_parallel_size == dcp
+
+
+def test_llm_invalid_dcp_reports_topology_remedy(tmp_path):
+    """Reject invalid topology at the public entry point before loading weights."""
+    from vllm import LLM
+
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "opt",
+                "architectures": ["OPTForCausalLM"],
+                "hidden_size": 64,
+                "num_attention_heads": 4,
+                "ffn_dim": 128,
+                "num_hidden_layers": 2,
+                "max_position_embeddings": 512,
+                "vocab_size": 100,
+            }
+        )
+    )
+    with pytest.raises(
+        ValidationError,
+        match=(r"topology-compatible --decode-context-parallel-size values are \[1\]"),
+    ):
+        LLM(
+            model=str(tmp_path),
+            skip_tokenizer_init=True,
+            tensor_parallel_size=1,
+            decode_context_parallel_size=8,
+        )
