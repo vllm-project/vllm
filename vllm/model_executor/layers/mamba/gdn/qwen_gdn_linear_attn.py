@@ -89,6 +89,7 @@ from vllm.v1.attention.backends.gdn_attn import (
     FLASHINFER_GDN_CHECKPOINT_ALIGNMENT,
     GDNAttentionMetadata,
 )
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -557,6 +558,16 @@ class ChunkGatedDeltaRule(CustomOp):
 
 @PluggableLayer.register("qwen_gated_delta_net_attention")
 class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
+    @property
+    def mamba_type(self) -> MambaAttentionBackendEnum:
+        if envs.VLLM_BATCH_INVARIANT:
+            if self.vllm_config.model_config.hf_config.model_type != "qwen3_5":
+                raise ValueError(
+                    "Batch-invariant Qwen GDN currently requires Qwen3.5 dense"
+                )
+            return MambaAttentionBackendEnum.QWEN_GDN_ATTN
+        return super().mamba_type
+
     def get_state_shape(
         self,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
@@ -736,6 +747,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
         self.enable_packed_recurrent_decode = (
             envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
+            and not envs.VLLM_BATCH_INVARIANT
         )
         # Off by default; the Qwen3.5 NVIDIA variant passes a fused gated RMS
         # norm that reads z strided from the packed qkvz projection and
@@ -761,8 +773,23 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             self.gdn_decode_kernel = "XPU"
 
         self.enable_fused_gdn_spec_decode = (
-            self.gdn_decode_kernel == "cuda" and self.speculative_config is not None
+            self.gdn_decode_kernel == "cuda"
+            and self.speculative_config is not None
+            and not envs.VLLM_BATCH_INVARIANT
         )
+        if envs.VLLM_BATCH_INVARIANT:
+            if not vllm_config.model_config.enforce_eager:
+                raise ValueError("Batch-invariant Qwen GDN requires enforce_eager=True")
+            if self.gdn_prefill_backend != "triton":
+                raise ValueError(
+                    "Batch-invariant Qwen GDN requires gdn_prefill_backend='triton'"
+                )
+            if self.get_state_dtype()[1] != torch.float32:
+                raise ValueError(
+                    "Batch-invariant Qwen GDN requires FP32 recurrent state"
+                )
+            if vllm_config.parallel_config.tensor_parallel_size != 1:
+                raise ValueError("Batch-invariant Qwen GDN currently requires TP=1")
         if self.speculative_config is not None:
             logger.info_once("GDN spec decode kernel: %s", self.gdn_decode_kernel)
 
@@ -1641,6 +1668,93 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out=core_attn_out,
         )
 
+    def _forward_core_batch_invariant(
+        self,
+        mixed_qkv: torch.Tensor,
+        b: torch.Tensor,
+        a: torch.Tensor,
+        core_attn_out: torch.Tensor,
+        metadata: GDNAttentionMetadata,
+    ) -> None:
+        sequences = metadata.batch_invariant_sequences
+        assert sequences is not None
+        conv_state = (
+            self.kv_cache[0]
+            if is_conv_state_dim_first()
+            else self.kv_cache[0].transpose(-1, -2)
+        )
+        ssm_state = self.kv_cache[1]
+        weight = self.conv1d.weight.view(self.conv1d.weight.size(0), -1)
+        spec_row = non_spec_row = 0
+        for start, end, speculative, cu in sequences:
+            x = mixed_qkv[start:end]
+            if speculative:
+                assert metadata.spec_state_indices_tensor is not None
+                assert metadata.num_accepted_tokens is not None
+                indices = metadata.spec_state_indices_tensor[spec_row : spec_row + 1]
+                accepted = metadata.num_accepted_tokens[spec_row : spec_row + 1]
+                x = causal_conv1d_update(
+                    x,
+                    conv_state,
+                    weight,
+                    self.conv1d.bias,
+                    self.activation,
+                    conv_state_indices=indices[:, 0],
+                    num_accepted_tokens=accepted,
+                    query_start_loc=cu,
+                    max_query_len=indices.size(1),
+                    validate_data=False,
+                )
+                spec_row += 1
+            else:
+                assert metadata.non_spec_state_indices_tensor is not None
+                indices = metadata.non_spec_state_indices_tensor[
+                    non_spec_row : non_spec_row + 1
+                ]
+                initial = (
+                    metadata.has_initial_state[non_spec_row : non_spec_row + 1]
+                    if metadata.has_initial_state is not None
+                    else None
+                )
+                if initial is not None:
+                    ssm_state[indices] = torch.where(
+                        initial[:, None, None, None], ssm_state[indices], 0
+                    )
+                    conv_state[indices] = torch.where(
+                        initial[:, None, None], conv_state[indices], 0
+                    )
+                x = causal_conv1d_update(
+                    x,
+                    conv_state,
+                    weight,
+                    self.conv1d.bias,
+                    self.activation,
+                    conv_state_indices=indices,
+                    query_start_loc=cu,
+                    max_query_len=end - start,
+                    validate_data=False,
+                )
+                indices = indices[:, None].expand(-1, end - start).contiguous()
+                accepted = None
+                non_spec_row += 1
+            q, k, v = self.rearrange_mixed_qkv(x)
+            output, _ = fused_sigmoid_gating_delta_rule_update(
+                A_log=self.A_log,
+                a=a[start:end],
+                b=b[start:end],
+                dt_bias=self.dt_bias,
+                q=q,
+                k=k,
+                v=v,
+                initial_state=ssm_state,
+                inplace_final_state=True,
+                cu_seqlens=cu,
+                ssm_state_indices=indices,
+                num_accepted_tokens=accepted,
+                use_qk_l2norm_in_kernel=True,
+            )
+            core_attn_out[start:end] = output.squeeze(0)
+
     def _forward_core(
         self,
         mixed_qkv: torch.Tensor,
@@ -1668,6 +1782,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             return
 
         assert isinstance(attn_metadata, GDNAttentionMetadata)
+        if envs.VLLM_BATCH_INVARIANT:
+            return self._forward_core_batch_invariant(
+                mixed_qkv, b, a, core_attn_out, attn_metadata
+            )
 
         if (
             self.enable_packed_recurrent_decode

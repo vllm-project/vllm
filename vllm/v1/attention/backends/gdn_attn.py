@@ -8,6 +8,7 @@ from typing import Literal
 
 import torch
 
+from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.mamba.checkpoint import (
@@ -90,6 +91,21 @@ class GDNAttentionBackend(AttentionBackend):
         return True
 
 
+class QwenGDNAttentionBackend(GDNAttentionBackend):
+    @staticmethod
+    def get_name() -> str:
+        return "QWEN_GDN_ATTN"
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        from vllm.platforms import current_platform
+
+        return (
+            current_platform.is_cuda()
+            and current_platform.is_device_capability_family(90)
+        )
+
+
 @dataclass
 class GDNAttentionMetadata:
     num_prefills: int
@@ -99,6 +115,7 @@ class GDNAttentionMetadata:
     num_spec_decodes: int
     num_spec_decode_tokens: int
     num_actual_tokens: int
+    batch_invariant_sequences: list[tuple[int, int, bool, torch.Tensor]] | None = None
 
     checkpoint: MambaPrefillCheckpointMetadata | None = None
     flashinfer_checkpoint_plan: GDNFlashInferCheckpointPlan | None = None
@@ -719,6 +736,21 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,
         )
+        if envs.VLLM_BATCH_INVARIANT:
+            offsets = query_start_loc_cpu.tolist()
+            lengths = query_start_loc_cpu.diff()
+            local_cu = torch.stack((torch.zeros_like(lengths), lengths), dim=1)
+            local_cu = async_tensor_h2d(local_cu, device=query_start_loc.device)
+            spec_rows = (
+                spec_sequence_masks_cpu.tolist()
+                if spec_sequence_masks_cpu is not None
+                else [False] * m.num_reqs
+            )
+            attn_metadata.batch_invariant_sequences = [
+                (start, end, spec_rows[i], local_cu[i])
+                for i, (start, end) in enumerate(zip(offsets[:-1], offsets[1:]))
+                if end > start
+            ]
         return attn_metadata
 
     def _stage_spec_decode(

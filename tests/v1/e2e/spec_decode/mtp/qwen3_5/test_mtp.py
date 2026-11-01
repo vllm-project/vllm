@@ -18,10 +18,123 @@ from vllm.v1.metrics.reader import Vector
 from ...utils import (
     assert_request_outputs_match,
     compute_acceptance_len,
+    compute_acceptance_rate,
     get_spec_decode_metric_value,
     get_test_prompts,
 )
 from .._correctness import check_mtp_correctness
+
+
+@single_gpu_only
+@pytest.mark.skipif(
+    not (
+        current_platform.is_cuda() and current_platform.is_device_capability_family(90)
+    ),
+    reason="Qwen GDN batch invariance currently requires CUDA SM90.",
+)
+@pytest.mark.parametrize("num_spec_tokens", [0, 1, 2, 3])
+def test_mtp_batch_invariance(
+    monkeypatch: pytest.MonkeyPatch,
+    num_spec_tokens: int,
+    vllm_runner,
+):
+    """MTP must preserve seeded token/logprob outputs when requests are regrouped."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
+    monkeypatch.setenv("VLLM_GPU_SYNC_CHECK", "error")
+    manual = (
+        "Routine facility inspections are recorded in the audit ledger every day. "
+        * 100
+    )
+    prompts = [
+        manual + "\nWhat is the capital of France?",
+        "Explain the water cycle.",
+        manual + "\nCompute 17 + 29.",
+        "Write a short story about a lighthouse.",
+    ]
+    params = [
+        SamplingParams(
+            temperature=0.6,
+            top_p=0.95,
+            max_tokens=32,
+            ignore_eos=True,
+            logprobs=5,
+            seed=1000 + i,
+        )
+        for i in range(len(prompts))
+    ]
+    cold_params = [param.clone() for param in params]
+    for param in cold_params:
+        param.skip_reading_prefix_cache = True
+    with vllm_runner(
+        "Qwen/Qwen3.5-0.8B-Base",
+        block_size=None,
+        enable_chunked_prefill=True,
+        dtype="bfloat16",
+        enforce_eager=True,
+        max_model_len=2048,
+        max_num_seqs=2,
+        max_num_batched_tokens=128,
+        gpu_memory_utilization=0.5,
+        enable_prefix_caching=True,
+        limit_mm_per_prompt={"image": 0, "video": 0},
+        attention_config={"backend": "FLASH_ATTN"},
+        additional_config={"gdn_prefill_backend": "triton"},
+        **(
+            {
+                "speculative_config": {
+                    "method": "mtp",
+                    "num_speculative_tokens": num_spec_tokens,
+                }
+            }
+            if num_spec_tokens
+            else {}
+        ),
+        disable_log_stats=False,
+    ) as runner:
+        llm = runner.llm
+        assert len(llm.get_tokenizer().encode(manual)) > 1024
+
+        def selected(output):
+            completion = output.outputs[0]
+            tokens = list(completion.token_ids)
+            assert completion.logprobs is not None
+            logprobs = [
+                step[token].logprob
+                for token, step in zip(tokens, completion.logprobs, strict=True)
+            ]
+            return tokens, logprobs
+
+        serial = [
+            selected(
+                llm.generate(
+                    [prompt],
+                    [param],
+                    use_tqdm=False,
+                )[0]
+            )
+            for prompt, param in zip(prompts, cold_params, strict=True)
+        ]
+        warm_outputs = llm.generate(prompts, params, use_tqdm=False)
+        cached_tokens = [warm_outputs[i].num_cached_tokens for i in (0, 2)]
+        assert all(count is not None and count > 0 for count in cached_tokens)
+        batched = [selected(output) for output in warm_outputs]
+        reversed_batch = [
+            selected(output)
+            for output in llm.generate(prompts[::-1], params[::-1], use_tqdm=False)
+        ][::-1]
+        cold_batch = [
+            selected(output)
+            for output in llm.generate(
+                prompts,
+                cold_params,
+                use_tqdm=False,
+            )
+        ]
+        if num_spec_tokens:
+            assert compute_acceptance_rate(llm.get_metrics()) > 0
+        assert serial == batched == reversed_batch == cold_batch
 
 
 def _add_random_mtp_module(model_name: str, path: Path) -> Path:

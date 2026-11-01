@@ -119,6 +119,31 @@ for output in outputs:
     print(f"Generated: {generated_text!r}\n")
 ```
 
+## Experimental Qwen GDN with MTP
+
+Dense Qwen3.5 GDN supports an experimental configuration on NVIDIA Hopper
+(SM90) with tensor parallel size one, BF16 model weights, FP32 recurrent state,
+and eager execution. Select the Triton GDN prefill backend explicitly:
+
+```bash
+VLLM_BATCH_INVARIANT=1 VLLM_USE_V2_MODEL_RUNNER=1 \
+VLLM_USE_BREAKABLE_CUDAGRAPH=0 \
+vllm serve Qwen/Qwen3.5-0.8B-Base \
+    --dtype bfloat16 --enforce-eager --tensor-parallel-size 1 \
+    --additional-config '{"gdn_prefill_backend":"triton"}' \
+    --speculative-config '{"method":"mtp","num_speculative_tokens":2}'
+```
+
+Use an explicit seed for each sampled request. This path runs convolution and
+recurrent attention separately for each request, retaining speculative state
+checkpoints for accepted-token recovery. It trades throughput for consistent
+arithmetic. CUDA graph execution, other devices, and tensor parallel sizes
+greater than one are unsupported.
+
+Batch invariance at a fixed speculative depth does not establish identical
+sampled outputs across speculative depths or between speculative and
+non-speculative sampling.
+
 ## Tested Models
 
 Batch invariance has been tested and verified on the following models:
