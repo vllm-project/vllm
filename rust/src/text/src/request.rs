@@ -151,9 +151,10 @@ pub struct SamplingParams {
     /// Number of prompt tokens to skip from returned routed-expert data.
     /// `None` returns routing for the whole prompt.
     pub routed_experts_prompt_start: Option<u32>,
-    /// When the server records routed experts, `Some(false)` skips this
-    /// request: its routing is neither recorded nor returned.
-    pub return_routed_experts: Option<bool>,
+    /// Whether to record and return auxiliary outputs: routed experts,
+    /// sampling masks, sample logprobs and `logprob_token_ids`. `None`
+    /// returns them.
+    pub return_aux_outputs: Option<bool>,
     /// Additional request parameters for custom extensions.
     ///
     /// Python's `SamplingParams` names this `extra_args`, which clients of the
@@ -198,7 +199,7 @@ impl Default for SamplingParams {
             structured_outputs: None,
             skip_reading_prefix_cache: None,
             routed_experts_prompt_start: None,
-            return_routed_experts: None,
+            return_aux_outputs: None,
             vllm_xargs: None,
             stream_interval: None,
         }

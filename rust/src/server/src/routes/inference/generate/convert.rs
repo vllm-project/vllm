@@ -58,7 +58,8 @@ pub(super) fn prepare_generate_request(
             .as_ref()
             .and_then(|options| options.continuous_usage_stats)
             .unwrap_or(false);
-    let include_logprobs = request.sampling_params.inner.logprobs.is_some();
+    let include_logprobs = request.sampling_params.inner.logprobs.is_some()
+        && request.sampling_params.inner.return_aux_outputs != Some(false);
     let include_prompt_logprobs = request.sampling_params.inner.prompt_logprobs.is_some();
     let return_token_ids = request.return_token_ids.unwrap_or(false);
     let mut sampling_params = request.sampling_params.inner;
@@ -136,8 +137,7 @@ mod tests {
                 "logprobs": 2,
                 "prompt_logprobs": 1,
                 "ignore_eos": true,
-                "routed_experts_prompt_start": 2,
-                "return_routed_experts": false
+                "routed_experts_prompt_start": 2
             },
             "kv_transfer_params": {
                 "connector": "x"
@@ -168,10 +168,6 @@ mod tests {
             prepared.text_request.sampling_params.routed_experts_prompt_start,
             Some(2)
         );
-        assert_eq!(
-            prepared.text_request.sampling_params.return_routed_experts,
-            Some(false)
-        );
         assert_eq!(prepared.text_request.priority, -3);
         assert_eq!(prepared.text_request.cache_salt.as_deref(), Some("salt"));
         assert_eq!(
@@ -181,6 +177,31 @@ mod tests {
                 .vllm_xargs
                 .and_then(|mut xargs| xargs.remove("kv_transfer_params")),
             Some(json!({"connector": "x"}))
+        );
+    }
+
+    #[test]
+    fn prepare_generate_request_skips_logprobs_without_aux_outputs() {
+        let prepare = |return_aux_outputs: bool| {
+            let request: GenerateRequest = serde_json::from_value(json!({
+                "token_ids": [11, 22],
+                "sampling_params": {"logprobs": 2, "return_aux_outputs": return_aux_outputs}
+            }))
+            .expect("parse request");
+            prepare_generate_request(
+                request,
+                &served(&["test-model"]),
+                ResolvedRequestContext::default(),
+                None,
+            )
+            .expect("prepare request")
+        };
+        assert!(prepare(true).options.include_logprobs);
+        let skipped = prepare(false);
+        assert!(!skipped.options.include_logprobs);
+        assert_eq!(
+            skipped.text_request.sampling_params.return_aux_outputs,
+            Some(false)
         );
     }
 

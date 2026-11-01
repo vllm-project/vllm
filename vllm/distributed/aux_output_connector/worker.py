@@ -145,10 +145,8 @@ class AuxOutputWorkerConnector:
             return None
 
         request_ids = list(input_batch.req_ids)
-        with self._lock:
-            # Requests that skip routed experts are not tracked.
-            if not any(request_id in self._requests for request_id in request_ids):
-                return None
+        if not any(request_id in self._requests for request_id in request_ids):
+            return None
         query_start_loc = input_batch.query_start_loc_np[: len(request_ids) + 1]
         num_rows = int(query_start_loc[-1])
         pending_output = PendingAuxOutput(

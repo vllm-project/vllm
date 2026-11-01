@@ -114,7 +114,7 @@ class _SchedulerRequest:
     finished: bool = False
     sampling_params: SimpleNamespace = field(
         default_factory=lambda: SimpleNamespace(
-            routed_experts_prompt_start=0, return_routed_experts=True
+            routed_experts_prompt_start=0, return_aux_outputs=True
         )
     )
 
@@ -449,8 +449,7 @@ def test_worker_ignores_cudagraph_query_padding():
     worker.close()
 
 
-def test_worker_skips_requests_without_routed_experts():
-    """A request absent from the metadata gets no rows in a mixed batch."""
+def test_worker_skips_requests_without_aux_outputs():
     worker = _make_worker(2)
     logical = np.arange(3 * 3 * 2, dtype=np.uint8).reshape(3, 3, 2)
     metadata = _metadata(0, [_request_metadata("recorded", 0, 1, 0, [])], {})
@@ -470,7 +469,7 @@ def test_worker_skips_requests_without_routed_experts():
     worker.close()
 
 
-def test_worker_skips_snapshot_without_routed_experts_requests():
+def test_worker_skips_snapshot_without_aux_outputs_requests():
     worker = _make_worker(1)
     worker._capturer = Mock()
     worker.begin_step(_metadata(0, [], {}).metadata)
@@ -1523,7 +1522,7 @@ def _scheduler_request(
         num_output_tokens=num_output_tokens,
         num_computed_tokens=num_tokens,
         sampling_params=SimpleNamespace(
-            routed_experts_prompt_start=prompt_start, return_routed_experts=True
+            routed_experts_prompt_start=prompt_start, return_aux_outputs=True
         ),
     )
 
