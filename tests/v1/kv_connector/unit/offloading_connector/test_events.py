@@ -370,11 +370,18 @@ def test_store_uses_request_context_and_removal_uses_chunk_key():
     context.set_offload_key_position(key, 8)
     tracker = _tracker()
     tracker.on_new_request(context, request, (group_config,))
+    tracker.record_store(request, group_config, 0, key)
+    # The request context must win over an existing snapshot.
+    tracker._pending_event_metadata[key].token_ids = ()
 
     [stored] = tracker.take_events(
         [
             OffloadingEvent(
-                keys=[key], medium=Medium.CPU, removed=False, req_context=context
+                keys=[key],
+                medium=Medium.CPU,
+                removed=False,
+                removal_expected=True,
+                req_context=context,
             )
         ]
     )
@@ -382,6 +389,7 @@ def test_store_uses_request_context_and_removal_uses_chunk_key():
     assert stored.block_hashes == [_wire_hash(h) for h in block_hashes[:2]]
     assert stored.token_ids == list(range(1, 9))
     assert stored.block_size == 4
+    assert (Medium.CPU, None) in tracker._pending_event_metadata[key].active_residencies
 
     [removed] = tracker.take_events(
         [OffloadingEvent(keys=[key], medium=Medium.CPU, removed=True)]
