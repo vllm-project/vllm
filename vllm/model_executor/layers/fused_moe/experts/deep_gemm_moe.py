@@ -39,6 +39,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     DeepGemmQuantScaleFMT,
+    deep_gemm_supports_scale_fmt,
     get_mk_alignment_for_contiguous_layout,
     is_deep_gemm_supported,
     m_grouped_fp8_fp4_gemm_nt_contiguous,
@@ -79,6 +80,14 @@ def _valid_deep_gemm(
     """
     if not has_deep_gemm():
         logger.debug_once("DeepGemm disabled: deep_gemm not available.")
+        return False
+
+    if not deep_gemm_supports_scale_fmt():
+        logger.debug_once(
+            "DeepGemm disabled: the 120 family needs packed ue8m0 scales and "
+            "VLLM_USE_DEEP_GEMM_E8M0 is off, so float32 scales would reach the "
+            "grouped kernels. This is not an error and we will fall back to triton."
+        )
         return False
 
     M = hidden_states.size(0)
