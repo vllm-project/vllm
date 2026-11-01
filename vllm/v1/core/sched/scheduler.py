@@ -1050,7 +1050,7 @@ class Scheduler(SchedulerInterface):
             step_skipped_waiting: deque[Request] = deque()
             step_skipped_kv_holding: deque[Request] = deque()
             # Blocks still reserved by in-flight prefills. Summed once per
-            # waiting scan and kept up to date as the scan admits async loads,
+            # waiting scan and kept up to date as the scan admits requests,
             # so admitting k loads costs O(k), not O(k^2). None: recompute.
             inflight_reserved: int | None = None
 
@@ -1554,8 +1554,10 @@ class Scheduler(SchedulerInterface):
                 request = request_queue.pop_request()
                 self.deferred_waiting.discard(request)
                 self.running.append(request)
-                # A chunked prefill admitted here joins _inflight_prefills below.
-                inflight_reserved = None
+                if request in self._inflight_prefills:
+                    # Its own remaining blocks just shrank (e.g. a finished
+                    # async load resuming): recompute the sum.
+                    inflight_reserved = None
                 if num_external_computed_tokens > 0:
                     # load_kv_async is False here
                     has_sync_kv_loads = True
@@ -1599,6 +1601,8 @@ class Scheduler(SchedulerInterface):
                 prefill_admitted |= num_computed_tokens < request.num_tokens - 1
                 # Only track requests that will still be prefilling after this chunk.
                 if num_computed_tokens + num_new_tokens < request.num_tokens:
+                    if inflight_reserved is not None:
+                        inflight_reserved += self._request_remaining_blocks(request)
                     self._inflight_prefills.add(request)
                 # Encoder-related.
                 if encoder_inputs_to_schedule:

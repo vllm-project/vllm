@@ -7986,6 +7986,74 @@ def test_async_load_admission_reservation_is_linear(monkeypatch):
     assert calls == ADMITTABLE
 
 
+@pytest.mark.parametrize("ready_blocks", [1, 3])
+def test_async_load_admission_reservation_is_linear_mixed(monkeypatch, ready_blocks):
+    """The same holds when the scan alternates async loads with requests it
+    admits directly (no external hit). A ready request that finishes its
+    prefill in this step reserves nothing, so the running sum is kept; one
+    that stays prefilling (1-block chunks via long_prefill_token_threshold)
+    joins the in-flight set, and its remaining blocks are added. Admission
+    decisions match main's: 10 loads and 10 ready requests fit.
+    """
+    BLOCK_SIZE = 16
+    NUM_EACH = 16
+    ADMITTABLE = 10
+    chunked = ready_blocks > 1
+    scheduler = create_scheduler(
+        block_size=BLOCK_SIZE,
+        # Per (load, ready) pair: 4 loaded + 1 reserved block for the load,
+        # 1 block for the ready request, + 2 reserved if it stays prefilling.
+        num_blocks=77 if chunked else 59,
+        max_num_seqs=2 * NUM_EACH,
+        long_prefill_token_threshold=BLOCK_SIZE if chunked else 0,
+        use_kv_connector=mock_kv(matched_tokens=BLOCK_SIZE * 4, is_async=True),
+    )
+    calls = 0
+    orig = Scheduler._request_remaining_blocks
+
+    def counting(self, request):
+        nonlocal calls
+        calls += 1
+        return orig(self, request)
+
+    monkeypatch.setattr(Scheduler, "_request_remaining_blocks", counting)
+    loads = create_requests(
+        num_requests=NUM_EACH,
+        num_tokens=BLOCK_SIZE * 5,
+        block_size=BLOCK_SIZE,
+        req_ids=[f"load{i}" for i in range(NUM_EACH)],
+    )
+    ready = create_requests(
+        num_requests=NUM_EACH,
+        num_tokens=BLOCK_SIZE * ready_blocks,
+        block_size=BLOCK_SIZE,
+        req_ids=[f"ready{i}" for i in range(NUM_EACH)],
+    )
+    ready_ids = {r.request_id for r in ready}
+    matched = scheduler.connector.get_num_new_matched_tokens
+
+    def no_hit_for_ready(request, num_computed_tokens):
+        if request.request_id in ready_ids:
+            return 0, False
+        return matched(request, num_computed_tokens)
+
+    monkeypatch.setattr(
+        scheduler.connector, "get_num_new_matched_tokens", no_hit_for_ready
+    )
+    for load, req in zip(loads, ready):
+        scheduler.add_request(load)
+        scheduler.add_request(req)
+    scheduler.schedule()
+
+    parked = [r for r in loads if r.status == RequestStatus.WAITING_FOR_REMOTE_KVS]
+    assert parked == loads[:ADMITTABLE]
+    assert all(r.status == RequestStatus.RUNNING for r in ready[:ADMITTABLE])
+    assert all(r.status == RequestStatus.WAITING for r in ready[ADMITTABLE:])
+    # One computation per admitted load, plus one per ready request that stays
+    # prefilling; recomputing after each ready admission costs 65 or 120 here.
+    assert calls == ADMITTABLE * (2 if chunked else 1)
+
+
 def _create_hybrid_mamba_connector_scheduler(
     matched_tokens: int,
     block_size: int = 16,
