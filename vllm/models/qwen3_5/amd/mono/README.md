@@ -47,6 +47,12 @@ every task is computed as on 256 CTAs:
 The 256-CTA builds trace as before the grid was a parameter; their kernel
 names are unchanged, the 128-CTA ones end in `_g128`.
 
+K2 is bit-exact with the stock Triton `gemm_afp4wfp4` only if it splits K
+the same way. The split counts depend on the installed AITER (`get_splitk`
+at AITER main gives gate_up 2 and down 2 at TP1 where older builds gave 4),
+so K2 probes them once per width at startup (`stock_split_fields`) and builds
+those; where they equal the defaults the build is unchanged.
+
 ## When it runs
 
 A step enters the mono graph only when it is a pure decode

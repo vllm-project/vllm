@@ -44,6 +44,7 @@ Weights are the checkpoint's as SGLang keeps them for ``gemm_afp4wfp4``: fp4x2
 A load past a weight's end (a dead slot) reads zeros at no memory traffic.
 """
 
+import functools
 from dataclasses import dataclass
 
 import flydsl.compiler as flyc
@@ -119,7 +120,12 @@ XSROW = HIDDEN // 32  # e8m0 codes (an i32 each) a row
 # The stock GEMMs' K splits on this image. These shapes have no tuned
 # gemm_afp4wfp4 config, so M<=8 uses DEFAULT.json (NUM_KSPLIT 4, BLOCK_K 512)
 # after get_splitk, and wider steps use NUM_KSPLIT 1. o_proj (K 6144) stays 4.
+# Other AITER versions split differently (``get_splitk`` of AITER main at
+# 59fae207 gives gate_up 2, down 2 at TP1 and 1 at TP2): a build takes the
+# installed AITER's counts through ``FfnBuild.gu_split`` / ``d_split`` /
+# ``o_split`` (``stock_split_fields``), these defaults where they agree.
 O_SPLITS = 4
+SPLIT_COUNTS = (1, 2, 4)  # K splits a tile's chain takes: whole, halves, quarters
 
 
 def gu_splits(s: int) -> int:
@@ -133,6 +139,41 @@ def d_splits(s: int, tp: int) -> int:
     if s > MAX_TOKENS:
         return 1
     return 4 if tp == 1 else 2
+
+
+@functools.cache
+def stock_splits(m: int, n: int, k: int) -> int:
+    """K splits of the stock MXFP4 GEMM (AITER Triton ``gemm_afp4wfp4``) at M
+    ``m`` for an [n, k] weight: the partials it returns with ``skip_reduce``.
+    Runs one small GEMM on the GPU, once per shape."""
+    from aiter.ops.triton.gemm_afp4wfp4 import gemm_afp4wfp4
+    from aiter.ops.triton.quant import dynamic_mxfp4_quant
+
+    xq, xs = dynamic_mxfp4_quant(torch.zeros(m, k, dtype=torch.bfloat16, device="cuda"))
+    w = torch.zeros(n, k // 2, dtype=torch.uint8, device="cuda")
+    ws = torch.full((n, k // 32), 127, dtype=torch.uint8, device="cuda")
+    p = gemm_afp4wfp4(xq, w, xs, ws, torch.bfloat16, skip_reduce=True)
+    return p.size(0) if p.dim() == 3 else 1
+
+
+def stock_split_fields(s: int, tp: int, oproj: bool) -> dict:
+    """``FfnBuild`` fields for the installed AITER's K splits at S rows: each 0
+    where it equals this module's default (so the build is #61573's), else the
+    count. ValueError for a count K2 cannot take."""
+    inter = FGeo(tp).inter
+    got = {
+        "gu_split": (stock_splits(s, 2 * inter, HIDDEN), gu_splits(s)),
+        "d_split": (stock_splits(s, HIDDEN, inter), d_splits(s, tp)),
+    }
+    if oproj:
+        got["o_split"] = (stock_splits(s, HIDDEN, CORE), O_SPLITS)
+    for name, (n, _) in got.items():
+        if n not in SPLIT_COUNTS:
+            raise ValueError(
+                f"the stock MXFP4 GEMM splits {name[:-6]}'s K in {n} at {s} rows; "
+                f"K2 reproduces {SPLIT_COUNTS} splits only"
+            )
+    return {name: 0 if n == default else n for name, (n, default) in got.items()}
 
 
 def split_total(vals):
@@ -216,6 +257,21 @@ class FfnBuild:
     # CTAs, one a CU, all resident (``tiling.resolve_grid``): 256 MI355X, 128
     # MI350P
     grid: int = DEFAULT_GRID
+    # the stock GEMMs' K splits of gate_up, down and o_proj (1, 2 or 4); 0: the
+    # defaults ``gu_splits`` / ``d_splits`` / ``O_SPLITS`` (``stock_split_fields``)
+    gu_split: int = 0
+    d_split: int = 0
+    o_split: int = 0
+
+
+def key_splits(key: "FfnBuild") -> tuple[int, int, int]:
+    """(gate_up, down, o_proj) K splits of a build."""
+    s = key.tokens
+    return (
+        key.gu_split or gu_splits(s),
+        key.d_split or d_splits(s, key.tp),
+        key.o_split or O_SPLITS,
+    )
 
 
 ABI = KernelAbi(
@@ -590,7 +646,7 @@ def o_finish(c, rraw, own=None):
         bf16_round(
             split_total(
                 red_at(c["red"], 2 * k + j // 2, 8 * (j % 2) + e, t)
-                for k in range(O_SPLITS)
+                for k in range(c["o_n"])
             )
         )
         + res[e]
@@ -610,7 +666,10 @@ def o_finish(c, rraw, own=None):
 def o_more_loads(c):
     """(owner, residual words, o weights) of each of the CTA's owner tasks past
     its first (``o_more``; none on 256 CTAs)."""
-    return [(own, o_res_loads(c, own), o_loads(c, own=own)) for own in o_more(c)]
+    return [
+        (own, o_res_loads(c, own), o_loads(c, splits=c["o_n"], own=own))
+        for own in o_more(c)
+    ]
 
 
 def o_more_passes(c, more, width=CORE, splits=4):
@@ -820,7 +879,7 @@ def stage_gu(c, j, g, ops, sliver):
     column pair): gate and up, the splits added as stock's reduce, bf16 each ->
     h (``h_out``)."""
     s, tid, wave, red = c["S"], c["tid"], c["wave"], c["red"]
-    n = gu_splits(s)
+    n = c["gu_n"]
     per = QUARTERS // n
     kq = wave // 2
     steps = [kq * GU_Q + i for i in range(GU_Q)]
@@ -1070,7 +1129,7 @@ def stage_down(c, ops, p=0, nxt=None):
     gl = lane // ROWS
     t = fx.min(lane % ROWS, s - 1)
     kq = wave // 2
-    n = d_splits(s, geo.tp)
+    n = c["d_n"]
     per = QUARTERS // n
 
     def run(acc):
@@ -1178,6 +1237,8 @@ def build(key: FfnBuild):
     assert key.normed == (key.tp > 1) and not (key.normed and key.oproj)
     # every CTA resident, or the launch hangs
     check_resident(key.grid)
+    gu_n, d_n, o_n = key_splits(key)
+    assert {gu_n, d_n, o_n} <= set(SPLIT_COUNTS), key
     geo = FGeo(key.tp, key.grid)
     nblk = key.grid
     lay = scratch_layout(key)
@@ -1218,6 +1279,8 @@ def build(key: FfnBuild):
     )
     if key.grid != DEFAULT_GRID:
         name += f"_g{key.grid}"
+    if key.gu_split or key.d_split or key.o_split:
+        name += f"_k{gu_n}{d_n}{o_n}"
 
     @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
     def kd(
@@ -1253,6 +1316,9 @@ def build(key: FfnBuild):
             "wave": tid // 64,
             "eps": key.eps,
             "shuffled": key.shuffled,
+            "gu_n": gu_n,
+            "d_n": d_n,
+            "o_n": o_n,
             "stamps": scratch + fx.Int64(lay["stamps"][0]) if key.stamps else None,
             "put": mb.put,
             "put_words": mb.put_words,
@@ -1293,13 +1359,13 @@ def build(key: FfnBuild):
             # the core first, then the residual and o weights: vmcnt drains in order
             craw = core_loads(c)
             rraw = o_res_loads(c)
-            oops = o_loads(c)
+            oops = o_loads(c, splits=o_n)
             o_quant(c, craw)
-            o_stage(c, oops)
+            o_stage(c, oops, splits=o_n)
             # owners past the CTA's first (128 CTAs): loads under its reduce
             more = o_more_loads(c)
             z, lnw = o_finish(c, rraw)
-            zs = o_more_passes(c, more)
+            zs = o_more_passes(c, more, splits=o_n)
             stamp(c, 5)
             # the first gate_up weights before the norm's hand-offs
             gops = gu_loads(c, geo.g_full * bid)

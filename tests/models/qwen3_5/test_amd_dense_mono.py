@@ -88,6 +88,28 @@ def _mxfp4(g, n, k):
     return w, ws
 
 
+_CONFIG = None
+
+
+def setUpModule():
+    """A VllmConfig for the stock custom ops the references build (SiluAndMul,
+    RMSNormGated), as tests/conftest.py's ``default_vllm_config``, with every
+    custom op on: the kernels match the ops' ROCm kernels (the eager serving
+    path), not their PyTorch-native fallbacks."""
+    global _CONFIG
+    from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
+
+    _CONFIG = set_current_vllm_config(
+        VllmConfig(compilation_config=CompilationConfig(custom_ops=["all"]))
+    )
+    _CONFIG.__enter__()
+
+
+def tearDownModule():
+    if _CONFIG is not None:
+        _CONFIG.__exit__(None, None, None)
+
+
 def _grid():
     """The grid the kernels build for on this GPU."""
     from vllm.models.qwen3_5.amd.mono.tiling import device_grid
@@ -137,11 +159,16 @@ def _dequant(wq, ws):
 
 def _gemma_norm(x, residual, w):
     """GemmaRMSNorm as the stock path runs it on ROCm with aiter -> x, residual."""
-    import vllm.models.minimax_m3.amd.ops.gemma_rmsnorm as M
+    # a from-import: the ops package re-exports a ``gemma_rmsnorm`` function that
+    # shadows the module of the same name as an attribute
+    from vllm.models.minimax_m3.amd.ops.gemma_rmsnorm import (
+        gemma_fused_add_rmsnorm,
+        gemma_rmsnorm,
+    )
 
     if residual is None:
-        return M.gemma_rmsnorm(x, w, EPS), x
-    return M.gemma_fused_add_rmsnorm(x, residual, w, EPS)
+        return gemma_rmsnorm(x, w, EPS), x
+    return gemma_fused_add_rmsnorm(x, residual, w, EPS)
 
 
 @unittest.skipUnless(_gfx950(), "needs FlyDSL and aiter on gfx950")
@@ -167,7 +194,14 @@ class DenseFfnTest(unittest.TestCase):
                 w2=D.shuffle_w(w2),
                 w2s=w2s,
             )
-            key = D.FfnBuild(tokens=s, eps=EPS, shuffled=True, oproj=True, grid=_grid())
+            key = D.FfnBuild(
+                tokens=s,
+                eps=EPS,
+                shuffled=True,
+                oproj=True,
+                grid=_grid(),
+                **D.stock_split_fields(s, 1, True),
+            )
             out = torch.empty(s, D.HIDDEN, dtype=BF, device="cuda")
             res_out = torch.empty_like(out)
             epoch = torch.zeros(1, dtype=torch.int32, device="cuda")
@@ -221,7 +255,12 @@ class DenseFfnTest(unittest.TestCase):
                 w2, w2s = _k_cols(w2, w2s, D.INTER, 2, rank)
                 w13_sh, w2_sh = D.shuffle_w(w13), D.shuffle_w(w2)
                 key = D.FfnBuild(
-                    tokens=s, shuffled=True, tp=2, normed=True, grid=_grid()
+                    tokens=s,
+                    shuffled=True,
+                    tp=2,
+                    normed=True,
+                    grid=_grid(),
+                    **D.stock_split_fields(s, 2, False),
                 )
                 out = torch.empty(s, D.HIDDEN, dtype=BF, device="cuda")
                 epoch = torch.zeros(1, dtype=torch.int32, device="cuda")
@@ -336,23 +375,29 @@ def _linear_quartered(x, w, ws):
 class StockSplitTest(unittest.TestCase):
     def test_k2_follows_stock_splits(self):
         """K2's split counts are the stock GEMM's at every width (from the
-        partials its config yields)."""
+        partials its config yields on random data), whichever AITER is
+        installed: the build's (``key_splits`` of ``stock_split_fields``)."""
         from vllm.models.qwen3_5.amd.mono import dense_ffn as D
 
         g = torch.Generator(device="cuda").manual_seed(3)
         for tp in D.TP_SIZES:
             inter = D.FGeo(tp).inter
-            shapes = [("gate_up", 2 * inter, D.HIDDEN, D.gu_splits)]
-            shapes.append(("down", D.HIDDEN, inter, lambda s: D.d_splits(s, tp)))
+            shapes = [("gate_up", 2 * inter, D.HIDDEN, 0)]
+            shapes.append(("down", D.HIDDEN, inter, 1))
             if tp == 1:
-                shapes.append(("o_proj", D.HIDDEN, D.CORE, lambda s: D.O_SPLITS))
-            for name, n, k, want in shapes:
+                shapes.append(("o_proj", D.HIDDEN, D.CORE, 2))
+            for name, n, k, which in shapes:
                 w, ws = _mxfp4(g, n, k)
                 for s in _widths(tp):
                     p = _linear_parts(_rnd(g, s, k), w, ws)
                     got = p.size(0) if p.dim() == 3 else 1
+                    key = D.FfnBuild(
+                        tokens=s, tp=tp, normed=tp > 1, oproj=tp == 1,
+                        **D.stock_split_fields(s, tp, tp == 1),
+                    )  # fmt: skip
                     with self.subTest(tp=tp, gemm=name, s=s):
-                        self.assertEqual(got, want(s))
+                        self.assertEqual(got, D.key_splits(key)[which])
+                        self.assertIn(got, D.SPLIT_COUNTS)
 
 
 def _cancel_blocks(w, ws, rows, blocks, g):
@@ -441,12 +486,23 @@ class StockChainTest(unittest.TestCase):
                 epoch = torch.ones(1, dtype=torch.int32, device="cuda")
                 out = torch.empty(s, D.HIDDEN, dtype=BF, device="cuda")
                 if tp == 1:
-                    key = D.FfnBuild(tokens=s, eps=EPS, shuffled=True, grid=_grid())
+                    key = D.FfnBuild(
+                        tokens=s,
+                        eps=EPS,
+                        shuffled=True,
+                        grid=_grid(),
+                        **D.stock_split_fields(s, 1, False),
+                    )
                     args = dict(hidden=h, residual=r, ln_w=ln_w)
                     res_out = torch.empty_like(out)
                 else:
                     key = D.FfnBuild(
-                        tokens=s, shuffled=True, tp=2, normed=True, grid=_grid()
+                        tokens=s,
+                        shuffled=True,
+                        tp=2,
+                        normed=True,
+                        grid=_grid(),
+                        **D.stock_split_fields(s, 2, False),
                     )
                     args = dict(hidden=x, residual=None, ln_w=None)
                     res_out = None

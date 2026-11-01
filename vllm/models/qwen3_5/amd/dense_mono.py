@@ -692,12 +692,20 @@ class DenseMono:
         )
 
     def _k2_key(self, dense_ffn, s: int, eps=1e-6):
+        # K2 reproduces the installed AITER GEMM's K splits (probed once per
+        # width, from _allocate, before any graph capture)
+        splits = dense_ffn.stock_split_fields(s, self.tp, self.oproj)
         if self.whole_step:
             return dense_ffn.FfnBuild(
-                tokens=s, eps=eps, shuffled=True, oproj=self.oproj, grid=self.grid
+                tokens=s,
+                eps=eps,
+                shuffled=True,
+                oproj=self.oproj,
+                grid=self.grid,
+                **splits,
             )
         return dense_ffn.FfnBuild(
-            tokens=s, shuffled=True, tp=self.tp, normed=True, grid=self.grid
+            tokens=s, shuffled=True, tp=self.tp, normed=True, grid=self.grid, **splits
         )
 
     def prepare(self) -> None:
@@ -787,6 +795,12 @@ class DenseMono:
                     logger.warning(
                         "Qwen3.8 dense mono K1 off: layer %d %s", layer.layer_idx, why
                     )
+        if self.whole_step or self.k2:
+            try:
+                for s in range(1, self.k2_rows + 1):
+                    D.stock_split_fields(s, self.tp, self.oproj)
+            except ValueError as exc:
+                return f"K2: {exc}"
         self._allocate()
         self._shuffle_weights()
         return self._self_check()
