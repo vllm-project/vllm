@@ -4,9 +4,9 @@
 (``VLLM_ROCM_MINIMAX_M3_MONO_DRAFTER=1``).
 
 A draft step of 1..MAX_REQS requests (7 query rows each) runs its 5 layers and
-final norm as one launch; other steps run the stock layers. Every condition is
-decided from TP-replicated state: the kernels exchange partials in-kernel, so
-ranks that disagreed would wait on each other.
+final norm in launches of up to 8 requests; other steps run the stock layers.
+Every condition is decided from TP-replicated state: the kernels exchange
+partials in-kernel, so ranks that disagreed would wait on each other.
 """
 
 import torch

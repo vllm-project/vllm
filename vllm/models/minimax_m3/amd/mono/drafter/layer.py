@@ -374,8 +374,10 @@ def build_drafter(wait_ticks=1_000_000_000):
                     hq = task % 4
                     r = t // layout.QPR
                     p0, p6, lo, hi, b0w, b1w = att.window(r, positions, seq_lens)
-                    # a padded request of a FULL graph replay can have an empty window
-                    # (stale positions past its seq_len): no partitions to wait for
+                    # a padded request of a FULL graph replay has an empty window
+                    # (seq_len 0): no partitions. Its merges wait for this layer's
+                    # QKV as partitions do; unpaced, they would retag the attention
+                    # flags (shared by the layers) before the GEMVs read them.
                     na = fx.max(b1w - b0w + 1, I32(0))
                     nparts = (na + bpp - 1) // bpp  # this request's partition CTAs
                     if nparts > 0:
@@ -388,6 +390,10 @@ def build_drafter(wait_ticks=1_000_000_000):
                             health,
                             rank,
                             6,
+                        )
+                    else:
+                        dev.wait_flags(
+                            flag(layout.F_QKV), layout.NG, tag, tid, dl, health, rank, 6
                         )
                     att.merge_task(
                         t,

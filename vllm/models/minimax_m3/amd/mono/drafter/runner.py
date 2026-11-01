@@ -20,10 +20,10 @@ from vllm.models.minimax_m3.amd.mono.peer_buffer import PeerBuffer
 # the symmetric buffer: the narrow kernel's all-reduce slots, then the wide kernel's
 PEER_BYTES = layout.SYM_BYTES + layout.SYM_W_BYTES
 WIDE_BASE = layout.SYM_BYTES
-# requests a step takes: 1..2 run the narrow kernel, 3..8 the wide one. Every
-# draft graph size up to 8 requests is captured, so padded requests (stale
-# metadata) of a FULL graph replay never reach the kernels.
-MAX_REQS = 8
+# requests a step takes, in launches of up to 8: 1..2 run the narrow kernel,
+# 3..8 the wide one. A FULL graph replay pads 9 requests to 10; the kernels
+# treat a padded request (seq_len 0) as one with no keys.
+MAX_REQS = 10
 WAIT_S = 10.0
 
 _GEMV = {
@@ -181,10 +181,27 @@ class DrafterRunner:
         bt = md.block_table
         x = inputs_embeds.contiguous()
         out = torch.empty((n, layout.HIDDEN), dtype=torch.bfloat16, device=x.device)
-        if n // layout.QPR >= 3:
-            fn, scratch = self.wide, self.scratch_w
-        else:
-            fn, scratch = self.narrow, self.scratch
-        self._launch(fn, scratch, x, out, bt, positions, slots, md.seq_lens, n)
-        self.step.add_(1)
+        q = layout.QPR
+        n_req = n // q
+        # a request reads only its own rows and cache and every GEMV row is per
+        # token, so a step splits into independent launches (a fresh tag each)
+        for r0 in range(0, n_req, 8):
+            k = min(8, n_req - r0)
+            a, b = r0 * q, (r0 + k) * q
+            if k >= 3:
+                fn, scratch = self.wide, self.scratch_w
+            else:
+                fn, scratch = self.narrow, self.scratch
+            self._launch(
+                fn,
+                scratch,
+                x[a:b],
+                out[a:b],
+                bt[r0:],
+                positions[a:],
+                slots[a:],
+                md.seq_lens[r0:],
+                b - a,
+            )
+            self.step.add_(1)
         return out
