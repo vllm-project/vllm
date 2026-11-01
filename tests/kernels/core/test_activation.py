@@ -220,6 +220,54 @@ def test_act_and_mul(
         opcheck(fn, (out, x))
 
 
+@pytest.mark.parametrize("activation", ["silu_and_mul", "fatrelu", "gelu_fast"])
+@pytest.mark.parametrize("misaligned", ["input", "output"])
+@pytest.mark.parametrize("dtype", DTYPES)
+# Above 128 tokens, SM100+ takes the 256-bit path.
+@pytest.mark.parametrize("num_tokens", [7, 256])
+@torch.inference_mode()
+def test_activation_misaligned_data_ptr(
+    default_vllm_config,
+    activation: str,
+    misaligned: str,
+    dtype: torch.dtype,
+    num_tokens: int,
+) -> None:
+    """A contiguous tensor that starts one element past a vector boundary
+    must take the scalar path instead of faulting on a misaligned load."""
+    torch.set_default_device(CUDA_DEVICES[0])
+    d = 512
+
+    def offset_by_one(shape: tuple[int, int]) -> torch.Tensor:
+        return torch.empty(shape[0] * shape[1] + 1, dtype=dtype)[1:].view(shape)
+
+    in_shape = (num_tokens, d if activation == "gelu_fast" else 2 * d)
+    x = torch.randn(in_shape, dtype=dtype)
+    if misaligned == "input":
+        x = offset_by_one(in_shape).copy_(x)
+    out = (
+        offset_by_one((num_tokens, d))
+        if misaligned == "output"
+        else torch.empty(num_tokens, d, dtype=dtype)
+    )
+
+    if activation == "silu_and_mul":
+        layer = SiluAndMul(compile_native=False)
+        torch.ops._C.silu_and_mul(out, x)
+    elif activation == "fatrelu":
+        layer = FatreluAndMul(0.5)
+        torch.ops._C.fatrelu_and_mul(out, x, 0.5)
+    else:
+        layer = FastGELU()
+        torch.ops._C.gelu_fast(out, x)
+    torch.testing.assert_close(
+        out,
+        layer.forward_native(x),
+        atol=get_default_atol(out),
+        rtol=get_default_rtol(out),
+    )
+
+
 SWIGLU_LIMITS = [3.0, 7.0, 15.0]
 
 
