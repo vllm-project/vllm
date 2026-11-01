@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from typing import Any
+
 import torch
 from transformers import PreTrainedConfig
 
@@ -86,6 +88,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         self.output_slices: tuple[int, ...]
         self.output_size: int
         self.n_slices: int
+        self._adapter_ranks: dict[int, int] = {}
 
     def _init_lora_stream_context(self) -> None:
         if not self._enable_aux_cuda_stream:
@@ -155,6 +158,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         self.output_slices = (self.lora_b_stacked[0].shape[2],)
 
     def reset_lora(self, index: int):
+        self._adapter_ranks.pop(index, None)
         for s_index in range(self.n_slices):
             self.lora_a_stacked[s_index][index] = 0
             self.lora_b_stacked[s_index][index] = 0
@@ -186,6 +190,8 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         self.lora_b_stacked[0][index, 0, : lora_b.shape[0], : lora_b.shape[1]].copy_(
             lora_b, non_blocking=True
         )
+
+        self._adapter_ranks[index] = lora_a.shape[0]
 
     def _get_quant_method(self) -> QuantizeMethodBase:
         quant_method = self.base_layer.quant_method
@@ -228,8 +234,19 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             output = output.flatten(0, 1)
             x = x.flatten(0, 1)
 
+        lora_kwargs: dict[str, Any] = {}
+        if current_platform.is_xpu() and getattr(
+            self.punica_wrapper, "_active_rank_enabled", False
+        ):
+            lora_kwargs["adapter_ranks"] = self._adapter_ranks
         lora_output: torch.Tensor | None = self.punica_wrapper.add_lora_linear(
-            output, x, self.lora_a_stacked, self.lora_b_stacked, 1.0, self.output_slices
+            output,
+            x,
+            self.lora_a_stacked,
+            self.lora_b_stacked,
+            1.0,
+            self.output_slices,
+            **lora_kwargs,
         )
         if not current_platform.can_update_inplace():
             output = lora_output

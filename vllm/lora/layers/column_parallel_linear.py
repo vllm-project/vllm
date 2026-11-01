@@ -344,6 +344,10 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                     index, 0, : lora_b_i.shape[0], : lora_b_i.shape[1]
                 ].copy_(lora_b_i, non_blocking=True)
 
+        self._adapter_ranks[index] = max(
+            (a.shape[0] for a in lora_a if a is not None), default=0
+        )
+
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         merged_cls = maybe_get_oot_by_class(MergedColumnParallelLinear)
         base_forward = getattr(type(self.base_layer), "forward", None)
