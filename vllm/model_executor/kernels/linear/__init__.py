@@ -1202,49 +1202,34 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
         HummingNvFp4LinearKernel,
     )
 
-    # VLLM_BATCH_INVARIANT forces deterministic execution. Prefer the
-    # batch-invariant CUTLASS implementation when available, otherwise fall
-    # back to emulation. It overrides --linear-backend.
+    # VLLM_BATCH_INVARIANT forces deterministic execution: Humming for W4A16,
+    # otherwise CUTLASS, or emulation where CUTLASS is unsupported. It
+    # overrides --linear-backend.
     force_kernel: type[NvFp4LinearKernel] | None = None
     quantization = "nvfp4_w4a16" if use_a16 else "nvfp4_w4a4"
     linear_backend = _get_linear_backend(quantization=quantization)
-    if envs.VLLM_BATCH_INVARIANT and use_a16:
-        if linear_backend not in ("auto", "humming"):
-            logger.warning_once(
-                "VLLM_BATCH_INVARIANT overrides --linear-backend=%s; using the "
-                "Humming backend for deterministic W4A16 execution.",
-                linear_backend,
-            )
-        force_kernel = HummingNvFp4LinearKernel
-    elif envs.VLLM_BATCH_INVARIANT:
-        bi_supported, reason = CutlassNvFp4LinearKernel.is_supported()
-        if bi_supported:
-            if linear_backend not in ("auto", "cutlass"):
-                logger.warning_once(
-                    "VLLM_BATCH_INVARIANT overrides --linear-backend=%s; "
-                    "using the CUTLASS backend for deterministic execution.",
-                    linear_backend,
-                )
+    if envs.VLLM_BATCH_INVARIANT:
+        if use_a16:
+            force_kernel, bi_backend = HummingNvFp4LinearKernel, "humming"
+        else:
+            cutlass_supported, reason = CutlassNvFp4LinearKernel.is_supported()
+            if cutlass_supported:
+                force_kernel, bi_backend = CutlassNvFp4LinearKernel, "cutlass"
             else:
                 logger.info_once(
-                    "VLLM_BATCH_INVARIANT forces NVFP4 linear to use the "
-                    "CUTLASS backend for deterministic execution."
+                    "VLLM_BATCH_INVARIANT is set but the batch-invariant NVFP4 "
+                    "kernel is not supported on this platform; falling back to "
+                    "emulation for deterministic execution. Reason: %s",
+                    reason,
                 )
-            force_kernel = CutlassNvFp4LinearKernel
-        else:
-            if linear_backend not in ("auto", "emulation"):
-                logger.warning_once(
-                    "VLLM_BATCH_INVARIANT overrides --linear-backend=%s; "
-                    "using the emulation backend for deterministic execution.",
-                    linear_backend,
-                )
-            logger.info_once(
-                "VLLM_BATCH_INVARIANT is set but the batch-invariant NVFP4 "
-                "kernel is not supported on this platform; falling back to "
-                "emulation for deterministic execution. Reason: %s",
-                reason,
+                force_kernel, bi_backend = EmulationNvFp4LinearKernel, "emulation"
+        if linear_backend not in ("auto", bi_backend):
+            logger.warning_once(
+                "VLLM_BATCH_INVARIANT overrides --linear-backend=%s; using the "
+                "%s backend for deterministic execution.",
+                linear_backend,
+                bi_backend,
             )
-            force_kernel = EmulationNvFp4LinearKernel
     elif linear_backend == "auto" and use_a16:
         _cc = current_platform.get_device_capability()
         compute_capability = _cc.to_int() if _cc is not None else None
