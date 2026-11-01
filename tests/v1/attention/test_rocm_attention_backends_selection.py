@@ -933,21 +933,24 @@ def test_rocm_attn_rejects_kv_connector(mock_vllm_config, mock_get_cdna_version)
 
 
 @pytest.mark.parametrize(
-    "aiter_found, expected_backend",
+    "aiter_found, gfx950, expected_backend",
     [
-        (True, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN),
-        (False, AttentionBackendEnum.TRITON_ATTN),
+        (True, False, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN),
+        (True, True, AttentionBackendEnum.TRITON_ATTN),
+        (False, False, AttentionBackendEnum.TRITON_ATTN),
+        (False, True, AttentionBackendEnum.TRITON_ATTN),
     ],
 )
 def test_auto_selection_for_kv_connector(
-    aiter_found, expected_backend, mock_vllm_config, mock_get_cdna_version
+    aiter_found, gfx950, expected_backend, mock_vllm_config, mock_get_cdna_version
 ):
     """Auto-selection with a KV connector and AITER enabled resolves to unified attn,
-    and to triton attn if AITER not enabled."""
+    and to triton attn if AITER not enabled or on gfx950."""
     from vllm.platforms.rocm import RocmPlatform
 
-    with patch(
-        "vllm._aiter_ops.is_aiter_found_and_supported", return_value=aiter_found
+    with (
+        patch("vllm._aiter_ops.is_aiter_found_and_supported", return_value=aiter_found),
+        patch("vllm.platforms.rocm.on_gfx950", return_value=gfx950),
     ):
         backend_path = RocmPlatform.get_attn_backend_cls(
             selected_backend=None,
