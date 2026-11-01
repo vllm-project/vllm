@@ -10268,6 +10268,91 @@ async fn access_log_disabled_logs_nothing() {
     assert_eq!(lines, Vec::<String>::new());
 }
 
+/// Captures the `--log-error-stack` events as `LEVEL field=value ...`.
+#[derive(Clone, Default)]
+struct ErrorLogCapture(Arc<std::sync::Mutex<Vec<String>>>);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ErrorLogCapture {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        if event.metadata().target() != "vllm_server::middleware::error_log" {
+            return;
+        }
+        let mut line = event.metadata().level().to_string();
+        event.record(
+            &mut |field: &tracing::field::Field, value: &dyn fmt::Debug| {
+                line.push_str(&format!(" {}={value:?}", field.name()));
+            },
+        );
+        self.0.lock().expect("error log lock").push(line);
+    }
+}
+
+/// Send one good and two bad requests, and return what got logged.
+async fn error_log_lines(log_error_stack: bool) -> Vec<String> {
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    let (chat, engine_task) = test_chat_with_engine_handle().await;
+    let app = build_router(Arc::new(
+        AppState::new(vec!["test-model".to_string()], chat).with_api_server_options(
+            ApiServerOptions {
+                log_error_stack,
+                ..Default::default()
+            },
+        ),
+    ));
+    let capture = ErrorLogCapture::default();
+    let _guard =
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(capture.clone()));
+
+    let chat = |body: &str| {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_owned()))
+            .expect("build request")
+    };
+    let requests = [
+        Request::builder()
+            .method("GET")
+            .uri("/v1/models")
+            .body(Body::empty())
+            .expect("build request"),
+        chat(r#"{"model":"missing","messages":[{"role":"user","content":"hi"}]}"#),
+        chat("{not json"),
+    ];
+    for request in requests {
+        let response = app.clone().oneshot(request).await.expect("call app");
+        to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    }
+
+    engine_task.abort_and_join().await;
+    capture.0.lock().expect("error log lock").clone()
+}
+
+/// Only the failed requests are logged.
+#[tokio::test]
+#[serial]
+async fn log_error_stack_logs_error_responses() {
+    expect_test::expect![[r#"
+        [
+            "ERROR message=Error response method=POST path=\"/v1/chat/completions\" status=404 error_type=\"NotFoundError\" error=\"The model `missing` does not exist.\"",
+            "ERROR message=Error response method=POST path=\"/v1/chat/completions\" status=400 error_type=\"Bad Request\" error=\"Failed to parse the request body as JSON: key must be a string at line 1 column 2\"",
+        ]
+    "#]].assert_debug_eq(&error_log_lines(true).await);
+}
+
+/// Without `--log-error-stack`, error responses are not logged.
+#[tokio::test]
+#[serial]
+async fn log_error_stack_disabled_logs_nothing() {
+    assert_eq!(error_log_lines(false).await, Vec::<String>::new());
+}
+
 /// Captures the events `--enable-log-outputs` logs, one `LEVEL field=value ...`
 /// line per event.
 #[derive(Clone, Default)]

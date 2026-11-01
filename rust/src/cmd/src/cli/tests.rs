@@ -256,6 +256,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         enable_prompt_tokens_details: false,
                         enable_per_request_metrics: false,
                         enable_request_id_headers: false,
+                        log_error_stack: None,
                         enable_scale_out: false,
                         enable_tokenizer_info_endpoint: false,
                         sse_keep_alive_interval: 0,
@@ -267,6 +268,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         disable_request_id_randomization: false,
                         http_max_request_body_size: None,
                         skip_model_name_validation: false,
+                        server_dev_mode: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -708,6 +710,46 @@ fn args_json_reads_env_only_settings_from_env() {
         ]
     "#]]
     .assert_debug_eq(&errors);
+}
+
+/// `--log-error-stack` falls back to `VLLM_SERVER_DEV_MODE`. Python leaves the
+/// flag out of `--args-json` when it matches that default, so check both paths.
+#[test]
+fn log_error_stack_defaults_to_server_dev_mode() {
+    let serve = |extra_args: &[&str]| {
+        let cli =
+            Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"].iter().chain(extra_args))
+                .unwrap();
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve args");
+        };
+        args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args))
+            .api_server_options
+            .log_error_stack
+    };
+    // `--server-dev-mode` is the hidden flag bound to `VLLM_SERVER_DEV_MODE`.
+    assert!(!serve(&[]));
+    assert!(serve(&["--log-error-stack"]));
+    assert!(serve(&["--server-dev-mode", "1"]));
+    assert!(!serve(&[
+        "--server-dev-mode",
+        "1",
+        "--log-error-stack",
+        "false"
+    ]));
+
+    let json = |args_json: &str, vars: &[(&str, &str)]| {
+        let vars: HashMap<_, _> = vars.iter().copied().collect();
+        let mut args: SharedRuntimeArgs = serde_json::from_str(args_json).unwrap();
+        args.apply_env_fallbacks(|name| vars.get(name).map(|value| value.to_string()))
+            .unwrap();
+        args.api_server_options().log_error_stack
+    };
+    let model_only = r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#;
+    let disabled = r#"{"model_tag":"Qwen/Qwen3-0.6B","log_error_stack":false}"#;
+    assert!(!json(model_only, &[]));
+    assert!(json(model_only, &[("VLLM_SERVER_DEV_MODE", "1")]));
+    assert!(!json(disabled, &[("VLLM_SERVER_DEV_MODE", "1")]));
 }
 
 #[test]
@@ -1657,6 +1699,7 @@ fn frontend_args_accept_json() {
                         enable_prompt_tokens_details: false,
                         enable_per_request_metrics: false,
                         enable_request_id_headers: false,
+                        log_error_stack: None,
                         enable_scale_out: false,
                         enable_tokenizer_info_endpoint: false,
                         sse_keep_alive_interval: 0,
@@ -1668,6 +1711,7 @@ fn frontend_args_accept_json() {
                         disable_request_id_randomization: false,
                         http_max_request_body_size: None,
                         skip_model_name_validation: false,
+                        server_dev_mode: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -2584,6 +2628,7 @@ fn serve_args_accept_handshake_aliases() {
                         enable_prompt_tokens_details: false,
                         enable_per_request_metrics: false,
                         enable_request_id_headers: false,
+                        log_error_stack: None,
                         enable_scale_out: false,
                         enable_tokenizer_info_endpoint: false,
                         sse_keep_alive_interval: 0,
@@ -2595,6 +2640,7 @@ fn serve_args_accept_handshake_aliases() {
                         disable_request_id_randomization: false,
                         http_max_request_body_size: None,
                         skip_model_name_validation: false,
+                        server_dev_mode: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -2883,6 +2929,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 default_return_tokens_as_token_ids: false,
                 enable_per_request_metrics: false,
                 enable_request_id_headers: false,
+                log_error_stack: false,
                 enable_scale_out: false,
                 enable_tokenizer_info_endpoint: false,
                 skip_model_name_validation: false,
@@ -3010,6 +3057,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 default_return_tokens_as_token_ids: false,
                 enable_per_request_metrics: false,
                 enable_request_id_headers: false,
+                log_error_stack: false,
                 enable_scale_out: false,
                 enable_tokenizer_info_endpoint: false,
                 skip_model_name_validation: false,
@@ -3250,6 +3298,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 default_return_tokens_as_token_ids: false,
                 enable_per_request_metrics: false,
                 enable_request_id_headers: false,
+                log_error_stack: false,
                 enable_scale_out: false,
                 enable_tokenizer_info_endpoint: false,
                 skip_model_name_validation: false,
