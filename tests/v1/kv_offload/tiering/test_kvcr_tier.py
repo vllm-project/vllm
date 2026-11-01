@@ -193,6 +193,7 @@ def _make_tier(
     control_ports: list[int] | None = None,
     data_parallel_rank_local: int | None = None,
     backpressure: dict[str, Any] | None = None,
+    demote_served_chunks: bool = False,
 ) -> KVCRSecondaryTierManager:
     def make_control(_bind_host, bind_port, advertise_host):
         return _StubControlChannel(f"tcp://{advertise_host}:{int(bind_port)}")
@@ -225,6 +226,7 @@ def _make_tier(
         "g3": g3,
         "local_dram_backend": "UCX",
         "remote_fw_dram_backend": "UCX",
+        "demote_served_chunks": demote_served_chunks,
     }
     if backpressure is not None:
         tier_config["backpressure"] = backpressure
@@ -477,6 +479,7 @@ def test_kvcr_tier_maps_query_status(monkeypatch, status, expected):
     assert tier.lookup(OffloadKey(b"k0"), ReqContext(req_id="req")) is expected
 
 
+@pytest.mark.parametrize("demote_served_chunks", [False, True])
 @pytest.mark.parametrize(
     ("job_keys", "chunk_ids", "success"),
     [
@@ -488,11 +491,11 @@ def test_kvcr_tier_maps_query_status(monkeypatch, status, expected):
     ids=["original-keys", "reordered-keys", "short-chunks", "unexpected-key"],
 )
 def test_kvcr_tier_serves_primary_pin_request(
-    monkeypatch, job_keys, chunk_ids, success
+    monkeypatch, job_keys, chunk_ids, success, demote_served_chunks
 ):
     """Validate pin jobs and hold accepted hits until KVCR releases the pin."""
     kvcr = RecordingKVCR()
-    tier = _make_tier(monkeypatch, kvcr)
+    tier = _make_tier(monkeypatch, kvcr, demote_served_chunks=demote_served_chunks)
     keys = (BlockKey(b"k0"), BlockKey(b"k1"), BlockKey(b"k2"))
     hit_keys = (keys[0], keys[2])
     lifecycle: list[str] = []
@@ -514,6 +517,10 @@ def test_kvcr_tier_serves_primary_pin_request(
                 req_context=req_context,
             )
 
+        def demote(self, served_keys):
+            lifecycle.append(f"demote:{len(served_keys)}")
+            return len(served_keys)
+
         def on_request_finished(self, req_context):
             lifecycle.append("finished")
 
@@ -525,7 +532,8 @@ def test_kvcr_tier_serves_primary_pin_request(
 
     [(queued_request, result)] = bindings.poll_pin_results()
     assert queued_request == request
-    assert lifecycle == ["new", "finished"]
+    demoted = ["demote:2"] if success and demote_served_chunks else []
+    assert lifecycle == ["new", *demoted, "finished"]
     if not success:
         assert result is None
         assert list(tier.get_finished_jobs()) == [JobResult(11, False)]

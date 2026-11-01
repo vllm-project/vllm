@@ -244,6 +244,27 @@ class CPUOffloadingManager(OffloadingManager):
     def touch(self, keys: Collection[OffloadKey], req_context: ReqContext) -> None:
         self._policy.touch(keys, req_context)
 
+    def demote(self, keys: Collection[OffloadKey], pins_held: int = 0) -> int:
+        """Move ready chunks to the front of the eviction order.
+
+        Args:
+            keys: Chunks to demote, head-to-tail.
+            pins_held: Read pins the caller holds on each chunk. A chunk with
+                more pins has another reader and keeps its place.
+
+        Returns:
+            The number of chunks passed to the policy to demote.
+
+        """
+        demoted = []
+        for key in keys:
+            chunk = self._policy.get(key)
+            if chunk is not None and chunk.is_ready and chunk.ref_cnt <= pins_held:
+                demoted.append(key)
+        if demoted:
+            self._policy.demote(demoted)
+        return len(demoted)
+
     @override
     def complete_load(
         self, keys: Collection[OffloadKey], req_context: ReqContext

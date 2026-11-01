@@ -15,6 +15,10 @@ from vllm.v1.kv_offload.cpu.policies.base import (
 
 _HeapEntry = tuple[tuple[int, int], OffloadKey]
 
+# Demoted chunks rank below every recency rank (whose first element counts up
+# from 1), oldest demotion first.
+_DEMOTED_RANK_BASE = -(1 << 61)
+
 
 @dataclass(slots=True)
 class _RequestRank:
@@ -37,6 +41,9 @@ class LRUCachePolicy(CachePolicy):
     A use is indicated by,
      - First time the key is added (store).
      - A request-scoped access.
+
+    A demoted chunk is evicted before every chunk that was not demoted, until
+    its next use.
     """
 
     def __init__(self, cache_capacity: int):
@@ -47,6 +54,7 @@ class LRUCachePolicy(CachePolicy):
         self._heap: list[_HeapEntry] = []
         self._next_rank = 0
         self._cache_generation = 0
+        self._next_demoted_rank = _DEMOTED_RANK_BASE
 
     def _get_request_rank(self, req_context: ReqContext) -> int:
         state = req_context.get_state(_RequestRank)
@@ -163,6 +171,18 @@ class LRUCachePolicy(CachePolicy):
         self._update_recency(reversed(order_request_keys(key_groups, req_context)))
 
     @override
+    def demote(self, keys: Iterable[OffloadKey]) -> None:
+        # Tail first, so a demoted prefix loses its tail before its head.
+        for key in reversed(list(keys)):
+            if key not in self.chunks:
+                continue
+            self._next_demoted_rank += 1
+            self._ranks[key] = (self._next_demoted_rank, 0)
+            if key in self._evictable:
+                self._push_evictable(key)
+        self._maybe_compact_heap()
+
+    @override
     def clear(self) -> None:
         self.chunks.clear()
         self._ranks.clear()
@@ -170,6 +190,7 @@ class LRUCachePolicy(CachePolicy):
         self._heap.clear()
         self._next_rank = 0
         self._cache_generation += 1
+        self._next_demoted_rank = _DEMOTED_RANK_BASE
 
     @override
     def evict(
