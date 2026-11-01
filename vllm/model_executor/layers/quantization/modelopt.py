@@ -173,6 +173,16 @@ class ModelOptKVCacheMethod(BaseKVCacheMethod):
         super().__init__(quant_config)
 
 
+# W4A16 checkpoints carry no (or a deprecated) input_scale: a layerwise reload
+# neither waits for it (weight_loader_numel = 0) nor rejects a late copy. The
+# suffixes apply to the whole config, so in a mixed-precision checkpoint an
+# input_scale matching no parameter (e.g. a misnamed FP8 one) is dropped too.
+_W4A16_IGNORE_UNEXPECTED_SUFFIXES = (
+    *QuantizationConfig._ignore_unexpected_suffixes,
+    ".input_scale",
+)
+
+
 class ModelOptQuantConfigBase(QuantizationConfig):
     # ModelOpt quant-algo string, set by each subclass. Fed to resolve() to
     # build the QuantSpec for the generic ModelOptLinearMethod. The mixed
@@ -762,6 +772,8 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
                 f"Unsupported ModelOpt NVFP4 quant_algo: {quant_method}. "
                 f"Supported: {' / '.join(supported)}."
             )
+        if quant_method == "W4A16_NVFP4":
+            self._ignore_unexpected_suffixes = _W4A16_IGNORE_UNEXPECTED_SUFFIXES
 
     def get_name(self) -> QuantizationMethods:
         return "modelopt_fp4"
@@ -1027,6 +1039,15 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             weight_loader=weight_loader,
         )
         layer.register_parameter("w2_input_scale", w2_input_scale)
+        if self.use_a16:
+            w13_input_scale.weight_loader_numel = 0
+            w2_input_scale.weight_loader_numel = 0
+
+    @property
+    def ignored_weight_reload_suffixes(self) -> tuple[str, ...]:
+        # W4A16 drops the (deprecated) input scales after processing; a
+        # layerwise reload may send them again.
+        return ("input_scale",) if self.use_a16 else ()
 
         # Keep dummy scales positive and gate/up global scales identical.
         for param, value in (
@@ -1671,6 +1692,11 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         self.nvfp4_config = nvfp4_config
         self.w4a16_nvfp4_config = w4a16_nvfp4_config
         self.mxfp8_config = mxfp8_config
+        if any(
+            info.get("quant_algo", "").upper() == "W4A16_NVFP4"
+            for info in quantized_layers.values()
+        ):
+            self._ignore_unexpected_suffixes = _W4A16_IGNORE_UNEXPECTED_SUFFIXES
 
         block_sizes = {
             int(layer_info.get("group_size", 128))
@@ -2599,9 +2625,9 @@ class _DropInputScale(FormatScheme):
 
     def extra_weights(self, layer, shapes, ctx, wl) -> None:
         data = torch.full((shapes.num_partitions,), torch.nan)
-        layer.register_parameter(
-            "input_scale", PerTensorScaleParameter(data=data, weight_loader=wl)
-        )
+        scale = PerTensorScaleParameter(data=data, weight_loader=wl)
+        scale.weight_loader_numel = 0
+        layer.register_parameter("input_scale", scale)
 
     def post_process(self, layer) -> None:
         scale = getattr(layer, "input_scale", None)
