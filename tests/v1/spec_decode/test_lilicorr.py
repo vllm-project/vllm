@@ -727,7 +727,7 @@ def owned_head_model(monkeypatch):
                 get_vocab_size=lambda: 64,
             ),
             attention_config=SimpleNamespace(),
-            cache_config=SimpleNamespace(),
+            cache_config=SimpleNamespace(cache_dtype="auto"),
             load_config=LoadConfig(),
         )
         with set_current_vllm_config(
