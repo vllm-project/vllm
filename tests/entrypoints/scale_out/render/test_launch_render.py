@@ -2,9 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """E2E tests for render endpoints via `vllm launch` (GPU-less serving)."""
 
+import asyncio
+import socket
+
 import httpx
 import pytest
 import pytest_asyncio
+import uvicorn
+from mcp.server.mcpserver import MCPServer
+from pydantic import BaseModel
 
 from tests.utils import RemoteLaunchRenderServer
 
@@ -177,3 +183,43 @@ async def test_models_endpoint(client):
     assert "data" in data
     model_ids = [m["id"] for m in data["data"]]
     assert MODEL_NAME in model_ids
+
+
+@pytest.mark.asyncio
+async def test_render_starts_with_optional_nested_mcp_arguments():
+    """A valid MCP schema must not prevent the render server from starting."""
+
+    class SearchFilter(BaseModel):
+        department: str
+
+    mcp = MCPServer("browser")
+
+    @mcp.tool()
+    def search(query: str, filters: SearchFilter | None = None) -> str:
+        """Search with an optional department filter."""
+        return query
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        tool_server = uvicorn.Server(uvicorn.Config(mcp.sse_app(), log_level="error"))
+        task = asyncio.create_task(tool_server.serve(sockets=[sock]))
+        try:
+            async with asyncio.timeout(15):
+                while not tool_server.started:
+                    if task.done():
+                        await task
+                    await asyncio.sleep(0.01)
+            args = ["--tool-server", f"127.0.0.1:{sock.getsockname()[1]}"]
+            with await asyncio.to_thread(
+                RemoteLaunchRenderServer, MODEL_NAME, args, max_wait_seconds=120
+            ) as server:
+                async with httpx.AsyncClient(timeout=30) as client:
+                    response = await client.post(
+                        server.url_for("v1/completions/render"),
+                        json={"model": MODEL_NAME, "prompt": "Find the owner"},
+                    )
+                assert response.status_code == 200
+                assert response.json()[0]["token_ids"]
+        finally:
+            tool_server.should_exit = True
+            await task
