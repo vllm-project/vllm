@@ -33,8 +33,8 @@ def unpack_tensor(
 ) -> list[tuple[str, torch.Tensor]]:
     """Unpack a packed uint8 tensor into a list of named tensors.
 
-    The returned tensors are views of ``packed_tensor`` when their byte offsets
-    satisfy the dtype's alignment. Misaligned slices are cloned before their
+    Contiguous slices are views of ``packed_tensor`` when their byte offsets
+    satisfy the dtype's alignment. Other slices are copied before their
     dtype is restored. If ``packed_tensor`` lives in storage that may be reused
     — e.g. a reused CUDA IPC buffer — callers must clone the views before the
     underlying storage is overwritten.
@@ -51,6 +51,7 @@ def unpack_tensor(
 
     result = []
     for name, shape, dtype, tensor in zip(names, shapes, dtypes, unpacked_tensors):
+        tensor = tensor.contiguous()
         if tensor.storage_offset() % dtype.itemsize:
             tensor = tensor.clone()
         result.append((name, tensor.view(dtype).view(shape)))
@@ -239,25 +240,25 @@ def packed_nccl_broadcast_consumer(
             packing_tensor_sizes[buffer_idx], dtype=torch.uint8, device=device
         )
         group.broadcast(packed, src=src)
+        names, shapes, dtypes, tensor_sizes = zip(*packing_tensor_meta_data[buffer_idx])
+        unpacked = unpack_tensor(
+            packed, list(names), list(shapes), list(dtypes), list(tensor_sizes)
+        )
 
-        # post_unpack_func may keep the unpacked views and read them from a later
+        # post_unpack_func may keep the unpacked tensors and read them from a later
         # pack's callback, on another slot stream. Chaining the ready events
-        # orders every callback after all earlier receives, and record_stream
-        # keeps the allocator from reissuing this buffer once it is freed while
-        # the broadcast or such a read is still pending.
+        # orders every callback after earlier receives and alignment copies.
+        # record_stream protects both packed views and alignment copies from
+        # reuse while a later callback's read is still pending.
         if prev_received is not None:
             streams[buffer_idx].wait_event(prev_received)
         prev_received = torch.Event()
         prev_received.record(streams[buffer_idx])
-        for stream in (*streams, caller_stream):
-            packed.record_stream(stream)
+        for _, tensor in unpacked:
+            for stream in (*streams, caller_stream):
+                tensor.record_stream(stream)
 
-        names, shapes, dtypes, tensor_sizes = zip(*packing_tensor_meta_data[buffer_idx])
-        post_unpack_func(
-            unpack_tensor(
-                packed, list(names), list(shapes), list(dtypes), list(tensor_sizes)
-            )
-        )
+        post_unpack_func(unpacked)
         event = torch.Event()
         event.record(streams[buffer_idx])
         slot_done[buffer_idx] = event
