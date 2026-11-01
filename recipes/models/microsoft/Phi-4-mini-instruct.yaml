@@ -1,0 +1,178 @@
+meta:
+  title: "Phi-4"
+  slug: "phi-4"
+  provider: "Microsoft"
+  description: "Microsoft's Phi-4 family of lightweight dense models (mini-instruct, reasoning, multimodal) with 128K context"
+  date_added: 2026-04-02
+  date_updated: 2026-04-17
+  tasks:
+    - text
+    - multimodal
+  related_recipes: []
+  hardware:
+    h100: verified
+
+model:
+  model_id: "microsoft/Phi-4-mini-instruct"
+  min_vllm_version: "0.7.0"
+  architecture: dense
+  parameter_count: "4B"
+  active_parameters: "4B"
+  context_length: 131072
+  base_args: []
+  base_env: {}
+
+features:
+  text_only:
+    description: "Skip loading the vision encoder for text-only workloads — frees VRAM for KV cache. Mutually exclusive with encoder_parallel."
+    args:
+      - "--language-model-only"
+  encoder_parallel:
+    description: "Run the vision encoder in data-parallel mode — avoids TP comm overhead on the small encoder. Mutually exclusive with text_only."
+    args:
+      - "--mm-encoder-tp-mode"
+      - "data"
+
+opt_in_features:
+  - text_only
+  - encoder_parallel
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 10
+    description: "Phi-4-mini-instruct, conversational instruction-tuned"
+
+  mini_reasoning:
+    model_id: "microsoft/Phi-4-mini-reasoning"
+    precision: bf16
+    vram_minimum_gb: 10
+    description: "Optimized for reasoning tasks"
+
+  reasoning:
+    model_id: "microsoft/Phi-4-reasoning"
+    precision: bf16
+    vram_minimum_gb: 30
+    description: "Advanced reasoning capabilities (14B)"
+
+  multimodal:
+    model_id: "microsoft/Phi-4-multimodal-instruct"
+    min_vllm_version: "0.8.0"
+    precision: bf16
+    vram_minimum_gb: 16
+    description: "Multimodal instruction-following (text + image)"
+    extra_args:
+      - "--trust-remote-code"
+
+  fp8:
+    model_id: "RedHatAI/Phi-4-mini-instruct-FP8-dynamic"
+    precision: fp8
+    vram_minimum_gb: 5
+    description: "RedHatAI FP8 (E4M3) with dynamic per-token activation quantization"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+hardware_overrides: {}
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  The Phi-4 family includes several lightweight, open models from Microsoft. These models
+  can process text and, in some variants, multimodal inputs like images, to generate
+  text outputs. They come with a 128K token context length.
+
+  ## Prerequisites
+
+  - Hardware: 1x GPU with >=16 GB VRAM (A100, L40S, H100, etc.)
+  - vLLM >= 0.7.0 (the `multimodal` variant serves `Phi-4-multimodal-instruct`, which needs vLLM >= 0.8.0)
+
+  ### Install vLLM
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend auto
+  ```
+
+  ## Launch commands
+
+  Phi-4-mini-instruct on a single GPU:
+
+  ```bash
+  vllm serve microsoft/Phi-4-mini-instruct \
+    --host 0.0.0.0 \
+    --max-model-len 4000
+  ```
+
+  Phi-4-multimodal-instruct (requires --trust-remote-code for LoRA modules):
+
+  ```bash
+  vllm serve microsoft/Phi-4-multimodal-instruct \
+    --host 0.0.0.0 \
+    --max-model-len 4000 \
+    --trust-remote-code
+  ```
+
+  ## Client Usage
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1", timeout=3600)
+
+  response = client.chat.completions.create(
+      model="microsoft/Phi-4-mini-instruct",
+      messages=[{"role": "user", "content": "Write a short story"}],
+      temperature=0.0,
+  )
+  print(response.choices[0].message.content)
+  ```
+
+  Multimodal (requires Phi-4-multimodal-instruct):
+
+  ```python
+  response = client.chat.completions.create(
+      model="microsoft/Phi-4-multimodal-instruct",
+      messages=[{
+          "role": "user",
+          "content": [
+              {"type": "text", "text": "Describe this image."},
+              {"type": "image_url", "image_url": {"url": "https://example.com/image.jpg"}},
+          ],
+      }],
+  )
+  ```
+
+  ## Available Phi-4 Variants
+
+  - `microsoft/Phi-4-mini-instruct` — conversational instruction-tuned
+  - `microsoft/Phi-4-mini-reasoning` — optimized for reasoning
+  - `microsoft/Phi-4-reasoning` — advanced reasoning
+  - `microsoft/Phi-4-multimodal-instruct` — multimodal (text + image)
+
+  ## Benchmarking
+
+  ```bash
+  vllm bench serve \
+    --model microsoft/Phi-4-mini-instruct \
+    --dataset-name random \
+    --random-input-len 2000 \
+    --random-output-len 512 \
+    --num-prompts 100
+  ```
+
+  ## Troubleshooting
+
+  - Multimodal variant fails to load: add `--trust-remote-code`.
+
+  ## References
+
+  - [Phi-4-mini-instruct](https://huggingface.co/microsoft/Phi-4-mini-instruct)
+  - [Phi-4-multimodal-instruct](https://huggingface.co/microsoft/Phi-4-multimodal-instruct)
+  - [Phi-4-reasoning](https://huggingface.co/microsoft/Phi-4-reasoning)

@@ -300,6 +300,7 @@ def test_worker_creates_platform_torch_profiler(device_type, activities, expecte
         worker_name="rank0",
         local_rank=0,
         activities=expected,
+        profiler_kwargs=None,
     )
 
 
@@ -321,6 +322,7 @@ def test_worker_reuses_torch_wrapper_across_profile_rounds(worker_type):
             profile_prefix="first",
             delay_iterations=5,
             max_iterations=2,
+            profiler_kwargs={"record_shapes": True},
         )
         worker.profile(is_start=False)
         worker.profile(profile_prefix="second")
@@ -330,6 +332,10 @@ def test_worker_reuses_torch_wrapper_across_profile_rounds(worker_type):
     assert wrapper.return_value.set_output_name.call_args_list == [
         call("first_rank0"),
         call("second_rank0"),
+    ]
+    assert wrapper.return_value.set_profiler_kwargs.call_args_list == [
+        call({"record_shapes": True}),
+        call(None),
     ]
     assert wrapper.return_value.start.call_args_list == [
         call(delay_iterations=5, max_iterations=2),
@@ -349,6 +355,7 @@ def test_executor_profile_only_forwards_supplied_override_kwargs():
         "bounded",
         delay_iterations=5,
         max_iterations=2,
+        profiler_kwargs={"record_shapes": True},
     )
 
     assert executor.collective_rpc.call_args_list == [
@@ -356,7 +363,11 @@ def test_executor_profile_only_forwards_supplied_override_kwargs():
         call(
             "profile",
             args=(True, "bounded"),
-            kwargs={"delay_iterations": 5, "max_iterations": 2},
+            kwargs={
+                "delay_iterations": 5,
+                "max_iterations": 2,
+                "profiler_kwargs": {"record_shapes": True},
+            },
         ),
     ]
 
@@ -1252,9 +1263,12 @@ def test_gpu_worker_creates_proton_profiler():
         Worker.profile(worker)
 
     wrapper.assert_called_once_with(worker.profiler_config, worker_name="rank1")
-    worker.profiler.start.assert_called_once_with(
+    # mypy still narrows worker.profiler to the None assigned above, so check
+    # the started wrapper directly and that it is the one the worker kept.
+    wrapper.return_value.start.assert_called_once_with(
         delay_iterations=None, max_iterations=None
     )
+    assert worker.profiler is wrapper.return_value
 
 
 @_requires_cuda_for_proton
