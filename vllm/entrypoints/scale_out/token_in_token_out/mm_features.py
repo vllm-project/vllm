@@ -65,31 +65,26 @@ def _encode_metadata_items(
     return metadata_items
 
 
-def _encode_mm_kwargs_with_metadata(
+def _encode_mm_metadata(
     raw_mm_kwargs: MultiModalKwargsOptionalItems,
     *,
     metadata_fields_for: Callable[[str], Collection[str]] | None = None,
-) -> tuple[dict[str, list[str | None]], dict[str, list[str | None]] | None]:
-    """Serialize full kwargs and their metadata-only subsets per modality."""
-    kwargs_data: dict[str, list[str | None]] = {}
+) -> dict[str, list[str | None]] | None:
+    """Serialize metadata-only subsets, or ``None`` if a modality has none."""
     metadata_by_modality: dict[str, list[str | None]] = {}
 
     for modality, items in raw_mm_kwargs.items():
-        kwargs_data[modality] = [
-            encode_mm_kwargs_item(item) if item is not None else None for item in items
-        ]
-
         declared = (
             set(metadata_fields_for(modality))
             if metadata_fields_for is not None
             else set()
         )
         metadata_items = _encode_metadata_items(items, declared=declared)
-        if any(item is not None for item in metadata_items):
-            metadata_by_modality[modality] = metadata_items
+        if not any(item is not None for item in metadata_items):
+            return None
+        metadata_by_modality[modality] = metadata_items
 
-    mm_metadata = metadata_by_modality or None
-    return kwargs_data, mm_metadata
+    return metadata_by_modality
 
 
 def mm_kwargs_from_features(
@@ -147,8 +142,9 @@ def extract_mm_features(
     Returns ``None`` for text-only prompts. ``mm_metadata`` keeps the
     intersection of processed kwargs that prefill needs after EC transfer:
     fields declared as embedding metadata, plus fields marked
-    ``keep_on_cpu`` (for example M-RoPE grid dims). With
-    ``mm_payload="none"`` neither is serialized.
+    ``keep_on_cpu`` (for example M-RoPE grid dims). It is ``None`` if any
+    modality has no such fields. ``mm_payload="metadata"`` omits ``kwargs_data``
+    and ``mm_payload="none"`` omits both.
     """
     if engine_input.get("type") != "multimodal":
         return None
@@ -160,13 +156,20 @@ def extract_mm_features(
 
     kwargs_data: dict[str, list[str | None]] | None = None
     mm_metadata: dict[str, list[str | None]] | None = None
-    if mm_payload == "tensors":
-        raw_mm_kwargs = mm_engine_input.get("mm_kwargs")
-        if raw_mm_kwargs:
-            kwargs_data, mm_metadata = _encode_mm_kwargs_with_metadata(
-                raw_mm_kwargs,
-                metadata_fields_for=metadata_fields_for,
-            )
+    raw_mm_kwargs = mm_engine_input.get("mm_kwargs")
+    if raw_mm_kwargs and mm_payload != "none":
+        mm_metadata = _encode_mm_metadata(
+            raw_mm_kwargs,
+            metadata_fields_for=metadata_fields_for,
+        )
+        if mm_payload == "tensors":
+            kwargs_data = {
+                modality: [
+                    encode_mm_kwargs_item(item) if item is not None else None
+                    for item in items
+                ]
+                for modality, items in raw_mm_kwargs.items()
+            }
 
     return MultiModalFeatures(
         mm_hashes=mm_hashes,

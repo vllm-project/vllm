@@ -174,6 +174,15 @@ Do not forward such a response to `/inference/v1/generate`, which reads a null
 `kwargs_data` as every item being cached. The default, `"tensors"`, returns
 both fields.
 
+Callers that send the media to the encode worker another way and only need
+`mm_metadata` for prefill can set `"mm_payload": "metadata"`. The response then
+sets `kwargs_data` to null and keeps `mm_metadata`.
+
+`mm_metadata` is null if any modality in the request has no metadata fields,
+for example an image and a video on a model that declares them only for video.
+Do not use the prefill form below for such a request. With `"metadata"`, both
+fields are then null, so send the media or render with `"tensors"` instead.
+
 `"return_mm_kwargs": false` is a deprecated alias for `"mm_payload": "none"`
 and is ignored when `mm_payload` is set.
 

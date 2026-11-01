@@ -450,6 +450,19 @@ class GenerateRequest(BaseModel):
         )
 
 
+class RenderedGenerateRequest(GenerateRequest):
+    """A `GenerateRequest` produced by `/render`.
+
+    `ec_transfer_params` come from the encode response, so a render with
+    `mm_payload="metadata"` cannot have them yet. `/inference/v1/generate`
+    still validates the request it receives as a `GenerateRequest`.
+    """
+
+    @model_validator(mode="after")
+    def _require_ec_for_metadata_only(self) -> "RenderedGenerateRequest":
+        return self
+
+
 class GenerateLogProb(BaseModel):
     """A single (token, logprob) candidate on the generate wire protocol.
 
