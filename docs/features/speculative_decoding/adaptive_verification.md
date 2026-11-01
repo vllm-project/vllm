@@ -19,7 +19,18 @@ Adaptive verification is supported for model-based drafters (EAGLE, MTP, DFlash,
 
 ## Usage
 
-It is off by default. Enable it in the speculative config with `enable_adaptive_verification`. For example, with DSpark:
+For DeepSeek-V4.1 DSpark, long prefills preprocess only the context suffix
+needed by the draft's sliding-window attention. The retained suffix includes
+the maximum speculative rejection distance, including when adaptive
+verification changes request lengths. This optimization is automatic when
+prefill and decode context parallelism are both disabled; no additional
+configuration is required. In mixed batches, short requests retain their full
+context without being padded to the sliding-window size. Packed capacities
+use scheduled token counts; GPU request boundaries determine which rows are
+valid when adaptive verification shortens a request. Batches with insufficient
+context to trim use the original path.
+
+Adaptive verification is off by default. Enable it in the speculative config with `enable_adaptive_verification`. For example, with DSpark:
 
 ```bash
 vllm serve deepseek-ai/DeepSeek-V4-Flash-DSpark \
