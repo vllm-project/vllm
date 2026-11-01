@@ -2,11 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import argparse
 import asyncio
+import io
+import json
 from pathlib import Path
 from typing import Protocol, cast
 
 import numpy as np
+import pybase64 as base64
 import pytest
 import soundfile as sf
 
@@ -328,3 +332,147 @@ def test_asr_dataset_unknown_tokenizer_gets_empty_prompt(tmp_path: Path) -> None
     )
     assert len(samples) == 1
     assert samples[0].prompt == ""
+
+
+@pytest.mark.parametrize("with_tokenizer", [False, True])
+@pytest.mark.parametrize("enable_multimodal_chat", [False, True])
+@pytest.mark.parametrize("output_len", [None, -1, 0, 64])
+def test_custom_audio_get_samples_preserves_audio(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    with_tokenizer: bool,
+    enable_multimodal_chat: bool,
+    output_len: int | None,
+) -> None:
+    """Skipping tokenizer init must not drop audio on either request path."""
+    audio_path = tmp_path / "sample.wav"
+    sf.write(audio_path, np.linspace(-0.5, 0.5, 1600), 16_000)
+    dataset_path = tmp_path / "audio.jsonl"
+    dataset_path.write_text(
+        json.dumps(
+            {
+                "prompt": "Transcribe this audio.",
+                "audio": str(audio_path),
+                "output_tokens": 17,
+            }
+        )
+        + "\n"
+    )
+    args = argparse.Namespace(
+        dataset_name="custom_audio",
+        dataset_path=str(dataset_path),
+        disable_shuffle=True,
+        seed=0,
+        num_prompts=1,
+        custom_output_len=output_len,
+        enable_multimodal_chat=enable_multimodal_chat,
+        request_id_prefix="audio-",
+        no_oversample=False,
+    )
+    tokenizer = _as_tokenizer(_Tokenizer()) if with_tokenizer else None
+    samples = datasets_module.get_samples(args, tokenizer)
+    assert len(samples) == 1
+    sample = samples[0]
+    assert sample.prompt == "Transcribe this audio."
+    assert sample.prompt_len == (3 if with_tokenizer else 1)
+    assert sample.request_id == "audio-0"
+    expected_len = (
+        (17 if with_tokenizer else 256) if output_len in (None, -1) else output_len
+    )
+    assert sample.expected_output_len == expected_len
+    assert isinstance(sample.multi_modal_data, dict)
+    request = RequestFuncInput(
+        prompt=sample.prompt,
+        api_url="http://localhost:8000/v1/audio/transcriptions",
+        prompt_len=sample.prompt_len,
+        output_len=sample.expected_output_len,
+        model="test-audio-model",
+        multi_modal_content=sample.multi_modal_data,
+    )
+    if enable_multimodal_chat:
+        messages = request_func_module._get_chat_messages(request)
+        assert messages == [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": sample.prompt},
+                    sample.multi_modal_data,
+                ],
+            }
+        ]
+        assert sample.multi_modal_data["type"] == "input_audio"
+        audio_content = sample.multi_modal_data["input_audio"]
+        assert audio_content["format"] == "wav"
+        audio, sample_rate = sf.read(
+            io.BytesIO(base64.b64decode(audio_content["data"]))
+        )
+    else:
+        audio, sample_rate = sample.multi_modal_data["audio"]
+        monkeypatch.setattr(request_func_module.aiohttp, "FormData", _FakeFormData)
+        session = _FakeSession()
+        output = asyncio.run(
+            request_func_module.async_request_openai_audio(request, session)
+        )
+        assert output.success
+        assert session.uploaded_bytes is not None
+        uploaded_audio, uploaded_rate = sf.read(io.BytesIO(session.uploaded_bytes))
+        np.testing.assert_array_equal(uploaded_audio, audio)
+        assert uploaded_rate == sample_rate
+    expected_audio, expected_rate = sf.read(audio_path)
+    np.testing.assert_array_equal(audio, expected_audio)
+    assert sample_rate == expected_rate
+
+
+@pytest.mark.parametrize("enable_multimodal_chat", [False, True])
+@pytest.mark.parametrize("skip_chat_template", [False, True])
+def test_custom_audio_preserves_chat_template_behavior(
+    tmp_path: Path, enable_multimodal_chat: bool, skip_chat_template: bool
+) -> None:
+    class TemplateTokenizer(_Tokenizer):
+        chat_template = "test-template"
+
+        def apply_chat_template(self, messages, *, add_generation_prompt, tokenize):
+            assert add_generation_prompt is True
+            assert tokenize is False
+            return "templated " + messages[0]["content"]
+
+    audio_path = tmp_path / "sample.wav"
+    _write_wav(audio_path)
+    dataset = object.__new__(datasets_module.CustomAudioDataset)
+    dataset.data = [{"prompt": "Transcribe.", "audio": str(audio_path)}]
+    sample = dataset.sample(
+        tokenizer=_as_tokenizer(TemplateTokenizer()),
+        num_requests=1,
+        output_len=32,
+        enable_multimodal_chat=enable_multimodal_chat,
+        skip_chat_template=skip_chat_template,
+    )[0]
+    expected = "Transcribe."
+    if not enable_multimodal_chat and not skip_chat_template:
+        expected = "templated " + expected
+    assert sample.prompt == expected
+    assert sample.prompt_len == len(expected.split())
+
+
+@pytest.mark.parametrize("with_tokenizer", [False, True])
+@pytest.mark.parametrize("output_len", [None, -1])
+def test_custom_audio_missing_output_tokens(
+    tmp_path: Path, with_tokenizer: bool, output_len: int | None
+) -> None:
+    audio_path = tmp_path / "sample.wav"
+    _write_wav(audio_path)
+    dataset = object.__new__(datasets_module.CustomAudioDataset)
+    dataset.data = [{"prompt": "Transcribe.", "audio": str(audio_path)}]
+    if with_tokenizer:
+        with pytest.raises(ValueError, match="'output_tokens' field"):
+            dataset.sample(
+                tokenizer=_as_tokenizer(_Tokenizer()),
+                num_requests=1,
+                output_len=output_len,
+            )
+    else:
+        sample = dataset.sample(tokenizer=None, num_requests=1, output_len=output_len)[
+            0
+        ]
+        assert sample.expected_output_len == 256
+        assert sample.multi_modal_data is not None
