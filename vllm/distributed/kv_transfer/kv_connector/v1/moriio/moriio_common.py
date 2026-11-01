@@ -356,10 +356,10 @@ class MoRIIOConfig:
         tp_size = get_tensor_model_parallel_world_size()
         port_offset = get_port_offset(dp_rank, tp_rank)
         backend = str(extra_config.get("backend", "rdma")).lower()
-        if backend not in ("rdma", "xgmi"):
+        if backend not in ("rdma", "xgmi", "ofi"):
             raise ValueError(
                 f"Invalid MoRIIO backend {backend!r} in kv_connector_extra_config; "
-                "must be one of 'rdma' or 'xgmi'."
+                "must be one of 'rdma', 'xgmi', or 'ofi'."
             )
 
         transfer_timeout = _positive_finite_timeout(
