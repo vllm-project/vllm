@@ -188,12 +188,7 @@ def build_ssd_prefill_metadata(
     # inside a sequence. Sequences tile the tokens, so that is every line.
     segment_starts = [
         starts,
-        torch.arange(
-            _FLASHINFER_SSD_CHUNK_SIZE,
-            num_tokens,
-            _FLASHINFER_SSD_CHUNK_SIZE,
-            dtype=starts.dtype,
-        ),
+        torch.arange(0, num_tokens, _FLASHINFER_SSD_CHUNK_SIZE, dtype=starts.dtype),
     ]
     if checkpoint_offsets_p is not None:
         offsets = torch.tensor(checkpoint_offsets_p, dtype=starts.dtype)

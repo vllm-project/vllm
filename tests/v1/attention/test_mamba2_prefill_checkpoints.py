@@ -168,6 +168,20 @@ def test_flashinfer_layout_starts_a_segment_at_each_checkpoint(monkeypatch):
     assert meta.checkpoint_token_indices_p.tolist() == [-1, 868]
 
 
+def test_flashinfer_layout_builds_a_prefill_shorter_than_the_grid(monkeypatch):
+    """A prefill batch under 128 tokens is one segment per sequence."""
+    monkeypatch.setattr(
+        ssd_dispatch,
+        "_mamba_ssd_backend",
+        object.__new__(ssd_dispatch.FlashInferSSDBackend),
+    )
+    builder = _create_mamba2_builder()
+    meta = _build(builder, seq_lens=[40, 60], query_lens=[40, 60])
+
+    segment_starts = meta.chunk_indices_p * 128 + meta.chunk_offsets_p
+    assert segment_starts.tolist() == [0, 40]
+
+
 def test_update_block_table_regathers_checkpoint_blocks():
     """Groups sharing a spec reuse one group's metadata via update_block_table.
 
