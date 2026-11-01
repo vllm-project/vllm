@@ -20,6 +20,15 @@ void topk_sigmoid(torch::stable::Tensor& topk_weights,
                   double routed_scaling_factor,
                   std::optional<torch::stable::Tensor> is_padding);
 
+#ifdef USE_CUDA
+void muse_spark_routing(torch::stable::Tensor& topk_weights,
+                        torch::stable::Tensor& topk_ids,
+                        const torch::stable::Tensor& logits,
+                        const torch::stable::Tensor& bias, double multiplier,
+                        double route_scale, double division_eps,
+                        const std::optional<torch::stable::Tensor>& is_padding);
+#endif
+
 void topk_softplus_sqrt(
     torch::stable::Tensor& topk_weights, torch::stable::Tensor& topk_indices,
     torch::stable::Tensor& token_expert_indices,
@@ -43,6 +52,16 @@ void moe_align_block_size(torch::stable::Tensor topk_ids, int64_t num_experts,
                           torch::stable::Tensor num_tokens_post_pad,
                           std::optional<torch::stable::Tensor> maybe_expert_map,
                           std::optional<torch::stable::Tensor> scatter_idx);
+
+#ifdef USE_CUDA
+void fused_globalize_align_block_size(
+    torch::stable::Tensor topk_idx, torch::stable::Tensor psum,
+    int64_t rank_expert_offset, int64_t global_num_experts,
+    int64_t local_num_experts, int64_t block_size,
+    torch::stable::Tensor sorted_ids, torch::stable::Tensor expert_ids,
+    torch::stable::Tensor num_tokens_post_pad,
+    std::optional<torch::stable::Tensor> scatter_idx);
+#endif
 
 void batched_moe_align_block_size(
     int64_t max_tokens_per_batch, int64_t block_size,
@@ -72,7 +91,8 @@ torch::stable::Tensor moe_wna16_gemm(
 std::tuple<torch::stable::Tensor, torch::stable::Tensor> grouped_topk(
     const torch::stable::Tensor& scores, int64_t n_group, int64_t topk_group,
     int64_t topk, bool renormalize, double routed_scaling_factor,
-    const torch::stable::Tensor& bias, int64_t scoring_func);
+    const torch::stable::Tensor& bias, int64_t scoring_func,
+    const std::optional<torch::stable::Tensor>& is_padding);
 #endif
 
 bool moe_permute_unpermute_supported();

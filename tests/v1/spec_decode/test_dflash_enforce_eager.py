@@ -35,6 +35,8 @@ def _make_speculative_config(enforce_eager, target_enforce_eager):
         hf_config=hf_config, architectures=hf_config.architectures, max_model_len=128
     )
     draft.registry.inspect_model_cls.return_value = (None, "DSparkDraftModel")
+    # No declared speculator-config class: let the configured method win.
+    draft.speculator_config_class = None
     target = MagicMock(
         max_model_len=128,
         quantization=None,
@@ -43,8 +45,10 @@ def _make_speculative_config(enforce_eager, target_enforce_eager):
     )
     target.hf_config.model_type = "deepseek_v4"
 
+    # The draft ModelConfig is built in the speculator config class, which
+    # imports it from ``vllm.config`` at call time; patch it there.
     with patch(
-        "vllm.config.speculative.ModelConfig", return_value=draft
+        "vllm.config.ModelConfig", return_value=draft
     ) as model_config_cls:
         config = SpeculativeConfig(
             model="draft",

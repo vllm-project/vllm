@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
-from torch.nn.parameter import Parameter
 
 from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
     swizzle_mxfp4_scales,
@@ -10,6 +9,7 @@ from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Dynamic,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_cutedsl
 
@@ -41,9 +41,10 @@ class FlashInferMxFp4LinearKernel(MxFp4LinearKernel):
 
         # swizzle pads N to the next multiple of 128 for CUTLASS tiling
         padded_N = ((N + 127) // 128) * 128
-        layer.weight_scale = Parameter(
+        replace_parameter(
+            layer,
+            "weight_scale",
             swizzle_mxfp4_scales(layer.weight_scale.data, N, K).reshape(padded_N, -1),
-            requires_grad=False,
         )
 
     def apply_weights(
