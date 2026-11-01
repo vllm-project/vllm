@@ -46,17 +46,17 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
+from vllm.model_executor.models.utils import (
+    get_spec_layer_idx_from_weight_name,
+    is_pp_missing_parameter,
+    maybe_prefix,
+)
 from vllm.sequence import IntermediateTensors
 from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
 
-from .hy_v3 import HYV3DecoderLayer
-from .utils import (
-    get_spec_layer_idx_from_weight_name,
-    is_pp_missing_parameter,
-    maybe_prefix,
-)
+from .model import HYV3DecoderLayer
 
 
 def _is_moe(config: PreTrainedConfig) -> bool:
