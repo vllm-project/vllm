@@ -5,8 +5,40 @@ import argparse
 import json
 import math
 import os
+from collections.abc import Iterable
 from contextlib import contextmanager
 from typing import Any
+
+
+def calculate_concurrency(
+    intervals: Iterable[tuple[float, float]], min_start_time: float
+) -> tuple[int, list[float], list[int]]:
+    """Return the exact peak and step-plot points for half-open intervals."""
+    events: list[tuple[float, int]] = []
+    for start_time, end_time in intervals:
+        if end_time <= start_time:
+            continue
+        events.append((start_time - min_start_time, 1))
+        events.append((end_time - min_start_time, -1))
+
+    events.sort(key=lambda event: (event[0], event[1]))
+    active = 0
+    peak = 0
+    event_times: list[float] = []
+    concurrency: list[int] = []
+    index = 0
+    while index < len(events):
+        timestamp = events[index][0]
+        event_times.append(timestamp)
+        concurrency.append(active)
+        while index < len(events) and events[index][0] == timestamp:
+            active += events[index][1]
+            index += 1
+        event_times.append(timestamp)
+        concurrency.append(active)
+        peak = max(peak, active)
+
+    return peak, event_times, concurrency
 
 
 def redact_sensitive_namespace(

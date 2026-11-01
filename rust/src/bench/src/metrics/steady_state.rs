@@ -10,9 +10,8 @@ use serde::{Deserialize, Serialize};
 
 /// Bounds and metadata of the detected steady-state window.
 ///
-/// `observed_peak` is event-exact and may differ by 1 from the
-/// bucket-approximated `max_concurrent_requests` on `BenchmarkMetrics`;
-/// this is expected.
+/// `observed_peak` is event-exact. For positive-duration requests, it uses the
+/// same half-open interval semantics as `max_concurrent_requests`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SteadyStateWindow {
     pub start_s: f64,
