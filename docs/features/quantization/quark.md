@@ -283,6 +283,15 @@ selecting FlyDSL on unsupported hardware or without its kernels raises a
 kernel-selection error. Dynamic MXFP4 activations and weight-only MXFP4
 schemes continue to use their existing backends unless explicitly overridden.
 
+FlyDSL configuration calibration and executable warmup are separate operations.
+Keep `FLYDSL_AUTOTUNE=0` during serving and perform optional calibration through
+FlyDSL's `tune_gemm` API beforehand. The first use of a new exact M/N/K shape can
+still JIT-compile its executable, including prefill shapes not covered by decode
+warmup. Warm the expected shapes before measuring steady-state serving latency.
+For an emulation reference that retains BF16 weights between calls, set
+`VLLM_MXFP4_EMULATION_DEQUANT_AT_LOAD=1`; this uses more model memory than the
+compressed FlyDSL backend.
+
 vLLM supports loading MXFP4 and MXFP6 models quantized offline through AMD Quark, compliant with [Open Compute Project (OCP) specification](https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf).
 
 The scheme currently only supports dynamic quantization for activations.
