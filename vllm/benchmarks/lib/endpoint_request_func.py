@@ -396,6 +396,8 @@ def _choice_has_streamed_output(choice: dict[str, Any]) -> bool:
     if (
         delta.get("content")
         or delta.get("reasoning")
+        # Servers such as SGLang stream reasoning as `reasoning_content`.
+        or delta.get("reasoning_content")
         or delta.get("tool_calls")
         or delta.get("function_call")
     ):
