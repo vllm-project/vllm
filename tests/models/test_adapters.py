@@ -6,6 +6,7 @@ import pytest
 import torch
 from transformers import Gemma3Config, PreTrainedConfig, Qwen2Config
 
+from vllm.config import LoadConfig, VllmConfig
 from vllm.model_executor.models.adapters import (
     _create_pooling_model_cls,
     _resolve_num_labels,
@@ -97,10 +98,11 @@ def _buffer_reusing_iterator(weight_dict):
         yield name, view
 
 
-def _make_pooling_model(base_cls=SimpleModel):
+def _make_pooling_model(base_cls=SimpleModel, load_format="fastsafetensors"):
     PoolingModel = _create_pooling_model_cls(base_cls)
     model = base_cls()
     model.__class__ = PoolingModel
+    model.vllm_config = VllmConfig(load_config=LoadConfig(load_format=load_format))
     model.lm_head = StageMissingLayer("output", model.lm_head)
     return model
 
@@ -244,6 +246,25 @@ def test_pooling_prefix_probe_uses_hf_to_vllm_mapper(monkeypatch):
         "language_model.model.embed.weight",
         "language_model.model.layer0.weight",
     }
+
+
+def test_pooling_load_weights_skips_clone_for_owned_tensor_formats(monkeypatch):
+    """Whitelisted load formats yield owned tensors, so probing must not clone."""
+    ref = _make_reference_weights()
+    model = _make_pooling_model(load_format="runai_streamer")
+
+    clone_count = 0
+    original_clone = torch.Tensor.clone
+
+    def counting_clone(self, *args, **kwargs):
+        nonlocal clone_count
+        clone_count += 1
+        return original_clone(self, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "clone", counting_clone)
+    model.load_weights(iter(ref.items()))
+
+    assert clone_count == 0
 
 
 def _composite_config(outer_labels=None, inner_labels=None):
