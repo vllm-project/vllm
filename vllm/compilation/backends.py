@@ -544,7 +544,7 @@ def _decompose_size_nodes(graph: fx.GraphModule) -> None:
                         f"'{node.name}'"
                     )
 
-        # Replace size node in each user's args.
+        # Replace size nodes throughout positional and keyword arguments.
         for user in list(node.users):
             if (
                 user.op == "call_function"
@@ -561,15 +561,12 @@ def _decompose_size_nodes(graph: fx.GraphModule) -> None:
                 user.replace_all_uses_with(dims[idx])
                 graph.graph.erase_node(user)
             else:
-                # User consumes the full size tuple (e.g. view(clone, size))
-                # → view(clone, d0, d1, ...)
-                new_args = []
-                for arg in user.args:
-                    if arg is node:
-                        new_args.extend(dims)
-                    else:
-                        new_args.append(arg)
-                user.args = tuple(new_args)
+                user.args, user.kwargs = fx.map_arg(
+                    (user.args, user.kwargs),
+                    lambda arg, node=node, dims=tuple(dims): dims
+                    if arg is node
+                    else arg,
+                )
         graph.graph.erase_node(node)
 
 
