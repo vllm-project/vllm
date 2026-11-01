@@ -272,6 +272,10 @@ vllm bench serve \
 
 The generated timeline is an interactive visualization in the form of an HTML file that can be rendered in most browsers. To customize the ITL color thresholds, one can use `--timeline-itl-thresholds` flag (default: 25ms, 50ms)
 
+Timeline timestamps are relative to the first request and rounded to milliseconds,
+with rounding carried across minute and hour boundaries. Benchmark latency metrics
+retain their original precision.
+
 Example output:
 
 <iframe src="../assets/contributing/vllm_bench_serve_timeline.html" width="100%" height="600" frameborder="0"></iframe>
