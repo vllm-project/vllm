@@ -899,13 +899,15 @@ def _dcp_a2a_unpack_combine(
     lse_pack_dim: int,
     return_lse: bool,
     is_lse_base_on_e: bool,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     world_size, num_tokens, h_per_rank, _ = recv_buffer.shape
-    out = torch.empty(
-        (num_tokens, h_per_rank, head_dim),
-        device=recv_buffer.device,
-        dtype=recv_buffer.dtype,
-    )
+    if out is None:
+        out = torch.empty(
+            (num_tokens, h_per_rank, head_dim),
+            device=recv_buffer.device,
+            dtype=recv_buffer.dtype,
+        )
     out_lse = torch.empty(
         (num_tokens, h_per_rank) if return_lse else (1, 1),
         device=recv_buffer.device,
@@ -945,6 +947,7 @@ def dcp_a2a_lse_reduce(
     is_lse_base_on_e: bool = True,
     seq_lens: torch.Tensor | None = None,
     query_start_loc: torch.Tensor | None = None,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Combine partial attention outputs across DCP ranks using All-to-All.
 
@@ -960,6 +963,7 @@ def dcp_a2a_lse_reduce(
         is_lse_base_on_e: If True, LSE is base e; if False, base 2
         seq_lens: Local KV lengths. Empty shards contribute zero weight.
         query_start_loc: Cumulative query-token offsets for each request.
+        out: Optional [B, H/N, D] buffer the combined output is written to.
 
     Returns:
         Combined output [B, H/N, D] (head-scattered)
@@ -968,7 +972,7 @@ def dcp_a2a_lse_reduce(
     """
     world_size = cp_group.world_size
 
-    if world_size == 1:
+    if world_size == 1 and out is None:
         if return_lse:
             return cp_attn_out, cp_attn_lse
         return cp_attn_out
@@ -1006,7 +1010,50 @@ def dcp_a2a_lse_reduce(
     work.wait()
 
     return _dcp_a2a_unpack_combine(
-        recv_buffer, D, lse_pack_dim, return_lse, is_lse_base_on_e
+        recv_buffer, D, lse_pack_dim, return_lse, is_lse_base_on_e, out
+    )
+
+
+def dcp_a2a_v_up_proj_lse_reduce(
+    cp_attn_out: torch.Tensor,
+    cp_attn_lse: torch.Tensor,
+    w_uv: torch.Tensor,
+    out: torch.Tensor,
+    cp_group: GroupCoordinator,
+    is_lse_base_on_e: bool = True,
+    seq_lens: torch.Tensor | None = None,
+    query_start_loc: torch.Tensor | None = None,
+) -> None:
+    """Up-project partial MLA outputs by W_UV, then combine them with All-to-All.
+
+    The LSE merge is a per-head weighted sum and W_UV is linear per head, so
+    this matches ``dcp_a2a_lse_reduce`` followed by the up-projection up to
+    rounding, while the All-to-All carries V instead of L values per head.
+
+    Args:
+        cp_attn_out: [B, H, L] partial latent outputs, H = total heads
+        cp_attn_lse: [B, H] floating-point log-sum-exp values
+        w_uv: [H, L, V] up-projection of all H heads, in DCP rank order
+        out: [B, H/N * V] combined output of this rank's heads
+        cp_group: GroupCoordinator for DCP communication
+        is_lse_base_on_e: If True, LSE is base e; if False, base 2
+        seq_lens: Local KV lengths. Empty shards contribute zero weight.
+        query_start_loc: Cumulative query-token offsets for each request.
+
+    """
+    B, H, _ = cp_attn_out.shape
+    V = w_uv.shape[-1]
+    v = cp_attn_out.new_empty((B, H, V))
+    # (H, B, L) x (H, L, V) -> (H, B, V) written transposed into (B, H, V)
+    torch.bmm(cp_attn_out.transpose(0, 1), w_uv, out=v.transpose(0, 1))
+    dcp_a2a_lse_reduce(
+        v,
+        cp_attn_lse,
+        cp_group,
+        is_lse_base_on_e=is_lse_base_on_e,
+        seq_lens=seq_lens,
+        query_start_loc=query_start_loc,
+        out=out.view(B, -1, V),
     )
 
 
@@ -1470,6 +1517,8 @@ class MLADCPManager:
         self.max_num_tokens = get_dcp_workspace_max_num_tokens(vllm_config)
         self.use_a2a = parallel_config.dcp_comm_backend == "a2a"
         self.padded_num_heads = padded_num_heads
+        # Set when the combine can merge W_UV-projected outputs instead.
+        self.v_up_proj_combine: Callable[..., None] | None = None
 
         self.combine = self._init_combine(
             num_heads,
@@ -1523,6 +1572,13 @@ class MLADCPManager:
                 is_lse_base_on_e=is_lse_base_on_e,
             )
 
+        # PCP regroups the merged heads before the up-projection.
+        if self.use_a2a and not use_pcp:
+            self.v_up_proj_combine = functools.partial(
+                dcp_a2a_v_up_proj_lse_reduce,
+                cp_group=self.group,
+                is_lse_base_on_e=is_lse_base_on_e,
+            )
         combine_fn = (
             dcp_a2a_lse_reduce
             if self.use_a2a

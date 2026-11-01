@@ -601,5 +601,83 @@ def test_distributed_packed_a2a_with_workspace_matches_reference():
     )
 
 
+def _distributed_v_up_proj_a2a_worker(env: dict[str, str]) -> None:
+    update_environment_variables(env)
+    local_rank = int(env["LOCAL_RANK"])
+    world_size = int(env["WORLD_SIZE"])
+    torch.accelerator.set_device_index(local_rank)
+    dist.init_process_group(
+        backend="nccl",
+        init_method=env["DISTRIBUTED_INIT_METHOD"],
+        rank=local_rank,
+        world_size=world_size,
+    )
+    try:
+        from vllm.v1.attention.ops.dcp import (
+            dcp_a2a_lse_reduce,
+            dcp_a2a_v_up_proj_lse_reduce,
+        )
+
+        dtype = _dtype_from_name(env["TEST_DTYPE"])
+        device = torch.device(f"cuda:{local_rank}")
+        rank = dist.get_rank()
+        B, h_per_rank, L, V = 7, 2, 64, 32
+        H = world_size * h_per_rank
+        cp_group = _FakeCPGroup(world_size, dist.group.WORLD)
+
+        generator = torch.Generator(device=device)
+        generator.manual_seed(1234)
+        w_uv = torch.randn(
+            H, L, V, device=device, dtype=dtype, generator=generator
+        ) / math.sqrt(L)
+        generator.manual_seed(1235 + rank)
+        cp_attn_out = torch.randn(
+            B, H, L, device=device, dtype=dtype, generator=generator
+        )
+        cp_attn_lse = torch.randn(B, H, device=device, dtype=dtype, generator=generator)
+        # Rank 0 holds no KV for the first request; its output there is undefined.
+        seq_lens = torch.tensor([int(rank != 0), 3], device=device, dtype=torch.int32)
+        query_start_loc = torch.tensor([0, 2, B], device=device, dtype=torch.int32)
+        if rank == 0:
+            cp_attn_out[:2] = float("nan")
+
+        actual = torch.empty(B, h_per_rank * V, device=device, dtype=dtype)
+        dcp_a2a_v_up_proj_lse_reduce(
+            cp_attn_out,
+            cp_attn_lse,
+            w_uv,
+            actual,
+            cp_group,
+            seq_lens=seq_lens,
+            query_start_loc=query_start_loc,
+        )
+
+        latent = dcp_a2a_lse_reduce(
+            cp_attn_out,
+            cp_attn_lse,
+            cp_group,
+            seq_lens=seq_lens,
+            query_start_loc=query_start_loc,
+        )
+        assert isinstance(latent, torch.Tensor)
+        local_w_uv = w_uv[rank * h_per_rank : (rank + 1) * h_per_rank]
+        expected = torch.bmm(latent.transpose(0, 1).float(), local_w_uv.float())
+        _assert_packed_a2a_close(actual, expected.transpose(0, 1).reshape(B, -1), dtype)
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 2, reason="Need at least 2 GPUs."
+)
+@pytest.mark.parametrize("dtype_name", ["bfloat16", "float32"])
+def test_distributed_v_up_proj_a2a_matches_combine_then_v_up_proj(dtype_name: str):
+    _distributed_run(
+        _distributed_v_up_proj_a2a_worker,
+        world_size=2,
+        extra_env={"TEST_DTYPE": dtype_name},
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
