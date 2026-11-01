@@ -153,8 +153,8 @@ fn build_router_with_options(
         .route("/v1/models", get(openai::list_models))
         .route("/v1/completions", post(openai::completions))
         .route("/v1/chat/completions", post(openai::chat_completions))
-        // TODO: implement the Anthropic Messages API.
-        .route("/v1/messages", post(not_supported))
+        // Anthropic-compatible endpoints
+        .route("/v1/messages", post(anthropic::messages))
         .route("/v1/messages/count_tokens", post(anthropic::count_tokens))
         // TODO: implement batched chat completions.
         .route("/v1/chat/completions/batch", post(not_supported))

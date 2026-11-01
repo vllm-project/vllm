@@ -877,7 +877,6 @@ async fn unimplemented_python_routes_return_not_implemented() {
     let app = test_app().await;
 
     for (method, uri) in [
-        ("POST", "/v1/messages"),
         ("POST", "/v1/chat/completions/batch"),
         ("POST", "/v1/decisions"),
         ("POST", "/v1/systemone"),
@@ -10654,7 +10653,7 @@ async fn anthropic_text_count_matches_chat_tokenization() {
         (
             "/tokenize",
             json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "messages": [
-            {"role": "system", "content": "Be precise."}, {"role": "user", "content": "Hello world"}]}),
+            {"role": "system", "content": "Be precise."}, {"role": "user", "content": [{"type": "text", "text": "Hello"}, {"type": "text", "text": " world"}]}]}),
         ),
     ] {
         let response = app
@@ -10691,4 +10690,34 @@ async fn anthropic_count_rejects_unsupported_content_with_anthropic_error() {
         serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert_eq!(body["type"], "error");
     assert_eq!(body["error"]["type"], "invalid_request_error");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn anthropic_text_generation_reports_content_and_stop() {
+    for (text, finish, expected) in [
+        ("Hello", EngineCoreFinishReason::Length, "max_tokens"),
+        ("", EngineCoreFinishReason::Stop, "end_turn"),
+    ] {
+        let (mut app, engine_task) = test_app_with_stream_output_specs(vec![(
+            bytes_to_token_ids(text.as_bytes()),
+            Some(finish),
+        )])
+        .await;
+        let (status, body) = post_json(
+            &mut app,
+            "/v1/messages",
+            json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat", "max_tokens": 10,
+                "messages": [{"role": "user", "content": "Hi"}]
+            }),
+        )
+        .await;
+        engine_task.await.unwrap();
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["content"], json!([{"type": "text", "text": text}]));
+        assert_eq!(body["stop_reason"], expected);
+        assert_eq!(body.get("stop_sequence"), Some(&serde_json::Value::Null));
+        assert_eq!(body["usage"]["output_tokens"], text.len());
+    }
 }
