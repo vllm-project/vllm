@@ -66,6 +66,26 @@ def _strip_partial_delim(value: str) -> str:
     return value
 
 
+def _parse_gemma4_value(value_str: str) -> object:
+    """Parse a single Gemma4 bare value into a Python object."""
+    value_str = value_str.strip()
+    if not value_str:
+        return value_str
+    if value_str == "true":
+        return True
+    if value_str == "false":
+        return False
+    if value_str.lower() in ("null", "none", "nil"):
+        return None
+    try:
+        if "." in value_str:
+            return float(value_str)
+        return int(value_str)
+    except ValueError:
+        pass
+    return value_str
+
+
 def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
     return _parse_gemma4_fields(args_str, partial=partial)[0]
 
@@ -207,7 +227,7 @@ def _parse_gemma4_fields(
                 # Digits may still arrive (e.g. "108." -> "108.2");
                 # withhold to avoid corrupting the streaming diff.
                 break
-            result[key] = raw_val
+            result[key] = _parse_gemma4_value(raw_val)
 
     return result, open_key
 
@@ -288,7 +308,7 @@ def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
             raw_val = arr_str[val_start:i].strip()
             if partial and raw_val.endswith("."):
                 break
-            items.append(raw_val)
+            items.append(_parse_gemma4_value(raw_val))
 
     return items
 
