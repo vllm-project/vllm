@@ -374,7 +374,13 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                 key=sort_beams_key,
                 reverse=True,
             )
-            instance.beams = sorted_beams[:beam_width]
+            instance.beams = []
+            for beam in sorted_beams[:beam_width]:
+                if len(beam.tokens) >= self.model_config.max_model_len:
+                    beam.finish_reason = "length"
+                    instance.completed.append(beam)
+                else:
+                    instance.beams.append(beam)
 
         return False
 
