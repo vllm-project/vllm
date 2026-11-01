@@ -29,6 +29,7 @@ hybrid_module = importlib.import_module(
 RDNAHybridW4A16LinearKernel = hybrid_module.RDNAHybridW4A16LinearKernel
 pack_int4_exllama_shuffle = hybrid_module.pack_int4_exllama_shuffle
 dequantize_w4a16 = hybrid_module.dequantize_w4a16
+pack_scale_zp_carrier = hybrid_module.pack_scale_zp_carrier
 SUPPORTED_GROUP_SIZES = hybrid_module.SUPPORTED_GROUP_SIZES
 MAX_SKINNY_BATCH_SIZE = hybrid_module.MAX_SKINNY_BATCH_SIZE
 LDS_CAPACITY_ELEMENTS = hybrid_module.LDS_CAPACITY_ELEMENTS
@@ -285,39 +286,69 @@ def _make_prefill_case(M, K, N, G, dtype, has_zp):
     return x, w_int4, b_q, scales, zp_raw, zp_packed
 
 
+PREFILL_SHAPES = [
+    (17, 256, 512, 32),
+    (32, 512, 256, 64),
+    (33, 512, 512, 128),
+    (64, 1024, 256, 128),
+    (129, 256, 512, 32),
+    (160, 256, 1024, 64),
+    (256, 512, 512, 128),
+    (257, 512, 512, 128),
+]
+
+
 @pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("has_zp", [False, True])
-@pytest.mark.parametrize(
-    "M,K,N,G",
-    [
-        (17, 256, 512, 32),
-        (32, 512, 256, 64),
-        (33, 512, 512, 128),
-        (64, 1024, 256, 128),
-        (129, 256, 512, 32),
-        (256, 512, 512, 128),
-        (257, 512, 512, 128),
-    ],
-)
-def test_triton_prefill_gemm_matches_reference(dtype, has_zp, M, K, N, G):
-    """The Triton prefill GEMM matches a float32 dequantize-then-matmul reference.
+@pytest.mark.parametrize("zp_mode", ["sym", "zp", "scale_zp_carrier"])
+@pytest.mark.parametrize("M,K,N,G", PREFILL_SHAPES)
+def test_triton_prefill_gemm_matches_reference(dtype, zp_mode, M, K, N, G):
+    """Prefill GEMM against a float32 oracle, over the symmetric, scalar
+    zero-point and scale/zero-point carrier dequants, at M values on both sides
+    of where gfx1151 switches fp16 to the packed dequant."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA/HIP device not available")
+    if zp_mode == "scale_zp_carrier" and dtype != torch.float16:
+        pytest.skip("The scale/zero-point carrier is fp16 only")
+    set_random_seed(0)
 
-    Covers fp16 and bf16, with and without zero points, at M values on both
-    sides of where gfx1151 switches fp16 to the packed dequant.
-    """
+    x, w_int4, b_q, scales, zp_raw, zp_packed = _make_prefill_case(
+        M, K, N, G, dtype, has_zp=zp_mode != "sym"
+    )
+    scale_zp_carrier = (
+        pack_scale_zp_carrier(scales, zp_packed)
+        if zp_mode == "scale_zp_carrier"
+        else None
+    )
+    out = triton_w4a16_skinny_fmt_gemm(
+        a=x,
+        b_q=b_q,
+        scales=scales,
+        group_size=G,
+        zp=zp_packed,
+        scale_zp_carrier=scale_zp_carrier,
+    )
+    ref = _rdna_hybrid_w4a16_reference(x, w_int4, scales, zp_raw, G, bias=None)
+    torch.testing.assert_close(out, ref, rtol=1e-2, atol=5e-2)
+
+
+@pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
+@pytest.mark.parametrize("M,K,N,G", PREFILL_SHAPES)
+def test_triton_prefill_scale_zp_carrier_matches_scalar_zp(M, K, N, G):
+    """The carrier rounds bias_eff to fp16 and fuses it into an FMA, so it may
+    differ from the scalar zero-point dequant by a rounding step."""
+    dtype = torch.float16
     if not torch.cuda.is_available():
         pytest.skip("CUDA/HIP device not available")
     set_random_seed(0)
 
-    x, w_int4, b_q, scales, zp_raw, zp_packed = _make_prefill_case(
-        M, K, N, G, dtype, has_zp
-    )
+    x, _, b_q, scales, _, zp_packed = _make_prefill_case(M, K, N, G, dtype, has_zp=True)
+    kwargs = dict(a=x, b_q=b_q, scales=scales, group_size=G, zp=zp_packed)
+    base = triton_w4a16_skinny_fmt_gemm(**kwargs)
     out = triton_w4a16_skinny_fmt_gemm(
-        a=x, b_q=b_q, scales=scales, group_size=G, zp=zp_packed
+        **kwargs, scale_zp_carrier=pack_scale_zp_carrier(scales, zp_packed)
     )
-    ref = _rdna_hybrid_w4a16_reference(x, w_int4, scales, zp_raw, G, bias=None)
-    torch.testing.assert_close(out, ref, rtol=1e-2, atol=5e-2)
+    torch.testing.assert_close(out, base, rtol=1e-2, atol=1e-2)
 
 
 # ---------------------------------------------------------------------------
@@ -528,11 +559,72 @@ def test_rdna_hybrid_w4a16_process_weights_asymmetric_repack(group_size, dist_in
     expected_zp = _pack_zp_rows_for_kernel(zeros_int4_gn.t().contiguous())
     torch.testing.assert_close(layer.weight_zero_point, expected_zp)
 
+    # Only the gfx1151 packed fp16 dequant reads the carrier, from g64 up.
+    assert hasattr(layer, "_hybrid_w_scale_zp_carrier") == (
+        hybrid_module._on_gfx1151() and G >= 64
+    )
+
     # Quantized weights match symmetric path's layout regardless of zp.
     w_q_i32 = layer.weight_packed.view(torch.int32)
     assert tuple(w_q_i32.shape) == (N, K // 8)
     expected_packed = pack_int4_exllama_shuffle(w_int4_kn.t().contiguous())
     torch.testing.assert_close(w_q_i32, expected_packed)
+
+
+def test_rdna_hybrid_w4a16_reload_rebuilds_scale_zp_carrier(dist_init):
+    """Layerwise reload rebuilds the carrier from the new scales and zero-points
+    in its original storage, which captured graphs point at."""
+    if not hybrid_module._on_gfx1151():
+        pytest.skip("The scale/zero-point carrier is gfx1151 only")
+
+    from vllm.model_executor.layers.quantization.base_config import (
+        QuantizeMethodBase,
+    )
+    from vllm.model_executor.model_loader.reload import (
+        finalize_layerwise_reload,
+        initialize_layerwise_reload,
+        record_metadata_for_reloading,
+    )
+    from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+
+    class KernelMethod(QuantizeMethodBase):
+        def __init__(self, kernel):
+            self.kernel = kernel
+
+        def create_weights(self, layer, *weight_args, **extra_weight_attrs):
+            pass
+
+        def apply(self, layer, *args, **kwargs):
+            raise NotImplementedError
+
+        def process_weights_after_loading(self, layer):
+            self.kernel.process_weights_after_loading(layer)
+
+    set_random_seed(0)
+    K, N, G = 256, 128, 128
+    layer, kernel, *_ = _build_prefill_dequant_case(K, N, G, has_zp=True)
+    new_layer, *_ = _build_prefill_dequant_case(K, N, G, has_zp=True)
+    new_ckpt = {name: p.data for name, p in new_layer.named_parameters()}
+    for param in layer.parameters():
+        param.weight_loader = default_weight_loader
+    layer.quant_method = KernelMethod(kernel)
+
+    with torch.device(device):
+        record_metadata_for_reloading(layer)
+    kernel.process_weights_after_loading(layer)
+    carrier = layer._hybrid_w_scale_zp_carrier
+    old_carrier = carrier.clone()
+
+    initialize_layerwise_reload(layer)
+    for name, value in new_ckpt.items():
+        param = getattr(layer, name)
+        param.weight_loader(param, value)
+    finalize_layerwise_reload(layer, model_config=None)
+
+    assert layer._hybrid_w_scale_zp_carrier.data_ptr() == carrier.data_ptr()
+    expected = pack_scale_zp_carrier(layer.weight_scale, layer.weight_zero_point)
+    assert torch.equal(layer._hybrid_w_scale_zp_carrier, expected)
+    assert not torch.equal(expected, old_carrier)
 
 
 # ---------------------------------------------------------------------------
@@ -1227,3 +1319,26 @@ def test_rdna_hybrid_w4a16_medium_skinny_matches_reference(dtype, has_zp):
     reference = _rdna_hybrid_w4a16_reference(x_mk, w_int4_nk, scales, zp, G, bias=None)
 
     torch.testing.assert_close(output, reference, rtol=2e-2, atol=2e-2)
+
+
+@pytest.mark.parametrize("M,packed", [(256, False), (257, True)])
+def test_gfx1151_zp_gather_cutoff(M, packed):
+    """Without the carrier (g32), asymmetric weights pack from M > 256."""
+    select = hybrid_module._select_skinny_gfx1151_config
+    assert select(M, 4096, 4096, 32, torch.float16, True, False)[-1] == packed
+
+
+@pytest.mark.parametrize(
+    "M,N,K,packed",
+    [
+        (128, 16384, 4096, False),
+        (129, 16384, 4096, True),
+        (129, 12288, 4096, False),
+        (192, 12288, 4096, False),
+        (193, 12288, 4096, True),
+    ],
+)
+def test_gfx1151_carrier_cutoff(M, N, K, packed):
+    """The carrier packs from M > 128 for very wide N, otherwise from M > 192."""
+    select = hybrid_module._select_skinny_gfx1151_config
+    assert select(M, N, K, 128, torch.float16, True, True)[-1] == packed
