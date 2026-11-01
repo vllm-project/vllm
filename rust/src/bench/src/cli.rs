@@ -99,6 +99,15 @@ pub enum RampUpStrategy {
     Exponential,
 }
 
+impl RampUpStrategy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Linear => "linear",
+            Self::Exponential => "exponential",
+        }
+    }
+}
+
 /// Strategy for assigning LoRA modules to requests.
 #[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoraAssignment {
