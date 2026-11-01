@@ -78,7 +78,9 @@ next step verifies those drafts. A step that selects K=0 requests no drafts, so
 it does not appear in the per-request spec-decode counters such as
 `vllm:spec_decode_num_drafts_total` (see
 [acceptance metrics](acceptance_metrics.md)). Those count per request, while this
-counter counts scheduler steps, so the two do not reconcile.
+counter counts scheduler steps, so the two do not reconcile. The counter is
+exported by the Python frontend only; the Rust frontend
+(`VLLM_USE_RUST_FRONTEND=1`) does not report it.
 
 ## Limitations
 
