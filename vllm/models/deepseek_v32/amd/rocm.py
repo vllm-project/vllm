@@ -279,7 +279,9 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             indexer_n_head_scale,
             has_indexer=has_indexer,
             index_rope_interleave=self._index_rope_interleave,
-            quantize_mqa=self._fp8_kv and not use_mha,
+            # Under DCP the query is gathered in the model dtype, and
+            # forward_mqa quantizes it for an FP8 KV cache.
+            quantize_mqa=self._fp8_kv and not use_mha and self.dcp_manager is None,
         )
 
         if self.indexer is not None and not self.skip_topk:
@@ -307,9 +309,26 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         if self._fp8_kv_needs_view:
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
-        q_for_attn = self._build_q_for_attn(ql_nope, mqa_q, num_actual)
-        attn_out, _ = self.impl.forward_mqa(  # type: ignore[attr-defined]
-            q_for_attn, kv_cache, attn_metadata, self
-        )
+        if self.dcp_manager is not None:
+            assert self.dcp_manager.query_gather is not None
+            q_local = torch.cat((ql_nope[:num_actual], mqa_q[:num_actual]), dim=-1)
+            q_gathered = self.dcp_manager.query_gather(q_local)
+            attn_out, lse = self.impl.forward_mqa(  # type: ignore[attr-defined]
+                q_gathered, kv_cache, attn_metadata, self
+            )
+            assert lse is not None
+            # Rows where this rank owns no selected token are (0, -inf), so
+            # the merge needs no per-row lengths.
+            attn_out = self.dcp_manager.combine(
+                attn_out,
+                lse,
+                seq_lens=None,  # type: ignore[arg-type]
+                query_start_loc=None,  # type: ignore[arg-type]
+            )
+        else:
+            q_for_attn = self._build_q_for_attn(ql_nope, mqa_q, num_actual)
+            attn_out, _ = self.impl.forward_mqa(  # type: ignore[attr-defined]
+                q_for_attn, kv_cache, attn_metadata, self
+            )
 
         self._compute_uv_out(attn_out, output, num_actual)

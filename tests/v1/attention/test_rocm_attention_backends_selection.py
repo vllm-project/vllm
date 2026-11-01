@@ -646,8 +646,8 @@ def test_mla_backend_selection(
 @pytest.mark.parametrize(
     "selected_backend", [None, AttentionBackendEnum.ROCM_AITER_MLA_SPARSE]
 )
-def test_sparse_mla_backend_rejects_dcp(selected_backend, use_dcp):
-    """Sparse MLA remains selectable without DCP and fails early with DCP."""
+def test_sparse_mla_backend_supports_dcp(selected_backend, use_dcp):
+    """Sparse MLA is selectable with and without DCP."""
     from vllm.platforms.rocm import RocmPlatform
 
     selector_config = AttentionSelectorConfig(
@@ -659,13 +659,9 @@ def test_sparse_mla_backend_rejects_dcp(selected_backend, use_dcp):
         use_sparse=True,
         use_dcp=use_dcp,
     )
-    if use_dcp:
-        with pytest.raises(ValueError, match="DCP not supported"):
-            RocmPlatform.get_attn_backend_cls(selected_backend, selector_config)
-    else:
-        assert RocmPlatform.get_attn_backend_cls(selected_backend, selector_config) == (
-            AttentionBackendEnum.ROCM_AITER_MLA_SPARSE.get_path()
-        )
+    assert RocmPlatform.get_attn_backend_cls(selected_backend, selector_config) == (
+        AttentionBackendEnum.ROCM_AITER_MLA_SPARSE.get_path()
+    )
 
 
 @pytest.mark.parametrize("use_dcp", [False, True])
