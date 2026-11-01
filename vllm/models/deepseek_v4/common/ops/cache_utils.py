@@ -806,17 +806,6 @@ def combine_topk_swa_indices(
     return combined_indices, combined_lens
 
 
-def hf_config_int(vllm_config: Any, name: str, default: int) -> int:
-    model_config = getattr(vllm_config, "model_config", None)
-    hf_config = getattr(model_config, "hf_config", None)
-    return int(getattr(hf_config, name, default) or default)
-
-
-def scheduler_config_int(vllm_config: Any, name: str, default: int) -> int:
-    scheduler_config = getattr(vllm_config, "scheduler_config", None)
-    return int(getattr(scheduler_config, name, default) or default)
-
-
 class CombineTopkSwaIndicesKernel(
     VllmTritonJitKernel["CombineTopkSwaIndicesKernel.CompileKey"]
 ):
@@ -960,12 +949,9 @@ class CombineTopkSwaIndicesKernel(
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        if scheduler_config_int(vllm_config, "max_num_batched_tokens", 0) <= 0:
-            return []
-
-        window_size = hf_config_int(vllm_config, "sliding_window", 128)
         hf_config = vllm_config.model_config.hf_config
-        index_topk = int(getattr(hf_config, "index_topk", 0) or 0)
+        window_size = hf_config.sliding_window
+        index_topk = hf_config.index_topk
         compress_ratios = tuple(
             sorted({max(1, int(ratio)) for ratio in get_compress_ratios(hf_config)})
         )
@@ -982,8 +968,8 @@ class CombineTopkSwaIndicesKernel(
             ),
         )
         image_width = (
-            hf_config_int(vllm_config, "vision_max_n_token", 0)
-            if hf_config_int(vllm_config, "vision_n_layers", 0) > 0
+            getattr(hf_config, "vision_max_n_token", 0)
+            if getattr(hf_config, "vision_n_layers", 0) > 0
             else 0
         )
         # Warm both the plain-window variant (batches without image spans)

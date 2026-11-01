@@ -31,10 +31,8 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
 )
 from vllm.models.deepseek_v4.common.ops.cache_utils import (
-    hf_config_int,
     quantize_and_insert_k_kernel,
     remap_flashinfer_index,
-    scheduler_config_int,
 )
 from vllm.platforms import current_platform
 from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
@@ -904,10 +902,9 @@ def _combine_topk_swa_warmup_inputs(vllm_config: Any) -> _WarmupInputRows:
     padded width is the same for all rows; SWA-only layers (ratio 0) pass
     ``TOP_K=0``.
     """
-    model_config = getattr(vllm_config, "model_config", None)
-    hf_config = getattr(model_config, "hf_config", None)
+    hf_config = vllm_config.model_config.hf_config
     compress_ratios = get_compress_ratios(hf_config) or [0]
-    topk = hf_config_int(vllm_config, "index_topk", 0)
+    topk = hf_config.index_topk
     return zip_inputs(
         *(
             dict(compress_ratio=ratio, topk=topk if ratio > 0 else 0, topk_width=topk)
@@ -1050,10 +1047,7 @@ class CombineTopkSwaIndicesKernel(
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        if scheduler_config_int(vllm_config, "max_num_batched_tokens", 0) <= 0:
-            return []
-
-        window_size = hf_config_int(vllm_config, "sliding_window", 128)
+        window_size = vllm_config.model_config.hf_config.sliding_window
         return self._trace_dispatch(self.dispatch)(
             _combine_topk_swa_warmup_inputs(vllm_config),
             _COMBINE_TOPK_SWA_POINTER_INPUTS,
