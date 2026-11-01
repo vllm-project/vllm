@@ -6,7 +6,7 @@ import torch
 from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointMetadata,
 )
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import HAS_TRITON, tl, triton
 
 
 @triton.jit
@@ -88,6 +88,23 @@ def store_prefill_checkpoint(
             Readers take the first ``state_len`` slots as the newest inputs.
 
     """
+    if not HAS_TRITON or x.device.type == "cpu":
+        offsets = checkpoint.checkpoint_offsets.tolist()
+        dst_indices = checkpoint.state_indices.tolist()
+        src_indices = chunk_idx.tolist()
+        starts = query_start_loc.tolist()
+        for row, offset in enumerate(offsets):
+            if offset <= 0:
+                continue
+            dst = dst_indices[row]
+            src = src_indices[row]
+            token_end = starts[row] + offset
+            conv_state[dst, :, :state_len].copy_(
+                x[:, token_end - state_len : token_end]
+            )
+            ssm_state[dst].copy_(chunk_states[src])
+        return
+
     dim = x.size(0)
     ssm_row_size = chunk_states[0].numel()
     block_size = 1024
