@@ -356,6 +356,20 @@ class Fp8LinearMethod(LinearMethodBase):
         self.use_marlin = isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if self.block_quant and getattr(layer, "is_bmm", False):
+            # is_bmm is set after create_weights picked a plain linear kernel.
+            self.fp8_linear = init_fp8_linear_kernel(
+                activation_quant_key=self.activation_quant_key,
+                weight_quant_key=self.weight_quant_key,
+                weight_shape=(
+                    layer.output_size_per_partition,
+                    layer.input_size_per_partition,
+                ),
+                input_dtype=self.input_dtype,
+                out_dtype=self.out_dtype,
+                is_bmm=True,
+            )
+            self.use_marlin = isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel)
         if is_weights_pre_processed():
             # Weights are already in runtime format; the only state tensor
             # export cannot carry is the `input_scale = None` stamp that dynamic
