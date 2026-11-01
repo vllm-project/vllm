@@ -364,8 +364,8 @@ class RequestSpecDecodeMetrics:
             also the histogram's upper bound.
         histogram: Dense counts indexed by accepted draft tokens ``j``
             (length ``num_spec_tokens + 1``).
-        num_draft_tokens: Total proposed draft tokens, after the
-            grammar-invalidated (``num_invalid_spec_tokens``) adjustment.
+        num_draft_tokens: Total proposed draft tokens, excluding
+            grammar-invalidated and trimmed ngram drafts.
         per_step_accepted: Ordered accepted-draft count per verify step
             (``detailed`` only; empty otherwise).
         per_step_drafted: Ordered proposed-draft count per verify step
