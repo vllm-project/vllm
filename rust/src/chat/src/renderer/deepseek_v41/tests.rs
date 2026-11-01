@@ -359,12 +359,69 @@ fn system_after_dropped_developer_becomes_leading_system() {
         ],
         ..ChatRequest::for_test()
     };
-    expect!["<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\nsys"]
+    expect!["<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\nsys<｜Assistant｜><think>"]
         .assert_eq(&render(&request));
 
     request.messages.push(ChatMessage::user("question"));
     expect!["<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\nsys<｜User｜>question<｜Assistant｜><think>"]
         .assert_eq(&render(&request));
+}
+
+#[test]
+fn system_only_opens_assistant_turn_in_chat_and_thinking_modes() {
+    let rendered = [false, true].map(|enable_thinking| {
+        let mut request = ChatRequest {
+            messages: vec![ChatMessage::system("You are helpful.")],
+            ..ChatRequest::for_test()
+        };
+        request
+            .chat_options
+            .template_kwargs
+            .insert("thinking".to_string(), json!(enable_thinking));
+        render(&request)
+    });
+
+    expect![[r#"
+        [
+            "<｜begin▁of▁sentence｜><｜System｜>You are helpful.<｜Assistant｜></think>",
+            "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\nYou are helpful.<｜Assistant｜><think>",
+        ]
+    "#]]
+    .assert_debug_eq(&rendered);
+}
+
+#[test]
+fn system_to_assistant_transitions_in_chat_and_thinking_modes() {
+    let rendered = [false, true].map(|enable_thinking| {
+        let mut request = ChatRequest {
+            messages: vec![
+                ChatMessage::system("rules"),
+                ChatMessage::assistant_blocks(vec![
+                    AssistantContentBlock::Reasoning {
+                        text: "reason".to_string(),
+                    },
+                    AssistantContentBlock::Text {
+                        text: "answer".to_string(),
+                    },
+                ]),
+            ],
+            ..ChatRequest::for_test()
+        };
+        request
+            .chat_options
+            .template_kwargs
+            .insert("thinking".to_string(), json!(enable_thinking));
+        request.chat_options.reasoning_effort = Some(EffortValue::from("low"));
+        render(&request)
+    });
+
+    expect![[r#"
+        [
+            "<｜begin▁of▁sentence｜><｜System｜>rules<｜Assistant｜></think>answer<｜end▁of▁sentence｜>",
+            "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 50 (range 1-100, the higher the value, the more thorough the reasoning)\n\nrules<｜Assistant｜><think>reason</think>answer<｜end▁of▁sentence｜>",
+        ]
+    "#]]
+    .assert_debug_eq(&rendered);
 }
 
 #[test]
