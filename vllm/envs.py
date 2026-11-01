@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: str | None = None
     VLLM_ENGINE_READY_TIMEOUT_S: int = 600
+    VLLM_HEALTH_CHECK_GPU_TIMEOUT: int = 20
     VLLM_CHAT_TEMPLATE_RENDER_TIMEOUT: float = 30.0
     VLLM_CHAT_TEMPLATE_FUEL: int = 500000
     VLLM_API_KEY: str | None = None
@@ -842,6 +843,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # during startup. Default is 600 seconds (10 minutes).
     "VLLM_ENGINE_READY_TIMEOUT_S": lambda: int(
         os.environ.get("VLLM_ENGINE_READY_TIMEOUT_S", "600")
+    ),
+    # Timeout in seconds for GPU health check (dummy forward pass).
+    # Default is 20 seconds; non-positive values fall back to the default.
+    "VLLM_HEALTH_CHECK_GPU_TIMEOUT": lambda: (
+        val
+        if (val := int(os.environ.get("VLLM_HEALTH_CHECK_GPU_TIMEOUT", "20"))) > 0
+        else 20
     ),
     # Maximum wall-clock seconds allowed for a single chat template render.
     # Set to 0 to disable the timeout.
@@ -2501,6 +2509,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_TUNED_CONFIG_FOLDER",
         "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR",
         "VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS",
+        "VLLM_HEALTH_CHECK_GPU_TIMEOUT",
         "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
         "VLLM_HTTP_MAX_REQUEST_BODY_SIZE",
         "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",

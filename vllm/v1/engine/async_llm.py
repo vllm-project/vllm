@@ -215,6 +215,7 @@ class AsyncLLM(EngineClient):
             self.logger_manager.log_engine_initialized()
 
         self._client_count = client_count
+        self._gpu_health_probe: asyncio.Task[bool] | None = None
 
         self.output_handler: asyncio.Task | None = None
         try:
@@ -1146,6 +1147,37 @@ class AsyncLLM(EngineClient):
             return
         if self.errored:
             raise self.dead_error
+
+    async def check_health_gpu(self) -> bool:
+        logger.debug("Called check_health_gpu.")
+        await self.check_health()
+
+        # Single-flight: concurrent and timed-out callers await the pending
+        # probe instead of queueing more utility calls on a stalled engine.
+        probe = self._gpu_health_probe
+        if probe is None:
+            probe = asyncio.create_task(self.engine_core.check_ready_async())
+            probe.add_done_callback(self._on_gpu_health_probe_done)
+            self._gpu_health_probe = probe
+        try:
+            return await asyncio.wait_for(
+                asyncio.shield(probe), timeout=envs.VLLM_HEALTH_CHECK_GPU_TIMEOUT
+            )
+        except TimeoutError:
+            logger.warning(
+                "GPU health check timed out after %ss",
+                envs.VLLM_HEALTH_CHECK_GPU_TIMEOUT,
+            )
+        except Exception:
+            logger.warning("GPU health check failed", exc_info=True)
+        return False
+
+    def _on_gpu_health_probe_done(self, probe: asyncio.Task[bool]) -> None:
+        if self._gpu_health_probe is probe:
+            self._gpu_health_probe = None
+        if not probe.cancelled():
+            # Mark the exception retrieved even if every caller timed out.
+            probe.exception()
 
     async def start_profile(
         self,
