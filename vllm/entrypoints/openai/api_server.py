@@ -13,13 +13,15 @@ from vllm.entrypoints.launchers.api_server.entry import (
 from vllm.entrypoints.launchers.api_server.routers import register_api_routers
 from vllm.entrypoints.launchers.app import build_app
 from vllm.entrypoints.launchers.launcher import (
-    create_server_socket,
-    create_server_unix_socket,
     setup_server,
     validate_api_server_args,
 )
 from vllm.entrypoints.launchers.render.app_state import init_render_app_state
 from vllm.entrypoints.launchers.render.entry import build_and_serve_renderer
+from vllm.entrypoints.launchers.utils.listen import (
+    create_server_socket,
+    create_server_unix_socket,
+)
 
 warnings.warn(
     "`vllm.entrypoints.openai.api_server` is deprecated and will likely be"
