@@ -816,3 +816,17 @@ def test_legacy_layerwise_engine_does_not_reuse_storers_on_empty_steps():
         connector.clear_connector_metadata()
 
     assert connector._lmcache_engine.layerwise_storers == []
+
+
+def test_use_native_raises_clear_error(monkeypatch):
+    """The in-tree integration was removed, so use_native must fail loudly."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
+
+    monkeypatch.setattr(KVConnectorBase_V1, "__init__", lambda self, **kwargs: None)
+    vllm_config = MagicMock()
+    vllm_config.kv_transfer_config.get_from_extra_config.side_effect = (
+        lambda key, default: key == "use_native"
+    )
+
+    with pytest.raises(ValueError, match="use_native"):
+        LMCacheConnectorV1(vllm_config, MagicMock(), MagicMock())
