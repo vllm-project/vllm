@@ -317,6 +317,7 @@ steps:
 
 - label: ":nvidia: (B200) [Nightly] LM Eval Spec Decode"
   key: lm-eval-spec-decode-4xb200
+  automatic_shard: true
   timeout_in_minutes: 120
   device: b200-k8s
   num_devices: 4
@@ -343,6 +344,7 @@ steps:
   - PYTHONPATH=/vllm-workspace pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-spec-decode.txt
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) LM Eval Spec Decode (Fixed-length FP8)"
       dind: false
       device: mi355_4
