@@ -57,6 +57,13 @@ class ECCPUScheduler:
         self._is_producer: bool = ec_config.is_ec_producer
         self._is_consumer: bool = ec_config.is_ec_consumer
 
+        allowed_peers = ec_config.get_from_extra_config("ec_allowed_peers", [])
+        if not isinstance(allowed_peers, list) or any(
+            not isinstance(peer, str) for peer in allowed_peers
+        ):
+            raise ValueError("ec_allowed_peers must be a list of host:port strings")
+        self._allowed_peers = frozenset(allowed_peers)
+
         self._region = create_ec_shared_region(vllm_config)
         # Block allocator + LRU eviction policy for the shared region.
         self._cache = EmbeddingCache(self._region.num_blocks)
@@ -394,6 +401,15 @@ class ECCPUScheduler:
         Returns True if the transfer was started. Returns False when the
         cache cannot accommodate the encoding; admission will retry it.
         """
+        host, port = info.get("peer_host"), info.get("peer_port")
+        if (
+            not isinstance(host, str)
+            or type(port) is not int
+            or not 1 <= port <= 65535
+            or f"{host}:{port}" not in self._allowed_peers
+        ):
+            raise _RemoteUnavailable("the producer is not allowed")
+
         from math import ceil
 
         from vllm.distributed.ec_transfer.ec_connector.cpu.session import (
