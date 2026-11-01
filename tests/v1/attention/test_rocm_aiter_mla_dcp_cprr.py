@@ -41,8 +41,8 @@ def test_native_head_counts_are_used_as_is(n):
 
 
 def test_non_native_head_count_pads_up_to_the_next_native():
-    """K3 at TP8/DCP8 gathers 96 heads for the target; the kernel has no 96
-    variant, so it must run at 128, not silently fall out of the asm path."""
+    """K3 at TP8/DCP8 gathers 96 heads for the target; unless AITER reports 96
+    native it must run at 128, not silently fall out of the asm path."""
     assert _heads(96) == 128
     assert _heads(1) == 16
     assert _heads(17) == 32
@@ -188,11 +188,76 @@ def _build(monkeypatch, gathered_heads, segmented_supported=True):
 
 
 def test_selects_cprr_for_k3_gathered_heads(on_gfx950, monkeypatch):
-    """K3 at TP8/DCP8 gathers 96 heads; the builder must take cprr padded to 128."""
+    """K3 at TP8/DCP8 gathers 96 heads; without AITER's shape planner the
+    builder must take cprr padded to 128."""
     builder = _build(monkeypatch, gathered_heads=96)
     assert builder._asm_dcp_verify
     assert builder._asm_dcp_verify_heads == 128
     assert builder._num_attention_heads == 128
+
+
+def _fake_shape_support(monkeypatch, native_max_qlen=6, supported=True):
+    """AITER's planner as v0.1.27 answers for 96 fp8 heads; returns asked qlens."""
+    asked = []
+
+    def get_mla_decode_shape_support(num_heads, qlen, q_dtype, kv_dtype, **kwargs):
+        assert (num_heads, q_dtype, kv_dtype) == (96, "fp8", "fp8")
+        assert kwargs == dict(return_lse=True, cp_world_size=DCP, cp_round_robin=True)
+        asked.append(qlen)
+        return SimpleNamespace(native=qlen <= native_max_qlen, supported=supported)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "aiter.ops.attention",
+        SimpleNamespace(get_mla_decode_shape_support=get_mla_decode_shape_support),
+    )
+    monkeypatch.setitem(
+        sys.modules, "aiter", SimpleNamespace(dtypes=SimpleNamespace(fp8="fp8"))
+    )
+    return asked
+
+
+@pytest.mark.parametrize("supported", [True, None], ids=["asm", "opus"])
+def test_selects_native_96_when_aiter_reports_it(on_gfx950, monkeypatch, supported):
+    """The fp8 cprr kernel runs 96 heads unpadded where AITER plans it native,
+    which skips the 96 -> 128 query pad and a quarter of the kernel's heads."""
+    _fake_shape_support(monkeypatch, supported=supported)
+    builder = _build(monkeypatch, gathered_heads=96)
+    assert builder._asm_dcp_verify
+    assert builder._asm_dcp_verify_heads == 96
+    assert builder._num_attention_heads == 96
+
+
+def test_native_96_asks_every_cprr_qlen(monkeypatch):
+    asked = _fake_shape_support(monkeypatch)
+    assert rocm_aiter_mla._aiter_native_fp8_cprr(96, "fp8", 6, DCP)
+    assert asked == list(range(MIN_QLEN, 7))
+
+
+@pytest.mark.parametrize(
+    "heads,kv_cache_dtype,max_qlen,native_max_qlen,supported",
+    [
+        (96, "fp8", 7, 6, True),  # AITER folds 96 heads past qlen 6
+        (96, "fp8", 5, 6, False),  # planned native, but no kernel
+        (96, "auto", 5, 6, True),  # bf16 KV is not probed
+        (112, "fp8", 5, 6, True),  # only 96 is probed
+    ],
+)
+def test_native_96_keeps_padding_otherwise(
+    monkeypatch, heads, kv_cache_dtype, max_qlen, native_max_qlen, supported
+):
+    _fake_shape_support(monkeypatch, native_max_qlen, supported)
+    assert not rocm_aiter_mla._aiter_native_fp8_cprr(
+        heads, kv_cache_dtype, max_qlen, DCP
+    )
+
+
+def test_native_96_needs_aiter_shape_planner(monkeypatch):
+    """Builds before get_mla_decode_shape_support keep padding: some of them
+    reject 96-head metadata on the OPUS route."""
+    _fake_shape_support(monkeypatch)
+    monkeypatch.setitem(sys.modules, "aiter.ops.attention", None)
+    assert not rocm_aiter_mla._aiter_native_fp8_cprr(96, "fp8", 5, DCP)
 
 
 @pytest.mark.parametrize(
