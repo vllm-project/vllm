@@ -4,6 +4,7 @@
 import contextlib
 from collections.abc import Iterator
 from dataclasses import dataclass
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -12,8 +13,17 @@ import torch
 
 import vllm.distributed.aux_output_connector.worker as aux_output_worker
 import vllm.v1.worker.gpu.model_runner as model_runner_module
-from vllm.config import CacheConfig, LoRAConfig, ParallelConfig
+from vllm.config import (
+    AttentionConfig,
+    CacheConfig,
+    KernelConfig,
+    LoadConfig,
+    LoRAConfig,
+    ParallelConfig,
+    SpeculativeConfig,
+)
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -66,7 +76,7 @@ def test_non_last_pp_rank_uses_global_batch_for_sample_feedback(monkeypatch):
 
     runner.sample_tokens(None)
 
-    pp_receive.assert_called_once_with(global_batch)
+    pp_receive.assert_called_once_with(global_batch, recv_drafts=False)
     postprocess_num_computed_tokens.assert_called_once_with(global_batch)
     postprocess_state.assert_called_once_with(global_batch.idx_mapping, 0)
     restore_for_sampling.assert_not_called()
@@ -504,27 +514,48 @@ def test_async_copy_to_np_does_not_alias_reused_buffer():
     [("auto", "auto"), ("bfloat16", "bfloat16"), (None, "fp8_e4m3")],
 )
 @pytest.mark.parametrize("data_parallel_index", [0, 3])
+@pytest.mark.parametrize(
+    ("draft_moe", "draft_attn"),
+    [(None, None), ("triton", AttentionBackendEnum.TRITON_ATTN)],
+)
 def test_standalone_draft_kv_dtype_override(
-    monkeypatch, draft_dtype, expected_dtype, data_parallel_index
+    monkeypatch, draft_dtype, expected_dtype, data_parallel_index, draft_moe, draft_attn
 ):
     @dataclass
     class Config:
         cache_config: CacheConfig
         parallel_config: ParallelConfig
         model_config: object
+        kernel_config: KernelConfig
+        attention_config: AttentionConfig
         quant_config: object | None = None
 
-    target = Config(CacheConfig(cache_dtype="fp8_e4m3"), ParallelConfig(), object())
+    target = Config(
+        CacheConfig(cache_dtype="fp8_e4m3"),
+        ParallelConfig(),
+        object(),
+        KernelConfig(moe_backend="flashinfer_cutlass"),
+        AttentionConfig(backend=AttentionBackendEnum.FLASHINFER),
+    )
     target.parallel_config.data_parallel_index = data_parallel_index
     speculator = object.__new__(ar_module.StandaloneARSpeculator)
     speculator.vllm_config = target
     speculator.draft_model_config = object()
-    speculator.speculative_config = SimpleNamespace(
-        kv_cache_dtype=draft_dtype, draft_parallel_config=ParallelConfig()
+    spec = SimpleNamespace(
+        kv_cache_dtype=draft_dtype,
+        moe_backend=draft_moe,
+        attention_backend=draft_attn,
+        draft_parallel_config=ParallelConfig(),
     )
+    spec.apply_draft_overrides = partial(SpeculativeConfig.apply_draft_overrides, spec)
+    speculator.speculative_config = spec
     get_model = Mock(return_value=object())
     monkeypatch.setattr(ar_module, "get_model", get_model)
     monkeypatch.setattr(ar_module, "set_model_tag", lambda _: contextlib.nullcontext())
+    monkeypatch.setattr(ar_module, "get_draft_load_config", lambda _: LoadConfig())
+    monkeypatch.setattr(
+        ar_module, "get_pp_safe_draft_load_config", lambda load_config: load_config
+    )
 
     speculator.load_draft_model(object(), set())
 
@@ -534,3 +565,9 @@ def test_standalone_draft_kv_dtype_override(
     assert target.cache_config.cache_dtype == "fp8_e4m3"
     assert draft_config.parallel_config.data_parallel_index == data_parallel_index
     assert target.parallel_config.data_parallel_index == data_parallel_index
+    assert draft_config.kernel_config.moe_backend == (draft_moe or "flashinfer_cutlass")
+    assert draft_config.attention_config.backend == (
+        draft_attn or AttentionBackendEnum.FLASHINFER
+    )
+    assert target.kernel_config.moe_backend == "flashinfer_cutlass"
+    assert target.attention_config.backend == AttentionBackendEnum.FLASHINFER
