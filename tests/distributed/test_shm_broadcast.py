@@ -9,6 +9,7 @@ import random
 import threading
 import time
 import weakref
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest import mock
 
@@ -744,6 +745,30 @@ def test_reader_in_reference_cycle_is_collected_without_blocking():
 
     assert not collector.is_alive()
     assert reader_ref() is None
+
+
+@pytest.mark.cpu_test
+def test_overflow_receive_keeps_the_original_deadline(monkeypatch) -> None:
+    """Waiting for the SHM notification must not restart the socket-body budget."""
+    clock = SimpleNamespace(now=10.0)
+    monkeypatch.setattr(
+        shm_broadcast, "time", SimpleNamespace(monotonic=lambda: clock.now)
+    )
+    reader = MessageQueue.__new__(MessageQueue)
+    reader._is_local_reader = True
+    reader.tensor_arena = None
+    reader.local_socket = mock.Mock()
+
+    @contextmanager
+    def acquire_read(timeout, indefinite):
+        assert timeout == 5.0
+        clock.now += 2.0
+        yield bytearray([1])
+
+    reader.acquire_read = acquire_read
+    with mock.patch.object(MessageQueue, "recv", return_value="payload") as recv:
+        assert reader.dequeue(timeout=5.0) == "payload"
+        recv.assert_called_once_with(reader.local_socket, 3.0)
 
 
 def test_warning_logs(caplog_vllm):
