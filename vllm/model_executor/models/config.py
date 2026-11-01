@@ -899,10 +899,57 @@ class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
 
     @classmethod
     def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        hf_config = vllm_config.model_config.hf_config
         cls.update_mamba_ssm_cache_dtype(
-            cache_config=vllm_config.cache_config,
-            hf_config=vllm_config.model_config.hf_config,
+            cache_config=vllm_config.cache_config, hf_config=hf_config
         )
+        if getattr(hf_config, "bf16_activations", False):
+            cls.verify_bf16_activations(vllm_config)
+
+    @staticmethod
+    def verify_bf16_activations(vllm_config: "VllmConfig") -> None:
+        """Check the mode set with ``hf_overrides={"bf16_activations": True}``.
+
+        The mode keeps every activation in BF16: the checkpoint's per-tensor
+        FP8 linears run as W8A16 (``ModelOptFp8W8A16LinearMethod``) and
+        attention runs a BF16 KV cache with an unquantized query.
+
+        Raises:
+            ValueError: if the model dtype is not BF16, the KV cache is
+                quantized, or a checkpoint layer quantizes activations in a
+                way the mode does not replace.
+
+        """
+        import torch
+
+        model_config = vllm_config.model_config
+        if model_config.dtype != torch.bfloat16:
+            raise ValueError(
+                "Nemotron-H bf16_activations needs --dtype bfloat16; got "
+                f"{model_config.dtype}"
+            )
+        kv_cache_dtype = vllm_config.cache_config.cache_dtype
+        if kv_cache_dtype not in ("auto", "bfloat16"):
+            raise ValueError(
+                "Nemotron-H bf16_activations needs a BF16 KV cache; pass "
+                f"--kv-cache-dtype bfloat16 instead of {kv_cache_dtype}"
+            )
+        quantization = model_config.quantization
+        if quantization is None:
+            return
+        algos: set[str] = set()
+        if quantization.startswith("modelopt"):
+            hf_quant_config = model_config.hf_config.quantization_config
+            quant_config = hf_quant_config.get("quantization", hf_quant_config)
+            layers = quant_config.get("quantized_layers") or {"": quant_config}
+            algos = {str(info.get("quant_algo")).upper() for info in layers.values()}
+        if not algos or not algos <= {"FP8", "W4A16_NVFP4"}:
+            raise ValueError(
+                "Nemotron-H bf16_activations serves ModelOpt FP8 linears as "
+                "W8A16 and W4A16 NVFP4 as is; got quantization "
+                f"{quantization} with {sorted(algos) or 'no ModelOpt algo'}"
+            )
+        logger.info_once("Nemotron-H bf16_activations: FP8 linears run as W8A16")
 
 
 class NemotronHNanoVLV2Config(VerifyAndUpdateConfig):

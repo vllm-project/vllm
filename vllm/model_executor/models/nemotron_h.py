@@ -831,6 +831,12 @@ class NemotronHForCausalLM(
         scheduler_config = vllm_config.scheduler_config
 
         self.quant_config = vllm_config.quant_config
+        if getattr(config, "bf16_activations", False):
+            from vllm.model_executor.layers.quantization.modelopt import (
+                use_fp8_w8a16,
+            )
+
+            use_fp8_w8a16(self.quant_config)
 
         super().__init__()
         self.config = config
