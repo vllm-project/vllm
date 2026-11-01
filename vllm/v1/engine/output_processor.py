@@ -685,6 +685,7 @@ class OutputProcessor:
             stream_interval=self.stream_interval,
         )
         self.request_states[request_id] = req_state
+        self.lora_states.request_waiting(request_id, req_state.lora_name)
         if parent_req:
             self.parent_requests[parent_req.request_id] = parent_req
 
@@ -917,6 +918,7 @@ class OutputProcessor:
     def _finish_request(self, req_state: RequestState) -> None:
         req_id = req_state.request_id
         self.request_states.pop(req_id)
+        self.lora_states.request_finished(req_id, req_state.lora_name)
 
         internal_ids = self.external_req_ids[req_state.external_req_id]
         internal_ids.remove(req_id)
@@ -1040,8 +1042,6 @@ class OutputProcessor:
             req_stats=req_state.stats,
             num_cached_tokens=req_state.num_cached_tokens,
         )
-        self.lora_states.request_finished(req_state.request_id, req_state.lora_name)
-
         ParentRequest.observe_finished_request(
             req_state.parent_req, iteration_stats, req_state.stats.num_generation_tokens
         )

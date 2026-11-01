@@ -700,5 +700,7 @@ class LoRARequestStates:
         if not self.log_stats or scheduler_stats is None:
             return
         for lora_name, stats in self.requests.items():
-            scheduler_stats.waiting_lora_adapters[lora_name] = len(stats.waiting)
-            scheduler_stats.running_lora_adapters[lora_name] = len(stats.running)
+            if stats.waiting:
+                scheduler_stats.waiting_lora_adapters[lora_name] = len(stats.waiting)
+            if stats.running:
+                scheduler_stats.running_lora_adapters[lora_name] = len(stats.running)
