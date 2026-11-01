@@ -897,6 +897,102 @@ class TestSkipToolParsing:
         assert engine.skip_tool_parsing is True
 
 
+def _absorb_marker_tool_config() -> ParserEngineConfig:
+    """Qwen3-shaped grammar: duplicate ``</think>`` is absorbed in CONTENT,
+    and a tool span may legitimately quote the same marker as text."""
+    return ParserEngineConfig(
+        name="absorb_marker_tool_test",
+        initial_state=ParserState.REASONING,
+        terminals={
+            "THINK_START": "<think>",
+            "THINK_END": "</think>",
+            "TOOL_START": "<tool_call>",
+            "TOOL_END": "</tool_call>",
+        },
+        transitions={
+            (ParserState.REASONING, "THINK_END"): Transition(
+                ParserState.CONTENT,
+                (EventType.REASONING_END,),
+            ),
+            (ParserState.CONTENT, "THINK_END"): Transition(
+                ParserState.CONTENT,
+                (),
+            ),
+            (ParserState.CONTENT, "THINK_START"): Transition(
+                ParserState.REASONING,
+                (EventType.REASONING_START,),
+            ),
+            (ParserState.CONTENT, "TOOL_START"): Transition(
+                ParserState.TOOL_ARGS,
+                (EventType.TOOL_CALL_START,),
+            ),
+            (ParserState.TOOL_ARGS, "TOOL_END"): Transition(
+                ParserState.CONTENT,
+                (EventType.TOOL_CALL_END,),
+            ),
+        },
+        content_events={
+            ParserState.REASONING: EventType.REASONING_CHUNK,
+            ParserState.CONTENT: EventType.TEXT_CHUNK,
+            ParserState.TOOL_ARGS: EventType.ARG_VALUE_CHUNK,
+        },
+    )
+
+
+class TestSkipToolParsingMarkerPassthrough:
+    """A skipped tool span is forwarded to the tool pass verbatim; markers
+    with reasoning-channel transitions must not fire inside it."""
+
+    _TEXT = "reason<think><tool_call>alpha </think> omega</tool_call></think>"
+    _SPAN = "<tool_call>alpha </think> omega</tool_call>"
+
+    def test_think_start_inside_skipped_span_forwarded_verbatim(self):
+        # A <think> inside a quoted argument is the worse case: on main it
+        # sent the rest of the call to reasoning. A skipped span must stay
+        # verbatim, markers and all.
+        engine = StreamingParserEngine(_absorb_marker_tool_config(), tokenizer=None)
+        engine.skip_tool_parsing = True
+
+        text = "reason<think><tool_call>alpha</tool_call>"
+        events = engine.parse_complete(text)
+
+        reasoning = "".join(
+            e.value for e in events if e.type == EventType.REASONING_CHUNK
+        )
+        assert reasoning == text
+        assert not any(e.type == EventType.REASONING_START for e in events)
+
+    def test_marker_inside_skipped_span_forwarded_verbatim(self):
+        engine = StreamingParserEngine(_absorb_marker_tool_config(), tokenizer=None)
+        engine.skip_tool_parsing = True
+
+        events = engine.parse_complete(self._TEXT)
+
+        reasoning = "".join(
+            e.value
+            for e in events
+            if e.type in (EventType.REASONING_CHUNK, EventType.REASONING_END)
+        )
+        # The whole span, including the quoted end marker, rides the reasoning
+        # channel untouched. Only the real trailing end marker closes it, and it
+        # closes it on the last character rather than mid-span.
+        assert reasoning == self._TEXT
+        assert sum(1 for e in events if e.type == EventType.REASONING_END) == 1
+
+    def test_marker_inside_skipped_span_streaming(self):
+        engine = StreamingParserEngine(_absorb_marker_tool_config(), tokenizer=None)
+        engine.skip_tool_parsing = True
+
+        events = TestStreaming._feed_chars(engine, self._TEXT)
+
+        reasoning = "".join(
+            e.value
+            for e in events
+            if e.type in (EventType.REASONING_CHUNK, EventType.REASONING_END)
+        )
+        assert reasoning == self._TEXT
+
+
 def _message_header_config(reasoning_end: bool) -> ParserEngineConfig:
     """MESSAGE_HEADER-based grammar whose tool opener optionally carries
     REASONING_END, mirroring the two shapes a transition table can take."""

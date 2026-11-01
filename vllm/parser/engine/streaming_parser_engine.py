@@ -422,6 +422,13 @@ class StreamingParserEngine:
             # The projected skip state may not define the wrapper closer.
             if self.skip_tool_parsing and terminal in self._tool_exit_terminals:
                 self._in_skipped_tool_span = False
+            elif self.skip_tool_parsing and terminal in self._tool_terminals:
+                # A tool opener reached from a state that has no transition for
+                # it, such as a <tool_call> in reasoning, still opens a skipped
+                # span. Without this the span never opens, so a marker quoted
+                # inside it fires its own channel's transition instead of being
+                # forwarded verbatim with the rest of the span.
+                self._in_skipped_tool_span = True
             return self._emit_for_state(value, token_count)
 
         if self.skip_reasoning_parsing and terminal in self._reasoning_markup_terminals:
@@ -478,6 +485,16 @@ class StreamingParserEngine:
                         )
                     ]
                 return []
+
+        if (
+            self.skip_tool_parsing
+            and self._in_skipped_tool_span
+            and terminal not in self._tool_terminals
+        ):
+            # A skipped tool span is handed to the tool pass verbatim, so a
+            # non-tool marker inside it (e.g. a quoted </think> in a Qwen
+            # parameter value) must not fire its reasoning-channel transition.
+            return self._emit_for_state(value, token_count)
 
         if transition.skip_in_token_id_mode and self._ever_had_token_ids:
             return self._emit_for_state(value, token_count)
