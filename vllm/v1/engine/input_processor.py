@@ -288,6 +288,14 @@ class InputProcessor:
         if lora_request is None:
             return
 
+        if (
+            self.speculative_config
+            and not self.speculative_config.speculator_config.supports_request_lora
+        ):
+            raise VLLMValidationError(
+                "This speculator does not support request-specific LoRA adapters"
+            )
+
         # LoRA request passed in while LoRA is not enabled
         if not self.lora_config:
             raise VLLMValidationError(
