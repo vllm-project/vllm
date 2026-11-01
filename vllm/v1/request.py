@@ -239,6 +239,10 @@ class Request:
         # None entry in the queue means finished.
         self.streaming_queue: deque[StreamingUpdate | None] | None = None
 
+        # --enable-unbounded-streaming-input: position shift not yet sent to the
+        # worker (kept until the request is scheduled).
+        self.pending_reanchor_d = 0
+
         # If True, request should be aborted immediately after being added to
         # the scheduler so the connector's request_finished hook runs.
         self.abort_immediately = abort_immediately

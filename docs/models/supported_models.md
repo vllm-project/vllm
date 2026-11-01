@@ -791,7 +791,7 @@ WebSocket endpoint.
 | `Qwen3ASRRealtimeGeneration` | Qwen3-ASR Realtime | `Qwen/Qwen3-ASR-0.6B` | | |
 
 !!! note
-    `VoxtralRealtimeGeneration` requires `mistral-common[audio]` to be installed, and must be served with `--tokenizer-mode mistral`.
+    `VoxtralRealtimeGeneration` requires `mistral-common[audio]` to be installed, and must be served with `--tokenizer-mode mistral`. See [Serving Voxtral realtime](../serving/online_serving/speech_to_text.md#serving-voxtral-realtime) for window sizes and unbounded sessions.
 
     `Qwen3ASRRealtimeGeneration` is not auto-detected from `config.json`.
     You must pass `--hf-overrides '{"architectures":["Qwen3ASRRealtimeGeneration"]}'`

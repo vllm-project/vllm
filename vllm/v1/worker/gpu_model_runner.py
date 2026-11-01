@@ -210,6 +210,10 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
+from vllm.v1.worker.reanchor_rotary import (
+    init_reanchor_rotary_specs,
+    rerotate_shifted_sessions,
+)
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
     check_ubatch_thresholds,
@@ -3944,6 +3948,16 @@ class GPUModelRunner(
             # Update persistent batch states.
             deferred_state_corrections_fn = self._update_states(scheduler_output)
 
+            # Before this step's forward writes new keys.
+            if scheduler_output.reanchor_reqs:
+                rerotate_shifted_sessions(
+                    scheduler_output,
+                    self.compilation_config.static_forward_context,
+                    self.kv_cache_config.kv_cache_groups,
+                    self.reanchor_rotary_specs,
+                    self.device,
+                )
+
             if has_ec_transfer() and not get_ec_transfer().is_consumer:
                 with self.maybe_get_ec_connector_output(
                     scheduler_output,
@@ -7043,6 +7057,14 @@ class GPUModelRunner(
             kv_transfer_group = get_kv_transfer_group()
             kv_transfer_group.register_kv_caches(kv_caches)
             kv_transfer_group.set_host_xfer_buffer_ops(copy_kv_blocks)
+
+        if self.scheduler_config.enable_unbounded_streaming_input and not is_profiling:
+            # Raises if a layer cannot be re-anchored.
+            self.reanchor_rotary_specs = init_reanchor_rotary_specs(
+                self.get_model(),
+                kv_cache_config,
+                self.compilation_config.static_forward_context,
+            )
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
         """Add encoder-only layers to the KV cache config."""
