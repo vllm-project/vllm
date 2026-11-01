@@ -168,6 +168,19 @@ class ThinkingBudgetStateHolder:
                 return i
         return -1
 
+    @staticmethod
+    def _find_last_sequence_index_from(
+        target_list: list[int], token_ids: list[int], search_start: int
+    ) -> int:
+        """Last occurrence of ``token_ids`` at or after ``search_start``."""
+        if not token_ids:
+            return -1
+        lo = max(0, search_start)
+        for i in range(len(target_list) - len(token_ids), lo - 1, -1):
+            if target_list[i : i + len(token_ids)] == token_ids:
+                return i
+        return -1
+
     def _init_state_entry(
         self, prompt_tok_ids: list[int] | None, thinking_token_budget: int
     ) -> dict[str, Any]:
@@ -221,6 +234,8 @@ class ThinkingBudgetStateHolder:
             "force_index": [],
             "start_thinking": start_thinking,
             "end_thinking": -1,
+            "start_search_pos": 0,
+            "end_search_pos": 0,
             "in_spec_mode": False,
             "bonus_token_forced": False,
             "continue_thinking": continue_thinking,
@@ -236,24 +251,29 @@ class ThinkingBudgetStateHolder:
             state["force_index"] = []
             return
 
+        output_tok_ids = state.get("output_tok_ids", [])
         if state["start_thinking"] == -1:
             scan_offset = state.get("scan_offset", 0)
-            output_slice = state.get("output_tok_ids", [])[scan_offset:]
-            start_thinking = self._find_last_sequence_index(
-                output_slice, self.think_start_token_ids
+            seq_len = len(self.think_start_token_ids)
+            start_thinking = self._find_last_sequence_index_from(
+                output_tok_ids,
+                self.think_start_token_ids,
+                max(scan_offset, state["start_search_pos"] - (seq_len - 1)),
             )
-            if start_thinking >= 0:
-                start_thinking += scan_offset
             state["start_thinking"] = start_thinking
+            if start_thinking == -1:
+                state["start_search_pos"] = len(output_tok_ids)
         if state["end_thinking"] == -1:
             scan_offset = state.get("scan_offset", 0)
-            output_slice = state.get("output_tok_ids", [])[scan_offset:]
-            end_thinking = self._find_last_sequence_index(
-                output_slice, self.think_end_token_ids
+            seq_len = len(self.think_end_token_ids)
+            end_thinking = self._find_last_sequence_index_from(
+                output_tok_ids,
+                self.think_end_token_ids,
+                max(scan_offset, state["end_search_pos"] - (seq_len - 1)),
             )
-            if end_thinking >= 0:
-                end_thinking += scan_offset
             state["end_thinking"] = end_thinking
+            if end_thinking == -1:
+                state["end_search_pos"] = len(output_tok_ids)
 
         if (
             not state.get("in_end", False)
@@ -268,6 +288,8 @@ class ThinkingBudgetStateHolder:
             state["start_thinking"] = -1
             state["end_thinking"] = -1
             state["scan_offset"] = len(state.get("output_tok_ids", []))
+            state["start_search_pos"] = state["scan_offset"]
+            state["end_search_pos"] = state["scan_offset"]
             state["check_count_down"] = state["thinking_token_budget"]
             return
 
@@ -380,6 +402,8 @@ class ThinkingBudgetStateHolder:
                     state["start_thinking"] = -1
                     state["end_thinking"] = -1
                     state["scan_offset"] = len(state.get("output_tok_ids", []))
+                    state["start_search_pos"] = state["scan_offset"]
+                    state["end_search_pos"] = state["scan_offset"]
 
             elif absolute_start_pos >= 0 and not state["continue_thinking"]:
                 # Found think start - entering think mode
@@ -395,6 +419,8 @@ class ThinkingBudgetStateHolder:
                 state["start_thinking"] = -1
                 state["end_thinking"] = -1
                 state["scan_offset"] = len(state.get("output_tok_ids", []))
+                state["start_search_pos"] = state["scan_offset"]
+                state["end_search_pos"] = state["scan_offset"]
 
             elif state["in_think"]:
                 # Continue thinking mode, increment count by new tokens
@@ -464,6 +490,7 @@ class ThinkingBudgetStateHolder:
                 state["end_count"] += 1
                 state["force_index"] = [0]
             if state["end_count"] >= len(self.think_end_token_ids):
+                new_offset = len(state.get("output_tok_ids", []))
                 state.update(
                     {
                         "in_end": False,
@@ -473,7 +500,9 @@ class ThinkingBudgetStateHolder:
                         "end_thinking": -1,
                         "think_count": 0,
                         "continue_thinking": False,
-                        "scan_offset": len(state.get("output_tok_ids", [])),
+                        "scan_offset": new_offset,
+                        "start_search_pos": new_offset,
+                        "end_search_pos": new_offset,
                     }
                 )
 
