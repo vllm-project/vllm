@@ -90,6 +90,7 @@ def test_model_rpc_uses_execute_model_timeout(monkeypatch, method, result, stall
 
     executor: Any = MultiprocExecutor.__new__(MultiprocExecutor)
     executor.is_failed = False
+    executor.failure_callback = None
     executor.output_rank = 1
     executor.futures_queue = deque()
     executor.rpc_broadcast_mq = SimpleNamespace(enqueue=lambda payload: None)

@@ -403,6 +403,13 @@ class MultiprocExecutor(Executor):
         else:
             self.failure_callback = callback
 
+    def _mark_failed(self) -> None:
+        self.is_failed = True
+        callback = self.failure_callback
+        if callback is not None:
+            self.failure_callback = None
+            callback()
+
     def execute_model(  # type: ignore[override]
         self, scheduler_output: SchedulerOutput, non_block: bool = False
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
@@ -496,16 +503,20 @@ class MultiprocExecutor(Executor):
             response_mqs = (response_mqs[output_rank],)
 
         def get_response():
+            if self.is_failed:
+                raise RuntimeError("Executor failed.")
             responses = []
             has_failure = False
 
-            for mq in response_mqs:
+            for idx, mq in enumerate(response_mqs):
                 dequeue_timeout = (
                     None if deadline is None else max(0.0, deadline - time.monotonic())
                 )
                 try:
                     status, result = mq.dequeue(timeout=dequeue_timeout)
                 except TimeoutError as e:
+                    # A late reply cannot be distinguished from the next RPC.
+                    self._mark_failed()
                     raise TimeoutError(f"RPC call to {method} timed out.") from e
 
                 if status == WorkerProc.ResponseStatus.FAILURE_WITH_KV_OUTPUT:
@@ -513,6 +524,8 @@ class MultiprocExecutor(Executor):
                         not self.vllm_config.parallel_config.enable_fault_tolerance
                         or self.is_failed
                     ):
+                        if idx + 1 < len(response_mqs):
+                            self._mark_failed()
                         raise RuntimeError("Worker failed with KV connector output")
                     has_failure = True
                     assert isinstance(result, KVConnectorOutput)
@@ -522,6 +535,9 @@ class MultiprocExecutor(Executor):
                         not self.vllm_config.parallel_config.enable_fault_tolerance
                         or self.is_failed
                     ):
+                        # Later queues still hold this RPC's untagged replies.
+                        if idx + 1 < len(response_mqs):
+                            self._mark_failed()
                         raise RuntimeError(
                             f"Worker failed with error '{result}', please check the"
                             " stack trace above for the root cause"
