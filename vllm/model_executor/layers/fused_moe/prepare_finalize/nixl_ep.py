@@ -15,6 +15,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input,
     normalize_batched_scales_shape,
 )
+from vllm.platforms import current_platform
 from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_id,
     dbo_enabled,
@@ -43,6 +44,36 @@ def dequant_fp8(
     )
     expert_x_scales = expert_x_scales.view(num_experts, -1, 1)
     return (expert_x_fp32 * expert_x_scales).view(expert_x_fp8.size())
+
+
+def _dynamic_per_tensor_scale_for_valid_rows(
+    x: torch.Tensor,
+    expert_num_tokens: torch.Tensor,
+    quant_max: float,
+) -> torch.Tensor | None:
+    """Per-tensor scale computed over valid rows only.
+
+    The NIXL receive buffer has a fixed capacity per expert, but an expert
+    may receive fewer tokens than that capacity; rows past
+    ``expert_num_tokens[e]`` are stale leftovers from earlier calls. A dynamic
+    per-tensor scale computed over the whole buffer would be inflated by
+    those rows and corrupt the quantized valid rows, so restrict the absmax
+    to valid rows. Returns None when ``expert_num_tokens`` does not line up
+    with ``x``, in which case the caller falls back to the previous behavior.
+    All shapes here are static and no host sync is involved.
+    """
+    num_experts, max_tokens, _ = x.size()
+    if expert_num_tokens.numel() != num_experts:
+        return None
+    counts = expert_num_tokens.to(device=x.device)
+    valid_rows = torch.arange(max_tokens, device=x.device).unsqueeze(
+        0
+    ) < counts.unsqueeze(1)
+    valid_values = torch.where(valid_rows.unsqueeze(-1), x, 0)
+    scale = valid_values.abs().max().float() / quant_max
+    # Mirror the int8 dynamic path, which clamps tiny scales: an all-zero
+    # valid set must not produce a zero scale (and NaNs downstream).
+    return torch.clamp(scale, min=1e-10).reshape(1)
 
 
 class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
@@ -150,6 +181,7 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         x: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         a1_dtype: torch.dtype,
         quant_config: FusedMoEQuantConfig,
+        expert_num_tokens: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         if self.use_fp8_dispatch:
             block_k = (
@@ -170,16 +202,41 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
         num_experts, max_tokens, hidden_dim = x.size()
 
-        x = x.view((-1, hidden_dim))
         q_dtype = quant_config.quant_dtype
 
         if q_dtype == "nvfp4":
             q_dtype = None
             logger.debug_once("Using NIXL EP bfloat16 dispatch for NVFP4 MoE.")
 
+        # Dynamic per-tensor quantization computes a single scale over the
+        # whole receive buffer, but rows past expert_num_tokens[e] are stale
+        # leftovers that would inflate the scale and corrupt valid rows.
+        # Restrict the scale to valid rows only. Per-token and block
+        # quantization never mix rows in a scale, and a static scale is
+        # fixed, so those paths are left untouched.
+        a1_scale = quant_config.a1_scale
+        if (
+            expert_num_tokens is not None
+            and a1_scale is None
+            and not quant_config.per_act_token_quant
+            and quant_config.block_shape is None
+            and q_dtype in (current_platform.fp8_dtype(), torch.int8)
+        ):
+            quant_max = (
+                float(torch.iinfo(q_dtype).max)
+                if q_dtype == torch.int8
+                else float(torch.finfo(q_dtype).max)
+            )
+            valid_scale = _dynamic_per_tensor_scale_for_valid_rows(
+                x, expert_num_tokens, quant_max
+            )
+            if valid_scale is not None:
+                a1_scale = valid_scale
+
+        x = x.view((-1, hidden_dim))
         x, x_scales = moe_kernel_quantize_input(
             x,
-            quant_config.a1_scale,
+            a1_scale,
             q_dtype,
             quant_config.per_act_token_quant,
             quant_config.block_shape,
@@ -281,7 +338,9 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         a1_dtype: torch.dtype,
         quant_config: FusedMoEQuantConfig,
     ) -> mk.PrepareResultType:
-        expert_x, expert_x_scale = self._do_quant(expert_x, a1_dtype, quant_config)
+        expert_x, expert_x_scale = self._do_quant(
+            expert_x, a1_dtype, quant_config, expert_num_tokens
+        )
 
         expert_tokens_meta = mk.ExpertTokensMetadata(
             expert_num_tokens=expert_num_tokens, expert_num_tokens_cpu=None
