@@ -493,8 +493,7 @@ class FlashInferAllReduce:
         element_size = input_tensor.element_size()
 
         # The fusion kernels load each token row as float4, so a row must be a
-        # whole number of 16-byte vectors. MNNVL asserts on this and kills the
-        # worker; the trtllm path has no check and silently truncates indexing.
+        # whole number of 16-byte vectors. MNNVL asserts on this.
         if hidden_dim * element_size % 16 != 0:
             return False
 
