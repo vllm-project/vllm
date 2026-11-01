@@ -37,9 +37,19 @@ class TestParameterSweepItem:
         assert args.port == 8000
         assert len(cmd) == 3
 
-    def test_override_inline_nested_list(self):
+    @pytest.mark.parametrize(
+        "original",
+        [
+            ["--compilation-config.cudagraph_capture_sizes=[8,16]"],
+            [
+                "--compilation-config.cudagraph_capture_sizes+",
+                "8",
+                "--compilation_config.cudagraph_capture_sizes+=16",
+            ],
+        ],
+    )
+    def test_override_nested_list(self, original):
         """The parser must not concatenate stale and swept capture sizes."""
-        original = ["--compilation-config.cudagraph_capture_sizes=[8,16]"]
         item = ParameterSweepItem(
             {"compilation_config.cudagraph_capture_sizes": [32, 64]}
         )
@@ -49,6 +59,29 @@ class TestParameterSweepItem:
         args = parser.parse_args(item.apply_to_cmd(original))
 
         assert args.compilation_config == {"cudagraph_capture_sizes": [32, 64]}
+
+    @pytest.mark.parametrize(
+        "params,option",
+        [
+            ({"max_tokens": 300}, "--max-tokens"),
+            (
+                {"compilation_config.use_inductor_graph_partition": True},
+                "--compilation-config.use_inductor_graph_partition",
+            ),
+            (
+                {"compilation_config.cudagraph_capture_sizes": [32, 64]},
+                "--compilation-config.cudagraph_capture_sizes+",
+            ),
+        ],
+    )
+    def test_missing_override_value_names_the_option(self, params, option):
+        """Malformed base commands should identify the option missing a value."""
+        with pytest.raises(ValueError) as exc_info:
+            ParameterSweepItem(params).apply_to_cmd(["vllm", "serve", option])
+
+        assert (
+            str(exc_info.value) == f"Missing value for command-line option {option!r}"
+        )
 
     @pytest.mark.parametrize(
         "original",

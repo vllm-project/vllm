@@ -132,6 +132,8 @@ class ParameterSweepItem(dict[str, object]):
                 v = json.dumps(v)
 
             candidates = set(self._iter_cmd_key_candidates(k))
+            if "." in k:
+                candidates.update({f"{candidate}+" for candidate in candidates})
             is_flag = isinstance(v, bool) and "." not in k
             if is_flag:
                 candidates.update(self._iter_cmd_key_candidates("no-" + k))
@@ -146,9 +148,8 @@ class ParameterSweepItem(dict[str, object]):
                     updated_cmd.append(arg)
                     continue
 
-                # Dotted booleans consume a value, unlike top-level flags.
-                if not separator and not is_flag:
-                    next(args)
+                if not separator and not is_flag and next(args, None) is None:
+                    raise ValueError(f"Missing value for command-line option {key!r}")
                 if not replaced:
                     updated_cmd.extend(normalized)
                     replaced = True
