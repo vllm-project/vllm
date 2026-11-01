@@ -221,7 +221,7 @@ The following endpoints **do not require authentication** even when `--api-key` 
 - `/tokenize` - Tokenize text (not gated by `--enable-scale-out`)
 - `/detokenize` - Detokenize tokens
 - `/health` - Health check
-- `/health/ready` (`/ready` alias) - Readiness check (may run a dummy forward pass when the engine is idle)
+- `/ready` - Readiness check (may run a dummy forward pass when the engine is idle)
 - `/ping` - SageMaker health check
 - `/version` - Version information
 - `/load` - Server load metrics

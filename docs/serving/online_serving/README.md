@@ -90,7 +90,7 @@ For further details on speech to text, please refer to [this page](speech_to_tex
 - `/load` - Server load metrics
 - `/v1/models` - List available models
 - `/health` - Health check
-- `/health/ready` (`/ready` alias) - Readiness check (not served by the Rust frontend)
+- `/ready` - Readiness check (not served by the Rust frontend)
     - Returns 503 if the engine is dead, sleeping or paused, or if the dummy forward pass it runs while idle fails or times out (`VLLM_HEALTH_CHECK_GPU_TIMEOUT`). MoE models with data parallelism skip the dummy forward pass.
     - As a Kubernetes readiness probe it removes a sleeping or paused pod from Service endpoints, so send `/wake_up` and `/resume` to the pod directly.
 
