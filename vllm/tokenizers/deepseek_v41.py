@@ -29,8 +29,7 @@ def _normalize_messages(
     messages: list[ChatCompletionMessageParam],
 ) -> list[dict[str, Any]]:
     # vLLM additions to the reference: Responses API part types, image_pil,
-    # tool_reference, one tool message per call, and ValueError (400) instead
-    # of the reference's asserts.
+    # tool_reference, and ValueError (400) instead of the reference's asserts.
     result = [dict(message) for message in copy.deepcopy(messages)]
     image_idx = 0
     for message in result:
@@ -67,24 +66,7 @@ def _normalize_messages(
                     )
             message["content"] = "\n\n".join(parts)
 
-    # V4.1 pairs tool results with calls by position, and /v1/messages sends a
-    # tool_result with tool_reference items as two tool messages for one call.
-    merged: list[dict[str, Any]] = []
-    for message in result:
-        prev = merged[-1] if merged else None
-        if (
-            prev is not None
-            and message["role"] == prev["role"] == "tool"
-            and message.get("tool_call_id")
-            and message.get("tool_call_id") == prev.get("tool_call_id")
-        ):
-            prev["content"] = "\n\n".join(
-                c for c in (prev.get("content"), message.get("content")) if c
-            )
-            prev["_image_indices"].extend(message["_image_indices"])
-        else:
-            merged.append(message)
-    return merged
+    return result
 
 
 def get_deepseek_v41_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
