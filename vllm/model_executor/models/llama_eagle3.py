@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING
 
 import torch
@@ -416,6 +416,49 @@ class Eagle3LlamaForCausalLM(_Eagle3LlamaForCausalLMBase):
             )
 
         return self.model.fc(hidden_states)
+
+    @property
+    def combine_aux_hidden_states(
+        self,
+    ) -> Callable[[list[torch.Tensor]], torch.Tensor] | None:
+        model = self.model
+        if (
+            type(self).combine_hidden_states
+            is Eagle3LlamaForCausalLM.combine_hidden_states
+            and model.use_aux_hidden_state
+            and not model.norm_before_fc
+            and model.fc_norm is not None
+        ):
+            return self._combine_aux_hidden_states
+        return None
+
+    def _combine_aux_hidden_states(
+        self, aux_hidden_states: list[torch.Tensor]
+    ) -> torch.Tensor:
+        model = self.model
+        if len(aux_hidden_states) == model.num_aux_hidden_states and aux_hidden_states:
+            first = aux_hidden_states[0]
+            # Direct norms must retain cat's promotion and aligned input layout.
+            if all(
+                state.ndim == 2
+                and state.shape == first.shape
+                and state.dtype == first.dtype
+                and state.device == first.device
+                and state.shape[-1] == norm.weight.numel()
+                and state.is_contiguous()
+                and state.data_ptr() % 16 == 0
+                for state, norm in zip(aux_hidden_states, model.fc_norm)
+            ):
+                hidden_states = torch.cat(
+                    [
+                        norm(state)
+                        for norm, state in zip(model.fc_norm, aux_hidden_states)
+                    ],
+                    dim=-1,
+                )
+                return model.fc(hidden_states)
+
+        return self.combine_hidden_states(torch.cat(aux_hidden_states, dim=-1))
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         model_weights = {}
