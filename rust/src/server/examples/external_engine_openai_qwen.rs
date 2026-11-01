@@ -20,8 +20,8 @@ use tracing_subscriber::EnvFilter;
 use vllm_engine_core_client::TransportMode;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_server::{
-    ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
-    HttpListenerMode, ParserSelection, RendererSelection, serve,
+    AccessLogConfig, ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode,
+    CorsConfig, HttpListenerMode, ParserSelection, RendererSelection, serve,
 };
 
 #[derive(Debug, Parser)]
@@ -93,7 +93,9 @@ async fn main() -> Result<()> {
         stream_interval: NonZeroU32::MIN,
         api_server_options: ApiServerOptions::default(),
         cors: CorsConfig::default(),
+        access_log: AccessLogConfig::default(),
         tls: None,
+        root_path: None,
         api_keys: Vec::new(),
         disable_log_stats: false,
         custom_histogram_buckets: Default::default(),
