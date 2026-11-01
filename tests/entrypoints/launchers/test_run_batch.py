@@ -1291,6 +1291,33 @@ def test_validate_batch_rejects_malformed_request(tmp_path):
         validate_batch(f)
 
 
+@pytest.mark.parametrize(
+    "url,body",
+    [
+        ("/v1/completions", {"model": CHAT_MODEL_NAME, "prompt": ""}),
+        (
+            "/v1/chat/completions",
+            {
+                "model": CHAT_MODEL_NAME,
+                "messages": [{"role": "user", "content": "Hello world!"}],
+                "stream_options": {"include_usage": True},
+            },
+        ),
+    ],
+)
+def test_validate_batch_reports_request_validation_errors(tmp_path, url, body):
+    """Errors from the request models' own validators also name the line."""
+    request = {"custom_id": "bad", "method": "POST", "url": url, "body": body}
+    input_path = _write_batch(tmp_path, [INPUT_BATCH, json.dumps(request)])
+    bad_line = len(INPUT_BATCH.strip().split("\n")) + 1
+
+    with (
+        open(input_path, encoding="utf-8") as f,
+        pytest.raises(ValueError, match=f"line {bad_line}:"),
+    ):
+        validate_batch(f)
+
+
 @pytest.mark.asyncio
 async def test_requests_and_responses_reuse_type_adapters(monkeypatch):
     """Building a TypeAdapter rebuilds its schema, too slow to do per request."""

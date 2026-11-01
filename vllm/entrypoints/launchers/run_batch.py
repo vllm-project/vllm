@@ -444,7 +444,7 @@ def validate_batch(input_file: IO[str]) -> int:
             continue
         try:
             BatchRequestInput.model_validate_json(request_json)
-        except pydantic.ValidationError as e:
+        except (pydantic.ValidationError, VLLMValidationError) as e:
             raise ValueError(f"Invalid request on line {line_number}: {e}") from e
         num_requests += 1
     return num_requests
