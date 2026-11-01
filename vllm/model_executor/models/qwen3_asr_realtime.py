@@ -57,13 +57,23 @@ class Qwen3ASRRealtimeBuffer:
     audio has been buffered for processing.
     """
 
-    def __init__(self, sampling_rate: int, segment_duration_s: float = 5.0):
+    def __init__(
+        self,
+        sampling_rate: int,
+        segment_duration_s: float = 5.0,
+        *,
+        n_window: int,
+        hop_length: int,
+    ):
         self._sampling_rate = sampling_rate
         self._segment_size = int(segment_duration_s * sampling_rate)
+        self._n_window = n_window
+        self._hop_length = hop_length
 
         self._buffer_size = _PRE_ALLOCATE_BUFFER_SIZE_IN_S * sampling_rate
         self._buffer: np.ndarray = np.empty(self._buffer_size, dtype=np.float32)
         self._filled_len = 0
+        self._carry: np.ndarray | None = None
 
     def write_audio(self, audio: np.ndarray) -> None:
         put_end = self._filled_len + len(audio)
@@ -88,14 +98,27 @@ class Qwen3ASRRealtimeBuffer:
                 self._segment_size : self._filled_len
             ]
         self._filled_len = remaining
+        self._carry = segment[-self._carry_samples(segment) :].copy()
         return segment
+
+    def _carry_samples(self, segment: np.ndarray) -> int:
+        feature_lens = len(segment) // self._hop_length
+        chunk_frames = self._n_window * 2
+        rem_frames = feature_lens % chunk_frames
+        if rem_frames == 0:
+            rem_frames = chunk_frames
+        return rem_frames * self._hop_length
 
     def flush(self) -> np.ndarray | None:
         if self._filled_len == 0:
             return None
-        audio = self._buffer[: self._filled_len].copy()
+        tail = self._buffer[: self._filled_len].copy()
         self._filled_len = 0
-        return audio
+        carry = self._carry
+        self._carry = None
+        if carry is None or len(carry) == 0:
+            return tail
+        return np.concatenate((carry, tail))
 
 
 class Qwen3ASRRealtimeMultiModalProcessor(Qwen3ASRMultiModalProcessor):
@@ -193,9 +216,12 @@ class Qwen3ASRRealtimeGeneration(Qwen3ASRForConditionalGeneration, SupportsRealt
 
         # Use a small segment size for low-latency streaming.
         segment_duration_s = 5.0
+        audio_config = model_config.hf_config.thinker_config.audio_config
         buffer = Qwen3ASRRealtimeBuffer(
             sampling_rate=sampling_rate,
             segment_duration_s=segment_duration_s,
+            n_window=audio_config.n_window,
+            hop_length=feature_extractor.hop_length,
         )
 
         audio_placeholder = cls.get_placeholder_str("audio", 0)
