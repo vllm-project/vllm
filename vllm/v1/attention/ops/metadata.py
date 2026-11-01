@@ -22,10 +22,25 @@ def _token_request(query_start_loc, token, num_reqs):
 
 @triton.jit(do_not_specialize=["num_reqs", "num_mapped", "num_tokens"])
 def _token_request_mapping_kernel(
-    query_start_loc, output, num_reqs, num_mapped, num_tokens
+    query_start_loc,
+    output,
+    num_reqs,
+    num_mapped,
+    num_tokens,
+    ITERS: tl.constexpr,
 ):
     token = tl.program_id(0) * 256 + tl.arange(0, 256)
-    req = _token_request(query_start_loc, token, num_reqs)
+    lo = tl.zeros((256,), tl.int32)
+    hi = tl.full((256,), num_reqs, tl.int32)
+    # Fixed iteration count: no cross-warp reduction in the search loop.
+    for _ in tl.static_range(ITERS):
+        active = lo < hi
+        mid = (lo + hi) // 2
+        end = tl.load(query_start_loc + mid + 1, mid < num_reqs, other=0x7FFFFFFF)
+        right = active & (end <= token)
+        lo = tl.where(right, mid + 1, lo)
+        hi = tl.where(active & ~right, mid, hi)
+    req = tl.minimum(lo, num_reqs - 1)
     tl.store(output + token, tl.where(token < num_mapped, req, 0), token < num_tokens)
 
 
@@ -40,12 +55,14 @@ def compute_token_to_req_indices(
     Reads only the device ``query_start_loc``, so it is safe to record in a
     CUDA graph. Tokens at or past ``num_mapped_tokens`` are mapped to 0.
     """
+    num_reqs = query_start_loc.shape[0] - 1
     _token_request_mapping_kernel[((num_tokens + 255) // 256,)](
         query_start_loc,
         out,
-        query_start_loc.shape[0] - 1,
+        num_reqs,
         num_mapped_tokens,
         num_tokens,
+        ITERS=max(1, num_reqs.bit_length()),
         num_warps=4,
     )
     return out[:num_tokens]
