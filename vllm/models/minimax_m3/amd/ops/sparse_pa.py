@@ -630,3 +630,73 @@ def _run_gluon_decode(
         sliding_window=-1,
         ps=True,
     )
+
+
+# Rows of the warmup's small call: several context partitions per row, and no
+# specialization on == 1.
+_WARMUP_FEW_ROWS = 3
+
+
+@torch.no_grad()
+def minimax_m3_sparse_attn_aiter_warmup(
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    sparse_bt_buffer: torch.Tensor,  # [max_tokens * num_kv_heads, width] int32
+    sparse_ctx_buffer: torch.Tensor,  # [max_tokens * num_kv_heads] int32
+    num_heads: int,
+    num_kv_heads: int,
+    head_size: int,
+    sm_scale: float,
+    dtype: torch.dtype,
+    k_scale: torch.Tensor | None = None,
+    v_scale: torch.Tensor | None = None,
+) -> tuple[int, ...]:
+    """Compile the variants of AITER's Gluon decode kernel that serving reaches
+    but the startup forwards do not, and return the row counts it called.
+
+    Two properties of a call select the variant:
+    - ``ONE_SHOT`` (one context partition per row) holds once a call has at
+      least as many rows (tokens x KV heads) as the GPU runs programs at once.
+      Decode batches usually stay below that, and a prefill short enough for
+      the dense MSA path never reaches the sparse attend.
+    - The alignment of the context lengths. A prefill's rows follow the decode
+      rows in the table buffers the indexer fills, so when the decode token
+      count times KV heads is not a multiple of 4 the pointer is not 16-byte
+      aligned, and Triton specializes on that.
+    Each variant takes seconds to compile, a TTFT spike on the request that
+    meets it. This calls the attend on the layer's own cache and table buffers
+    (their contents are rewritten before every use) at both row counts and
+    both alignments.
+    """
+    from aiter.ops.triton.gluon.pa_decode_gluon import get_recommended_splits
+
+    kvh = num_kv_heads
+    max_rows = sparse_ctx_buffer.shape[0] // kvh - 1
+    many = _WARMUP_FEW_ROWS
+    while get_recommended_splits(many * kvh, 1) > 1 and many < max_rows:
+        many *= 2
+    row_counts = tuple(n for n in (_WARMUP_FEW_ROWS, many) if n <= max_rows)
+    for n in row_counts:
+        q = torch.zeros(
+            n, num_heads, head_size, dtype=dtype, device=sparse_ctx_buffer.device
+        )
+        out = torch.empty_like(q)
+        # From row 0 (aligned) and from row 1, as after an odd decode count.
+        for first in (0, 1):
+            sparse_bt = sparse_bt_buffer[first * kvh : (first + n) * kvh]
+            sparse_ctx = sparse_ctx_buffer[first * kvh : (first + n) * kvh]
+            sparse_bt.zero_()  # page 0 exists in every cache view
+            sparse_ctx.fill_(ASM_PAGE_SIZE)  # one page
+            _run_gluon_decode(
+                q,
+                k_cache,
+                v_cache,
+                sparse_bt,
+                sparse_ctx,
+                kvh,
+                sm_scale,
+                out,
+                k_scale,
+                v_scale,
+            )
+    return row_counts
