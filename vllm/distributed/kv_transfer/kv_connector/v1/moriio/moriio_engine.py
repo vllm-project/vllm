@@ -46,6 +46,7 @@ if TYPE_CHECKING:
         MoRIIOConnectorWorker,
     )
     from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_tp_mapping import (
+        MoRIIOWriteTPMapping,
         WriteTarget,
     )
 
@@ -382,10 +383,23 @@ class MoRIIOWriter:
 
         is_mamba = self.worker._is_mamba_layer(task.layer_name)
         transfer_statuses: list[Any] = []
+        layer_mapping = task.tp_mapping
+        if task.tp_mapping is not None and not is_mamba:
+            # Head slices follow this layer's KV-head count, which may be
+            # below the model-wide one the request's targets were sized for.
+            layer_mapping = self.worker._write_tp_mapping(
+                task.remote_tp_size, task.layer_name
+            )
         for target in self._write_targets(task):
-            if target is not None and not is_mamba and not target.num_heads:
-                # Another producer rank writes this attention copy.
-                continue
+            if target is not None and not is_mamba:
+                assert layer_mapping is not None
+                target = next(
+                    (t for t in layer_mapping.targets if t.tp_rank == target.tp_rank),
+                    None,
+                )
+                if target is None or not target.num_heads:
+                    # Another producer rank writes this attention copy.
+                    continue
             target_engine_id = self._target_engine_id(
                 task, request_info.decode_dp_rank, target
             )
@@ -405,6 +419,7 @@ class MoRIIOWriter:
                         remote_moriio_meta,
                         remote_engine_id=target_engine_id,
                         target=target,
+                        tp_mapping=layer_mapping,
                     )
                 ]
             for plan in plans:
@@ -422,6 +437,7 @@ class MoRIIOWriter:
         remote_moriio_meta: MoRIIOAgentMetadata,
         remote_engine_id: str | None = None,
         target: "WriteTarget | None" = None,
+        tp_mapping: "MoRIIOWriteTPMapping | None" = None,
     ) -> LayerTransferPlan:
         """Prepare the transfer plan for a layer.
 
@@ -432,6 +448,8 @@ class MoRIIOWriter:
             remote_engine_id: Destination engine ID used to resolve remote offsets
             target: Consumer rank and head slice to write; None writes the
                 whole shard
+            tp_mapping: The layer's TP mapping, ``target`` included; defaults
+                to the request's
 
         Returns:
             The transfer plan
@@ -440,6 +458,7 @@ class MoRIIOWriter:
         layer_cache = self.worker.kv_caches[task.layer_name]
         if remote_engine_id is None:
             remote_engine_id = task.dst_engine_id
+        tp_mapping = tp_mapping or task.tp_mapping
         self.worker._check_peer_block_size(task.layer_name, remote_moriio_meta)
         target_rank = -1 if target is None else target.tp_rank
         key = (task.layer_name, *_get_write_geometry_key(layer_cache), target_rank)
@@ -454,9 +473,9 @@ class MoRIIOWriter:
                 remote_blocks = remote_blocks[: len(local_blocks)]
             if (
                 target is None
-                or task.tp_mapping is None
+                or tp_mapping is None
                 or (
-                    task.tp_mapping.copies_whole_block(target)
+                    tp_mapping.copies_whole_block(target)
                     and self.worker._block_copy_matches_peer(
                         task.layer_name, remote_moriio_meta
                     )

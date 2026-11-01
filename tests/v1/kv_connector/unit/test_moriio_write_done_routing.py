@@ -289,11 +289,17 @@ def test_execute_write_task_writes_every_fanout_target():
 
     worker._get_built_session = _get_built_session
     worker._is_mamba_layer = lambda layer_name: False
+    worker._write_tp_mapping = lambda remote_tp_size, layer_name=None: MLA_FANOUT
     writer = make_moriio_writer(worker)
     write_sessions: list[list[str]] = []
 
     def _prepare_transfer_plan(
-        task, request_info, remote_moriio_meta, remote_engine_id=None, target=None
+        task,
+        request_info,
+        remote_moriio_meta,
+        remote_engine_id=None,
+        target=None,
+        tp_mapping=None,
     ):
         return "plan"
 
