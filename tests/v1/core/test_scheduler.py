@@ -8995,6 +8995,105 @@ def test_prefill_progress_reports_queued_requests_and_stops_after_abort():
     assert all(not scheduler.has_request(request.request_id) for request in requests)
 
 
+def test_queued_prefill_progress_confirms_prefix_cache_after_admission():
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        max_num_seqs=1,
+        max_num_batched_tokens=64,
+        max_model_len=128,
+    )
+    warmup, running, queued = create_requests(
+        num_requests=3, num_tokens=64, same_prompt=True, max_tokens=4
+    )
+    scheduler.add_request(warmup)
+    scheduler.schedule()
+    scheduler.finish_requests(warmup.request_id, RequestStatus.FINISHED_ABORTED)
+
+    queued.include_prefill_progress = True
+    scheduler.add_request(running)
+    scheduler.add_request(queued)
+    output = scheduler.update_from_output(
+        scheduler.schedule(),
+        ModelRunnerOutput(
+            req_ids=[running.request_id],
+            req_id_to_index={running.request_id: 0},
+            sampled_token_ids=[[]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    first = next(
+        entry.prefill_progress
+        for batch in output.values()
+        for entry in batch.outputs
+        if entry.request_id == queued.request_id
+    )
+    assert first.phase == 1  # QUEUED
+    assert not first.cache_accounting_final
+    assert first.local_cached_tokens == 0
+    assert first.remaining_compute_tokens == 64
+
+    scheduler.finish_requests(running.request_id, RequestStatus.FINISHED_ABORTED)
+    scheduled = scheduler.schedule()
+    assert scheduled.num_scheduled_tokens[queued.request_id] == 16
+    output = scheduler.update_from_output(
+        scheduled,
+        ModelRunnerOutput(
+            req_ids=[queued.request_id],
+            req_id_to_index={queued.request_id: 0},
+            sampled_token_ids=[[]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    confirmed = next(
+        entry.prefill_progress
+        for batch in output.values()
+        for entry in batch.outputs
+        if entry.request_id == queued.request_id
+    )
+    assert confirmed.sequence > first.sequence
+    assert confirmed.cache_accounting_final
+    assert confirmed.local_cached_tokens == 48
+    assert confirmed.total_compute_tokens == 16
+
+    assert scheduler.reset_prefix_cache(reset_running_requests=True)
+    output = scheduler.update_from_output(
+        SchedulerOutput(
+            scheduled_new_reqs=[],
+            scheduled_cached_reqs=CachedRequestData.make_empty(),
+            num_scheduled_tokens={},
+            total_num_scheduled_tokens=0,
+            scheduled_encoder_inputs={},
+            scheduled_spec_decode_tokens={},
+            finished_req_ids=set(),
+            free_encoder_mm_hashes=[],
+        ),
+        ModelRunnerOutput(
+            req_ids=[],
+            req_id_to_index={},
+            sampled_token_ids=[],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    preempted = next(
+        entry.prefill_progress
+        for batch in output.values()
+        for entry in batch.outputs
+        if entry.request_id == queued.request_id
+    )
+    assert preempted.sequence > confirmed.sequence
+    assert preempted.phase == 5  # PREEMPTED
+    assert not preempted.cache_accounting_final
+    assert preempted.local_cached_tokens == 0
+    assert preempted.remaining_compute_tokens == 64
+    scheduler.finish_requests(None, RequestStatus.FINISHED_ABORTED)
+
+
 def test_prefill_progress_only_checks_due_requests_and_reactivates_after_preemption():
     scheduler = create_scheduler(
         max_num_seqs=1, max_num_batched_tokens=16, max_model_len=128
