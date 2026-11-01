@@ -159,10 +159,10 @@ class LogitsProcessor(PluggableLayer):
         # required for RL training-inference consistency.
         model_config = get_current_vllm_config().model_config
         self.head_dtype = model_config.head_dtype if model_config is not None else None
-        # Dtype the all-gathered logits are written in; None keeps the head's
-        # dtype. A caller that would cast the logits anyway (e.g. the sampler
-        # to fp32) may set it per call; it is used only where the cast is
-        # exact and nothing runs on the logits in between.
+        # Set to torch.float32 by a caller that would cast the gathered logits
+        # to FP32 anyway (the sampler); the fused gather then writes FP32
+        # where nothing in this layer runs on the logits after the gather.
+        # None keeps the head's dtype.
         self.gather_out_dtype: torch.dtype | None = None
 
     def forward(
@@ -189,23 +189,26 @@ class LogitsProcessor(PluggableLayer):
                 logits *= self.scale
         return logits
 
-    def _use_fused_gather(self, logits: torch.Tensor) -> bool:
-        out_dtype = self.gather_out_dtype or logits.dtype
-        return (
+    def _fused_gather_dtype(self, logits: torch.Tensor) -> torch.dtype | None:
+        """Output dtype of the fused vocab-parallel gather of ``logits``, or
+        None where the fused gather does not apply."""
+        if not (
             self.use_all_gather
             and current_platform.is_cuda()
             and logits.dim() == 2
             and logits.shape[-1] * get_tp_group().world_size >= self.org_vocab_size
-            and (
-                out_dtype == logits.dtype
-                or (
-                    # The scale and soft cap run after the gather, in its dtype.
-                    self.scale == 1.0
-                    and self.soft_cap is None
-                    and out_dtype == torch.float32
-                )
-            )
-        )
+            # A subclass's own gather (e.g. a custom all-gather) is kept.
+            and type(self)._gather_logits is LogitsProcessor._gather_logits
+        ):
+            return None
+        if (
+            self.gather_out_dtype == torch.float32
+            # The scale and soft cap run after the gather, in its dtype.
+            and self.scale == 1.0
+            and self.soft_cap is None
+        ):
+            return torch.float32
+        return logits.dtype
 
     def _gather_logits(self, logits: torch.Tensor) -> torch.Tensor:
         """gather/all-gather the logits tensor across model parallel group."""
@@ -279,11 +282,10 @@ class LogitsProcessor(PluggableLayer):
 
         # Gather logits for TP
         if lm_head.tp_size > 1:
-            if self._use_fused_gather(logits):
+            out_dtype = self._fused_gather_dtype(logits)
+            if out_dtype is not None:
                 return all_gather_vocab_parallel_logits(
-                    logits,
-                    self.org_vocab_size,
-                    self.gather_out_dtype or logits.dtype,
+                    logits, self.org_vocab_size, out_dtype
                 )
             logits = self._gather_logits(logits)
 
