@@ -578,16 +578,14 @@ async fn generate_sse_stream(
 fn to_sse_event(chunk: &GenerateStreamResponse) -> Event {
     trace!(?chunk, "generate emitting chunk");
     Event::default()
-        .json_data(chunk)
-        .expect("generate chunk must serialize to JSON")
+        .data(serde_json::to_string(chunk).expect("generate chunk must serialize to JSON"))
 }
 
 fn to_error_sse_event(error: &ApiError) -> Event {
     let response = error.to_error_response();
     trace!(?response, "generate emitting error");
     Event::default()
-        .json_data(response)
-        .expect("ErrorResponse must serialize to JSON")
+        .data(serde_json::to_string(&response).expect("ErrorResponse must serialize to JSON"))
 }
 
 fn done_sse_event() -> Event {
