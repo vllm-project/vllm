@@ -58,7 +58,9 @@ def _layer_norm_fwd_1pass_kernel(
     else:
         xbar = tl.where(cols < N, x, 0.0)
         var = tl.sum(xbar * xbar, axis=0) / N
-    rstd = 1 / tl.sqrt(var + eps)
+    # `eps` arrives as fp64 when Inductor re-emits this kernel under
+    # torch.compile; keep the arithmetic in fp32 like the eager launch.
+    rstd = 1 / tl.sqrt(var + eps.to(tl.float32))
     tl.store(Rstd + row, rstd)
     # Normalize and apply linear transformation
     mask = cols < N
