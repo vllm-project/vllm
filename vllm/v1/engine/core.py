@@ -1248,6 +1248,8 @@ class EngineCoreProc(EngineCore):
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
         self.engines_running = False
         self.shutdown_state = EngineShutdownState.RUNNING
+        # Set when a drain starts; the drain aborts what is left once it passes.
+        self._shutdown_deadline: float | None = None
         self.reject_new_requests = False
 
         # Receiver for tensor IPC
@@ -1798,8 +1800,28 @@ class EngineCoreProc(EngineCore):
                         num_requests,
                         shutdown_timeout,
                     )
+                self._shutdown_deadline = time.monotonic() + shutdown_timeout
 
             self.shutdown_state = EngineShutdownState.SHUTTING_DOWN
+
+        # Abort whatever the drain did not finish by its deadline, so clients
+        # get a final "abort" output before the process manager kills us.
+        if (
+            self._shutdown_deadline is not None
+            and time.monotonic() >= self._shutdown_deadline
+        ):
+            self._shutdown_deadline = None
+            num_requests = self.scheduler.get_num_unfinished_requests()
+            if num_requests > 0:
+                logger.info(
+                    "[shutdown] EngineCore: drain deadline reached; "
+                    "aborting in-flight requests count=%d",
+                    num_requests,
+                )
+                aborted_reqs = self.scheduler.finish_requests(
+                    None, RequestStatus.FINISHED_ABORTED
+                )
+                self._send_abort_outputs(aborted_reqs)
 
         # Exit when no work remaining
         if not self.has_work():
