@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for DeepSeek-V4 in-image bidirectional SWA visibility (vision variant).
+"""Tests for DeepSeek V4 C128 prefill and in-image bidirectional SWA visibility.
 
 The reference semantics are a torch port of the official
 ``get_image_visible`` / ``get_window_topk_idxs_visible``: inside an image span
@@ -23,6 +23,7 @@ from vllm.models.deepseek_v4.common.ops.cache_utils import (
     build_flashinfer_mixed_sparse_indices,
     combine_topk_swa_indices,
 )
+from vllm.platforms import current_platform
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.mla.sparse_swa import (
     DeepseekSparseSWAMetadataBuilder,
@@ -35,6 +36,186 @@ WINDOW = 8
 MAX_IMG = 6
 WIDTH = WINDOW + MAX_IMG
 BLOCK_SIZE = 64
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda()
+    or not current_platform.is_device_capability_family(90),
+    reason="requires Hopper",
+)
+@pytest.mark.parametrize("infinite_sink", [False, True])
+@pytest.mark.parametrize("context, query_len", [(7, 7), (131, 9), (1048576, 13)])
+def test_c128_native_prefill_matches_flashmla_with_offset(
+    infinite_sink, context, query_len
+):
+    """Native single-request prefill preserves bits and ignores padded heads.
+
+    Nonzero Q/output storage offsets and NaN workspace padding catch reads
+    outside the visible KV region; only the active output heads may be written.
+    """
+    from vllm.models.deepseek_v4.nvidia.ops.c128_prefill import (
+        c128_prefill_attention,
+    )
+    from vllm.v1.attention.ops.flashmla import flash_mla_sparse_fwd
+
+    torch.manual_seed(123)
+    device = "cuda"
+    gather_len = min(context, query_len + 127)
+    compressed_len = context // 128
+    compressed_width = compressed_len + 3
+    q_storage = torch.randn(query_len + 5, 64, 512, device=device, dtype=torch.bfloat16)
+    q = q_storage[5:]
+    q[:, 8:] = float("nan")
+    out_storage = torch.full_like(q_storage, 42)
+    out = out_storage[5:]
+    kv = torch.full(
+        (1, compressed_width + gather_len + 3, 512),
+        float("nan"),
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    kv[0, :compressed_len].normal_()
+    kv[0, compressed_width : compressed_width + gather_len].normal_()
+    sink = torch.randn(64, device=device)
+    if infinite_sink:
+        sink[0], sink[1] = -float("inf"), float("inf")
+    keys = torch.cat(
+        (
+            kv[0, :compressed_len],
+            kv[0, compressed_width : compressed_width + gather_len],
+        )
+    )
+    pos = torch.arange(context - query_len, context, device=device)
+    swa_pos = torch.arange(context - gather_len, context, device=device)
+    mask = torch.cat(
+        (
+            torch.arange(compressed_len, device=device)[None, :]
+            < (pos[:, None] + 1) // 128,
+            (swa_pos[None, :] <= pos[:, None])
+            & (swa_pos[None, :] >= pos[:, None] - 127),
+        ),
+        dim=1,
+    )
+    width = ((keys.shape[0] + 127) // 128) * 128
+    indices = torch.full((query_len, width), -1, device=device, dtype=torch.int32)
+    lengths = mask.sum(-1).int()
+    for row in range(query_len):
+        visible = mask[row].nonzero().flatten().int()
+        indices[row, : visible.numel()] = visible
+    reference = flash_mla_sparse_fwd(
+        q,
+        keys.view(-1, 1, 512),
+        indices[:, None, :],
+        512**-0.5,
+        attn_sink=sink,
+        topk_length=lengths,
+    )[0]
+    c128_prefill_attention(
+        q,
+        kv,
+        sink,
+        out,
+        torch.tensor([context], device=device, dtype=torch.int32),
+        torch.tensor([gather_len], device=device, dtype=torch.int32),
+        compressed_width,
+        512**-0.5,
+    )
+    assert torch.equal(out[:, :8].view(torch.int16), reference[:, :8].view(torch.int16))
+    assert torch.all(out[:, 8:] == 42)
+    assert torch.all(out_storage[:5] == 42)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda()
+    or not current_platform.is_device_capability_family(90),
+    reason="requires Hopper",
+)
+@pytest.mark.parametrize(
+    "context",
+    [
+        1,
+        127,
+        128,
+        131,
+        8192,
+        16383,
+        16384,
+        16400,
+        32769,
+        65536,
+        131072,
+        786432,
+        1048576,
+    ],
+)
+@pytest.mark.parametrize("seed", [0, 123])
+@pytest.mark.parametrize("sink_kind", ["random", "large", "infinite"])
+def test_c128_prefill_bitwise_matches_flashmla(context, seed, sink_kind):
+    """The eight-head optimization preserves the replaced kernel's BF16 bits."""
+    from vllm.models.deepseek_v4.nvidia.ops.c128_prefill import (
+        c128_prefill_attention,
+    )
+    from vllm.v1.attention.ops.flashmla import flash_mla_sparse_fwd
+
+    torch.manual_seed(seed)
+    query_len = min(17, context)
+    compressed = context // 128
+    gather_len = min(context, query_len + 127)
+    q = torch.randn(query_len, 64, 512, device="cuda", dtype=torch.bfloat16)
+    q[:, 8:] = 0
+    kv = torch.randn(
+        1, compressed + gather_len, 512, device="cuda", dtype=torch.bfloat16
+    )
+    sink = torch.randn(64, device="cuda", dtype=torch.float32)
+    if sink_kind == "large":
+        sink.fill_(30)
+    elif sink_kind == "infinite":
+        sink[0], sink[1] = -float("inf"), float("inf")
+    actual, expected = torch.empty_like(q), torch.empty_like(q)
+    positions = torch.arange(context - query_len, context, device="cuda")
+    compressed_lens = (positions + 1) // 128
+    swa_lens = torch.minimum(positions + 1, torch.full_like(positions, 128))
+    lens = (compressed_lens + swa_lens).int()
+    width = ((compressed + 128 + 127) // 128) * 128
+    columns = torch.arange(width, device="cuda")
+    indices = torch.where(
+        columns[None, :] < compressed_lens[:, None],
+        columns[None, :],
+        compressed
+        + positions[:, None]
+        - swa_lens[:, None]
+        + 1
+        + columns[None, :]
+        - compressed_lens[:, None]
+        - (context - gather_len),
+    )
+    indices = torch.where(columns[None, :] < lens[:, None], indices, -1).int()
+    flash_mla_sparse_fwd(
+        q,
+        kv.view(-1, 1, 512),
+        indices[:, None, :],
+        512**-0.5,
+        attn_sink=sink,
+        topk_length=lens,
+        out=expected,
+    )
+    c128_prefill_attention(
+        q,
+        kv,
+        sink,
+        actual,
+        torch.tensor([context], device="cuda", dtype=torch.int32),
+        torch.tensor([gather_len], device="cuda", dtype=torch.int32),
+        compressed,
+        512**-0.5,
+    )
+    actual_bits = actual[:, :8].view(torch.int16)
+    expected_bits = expected[:, :8].view(torch.int16)
+    assert torch.equal(actual_bits, expected_bits), (
+        f"{(actual_bits != expected_bits).sum().item()} BF16 elements differ; "
+        f"max absolute error "
+        f"{(actual[:, :8].float() - expected[:, :8].float()).abs().max().item()}"
+    )
 
 
 def ref_left_right(

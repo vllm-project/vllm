@@ -231,6 +231,27 @@ MLA decode backends are selected using the standard
 
 --8<-- "gen:table-mla-decode"
 
+### DeepSeek V4 C128 Prefill on Hopper
+
+The `FLASHMLA_SPARSE_DSV4` backend automatically uses the optional `_c128_C`
+extension for eligible DeepSeek V4 text prefills on Hopper (H100/H200). Source
+builds include this target for supported architectures; precompiled installations
+need to build it separately. No additional serving flag is required. Without
+the extension, prefill uses the existing FlashMLA path.
+
+The optimization shares compressed KV across eight queries with eight local
+heads. It requires BF16 queries, a 128-token sliding window, at least 512
+compressed KV rows (65,536 context tokens), at least 4,096 query tokens, and one
+prefill request in the workspace group. Image visibility, batch invariant
+execution, other shapes, and decode use the existing path. Workspace grouping
+can therefore affect whether concurrent prefills use the optimization.
+
+The shared-prefix and per-query-tail kernels preserve the pinned FlashMLA
+accumulation and rounding order using unnormalized FP32 intermediate state.
+The staging buffers use approximately 194 MiB for 8,192 query tokens. Bitwise
+compatibility applies to the tested Hopper implementation, not to the whole
+model across different batches or compiler/dependency versions.
+
 ### DeepSeek V4 Decode Backends
 
 DeepSeek V4 sparse MLA uses its own decode backends, selected via
