@@ -9,6 +9,8 @@ from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.metrics.stats import IterationStats
 
+_INT64_MIN = -(2**63)
+
 
 class ParentRequest:
     """Info, state & processing for parallel sampling request.
@@ -77,8 +79,11 @@ class ParentRequest:
             # Cache child sampling_params for later reuse
             self.cached_child_sampling_params = child_sampling_params
         else:
-            # Each child gets a clone with a unique seed
-            child_sampling_params.seed = seed + index
+            # Each child gets a clone with a unique seed, wrapped to stay in
+            # int64 when the parent seed is near the top of the range.
+            child_sampling_params.seed = (
+                seed + index - _INT64_MIN
+            ) % 2**64 + _INT64_MIN
         return child_sampling_params
 
     def get_child_info(self, index: int) -> tuple[str, SamplingParams]:
