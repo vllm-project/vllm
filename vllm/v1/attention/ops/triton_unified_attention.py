@@ -177,7 +177,7 @@ def _store_output_td(
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_seqs"])
 def kernel_unified_attention(
     # Output destination for the 2D path.  In 3D mode per-segment partials
     # go to the ``segm_*`` tensors (see bottom of signature) and
@@ -696,7 +696,7 @@ def kernel_unified_attention(
             )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_seqs"])
 def reduce_segments(
     output_ptr,  # [num_tokens, num_query_heads, head_size]
     segm_output_ptr,
