@@ -118,7 +118,7 @@ hadamard_transform_kernel(b16* a, b16* out, int total_num_chunks) {
     int64_t threadid = threadIdx.x % 32;
     extern __shared__ b32 bfrag_arr[]; // num_chunks * warps_per_block * 128
     int64_t real_num_chunks = ((blockid + 1) * num_chunks) > total_num_chunks ? (total_num_chunks - (blockid * num_chunks)) : num_chunks;
-    int64_t diff_num_chunks = real_num_chunks - num_chunks;
+    int64_t diff_num_chunks = num_chunks - real_num_chunks;
 
     b32* a_start_ptr = (b32*) (a + blockid * num_chunks * 256); // offset a to where this warp starts
     b32* out_start_ptr = (b32*) (out + blockid * num_chunks * 256);
@@ -389,6 +389,9 @@ hadamard_transform_kernel(b16* a, b16* out, int total_num_chunks) {
                         SWITCH_WAIT_ASYNC_LOAD_GROUP(29)
                         SWITCH_WAIT_ASYNC_LOAD_GROUP(30)
                         SWITCH_WAIT_ASYNC_LOAD_GROUP(31)
+                        default:
+                            asm volatile("cp.async.wait_group 0;\n");
+                            break;
                     }
                 } else {
                     switch(k) {
@@ -424,6 +427,9 @@ hadamard_transform_kernel(b16* a, b16* out, int total_num_chunks) {
                         SWITCH_WAIT_ASYNC_LOAD_GROUP(29)
                         SWITCH_WAIT_ASYNC_LOAD_GROUP(30)
                         SWITCH_WAIT_ASYNC_LOAD_GROUP(31)
+                        default:
+                            asm volatile("cp.async.wait_group 0;\n");
+                            break;
                     }
                 }
             }
