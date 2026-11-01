@@ -14,6 +14,7 @@ from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
+    normalize_reasoning_content,
 )
 from vllm.tasks import check_removed_pooling_task
 from vllm.utils import random_uuid
@@ -315,6 +316,11 @@ class ChatRequestMixin(ChatRequestOptionsMixin):
     # --8<-- [start:chat-params]
     messages: list[ChatCompletionMessageParam]
     # --8<-- [end:chat-params]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_reasoning_before(cls, data: Any) -> Any:
+        return normalize_reasoning_content(data)
 
 
 class EncodingRequestMixin(OpenAIBaseModel):
