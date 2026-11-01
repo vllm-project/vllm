@@ -33,9 +33,11 @@ a value that literally contains ``<|close|>argument<|sep|>`` or
 
 import json
 from collections.abc import Sequence
+from typing import Any
 
 import regex as re
-from openai.types.responses import ToolChoiceCustom, ToolChoiceFunction
+from openai.types.responses import FunctionTool, ToolChoiceCustom, ToolChoiceFunction
+from xgrammar import StructuralTag
 
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
@@ -48,12 +50,14 @@ from vllm.entrypoints.generate.base.protocol import (
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
+    ChatCompletionToolsParam,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
+from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
 
 logger = init_logger(__name__)
 
@@ -69,6 +73,59 @@ def _partial_tag_overlap(text: str, tag: str) -> int:
     return 0
 
 
+def _resolve_argument_ref_types(parameters: dict[str, Any]) -> dict[str, Any]:
+    """Expose referenced types to the XTML builder without expanding schemas."""
+    props = parameters.get("properties")
+    if not isinstance(props, dict):
+        return parameters
+
+    def refs(schema):
+        if isinstance(schema, list):
+            for item in schema:
+                yield from refs(item)
+        elif isinstance(schema, dict):
+            if "$ref" in schema:
+                yield schema["$ref"]
+            for key, value in schema.items():
+                if key in (
+                    "$defs",
+                    "definitions",
+                    "dependentSchemas",
+                    "patternProperties",
+                    "properties",
+                ) and isinstance(value, dict):
+                    for subschema in value.values():
+                        yield from refs(subschema)
+                elif key not in ("const", "default", "enum", "examples"):
+                    yield from refs(value)
+
+    # The builder only carries these root tables into each argument's schema.
+    if not all(
+        isinstance(ref, str) and ref.startswith(("#/$defs/", "#/definitions/"))
+        for ref in refs(parameters)
+    ):
+        return parameters
+
+    typed = {}
+    for key, prop in props.items():
+        if not isinstance(prop, dict) or "type" in prop or "$ref" not in prop:
+            continue
+        node: Any = prop
+        seen = set()
+        while isinstance(node, dict) and "type" not in node and "$ref" in node:
+            ref = node["$ref"]
+            if ref in seen:
+                break
+            seen.add(ref)
+            node = parameters
+            # Match XGrammar's literal pointer tokens; escaped refs stay loose.
+            for token in ref[2:].split("/"):
+                node = node.get(token) if isinstance(node, dict) else None
+        if isinstance(node, dict) and isinstance(node.get("type"), str):
+            typed[key] = {**prop, "type": node["type"]}
+    return {**parameters, "properties": {**props, **typed}} if typed else parameters
+
+
 class KimiK3ToolParser(ToolParser):
     supports_required_and_named = False
     # Enables the vLLM-side XTML structural tag builder
@@ -78,6 +135,40 @@ class KimiK3ToolParser(ToolParser):
     # ``required`` (and ``auto`` when a tool sets ``strict``) instead of the
     # generic JSON guided decoding, which conflicts with the XTML format.
     structural_tag_model = "kimi_k3"
+
+    def get_structural_tag(
+        self,
+        request: ChatCompletionRequest | ResponsesRequest,
+        *,
+        reasoning: bool = False,
+        strict_level: ToolStrictLevel = ToolStrictLevel.AUTO,
+    ) -> StructuralTag | None:
+        tools = []
+        for tool in request.tools or []:
+            function = (
+                tool.function if isinstance(tool, ChatCompletionToolsParam) else tool
+            )
+            if (
+                isinstance(tool, (ChatCompletionToolsParam, FunctionTool))
+                and isinstance(function.parameters, dict)
+                and (
+                    function.strict is True or strict_level >= ToolStrictLevel.PARAMETER
+                )
+            ):
+                parameters = _resolve_argument_ref_types(function.parameters)
+                if parameters is not function.parameters:
+                    function = function.model_copy(update={"parameters": parameters})
+                    tool = (
+                        tool.model_copy(update={"function": function})
+                        if isinstance(tool, ChatCompletionToolsParam)
+                        else function
+                    )
+            tools.append(tool)
+        return super().get_structural_tag(
+            request.model_copy(update={"tools": tools}),
+            reasoning=reasoning,
+            strict_level=strict_level,
+        )
 
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)

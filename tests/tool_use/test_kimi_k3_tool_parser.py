@@ -2,9 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+from copy import deepcopy
 from typing import cast
 
 import pytest
+from xgrammar import Grammar
+from xgrammar.testing import _is_grammar_accept_string
 
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -18,6 +21,7 @@ from vllm.parser.parser_manager import ParserManager
 from vllm.reasoning.kimi_k3_reasoning_parser import KimiK3ReasoningParser
 from vllm.tokenizers.protocol import TokenizerLike
 from vllm.tool_parsers.kimi_k3_tool_parser import KimiK3ToolParser
+from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
 
 OPEN = "<|open|>"
 CLOSE = "<|close|>"
@@ -464,6 +468,101 @@ def test_adjust_request_keeps_xtml_markers_contiguous(req):
     assert adjusted.skip_special_tokens is False
     assert adjusted.spaces_between_special_tokens is False
     assert KimiK3ToolParser.supports_required_and_named is False
+
+
+@pytest.mark.parametrize("request_factory", [_request, _responses_request])
+@pytest.mark.parametrize("definitions", ["$defs", "definitions"])
+@pytest.mark.parametrize(
+    ("strict", "strict_level", "constrained"),
+    [
+        (True, ToolStrictLevel.AUTO, True),
+        (False, ToolStrictLevel.AUTO, False),
+        (False, ToolStrictLevel.PARAMETER, True),
+    ],
+)
+def test_ref_only_argument_uses_referenced_type(
+    request_factory, definitions, strict, strict_level, constrained
+):
+    """Strict XTML must reject arrays for a recursively defined object argument."""
+    parameters = {
+        "type": "object",
+        "properties": {
+            "root": {
+                "$ref": f"#/{definitions}/group/items",
+                "default": {"$ref": "literal data, not a schema reference"},
+            }
+        },
+        definitions: {
+            "group": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"data": {"type": "string"}},
+                    "additionalProperties": {"$ref": f"#/{definitions}/group/items"},
+                },
+            }
+        },
+    }
+    request = request_factory()
+    assert request.tools is not None
+    function = (
+        request.tools[0].function
+        if isinstance(request, ChatCompletionRequest)
+        else request.tools[0]
+    )
+    function.parameters = parameters
+    function.strict = strict
+    request.tool_choice = "required"
+    original_tools = deepcopy(request.tools)
+    parser = KimiK3DelegatingParser(
+        _dummy_tokenizer(), chat_template_kwargs={"thinking": False}
+    )
+    parser.tool_strict_level = strict_level
+    adjusted = parser.adjust_request(request)
+    structured_outputs = adjusted.extract_structured_outputs()
+    assert structured_outputs is not None
+    grammar = Grammar.from_structural_tag(structured_outputs.structural_tag)
+    for argument_type, value, valid in [
+        ("object", '{"data":"x","child":{"data":"y"}}', True),
+        ("object", "[]", False),
+        ("array", "[]", False),
+    ]:
+        body = _response("") + _tools(
+            _call("calc", 1, _arg("root", argument_type, value))
+        )
+        assert _is_grammar_accept_string(grammar, body) is (valid or not constrained)
+    assert request.tools == original_tools
+
+
+@pytest.mark.parametrize(
+    ("ref", "target"),
+    [
+        ("#/properties/other", {"type": "object"}),
+        ("#/$defs/missing", {"type": "object"}),
+        ("#/$defs/node", {"$ref": "#/$defs/node"}),
+        ("#/$defs/node", {"type": ["object", "null"]}),
+        (
+            "#/$defs/node",
+            {"type": "object", "properties": {"child": {"$ref": "#"}}},
+        ),
+        ("#/$defs/a~1b", {"type": "object"}),
+        ("#/$defs/a%20b", {"type": "object"}),
+    ],
+)
+def test_unresolved_argument_ref_keeps_permissive_grammar(ref, target):
+    request = _request()
+    assert request.tools is not None
+    request.tool_choice = "required"
+    request.tools[0].function.strict = True
+    request.tools[0].function.parameters = {
+        "type": "object",
+        "properties": {"root": {"$ref": ref}},
+        "$defs": {"node": target, "a/b": target, "a b": target},
+    }
+    tag = KimiK3ToolParser(_dummy_tokenizer()).get_structural_tag(request)
+    grammar = Grammar.from_structural_tag(tag)
+    body = _response("") + _tools(_call("calc", 1, _arg("root", "array", "[]")))
+    assert _is_grammar_accept_string(grammar, body)
 
 
 def test_adjust_request_required_uses_xtml_parser_not_json_guidance():
