@@ -310,6 +310,101 @@ def test_supported_backend_preserves_dcp_eligibility(backend_name, default_vllm_
     assert backend_cls.validate_configuration(**kwargs) == invalid_without_dcp
 
 
+@pytest.mark.parametrize(
+    ("jit_usable", "expected_backend"),
+    [(False, "TRITON_ATTN"), (True, "FLASHINFER")],
+)
+def test_fp8_kv_auto_selection_respects_attention_jit_availability(
+    jit_usable: bool, expected_backend: str, monkeypatch: pytest.MonkeyPatch
+):
+    """Select Triton on SM120 if unavailable; preserve FlashInfer otherwise.
+
+    The lightweight backend stub models the proposed attention-specific
+    predicate. This keeps the test independent of FlashInfer's optional
+    runtime package and does not change the broader ``has_flashinfer()`` check.
+    The ``True`` case checks selector behavior when the predicate reports
+    availability; it does not validate per-kernel artifact coverage.
+    """
+    import sys
+    from types import ModuleType
+
+    try:
+        import vllm._C_stable_libtorch  # noqa: F401
+    except ModuleNotFoundError as error:
+        if error.name != "vllm._C_stable_libtorch":
+            raise
+        # CUDA platform import normally imports this extension to register ops.
+        # Selector-only coverage does not call those ops, so stand in for the
+        # extension when testing from an unbuilt source checkout.
+        sys.modules["vllm._C_stable_libtorch"] = ModuleType("vllm._C_stable_libtorch")
+
+    from vllm.platforms.cuda import CudaPlatform
+    from vllm.utils import flashinfer as flashinfer_utils
+
+    class FlashInferBackendStub:
+        @classmethod
+        def full_cls_name(cls):
+            return (__name__, "FlashInferBackendStub")
+
+        @classmethod
+        def get_name(cls):
+            return "FLASHINFER"
+
+        @classmethod
+        def is_attention_jit_usable(cls):
+            return flashinfer_utils.is_flashinfer_jit_usable()
+
+        @classmethod
+        def validate_configuration(cls, **kwargs):
+            assert kwargs["device_capability"] == DeviceCapability(12, 0)
+            assert kwargs["kv_cache_dtype"] == "fp8"
+            return (
+                []
+                if cls.is_attention_jit_usable()
+                else ["FlashInfer attention JIT is unavailable"]
+            )
+
+    # CUDA resolves the selected class by qualified name after validation.
+    # Register the local stub so this stays independent of FlashInfer.
+    monkeypatch.setattr(
+        sys.modules[__name__], "FlashInferBackendStub", FlashInferBackendStub,
+        raising=False,
+    )
+
+    vllm_config = VllmConfig(cache_config=CacheConfig(block_size=16))
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch("vllm.platforms.current_platform", CudaPlatform()),
+        patch.object(
+            CudaPlatform,
+            "get_device_capability",
+            return_value=DeviceCapability(12, 0),
+        ),
+        patch(
+            "vllm.platforms.cuda._get_attn_backend_class",
+            side_effect=lambda backend: (
+                FlashInferBackendStub
+                if backend == AttentionBackendEnum.FLASHINFER
+                else backend.get_class()
+            ),
+        ),
+        patch.object(
+            flashinfer_utils,
+            "is_flashinfer_jit_usable",
+            return_value=jit_usable,
+        ) as attention_jit_usable,
+    ):
+        backend = get_attn_backend(
+            head_size=128,
+            dtype=torch.float16,
+            kv_cache_dtype="fp8",
+        )
+
+    attention_jit_usable.assert_called_once_with()
+    assert backend.get_name() == expected_backend
+
+
 @pytest.mark.parametrize("device", ["cpu", "cuda", "hip"])
 def test_fp32_fallback(device: str):
     """Test attention backend selection with fp32."""
