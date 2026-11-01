@@ -10784,6 +10784,9 @@ async fn anthropic_assistant_prefix_count_matches_generation_without_echo() {
         {"role": "user", "content": "Complete"},
         {"role": "assistant", "content": "prefix"}
     ]});
+    let (status, response) = post_json(&mut app, "/v1/messages", input.clone()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    assert_eq!(response["error"]["type"], "invalid_request_error");
     let (status, count) = post_json(&mut app, "/v1/messages/count_tokens", input.clone()).await;
     assert_eq!(status, StatusCode::OK, "{count}");
     // The fixture renderer appends `assistant:` only for a new turn.
@@ -10793,6 +10796,12 @@ async fn anthropic_assistant_prefix_count_matches_generation_without_echo() {
     );
     let mut generation = input;
     generation["max_tokens"] = json!(20);
+    generation["temperature"] = json!(0.5);
+    generation["stop_sequences"] = json!(["STOP"]);
+    let (status, generation_count) =
+        post_json(&mut app, "/v1/messages/count_tokens", generation.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{generation_count}");
+    assert_eq!(generation_count, count);
     let (status, response) = post_json(&mut app, "/v1/messages", generation).await;
     engine_task.await.unwrap();
     assert_eq!(status, StatusCode::OK, "{response}");

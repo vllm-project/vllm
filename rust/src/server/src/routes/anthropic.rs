@@ -31,13 +31,22 @@ use vllm_llm::TokenUsage;
 
 #[derive(Debug, Deserialize, Validate)]
 #[serde(deny_unknown_fields)]
-pub struct MessagesInput {
+pub struct MessagesRequest {
     model: String,
     messages: Vec<Message>,
     system: Option<TextContent>,
+    #[validate(range(min = 1))]
+    max_tokens: Option<u32>,
+    #[validate(range(min = 0.0, max = 1.0))]
+    temperature: Option<f32>,
+    #[validate(custom(function = "validate_top_p_value"))]
+    top_p: Option<f32>,
+    top_k: Option<u32>,
+    stop_sequences: Option<Vec<String>>,
+    stream: Option<bool>,
 }
 
-impl Normalizable for MessagesInput {}
+impl Normalizable for MessagesRequest {}
 
 #[derive(Debug, Deserialize, serde::Serialize)]
 #[serde(tag = "role", rename_all = "lowercase", deny_unknown_fields)]
@@ -92,7 +101,7 @@ impl TextContent {
     }
 }
 
-impl MessagesInput {
+impl MessagesRequest {
     fn into_chat_request(
         self,
         model: &LoraModelResolution,
@@ -102,6 +111,17 @@ impl MessagesInput {
             return Err(invalid_request!("model and messages must be non-empty"));
         }
         model.model_names.check(Some(&self.model))?;
+        if self.stream == Some(true) {
+            return Err(invalid_request!("Streaming Messages is not supported yet"));
+        }
+        let stop_strings = self
+            .stop_sequences
+            .map(|stops| {
+                let stops = StringOrArray::Array(stops);
+                validate_stop(&stops).map_err(|error| invalid_request!("{error}"))?;
+                Ok::<_, ApiError>(stops.into_vec())
+            })
+            .transpose()?;
         let mut messages = Vec::new();
         if let Some(system) = self.system {
             let text = system.into_text(true);
@@ -119,10 +139,16 @@ impl MessagesInput {
         }
         let continuation = matches!(messages.last(), Some(ChatMessage::Assistant { content })
             if content.iter().any(|b| matches!(b, AssistantContentBlock::Text { text } if !text.is_empty())));
-        Ok(ChatRequest {
+        let request = ChatRequest {
             request_id: format!("msg_{}", ctx.request_id),
             messages,
-            sampling_params: SamplingParams::default(),
+            sampling_params: SamplingParams {
+                max_tokens: self.max_tokens,
+                temperature: self.temperature,
+                top_p: self.top_p,
+                top_k: self.top_k,
+                ..Default::default()
+            },
             chat_options: ChatOptions {
                 generation_prompt_mode: if continuation {
                     GenerationPromptMode::ContinueFinalAssistant
@@ -132,7 +158,10 @@ impl MessagesInput {
                 ..Default::default()
             },
             tool_context: ResolvedToolContext::default(),
-            decode_options: Default::default(),
+            decode_options: vllm_text::TextDecodeOptions {
+                stop_strings,
+                ..Default::default()
+            },
             intermediate: false,
             prompt_truncation: None,
             priority: ctx.priority.unwrap_or(0),
@@ -143,7 +172,11 @@ impl MessagesInput {
             session_id: ctx.session_id,
             lora_request: model.lora_request.clone(),
             return_prompt_text: false,
-        })
+        };
+        request
+            .validate()
+            .map_err(|error| chat_submit_error("invalid Messages request", error))?;
+        Ok(request)
     }
 }
 
@@ -187,7 +220,7 @@ fn error_response(error: ApiError) -> Response {
 pub async fn count_tokens(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    body: Result<ValidatedJson<MessagesInput>, ApiError>,
+    body: Result<ValidatedJson<MessagesRequest>, ApiError>,
 ) -> Response {
     let body = match body {
         Ok(body) => body.0,
@@ -210,49 +243,6 @@ pub(crate) struct CountTokensResponse {
 #[derive(serde::Serialize)]
 struct ContextManagement {
     original_input_tokens: usize,
-}
-
-#[derive(Debug, Deserialize, Validate)]
-pub struct MessagesRequest {
-    #[serde(flatten)]
-    input: MessagesInput,
-    #[validate(range(min = 1))]
-    max_tokens: u32,
-    #[validate(range(min = 0.0, max = 1.0))]
-    temperature: Option<f32>,
-    #[validate(custom(function = "validate_top_p_value"))]
-    top_p: Option<f32>,
-    top_k: Option<u32>,
-    stop_sequences: Option<Vec<String>>,
-    stream: Option<bool>,
-}
-
-impl Normalizable for MessagesRequest {}
-
-impl MessagesRequest {
-    fn into_chat_request(
-        self,
-        model: &LoraModelResolution,
-        ctx: ResolvedRequestContext,
-    ) -> Result<ChatRequest, ApiError> {
-        if self.stream == Some(true) {
-            return Err(invalid_request!("Streaming Messages is not supported yet"));
-        }
-        let mut request = self.input.into_chat_request(model, ctx)?;
-        request.sampling_params.max_tokens = Some(self.max_tokens);
-        request.sampling_params.temperature = self.temperature;
-        request.sampling_params.top_p = self.top_p;
-        request.sampling_params.top_k = self.top_k;
-        if let Some(stops) = self.stop_sequences {
-            let stops = StringOrArray::Array(stops);
-            validate_stop(&stops).map_err(|error| invalid_request!("{error}"))?;
-            request.decode_options.stop_strings = Some(stops.into_vec());
-        }
-        request
-            .validate()
-            .map_err(|error| chat_submit_error("invalid Messages request", error))?;
-        Ok(request)
-    }
 }
 
 pub async fn messages(
@@ -284,7 +274,7 @@ impl<'a> MessagesLlm<'a> {
     }
     pub(crate) async fn count_tokens(
         &self,
-        body: MessagesInput,
+        body: MessagesRequest,
         context: ResolvedRequestContext,
     ) -> Result<CountTokensResponse, ApiError> {
         let model = self.state.resolve_model_with_loras(Some(&body.model)).await;
@@ -315,7 +305,13 @@ impl<'a> MessagesLlm<'a> {
         body: MessagesRequest,
         context: ResolvedRequestContext,
     ) -> Result<MessagesResponse, ApiError> {
-        let model = self.state.resolve_model_with_loras(Some(&body.input.model)).await;
+        if body.max_tokens.is_none() {
+            return Err(invalid_request!(
+                param = "max_tokens",
+                "max_tokens is required for generation"
+            ));
+        }
+        let model = self.state.resolve_model_with_loras(Some(&body.model)).await;
         let request = body.into_chat_request(&model, context)?;
         validate_max_output_tokens(
             "max_tokens",
