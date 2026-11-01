@@ -260,6 +260,7 @@ class MoERunner(MoERunnerInterface):
         routed_input_transform: torch.nn.Module | None = None,
         routed_output_transform: torch.nn.Module | None = None,
         routed_scaling_factor: float = 1.0,
+        routed_scale_prefolded: bool = False,
     ):
         super().__init__()
         self.moe_config = moe_config
@@ -267,6 +268,7 @@ class MoERunner(MoERunnerInterface):
         self.routed_input_transform = routed_input_transform
         self.routed_output_transform = routed_output_transform
         self.routed_scaling_factor = routed_scaling_factor
+        self.routed_scale_prefolded = routed_scale_prefolded
         self.gate = gate
         self.shared_expert_gate = shared_expert_gate
         self.routed_experts = routed_experts
@@ -413,6 +415,8 @@ class MoERunner(MoERunnerInterface):
         (the decoder layer compensates with matching divisions).
         """
         if self.routed_scaling_factor != 1.0:
+            if self.routed_scale_prefolded and fused_output.dtype != torch.float16:
+                return shared_output, fused_output
             if fused_output.dtype != torch.float16 or shared_output is None:
                 fused_output *= self.routed_scaling_factor
             elif shared_output is not None:
