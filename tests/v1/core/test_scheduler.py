@@ -48,6 +48,7 @@ from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.diffusion_scheduler import (
     DiffusionAsyncScheduler,
     DiffusionScheduler,
@@ -56,6 +57,7 @@ from vllm.v1.core.sched.diffusion_scheduler import (
 from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.sched.state_scheduler import StateScheduler
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.engine import FinishReason
 from vllm.v1.engine.core import EngineCore
@@ -4991,8 +4993,6 @@ def test_grammar_compile_error_finishes_only_request(async_grammar: bool):
 
 def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler = object.__new__(Scheduler)
-    scheduler.has_state_slots = False
-    scheduler.state_error_outputs = []
     sampling_params = SamplingParams(ignore_eos=True, max_tokens=4)
     sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
 
@@ -8766,7 +8766,7 @@ def _state_scheduler(*, log_stats=False):
     config = get_kv_cache_configs(
         base.vllm_config, [{"state": spec}], [3 * spec.page_size_bytes]
     )[0]
-    return Scheduler(
+    return StateScheduler(
         vllm_config=base.vllm_config,
         kv_cache_config=config,
         block_size=1,
@@ -10120,6 +10120,112 @@ def test_state_stream_replaces_only_after_park_not_length_stop(queued):
     new = manager.get("next")
     assert new.slot == old.slot and new.generation > old.generation
     assert manager.get("peer") == peer_handle
+
+
+class _CustomStateScheduler(StateScheduler):
+    pass
+
+
+class _AsyncStateScheduler(StateScheduler, AsyncScheduler):
+    pass
+
+
+@pytest.mark.parametrize(
+    ("scheduler_cls", "expected"),
+    [
+        (None, StateScheduler),
+        (_CustomStateScheduler, _CustomStateScheduler),
+        (Scheduler, None),
+        (DiffusionScheduler, None),
+        (_AsyncStateScheduler, None),
+    ],
+)
+def test_state_layout_selects_state_scheduler(scheduler_cls, expected):
+    from vllm.v1.core.sched.state_scheduler import get_scheduler_cls
+
+    scheduler = _state_scheduler()
+    scheduler_config = scheduler.vllm_config.scheduler_config
+    scheduler_config.scheduler_cls = scheduler_cls
+    if expected is None:
+        with pytest.raises(ValueError, match="StateScheduler subclass"):
+            get_scheduler_cls(scheduler_config, scheduler.kv_cache_config)
+    else:
+        assert (
+            get_scheduler_cls(scheduler_config, scheduler.kv_cache_config) is expected
+        )
+
+
+def test_attention_layout_keeps_configured_scheduler():
+    from vllm.v1.core.sched.state_scheduler import get_scheduler_cls
+
+    scheduler = create_scheduler()
+    assert (
+        get_scheduler_cls(
+            scheduler.vllm_config.scheduler_config, scheduler.kv_cache_config
+        )
+        is Scheduler
+    )
+    with pytest.raises(ValueError, match="persistent-state KV cache"):
+        StateScheduler(
+            vllm_config=scheduler.vllm_config,
+            kv_cache_config=scheduler.kv_cache_config,
+            block_size=16,
+            structured_output_manager=scheduler.structured_output_manager,
+        )
+
+
+def test_state_error_only_step_keeps_client_batch_and_stats():
+    from vllm.v1.core.sched.interface import AddRequestDisposition
+    from vllm.v1.engine import StreamAdmissionContext, StreamAdmissionId
+
+    scheduler = _state_scheduler(log_stats=True)
+    payload = _stream_request("unknown")
+    payload.stream_admission = StreamAdmissionContext(
+        "frontend", StreamAdmissionId("epoch", 1)
+    )
+    payload.client_index = 7
+    request = Request.from_engine_core_request(payload, None)
+    assert scheduler.add_request(request) is AddRequestDisposition.REJECTED
+    step = scheduler.schedule()
+    outputs = scheduler.update_from_output(step, _state_output(step))
+    assert list(outputs) == [7]
+    assert outputs[7].outputs[0].request_id == "unknown"
+    assert outputs[7].outputs[0].finish_reason == FinishReason.ERROR
+    assert outputs[7].scheduler_stats is not None
+
+
+def test_tagged_add_cannot_touch_ordinary_request():
+    from vllm.v1.engine import StreamAdmissionContext, StreamAdmissionId
+
+    core = object.__new__(EngineCore)
+    core.scheduler = create_scheduler()
+    existing = Request.from_engine_core_request(_stream_request(), None)
+    core.add_request(existing)
+    payload = _stream_request()
+    payload.stream_admission = StreamAdmissionContext(
+        "frontend", StreamAdmissionId("epoch", 1)
+    )
+    tagged = Request.from_engine_core_request(payload, None)
+    tagged.abort_immediately = True
+    with pytest.raises(ValueError, match="requires persistent state"):
+        core.add_request(tagged)
+    assert core.scheduler.requests["stream"] is existing
+    assert existing.status == RequestStatus.WAITING
+    assert not existing.streaming_queue
+
+
+def test_tagged_update_refused_without_state_scheduler():
+    from vllm.exceptions import VLLMValidationError
+    from vllm.v1.engine import StreamAdmissionContext, StreamAdmissionId
+
+    core = object.__new__(EngineCore)
+    core.scheduler = create_scheduler()
+    payload = _stream_request()
+    payload.stream_admission = StreamAdmissionContext(
+        "frontend", StreamAdmissionId("epoch", 1)
+    )
+    with pytest.raises(VLLMValidationError, match="requires persistent state"):
+        core.preprocess_add_request(payload)
 
 
 def test_state_model_failure_retires_only_matching_live_handle():

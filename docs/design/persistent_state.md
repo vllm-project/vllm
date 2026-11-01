@@ -34,6 +34,10 @@ A model declares its state by constructing a
   `ModelState.state_slots`. Models that write state from a stream other than the
   runner's main stream must register that stream with
   `StateSlotBindings.register_writing_stream` before enqueueing the writes.
+- The engine core selects `StateScheduler`
+  (`vllm/v1/core/sched/state_scheduler.py`) when the KV cache layout holds
+  persistent state. A configured `scheduler_cls` must subclass it and must not
+  be an async scheduler.
 - Preempting a request with persistent state finishes it with an error instead
   of recomputing it, because the state cannot be rebuilt from tokens.
 - A resumable request parks for its next input only when a turn stops on EOS.
@@ -101,7 +105,8 @@ Input is then sent as ordinary resumable updates for the same request ID with
 `EngineCoreRequest.stream_admission` set to the admission identity; setting
 `input_closed=True`, or sending a non-resumable update, closes input. Rejected
 updates are reported on `EngineCoreOutput.stream_output` without ending the
-session.
+session. An engine without persistent state refuses any update that carries
+`stream_admission` as a validation error.
 
 The engine expires sessions on its own monotonic clock, including while idle,
 and aborts expired sessions with an error output. Configure the deadlines and

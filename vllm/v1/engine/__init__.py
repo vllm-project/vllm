@@ -176,7 +176,6 @@ StreamUpdateRejection = Literal[
     "identity_mismatch",
     "input_closed",
     "empty_update",
-    "unsupported_admission",
     "preprocessing_error",
     "shutdown",
     "mm_cache_miss",

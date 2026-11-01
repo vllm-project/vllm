@@ -28,7 +28,7 @@ from vllm.v1.kv_cache_interface import StateSlotHandle
 from vllm.v1.request import Request, RequestStatus
 
 if TYPE_CHECKING:
-    from vllm.v1.core.sched.scheduler import Scheduler
+    from vllm.v1.core.sched.state_scheduler import StateScheduler
 
 
 @dataclass
@@ -85,7 +85,7 @@ class StreamAdmissions:
     int64 sequence exhaustion; old sessions keep their original tags and handles.
     """
 
-    def __init__(self, scheduler: "Scheduler", config: StreamAdmissionConfig):
+    def __init__(self, scheduler: "StateScheduler", config: StreamAdmissionConfig):
         self.scheduler = scheduler
         self.config = config
         self.manager = next(

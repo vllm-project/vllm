@@ -26,7 +26,7 @@ from vllm.v1.core.kv_cache_planning import (
     get_kv_cache_configs,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.sched.state_scheduler import StateScheduler
 from vllm.v1.engine import (
     EngineCoreRequest,
     StreamAdmissionContext,
@@ -56,7 +56,7 @@ SPEC = PersistentStateSpec(
 )
 
 
-def build_scheduler(num_pages: int) -> Scheduler:
+def build_scheduler(num_pages: int) -> StateScheduler:
     # Only the model's config is fetched; no weights are loaded.
     model_config = ModelConfig(
         model="facebook/opt-125m", max_model_len=32, skip_tokenizer_init=True
@@ -84,7 +84,7 @@ def build_scheduler(num_pages: int) -> Scheduler:
     )
     # The engine core records the planned block (slot) count before scheduling.
     vllm_config.cache_config.num_gpu_blocks = kv_cache_config.num_blocks
-    return Scheduler(
+    return StateScheduler(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
         block_size=1,
