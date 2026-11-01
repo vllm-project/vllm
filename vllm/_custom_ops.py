@@ -745,6 +745,32 @@ def moe_gptq_gemm_rdna3(
     )
 
 
+def moe_w4a8_decode_rdna3(
+    out: torch.Tensor,
+    x: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    w13: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w13_zp: torch.Tensor | None,
+    w2: torch.Tensor,
+    w2_scale: torch.Tensor,
+    w2_zp: torch.Tensor | None,
+) -> None:
+    torch.ops._rocm_C.moe_w4a8_decode_rdna3(
+        out,
+        x,
+        topk_ids,
+        topk_weights,
+        w13,
+        w13_scale,
+        w13_zp,
+        w2,
+        w2_scale,
+        w2_zp,
+    )
+
+
 # cutlass
 def cutlass_scaled_mm_supports_fp4(cuda_device_capability: int) -> bool:
     return torch.ops._C.cutlass_scaled_mm_supports_fp4(cuda_device_capability)
