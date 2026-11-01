@@ -2,13 +2,41 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+import socket
 
 import torch
 import torch.distributed as dist
 
 from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.distributed.utils import StatelessProcessGroup
-from vllm.utils.network_utils import get_ip, get_open_port
+from vllm.utils.network_utils import get_ip
+
+
+def _create_stateless_process_group() -> StatelessProcessGroup:
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+    listen_socket: socket.socket | None = None
+    endpoint: list[str | int | None] = [None, None]
+
+    if rank == 0:
+        ip = get_ip()
+        listen_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listen_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listen_socket.bind((ip, 0))
+        listen_socket.listen()
+        endpoint[:] = [ip, listen_socket.getsockname()[1]]
+
+    dist.broadcast_object_list(endpoint, src=0)
+    ip, port = endpoint
+    assert isinstance(ip, str)
+    assert isinstance(port, int)
+    return StatelessProcessGroup.create(
+        ip,
+        port,
+        rank,
+        world_size,
+        listen_socket=listen_socket,
+    )
 
 
 def _run_test(pg):
@@ -24,18 +52,7 @@ def _run_test(pg):
 
 if __name__ == "__main__":
     dist.init_process_group(backend="gloo")
-
-    rank = dist.get_rank()
-    if rank == 0:
-        port = get_open_port()
-        ip = get_ip()
-        dist.broadcast_object_list([ip, port], src=0)
-    else:
-        recv = [None, None]
-        dist.broadcast_object_list(recv, src=0)
-        ip, port = recv
-
-    stateless_pg = StatelessProcessGroup.create(ip, port, rank, dist.get_world_size())
+    stateless_pg = _create_stateless_process_group()
 
     for pg in [dist.group.WORLD, stateless_pg]:
         if os.environ.get("VLLM_TEST_WITH_DEFAULT_DEVICE_SET", "0") == "1":
