@@ -249,7 +249,14 @@ def triton_scaled_mm(
         and (block_size_n & (block_size_n - 1)) == 0
         and (block_size_k & (block_size_k - 1)) == 0
     )
-    if use_td and input.device not in _TD_ALLOCATOR_DEVICES:
+    # XPU Triton lowers tensor descriptors to 2D block IO and needs no global
+    # scratch allocator. Skipping it also keeps triton.set_allocator out of the
+    # torch.compile graph, which otherwise breaks split_module.
+    if (
+        use_td
+        and not input.is_xpu
+        and input.device not in _TD_ALLOCATOR_DEVICES
+    ):
         set_triton_allocator(input.device)
         _TD_ALLOCATOR_DEVICES.add(input.device)
 
