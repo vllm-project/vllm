@@ -263,6 +263,9 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
     ):
         lora_context = self._lora_context
         assert lora_context is not None, "LoRA context must be set"
+        if apply_router_weight_on_input:
+            # prepare() already scaled the input; don't weight the output again.
+            topk_weights = torch.ones_like(topk_weights)
         num_tokens = hidden_states.size(0)
         top_k = self.topk
         intermediate_size = self.intermediate_size_per_partition

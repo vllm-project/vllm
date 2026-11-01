@@ -126,7 +126,11 @@ class LoRAExpertsMixin:
         w2: torch.Tensor,
         top_k_num: int,
         add_inputs: bool = True,
+        mul_routed_weight: bool = True,
     ) -> None:
+        if not mul_routed_weight:
+            # The op's mul_routed_weight also picks the row mapping; keep it.
+            topk_weights = torch.ones_like(topk_weights)
         w2_lora_b_stacked = lora_context.w2_lora_b_stacked
         if lora_context.enable_moe_shared_loras:
             # w2 lora_B is shared across experts (collapsed expert-dim 1);
