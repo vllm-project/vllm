@@ -75,15 +75,13 @@ _TIER_POLL_LOCK_TIMEOUT_S = 1.0
 # Warn after this much continuous failure to acquire the lock. Above the 5 s
 # warning drain_jobs() emits, so a slow reset_cache() does not warn twice.
 _TIER_POLL_STALL_WARN_S = 30.0
-# Give up after rounds have failed continuously for this long. Counted in time,
-# not rounds: at the default 1 ms interval a round budget is spent in a blink,
-# so a transient fault (a peer reconnecting) would turn the thread off for
-# good. on_schedule_end() still serves the tiers, so the fallback is per-step
-# servicing rather than none.
-_TIER_POLL_GIVE_UP_AFTER_S = 30.0
-# Minimum spacing between logged tracebacks for a run of failing rounds, which
-# would otherwise log one per interval.
-_TIER_POLL_ERROR_LOG_INTERVAL_S = 1.0
+# Back off after this much continuous failure (time, not rounds, so a brief
+# fault doesn't trip it). Never exit: an idle engine would leave peers unserved.
+_TIER_POLL_BACK_OFF_AFTER_S = 30.0
+# Minimum wait between rounds while backing off.
+_TIER_POLL_BACKOFF_S = 1.0
+# Minimum spacing between failure logs.
+_TIER_POLL_ERROR_LOG_INTERVAL_S = 30.0
 # How long shutdown() waits for the thread to finish its round.
 _TIER_POLL_JOIN_TIMEOUT_S = 5.0
 
@@ -109,6 +107,13 @@ class RequestState:
 class JobMetadata(NamedTuple):
     transfer_job: TransferJob
     tier_idx: int
+
+
+class _DeferredRelease(NamedTuple):
+    event: threading.Event
+    tier_idx: int
+    chunk_ids: list[int]
+    deferred_at: float
 
 
 class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
@@ -144,6 +149,9 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         self.complete_read = self.complete_load
         self.prepare_write = self.prepare_store
         self.complete_write = self.complete_store
+        # Chunks of failed writes the writer may still be filling; their
+        # release to the free pool is deferred until release_deferred_write().
+        self._deferred_release_chunk_ids: set[int] = set()
 
         self._kv_memoryview = mmap_region.create_kv_memoryview()
 
@@ -156,6 +164,54 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         request accesses, so they must not alter request-scoped recency.
         """
         return self._prepare_load(keys, req_context, record_access=False)
+
+    def defer_write_release(self, keys: Collection[OffloadKey]) -> list[int]:
+        """Fail pending writes like ``complete_write(False)``, deferring the release.
+
+        The keys leave the cache (lookups miss and a later store allocates a
+        fresh chunk), while the chunks stay counted as write-pending and out
+        of the free pool. Returns the deferred chunk ids, to be passed to
+        ``release_deferred_write`` once the writer can no longer touch them.
+        """
+        chunk_ids: list[int] = []
+        for key in keys:
+            chunk = self._policy.get(key)
+            # Every key must still be pending, or a chunk the tier may still
+            # write to would go unheld.
+            assert chunk is not None and not chunk.is_ready, (
+                f"defer_write_release: key {key!r} is not a pending write"
+            )
+            self._policy.remove(key)
+            self._deferred_release_chunk_ids.add(chunk.chunk_id)
+            chunk_ids.append(chunk.chunk_id)
+        if chunk_ids and self.events is not None:
+            self.events.append(
+                OffloadingEvent(
+                    keys=list(keys),
+                    medium=self.medium,
+                    removed=True,
+                    metadata_only=True,
+                )
+            )
+        return chunk_ids
+
+    def release_deferred_write(self, chunk_ids: Iterable[int]) -> None:
+        """Complete a deferred release: return the chunks to the free pool."""
+        for chunk_id in chunk_ids:
+            self._deferred_release_chunk_ids.remove(chunk_id)
+            self._num_write_pending_chunks -= 1
+            self._free_list.append(chunk_id)
+
+    @property
+    def num_deferred_release_chunks(self) -> int:
+        return len(self._deferred_release_chunk_ids)
+
+    @override
+    def reset_cache(self) -> None:
+        assert not self._deferred_release_chunk_ids, (
+            "reset_cache with deferred-release chunks: a tier may still write to them"
+        )
+        super().reset_cache()
 
     def get_kv_memoryview(self) -> memoryview:
         """Return the memoryview over the primary tier's KV cache buffer.
@@ -250,6 +306,9 @@ class TieringOffloadingManager(OffloadingManager):
         #   True:  secondary → primary (promotion)
         #   False: primary → secondary (cascade)
         self._jobs: dict[JobId, JobMetadata] = {}
+        # Finished promotions whose failed chunks await release until the tier
+        # sets their JobResult.deferred_release event.
+        self._deferred_releases: dict[JobId, _DeferredRelease] = {}
         # Set by reset_cache() until on_reset_flushed(); see lookup().
         self._promotions_held = False
         primary_view = self.primary_tier.get_kv_memoryview()
@@ -346,9 +405,12 @@ class TieringOffloadingManager(OffloadingManager):
 
     def _tier_poll_loop(self) -> None:
         stalled_since: float | None = None
-        # Start of the current run of failed rounds, and when one last logged.
+        # Current failure run: start, count, and last log time.
         failing_since: float | None = None
+        failures = 0
         last_error_log = 0.0
+        backing_off = False
+        backoff_s = max(self._tier_poll_interval_s, _TIER_POLL_BACKOFF_S)
         while not self._tier_poll_stop.is_set():
             if not self._lock.acquire(timeout=_TIER_POLL_LOCK_TIMEOUT_S):
                 now = time.monotonic()
@@ -367,28 +429,45 @@ class TieringOffloadingManager(OffloadingManager):
             try:
                 self.poll_tiers()
                 failing_since = None
+                failures = 0
             except Exception:
-                # Never let a round kill the thread silently: on_schedule_end()
-                # still serves these tiers, so persistent failure degrades to
-                # per-step servicing instead of stopping the tier-poll thread.
+                # Keep retrying so peers are served while idle. Rate-limit
+                # logs: traceback on the first failure, a summary after.
                 now = time.monotonic()
                 if failing_since is None:
                     failing_since = now
+                failures += 1
                 if now - last_error_log >= _TIER_POLL_ERROR_LOG_INTERVAL_S:
                     last_error_log = now
-                    logger.exception("KV offload tier-poll round failed")
+                    if failures == 1:
+                        logger.exception("KV offload tier-poll round failed")
+                    else:
+                        logger.warning(
+                            "KV offload tier-poll thread has failed %d "
+                            "consecutive rounds (%.0fs); still retrying so "
+                            "peers are served while the engine is idle.",
+                            failures,
+                            now - failing_since,
+                        )
             finally:
                 self._lock.release()
             if (
                 failing_since is not None
-                and time.monotonic() - failing_since >= _TIER_POLL_GIVE_UP_AFTER_S
+                and time.monotonic() - failing_since >= _TIER_POLL_BACK_OFF_AFTER_S
             ):
-                logger.error(
-                    "KV offload tier-poll thread stopping after %.0fs of "
-                    "consecutive failures; falling back to per-step servicing.",
-                    _TIER_POLL_GIVE_UP_AFTER_S,
-                )
-                return
+                if not backing_off:
+                    logger.error(
+                        "KV offload tier-poll thread backing off to %.1fs "
+                        "after %.0fs of consecutive failures; it keeps "
+                        "retrying so peers are still served while the engine "
+                        "is idle.",
+                        backoff_s,
+                        _TIER_POLL_BACK_OFF_AFTER_S,
+                    )
+                    backing_off = True
+                self._tier_poll_stop.wait(backoff_s)
+                continue
+            backing_off = False
             # Yield unconditionally, and only after release(). Python locks are
             # not fair, so a release-then-reacquire loop could starve the
             # scheduler thread; this pause is what bounds its wait to one round.
@@ -491,7 +570,18 @@ class TieringOffloadingManager(OffloadingManager):
                 transfer_job.req_context,
                 True,
             )
-        if failed_keys:
+        if not failed_keys:
+            assert completed_job.deferred_release is None
+        elif completed_job.deferred_release is not None:
+            chunk_ids = self.primary_tier.defer_write_release(failed_keys)
+            self._deferred_releases[completed_job.job_id] = _DeferredRelease(
+                event=completed_job.deferred_release,
+                tier_idx=job_metadata.tier_idx,
+                chunk_ids=chunk_ids,
+                deferred_at=time.monotonic(),
+            )
+            self._metrics.on_release_deferred(job_metadata.tier_idx, len(chunk_ids))
+        else:
             self.primary_tier.complete_write(
                 failed_keys,
                 transfer_job.req_context,
@@ -534,6 +624,9 @@ class TieringOffloadingManager(OffloadingManager):
                     f" but belongs to tier #{job_metadata.tier_idx}"
                 )
                 transfer_job = job_metadata.transfer_job
+                assert (
+                    transfer_job.is_promotion or completed_job.deferred_release is None
+                )
                 self._metrics.on_job_finished(job_metadata, completed_job)
 
                 if transfer_job.is_promotion:
@@ -547,6 +640,22 @@ class TieringOffloadingManager(OffloadingManager):
                         transfer_job.keys, transfer_job.req_context
                     )
                     self._update_backpressure(tier, job_metadata, completed_job)
+            if self._deferred_releases:
+                self._complete_deferred_releases(i)
+
+    def _complete_deferred_releases(self, tier_idx: int) -> None:
+        released = [
+            job_id
+            for job_id, deferred in self._deferred_releases.items()
+            if deferred.tier_idx == tier_idx and deferred.event.is_set()
+        ]
+        now = time.monotonic()
+        for job_id in released:
+            deferred = self._deferred_releases.pop(job_id)
+            self.primary_tier.release_deferred_write(deferred.chunk_ids)
+            self._metrics.on_deferred_release_done(
+                tier_idx, len(deferred.chunk_ids), now - deferred.deferred_at
+            )
 
     def _should_store_to_tier(
         self, tier: SecondaryTierManager, num_blocks: int
@@ -1116,11 +1225,21 @@ class TieringOffloadingManager(OffloadingManager):
 
     @override
     def has_pending_work(self) -> bool:
-        # In-flight primary<->secondary transfers (pending promotions are
-        # translated to transfer jobs in on_schedule_end), plus any work the
-        # secondary tiers themselves still have outstanding.
+        """Report whether outstanding work needs an engine step to finish.
+
+        Work a live tier-poll thread finishes on its own is excluded, so an
+        engine that only serves peers can go idle.
+        """
+        if self._polled_tiers:
+            # Without a live thread, or with another tier a peer lookup can
+            # promote from, only a step makes progress.
+            thread = self._tier_poll_thread
+            if thread is None or not thread.is_alive() or len(self.secondary_tiers) > 1:
+                return True
+            return any(state.pending_cascade_keys for state in self._req_state.values())
         return (
             bool(self._jobs)
+            or bool(self._deferred_releases)
             or any(state.pending_cascade_keys for state in self._req_state.values())
             or any(tier.has_pending_work() for tier in self.secondary_tiers)
         )
@@ -1167,6 +1286,9 @@ class TieringOffloadingManager(OffloadingManager):
         # so manager bookkeeping is consistent before the primary reset.
         self._process_finished_jobs()
         assert not self._jobs
+        assert not self._deferred_releases, (
+            "drain_jobs() returned with deferred releases still pending"
+        )
 
         # Deferred promotion submissions reserve primary slots that the
         # reset below invalidates; their submit_load() has not yet been

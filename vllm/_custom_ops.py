@@ -1987,6 +1987,222 @@ def scaled_int8_quant(
     return output, input_scales, input_azp
 
 
+def gather_block_table_cpu(
+    block_table: torch.Tensor,
+    output: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    num_blocks: torch.Tensor,
+    num_reqs_padded: int,
+) -> None:
+    torch.ops._C.gather_block_table_cpu(
+        block_table,
+        output,
+        idx_mapping,
+        num_blocks,
+        num_reqs_padded,
+    )
+
+
+def compute_slot_mapping_cpu(
+    block_table: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    positions: torch.Tensor,
+    block_size: int,
+    mapping_enabled: bool,
+    pad_slot_id: int,
+) -> None:
+    torch.ops._C.compute_slot_mapping_cpu(
+        block_table,
+        slot_mapping,
+        idx_mapping,
+        query_start_loc,
+        positions,
+        block_size,
+        mapping_enabled,
+        pad_slot_id,
+    )
+
+
+def prepare_prefill_inputs_cpu(
+    input_ids: torch.Tensor,
+    next_prefill_tokens: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    all_token_ids: torch.Tensor,
+    prefill_len: torch.Tensor,
+    num_computed_tokens: torch.Tensor,
+) -> None:
+    torch.ops._C.prepare_prefill_inputs_cpu(
+        input_ids,
+        next_prefill_tokens,
+        idx_mapping,
+        query_start_loc,
+        all_token_ids,
+        prefill_len,
+        num_computed_tokens,
+    )
+
+
+def get_prompt_logprobs_token_ids_cpu(
+    num_tokens: int,
+    query_start_loc: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    num_computed_tokens: torch.Tensor,
+    all_token_ids: torch.Tensor,
+) -> torch.Tensor:
+    return torch.ops._C.get_prompt_logprobs_token_ids_cpu(
+        num_tokens,
+        query_start_loc,
+        idx_mapping,
+        num_computed_tokens,
+        all_token_ids,
+    )
+
+
+def prepare_pos_seq_lens_cpu(
+    idx_mapping: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    num_computed_tokens: torch.Tensor,
+    pos: torch.Tensor,
+    seq_lens: torch.Tensor,
+) -> None:
+    torch.ops._C.prepare_pos_seq_lens_cpu(
+        idx_mapping,
+        query_start_loc,
+        num_computed_tokens,
+        pos,
+        seq_lens,
+    )
+
+
+def prepare_mrope_positions_cpu(
+    positions: torch.Tensor,
+    prefill_positions: torch.Tensor,
+    prefill_delta: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    prefill_lens: torch.Tensor,
+    num_computed_tokens: torch.Tensor,
+) -> None:
+    torch.ops._C.prepare_mrope_positions_cpu(
+        positions,
+        prefill_positions,
+        prefill_delta,
+        idx_mapping,
+        query_start_loc,
+        prefill_lens,
+        num_computed_tokens,
+    )
+
+
+def combine_sampled_and_draft_tokens_cpu(
+    input_ids: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    last_sampled_tokens: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    prefill_len: torch.Tensor,
+    draft_tokens: torch.Tensor,
+    cu_num_logits: torch.Tensor,
+    num_logits: int,
+    num_new_sampled_tokens: int,
+) -> torch.Tensor:
+    return torch.ops._C.combine_sampled_and_draft_tokens_cpu(
+        input_ids,
+        idx_mapping,
+        last_sampled_tokens,
+        query_start_loc,
+        seq_lens,
+        prefill_len,
+        draft_tokens,
+        cu_num_logits,
+        num_logits,
+        num_new_sampled_tokens,
+    )
+
+
+def post_update_cpu(
+    idx_mapping: torch.Tensor,
+    num_computed_tokens: torch.Tensor,
+    last_sampled_tokens: torch.Tensor,
+    output_bin_counts: torch.Tensor | None,
+    sampled_tokens: torch.Tensor,
+    num_sampled: torch.Tensor,
+    num_rejected: torch.Tensor,
+    query_start_loc: torch.Tensor | None,
+    all_token_ids: torch.Tensor,
+    total_len: torch.Tensor,
+) -> None:
+    torch.ops._C.post_update_cpu(
+        idx_mapping,
+        num_computed_tokens,
+        last_sampled_tokens,
+        output_bin_counts,
+        sampled_tokens,
+        num_sampled,
+        num_rejected,
+        query_start_loc,
+        all_token_ids,
+        total_len,
+    )
+
+
+def gumbel_sample_cpu(
+    logits: torch.Tensor,
+    expanded_idx_mapping: torch.Tensor,
+    temperature: torch.Tensor,
+    seeds: torch.Tensor,
+    positions: torch.Tensor,
+    apply_temperature: bool,
+    is_drafting: bool,
+    use_fp64: bool,
+) -> torch.Tensor:
+    return torch.ops._C.gumbel_sample_cpu(
+        logits,
+        expanded_idx_mapping,
+        temperature,
+        seeds,
+        positions,
+        apply_temperature,
+        is_drafting,
+        use_fp64,
+    )
+
+
+def apply_logit_bias_cpu(
+    logits: torch.Tensor,
+    expanded_idx_mapping: torch.Tensor,
+    positions: torch.Tensor,
+    num_allowed_token_ids: torch.Tensor,
+    allowed_token_ids: torch.Tensor,
+    num_logit_bias: torch.Tensor,
+    logit_bias_token_ids: torch.Tensor,
+    logit_bias: torch.Tensor,
+    min_lens: torch.Tensor,
+    num_stop_token_ids: torch.Tensor,
+    restore_when_all_masked: torch.Tensor,
+    stop_token_ids: torch.Tensor,
+    check_all_masked_rows: bool,
+) -> None:
+    torch.ops._C.apply_logit_bias_cpu(
+        logits,
+        expanded_idx_mapping,
+        positions,
+        num_allowed_token_ids,
+        allowed_token_ids,
+        num_logit_bias,
+        logit_bias_token_ids,
+        logit_bias,
+        min_lens,
+        num_stop_token_ids,
+        restore_when_all_masked,
+        stop_token_ids,
+        check_all_masked_rows,
+    )
+
+
 # mamba
 def selective_scan_fwd(
     u: torch.Tensor,
@@ -2426,6 +2642,28 @@ def topk_sigmoid(
     )
 
 
+def muse_spark_routing(
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    logits: torch.Tensor,
+    bias: torch.Tensor,
+    multiplier: float,
+    route_scale: float,
+    division_eps: float,
+    is_padding: torch.Tensor | None = None,
+) -> None:
+    torch.ops._moe_C.muse_spark_routing(
+        topk_weights,
+        topk_ids,
+        logits,
+        bias,
+        multiplier,
+        route_scale,
+        division_eps,
+        is_padding,
+    )
+
+
 def topk_hash_softplus_sqrt(
     topk_weights: torch.Tensor,
     topk_indices: torch.Tensor,
@@ -2782,6 +3020,7 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
     q_fp8_scale: float = 1.0,
     kv_k_scale: torch.Tensor | None = None,
     kv_v_scale: torch.Tensor | None = None,
+    write_qkv: bool = True,
 ) -> None:
     """Fused MiniMax-M3 attention pre-processing (in-place).
 
@@ -2792,11 +3031,13 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
     - sparse layer (``num_index_heads > 0``): ``[q | k | v | index_q |
       index_k]`` — the index branch is read straight out of ``qkv``.
 
-    When ``kv_cache`` is given (sparse serving), also scatter-inserts the
-    normed/roped k & v into the paged KV cache by ``slot_mapping`` and the
-    index key into ``index_cache`` by ``index_slot_mapping``. ``kv_cache_dtype``
-    selects the cache storage/conversion path. If
-    ``index_slot_mapping`` is omitted, ``slot_mapping`` is used for both caches.
+    When ``kv_cache`` is given, also scatter-inserts the normed/roped k & v
+    into the paged KV cache by ``slot_mapping`` and, on sparse layers, the
+    index key into ``index_cache`` by ``index_slot_mapping``.
+    ``kv_cache_dtype`` selects the cache storage/conversion path; a dense
+    layer's insert stores exactly what ``reshape_and_cache_flash`` would with
+    unit k/v scales. If ``index_slot_mapping`` is omitted, ``slot_mapping`` is
+    used for both caches.
 
     If ``q_out`` / ``index_q_out`` (contiguous ``[N, nq*128]`` / ``[N,
     niq*128]``) are given, the normed/roped q / index_q are written there
@@ -2818,6 +3059,11 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
     ``[index_q | index_k]`` tail, but the kernel only processes the main q/k/v
     branches and main KV cache. This is used by MiniMax-M3 index-topk reuse
     layers that consume top-k block ids selected by an earlier sparse layer.
+
+    ``write_qkv=False`` needs ``q_fp8_out`` without ``q_out``, for callers that
+    read only the FP8 q, ``index_q_out`` and the caches: k and index_k need not
+    be rewritten in ``qkv``. The persistent kernel (SM80+, ``rotary_dim`` 64)
+    skips those stores; the fallback kernel may still make them.
     """
     torch.ops._C.fused_minimax_m3_qknorm_rope_kv_insert(
         qkv,
@@ -2845,6 +3091,47 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
         q_fp8_scale,
         kv_k_scale,
         kv_v_scale,
+        write_qkv,
+    )
+
+
+def fused_minimax_m3_dspark_context_kv(
+    all_kv: torch.Tensor,
+    k_norm_weight: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    positions: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    kv_cache: torch.Tensor,
+    cache_offsets: torch.Tensor,
+    k_scale: torch.Tensor,
+    scale_offsets: torch.Tensor,
+    rotary_dim: int,
+    eps: float,
+    kv_cache_dtype: str,
+) -> None:
+    """Store the MiniMax-M3 DSpark draft's context K/V for every layer.
+
+    ``all_kv`` ``[N, L, 2, nkv, 128]`` holds each layer's K and V. K gets the
+    layer's Gemma RMSNorm (``k_norm_weight[L, 128]``) and partial NeoX RoPE;
+    both are stored like ``reshape_and_cache_flash`` into the layers' caches.
+    Layer ``l``'s cache is ``kv_cache`` (layer 0, ``[nb, nkv, bs, 2 * 128]``)
+    shifted by ``cache_offsets[l]`` elements; its fp8 k/v scales are
+    ``k_scale`` (layer 0's) shifted by ``scale_offsets[0, l]`` /
+    ``scale_offsets[1, l]`` floats. Slots < 0 are skipped.
+    """
+    torch.ops._C.fused_minimax_m3_dspark_context_kv(
+        all_kv,
+        k_norm_weight,
+        cos_sin_cache,
+        positions,
+        slot_mapping,
+        kv_cache,
+        cache_offsets,
+        k_scale,
+        scale_offsets,
+        rotary_dim,
+        eps,
+        kv_cache_dtype,
     )
 
 
@@ -3177,6 +3464,7 @@ def cp_gather_and_upconvert_nvfp4_kv_cache(
     block_table: torch.Tensor,
     workspace_starts: torch.Tensor,
     batch_size: int,
+    seq_starts: torch.Tensor | None = None,
 ) -> None:
     """Gather and upconvert an nvfp4_ds_mla KV cache to a BF16 workspace.
 
@@ -3186,6 +3474,8 @@ def cp_gather_and_upconvert_nvfp4_kv_cache(
         block_table: Block indices [num_reqs, max_blocks]
         workspace_starts: Workspace start offsets [num_reqs]
         batch_size: Number of requests
+        seq_starts: Per-request token offset into the context to start
+            reading from [num_reqs]; None reads from the first token.
 
     """
     torch.ops._C_cache_ops.cp_gather_and_upconvert_nvfp4_kv_cache(
@@ -3194,6 +3484,7 @@ def cp_gather_and_upconvert_nvfp4_kv_cache(
         block_table,
         workspace_starts,
         batch_size,
+        seq_starts,
     )
 
 
