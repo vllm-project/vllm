@@ -186,6 +186,8 @@ class FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearKernel):
 class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
     """NVFP4 GEMM via FlashInfer's CUTLASS wrapper."""
 
+    _flashinfer_backend = "cutlass"
+
     def input_quant_key(self) -> QuantKey | None:
         """This kernel supports dynamic quantization of the input. By
         convention, pre-quantized blockscales must use the swizzled layout."""
@@ -255,7 +257,7 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
             layer.weight_scale,
             layer.alpha,
             output_dtype,
-            backend="cutlass",
+            backend=self._flashinfer_backend,
         )
 
         out = slice_nvfp4_output(out, output_size)
@@ -263,6 +265,14 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
         if bias is not None:
             out = out + bias
         return out.view(*output_shape)
+
+
+class FlashInferAutoNvFp4LinearKernel(FlashInferCutlassNvFp4LinearKernel):
+    """NVFP4 GEMM via FlashInfer mm_fp4(backend="auto") on the CUTLASS weight
+    layout. FlashInfer's auto candidates (CUTLASS and cuDNN on SM10x) share
+    that layout; TRT-LLM, which needs shuffled weights, is never one of them."""
+
+    _flashinfer_backend = "auto"
 
 
 class FlashInferTrtllmNvFp4LinearKernel(NvFp4LinearKernel):

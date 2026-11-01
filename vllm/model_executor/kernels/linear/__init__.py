@@ -156,6 +156,7 @@ from vllm.model_executor.kernels.linear.nvfp4.fbgemm import (
     FbgemmNvFp4LinearKernel,
 )
 from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
+    FlashInferAutoNvFp4LinearKernel,
     FlashInferB12xNvFp4LinearKernel,
     FlashInferCudnnNvFp4LinearKernel,
     FlashInferCuteDslNvFp4LinearKernel,
@@ -298,6 +299,11 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
         CutlassFp8BlockScaledMMKernel,
         CutlassW4A8LinearKernel,
         CutlassNvFp4LinearKernel,
+    },
+    # Kernels that let FlashInfer pick the backend (backend="auto").
+    "flashinfer": {
+        FlashInferFP8ScaledMMLinearKernel,
+        FlashInferAutoNvFp4LinearKernel,
     },
     "flashinfer_cutlass": {
         FlashInferFP8ScaledMMLinearKernel,
@@ -606,6 +612,8 @@ _POSSIBLE_NVFP4_KERNELS: dict[PlatformEnum, list[type[NvFp4LinearKernel]]] = {
         TorchNvFp4LinearKernel,
         EmulationNvFp4LinearKernel,
         HummingNvFp4LinearKernel,
+        # Only with --linear-backend=flashinfer.
+        FlashInferAutoNvFp4LinearKernel,
     ],
     PlatformEnum.ROCM: [
         EmulationNvFp4LinearKernel,
@@ -1447,6 +1455,7 @@ __all__ = [
     "CutlassNvFp4LinearKernel",
     "EmulationNvFp4LinearKernel",
     "FbgemmNvFp4LinearKernel",
+    "FlashInferAutoNvFp4LinearKernel",
     "FlashInferCuteDslNvFp4LinearKernel",
     "FlashInferCuteDslNvFp4W4A16LinearKernel",
     "FlashInferB12xNvFp4LinearKernel",
