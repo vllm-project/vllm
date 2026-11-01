@@ -132,6 +132,14 @@ When no backend is specified (the default):
 4. If no backend is compatible, an error is raised listing all backends and
    their incompatibility reasons
 
+!!! note "Pre-SM80 GPUs (Turing, e.g. T4)"
+    FlashAttention requires SM80+, so on pre-SM80 GPUs automatic selection
+    usually falls back to a Triton-based backend (`TRITON_ATTN` or
+    `FLEX_ATTENTION`). With current Triton releases these kernels do not use
+    tensor cores on pre-SM80 GPUs, so prefill can be much slower than on
+    newer hardware. vLLM logs a one-time warning when this happens. See
+    [#60821](https://github.com/vllm-project/vllm/issues/60821) for status.
+
 ## Backend Priority (CUDA)
 
 When no backend is explicitly selected, vLLM chooses the first
