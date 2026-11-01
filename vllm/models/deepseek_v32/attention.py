@@ -32,7 +32,10 @@ from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV32IndexerCache,
     yarn_get_mscale,
 )
-from vllm.model_executor.models.utils import extract_layer_index
+from vllm.model_executor.models.utils import (
+    compute_skip_topk_layers,
+    extract_layer_index,
+)
 from vllm.models.deepseek_v32.common.kernels import fused_norm_rope, fused_q
 from vllm.platforms import current_platform
 from vllm.v1.attention.ops.pcp import (
@@ -169,17 +172,7 @@ class DeepseekV32Attention(MLAAttention):
             scaling = scaling * mscale * mscale
 
         layer_id = extract_layer_index(prefix)
-        index_topk_freq = getattr(config, "index_topk_freq", 1)
-        index_topk_pattern = getattr(config, "index_topk_pattern", None)
-        index_skip_topk_offset = getattr(config, "index_skip_topk_offset", 2)
-        if index_topk_pattern is None:
-            skip_topk = (
-                max(layer_id - index_skip_topk_offset + 1, 0) % index_topk_freq != 0
-            )
-        elif 0 <= layer_id < len(index_topk_pattern):
-            skip_topk = index_topk_pattern[layer_id] == "S"
-        else:
-            skip_topk = False
+        skip_topk = layer_id in compute_skip_topk_layers(config)
 
         num_hidden_layers = getattr(config, "num_hidden_layers", None)
         is_mtp_layer = num_hidden_layers is not None and layer_id >= num_hidden_layers
