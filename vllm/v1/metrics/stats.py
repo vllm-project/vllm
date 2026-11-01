@@ -132,6 +132,10 @@ class PrefixCacheStats(BaseCacheStats):
 
     preempted_hits: int = 0
     """The `hits` number for preempted requests."""
+
+    evicted_blocks: int = 0
+    """Cached blocks evicted to make room for new blocks (local cache only)."""
+
     hits_by_source: dict[CacheHitSource, int] = field(default_factory=dict)
     """`hits` split by the cache tier that supplied them (connector stats only)."""
 
