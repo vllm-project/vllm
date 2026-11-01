@@ -215,6 +215,21 @@ RUN --mount=type=cache,id=vllm-rocm-ccache,target=/root/.cache/ccache \
  && git checkout ${DEEPEP_BRANCH} \
  && LDFLAGS="-fuse-ld=mold" MAX_JOBS="${MAX_JOBS:-$(nproc)}" python3 setup.py --variant rocm --rocm-explicit-ctx --nic ${DEEPEP_NIC} --rocm-gfx942-fp8-fnuz-max 224 bdist_wheel --dist-dir=/app/deep_install
 
+# mamba-ssm and causal-conv1d, the fast path transformers uses for the hybrid-model references in the
+# language model tests. CI only. Their setup.py targets HIP_ARCHITECTURES (default: the local GPU).
+FROM dev AS build_mamba
+ARG MAMBA_COMMIT="269cbe654d10883374736eb936e61d3ee5625695"
+ARG CAUSAL_CONV1D_COMMIT="da6dbaa9fd5a919967f14d3fd031da1288ad5025"
+ARG HIP_ARCHITECTURES="gfx942,gfx950"
+RUN MAMBA_FORCE_BUILD=TRUE CAUSAL_CONV1D_FORCE_BUILD=TRUE \
+    python3 -m pip wheel --no-build-isolation --no-deps -w /app/mamba_install \
+        "git+https://github.com/AndreasKaratzas/mamba@${MAMBA_COMMIT}" \
+        "git+https://github.com/Dao-AILab/causal-conv1d@${CAUSAL_CONV1D_COMMIT}" \
+    && for w in /app/mamba_install/*.whl; do python3 -m zipfile -e "$w" /tmp/whl; done \
+    && for so in /tmp/whl/*.so; do for a in $(echo "$HIP_ARCHITECTURES" | tr , ' '); do \
+         llvm-objdump --offloading "$so" | grep -qw "$a" || { echo "$so lacks $a" >&2; exit 1; }; done; done \
+    && rm -rf /tmp/whl
+
 # rdma-core recent enough for DeepEP's rocshmem. CI only: it replaces the distro libibverbs, which
 # the vendor NIC providers in the runtime (AINIC, Broadcom bnxt_re) are built against.
 FROM dev AS build_rdma_core
@@ -363,6 +378,9 @@ RUN --mount=type=bind,source=requirements/test/rocm.txt,target=/t.txt --mount=ty
     sp="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')" \
     && pip freeze --path "$sp" | sort >/tmp/shipped && uv pip install --system -c /etc/rocm-constraints.txt -r /t.txt /tu \
     && ! pip freeze --path "$sp" | sort | comm -23 /tmp/shipped - | grep . # a test dep changed a shipped package (apt's python3-* may be shadowed)
+RUN --mount=type=bind,from=build_mamba,src=/app/mamba_install,target=/mamba \
+    --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
+    uv pip install --system --no-deps /mamba/*.whl
 ENV HF_XET_HIGH_PERFORMANCE=1
 
 # ==== per-commit stages: nothing below is part of the runtime key ====
