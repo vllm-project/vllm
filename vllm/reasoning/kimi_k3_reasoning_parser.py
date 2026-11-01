@@ -174,7 +174,11 @@ class KimiK3ReasoningParser(ReasoningParser):
         )
 
     def is_reasoning_end_streaming(
-        self, input_ids: Sequence[int], delta_ids: Iterable[int]
+        self,
+        input_ids: Sequence[int],
+        delta_ids: Iterable[int],
+        *,
+        prompt_len: int = 0,
     ) -> bool:
         """Reasoning-end check for a single decode step.
 
@@ -194,7 +198,13 @@ class KimiK3ReasoningParser(ReasoningParser):
             return False
         carry = max(len(self._think_close_ids), len(self._think_open_ids)) - 1
         head = len(input_ids) - len(delta)
-        window = list(input_ids[max(0, head - carry) : head]) + delta
+        response_end = prompt_len + len(self._response_open_ids)
+        if head < response_end and self.is_response_only(
+            input_ids[prompt_len:response_end]
+        ):
+            return True
+        window_start = max(0, head - carry)
+        window = list(input_ids[window_start:head]) + delta
         return _newest_marker(window, self._think_close_ids, self._think_open_ids) == 0
 
     def _extract_content_ids(self, input_ids: list[int]) -> list[int]:
@@ -290,6 +300,12 @@ class KimiK3ReasoningParser(ReasoningParser):
         if self._should_preserve_tool_channels(request):
             return text or None
         return self._strip_content_wrapper(text) or None
+
+    def is_response_only(self, token_ids: Sequence[int]) -> bool:
+        """Whether generated tokens begin with the response control marker."""
+        return len(token_ids) >= len(self._response_open_ids) and _match_at(
+            token_ids, 0, self._response_open_ids
+        )
 
     def extract_reasoning(
         self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
@@ -425,6 +441,18 @@ class KimiK3ReasoningParser(ReasoningParser):
         self._last_streaming_content_token_ids = None
         if not self._thinking_enabled:
             return DeltaMessage(content=delta_text)
+
+        # Only actual control tokens at the start establish response-only output.
+        # Hold a split opener, but leave ordinary quoted marker text untouched.
+        if self.is_response_only(current_token_ids):
+            return DeltaMessage(content=current_text or None)
+        if (
+            current_token_ids
+            and len(current_token_ids) < len(self._response_open_ids)
+            and list(current_token_ids)
+            == self._response_open_ids[: len(current_token_ids)]
+        ):
+            return None
 
         # reasoning already ended -> downstream content
         if self._think_close_re.search(previous_text):

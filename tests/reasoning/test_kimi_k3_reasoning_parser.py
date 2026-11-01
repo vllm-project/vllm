@@ -25,7 +25,7 @@ THINK_CLOSE = f"{CLOSE}think{SEP}"
 RESPONSE_OPEN = f"{OPEN}response{SEP}"
 OPEN_IDS = [1, 2, 3]
 CLOSE_IDS = [4, 2, 3]
-RESPONSE_OPEN_IDS = [ord(ch) for ch in RESPONSE_OPEN]
+RESPONSE_OPEN_IDS = [1, 5, 3]
 
 
 class DummyTokenizer:
@@ -40,6 +40,8 @@ class DummyTokenizer:
             return [1, 2, 3]
         if text == THINK_CLOSE:
             return [4, 2, 3]
+        if text == RESPONSE_OPEN:
+            return RESPONSE_OPEN_IDS
         return [ord(ch) for ch in text]
 
 
@@ -127,6 +129,9 @@ def test_is_reasoning_end_ignores_stale_close_from_prior_turn():
     new_open = [1, 2, 3]
     # prior close, then current-turn open still unclosed -> not ended
     assert not parser.is_reasoning_end([*stale_close, *new_open])
+    assert not parser.is_reasoning_end([*RESPONSE_OPEN_IDS, *new_open])
+    # A prior response channel alone does not establish the new turn's state.
+    assert not parser.is_reasoning_end([*RESPONSE_OPEN_IDS, 9])
     # ...then the current turn emits its own close -> ended
     assert parser.is_reasoning_end([*stale_close, *new_open, *stale_close])
     # open with no close yet -> not ended
@@ -179,6 +184,96 @@ def test_count_reasoning_tokens_through_delegating_parser():
     parser = ReasoningOnlyParser(_dummy_tokenizer())
 
     assert parser.count_reasoning_tokens([*OPEN_IDS, 9, *CLOSE_IDS, 11]) == 1
+
+
+def test_response_only_transition_preserves_content():
+    parser = ReasoningOnlyParser(_dummy_tokenizer())
+    request = ChatCompletionRequest(model="test-model", messages=[])
+    body = '{"marker":"' + RESPONSE_OPEN + '"}'
+    content = ""
+    for text, ids in (
+        (OPEN + "response", RESPONSE_OPEN_IDS[:-1]),
+        (SEP + "{", [RESPONSE_OPEN_IDS[-1], ord("{")]),
+        (body[1:], list(map(ord, body[1:]))),
+    ):
+        delta = parser.parse_delta(text, ids, request, finished=False)
+        if delta:
+            assert not delta.reasoning
+            content += delta.content or ""
+    assert content == body
+    assert parser._stream_state.reasoning_ended
+
+
+@pytest.mark.parametrize("committed", [False, True])
+@pytest.mark.parametrize("prompt_ends_inside_close", [False, True])
+def test_constraint_start_with_prompt(committed, prompt_ends_inside_close):
+    from types import SimpleNamespace
+
+    from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+    from vllm.v1.request import Request
+    from vllm.v1.structured_output import StructuredOutputManager
+
+    tokenizer = DummyTokenizer()
+    reasoner = KimiK3ReasoningParser(tokenizer)
+    # The generated-output boundary must not depend on a particular template.
+    prompt = [
+        9,
+        *tokenizer.encode(f'{OPEN}message role="assistant" custom="x"{SEP}'),
+        *OPEN_IDS,
+    ]
+    if prompt_ends_inside_close:
+        prompt.extend([9, *CLOSE_IDS[:-1]])
+    request = Request(
+        request_id="test",
+        prompt_token_ids=prompt,
+        sampling_params=SamplingParams(
+            max_tokens=32,
+            structured_outputs=StructuredOutputsParams(json_object=True),
+        ),
+        pooling_params=None,
+    )
+    if prompt_ends_inside_close:
+        delta = [CLOSE_IDS[-1], ord("{")]
+    else:
+        request.append_output_token_ids(RESPONSE_OPEN_IDS[:-1])
+        # A later invalid draft opener must not hide the first transition.
+        delta = [RESPONSE_OPEN_IDS[-1], *RESPONSE_OPEN_IDS, ord("{")]
+    if committed:
+        request.append_output_token_ids(delta)
+    manager = SimpleNamespace(
+        enable_in_reasoning=False, _get_reasoner=lambda _: reasoner
+    )
+    bounds = StructuredOutputManager._get_constraint_bounds(
+        manager,
+        request,
+        delta,
+        spec_tokens_committed=committed,
+    )
+    assert bounds.grammar_start == bounds.constraint_start == 1
+
+
+def test_quoted_response_prefix_with_consumed_think_opener():
+    parser = ReasoningOnlyParser(_dummy_tokenizer())
+    request = ChatCompletionRequest(model="test-model", messages=[])
+    quoted = RESPONSE_OPEN + " is an example"
+    first = parser.parse_delta(
+        quoted,
+        list(map(ord, quoted)),
+        request,
+        finished=False,
+    )
+    assert first is not None and first.reasoning == quoted
+    assert first.content is None
+    assert not parser._stream_state.reasoning_ended
+
+    second = parser.parse_delta(
+        THINK_CLOSE + RESPONSE_OPEN + "{}",
+        [*CLOSE_IDS, *RESPONSE_OPEN_IDS, ord("{"), ord("}")],
+        request,
+        finished=True,
+    )
+    assert second is not None and second.content == "{}"
+    assert not second.reasoning
 
 
 def test_streaming_split_open_marker_is_held_back():
