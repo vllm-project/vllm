@@ -134,6 +134,13 @@ class DraftModelSpeculator(BaseSpeculator):
     # forward's attention metadata. Otherwise the drafter rebuilds it.
     can_reuse_target_attn_metadata: bool = True
 
+    def set_lora_manager(self, lora_manager: Any) -> None:
+        """Receive the runner-owned manager; may wrap target adapter activation.
+
+        Shared-model drafters can also install their draft adapter mapping.
+        """
+        return
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
         self.device = device
