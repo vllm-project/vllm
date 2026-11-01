@@ -91,7 +91,6 @@ from vllm.v1.engine import (
     PrefixHashConfig,
     ReconfigureDistributedRequest,
     ReconfigureRankType,
-    StreamAdmissionId,
     StreamAdmissionResult,
     StreamOutput,
     StreamUpdateRejection,
@@ -542,25 +541,14 @@ class EngineCore:
             )
         return metadata
 
-    def get_stream_admission_epoch(self, owner: str, renew: bool = False) -> str:
-        admissions = self.scheduler.stream_admissions
-        if admissions is None:
-            raise ValueError("Stream admission requires persistent state")
-        return admissions.get_epoch(owner, renew)
-
-    def admit_stream(
-        self, owner: str, admission_id: StreamAdmissionId, request: EngineCoreRequest
-    ) -> StreamAdmissionResult:
+    def admit_stream(self, request: EngineCoreRequest) -> StreamAdmissionResult:
         """Atomically admit an empty stream; retries never extend its deadline."""
         admissions = self.scheduler.stream_admissions
         if admissions is None:
             raise ValueError("Stream admission requires persistent state")
         admissions.expire()
         return admissions.admit(
-            owner,
-            admission_id,
-            request,
-            reject_new_requests=getattr(self, "reject_new_requests", False),
+            request, reject_new_requests=getattr(self, "reject_new_requests", False)
         )
 
     def add_request(self, request: Request, request_wave: int = 0):
@@ -1220,10 +1208,13 @@ class EngineCore:
         This function could be directly used in input processing thread to allow
         request initialization running in parallel with Model forward
         """
-        if request.stream_admission is not None and (
-            self.scheduler.stream_admissions is None
-        ):
-            raise VLLMValidationError("Stream admission requires persistent state")
+        if request.stream_admission is not None:
+            admissions = self.scheduler.stream_admissions
+            if admissions is None:
+                raise VLLMValidationError("Stream admission requires persistent state")
+            # Before grammar init, so a refused update has no side effects.
+            if admissions.unsupported_input(request):
+                raise VLLMValidationError("Unsupported parameters for a stream input")
         # Note on thread safety: no race condition.
         # `mm_receiver_cache` is reset at the end of LLMEngine init,
         # and will only be accessed in the input processing thread afterwards.

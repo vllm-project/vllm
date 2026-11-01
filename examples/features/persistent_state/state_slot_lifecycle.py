@@ -27,11 +27,7 @@ from vllm.v1.core.kv_cache_planning import (
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.state_scheduler import StateScheduler
-from vllm.v1.engine import (
-    EngineCoreRequest,
-    StreamAdmissionContext,
-    StreamAdmissionId,
-)
+from vllm.v1.engine import EngineCoreRequest, StreamAdmissionContext
 from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     PersistentStateDescriptor,
@@ -137,15 +133,13 @@ def main() -> None:
     print(f"free slots: {slots.num_free_slots}")
 
     # 1. Reserve a slot before any audio arrives (EngineCore.admit_stream).
-    owner = "api-server-0"
-    admission_id = StreamAdmissionId(admissions.get_epoch(owner), sequence=0)
-    result = admissions.admit(owner, admission_id, stream_request("s1", []))
+    result = admissions.admit(stream_request("s1", []))
     print(f"admitted: {result.accepted}, status: {result.status}")
 
     # 2. Send input for the admitted stream. The scheduler hands the worker the
     # slot handle (engine epoch, slot, generation) to read and write.
     chunk = stream_request("s1", [1, 2, 3])
-    chunk.stream_admission = StreamAdmissionContext(owner, admission_id)
+    chunk.stream_admission = StreamAdmissionContext()
     scheduler.add_request(Request.from_engine_core_request(chunk, None))
     step = scheduler.schedule()
     assert step.state_slot_handles is not None

@@ -8825,26 +8825,16 @@ def _stream_request(request_id="stream"):
     )
 
 
-def _admit_stream(core, sequence=1, request=None, owner="frontend"):
-    from vllm.v1.engine import StreamAdmissionId
-
-    return core.admit_stream(
-        owner,
-        StreamAdmissionId(core.get_stream_admission_epoch(owner), sequence),
-        request or _stream_request(),
-    )
+def _admit_stream(core, request=None):
+    return core.admit_stream(request or _stream_request())
 
 
-def _stream_chunk(core, *, closed=False):
-    from vllm.v1.engine import StreamAdmissionContext, StreamAdmissionId
+def _stream_chunk(core=None, *, closed=False, request_id="stream"):
+    from vllm.v1.engine import StreamAdmissionContext
 
-    payload = _stream_request()
+    payload = _stream_request(request_id)
     payload.prompt_token_ids = [1, 2, 3]
-    payload.stream_admission = StreamAdmissionContext(
-        "frontend",
-        StreamAdmissionId(core.get_stream_admission_epoch("frontend"), 1),
-        closed,
-    )
+    payload.stream_admission = StreamAdmissionContext(closed)
     return Request.from_engine_core_request(payload, None)
 
 
@@ -8866,29 +8856,24 @@ def _pausable_stream_core():
 
 
 @pytest.mark.parametrize("mode", ["abort", "wait"])
-def test_stream_admission_pause_refuses_without_slots_and_replays_after_resume(mode):
-    """Pause refusals use the bounded replay window and require a fresh retry ID."""
+def test_stream_admission_pause_refuses_without_slots(mode):
+    """A paused engine refuses new streams without remembering the refusal."""
     core = _pausable_stream_core()
     admissions = core.scheduler.stream_admissions
-    admissions.max_records = 2
     free_slots = admissions.manager.num_free_slots
     core.pause_generation(mode=mode, clear_cache=False)
-    for sequence in range(1, 4):
-        refused = _admit_stream(core, sequence)
+    for _ in range(2):
+        refused = _admit_stream(core)
         assert not refused.accepted
         assert refused.reason == "engine_paused"
         assert refused.status == "refused"
-        assert _admit_stream(core, sequence) == refused
         assert admissions.manager.num_free_slots == free_slots
         assert not core.scheduler.requests and not core.scheduler.waiting
         assert not admissions.sessions
-        assert len(admissions.owners["frontend"].records) <= 2
-    assert _admit_stream(core, 1).reason == "expired_id"
-    assert admissions.refusals["engine_paused"] == 3
+    assert admissions.refusals["engine_paused"] == 2
 
     core.resume_scheduler()
-    assert _admit_stream(core, 3) == refused
-    assert _admit_stream(core, 4).accepted
+    assert _admit_stream(core).accepted
     assert admissions.manager.num_free_slots == free_slots - 1
 
 
@@ -8946,8 +8931,6 @@ def test_stream_admission_paused_add_rejection_preserves_incoming_identity():
         "enqueue",
         "waiting_queue",
         "insert",
-        "remember",
-        "result",
         "request_handle",
         "slot_handle",
         "request_blocks",
@@ -8973,8 +8956,6 @@ def test_failed_utility_body_rolls_back_admission(monkeypatch, fault):
         "enqueue": (scheduler, "_enqueue_waiting_request"),
         "waiting_queue": (scheduler.waiting, "add_request"),
         "insert": (admissions, "_insert_parked_request"),
-        "remember": (admissions, "_remember"),
-        "result": (admissions, "_result"),
     }
     tables = {
         "request_handle": (manager, "_requests"),
@@ -9035,29 +9016,8 @@ def test_failed_utility_body_rolls_back_admission(monkeypatch, fault):
     assert not scheduler.kv_holding_waiting and not scheduler.deferred_waiting
     assert scheduler.num_waiting_for_streaming_input == 0
     assert not scheduler.state_retirements and not scheduler.finished_req_ids
-    assert not admissions.owners["frontend"].records and not admissions.sessions
-    assert admissions.owners["frontend"].replay_floor == 0
+    assert not admissions.sessions
     assert _admit_stream(core).accepted
-
-
-def test_admission_rollback_restores_replay_window(monkeypatch):
-    core = _stream_core()
-    admissions = core.scheduler.stream_admissions
-    admissions.max_records = 1
-    first = _admit_stream(core)
-    original = admissions._remember
-
-    def fail_after(*args):
-        original(*args)
-        raise RuntimeError("after eviction")
-
-    with monkeypatch.context() as m:
-        m.setattr(admissions, "_remember", fail_after)
-        with pytest.raises(RuntimeError, match="after eviction"):
-            _admit_stream(core, 2, _stream_request("second"))
-    assert _admit_stream(core) == first
-    assert len(admissions.sessions) == len(admissions.owners["frontend"].records) == 1
-    assert _admit_stream(core, 2, _stream_request("second")).accepted
 
 
 @pytest.mark.parametrize(
@@ -9075,9 +9035,9 @@ def test_stream_admission_validation_recovers(field, value):
     invalid = _stream_request()
     setattr(invalid, field, value)
     with pytest.raises(ValueError):
-        _admit_stream(core, request=invalid)
+        _admit_stream(core, invalid)
     assert not core.scheduler.requests
-    assert not core.scheduler.stream_admissions.owners["frontend"].records
+    assert not core.scheduler.stream_admissions.sessions
     assert _admit_stream(core).accepted
 
 
@@ -9087,7 +9047,7 @@ def test_stream_admission_rejects_unsupported_streaming_params(params):
     invalid = _stream_request()
     invalid.sampling_params = params
     with pytest.raises(ValueError):
-        _admit_stream(core, request=invalid)
+        _admit_stream(core, invalid)
     assert not core.scheduler.requests
     assert _admit_stream(core).accepted
 
@@ -9104,29 +9064,82 @@ def test_lost_utility_reply_reclaims_admission():
     assert admissions.next_deadline() == deadline
     admissions.clock = lambda: deadline
     admissions.expire()
-    assert _admit_stream(core).status == "finished"
     assert admissions.expiries == {"never_fed": 1}
-    assert not scheduler.requests
-    assert _admit_stream(core, 2, _stream_request("replacement")).accepted
+    assert not scheduler.requests and not admissions.sessions
+    assert _admit_stream(core, _stream_request("replacement")).accepted
+
+
+def test_admit_stream_async_routes_stream_to_calling_client():
+    import asyncio
+
+    import msgspec
+
+    from vllm.v1.engine import StreamAdmissionResult
+    from vllm.v1.engine.core_client import AsyncMPClient
+
+    client = object.__new__(AsyncMPClient)
+    client.client_index = 3
+    calls = []
+
+    async def call_utility_async(method, *args):
+        calls.append((method, args))
+        # Without insecure serialization, utility results decode to builtins.
+        return msgspec.to_builtins(StreamAdmissionResult(True, "stream", "never_fed"))
+
+    client.call_utility_async = call_utility_async
+    request = _stream_request()
+    result = asyncio.run(client.admit_stream_async(request))
+    assert result == StreamAdmissionResult(True, "stream", "never_fed")
+    assert calls == [("admit_stream", (request,))]
+    assert request.client_index == 3
+
+
+@pytest.mark.parametrize("change", ["structured", "embeds"])
+def test_unsupported_stream_input_refused_before_preprocessing(change):
+    from vllm.exceptions import VLLMValidationError
+    from vllm.sampling_params import StructuredOutputsParams
+    from vllm.v1.engine import StreamAdmissionContext
+    from vllm.v1.structured_output import StructuredOutputManager
+
+    core = _stream_core()
+    core.mm_receiver_cache = None
+    manager = StructuredOutputManager(core.scheduler.vllm_config)
+    core.structured_output_manager = manager
+    assert _admit_stream(core).accepted
+    payload = _stream_request()
+    payload.prompt_token_ids = [1, 2, 3]
+    payload.stream_admission = StreamAdmissionContext()
+    if change == "structured":
+        payload.sampling_params = SamplingParams(
+            structured_outputs=StructuredOutputsParams(regex="[0-9]+")
+        )
+    else:
+        payload.prompt_embeds = torch.zeros(3, 4)
+    with pytest.raises(VLLMValidationError, match="Unsupported parameters"):
+        core.preprocess_add_request(payload)
+    # A refused update must not select or initialize a grammar backend.
+    assert manager.backend is None and manager.backend_name is None
+    assert core.scheduler.stream_admissions.sessions["stream"].status == "never_fed"
 
 
 def test_admission_refuses_without_mutation_when_full():
     core = _stream_core()
     scheduler = core.scheduler
     assert _admit_stream(core).accepted
-    assert _admit_stream(core, 2, _stream_request("second")).accepted
+    assert _admit_stream(core, _stream_request("second")).accepted
     manager = scheduler.kv_cache_manager.coordinator.state_managers["state"]
     before = dict(scheduler.requests), list(scheduler.waiting), manager.num_free_slots
-    refused = _admit_stream(core, 3, _stream_request("third"))
+    refused = _admit_stream(core, _stream_request("third"))
     assert not refused.accepted and refused.reason == "capacity"
     assert before == (
         dict(scheduler.requests),
         list(scheduler.waiting),
         manager.num_free_slots,
     )
+    assert _admit_stream(core, _stream_request("third")) == refused
+    # Never scheduled, so its slot needs no fence and frees at once.
     scheduler.finish_requests("stream", RequestStatus.FINISHED_ABORTED)
-    assert _admit_stream(core, 3, _stream_request("third")) == refused
-    assert _admit_stream(core, 4, _stream_request("third")).accepted
+    assert _admit_stream(core, _stream_request("third")).accepted
 
 
 def test_stream_admission_respects_active_limit_with_spare_physical_slots():
@@ -9134,7 +9147,7 @@ def test_stream_admission_respects_active_limit_with_spare_physical_slots():
     scheduler = core.scheduler
     scheduler.max_num_active_reqs = 1
     assert _admit_stream(core).accepted
-    assert _admit_stream(core, 2, _stream_request("second")).reason == "active_limit"
+    assert _admit_stream(core, _stream_request("second")).reason == "active_limit"
     scheduler.add_request(_stream_chunk(core))
     step = scheduler.schedule()
     assert step.num_scheduled_tokens == {"stream": 3}
@@ -9142,47 +9155,32 @@ def test_stream_admission_respects_active_limit_with_spare_physical_slots():
     scheduler.finish_requests("stream", RequestStatus.FINISHED_ABORTED)
     cleanup = scheduler.schedule()
     scheduler.update_from_output(cleanup, _state_output(cleanup))
-    assert _admit_stream(core, 3, _stream_request("second")).accepted
+    assert _admit_stream(core, _stream_request("second")).accepted
 
 
-def test_stream_admission_conflict_eviction_and_restart():
+def test_stream_admission_request_id_conflicts():
+    """Only an identical retry of a live session is idempotent."""
     core = _stream_core()
-    admissions = core.scheduler.stream_admissions
-    admissions.max_records = 2
+    scheduler = core.scheduler
+    admissions = scheduler.stream_admissions
     original = _stream_request()
-    assert _admit_stream(core, request=original).accepted
-    changed = _stream_request()
-    changed.priority = 1
-    with pytest.raises(ValueError, match="Conflicting"):
-        _admit_stream(core, request=changed)
-    assert _admit_stream(core, 2, _stream_request("other")).accepted
-    assert not _admit_stream(core, 3, _stream_request("full")).accepted
-    core.scheduler.finish_requests("stream", RequestStatus.FINISHED_ABORTED)
-    assert _admit_stream(core).reason == "expired_id"
-    assert len(admissions.owners["frontend"].records) <= 2
-    assert _admit_stream(core, 4, _stream_request("new")).accepted
-    from vllm.v1.engine import StreamAdmissionId
+    accepted = _admit_stream(core, original)
+    assert accepted.accepted
+    for field, value in [("priority", 1), ("client_index", 1), ("arrival_time", 2.0)]:
+        changed = _stream_request()
+        setattr(changed, field, value)
+        assert _admit_stream(core, changed).reason == "request_id_in_use"
+    assert _admit_stream(core, original) == accepted
+    assert admissions.refusals == {"request_id_in_use": 3}
 
-    restarted = _stream_core()
+    # An ordinary request with the ID is not an admission to replay.
+    ordinary = Request.from_engine_core_request(_stream_request("ordinary"), None)
+    scheduler.add_request(ordinary)
     assert (
-        restarted.admit_stream(
-            "frontend",
-            StreamAdmissionId(core.get_stream_admission_epoch("frontend"), 5),
-            original,
-        ).reason
-        == "owner_epoch"
+        _admit_stream(core, _stream_request("ordinary")).reason == "request_id_in_use"
     )
-    assert _admit_stream(restarted).accepted
-
-
-def test_stream_admission_older_sequence_cannot_succeed_outside_replay_window():
-    core = _stream_core()
-    core.scheduler.stream_admissions.max_records = 1
-    assert _admit_stream(core, 100).accepted
-    refused = _admit_stream(core, 1, _stream_request("second"))
-    assert refused.reason == "expired_id" and refused.replay_floor == 101
-    assert _admit_stream(core, 1, _stream_request("second")).reason == "expired_id"
-    assert _admit_stream(core, 101, _stream_request("second")).accepted
+    assert scheduler.requests["ordinary"] is ordinary
+    assert "ordinary" not in admissions.sessions
 
 
 @pytest.mark.parametrize("finish", ["terminal", "deadline"])
@@ -9212,13 +9210,14 @@ def test_final_park_retains_slot_until_terminal_or_deadline(finish):
         admissions.clock = lambda: drain_deadline
         admissions.expire()
         assert admissions.expiries == {"draining": 1}
-    assert _admit_stream(core).status == "awaiting_fence"
+    # The retiring session still owns its ID and its slot.
+    assert _admit_stream(core).reason == "request_id_in_use"
     assert manager.num_free_slots == 1
     cleanup = scheduler.schedule()
     scheduler.update_from_output(cleanup, _state_output(cleanup))
     assert manager.num_free_slots == 2
-    assert _admit_stream(core).status == "finished"
-    assert _admit_stream(core, 2, _stream_request("replacement")).accepted
+    assert not admissions.sessions and not scheduler.state_retirements
+    assert _admit_stream(core, _stream_request("replacement")).accepted
 
 
 def test_parked_idle_deadline_recovers_and_feed_cancels_never_fed():
@@ -9240,30 +9239,29 @@ def test_parked_idle_deadline_recovers_and_feed_cancels_never_fed():
     cleanup = scheduler.schedule()
     scheduler.update_from_output(cleanup, _state_output(cleanup))
     assert admissions.expiries == {"parked_idle": 1}
-    assert _admit_stream(core, 2, _stream_request("replacement")).accepted
+    assert _admit_stream(core, _stream_request("replacement")).accepted
 
 
-def test_stream_owner_and_generation_reject_late_chunks_after_expiry():
+def test_stream_late_chunk_after_expiry_is_refused():
+    """A chunk for an expired stream cannot create a request or touch another."""
     core = _stream_core()
     scheduler = core.scheduler
     admissions = scheduler.stream_admissions
     _admit_stream(core)
-    stale = _stream_chunk(core)
+    stale = _stream_chunk()
     admissions.clock = lambda: 115.0
     scheduler.add_request(stale)
-    assert not scheduler.requests
-    # The same sequence in another owner's namespace is an independent ID.
-    assert _admit_stream(core, owner="other").accepted
+    assert not scheduler.requests and not admissions.sessions
+    _, rejection = scheduler.state_error_outputs[-1]
+    assert rejection.request_id == "stream"
+    assert rejection.stream_output.rejection == "unknown_admission"
+    assert _admit_stream(core, _stream_request("next")).accepted
     scheduler.add_request(stale)
-    assert _admit_stream(core, owner="other").status == "never_fed"
-    from vllm.v1.engine import StreamAdmissionContext, StreamAdmissionId
-
-    stale.stream_admission = StreamAdmissionContext(
-        "other", StreamAdmissionId(core.get_stream_admission_epoch("other"), 1)
-    )
-    scheduler.add_request(stale)
-    assert _admit_stream(core, owner="other").status == "live"
-    assert scheduler.schedule().num_scheduled_tokens == {"stream": 3}
+    core.abort_requests(["stream"])
+    assert admissions.sessions["next"].status == "never_fed"
+    scheduler.add_request(_stream_chunk(request_id="next"))
+    assert admissions.sessions["next"].status == "live"
+    assert scheduler.schedule().num_scheduled_tokens == {"next": 3}
 
 
 def test_stream_queued_final_add_and_nonrenewable_drain_deadline():
@@ -9283,11 +9281,12 @@ def test_stream_queued_final_add_and_nonrenewable_drain_deadline():
     output = _state_output(step)
     output.sampled_token_ids = [[7]]
     scheduler.update_from_output(step, output)
-    assert not scheduler.requests
-    assert _admit_stream(core).status == "awaiting_fence"
+    assert not scheduler.requests and not admissions.sessions
+    # The retiring session still owns its ID.
+    assert _admit_stream(core).reason == "request_id_in_use"
     cleanup = scheduler.schedule()
     scheduler.update_from_output(cleanup, _state_output(cleanup))
-    assert _admit_stream(core).status == "finished"
+    assert not scheduler.state_retirements
     assert not admissions.expiries
 
 
@@ -9317,7 +9316,7 @@ def test_stream_deadline_scheduler_abort_output_and_occupied_counts():
     assert outputs[0].outputs[0].finish_reason == FinishReason.ABORT
     assert not any(admissions.occupied().values())
     assert scheduler.make_stats().stream_expiries == {"draining": 1}
-    assert _admit_stream(core, 2, _stream_request("replacement")).accepted
+    assert _admit_stream(core, _stream_request("replacement")).accepted
 
 
 def test_stream_admission_utility_wire_round_trip(monkeypatch):
@@ -9328,7 +9327,6 @@ def test_stream_admission_utility_wire_round_trip(monkeypatch):
     from vllm.v1.engine import (
         EngineCoreOutputs,
         EngineCoreRequestType,
-        StreamAdmissionId,
         StreamAdmissionResult,
     )
     from vllm.v1.engine.core import EngineCoreProc, EngineShutdownState
@@ -9343,11 +9341,7 @@ def test_stream_admission_utility_wire_round_trip(monkeypatch):
     encoder = MsgpackEncoder()
     decoder = MsgpackDecoder()
     for sequence in range(1, 4):
-        args = (
-            "frontend",
-            StreamAdmissionId(core.get_stream_admission_epoch("frontend"), sequence),
-            _stream_request(str(sequence)),
-        )
+        args = (_stream_request(str(sequence)),)
         proc._handle_client_request(
             EngineCoreRequestType.UTILITY,
             (0, sequence, "admit_stream", decoder.decode(encoder.encode(args))),
@@ -9401,7 +9395,7 @@ def test_idle_engine_wakes_for_stream_deadline_only(state):
     if state:
         _step_stream_core(core)
         assert not proc.scheduler.requests
-        assert _admit_stream(core, 2, _stream_request("replacement")).accepted
+        assert _admit_stream(core, _stream_request("replacement")).accepted
 
 
 def _step_stream_core(core):
@@ -9708,102 +9702,40 @@ def test_ordinary_deferred_free_stops_at_first_pending_fence():
     assert len(queue) == 100
 
 
-@pytest.mark.parametrize("capacity", [1, 4096])
-def test_stream_admission_sequence_limit_is_per_owner_epoch(capacity):
-    """INT64_MAX decisions cannot exhaust another owner or a renewed epoch."""
-    from vllm.v1.engine import StreamAdmissionId
+@pytest.mark.parametrize("change", ["untagged", "stop", "structured", "embeds"])
+def test_stream_admission_rejected_add_cannot_abort_session(change):
+    """A rejected update leaves the session and its deadline untouched."""
+    from vllm.sampling_params import StructuredOutputsParams
 
     core = _stream_core()
     admissions = core.scheduler.stream_admissions
-    admissions.max_records = capacity
-    admissions.config.max_owners = capacity + 1
-    for i in range(capacity):
-        _admit_stream(core, 2**63 - 1, _stream_request(str(i)), owner=str(i))
-    other_epoch = core.get_stream_admission_epoch("other")
-    core.scheduler.finish_requests(None, RequestStatus.FINISHED_ABORTED)
-    assert admissions.manager.num_free_slots == 2
-    assert core.admit_stream(
-        "other", StreamAdmissionId(other_epoch, 0), _stream_request("other")
-    ).accepted
-    old_id = StreamAdmissionId(core.get_stream_admission_epoch("0"), 2**63 - 1)
-    new_epoch = core.get_stream_admission_epoch("0", renew=True)
-    assert core.admit_stream("0", old_id, _stream_request("0")).reason == "owner_epoch"
-    assert core.admit_stream(
-        "0", StreamAdmissionId(new_epoch, 0), _stream_request("0")
-    ).accepted
-
-
-def test_stream_admission_owner_eviction_preserves_other_session_and_records():
-    from vllm.v1.engine import StreamAdmissionId
-
-    core = _stream_core()
-    admissions = core.scheduler.stream_admissions
-    admissions.max_records = 1
-    first = _admit_stream(core)
-    chunk = _stream_chunk(core)
-    handle = admissions.manager.get("stream")
-    for sequence in range(3):
-        _admit_stream(core, sequence, _stream_request("other"), owner="other")
-    assert _admit_stream(core) == first
-    assert admissions.manager.get("stream") == handle
-    old_id = chunk.stream_admission.admission_id
-    core.get_stream_admission_epoch("frontend", renew=True)
-    assert (
-        core.admit_stream("frontend", old_id, _stream_request()).reason == "owner_epoch"
-    )
-    core.add_request(chunk)
-    assert core.scheduler.schedule().num_scheduled_tokens == {"stream": 3}
-    assert admissions.manager.get("stream") == handle
-    assert len(admissions.owners) == 2
-    assert all(len(ns.records) <= 1 for ns in admissions.owners.values())
-    assert StreamAdmissionId(core.get_stream_admission_epoch("frontend"), 1) != old_id
-
-
-def test_stream_admission_owner_registry_recovers_after_expiry_without_eviction():
-    from vllm.v1.engine import StreamAdmissionId
-
-    core = _stream_core()
-    admissions = core.scheduler.stream_admissions
-    admissions.config.max_owners = 1
-    old_id = StreamAdmissionId(core.get_stream_admission_epoch("frontend"), 1)
-    first = _admit_stream(core)
-    with pytest.raises(ValueError, match="Owner namespace capacity"):
-        core.get_stream_admission_epoch("other")
-    assert _admit_stream(core) == first
-    admissions.clock = lambda: 100 + admissions.config.owner_epoch_timeout
-    other = core.get_stream_admission_epoch("other")
-    assert len(admissions.owners) == 1
-    assert (
-        core.admit_stream("frontend", old_id, _stream_request()).reason == "owner_epoch"
-    )
-    assert core.admit_stream(
-        "other", StreamAdmissionId(other, 0), _stream_request("new")
-    ).accepted
-
-
-@pytest.mark.parametrize("mismatch", ["stale", "wrong_owner"])
-def test_stream_admission_rejected_add_cannot_abort_replacement(mismatch):
-    from vllm.v1.engine import StreamAdmissionContext
-
-    core = _stream_core()
     _admit_stream(core)
+    deadline = admissions.next_deadline()
     rejected = _stream_chunk(core)
     rejected.abort_immediately = True
-    if mismatch == "stale":
-        core.scheduler.finish_requests("stream", RequestStatus.FINISHED_ABORTED)
-        assert _admit_stream(core, owner="replacement").accepted
+    expected = "unsupported_update"
+    if change == "untagged":
+        rejected.stream_admission = None
+        expected = "identity_mismatch"
+    elif change == "stop":
+        rejected.sampling_params = SamplingParams(stop=["end"])
+    elif change == "embeds":
+        rejected.prompt_embeds = torch.zeros(3, 4)
+        rejected.prompt_is_token_ids = [True, False, True]
     else:
-        rejected.stream_admission = StreamAdmissionContext(
-            "wrong", rejected.stream_admission.admission_id
+        rejected.sampling_params = SamplingParams(
+            structured_outputs=StructuredOutputsParams(regex="[0-9]+")
         )
     before = core.scheduler.requests["stream"]
     core.add_request(rejected)
     assert core.scheduler.requests["stream"] is before
     assert before.status == RequestStatus.WAITING_FOR_STREAMING_REQ
     assert not before.streaming_queue
+    assert admissions.sessions["stream"].status == "never_fed"
+    assert admissions.next_deadline() == deadline
     _, output = core.scheduler.state_error_outputs[-1]
     assert output.stream_output.context == rejected.stream_admission
-    assert output.stream_output.rejection == "identity_mismatch"
+    assert output.stream_output.rejection == expected
 
 
 def test_stream_admission_unknown_update_delivers_correlated_error():
@@ -9838,11 +9770,13 @@ def test_stream_admission_ordinary_preaborted_add_still_aborts():
     assert request.status == RequestStatus.FINISHED_ABORTED
 
 
-@pytest.mark.parametrize("identity", ["stale", "unknown", "untagged"])
+@pytest.mark.parametrize("identity", ["tagged", "untagged"])
 @pytest.mark.parametrize(
     "cause", ["preprocessing_error", "shutdown", "mm_cache_miss", "validation_error"]
 )
-def test_stream_admission_ingress_rejection_preserves_identity(identity, cause):
+def test_stream_admission_ingress_rejection_preserves_identity(
+    identity, cause, monkeypatch
+):
     """A rejected ADD cannot report completion of a reused request ID."""
     import queue
     from copy import deepcopy
@@ -9854,12 +9788,8 @@ def test_stream_admission_ingress_rejection_preserves_identity(identity, cause):
     from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
     core = _stream_core()
-    if identity == "stale":
-        assert _admit_stream(core).accepted
     context = _stream_chunk(core).stream_admission
-    if identity == "stale":
-        core.scheduler.finish_requests("stream", RequestStatus.FINISHED_ABORTED)
-    assert _admit_stream(core, owner="replacement").accepted
+    assert _admit_stream(core).accepted
     scheduler = core.scheduler
     replacement = scheduler.requests["stream"]
     sessions_before = deepcopy(scheduler.stream_admissions.sessions)
@@ -9878,10 +9808,13 @@ def test_stream_admission_ingress_rejection_preserves_identity(identity, cause):
     payload.prompt_token_ids = [1]
     payload.client_index = 7
     payload.stream_admission = context if identity != "untagged" else None
-    if cause == "preprocessing_error":
-        payload.sampling_params = None
     payload = MsgpackDecoder(EngineCoreRequest).decode(MsgpackEncoder().encode(payload))
     if cause == "preprocessing_error":
+
+        def fail(*args, **kwargs):
+            raise ValueError("preprocessing failed")
+
+        monkeypatch.setattr(Request, "from_engine_core_request", fail)
         with pytest.raises(ValueError):
             proc.preprocess_add_request(payload)
         proc._handle_request_preproc_error(payload)
@@ -9934,10 +9867,10 @@ def test_stream_admission_abort_outputs_keep_admitted_contexts():
     from vllm.v1.engine.core import EngineCoreProc
 
     core = _stream_core()
-    for sequence, client in [(1, 7), (2, 8)]:
-        payload = _stream_request(str(sequence))
+    for request_id, client in [("1", 7), ("2", 8)]:
+        payload = _stream_request(request_id)
         payload.client_index = client
-        assert _admit_stream(core, sequence, payload).accepted
+        assert _admit_stream(core, payload).accepted
     ordinary = create_requests(num_requests=1, num_tokens=4)[0]
     ordinary.client_index = 7
     core.add_request(ordinary)
@@ -9964,38 +9897,6 @@ def test_stream_admission_abort_outputs_keep_admitted_contexts():
             assert output.finish_reason == FinishReason.ABORT
             seen.add(output.request_id)
     assert seen == set(contexts)
-
-
-def test_stream_admission_exhausted_owner_renews_without_replaying_old_ids():
-    from vllm.v1.engine import StreamAdmissionId
-
-    core = _stream_core()
-    admissions = core.scheduler.stream_admissions
-    admissions.max_records = 1
-    epoch = core.get_stream_admission_epoch("frontend")
-    highest = StreamAdmissionId(epoch, 2**63 - 1)
-    assert core.admit_stream("frontend", highest, _stream_request()).accepted
-    assert _admit_stream(core, 0, _stream_request("low")).reason == "expired_id"
-    assert admissions.owners["frontend"].replay_floor == 2**63
-    assert not admissions.owners["frontend"].records
-    core.scheduler.finish_requests("stream", RequestStatus.FINISHED_ABORTED)
-    assert (
-        core.admit_stream("frontend", highest, _stream_request()).reason == "expired_id"
-    )
-    assert _admit_stream(core, 0, _stream_request("other"), owner="other").accepted
-    other = admissions.owners["other"]
-    new_epoch = core.get_stream_admission_epoch("frontend", renew=True)
-    assert (
-        core.admit_stream("frontend", highest, _stream_request()).reason
-        == "owner_epoch"
-    )
-    fresh = StreamAdmissionId(new_epoch, 0)
-    assert core.admit_stream("frontend", fresh, _stream_request()).accepted
-    core.scheduler.finish_requests("stream", RequestStatus.FINISHED_ABORTED)
-    assert core.admit_stream("frontend", fresh, _stream_request()).status == "finished"
-    assert "stream" not in core.scheduler.requests
-    assert admissions.owners["other"] is other
-    assert len(other.records) == 1
 
 
 @pytest.mark.parametrize("queued", [False, True])
@@ -10080,7 +9981,7 @@ def test_state_stream_stop_token_terminates_instead_of_parking(queued):
 def test_state_stream_replaces_only_after_park_not_length_stop(queued):
     core = _stream_core()
     assert _admit_stream(core).accepted
-    assert _admit_stream(core, 2, _stream_request("peer")).accepted
+    assert _admit_stream(core, _stream_request("peer")).accepted
     scheduler = core.scheduler
     manager = scheduler.kv_cache_manager.coordinator.state_managers["state"]
     peer_handle = manager.get("peer")
@@ -10111,12 +10012,12 @@ def test_state_stream_replaces_only_after_park_not_length_stop(queued):
         assert "stream" not in scheduler.requests
     assert manager.get("peer") == peer_handle
     assert manager.num_free_slots == 0
-    assert not _admit_stream(core, 3, _stream_request("next")).accepted
+    assert not _admit_stream(core, _stream_request("next")).accepted
     cleanup = scheduler.schedule()
     assert cleanup.state_cleanup_handles["stream"]["state"] == old
     assert manager.num_free_slots == 0
     scheduler.update_from_output(cleanup, _state_output(cleanup))
-    assert _admit_stream(core, 4, _stream_request("next")).accepted
+    assert _admit_stream(core, _stream_request("next")).accepted
     new = manager.get("next")
     assert new.slot == old.slot and new.generation > old.generation
     assert manager.get("peer") == peer_handle
@@ -10176,13 +10077,11 @@ def test_attention_layout_keeps_configured_scheduler():
 
 def test_state_error_only_step_keeps_client_batch_and_stats():
     from vllm.v1.core.sched.interface import AddRequestDisposition
-    from vllm.v1.engine import StreamAdmissionContext, StreamAdmissionId
+    from vllm.v1.engine import StreamAdmissionContext
 
     scheduler = _state_scheduler(log_stats=True)
     payload = _stream_request("unknown")
-    payload.stream_admission = StreamAdmissionContext(
-        "frontend", StreamAdmissionId("epoch", 1)
-    )
+    payload.stream_admission = StreamAdmissionContext()
     payload.client_index = 7
     request = Request.from_engine_core_request(payload, None)
     assert scheduler.add_request(request) is AddRequestDisposition.REJECTED
@@ -10195,16 +10094,14 @@ def test_state_error_only_step_keeps_client_batch_and_stats():
 
 
 def test_tagged_add_cannot_touch_ordinary_request():
-    from vllm.v1.engine import StreamAdmissionContext, StreamAdmissionId
+    from vllm.v1.engine import StreamAdmissionContext
 
     core = object.__new__(EngineCore)
     core.scheduler = create_scheduler()
     existing = Request.from_engine_core_request(_stream_request(), None)
     core.add_request(existing)
     payload = _stream_request()
-    payload.stream_admission = StreamAdmissionContext(
-        "frontend", StreamAdmissionId("epoch", 1)
-    )
+    payload.stream_admission = StreamAdmissionContext()
     tagged = Request.from_engine_core_request(payload, None)
     tagged.abort_immediately = True
     with pytest.raises(ValueError, match="requires persistent state"):
@@ -10216,14 +10113,12 @@ def test_tagged_add_cannot_touch_ordinary_request():
 
 def test_tagged_update_refused_without_state_scheduler():
     from vllm.exceptions import VLLMValidationError
-    from vllm.v1.engine import StreamAdmissionContext, StreamAdmissionId
+    from vllm.v1.engine import StreamAdmissionContext
 
     core = object.__new__(EngineCore)
     core.scheduler = create_scheduler()
     payload = _stream_request()
-    payload.stream_admission = StreamAdmissionContext(
-        "frontend", StreamAdmissionId("epoch", 1)
-    )
+    payload.stream_admission = StreamAdmissionContext()
     with pytest.raises(VLLMValidationError, match="requires persistent state"):
         core.preprocess_add_request(payload)
 

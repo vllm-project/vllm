@@ -1,24 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Transactional, pre-input admission for synchronous state-only engines."""
+"""Transactional, pre-input admission for synchronous state-only engines.
+
+A request ID names one admitted session. A retry with the same ID and payload
+returns the live session's result; once a session ends, its ID is not reused.
+"""
 
 import math
 import time
 from collections import Counter, deque
 from contextlib import ExitStack
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from hashlib import sha256
 from typing import TYPE_CHECKING, Literal
-from uuid import uuid4
 
 import msgspec
 
-from vllm.sampling_params import RequestOutputKind
+from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.v1.engine import (
     EngineCoreRequest,
     StreamAdmissionContext,
-    StreamAdmissionId,
     StreamAdmissionReason,
     StreamAdmissionResult,
     StreamAdmissionStatus,
@@ -36,54 +38,31 @@ class StreamAdmissionConfig:
     never_fed_timeout: float = 15.0
     parked_idle_timeout: float = 60.0
     draining_timeout: float = 40.0
-    max_records: int = 4096
-    max_owners: int = 64
-    owner_epoch_timeout: float = 300.0
 
     def __post_init__(self) -> None:
         for value in (
             self.never_fed_timeout,
             self.parked_idle_timeout,
             self.draining_timeout,
-            self.owner_epoch_timeout,
         ):
             if not math.isfinite(value) or value <= 0:
                 raise ValueError("Stream deadlines must be finite and positive")
-        for value in (self.max_records, self.max_owners):
-            if type(value) is not int or value < 1:
-                raise ValueError("Stream replay capacities must be positive integers")
 
 
 @dataclass
 class AdmissionRecord:
-    owner: str
-    admission_id: StreamAdmissionId
+    """One admitted session, from admission until its request finishes."""
+
     fingerprint: bytes
-    request_id: str
-    accepted: bool
-    status: StreamAdmissionStatus
-    reason: StreamAdmissionReason | None = None
-    handle: StateSlotHandle | None = None
+    handle: StateSlotHandle
+    status: StreamAdmissionStatus = "never_fed"
     deadline: float | None = None
     deadline_reason: Literal["never_fed", "parked_idle", "draining"] | None = None
     input_closed: bool = False
 
 
-@dataclass
-class OwnerNamespace:
-    epoch: str
-    expires_at: float
-    replay_floor: int = 0
-    records: dict[int, AdmissionRecord] = field(default_factory=dict)
-
-
 class StreamAdmissions:
-    """Bounded owner namespaces with independent replay windows.
-
-    Only renewal by the same owner or an engine-clock expiry discards its
-    namespace. Unknown epochs never create records. Renewal recovers even from
-    int64 sequence exhaustion; old sessions keep their original tags and handles.
-    """
+    """Admitted sessions of a StateScheduler and their deadlines."""
 
     def __init__(self, scheduler: "StateScheduler", config: StreamAdmissionConfig):
         self.scheduler = scheduler
@@ -92,124 +71,49 @@ class StreamAdmissions:
             iter(scheduler.kv_cache_manager.coordinator.state_managers.values())
         )
         self.clock = time.monotonic
-        self.max_records = config.max_records
-        self.owners: dict[str, OwnerNamespace] = {}
         self.sessions: dict[str, AdmissionRecord] = {}
         self.refusals: Counter[str] = Counter()
         self.expiries: Counter[str] = Counter()
 
-    @staticmethod
-    def _validate_owner(owner: str) -> None:
-        if not isinstance(owner, str) or not 1 <= len(owner) <= 256:
-            raise ValueError("Admission owner must contain 1 to 256 characters")
-
-    def get_epoch(self, owner: str, renew: bool = False) -> str:
-        """Acquire or explicitly renew an owner's replay namespace.
-
-        A full registry refuses new owners until an existing namespace expires;
-        it never evicts another owner's records in response to traffic pressure.
-        Acquiring an existing epoch does not extend its fixed lifetime.
-        """
-        self._validate_owner(owner)
-        now = self.clock()
-        self.owners = {
-            name: ns for name, ns in self.owners.items() if ns.expires_at > now
-        }
-        namespace = self.owners.get(owner)
-        if namespace is not None and not renew:
-            return namespace.epoch
-        if namespace is None and len(self.owners) >= self.config.max_owners:
-            raise ValueError("Owner namespace capacity; retry after epoch expiry")
-        namespace = OwnerNamespace(uuid4().hex, now + self.config.owner_epoch_timeout)
-        self.owners[owner] = namespace
-        return namespace.epoch
-
     def admit(
-        self,
-        owner: str,
-        admission_id: StreamAdmissionId,
-        payload: EngineCoreRequest,
-        *,
-        reject_new_requests: bool = False,
+        self, payload: EngineCoreRequest, *, reject_new_requests: bool = False
     ) -> StreamAdmissionResult:
-        """Replay recorded results before applying the current admission policy.
+        """Reserve a slot and park an empty resumable request, atomically.
 
-        A pause refusal is remembered; retry after resume with a fresh ID.
+        A retry matching a live session's ID and payload returns its current
+        result without moving its deadline.
         """
-        self._validate_owner(owner)
-        if type(admission_id.sequence) is not int or not (
-            0 <= admission_id.sequence < 2**63
-        ):
-            raise ValueError("Admission sequence must be a nonnegative int64")
-        namespace = self.owners.get(owner)
-        if (
-            namespace is None
-            or namespace.epoch != admission_id.owner_epoch
-            or namespace.expires_at <= self.clock()
-        ):
-            return self._refuse(payload.request_id, "owner_epoch")
-        if admission_id.sequence < namespace.replay_floor:
-            return self._refuse(
-                payload.request_id, "expired_id", namespace.replay_floor
-            )
-
         self._validate(payload)
         fingerprint = sha256(
             msgspec.msgpack.encode(payload, order="deterministic")
         ).digest()
-        key = admission_id.sequence
-        if record := namespace.records.get(key):
-            if record.fingerprint != fingerprint:
-                raise ValueError("Conflicting payload for stream admission ID")
-            return self._result(record, namespace.replay_floor)
-
         request_id = payload.request_id
-        reason: StreamAdmissionReason | None = None
-        if len(namespace.records) >= self.max_records and key <= min(namespace.records):
-            reason = "expired_id"
-        elif reject_new_requests:
-            reason = "engine_paused"
-        elif request_id in self.scheduler.requests or any(
+        if (record := self.sessions.get(request_id)) is not None:
+            if record.fingerprint != fingerprint:
+                return self._refuse(request_id, "request_id_in_use")
+            return StreamAdmissionResult(True, request_id, record.status)
+        if reject_new_requests:
+            return self._refuse(request_id, "engine_paused")
+        if request_id in self.scheduler.requests or any(
             r.request_id == request_id for r in self.scheduler.state_retirements
         ):
-            reason = "request_id_in_use"
-        elif not self.manager.num_free_slots:
-            reason = "capacity"
-        elif len(self.scheduler.requests) >= self.scheduler.max_num_active_reqs:
-            reason = "active_limit"
-        record = AdmissionRecord(
-            owner,
-            admission_id,
-            fingerprint,
-            request_id,
-            reason is None,
-            "refused" if reason else "never_fed",
-            reason,
-        )
+            return self._refuse(request_id, "request_id_in_use")
+        if not self.manager.num_free_slots:
+            return self._refuse(request_id, "capacity")
+        if len(self.scheduler.requests) >= self.scheduler.max_num_active_reqs:
+            return self._refuse(request_id, "active_limit")
         # Only admission-local resources can mutate here: no preprocessing caches,
         # grammar tasks, connector callbacks, or worker dispatch.
         with ExitStack() as undo:
-            undo.callback(
-                self._restore_records,
-                namespace,
-                namespace.records.copy(),
-                namespace.replay_floor,
-            )
-            if reason is None:
-                request = Request.from_engine_core_request(deepcopy(payload), None)
-                request.stream_admission = StreamAdmissionContext(owner, admission_id)
-                record.handle = self.manager.allocate_for_admission(request_id, undo)
-                assert record.handle is not None
-                old_count = self.scheduler.num_waiting_for_streaming_input
-                undo.callback(self._undo_insertion, request, old_count)
-                self._insert_parked_request(request, record)
-            self._remember(namespace, key, record)
-            if reason:
-                undo.callback(setattr, self, "refusals", self.refusals.copy())
-                self.refusals[reason] += 1
-            result = self._result(record, namespace.replay_floor)
+            request = Request.from_engine_core_request(deepcopy(payload), None)
+            request.stream_admission = StreamAdmissionContext()
+            handle = self.manager.allocate_for_admission(request_id, undo)
+            assert handle is not None
+            old_count = self.scheduler.num_waiting_for_streaming_input
+            undo.callback(self._undo_insertion, request, old_count)
+            self._insert_parked_request(request, AdmissionRecord(fingerprint, handle))
             undo.pop_all()
-        return result
+        return StreamAdmissionResult(True, request_id, "never_fed")
 
     def _validate(self, payload: EngineCoreRequest) -> None:
         if (
@@ -221,14 +125,7 @@ class StreamAdmissions:
             not payload.resumable
             or payload.prompt_token_ids != []
             or payload.mm_features
-            or payload.prompt_embeds is not None
-            or payload.prompt_is_token_ids is not None
-            or payload.pooling_params is not None
-            or payload.sampling_params is None
-            or payload.sampling_params.structured_outputs is not None
-            or payload.sampling_params.n != 1
-            or payload.sampling_params.output_kind == RequestOutputKind.FINAL_ONLY
-            or payload.sampling_params.stop
+            or self.unsupported_input(payload)
             or payload.abort_immediately
             or payload.stream_admission is not None
             or payload.data_parallel_rank not in (None, 0)
@@ -244,10 +141,32 @@ class StreamAdmissions:
             self.scheduler.connector is not None
             or self.scheduler.ec_connector is not None
             or self.scheduler.aux_output_connector is not None
-            or (payload.sampling_params.extra_args or {}).get("kv_transfer_params")
-            or (payload.sampling_params.extra_args or {}).get("ec_transfer_params")
         ):
             raise ValueError("Stream admission does not support transfer connectors")
+
+    @staticmethod
+    def unsupported_input(request: EngineCoreRequest | Request) -> bool:
+        """Whether a stream input uses features a state stream cannot carry."""
+        return (
+            request.pooling_params is not None
+            or request.prompt_embeds is not None
+            or request.prompt_is_token_ids is not None
+            or StreamAdmissions._unsupported_params(request.sampling_params)
+        )
+
+    @staticmethod
+    def _unsupported_params(params: SamplingParams | None) -> bool:
+        """Sampling features a state stream cannot carry across inputs."""
+        extra_args = (params.extra_args or {}) if params is not None else {}
+        return (
+            params is None
+            or params.structured_outputs is not None
+            or params.n != 1
+            or params.output_kind == RequestOutputKind.FINAL_ONLY
+            or bool(params.stop)
+            or bool(extra_args.get("kv_transfer_params"))
+            or bool(extra_args.get("ec_transfer_params"))
+        )
 
     def _insert_parked_request(self, request: Request, record: AdmissionRecord) -> None:
         request.status = RequestStatus.WAITING_FOR_STREAMING_REQ
@@ -267,58 +186,21 @@ class StreamAdmissions:
         self.scheduler.num_waiting_for_streaming_input = old_count
         self.sessions.pop(request.request_id, None)
 
-    def _restore_records(
-        self, namespace: OwnerNamespace, records: dict[int, AdmissionRecord], floor: int
-    ) -> None:
-        namespace.records = records
-        namespace.replay_floor = floor
-
-    def _remember(
-        self, namespace: OwnerNamespace, key: int, record: AdmissionRecord
-    ) -> None:
-        if record.reason == "expired_id":
-            namespace.replay_floor = min(namespace.records) + 1
-        else:
-            namespace.records[key] = record
-            if len(namespace.records) <= self.max_records:
-                return
-            namespace.replay_floor = min(namespace.records) + 1
-        namespace.records = {
-            k: v for k, v in namespace.records.items() if k >= namespace.replay_floor
-        }
-
-    def _result(
-        self, record: AdmissionRecord, replay_floor: int
-    ) -> StreamAdmissionResult:
-        if record.status == "awaiting_fence" and not any(
-            r.handle == record.handle for r in self.scheduler.state_retirements
-        ):
-            record.status = "finished"
-        return StreamAdmissionResult(
-            record.accepted,
-            record.request_id,
-            record.status,
-            record.reason,
-            replay_floor,
-        )
-
     def _refuse(
-        self, request_id: str, reason: StreamAdmissionReason, replay_floor: int = 0
+        self, request_id: str, reason: StreamAdmissionReason
     ) -> StreamAdmissionResult:
         self.refusals[reason] += 1
-        return StreamAdmissionResult(False, request_id, "refused", reason, replay_floor)
+        return StreamAdmissionResult(False, request_id, "refused", reason)
 
     def accept_update(self, request: Request) -> StreamUpdateRejection | None:
         record = self.sessions.get(request.request_id)
         context = request.stream_admission
         if record is None:
             return "unknown_admission" if context is not None else None
-        if (
-            context is None
-            or context.admission_id != record.admission_id
-            or context.owner != record.owner
-        ):
+        if context is None:
             return "identity_mismatch"
+        if self.unsupported_input(request):
+            return "unsupported_update"
         if request.resumable:
             if record.input_closed:
                 return "input_closed"
@@ -342,10 +224,7 @@ class StreamAdmissions:
             record.deadline_reason = "parked_idle"
 
     def finish(self, request_id: str) -> None:
-        if record := self.sessions.pop(request_id, None):
-            record.status = "awaiting_fence"
-            record.deadline = None
-            record.deadline_reason = None
+        self.sessions.pop(request_id, None)
 
     def next_deadline(self) -> float | None:
         return min(

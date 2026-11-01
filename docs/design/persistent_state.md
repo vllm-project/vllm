@@ -82,35 +82,41 @@ retried once; a second miss is a fatal engine error.
 
 ## Stream admission
 
-With persistent state enabled, the engine core exposes two utility methods for
-reserving a slot before any input arrives:
+With persistent state enabled, the engine core exposes the utility method
+`admit_stream(request)`, which reserves a slot before any input arrives. It
+atomically reserves a slot and parks an empty resumable request. The request
+must be an empty, resumable sampling request (`n=1`, no stop strings, no
+structured outputs, no transfer connectors). Async frontends call it through
+`EngineCoreClient.admit_stream_async`, which routes the stream's outputs back
+to the calling API server, as for an ordinary request.
 
-- `get_stream_admission_epoch(owner, renew=False)` returns a replay namespace
-  (epoch) for an owner, such as one API server process. The epoch has a fixed
-  lifetime; `renew=True` starts a new namespace and discards the old one.
-- `admit_stream(owner, admission_id, request)` atomically reserves a slot and
-  parks an empty resumable request. `admission_id` is a `StreamAdmissionId`
-  (owner epoch, sequence). The request must be an empty, resumable sampling
-  request (`n=1`, no stop strings, no structured outputs, no transfer
-  connectors).
-
-Admission is transactional and idempotent: retrying the same ID with the same
-payload returns the recorded result and never extends a deadline; reusing an ID
-with a different payload is an error. Refusals return
-`StreamAdmissionResult(accepted=False, reason=...)` with one of `owner_epoch`,
-`expired_id`, `request_id_in_use`, `capacity`, `active_limit`, or
-`engine_paused`, and neither allocate a slot nor create a request.
+The request ID names the stream, so the caller must give every session a
+globally unique ID and never reuse it. vLLM's input processor adds a random
+suffix to internal request IDs, but `admit_stream` does not go through it, and
+`VLLM_DISABLE_REQUEST_ID_RANDOMIZATION` turns the suffix off. A retry must
+resend the identical payload, including its `arrival_time` and calling
+frontend; it then returns the live session's current result and never extends
+its deadline. Any other use of an ID that is in use, including by a session
+that is still retiring, is refused as `request_id_in_use`. Once a session
+ends, the engine forgets it. After a timed-out or cancelled admission, the
+caller aborts the request ID, abandons any retries under it, and admits with a
+new ID; a late input or abort for the old ID cannot reach the new session.
+Refusals return `StreamAdmissionResult(accepted=False, reason=...)` with one
+of `request_id_in_use`, `capacity`, `active_limit`, or `engine_paused`, and
+neither allocate a slot nor create a request.
 
 Input is then sent as ordinary resumable updates for the same request ID with
-`EngineCoreRequest.stream_admission` set to the admission identity; setting
-`input_closed=True`, or sending a non-resumable update, closes input. Rejected
-updates are reported on `EngineCoreOutput.stream_output` without ending the
-session. An engine without persistent state refuses any update that carries
+`EngineCoreRequest.stream_admission` set to a `StreamAdmissionContext`;
+setting `input_closed=True`, or sending a non-resumable update, closes input.
+Inputs must keep the admission's restrictions and carry token IDs only (no
+prompt embeddings); the engine refuses others before preprocessing. Rejected updates are
+reported on `EngineCoreOutput.stream_output` without ending the session. An
+engine without persistent state refuses any update that carries
 `stream_admission` as a validation error.
 
 The engine expires sessions on its own monotonic clock, including while idle,
-and aborts expired sessions with an error output. Configure the deadlines and
-replay bounds with `--additional-config`:
+and aborts expired sessions with an error output. Configure the deadlines with
+`--additional-config`:
 
 ```bash
 vllm serve <model> \
@@ -122,11 +128,8 @@ vllm serve <model> \
 | `never_fed_timeout` | `15.0` | Seconds an admitted stream may wait for its first input. |
 | `parked_idle_timeout` | `60.0` | Seconds a parked stream may wait for its next input. |
 | `draining_timeout` | `40.0` | Seconds a stream may take to finish after input closes. |
-| `owner_epoch_timeout` | `300.0` | Lifetime of an owner epoch in seconds. |
-| `max_records` | `4096` | Admission results remembered per owner for replay. |
-| `max_owners` | `64` | Concurrent owner namespaces. |
 
-Timeouts must be finite and positive; capacities must be positive integers.
+Timeouts must be finite and positive.
 
 ## Supported configurations
 

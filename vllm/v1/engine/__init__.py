@@ -153,19 +153,8 @@ class EngineCoreReadyResponse:
     prefix_hash_config: PrefixHashConfig | None = None
 
 
-class StreamAdmissionId(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
-    """Server-issued owner epoch and sequence within its replay window."""
-
-    owner_epoch: str
-    sequence: int
-
-
-StreamAdmissionStatus = Literal[
-    "never_fed", "live", "parked", "draining", "awaiting_fence", "finished", "refused"
-]
+StreamAdmissionStatus = Literal["never_fed", "live", "parked", "draining", "refused"]
 StreamAdmissionReason = Literal[
-    "owner_epoch",
-    "expired_id",
     "request_id_in_use",
     "capacity",
     "active_limit",
@@ -176,6 +165,7 @@ StreamUpdateRejection = Literal[
     "identity_mismatch",
     "input_closed",
     "empty_update",
+    "unsupported_update",
     "preprocessing_error",
     "shutdown",
     "mm_cache_miss",
@@ -185,8 +175,8 @@ StreamUpdateRejection = Literal[
 
 
 class StreamAdmissionContext(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
-    owner: str
-    admission_id: StreamAdmissionId
+    """Marks an input for an admitted stream; the request ID names the stream."""
+
     input_closed: bool = False
 
 
@@ -202,7 +192,6 @@ class StreamAdmissionResult(msgspec.Struct, frozen=True):  # type: ignore[call-a
     request_id: str
     status: StreamAdmissionStatus
     reason: StreamAdmissionReason | None = None
-    replay_floor: int = 0
 
 
 class EngineCoreRequest(

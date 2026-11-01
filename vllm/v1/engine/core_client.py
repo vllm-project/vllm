@@ -50,6 +50,7 @@ from vllm.v1.engine import (
     PauseMode,
     ReconfigureDistributedRequest,
     ReconfigureRankType,
+    StreamAdmissionResult,
     UtilityOutput,
 )
 from vllm.v1.engine.coordinator import DPCoordinator
@@ -312,6 +313,11 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def reset_encoder_cache_async(self) -> None:
+        raise NotImplementedError
+
+    async def admit_stream_async(
+        self, request: EngineCoreRequest
+    ) -> StreamAdmissionResult:
         raise NotImplementedError
 
     async def sleep_async(self, level: int = 1, mode: PauseMode = "abort") -> None:
@@ -1352,6 +1358,14 @@ class AsyncMPClient(MPClient):
         request.client_index = self.client_index
         await self._send_input(EngineCoreRequestType.ADD, request)
         self._ensure_output_queue_task()
+
+    async def admit_stream_async(
+        self, request: EngineCoreRequest
+    ) -> StreamAdmissionResult:
+        # The admitted stream's outputs return to this client, as for an ADD.
+        request.client_index = self.client_index
+        result = await self.call_utility_async("admit_stream", request)
+        return msgspec.convert(result, StreamAdmissionResult)
 
     async def abort_requests_async(self, request_ids: list[str]) -> None:
         if request_ids and not self.resources.engine_dead:
