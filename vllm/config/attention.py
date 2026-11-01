@@ -14,6 +14,17 @@ IndexerKVDType = Literal["auto", "bf16", "fp8", "mxfp4", "nvfp4"]
 MiniMaxM3MSADecodeBackend = Literal["triton", "cutlass"]
 
 
+def _validate_decoder_backend(
+    backend: AttentionBackendEnum,
+) -> AttentionBackendEnum:
+    if backend == AttentionBackendEnum.TORCH_SDPA:
+        raise ValueError(
+            "TORCH_SDPA is only supported for multi-modal encoder attention "
+            "and cannot be used as a decoder attention backend."
+        )
+    return backend
+
+
 @config
 class HiSparseConfig:
     """Configuration for HiSparse sparse-MLA KV offloading."""
@@ -245,12 +256,9 @@ class AttentionConfig:
             if value.lower() == "auto":
                 return None
             value = AttentionBackendEnum[value.upper()]
-        if value == AttentionBackendEnum.TORCH_SDPA:
-            raise ValueError(
-                "TORCH_SDPA is only supported for multi-modal encoder attention "
-                "and cannot be used as a decoder attention backend."
-            )
-        return value
+        if value is None:
+            return None
+        return _validate_decoder_backend(value)
 
     @field_validator("mla_prefill_backend", mode="before")
     @classmethod
@@ -283,5 +291,5 @@ class AttentionConfig:
                 )
             if isinstance(backend, str):
                 backend = AttentionBackendEnum[backend.upper()]
-            parsed[kind] = backend
+            parsed[kind] = _validate_decoder_backend(backend)
         return parsed

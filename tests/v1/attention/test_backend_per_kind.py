@@ -88,6 +88,18 @@ def test_backend_per_kind_rejects_unknown_kind():
         AttentionConfig(backend_per_kind=backend_per_kind)
 
 
+@pytest.mark.parametrize(
+    "backend",
+    ["TORCH_SDPA", AttentionBackendEnum.TORCH_SDPA],
+)
+def test_backend_per_kind_rejects_torch_sdpa(backend):
+    with pytest.raises(
+        ValueError,
+        match="only supported for multi-modal encoder attention",
+    ):
+        AttentionConfig(backend_per_kind={"full_attention": backend})
+
+
 def test_backend_per_kind_defaults_empty():
     assert AttentionConfig().backend_per_kind == {}
 
