@@ -153,6 +153,9 @@ class PreparedMla:
         self.weights: tuple = (*norms, attention.q_b_proj.weight, attention.W_UK_T)
         self.weights += (attention.W_UV, attention._q_scale_inv, attention._k_scale_inv)
         self.device, self.pitches = attention.q_b_proj.weight.device, pitches
+        # Host floats, so weight reloads need not refresh them: no quant config
+        # gives K3's MLA a KV-cache method, and its post-load processing resets
+        # q/k scales to 1.0 (set_default_quant_scales).
         k_scale = attention._k_scale_float
         softmax = attention.scale * attention._q_scale_float * k_scale
         self.eps = cutlass.Float32(attention.rms_norm_eps)
