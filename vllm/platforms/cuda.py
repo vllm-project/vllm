@@ -994,7 +994,17 @@ class NvmlCudaPlatform(CudaPlatformBase):
     def log_warnings(cls):
         device_ids: int = pynvml.nvmlDeviceGetCount()
         if device_ids > 1:
-            device_names = [cls._get_physical_device_name(i) for i in range(device_ids)]
+            device_names = []
+            for i in range(device_ids):
+                try:
+                    device_names.append(cls._get_physical_device_name(i))
+                except pynvml.NVMLError as exc:
+                    logger.warning_once(
+                        "Failed to query NVML device %d: %s",
+                        i,
+                        str(exc),
+                        scope="process",
+                    )
             if (
                 len(set(device_names)) > 1
                 and os.environ.get("CUDA_DEVICE_ORDER") != "PCI_BUS_ID"
