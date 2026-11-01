@@ -32,6 +32,10 @@ Widths 1..8 at TP1 and 1..16 at TP2, each with its own weights and Mailbox
 layer tag, over many input draws: a norm reduced in another order than the stock
 kernel's still matches on most rows, and shows on about one row in 640.
 Run directly with ``pytest tests/models/qwen3_5/test_amd_dense_mono.py``.
+
+The kernels build for the GPU's grid (``tiling.device_grid``: 256 CTAs on
+MI355X, 128 on MI350P). ``VLLM_ROCM_QWEN38_DENSE_MONO_GRID=128`` runs the
+128-CTA builds on a 256-CU GPU.
 """
 
 import os
@@ -82,6 +86,13 @@ def _mxfp4(g, n, k):
         120, 127, (n, k // 32), dtype=torch.uint8, device="cuda", generator=g
     )
     return w, ws
+
+
+def _grid():
+    """The grid the kernels build for on this GPU."""
+    from vllm.models.qwen3_5.amd.mono.tiling import device_grid
+
+    return device_grid()
 
 
 def _widths(tp):
@@ -156,7 +167,7 @@ class DenseFfnTest(unittest.TestCase):
                 w2=D.shuffle_w(w2),
                 w2s=w2s,
             )
-            key = D.FfnBuild(tokens=s, eps=EPS, shuffled=True, oproj=True)
+            key = D.FfnBuild(tokens=s, eps=EPS, shuffled=True, oproj=True, grid=_grid())
             out = torch.empty(s, D.HIDDEN, dtype=BF, device="cuda")
             res_out = torch.empty_like(out)
             epoch = torch.zeros(1, dtype=torch.int32, device="cuda")
@@ -209,7 +220,9 @@ class DenseFfnTest(unittest.TestCase):
                 w13s = torch.cat([w13s[r] for r in rows]).contiguous()
                 w2, w2s = _k_cols(w2, w2s, D.INTER, 2, rank)
                 w13_sh, w2_sh = D.shuffle_w(w13), D.shuffle_w(w2)
-                key = D.FfnBuild(tokens=s, shuffled=True, tp=2, normed=True)
+                key = D.FfnBuild(
+                    tokens=s, shuffled=True, tp=2, normed=True, grid=_grid()
+                )
                 out = torch.empty(s, D.HIDDEN, dtype=BF, device="cuda")
                 epoch = torch.zeros(1, dtype=torch.int32, device="cuda")
                 scratch = torch.zeros(
@@ -428,11 +441,13 @@ class StockChainTest(unittest.TestCase):
                 epoch = torch.ones(1, dtype=torch.int32, device="cuda")
                 out = torch.empty(s, D.HIDDEN, dtype=BF, device="cuda")
                 if tp == 1:
-                    key = D.FfnBuild(tokens=s, eps=EPS, shuffled=True)
+                    key = D.FfnBuild(tokens=s, eps=EPS, shuffled=True, grid=_grid())
                     args = dict(hidden=h, residual=r, ln_w=ln_w)
                     res_out = torch.empty_like(out)
                 else:
-                    key = D.FfnBuild(tokens=s, shuffled=True, tp=2, normed=True)
+                    key = D.FfnBuild(
+                        tokens=s, shuffled=True, tp=2, normed=True, grid=_grid()
+                    )
                     args = dict(hidden=x, residual=None, ln_w=None)
                     res_out = None
                 scratch = torch.zeros(
@@ -577,6 +592,7 @@ class DenseGdnTest(unittest.TestCase):
                 tp=tp,
                 normed=normed,
                 oproj=oproj,
+                grid=_grid(),
             )
             fold = {}
             if oproj:

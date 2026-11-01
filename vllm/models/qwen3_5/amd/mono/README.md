@@ -24,6 +24,29 @@ a GPU other than gfx950, pipeline parallel, LoRA, a KV connector, sequence
 parallel, speculative tokens, or a shape or quant method other than this
 Quark MXFP4 27B dense MLP.
 
+## Grid width
+
+Every K1 and K2 launch is one persistent CTA per compute unit, all of them
+resident, so the grid is the GPU's CU count. `mono/tiling.py` takes it from
+the device: 256 on MI355X and MI350X, 128 on MI350P. Any other count is
+refused (a grid wider than the CUs deadlocks; other widths have no stage
+plan). `VLLM_ROCM_QWEN38_DENSE_MONO_GRID=128` runs the 128-CTA build on a
+256-CU GPU, for checking it there.
+
+On 128 CTAs the stages whose tasks outnumber the CTAs take more passes a CTA;
+every task is computed as on 256 CTAs:
+
+| Stage | Tasks (TP1) | 256 CTAs | 128 CTAs |
+| --- | --- | --- | --- |
+| K1 front, K2 o_proj, TP2 out_proj | 160 owners of 32 columns | CTAs 0..159 | second pass on CTAs 0..31 |
+| K1 in_proj_qkvz | 1024 groups of 16 rows | 4 a CTA, 1 pass | 8 a CTA, 2 passes (TP2: 4, 1 pass) |
+| K1 GDN | 768 S tasks of 8 state rows | 3 S a CTA, 1 pass | 6 S a CTA, passes of whole tokens above 24 tasks |
+| K2 gate_up | 1088 groups of 16 columns | 4 whole + 4 columns | 8 whole + 8 columns |
+| K2 down | 320 groups of 16 rows | 1 whole + 4 rows, 1 pass | 2 whole + 8 rows, 2 passes |
+
+The 256-CTA builds trace as before the grid was a parameter; their kernel
+names are unchanged, the 128-CTA ones end in `_g128`.
+
 ## When it runs
 
 A step enters the mono graph only when it is a pure decode
@@ -117,7 +140,12 @@ stock modules scored 0.1818 on the same eval.
 
 ```bash
 pytest tests/models/qwen3_5/test_amd_dense_mono.py
+pytest tests/models/qwen3_5/test_amd_dense_mono_tiling.py  # CPU only
 ```
+
+`test_amd_dense_mono_tiling.py` needs no GPU: it checks the grid choice
+and, for 256 and 128 CTAs, that every stage's tasks run exactly once and
+that no GDN pass waits on a later one.
 
 `DenseFfnTest` checks K2 against the stock MXFP4 GEMM, Gemma norm, and
 SiLU-mul, including the TP2 down partial before the all-reduce.
@@ -137,5 +165,6 @@ amd/mono/
     dense_ffn.py     K2, the MXFP4 FFN
     helpers.py       step tag, sigmoid, e8m0
     sources.py       kernel source digest
+    tiling.py        grid width from the CU count, per-stage task plans
     common/          device ops, mailbox sync, MX helpers, plan / build keys
 ```
