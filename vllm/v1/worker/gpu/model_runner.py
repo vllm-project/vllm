@@ -71,6 +71,7 @@ from vllm.tasks import SupportedTask
 from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, async_tensor_h2d
+from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -101,6 +102,7 @@ from vllm.v1.worker.gpu.attn_utils import (
     FastPrefillHelper,
     build_slot_mappings_by_layer,
     get_kv_cache_spec,
+    get_varlen_cudagraph_unsupported_backend,
     init_attn_backend,
     init_kv_cache,
 )
@@ -779,13 +781,33 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             is_profiling=is_profiling,
             piecewise_capture_available=piecewise_capture_available,
         )
+        # Fixed-width speculation also produces short decode rows at admission
+        # and request completion. The padded draft pass must fit the token budget.
+        varlen_decode = self.adaptive_verification is not None or (
+            self.decode_query_len > 1
+            and self.ubatch_runner is None
+            and self.pcp_manager is None
+            and (
+                self.speculator is None
+                or self.max_num_reqs * self.speculator.num_query_per_req
+                <= self.max_num_tokens
+            )
+            and additional_attn_cg_support[0] == AttentionCGSupport.ALWAYS
+            and get_varlen_cudagraph_unsupported_backend(
+                self.attn_groups,
+                self.vllm_config,
+                self.decode_query_len,
+                checked_layer_names=target_attn_layer_names,
+            )
+            is None
+        )
         self.cudagraph_manager = ModelCudaGraphManager(
             self.vllm_config,
             self.device,
             cudagraph_mode,
             decode_query_len=self.decode_query_len,
             lora_capture_cases=self.lora_capture_cases,
-            varlen_decode=self.adaptive_verification is not None,
+            varlen_decode=varlen_decode,
             ubatch_runner=self.ubatch_runner,
         )
         if self.cache_config.kv_sharing_fast_prefill and self.pcp_manager is None:
@@ -1832,9 +1854,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         if batch_req_state is not None:
             num_toks = batch_req_state.num_tokens
-            if batch_req_state.has_prefill:
-                # Varlen decode graphs replay decodes only, and their bound
-                # alone would admit a short prefill.
+            if not batch_req_state.decode_graph_eligible:
+                # Keep genuine prefills out, while allowing one-token
+                # extensions over an existing KV cache to replay decode graphs.
                 max_query_len = None
             if self.pcp_manager is not None:
                 num_toks = self.pcp_manager.get_num_tokens_for_dispatch(
