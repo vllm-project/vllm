@@ -112,6 +112,8 @@ llm.collective_rpc("reload_weights", kwargs={"weights_iterator": weights_iterato
 | `_copy_and_restore_kernel_tensors` | Copy processed weights into original tensor locations to affect compiled cuda graphs, etc. | Called by `_layerwise_process` after `process_weights_after_loading` | Not called. There is no compiled cuda graph yet |
 | `finalize_layerwise_processing` | Catch any layers which did not load all weights (for example attention weights or weights with padding) | Called by `BaseModelLoader` | Called by `BaseModelLoader` |
 
+If a loadable layer receives no weights during a reload, finalization warns and restores its existing tensors and original weight loaders, allowing subsequent updates to write into the same storage.
+
 You can plug into this lifecycle directly by calling the `initialize_layerwise_reload`, loading weights, then calling `finalize_layerwise_processing`:
 
 ```python
