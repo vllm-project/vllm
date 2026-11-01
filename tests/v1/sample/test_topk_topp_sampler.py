@@ -182,7 +182,12 @@ def test_flashinfer_sampler_fallback_when_jit_cannot_target_gpu(monkeypatch):
     import flashinfer.jit.core
     from flashinfer.compilation_context import CompilationContext
 
+    from vllm.v1.sample.ops import topk_topp_sampler
     from vllm.v1.sample.ops.topk_topp_sampler import flashinfer_sampler_supported
+
+    # Bypass the cache so the faked FlashInfer state below is read.
+    cached = topk_topp_sampler.flashinfer_jit_unsupported_reason
+    monkeypatch.setattr(topk_topp_sampler, cached.__name__, cached.__wrapped__)
 
     def fake_check_cuda_arch():
         raise RuntimeError("FlashInfer requires GPUs with sm75 or higher")
