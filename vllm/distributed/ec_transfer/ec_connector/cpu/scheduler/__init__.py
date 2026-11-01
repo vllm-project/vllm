@@ -32,6 +32,7 @@ from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.distributed.ec_transfer.ec_connector.cpu.data.base import DataTransport
     from vllm.multimodal.inputs import MultiModalFeatureSpec
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.outputs import ECConnectorOutput
@@ -122,15 +123,55 @@ class ECCPUScheduler:
                 self.shutdown()
                 raise
 
+    def _create_data_transport(self, engine_id: str) -> "DataTransport":
+        """Build the P2P data plane named by ``ec_transport`` (default nixl)."""
+        from vllm import envs
+
+        name = str(self._ec_config.get_from_extra_config("ec_transport", "nixl"))
+        if name == "nixl":
+            from vllm.distributed.ec_transfer.ec_connector.cpu.data.nixl import (
+                NixlDataTransport,
+            )
+            from vllm.distributed.nixl_utils import NixlWrapper, nixl_agent_config
+
+            if NixlWrapper is None or nixl_agent_config is None:
+                raise RuntimeError(
+                    "ec_enable_nixl requires NIXL; install the `nixl` package or "
+                    "remove ec_enable_nixl from ec_connector_extra_config."
+                )
+            return NixlDataTransport(
+                agent_name=engine_id,
+                base_ptr=self._region.blocks.data_ptr(),
+                num_blocks=self._region.num_blocks,
+                block_size_bytes=self._region.block_size_bytes,
+                total_size_bytes=self._region.num_blocks
+                * self._region.block_size_bytes,
+            )
+        if name == "moriio":
+            from vllm.distributed.ec_transfer.ec_connector.cpu.data.moriio import (
+                MoRIIODataTransport,
+            )
+
+            cfg = self._ec_config.get_from_extra_config
+            port = envs.VLLM_EC_SIDE_CHANNEL_PORT
+            return MoRIIODataTransport(
+                agent_name=engine_id,
+                region=self._region.blocks,
+                block_size_bytes=self._region.block_size_bytes,
+                host=str(cfg("moriio_host", envs.VLLM_EC_SIDE_CHANNEL_HOST)),
+                port=int(cfg("moriio_port", port + 1)),
+                notify_port=int(cfg("moriio_notify_port", port + 2)),
+                qp_per_transfer=int(cfg("moriio_qp_per_transfer", 1)),
+                num_workers=int(cfg("moriio_num_workers", 1)),
+            )
+        raise ValueError(f"Unknown ec_transport {name!r}; expected nixl or moriio")
+
     def _setup_nixl(self, vllm_config: "VllmConfig") -> None:
         # Lazy imports keep nixl/zmq off the gate-off path.
         from vllm import envs
         from vllm.distributed.ec_transfer.ec_connector.cpu.control.zmq import (
             ZmqClientTransport,
             ZmqServerTransport,
-        )
-        from vllm.distributed.ec_transfer.ec_connector.cpu.data.nixl import (
-            NixlDataTransport,
         )
         from vllm.distributed.ec_transfer.ec_connector.cpu.protocol import (
             compute_ec_compatibility_hash,
@@ -139,14 +180,8 @@ class ECCPUScheduler:
             PRODUCER_PIN_LEASE_S,
             ProducerSession,
         )
-        from vllm.distributed.nixl_utils import NixlWrapper, nixl_agent_config
         from vllm.version import __version__ as VLLM_VERSION
 
-        if NixlWrapper is None or nixl_agent_config is None:
-            raise RuntimeError(
-                "ec_enable_nixl requires NIXL; install the `nixl` package or "
-                "remove ec_enable_nixl from ec_connector_extra_config."
-            )
         engine_id = self._ec_config.engine_id
         assert engine_id is not None
         # How long a consumer waits for an XferAck. The producer answers from
@@ -167,13 +202,7 @@ class ECCPUScheduler:
             self._peer_host = envs.VLLM_EC_SIDE_CHANNEL_HOST
             self._peer_port = envs.VLLM_EC_SIDE_CHANNEL_PORT
 
-        self._data = NixlDataTransport(
-            agent_name=engine_id,
-            base_ptr=self._region.blocks.data_ptr(),
-            num_blocks=self._region.num_blocks,
-            block_size_bytes=self._region.block_size_bytes,
-            total_size_bytes=self._region.num_blocks * self._region.block_size_bytes,
-        )
+        self._data = self._create_data_transport(engine_id)
         if self._is_producer:
             assert self._peer_host is not None
             assert self._peer_port is not None
