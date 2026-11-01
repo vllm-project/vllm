@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections import defaultdict
 from http import HTTPStatus
 
 import openai
@@ -54,11 +55,12 @@ def default_server_args():
     ],
 )
 def server(model_key, default_server_args, request):
+    server_args = list(default_server_args)
     if request.param:
-        default_server_args.append(request.param)
+        server_args.append(request.param)
 
     model_name = MODELS[model_key]
-    with RemoteOpenAIServer(model_name, default_server_args) as remote_server:
+    with RemoteOpenAIServer(model_name, server_args) as remote_server:
         yield remote_server
 
 
@@ -71,7 +73,66 @@ async def client(server):
 _PROMPT = "Hello my name is Robert and I love magic"
 
 
-def _get_expected_values(num_requests: int, prompt_ids: list[int], max_tokens: int):
+def _metric_totals(body: str, api_surface: str | None = None) -> dict[str, float]:
+    totals: dict[str, float] = defaultdict(float)
+    for family in text_string_to_metric_families(body):
+        for sample in family.samples:
+            if (
+                api_surface is not None
+                and sample.labels.get("api_surface") != api_surface
+            ):
+                continue
+            if sample.name.endswith(("_total", "_sum", "_count")):
+                totals[sample.name] += sample.value
+    return totals
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "api_surface, expected",
+    [
+        (
+            None,
+            {
+                "vllm:request_success_total": 9,
+                "vllm:e2e_request_latency_seconds_count": 4,
+                "vllm:e2e_request_latency_seconds_sum": 8,
+            },
+        ),
+        (
+            "messages",
+            {
+                "vllm:request_success_total": 4,
+                "vllm:e2e_request_latency_seconds_count": 4,
+                "vllm:e2e_request_latency_seconds_sum": 8,
+            },
+        ),
+        ("completions", {"vllm:request_success_total": 5}),
+        ("unknown", {}),
+    ],
+)
+def test_metric_totals_sum_engines_and_finish_reasons_with_api_filter(
+    api_surface, expected
+):
+    body = """# TYPE vllm:request_success counter
+vllm:request_success_total{engine="0",api_surface="messages",finished_reason="stop"} 1
+vllm:request_success_total{engine="0",api_surface="messages",finished_reason="length"} 2
+vllm:request_success_total{engine="1",api_surface="messages",finished_reason="stop"} 1
+vllm:request_success_total{api_surface="completions",finished_reason="stop"} 5
+# TYPE vllm:e2e_request_latency_seconds histogram
+vllm:e2e_request_latency_seconds_bucket{api_surface="messages",le="+Inf"} 4
+vllm:e2e_request_latency_seconds_count{api_surface="messages"} 4
+vllm:e2e_request_latency_seconds_sum{api_surface="messages"} 8
+"""
+    assert _metric_totals(body, api_surface) == expected
+
+
+def _get_expected_values(
+    num_requests: int,
+    prompt_ids: list[int],
+    max_tokens: int,
+    num_cached_tokens: float = 0,
+):
     num_prompt_tokens = len(prompt_ids)
 
     # {metric_family: [(suffix, expected_value)]}
@@ -102,7 +163,7 @@ def _get_expected_values(num_requests: int, prompt_ids: list[int], max_tokens: i
         "vllm:iteration_tokens_total": [
             (
                 "_sum",
-                num_requests * (num_prompt_tokens + max_tokens),
+                num_requests * (num_prompt_tokens + max_tokens) - num_cached_tokens,
             ),
             ("_count", num_requests * max_tokens),
         ],
@@ -124,60 +185,138 @@ async def test_metrics_counts(
     model_name = MODELS[model_key]
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     prompt_ids = tokenizer.encode(_PROMPT)
-    num_requests = 10
+    num_requests = 2
     max_tokens = 10
+    baseline = requests.get(server.url_for("metrics"))
+    baseline.raise_for_status()
+    before = _metric_totals(baseline.text)
 
     for _ in range(num_requests):
-        # sending a request triggers the metrics to be logged.
         await client.completions.create(
             model=model_name,
             prompt=prompt_ids,
             max_tokens=max_tokens,
+            extra_body={"ignore_eos": True},
         )
 
     response = requests.get(server.url_for("metrics"))
-    print(response.text)
     assert response.status_code == HTTPStatus.OK
-
-    # Loop over all expected metric_families
-    expected_values = _get_expected_values(num_requests, prompt_ids, max_tokens)
-    for metric_family, suffix_values_list in expected_values.items():
-        if metric_family not in EXPECTED_METRICS_V1 or (
+    after = _metric_totals(response.text)
+    cached_tokens = (
+        after["vllm:prompt_tokens_cached_total"]
+        - before["vllm:prompt_tokens_cached_total"]
+    )
+    expected_values = _get_expected_values(
+        num_requests, prompt_ids, max_tokens, cached_tokens
+    )
+    for metric_family, suffix_values in expected_values.items():
+        if (
             not server.show_hidden_metrics
             and metric_family in HIDDEN_DEPRECATED_METRICS
         ):
             continue
+        for suffix, expected_value in suffix_values:
+            sample_name = f"{metric_family}{suffix}"
+            assert sample_name in after, f"Missing {sample_name} in metrics endpoint"
+            assert after[sample_name] - before.get(sample_name, 0) == expected_value, (
+                sample_name
+            )
 
-        found_metric = False
 
-        # Check to see if the metric_family is found in the prom endpoint.
-        for family in text_string_to_metric_families(response.text):
-            if family.name == metric_family:
-                found_metric = True
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "server, enable_api_surface_metrics",
+    [("", False), ("--enable-api-surface-metrics", True)],
+    indirect=["server"],
+    scope="module",
+)
+@pytest.mark.parametrize("api_surface", ["messages", "chat_completions", "completions"])
+@pytest.mark.parametrize("stream", [False, True])
+async def test_metrics_counts_by_api_surface(
+    server, client, model_key, api_surface, stream, enable_api_surface_metrics
+):
+    """Native JSON/SSE requests aggregate by default and split metrics on opt-in."""
+    if model_key == "multimodal":
+        pytest.skip("Covered by the text model")
 
-                # Check that each suffix is found in the prom endpoint.
-                for suffix, expected_value in suffix_values_list:
-                    metric_name_w_suffix = f"{metric_family}{suffix}"
-                    found_suffix = False
+    response = requests.get(server.url_for("metrics"))
+    response.raise_for_status()
+    if not enable_api_surface_metrics:
+        assert all(
+            "api_surface" not in sample.labels
+            for family in text_string_to_metric_families(response.text)
+            for sample in family.samples
+        )
+    surfaces = ("messages", "chat_completions", "completions", "unknown")
+    before = _metric_totals(response.text)
+    before_by_api = {
+        surface: _metric_totals(response.text, surface) for surface in surfaces
+    }
+    kwargs = {"model": MODELS[model_key], "max_tokens": 4, "stream": stream}
+    messages = [{"role": "user", "content": _PROMPT}]
+    if api_surface == "messages":
+        async with server.get_async_client_anthropic() as anthropic_client:
+            result = await anthropic_client.messages.create(messages=messages, **kwargs)
+            if stream:
+                events = [event async for event in result]
+                assert events[-1].type == "message_stop"
+            else:
+                assert result.type == "message"
+    else:
+        result = (
+            await client.chat.completions.create(messages=messages, **kwargs)
+            if api_surface == "chat_completions"
+            else await client.completions.create(prompt=_PROMPT, **kwargs)
+        )
+        if stream:
+            chunks = [chunk async for chunk in result]
+            assert chunks[-1].choices[0].finish_reason is not None
+        else:
+            assert result.choices[0].finish_reason is not None
 
-                    for sample in family.samples:
-                        if sample.name == metric_name_w_suffix:
-                            found_suffix = True
-
-                            # For each suffix, value sure the value matches
-                            # what we expect.
-                            assert sample.value == expected_value, (
-                                f"{metric_name_w_suffix} expected value of "
-                                f"{expected_value} did not match found value "
-                                f"{sample.value}"
-                            )
-                            break
-                    assert found_suffix, (
-                        f"Did not find {metric_name_w_suffix} in prom endpoint"
-                    )
-                break
-
-        assert found_metric, f"Did not find {metric_family} in prom endpoint"
+    response = requests.get(server.url_for("metrics"))
+    response.raise_for_status()
+    after = _metric_totals(response.text)
+    after_by_api = {
+        surface: _metric_totals(response.text, surface) for surface in surfaces
+    }
+    if enable_api_surface_metrics:
+        for surface in surfaces:
+            if surface != api_surface:
+                assert after_by_api[surface] == before_by_api[surface], surface
+        before, after = before_by_api[api_surface], after_by_api[api_surface]
+    else:
+        assert all(
+            "api_surface" not in sample.labels
+            for family in text_string_to_metric_families(response.text)
+            for sample in family.samples
+        )
+    delta = {name: value - before.get(name, 0) for name, value in after.items()}
+    assert delta["vllm:request_success_total"] == 1
+    for metric in (
+        "time_to_first_token_seconds",
+        "request_time_per_output_token_seconds",
+        "e2e_request_latency_seconds",
+        "request_queue_time_seconds",
+        "request_inference_time_seconds",
+        "request_prefill_time_seconds",
+        "request_decode_time_seconds",
+        "request_prompt_tokens",
+        "request_generation_tokens",
+        "request_prefill_kv_computed_tokens",
+    ):
+        assert delta[f"vllm:{metric}_count"] == 1, metric
+    prompt_tokens = delta["vllm:prompt_tokens_total"]
+    generation_tokens = delta["vllm:generation_tokens_total"]
+    assert prompt_tokens > 0
+    assert generation_tokens > 0
+    assert delta["vllm:request_prompt_tokens_sum"] == prompt_tokens
+    assert delta["vllm:request_generation_tokens_sum"] == generation_tokens
+    assert delta["vllm:inter_token_latency_seconds_count"] == generation_tokens - 1
+    assert delta["vllm:prompt_tokens_by_source_total"] == prompt_tokens
+    assert delta["vllm:request_prefill_kv_computed_tokens_sum"] == (
+        prompt_tokens - delta["vllm:prompt_tokens_cached_total"]
+    )
 
 
 EXPECTED_METRICS_V1 = [

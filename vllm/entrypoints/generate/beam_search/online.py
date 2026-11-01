@@ -39,6 +39,7 @@ class BeamSearchOnlineMixin(ABC):
         trace_headers: Mapping[str, str] | None = None,
         session_id: str | None = None,
         priority: int = 0,
+        api_surface: str = "unknown",
     ) -> AsyncGenerator[RequestOutput, None]:
         beam_width = params.beam_width
         max_tokens = params.max_tokens
@@ -108,6 +109,7 @@ class BeamSearchOnlineMixin(ABC):
                             trace_headers=trace_headers,
                             session_id=session_id,
                             priority=priority,
+                            api_surface=api_surface,
                         )
                     )
                 )
