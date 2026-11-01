@@ -472,11 +472,12 @@ mod tests {
     #[tokio::test]
     async fn test_reasoning_and_tool_call_deltas_are_streamed_outputs() {
         let reasoning = r#"{"choices":[{"delta":{"reasoning":"hmm"}}]}"#;
+        let reasoning_content = r#"{"choices":[{"delta":{"reasoning_content":"hmm"}}]}"#;
         let tool_call = r#"{"choices":[{"delta":{"tool_calls":[{"index":0}]}}]}"#;
-        let output = run_chat(&[ROLE, reasoning, tool_call, TOKEN, USAGE]).await;
+        let output = run_chat(&[ROLE, reasoning, reasoning_content, tool_call, TOKEN, USAGE]).await;
 
         assert!(output.success, "{}", output.error);
-        assert_eq!(output.itl.len(), 2);
+        assert_eq!(output.itl.len(), 3);
         assert_eq!(output.generated_text, "a");
     }
 

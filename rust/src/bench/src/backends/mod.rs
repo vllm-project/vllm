@@ -49,6 +49,8 @@ pub struct ChatDelta {
     pub role: Option<String>,
     pub content: Option<String>,
     pub reasoning: Option<String>,
+    /// Sent by SGLang, and by vLLM before vllm-project/vllm#27752.
+    pub reasoning_content: Option<String>,
     pub tool_calls: Option<Vec<serde_json::Value>>,
     pub function_call: Option<serde_json::Value>,
 }
@@ -60,6 +62,7 @@ impl ChatDelta {
         let non_empty = |s: &Option<String>| s.as_deref().is_some_and(|s| !s.is_empty());
         if non_empty(&self.content)
             || non_empty(&self.reasoning)
+            || non_empty(&self.reasoning_content)
             || self.tool_calls.as_ref().is_some_and(|t| !t.is_empty())
             || self
                 .function_call
