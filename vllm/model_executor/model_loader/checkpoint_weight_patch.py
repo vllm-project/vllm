@@ -17,6 +17,8 @@ from typing import NamedTuple
 
 import torch
 
+from vllm.model_executor.models.utils import _get_tied_embedding_params
+
 _DEFAULT_PATCH_CHUNK_BYTES = 512 << 20
 
 __all__ = [
@@ -136,6 +138,36 @@ def _load_weight_chunk(
     return set() if loaded_names is None else set(loaded_names)
 
 
+def _canonicalize_tied_patches(
+    model: torch.nn.Module,
+    patches: list[CheckpointWeightPatch],
+) -> list[CheckpointWeightPatch]:
+    """Drop or rename tied aliases so chunked loads stay consistent.
+
+    ``AutoWeightsLoader`` skips tied aliases and requires their canonical name
+    in the same ``load_weights`` call. Chunking by ``max_chunk_bytes`` can put
+    an alias alone in one call and its canonical weight in the next, which
+    raises even when both patches were supplied. Prefer the canonical patch
+    when both are present; otherwise load the alias under the canonical name.
+    """
+    aliased = _get_tied_embedding_params(model)
+    if not aliased:
+        return patches
+
+    patch_names = {patch.name for patch in patches}
+    canonicalized: list[CheckpointWeightPatch] = []
+    for patch in patches:
+        canonical = aliased.get(patch.name)
+        if canonical is None:
+            canonicalized.append(patch)
+            continue
+        if canonical in patch_names:
+            # Shared storage is updated by the canonical patch.
+            continue
+        canonicalized.append(patch._replace(name=canonical))
+    return canonicalized
+
+
 @torch.no_grad()
 def load_checkpoint_weight_patches(
     model: torch.nn.Module,
@@ -182,7 +214,7 @@ def load_checkpoint_weight_patches(
     if max_chunk_bytes <= 0:
         raise ValueError("max_chunk_bytes must be positive")
 
-    patch_list = list(patches)
+    patch_list = _canonicalize_tied_patches(model, list(patches))
     patch_numels = [_validate_patch_structure(patch) for patch in patch_list]
     # All patches in one call must use the same dense or sparse representation.
     sparse_flags = {patch.indices is not None for patch in patch_list}
