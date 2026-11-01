@@ -4,8 +4,8 @@ vLLM provides an HTTP server that implements OpenAI's [Completions API](https://
 
 !!! warning "API key authentication does not protect every endpoint"
     The `--api-key` option (or `VLLM_API_KEY` environment variable) only
-    authenticates requests to endpoints under the `/v1`, `/v2`, and
-    `/inference` path prefixes. Other endpoints on the same HTTP server are
+    authenticates requests to endpoints under the `/v1`, `/v2`, `/inference`,
+    and `/cohere` path prefixes. Other endpoints on the same HTTP server are
     **not** authenticated — most notably `/invocations`, which exposes the same
     inference capabilities as the `/v1` endpoints. Do not rely on `--api-key`
     alone to secure vLLM. See
