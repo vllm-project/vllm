@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-
+import contextlib
+import types
 from unittest.mock import MagicMock
 
 import pytest
@@ -487,6 +488,153 @@ def test_fp8_softmax_preserves_small_probabilities() -> None:
     expected = torch.einsum("qht,thd->qhd", probabilities, value_cache[0].float())
 
     torch.testing.assert_close(output.float(), expected, atol=5e-5, rtol=1e-2)
+
+
+@contextlib.contextmanager
+def _block_table_before_unmapped_memory(rows: list[list[int]]):
+    """Yield ``rows`` as an int32 block table whose last entry ends the mapped
+    memory, so a read past it faults instead of returning stale data."""
+    driver = pytest.importorskip("cuda.bindings.driver")
+
+    def check(result):
+        assert result[0] == driver.CUresult.CUDA_SUCCESS, result[0]
+        return result[1] if len(result) > 1 else None
+
+    prop = driver.CUmemAllocationProp()
+    prop.type = driver.CUmemAllocationType.CU_MEM_ALLOCATION_TYPE_PINNED
+    prop.location.type = driver.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE
+    prop.location.id = torch.accelerator.current_device_index()
+    size = check(
+        driver.cuMemGetAllocationGranularity(
+            prop,
+            driver.CUmemAllocationGranularity_flags.CU_MEM_ALLOC_GRANULARITY_MINIMUM,
+        )
+    )
+    # Map only the first of two reserved granules.
+    base = check(driver.cuMemAddressReserve(2 * size, 0, 0, 0))
+    handle = check(driver.cuMemCreate(size, prop, 0))
+    check(driver.cuMemMap(base, size, 0, handle, 0))
+    access = driver.CUmemAccessDesc()
+    access.location = prop.location
+    access.flags = driver.CUmemAccess_flags.CU_MEM_ACCESS_FLAGS_PROT_READWRITE
+    check(driver.cuMemSetAccess(base, size, [access], 1))
+
+    values = torch.tensor(rows, dtype=torch.int32)
+    view = types.SimpleNamespace(
+        __cuda_array_interface__={
+            "shape": tuple(values.shape),
+            "typestr": "<i4",
+            "data": (int(base) + size - values.nbytes, False),
+            "version": 3,
+        }
+    )
+    try:
+        block_table = torch.as_tensor(view, device="cuda")
+        block_table.copy_(values)
+        yield block_table
+        torch.accelerator.synchronize()
+    finally:
+        driver.cuMemUnmap(base, size)
+        driver.cuMemRelease(handle)
+        driver.cuMemAddressFree(base, 2 * size)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Needs CUDA VMM.")
+@torch.inference_mode()
+def test_tile_wider_than_block_stays_within_block_table_row() -> None:
+    """Lanes of the last KV tile past seq_len must not read block-table
+    entries beyond the blocks the sequence owns."""
+    torch.set_default_device(DEVICE_TYPE)
+    set_random_seed(0)
+    block_size, head_size = 16, 128
+    # A 32-wide prefill tile over positions 32..63 maps to blocks 2 and 3.
+    query_len, kv_len = 2, 34
+    num_blocks = triton.cdiv(kv_len, block_size)
+    query = torch.randn(query_len, 1, head_size, dtype=torch.bfloat16)
+    key_cache = torch.randn(num_blocks, block_size, 1, head_size, dtype=torch.bfloat16)
+    value_cache = torch.randn_like(key_cache)
+    output = torch.empty_like(query)
+    rows = [torch.randperm(num_blocks).tolist()]
+
+    with _block_table_before_unmapped_memory(rows) as block_table:
+        unified_attention(
+            q=query,
+            k=key_cache,
+            v=value_cache,
+            out=output,
+            cu_seqlens_q=torch.tensor([0, query_len], dtype=torch.int32),
+            max_seqlen_q=query_len,
+            seqused_k=torch.tensor([kv_len], dtype=torch.int32),
+            max_seqlen_k=kv_len,
+            softmax_scale=head_size**-0.5,
+            causal=True,
+            window_size=(-1, -1),
+            block_table=block_table,
+            softcap=0,
+            q_descale=None,
+            k_descale=None,
+            v_descale=None,
+        )
+
+    expected = ref_paged_attn(
+        query,
+        key_cache,
+        value_cache,
+        [query_len],
+        [kv_len],
+        torch.tensor(rows),
+        head_size**-0.5,
+    )
+    torch.testing.assert_close(output, expected, atol=1.5e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Needs CUDA VMM.")
+@torch.inference_mode()
+def test_int4_tile_wider_than_block_stays_within_block_table_row() -> None:
+    """Same as above for the INT4 per-token-head kernel."""
+    torch.set_default_device(DEVICE_TYPE)
+    set_random_seed(0)
+    block_size, head_size = 16, 128
+    query_len, kv_len = 2, 34
+    num_blocks = triton.cdiv(kv_len, block_size)
+    query = torch.randn(query_len, 1, head_size, dtype=torch.bfloat16)
+    cache_shape = (num_blocks, block_size, 1, head_size // 2)
+    key_cache = torch.randint(0, 256, cache_shape, dtype=torch.uint8)
+    value_cache = torch.randint_like(key_cache, 0, 256)
+    k_scale_cache = torch.rand(cache_shape[:-1]) * 0.1
+    v_scale_cache = torch.rand_like(k_scale_cache) * 0.1
+    rows = [torch.randperm(num_blocks).tolist()]
+
+    def run(block_table: torch.Tensor) -> torch.Tensor:
+        output = torch.empty_like(query)
+        unified_attention(
+            q=query,
+            k=key_cache,
+            v=value_cache,
+            out=output,
+            cu_seqlens_q=torch.tensor([0, query_len], dtype=torch.int32),
+            max_seqlen_q=query_len,
+            seqused_k=torch.tensor([kv_len], dtype=torch.int32),
+            max_seqlen_k=kv_len,
+            softmax_scale=head_size**-0.5,
+            causal=True,
+            window_size=(-1, -1),
+            block_table=block_table,
+            softcap=0,
+            q_descale=None,
+            k_descale=None,
+            v_descale=None,
+            kv_quant_mode=KVQuantMode.INT4_PER_TOKEN_HEAD,
+            k_scale_cache=k_scale_cache,
+            v_scale_cache=v_scale_cache,
+        )
+        return output
+
+    with _block_table_before_unmapped_memory(rows) as block_table:
+        output = run(block_table)
+
+    expected = run(torch.tensor(rows, dtype=torch.int32))
+    torch.testing.assert_close(output, expected)
 
 
 def ref_paged_clamped_mm_attn(
