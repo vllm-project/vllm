@@ -1129,7 +1129,7 @@ class OffloadingConnectorScheduler:
             req_status, max_num_new_tokens
         )
         num_hit_tokens = self._lookup_partial_tail_hit(
-            req_status, complete_hit, max_num_new_tokens
+            req_status, complete_hit, full_attention_hit_boundary, max_num_new_tokens
         )
         if num_hit_tokens is not None and full_attention_hit_boundary is not None:
             self._maybe_register_shared_prefix_junction(
@@ -1141,6 +1141,7 @@ class OffloadingConnectorScheduler:
         self,
         req_status: RequestOffloadState,
         complete_hit: int | None,
+        full_attention_hit_boundary: int | None,
         max_num_new_tokens: int | None,
     ) -> int | None:
         """Extend a complete-chunk hit with a partial tail, if supported."""
@@ -1151,10 +1152,26 @@ class OffloadingConnectorScheduler:
         local_tokens = req_status.num_locally_computed_tokens
         complete_boundary = local_tokens + complete_hit
         tokens_per_hash = self.config.tokens_per_hash
+        block_size = self._partial_tail_block_size
+        # A recurrent group holds state only at a producer's tail, so the
+        # full-attention prefix, not the complete hit, bounds the search.
+        anchor_boundary = max(complete_boundary, full_attention_hit_boundary or 0)
+        anchor_pending = anchor_boundary > complete_boundary and any(
+            key in (self._chunks_being_loaded or ())
+            for group_config, group_state in zip(
+                self.config.kv_group_configs, req_status.group_states
+            )
+            if not group_config.requires_cow_source
+            for key in group_state.offload_keys[
+                complete_boundary // block_size : anchor_boundary // block_size
+            ]
+        )
+        if anchor_pending:
+            anchor_boundary = complete_boundary
         # A partial tail carries its own EAGLE proof, so it may also lie in
         # the block after the chunk that the complete-chunk lookup pops.
         num_search_blocks = 2 if self._max_eagle_proof_margin else 1
-        block_end = complete_boundary + (
+        block_end = anchor_boundary + (
             num_search_blocks * self._partial_tail_block_size
         )
         max_boundary = min(req_status.req.num_prompt_tokens - 1, block_end - 1)
@@ -1176,16 +1193,15 @@ class OffloadingConnectorScheduler:
         if max_boundary <= complete_boundary:
             return complete_hit
 
-        # A boundary past the block of complete_boundary also loads that
+        # A boundary past the block of anchor_boundary also loads that
         # block's complete chunk. Look it up once, and only if it is needed.
         # Partial tails use one block per chunk, so a block index is a chunk
         # index.
-        block_size = self._partial_tail_block_size
-        bridge_chunk_idx = complete_boundary // block_size
+        bridge_chunk_idx = anchor_boundary // block_size
         bridge_boundary = (bridge_chunk_idx + 1) * block_size
         # Bridge keys that the complete-chunk lookup did not confirm.
         unconfirmed_bridge_keys: list[tuple[GroupOffloadConfig, OffloadKey]] = []
-        pending = False
+        pending = anchor_pending
         if max_boundary >= bridge_boundary:
             for group_config, group_state in zip(
                 self.config.kv_group_configs, req_status.group_states
@@ -1204,7 +1220,12 @@ class OffloadingConnectorScheduler:
                     break
                 pending |= result is not LookupResult.HIT
         bridge_pending = pending
+        # A tail of this request may lie below a sibling's longer full-attention
+        # prefix. A block-aligned boundary there is a complete chunk, which the
+        # complete-chunk lookup already missed.
         for boundary in range(max_boundary, complete_boundary, -tokens_per_hash):
+            if boundary <= anchor_boundary and boundary % block_size == 0:
+                continue
             loads_bridge = boundary >= bridge_boundary
             hit, boundary_pending = self._lookup_partial_tail(
                 req_status, boundary, loads_bridge and bridge_pending
