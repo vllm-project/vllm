@@ -49,6 +49,8 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponseInProgressEvent,
     ResponseInputOutputItem,
     ResponseInputOutputMessage,
+    ResponsesInputTokensRequest,
+    ResponsesInputTokensResponse,
     ResponsesRequest,
     ResponsesResponse,
     ResponseUsage,
@@ -312,6 +314,45 @@ class OpenAIServingResponses(GenerateBaseServing):
             skip_mm_cache=skip_mm_cache,
         )
 
+    async def count_input_tokens(
+        self, request: ResponsesInputTokensRequest
+    ) -> ResponsesInputTokensResponse | ErrorResponse:
+        render_request = request.to_responses_request()
+        error = await self._check_model(render_request)
+        if error is not None:
+            return error
+        error = self._validate_create_responses_input(render_request)
+        if error is not None:
+            return error
+
+        prev_response = await self._get_previous_response(render_request)
+        if isinstance(prev_response, ErrorResponse):
+            return prev_response
+
+        render_result = await self._render_resolved_response_inputs(
+            render_request, prev_response, skip_mm_cache=True
+        )
+        if isinstance(render_result, ErrorResponse):
+            return render_result
+        error = self._validate_generator_input(render_result.engine_input)
+        if error is not None:
+            return error
+        return ResponsesInputTokensResponse(
+            input_tokens=self._extract_prompt_len(render_result.engine_input)
+        )
+
+    async def _get_previous_response(
+        self, request: ResponsesRequest
+    ) -> ResponsesResponse | ErrorResponse | None:
+        prev_response_id = request.previous_response_id
+        if prev_response_id is None:
+            return None
+        async with self.response_store_lock:
+            prev_response = self.response_store.get(prev_response_id)
+        if prev_response is None:
+            return self._make_not_found_error(prev_response_id)
+        return prev_response
+
     async def create_responses(
         self,
         request: ResponsesRequest,
@@ -361,15 +402,9 @@ class OpenAIServingResponses(GenerateBaseServing):
             # value).
             request.store = False
 
-        # Handle the previous response ID.
-        prev_response_id = request.previous_response_id
-        if prev_response_id is not None:
-            async with self.response_store_lock:
-                prev_response = self.response_store.get(prev_response_id)
-            if prev_response is None:
-                return self._make_not_found_error(prev_response_id)
-        else:
-            prev_response = None
+        prev_response = await self._get_previous_response(request)
+        if isinstance(prev_response, ErrorResponse):
+            return prev_response
 
         lora_request = self._maybe_get_adapters(request)
         model_name = self.models.model_name(lora_request)
