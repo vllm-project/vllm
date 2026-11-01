@@ -80,6 +80,7 @@ class Request:
         reasoning_parser_kwargs: dict[str, Any] | None = None,
         abort_immediately: bool = False,
         kv_hints: KvHintsEnvelope | None = None,
+        block_hashes: list["BlockHash"] | None = None,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -222,7 +223,9 @@ class Request:
         # add_request, then observed each verify step); stays None otherwise.
         self.spec_decode_metrics: RequestSpecDecodeMetrics | None = None
 
-        self.block_hashes: list[BlockHash] = []
+        # Prompt block hashes precomputed by the frontend; the hasher continues
+        # from the first block they don't cover.
+        self.block_hashes: list[BlockHash] = block_hashes or []
         # Store the block hasher without binding self to avoid creating a
         # reference cycle (Request -> partial -> Request) that prevents
         # immediate garbage collection via reference counting.
@@ -245,6 +248,7 @@ class Request:
         cls,
         request: EngineCoreRequest,
         block_hasher: Callable[["Request"], list["BlockHash"]] | None,
+        block_hashes: list["BlockHash"] | None = None,
     ) -> "Request":
         return cls(
             request_id=request.request_id,
@@ -267,6 +271,7 @@ class Request:
             reasoning_ended=request.reasoning_ended,
             reasoning_parser_kwargs=request.reasoning_parser_kwargs,
             abort_immediately=request.abort_immediately,
+            block_hashes=block_hashes,
         )
 
     def append_output_token_ids(

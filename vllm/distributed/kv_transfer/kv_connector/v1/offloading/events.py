@@ -24,8 +24,9 @@ Windowed attention groups keep the legacy placeholder payload.
 """
 
 from collections.abc import Iterable
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
+
+import msgspec
 
 from vllm.distributed.kv_events import (
     MEDIUM_CPU,
@@ -69,8 +70,8 @@ _MEDIUM_TO_EVENT_STR: dict[Medium, str] = {
     Medium.STORAGE: MEDIUM_STORAGE,
 }
 
-# The tracker is CPU-primary by construction: the primary tier's residency key.
-_PRIMARY_RESIDENCY: tuple[Medium, str | None] = (Medium.CPU, None)
+# The tracker is CPU-primary by construction: the primary tier's residency bit.
+_PRIMARY_RESIDENCY_BIT = 1
 
 
 class OffloadingEventGroupSpec(NamedTuple):
@@ -88,11 +89,16 @@ def get_offloading_event_group_spec(
     )
 
 
-@dataclass(slots=True)
-class _OffloadEventMetadata:
+class _OffloadEventMetadata(
+    msgspec.Struct,
+    gc=False,  # type: ignore[call-arg]
+):
     """BlockStored payload snapshot for one OffloadKey, captured while the
     Request is available and kept until the final matching removal event.
-    ``medium`` and ``ownership`` are forwarded from the OffloadingEvent."""
+    ``medium`` and ``ownership`` are forwarded from the OffloadingEvent.
+
+    One is kept per offloaded chunk, so it is untracked by the cyclic GC: keep
+    fields free of tracked containers (``active_residencies`` is a bitmask)."""
 
     # The chunk's constituent block hashes; the last one is the OffloadKey.
     block_hashes: tuple[BlockHash, ...]
@@ -105,8 +111,8 @@ class _OffloadEventMetadata:
     extra_keys: tuple[tuple[Any, ...] | None, ...] | None
     group_idx: int
     kv_cache_spec: OffloadingEventGroupSpec
-    active_residencies: set[tuple[Medium, str | None]]
-    lookahead_token_ids: list[list[int]] | None = None
+    active_residencies: int
+    lookahead_token_ids: tuple[tuple[int, ...], ...] | None = None
 
 
 def describes_group(group_config: "GroupOffloadConfig") -> bool:
@@ -167,6 +173,10 @@ class OffloadingEventsTracker:
 
         # OffloadKey -> payload snapshot, kept until final removal or reset.
         self._pending_event_metadata: dict[OffloadKey, _OffloadEventMetadata] = {}
+        # (medium, ownership) -> its bit in active_residencies.
+        self._residency_bits: dict[tuple[Medium, str | None], int] = {
+            (Medium.CPU, None): _PRIMARY_RESIDENCY_BIT
+        }
 
     def record_store(
         self,
@@ -186,7 +196,7 @@ class OffloadingEventsTracker:
             return
         meta = self._build_event_metadata(req, group_config, chunk_idx)
         if existing := self._pending_event_metadata.get(offload_key):
-            meta.active_residencies.update(existing.active_residencies)
+            meta.active_residencies |= existing.active_residencies
         self._pending_event_metadata[offload_key] = meta
 
     def record_lookup(
@@ -201,17 +211,15 @@ class OffloadingEventsTracker:
             return
         if not describes_group(group_config):
             return
-        if offload_key not in self._pending_event_metadata:
-            self._pending_event_metadata[offload_key] = self._build_event_metadata(
-                req, group_config, chunk_idx
-            )
+        meta = self._pending_event_metadata.get(offload_key)
+        if meta is None:
+            meta = self._build_event_metadata(req, group_config, chunk_idx)
+            self._pending_event_metadata[offload_key] = meta
         # Primary residency is registered here rather than by the manager's
         # prepare_write(): the payload needs the Request, which only the
         # scheduler holds at lookup time, and the manager reaches this tracker
         # only through OffloadingEvents.
-        self._pending_event_metadata[offload_key].active_residencies.add(
-            _PRIMARY_RESIDENCY
-        )
+        meta.active_residencies |= _PRIMARY_RESIDENCY_BIT
 
     def record_partial_store(
         self,
@@ -293,12 +301,12 @@ class OffloadingEventsTracker:
             extra_keys=None,
             group_idx=group_config.group_idx,
             kv_cache_spec=group_config.kv_event_group_spec,
-            active_residencies={_PRIMARY_RESIDENCY},
+            active_residencies=_PRIMARY_RESIDENCY_BIT,
         )
         if _is_recurrent_group(group_config):
             meta = _as_state_checkpoint(meta)
         if existing := self._pending_event_metadata.get(offload_key):
-            meta.active_residencies.update(existing.active_residencies)
+            meta.active_residencies |= existing.active_residencies
         self._pending_event_metadata[offload_key] = meta
 
     def take_events(self, events: Iterable[OffloadingEvent]) -> Iterable[KVCacheEvent]:
@@ -336,15 +344,15 @@ class OffloadingEventsTracker:
 
     def _lookahead_tokens(
         self, req: Request, start: int, end: int, block_size: int
-    ) -> list[list[int]] | None:
+    ) -> tuple[tuple[int, ...], ...] | None:
         length = self.num_hash_lookahead_tokens
         if not length:
             return None
         assert end + length <= req.num_tokens
-        return [
-            list(req.all_token_ids[i : i + length])
+        return tuple(
+            tuple(req.all_token_ids[i : i + length])
             for i in range(start + block_size, end + 1, block_size)
-        ]
+        )
 
     def _build_event_metadata(
         self,
@@ -420,7 +428,7 @@ class OffloadingEventsTracker:
             extra_keys=None,
             group_idx=group_config.group_idx,
             kv_cache_spec=group_config.kv_event_group_spec,
-            active_residencies={_PRIMARY_RESIDENCY},
+            active_residencies=_PRIMARY_RESIDENCY_BIT,
         )
         if _is_recurrent_group(group_config):
             meta = _as_state_checkpoint(meta)
@@ -463,6 +471,11 @@ class OffloadingEventsTracker:
         # eviction event so BlockRemoved can fan out to the same hashes.
         # Events are self-contained (own parent), so key order is free.
         locality = event.locality.value if event.locality is not None else None
+        residency_bit = 0
+        if event.removal_expected:
+            residency_bit = self._residency_bits.setdefault(
+                (event.medium, event.ownership), 1 << len(self._residency_bits)
+            )
         for key in event.keys:
             meta = self._pending_event_metadata.get(key)
             if meta is None:
@@ -480,8 +493,7 @@ class OffloadingEventsTracker:
                 )
                 continue
 
-            if event.removal_expected:
-                meta.active_residencies.add((event.medium, event.ownership))
+            meta.active_residencies |= residency_bit
             yield BlockStored(
                 block_hashes=list(
                     maybe_convert_block_hash(h) for h in meta.block_hashes
@@ -492,7 +504,11 @@ class OffloadingEventsTracker:
                     else None
                 ),
                 token_ids=list(meta.token_ids),
-                lookahead_token_ids=meta.lookahead_token_ids,
+                lookahead_token_ids=(
+                    [list(tokens) for tokens in meta.lookahead_token_ids]
+                    if meta.lookahead_token_ids is not None
+                    else None
+                ),
                 block_size=meta.block_size,
                 lora_id=meta.lora_id,
                 medium=_MEDIUM_TO_EVENT_STR[event.medium],
@@ -511,18 +527,19 @@ class OffloadingEventsTracker:
         # Keep group_idx unambiguous if a manager batch spans groups.
         locality = event.locality.value if event.locality is not None else None
         by_group: dict[int, list] = {}
+        residency_mask = ~self._residency_bits.get((event.medium, event.ownership), 0)
         for key in event.keys:
             meta = self._pending_event_metadata.get(key)
             if event.metadata_only:
                 if meta is not None:
-                    meta.active_residencies.discard((event.medium, event.ownership))
+                    meta.active_residencies &= residency_mask
                 continue
             if meta is not None:
                 group_idx = meta.group_idx
                 by_group.setdefault(group_idx, []).extend(
                     maybe_convert_block_hash(h) for h in meta.block_hashes
                 )
-                meta.active_residencies.discard((event.medium, event.ownership))
+                meta.active_residencies &= residency_mask
             else:
                 if self.self_describing_enabled:
                     logger.warning_once(
