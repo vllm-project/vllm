@@ -5,7 +5,7 @@ import os
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, nullcontext
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 
@@ -14,12 +14,18 @@ import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
 import requests
+from transformers import MixtralConfig
 
+from tests.models.utils import check_logprobs_close
 from tests.utils import RemoteOpenAIServer
+from vllm import SamplingParams
+from vllm.config import DeviceConfig, ModelConfig, ParallelConfig, VllmConfig
 from vllm.distributed.elastic_ep.external_elastic_ep import (
     ExternalElasticEPScaleCoordinator,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.platforms import current_platform
+from vllm.v1.engine.input_processor import InputProcessor
 
 if TYPE_CHECKING:
     from vllm.v1.engine.core_client import DPAsyncMPClient
@@ -31,6 +37,74 @@ ELASTIC_EP_MODEL_NAME = "deepseek-ai/DeepSeek-V2-Lite-Chat"
 DP_SIZE = int(os.getenv("DP_SIZE", "2"))
 # Default tensor parallel size to use
 TP_SIZE = int(os.getenv("TP_SIZE", "1"))
+
+
+@pytest.mark.parametrize(
+    "mode,start,local,rank,expected",
+    [
+        ("external", 2, 1, 2, 0),
+        ("external", 2, 1, 0, 0),
+        ("hybrid", 2, 2, 3, 1),
+        ("hybrid", 2, 2, 1, 1),
+        ("hybrid", 1, 2, 1, 1),
+        ("hybrid", 1, 2, 2, 1),
+        ("hybrid", 0, 2, 1, 1),
+        ("hybrid", 2, 2, None, None),
+        ("internal", 0, 2, 3, 3),
+        ("external", 2, 1, 1, "invalid"),
+        ("hybrid", 2, 2, 4, "invalid"),
+        ("hybrid", 2, 2, -1, "invalid"),
+        ("internal", 0, 2, 4, "invalid"),
+    ],
+)
+def test_dp_rank_input_normalization(tmp_path, mode, start, local, rank, expected):
+    """Global aliases preserve local precedence and never address another node."""
+    MixtralConfig(
+        architectures=["MixtralForCausalLM"],
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        num_local_experts=2,
+        num_experts_per_tok=1,
+        vocab_size=32,
+        max_position_embeddings=32,
+    ).save_pretrained(tmp_path)
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path),
+            dtype="float32",
+            max_model_len=32,
+            skip_tokenizer_init=True,
+        ),
+        device_config=DeviceConfig(device="cpu"),
+        parallel_config=ParallelConfig(
+            data_parallel_size=4,
+            data_parallel_size_local=local,
+            data_parallel_rank=start,
+            data_parallel_external_lb=mode == "external",
+            data_parallel_hybrid_lb=mode == "hybrid",
+        ),
+    )
+    processor = InputProcessor(config)
+    try:
+        context = (
+            pytest.raises(VLLMValidationError, match="data_parallel_rank")
+            if expected == "invalid"
+            else nullcontext()
+        )
+        with context:
+            request = processor.process_inputs(
+                "rank",
+                {"type": "token", "prompt_token_ids": [1, 2]},
+                SamplingParams(max_tokens=1),
+                ("generate",),
+                data_parallel_rank=rank,
+            )
+            assert request.data_parallel_rank == expected
+    finally:
+        processor.renderer.shutdown()
 
 
 class DictStore:
@@ -305,6 +379,43 @@ def _get_parallel_config(server: RemoteOpenAIServer):
 
     vllm_config = response.json()["vllm_config"]
     return vllm_config["parallel_config"]
+
+
+@pytest.mark.asyncio
+async def test_external_lb_global_rank_header(clients, servers):
+    """Pinning a global rank preserves generation on its external-LB endpoint."""
+    for client, (_, server_args) in zip(clients, servers):
+        rank = int(server_args[server_args.index("--data-parallel-rank") + 1])
+        completions = []
+        for headers in ({}, {"X-data-parallel-rank": str(rank)}):
+            completion = await client.completions.create(
+                model=MODEL_NAME,
+                prompt="The capital of France is",
+                max_tokens=5,
+                temperature=0,
+                logprobs=5,
+                extra_headers=headers,
+            )
+            assert completion.usage.completion_tokens > 0
+            choice = completion.choices[0]
+            assert choice.logprobs is not None
+            assert choice.logprobs.tokens
+            completions.append(
+                (choice.logprobs.tokens, choice.text, choice.logprobs.top_logprobs)
+            )
+        check_logprobs_close(
+            outputs_0_lst=[completions[0]],
+            outputs_1_lst=[completions[1]],
+            name_0="unpinned",
+            name_1="global-rank header",
+        )
+        with pytest.raises(openai.BadRequestError, match=r"data[ _]parallel[ _]rank"):
+            await client.completions.create(
+                model=MODEL_NAME,
+                prompt="Hello",
+                max_tokens=1,
+                extra_headers={"X-data-parallel-rank": str(DP_SIZE)},
+            )
 
 
 def _assert_expert_parallel_config(

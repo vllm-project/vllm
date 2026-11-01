@@ -141,3 +141,18 @@ The coordinator process also runs in this scenario, co-located with the DP rank 
 </figure>
 
 In the above diagram, each of the dotted boxes corresponds to a separate launch of `vllm serve` - these could be separate Kubernetes pods, for example.
+
+## Routing requests with `X-data-parallel-rank`
+
+The `X-data-parallel-rank` HTTP header pins a request to a particular data-parallel engine. Without the header, the frontend uses its configured load balancing.
+
+With hybrid or external load balancing, the Python API server accepts both:
+
+- A local engine index in `[0, data_parallel_size_local)`.
+- A global DP rank managed by that endpoint, starting at `--data-parallel-start-rank` for hybrid load balancing or `--data-parallel-rank` for external load balancing.
+
+For example, a hybrid endpoint managing global ranks `2` and `3` accepts header `0` or `2` for global rank `2`, and header `1` or `3` for global rank `3`. An external endpoint managing only global rank `3` accepts header `0` or `3`.
+
+Local indices take precedence when the ranges overlap, preserving existing callers. For an endpoint managing global ranks `1` and `2`, header `1` still selects local index `1` (global rank `2`). Values outside both ranges are rejected; this header cannot route a request to an engine outside the endpoint's managed group.
+
+With internal load balancing, the Python API server continues to accept ranks in `[0, data_parallel_size)`. The Rust frontend interprets the header as a global rank.
