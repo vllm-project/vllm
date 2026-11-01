@@ -180,24 +180,22 @@ pub async fn count_tokens(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: Result<ValidatedJson<CountTokensRequest>, ApiError>,
-) -> Result<Json<serde_json::Value>, AnthropicError> {
-    let body = body?.0;
-    let model = state.resolve_model_with_loras(Some(&body.model)).await;
-    let request = body.into_chat(&model, resolve_request_context(&headers, None))?;
-    let text = state
-        .chat
-        .request_processor()
-        .prepare_for_tokenization(request)
-        .await
-        .map_err(|error| chat_submit_error("count_tokens failed", error))?;
-    let tokens = state
-        .chat
-        .text()
-        .request_processor()
-        .tokenize(text)
-        .map_err(|error| text_submit_error("count_tokens failed", error))?;
-    Ok(Json(json!({"input_tokens": tokens.len(),
-        "context_management": {"original_input_tokens": tokens.len()}})))
+) -> Result<Json<CountTokensResponse>, AnthropicError> {
+    Ok(Json(
+        MessagesLlm::new(&state)
+            .count_tokens(body?.0, resolve_request_context(&headers, None))
+            .await?,
+    ))
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct CountTokensResponse {
+    input_tokens: usize,
+    context_management: CountContext,
+}
+#[derive(serde::Serialize)]
+struct CountContext {
+    original_input_tokens: usize,
 }
 
 #[derive(Debug, Deserialize, Validate)]
@@ -248,18 +246,67 @@ pub async fn messages(
     headers: HeaderMap,
     body: Result<ValidatedJson<MessagesRequest>, ApiError>,
 ) -> Result<Response, AnthropicError> {
-    let body = body?.0;
-    let model = state.resolve_model_with_loras(Some(&body.input.model)).await;
-    let request = body.into_chat(&model, resolve_request_context(&headers, None))?;
-    validate_max_output_tokens(
-        "max_tokens",
-        request.sampling_params.max_tokens,
-        state.chat.engine_core_client().max_model_len(),
-    )?;
-    let request_id = request.request_id.clone();
-    let span = tracing::info_span!("messages", request_id = %request_id, engine_request_id = tracing::field::Empty);
-    let response = async {
-        let response = state.chat.chat(request).await
+    Ok(Json(
+        MessagesLlm::new(&state)
+            .create(body?.0, resolve_request_context(&headers, None))
+            .await?,
+    )
+    .into_response())
+}
+
+/// Anthropic request handling over the application's shared chat inference.
+pub(crate) struct MessagesLlm<'a> {
+    state: &'a AppState,
+}
+
+impl<'a> MessagesLlm<'a> {
+    pub(crate) fn new(state: &'a AppState) -> Self {
+        Self { state }
+    }
+    pub(crate) async fn count_tokens(
+        &self,
+        body: CountTokensRequest,
+        context: ResolvedRequestContext,
+    ) -> Result<CountTokensResponse, ApiError> {
+        let model = self.state.resolve_model_with_loras(Some(&body.model)).await;
+        let request = body.into_chat(&model, context)?;
+        let text = self
+            .state
+            .chat
+            .request_processor()
+            .prepare_for_tokenization(request)
+            .await
+            .map_err(|error| chat_submit_error("count_tokens failed", error))?;
+        let tokens = self
+            .state
+            .chat
+            .text()
+            .request_processor()
+            .tokenize(text)
+            .map_err(|error| text_submit_error("count_tokens failed", error))?;
+        Ok(CountTokensResponse {
+            input_tokens: tokens.len(),
+            context_management: CountContext {
+                original_input_tokens: tokens.len(),
+            },
+        })
+    }
+    pub(crate) async fn create(
+        &self,
+        body: MessagesRequest,
+        context: ResolvedRequestContext,
+    ) -> Result<MessagesResponse, ApiError> {
+        let model = self.state.resolve_model_with_loras(Some(&body.input.model)).await;
+        let request = body.into_chat(&model, context)?;
+        validate_max_output_tokens(
+            "max_tokens",
+            request.sampling_params.max_tokens,
+            self.state.chat.engine_core_client().max_model_len(),
+        )?;
+        let request_id = request.request_id.clone();
+        let span = tracing::info_span!("messages", request_id = %request_id, engine_request_id = tracing::field::Empty);
+        let response = async {
+        let response = self.state.chat.chat(request).await
             .map_err(|error| chat_submit_error("failed to submit Messages request", error))?
             .collect_message().await
             .map_err(|error| chat_submit_error("failed to collect Messages response", error))?;
@@ -268,7 +315,7 @@ pub async fn messages(
             return Err(invalid_request!("Reasoning and tool output are not supported yet"));
         }
         let text = response.message.text();
-        let options = state.api_server_options;
+        let options = self.state.api_server_options;
         if options.enable_log_requests {
             tracing::info!(model = %model.response_model(), prompt_tokens = response.usage.prompt_token_count,
                 output_tokens = response.usage.output_token_count, finish_reason = reason, "Messages finished");
@@ -283,11 +330,12 @@ pub async fn messages(
             kv_transfer_params: response.kv_transfer_params, ec_transfer_params: response.ec_transfer_params,
         })
     }.instrument(span).await?;
-    Ok(Json(response).into_response())
+        Ok(response)
+    }
 }
 
 #[derive(serde::Serialize)]
-struct MessagesResponse {
+pub(crate) struct MessagesResponse {
     id: String,
     #[serde(rename = "type")]
     message_type: &'static str,
