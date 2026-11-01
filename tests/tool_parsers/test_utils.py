@@ -13,6 +13,7 @@ from vllm.tool_parsers.utils import (
     escape_ctrl_chars_in_strings,
     escape_nested_quotes_in_strings,
     extract_types_from_schema,
+    find_common_prefix,
     get_parameter_value,
     handle_single_tool,
     make_valid_python,
@@ -773,3 +774,21 @@ class TestRenameReservedKwargs:
             "path": "x",
             "from": 1,
         }
+
+
+@pytest.mark.parametrize(
+    "s1, s2, expected",
+    [
+        ("", "", ""),
+        ("", "abc", ""),
+        ("abc", "abc", "abc"),
+        ("abc", "abcdef", "abc"),
+        ("abcdef", "abc", "abc"),
+        ('{"fruit": "ap"}', '{"fruit": "apple"}', '{"fruit": "ap'),
+        ("xbc", "abc", ""),
+        ("abcx", "abcy", "abc"),
+        ("日本語x", "日本語y", "日本語"),
+    ],
+)
+def test_find_common_prefix(s1, s2, expected):
+    assert find_common_prefix(s1, s2) == expected
