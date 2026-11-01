@@ -116,6 +116,7 @@ from .qwen2_5_vl import (
     Qwen2_5_VLImageInputs,
     Qwen2_5_VLProcessingInfo,
     Qwen2_5_VLVideoInputs,
+    _pad_flashinfer_cu_seqlens_buffer,
 )
 from .qwen3_moe import Qwen3MoeForCausalLM, Qwen3MoeModel
 from .utils import (
@@ -1883,6 +1884,15 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
                 "max_seqlen",
                 "sequence_lengths",
             ],
+            # FlashInfer packs the q/k/o and v offsets into one cu_seqlens
+            # tensor, split at its midpoint. Replays usually pad to a smaller
+            # batch bucket than capture, so each half has to be copied into
+            # its own half of the capture buffer.
+            padding_logics=(
+                {"cu_seqlens": _pad_flashinfer_cu_seqlens_buffer}
+                if self.visual.attn_backend == AttentionBackendEnum.FLASHINFER
+                else {}
+            ),
             # The vision encoder concatenates the deepstack features with
             # the main features along the hidden dim.
             out_hidden_size=self.visual_dim + self.multiscale_dim,
