@@ -170,6 +170,94 @@ ACTIVATION_CASES = [
 ]
 
 
+@pytest.mark.parametrize("per_token_activation", [False, True])
+@torch.inference_mode()
+def test_trtllm_nvfp4_reuses_workspace(per_token_activation, trtllm_workspace_check):
+    from vllm.v1.worker.workspace import current_workspace_manager
+
+    set_random_seed(7)
+    with set_current_vllm_config(
+        VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
+    ):
+        e, n, k = 16, 1024, 1024
+        w1, w2, quant_config = make_test_quant_config(
+            e,
+            n,
+            k,
+            in_dtype=torch.bfloat16,
+            quant_dtype="nvfp4",
+            is_scale_swizzled=False,
+        )
+        w1_scale, w2_scale = quant_config.w1_scale, quant_config.w2_scale
+        assert w1_scale is not None and w2_scale is not None
+        w1_scale, w2_scale = [
+            torch.stack(
+                [
+                    convert_swizzled_to_linear(scale, weight.size(1), width, 16)
+                    for scale in scales
+                ]
+            )
+            for weight, scales, width in (
+                (w1, w1_scale, k),
+                (w2, w2_scale, n),
+            )
+        ]
+        w1, w1_scale = reorder_w1w3_to_w3w1(w1, w1_scale)
+        w1, w1_scale, w2, w2_scale = prepare_static_weights_for_trtllm_fp4_moe(
+            w1,
+            w2,
+            w1_scale,
+            w2_scale,
+            hidden_size=k,
+            intermediate_size=n,
+            num_experts=e,
+            is_gated_activation=True,
+        )
+        quant_config._w1.scale = w1_scale
+        quant_config._w2.scale = w2_scale
+        config = FusedMoEConfig(
+            num_experts=e,
+            experts_per_token=2,
+            hidden_dim=k,
+            intermediate_size=n,
+            num_local_experts=e,
+            num_logical_experts=e,
+            activation=MoEActivation.SILU,
+            device="cuda",
+            moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+            in_dtype=torch.bfloat16,
+            routing_method=RoutingMethodType.TopK,
+            max_num_tokens=32,
+        )
+        layers = [
+            _make_trtllm_fp4_moe_kernel(config, quant_config, per_token_activation)
+            for _ in range(2)
+        ]
+        trtllm_workspace_check(
+            "trtllm_fp4_block_scale_routed_moe",
+            "nvfp4",
+            use_per_token_scale=per_token_activation,
+        )
+        x = torch.randn(32, k, device="cuda", dtype=torch.bfloat16) / 10
+        logits = torch.randn(32, e, device="cuda", dtype=torch.bfloat16)
+        weights, ids, _ = fused_topk(x, logits, 2, renormalize=False)
+        # Reserve the modular wrapper's output separately from TRTLLM scratch.
+        current_workspace_manager().get_simultaneous(((32, k), torch.bfloat16))
+        for layer, rows in [(layers[0], 1), (layers[1], 32), (layers[0], 16)]:
+            layer.apply(
+                hidden_states=x[:rows],
+                w1=w1,
+                w2=w2,
+                topk_weights=weights[:rows],
+                topk_ids=ids[:rows],
+                activation=MoEActivation.SILU,
+                global_num_experts=e,
+                expert_map=None,
+                apply_router_weight_on_input=False,
+            )
+            current_workspace_manager().lock()
+
+
 @pytest.mark.parametrize("m,n,k", MNK_FACTORS)
 @pytest.mark.parametrize("e", [128])
 @pytest.mark.parametrize("topk", [8])

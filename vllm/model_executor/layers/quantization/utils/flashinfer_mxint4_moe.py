@@ -191,6 +191,7 @@ def flashinfer_trtllm_mxint4_moe(
     e_score_correction_bias: torch.Tensor | None = None,
     routing_method_type: int | None = None,
     routing_replay_out: torch.Tensor | None = None,
+    workspace_buffer: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Apply FlashInfer TensorRT-LLM MxInt4 MoE kernel.
 
@@ -212,6 +213,8 @@ def flashinfer_trtllm_mxint4_moe(
             so they can be replayed later
         e_score_correction_bias: Optional routing bias. dtype: bfloat16
         routing_method_type: FlashInfer RoutingMethodType enum value
+        workspace_buffer: Optional caller-owned scratch buffer, sized by
+            ``trtllm_fused_moe_workspace_size(quant_mode="mxint4")``
 
     Returns:
         Output tensor from MoE layer. dtype: same as x (bfloat16)
@@ -241,6 +244,10 @@ def flashinfer_trtllm_mxint4_moe(
     if routing_method_type == RoutingMethodType.DeepSeekV3:
         router_logits = router_logits.to(torch.float32)
 
+    kwargs = {}
+    if workspace_buffer is not None:
+        kwargs["workspace_buffer"] = workspace_buffer
+
     out = trtllm_mxint4_block_scale_moe(
         routing_logits=router_logits,
         routing_bias=routing_bias,
@@ -266,6 +273,7 @@ def flashinfer_trtllm_mxint4_moe(
         output=None,
         tune_max_num_tokens=8192,
         routing_replay_out=routing_replay_out,
+        **kwargs,
     )
     if isinstance(out, (tuple, list)):
         out = out[0]
