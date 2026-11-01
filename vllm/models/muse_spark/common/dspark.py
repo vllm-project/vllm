@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn as nn
 
+from vllm import _custom_ops as ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
@@ -234,13 +235,16 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
             num_layers * num_ctx, self._num_kv_heads, self._head_dim
         )
         if self._rotary_emb is not None:
-            positions = context_positions.repeat(num_layers)
-            all_k_flat, _ = self._rotary_emb(
-                positions,
+            # Not the module's forward, which would replace the FP32 table the
+            # draft's attention shares with a copy in the key dtype. The kernel
+            # rotates in place, so the keys go in once, not as both Q and K.
+            ops.rotary_embedding(
+                context_positions.repeat(num_layers),
                 all_k_flat,
-                # CUDA RoPE updates both operands in place. Aliasing the same
-                # context-key tensor as Q and K rotates it twice.
                 None,
+                self._head_dim,
+                self._rotary_emb.cos_sin_cache,
+                self._rotary_emb.is_neox_style,
             )
         if context_slot_mapping is None:
             return
