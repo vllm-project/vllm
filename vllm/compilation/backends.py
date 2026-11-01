@@ -1075,7 +1075,7 @@ class VllmBackend:
                 continue
             hash_content.append(filepath)
             try:
-                with open(filepath) as f:
+                with open(filepath, encoding="utf-8") as f:
                     hash_content.append(f.read())
             except (OSError, UnicodeDecodeError):
                 logger.warning("Failed to read file %s", filepath)
