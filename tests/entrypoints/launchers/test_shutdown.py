@@ -425,6 +425,70 @@ async def test_wait_timeout_with_short_duration():
 
 
 @pytest.mark.asyncio
+async def test_wait_timeout_aborts_requests_past_deadline():
+    """Verify a request still running at the drain deadline ends with
+    finish_reason='abort' and the server exits within the budget."""
+    wait_timeout = 2
+    server_args = [
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "8192",
+        "--enforce-eager",
+        "--gpu-memory-utilization",
+        "0.05",
+        "--max-num-seqs",
+        "4",
+        "--shutdown-timeout",
+        str(wait_timeout),
+    ]
+
+    with RemoteOpenAIServer(MODEL_NAME, server_args) as remote_server:
+        # The request outlives the drain, so the client must not give up first.
+        client = remote_server.get_async_client(timeout=60)
+        proc = remote_server.proc
+        child_pids = _get_child_pids(proc.pid)
+
+        # Warm up, so the long request below is running by the time we check.
+        await client.completions.create(model=MODEL_NAME, prompt="Hello", max_tokens=5)
+
+        # Long enough to still be running when the drain deadline passes.
+        request = asyncio.create_task(
+            client.completions.create(
+                model=MODEL_NAME,
+                prompt="Write a story: ",
+                max_tokens=8000,
+                extra_body={"ignore_eos": True},
+            )
+        )
+        await _wait_for_running_request(remote_server.url_for("metrics"))
+
+        start_time = time.time()
+        proc.send_signal(signal.SIGTERM)
+
+        response = await asyncio.wait_for(
+            request, timeout=wait_timeout + _SHUTDOWN_DETECTION_TIMEOUT
+        )
+        assert response.choices[0].finish_reason == "abort", (
+            f"Expected the request to be aborted at the drain deadline, got "
+            f"finish_reason={response.choices[0].finish_reason!r}"
+        )
+
+        # The drain timeout plus EngineCore teardown, with room for slow CI.
+        max_wait = wait_timeout + 15
+        while proc.poll() is None and time.time() - start_time < max_wait:
+            await asyncio.sleep(0.1)
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+            pytest.fail(f"Process did not exit within {max_wait}s after SIGTERM")
+
+        assert proc.returncode in (0, -15, None), f"Unexpected: {proc.returncode}"
+
+        await _assert_children_cleaned_up(child_pids)
+
+
+@pytest.mark.asyncio
 async def test_abort_timeout_fails_inflight_requests():
     """Verify abort timeout (0) immediately aborts in-flight requests."""
     server_args = [
