@@ -90,8 +90,8 @@ def gather_dcp_context_rows(
 
     Args:
         gathered: Contiguous all-gathered rows ``[N, kv_lora_rank + rope_dim]``.
-        row_indices: Contiguous ``[C]``, the row of ``gathered`` that each
-            output row is copied from.
+        row_indices: Contiguous int64 ``[C]``, the row of ``gathered`` that
+            each output row is copied from.
         kv_lora_rank: Width of the latent part of a row.
 
     Returns:
@@ -101,7 +101,7 @@ def gather_dcp_context_rows(
     """
     assert gathered.dim() == 2 and gathered.is_contiguous()
     assert row_indices.dim() == 1 and row_indices.is_contiguous()
-    assert row_indices.dtype in (torch.int32, torch.int64)
+    assert row_indices.dtype == torch.int64
     assert row_indices.device == gathered.device
     assert 0 < kv_lora_rank <= gathered.shape[1]
     num_rows = row_indices.shape[0]

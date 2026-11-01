@@ -372,6 +372,82 @@ def test_dcp_context_row_indices_unshard_the_context(
     assert cursor == context_lens
 
 
+def _bits(t: torch.Tensor) -> torch.Tensor:
+    return t.contiguous().view(torch.uint8)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("dims", [(512, 64), (384, 48), (512, 0)])
+@pytest.mark.parametrize("num_rows", [0, 33, 1000])
+def test_gather_dcp_context_rows_copies_rows(num_rows, dims, dtype):
+    """The gather equals indexing the latent and rope parts of the rows, also
+    for NoPE MLA layers, which have no rope part."""
+    from vllm.v1.attention.ops.mla_dcp_context import gather_dcp_context_rows
+
+    kv_lora_rank, rope_dim = dims
+    generator = torch.Generator(device="cuda").manual_seed(num_rows)
+    gathered = torch.randn(
+        (1200, kv_lora_rank + rope_dim), device="cuda", generator=generator
+    ).to(dtype)
+    row_indices = torch.randint(
+        0, 1200, (num_rows,), device="cuda", generator=generator
+    )
+
+    latent, k_pe = gather_dcp_context_rows(gathered, row_indices, kv_lora_rank)
+
+    expected = gathered[row_indices].unsqueeze(1)
+    assert latent.shape == (num_rows, 1, kv_lora_rank)
+    assert k_pe.shape == (num_rows, 1, rope_dim)
+    assert latent.dtype == k_pe.dtype == dtype
+    assert latent.is_contiguous() and k_pe.is_contiguous()
+    assert torch.equal(_bits(latent), _bits(expected[..., :kv_lora_rank]))
+    assert torch.equal(_bits(k_pe), _bits(expected[..., kv_lora_rank:]))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("rope_dim", [64, 0])
+def test_gather_dcp_context_rows_warmup_covers_the_context_loop(dtype, rope_dim):
+    """The JIT warmup compiles the variant that the context loop launches: rows
+    of the all-gather part of the workspace, int64 row indices taken at any
+    offset into the batch's indices, and any number of rows."""
+    from vllm.v1.attention.ops.mla_dcp_context import (
+        _gather_context_rows,
+        gather_dcp_context_rows,
+    )
+
+    kv_lora_rank = 512
+    kernel = _gather_context_rows.kernel
+
+    def compiled_variants() -> set:
+        return {key for caches in kernel.device_caches.values() for key in caches[0]}
+
+    kernel.device_caches.clear()
+    _gather_context_rows.warmup(
+        dtype=dtype, kv_lora_rank=kv_lora_rank, rope_dim=rope_dim
+    )
+    torch.accelerator.synchronize()
+    warmed = compiled_variants()
+    assert warmed
+
+    workspace_rows, dcp_world_size = 1024, 4
+    workspace = torch.zeros(
+        (workspace_rows + workspace_rows // dcp_world_size, kv_lora_rank + rope_dim),
+        dtype=dtype,
+        device="cuda",
+    )
+    gathered = workspace[workspace_rows // dcp_world_size :]
+    row_indices = torch.arange(workspace_rows, device="cuda")
+    for start, num_rows in ((0, 1), (1, 33), (3, 1000)):
+        gather_dcp_context_rows(
+            gathered, row_indices[start : start + num_rows], kv_lora_rank
+        )
+    torch.accelerator.synchronize()
+
+    assert compiled_variants() == warmed
+
+
 def test_chunked_context_metadata_owns_context_lengths():
     """Reusing CPU scratch must not overwrite an earlier batch's context lengths."""
     context_lens = torch.tensor([16, 32], dtype=torch.int32)
