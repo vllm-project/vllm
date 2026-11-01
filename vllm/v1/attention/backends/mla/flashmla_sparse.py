@@ -388,9 +388,13 @@ class FlashMLASparseMetadataBuilder(
             FlashMLASparseImpl._compute_fp8_decode_padded_heads(self.num_heads)
         )
 
-        self.use_fp8_kv_cache = (
-            cache_config.cache_dtype in QUANTIZED_DS_MLA_CACHE_FORMATS
+        # Read the resolved layout from the layer's spec: canonicalization
+        # no longer writes the ds_mla format back to cache_config, so the
+        # global value stays the user-facing "fp8" / "nvfp4" alias here.
+        cache_dtype = (
+            getattr(kv_cache_spec, "cache_dtype_str", None) or cache_config.cache_dtype
         )
+        self.use_fp8_kv_cache = cache_dtype in QUANTIZED_DS_MLA_CACHE_FORMATS
         max_num_seqs = vllm_config.scheduler_config.max_num_seqs
         # Shape: [max_num_seqs], all elements = topk_tokens (constant for full-CG)
         self.topk_tokens_tensor = torch.full(
@@ -446,10 +450,10 @@ class FlashMLASparseMetadataBuilder(
         )
 
         if parallel_config.decode_context_parallel_size > 1:
-            if self.pcp_dcp_kv_gather and cache_config.cache_dtype != "fp8_ds_mla":
+            if self.pcp_dcp_kv_gather and cache_dtype != "fp8_ds_mla":
                 raise NotImplementedError(
                     "PCP+DCP sparse prefill gathers the KV through the fp8_ds_mla "
-                    f"upconvert; got a {cache_config.cache_dtype} cache"
+                    f"upconvert; got a {cache_dtype} cache"
                 )
             if not self.fp8_use_mixed_batch and not self.pcp_dcp_kv_gather:
                 raise NotImplementedError(
