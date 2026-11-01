@@ -43,9 +43,10 @@ class _RequestCacheAccess:
     inserted_keys: set[OffloadKey] = field(default_factory=set)
     reused_keys: set[OffloadKey] = field(default_factory=set)
     store_miss_keys: set[OffloadKey] = field(default_factory=set)
-    # Keys of offers that failed to allocate, until an offer of them succeeds.
-    # Offering them again is a retry, not another use of the content.
-    failed_offer_keys: set[OffloadKey] = field(default_factory=set)
+    # Keys this request has counted toward store_threshold. Each counts once
+    # per request: a retry of a failed offer, or a re-offer after preemption,
+    # is not another use of the content.
+    counted_keys: set[OffloadKey] = field(default_factory=set)
     finished: bool = False
 
 
@@ -130,11 +131,11 @@ class CPUOffloadingManager(OffloadingManager):
         return CPULoadStoreSpec([chunk.chunk_id for chunk in chunks])
 
     def _record_accesses(
-        self, keys: Collection[OffloadKey], retried: Collection[OffloadKey]
+        self, keys: Collection[OffloadKey], counted: Collection[OffloadKey]
     ) -> None:
         """Record an offer without evicting its tracked candidates.
 
-        Keys in ``retried`` were counted by a failed offer of the same request:
+        Keys in ``counted`` were counted by an earlier offer of the same request:
         they stay tracked but don't count again.
         """
         assert self.counts is not None
@@ -142,7 +143,7 @@ class CPUOffloadingManager(OffloadingManager):
         for key in keys:
             if key in self.counts:
                 self.counts.move_to_end(key)
-                if key not in retried:
+                if key not in counted:
                     self.counts[key] += 1
                 protected.add(key)
 
@@ -276,7 +277,7 @@ class CPUOffloadingManager(OffloadingManager):
         keys = list(keys)
         state = self._get_request_cache_access(req_context)
         if self.counts is not None:
-            self._record_accesses(keys, state.failed_offer_keys)
+            self._record_accesses(keys, state.counted_keys)
         # Partition the original offer before admission filtering. Ready
         # resident chunks are request reuses even if their tracker entry was
         # aged out; the threshold applies only to new store candidates.
@@ -295,9 +296,10 @@ class CPUOffloadingManager(OffloadingManager):
             for key in keys_to_store:
                 if self.counts.get(key, 0) >= self.store_threshold:
                     admitted_keys.append(key)
-                elif key not in state.failed_offer_keys:
+                elif key not in state.counted_keys:
                     self.stores_skipped_in_current_batch += 1
             keys_to_store = admitted_keys
+            state.counted_keys.update(keys)
 
         new_store_misses = [
             key for key in keys_to_store if key not in state.store_miss_keys
@@ -319,7 +321,6 @@ class CPUOffloadingManager(OffloadingManager):
         )
 
         if not keys_to_store:
-            state.failed_offer_keys.difference_update(keys)
             return PrepareStoreOutput(
                 keys_to_store=[],
                 store_spec=self._get_load_store_spec([], []),
@@ -333,8 +334,6 @@ class CPUOffloadingManager(OffloadingManager):
         if num_chunks_to_evict > 0:
             if num_chunks_to_evict > self._num_evictable_cache_chunks:
                 # Eviction will fail.
-                if self.counts is not None:
-                    state.failed_offer_keys.update(keys)
                 return None
             # There is a still a chance for eviction failure as some of the
             # idle chunks might be in the protected list.
@@ -344,8 +343,6 @@ class CPUOffloadingManager(OffloadingManager):
             protected = set(keys)
             evicted = self._policy.evict(num_chunks_to_evict, protected)
             if evicted is None:
-                if self.counts is not None:
-                    state.failed_offer_keys.update(keys)
                 return None
 
             # cache-policy removes only idle chunks.
@@ -378,7 +375,6 @@ class CPUOffloadingManager(OffloadingManager):
         # build store specs for allocated chunks
         store_spec = self._get_load_store_spec(keys_to_store, chunks)
 
-        state.failed_offer_keys.difference_update(keys)
         return PrepareStoreOutput(
             keys_to_store=keys_to_store,
             store_spec=store_spec,
