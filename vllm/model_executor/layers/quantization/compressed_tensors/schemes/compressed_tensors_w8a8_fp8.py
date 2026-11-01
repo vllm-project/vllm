@@ -145,6 +145,17 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
 
         expose_input_quant_key(layer, self.fp8_linear)
 
+    def dequantize_weight(self, layer: torch.nn.Module) -> torch.Tensor:
+        if (
+            self.strategy != QuantizationStrategy.CHANNEL
+            or not self.weight_quant.symmetric
+        ):
+            raise NotImplementedError(
+                "Compressed-tensors FP8 weight dequantization is only supported "
+                "for symmetric per-channel weights."
+            )
+        return (layer.weight.float() * layer.weight_scale.float()).to(layer.orig_dtype)
+
     def process_weights_after_loading(self, layer) -> None:
         if self.strategy == QuantizationStrategy.TENSOR:
             weight, weight_scale, input_scale = process_fp8_weight_tensor_strategy(

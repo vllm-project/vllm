@@ -121,6 +121,7 @@ Currently supported combinations are:
 | Checkpoint layer | Online target | Requirements |
 | ---------------- | ------------- | ------------ |
 | Serialized ModelOpt MXFP8 linear | any online linear method | Target-specific hardware requirements |
+| Serialized compressed-tensors symmetric per-channel FP8 linear (W8A8) | any online linear method | Supported source FP8 kernel and target-specific hardware requirements |
 | Serialized compressed-tensors NVFP4 MoE | any online MoE method | Target-specific hardware requirements |
 | Serialized ModelOpt NVFP4 MoE | any online MoE method | Target-specific hardware requirements |
 | Serialized Quark NVFP4 MoE | any online MoE method | Target-specific hardware requirements |
@@ -133,6 +134,21 @@ vllm serve MiniMaxAI/MiniMax-M3-MXFP8 \
   --linear-backend auto \
   --quantization-config.linear fp8_per_channel
 ```
+
+Compressed-tensors per-channel FP8 checkpoints can also be re-quantized,
+for example to MXFP4 weights using Marlin on Hopper:
+
+```bash
+vllm serve RedHatAI/Qwen3-0.6B-FP8-dynamic \
+  --quantization-config.linear mxfp4 \
+  --kernel-config '{"linear_backend_per_quant": {"mxfp4": "marlin"}}'
+```
+
+This source support is limited to symmetric per-channel FP8 W8A8 linear
+layers; per-tensor and block-scaled FP8 sources are not supported. The
+online target determines activation precision and backend selection.
+Re-quantization can change model accuracy and should be evaluated for
+the target workload.
 
 Similarly, for example, NVFP4 MoE checkpoints can be re-quantized to any online MoE method,
 for example compressed-tensors NVFP4 experts to online MXFP4:
