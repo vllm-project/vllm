@@ -54,6 +54,20 @@ WeightsTransformFn: TypeAlias = Callable[
 unrecognized tensors through unchanged."""
 
 
+@dataclass(frozen=True)
+class StageLocalTransform:
+    """A weights transform that keeps every weight in the layer it came from,
+    so `AutoWeightsLoader` can drop the weights of layers on other pipeline
+    stages before running it."""
+
+    transform: WeightsTransformFn
+
+    def __call__(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[tuple[str, torch.Tensor]]:
+        return self.transform(weights)
+
+
 @dataclass
 class WeightsMapper:
     """Maps the name of each weight if they match the following patterns.
@@ -487,6 +501,20 @@ class AutoWeightsLoader:
             self.ignore_unexpected_suffixes.extend(ignore_unexpected_suffixes)
         mapper |= self.REMOVE_UNUSED_ROTARY_EMBEDS_MAPPER
 
+        transforms = mapper.weights_transforms
+        if (
+            transforms
+            and all(isinstance(t, StageLocalTransform) for t in transforms)
+            and get_pp_missing_layer_names(self.module)
+        ):
+            # `_load_module` skips these layers anyway; dropping their weights
+            # first spares the transforms from rewriting them.
+            weights = (
+                (name, weight)
+                for name, weight in weights
+                if (mapped := mapper.map_name(name)) is None
+                or not is_pp_missing_parameter(mapped, self.module)
+            )
         weights = mapper.apply(weights)
         weights = self._filter_skipped(weights)
 

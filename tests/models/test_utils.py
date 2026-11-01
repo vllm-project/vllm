@@ -11,6 +11,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
+    PPMissingLayer,
+    StageLocalTransform,
     WeightsMapper,
     _merge_multimodal_embeddings,
 )
@@ -357,3 +359,31 @@ def test_weights_mapper_transforms_see_earlier_emitted_names():
 
     # The halves merge into "e.w", which the suffix mapping then doubles.
     assert torch.equal(mapped[1], torch.tensor([2.0, 0.0]))
+
+
+@pytest.mark.parametrize("stage_local", [True, False])
+def test_auto_weights_loader_drops_other_stages_before_stage_local_transforms(
+    stage_local: bool,
+):
+    """Only a stage-local transform skips another stage's weights: any other
+    transform may still move them into a layer this stage holds."""
+    seen: list[str] = []
+
+    def record(weights):
+        for name, tensor in weights:
+            seen.append(name)
+            yield name, tensor
+
+    module = torch.nn.Module()
+    module.layers = torch.nn.ModuleList(
+        [PPMissingLayer(), torch.nn.Linear(2, 2, bias=False)]
+    )
+    transform = StageLocalTransform(record) if stage_local else record
+    weights = [(f"layers.{i}.weight", torch.ones(2, 2)) for i in range(2)]
+
+    loaded = AutoWeightsLoader(module).load_weights(
+        weights, mapper=WeightsMapper(weights_transforms=[transform])
+    )
+
+    assert loaded == {"layers.1.weight"}
+    assert seen == [name for name, _ in weights][1 if stage_local else 0 :]
