@@ -201,6 +201,16 @@ def test_reshape_and_cache_flash(
     if implementation == "triton" and kv_cache_layout == "HND":
         pytest.skip("Triton implementation only supports NHD layout.")
 
+    if (
+        implementation == "triton"
+        and kv_cache_dtype.startswith("fp8")
+        and current_platform.is_cuda()
+        and not current_platform.has_device_capability(89)
+    ):
+        pytest.skip(
+            "Triton limitation: fp8e4nv data type is not supported on CUDA arch < 89"
+        )
+
     if kv_scale_type == "attn_head" and implementation != "cuda":
         pytest.skip("Only CUDA implementation supports attn_head scaling.")
 
