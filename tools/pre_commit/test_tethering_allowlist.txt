@@ -206,3 +206,8 @@ tests/v1/fault_tolerance/test_fault_tolerance_e2e.py  # CI jobs disabled pending
 tests/v1/kv_connector/mooncake_integration/test_accuracy.py  # CI jobs disabled pending locked KV connectors installation
 tests/v1/kv_connector/mooncake_integration/test_mooncake_imports.py  # CI jobs disabled pending locked KV connectors installation
 tests/v1/kv_connector/moriio_integration/test_write_dummy_e2e_rocm.py  # CI jobs disabled pending locked KV connectors installation
+tests/quantization/test_auto_awq.py  # temporary: other Intel jobs removed on DO NOT MERGE debug branch
+tests/quantization/test_auto_round.py  # temporary: other Intel jobs removed on DO NOT MERGE debug branch
+tests/quantization/test_fp8_per_channel.py  # temporary: other Intel jobs removed on DO NOT MERGE debug branch
+tests/quantization/test_online.py  # temporary: other Intel jobs removed on DO NOT MERGE debug branch
+tests/quantization/test_per_token_kv_cache.py  # temporary: other Intel jobs removed on DO NOT MERGE debug branch
