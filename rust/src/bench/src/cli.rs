@@ -200,7 +200,8 @@ pub struct BenchServeArgs {
     #[arg(long)]
     pub input_len: Option<usize>,
 
-    /// General output length for datasets.
+    /// General output length for datasets. Maps to the dataset-specific output
+    /// length flags (e.g. --random-output-len, --sharegpt-output-len, --hf-output-len).
     #[arg(long)]
     pub output_len: Option<usize>,
 
