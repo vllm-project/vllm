@@ -18,6 +18,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector import (
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.connector import (
     MooncakeStoreKVEvents,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
+    StoreResidency,
+    store_block_key,
+)
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 pytestmark = pytest.mark.cpu_test
@@ -50,8 +54,25 @@ def make_lmcache_events(*token_ids: int) -> LMCacheKVEvents:
 
 
 def make_mooncake_events(*token_ids: int) -> MooncakeStoreKVEvents:
+    """One rank's report of the blocks it committed to the Store."""
+    block = BlockStored(
+        block_hashes=[b"\xab" * 32],
+        parent_block_hash=None,
+        token_ids=list(token_ids),
+        block_size=4,
+        lora_id=None,
+        medium="CPU",
+        lora_name=None,
+        group_idx=0,
+    )
     events = MooncakeStoreKVEvents(num_workers=1)
-    events.add_events([_block_stored(*token_ids)])
+    events.add_residency(
+        StoreResidency(
+            events=[block],
+            covered={store_block_key(block): frozenset({"tp0"})},
+        ),
+        required={0: frozenset({"tp0"})},
+    )
     return events
 
 
@@ -319,8 +340,8 @@ def test_salvaged_votes_dropped_live_votes_unaffected_mooncake_quorum():
 
     events = aggregated.kv_connector_output.kv_cache_events
     assert events is not None
-    # Mirror the MooncakeStore consumer (take_events -> pop_common_events).
-    published = events.pop_common_events()
+    # Mirror the MooncakeStore consumer (take_events -> pop_ready_events).
+    published = events.pop_ready_events()
     assert [e.token_ids for e in published] == [[1, 2, 3, 4]]
 
 
