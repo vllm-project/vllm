@@ -32,6 +32,7 @@ def _make_vllm_config(
         SimpleNamespace(
             num_speculative_tokens=num_speculative_tokens,
             parallel_drafting=False,
+            use_eagle_block_drop=lambda: False,
         )
         if num_speculative_tokens > 0
         else None
