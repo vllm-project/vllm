@@ -1277,7 +1277,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     fi
 
 # Install source-built Triton last so dependency resolution cannot restore the
-# previously installed version.
+# previously installed version. Preserve it in downstream uv installs too.
 COPY --from=extensions-build \
     /tmp/triton_from_source_workspace/dist/wheel.sha256 \
     /tmp/triton-source-wheel.sha256
@@ -1304,7 +1304,9 @@ RUN --mount=type=cache,target=/opt/uv/cache \
             bash /tmp/install_triton_from_source.sh \
                 /tmp/triton-source-dist \
                 /tmp/triton-source-wheel.sha256; \
-        fi; \
+        fi \
+        && uv pip list --system --format freeze \
+            | grep '^triton==' >> /etc/uv-overrides.txt; \
     fi \
     && rm -f \
         /tmp/install_triton_from_source.sh \
