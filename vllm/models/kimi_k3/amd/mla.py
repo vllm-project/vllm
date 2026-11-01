@@ -21,6 +21,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+from vllm.model_executor.utils import refill_derived
 from vllm.platforms import current_platform
 
 _OPT_KV_LORA_RANK = 512
@@ -174,8 +175,13 @@ class KimiK3MultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             self.qk_nope_head_dim,
             self.v_head_dim,
         )  # [L, N, P]
-        self._w_fold = self._compute_w_fold(
-            w_qb, W_UK, self.num_heads, self.qk_nope_head_dim, self.qk_rope_head_dim
+        # refilled in place: a reload reruns this, and captured graphs read it
+        refill_derived(
+            self,
+            "_w_fold",
+            self._compute_w_fold(
+                w_qb, W_UK, self.num_heads, self.qk_nope_head_dim, self.qk_rope_head_dim
+            ),
         )
 
     def process_weights_after_loading(self) -> None:
