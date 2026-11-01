@@ -4,6 +4,8 @@
 
 import torch
 
+import vllm.kernels  # noqa: F401
+from vllm import ir
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.custom_op import CustomOp
 
@@ -16,6 +18,10 @@ class RotaryEmbeddingBase(CustomOp):
     """Original rotary positional embedding."""
 
     # --8<-- [end:rotary_embedding]
+
+    rope_is_inplace: bool = True
+    """Whether the custom-op forward rotates query/key in place, also under
+    torch.compile (forward_native is out-of-place for every subclass)."""
 
     def __init__(
         self,
@@ -47,13 +53,8 @@ class RotaryEmbeddingBase(CustomOp):
         if not hasattr(self, "use_flashinfer"):
             self.use_flashinfer = False
 
-        self.use_aiter = (
-            self.enabled() and rocm_aiter_ops.is_triton_rotary_embed_enabled()
-        )
-        if self.use_aiter:
-            self.rocm_aiter_triton_rotary_embedding = (
-                rocm_aiter_ops.get_triton_rotary_embedding_op()
-            )
+        # Fusions may pick the AITER kernel even when the RoPE custom op is off.
+        self.use_aiter = rocm_aiter_ops.is_triton_rotary_embed_enabled()
 
         if init_cache:
             cache = self._compute_cos_sin_cache()
@@ -137,6 +138,9 @@ class RotaryEmbeddingBase(CustomOp):
 
 
 class RotaryEmbedding(RotaryEmbeddingBase):
+    # A vLLM IR op: under torch.compile it returns new tensors.
+    rope_is_inplace = False
+
     def __init__(
         self,
         head_size: int,
@@ -167,7 +171,10 @@ class RotaryEmbedding(RotaryEmbeddingBase):
         cos_sin_cache: torch.Tensor,
         is_neox_style: bool,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """A PyTorch-native implementation of forward()."""
+        """A PyTorch-native implementation of forward().
+
+        Also the reference for fusion matchers and kernel tests.
+        """
         positions = positions.flatten()
         num_tokens = positions.shape[0]
         cos_sin = cos_sin_cache.index_select(0, positions)
@@ -208,12 +215,20 @@ class RotaryEmbedding(RotaryEmbeddingBase):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """A PyTorch-native implementation of forward()."""
         cos_sin_cache = self._match_cos_sin_cache_dtype(query)
-        return self.forward_static(
+        if key is None:
+            query = ir.ops.rotary_embedding_query_only(
+                positions,
+                query,
+                self.head_size,
+                cos_sin_cache,
+                self.is_neox_style,
+            )
+            return query, None
+        return ir.ops.rotary_embedding(
             positions,
             query,
             key,
             self.head_size,
-            self.rotary_dim,
             cos_sin_cache,
             self.is_neox_style,
         )
@@ -235,13 +250,27 @@ class RotaryEmbedding(RotaryEmbeddingBase):
             )
             return query, key
 
-        from vllm import _custom_ops as ops
-
         cos_sin_cache = self._match_cos_sin_cache_dtype(query)
 
-        # ops.rotary_embedding() is an in-place operation
-        # that updates the query and key tensors.
-        ops.rotary_embedding(
+        # Eager callers rely on in-place RoPE, but a non-inplace provider (e.g.
+        # the native fallback) returns new tensors. Under torch.compile inputs
+        # are donated to maybe_inplace, so return its outputs instead.
+        compiling = torch.compiler.is_compiling()
+        if key is None:
+            query_out = ir.ops.rotary_embedding_query_only.maybe_inplace(
+                positions,
+                query,
+                self.head_size,
+                cos_sin_cache,
+                self.is_neox_style,
+            )
+            if compiling:
+                return query_out, None
+            if query_out is not query:
+                query.copy_(query_out)
+            return query, None
+
+        query_out, key_out = ir.ops.rotary_embedding.maybe_inplace(
             positions,
             query,
             key,
@@ -249,6 +278,11 @@ class RotaryEmbedding(RotaryEmbeddingBase):
             cos_sin_cache,
             self.is_neox_style,
         )
+        if compiling:
+            return query_out, key_out
+        if query_out is not query:
+            query.copy_(query_out)
+            key.copy_(key_out)
         return query, key
 
     def forward_hip(
@@ -257,17 +291,6 @@ class RotaryEmbedding(RotaryEmbeddingBase):
         query: torch.Tensor,
         key: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        if self.use_aiter:
-            cos_sin_cache = self._match_cos_sin_cache_dtype(query)
-            self.rocm_aiter_triton_rotary_embedding(
-                positions,
-                query,
-                key,
-                self.head_size,
-                cos_sin_cache,
-                self.is_neox_style,
-            )
-            return query, key
         return self.forward_cuda(positions, query, key)
 
     def forward_xpu(

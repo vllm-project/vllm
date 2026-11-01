@@ -591,22 +591,36 @@ class RocmAttentionImpl(AttentionImpl):
         is_neox: bool,
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
+        query_out: torch.Tensor | None = None,
+        key_out: torch.Tensor | None = None,
     ):
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
+            if query_out is not None and key_out is not None:
+                query_out.copy_(query)
+                key_out.copy_(key)
             return
         if self._use_interleaved_v_cache:
             # The Triton RoPE + cache writer only stores the regular V layout.
             # With layer_name hoisted, one RoPE + KV-cache pattern serves every
             # layer, so a layer switched to the interleaved V cache is handled
             # here at run time rather than left out of the fusion.
-            ops.rotary_embedding(
-                positions,
-                query,
-                key,
-                layer.head_size,  # type: ignore[attr-defined]
-                cos_sin_cache,
-                is_neox,
-            )
+            head_size = layer.head_size  # type: ignore[attr-defined]
+            if query_out is None or key_out is None:
+                ops.rotary_embedding(
+                    positions, query, key, head_size, cos_sin_cache, is_neox
+                )
+            else:
+                ops.rotary_embedding_out(
+                    positions,
+                    query,
+                    key,
+                    query_out,
+                    key_out,
+                    head_size,
+                    cos_sin_cache,
+                    is_neox,
+                )
+                key = key_out
             self.do_kv_cache_update(layer, key, value, kv_cache, layer_slot_mapping)
             return
         key_cache, value_cache = PagedAttention.split_kv_cache(
@@ -635,4 +649,6 @@ class RocmAttentionImpl(AttentionImpl):
             layer._v_scale,
             flash_layout,
             is_fp8_kv_cache,
+            query_out=query_out,
+            key_out=key_out,
         )

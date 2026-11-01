@@ -5,6 +5,7 @@ import itertools
 
 import torch
 
+from vllm import ir
 from vllm.benchmarks.lib.utils import default_vllm_config
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.triton_utils import triton
@@ -65,10 +66,11 @@ def get_benchmark(head_size, rotary_dim, is_neox_style, device):
                 quantiles=quantiles,
             )
         else:
-            ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: rope.forward_cuda(positions, query.clone(), key.clone()),
-                quantiles=quantiles,
-            )
+            with ir.ops.rotary_embedding.set_priority(["vllm_c", "native"]):
+                ms, min_ms, max_ms = triton.testing.do_bench(
+                    lambda: rope.forward_cuda(positions, query.clone(), key.clone()),
+                    quantiles=quantiles,
+                )
 
         return 1000 * ms, 1000 * max_ms, 1000 * min_ms
 

@@ -8,6 +8,7 @@ import torch
 
 from tests.compile.backend import TestBackend
 from tests.utils import TestFP8Layer
+from vllm import _custom_ops as ops
 from vllm.compilation.passes.fusion.act_quant_fusion import (
     ActivationQuantFusionPass,
 )
@@ -31,7 +32,6 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
-from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -132,20 +132,18 @@ class TestFusedAddRMSNorm(torch.nn.Module):
         return []
 
 
-class TestRotaryEmbedding(torch.nn.Module):
-    def __init__(self, head_dim=64, max_position=2048, base=10000):
+class TestInplaceRotaryEmbedding(torch.nn.Module):
+    """In-place `_C.rotary_embedding`, still called directly by some RoPE
+    variants (e.g. DeepSeek V4), must be defunctionalized."""
+
+    def __init__(self, head_dim=64, max_position=2048):
         super().__init__()
         self.head_dim = head_dim
-
-        self.rotary_emb = get_rope(
-            self.head_dim,
-            max_position=max_position,
-            rope_parameters={"rope_type": "default", "rope_theta": base},
-        )
+        self.register_buffer("cos_sin_cache", torch.randn(max_position, head_dim))
 
     def forward(self, positions, q, k):
-        q_rotated, k_rotated = self.rotary_emb(positions, q, k)
-        return q_rotated, k_rotated
+        ops.rotary_embedding(positions, q, k, self.head_dim, self.cos_sin_cache, True)
+        return q, k
 
     def example_inputs(self, num_tokens=32, head_dim=64):
         positions = torch.arange(num_tokens, dtype=torch.long)
@@ -160,40 +158,26 @@ class TestRotaryEmbedding(torch.nn.Module):
         return []
 
 
-class TestRotaryEmbeddingSliceScatter(torch.nn.Module):
-    def __init__(self, head_dim=64, num_heads=4, max_position=2048, base=10000):
+class TestInplaceRotaryEmbeddingSliceScatter(torch.nn.Module):
+    def __init__(self, head_dim=64, num_heads=4, max_position=2048):
         super().__init__()
         self.head_dim = head_dim
-        self.num_heads = num_heads
         self.hidden_size = head_dim * num_heads
-
         self.qkv_proj = torch.nn.Linear(
             self.hidden_size, self.hidden_size * 3, bias=False
         )
-
-        self.rotary_emb = get_rope(
-            self.head_dim,
-            max_position=max_position,
-            rope_parameters={"rope_type": "default", "rope_theta": base},
-        )
+        self.register_buffer("cos_sin_cache", torch.randn(max_position, head_dim))
 
     def forward(self, positions, hidden_states):
-        # Simulate the pattern: mm -> split_with_sizes -> rotary_embedding
-        # -> slice_scatter -> split_with_sizes
-
+        # mm -> split_with_sizes -> rotary_embedding -> slice_scatter -> split
         qkv = self.qkv_proj(hidden_states)
-        split_sizes = [self.hidden_size, self.hidden_size, self.hidden_size]
-        q, k, v = torch.split(qkv, split_sizes, dim=-1)
-
-        q_rotated, k_rotated = self.rotary_emb(positions, q, k)
-
-        qkv_updated = torch.cat([q_rotated, k_rotated, v], dim=-1)
-        return qkv_updated
+        q, k, v = torch.split(qkv, [self.hidden_size] * 3, dim=-1)
+        ops.rotary_embedding(positions, q, k, self.head_dim, self.cos_sin_cache, True)
+        return torch.cat([q, k, v], dim=-1)
 
     def example_inputs(self, num_tokens=32, head_dim=64, num_heads=4):
-        hidden_size = head_dim * num_heads
         positions = torch.arange(num_tokens, dtype=torch.long)
-        hidden_states = torch.randn(num_tokens, hidden_size)
+        hidden_states = torch.randn(num_tokens, head_dim * num_heads)
         return (positions, hidden_states)
 
     def ops_in_model(self, do_fusion):
@@ -254,8 +238,8 @@ class TestFunctionWithMutatedArgsAndReturn(torch.nn.Module):
 MODELS_AND_DO_FUSION = {
     TestSiluMul: [True, False],
     TestFusedAddRMSNorm: [True, False],
-    TestRotaryEmbedding: [False],
-    TestRotaryEmbeddingSliceScatter: [False],
+    TestInplaceRotaryEmbedding: [False],
+    TestInplaceRotaryEmbeddingSliceScatter: [False],
     TestFunctionWithMutatedArgsAndReturn: [False],
 }
 
