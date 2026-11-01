@@ -123,6 +123,13 @@ class CudaCommunicator(DeviceCommunicatorBase):
         # cuMem graph buffers cannot be IPC-registered; capture copies them instead.
         config = get_current_vllm_config_or_none()
         register = config is None or not config.use_cumem_cudagraph_pool
+        # On MI200 (gfx90a), IPC-registered graph buffers give corrupted
+        # all-reduce results under graph replay; copy them in, as eager mode does.
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx90a
+
+            if on_gfx90a():
+                register = False
 
         if use_torch_symm_mem and current_platform.is_cuda():
             self.symm_mem_comm = SymmMemCommunicator(
