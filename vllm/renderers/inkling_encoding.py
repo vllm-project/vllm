@@ -264,7 +264,7 @@ def _append_message(
 
 
 def _iter_render_parts(content: Any) -> Iterator[tuple[str, str]]:
-    """Yield (kind, text) per content part: kind in {text, image, audio}."""
+    """Yield (kind, text) per part; kind in {text, thinking, image, audio}."""
     if content is None:
         return
     if isinstance(content, str):
@@ -283,6 +283,9 @@ def _iter_render_parts(content: Any) -> Iterator[tuple[str, str]]:
         if ptype in (None, "text", "input_text"):
             text = part.get("text", "")
             yield ("text", text if isinstance(text, str) else "")
+        elif ptype == "thinking":
+            thinking = part.get("thinking", "")
+            yield ("thinking", thinking if isinstance(thinking, str) else "")
         elif ptype in _IMAGE_PART_TYPES:
             yield ("image", "")
         elif ptype in _AUDIO_PART_TYPES:
