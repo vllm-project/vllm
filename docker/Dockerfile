@@ -216,7 +216,7 @@ COPY requirements/cuda.txt requirements/cuda.txt
 COPY tools/use_existing_torch.py tools/use_existing_torch.py
 COPY pyproject.toml pyproject.toml
 RUN --mount=type=cache,target=/opt/uv/cache \
-    --mount=type=bind,source=requirements,target=/tmp/vllm-requirements,ro \
+    --mount=type=bind,source=requirements/rubin-prerelease.txt,target=/tmp/vllm-requirements/rubin-prerelease.txt,ro \
     if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ] && \
         [ ! -f /tmp/vllm-requirements/rubin-prerelease.txt ]; then \
         echo "INSTALL_RUBIN_PRERELEASE=true requires requirements/rubin-prerelease.txt" >&2; \
@@ -573,7 +573,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 # requested. The wheels are installed by the final image, which has no compiler.
 ARG BUILD_NIXL
 COPY tools/build_nixl_with_torch215_for_rubin.py /tmp/build_nixl_for_rubin.py
-RUN --mount=type=bind,source=requirements,target=/tmp/vllm-requirements,ro \
+RUN --mount=type=bind,source=requirements/kv_connectors.txt,target=/tmp/vllm-requirements/kv_connectors.txt,ro \
     set -eux; \
     NIXL_WORKSPACE=/tmp/nixl_workspace; \
     mkdir -p "${NIXL_WORKSPACE}/dist"; \
@@ -927,7 +927,7 @@ ARG PYTORCH_CUDA_INDEX_BASE_URL
 COPY requirements/common.txt /tmp/common.txt
 COPY requirements/cuda.txt /tmp/requirements-cuda.txt
 RUN --mount=type=cache,target=/opt/uv/cache \
-    --mount=type=bind,source=requirements,target=/tmp/vllm-requirements,ro \
+    --mount=type=bind,source=requirements/rubin-prerelease.txt,target=/tmp/vllm-requirements/rubin-prerelease.txt,ro \
     if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ] && \
         [ ! -f /tmp/vllm-requirements/rubin-prerelease.txt ]; then \
         echo "INSTALL_RUBIN_PRERELEASE=true requires requirements/rubin-prerelease.txt" >&2; \
@@ -1222,7 +1222,8 @@ ENV UV_HTTP_TIMEOUT=500
 ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 RUN --mount=type=cache,target=/opt/uv/cache \
-    --mount=type=bind,source=requirements,target=/tmp/vllm-requirements,ro \
+    --mount=type=bind,source=requirements/kv_connectors.txt,target=/tmp/vllm-requirements/kv_connectors.txt,ro \
+    --mount=type=bind,source=requirements/kv_connectors_cu12.txt,target=/tmp/vllm-requirements/kv_connectors_cu12.txt,ro \
     set -eu; \
     CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
     CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-'); \
@@ -1268,7 +1269,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 # Install Rubin prerelease dependencies when explicitly requested. Keep this
 # after the public vLLM and KV connector dependency pins installed above.
 RUN --mount=type=cache,target=/opt/uv/cache \
-    --mount=type=bind,source=requirements,target=/tmp/vllm-requirements,ro \
+    --mount=type=bind,source=requirements/rubin-prerelease.txt,target=/tmp/vllm-requirements/rubin-prerelease.txt,ro \
     if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
         echo "Installing Rubin prerelease requirements..." \
         && uv pip install --system \

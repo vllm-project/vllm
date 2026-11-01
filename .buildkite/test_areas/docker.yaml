@@ -9,6 +9,8 @@ steps:
   source_file_dependencies:
     - .buildkite/release-pipeline.yaml
     - .buildkite/scripts/docker-build-metadata-args.sh
+    - .buildkite/scripts/resolve-image-cache.py
+    - .buildkite/image_build/image_build.sh
     - .buildkite/scripts/rocm/build.sh
     - .buildkite/scripts/rocm/publish.sh
     - tools/vllm-rocm/therock_wheels.py

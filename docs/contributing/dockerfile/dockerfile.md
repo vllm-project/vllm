@@ -20,6 +20,16 @@ The edges of the build graph represent:
 The `test-deps` stage branches from `vllm-runtime-base` so Git and the test
 requirements remain cached independently of per-commit vLLM wheels and source.
 
+Mount only the requirement files a dependency stage reads. Mounting the entire
+`requirements/` directory makes unrelated changes, such as ROCm test pins,
+invalidate CUDA dependency layers and their downstream native builds.
+
+On main, the CI image build also looks for up to three published caches among
+the previous 20 first-parent ancestors beyond its immediate parent. This
+supplements the normal parent and rolling-cache imports when merges arrive
+before the parent finishes building. The lookup is bounded and optional;
+unavailable registry metadata does not prevent the image build from running.
+
 The `vllm-runtime-base` stage explicitly installs the current Ubuntu
 `ca-certificates` package so clients using the system trust store receive
 certificate removals when the image is rebuilt. This complements the Python
