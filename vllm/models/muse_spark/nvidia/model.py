@@ -61,6 +61,7 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, GateLinear
+from vllm.model_executor.layers.fused_moe.router.base_router import get_moe_padding_mask
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     ReplicatedLinear,
@@ -953,8 +954,13 @@ class MuseSpark1xMoE(nn.Module):
             logits, _ = self.router(router_input)
             if not self.aux_stream_routing:
                 return logits
+            # This path calls TRTLLM's routed experts directly, which skip -1.
+            # An SP all-gather can add rows beyond the runner's padding mask.
+            padding = get_moe_padding_mask(num_tokens)
+            if padding is not None and padding.shape[0] != num_tokens:
+                padding = None
             weights, ids = self.moe_router._compute_routing(
-                hidden_states, logits, torch.int32
+                hidden_states, logits, torch.int32, is_padding=padding
             )
             return ids, weights
 
