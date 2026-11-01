@@ -1102,12 +1102,13 @@ def deepseek_v41_server():
 async def test_messages_render_tool_search_result_for_deepseek_v41(
     deepseek_v41_server,
 ):
-    """A tool search result renders as the names of the tools it references."""
+    """A tool search result renders as one result naming the tools it found."""
     request = {
         "model": DEEPSEEK_V41_MODEL_NAME,
         "max_tokens": 16,
         "tools": [
             {"name": "tool_search", "input_schema": {"type": "object"}},
+            {"name": "read_file", "input_schema": {"type": "object"}},
             {
                 "name": "get_weather",
                 "input_schema": {"type": "object"},
@@ -1115,7 +1116,7 @@ async def test_messages_render_tool_search_result_for_deepseek_v41(
             },
         ],
         "messages": [
-            {"role": "user", "content": "What is the weather in Paris?"},
+            {"role": "user", "content": "Read notes.txt and find a weather tool."},
             {
                 "role": "assistant",
                 "content": [
@@ -1124,7 +1125,13 @@ async def test_messages_render_tool_search_result_for_deepseek_v41(
                         "id": "toolu_1",
                         "name": "tool_search",
                         "input": {"query": "weather"},
-                    }
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_2",
+                        "name": "read_file",
+                        "input": {"path": "notes.txt"},
+                    },
                 ],
             },
             {
@@ -1136,7 +1143,12 @@ async def test_messages_render_tool_search_result_for_deepseek_v41(
                         "content": [
                             {"type": "tool_reference", "tool_name": "get_weather"}
                         ],
-                    }
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_2",
+                        "content": "notes",
+                    },
                 ],
             },
         ],
@@ -1151,4 +1163,7 @@ async def test_messages_render_tool_search_result_for_deepseek_v41(
         )
 
     assert detokenize.status_code == 200
-    assert "<tool_result>get_weather</tool_result>" in detokenize.json()["prompt"]
+    assert (
+        "<｜User｜><tool_result>get_weather</tool_result>\n\n"
+        "<tool_result>notes</tool_result><｜Assistant｜>"
+    ) in detokenize.json()["prompt"]

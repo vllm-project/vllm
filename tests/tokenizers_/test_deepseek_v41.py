@@ -264,8 +264,14 @@ def test_unsupported_media_is_a_request_error():
 
 
 def test_tool_references_render_as_tool_names():
+    # /v1/messages sends a tool_result with tool_reference items as an empty
+    # tool message followed by one with the references, both for one call.
     messages = [
-        {"role": "assistant", "tool_calls": [tool_call("tool_search")]},
+        {
+            "role": "assistant",
+            "tool_calls": [tool_call("tool_search"), tool_call("read_file")],
+        },
+        {"role": "tool", "tool_call_id": "tool_search", "content": ""},
         {
             "role": "tool",
             "tool_call_id": "tool_search",
@@ -274,9 +280,11 @@ def test_tool_references_render_as_tool_names():
                 {"type": "tool_reference", "name": "get_time"},
             ],
         },
+        {"role": "tool", "tool_call_id": "read_file", "content": "notes"},
     ]
     assert render(messages, thinking=False).endswith(
-        "<tool_result>get_weather\n\nget_time</tool_result><｜Assistant｜></think>"
+        "<｜User｜><tool_result>get_weather\n\nget_time</tool_result>\n\n"
+        "<tool_result>notes</tool_result><｜Assistant｜></think>"
     )
 
 
