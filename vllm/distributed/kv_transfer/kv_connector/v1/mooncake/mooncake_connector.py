@@ -1903,14 +1903,10 @@ class MooncakeConnectorWorker:
         try:
             while True:
                 identity, metadata_bytes = await sock.recv_multipart()
-                # Renew here, not in a sender worker: those can all be
-                # waiting for prefills, and the renewal must not wait.
-                heartbeat = self._decode_heartbeat(metadata_bytes)
-                if heartbeat is not None:
-                    response = self._renew_kv_leases(heartbeat.lease_transfer_ids)
-                    await sock.send_multipart(
-                        (identity, self._encoder.encode(response))
-                    )
+                # Answer lease control messages here, not in a sender worker:
+                # those can all be waiting for prefills, and a lease must not
+                # wait for one.
+                if await self._handle_control_message(identity, metadata_bytes, sock):
                     continue
                 await self.sender_worker_queue.put((identity, metadata_bytes))
         except zmq.ContextTerminated:
@@ -1931,6 +1927,23 @@ class MooncakeConnectorWorker:
             # Leave malformed messages to the sender worker, which reports them.
             return None
         return heartbeat if heartbeat.lease_transfer_ids else None
+
+    async def _handle_control_message(
+        self,
+        identity: bytes,
+        metadata_bytes: bytes,
+        sock: zmq.asyncio.Socket,
+    ) -> bool:
+        """Handle a message that cannot wait for a sender worker.
+
+        Returns whether the message was answered here.
+        """
+        heartbeat = self._decode_heartbeat(metadata_bytes)
+        if heartbeat is None:
+            return False
+        response = self._renew_kv_leases(heartbeat.lease_transfer_ids)
+        await sock.send_multipart((identity, self._encoder.encode(response)))
+        return True
 
     def _renew_kv_leases(self, transfer_ids: list[TransferId]) -> MooncakeXferResponse:
         if self._kv_lease_duration is None:

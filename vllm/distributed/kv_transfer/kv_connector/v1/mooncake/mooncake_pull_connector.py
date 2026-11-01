@@ -210,6 +210,30 @@ class MooncakePullConnectorWorker(MooncakeConnectorWorker):
         for send_meta in list(self.reqs_need_send.values()):
             self._complete_transfer_if_read_by_all(send_meta)
 
+    async def _handle_control_message(
+        self, identity: bytes, payload: bytes, sock: zmq.asyncio.Socket
+    ) -> bool:
+        """Handle lease traffic ahead of the queued pull requests.
+
+        A sender worker can be waiting for prefills, and a report that shared
+        its queue could reach the prefiller after the blocks it releases were
+        reclaimed.
+        """
+        if await super()._handle_control_message(identity, payload, sock):
+            return True
+        try:
+            message = self._pull_message_decoder.decode(payload)
+        except msgspec.DecodeError:
+            # Leave it to the worker, which names the protocol mismatch.
+            return False
+        if isinstance(message, MooncakePullReading):
+            self._handle_read_lease(message)
+            return True
+        if isinstance(message, MooncakePullDone):
+            self._handle_read_done(message)
+            return True
+        return False
+
     async def _handle_side_channel_message(
         self, identity: bytes, payload: bytes, sock: zmq.asyncio.Socket
     ) -> None:
@@ -223,12 +247,12 @@ class MooncakePullConnectorWorker(MooncakeConnectorWorker):
                 "so the push and pull connectors are mixed on this P/D pair: "
                 f"{e}"
             ) from e
-        if isinstance(message, MooncakePullRequest):
-            await self._handle_pull_request(identity, sock, message)
-        elif isinstance(message, MooncakePullReading):
-            self._handle_read_lease(message)
-        else:
-            self._handle_read_done(message)
+        if not isinstance(message, MooncakePullRequest):
+            raise RuntimeError(
+                "Only pull requests may reach a sender worker; the listener "
+                f"handles lease traffic. Got {type(message).__name__}."
+            )
+        await self._handle_pull_request(identity, sock, message)
 
     async def _wait_for_blocks(
         self, d_req_id: ReqId, send_meta: SendBlockMeta
@@ -275,6 +299,20 @@ class MooncakePullConnectorWorker(MooncakeConnectorWorker):
         for d_req_id, (transfer_id, needs_data) in request.reqs.items():
             send_meta = self.reqs_need_send.get(transfer_id)
             if send_meta is None:
+                if transfer_id in self._expired_transfer_ids:
+                    # The prefiller freed these blocks already; waiting for
+                    # them would only end at the ready timeout.
+                    logger.warning(
+                        "Request %s was pulled after its KV expired on P side.",
+                        d_req_id,
+                    )
+                    err_reqs.append(d_req_id)
+                    if err_msg is None:
+                        err_msg = (
+                            "The prefiller released this request before handing "
+                            "out its blocks."
+                        )
+                    continue
                 # This reader may pair with the prefiller rank before its
                 # scheduler registered the request; hold it until the blocks
                 # show up.

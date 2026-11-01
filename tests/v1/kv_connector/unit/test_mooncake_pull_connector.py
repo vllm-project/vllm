@@ -32,6 +32,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_pull_connector import (  # noqa: E501
     MooncakePullConnector,
     MooncakePullConnectorWorker,
+    MooncakePullDone,
+    MooncakePullReading,
     MooncakePullRequest,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import (
@@ -1185,3 +1187,79 @@ def test_a_reader_that_never_reports_stops_holding_blocks(monkeypatch):
             assert "xfer-silent" not in producer.reqs_need_send
         finally:
             producer.shutdown()
+
+
+def test_lease_reports_never_wait_for_a_sender_worker():
+    """Lease traffic is answered by the listener, not by a queued pull."""
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakePullConnector", kv_role="kv_producer"
+    )
+    with patch_pull_worker_dependencies():
+        producer = make_worker(vllm_config, make_kv_cache_config())
+
+    reader = (producer.engine_id, 0, 0)
+    send_meta = SendBlockMeta(
+        p_req_id="p-req-report",
+        transfer_id="xfer-report",
+        local_block_ids=[[1]],
+        ready=asyncio.Event(),
+    )
+    producer.reqs_need_send["xfer-report"] = send_meta
+    producer._resolve_expected_readers(send_meta, 1, 1)
+    producer._leases.hand_out("xfer-report", reader)
+
+    encoding = producer._encoder
+    reading = encoding.encode(
+        MooncakePullReading(
+            engine_id=reader[0], tp_rank=0, pp_rank=0, transfer_ids=["xfer-report"]
+        )
+    )
+    done = encoding.encode(
+        MooncakePullDone(
+            engine_id=reader[0], tp_rank=0, pp_rank=0, transfer_ids=["xfer-report"]
+        )
+    )
+    pull = encoding.encode(
+        MooncakePullRequest(
+            engine_id=reader[0],
+            tp_rank=0,
+            tp_size=1,
+            pp_rank=0,
+            pp_size=1,
+            reqs={"d-req": ("xfer-report", True)},
+        )
+    )
+
+    assert asyncio.run(producer._handle_control_message(b"reader", reading, None))
+    assert producer._send_idle("xfer-report") is False
+
+    assert asyncio.run(producer._handle_control_message(b"reader", done, None))
+    assert "xfer-report" not in producer.reqs_need_send
+    assert producer.finished_sending_reqs == {"p-req-report"}
+
+    # Pull requests still wait for the prefiller's blocks, in a worker.
+    assert not asyncio.run(producer._handle_control_message(b"reader", pull, None))
+
+
+@pytest.mark.parametrize("pair", [30], indirect=True)
+@pytest.mark.asyncio
+async def test_a_pull_after_the_kv_expired_fails_instead_of_waiting(pair):
+    """A transfer the prefiller freed is reported, not waited for."""
+    producer = pair.producer
+    send_meta = pair.ready("xfer-gone", "p-req-gone", [[2]])
+    send_meta.expire_time = time.perf_counter() - 100
+    assert await fetch_sent(producer) == {"p-req-gone"}
+    assert "xfer-gone" in producer._expired_transfer_ids
+
+    async def holds_a_placeholder() -> bool:
+        return "xfer-gone" in producer.reqs_need_send
+
+    pair.read({"d-req-gone": ("xfer-gone", [[10]])})
+
+    # The abort timeout is 30s here, so a placeholder would keep the read
+    # waiting far past this bound.
+    assert await wait_for(lambda: fetch_recved(pair.decoder), timeout=3.0) == {
+        "d-req-gone"
+    }
+    assert pair.decoder.get_block_ids_with_load_errors() == {10}
+    assert not await run_on(producer.sender_loop, holds_a_placeholder())
