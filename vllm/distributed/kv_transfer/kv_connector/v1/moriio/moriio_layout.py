@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable, Mapping
+from functools import cache
 from typing import NamedTuple, cast
 
+import numpy as np
 import torch
 
 from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
@@ -489,6 +491,107 @@ def compute_block_transfer_offsets(
             w += 1
 
     return merge_fn(offset_local, offset_remote, sizes)
+
+
+@cache
+def _token_run_table(
+    block_size: int, entry_bytes: int, run_tokens: int
+) -> tuple[np.ndarray, np.ndarray] | None:
+    # MLA latents are stored token by token.
+    runs = [
+        [(slot * entry_bytes, run_tokens * entry_bytes)]
+        for slot in range(0, block_size, run_tokens)
+    ]
+    sizes = [size for _, size in runs[0]]
+    if any([size for _, size in run] != sizes for run in runs):
+        return None
+    offsets = [[offset for offset, _ in run] for run in runs]
+    return np.array(offsets, dtype=np.int64), np.array(sizes, dtype=np.int64)
+
+
+def get_token_run_table(
+    layer_name: str,
+    kv_cache: torch.Tensor,
+    layer_to_spec: Mapping[str, KVCacheSpec],
+    run_tokens: int,
+    latent_size: int | None,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Byte ranges of a run of ``run_tokens`` tokens in a block of this layer.
+
+    Returns ``(offsets, sizes)``: ``offsets[i]`` are the ranges, relative to
+    the block, of the run that starts at slot ``i * run_tokens``, and every run
+    has ranges of the same ``sizes``. Only an MLA latent of ``latent_size``
+    elements per token qualifies; any other layer returns None and can only be
+    copied in whole blocks.
+    """
+    spec = layer_to_spec[layer_name]
+    if (
+        type(spec) is not MLAAttentionSpec
+        or spec.tokens_per_state != 1
+        or spec.num_heads != 1
+        or spec.state_content_bytes is not None
+    ):
+        return None
+    geometry = cast(
+        LayerTransferGeometry,
+        get_layer_transfer_geometry(layer_name, kv_cache, layer_to_spec),
+    )
+    if geometry.block_len != geometry.block_size * geometry.slot_size_bytes:
+        return None
+    if spec.head_size != latent_size:
+        return None
+    return _token_run_table(geometry.block_size, geometry.slot_size_bytes, run_tokens)
+
+
+def compute_token_run_offsets(
+    layer_name: str,
+    kv_cache: torch.Tensor,
+    layer_to_spec: Mapping[str, KVCacheSpec],
+    runs: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+    run_tokens: int,
+    remote_num_blocks: int,
+    latent_size: int | None,
+    merge_fn: Callable[
+        [list[int], list[int], list[int]], tuple[list[int], list[int], list[int]]
+    ] = merge_contiguous_offsets,
+) -> tuple[list[int], list[int], list[int]]:
+    """Offsets copying runs of ``run_tokens`` tokens between blocks of the
+    same layout.
+
+    ``runs`` holds the local block id and slot and the remote block id and
+    slot of each run's first token.
+    """
+    table = get_token_run_table(
+        layer_name, kv_cache, layer_to_spec, run_tokens, latent_size
+    )
+    if table is None:
+        raise ValueError(
+            f"MoRIIO cannot copy layer {layer_name} in runs of {run_tokens} tokens"
+        )
+    offsets, sizes = table
+    geometry = cast(
+        LayerTransferGeometry,
+        get_layer_transfer_geometry(
+            layer_name, kv_cache, layer_to_spec, remote_num_blocks
+        ),
+    )
+    local_blocks, local_slots, remote_blocks, remote_slots = runs
+    for side, blocks, num_blocks in (
+        ("local", local_blocks, geometry.num_blocks),
+        ("remote", remote_blocks, remote_num_blocks),
+    ):
+        if len(blocks) and not 0 <= blocks.min() <= blocks.max() < num_blocks:
+            raise ValueError(f"{side} block ids are outside [0, {num_blocks})")
+    block_stride = geometry.block_stride * kv_cache.element_size()
+    local = (local_blocks * block_stride)[:, None] + offsets[local_slots // run_tokens]
+    remote = (remote_blocks * block_stride)[:, None] + offsets[
+        remote_slots // run_tokens
+    ]
+    return merge_fn(
+        local.ravel().tolist(),
+        remote.ravel().tolist(),
+        np.tile(sizes, len(local_blocks)).tolist(),
+    )
 
 
 class MambaOffsetTemplate(NamedTuple):
