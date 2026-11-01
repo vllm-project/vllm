@@ -285,9 +285,15 @@ schemes continue to use their existing backends unless explicitly overridden.
 
 FlyDSL configuration calibration and executable warmup are separate operations.
 Keep `FLYDSL_AUTOTUNE=0` during serving and perform optional calibration through
-FlyDSL's `tune_gemm` API beforehand. The first use of a new exact M/N/K shape can
-still JIT-compile its executable, including prefill shapes not covered by decode
-warmup. Warm the expected shapes before measuring steady-state serving latency.
+FlyDSL's `tune_gemm` API beforehand. Prefill executables share runtime row counts,
+with separate aligned and partial-tile epilogues. The selected linear layers
+register their configuration keys with vLLM's normal JIT warmup registry.
+Startup compiles the heuristic and persisted tuning choices through
+`max_num_batched_tokens`, using meta tensors without dummy GPU launches.
+This covers new prefill row counts within the configured budget while keeping
+the specialized decode paths. It requires a FlyDSL build providing
+`get_warmup_keys` and `compile_gemm` in the kernel package. Eager mode normally
+disables vLLM's JIT warmup, so it can still compile configurations on first use.
 For an emulation reference that retains BF16 weights between calls, set
 `VLLM_MXFP4_EMULATION_DEQUANT_AT_LOAD=1`; this uses more model memory than the
 compressed FlyDSL backend.

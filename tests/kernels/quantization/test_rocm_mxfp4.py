@@ -871,8 +871,8 @@ def test_rdna4_flydsl_compiled_graph_reads_changed_inputs(dynamic, dist_init):
 
 @pytest.mark.skipif(not on_rdna4(), reason="requires ROCm RDNA4")
 @pytest.mark.slow_test
-def test_rdna4_flydsl_serves_quark_checkpoint_with_fp8_override():
-    """Exercise checkpoint loading and the FP8 override through the real server."""
+def test_rdna4_flydsl_serves_quark_checkpoint_with_fp8_override(capfd, tmp_path):
+    """Load real weights and serve unseen prefills without request-time JIT."""
     from tests.utils import RemoteOpenAIServer
 
     model = "amd/Qwen3.8-27B-Quark-AWQ-MXFP4"
@@ -882,7 +882,6 @@ def test_rdna4_flydsl_serves_quark_checkpoint_with_fp8_override():
         "--dtype",
         "bfloat16",
         "--language-model-only",
-        "--enforce-eager",
         "--max-model-len",
         "4096",
         "--max-num-seqs",
@@ -894,8 +893,14 @@ def test_rdna4_flydsl_serves_quark_checkpoint_with_fp8_override():
         "--kernel-config",
         '{"linear_backend_per_quant":{"mxfp4":"flydsl"}}',
         "--disable-uvicorn-access-log",
+        "--jit-monitor-verbose",
     ]
-    with RemoteOpenAIServer(model, server_args, max_wait_seconds=1200) as server:
+    with RemoteOpenAIServer(
+        model,
+        server_args,
+        env_dict={"FLYDSL_RUNTIME_CACHE_DIR": str(tmp_path / "flydsl")},
+        max_wait_seconds=1200,
+    ) as server:
         response = server.get_client().chat.completions.create(
             model=model,
             messages=[
@@ -909,3 +914,18 @@ def test_rdna4_flydsl_serves_quark_checkpoint_with_fp8_override():
             extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
         assert response.choices[0].message.content.strip().rstrip(".") == "4"
+        for rows in (127, 311, 719, 1009):
+            response = server.get_client().completions.create(
+                model=model,
+                prompt=[100 + rows % 7] * rows,
+                temperature=0,
+                max_tokens=1,
+                extra_body={"ignore_eos": True},
+            )
+            assert response.usage.prompt_tokens == rows
+            assert response.usage.completion_tokens == 1
+    captured = capfd.readouterr()
+    logs = captured.out + captured.err
+    (tmp_path / "server.log").write_text(logs)
+    assert "FlydslMxfp4LinearKernel" in logs
+    assert "FlyDSL JIT compilation during inference" not in logs

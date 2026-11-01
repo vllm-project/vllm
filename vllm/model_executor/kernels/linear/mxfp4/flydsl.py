@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import importlib.util
+from dataclasses import dataclass
 
 import torch
 
@@ -13,10 +14,85 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Static,
 )
 from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.warmup.jit_warmup import VllmJitKernel, WarmupChoices
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from .base import MxFp4LinearKernel, MxFp4LinearLayerConfig
+
+
+class _FlydslMxfp4Gemm(VllmJitKernel["_FlydslMxfp4Gemm.CompileKey"]):
+    @dataclass(frozen=True)
+    class CompileKey:
+        signature: tuple
+
+    def dispatch(self, signature: tuple) -> CompileKey:  # type: ignore[override]
+        return self.CompileKey(signature=signature)
+
+    def get_warmup_keys(
+        self,
+        *,
+        n: int,
+        k: int,
+        mode: str,
+        normal_only: bool,
+        out_dtype: torch.dtype,
+        device_id: int,
+        max_m: int,
+    ) -> list[CompileKey]:
+        from flydsl.kernels.gemm.rdna4_mxfp4 import get_warmup_keys
+
+        signatures = get_warmup_keys(
+            n,
+            k,
+            max_m,
+            mode=mode,
+            normal_only=normal_only,
+            dtype=out_dtype,
+            device_id=device_id,
+            cache_policy="rotating",
+        )
+        return self._trace_dispatch(self.dispatch)(signature=WarmupChoices(*signatures))
+
+    def compile(self, compile_key: CompileKey) -> None:
+        from flydsl.kernels.gemm.rdna4_mxfp4 import compile_gemm
+
+        compile_gemm(compile_key.signature)
+
+    def __call__(
+        self,
+        x: torch.Tensor,
+        packed: torch.Tensor,
+        scales: torch.Tensor,
+        x_scale: torch.Tensor,
+        base_exponents: torch.Tensor | None,
+        table: torch.Tensor | None,
+        n: int,
+        k: int,
+        mode: str,
+        normal_only: bool,
+        out_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        from flydsl.kernels.gemm.rdna4_mxfp4 import PreparedMXFP4, gemm
+
+        if x.shape[0] == 0:
+            return torch.empty((0, n), device=x.device, dtype=out_dtype)
+        prepared = PreparedMXFP4(
+            packed,
+            scales,
+            n,
+            k,
+            mode,
+            base_exponents,
+            table,
+            normal_only=normal_only,
+            nibble_layout="split",
+        )
+        # Full-model execution visits different layers between uses of a weight.
+        return gemm(x, prepared, x_scale, dtype=out_dtype, cache_policy="rotating")
+
+
+_FLYDSL_MXFP4_GEMM = _FlydslMxfp4Gemm()
 
 
 def _flydsl_mxfp4_gemm(
@@ -32,23 +108,19 @@ def _flydsl_mxfp4_gemm(
     normal_only: bool,
     out_dtype: torch.dtype,
 ) -> torch.Tensor:
-    from flydsl.kernels.gemm.rdna4_mxfp4 import PreparedMXFP4, gemm
-
-    if x.shape[0] == 0:
-        return torch.empty((0, n), device=x.device, dtype=out_dtype)
-    prepared = PreparedMXFP4(
+    return _FLYDSL_MXFP4_GEMM(
+        x,
         packed,
         scales,
+        x_scale,
+        base_exponents,
+        table,
         n,
         k,
         mode,
-        base_exponents,
-        table,
-        normal_only=normal_only,
-        nibble_layout="split",
+        normal_only,
+        out_dtype,
     )
-    # Full-model execution visits different layers between uses of a weight.
-    return gemm(x, prepared, x_scale, dtype=out_dtype, cache_policy="rotating")
 
 
 def _flydsl_mxfp4_gemm_fake(
@@ -133,6 +205,27 @@ class FlydslMxfp4LinearKernel(MxFp4LinearKernel):
         layer._flydsl_mxfp4_k = prepared.k
         layer._flydsl_mxfp4_mode = prepared.mode
         layer._flydsl_mxfp4_normal_only = prepared.normal_only
+
+        from vllm.config import get_current_vllm_config_or_none
+
+        vllm_config = get_current_vllm_config_or_none()
+        if vllm_config is not None:
+            params_dtype = getattr(layer, "params_dtype", None)
+            output_dtypes = (
+                (params_dtype,)
+                if params_dtype is not None
+                else (torch.bfloat16, torch.float16)
+            )
+            for out_dtype in output_dtypes:
+                _FLYDSL_MXFP4_GEMM.register_warmup(
+                    n=prepared.n,
+                    k=prepared.k,
+                    mode=prepared.mode,
+                    normal_only=prepared.normal_only,
+                    out_dtype=out_dtype,
+                    device_id=layer.weight.device.index,
+                    max_m=vllm_config.scheduler_config.max_num_batched_tokens,
+                )
 
     def apply_weights(
         self,
