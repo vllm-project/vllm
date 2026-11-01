@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 use std::num::NonZeroU32;
-use std::sync::{Arc, Once};
+use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 
 use futures::StreamExt as _;
@@ -32,8 +32,8 @@ use vllm_engine_core_client::test_utils::{
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId};
 use vllm_llm::{
-    Error, FinishReason, GenerateOutputStreamExt as _, GeneratePromptInfo, GenerateRequest, Llm,
-    WeightVersionSpan,
+    Error, FinishReason, FinishedRequest, GenerateOutputStreamExt as _, GeneratePromptInfo,
+    GenerateRequest, Llm, RequestObserver, RequestObservers, WeightVersionSpan,
 };
 use vllm_metrics::METRICS;
 use zeromq::prelude::{SocketRecv, SocketSend};
@@ -1414,4 +1414,105 @@ async fn dropping_stream_records_abort_terminal_request_metrics() {
     )));
 
     llm.shutdown().await.unwrap();
+}
+
+#[derive(Default)]
+struct RecordingObserver(Mutex<Vec<Arc<FinishedRequest>>>);
+
+impl RequestObserver for RecordingObserver {
+    fn on_finished(&self, request: &Arc<FinishedRequest>) {
+        self.0.lock().unwrap().push(request.clone());
+    }
+}
+
+/// Covers a finished stream then dropped, and a live stream dropped (abort).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn request_observers_see_each_request_exactly_once() {
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = b"engine-observer".to_vec();
+
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id.clone(),
+        |dealer, push| {
+            Box::pin(async move {
+                let add = recv_engine_message(dealer).await;
+                assert_eq!(add[0].as_ref(), &[0x00]);
+                let finished: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+                send_outputs(
+                    push,
+                    RequestBatchOutputs {
+                        outputs: vec![request_output(
+                            &finished.request_id,
+                            vec![1, 2, 3],
+                            Some(EngineCoreFinishReason::Length),
+                        )],
+                        finished_requests: Some(BTreeSet::from([finished.request_id.clone()])),
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .await;
+
+                let add = recv_engine_message(dealer).await;
+                assert_eq!(add[0].as_ref(), &[0x00]);
+                let dropped: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+                send_outputs(
+                    push,
+                    RequestBatchOutputs {
+                        outputs: vec![request_output(&dropped.request_id, vec![99], None)],
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .await;
+
+                let abort =
+                    timeout(Duration::from_secs(1), recv_engine_message(dealer)).await.unwrap();
+                assert_eq!(abort[0].as_ref(), &[0x01]);
+            })
+        },
+    );
+
+    let recorder = Arc::new(RecordingObserver::default());
+    let llm = connect_async_llm_with_ipc(handshake_address, 0, "test-model", &ipc)
+        .await
+        .with_request_observers(RequestObservers::new(vec![recorder.clone()]));
+
+    let mut stream = llm.generate(sample_generate_request("req-finished", 4)).await.unwrap();
+    let output = stream.next().await.unwrap().unwrap();
+    assert_eq!(output.finish_reason, Some(FinishReason::Length));
+    // Drop before polling the stream to its end.
+    drop(stream);
+
+    let mut stream = llm.generate(sample_generate_request("req-dropped", 4)).await.unwrap();
+    let output = stream.next().await.unwrap().unwrap();
+    assert_eq!(output.token_ids, vec![99]);
+    drop(stream);
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    llm.shutdown().await.unwrap();
+
+    let seen: Vec<_> = (recorder.0.lock().unwrap().iter())
+        .map(|r| {
+            (
+                r.external_request_id.clone(),
+                r.finish_reason.clone(),
+                r.stats.prompt_tokens,
+                r.stats.generation_tokens,
+            )
+        })
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            ("req-finished".to_string(), FinishReason::Length, 2, 3,),
+            ("req-dropped".to_string(), FinishReason::Abort, 2, 1),
+        ]
+    );
+    let max_tokens: Vec<_> =
+        (recorder.0.lock().unwrap().iter()).map(|r| r.stats.max_tokens_param).collect();
+    assert_eq!(max_tokens, [Some(4), Some(4)]);
 }
