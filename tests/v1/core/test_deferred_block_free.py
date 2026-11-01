@@ -49,6 +49,22 @@ def _make_model_runner_output(
     )
 
 
+def _make_model_runner_output_with_tokens(
+    scheduler_output: SchedulerOutput,
+    token_ids: dict[str, int],
+) -> ModelRunnerOutput:
+    """Like `_make_model_runner_output`, but with per-request sampled tokens."""
+    req_ids = list(scheduler_output.num_scheduled_tokens.keys())
+    return ModelRunnerOutput(
+        req_ids=req_ids,
+        req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
+        sampled_token_ids=[[token_ids[req_id]] for req_id in req_ids],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+
+
 def _create_deferring_scheduler(scheduling_policy="fcfs"):
     """Async scheduler with deferred block freeing forced on.
 
@@ -647,3 +663,190 @@ def test_abort_deferred_async_load_frees_after_inflight_step():
         scheduler.update_from_output(output, _make_model_runner_output(output))
     assert not scheduler.deferred_frees
     assert pool.get_num_free_blocks() > num_free_held
+
+
+def test_spec_decode_defers_free_by_one_extra_step():
+    """Speculative decoding issues its draft forward *after* the step's
+    AsyncOutput copy event is recorded (so the D2H copy can overlap the
+    proposal), so a finished request's blocks may still be written by the
+    draft model of the step that produced its final token. Those writes are
+    only known complete once the next step's output has been processed, so
+    the blocks must be held one step longer.
+    """
+    scheduler = create_scheduler(model=MODEL, num_speculative_tokens=3)
+    scheduler.defer_block_free = True
+    pool = scheduler.kv_cache_manager.block_pool
+    num_free_initially = pool.get_num_free_blocks()
+
+    short, long = create_requests(
+        num_requests=2,
+        num_tokens=NUM_PROMPT_TOKENS,
+        max_tokens=20,
+        stop_token_ids=[STOP_TOKEN_ID],
+        req_ids=["short", "long"],
+    )
+    scheduler.add_request(short)
+    scheduler.add_request(long)
+
+    out0 = scheduler.schedule()
+    step_seq = scheduler.sched_step_seq
+    num_free_running = pool.get_num_free_blocks()
+    assert num_free_running < num_free_initially
+
+    # "short" stops on step 1's output while step 1's draft forward may
+    # still be writing its KV blocks.
+    scheduler.update_from_output(
+        out0,
+        _make_model_runner_output_with_tokens(
+            out0, {"short": STOP_TOKEN_ID, "long": 0}
+        ),
+    )
+    assert short.is_finished()
+    assert len(scheduler.deferred_frees) == 1
+    # Fence is one step past the step whose draft forward writes the blocks.
+    assert scheduler.deferred_frees[0][0] == step_seq + 1
+    held_blocks = len(scheduler.deferred_frees[0][1])
+    assert pool.get_num_free_blocks() == num_free_running
+
+    # Step 2 is dispatched after step 1's draft forward, so processing its
+    # output fences the draft writes and the blocks return to the pool.
+    out1 = scheduler.schedule()
+    assert long.request_id in out1.num_scheduled_tokens
+    scheduler.update_from_output(out1, _make_model_runner_output(out1))
+    assert not scheduler.deferred_frees
+    assert pool.get_num_free_blocks() == num_free_running + held_blocks
+
+
+def test_block_write_fence_unchanged_without_spec_decode():
+    """The extra fence step only applies when speculative decoding can issue
+    draft KV writes; the non-speculative path keeps its original fence."""
+    assert _create_deferring_scheduler()._block_write_fence_seq(7) == 7
+
+    spec_scheduler = create_scheduler(model=MODEL, num_speculative_tokens=3)
+    assert spec_scheduler.num_spec_tokens == 3
+    assert spec_scheduler._block_write_fence_seq(7) == 8
+
+
+class _RecordingExecutor:
+    """Minimal stand-in for the engine's executor, recording RPC calls."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def collective_rpc(self, method, timeout=None, args=(), kwargs=None):
+        self.calls.append(method)
+        return [None]
+
+
+def _make_idle_core(scheduler):
+    """Attach the scheduler/executor pair an idle `EngineCore` would have."""
+    from types import SimpleNamespace
+
+    from vllm.v1.engine.core import EngineCore
+
+    core = SimpleNamespace(scheduler=scheduler, model_executor=_RecordingExecutor())
+    core._flush_deferred_frees = lambda: EngineCore._flush_deferred_frees(core)
+    return core
+
+
+def test_idle_engine_flushes_deferred_frees():
+    """When the engine drains there is no later step to advance the fence, so
+    the idle path synchronizes the device and returns the held blocks."""
+    from vllm.v1.engine.core import EngineCore
+
+    scheduler = create_scheduler(model=MODEL, num_speculative_tokens=3)
+    scheduler.defer_block_free = True
+    pool = scheduler.kv_cache_manager.block_pool
+    num_free_initially = pool.get_num_free_blocks()
+
+    short, long = create_requests(
+        num_requests=2,
+        num_tokens=NUM_PROMPT_TOKENS,
+        max_tokens=20,
+        stop_token_ids=[STOP_TOKEN_ID],
+        req_ids=["short", "long"],
+    )
+    scheduler.add_request(short)
+    scheduler.add_request(long)
+    out0 = scheduler.schedule()
+    scheduler.update_from_output(
+        out0,
+        _make_model_runner_output_with_tokens(
+            out0, {"short": STOP_TOKEN_ID, "long": 0}
+        ),
+    )
+
+    # "short" finished, but its blocks are held one extra step.
+    assert short.is_finished()
+    assert scheduler.has_deferred_frees()
+    held_blocks = len(scheduler.deferred_frees[0][1])
+    num_free_held = pool.get_num_free_blocks()
+    assert num_free_held < num_free_initially
+
+    core = _make_idle_core(scheduler)
+    EngineCore._flush_deferred_frees(core)
+
+    # The device is fenced before the blocks go back to the pool.
+    assert core.model_executor.calls == ["synchronize_device"]
+    assert not scheduler.has_deferred_frees()
+    assert pool.get_num_free_blocks() == num_free_held + held_blocks
+
+    # Idempotent: a second idle pass does no extra work.
+    EngineCore._flush_deferred_frees(core)
+    assert core.model_executor.calls == ["synchronize_device"]
+
+
+def test_idle_engine_skips_sync_without_deferred_frees():
+    """The idle path must not add a device synchronization on every idle
+    iteration; it only runs while blocks are actually held."""
+    from vllm.v1.engine.core import EngineCore
+
+    scheduler = _create_deferring_scheduler()
+    assert not scheduler.has_deferred_frees()
+
+    core = _make_idle_core(scheduler)
+    EngineCore._flush_deferred_frees(core)
+
+    assert core.model_executor.calls == []
+
+
+def test_stalled_engine_flushes_deferred_frees():
+    """A step that executes nothing cannot advance the fence. If such a stall
+    lasts (e.g. a PD request waiting for remote KV), the held blocks are what
+    keeps the waiting request unschedulable, so they must be released."""
+    from vllm.v1.engine.core import EngineCoreProc
+
+    scheduler = create_scheduler(model=MODEL, num_speculative_tokens=3)
+    scheduler.defer_block_free = True
+    pool = scheduler.kv_cache_manager.block_pool
+
+    short, long = create_requests(
+        num_requests=2,
+        num_tokens=NUM_PROMPT_TOKENS,
+        max_tokens=20,
+        stop_token_ids=[STOP_TOKEN_ID],
+        req_ids=["short", "long"],
+    )
+    scheduler.add_request(short)
+    scheduler.add_request(long)
+    out0 = scheduler.schedule()
+    scheduler.update_from_output(
+        out0,
+        _make_model_runner_output_with_tokens(
+            out0, {"short": STOP_TOKEN_ID, "long": 0}
+        ),
+    )
+    assert short.is_finished()
+    assert scheduler.has_deferred_frees()
+    held_blocks = len(scheduler.deferred_frees[0][1])
+    num_free_held = pool.get_num_free_blocks()
+
+    core = _make_idle_core(scheduler)
+    core.step_fn = lambda: (None, False)
+    core.post_step = lambda model_executed: None
+    core.output_queue = None
+    EngineCoreProc._process_engine_step(core)
+
+    assert core.model_executor.calls == ["synchronize_device"]
+    assert not scheduler.has_deferred_frees()
+    assert pool.get_num_free_blocks() == num_free_held + held_blocks
