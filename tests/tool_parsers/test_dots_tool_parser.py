@@ -275,3 +275,78 @@ def test_streaming_emits_complete_json_before_end_marker_without_duplication(
         '{"query": "chairs"}'
     )
     assert messages[-1].tool_calls == calls
+
+
+def test_convert_param_value_null_literal_kept_for_strings(
+    parser: DotsToolParser,
+) -> None:
+    # The dots bug: a string param the model wrote as the literal text "null"
+    # must not become JSON null.
+    assert parser._convert_param_value("null", "string") == "null"
+    assert parser._convert_param_value("Null", "string") == "Null"
+    # Nullable schemas still get the real null.
+    assert parser._convert_param_value("null", ["string", "null"]) is None
+    assert parser._convert_param_value("null", "null") is None
+    # On other non-nullable scalars the shared coercer maps the text to JSON
+    # null (its trailing json.loads fallback); schema validation rejects it
+    # downstream either way.
+    assert parser._convert_param_value("null", "integer") is None
+    assert parser._convert_param_value("null", "boolean") is None
+
+
+def test_convert_param_value_number_never_emits_non_finite(
+    parser: DotsToolParser,
+) -> None:
+    # inf/nan are not valid JSON numbers; keep the raw text rather than emit
+    # `Infinity`/`NaN` into the arguments JSON.
+    assert parser._convert_param_value("inf", "number") == "inf"
+    assert parser._convert_param_value("Infinity", "number") == "Infinity"
+    assert parser._convert_param_value("-inf", "number") == "-inf"
+    assert parser._convert_param_value("nan", "number") == "nan"
+    assert parser._convert_param_value("5", "number") == 5
+    assert parser._convert_param_value("5.5", "number") == 5.5
+
+
+def test_convert_param_value_boolean_rejects_invalid_text(
+    parser: DotsToolParser,
+) -> None:
+    assert parser._convert_param_value("true", "boolean") is True
+    assert parser._convert_param_value("1", "boolean") is True
+    assert parser._convert_param_value("false", "boolean") is False
+    assert parser._convert_param_value("0", "boolean") is False
+    # Invalid boolean text must survive for schema validation, not silently
+    # read as False.
+    assert parser._convert_param_value("maybe", "boolean") == "maybe"
+    assert parser._convert_param_value("yes", "boolean") == "yes"
+
+
+def test_non_stream_xml_null_literal_and_anyof_nullable(
+    parser: DotsToolParser,
+) -> None:
+    tool = _tool(
+        "search",
+        {
+            "query": {"type": "string"},
+            "note": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+            "flag": {"type": "boolean"},
+        },
+    )
+    request = _request([tool])
+    text = (
+        "<dots_function_call>"
+        '<invoke name="search">'
+        '<parameter name="query">null</parameter>'
+        '<parameter name="note">null</parameter>'
+        '<parameter name="flag">maybe</parameter>'
+        "</invoke>"
+        "</dots_function_call>"
+    )
+
+    result = parser.extract_tool_calls(text, request)
+
+    assert result.tools_called
+    assert json.loads(result.tool_calls[0].function.arguments) == {
+        "query": "null",
+        "note": None,
+        "flag": "maybe",
+    }
