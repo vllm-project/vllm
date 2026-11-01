@@ -378,7 +378,7 @@ def _fwd_none_diag_kernel(
     q = tl.load(Q_block_ptr, mask=q_index[:, None] < n, other=0.0).to(tl.float32)
 
     # Compute decay factors for the current sub-block
-    q_decay = tl.exp(-s.to(tl.float32) * (off_c * CBLOCK + c_array[:, None]))
+    q_decay = tl.exp(-s.to(tl.float32) * (off_c * CBLOCK + c_array[:, None] + 1))
 
     # Compute non-diagonal attention output
     qkv_none_diag = tl.dot(q, kv) * q_decay
