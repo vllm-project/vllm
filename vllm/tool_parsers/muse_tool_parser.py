@@ -89,11 +89,14 @@ _MAX_MARKER_LEN = max(len(m) for m in _STRUCTURAL_MARKERS)
 # "<|start|>assistant", so the model's first emitted text is " to=self<|message|>").
 _OPEN_TAIL_TO_RE = re.compile(r"[^\S\n]+to=[A-Za-z0-9_.\-]*$")
 
-# --- Tool-call extraction (unchanged from MUSE_GLIMMER_RESPONSE_SCHEMA) -------------
+# --- Tool-call extraction ---------------------------------------------------
 _INVOKE_RE = re.compile(r"(<atem:invoke\b.*?</atem:invoke>)", re.DOTALL)
 _NAME_RE = re.compile(r'<atem:invoke\b[^>]*?\bname="([^"]+)"')
+# The model sometimes omits the last </atem:parameter>, so a value also ends
+# where its invoke closes.
 _PARAM_RE = re.compile(
-    r'<atem:parameter\b[^>]*?\bname="(?P<key>[^"]+)"[^>]*?>(?P<value>.*?)</atem:parameter>',
+    r'<atem:parameter\b[^>]*?\bname="(?P<key>[^"]+)"[^>]*?>(?P<value>.*?)'
+    r"(?:</atem:parameter>|\n?(?=</atem:invoke>))",
     re.DOTALL,
 )
 _FUNCTION_CALLS_OPEN = "<atem:function_calls>"
