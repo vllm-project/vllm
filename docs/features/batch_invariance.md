@@ -167,14 +167,7 @@ When batch invariance is enabled, vLLM:
 
 ### Speculative Decoding
 
-With speculative decoding (model runner V2), the drafter only proposes tokens; the batch-invariant target verifies them and decides every output token and logprob. Setting `"batch_invariant": false` in the speculative config lets the drafter use faster MoE kernels that are not batch invariant, which can speed up speculative decoding when batch invariance is used for train-inference consistency, e.g. RL rollouts that must reproduce the trainer's logprobs:
-
-```bash
-VLLM_BATCH_INVARIANT=1 vllm serve <model> \
-    --speculative-config '{"method": "mtp", "num_speculative_tokens": 3, "batch_invariant": false}'
-```
-
-Target tokens, logprobs and the output distribution are unchanged. With temperature > 0, which token a seeded request samples and the acceptance rate can then depend on batch composition; leave `batch_invariant` unset if you need seeded sampling to be reproducible across batches.
+With speculative decoding (model runner V2), `"batch_invariant": false` in `--speculative-config` lets the drafter use MoE kernels that are not batch invariant. The batch-invariant target still decides every output token and logprob. With temperature > 0, which token a seeded request samples can then depend on batch composition, so the default (unset) keeps the drafter batch invariant.
 
 ## Future Improvements
 
