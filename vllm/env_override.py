@@ -886,33 +886,7 @@ def _patch_inductor_operator_str_if_needed():
     if is_torch_equal_or_newer("2.13.0.dev"):
         return
 
-    import sys
-
-    target_name = "torch._inductor.exc"
-    if target_name in sys.modules:
-        _apply_inductor_operator_str_patch()
-        return
-
-    import importlib.abc
-
-    class _OperatorStrPatchFinder(importlib.abc.MetaPathFinder):
-        def find_spec(self, fullname, path, target=None):
-            if fullname != target_name:
-                return None
-            sys.meta_path.remove(self)
-            spec = importlib.util.find_spec(fullname)
-            if spec is None or spec.loader is None:
-                return None
-            original_exec = spec.loader.exec_module
-
-            def _exec_then_patch(module):
-                original_exec(module)
-                _apply_inductor_operator_str_patch()
-
-            spec.loader.exec_module = _exec_then_patch  # type: ignore[method-assign]
-            return spec
-
-    sys.meta_path.insert(0, _OperatorStrPatchFinder())
+    _run_after_module_import("torch._inductor.exc", _apply_inductor_operator_str_patch)
 
 
 _patch_inductor_operator_str_if_needed()
@@ -935,33 +909,9 @@ def _apply_inductor_pattern_matcher_patch() -> None:
 
 def _patch_inductor_pattern_matcher() -> None:
     """Apply the backport when Inductor imports its pattern matcher."""
-    import sys
-
-    target_name = "torch._inductor.pattern_matcher"
-    if target_name in sys.modules:
-        _apply_inductor_pattern_matcher_patch()
-        return
-
-    import importlib.abc
-
-    class _PatternMatcherPatchFinder(importlib.abc.MetaPathFinder):
-        def find_spec(self, fullname, path, target=None):
-            if fullname != target_name:
-                return None
-            sys.meta_path.remove(self)
-            spec = importlib.util.find_spec(fullname)
-            if spec is None or spec.loader is None:
-                return None
-            original_exec = spec.loader.exec_module
-
-            def _exec_then_patch(module):
-                original_exec(module)
-                _apply_inductor_pattern_matcher_patch()
-
-            spec.loader.exec_module = _exec_then_patch  # type: ignore[method-assign]
-            return spec
-
-    sys.meta_path.insert(0, _PatternMatcherPatchFinder())
+    _run_after_module_import(
+        "torch._inductor.pattern_matcher", _apply_inductor_pattern_matcher_patch
+    )
 
 
 # Remove once the minimum supported torch includes
