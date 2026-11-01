@@ -1201,6 +1201,8 @@ class EngineCore:
             # grammar compilation is async. Scheduler always checks grammar
             # compilation status before scheduling request.
             self.structured_output_manager.grammar_init(req)
+        if (kv_connector := self.scheduler.get_kv_connector()) is not None:
+            req.kv_preschedule_handle = kv_connector.on_preschedule_request(req)
         return req, request.current_wave
 
     def _eep_scale_up_before_kv_init(self):
@@ -1820,6 +1822,8 @@ class EngineCoreProc(EngineCore):
         elif request_type == EngineCoreRequestType.ADD:
             req, request_wave = request
             if self._reject_add_in_shutdown(req) or self._reject_add_while_paused(req):
+                if (connector := self.scheduler.get_kv_connector()) is not None:
+                    connector.cancel_preschedule_request(req)
                 return
             self.add_request(req, request_wave)
         elif request_type == EngineCoreRequestType.ABORT:
