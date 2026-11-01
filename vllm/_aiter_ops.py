@@ -929,6 +929,40 @@ def _rocm_aiter_w8a8_gemm_fake(
     return Y
 
 
+def _rocm_aiter_mxfp8_gemm_dynamic_quant_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    from aiter.ops.triton.gemm.basic.gemm_afp8wfp8 import gemm_afp8wfp8
+
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        MXFP8_BLOCK_SIZE,
+        mxfp8_e4m3_quantize,
+    )
+
+    x_q, x_s = mxfp8_e4m3_quantize(x)
+    return gemm_afp8wfp8(
+        x_q,
+        weight,
+        x_s,
+        weight_scale,
+        x_scale_group_size=MXFP8_BLOCK_SIZE,
+        w_scale_group_size=(1, MXFP8_BLOCK_SIZE),
+        dtype=out_dtype,
+    )
+
+
+def _rocm_aiter_mxfp8_gemm_dynamic_quant_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    return torch.empty(x.shape[0], weight.shape[0], dtype=out_dtype, device=x.device)
+
+
 def _rocm_aiter_preshuffled_per_token_w8a8_gemm_impl(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -3142,6 +3176,14 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_mxfp8_gemm_dynamic_quant",
+                op_func=_rocm_aiter_mxfp8_gemm_dynamic_quant_impl,
+                mutates_args=[],
+                fake_impl=_rocm_aiter_mxfp8_gemm_dynamic_quant_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
                 op_name="_rocm_aiter_preshuffled_per_token_w8a8_gemm",
                 op_func=_rocm_aiter_preshuffled_per_token_w8a8_gemm_impl,
                 fake_impl=_rocm_aiter_preshuffled_per_token_w8a8_gemm_fake,
@@ -3467,6 +3509,17 @@ class rocm_aiter_ops:
         output_dtype: torch.dtype = torch.float16,
     ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_w8a8_gemm(A, B, As, Bs, bias, output_dtype)
+
+    @staticmethod
+    def mxfp8_gemm_dynamic_quant(
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        out_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        return torch.ops.vllm.rocm_aiter_mxfp8_gemm_dynamic_quant(
+            x, weight, weight_scale, out_dtype
+        )
 
     @staticmethod
     def preshuffled_per_token_w8a8_gemm(
@@ -4399,6 +4452,16 @@ class rocm_aiter_ops:
         try:
             return _triton_gemm_config_is_tuned("GEMM-A8W8_BLOCKSCALE", n, k)
         except (AssertionError, ImportError):
+            return False
+
+    @staticmethod
+    @functools.cache
+    def is_triton_gemm_afp8wfp8_tuned(n: int, k: int) -> bool:
+        if not current_platform.is_rocm():
+            return False
+        try:
+            return _triton_gemm_config_is_tuned("GEMM-AFP8WFP8_A32_W1X32", n, k)
+        except (AssertionError, ImportError, FileNotFoundError):
             return False
 
     @staticmethod
