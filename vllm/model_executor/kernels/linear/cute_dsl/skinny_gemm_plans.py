@@ -68,6 +68,22 @@ SM121_SKINNY_GEMM_PLANS: dict[tuple[int, int], SkinnyGemmPlan] = {
 # isolation but lose there are left out. static_k entries have no k_unroll:
 # the static path is fully unrolled.
 SM90_SKINNY_GEMM_PLANS: dict[tuple[int, int], SkinnyGemmPlan] = {
+    # Qwen3-30B-A3B attention output projection.
+    (2048, 4096): {
+        1: SkinnyGemmConfig(1, 128, 2, k_unroll=4, vector_width=4, static_k=4096),
+        2: SkinnyGemmConfig(2, 128, 4, k_unroll=2, vector_width=4, static_k=4096),
+        4: SkinnyGemmConfig(4, 128, 4, vector_width=4, static_k=4096),
+    },
+    # Qwen3-30B-A3B fused QKV projection. M=4 is left to cuBLAS (1.03x).
+    (5120, 2048): {
+        1: SkinnyGemmConfig(1, 64, 4, k_unroll=4, vector_width=4),
+        2: SkinnyGemmConfig(2, 64, 4, k_unroll=4, vector_width=4),
+    },
+    # Qwen3-30B-A3B LM head. M=4 is left to cuBLAS (1.01x).
+    (151936, 2048): {
+        1: SkinnyGemmConfig(1, 128, 4),
+        2: SkinnyGemmConfig(2, 64, 4, k_unroll=4, vector_width=4),
+    },
     # Qwen3-4B attention output projection.
     (2560, 4096): {
         1: SkinnyGemmConfig(1, 128, 1, vector_width=4, static_k=4096),
