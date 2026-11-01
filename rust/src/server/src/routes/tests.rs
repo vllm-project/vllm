@@ -4806,8 +4806,22 @@ async fn engine_request_errors_map_to_http_status() {
             "ServiceUnavailableError",
         ),
         (invalid, StatusCode::BAD_REQUEST, "BadRequestError"),
+        (
+            RequestError {
+                code: "unknown".into(),
+                message: "Internal server error".into(),
+                retryable: false,
+            },
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "InternalServerError",
+        ),
     ] {
         let cases = [
+            (
+                "/v1/messages",
+                json!({"model": model, "messages": messages, "max_tokens": 10}),
+                status,
+            ),
             (
                 "/v1/completions",
                 json!({"model": model, "prompt": "hello"}),
@@ -4861,12 +4875,25 @@ async fn engine_request_errors_map_to_http_status() {
             let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
             engine_task.await.expect("mock engine task");
             let text = String::from_utf8(body.to_vec()).expect("utf8 body");
-            assert!(
-                text.contains(&format!("\"type\":\"{error_type}\""))
-                    && text.contains(&format!("\"code\":{}", status.as_u16()))
-                    && text.contains(&error.message),
-                "{uri} {request}: {text}"
-            );
+            if uri == "/v1/messages" {
+                let expected = match error_type {
+                    "ServiceUnavailableError" => "overloaded_error",
+                    "BadRequestError" => "invalid_request_error",
+                    _ => "api_error",
+                };
+                let body: serde_json::Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(
+                    body,
+                    json!({"type": "error", "error": {"type": expected, "message": error.message}})
+                );
+            } else {
+                assert!(
+                    text.contains(&format!("\"type\":\"{error_type}\""))
+                        && text.contains(&format!("\"code\":{}", status.as_u16()))
+                        && text.contains(&error.message),
+                    "{uri} {request}: {text}"
+                );
+            }
         }
     }
 }
@@ -10770,4 +10797,51 @@ async fn anthropic_assistant_prefix_count_matches_generation_without_echo() {
         response["content"],
         json!([{"type": "text", "text": "continuation"}])
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn anthropic_errors_cover_extraction_and_counting() {
+    let mut app = test_app().await;
+    for uri in ["/v1/messages", "/v1/messages/count_tokens"] {
+        for (body, status, kind) in [
+            (
+                "{".to_owned(),
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+            ),
+            (
+                json!({"model": "missing", "messages": [{"role":"user","content":"Hi"}]})
+                    .to_string(),
+                StatusCode::NOT_FOUND,
+                "not_found_error",
+            ),
+        ] {
+            let body = if body != "{" && uri == "/v1/messages" {
+                let mut value: serde_json::Value = serde_json::from_str(&body).unwrap();
+                value["max_tokens"] = json!(10);
+                value.to_string()
+            } else {
+                body
+            };
+            let response = app
+                .call(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status);
+            let value: serde_json::Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                    .unwrap();
+            assert_eq!(value["type"], "error");
+            assert_eq!(value["error"]["type"], kind);
+            assert!(value["error"].get("code").is_none());
+        }
+    }
 }

@@ -23,6 +23,8 @@ A final assistant message containing non-empty text is continued; token counting
 uses the same continuation prompt. Both endpoints reuse the shared chat renderer
 and tokenizer. Streaming, other content types, and other request options return
 an error. Authentication uses the existing bearer-token configuration.
+Request failures use Anthropic error envelopes. Retryable engine rejections return
+HTTP 503.
 Use `VLLM_USE_RUST_FRONTEND=0` for the Claude Code workflow below.
 
 ## Requirements
