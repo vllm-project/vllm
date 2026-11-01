@@ -57,6 +57,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.state import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers import (
     OnComputeStoreHandler,
+    OnHandoffStoreHandler,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
@@ -417,14 +418,18 @@ def _on_compute(scheduler: OffloadingConnectorScheduler) -> OnComputeStoreHandle
     return handler
 
 
+def _on_handoff(scheduler: OffloadingConnectorScheduler) -> OnHandoffStoreHandler:
+    handler = scheduler._store_handlers[StoreTrigger.ON_HANDOFF]
+    assert isinstance(handler, OnHandoffStoreHandler)
+    return handler
+
+
 def _partial_tail_store_jobs(
     scheduler: OffloadingConnectorScheduler, scheduler_output: Any
 ) -> dict[int, TransferJob]:
-    handler = _on_compute(scheduler)
-    sink = scheduler_module._StoreJobSink(scheduler, StoreTrigger.ON_COMPUTE)
-    handler._build_partial_tail_store_jobs(
-        scheduler_output, scheduler._req_status, sink
-    )
+    handler = _on_handoff(scheduler)
+    sink = scheduler_module._StoreJobSink(scheduler, StoreTrigger.ON_HANDOFF)
+    handler.build_store_jobs(scheduler_output, scheduler._req_status, sink)
     return sink.jobs
 
 
@@ -433,7 +438,7 @@ def _store_jobs(
 ) -> dict[int, TransferJob]:
     handler = _on_compute(scheduler)
     sink = scheduler_module._StoreJobSink(scheduler, StoreTrigger.ON_COMPUTE)
-    handler._build_chunk_store_jobs(scheduler_output, scheduler._req_status, sink)
+    handler.build_store_jobs(scheduler_output, scheduler._req_status, sink)
     return sink.jobs
 
 
@@ -457,7 +462,7 @@ def test_partial_tail_store_uses_attention_and_recurrent_cow_sources():
     req_status.group_states[0].block_ids[:] = [11, 12]
     req_status.group_states[1].block_ids[:] = [0, 21]
     _as_mock(scheduler.manager.prepare_store).side_effect = (
-        lambda keys, req_context, trigger: (generate_store_output(keys))
+        lambda keys, req_context, trigger: generate_store_output(keys)
     )
 
     output = SimpleNamespace(
@@ -525,7 +530,7 @@ def test_aligned_boundary_store_uses_exact_source_with_partial_tail():
     req_status.group_states[0].block_ids[:] = [11, 12]
     req_status.group_states[1].block_ids[:] = [0, 21]
     _as_mock(scheduler.manager.prepare_store).side_effect = (
-        lambda keys, req_context, trigger: (generate_store_output(keys))
+        lambda keys, req_context, trigger: generate_store_output(keys)
     )
 
     output = SimpleNamespace(
@@ -558,18 +563,36 @@ def test_aligned_boundary_store_maps_sparse_group_id_to_dense_transfer_slot():
     )
     _make_partial_tail_request(scheduler)
     _as_mock(scheduler.manager.prepare_store).side_effect = (
-        lambda keys, req_context, trigger: (generate_store_output(keys))
+        lambda keys, req_context, trigger: generate_store_output(keys)
     )
 
-    handler = _on_compute(scheduler)
-    sink = scheduler_module._StoreJobSink(scheduler, StoreTrigger.ON_COMPUTE)
+    handler = _on_handoff(scheduler)
+    sink = scheduler_module._StoreJobSink(scheduler, StoreTrigger.ON_HANDOFF)
     handler._build_aligned_boundary_store_jobs(
         {"req": [(1, 98, 16)]}, scheduler._req_status, sink
     )
-    [job] = sink.jobs.values()
+    [job_id] = sink.jobs
+    job = sink.jobs[job_id]
     assert isinstance(job.src_spec, GPULoadStoreSpec)
     assert job.src_spec.group_sizes == [1]
     assert job.src_spec.block_indices == [0]
+    assert scheduler._job_statuses[job_id].trigger is StoreTrigger.ON_HANDOFF
+
+
+def test_handoff_handler_runs_before_the_selected_trigger():
+    scheduler = _make_partial_tail_scheduler()
+    assert list(scheduler._store_handlers) == [
+        StoreTrigger.ON_HANDOFF,
+        StoreTrigger.ON_COMPUTE,
+    ]
+    _make_partial_tail_request(scheduler)
+    req_status = scheduler._req_status["req"]
+    assert _on_handoff(scheduler).first_live_chunk_idx(req_status, 1) is None
+
+
+def test_handoff_handler_is_absent_without_handoffs(request_runner):
+    runner = request_runner(block_size=4, num_gpu_blocks=32, async_scheduling=False)
+    assert list(runner.connector_scheduler._store_handlers) == [StoreTrigger.ON_COMPUTE]
 
 
 @pytest.mark.parametrize("cow_reuse", [False, True])
@@ -577,7 +600,7 @@ def test_aligned_boundary_store_flushes_before_block_reuse(cow_reuse):
     scheduler = _make_partial_tail_scheduler()
     _make_partial_tail_request(scheduler)
     _as_mock(scheduler.manager.prepare_store).side_effect = (
-        lambda keys, req_context, trigger: (generate_store_output(keys))
+        lambda keys, req_context, trigger: generate_store_output(keys)
     )
 
     output = SchedulerOutput.make_empty()
@@ -619,7 +642,7 @@ def test_normal_store_excludes_align_mode_mamba_sources():
             == group_config.tokens_per_chunk
         )
     _as_mock(scheduler.manager.prepare_store).side_effect = (
-        lambda keys, req_context, trigger: (generate_store_output(keys))
+        lambda keys, req_context, trigger: generate_store_output(keys)
     )
 
     output = SimpleNamespace(
@@ -835,11 +858,11 @@ def test_sparse_group_miss_registers_shared_prefix_junction():
     assert request.shared_prefix_boundary == 16
 
     # The recompute's Mamba state at the junction is handed off and stored.
-    scheduler.manager.prepare_store.side_effect = (
-        lambda keys, req_context, trigger: generate_store_output(keys)
+    scheduler.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
+        generate_store_output(keys)
     )
-    sink = scheduler_module._StoreJobSink(scheduler, StoreTrigger.ON_COMPUTE)
-    _on_compute(scheduler)._build_aligned_boundary_store_jobs(
+    sink = scheduler_module._StoreJobSink(scheduler, StoreTrigger.ON_HANDOFF)
+    _on_handoff(scheduler)._build_aligned_boundary_store_jobs(
         {"req": [(1, 77, 16)]}, scheduler._req_status, sink
     )
     [job_id] = sink.jobs
@@ -2294,8 +2317,8 @@ def test_finish_mid_prefill_stores_only_computed_blocks(
     runner = request_runner(
         block_size=block_size, num_gpu_blocks=16, async_scheduling=False
     )
-    runner.manager.prepare_store.side_effect = (
-        lambda keys, req_context, trigger: generate_store_output(keys)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
+        generate_store_output(keys)
     )
     # Chunked prefill: 6 of the 16 prompt tokens per step.
     runner.scheduler.max_num_scheduled_tokens = 6
@@ -4276,7 +4299,7 @@ def test_fence_at_update_state_after_alloc(request_runner):
 def test_fence_at_build_store_jobs(request_runner):
     """A new prefill (no load -> update_state_after_alloc returns early)
     reusing a finished request's pending-store block is flushed by
-    _build_chunk_store_jobs's fence."""
+    build_store_jobs's fence."""
     runner = request_runner(
         blocks_per_chunk=1,
         block_size=4,
@@ -4468,8 +4491,8 @@ def test_failed_store_is_not_published_as_cache(request_runner, async_scheduling
         worker_count=3,
     )
     runner.new_request(token_ids=[0] * (tokens_per_block * blocks_per_chunk))
-    runner.manager.prepare_store.side_effect = (
-        lambda keys, req_context, trigger: generate_store_output(keys)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
+        generate_store_output(keys)
     )
     runner.run(decoded_tokens=[0, 0], complete_transfers=False)
     job_id = next(iter(runner.connector_scheduler._job_statuses))
@@ -4508,8 +4531,8 @@ def test_successful_store_is_published(request_runner, async_scheduling: bool):
         worker_count=3,
     )
     runner.new_request(token_ids=[0] * (tokens_per_block * blocks_per_chunk))
-    runner.manager.prepare_store.side_effect = (
-        lambda keys, req_context, trigger: generate_store_output(keys)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
+        generate_store_output(keys)
     )
     runner.run(decoded_tokens=[0, 0], complete_transfers=False)
     job_id = next(iter(runner.connector_scheduler._job_statuses))
@@ -4574,8 +4597,8 @@ def test_failed_load_ends_or_reruns_its_request(
     )
     runner.scheduler.recompute_kv_load_failures = recompute
     runner.new_request(token_ids=[0] * block_size * 3)
-    runner.manager.prepare_store.side_effect = (
-        lambda keys, req_context, trigger: generate_store_output(keys)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
+        generate_store_output(keys)
     )
     runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_stored=(0, 1, 2))
 
@@ -5186,7 +5209,7 @@ def test_request_level_supply_covers_consumer_demand(
     """A REQUEST_LEVEL producer must offer every key a consumer will demand.
 
     Same relation as `test_sliding_window_demand_is_store_reachable`, but at
-    the level where the key set is really built: `_build_chunk_store_jobs` prunes
+    the level where the key set is really built: `build_store_jobs` prunes
     chunks with a null GPU block and unreachable SWA chunks, while the demand
     comes from an independent scan.
     """
@@ -6360,7 +6383,7 @@ class TestEagle:
         spec = MockOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
         scheduler = OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
         _as_mock(scheduler.manager.prepare_store).side_effect = (
-            lambda keys, req_context, trigger: (generate_store_output(keys))
+            lambda keys, req_context, trigger: generate_store_output(keys)
         )
 
         request = MagicMock()
@@ -7108,7 +7131,7 @@ class TestMambaHybridOffloadServing:
             LookupResult.HIT if key in stored else LookupResult.MISS
         )
         _as_mock(scheduler.manager.prepare_store).side_effect = (
-            lambda keys, ctx, trigger: (generate_store_output(list(keys)))
+            lambda keys, ctx, trigger: generate_store_output(list(keys))
         )
 
         def complete_all_jobs():
@@ -7281,8 +7304,8 @@ def test_lookahead_partial_store_uses_checkpoint_hash(lookahead):
         block_hasher=get_request_block_hasher(4, sha256, lookahead),
     )
     engine.add_request(request)
-    scheduler.manager.prepare_store.side_effect = (
-        lambda keys, ctx, trigger: generate_store_output(keys)
+    scheduler.manager.prepare_store.side_effect = lambda keys, ctx, trigger: (
+        generate_store_output(keys)
     )
     offered = set()
     for _ in range(5):
@@ -7307,3 +7330,64 @@ def test_lookahead_partial_store_uses_checkpoint_hash(lookahead):
     )
 
 
+def test_reachable_store_mask_skips_eagle_peek_with_lookahead_hashes():
+    """Lookahead hashes key an EAGLE group's tail, so its EAGLE peek must not
+    shrink the reachable store tail of a sliding-window group."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.events import (
+        get_offloading_event_group_spec,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.state import (
+        GroupOffloadConfig,
+        SchedulerOffloadConfig,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers.candidates import (  # noqa: E501
+        _reachable_store_block_mask,
+    )
+
+    swa_spec = SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=4,
+        head_size=16,
+        dtype=torch.float16,
+        sliding_window=32,
+    )
+    group = GroupOffloadConfig(
+        group_idx=0,
+        tokens_per_block=16,
+        tokens_per_chunk=16,
+        hashes_per_chunk=1,
+        kv_event_group_spec=get_offloading_event_group_spec(
+            KVCacheGroupSpec(["layer"], swa_spec)
+        ),
+        sliding_window_size_in_chunks=2,
+        kv_cache_spec=swa_spec,
+        manager_cls=SlidingWindowManager,
+        is_eagle_group=True,
+    )
+    plain_group = group._replace(is_eagle_group=False)
+
+    def mask(group_config, lookahead_tokens):
+        config = SchedulerOffloadConfig(
+            kv_group_configs=(group_config,),
+            blocks_per_chunk=1,
+            tokens_per_hash=4,
+            num_workers=1,
+            offload_prompt_only=False,
+            supports_partial_tail=False,
+            alignment_tokens=128,
+            retention_interval=None,
+            num_hash_lookahead_tokens=lookahead_tokens,
+        )
+        return _reachable_store_block_mask(
+            config=config,
+            group_config=group_config,
+            start_chunk_idx=0,
+            end_chunk_idx=16,
+            final_segment_end_chunk_idx=None,
+            reachable_boundaries=(),
+        )
+
+    # Without lookahead the EAGLE group keeps the extra peek block.
+    assert mask(group, 0) != mask(plain_group, 0)
+    # With lookahead the mask matches the non-EAGLE one.
+    assert mask(group, 8) == mask(plain_group, 8)
