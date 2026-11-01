@@ -44,6 +44,18 @@ VLLM_USE_PRECOMPILED=1 uv pip install -e .
 vllm download-kernels
 ```
 
+!!! note "Non-CUDA platforms (macOS, CPU backend)"
+    On macOS (Apple Silicon) or when developing for the CPU backend, use the
+    pre-built CPU wheel instead of the CUDA one:
+
+    ```bash
+    VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_VARIANT=cpu VLLM_TARGET_DEVICE=cpu uv pip install -e .
+    ```
+
+    For a full build from source, see the
+    [CPU installation instructions](../getting_started/installation/cpu.md).
+    On macOS, `VLLM_TARGET_DEVICE=cpu` is set automatically.
+
 To rebuild only the Rust frontend binary:
 
 ```bash
