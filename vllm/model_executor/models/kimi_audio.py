@@ -26,6 +26,7 @@ from vllm.model_executor.models.interfaces import (
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
+    _merge_multimodal_embeddings,
     init_vllm_registered_model,
     maybe_prefix,
 )
@@ -508,42 +509,14 @@ class KimiAudioForConditionalGeneration(
         if is_multimodal is None or not is_multimodal.any():
             return inputs_embeds
 
-        # multimodal_embeddings[0] contains audio embeddings
-        audio_embeds = multimodal_embeddings[0]
-
-        # Handle different tensor structures
-        if isinstance(audio_embeds, (list, tuple)):
-            audio_embeds = torch.cat(audio_embeds, dim=0)
-        elif audio_embeds.dim() == 3:
-            audio_embeds = audio_embeds.reshape(-1, audio_embeds.shape[-1])
-
-        # In PP, audio_embeds count should match is_multimodal.sum()
-        # For now, use embeddings sequentially
-        # (works for non-PP, PP needs vLLM infra fix)
-        num_mm_tokens = is_multimodal.sum().item()
-        num_audio_embeds = audio_embeds.shape[0]
-
-        # Use the minimum of available embeddings and positions
-        # This ensures we don't access out-of-bounds
-        num_to_use = min(num_audio_embeds, num_mm_tokens)
-
-        # Get positions for the tokens we'll actually process
-        mm_positions = is_multimodal.nonzero(as_tuple=True)[0]
-        actual_mm_mask = torch.zeros_like(is_multimodal)
-        actual_mm_mask[mm_positions[:num_to_use]] = True
-
-        # Use corresponding embeddings
-        used_audio_embeds = audio_embeds[:num_to_use]
-
-        # Save text embeddings at multimodal positions
-        text_at_mm_positions = inputs_embeds[actual_mm_mask].clone()
-
-        # Replace text with audio at multimodal positions
-        inputs_embeds[actual_mm_mask] = used_audio_embeds.to(dtype=inputs_embeds.dtype)
+        text_at_mm_positions = inputs_embeds[is_multimodal].clone()
+        inputs_embeds = _merge_multimodal_embeddings(
+            inputs_embeds, multimodal_embeddings, is_multimodal
+        )
 
         # Apply Kimi-Audio's unique fusion formula: (text + audio) × √2
-        inputs_embeds[actual_mm_mask] = (
-            inputs_embeds[actual_mm_mask] + text_at_mm_positions
+        inputs_embeds[is_multimodal] = (
+            inputs_embeds[is_multimodal] + text_at_mm_positions
         ) * (2**0.5)
 
         return inputs_embeds
