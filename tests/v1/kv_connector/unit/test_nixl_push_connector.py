@@ -45,6 +45,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlConnectorMetadata,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
+    _PUSH_WRITER_MAX_BACKOFF_S,
+    _PUSH_WRITER_POLL_INTERVAL_MS,
     NixlPushConnectorWorker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
@@ -1208,6 +1210,21 @@ class TestPushSchedulerNegative:
         assert "req-live" in sched._finished_request_blocks
 
 
+def _run_one_writer_pass(w: _StubWriterWorker, notifs: dict | None = None) -> None:
+    """Run ``_push_writer_loop`` on the test thread until a pass has polled
+    NIXL notifs (returning *notifs*), then stop."""
+
+    def _get_new_notifs():
+        w._push_writer_stop.set()
+        w._push_writer_wake.set()
+        return notifs or {}
+
+    w.nixl_wrapper = MagicMock()
+    w.nixl_wrapper.get_new_notifs.side_effect = _get_new_notifs
+    w._push_writer_wake.set()
+    w._push_writer_loop()
+
+
 class TestPushWriterNegative:
     """Failure / drop / idempotence paths in the writer thread."""
 
@@ -1400,6 +1417,118 @@ class TestPushWriterNegative:
             assert w._reqs_to_send[rid] >= now
         # Unknown request must not be inserted by the heartbeat path.
         assert "req-unknown" not in w._reqs_to_send
+
+    def test_persistent_writer_error_backs_off(self, caplog):
+        """A pass that keeps failing (here ``get_new_notifs``) is retried with
+        exponential backoff, not at the poll interval that unmatched finished
+        blocks keep the writer on."""
+        caplog.set_level(
+            logging.CRITICAL,
+            logger=("vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker"),
+        )
+        w = _StubWriterWorker.fresh()
+        w.nixl_wrapper = MagicMock()
+        w.nixl_wrapper.get_new_notifs.side_effect = RuntimeError("agent broken")
+        w._push_finished_blocks["req-waiting"] = ([1, 2],)
+        waits: list[float] = []
+
+        def _wait(timeout=None):
+            waits.append(timeout)
+            if len(waits) == 12:
+                w._push_writer_stop.set()
+            return False
+
+        with patch.object(w._push_writer_stop, "wait", side_effect=_wait):
+            w._push_writer_loop()
+
+        poll_s = _PUSH_WRITER_POLL_INTERVAL_MS / 1000.0
+        expected = [
+            min(poll_s * 2**n, _PUSH_WRITER_MAX_BACKOFF_S) for n in range(1, 13)
+        ]
+        assert waits == expected, f"failing writer pass re-ran after waits of {waits}"
+
+    def test_failed_push_start_is_recorded_without_dropping_the_pass(self, caplog):
+        """An error starting one matched push is that request's send failure;
+        the rest of the NIXL notif batch is still handled."""
+        caplog.set_level(
+            logging.CRITICAL,
+            logger=("vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker"),
+        )
+        w = _StubWriterWorker.fresh()
+
+        def _start(rid, blocks, rd):
+            if rid == "req-A":
+                raise NotImplementedError("different cache-group layouts")
+            w.start_push_calls.append((rid, blocks, rd))
+
+        w._do_start_push_kv = _start  # type: ignore[method-assign]
+        w._push_finished_blocks["req-A"] = ([1, 2],)
+        w._push_finished_blocks["req-B"] = ([3, 4],)
+        batch = [
+            PUSH_REG_NOTIF_PREFIX + msgspec.msgpack.encode(_registration_data(rid))
+            for rid in ("req-A", "req-B")
+        ] + [b"req-recv:1"]
+
+        _run_one_writer_pass(w, {"agent-0": batch})
+
+        assert [call[0] for call in w.start_push_calls] == ["req-B"], (
+            "req-A's push error dropped the rest of the notif batch"
+        )
+        assert list(w._pending_completion_notifs.queue) == [b"req-recv:1"]
+        assert w._send_failures == {"req-A"}
+        assert w.xfer_stats.data["num_failed_transfers"] == [1]
+
+    def test_failed_registration_send_fails_the_receive(self, caplog):
+        """An error before D sent its PUSH_REG fails that receive instead of
+        leaving it to wait for a push that P never starts."""
+        caplog.set_level(
+            logging.CRITICAL,
+            logger=("vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker"),
+        )
+        w = _StubWriterWorker.fresh()
+
+        def _ensure_handshake(engine_id, *args, **kwargs):
+            if engine_id == "prefill-gone":
+                raise RuntimeError("remove_remote_agent failed")
+            return None
+
+        w._ensure_handshake = _ensure_handshake  # type: ignore[method-assign]
+        w._remote_agents["prefill-engine"] = {(0, 0): "agent-0"}
+        w._reg_send_inbox.put(
+            ("req-A", _registration_data("req-A", remote_engine_id="prefill-gone"))
+        )
+        w._reg_send_inbox.put(("req-B", _registration_data("req-B")))
+
+        _run_one_writer_pass(w)
+
+        assert list(w._failed_recv_reqs.queue) == ["req-A"], (
+            "req-A's registration was dropped without failing the receive"
+        )
+        assert w.xfer_stats.data["num_failed_notifications"] == [1]
+        assert w.nixl_wrapper.send_notif.call_count == 1
+
+    def test_dead_writer_fails_get_transfer_results(self):
+        """The loop does not catch a BaseException, so one ends the writer.
+        Then ``get_transfer_results`` raises instead of leaving pushes in
+        queues nobody drains."""
+        w = _StubWriterWorker.fresh()
+        w.nixl_wrapper = MagicMock()
+        w.nixl_wrapper.get_new_notifs.side_effect = SystemExit
+        with pytest.raises(SystemExit):
+            w._push_writer_loop()
+        w._push_writer_thread = threading.Thread(target=lambda: None)
+        w._push_writer_thread.start()
+        w._push_writer_thread.join()
+
+        with (
+            patch.object(
+                NixlPushConnectorWorker.__mro__[1],
+                "get_transfer_results",
+                return_value=KVConnectorTransferResults(),
+            ),
+            pytest.raises(RuntimeError, match="nixl-push-writer"),
+        ):
+            w.get_transfer_results()
 
 
 # ----------------------------------------------------------------- #
