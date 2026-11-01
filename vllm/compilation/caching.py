@@ -6,6 +6,7 @@ import hashlib
 import inspect
 import os
 import pickle
+import tokenize
 from collections.abc import Callable, Sequence
 from typing import Any, Literal
 from unittest.mock import patch
@@ -614,6 +615,6 @@ def _compute_code_hash(files: set[str]) -> str:
         if not os.path.isfile(filepath):
             file_contents[filepath] = ""
         else:
-            with open(filepath) as f:
+            with tokenize.open(filepath) as f:
                 file_contents[filepath] = f.read()
     return _compute_code_hash_with_content(file_contents)
