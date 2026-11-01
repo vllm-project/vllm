@@ -1101,6 +1101,56 @@ def test_frontend_block_hashes_count_check():
     assert frontend_hashes(config, 3) is None
 
 
+@pytest.mark.parametrize("return_aux_outputs", [True, False])
+def test_aux_outputs_opt_out_ignores_frontend_block_hashes(return_aux_outputs):
+    """Frontend prompt hashes lack the aux-output salt, so the engine hashes an
+    opted-out request itself."""
+    from vllm.v1.engine import EngineCoreRequest, PrefixHashConfig
+    from vllm.v1.engine.core import EngineCore
+
+    init_none_hash(sha256)
+    block_hasher = get_request_block_hasher(3, sha256)
+    frontend_hashes = [BlockHash(bytes([i]) * 32) for i in range(1, 4)]
+    sampling_params = SamplingParams(
+        max_tokens=1, return_aux_outputs=return_aux_outputs
+    )
+    sampling_params.update_from_generation_config({}, eos_token_id=100)
+    request = EngineCoreRequest(
+        request_id="0",
+        prompt_token_ids=list(range(10)),
+        mm_features=None,
+        sampling_params=sampling_params,
+        pooling_params=None,
+        arrival_time=0.0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        block_hashes=list(frontend_hashes),
+    )
+    engine = SimpleNamespace(
+        mm_receiver_cache=None,
+        vllm_config=SimpleNamespace(
+            aux_output_config=SimpleNamespace(enable_return_routed_experts=True)
+        ),
+        prefix_hash_config=PrefixHashConfig(
+            hash_algo="sha256", hash_block_size=3, none_hash=kv_cache_utils.NONE_HASH
+        ),
+        request_block_hasher=block_hasher,
+    )
+
+    req, _ = EngineCore.preprocess_add_request(cast(EngineCore, engine), request)
+
+    if return_aux_outputs:
+        assert req.cache_salt is None
+        assert req.block_hashes == frontend_hashes
+    else:
+        assert req.cache_salt is not None
+        engine_hashes = Request.from_engine_core_request(request, block_hasher)
+        assert req.block_hashes == engine_hashes.block_hashes
+        assert len(req.block_hashes) == len(frontend_hashes)
+        assert set(req.block_hashes).isdisjoint(frontend_hashes)
+
+
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 @pytest.mark.parametrize("lookahead", [False, True])
 def test_request_block_hasher_incremental_append_with_multiple_mm_features(
