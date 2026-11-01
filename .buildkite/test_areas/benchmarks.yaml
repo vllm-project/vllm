@@ -23,6 +23,19 @@ steps:
       depends_on:
       - image-build-amd
 
+- label: ":nvidia: (B200) Forward Sparse Indexer"
+  key: forward-sparse-indexer-test-b200
+  device: b200-k8s
+  num_gpus: 1
+  timeout_in_minutes: 15
+  source_file_dependencies:
+  - vllm/benchmarks/forward/
+  - vllm/models/deepseek_v41/
+  - vllm/model_executor/layers/sparse_mqa_indexer.py
+  - tests/benchmarks/test_forward_cli.py
+  commands:
+  - pytest -v -s benchmarks/test_forward_cli.py -k deepseek_sparse_indexer
+
 - label: ":nvidia: (B200) [Nightly] Attention Benchmark Smoke"
   key: attention-benchmarks-smoke-test-b200
   device: b200-k8s
