@@ -174,7 +174,7 @@ impl TestTokenizer {
     }
 
     fn byte_to_token(id: u32) -> Option<String> {
-        u8::try_from(id).ok().map(|byte| String::from_utf8_lossy(&[byte]).into_owned())
+        u8::try_from(id).ok().map(|byte| String::from_utf8_lossy_owned(vec![byte]))
     }
 
     fn flush_bytes(bytes: &mut Vec<u8>, output: &mut String) {

@@ -179,7 +179,6 @@ fn build_1_2_5_buckets(max_value: u32) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use expect_test::expect;
-    use itertools::Itertools as _;
 
     use super::*;
     use crate::{EngineLabels, Metrics};

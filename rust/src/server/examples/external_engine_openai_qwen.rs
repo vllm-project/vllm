@@ -183,7 +183,7 @@ async fn stream_completion(
     let request: CreateChatCompletionRequest = CreateChatCompletionRequestArgs::default()
         .model(model)
         .stream(true)
-        .temperature(0.0)
+        .temperature(0.0_f32)
         .max_completion_tokens(128u32)
         .messages([ChatCompletionRequestUserMessageArgs::default()
             .content(prompt)
