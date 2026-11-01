@@ -48,6 +48,12 @@ def _kv_connector_enabled() -> bool:
 
 
 class RocmAiterUnifiedAttentionMetadataBuilder(RocmAttentionMetadataBuilder):
+    # Step-dependent fields reference persistent input buffers directly.
+    supports_draft_decode_metadata_update = True
+
+    def update_draft_decode_metadata(self, _metadata: RocmAttentionMetadata) -> None:
+        pass
+
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
     ) -> RocmAttentionMetadata:
