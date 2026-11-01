@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from unittest.mock import MagicMock
 
 import pytest
@@ -51,6 +52,33 @@ class TestExtractToolCalls:
         assert len(result.tool_calls) == 1
         assert result.tool_calls[0].function.name == "get_weather"
         assert '"location": "London"' in result.tool_calls[0].function.arguments
+
+    def test_hyphenated_tool_name(self, parser, mock_request):
+        model_output = (
+            "<start_function_call>call:get-weather{city:<escape>Paris<escape>}"
+            "<end_function_call>"
+        )
+        result = parser.extract_tool_calls(model_output, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "get-weather"
+        assert '"city": "Paris"' in result.tool_calls[0].function.arguments
+
+    def test_hyphenated_argument_key(self, parser, mock_request):
+        model_output = (
+            "<start_function_call>call:search{"
+            "city:<escape>Paris<escape>,max-results:<escape>5<escape>}"
+            "<end_function_call>"
+        )
+        result = parser.extract_tool_calls(model_output, mock_request)
+
+        assert result.tools_called is True
+        assert result.tool_calls[0].function.name == "search"
+        assert json.loads(result.tool_calls[0].function.arguments) == {
+            "city": "Paris",
+            "max-results": 5,
+        }
 
     def test_multiple_arguments(self, parser, mock_request):
         model_output = (
@@ -120,6 +148,12 @@ class TestParseArguments:
         result = parser._parse_arguments("message:<escape>Hello World<escape>")
         assert result == {"message": "Hello World"}
 
+    def test_hyphenated_argument_key(self, parser):
+        result = parser._parse_arguments(
+            "city:<escape>Paris<escape>,max-results:<escape>5<escape>"
+        )
+        assert result == {"city": "Paris", "max-results": 5}
+
 
 class TestAdjustRequest:
     def test_skip_special_tokens_disabled(self, parser, mock_request):
@@ -149,6 +183,73 @@ class TestBufferDeltaText:
         parser.buffered_delta_text = "<start_function_"
         result = parser._buffer_delta_text("call>")
         assert "<start_function_call>" in result
+
+
+class TestExtractToolCallsStreaming:
+    def test_hyphenated_tool_name_streaming(self, parser, mock_request):
+        chunks = [
+            "<start_function_call>",
+            "call:get-weather{",
+            "city:<escape>Paris<escape>",
+            "}<end_function_call>",
+        ]
+        previous_text = ""
+        name = None
+        args_parts: list[str] = []
+        for chunk in chunks:
+            current_text = previous_text + chunk
+            delta = parser.extract_tool_calls_streaming(
+                previous_text,
+                current_text,
+                chunk,
+                [],
+                [],
+                [],
+                mock_request,
+            )
+            if delta and delta.tool_calls:
+                for tool_call in delta.tool_calls:
+                    if tool_call.function and tool_call.function.name:
+                        name = tool_call.function.name
+                    if tool_call.function and tool_call.function.arguments:
+                        args_parts.append(tool_call.function.arguments)
+            previous_text = current_text
+
+        assert name == "get-weather"
+        assert json.loads("".join(args_parts)) == {"city": "Paris"}
+
+    def test_hyphenated_argument_key_streaming(self, parser, mock_request):
+        chunks = [
+            "<start_function_call>",
+            "call:search{",
+            "city:<escape>Paris<escape>,",
+            "max-results:<escape>5<escape>",
+            "}<end_function_call>",
+        ]
+        previous_text = ""
+        args_parts: list[str] = []
+        for chunk in chunks:
+            current_text = previous_text + chunk
+            delta = parser.extract_tool_calls_streaming(
+                previous_text,
+                current_text,
+                chunk,
+                [],
+                [],
+                [],
+                mock_request,
+            )
+            if delta and delta.tool_calls:
+                for tool_call in delta.tool_calls:
+                    if tool_call.function and tool_call.function.arguments:
+                        args_parts.append(tool_call.function.arguments)
+            previous_text = current_text
+
+        assert "max-results" in "".join(args_parts)
+        assert parser.prev_tool_call_arr[0]["arguments"] == {
+            "city": "Paris",
+            "max-results": 5,
+        }
 
 
 if __name__ == "__main__":
