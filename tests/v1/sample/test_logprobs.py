@@ -445,6 +445,51 @@ def test_logprob_token_ids_validate_vocab_bounds_invalid(token_ids: list[int]):
         )
 
 
+@pytest.mark.parametrize(
+    "params_kwargs",
+    [
+        {"logprobs": 20},
+        {"prompt_logprobs": 20},
+    ],
+)
+def test_logprobs_validation_rejects_counts_above_vocab_size(
+    params_kwargs: dict,
+):
+    """A request whose logprob count exceeds the vocab size must be rejected
+    during validation, even when it is within max_logprobs, so it fails with
+    a 4xx instead of crashing torch.topk in the worker.
+    """
+    model_config = _model_config(vocab_size=10, max_logprobs=20)
+    with pytest.raises(VLLMValidationError, match=r"max allowed: 10"):
+        SamplingParams(**params_kwargs).verify(
+            model_config,
+            speculative_config=None,
+            structured_outputs_config=None,
+            tokenizer=None,
+        )
+
+
+@pytest.mark.parametrize(
+    "params_kwargs",
+    [
+        {"logprobs": 10},
+        {"prompt_logprobs": 10},
+        {"logprobs": -1},
+        {"prompt_logprobs": -1},
+    ],
+)
+def test_logprobs_validation_allows_counts_up_to_vocab_size(
+    params_kwargs: dict,
+):
+    model_config = _model_config(vocab_size=10, max_logprobs=20)
+    SamplingParams(**params_kwargs).verify(
+        model_config,
+        speculative_config=None,
+        structured_outputs_config=None,
+        tokenizer=None,
+    )
+
+
 def test_prompt_logprob_token_ids_validation():
     """Rows may be ragged (-1 padded); the width is bounded by max_logprobs."""
     model_config = _model_config(vocab_size=100, max_logprobs=4)
