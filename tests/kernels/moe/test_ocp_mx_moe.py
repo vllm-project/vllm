@@ -1897,21 +1897,28 @@ def test_rocm_mxfp4_moe_oracle(
 
 
 @pytest.mark.parametrize("intermediate_size_unpadded", [640, 704])
+@pytest.mark.parametrize(
+    ("backend_name", "activation_name"),
+    [("AITER_MXFP4_MXFP4", "SILU"), ("AITER_MXFP4_BF16", "SWIGLUOAI")],
+)
 @pytest.mark.skipif(not ROCM_GFX950, reason="Requires GFX950")
 @pytest.mark.skipif(not ROCM_AITER_AVAILABLE, reason="Requires AITER")
 @torch.inference_mode()
-def test_aiter_mxfp4_w4a4_moe_pad_masks_only_padding(
+def test_aiter_mxfp4_moe_pad_masks_only_padding(
     intermediate_size_unpadded: int,
+    backend_name: str,
+    activation_name: str,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """At MoE tp_size == 1 the W4A4 MoE masks the padding and nothing else.
+    """At MoE tp_size == 1 the MXFP4 MoE masks the padding and nothing else.
 
     The experts are stored 768 wide with zeros past the real width, so the
     layer computes the same function whether the kernel is told that the tail
     is padding or not. A pad that is doubled twice (once by vLLM, once inside
     AITER for the fused gate/up weight) masks live intermediate rows as well.
-    640 stored at 768 is Qwen3.8 Flash Next's shape at TP1 and under expert
-    parallelism before the W4A4 intermediate was aligned to 128.
+    640 stored at 768 is Qwen3.8 Flash Next's W4A4 shape at TP1 and under
+    expert parallelism before the W4A4 intermediate was aligned to 128. The
+    W4A16 case uses gpt-oss's interleaved, biased layout.
     """
     import vllm.distributed.parallel_state as ps
     from vllm.config import VllmConfig, set_current_vllm_config
@@ -1934,7 +1941,9 @@ def test_aiter_mxfp4_w4a4_moe_pad_masks_only_padding(
     monkeypatch.setattr(ps, "_TP", types.SimpleNamespace(world_size=1))
     monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", True)
 
-    backend = Mxfp4MoeBackend.AITER_MXFP4_MXFP4
+    backend = Mxfp4MoeBackend[backend_name]
+    activation = MoEActivation[activation_name]
+    gpt_oss = backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
     experts_cls = backend_to_kernel_cls(backend)[0]
     num_experts, topk, num_tokens = 8, 2, 64
     hidden_size, intermediate_size = 512, 768
@@ -1944,12 +1953,24 @@ def test_aiter_mxfp4_w4a4_moe_pad_masks_only_padding(
     w13 = torch.randn(
         num_experts, 2 * intermediate_size, hidden_size, dtype=dtype, device=device
     )
-    w13[:, intermediate_size_unpadded:intermediate_size] = 0
-    w13[:, intermediate_size + intermediate_size_unpadded :] = 0
     w2 = torch.randn(
         num_experts, hidden_size, intermediate_size, dtype=dtype, device=device
     )
     w2[..., intermediate_size_unpadded:] = 0
+    w13_bias = w2_bias = None
+    if gpt_oss:
+        # Checkpoint layout: gate/up rows interleaved, padding at the end.
+        w13[:, 2 * intermediate_size_unpadded :] = 0
+        w13_bias = torch.randn(
+            num_experts, 2 * intermediate_size, dtype=torch.float32, device=device
+        )
+        w13_bias[:, 2 * intermediate_size_unpadded :] = 0
+        w2_bias = torch.randn(
+            num_experts, hidden_size, dtype=torch.float32, device=device
+        )
+    else:
+        w13[:, intermediate_size_unpadded:intermediate_size] = 0
+        w13[:, intermediate_size + intermediate_size_unpadded :] = 0
     w13_q, w13_scale = dynamic_mxfp4_quant(w13.reshape(-1, hidden_size))
     w2_q, w2_scale = dynamic_mxfp4_quant(w2.reshape(-1, intermediate_size))
     w13_q = w13_q.reshape(num_experts, 2 * intermediate_size, -1)
@@ -1958,7 +1979,7 @@ def test_aiter_mxfp4_w4a4_moe_pad_masks_only_padding(
     w2_scale = w2_scale.reshape(num_experts, hidden_size, -1)
 
     layer = types.SimpleNamespace(w13_input_scale=None, w2_input_scale=None)
-    w13_q, w2_q, w13_scale, w2_scale, _, _ = (
+    w13_q, w2_q, w13_scale, w2_scale, w13_bias, w2_bias = (
         convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             mxfp4_backend=backend,
             layer=layer,
@@ -1966,8 +1987,8 @@ def test_aiter_mxfp4_w4a4_moe_pad_masks_only_padding(
             w2_weight=w2_q,
             w13_weight_scale=w13_scale,
             w2_weight_scale=w2_scale,
-            w13_bias=None,
-            w2_bias=None,
+            w13_bias=w13_bias,
+            w2_bias=w2_bias,
         )
     )
     weights = (w13_q, w2_q, w13_scale, w2_scale)
@@ -1990,14 +2011,18 @@ def test_aiter_mxfp4_w4a4_moe_pad_masks_only_padding(
             num_local_experts=num_experts,
             num_logical_experts=num_experts,
             moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
-            activation=MoEActivation.SILU,
+            activation=activation,
             in_dtype=dtype,
             device=device,
             routing_method=RoutingMethodType.Renormalize,
             intermediate_size_per_partition_unpadded=unpadded,
         )
         quant_config = make_mxfp4_moe_quant_config(
-            mxfp4_backend=backend, w1_scale=w13_scale, w2_scale=w2_scale
+            mxfp4_backend=backend,
+            w1_scale=w13_scale,
+            w2_scale=w2_scale,
+            w1_bias=w13_bias,
+            w2_bias=w2_bias,
         )
         with set_current_vllm_config(VllmConfig()):
             kernel = make_mxfp4_moe_kernel(
@@ -2013,7 +2038,7 @@ def test_aiter_mxfp4_w4a4_moe_pad_masks_only_padding(
                 w2=w2_q,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                activation=MoEActivation.SILU,
+                activation=activation,
                 global_num_experts=num_experts,
                 expert_map=None,
                 apply_router_weight_on_input=False,
