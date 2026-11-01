@@ -214,6 +214,7 @@ class GateLinear(ReplicatedLinear):
             self.allow_ll_bf16_gemm = (
                 is_ll_bf16_gemm_available()
                 and self.weight.dtype == torch.bfloat16
+                and self.weight.shape[1] % 8 == 0
                 and self.ll_bf16_out_dtype in self.LL_BF16_OUT_DTYPES
             )
             self.allow_ll_fp32w_gemm = (
@@ -292,6 +293,7 @@ class GateLinear(ReplicatedLinear):
             self.allow_ll_bf16_gemm = (
                 is_ll_bf16_gemm_available()
                 and self.weight.dtype == torch.bfloat16
+                and self.weight.shape[1] % 8 == 0
                 and out_dtype in self.LL_BF16_OUT_DTYPES
             )
             self.ll_bf16_out_dtype = out_dtype

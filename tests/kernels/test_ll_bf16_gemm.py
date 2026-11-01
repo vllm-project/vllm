@@ -381,7 +381,9 @@ def test_cudagraph_input_update():
 # =================================================================
 
 
-def _make_gate_linear(monkeypatch, *, params_dtype, out_dtype=torch.float32):
+def _make_gate_linear(
+    monkeypatch, *, params_dtype, out_dtype=torch.float32, input_size=2048
+):
     monkeypatch.setattr(
         "vllm.model_executor.layers.linear.get_tensor_model_parallel_rank",
         lambda: 0,
@@ -406,7 +408,7 @@ def _make_gate_linear(monkeypatch, *, params_dtype, out_dtype=torch.float32):
         lambda: True,
     )
     return GateLinear(
-        input_size=2048,
+        input_size=input_size,
         output_size=64,
         bias=False,
         out_dtype=out_dtype,
@@ -525,6 +527,16 @@ def test_gate_linear_set_out_dtype_bf16_keeps_ll_bf16(monkeypatch):
     assert gate.allow_ll_bf16_gemm
     gate.set_out_dtype(torch.bfloat16)
     assert gate.allow_ll_bf16_gemm
+
+
+def test_gate_linear_k_not_multiple_of_8_disables_ll_bf16(monkeypatch):
+    # The kernel reads K in vectors of 8; such a gate must take the fallback
+    # instead of raising inside forward.
+    gate = _make_gate_linear(monkeypatch, params_dtype=torch.bfloat16, input_size=2052)
+    assert not gate.allow_ll_bf16_gemm
+    x = torch.randn(4, 2052, dtype=torch.bfloat16, device="cuda")
+    out, _ = gate(x)
+    assert out.shape == (4, 64)
 
 
 def test_gate_linear_fp16_out_dtype_disables_ll_bf16(monkeypatch):
