@@ -26,6 +26,7 @@ from vllm.v1.kv_offload.base import (
     OffloadPolicy,
     ReqContext,
     ScheduleEndContext,
+    StoreTrigger,
 )
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
@@ -1128,7 +1129,7 @@ class TestHasPendingWork:
         try:
             connector_scheduler = object.__new__(OffloadingConnectorScheduler)
             connector_scheduler.manager = manager
-            connector_scheduler._jobs = {}
+            connector_scheduler._job_statuses = {}
             connector_scheduler._reset_fence = {}
             connector = object.__new__(OffloadingConnector)
             connector.connector_scheduler = connector_scheduler
@@ -1185,7 +1186,7 @@ class TestHasPendingWork:
             assert manager._tier_poll_thread is None
             connector_scheduler = object.__new__(OffloadingConnectorScheduler)
             connector_scheduler.manager = manager
-            connector_scheduler._jobs = {}
+            connector_scheduler._job_statuses = {}
             connector_scheduler._reset_fence = {}
             connector = object.__new__(OffloadingConnector)
             connector.connector_scheduler = connector_scheduler
@@ -2995,8 +2996,13 @@ def _producer_with_cpu_hit(
     )
     seed_ctx = ReqContext(req_id="seed")
     with tiering.lock:
-        assert tiering.primary_tier.prepare_store([key], seed_ctx) is not None
-        tiering.primary_tier.complete_store([key], seed_ctx)
+        assert (
+            tiering.primary_tier.prepare_store([key], seed_ctx, StoreTrigger.ON_COMPUTE)
+            is not None
+        )
+        tiering.primary_tier.complete_store(
+            [key], seed_ctx, trigger=StoreTrigger.ON_COMPUTE
+        )
     return consumer, tiering
 
 
