@@ -6,6 +6,9 @@
 """
 
 import itertools
+import sys
+import types
+from typing import Any
 from unittest.mock import patch
 
 import numpy as np
@@ -484,3 +487,99 @@ def test_mha_attn_fp8_rejects_wrong_backend(default_vllm_config):
             MMEncoderAttention(4, 64)
     finally:
         vllm_config.model_config = old_model_config
+
+
+@pytest.mark.parametrize(
+    "fa_version,head_size,is_sm90,fa4_supported,pinned,expected",
+    [
+        (3, 80, True, True, None, 4),
+        (3, 64, True, True, None, None),
+        (3, 72, True, True, None, None),
+        (3, 128, True, True, None, None),
+        (2, 80, True, True, None, None),
+        (3, 80, False, True, None, None),
+        (3, 80, True, False, None, None),
+        (3, 80, True, True, 3, None),
+    ],
+)
+def test_vit_long_seq_fa_version(
+    fa_version, head_size, is_sm90, fa4_supported, pinned, expected
+):
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.config.attention import AttentionConfig
+    from vllm.v1.attention.backends import fa_utils
+
+    # `vllm.vllm_flash_attn` is CUDA-only, so patching through it by name would
+    # raise AttributeError on ROCm before the test body runs. Stub the module in
+    # sys.modules instead, which the lazy `from ... import` inside
+    # get_vit_long_seq_fa_version picks up on every platform.
+    fa_pkg: Any = types.ModuleType("vllm.vllm_flash_attn")
+    fa_mod: Any = types.ModuleType("vllm.vllm_flash_attn.flash_attn_interface")
+    fa_mod.is_fa_version_supported = lambda *a, **kw: fa4_supported
+    fa_pkg.flash_attn_interface = fa_mod
+
+    config = VllmConfig(attention_config=AttentionConfig(flash_attn_version=pinned))
+    with (
+        set_current_vllm_config(config),
+        patch.object(
+            fa_utils.current_platform, "is_device_capability", return_value=is_sm90
+        ),
+        patch.dict(
+            sys.modules,
+            {
+                "vllm.vllm_flash_attn": fa_pkg,
+                "vllm.vllm_flash_attn.flash_attn_interface": fa_mod,
+            },
+        ),
+    ):
+        assert fa_utils.get_vit_long_seq_fa_version(fa_version, head_size) == expected
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability(90), reason="FA3/FA4 on SM90 only"
+)
+@pytest.mark.parametrize("seqlen", [4096, 8192])
+def test_vit_long_seq_fa4_dispatch(seqlen: int):
+    from vllm.v1.attention.ops.vit_attn_wrappers import (
+        VIT_LONG_SEQ_MIN_SEQLEN,
+        flash_attn_maxseqlen_wrapper,
+    )
+    from vllm.vllm_flash_attn.flash_attn_interface import is_fa_version_supported
+
+    if not is_fa_version_supported(4):
+        pytest.skip("FA4 is not available in this build")
+
+    set_random_seed(0)
+    num_heads, head_size = 16, 80
+    q, k, v = (
+        torch.randn(
+            1, seqlen, num_heads, head_size, device="cuda", dtype=torch.bfloat16
+        )
+        for _ in range(3)
+    )
+    max_seqlen = torch.tensor(seqlen, dtype=torch.int32)
+
+    def attn(long_seq_fa_version):
+        return flash_attn_maxseqlen_wrapper(
+            q,
+            k,
+            v,
+            1,
+            False,
+            3,
+            head_size**-0.5,
+            max_seqlen=max_seqlen,
+            long_seq_fa_version=long_seq_fa_version,
+        )
+
+    out_fa3, out_gated = attn(None), attn(4)
+    if seqlen < VIT_LONG_SEQ_MIN_SEQLEN:
+        # Below the threshold the gated call must still run FA3.
+        torch.testing.assert_close(out_gated, out_fa3, rtol=0, atol=0)
+        return
+
+    ref = torch.nn.functional.scaled_dot_product_attention(
+        *(x.float().transpose(1, 2) for x in (q, k, v)), scale=head_size**-0.5
+    ).transpose(1, 2)
+    err = lambda o: ((o.float() - ref).norm() / ref.norm()).item()  # noqa: E731
+    assert err(out_gated) <= 1.05 * err(out_fa3)
