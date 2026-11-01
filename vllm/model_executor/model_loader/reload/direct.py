@@ -199,7 +199,10 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
     # nothing above modified the model
     model._direct_reload_begun = True  # one finish per begin
     for t, view in views:
-        t.data = view  # no zeroing: the full sync rewrites the checkpoint region
+        t.data = view
+        # the loaders rewrite only the checkpoint region: padding (Marlin MXFP4
+        # rounds up the experts) must read zero again, as at cold start
+        view.zero_()
     for _, t in _loadable_tensors(model):
         if not _owned(model, t):
             continue
