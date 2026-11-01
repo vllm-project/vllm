@@ -453,14 +453,13 @@ class TestPackedBroadcastDeferredConsumer:
 # --- Unit Tests: unpack_tensor ---
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 class TestUnpackTensor:
     """Test the shared unpack_tensor function."""
 
     def test_unpack_returns_views(self):
         """Unpacked tensors alias the packed buffer; callers that need
         independent storage must clone."""
-        packed = torch.randn(10, dtype=torch.float32).cuda().view(torch.uint8)
+        packed = torch.randn(10, dtype=torch.float32).view(torch.uint8)
 
         result = unpack_tensor(
             packed,
@@ -473,6 +472,56 @@ class TestUnpackTensor:
         assert result[0][1].data_ptr() == packed.data_ptr()
         packed.zero_()
         assert torch.count_nonzero(result[0][1]) == 0
+
+    def test_unpack_aligned_slice_returns_view(self):
+        """Keep a later wider tensor zero-copy when its offset is aligned."""
+        params = [
+            ("prefix", torch.arange(8, dtype=torch.uint8)),
+            ("weight", torch.arange(4, dtype=torch.int64)),
+        ]
+        chunk = pack_tensors(iter(params), lambda item: item[1], buffer_size_bytes=1024)
+        assert chunk is not None
+
+        result = unpack_tensor(
+            chunk.packed_tensor,
+            chunk.names,
+            chunk.shapes,
+            chunk.dtypes,
+            chunk.tensor_sizes,
+        )
+
+        assert result[1][1].data_ptr() == chunk.packed_tensor.data_ptr() + 8
+
+    @pytest.mark.parametrize(
+        "dtype", [torch.float16, torch.float32, torch.int32, torch.int64]
+    )
+    def test_unpack_clones_misaligned_slice(self, dtype):
+        """Restore a wider dtype after an odd-sized byte tensor."""
+        params = [
+            ("scale", torch.tensor([1, 2, 3], dtype=torch.uint8)),
+            ("weight", torch.arange(4, dtype=dtype)),
+        ]
+        chunk = pack_tensors(iter(params), lambda item: item[1], buffer_size_bytes=1024)
+        assert chunk is not None
+
+        result = unpack_tensor(
+            chunk.packed_tensor,
+            chunk.names,
+            chunk.shapes,
+            chunk.dtypes,
+            chunk.tensor_sizes,
+        )
+
+        for (expected_name, expected), (name, actual) in zip(
+            params, result, strict=True
+        ):
+            assert name == expected_name
+            assert actual.shape == expected.shape
+            assert actual.dtype == expected.dtype
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+        assert result[0][1].data_ptr() == chunk.packed_tensor.data_ptr()
+        assert result[1][1].data_ptr() != chunk.packed_tensor.data_ptr() + 3
 
 
 # --- Unit Tests: pack_tensors ---
