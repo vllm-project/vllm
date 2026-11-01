@@ -52,6 +52,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
+from vllm.v1.worker.gpu.buffer_utils import UvaBuffer
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_noised_argmax, spec_step_seed
 
 if TYPE_CHECKING:
@@ -72,8 +73,8 @@ _PUSH_MAX_REQS = 4
 # the load-time check).
 _MAX_REQS = 128
 # Bounded spin, about 2 s per kernel on GB300 (0.24 us per iteration), so that
-# a missing peer cannot hang the GPU. A timeout is counted in `errors`, and the
-# next `propose` raises.
+# a missing peer cannot hang the GPU. A timeout sets a flag in pinned host
+# memory, and the next `propose` raises.
 _SPIN_LIMIT = 1 << 23
 
 
@@ -148,6 +149,7 @@ def _tp_markov_sample_kernel(
         HALF: tl.constexpr = BLOCK_SIZE // 2
         bits = logits.to(tl.int16, bitcast=True).to(tl.int64) & 0xFFFF
         lo, hi = tl.split(tl.reshape(bits, (HALF, 2)))
+        # The 32-bit tag repeats only after 2^32 - 1 epochs.
         cword = (_tag(e, 32) << 32) | (hi << 16) | lo
         draft_step = (e - 1) // n_spec
         par = draft_step & 1
@@ -190,7 +192,7 @@ def _tp_markov_combine_kernel(
     out_ptr,  # int64 [num_reqs] (strided): sampled token
     out_stride,
     epoch_ptr,
-    err_ptr,
+    timed_out_ptr,  # int32 [1], pinned host memory (UVA)
     step,
     max_reqs,
     num_blocks,
@@ -214,7 +216,7 @@ def _tp_markov_combine_kernel(
         )
         it += 1
     if bad > 0:
-        tl.atomic_add(err_ptr, 1)
+        tl.store(timed_out_ptr, 1)
     # Consumed. The slot's next word, two epochs on, is written after this.
     tl.store(ptrs, 0, mask=mask)
     values = tl.where(
@@ -244,7 +246,7 @@ def _tp_markov_unpack_kernel(
     idx_map_ptr,  # [num_reqs] (strided): request state index
     idx_map_stride,
     epoch_ptr,
-    err_ptr,
+    timed_out_ptr,  # int32 [1], pinned host memory (UVA)
     n_spec,
     push_max_reqs,
     vocab_size,
@@ -286,8 +288,7 @@ def _tp_markov_unpack_kernel(
         bad = tl.sum((m & (((x >> 32) & 0xFFFFFFFF) != want)).to(tl.int32), axis=0)
         it += 1
     if bad > 0:
-        tl.atomic_add(err_ptr, 1)
-    tl.store(ptrs, 0, mask=m)  # consumed
+        tl.store(timed_out_ptr, 1)
     lo = (x & 0xFFFF).to(tl.int16).to(tl.bfloat16, bitcast=True)
     hi = ((x >> 16) & 0xFFFF).to(tl.int16).to(tl.bfloat16, bitcast=True)
     dst = cache_ptr + req * cache_stride_0 + step * cache_stride_1 + c_lo
@@ -498,6 +499,8 @@ class TPMarkovSampler:
         try:
             import torch.distributed._symmetric_memory as symm_mem
 
+            # Exchange timeouts, flagged by the kernels straight into host memory.
+            self.timed_out = UvaBuffer(1, torch.int32)
             buffers = (
                 symm_mem.empty(
                     2 * self.max_reqs * self.num_blocks,
@@ -534,19 +537,14 @@ class TPMarkovSampler:
         )
         # Device-side step counter: tags must change on every graph replay.
         self.epoch = torch.zeros(1, dtype=torch.int64, device=device)
-        # Exchange timeouts, copied to the host after every sample.
-        self.errors = torch.zeros(1, dtype=torch.int32, device=device)
-        self._errors_host = torch.zeros(
-            1, dtype=torch.int32, device="cpu", pin_memory=True
-        )
         torch.accelerator.synchronize()
         torch.distributed.barrier(group=self.group.cpu_group)
         return None
 
     def check_exchange(self) -> None:
         """Raise if an exchange of an earlier step timed out waiting for a
-        peer. Reads the host copy, so it does not synchronize."""
-        if self._errors_host.item():
+        peer. Reads host memory, so it does not synchronize."""
+        if self.timed_out.np[0]:
             raise RuntimeError(
                 "DSpark vocab-parallel Markov sampling timed out waiting for a "
                 "TP peer; the drafts of that step are invalid. Disable "
@@ -611,7 +609,7 @@ class TPMarkovSampler:
                 out,
                 out.stride(0),
                 self.epoch,
-                self.errors,
+                self.timed_out.uva(),
                 i,
                 self.max_reqs,
                 self.num_blocks,
@@ -631,7 +629,7 @@ class TPMarkovSampler:
                 rows,
                 rows.stride(0),
                 self.epoch,
-                self.errors,
+                self.timed_out.uva(),
                 n_spec,
                 self.push_max_reqs,
                 vocab_size,
@@ -672,4 +670,3 @@ class TPMarkovSampler:
                 num_warps=4,
             )
         self.epoch.add_(n_spec)
-        self._errors_host.copy_(self.errors, non_blocking=True)
