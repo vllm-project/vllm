@@ -201,10 +201,10 @@ class ObservabilityConfig:
                     "must not be empty"
                 )
             for bound in buckets:
-                if not math.isfinite(bound) or bound <= 0:
+                if not math.isfinite(bound) or bound < 0:
                     raise ValueError(
                         f"custom_histogram_buckets[{family!r}]: bound "
-                        f"{bound!r} must be finite and greater than 0"
+                        f"{bound!r} must be finite and non-negative"
                     )
             if any(a >= b for a, b in pairwise(buckets)):
                 raise ValueError(
