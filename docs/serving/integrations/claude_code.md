@@ -19,7 +19,10 @@ This means any model served by vLLM with proper tool calling support can act as 
 The Rust frontend supports `/v1/messages/count_tokens` and non-streaming
 `/v1/messages` for text conversations with a top-level system prompt. Generation
 accepts `max_tokens`, `temperature`, `top_p`, `top_k`, and `stop_sequences`.
-Streaming, other content types, and other request options return an error.
+A final assistant message containing non-empty text is continued; token counting
+uses the same continuation prompt. Both endpoints reuse the shared chat renderer
+and tokenizer. Streaming, other content types, and other request options return
+an error. Authentication uses the existing bearer-token configuration.
 Use `VLLM_USE_RUST_FRONTEND=0` for the Claude Code workflow below.
 
 ## Requirements

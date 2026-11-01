@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 pub(crate) mod convert;
-pub(crate) mod types;
+mod types;
 mod validate;
 
 use std::convert::Infallible;
@@ -67,43 +67,22 @@ pub async fn chat_completions(
     headers: HeaderMap,
     ValidatedJson(body): ValidatedJson<ChatCompletionRequest>,
 ) -> Response {
-    let keep_alive = state.api_server_options.sse_keep_alive_interval;
-    match create_chat_completion(state, headers, body).await {
-        Ok(ChatCompletionOutput::Full(response)) => Json(response).into_response(),
-        Ok(ChatCompletionOutput::Stream(stream)) => {
-            sse_response(chat_completion_sse_stream(stream), keep_alive)
-        }
-        Err(error) => error.into_response(),
-    }
-}
-
-pub(crate) enum ChatCompletionOutput<S> {
-    Full(Box<ChatCompletionResponse>),
-    Stream(S),
-}
-
-/// Execute a typed chat request before protocol-specific HTTP serialization.
-pub(crate) async fn create_chat_completion(
-    state: Arc<AppState>,
-    headers: HeaderMap,
-    body: ChatCompletionRequest,
-) -> Result<
-    ChatCompletionOutput<
-        impl Stream<Item = Result<ChatCompletionStreamResponse, ApiError>> + Send + 'static,
-    >,
-    ApiError,
-> {
     let stream = body.stream;
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
     let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
     let lora_resolution = state.resolve_model_with_loras(requested_model).await;
 
-    let prepared = prepare_chat_request(body, &lora_resolution, request_context)?;
-    validate_max_output_tokens(
+    let prepared = match prepare_chat_request(body, &lora_resolution, request_context) {
+        Ok(prepared) => prepared,
+        Err(error) => return error.into_response(),
+    };
+    if let Err(error) = validate_max_output_tokens(
         "max_completion_tokens",
         prepared.chat_request.sampling_params.max_tokens,
         state.chat.engine_core_client().max_model_len(),
-    )?;
+    ) {
+        return error.into_response();
+    }
     let request_span = tracing::info_span!(
         "chat_completions",
         request_id = %prepared.request_id,
@@ -116,12 +95,13 @@ pub(crate) async fn create_chat_completion(
     // is configured to count them.
     let count_reasoning_tokens = state.chat.reasoning_parser_name().is_some();
 
-    let mut chat_stream = state
-        .chat
-        .chat(prepared.chat_request)
-        .instrument(request_span.clone())
-        .await
-        .map_err(|error| chat_submit_error("failed to submit chat request", error))?;
+    let mut chat_stream =
+        match state.chat.chat(prepared.chat_request).instrument(request_span.clone()).await {
+            Ok(stream) => stream,
+            Err(error) => {
+                return chat_submit_error("failed to submit chat request", error).into_response();
+            }
+        };
 
     if stream {
         let prompt_text = chat_stream.take_prompt_text();
@@ -135,11 +115,11 @@ pub(crate) async fn create_chat_completion(
             count_reasoning_tokens,
             prepared.options,
         );
-        Ok(ChatCompletionOutput::Stream(
-            chunk_stream.instrument(request_span),
-        ))
+        let sse_stream = chat_completion_sse_stream(chunk_stream).instrument(request_span);
+
+        sse_response(sse_stream, api_server_options.sse_keep_alive_interval)
     } else {
-        let response = collect_chat_completion(
+        let response = match collect_chat_completion(
             chat_stream,
             prepared.request_id,
             prepared.response_model,
@@ -149,9 +129,13 @@ pub(crate) async fn create_chat_completion(
             prepared.options,
         )
         .instrument(request_span.clone())
-        .await?;
+        .await
+        {
+            Ok(response) => response,
+            Err(error) => return error.into_response(),
+        };
 
-        Ok(ChatCompletionOutput::Full(Box::new(response)))
+        Json(response).into_response()
     }
 }
 
