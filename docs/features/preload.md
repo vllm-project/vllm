@@ -229,6 +229,34 @@ The daemon's `--weight-cache-socket-dir` and the loader's `socket_dir` /
 Socket paths are derived from the GPU UUID, so they are stable regardless of
 `CUDA_VISIBLE_DEVICES` index remapping.
 
+## Compressed-tensors FP8 with Marlin
+
+On CUDA GPUs with compute capability 8.9 or newer, serialized
+`compressed-tensors` W8A8 FP8 checkpoints can reuse their Marlin weights
+through the weight cache daemon. This supports dense linear layers with
+per-tensor or per-channel weight scales and static per-tensor or dynamic
+per-token checkpoint activation schemes. Marlin computes with FP8 weights
+and FP16 or BF16 activations; the checkpoint's activation quantization is
+not used by this weight-only backend.
+
+Select Marlin explicitly and use the same dtype in both processes:
+
+```bash
+vllm preload --model RedHatAI/Meta-Llama-3.1-8B-FP8 \
+    --dtype bfloat16 --kernel-config '{"linear_backend": "marlin"}'
+
+vllm serve RedHatAI/Meta-Llama-3.1-8B-FP8 \
+    --dtype bfloat16 --kernel-config '{"linear_backend": "marlin"}' \
+    --load-format ipc_cache
+```
+
+The daemon packs the weights and reorders the scales once. Each engine
+reuses those tensors without repacking them, including on repeated restarts.
+The default `zero_copy` mode and disk fallback behavior are unchanged; see
+[Loader configuration](#loader-configuration). Marlin does not support
+`VLLM_BATCH_INVARIANT=1`. This support does not include block FP8, MoE,
+or other compressed-tensors quantization schemes.
+
 ## Limitations
 
 - **Platform**: CUDA and ROCm only; other platforms raise
@@ -250,6 +278,28 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
   support for pre-processed weights (the daemon transfers weights *after*
   quantization post-processing). Unsupported methods raise
   `UnsupportedQuantForIPCError`.
+  Online `fp8_per_tensor`, `fp8_per_channel`, and `fp8_per_block` dense
+  linear layers support CUDA IPC with the CUTLASS linear backend. Set
+  `--kernel-config '{"linear_backend": "cutlass"}'` on both the daemon and
+  engine; the block variant additionally requires a GPU supported by the
+  CUTLASS block-FP8 kernel. Online `mxfp8` linear layers can reuse weights
+  with an MXFP8 kernel that supports pre-processed weights, including
+  FlashInfer CUTLASS on Blackwell.
+  The engine reuses the quantized weights and scales without running online
+  quantization again. This does not enable online MoE quantization or
+  conversion from an already quantized checkpoint.
+  Serialized `compressed-tensors` W8A8 FP8 dense linear layers support
+  per-tensor and per-channel weights with static per-tensor or dynamic
+  per-token activations when both processes select the CUTLASS linear
+  backend. These checkpoints also support the
+  [Marlin weight-only backend](#compressed-tensors-fp8-with-marlin).
+  Engines retain the processed tensor layout and scales and rebuild
+  attention scale metadata from the cached scale buffers. Other
+  compressed-tensors schemes, transform wrappers, block FP8 and MoE are
+  not enabled by this support.
+  ModelOpt NVFP4 MoE supports the TRT-LLM and vLLM CUTLASS backends. With
+  CUTLASS, the daemon fuses activation scales once; engines reuse the fused
+  scales without modifying the daemon's shared tensors.
 - **Consistency**: the daemon and engine must run the same vLLM version and
   agree on model, dtype, quantization, and TP/DP layout, otherwise the
   fingerprint mismatch triggers the disk fallback.
