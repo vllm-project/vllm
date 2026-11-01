@@ -25,7 +25,8 @@ class CuteSkinnyFp8BlockMoeGemm:
     holds one FP32 scale per 128x128 weight block. With ``a_per_token`` the
     activation row is the pair's token (``p // top_k``, first GEMM of the
     layer); otherwise it is the pair itself (second GEMM). The activation is
-    not quantized. Accumulation is FP32 and the output is BF16.
+    not quantized. Accumulation is FP32 and the output is BF16. A pair whose
+    expert id is negative (padding) gets a zero output row.
 
     One CTA computes ``outputs_per_block`` outputs of one pair; the grid is
     ``(N / outputs_per_block, num_pairs)``. Each CTA's threads stride over K in
@@ -159,27 +160,36 @@ class CuteSkinnyFp8BlockMoeGemm:
             cutlass.Float8E4M3FN,
         )
 
-        num_k_tiles = k_extent // k_tile_size
-        for k_tile in cutlass.range(num_k_tiles, unroll=self.k_unroll):
-            vec_idx = k_tile * block_size + tidx
-            for ni in cutlass.range_constexpr(outputs_per_block):
-                cute.copy(
-                    copy_b, gB_vec[n_base + ni, (None, vec_idx)], b_regs[ni, None]
-                )
-            for ai in cutlass.range_constexpr(a_vectors):
-                cute.copy(
-                    copy_a,
-                    gA_vec[a_row, (None, vec_idx * a_vectors + ai)],
-                    a_regs[ai, None],
-                )
-            scale = gS[n_scale, vec_idx // vectors_per_scale]
-            b_f32 = b_regs.load().to(cutlass.Float32)
-            a_f32 = a_regs.load().to(cutlass.Float32)
-            for ni in cutlass.range_constexpr(outputs_per_block):
-                part = cutlass.Float32(0.0)
-                for vi in cutlass.range_constexpr(vector_width):
-                    part = part + a_f32[vi // _A_VECTOR, vi % _A_VECTOR] * b_f32[ni, vi]
-                acc[ni] = acc[ni] + part * scale
+        # A negative expert id marks a pair with no expert (padding in warmup
+        # and profiling runs); its output rows are zero.
+        valid = expert >= 0
+        if valid:
+            num_k_tiles = k_extent // k_tile_size
+            for k_tile in cutlass.range(num_k_tiles, unroll=self.k_unroll):
+                vec_idx = k_tile * block_size + tidx
+                for ni in cutlass.range_constexpr(outputs_per_block):
+                    cute.copy(
+                        copy_b,
+                        gB_vec[n_base + ni, (None, vec_idx)],
+                        b_regs[ni, None],
+                    )
+                for ai in cutlass.range_constexpr(a_vectors):
+                    cute.copy(
+                        copy_a,
+                        gA_vec[a_row, (None, vec_idx * a_vectors + ai)],
+                        a_regs[ai, None],
+                    )
+                scale = gS[n_scale, vec_idx // vectors_per_scale]
+                b_f32 = b_regs.load().to(cutlass.Float32)
+                a_f32 = a_regs.load().to(cutlass.Float32)
+                for ni in cutlass.range_constexpr(outputs_per_block):
+                    part = cutlass.Float32(0.0)
+                    for vi in cutlass.range_constexpr(vector_width):
+                        part = (
+                            part
+                            + a_f32[vi // _A_VECTOR, vi % _A_VECTOR] * b_f32[ni, vi]
+                        )
+                    acc[ni] = acc[ni] + part * scale
 
         for ni in cutlass.range_constexpr(outputs_per_block):
             acc[ni] = cute.arch.warp_reduction_sum(acc[ni])
@@ -197,8 +207,10 @@ class CuteSkinnyFp8BlockMoeGemm:
         cute.arch.sync_threads()
         if tidx == 0:
             routed_weight = cutlass.Float32(1.0)
-            if const_expr(self.mul_routed_weight):
-                routed_weight = gW[pair]
+            # Compile-time and runtime conditions cannot share one `if`.
+            if const_expr(self.mul_routed_weight):  # noqa: SIM102
+                if valid:
+                    routed_weight = gW[pair]
             for ni in cutlass.range_constexpr(outputs_per_block):
                 total = (
                     partials[ni, None]
