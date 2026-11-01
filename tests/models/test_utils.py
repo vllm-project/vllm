@@ -361,12 +361,34 @@ def test_weights_mapper_transforms_see_earlier_emitted_names():
     assert torch.equal(mapped[1], torch.tensor([2.0, 0.0]))
 
 
-@pytest.mark.parametrize("stage_local", [True, False])
-def test_auto_weights_loader_drops_other_stages_before_stage_local_transforms(
-    stage_local: bool,
-):
-    """Only a stage-local transform skips another stage's weights: any other
-    transform may still move them into a layer this stage holds."""
+def _pp_rank_1_module() -> torch.nn.Module:
+    module = torch.nn.Module()
+    module.layers = torch.nn.ModuleList(
+        [PPMissingLayer(), torch.nn.Linear(2, 2, bias=False)]
+    )
+    return module
+
+
+def test_auto_weights_loader_keeps_other_stages_for_plain_transforms():
+    """A plain transform may move another stage's weight into this stage."""
+    module = _pp_rank_1_module()
+
+    def move_to_layer_1(weights):
+        for name, tensor in weights:
+            yield name.replace("layers.0.", "layers.1."), tensor
+
+    loaded = AutoWeightsLoader(module).load_weights(
+        [("layers.0.weight", torch.full((2, 2), 3.0))],
+        mapper=WeightsMapper(weights_transforms=[move_to_layer_1]),
+    )
+
+    assert loaded == {"layers.1.weight"}
+    assert torch.equal(module.layers[1].weight, torch.full((2, 2), 3.0))
+
+
+def test_auto_weights_loader_drops_other_stages_before_stage_local_transforms():
+    """A stage-local merge never sees the parts of another stage's weights."""
+    module = _pp_rank_1_module()
     seen: list[str] = []
 
     def record(weights):
@@ -374,16 +396,17 @@ def test_auto_weights_loader_drops_other_stages_before_stage_local_transforms(
             seen.append(name)
             yield name, tensor
 
-    module = torch.nn.Module()
-    module.layers = torch.nn.ModuleList(
-        [PPMissingLayer(), torch.nn.Linear(2, 2, bias=False)]
-    )
-    transform = StageLocalTransform(record) if stage_local else record
-    weights = [(f"layers.{i}.weight", torch.ones(2, 2)) for i in range(2)]
+    weights = [
+        (f"layers.{i}.weight{half}", torch.full((1, 2), float(2 * i + j)))
+        for i in range(2)
+        for j, half in enumerate((".first", ".second"))
+    ]
+    transform = StageLocalTransform(lambda w: _pair_halves(record(w)))
 
     loaded = AutoWeightsLoader(module).load_weights(
         weights, mapper=WeightsMapper(weights_transforms=[transform])
     )
 
     assert loaded == {"layers.1.weight"}
-    assert seen == [name for name, _ in weights][1 if stage_local else 0 :]
+    assert seen == ["layers.1.weight.first", "layers.1.weight.second"]
+    assert torch.equal(module.layers[1].weight, torch.tensor([[2.0] * 2, [3.0] * 2]))
