@@ -14,7 +14,7 @@ from contextlib import nullcontext
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
@@ -292,6 +292,7 @@ def _sync_dp(
     uniform_token_count_per_rank: list[int] | None = None,
     allow_ubatching: bool = True,
     cudagraph_manager: Any = None,
+    profiler_ready_per_rank: list[bool] | None = None,
 ) -> tuple[BatchExecutionDescriptor, dp_utils.DPSyncState | None]:
     """Run the DP handshake with the all-reduce stubbed out.
 
@@ -302,7 +303,7 @@ def _sync_dp(
     """
     dp_size = len(num_tokens_per_rank)
     uniform_token_counts = uniform_token_count_per_rank or [0] * dp_size
-    reduced = torch.zeros(7, dp_size, dtype=torch.int32)
+    reduced = torch.zeros(8, dp_size, dtype=torch.int32)
     reduced[0] = torch.tensor(num_tokens_per_rank, dtype=torch.int32)
     reduced[1] = CUDAGraphMode.NONE.value
     reduced[2] = torch.tensor(uniform_token_counts, dtype=torch.int32)
@@ -310,10 +311,13 @@ def _sync_dp(
     reduced[4] = int(allow_ubatching)
     reduced[5] = 8  # num_reqs
     reduced[6] = 0  # allow_skip_drafts
+    if profiler_ready_per_rank is not None:
+        reduced[7] = torch.tensor(profiler_ready_per_rank, dtype=torch.int32)
 
-    dp_group = SimpleNamespace(cpu_all_reduce_=lambda t: t.copy_(reduced))
+    all_reduce = Mock(side_effect=lambda t: t.copy_(reduced))
+    dp_group = SimpleNamespace(cpu_all_reduce_=all_reduce)
     with patch.object(dp_utils, "get_dp_group", lambda: dp_group):
-        return dp_utils.sync_cudagraph_and_dp_padding(
+        result = dp_utils.sync_cudagraph_and_dp_padding(
             cudagraph_manager=cudagraph_manager,
             desired_batch_desc=BatchExecutionDescriptor(
                 cg_mode=CUDAGraphMode.NONE,
@@ -332,7 +336,14 @@ def _sync_dp(
             ),
             allow_ubatching=allow_ubatching,
             uniform_decode=uniform_token_counts[0] == DECODE_QUERY_LEN,
+            profiler_ready=(
+                profiler_ready_per_rank[0]
+                if profiler_ready_per_rank is not None
+                else None
+            ),
         )
+    all_reduce.assert_called_once()
+    return result
 
 
 def test_every_dp_rank_must_agree_to_microbatch():
@@ -361,6 +372,35 @@ def test_microbatching_pads_all_ranks_to_the_largest():
     assert desc.num_tokens == 256
     assert dp_sync_state is not None
     assert dp_sync_state.num_tokens_across_dp.tolist() == [256, 256]
+
+
+@pytest.mark.parametrize(
+    ("readiness", "expected"),
+    [
+        (None, None),
+        ([False, True], False),
+        ([True, False], False),
+        ([True, True], True),
+    ],
+)
+def test_profiler_readiness_uses_existing_dp_agreement(readiness, expected):
+    _, dp_sync_state = _sync_dp([64, 64], profiler_ready_per_rank=readiness)
+
+    assert dp_sync_state is not None and dp_sync_state.profiler_ready is expected
+
+
+def test_profiler_readiness_includes_locally_idle_rank():
+    _, dp_sync_state = _sync_dp([0, 64], profiler_ready_per_rank=[True, True])
+
+    assert dp_sync_state is not None
+    assert dp_sync_state.num_tokens_across_dp.tolist() == [0, 64]
+    assert dp_sync_state.profiler_ready is True
+
+
+def test_all_rank_idle_poll_is_not_a_profiler_boundary():
+    _, dp_sync_state = _sync_dp([0, 0], profiler_ready_per_rank=[True, True])
+
+    assert dp_sync_state is None
 
 
 def test_microbatching_survives_a_rank_that_cannot_fill_it():

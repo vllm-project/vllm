@@ -44,6 +44,9 @@ class DPSyncState:
     # Whether every rank's scheduler found that none of its requests can use this
     # step's drafts, so all ranks skip drafting together.
     skip_drafts: bool = False
+    # Whether every rank has armed synchronized profiler stepping. None when
+    # synchronized profiler stepping was not requested.
+    profiler_ready: bool | None = None
 
 
 def sync_cudagraph_and_dp_padding(
@@ -60,13 +63,18 @@ def sync_cudagraph_and_dp_padding(
     allow_ubatching: bool = False,
     uniform_decode: bool = False,
     allow_skip_drafts: bool = False,
+    profiler_ready: bool | None = None,
 ) -> tuple[BatchExecutionDescriptor, DPSyncState | None]:
     """Coordinates the batch descriptor and DP padding across all ranks.
+
+    When `profiler_ready` is set, its readiness bit is carried by the same
+    all-reduce and returned in `DPSyncState`.
 
     Returns (synced_batch_desc, sync). `sync` is None when no rank has work.
     """
     assert dp_size > 1, "DP size must be greater than 1"
-    tensor = torch.zeros(7, dp_size, dtype=torch.int32, device="cpu")
+    # Keep the collective shape independent of local profiler configuration.
+    tensor = torch.zeros(8, dp_size, dtype=torch.int32, device="cpu")
     tensor[0][dp_rank] = num_tokens
     tensor[1][dp_rank] = desired_batch_desc.cg_mode.value
     tensor[2][dp_rank] = uniform_token_count or 0  # (0 means None)
@@ -74,6 +82,8 @@ def sync_cudagraph_and_dp_padding(
     tensor[4][dp_rank] = int(allow_ubatching)
     tensor[5][dp_rank] = num_reqs
     tensor[6][dp_rank] = int(allow_skip_drafts)
+    if profiler_ready is not None:
+        tensor[7][dp_rank] = int(profiler_ready)
     if should_skip_dp_coordination():
         tensor[:] = tensor[:, dp_rank, None].clone()
     else:
@@ -105,6 +115,11 @@ def sync_cudagraph_and_dp_padding(
     num_reqs_across_dp = tensor[5]
     allow_skip_drafts_across_dp = tensor[6]
     skip_drafts = bool(torch.all(allow_skip_drafts_across_dp == 1))
+    synced_profiler_ready = (
+        bool(torch.all(tensor[7] == 1))
+        if profiler_ready is not None and not should_skip_dp_coordination()
+        else None
+    )
 
     # If ranks disagree on the uniform token count, or its 0 (means None) set to None
     synced_uniform_token_count: int | None = int(uniform_token_counts_across_dp[0])
@@ -176,6 +191,7 @@ def sync_cudagraph_and_dp_padding(
                 eager=ubatch_desc.cg_mode == CUDAGraphMode.NONE,
                 num_reqs=int(num_reqs_across_dp.max()),
                 skip_drafts=skip_drafts,
+                profiler_ready=synced_profiler_ready,
             )
 
     synced_cg_mode = CUDAGraphMode(int(cg_mode_across_dp.min()))
@@ -196,6 +212,7 @@ def sync_cudagraph_and_dp_padding(
                 eager=True,
                 num_reqs=int(num_reqs_across_dp.max()),
                 skip_drafts=skip_drafts,
+                profiler_ready=synced_profiler_ready,
             ),
         )
 
@@ -226,6 +243,7 @@ def sync_cudagraph_and_dp_padding(
         eager=False,
         num_reqs=int(num_reqs_across_dp.max()),
         skip_drafts=skip_drafts,
+        profiler_ready=synced_profiler_ready,
     )
 
 
@@ -244,6 +262,7 @@ def dispatch_cg_and_sync_dp(
     uniform_decode: bool = False,
     allow_skip_drafts: bool = False,
     dp_sync_state: DPSyncState | None = None,
+    profiler_ready: bool | None = None,
 ) -> tuple[BatchExecutionDescriptor, DPSyncState | None]:
     """Pick a cudagraph descriptor for this batch, agreeing it across DP ranks.
 
@@ -283,6 +302,9 @@ def dispatch_cg_and_sync_dp(
             same `uniform_token_count`; `num_reqs` may differ, as neither
             depends on it. Passing a sync from a different batch is a caller
             error and trips an assert.
+        profiler_ready: Whether this rank has armed synchronized profiler
+            stepping. When set, the existing DP agreement also reports whether
+            every rank is ready.
 
     Returns:
         (batch_desc, sync), where `sync` is this batch's agreement for a later
@@ -349,4 +371,5 @@ def dispatch_cg_and_sync_dp(
         allow_ubatching=allow_ubatching,
         uniform_decode=uniform_decode,
         allow_skip_drafts=allow_skip_drafts,
+        profiler_ready=profiler_ready,
     )
