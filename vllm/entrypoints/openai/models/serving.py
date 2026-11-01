@@ -48,7 +48,11 @@ class OpenAIModelRegistry:
         return self.base_model_paths[0].name
 
     def is_base_model(self, model_name: str) -> bool:
-        return any(model.name == model_name for model in self.base_model_paths)
+        # /v1/models publishes model_path as each entry's root, so accept it too.
+        return any(
+            model_name in (model.name, model.model_path)
+            for model in self.base_model_paths
+        )
 
     async def check_model(self, model_name: str | None) -> ErrorResponse | None:
         """Return an ErrorResponse if model_name is not served, else None."""
