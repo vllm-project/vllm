@@ -5,7 +5,7 @@
 Serves a tiny Llama through `vllm_runner` with and without
 `VLLM_USE_HW_AGNOSTIC` and checks the layer providers and logprobs. Needs a
 real engine, so it runs in the GPU job. The CPU-only unit tests for the
-resolution logic (`layers._resolve`) are in `test_layer_registry.py`.
+resolution logic (`hw_agnostic.resolve`) are in `test_layer_registry.py`.
 """
 
 import pytest

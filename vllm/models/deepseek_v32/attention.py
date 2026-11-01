@@ -31,32 +31,23 @@ from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV32IndexerCache,
     yarn_get_mscale,
 )
-from vllm.model_executor.models.utils import extract_layer_index
+from vllm.model_executor.models.utils import (
+    compute_skip_topk_layers,
+    extract_layer_index,
+)
 from vllm.models.deepseek_v32.common.kernels import fused_norm_rope, fused_q
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.ops.pcp import (
     finalize_mla_pcp_decode,
     maybe_gather_mla_latent_cache_inputs,
 )
+from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
     from vllm.v1.attention.backends.mla.index_group import (
         SparseMLAIndexGroupBuilder,
     )
-
-
-def reuses_previous_topk(
-    config: DeepseekV2Config | DeepseekV3Config, layer_id: int
-) -> bool:
-    """Whether the configured indexer pattern reuses the preceding top-k."""
-    pattern = getattr(config, "index_topk_pattern", None)
-    if pattern is not None:
-        return 0 <= layer_id < len(pattern) and pattern[layer_id] == "S"
-    frequency = getattr(config, "index_topk_freq", 1)
-    offset = getattr(config, "index_skip_topk_offset", 2)
-    return max(layer_id - offset + 1, 0) % frequency != 0
 
 
 class DeepseekV32Indexer(nn.Module):
@@ -176,7 +167,7 @@ class DeepseekV32Attention(MLAAttention):
             scaling = scaling * mscale * mscale
 
         layer_id = extract_layer_index(prefix)
-        skip_topk = reuses_previous_topk(config, layer_id)
+        skip_topk = layer_id in compute_skip_topk_layers(config)
 
         num_hidden_layers = getattr(config, "num_hidden_layers", None)
         is_mtp_layer = num_hidden_layers is not None and layer_id >= num_hidden_layers
@@ -400,6 +391,7 @@ class DeepseekV32Attention(MLAAttention):
             mla_kv_cache=mla_kv_cache,
             mla_kv_cache_dtype=self.kv_cache_dtype,
             mla_k_scale=mla_k_scale,
+            skip_scale=self._k_scale_float == 1.0,
             has_indexer=has_indexer,
             index_rope_interleave=self._index_rope_interleave,
             kv_c_out=kv_c_out,
@@ -548,6 +540,8 @@ class DeepseekV32Attention(MLAAttention):
                 cache_slot_mapping,
                 self.kv_cache_dtype,
                 self._k_scale,
+                self._k_scale_float == 1.0
+                and self.kv_cache_dtype in ("fp8", "fp8_e4m3", "fp8_e5m2"),
             )
 
         num_actual = attn_metadata.num_actual_tokens  # type: ignore[attr-defined]

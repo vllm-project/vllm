@@ -6,7 +6,7 @@ Multimodal embedding entries contain encoder outputs, not weights. Drafters
 retain their local text embedding lookup.
 """
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
@@ -15,6 +15,7 @@ from typing import TypeVar, overload
 import torch
 
 from vllm.sequence import IntermediateTensors
+from vllm.utils.math_utils import cdiv
 
 _T = TypeVar("_T")
 
@@ -22,7 +23,7 @@ _T = TypeVar("_T")
 class PPTransportDataType(str, Enum):
     HIDDEN_STATES = "hidden_states"
     RESIDUAL = "residual"
-    TOPK_INDICES = "pp_transport.topk_indices"
+    TOPK_INDICES = "topk_indices"
     MULTIMODAL_EMBEDDINGS = "pp_transport.multimodal_embeddings"
     MULTIMODAL_MASK = "pp_transport.multimodal_mask"
 
@@ -73,6 +74,7 @@ class PPTransportTensor:
 
     A buffer supplies both shape and dtype. Received values are copied into it
     without replacing its address, and outgoing values use its active rows.
+    Sequence-parallel fields hold ceil(global_tokens / tp_size) local rows.
     """
 
     shape: tuple[int, ...] = ()
@@ -80,6 +82,7 @@ class PPTransportTensor:
     buffer: torch.Tensor | None = None
     receive: bool = True
     send: bool = True
+    sequence_parallel: bool = False
 
     def __post_init__(self):
         if self.buffer is not None:
@@ -101,7 +104,11 @@ class PPTransport:
         tensors: Mapping[PPTransportDataType, PPTransportTensor] | None = None,
         *,
         payload_types: Sequence[PPTransportDataType] = (),
+        tp_size: int = 1,
     ):
+        if tp_size < 1:
+            raise ValueError("PP transport requires a positive TP size")
+        self.tp_size = tp_size
         receive = []
         send = []
         for data_type, tensor in (tensors or {}).items():
@@ -113,6 +120,18 @@ class PPTransport:
                 send.append((data_type.value, tensor))
         self._receive = tuple(receive)
         self._send = tuple(send)
+        self._input_partitions = {
+            key: tp_size for key, tensor in receive if tensor.sequence_parallel
+        }
+        self._input_dtypes = {
+            key: tensor.dtype for key, tensor in receive if tensor.dtype is not None
+        }
+        self.has_sharded_tensors = tp_size > 1 and any(
+            tensor.sequence_parallel for _, tensor in receive + send
+        )
+        self.all_gather_policy = PPTransportAllGatherPolicy(
+            {key: False for key, tensor in receive + send if tensor.sequence_parallel}
+        )
         selected = set(payload_types)
         for data_type in payload_types:
             selected.update(PP_TRANSPORT_REGISTRY[data_type].companions)
@@ -124,16 +143,41 @@ class PPTransport:
     def make_empty_intermediate_tensors(
         self, batch_size: int, dtype: torch.dtype, device: torch.device
     ) -> IntermediateTensors:
-        return IntermediateTensors(
-            {
-                key: torch.zeros(
-                    (batch_size, *tensor.shape),
-                    dtype=tensor.dtype or dtype,
-                    device=device,
-                )
-                for key, tensor in self._receive
-            }
+        return _allocate_intermediate_tensors(
+            self._receive, batch_size, dtype, device, self.tp_size
         )
+
+    def prepare_inputs(
+        self,
+        buffers: IntermediateTensors,
+        num_tokens: int,
+        received: IntermediateTensors | None = None,
+    ) -> IntermediateTensors:
+        """Use the same per-field views during profiling, capture and execution."""
+        views = {}
+        for key, buffer in buffers.items():
+            partition = self._input_partitions.get(key, 1)
+            num_rows = cdiv(num_tokens, partition)
+            if num_rows > buffer.shape[0]:
+                raise ValueError(f"PP input exceeds buffer capacity: {key}")
+            view = buffer[:num_rows]
+            if received is not None:
+                source = received[key][:num_rows]
+                if source.shape != view.shape:
+                    raise ValueError(
+                        f"Invalid PP input shape for {key}: {source.shape}"
+                    )
+                if (
+                    key in self._input_dtypes
+                    and source.dtype != self._input_dtypes[key]
+                ):
+                    raise ValueError(
+                        f"Invalid PP input dtype for {key}: {source.dtype}"
+                    )
+                # Legacy models can send FP32 residuals into model-dtype buffers.
+                view.copy_(source)
+            views[key] = view
+        return IntermediateTensors(views)
 
     def restore_buffers(self, tensors: IntermediateTensors) -> None:
         for key, binding in self._receive:
@@ -145,12 +189,19 @@ class PPTransport:
     ) -> IntermediateTensors:
         output = {}
         for key, binding in self._send:
+            partition = self.tp_size if binding.sequence_parallel else 1
+            num_rows = cdiv(num_tokens, partition)
             if binding.buffer is None:
-                output[key] = tensors[key]
+                tensor = tensors[key]
+                if tensor.shape != (num_rows, *binding.shape):
+                    raise ValueError(
+                        f"Invalid PP output shape for {key}: {tensor.shape}"
+                    )
+                output[key] = tensor
             else:
-                if num_tokens > binding.buffer.shape[0]:
+                if num_rows > binding.buffer.shape[0]:
                     raise ValueError(f"PP send exceeds buffer capacity: {key}")
-                output[key] = binding.buffer[:num_tokens]
+                output[key] = binding.buffer[:num_rows]
         return IntermediateTensors(output)
 
     def new_payload(
@@ -159,11 +210,62 @@ class PPTransport:
         return PPTransportPayload(self._payload_types, tensors)
 
 
-def make_empty_intermediate_tensors_factory(keys: list[str], hidden_size: int):
+def _allocate_intermediate_tensors(
+    bindings: Iterable[tuple[str, PPTransportTensor]],
+    num_tokens: int,
+    dtype: torch.dtype,
+    device: torch.device,
+    tp_size: int = 1,
+) -> IntermediateTensors:
+    return IntermediateTensors(
+        {
+            key: torch.zeros(
+                (
+                    cdiv(num_tokens, tp_size)
+                    if binding.sequence_parallel
+                    else num_tokens,
+                    *binding.shape,
+                ),
+                dtype=binding.dtype or dtype,
+                device=device,
+            )
+            for key, binding in bindings
+        }
+    )
+
+
+def make_empty_intermediate_tensors_factory(
+    keys: list[str],
+    hidden_size: int,
+    buffers: Mapping[str, torch.Tensor] | None = None,
+):
     """Compatibility entry point for models with token-major base tensors."""
-    return PPTransport(
-        {PPTransportDataType(key): PPTransportTensor((hidden_size,)) for key in keys}
-    ).make_empty_intermediate_tensors
+    bindings = {key: PPTransportTensor((hidden_size,)) for key in keys}
+    bindings.update(
+        {
+            key: PPTransportTensor(buffer=buffer)
+            for key, buffer in (buffers or {}).items()
+        }
+    )
+
+    def make_empty_intermediate_tensors(batch_size, dtype, device):
+        return _allocate_intermediate_tensors(
+            bindings.items(), batch_size, dtype, device
+        )
+
+    return make_empty_intermediate_tensors
+
+
+def copy_intermediate_tensors(
+    buffers: IntermediateTensors, tensors: IntermediateTensors
+) -> IntermediateTensors:
+    """Copy capture outputs and retain their individual shapes for graph replay."""
+    views = {}
+    for key, tensor in tensors.items():
+        buffer = buffers[key]
+        _copy_to_buffer(key, tensor, buffer)
+        views[key] = buffer[: tensor.shape[0]]
+    return IntermediateTensors(views)
 
 
 class PPTransportAllGatherPolicy(dict[str, bool]):

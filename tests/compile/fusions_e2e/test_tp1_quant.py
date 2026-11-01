@@ -103,7 +103,7 @@ def test_tp1_fp8_fusions(
     model_kwargs["hf_overrides"] = hf_overrides(n_layers)
     model_kwargs["load_format"] = "dummy"
     model_kwargs["max_model_len"] = 1024
-    model_kwargs["kernel_config"] = {"enable_flashinfer_autotune": False}
+    model_kwargs["enable_flashinfer_autotune"] = False
 
     compilation_config = dict(
         use_inductor_graph_partition=inductor_graph_partition,
@@ -132,6 +132,13 @@ def test_tp1_fp8_fusions(
         # On ROCm norm_rope_fusion is only supported without
         # enabling AITER.
         matches_check.remove("norm_rope_fusion")
+
+    if current_platform.is_xpu():
+        # XPU defaults to the weight-only W8A16 FP8 path, which leaves no
+        # activation quant op for rms+quant fusion; opt into W8A8 instead.
+        model_kwargs["linear_backend"] = "xpu"
+        # Attention + quant fusion is not supported on XPU.
+        matches = matches._replace(attn_quant_fusion=0)
 
     run_e2e_fusion_test(
         model_name,
@@ -180,7 +187,7 @@ def test_tp1_fp4_fusions(
     model_kwargs["hf_overrides"] = hf_overrides(n_layers)
     model_kwargs["load_format"] = "dummy"
     model_kwargs["max_model_len"] = 1024
-    model_kwargs["kernel_config"] = {"enable_flashinfer_autotune": False}
+    model_kwargs["enable_flashinfer_autotune"] = False
 
     compilation_config = dict(
         use_inductor_graph_partition=inductor_graph_partition,
@@ -226,7 +233,7 @@ def test_tp1_fp4_mixed_precision_act_fusion(
     model_kwargs["hf_overrides"] = hf_overrides(n_layers)
     model_kwargs["load_format"] = "dummy"
     model_kwargs["max_model_len"] = 1024
-    model_kwargs["kernel_config"] = {"enable_flashinfer_autotune": False}
+    model_kwargs["enable_flashinfer_autotune"] = False
 
     compilation_config = dict(
         use_inductor_graph_partition=inductor_graph_partition,

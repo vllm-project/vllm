@@ -8,7 +8,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
-from vllm.distributed import get_pp_group
+from vllm.distributed import get_pp_group, tensor_model_parallel_all_reduce
 from vllm.distributed.pp_transport import (
     PPTransport,
     PPTransportDataType,
@@ -40,6 +40,7 @@ from vllm.model_executor.models.utils import (
     get_pp_missing_layer_names,
     is_pp_missing_parameter,
     make_layers,
+    pp_topk_buffers,
 )
 from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
 from vllm.models.common.ops.sequence_parallel import (
@@ -48,10 +49,7 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_reduce_scatter,
     sp_shard,
 )
-from vllm.models.deepseek_v32.attention import (
-    DeepseekV32Attention,
-    reuses_previous_topk,
-)
+from vllm.models.deepseek_v32.attention import DeepseekV32Attention
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.mla.index_group import (
     SparseMLAIndexGroupBuilder,
@@ -235,26 +233,18 @@ class DeepseekV32Model(torch.nn.Module):
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
+        pp_buffers = pp_topk_buffers(
+            config, self.topk_indices_buffer, range(config.num_hidden_layers)
+        )
         self.pp_transport = PPTransport(
             {
                 PPTransportDataType.HIDDEN_STATES: PPTransportTensor(
                     shape=(config.hidden_size,)
                 ),
-                PPTransportDataType.RESIDUAL: PPTransportTensor(
-                    shape=(config.hidden_size,)
-                ),
                 PPTransportDataType.TOPK_INDICES: PPTransportTensor(
                     buffer=self.topk_indices_buffer,
-                    receive=(
-                        vllm_config.use_v2_model_runner
-                        and not get_pp_group().is_first_rank
-                        and reuses_previous_topk(config, self.start_layer)
-                    ),
-                    send=(
-                        vllm_config.use_v2_model_runner
-                        and not get_pp_group().is_last_rank
-                        and reuses_previous_topk(config, self.end_layer)
-                    ),
+                    receive=bool(pp_buffers),
+                    send=bool(pp_buffers),
                 ),
             }
         )
@@ -293,12 +283,12 @@ class DeepseekV32Model(torch.nn.Module):
             else:
                 assert input_ids is not None
                 hidden_states = self.embed_input_ids(input_ids)
-            residual = None
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
-            residual = intermediate_tensors["residual"]
             self.pp_transport.restore_buffers(intermediate_tensors)
+        # Later PP stages receive the TP-reduced residual stream, like an embedding.
+        residual = None
 
         full_num_tokens = positions.shape[0]
         if self.use_sequence_parallel:
@@ -310,7 +300,6 @@ class DeepseekV32Model(torch.nn.Module):
             hidden_states = sp_shard(hidden_states)
             if attn_in is not None:
                 attn_in = sp_shard(attn_in)
-            assert residual is None, "Currently, SP is not supported with PP"
 
         aux_hidden_states = []
         for idx, layer in enumerate(
@@ -328,8 +317,10 @@ class DeepseekV32Model(torch.nn.Module):
             assert not self.use_sequence_parallel, (
                 "Currently, SP is not supported with PP"
             )
+            # PP send/recv needs TP-replicated tensors; reduce the partial sum.
+            hidden_states = residual + tensor_model_parallel_all_reduce(hidden_states)
             return self.pp_transport.make_intermediate_tensors(
-                full_num_tokens, hidden_states=hidden_states, residual=residual
+                full_num_tokens, hidden_states=hidden_states
             )
 
         if self.use_sequence_parallel:
@@ -377,7 +368,12 @@ class DeepseekV32Model(torch.nn.Module):
         pp_missing_layer_names = get_pp_missing_layer_names(self)
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        _pending_wk_fp8: dict = {}
+        # Reordering loaders (e.g. runai_streamer) can split an FP8 indexer wk
+        # weight/scale pair across load_weights() calls; keep the pending
+        # buffer on the model so pairs survive the call boundary.
+        _pending_wk_fp8 = getattr(self, "_pending_indexer_wk_fp8", None)
+        if _pending_wk_fp8 is None:
+            self._pending_indexer_wk_fp8 = _pending_wk_fp8 = {}
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -465,6 +461,7 @@ class DeepseekV32ForCausalLM(DeepseekV2ForCausalLM):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
+        self.pp_transport = self.model.pp_transport
         if self.config.model_type == "glm_moe_dsa":
             enable_glm52_low_latency_gemm(self, vllm_config.model_config.dtype)
 

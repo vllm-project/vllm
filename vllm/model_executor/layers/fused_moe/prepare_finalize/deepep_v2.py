@@ -127,6 +127,11 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.use_cudagraph = use_cudagraph
         self.sp_size = sp_size
 
+        # Set by FusedMoEKernelModularImpl when the experts globalize
+        # recv_topk_idx themselves, letting the decode path skip the standalone
+        # _globalize_recv_topk_idx launch.
+        self.defer_globalize = False
+
         # DBO microbatching: one handle slot per micro-batch.
         self.handles: list[deep_ep.EPHandle | None] = [None, None]
 
@@ -275,6 +280,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             # during profile_run when CUDA graphs are enabled.
             expert_tokens_meta = None
 
+        globalize_deferred = False
         if recv_topk_idx is None:
             # do_expand=True (prefill mode): build topk_ids from
             # per-expert token counts.
@@ -307,12 +313,15 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             #     be treated as real routed tokens by experts that build routing
             #     over *all* rows (e.g. triton MoE backend's make_routing_data),
             #     polluting the per-expert token lists and corrupting real tokens.
-            recv_topk_idx = _globalize_recv_topk_idx(
-                recv_topk_idx,
-                psum_recv_per_rank,
-                self.rank_expert_offset,
-                self.num_experts,
-            )
+            if self.defer_globalize and self.use_cudagraph:
+                globalize_deferred = True
+            else:
+                recv_topk_idx = _globalize_recv_topk_idx(
+                    recv_topk_idx,
+                    psum_recv_per_rank,
+                    self.rank_expert_offset,
+                    self.num_experts,
+                )
 
         # Reshape recv_topk_weights to match recv_topk_idx shape [N, 1]
         if recv_topk_weights is not None and recv_topk_weights.ndim == 1:
@@ -329,6 +338,9 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                     expert_num_tokens_cpu=None,
                 )
             expert_tokens_meta.psum_recv_per_rank = psum_recv_per_rank
+            if globalize_deferred:
+                # recv_topk_idx still holds LOCAL ids; experts globalize it.
+                expert_tokens_meta.rank_expert_offset = self.rank_expert_offset
 
         if _quantize_before_dispatch(quant_config, defer_input_quant):
             if quant_config.quant_dtype == "mxfp8" and expert_x_scale is not None:
