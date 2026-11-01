@@ -157,6 +157,40 @@ async def test_basic_audio(foscolo, client_and_model):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["transcriptions", "translations"])
+async def test_verbose_json_without_timestamp_tokens(
+    foscolo, client_and_model, endpoint
+):
+    """Regression test for #59345.
+
+    `foscolo` has speech running up to its end, so Whisper finishes without
+    emitting any timestamp token. verbose_json must keep the decoded text
+    instead of returning empty text and no segments.
+    """
+    client, model_name = client_and_model
+    if "whisper" not in model_name.lower():
+        pytest.skip("verbose_json requires segment timestamps")
+
+    create = getattr(client.audio, endpoint).create
+    kwargs: dict = dict(model=model_name, temperature=0.0)
+    if endpoint == "translations":
+        kwargs["extra_body"] = dict(language="it", to_language="en")
+    else:
+        kwargs["language"] = "it"
+
+    plain = await create(file=foscolo, response_format="json", **kwargs)
+    foscolo.seek(0)
+    verbose = await create(file=foscolo, response_format="verbose_json", **kwargs)
+
+    assert len(verbose.segments) >= 1
+    # Timestamp and no-timestamp prompts may differ by a few words, but the
+    # verbose response must not lose the transcript.
+    assert len(verbose.text.split()) >= 0.8 * len(plain.text.split())
+    assert 0 <= verbose.segments[0].start < verbose.segments[-1].end
+    assert verbose.segments[-1].end <= float(verbose.duration) + 0.5
+
+
+@pytest.mark.asyncio
 async def test_audio_prompt(foscolo, client_and_model):
     client, model_name = client_and_model
     # Condition whisper on starting text
