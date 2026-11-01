@@ -1151,6 +1151,44 @@ def test_rocm_capture_metadata_sets_adaptive_marker(monkeypatch) -> None:
     assert actual.for_cudagraph_capture is _on_gfx950()
 
 
+@pytest.mark.parametrize("column_scale", [False, True])
+@pytest.mark.parametrize("strided", [False, True])
+@torch.inference_mode()
+def test_fp8_mqa_logits_torch_preserves_inputs(column_scale, strided):
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import fp8_mqa_logits_torch
+
+    device = "cuda"
+    step = 2 if strided else 1
+    q = torch.zeros(3, 2, 128 * step, device=device)
+    q[:, 0, 0], q[:, 1, step] = 1, 1
+    k = torch.zeros(4, 128 * step, device=device)
+    k[:, : 2 * step : step] = torch.tensor(
+        [[2, 0], [-1, 3], [4, -2], [0, 1]], device=device
+    )
+    q = q.to(current_platform.fp8_dtype())[..., ::step]
+    k = k.to(current_platform.fp8_dtype())[..., ::step]
+    scale = torch.tensor([0.5, 2, 0, 1], device=device)
+    if column_scale:
+        scale = scale[:, None]
+    weights = torch.tensor([[1, 2], [-1, 1], [0, -2]], device=device).float()
+    starts = torch.tensor([0, 1, 2], dtype=torch.int32, device=device)
+    ends = torch.tensor([4, 3, 2], dtype=torch.int32, device=device)
+    inputs = (q, k, scale, weights, starts, ends)
+    before = [x.contiguous().view(torch.uint8).clone() for x in inputs]
+
+    actual = fp8_mqa_logits_torch(q, (k, scale), weights, starts, ends)
+
+    # Two basis-vector heads make the weighted ReLU scores exact; the final
+    # request has an empty interval and must remain entirely masked.
+    neg_inf = float("-inf")
+    expected = torch.tensor(
+        [[1, 12, 0, 2], [neg_inf, 6, 0, neg_inf], [neg_inf] * 4], device=device
+    )
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    for original, snapshot in zip(inputs, before):
+        assert torch.equal(original.contiguous().view(torch.uint8), snapshot)
+
+
 @requires_split_decode_arch
 @torch.inference_mode()
 def test_decode_num_splits_heuristic(monkeypatch) -> None:
