@@ -6,6 +6,7 @@ import sys
 import threading
 from contextlib import nullcontext
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, Mock, call, patch
 from uuid import UUID
 
@@ -47,6 +48,8 @@ def _make_worker(profiler, *, synchronize_iterations=False, dp_size=1) -> Worker
     worker.vllm_config = SimpleNamespace(profiler_config=worker.profiler_config)
     worker.parallel_config = SimpleNamespace(data_parallel_size=dp_size)
     worker._dp_profiler_requested = False
+    worker._dp_profiler_bounds = (None, None)
+    worker._dp_profiler_unsupported = False
     return worker
 
 
@@ -715,7 +718,8 @@ class TestAnnotateProfile:
     """Tests for Worker.annotate_profile() annotation string formatting."""
 
     def _annotate(self, detailed: bool) -> str:
-        worker = _make_worker(MagicMock())
+        profiler = MagicMock()
+        worker = _make_worker(profiler)
         worker.vllm_config.profiler_config.detailed_trace_annotation = detailed
 
         ctx_req = MagicMock(req_id="ctx1", num_computed_tokens=0)
@@ -735,7 +739,7 @@ class TestAnnotateProfile:
         )
 
         Worker.annotate_profile(worker, sched)
-        return worker.profiler.annotate_context_manager.call_args[0][0]
+        return profiler.annotate_context_manager.call_args[0][0]
 
     def test_simple_format_mixed(self):
         assert self._annotate(detailed=False) == (
@@ -749,28 +753,26 @@ class TestAnnotateProfile:
         )
 
     def test_skips_annotation_work_when_profiler_does_not_annotate(self):
-        worker = _make_worker(MagicMock())
-        worker.profiler.should_annotate = False
-        worker.profiler.is_running = False
+        profiler = MagicMock(should_annotate=False, is_running=False)
+        worker = _make_worker(profiler)
 
         with patch(
             "vllm.v1.worker.gpu_worker.compute_iteration_details"
         ) as compute_iteration_details:
             context = Worker.annotate_profile(worker, scheduler_output=None)
 
-        worker.profiler.step.assert_called_once_with()
+        profiler.step.assert_called_once_with()
         compute_iteration_details.assert_not_called()
-        worker.profiler.annotate_context_manager.assert_not_called()
+        profiler.annotate_context_manager.assert_not_called()
         assert isinstance(context, nullcontext)
 
     def test_synchronized_mode_suppresses_rank_local_step(self):
-        worker = _make_worker(MagicMock(), synchronize_iterations=True, dp_size=2)
-        worker.profiler.is_running = False
-        worker.profiler.should_annotate = False
+        profiler = MagicMock(should_annotate=False, is_running=False)
+        worker = _make_worker(profiler, synchronize_iterations=True, dp_size=2)
 
         Worker.annotate_profile(worker, scheduler_output=None)
 
-        worker.profiler.step.assert_not_called()
+        profiler.step.assert_not_called()
 
 
 class TestDPSynchronizedProfiler:
@@ -794,7 +796,8 @@ class TestDPSynchronizedProfiler:
         assert profiler._active_iteration_count == 1
 
     def test_profile_request_arms_without_starting_locally(self):
-        worker = _make_worker(MagicMock(), synchronize_iterations=True, dp_size=2)
+        profiler = MagicMock()
+        worker = _make_worker(profiler, synchronize_iterations=True, dp_size=2)
 
         with patch(
             "vllm.distributed.utils.get_worker_rank_suffix",
@@ -803,13 +806,12 @@ class TestDPSynchronizedProfiler:
             Worker.profile(worker)
 
         assert worker._dp_profiler_requested is True
-        worker.profiler.start.assert_not_called()
+        profiler.start.assert_not_called()
 
     @pytest.mark.parametrize("synchronize_iterations", [False, True])
     def test_single_rank_keeps_rank_local_profiling(self, synchronize_iterations):
-        worker = _make_worker(
-            MagicMock(), synchronize_iterations=synchronize_iterations
-        )
+        profiler = MagicMock()
+        worker = _make_worker(profiler, synchronize_iterations=synchronize_iterations)
 
         with (
             patch(
@@ -819,13 +821,59 @@ class TestDPSynchronizedProfiler:
         ):
             Worker.profile(worker)
 
-        worker.profiler.start.assert_called_once_with()
+        profiler.start.assert_called_once_with(
+            delay_iterations=None, max_iterations=None
+        )
         assert worker._dp_profiler_requested is False
         if synchronize_iterations:
             logger.info_once.assert_called_once()
             assert "data_parallel_size=1" in logger.info_once.call_args.args[0]
         else:
             logger.info_once.assert_not_called()
+
+    def test_session_bounds_apply_at_agreed_boundaries(self, default_profiler_config):
+        profiler = ConcreteWorkerProfiler(default_profiler_config)
+        worker = _make_worker(profiler, synchronize_iterations=True, dp_size=2)
+        with patch(
+            "vllm.distributed.utils.get_worker_rank_suffix", return_value="rank0"
+        ):
+            Worker.profile(worker, delay_iterations=2, max_iterations=1)
+
+        Worker._advance_dp_synchronized_profiler(worker, True)
+        assert profiler.start_call_count == 0
+        Worker._advance_dp_synchronized_profiler(worker, True)
+        assert profiler.start_call_count == 1
+        Worker._advance_dp_synchronized_profiler(worker, True)
+        assert profiler.stop_call_count == 1
+        assert worker._dp_profiler_requested is False
+
+    def test_invalid_session_bounds_fail_before_arming(self):
+        worker = _make_worker(MagicMock(), synchronize_iterations=True, dp_size=2)
+        with (
+            patch(
+                "vllm.distributed.utils.get_worker_rank_suffix", return_value="rank0"
+            ),
+            pytest.raises(ValueError, match="delay_iterations"),
+        ):
+            Worker.profile(worker, delay_iterations=-1)
+
+        assert worker._dp_profiler_requested is False
+
+    def test_runner_without_callbacks_keeps_rank_local_profiling(
+        self, default_profiler_config
+    ):
+        profiler = ConcreteWorkerProfiler(default_profiler_config)
+        worker = _make_worker(profiler, synchronize_iterations=True, dp_size=2)
+        worker.model_runner = object()
+
+        worker._configure_dp_synchronized_profiler()
+        with patch(
+            "vllm.distributed.utils.get_worker_rank_suffix", return_value="rank0"
+        ):
+            Worker.profile(worker)
+
+        assert profiler.start_call_count == 1
+        assert worker._dp_profiler_requested is False
 
     def test_delayed_start_counts_shared_boundaries(self, default_profiler_config):
         default_profiler_config.delay_iterations = 2
@@ -914,11 +962,14 @@ def test_worker_init_enables_requested_profiler_clock(
         distributed_executor_backend="external_launcher",
         assigned_physical_gpu_ids=None,
         enable_dbo=False,
+        get_local_gpu_index=lambda local_rank: local_rank,
     )
     default_profiler_config.synchronize_iterations_across_dp = synchronized
     worker.profiler_config = default_profiler_config
     worker.profiler = profiler = ConcreteWorkerProfiler(default_profiler_config)
     worker._dp_profiler_requested = False
+    worker._dp_profiler_bounds = (None, None)
+    worker._dp_profiler_unsupported = False
     worker.vllm_config = SimpleNamespace(
         parallel_config=worker.parallel_config,
         speculative_config=None,
@@ -940,6 +991,7 @@ def test_worker_init_enables_requested_profiler_clock(
         "current_platform",
         MagicMock(
             logical_device_id_to_visible_device_id=Mock(return_value=0),
+            uses_standalone_cpu_model_runner=Mock(return_value=False),
         ),
     )
     for name in (
@@ -1006,7 +1058,7 @@ def _v1_boundary_result(profiler_ready=True):
 
 @pytest.mark.parametrize("profiler_ready", [True, False, None])
 def test_v1_execute_model_advances_profiler_only_after_dp_agreement(profiler_ready):
-    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner: Any = GPUModelRunner.__new__(GPUModelRunner)
     runner.execute_model_state = None
     runner.speculative_config = None
     runner.synchronize_input_prep = nullcontext
@@ -1046,7 +1098,7 @@ def test_v1_execute_model_advances_profiler_only_after_dp_agreement(profiler_rea
 
 @pytest.mark.parametrize("profiler_ready", [True, False, None])
 def test_v1_dummy_run_advances_profiler_only_after_dp_agreement(profiler_ready):
-    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner: Any = GPUModelRunner.__new__(GPUModelRunner)
     runner.vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(multimodal_config=None)
     )
@@ -1129,6 +1181,7 @@ def test_skipped_dp_coordination_does_not_claim_profiler_readiness(runner_versio
                 dp_rank=0,
                 profiler_ready=True,
             )
+            assert sync is not None
             readiness = sync.profiler_ready
     assert readiness is None
     all_reduce.assert_not_called()
@@ -1759,8 +1812,9 @@ def test_gpu_worker_recreates_proton_profiler_for_each_run():
 
 
 def test_gpu_worker_reuses_cuda_graph_proton_session():
-    worker = _make_worker(MagicMock(spec=ProtonProfilerWrapper))
-    worker.profiler.has_cuda_graph_session = True
+    profiler = MagicMock(spec=ProtonProfilerWrapper)
+    profiler.has_cuda_graph_session = True
+    worker = _make_worker(profiler)
     worker.profiler_config.profiler = "proton"
 
     with patch(
@@ -1770,11 +1824,9 @@ def test_gpu_worker_reuses_cuda_graph_proton_session():
         Worker.profile(worker, profile_prefix="first")
         Worker.profile(worker, is_start=False)
 
-    worker.profiler.set_output_name.assert_called_once_with("first_rank1")
-    worker.profiler.start.assert_called_once_with(
-        delay_iterations=None, max_iterations=None
-    )
-    worker.profiler.stop.assert_called_once_with()
+    profiler.set_output_name.assert_called_once_with("first_rank1")
+    profiler.start.assert_called_once_with(delay_iterations=None, max_iterations=None)
+    profiler.stop.assert_called_once_with()
 
 
 @_requires_cuda_for_proton
