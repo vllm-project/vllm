@@ -2502,7 +2502,13 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         supports_spec_decode = self.query_len_support != QueryLenSupport.SINGLE_ONLY
         self._init_reorder_batch_threshold(
-            self.reorder_batch_threshold, supports_spec_decode, supports_dcp_with_varlen
+            self.reorder_batch_threshold,
+            supports_spec_decode,
+            supports_dcp_with_varlen
+            or (
+                self.non_causal_multi_token_decode
+                and self.supports_non_causal_multi_token_dcp
+            ),
         )
 
         if self.query_len_support == QueryLenSupport.SINGLE_ONLY:
