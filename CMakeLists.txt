@@ -473,12 +473,20 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/custom_all_gather_reduce_scatter.cu"
     "csrc/custom_all_gather_reduce_scatter_ops.cpp"
     "csrc/custom_all_reduce.cu"
-    "csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu"
     "csrc/fused_kimi_k3_mla_key_concat_kv_cache_kernel.cu")
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")
     list(APPEND VLLM_STABLE_EXT_SRC
       "csrc/fused_qknorm_rope_cache_kernel.cu")
+  endif()
+
+  # The DeepseekV4 fused qnorm/RoPE KV-insert kernel runs as a CuTe DSL
+  # kernel on CUDA (vllm/model_executor/kernels/attention/
+  # fused_deepseek_v4_qnorm_rope_kv_insert.py); the extension source is
+  # built only for ROCm, which has no CuTe DSL support.
+  if(VLLM_GPU_LANG STREQUAL "HIP")
+    list(APPEND VLLM_STABLE_EXT_SRC
+      "csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu")
   endif()
 
   if(VLLM_GPU_LANG STREQUAL "CUDA" AND
