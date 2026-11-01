@@ -68,13 +68,15 @@ def test_fastsafetensors_sub_shard_chunking(monkeypatch):
     the transient copy, and does so even after collapsing the pipeline to
     fully serial, so the smallest satisfiable budget is 2 x 147 = 294 MiB.
 
-    384 MiB therefore sits above the floor and below the shard, forcing the
-    planner to split the shard -- it loads as 4 chunks. Below 294 MiB the plan
-    is infeasible and the loader raises rather than falling back, which
-    test_fastsafetensors_budget_infeasible covers.
+    On unified-memory systems (DGX Spark) the copier first reserves 16 MiB per
+    DMA worker, 128 MiB by default. 512 MiB leaves 384 MiB there and 512 MiB
+    elsewhere, both above the floor and below the shard, forcing the planner
+    to split the shard. Below 294 MiB the plan is infeasible and the loader
+    raises rather than falling back, which test_fastsafetensors_budget_infeasible
+    covers.
     """
     monkeypatch.setenv(
-        "VLLM_FASTSAFETENSORS_DEVICE_MEMORY_BUDGET", str(384 * 1024 * 1024)
+        "VLLM_FASTSAFETENSORS_DEVICE_MEMORY_BUDGET", str(512 * 1024 * 1024)
     )
     with tempfile.TemporaryDirectory() as tmpdir:
         _assert_matches_safetensors(tmpdir)
