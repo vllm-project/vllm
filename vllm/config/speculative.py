@@ -435,6 +435,7 @@ _DRAFT_VLLM_CONFIG_OVERRIDES = (
     # Otherwise the draft inherits the target's --moe-backend, which fails
     # when the draft is unquantized and that backend is not.
     ("moe_backend", "kernel_config", "moe_backend"),
+    ("batch_invariant", "kernel_config", "batch_invariant"),
     # Only when set, so the draft keeps a KV cache layout the target shares.
     ("attention_backend", "attention_config", "backend"),
     ("kv_cache_dtype", "cache_config", "cache_dtype"),
@@ -499,6 +500,12 @@ class SpeculativeConfig:
     """KV cache dtype for the draft model. When `None`, the draft inherits the
     target model's `--kv-cache-dtype`. Custom dtypes registered by platform
     backends are accepted."""
+    batch_invariant: bool | None = None
+    """When `None`, the drafter follows `VLLM_BATCH_INVARIANT`. When `False`,
+    under batch invariance the drafter may select MoE kernels that are not
+    batch invariant: target tokens and logprobs are unchanged, but with
+    temperature > 0 seeded sampling and acceptance can depend on batch
+    composition. No effect without `VLLM_BATCH_INVARIANT`."""
     max_model_len: int | None = Field(default=None, ge=1)
     """The maximum model length of the draft model. Used when testing the
     ability to skip speculation for some sequences."""

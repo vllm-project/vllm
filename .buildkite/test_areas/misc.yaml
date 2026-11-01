@@ -917,12 +917,14 @@ steps:
     - vllm/lora/ops/triton_ops
     - vllm/model_executor/kernels/linear
     - vllm/model_executor/determinism
+    - vllm/config/speculative.py
     - tests/v1/determinism/
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s v1/determinism/test_batch_invariance.py
     - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
     - pytest -v -s v1/determinism/test_lora_shrink_batch_invariant.py
+    - pytest -v -s v1/determinism/test_drafter_batch_invariance.py
     - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
     - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN
   mirror:
