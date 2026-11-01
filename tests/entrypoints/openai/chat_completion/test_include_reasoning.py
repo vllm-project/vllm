@@ -8,6 +8,7 @@ when ``include_reasoning=False``, for both streaming and non-streaming
 Chat Completions, while reasoning tokens remain represented in usage.
 """
 
+import httpx
 import openai
 import pytest
 import pytest_asyncio
@@ -93,6 +94,29 @@ async def test_reasoning_tokens_in_usage(client: openai.AsyncOpenAI):
     details = response.usage.completion_tokens_details
     assert details is not None
     assert details.reasoning_tokens > 0
+
+
+@pytest.mark.asyncio
+async def test_batch_reasoning_tokens_in_usage(server: RemoteOpenAIServer):
+    """The batch endpoint reports hidden reasoning in usage like single chats."""
+    async with httpx.AsyncClient() as http_client:
+        response = await http_client.post(
+            server.url_for("v1/chat/completions/batch"),
+            json={
+                "model": MODEL_NAME,
+                "messages": [MESSAGES, MESSAGES],
+                "max_tokens": 64,
+                "temperature": 0,
+                "include_reasoning": False,
+            },
+            timeout=120,
+        )
+
+    assert response.status_code == 200, response.text
+    usage = response.json()["usage"]
+    details = usage["completion_tokens_details"]
+    assert details is not None
+    assert 0 < details["reasoning_tokens"] <= usage["completion_tokens"]
 
 
 @pytest.mark.asyncio

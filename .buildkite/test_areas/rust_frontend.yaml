@@ -39,7 +39,8 @@ steps:
   - pytest -v -s benchmarks/test_serve_cli.py
   # The Rust frontend re-renders messages instead of reusing kv_transfer_params["prompt_token_ids"].
   - pytest -v -s entrypoints/openai/chat_completion/test_chat_completion.py -k "not test_kv_transfer_prompt_token_ids_round_trip and not test_kv_transfer_prompt_token_ids_streaming"
-  - pytest -v -s entrypoints/openai/chat_completion/test_include_reasoning.py
+  # The Rust frontend does not serve /v1/chat/completions/batch.
+  - pytest -v -s entrypoints/openai/chat_completion/test_include_reasoning.py -k "not test_batch_reasoning_tokens_in_usage"
   - pytest -v -s entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py
   - pytest -v -s entrypoints/openai/chat_completion/test_chat_echo.py
   - pytest -v -s entrypoints/openai/chat_completion/test_logprob_token_ids.py
