@@ -553,6 +553,54 @@ def test_inc_config_parser_fused_module_requires_consistent_configs() -> None:
         config.config_parser.resolve(DummyLayer(), "layers.0.self_attn.qkv_proj")
 
 
+@pytest.mark.parametrize(
+    "pattern,layer_name",
+    [
+        ("model.layers.0.q_proj", "model.layers.0.q_proj"),
+        (r"model\.layers\.0\..*", "model.layers.0.q_proj"),
+        ("head", "nested.head"),
+    ],
+)
+def test_inc_config_parser_mixed_fp8_override(pattern, layer_name) -> None:
+    config = make_config(
+        extra_config={pattern: make_block_fp8_raw_config(data_type="fp8")}
+    )
+    layer = DummyLayer()
+
+    resolved = config.config_parser.resolve(layer, layer_name)
+
+    assert resolved.is_fp8_block
+    assert resolved.data_type == "fp"
+    assert config.get_layer_config(layer, layer_name) == (8, (128, 128), True)
+    assert config.config_parser.resolve(layer, "model.layers.1.q_proj").is_wna16_int
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        (None, None),
+        ("data_type", "int"),
+        ("packing_format", "auto_round:auto_gptq"),
+        ("backend", "different-backend"),
+    ],
+)
+def test_inc_config_parser_mixed_fp8_fused_formats(field, value) -> None:
+    overrides = {
+        f"model.{name}": make_block_fp8_raw_config()
+        for name in ("q_proj", "k_proj", "v_proj")
+    }
+    if field is not None:
+        overrides["model.k_proj"][field] = value
+    config = make_config(extra_config=overrides)
+    config.packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
+
+    if field is None:
+        assert config.config_parser.resolve(DummyLayer(), "model.qkv_proj").is_fp8_block
+    else:
+        with pytest.raises(ValueError, match="requires consistent quant config"):
+            config.config_parser.resolve(DummyLayer(), "model.qkv_proj")
+
+
 def test_inc_mxfp8() -> None:
     config = make_config(
         weight_bits=8,
