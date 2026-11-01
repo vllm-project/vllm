@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The gfx950 native mxfp4_mla decode: the V widening bit for bit against an
-exact dequant, and the attention output against the bf16-unpack decode."""
+"""The gfx950 native mxfp4_mla kernel: the V widening bit for bit against an
+exact dequant, decode rows against the bf16-unpack decode, and causal prefill
+rows against a torch emulation of its quantization and exact attention."""
+
+import math
 
 import pytest
 import torch
@@ -141,15 +144,46 @@ def test_native_decode_matches_bf16_unpack(num_splits: int, heads: int):
     assert err.mean() <= 0.02 * ref.mean(), (err.mean(), ref.mean())
 
 
-@pytest.mark.parametrize("topk", [128, 300])
-def test_native_on_prefill_rows_matches_prefill_kernel(topk: int):
-    """Causal prefill rows, as the backend now sends them: query t sees
-    min(t + 1, topk) of the first t + 1 slots. The native kernel at one split
-    stays within MXFP8 error of the prefill kernel's bf16 unpack."""
+def _mxfp8(x: torch.Tensor) -> torch.Tensor:
+    """Round to MXFP8 as the kernel quantizes Q: e4m3 with one power-of-two
+    scale per 32 values, the block maximum mapped at or below 448."""
+    blocks = x.reshape(*x.shape[:-1], -1, GROUP)
+    amax = (
+        blocks.abs().amax(-1, keepdim=True).clamp_min(torch.finfo(torch.float32).tiny)
+    )
+    scale = torch.exp2(torch.ceil(torch.log2(amax / 448.0)).clamp(-127, 127))
+    return ((blocks / scale).to(torch.float8_e4m3fn).float() * scale).reshape(x.shape)
+
+
+def _emulate_native(q: torch.Tensor, keys: torch.Tensor) -> torch.Tensor:
+    """The native kernel's arithmetic for one row at one split, in fp32: MXFP8
+    Q, exact K and V, online softmax over TILE_K-token tiles with P rounded
+    to e4m3 as P * 256."""
+    q = _mxfp8(q.float())
+    log2_scale = LATENT**-0.5 * math.log2(math.e)
+    m = torch.full((q.shape[0],), -math.inf)
+    denom = torch.zeros(q.shape[0])
+    acc = torch.zeros(q.shape[0], LATENT)
+    for start in range(0, len(keys), TILE_K.value):
+        tile = keys[start : start + TILE_K.value]
+        s = q @ tile.T * log2_scale
+        m_new = torch.maximum(m, s.amax(-1))
+        alpha = torch.exp2(m - m_new)
+        p = torch.exp2(s - m_new[:, None])
+        denom = denom * alpha + p.sum(-1)
+        p8 = (p * 256.0).to(torch.float8_e4m3fn).float() / 256.0
+        acc = acc * alpha[:, None] + p8 @ tile
+        m = m_new
+    return acc / denom[:, None]
+
+
+def _native_prefill_case(topk: int):
+    """Causal prefill rows, as the backend sends them on gfx950: query t sees
+    min(t + 1, topk) of the first t + 1 slots. Returns the native kernel's
+    output at one split, its torch emulation and exact-dequant attention."""
     from vllm.v1.attention.ops.mxfp4_mla.store import store_mxfp4_mla
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
         rocm_sparse_attn_decode_bf16,
-        rocm_sparse_attn_prefill,
     )
 
     set_random_seed(0)
@@ -177,12 +211,41 @@ def test_native_on_prefill_rows_matches_prefill_kernel(topk: int):
         ragged_indptr=indptr.cuda(),
         kv_cache_dtype="mxfp4_mla",
     )
-    want = torch.zeros(num_tokens, heads, LATENT, dtype=torch.bfloat16).cuda()
-    rocm_sparse_attn_prefill(indices=None, topk_length=None, output=want, **common)
-    got = torch.zeros_like(want)
+    got = torch.zeros(num_tokens, heads, LATENT, dtype=torch.bfloat16).cuda()
     rocm_sparse_attn_decode_bf16(output=got, num_splits=1, native_mxfp4=True, **common)
-    got, want = got.float().cpu(), want.float().cpu()
+    got = got.float().cpu()
+
+    keys = _dequantize(packed)
+    q = q.cpu()
+    emulated = torch.empty_like(got)
+    exact = torch.empty_like(got)
+    for t in range(num_tokens):
+        row_keys = keys[indices[indptr[t] : indptr[t + 1]].long()]
+        emulated[t] = _emulate_native(q[t], row_keys)
+        weights = (q[t].double() @ row_keys.double().T * LATENT**-0.5).softmax(-1)
+        exact[t] = (weights @ row_keys.double()).float()
+    return got, emulated, exact
+
+
+# Measured kernel vs emulation at topk 128/300/2048: max 0.059 (bf16 output
+# rounding: |out| reaches 24, where half a bf16 ulp is 0.0625), mean 2.2e-4 to
+# 2.8e-4, against max 1.1-1.35 and mean 5.4e-3 to 6.8e-3 vs exact. Bounds are
+# the measured values plus about 25%.
+EMULATION_MAX_ABS_ERR = 0.075
+EMULATION_MEAN_ABS_ERR = 3.5e-4
+
+
+@pytest.mark.parametrize("topk", [128, 300])
+def test_native_on_prefill_rows(topk: int):
+    """Prefill rows now go through the native kernel, so Q is quantized to
+    MXFP8 there too. Tight: the kernel matches a torch emulation of exactly
+    that quantization, so any other error is a bug. Loose: the quantization
+    itself stays a small fraction of exact attention."""
+    got, emulated, exact = _native_prefill_case(topk)
     assert torch.isfinite(got).all()
-    err = (got - want).abs()
-    assert err.max() <= 0.05 * want.abs().max(), (err.max(), want.abs().max())
-    assert err.mean() <= 0.02 * want.abs().mean(), (err.mean(), want.abs().mean())
+    err = (got - emulated).abs()
+    assert err.max() <= EMULATION_MAX_ABS_ERR, err.max()
+    assert err.mean() <= EMULATION_MEAN_ABS_ERR, err.mean()
+    err, ref = (got - exact).abs(), exact.abs()
+    assert err.max() <= 0.07 * ref.max(), (err.max(), ref.max())
+    assert err.mean() <= 0.04 * ref.mean(), (err.mean(), ref.mean())
