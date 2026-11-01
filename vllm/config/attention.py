@@ -12,6 +12,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 IndexerKVDType = Literal["auto", "bf16", "fp8", "mxfp4", "nvfp4"]
 MiniMaxM3MSADecodeBackend = Literal["triton", "cutlass"]
+MiniMaxM3IndexerPrefillBackend = Literal["auto", "fmha", "cute"]
 
 
 @config
@@ -44,6 +45,11 @@ class AttentionConfig:
     """Sparse decode kernel used by the MiniMax M3 MSA backend. "cutlass" falls
     back to Triton where the CUTLASS kernel does not support the platform, KV
     cache dtype, or head layout."""
+
+    minimax_m3_indexer_prefill_backend: MiniMaxM3IndexerPrefillBackend = "auto"
+    """Prefill scorer for the MiniMax M3 MSA indexer. "auto" uses the CuTe
+    scorer for supported FP8 indexer Q/K and FMHA otherwise; "fmha" and "cute"
+    force a backend without changing indexer precision."""
 
     backend_per_kind: dict[str, AttentionBackendEnum] = field(default_factory=dict)
     """Per-KV-cache-group attention backend overrides, keyed by
