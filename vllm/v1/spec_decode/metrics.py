@@ -293,9 +293,10 @@ class SpecDecodingProm:
         a step that scheduled nothing carries the default K rather than a
         selected one.
 
-        A step that selects K=0 requests no drafts, so the per-request
-        spec-decode counters never see it; without this counter a schedule that
-        has stopped speculating is indistinguishable from one that is not
+        The per-request spec-decode counters record the drafts a step verifies,
+        which a step that selects K=0 can still do for earlier drafts, so they
+        do not show the K=0 selection; without this counter a schedule that has
+        stopped speculating is indistinguishable from one that is not
         configured."""
         if not self.spec_decoding_enabled:
             return
