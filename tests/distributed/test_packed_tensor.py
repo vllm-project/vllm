@@ -144,6 +144,7 @@ class TestPackedBroadcastRoundtrip:
         """Test roundtrip with mixed data types."""
         # Create params with mixed dtypes
         params = [
+            ("scale", torch.tensor([1, 2, 3], dtype=torch.uint8).cuda()),
             ("layer1.weight", torch.randn(10, 20, dtype=torch.float32).cuda()),
             ("layer1.bias", torch.randn(10, dtype=torch.float16).cuda()),
             ("layer2.weight", torch.randn(20, 30, dtype=torch.bfloat16).cuda()),
@@ -338,26 +339,29 @@ class SentinelBroadcastGroup:
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 class TestPackedBroadcastDeferredConsumer:
     """Consumers that keep unpacked tensors and read them from a later pack's
-    callback, as layerwise reload does, on a different slot stream."""
+    callback, as layerwise reload does, on a different slot stream. The float64
+    cases use a four-byte prefix to exercise cloned, misaligned slices."""
 
-    def test_deferred_read_is_ordered_after_receive(self):
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+    def test_deferred_read_is_ordered_after_receive(self, dtype):
         numel = 4
-        state_dict_info = [
-            ("a", ([numel], torch.float32)),
-            ("b", ([numel], torch.float32)),
-        ]
+        state_dict_info = []
+        for name in ("a", "b"):
+            if dtype == torch.float64:
+                state_dict_info.append((f"{name}.prefix", ([1], torch.float32)))
+            state_dict_info.append((name, ([numel], dtype)))
         # A fresh sentinel per run keeps a stale allocator block that held a
         # previous run's value from masking an unordered read.
         expected = float(torch.randint(1, 2**20, ()).item())
         group = DelayedFirstBroadcastGroup(sentinels=[expected, -expected])
-        observed = torch.full((numel,), -1.0, device="cuda")
+        observed = torch.full((numel,), -1.0, dtype=dtype, device="cuda")
         torch.accelerator.synchronize()
 
         retained: list[torch.Tensor] = []
         read_enqueued_before_receive: list[bool] = []
 
         def post_unpack_func(tensor_list):
-            [(_, tensor)] = tensor_list
+            _, tensor = tensor_list[-1]
             if not retained:
                 retained.append(tensor)
             else:
@@ -370,7 +374,7 @@ class TestPackedBroadcastDeferredConsumer:
             src=0,
             post_unpack_func=post_unpack_func,
             # Smaller than one tensor, so each tensor gets its own pack.
-            buffer_size_bytes=numel * 4 - 1,
+            buffer_size_bytes=numel * dtype.itemsize - 1,
             num_buffers=2,
         )
         torch.accelerator.synchronize()
@@ -379,36 +383,46 @@ class TestPackedBroadcastDeferredConsumer:
         assert read_enqueued_before_receive == [True], (
             "the first receive finished before the deferred read was enqueued"
         )
-        torch.testing.assert_close(observed, torch.full_like(observed, expected))
+        expected_tensor = torch.full(
+            (numel * dtype.itemsize // 4,), expected, dtype=torch.float32, device="cuda"
+        ).view(dtype)
+        torch.testing.assert_close(observed, expected_tensor, rtol=0, atol=0)
 
     @pytest.mark.parametrize(
         ("num_buffers", "packs_per_layer"), [(2, 4), (2, 5), (3, 5)]
     )
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
     def test_freed_pack_not_reused_while_replay_pending(
-        self, num_buffers, packs_per_layer
+        self, num_buffers, packs_per_layer, dtype
     ):
-        """Views dropped right after the replay is enqueued (as layerwise
+        """Tensors dropped right after the replay is enqueued (as layerwise
         reload's ``info.reset()`` does) must not let the next receive reuse a
         buffer the replay still reads."""
         num_packs = packs_per_layer + 4
         # A size unique to this run keeps blocks cached by earlier tests from
         # being picked instead of the ones this layer frees.
         numel = 128 * int(torch.randint(1, 64, ()).item())
-        state_dict_info = [
-            (f"w{i}", ([numel], torch.float32)) for i in range(num_packs)
-        ]
+        state_dict_info = []
+        for i in range(num_packs):
+            if dtype == torch.float64:
+                state_dict_info.append((f"prefix{i}", ([1], torch.float32)))
+            state_dict_info.append((f"w{i}", ([numel], dtype)))
         sentinels = torch.randperm(2**20)[:num_packs].float().tolist()
         group = SentinelBroadcastGroup(sentinels)
-        observed = torch.full((packs_per_layer, numel), -1.0, device="cuda")
+        observed = torch.full(
+            (packs_per_layer, numel), -1.0, dtype=dtype, device="cuda"
+        )
         torch.accelerator.synchronize()
         torch.accelerator.empty_cache()
 
         retained: list[torch.Tensor] = []
+        tensor_ptrs: list[int] = []
         replayed = False
 
         def post_unpack_func(tensor_list):
             nonlocal replayed
-            [(_, tensor)] = tensor_list
+            _, tensor = tensor_list[-1]
+            tensor_ptrs.append(tensor.data_ptr())
             if replayed:
                 return
             retained.append(tensor)
@@ -427,7 +441,7 @@ class TestPackedBroadcastDeferredConsumer:
             src=0,
             post_unpack_func=post_unpack_func,
             # Smaller than one tensor, so each tensor gets its own pack.
-            buffer_size_bytes=numel * 4 - 1,
+            buffer_size_bytes=numel * dtype.itemsize - 1,
             num_buffers=num_buffers,
         )
         torch.accelerator.synchronize()
@@ -438,13 +452,19 @@ class TestPackedBroadcastDeferredConsumer:
         assert all(group.pending_at_receive[i] for i in window), (
             "the replay finished before every receive in the window was issued"
         )
-        pack_bytes = numel * 4
+        pack_bytes = numel * dtype.itemsize
         for i in window:
             for j in range(packs_per_layer):
-                assert abs(group.ptrs[i] - group.ptrs[j]) >= pack_bytes, (
-                    f"pack {i} reused pack {j}'s buffer while the replay was pending"
+                assert abs(tensor_ptrs[i] - tensor_ptrs[j]) >= pack_bytes, (
+                    f"tensor {i} reused tensor {j}'s storage while replay was pending"
                 )
-        expected = torch.tensor(sentinels[:packs_per_layer], device="cuda")
+        expected = (
+            torch.tensor(
+                sentinels[:packs_per_layer], dtype=torch.float32, device="cuda"
+            )
+            .repeat_interleave(dtype.itemsize // 4)
+            .view(dtype)
+        )
         torch.testing.assert_close(
             observed, expected.unsqueeze(1).expand_as(observed), rtol=0, atol=0
         )
@@ -453,14 +473,25 @@ class TestPackedBroadcastDeferredConsumer:
 # --- Unit Tests: unpack_tensor ---
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param(
+            "cuda",
+            marks=pytest.mark.skipif(
+                not torch.cuda.is_available(), reason="CUDA not available"
+            ),
+        ),
+    ],
+)
 class TestUnpackTensor:
     """Test the shared unpack_tensor function."""
 
-    def test_unpack_returns_views(self):
+    def test_unpack_returns_views(self, device):
         """Unpacked tensors alias the packed buffer; callers that need
         independent storage must clone."""
-        packed = torch.randn(10, dtype=torch.float32).cuda().view(torch.uint8)
+        packed = torch.randn(10, dtype=torch.float32, device=device).view(torch.uint8)
 
         result = unpack_tensor(
             packed,
@@ -473,6 +504,68 @@ class TestUnpackTensor:
         assert result[0][1].data_ptr() == packed.data_ptr()
         packed.zero_()
         assert torch.count_nonzero(result[0][1]) == 0
+
+    def test_unpack_aligned_slice_returns_view(self, device):
+        """Keep a later wider tensor zero-copy when its offset is aligned."""
+        params = [
+            ("prefix", torch.arange(8, dtype=torch.uint8, device=device)),
+            ("weight", torch.arange(4, dtype=torch.int64, device=device)),
+        ]
+        chunk = pack_tensors(iter(params), lambda item: item[1], buffer_size_bytes=1024)
+        assert chunk is not None
+
+        result = unpack_tensor(
+            chunk.packed_tensor,
+            chunk.names,
+            chunk.shapes,
+            chunk.dtypes,
+            chunk.tensor_sizes,
+        )
+
+        assert result[1][1].data_ptr() == chunk.packed_tensor.data_ptr() + 8
+
+    @pytest.mark.parametrize(
+        "dtype", [torch.float16, torch.float32, torch.int32, torch.int64]
+    )
+    def test_unpack_clones_misaligned_slice(self, dtype, device):
+        """Restore a wider dtype after an odd-sized byte tensor."""
+        params = [
+            ("scale", torch.tensor([1, 2, 3], dtype=torch.uint8, device=device)),
+            ("weight", torch.arange(4, dtype=dtype, device=device)),
+        ]
+        chunk = pack_tensors(iter(params), lambda item: item[1], buffer_size_bytes=1024)
+        assert chunk is not None
+
+        result = unpack_tensor(
+            chunk.packed_tensor,
+            chunk.names,
+            chunk.shapes,
+            chunk.dtypes,
+            chunk.tensor_sizes,
+        )
+
+        for (expected_name, expected), (name, actual) in zip(
+            params, result, strict=True
+        ):
+            assert name == expected_name
+            assert actual.shape == expected.shape
+            assert actual.dtype == expected.dtype
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+        assert result[0][1].data_ptr() == chunk.packed_tensor.data_ptr()
+        assert result[1][1].data_ptr() != chunk.packed_tensor.data_ptr() + 3
+
+    def test_unpack_non_contiguous_buffer(self, device):
+        """Retain support for strided packed bytes when restoring a wider dtype."""
+        expected = torch.arange(4, dtype=torch.int64, device=device)
+        raw = expected.view(torch.uint8)
+        backing = torch.zeros(raw.numel() * 2, dtype=torch.uint8, device=device)
+        packed = backing[::2]
+        packed.copy_(raw)
+
+        result = unpack_tensor(packed, ["weight"], [[4]], [torch.int64], [raw.numel()])
+
+        torch.testing.assert_close(result[0][1], expected, rtol=0, atol=0)
 
 
 # --- Unit Tests: pack_tensors ---
@@ -776,6 +869,7 @@ class TestPackedIpcRoundtrip:
     def test_roundtrip_basic(self):
         """Test basic IPC producer -> consumer roundtrip."""
         params = [
+            ("prefix", torch.tensor([1, 2, 3], dtype=torch.uint8).cuda()),
             ("w1", torch.randn(10, 20, dtype=torch.float32).cuda()),
             ("scale", torch.tensor(1.5, dtype=torch.float32).cuda()),
             ("w2", torch.randn(5, dtype=torch.float16).cuda()),
