@@ -519,6 +519,45 @@ class _RecordingOp(FakeOp):
         return super().combine(*args, **kwargs)
 
 
+@pytest.mark.parametrize("num_ubatches", [2, 3])
+@pytest.mark.parametrize("num_spec_tokens", [0, 1, 3])
+def test_later_microbatch_ops_hold_their_share(
+    monkeypatch, num_ubatches, num_spec_tokens
+):
+    import numpy as np
+
+    import vllm.model_executor.layers.fused_moe.all2all_utils as all2all_utils
+    from vllm.v1.worker.ubatch_utils import maybe_create_ubatch_slices
+
+    spec = SimpleNamespace(num_speculative_tokens=num_spec_tokens)
+    monkeypatch.setattr(
+        all2all_utils,
+        "get_current_vllm_config",
+        lambda: SimpleNamespace(speculative_config=spec if num_spec_tokens else None),
+    )
+    max_tokens = 64
+    bound = all2all_utils._mori_ubatch_max_tokens(max_tokens, num_ubatches)
+    assert bound < max_tokens
+
+    q = 1 + num_spec_tokens
+    for num_tokens in range(num_ubatches, max_tokens + 1):
+        # Split as gpu/ubatch_utils.create_ubatch_slices does.
+        split_point = None
+        if q > 1 and num_tokens // (q * num_ubatches) > 0:
+            split_point = q * (num_tokens // (q * num_ubatches))
+        _, slices = maybe_create_ubatch_slices(
+            True,
+            np.full(num_tokens, 1, dtype=np.int32),
+            num_tokens,
+            num_tokens,
+            num_ubatches,
+            split_point=split_point,
+        )
+        assert slices is not None
+        for s in slices[1:]:
+            assert s.token_slice.stop - s.token_slice.start <= bound
+
+
 def test_dbo_microbatches_interleave_on_their_own_ops(monkeypatch):
     dbo = _DBOProbe(monkeypatch)
     ops = [_RecordingOp(f"op{i}", dbo.events, recv=3 + i) for i in range(2)]
