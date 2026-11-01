@@ -7,6 +7,12 @@ import json
 
 from vllm.tokenizers import TokenizerLike
 
+# Incremental detokenization holds a token back while the decoded text ends in
+# an incomplete UTF-8 sequence. A code point spans at most 4 byte-fallback
+# tokens, so a longer run is malformed output; it is flushed as replacement
+# characters so that per-token decode cost stays bounded.
+MAX_PENDING_TOKENS = 16
+
 
 def _replace_none_with_empty(tokens: list[str | None]):
     for i, token in enumerate(tokens):
@@ -266,7 +272,9 @@ def detokenize_incrementally(
             spaces_between_special_tokens=spaces_between_special_tokens,
         )
 
-    if len(new_text) <= len(prefix_text) or new_text.endswith("�"):
+    if (
+        len(new_text) <= len(prefix_text) or new_text.endswith("�")
+    ) and output_token_count - read_offset < MAX_PENDING_TOKENS:
         # utf-8 char at the end means it's a potential unfinished byte sequence
         # from byte fallback tokenization.
         # If it's in the middle, it's probably a real invalid id generated

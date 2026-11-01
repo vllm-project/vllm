@@ -11,6 +11,7 @@ from transformers import TokenizersBackend
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.detokenizer_utils import (
+    MAX_PENDING_TOKENS,
     convert_prompt_ids_to_tokens,
     detokenize_incrementally,
 )
@@ -196,6 +197,10 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
             ids=request.prompt_token_ids,
             skip_special_tokens=self.skip_special_tokens,
         )
+        # Tokens the stream has not rendered yet, and the tokens behind its
+        # last rendered text (what a restarted stream is primed with).
+        self._pending_ids: list[int] = []
+        self._context_ids: list[int] = (request.prompt_token_ids or [])[-4:]
 
         self.spaces_between_special_tokens = (
             sampling_params.skip_special_tokens
@@ -239,7 +244,7 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
             # Handle rare observed overflow, still to be diagnosed.
             # See https://github.com/vllm-project/vllm/issues/21951.
             logger.exception("Encountered invalid token id: %r", next_token_id)
-            token = None
+            return None
         except Exception as e:
             if not str(e).startswith(INVALID_PREFIX_ERR_MSG):
                 raise e
@@ -255,8 +260,37 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
             self.stream = tokenizers.decoders.DecodeStream(
                 skip_special_tokens=self.skip_special_tokens
             )
+            self._pending_ids.clear()
             token = self.stream.step(self.tokenizer, next_token_id)
-        return token
+        if token:
+            self._context_ids = (self._pending_ids + [next_token_id])[-4:]
+            self._pending_ids.clear()
+            return token
+        self._pending_ids.append(next_token_id)
+        if len(self._pending_ids) < MAX_PENDING_TOKENS:
+            return None
+        return self._flush_pending()
+
+    def _flush_pending(self) -> str:
+        """Render the held-back tokens as they are (replacement characters for
+        malformed bytes) and restart the stream behind them, so that a long
+        malformed run is not re-decoded in full on every step."""
+        text = self.tokenizer.decode(
+            self._pending_ids, skip_special_tokens=self.skip_special_tokens
+        )
+        self._pending_ids.clear()
+        # Prime the new stream with the text before the run so the next token
+        # decodes in the same context as in an unbroken stream. A primed prefix
+        # that itself ends in an incomplete sequence would be re-emitted.
+        context = self._context_ids
+        if self.tokenizer.decode(
+            context, skip_special_tokens=self.skip_special_tokens
+        ).endswith("�"):
+            context = []
+        self.stream = tokenizers.decoders.DecodeStream(
+            ids=context or None, skip_special_tokens=self.skip_special_tokens
+        )
+        return text
 
 
 class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
