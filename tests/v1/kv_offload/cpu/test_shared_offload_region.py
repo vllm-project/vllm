@@ -11,7 +11,7 @@ import threading
 import time
 import uuid
 from types import SimpleNamespace
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock, call, mock_open
 
 import pytest
 
@@ -492,6 +492,80 @@ def test_file_has_correct_size(iid):
     """The mmap file size on disk must equal total_size_bytes."""
     with _region(iid, num_chunks=4) as r:
         assert os.path.getsize(r.mmap_path) == 4 * PAGE_SIZE
+
+
+def test_custom_backing_prefaults_thp_aligned_shards_without_padding(
+    iid, tmp_path, monkeypatch
+):
+    """Request THP before pre-faulting a PMD-aligned share of an exact-size pool."""
+    pmd_size = 2 << 20
+    size = 3 * pmd_size + PAGE_SIZE
+    advice_calls = []
+
+    class ObservedMmap(mmap.mmap):
+        def madvise(self, advice, *args):
+            advice_calls.append((advice, args))
+
+    monkeypatch.setattr(mmap, "mmap", ObservedMmap)
+    monkeypatch.setattr(
+        region_module, "open", mock_open(read_data=str(pmd_size)), raising=False
+    )
+    region = SharedOffloadRegion(
+        engine_id=iid,
+        num_chunks=1,
+        rank=None,
+        kv_bytes_per_chunk=size,
+        cpu_page_size=size,
+        populate_shard=(1, 2),
+        shm_dir=str(tmp_path),
+    )
+    try:
+        assert region.base_tensor.numel() == region.mapped_size_bytes == size
+        populate = getattr(mmap, "MADV_POPULATE_WRITE", 23)
+        assert advice_calls == [
+            (getattr(mmap, "MADV_HUGEPAGE", 14), ()),
+            (populate, (0, PAGE_SIZE)),
+            (populate, (2 * pmd_size, pmd_size + PAGE_SIZE)),
+        ]
+    finally:
+        region.cleanup()
+
+
+def test_hugetlbfs_dir_rounds_mapping_to_huge_pages(iid, monkeypatch):
+    """A huge-page directory maps one file of whole huge pages, even when
+    segments are requested, but exposes only the KV."""
+    monkeypatch.setattr(region_module, "_MIN_SEGMENT_BYTES", PAGE_SIZE)
+    huge_page = 2 * 1024 * 1024
+    real_statvfs = os.statvfs
+    monkeypatch.setattr(
+        region_module.os,
+        "statvfs",
+        lambda path: (
+            SimpleNamespace(f_bsize=huge_page)
+            if path == "/dev/shm"
+            else real_statvfs(path)
+        ),
+    )
+    free_space_check = MagicMock()
+    monkeypatch.setattr(region_module, "check_shm_free_space", free_space_check)
+
+    r = SharedOffloadRegion(
+        engine_id=iid,
+        num_chunks=3,
+        rank=0,
+        kv_bytes_per_chunk=PAGE_SIZE,
+        cpu_page_size=PAGE_SIZE,
+        num_segments=3,
+    )
+    try:
+        assert r.is_hugetlb
+        assert r._segments == [(r.mmap_path, 0, huge_page)]
+        assert os.path.getsize(r.mmap_path) == huge_page
+        assert r.base_tensor.numel() == r.total_size_bytes == 3 * PAGE_SIZE
+    finally:
+        r.cleanup()
+        _cleanup_file(r.mmap_path)
+    free_space_check.assert_not_called()
 
 
 def test_madvise_success_selects_madvise_population(iid, monkeypatch):
@@ -1180,6 +1254,7 @@ def test_insufficient_space_raises_clear_error(monkeypatch):
     mock_close.assert_called_once_with(9999)
     mock_check.assert_called_once_with(
         4 * PAGE_SIZE,
+        shm_path="/dev/shm",
         allocation_name="CPU KV offload shared region in /dev/shm",
     )
 
