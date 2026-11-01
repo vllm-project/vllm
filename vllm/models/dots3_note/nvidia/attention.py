@@ -28,6 +28,7 @@ from vllm.v1.attention.backend import (
     AttentionLayer,
     CommonAttentionMetadata,
 )
+from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
 from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
     FlashAttnMLASparseBackend,
     FlashAttnMLASparseImpl,
@@ -50,7 +51,6 @@ from vllm.v1.worker.workspace import (
     current_workspace_manager,
     is_workspace_manager_initialized,
 )
-from vllm.vllm_flash_attn.flash_attn_interface import flash_attn_varlen_func
 
 
 @triton.jit
