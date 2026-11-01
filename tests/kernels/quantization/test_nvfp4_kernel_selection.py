@@ -4,6 +4,7 @@
 
 import pytest
 
+import vllm.envs as envs
 from vllm.model_executor.kernels.linear import (
     _POSSIBLE_NVFP4_KERNELS,
     CutlassNvFp4LinearKernel,
@@ -12,6 +13,8 @@ from vllm.model_executor.kernels.linear import (
     FlashInferCuteDslNvFp4LinearKernel,
     FlashInferCuteDslNvFp4W4A16LinearKernel,
     FlashInferCutlassNvFp4LinearKernel,
+    HummingNvFp4LinearKernel,
+    init_nvfp4_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.transform.schemes.linear_qutlass_nvfp4 import (  # noqa: E501
     QutlassNvFP4LinearMethod,
@@ -51,3 +54,16 @@ def test_qutlass_nvfp4_uses_the_kernel_flashinfer_backend(kernel_cls, backend):
     failing model loading."""
     kernel = kernel_cls.__new__(kernel_cls)
     assert QutlassNvFP4LinearMethod._get_flashinfer_gemm_backend(kernel) == backend
+
+
+def test_batch_invariant_w4a16_selects_humming(monkeypatch):
+    # The batch-invariant CUTLASS kernel is W4A4-only.
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    for kernel in (CutlassNvFp4LinearKernel, HummingNvFp4LinearKernel):
+        monkeypatch.setattr(
+            kernel,
+            "is_supported",
+            classmethod(lambda cls, compute_capability=None: (True, None)),
+        )
+    kernel = init_nvfp4_linear_kernel(use_a16=True)
+    assert isinstance(kernel, HummingNvFp4LinearKernel)

@@ -185,33 +185,11 @@ class XpuMemAllocator:
                 if requests_offload != was_offloaded:
                     has_policy_conflict = True
                 continue
-            size_in_bytes = data.handle[1]
-            total_bytes += size_in_bytes
-            if data.tag not in offload_tags:
-                unmap_and_release(data.handle)
-                data.is_asleep = True
-                continue
-
-            backup_bytes += size_in_bytes
-            device, _, _, _ = data.handle
-            cpu_backup_tensor = torch.empty(
-                size_in_bytes,
-                dtype=torch.uint8,
-                device="cpu",
-                pin_memory=PIN_MEMORY,
-            )
-            cpu_ptr = cpu_backup_tensor.data_ptr()
-            _xpu_memcpy_sync(
-                cpu_ptr,
-                ptr,
-                size_in_bytes,
-                MEMCPY_DEVICE_TO_HOST,
-                device,
-            )
-            data.cpu_backup_tensor = cpu_backup_tensor
-
-            unmap_and_release(data.handle)
-            data.is_asleep = True
+            offload = data.tag in offload_tags
+            total_bytes += data.handle[1]
+            if offload:
+                backup_bytes += data.handle[1]
+            self._put_to_sleep(ptr, data, offload)
 
         logger.info(
             "XpuMemAllocator: sleep freed %.2f GiB memory in total, of which "
@@ -233,6 +211,23 @@ class XpuMemAllocator:
         if callable(xpu_empty_cache):
             xpu_empty_cache()
 
+    def _put_to_sleep(self, ptr: int, data: AllocationData, offload: bool) -> None:
+        device, size_in_bytes, _, _ = data.handle
+        if offload:
+            if data.cpu_backup_tensor is None:
+                data.cpu_backup_tensor = torch.empty(
+                    size_in_bytes,
+                    dtype=torch.uint8,
+                    device="cpu",
+                    pin_memory=PIN_MEMORY,
+                )
+            cpu_ptr = data.cpu_backup_tensor.data_ptr()
+            _xpu_memcpy_sync(cpu_ptr, ptr, size_in_bytes, MEMCPY_DEVICE_TO_HOST, device)
+        else:
+            data.cpu_backup_tensor = None
+        unmap_and_release(data.handle)
+        data.is_asleep = True
+
     def discard(self, tags: tuple[str, ...] | str) -> None:
         """Discard mapped allocations with the given tags without CPU backup."""
         if isinstance(tags, str):
@@ -240,7 +235,7 @@ class XpuMemAllocator:
 
         discarded_bytes = 0
         has_policy_conflict = False
-        for data in self.pointer_to_data.values():
+        for ptr, data in self.pointer_to_data.items():
             if data.tag not in tags:
                 continue
             if data.is_asleep:
@@ -248,8 +243,7 @@ class XpuMemAllocator:
                     has_policy_conflict = True
                 continue
             torch.accelerator.synchronize(data.handle[0])
-            unmap_and_release(data.handle)
-            data.is_asleep = True
+            self._put_to_sleep(ptr, data, offload=False)
             discarded_bytes += data.handle[1]
 
         logger.info(
@@ -289,7 +283,6 @@ class XpuMemAllocator:
                 MEMCPY_HOST_TO_DEVICE,
                 device,
             )
-            data.cpu_backup_tensor = None
 
     def release_pools(self) -> None:
         """Release pools, retaining allocators until their allocations are freed."""

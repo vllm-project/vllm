@@ -162,7 +162,7 @@ def test_routed_experts_loads_per_expert_biases():
     class Loader:
         quant_config = None
         quant_method = object()
-        _fused_shared_expert_quantizer = None
+        shared_expert_online_loader = None
         moe_config = SimpleNamespace(
             is_act_and_mul=True,
             tp_rank=0,
