@@ -266,6 +266,17 @@ class ParallelConfig:
     most beneficial for multimodal serving with large images and tensor
     parallelism. Active only when all queue readers are node-local; reserves
     slots in ``/dev/shm``."""
+    shm_tensor_arena_slots: int = Field(default=8, ge=1)
+    """Number of slots in the shared-memory tensor arena
+    (``enable_shm_tensor_arena``). Each engine→worker message that carries large
+    CPU tensors takes one slot, which stays in use while a reader still holds one
+    of its tensors (a multimodal request keeps its ``pixel_values`` until it
+    finishes). With more image requests in flight than slots, the rest take the
+    copying fallback path. The arena reserves slots x
+    ``shm_tensor_arena_slot_mb`` of ``/dev/shm``."""
+    shm_tensor_arena_slot_mb: int = Field(default=256, ge=1)
+    """Size of one shared-memory tensor arena slot, in MiB. A message whose
+    large tensors do not fit in one slot takes the copying fallback path."""
 
     enable_elastic_ep: bool = False
     """Enable elastic expert parallelism with stateless NCCL groups for DP/EP."""
@@ -1026,6 +1037,8 @@ class ParallelConfig:
             "max_parallel_loading_workers",
             "disable_custom_all_reduce",
             "enable_shm_tensor_arena",
+            "shm_tensor_arena_slots",
+            "shm_tensor_arena_slot_mb",
             "ray_workers_use_nsight",
             "ray_runtime_env",
             "placement_group",

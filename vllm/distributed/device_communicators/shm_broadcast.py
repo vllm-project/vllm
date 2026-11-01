@@ -504,6 +504,8 @@ class MessageQueue:
         max_chunks: int = 10,
         connect_ip: str | None = None,
         enable_shm_tensor_arena: bool = False,
+        shm_tensor_arena_slots: int = 8,
+        shm_tensor_arena_slot_mb: int = 256,
     ):
         if local_reader_ranks is None:
             local_reader_ranks = list(range(n_local_reader))
@@ -529,7 +531,11 @@ class MessageQueue:
             if enable_shm_tensor_arena and n_remote_reader == 0:
                 from vllm.distributed.device_communicators import shm_tensor_arena
 
-                self.tensor_arena = shm_tensor_arena.ShmTensorArena(n_local_reader)
+                self.tensor_arena = shm_tensor_arena.ShmTensorArena(
+                    n_local_reader,
+                    slot_bytes=shm_tensor_arena_slot_mb * 1024 * 1024,
+                    n_slots=shm_tensor_arena_slots,
+                )
 
             # XPUB is very similar to PUB,
             # except that it can receive subscription messages
