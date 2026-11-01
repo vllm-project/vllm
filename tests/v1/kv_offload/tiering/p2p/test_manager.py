@@ -3155,10 +3155,14 @@ def _producer_with_cpu_hit(
     seed_ctx = ReqContext(req_id="seed")
     with tiering.lock:
         assert (
-            tiering.primary_tier.prepare_store([key], seed_ctx, StoreTrigger.ON_COMPUTE)
+            tiering.primary_tier.prepare_store(
+                [key], seed_ctx, trigger=StoreTrigger.ON_COMPUTE
+            )
             is not None
         )
-        tiering.primary_tier.complete_store([key], seed_ctx, StoreTrigger.ON_COMPUTE)
+        tiering.primary_tier.complete_store(
+            [key], seed_ctx, trigger=StoreTrigger.ON_COMPUTE
+        )
     return consumer, tiering
 
 
@@ -3359,9 +3363,11 @@ def test_reset_cache_releases_parked_p2p_slots(drain_peers):
     keys = [OffloadKey(b"one"), OffloadKey(b"two")]
     try:
         tiering.on_new_request(ctx)
-        store = tiering.prepare_store(keys, ctx, StoreTrigger.ON_COMPUTE)
+        store = tiering.prepare_store(keys, ctx, trigger=StoreTrigger.ON_COMPUTE)
         assert store is not None
-        tiering.complete_store(store.keys_to_store, ctx, StoreTrigger.ON_COMPUTE)
+        tiering.complete_store(
+            store.keys_to_store, ctx, trigger=StoreTrigger.ON_COMPUTE
+        )
         tiering.on_schedule_end(ScheduleEndContext([], ()))
         tiering.reset_cache()
         tiering.on_reset_flushed()
@@ -3369,7 +3375,7 @@ def test_reset_cache_releases_parked_p2p_slots(drain_peers):
         replacement = tiering.prepare_store(
             [OffloadKey(str(i).encode()) for i in range(8)],
             ctx,
-            StoreTrigger.ON_COMPUTE,
+            trigger=StoreTrigger.ON_COMPUTE,
         )
         assert replacement is not None
         assert len(replacement.keys_to_store) == 8
@@ -3443,10 +3449,12 @@ def test_reset_symmetric_lookup_rounds(drain_peers, fetch_before_reset):
     step = ScheduleEndContext([], ())
 
     def store():
-        output = tiering.prepare_store([key], local_ctx, StoreTrigger.ON_COMPUTE)
+        output = tiering.prepare_store(
+            [key], local_ctx, trigger=StoreTrigger.ON_COMPUTE
+        )
         assert output is not None
         tiering.complete_store(
-            output.keys_to_store, local_ctx, StoreTrigger.ON_COMPUTE
+            output.keys_to_store, local_ctx, trigger=StoreTrigger.ON_COMPUTE
         )
         tiering.on_schedule_end(step)
 

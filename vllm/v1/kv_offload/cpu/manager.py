@@ -270,6 +270,7 @@ class CPUOffloadingManager(OffloadingManager):
         self,
         keys: Collection[OffloadKey],
         req_context: ReqContext,
+        *,
         trigger: StoreTrigger,
     ) -> PrepareStoreOutput | None:
         return self._prepare_store(keys, req_context)
@@ -389,6 +390,7 @@ class CPUOffloadingManager(OffloadingManager):
         self,
         keys: Collection[OffloadKey],
         req_context: ReqContext,
+        *,
         trigger: StoreTrigger,
         success: bool = True,
     ) -> None:
