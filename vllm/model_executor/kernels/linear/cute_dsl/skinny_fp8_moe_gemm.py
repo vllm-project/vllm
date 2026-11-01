@@ -117,7 +117,9 @@ class ShapeDynamicSkinnyFp8MoeGemm(CuteDslGemm):
         )
         s = make_fake_tensor(cutlass.Float32, (n_scale, k_scale), divisibility=1)
         ids = make_fake_tensor(cutlass.Int32, (num_pairs,), divisibility=1)
-        w = make_fake_tensor(cutlass.Float32, (num_pairs,), divisibility=1)
+        # Own symbolic length: a one-element stand-in is passed when the
+        # kernel does not multiply the routing weights.
+        w = make_fake_tensor(cutlass.Float32, (cute.sym_int(),), divisibility=1)
         c = make_fake_tensor(cutlass.BFloat16, (num_pairs, n), divisibility=1)
         kernel = CuteSkinnyFp8BlockMoeGemm(
             block_size=config.block_size,
