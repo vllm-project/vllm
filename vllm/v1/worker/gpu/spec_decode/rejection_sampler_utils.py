@@ -20,6 +20,10 @@ from vllm.v1.worker.gpu.spec_decode.draft_logits import (
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.spec_decode.vocab_shard import VocabShard
 
+# Vocabulary block sizes of the per-block statistics and of resampling.
+VOCAB_BLOCK_SIZE = 8192
+RESAMPLE_BLOCK_SIZE = 1024
+
 
 @triton.jit
 def _compute_max_and_sumexp(logits):
@@ -1221,7 +1225,8 @@ def rejection_sample(
     if vocab_shard is not None:
         assert vocab_size == vocab_shard.num_cols
         assert contexts is None and fly_window_size == 0
-        assert draft_logits_row_mapping is None
+        # The one-hot draft path reads target logits at full-vocabulary ids.
+        assert draft_logits is not None and draft_logits_row_mapping is None
         vocab_size = vocab_shard.vocab_size
         target_col_start = vocab_shard.col_start
 
@@ -1277,7 +1282,6 @@ def rejection_sample(
     # Compute the per-vocab-block logits stats, such as target argmax
     # (for greedy requests), and target max + softmax exponential
     # (for non-greedy requests).
-    VOCAB_BLOCK_SIZE = 8192
     vocab_num_blocks = triton.cdiv(vocab_size, VOCAB_BLOCK_SIZE)
     padded_vocab_num_blocks = triton.next_power_of_2(vocab_num_blocks)
     target_local_argmax = target_logits.new_empty(
@@ -1479,7 +1483,6 @@ def rejection_sample(
     )
 
     # Resample the rejected/bonus tokens.
-    RESAMPLE_BLOCK_SIZE = 1024
     resample_num_blocks = triton.cdiv(vocab_size, RESAMPLE_BLOCK_SIZE)
     padded_resample_num_blocks = triton.next_power_of_2(resample_num_blocks)
     resampled_local_argmax = target_logits.new_empty(

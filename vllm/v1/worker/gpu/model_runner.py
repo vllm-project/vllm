@@ -562,7 +562,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             ):
                 self.vocab_shard = self._init_vocab_shard()
                 enable = getattr(self.speculator, "enable_vocab_sharded_drafting", None)
-                if self.vocab_shard is not None and enable is not None:
+                if enable is not None:
                     enable(self.vocab_shard)
 
         if self.is_pooling_model and self.is_last_pp_rank:
@@ -1705,38 +1705,55 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return block_tables, slot_mappings
 
     def _init_vocab_shard(self) -> VocabShard | None:
+        """Vocab-sharded verification, if this configuration supports it.
+        Collective: every TP rank reaches the same decision."""
         reason = None
-        if self.rejection_sampler is None:
-            reason = "there is no rejection sampler"
+        draft_logits = getattr(self.speculator, "draft_logits", None)
+        if not isinstance(self.rejection_sampler, RejectionSampler):
+            reason = "the rejection sampler is not the default one"
         elif self.batch_sharder is not None:
             reason = "batch-sharded sampling is enabled"
+        elif self.pcp_manager is not None:
+            reason = "prefill context parallelism is enabled"
         elif not current_platform.is_cuda():
             reason = "it needs CUDA"
         elif not hasattr(self.model, "compute_logits_local"):
             reason = (
                 f"{type(self.model).__name__} does not implement compute_logits_local"
             )
+        else:
+            reason = self.rejection_sampler.vocab_sharding_unsupported_reason(
+                draft_logits
+            )
+        shard = None
         if reason is None:
+            assert self.rejection_sampler is not None and draft_logits is not None
             hidden = torch.zeros(
                 1,
                 self.model_config.get_hidden_size(),
                 dtype=self.dtype,
                 device=self.device,
             )
-            local_vocab_size = self.model.compute_logits_local(hidden).shape[-1]
+            local_logits = self.model.compute_logits_local(hidden)
             reason = vocab_shard_unsupported_reason(
-                self.vocab_size, local_vocab_size, get_tp_group().world_size
+                self.vocab_size, local_logits.shape[-1], get_tp_group().world_size
             )
-        if reason is not None:
+            if draft_logits.values.shape[-1] != self.vocab_size:
+                reason = "the draft logits do not cover the target vocabulary"
+        if reason is None:
+            shard, reason = VocabShard.create(
+                self.vocab_size,
+                local_logits.shape[-1],
+                max_num_logits=self.max_num_reqs * self.decode_query_len,
+                max_num_reqs=self.max_num_reqs,
+                logits_dtype=local_logits.dtype,
+                device=self.device,
+            )
+        if shard is None:
             logger.warning("vocab_sharded_verification is ignored because %s.", reason)
             return None
-        shard = VocabShard(
-            self.vocab_size,
-            local_vocab_size,
-            max_num_logits=self.max_num_reqs * self.decode_query_len,
-            max_num_reqs=self.max_num_reqs,
-            device=self.device,
-        )
+        assert self.rejection_sampler is not None and draft_logits is not None
+        self.rejection_sampler.warmup_vocab_sharded(shard, draft_logits)
         logger.info(
             "Vocab-sharded verification: this rank owns vocabulary columns [%d, %d).",
             shard.col_start,
@@ -1756,14 +1773,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             and input_batch.num_draft_tokens > 0
             and self.rejection_sampler is not None
         ):
+            self.vocab_shard.check_exchange()
             assert self.speculator is not None
             draft_logits = self.speculator.draft_logits
-            if (
-                grammar_output is None
-                and self.rejection_sampler.supports_vocab_sharding(
+            if grammar_output is None and (
+                self.rejection_sampler.supports_vocab_sharding(
                     input_batch, draft_logits
                 )
-                and draft_logits.values.shape[-1] == self.vocab_shard.vocab_size
             ):
                 local_logits = self.model.compute_logits_local(
                     hidden_states[input_batch.logits_indices]

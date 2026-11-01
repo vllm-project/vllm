@@ -115,7 +115,12 @@ class DSparkSpeculator(DFlashSpeculator):
             self.vllm_config, target_model
         ):
             self._try_enable_sharded_sequential_sampling()
-        if self.speculative_config.dspark_tp_markov_sampling:
+        if (
+            self.speculative_config.dspark_tp_markov_sampling
+            and not self.speculative_config.vocab_sharded_verification
+        ):
+            # Else decided in enable_vocab_sharded_drafting, which the model
+            # runner calls once verification has (or has not) been sharded.
             self._try_enable_tp_markov_sampling()
 
     def _try_enable_tp_markov_sampling(self) -> None:
@@ -134,6 +139,8 @@ class DSparkSpeculator(DFlashSpeculator):
     def propose(self, *args, **kwargs) -> torch.Tensor:
         if self._tp_markov_sampler is not None:
             self._tp_markov_sampler.check_exchange()
+        if self._draft_vocab_shard is not None:
+            self._draft_vocab_shard.check_exchange()
         return super().propose(*args, **kwargs)
 
     def _try_enable_sharded_sequential_sampling(self) -> None:
@@ -204,56 +211,72 @@ class DSparkSpeculator(DFlashSpeculator):
             self.use_acceptance_estimator = False
         return model
 
-    def enable_vocab_sharded_drafting(self, vocab_shard: VocabShard) -> None:
-        """With vocab-sharded verification, draft on the same owned columns:
-        each rank computes only its columns of the draft logits (its lm_head
-        shard plus its right neighbour's boundary columns), runs the Markov
-        loop on them and caches only them, as verification reads only them.
-        `complete_draft_logits` fills the rest for a step verified in full.
-        Collective: every TP rank calls it."""
-        sampler = self._tp_markov_sampler
+    def enable_vocab_sharded_drafting(self, vocab_shard: VocabShard | None) -> None:
+        """With vocab-sharded verification (``vocab_shard``), draft on the same
+        owned columns: each rank computes only its columns of the draft logits
+        (its lm_head shard plus its right neighbour's boundary columns), runs
+        the Markov loop on them and caches only them, as verification reads
+        only them. `complete_draft_logits` fills the rest for a step verified
+        in full. Otherwise, or if that is unsupported, the Markov loop is set
+        up as without vocab-sharded verification. Collective: every TP rank
+        calls it."""
+        if not self.speculative_config.dspark_tp_markov_sampling:
+            return
         reason = None
-        if sampler is None:
-            reason = "dspark_tp_markov_sampling is not active"
+        if vocab_shard is None:
+            reason = "verification is not vocab-sharded"
         elif not hasattr(self.model, "compute_draft_logits_local"):
             reason = "the draft model has no compute_draft_logits_local"
-        elif sampler.vocab_size != vocab_shard.vocab_size:
-            reason = "the draft and target vocabularies differ"
+        elif self.draft_logits is None:
+            reason = "drafting is greedy"
         if reason is None:
+            assert vocab_shard is not None and self.draft_logits is not None
             hidden = torch.zeros(
                 1,
                 self.model.config.hidden_size,
                 dtype=self.draft_logits.values.dtype,
                 device=self.device,
             )
-            local = self.model.compute_draft_logits_local(hidden).shape[-1]
+            local_logits = self.model.compute_draft_logits_local(hidden)
             reason = vocab_shard_unsupported_reason(
-                sampler.vocab_size, local, vocab_shard.world
+                vocab_shard.vocab_size, local_logits.shape[-1], vocab_shard.world
             )
-        ranges = [
-            vocab_shard_range(vocab_shard.vocab_size, vocab_shard.world, r)
-            for r in range(vocab_shard.world)
-        ]
-        owned_sampler = None
+        owned_sampler = draft_shard = None
         if reason is None:
+            assert vocab_shard is not None
+            ranges = [
+                vocab_shard_range(vocab_shard.vocab_size, vocab_shard.world, r)
+                for r in range(vocab_shard.world)
+            ]
             owned_sampler, reason = TPMarkovSampler.create(self, ranges)
-        if owned_sampler is None:
+            if owned_sampler is not None and (
+                owned_sampler.vocab_size != vocab_shard.vocab_size
+            ):
+                owned_sampler = None
+                reason = "the draft and target vocabularies differ"
+        if owned_sampler is not None:
+            # The owned path runs up to the sampler's batch size.
+            draft_shard, reason = VocabShard.create(
+                owned_sampler.vocab_size,
+                local_logits.shape[-1],
+                max_num_logits=owned_sampler.max_reqs * self.num_speculative_steps,
+                max_num_reqs=owned_sampler.max_reqs,
+                logits_dtype=local_logits.dtype,
+                device=self.device,
+                verify=False,
+            )
+        if owned_sampler is None or draft_shard is None:
             logger.info("Drafting is not vocab-sharded because %s.", reason)
+            self._try_enable_tp_markov_sampling()
             return
         self._tp_markov_sampler = owned_sampler
-        self._draft_vocab_shard = VocabShard(
-            sampler.vocab_size,
-            local,
-            max_num_logits=self.max_num_reqs * self.num_speculative_steps,
-            max_num_reqs=self.max_num_reqs,
-            device=self.device,
-            verify=False,
-        )
+        self._draft_vocab_shard = draft_shard
         logger.info("DSpark drafting is vocab-sharded.")
 
     def complete_draft_logits(self, idx_mapping: torch.Tensor) -> None:
         """Fill the other ranks' columns of these requests' cached draft
-        logits (vocab-sharded drafting), before a step verified in full."""
+        logits (vocab-sharded drafting), before a step verified in full.
+        ``idx_mapping``: the step's request state indices."""
         if self._draft_vocab_shard is not None and self.draft_logits is not None:
             assert self._tp_markov_sampler is not None
             self._tp_markov_sampler.complete_cache(

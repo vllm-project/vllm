@@ -72,6 +72,8 @@ _PUSH_MAX_REQS = 4
 # Larger batches run the replicated loop (bounds the recompute's memory and
 # the load-time check).
 _MAX_REQS = 128
+# Owned-only mode: transient memory per all-gather of `complete_cache`.
+_COMPLETE_CHUNK_BYTES = 64 << 20
 # Bounded spin, about 2 s per kernel on GB300 (0.24 us per iteration), so that
 # a missing peer cannot hang the GPU. A timeout sets a flag in pinned host
 # memory, and the next `propose` raises.
@@ -391,7 +393,9 @@ class TPMarkovSampler:
         self.w2_peers = (self.w2[: self.col_start], self.w2[self.col_end :])
         self.max_reqs = min(speculator.max_num_reqs, _MAX_REQS)
         self.n_spec = speculator.num_speculative_steps
-        self.push_max_reqs = 0 if self.owned_only else min(_PUSH_MAX_REQS, self.max_reqs)
+        self.push_max_reqs = (
+            0 if self.owned_only else min(_PUSH_MAX_REQS, self.max_reqs)
+        )
 
     @classmethod
     def create(
@@ -722,21 +726,24 @@ class TPMarkovSampler:
 
     def complete_cache(self, cache: torch.Tensor, req_rows: torch.Tensor) -> None:
         """Owned-only mode: fill the other ranks' columns of the cache rows
-        ``req_rows`` (request state indices), for a consumer that reads the
-        whole vocabulary. An all-gather of every rank's columns."""
+        ``req_rows`` (request state indices of a step's batch, all valid), for
+        a consumer that reads the whole vocabulary. All-gathers every rank's
+        columns, a bounded number of rows at a time."""
         if not self.owned_only or req_rows.numel() == 0:
             return
         group = get_tp_group()
-        rows = req_rows.to(torch.long)
+        own = self.col_end - self.col_start
         width = max(b - a for a, b in self.owned_ranges)
-        mine = cache.new_zeros(rows.numel(), cache.shape[1], width)
-        mine[:, :, : self.col_end - self.col_start] = cache[
-            rows, :, self.col_start : self.col_end
-        ]
-        every = cache.new_empty(self.world, *mine.shape)
-        torch.distributed.all_gather_into_tensor(every, mine, group=group.device_group)
-        full = cache[rows]
-        for r, (a, b) in enumerate(self.owned_ranges):
-            if r != self.rank:
-                full[:, :, a:b] = every[r, :, :, : b - a]
-        cache[rows] = full
+        row_bytes = self.world * cache.shape[1] * width * cache.element_size()
+        chunk = max(1, _COMPLETE_CHUNK_BYTES // row_bytes)
+        for i in range(0, req_rows.numel(), chunk):
+            rows = req_rows[i : i + chunk].to(torch.long)
+            mine = cache.new_zeros(rows.numel(), cache.shape[1], width)
+            mine[:, :, :own] = cache[rows, :, self.col_start : self.col_end]
+            every = cache.new_empty(self.world, *mine.shape)
+            torch.distributed.all_gather_into_tensor(
+                every, mine, group=group.device_group
+            )
+            for r, (a, b) in enumerate(self.owned_ranges):
+                if r != self.rank:
+                    cache[rows, :, a:b] = every[r, :, :, : b - a]
