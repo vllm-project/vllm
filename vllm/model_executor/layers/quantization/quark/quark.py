@@ -4,6 +4,7 @@
 import fnmatch
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
+import regex as re
 import torch
 
 from vllm.logger import init_logger
@@ -104,6 +105,17 @@ class QuarkConfig(QuantizationConfig):
         super().__init__()
         if kv_cache_group is None:
             kv_cache_group = []
+        exclude = quant_config.get("exclude")
+        if isinstance(exclude, list):
+            # Exclude entries may name parameters ("<module>.weight") rather than
+            # modules; layers are matched by module name.
+            quant_config = {
+                **quant_config,
+                "exclude": [
+                    e if e.startswith("re:") else re.sub(r"\.(weight|bias)$", "", e)
+                    for e in exclude
+                ],
+            }
         self.quant_config = quant_config
         # Copy the class-level default (which a subclass may override, e.g. the
         # DeepSeek-V4 Quark config) so per-instance edits don't mutate the class.

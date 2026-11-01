@@ -1958,6 +1958,68 @@ def test_quark_should_ignore_layer_rejects_partial_fused_matches():
         )
 
 
+def test_quark_exclude_parameter_names_match_modules():
+    # e.g. amd/Qwen3.8-27B-Quark-AWQ-MXFP4 lists its BF16 MTP head by parameter
+    # name next to module names and regexes.
+    exclude = [
+        "lm_head",
+        "re:model.visual.*",
+        "re:.*\\.norm\\.weight",
+        "mtp.fc.weight",
+        "mtp.norm.weight",
+        "mtp.layers.0.self_attn.q_proj.weight",
+        "mtp.layers.0.self_attn.k_proj.weight",
+        "mtp.layers.0.self_attn.v_proj.weight",
+        "mtp.layers.0.self_attn.o_proj.weight",
+        "mtp.layers.0.self_attn.o_proj.bias",
+        "mtp.layers.0.mlp.gate_proj.weight",
+        "mtp.layers.0.mlp.up_proj.weight",
+        "mtp.layers.0.mlp.down_proj.weight",
+    ]
+    mxfp4 = {
+        "dtype": "fp4",
+        "qscheme": "per_group",
+        "group_size": 32,
+        "scale_format": "e8m0",
+    }
+    config = _make_qtensor_config(
+        {**mxfp4, "is_dynamic": False},
+        {**mxfp4, "is_dynamic": True},
+        exclude=exclude,
+    )
+    config.packed_modules_mapping = FUSED_MAPPING
+
+    unquantized = (None, None, UnquantizedLinearMethod)
+    for prefix in [
+        "lm_head",
+        "model.visual.blocks.0.attn.qkv",
+        "mtp.fc",
+        "mtp.layers.0.self_attn.qkv_proj",
+        "mtp.layers.0.self_attn.o_proj",
+        "mtp.layers.0.mlp.gate_up_proj",
+        "mtp.layers.0.mlp.down_proj",
+    ]:
+        assert config.get_quant_method_target(prefix, LinearBase) == unquantized, prefix
+
+    quantized = (kMxfp4Static, kMxfp4Dynamic, QuarkLinearMethod)
+    for prefix in [
+        "model.layers.0.self_attn.qkv_proj",
+        "model.layers.0.mlp.gate_up_proj",
+        "model.layers.0.mlp.down_proj",
+    ]:
+        assert config.get_quant_method_target(prefix, LinearBase) == quantized, prefix
+
+    # Other consumers read the mapped list; regexes and the input are unchanged.
+    assert config.quant_config["exclude"][:5] == [
+        "lm_head",
+        "re:model.visual.*",
+        "re:.*\\.norm\\.weight",
+        "mtp.fc",
+        "mtp.norm",
+    ]
+    assert exclude[3] == "mtp.fc.weight"
+
+
 def test_fused_name_listed_directly_is_skipped():
     # Regression for Step-3.5-Flash-FP8: the checkpoint lists the fused
     # name (``qkv_proj``) directly in ``modules_to_not_convert``. When a
