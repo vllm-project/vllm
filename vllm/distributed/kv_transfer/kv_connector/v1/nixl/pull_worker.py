@@ -458,7 +458,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         num_tokens: int,
         block_size_ratio: int,
         remote_physical_per_logical: int,
-    ) -> tuple[BlockIds, BlockIds, list[int]]:
+    ) -> tuple[BlockIds, BlockIds, list[range]]:
         """Pair kernel blocks holding the same tokens across P/D block sizes.
 
         Local blocks are split into remote-sized sub-blocks. Each side
@@ -467,22 +467,22 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         different tokens. So drop each side's sub-blocks past that last token
         and pair the lists from their ends. SSM groups pass through unpaired.
 
-        Returns the paired lists and, per group, the local sub-blocks the
-        read covers from the start of the group.
+        Returns the paired lists and, per group, the range of local sub-blocks
+        the read covers.
         """
         local_per_logical = (
             self._physical_blocks_per_logical_kv_block * block_size_ratio
         )
         paired_local: list[list[int]] = []
         paired_remote: list[list[int]] = []
-        covered: list[int] = []
+        covered: list[range] = []
         for g, (local, remote) in enumerate(
             zip(local_block_ids, remote_block_ids, strict=True)
         ):
             if _is_ssm_spec(self._group_spec_types[g]):
                 paired_local.append(list(local))
                 paired_remote.append(list(remote))
-                covered.append(len(local))
+                covered.append(range(len(local)))
                 continue
             spec = self.kv_cache_config.transfer_groups[g].kv_cache_spec
             num_sub_blocks = cdiv(num_tokens, spec.block_size // local_per_logical)
@@ -494,7 +494,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             num_pairs = min(len(local), len(remote))
             paired_local.append(local[len(local) - num_pairs :])
             paired_remote.append(remote[len(remote) - num_pairs :])
-            covered.append(len(local))
+            covered.append(range(len(local) - num_pairs, len(local)))
         return paired_local, paired_remote, covered
 
     def _read_blocks(
