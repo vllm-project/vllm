@@ -93,6 +93,12 @@ impl TextRequestProcessor {
         self.backend.tokenizer()
     }
 
+    /// Return whether a real tokenizer is loaded; see
+    /// [`TextBackend::has_tokenizer`].
+    pub fn has_tokenizer(&self) -> bool {
+        self.backend.has_tokenizer()
+    }
+
     /// Return the effective model context length.
     pub fn max_model_len(&self) -> u32 {
         self.max_model_len
@@ -149,6 +155,11 @@ impl TextRequestProcessor {
 
     /// Tokenize and lower one request without submitting it to an engine.
     pub fn prepare(&self, mut request: TextRequest) -> Result<PreparedTextRequest> {
+        // Without a tokenizer the output stays token IDs only, which also
+        // rejects stop strings in `validate`.
+        if !self.has_tokenizer() {
+            request.decode_options.detokenize = false;
+        }
         request.validate()?;
 
         if request.arrival_time.is_none() {
@@ -238,6 +249,12 @@ impl TextLlm {
         self.processor.tokenizer()
     }
 
+    /// Return whether a real tokenizer is loaded; see
+    /// [`TextBackend::has_tokenizer`].
+    pub fn has_tokenizer(&self) -> bool {
+        self.processor.has_tokenizer()
+    }
+
     /// Tokenizer vocabulary size (the number of tokens the tokenizer knows),
     /// used to bound `allowed_token_ids` like the Python frontend `len(tokenizer)`.
     pub fn tokenizer_vocab_size(&self) -> usize {
@@ -281,6 +298,12 @@ impl TextLlm {
             text_request,
             generate_request,
         } = self.processor.prepare(request)?;
+        // The engine compiles grammars with its own tokenizer, which it skips
+        // along with this frontend under `--skip-tokenizer-init`. A render-only
+        // frontend forwards the constraint to an engine it does not configure.
+        if !self.has_tokenizer() && generate_request.sampling_params.structured_outputs.is_some() {
+            return Err(Error::TokenizerUnavailable);
+        }
 
         let raw_stream = self.llm.generate(generate_request).await?;
         Ok((text_request, raw_stream))
@@ -303,6 +326,9 @@ impl TextLlm {
 mod tests {
     use std::sync::Arc;
 
+    use thiserror_ext::AsReport as _;
+    use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
+    use vllm_tokenizer::UnavailableTokenizer;
     use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::*;
@@ -318,6 +344,107 @@ mod tests {
         fn model_id(&self) -> &str {
             "test-model"
         }
+    }
+
+    /// A `--skip-tokenizer-init` backend: token IDs only, bounded by the model
+    /// vocabulary.
+    struct TokenizerlessTextBackend;
+
+    impl TextBackend for TokenizerlessTextBackend {
+        fn tokenizer(&self) -> DynTokenizer {
+            Arc::new(UnavailableTokenizer::new(self.model_vocab_size()))
+        }
+
+        fn has_tokenizer(&self) -> bool {
+            false
+        }
+
+        fn model_vocab_size(&self) -> usize {
+            100
+        }
+
+        fn model_id(&self) -> &str {
+            "test-model"
+        }
+    }
+
+    #[test]
+    fn tokenizerless_backend_prepares_token_id_prompts_only() {
+        let processor = TextRequestProcessor::new(Arc::new(TokenizerlessTextBackend), 64);
+        let token_ids = || TextRequest {
+            prompt: Prompt::TokenIds(vec![1, 2, 99]),
+            ..TextRequest::for_test()
+        };
+
+        let prepared = processor.prepare(token_ids()).unwrap();
+        assert_eq!(prepared.generate_request.prompt_token_ids, vec![1, 2, 99]);
+        // The output is never detokenized.
+        assert!(!prepared.text_request.decode_options.detokenize);
+
+        // Preparing keeps structured outputs: a render-only frontend forwards
+        // them to an engine it does not configure.
+        let structured = processor
+            .prepare(TextRequest {
+                sampling_params: SamplingParams {
+                    structured_outputs: Some(StructuredOutputsParams::json(
+                        serde_json::json!({"type": "object"}),
+                    )),
+                    ..SamplingParams::default()
+                },
+                ..token_ids()
+            })
+            .unwrap();
+        assert!(structured.generate_request.sampling_params.structured_outputs.is_some());
+
+        let errors = [
+            processor.prepare(TextRequest::for_test()),
+            processor.prepare(TextRequest {
+                decode_options: TextDecodeOptions {
+                    stop_strings: Some(vec!["stop".to_string()]),
+                    ..Default::default()
+                },
+                ..token_ids()
+            }),
+            processor.prepare(TextRequest {
+                sampling_params: SamplingParams {
+                    bad_words: Some(vec!["bad".to_string()]),
+                    ..SamplingParams::default()
+                },
+                ..token_ids()
+            }),
+            // The model vocabulary bounds token IDs without a tokenizer.
+            processor.prepare(TextRequest {
+                prompt: Prompt::TokenIds(vec![100]),
+                ..TextRequest::for_test()
+            }),
+        ]
+        .map(|result| {
+            let error = result.unwrap_err();
+            (
+                error.is_request_validation_error(),
+                error.to_report_string(),
+            )
+        });
+        expect_test::expect![[r#"
+            [
+                (
+                    true,
+                    "this request needs a tokenizer, which is not loaded when `--skip-tokenizer-init` is set",
+                ),
+                (
+                    true,
+                    "text request `test-request` stop strings require detokenization; enable it or use stop token IDs",
+                ),
+                (
+                    true,
+                    "this request needs a tokenizer, which is not loaded when `--skip-tokenizer-init` is set",
+                ),
+                (
+                    true,
+                    "token_id(s) [100] in prompt are out of vocabulary. Vocabulary size: 100",
+                ),
+            ]
+        "#]].assert_debug_eq(&errors);
     }
 
     #[test]

@@ -236,7 +236,7 @@ impl HuggingFaceTokenizer {
         info!(path = %path.display(), "loading tokenizer with fastokens");
         let tokenizer_json = load_tokenizer_json_with_extra_tokens(path)?;
         let mut t = FastokensTokenizer::from_json(tokenizer_json)
-            .map_err(|error| tokenizer_error!("failed to load tokenizer: {}", error.as_report()))?;
+            .map_err(|error| backend!("failed to load tokenizer: {}", error.as_report()))?;
         // fastokens applies `tokenizer.json`'s truncation and padding on encode, but
         // transformers resets both on every call, so the Python frontend never sees them.
         t.set_truncation(None);
@@ -249,7 +249,7 @@ impl HuggingFaceTokenizer {
         info!(path = %path.display(), "loading tokenizer with huggingface tokenizers");
         let tokenizer_json = load_tokenizer_json_with_extra_tokens(path)?;
         let mut t = serde_json::from_value::<HfTokenizer>(tokenizer_json)
-            .map_err(|error| tokenizer_error!("failed to load tokenizer: {}", error.as_report()))?;
+            .map_err(|error| backend!("failed to load tokenizer: {}", error.as_report()))?;
         // Like `new_fastokens`: the Python frontend never applies `tokenizer.json`'s
         // truncation and padding.
         t.with_truncation(None).expect("clearing truncation cannot fail");
@@ -279,22 +279,22 @@ impl Tokenizer for HuggingFaceTokenizer {
             Backend::Hf(t) => {
                 let encoding = t
                     .encode(text, add_special_tokens)
-                    .map_err(|error| tokenizer_error!("encoding failed: {}", error.as_report()))?;
+                    .map_err(|error| backend!("encoding failed: {}", error.as_report()))?;
                 Ok(encoding.get_ids().to_vec())
             }
             Backend::Fastokens(t) | Backend::FastokensByteLevel(t) => t
                 .encode_with_special_tokens(text, add_special_tokens)
-                .map_err(|error| tokenizer_error!("encoding failed: {}", error.as_report())),
+                .map_err(|error| backend!("encoding failed: {}", error.as_report())),
         }
     }
 
     fn encode_ordinary(&self, text: &str) -> Result<Vec<u32>> {
         match &self.backend {
             Backend::Hf(tokenizer) => encode_hf_ordinary(tokenizer, text)
-                .map_err(|error| tokenizer_error!("encoding failed: {}", error.as_report())),
+                .map_err(|error| backend!("encoding failed: {}", error.as_report())),
             Backend::Fastokens(tokenizer) | Backend::FastokensByteLevel(tokenizer) => {
                 encode_fastokens_ordinary(tokenizer, text)
-                    .map_err(|error| tokenizer_error!("encoding failed: {}", error.as_report()))
+                    .map_err(|error| backend!("encoding failed: {}", error.as_report()))
             }
         }
     }
@@ -303,10 +303,10 @@ impl Tokenizer for HuggingFaceTokenizer {
         match &self.backend {
             Backend::Hf(t) => t
                 .decode(token_ids, skip_special_tokens)
-                .map_err(|error| tokenizer_error!("decoding failed: {}", error.as_report())),
+                .map_err(|error| backend!("decoding failed: {}", error.as_report())),
             Backend::Fastokens(t) => t
                 .decode(token_ids, skip_special_tokens)
-                .map_err(|error| tokenizer_error!("decoding failed: {}", error.as_report())),
+                .map_err(|error| backend!("decoding failed: {}", error.as_report())),
             Backend::FastokensByteLevel(t) => {
                 decode_fastokens_byte_level(t, token_ids, skip_special_tokens)
             }
