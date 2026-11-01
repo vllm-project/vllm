@@ -13,7 +13,8 @@ additional runtime details. Verbose logging is intentionally opt-in because it
 can emit many logs and add overhead.
 
 Currently monitors:
-- CuTeDSL cute.compile calls
+- CuTeDSL cute.compile calls, and compiles of VLLM_CUTE_DSL_AOT_CACHE hits
+  for export
 - Triton ``@triton.autotune`` cache misses (via ``knobs.autotuning.print``)
 - Triton ``@triton.jit`` first-time compilations
   (via ``knobs.runtime.jit_post_compile_hook``)
@@ -289,6 +290,13 @@ def _log_cutedsl_jit_compile(fn_name: str) -> None:
         event="JIT compilation",
         fn_name=fn_name,
     )
+
+
+def report_cutedsl_compile(fn_name: str) -> None:
+    """Report a CuTeDSL compilation that does not go through ``cute.compile``,
+    such as exporting a VLLM_CUTE_DSL_AOT_CACHE hit."""
+    if _active:
+        _log_cutedsl_jit_compile(fn_name)
 
 
 class _MonitoredCuteCompile:
