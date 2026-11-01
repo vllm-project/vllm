@@ -459,7 +459,14 @@ class _attention(torch.autograd.Function):
         E_FBLOCK = e // NUM_FBLOCK
         assert e % NUM_FBLOCK == 0
 
-        CBLOCK = 64
+        # Device-aware CBLOCK: on Ampere (SM 8.x) the 64 KB fp32 kv
+        # accumulator + double-buffered k_trans/v at CBLOCK=64 yields a peak
+        # SMEM of ~131 KB per CTA, exceeding the ~99 KB hardware ceiling on
+        # consumer/prosumer Ampere GPUs (RTX A4000, 4090, A10, etc.) and
+        # causing the kernel to fail to launch with OutOfResources. Halving
+        # CBLOCK to 32 brings the peak to ~96 KB, fits the ceiling, and
+        # leaves Hopper+ unchanged.
+        CBLOCK = 64 if capability[0] >= 9 else 32
         NUM_CBLOCK = BLOCK // CBLOCK
         assert BLOCK % CBLOCK == 0, "BLOCK must be a multiple of CBLOCK"
 
