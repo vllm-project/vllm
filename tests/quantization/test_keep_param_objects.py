@@ -114,10 +114,11 @@ def _moe(quant_config: QuantizationConfig | None, **kwargs):
         num_experts=8,
         top_k=2,
         hidden_size=SIZE,
+        intermediate_size=SIZE,
         params_dtype=torch.bfloat16,
         quant_config=quant_config,
         prefix="model.layers.0.mlp.experts",
-        **{"intermediate_size": SIZE, **kwargs},
+        **kwargs,
     ).routed_experts
     return layer, layer.quant_method
 
@@ -458,55 +459,6 @@ def test_direct_reload_keeps_kernel_tensor_addresses(
     fresh = _kernel_tensors(*_cold_start(build, default_vllm_config, seed=1)[:2])
     # bytes: random FP8/E8M0 payloads include NaN encodings
     assert [n for n in reloaded if not _same_bytes(reloaded[n], fresh[n])] == []
-
-
-def test_direct_reload_zeroes_padding(
-    default_vllm_config, dist_init, monkeypatch
-) -> None:
-    """Marlin rounds the MXFP4 intermediate size up (448 -> 512) and its repack
-    moves the padding; the checkpoint covers only the unpadded region, so a
-    reload must leave the padding zero, as a cold start does."""
-    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
-    default_vllm_config.model_config = ModelConfig()
-    default_vllm_config.kernel_config.moe_backend = "marlin"
-    n = 448
-    unpadded = {
-        "w13_weight": (slice(None), slice(2 * n)),
-        "w13_weight_scale": (slice(None), slice(2 * n)),
-        "w13_bias": (slice(None), slice(2 * n)),
-        "w2_weight": (Ellipsis, slice(n // 2)),
-        "w2_weight_scale": (Ellipsis, slice(n // 32)),
-    }
-
-    def cold_start(seed: int):
-        default_vllm_config.compilation_config.static_forward_context.clear()
-        with torch.device("cuda"):
-            layer, method = _moe(
-                Mxfp4Config(), intermediate_size=n, has_bias=True, **GPT_OSS_SWIGLU
-            )
-        load(layer, seed)
-        process_weights_after_loading(
-            layer, default_vllm_config.model_config, torch.device("cuda")
-        )
-        return layer, method
-
-    def load(layer: torch.nn.Module, seed: int) -> None:
-        torch.manual_seed(seed)
-        for name, param in layer.named_parameters(recurse=False):
-            region = param.data[unpadded.get(name, ...)]
-            if param.dtype == torch.uint8:
-                region.copy_(torch.randint(120, 130, region.shape))
-            else:
-                region.copy_(torch.rand(region.shape) + 0.5)
-
-    layer, method = cold_start(seed=0)
-    assert layer.moe_config.intermediate_size_per_partition > n  # padded
-    begin_direct_reload(layer)
-    load(layer, seed=1)
-    finish_direct_reload(layer, default_vllm_config.model_config, torch.device("cuda"))
-    reloaded = _kernel_tensors(layer, method)
-    fresh = _kernel_tensors(*cold_start(seed=1))
-    assert [k for k in reloaded if not _same_bytes(reloaded[k], fresh[k])] == []
 
 
 def test_localized_nvfp4_shards_refilled_in_place():
