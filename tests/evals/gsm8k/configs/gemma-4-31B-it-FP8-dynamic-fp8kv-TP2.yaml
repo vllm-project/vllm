@@ -1,0 +1,17 @@
+# Gemma-4 full-attention layers (head_size=512) with an FP8 KV cache take the
+# FA4 SM90 FP8 MMA path on Hopper; the sliding-window layers use FA3 FP8.
+# The hf-override makes the model text-only. Without it Gemma-4 is an
+# mm-prefix LM, which FLASH_ATTN does not support with FP8 KV on SM90.
+model_name: "RedHatAI/gemma-4-31B-it-FP8-dynamic"
+# Measured 0.970 on 2x H200 with this harness and FA PR 199.
+accuracy_threshold: 0.96
+num_questions: 1319
+num_fewshot: 5
+use_chat_completions: true
+max_tokens: 512
+server_args: >-
+  --tensor-parallel-size 2
+  --max-model-len 4096
+  --kv-cache-dtype fp8
+  --attention-backend FLASH_ATTN
+  --hf-overrides '{"text_config":{"use_bidirectional_attention":null}}'
