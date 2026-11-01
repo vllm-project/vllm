@@ -1981,6 +1981,11 @@ def _rocm_aiter_fp8_attn_impl(
     max_seqlen_value = q_len if max_seqlen is None else max_seqlen.item()
 
     q, k, v = (x.flatten(0, 1) for x in (q, k, v))
+    # AITER takes its asm FP8 kernel only for per-tensor descales of shape (1,);
+    # the encoder keeps them (1, 1, 1, 1), which selects the slower CK-tile one.
+    q_descale, k_descale, v_descale = (
+        d.view(1) if d.numel() == 1 else d for d in (q_descale, k_descale, v_descale)
+    )
     output = flash_attn_varlen_fp8_pertensor_func(
         q,
         k,
