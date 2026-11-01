@@ -248,6 +248,65 @@ def test_memory_profile_bounds_decode_logits_rows(monkeypatch, kv_cache_memory_b
     assert get_current_vllm_config_or_none() is None
 
 
+@pytest.mark.parametrize("estimate_enabled", [True, False])
+def test_cudagraph_memory_profile_runs_only_when_applied(monkeypatch, estimate_enabled):
+    """The graph memory estimate is a full capture pass; with the estimate
+    disabled it is neither run nor subtracted from the KV cache budget."""
+    from vllm.config import CUDAGraphMode
+
+    estimate = 3 * GiB_bytes
+    calls = []
+
+    def profile_cudagraph_memory():
+        calls.append(1)
+        return estimate
+
+    worker = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL)
+        ),
+        randomize_dummy_inputs=False,
+        use_v2_model_runner=False,
+        cache_config=SimpleNamespace(
+            kv_cache_memory_bytes=None, gpu_memory_utilization=0.9
+        ),
+        model_config=SimpleNamespace(multimodal_config=None),
+        parallel_config=SimpleNamespace(),
+        model_runner=SimpleNamespace(
+            profile_run=lambda **kwargs: None,
+            model_memory_usage=0,
+            profile_cudagraph_memory=profile_cudagraph_memory,
+        ),
+        init_snapshot=SimpleNamespace(
+            free_memory=80 * GiB_bytes, total_memory=80 * GiB_bytes
+        ),
+        requested_memory=72 * GiB_bytes,
+        _scoped_allocator_max_split=lambda **kwargs: nullcontext(),
+    )
+    profile_result = SimpleNamespace(
+        after_profile=SimpleNamespace(free_memory=60 * GiB_bytes),
+        total_consumed=20 * GiB_bytes,
+        non_kv_cache_memory=20 * GiB_bytes,
+        transient_peak_headroom=0,
+    )
+    monkeypatch.setattr(gpu_worker, "maybe_apply_startup_plan", lambda _: None)
+    monkeypatch.setattr(
+        gpu_worker,
+        "memory_profiling",
+        lambda *args, **kwargs: nullcontext(profile_result),
+    )
+    monkeypatch.setattr(gpu_worker.current_platform, "is_cuda_alike", lambda: True)
+    monkeypatch.setenv(
+        "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", "1" if estimate_enabled else "0"
+    )
+
+    available = gpu_worker.Worker.determine_available_memory(worker)
+
+    assert calls == ([1] if estimate_enabled else [])
+    expected = 52 * GiB_bytes - (estimate if estimate_enabled else 0)
+    assert available == expected
+
+
 # Startup-plan persistence (vllm/v1/worker/startup_plan.py), applied and
 # saved by Worker.determine_available_memory / compile_or_warm_up_model.
 
