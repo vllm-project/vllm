@@ -5,7 +5,8 @@ use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::BoxError;
-use axum::http::HeaderMap;
+use axum::http::header::CONTENT_TYPE;
+use axum::http::{HeaderMap, HeaderValue};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use futures::Stream;
@@ -38,19 +39,29 @@ pub fn unix_timestamp() -> u64 {
 /// event has been produced for that long (queued, prefill, between tokens, or
 /// while a parser buffers a long tool call). SSE parsers ignore comments, but
 /// they still count as bytes for read timeouts in reverse proxies and clients.
+///
+/// The content type names the UTF-8 charset, like the Python frontend: clients
+/// such as `requests` otherwise decode a `text/*` body as ISO-8859-1.
 pub fn sse_response<S, E>(stream: S, keep_alive_interval: Option<Duration>) -> Response
 where
     S: Stream<Item = Result<Event, E>> + Send + 'static,
     E: Into<BoxError>,
 {
     let sse = Sse::new(stream);
-    match keep_alive_interval {
+    let mut response = match keep_alive_interval {
         Some(interval) => sse
             .keep_alive(KeepAlive::new().interval(interval).text("keep-alive"))
             .into_response(),
         None => sse.into_response(),
-    }
+    };
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static(SSE_CONTENT_TYPE));
+    response
 }
+
+/// Content type of streamed responses.
+const SSE_CONTENT_TYPE: &str = "text/event-stream; charset=utf-8";
 
 /// Construct an API error for a failed utility call to the engine core.
 pub fn utility_call_error(method: &str, error: impl AsReport) -> ApiError {
@@ -278,6 +289,16 @@ mod tests {
             ]
         "#]]
         .assert_debug_eq(&frames);
+    }
+
+    #[test]
+    fn sse_response_names_utf8_charset() {
+        let events = stream::iter([Ok::<_, Infallible>(Event::default().data("x"))]);
+        let response = sse_response(events, None);
+        assert_eq!(
+            response.headers().get(CONTENT_TYPE).unwrap(),
+            "text/event-stream; charset=utf-8"
+        );
     }
 
     /// Without an interval, an idle gap produces no extra bytes.
