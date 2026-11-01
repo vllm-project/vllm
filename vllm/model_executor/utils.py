@@ -235,7 +235,7 @@ def refill_derived(obj: object, name: str, new: torch.Tensor) -> torch.Tensor: .
 def refill_derived(
     obj: object, name: str, new: torch.Tensor | None
 ) -> torch.Tensor | None:
-    """Set ``obj.name`` (a buffer or plain attribute, never a parameter) to a
+    """Set ``obj.name`` (a plain attribute, never a parameter or buffer) to a
     tensor derived from the weights. A held tensor of the same shape, dtype and
     device is refilled in place, so captured CUDA graphs keep its address; it
     must own its storage. Returns the tensor now held under ``name``."""
