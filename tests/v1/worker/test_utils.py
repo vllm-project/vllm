@@ -25,6 +25,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
     _SlotMappingStaging,
 )
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
+from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot
 from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
@@ -1402,7 +1403,9 @@ def test_bind_and_copy_replayssm_cache_by_group(monkeypatch, layout):
     runner_pages: list[torch.Tensor] = []
     bind_kv_cache(pages, ctx, runner_pages)
     initialize_replayssm_ring_trackers(kv_config, ctx)
-    assert pages[names[0]].untyped_storage().nbytes() == 4 * 256
+    # ROCm rounds the shared allocation up to a 4 KiB RDMA page.
+    expected_storage_size = 4096 if current_platform.is_rocm() else budget
+    assert pages[names[0]].untyped_storage().nbytes() == expected_storage_size
     for mixer in mixers:
         assert len(mixer.kv_cache) == 5
     assert mixers[0]._replayssm_ring_start is mixers[2]._replayssm_ring_start
