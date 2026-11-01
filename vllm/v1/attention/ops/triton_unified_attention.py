@@ -15,6 +15,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.platform_utils import num_compute_units
 from vllm.v1.attention.ops.triton_attention_helpers import (
     apply_alibi_to_score,
     apply_softcap,
@@ -35,6 +36,10 @@ is_batch_invariant = envs.VLLM_BATCH_INVARIANT
 float8_info = torch.finfo(current_platform.fp8_dtype())
 # Longest per-request query (e.g. 1 + num_speculative_tokens) run by split-K.
 MAX_3D_QUERY_LEN = 8
+# Thresholds for the larger prefill Q tile, see _get_prefill_block_m.
+PREFILL_TILE_MIN_TOKENS = 2048
+PREFILL_TILE_MIN_BLOCKS_PER_SEQ = 6
+PREFILL_TILE_MIN_PROGRAMS_PER_SM = 4
 
 
 @triton.jit
@@ -825,6 +830,42 @@ def _get_tile_size(
     return 16 if element_size >= 2 else 32
 
 
+def _get_prefill_block_m(
+    head_size: int,
+    num_queries_per_kv: int,
+    num_tokens: int,
+    num_seqs: int,
+    num_kv_heads: int,
+    dtype: torch.dtype,
+) -> int | None:
+    """Larger BLOCK_M for prefill-heavy batches on sm80/sm89, else None.
+
+    The tile wastes rows on decode sequences, so it needs enough tokens, query
+    blocks per sequence and programs to fill the GPU.
+    """
+    if (
+        is_batch_invariant
+        or num_tokens < PREFILL_TILE_MIN_TOKENS
+        or num_queries_per_kv > 16
+        or not 64 <= head_size <= 128
+        or dtype not in (torch.float16, torch.bfloat16)
+        or not current_platform.is_cuda()
+        or not (
+            current_platform.is_device_capability(80)
+            or current_platform.is_device_capability(89)
+        )
+    ):
+        return None
+    block_m = 64 if head_size <= 64 else 128
+    block_q = block_m // num_queries_per_kv
+    if num_tokens < PREFILL_TILE_MIN_BLOCKS_PER_SEQ * num_seqs * block_q:
+        return None
+    num_programs = (num_tokens // block_q + num_seqs) * num_kv_heads
+    if num_programs < PREFILL_TILE_MIN_PROGRAMS_PER_SM * num_compute_units():
+        return None
+    return block_m
+
+
 def unified_attention(
     q,
     k,
@@ -873,6 +914,8 @@ def unified_attention(
     # Gemma4: clamp mm_prefix bidirectional ranges by the sliding window.
     # Default False keeps the original behavior for every other model.
     mm_prefix_clamp_sliding_window: bool = False,
+    # Larger prefill Q tile; only the TRITON_ATTN backend opts in.
+    prefill_tile: bool = False,
 ):
     # Resolve causal: bool or per-seq tensor.
     use_per_seq_causal = isinstance(causal, torch.Tensor)
@@ -978,6 +1021,35 @@ def unified_attention(
         BLOCK_M = 32
         BLOCK_Q = BLOCK_M // num_queries_per_kv
         launch_num_warps = 8
+        launch_num_stages = 2
+
+    prefill_block_m = None
+    # Only plain causal attention was tested with the larger tile.
+    if (
+        prefill_tile
+        and kv_quant_mode == KVQuantMode.NONE
+        and not use_td
+        and use_causal
+        and not use_per_seq_causal
+        and not use_mm_prefix
+        and not use_rswa
+        and not use_alibi_slopes
+        and not use_qq_bias
+        and output_scale is None
+        and chunk_lookback < 0
+    ):
+        prefill_block_m = _get_prefill_block_m(
+            head_size,
+            num_queries_per_kv,
+            q.shape[0],
+            num_seqs,
+            num_kv_heads,
+            q.dtype,
+        )
+    if prefill_block_m is not None:
+        BLOCK_M = prefill_block_m
+        BLOCK_Q = BLOCK_M // num_queries_per_kv
+        launch_num_warps = 4
         launch_num_stages = 2
 
     # Ideally we would launch with kernel with:
