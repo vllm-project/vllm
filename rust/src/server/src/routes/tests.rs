@@ -61,11 +61,13 @@ use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 use super::{
     build_router, build_router_with_dev_mode, build_router_with_dev_mode_and_lora,
     build_router_with_scale_out_endpoints, render::build_router as build_render_router,
+    strip_root_path, with_root_path,
 };
 use crate::config::{
-    ApiServerOptions, CorsConfig, DEFAULT_REQUEST_BODY_LIMIT_BYTES, LoraModulePath,
+    AccessLogConfig, ApiServerOptions, CorsConfig, DEFAULT_REQUEST_BODY_LIMIT_BYTES, LoraModulePath,
 };
 use crate::lora::LoadLoraError;
+use crate::model_names::ServedModelNames;
 use crate::render::RenderState;
 use crate::state::AppState;
 
@@ -777,7 +779,7 @@ fn test_render_app_with(
     let backend = Arc::new(FakeChatBackend::new());
     build_render_router(Arc::new(RenderState {
         model: "backend-model".to_string(),
-        served_model_names: vec!["render-model".to_string()],
+        served_model_names: ServedModelNames::new(vec!["render-model".to_string()]),
         max_model_len,
         text: TextRequestProcessor::new(backend.clone(), max_model_len.unwrap_or(u32::MAX)),
         chat: ChatRequestProcessor::render_only(backend)
@@ -1799,7 +1801,7 @@ async fn render_glm_tools_for_none_follow_server_exclusion_setting() {
     for exclude in [false, true] {
         let mut app = build_render_router(Arc::new(RenderState {
             model: "glm-test".into(),
-            served_model_names: vec!["glm-test".into()],
+            served_model_names: ServedModelNames::new(vec!["glm-test".into()]),
             max_model_len: Some(4096),
             text: TextRequestProcessor::new(Arc::new(FakeChatBackend::new()), 4096),
             chat: ChatRequestProcessor::render_only(backend.clone())
@@ -2111,6 +2113,65 @@ async fn api_key_auth_rejects_missing_token_on_guarded_route() {
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
     assert_eq!(json, json!({ "error": "Unauthorized" }));
+}
+
+/// The root path is stripped up to a path segment boundary, like Starlette's
+/// `get_route_path`, keeping the query.
+#[test]
+fn strip_root_path_keeps_query_and_segment_boundary() {
+    let rewritten = [
+        "/llm/v1/models?limit=1",
+        "/llm/v1/models",
+        "/llm",
+        "/llmx/v1/models",
+        "/v1/models",
+    ]
+    .map(|uri| {
+        let request = Request::builder().uri(uri).body(Body::empty()).expect("build request");
+        strip_root_path(request, "/llm").uri().to_string()
+    });
+    expect_test::expect![[r#"
+        [
+            "/v1/models?limit=1",
+            "/v1/models",
+            "/",
+            "/llmx/v1/models",
+            "/v1/models",
+        ]
+    "#]]
+    .assert_debug_eq(&rewritten);
+}
+
+/// Like FastAPI's `root_path`, routes are served both under the prefix and at
+/// their bare paths, and API-key auth guards the prefixed paths too. The
+/// prefix only matches up to a path segment boundary.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn root_path_serves_routes_under_prefix_and_at_bare_paths() {
+    let (app, _engine_task) = test_app_with_api_keys(vec!["secret".to_string()]).await;
+    let mut app = with_root_path(app, "/llm".to_string());
+
+    for (uri, authorization, expected) in [
+        ("/v1/models", Some("Bearer secret"), StatusCode::OK),
+        ("/llm/v1/models", Some("Bearer secret"), StatusCode::OK),
+        ("/llm/v1/models", None, StatusCode::UNAUTHORIZED),
+        (
+            "/llmx/v1/models",
+            Some("Bearer secret"),
+            StatusCode::NOT_FOUND,
+        ),
+        ("/llm", Some("Bearer secret"), StatusCode::NOT_FOUND),
+    ] {
+        let mut request = Request::builder().uri(uri);
+        if let Some(authorization) = authorization {
+            request = request.header("authorization", authorization);
+        }
+        let response = app
+            .call(request.body(Body::empty()).expect("build request"))
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), expected, "{uri} {authorization:?}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3179,6 +3240,48 @@ async fn wrong_model_returns_not_found() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn skip_model_name_validation_serves_unknown_model_with_base_model() {
+    let (chat, engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-openai-skip-model-name",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let mut app = build_router(Arc::new(
+        AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat).with_api_server_options(
+            ApiServerOptions {
+                skip_model_name_validation: true,
+                ..Default::default()
+            },
+        ),
+    ));
+
+    let (status, json) = post_json(
+        &mut app,
+        "/v1/chat/completions",
+        json!({
+            "model": "wrong-model",
+            "stream": false,
+            "messages": [{"role": "user", "content": "hello"}]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["model"], "Qwen/Qwen1.5-0.5B-Chat");
+
+    let (status, json) = post_json(
+        &mut app,
+        "/tokenize",
+        json!({"model": "wrong-model", "prompt": "hello"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn invalid_request_returns_openai_error() {
     let mut app = test_app().await;
     let response = app
@@ -3293,6 +3396,7 @@ async fn non_stream_chat_returns_json_response() {
     let response_object = json.as_object().expect("response object");
     let choice = json["choices"][0].as_object().expect("choice object");
     let message = choice["message"].as_object().expect("message object");
+    let usage = json["usage"].as_object().expect("usage object");
     for (object, key) in [
         (response_object, "service_tier"),
         (response_object, "system_fingerprint"),
@@ -3309,6 +3413,8 @@ async fn non_stream_chat_returns_json_response() {
         (message, "audio"),
         (message, "function_call"),
         (message, "reasoning"),
+        // No reasoning parser is configured, so reasoning tokens are unknown.
+        (usage, "completion_tokens_details"),
     ] {
         assert!(
             object.contains_key(key) && object[key].is_null(),
@@ -3317,6 +3423,61 @@ async fn non_stream_chat_returns_json_response() {
     }
     // ...except `tool_calls`, which Python pops from the payload when empty.
     assert!(!message.contains_key("tool_calls"), "{json}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_return_prompt_text_reports_the_rendered_prompt() {
+    for stream in [false, true] {
+        let (mut app, engine_task) = test_app_with_backend_and_engine_request_check(
+            Arc::new(FakeChatBackend::new()),
+            |_| {},
+        )
+        .await;
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "stream": stream,
+                            "messages": [{"role": "user", "content": "hello"}],
+                            "return_prompt_text": true,
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        engine_task.await.expect("mock engine task");
+
+        let prompt_texts = if stream {
+            let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+            sse_json_payloads(&text)
+                .into_iter()
+                .map(|chunk| chunk.get("prompt_text").cloned())
+                .collect::<Vec<_>>()
+        } else {
+            let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+            vec![json.get("prompt_text").cloned()]
+        };
+        // Streaming sends it on the first chunk only.
+        let (first, rest) = prompt_texts.split_first().expect("response");
+        assert_eq!(
+            first,
+            &Some(json!("user: hello\nassistant:")),
+            "stream={stream}"
+        );
+        assert!(
+            rest.iter().all(Option::is_none),
+            "stream={stream}: {prompt_texts:?}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3628,6 +3789,7 @@ async fn non_stream_chat_image_url_reaches_engine_mm_features() {
                     json!({
                         "model": "Qwen/Qwen1.5-0.5B-Chat",
                         "stream": false,
+                        "return_prompt_text": true,
                         "messages": [{
                             "role": "user",
                             "content": [
@@ -3655,6 +3817,11 @@ async fn non_stream_chat_image_url_reaches_engine_mm_features() {
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
 
     assert_eq!(json["object"], "chat.completion");
+    // The rendered prompt, before the image placeholder is expanded.
+    assert_eq!(
+        json["prompt_text"],
+        json!("user: describe <|image_pad|>\nassistant:")
+    );
     assert_eq!(json["choices"][0]["message"]["content"], "hi");
 }
 
@@ -4961,6 +5128,7 @@ async fn non_stream_completions_return_json_response() {
     // non-streaming responses.
     let response_object = json.as_object().expect("response object");
     let choice = json["choices"][0].as_object().expect("choice object");
+    let usage = json["usage"].as_object().expect("usage object");
     for (object, key) in [
         (response_object, "service_tier"),
         (response_object, "system_fingerprint"),
@@ -4972,6 +5140,8 @@ async fn non_stream_completions_return_json_response() {
         (choice, "prompt_token_ids"),
         (choice, "routed_experts"),
         (choice, "weight_versions"),
+        // Completions never count reasoning tokens.
+        (usage, "completion_tokens_details"),
     ] {
         assert!(
             object.contains_key(key) && object[key].is_null(),
@@ -6938,6 +7108,11 @@ async fn include_reasoning_false_suppresses_reasoning_in_non_stream_chat() {
     // responses.
     assert!(
         json["choices"][0]["message"]["reasoning"].is_null(),
+        "{text}"
+    ); // The auto-selected reasoning parser still counts the hidden reasoning.
+    assert_eq!(
+        json["usage"]["completion_tokens_details"],
+        json!({"reasoning_tokens": 5}),
         "{text}"
     );
 }
@@ -9970,6 +10145,127 @@ async fn profile_routes_are_hidden_when_profiling_is_disabled() {
     }
 
     engine_task.abort_and_join().await;
+}
+
+/// Captures the access-log events as `LEVEL field=value ...`, with the
+/// nondeterministic `latency` shown only as present.
+#[derive(Clone, Default)]
+struct AccessLogCapture(Arc<std::sync::Mutex<Vec<String>>>);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for AccessLogCapture {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        if event.metadata().target() != "vllm_server::middleware::access_log" {
+            return;
+        }
+        let mut line = event.metadata().level().to_string();
+        event.record(
+            &mut |field: &tracing::field::Field, value: &dyn fmt::Debug| match field.name() {
+                "latency" => line.push_str(" latency=<elapsed>"),
+                name => line.push_str(&format!(" {name}={value:?}")),
+            },
+        );
+        self.0.lock().expect("access log lock").push(line);
+    }
+}
+
+/// Send each request to an app with an API key and `access_log`, and return
+/// the access-log lines. The middleware runs on the test's own task, so a
+/// thread-local subscriber sees its events.
+async fn access_log_lines(
+    access_log: AccessLogConfig,
+    requests: Vec<Request<Body>>,
+) -> Vec<String> {
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    let (chat, engine_task) = test_chat_with_engine_handle().await;
+    let app = build_router(Arc::new(
+        AppState::new(vec!["test-model".to_string()], chat)
+            .with_api_keys(vec!["secret".to_string()])
+            .with_access_log(access_log),
+    ));
+    let capture = AccessLogCapture::default();
+    let _guard =
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(capture.clone()));
+
+    for request in requests {
+        let response = app.clone().oneshot(request).await.expect("call app");
+        to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    }
+
+    engine_task.abort_and_join().await;
+    capture.0.lock().expect("access log lock").clone()
+}
+
+/// One INFO event per response, like Python's uvicorn access log, with the
+/// client address (absent without one), request target including the query
+/// string, status and latency, including rejected and unrouted requests;
+/// excluded paths match without the query string.
+#[tokio::test]
+#[serial]
+async fn access_log_records_each_response() {
+    let get = |uri: &str, authorized: bool| {
+        let mut request = Request::builder().method("GET").uri(uri);
+        if authorized {
+            request = request.header("authorization", "Bearer secret");
+        }
+        request.body(Body::empty()).expect("build request")
+    };
+    let mut with_client = get("/v1/models?limit=1", true);
+    with_client
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            52344,
+        ))));
+    let access_log = AccessLogConfig {
+        enabled: true,
+        excluded_paths: vec!["/version".to_string()],
+    };
+
+    let lines = access_log_lines(
+        access_log,
+        vec![
+            with_client,
+            get("/v1/models", false),
+            get("/missing", true),
+            get("/version?verbose=1", false),
+        ],
+    )
+    .await;
+
+    expect_test::expect![[r#"
+        [
+            "INFO message=HTTP response client=127.0.0.1:52344 method=GET uri=\"/v1/models?limit=1\" version=HTTP/1.1 status=200 latency=<elapsed>",
+            "INFO message=HTTP response method=GET uri=\"/v1/models\" version=HTTP/1.1 status=401 latency=<elapsed>",
+            "INFO message=HTTP response method=GET uri=\"/missing\" version=HTTP/1.1 status=404 latency=<elapsed>",
+        ]
+    "#]].assert_debug_eq(&lines);
+}
+
+/// `--disable-access-log` removes the access log.
+#[tokio::test]
+#[serial]
+async fn access_log_disabled_logs_nothing() {
+    let lines = access_log_lines(
+        AccessLogConfig {
+            enabled: false,
+            excluded_paths: Vec::new(),
+        },
+        vec![
+            Request::builder()
+                .method("GET")
+                .uri("/version")
+                .body(Body::empty())
+                .expect("build request"),
+        ],
+    )
+    .await;
+
+    assert_eq!(lines, Vec::<String>::new());
 }
 
 /// Captures the events `--enable-log-outputs` logs, one `LEVEL field=value ...`
