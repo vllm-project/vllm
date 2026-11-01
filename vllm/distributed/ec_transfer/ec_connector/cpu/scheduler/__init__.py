@@ -18,8 +18,8 @@ from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
     ECCPUWorkerMetadata,
     create_ec_shared_region,
 )
-from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.embedding_cache import (
-    EmbeddingCache,
+from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.primary import (
+    ECPrimaryTierManager,
 )
 from vllm.distributed.ec_transfer.ec_connector.encoder_output_width import (
     get_encoder_output_width,
@@ -57,9 +57,9 @@ class ECCPUScheduler:
         self._is_producer: bool = ec_config.is_ec_producer
         self._is_consumer: bool = ec_config.is_ec_consumer
 
-        self._region = create_ec_shared_region(vllm_config)
-        # Block allocator + LRU eviction policy for the shared region.
-        self._cache = EmbeddingCache(self._region.num_blocks)
+        self._primary = ECPrimaryTierManager(create_ec_shared_region(vllm_config))
+        # Temporary compatibility seam for CPU/NIXL tests and ProducerSession.
+        self._cache = self._primary.cache
         self._metadata_resolver = PlaceholderMetadataResolver(vllm_config.model_config)
 
         # mm_hash → block IDs allocated this step for GPU→mmap saves.
@@ -161,7 +161,7 @@ class ECCPUScheduler:
             vllm_version=VLLM_VERSION,
             model=str(vllm_config.model_config.model),
             dtype=str(self._dtype),
-            block_size_bytes=self._region.block_size_bytes,
+            block_size_bytes=self._primary.block_size_bytes,
         )
         if self._is_producer:
             self._peer_host = envs.VLLM_EC_SIDE_CHANNEL_HOST
@@ -169,10 +169,10 @@ class ECCPUScheduler:
 
         self._data = NixlDataTransport(
             agent_name=engine_id,
-            base_ptr=self._region.blocks.data_ptr(),
-            num_blocks=self._region.num_blocks,
-            block_size_bytes=self._region.block_size_bytes,
-            total_size_bytes=self._region.num_blocks * self._region.block_size_bytes,
+            base_ptr=self._primary.base_ptr,
+            num_blocks=self._primary.num_blocks,
+            block_size_bytes=self._primary.block_size_bytes,
+            total_size_bytes=self._primary.total_size_bytes,
         )
         if self._is_producer:
             assert self._peer_host is not None
@@ -191,7 +191,7 @@ class ECCPUScheduler:
     def has_cache_item(self, identifier: str) -> bool:
         if not self._is_consumer:
             return False
-        entry = self._cache.get(identifier)
+        entry = self._primary.get(identifier)
         return entry is not None and entry.ready
 
     def ensure_cache_available(
@@ -271,7 +271,7 @@ class ECCPUScheduler:
             else None
         )
 
-        entry = self._cache.get(mm_hash)
+        entry = self._primary.get(mm_hash)
         if entry is not None and entry.ready:
             # Local hit: upstream's update_state_after_alloc pins and
             # loads it through the same path as a natively cached entry.
@@ -304,7 +304,7 @@ class ECCPUScheduler:
         if (
             len(shape) != 2
             or shape[0] != num_embeds
-            or size != self._num_blocks(shape) * self._region.block_size_bytes
+            or size != self._num_blocks(shape) * self._primary.block_size_bytes
         ):
             logger.warning(
                 "EC consumer: size mismatch mm_hash=%s announced=%d shape=%s "
@@ -400,8 +400,8 @@ class ECCPUScheduler:
             ConsumerSession,
         )
 
-        n_blocks = max(1, ceil(size_bytes / self._region.block_size_bytes))
-        entry = self._cache.alloc(mm_hash, n_blocks, shape)
+        n_blocks = max(1, ceil(size_bytes / self._primary.block_size_bytes))
+        entry = self._primary.alloc(mm_hash, n_blocks, shape)
         if entry is None:
             logger.debug(
                 "EC consumer: cache full for mm_hash=%s (%d blocks); deferring",
@@ -425,7 +425,7 @@ class ECCPUScheduler:
         try:
             self._sessions[addr].start_xfer(mm_hash, indices, deadline)
         except Exception:
-            self._cache.discard(mm_hash)
+            self._primary.discard(mm_hash)
             raise
         logger.debug(
             "EC consumer: starting NIXL xfer mm_hash=%s from %s:%d blocks=%d",
@@ -450,12 +450,12 @@ class ECCPUScheduler:
         r = session.take_results()
         for mm_hash in r.completed:
             self._in_flight.discard(mm_hash)
-            self._cache.mark_ready(mm_hash)
+            self._primary.mark_ready(mm_hash)
             self._step_completed.add(mm_hash)
             logger.debug("EC consumer: NIXL xfer complete mm_hash=%s", mm_hash)
         for mm_hash in r.tombstoned:
             self._in_flight.discard(mm_hash)
-            self._cache.discard(mm_hash)
+            self._primary.discard(mm_hash)
             self._tombstones.add(mm_hash)
             logger.debug("EC consumer: NIXL xfer failed mm_hash=%s", mm_hash)
         for mm_hash in r.quarantined:
@@ -470,13 +470,13 @@ class ECCPUScheduler:
         for mm_hash in r.retryable:
             # Release this attempt's blocks, retaining the request wait budget.
             self._in_flight.discard(mm_hash)
-            self._cache.discard(mm_hash)
+            self._primary.discard(mm_hash)
             logger.debug(
                 "EC consumer: NIXL xfer mm_hash=%s retryable; will re-request",
                 mm_hash,
             )
         for mm_hash, _block_indices in r.settled:
-            self._cache.discard(mm_hash)
+            self._primary.discard(mm_hash)
             logger.debug(
                 "EC consumer: quarantined NIXL xfer mm_hash=%s settled", mm_hash
             )
@@ -503,27 +503,27 @@ class ECCPUScheduler:
 
     def _num_blocks(self, shape: tuple[int, ...]) -> int:
         size_bytes = shape[0] * shape[1] * self._dtype.itemsize
-        block_size = self._region.block_size_bytes
+        block_size = self._primary.block_size_bytes
         return (size_bytes + block_size - 1) // block_size
 
     def update_state_after_alloc(self, request: "Request", index: int) -> None:
         feature = request.mm_features[index]
         mm_hash = feature.identifier
 
-        if self._is_producer and self._cache.get(mm_hash) is None:
+        if self._is_producer and self._primary.get(mm_hash) is None:
             shape = (
                 feature.mm_position.get_num_embeds(),
                 get_encoder_output_width(self._vllm_config, feature.modality),
             )
-            entry = self._cache.alloc(mm_hash, self._num_blocks(shape), shape)
+            entry = self._primary.alloc(mm_hash, self._num_blocks(shape), shape)
             if entry is not None:
                 self._pending_saves[mm_hash] = list(entry.block_ids)
 
         if self._is_consumer and mm_hash not in self._pending_loads:
-            entry = self._cache.get(mm_hash)
+            entry = self._primary.get(mm_hash)
             if entry is not None and entry.ready:
                 assert entry.shape is not None
-                self._cache.pin(mm_hash)
+                self._primary.pin(mm_hash)
                 transfer_id = self._next_transfer_id
                 self._next_transfer_id += 1
                 self._pending_loads[mm_hash] = (
@@ -563,7 +563,7 @@ class ECCPUScheduler:
         if not isinstance(meta, ECCPUWorkerMetadata):
             return
         for mm_hash in meta.completed_saves:
-            entry = self._cache.get(mm_hash)
+            entry = self._primary.get(mm_hash)
             if entry is None:
                 logger.debug(
                     "EC producer: worker reported completed save for unknown "
@@ -571,7 +571,7 @@ class ECCPUScheduler:
                     mm_hash,
                 )
             elif not entry.ready:
-                self._cache.mark_ready(mm_hash)
+                self._primary.mark_ready(mm_hash)
                 logger.debug("EC producer: mm_hash=%s marked ready", mm_hash)
         for transfer_id in meta.completed_loads:
             pending = self._load_acks.get(transfer_id)
@@ -584,7 +584,7 @@ class ECCPUScheduler:
             # Drop the entry before unpinning so a replayed report is treated
             # as stale rather than releasing the pin a second time.
             del self._load_acks[transfer_id]
-            self._cache.unpin(mm_hash)
+            self._primary.unpin(mm_hash)
             logger.debug("EC consumer: mm_hash=%s unpinned after load", mm_hash)
 
     def has_pending_push_work(self) -> bool:
@@ -596,7 +596,7 @@ class ECCPUScheduler:
         this only has to outlive dispatched saves and loads, so the engine can
         quiesce once the worker has confirmed them.
         """
-        return self._nixl_enabled or self._cache.has_held_entries()
+        return self._nixl_enabled or self._primary.has_held_entries()
 
     def request_finished(
         self, request: "Request"
@@ -612,7 +612,7 @@ class ECCPUScheduler:
 
         for feature in request.mm_features:
             mm_hash = feature.identifier
-            entry = self._cache.get(mm_hash)
+            entry = self._primary.get(mm_hash)
             if entry is None:
                 # Never saved, or evicted since. Publishing placeholder
                 # metadata without an address invites an orchestrator to
@@ -633,7 +633,7 @@ class ECCPUScheduler:
             # which the consumer retries on a later step rather than treating
             # as a miss.
             assert entry.shape is not None
-            size_bytes = len(entry.block_ids) * self._region.block_size_bytes
+            size_bytes = len(entry.block_ids) * self._primary.block_size_bytes
             items[mm_hash].update(
                 peer_host=self._peer_host,
                 peer_port=self._peer_port,
@@ -660,7 +660,7 @@ class ECCPUScheduler:
             self._teardown_nixl()
 
         try:
-            self._region.cleanup()
+            self._primary.shutdown()
         except Exception:
             logger.debug("ec: region cleanup failed", exc_info=True)
 
