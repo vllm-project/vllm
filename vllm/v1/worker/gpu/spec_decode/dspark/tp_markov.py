@@ -11,9 +11,10 @@ every rank pays the full cost.
 Here rank ``r`` owns a contiguous range of the sampler's 1024-column blocks.
 Per step it computes the bias of its columns only (a row slice of
 ``markov_w2``), Gumbel-samples its blocks with the stock noise keys, and
-publishes one 8-byte word per block, ``[block max (fp32) | tag | token]``, to
-every rank through symmetric memory. Each word carries its own tag, so no
-fence or flag is needed (NCCL's LL protocol). Every rank then picks the
+publishes one 8-byte word per block, ``[block max (fp32) | tag | index in the
+block]``, to every rank through symmetric memory. Each word carries its own
+tag, so no fence or flag is needed (NCCL's LL protocol), and its reader
+clears it, so a slot never holds a stale word. Every rank then picks the
 winner the way stock does: the first NaN block, else the first maximum.
 Block maxima are the values stock computes, so the drafted tokens are
 identical.
@@ -27,10 +28,11 @@ on every rank, is completed after the loop in one of two ways:
 * ``recompute`` (larger batches, where pushing would cost more NVLink time
   than it saves): every rank recomputes the peers' columns for all steps at
   once from the sampled tokens, with one projection over all steps. That
-  reads ``markov_w2`` once instead of once per step.
+  reads the peers' rows of ``markov_w2`` once instead of once per step.
 
 Either way the cache equals the stock cache bitwise, provided the projection
-slices compute the same values as the full projection (checked by the tests).
+slices compute the same values as the stock projection, which is checked on
+the real weight at load time.
 """
 
 from __future__ import annotations
@@ -49,6 +51,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import cdiv
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_noised_argmax, spec_step_seed
 
 if TYPE_CHECKING:
@@ -59,22 +62,30 @@ logger = init_logger(__name__)
 # The stock sampler's block size: block maxima are only comparable to stock
 # at this granularity.
 _BLOCK_SIZE = 1024
-_TOKEN_BITS = 18
-_TAG_BITS = 14
+# An exchange word is [block max (fp32) | tag | index in the block].
+_INDEX_BITS = tl.constexpr(10)
+_TAG_BITS = tl.constexpr(22)
 # Push the cache slices while sampling up to this many requests; recompute
 # them after the loop above it. Also sizes the push staging buffer.
 _PUSH_MAX_REQS = 4
 # Larger batches run the replicated loop (bounds the recompute's memory and
 # the load-time check).
 _MAX_REQS = 128
-# Bounded spin (about a second) so a missing peer cannot hang the GPU; a
-# timeout is counted in `errors`.
-_SPIN_LIMIT = 1 << 24
+# Bounded spin, about 2 s per kernel on GB300 (0.24 us per iteration), so that
+# a missing peer cannot hang the GPU. A timeout is counted in `errors`, and the
+# next `propose` raises.
+_SPIN_LIMIT = 1 << 23
 
 
 @triton.jit
 def _peer_ptr(ptrs, rank, dtype: tl.constexpr):
     return tl.load(ptrs + rank).to(tl.pointer_type(dtype))
+
+
+@triton.jit
+def _tag(e, BITS: tl.constexpr):
+    # Never 0, so a cleared (or never written) word does not match.
+    return e % ((1 << BITS) - 1) + 1
 
 
 @triton.jit
@@ -137,7 +148,7 @@ def _tp_markov_sample_kernel(
         HALF: tl.constexpr = BLOCK_SIZE // 2
         bits = logits.to(tl.int16, bitcast=True).to(tl.int64) & 0xFFFF
         lo, hi = tl.split(tl.reshape(bits, (HALF, 2)))
-        cword = ((e & 0xFFFFFFFF) << 32) | (hi << 16) | lo
+        cword = (_tag(e, 32) << 32) | (hi << 16) | lo
         draft_step = (e - 1) // n_spec
         par = draft_step & 1
         soff = (
@@ -165,10 +176,9 @@ def _tp_markov_sample_kernel(
         USE_FP64=False,
         APPLY_TEMPERATURE=True,
     )
-    token = (block_idx * BLOCK_SIZE + idx).to(tl.int64)
-    tag = e & ((1 << 14) - 1)
+    tl.static_assert(BLOCK_SIZE == 1 << _INDEX_BITS)
     vbits = value.to(tl.float32).to(tl.int32, bitcast=True).to(tl.int64) & 0xFFFFFFFF
-    word = (vbits << 32) | (tag << 18) | token
+    word = (vbits << 32) | (_tag(e, _TAG_BITS) << _INDEX_BITS) | idx.to(tl.int64)
     woff = ((e & 1) * max_reqs + row) * num_blocks + block_idx
     for d in tl.static_range(WORLD):
         tl.store(_peer_ptr(word_ptrs, d, tl.int64) + woff, word)
@@ -189,25 +199,28 @@ def _tp_markov_combine_kernel(
 ):
     row = tl.program_id(0).to(tl.int64)
     e = tl.load(epoch_ptr).to(tl.int64) + step + 1
-    tag = e & ((1 << 14) - 1)
+    tag = _tag(e, _TAG_BITS)
     block = tl.arange(0, PADDED_NUM_BLOCKS)
     mask = block < num_blocks
     ptrs = word_ptr + ((e & 1) * max_reqs + row) * num_blocks + block
+    tag_mask: tl.constexpr = (1 << _TAG_BITS) - 1
     w = tl.load(ptrs, mask=mask, other=0, volatile=True)
-    bad = tl.sum((mask & (((w >> 18) & ((1 << 14) - 1)) != tag)).to(tl.int32), axis=0)
+    bad = tl.sum((mask & (((w >> _INDEX_BITS) & tag_mask) != tag)).to(tl.int32), axis=0)
     it = 0
     while (bad > 0) & (it < SPIN_LIMIT):
         w = tl.load(ptrs, mask=mask, other=0, volatile=True)
         bad = tl.sum(
-            (mask & (((w >> 18) & ((1 << 14) - 1)) != tag)).to(tl.int32), axis=0
+            (mask & (((w >> _INDEX_BITS) & tag_mask) != tag)).to(tl.int32), axis=0
         )
         it += 1
     if bad > 0:
         tl.atomic_add(err_ptr, 1)
+    # Consumed. The slot's next word, two epochs on, is written after this.
+    tl.store(ptrs, 0, mask=mask)
     values = tl.where(
         mask, (w >> 32).to(tl.int32).to(tl.float32, bitcast=True), float("-inf")
     )
-    tokens = w & ((1 << 18) - 1)
+    tokens = (block.to(tl.int64) << _INDEX_BITS) | (w & ((1 << _INDEX_BITS) - 1))
     # As torch.argmax over the stock per-block maxima: the first NaN, else the
     # first maximum.
     nan_block = tl.min(tl.where(values != values, block, PADDED_NUM_BLOCKS), axis=0)
@@ -264,7 +277,7 @@ def _tp_markov_unpack_kernel(
         + jb * HALF
         + w
     )
-    want = e & 0xFFFFFFFF
+    want = _tag(e, 32)
     x = tl.load(ptrs, mask=m, other=0, volatile=True)
     bad = tl.sum((m & (((x >> 32) & 0xFFFFFFFF) != want)).to(tl.int32), axis=0)
     it = 0
@@ -274,6 +287,7 @@ def _tp_markov_unpack_kernel(
         it += 1
     if bad > 0:
         tl.atomic_add(err_ptr, 1)
+    tl.store(ptrs, 0, mask=m)  # consumed
     lo = (x & 0xFFFF).to(tl.int16).to(tl.bfloat16, bitcast=True)
     hi = ((x >> 16) & 0xFFFF).to(tl.int16).to(tl.bfloat16, bitcast=True)
     dst = cache_ptr + req * cache_stride_0 + step * cache_stride_1 + c_lo
@@ -288,8 +302,10 @@ def _tp_markov_fill_kernel(
     cache_stride_1,
     logits_ptr,  # [num_reqs * n_spec, vocab]: base logits, (request, step) rows
     logits_stride,
-    bias_ptr,  # [num_reqs * n_spec, vocab]: bias, same rows
-    bias_stride,
+    bias_lo_ptr,  # [num_reqs * n_spec, own_start]: bias left of this rank's
+    bias_lo_stride,
+    bias_hi_ptr,  # [num_reqs * n_spec, vocab - own_end]: and right of it
+    bias_hi_stride,
     idx_map_ptr,  # [num_reqs] (strided)
     idx_map_stride,
     n_spec,
@@ -300,17 +316,19 @@ def _tp_markov_fill_kernel(
 ):
     # grid: (num_reqs * n_spec, cdiv(vocab, BLOCK_SIZE))
     r = tl.program_id(0).to(tl.int64)
-    cols = tl.program_id(1) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    if (tl.program_id(1) * BLOCK_SIZE >= own_start) & (
-        tl.program_id(1) * BLOCK_SIZE < own_end
-    ):
+    start = tl.program_id(1) * BLOCK_SIZE
+    if (start >= own_start) & (start < own_end):
         return  # this rank's own blocks were cached while sampling
     req = tl.load(idx_map_ptr + (r // n_spec) * idx_map_stride).to(tl.int64)
     if req < 0:
         return
+    cols = start + tl.arange(0, BLOCK_SIZE)
     mask = cols < vocab_size
     logits = tl.load(logits_ptr + r * logits_stride + cols, mask=mask)
-    bias = tl.load(bias_ptr + r * bias_stride + cols, mask=mask)
+    if start < own_start:
+        bias = tl.load(bias_lo_ptr + r * bias_lo_stride + cols, mask=mask)
+    else:
+        bias = tl.load(bias_hi_ptr + r * bias_hi_stride + cols - own_end, mask=mask)
     logits = (logits.to(tl.float32) + bias.to(tl.float32)).to(logits.dtype)
     tl.store(
         cache_ptr + req * cache_stride_0 + (r % n_spec) * cache_stride_1 + cols,
@@ -320,55 +338,46 @@ def _tp_markov_fill_kernel(
 
 
 class TPMarkovSampler:
-    """Runs a DSpark speculator's Markov loop vocab-parallel over TP."""
+    """Runs a DSpark speculator's Markov loop vocab-parallel over TP.
+
+    Build it with `create`, which falls back (returns no sampler) on every TP
+    rank alike.
+    """
 
     def __init__(self, speculator: DSparkSpeculator):
-        import torch.distributed._symmetric_memory as symm_mem
-
-        group = get_tp_group()
-        self.world = group.world_size
-        self.rank = group.rank_in_group
+        self.speculator = speculator
+        self.group = get_tp_group()
+        self.world = self.group.world_size
+        self.rank = self.group.rank_in_group
         model = speculator.model
         w2 = model.model.markov_head.markov_w2.weight
         # Vocab padding rows (if any) are cut off, as the logits processor does.
         self.vocab_size = min(w2.shape[0], model.logits_processor.org_vocab_size)
         self.w2 = w2[: self.vocab_size]
-        self.num_blocks = triton.cdiv(self.vocab_size, _BLOCK_SIZE)
-        self.per = triton.cdiv(self.num_blocks, self.world)
+        self.num_blocks = cdiv(self.vocab_size, _BLOCK_SIZE)
+        self.per = cdiv(self.num_blocks, self.world)
         self.col_start = min(self.vocab_size, self.rank * self.per * _BLOCK_SIZE)
         self.col_end = min(self.vocab_size, (self.rank + 1) * self.per * _BLOCK_SIZE)
-        # Contiguous rows: F.linear on the slice computes those columns.
-        self.w2_shard = w2[self.col_start : self.col_end]
+        # Contiguous rows: F.linear on a row slice computes those columns.
+        self.w2_shard = self.w2[self.col_start : self.col_end]
+        self.w2_peers = (self.w2[: self.col_start], self.w2[self.col_end :])
         self.max_reqs = min(speculator.max_num_reqs, _MAX_REQS)
         self.n_spec = speculator.num_speculative_steps
         self.push_max_reqs = min(_PUSH_MAX_REQS, self.max_reqs)
-        device = w2.device
 
-        name = group.device_group.group_name
-        self.words = symm_mem.empty(
-            2 * self.max_reqs * self.num_blocks, dtype=torch.int64, device=device
-        )
-        half = _BLOCK_SIZE // 2
-        self.stage = symm_mem.empty(
-            2 * self.world * self.push_max_reqs * self.n_spec * self.per * half,
-            dtype=torch.int64,
-            device=device,
-        )
-        # Tags never match a zeroed word: the first epoch is 1.
-        self.words.zero_()
-        self.stage.zero_()
-        handles = [symm_mem.rendezvous(t, name) for t in (self.words, self.stage)]
-        self._handles = handles
-        self.word_ptrs, self.stage_ptrs = (
-            torch.tensor(list(h.buffer_ptrs), dtype=torch.int64, device=device)
-            for h in handles
-        )
-        # Device-side step counter: tags must change on every graph replay.
-        self.epoch = torch.zeros(1, dtype=torch.int32, device=device)
-        # Exchange timeouts (expected to stay 0).
-        self.errors = torch.zeros(1, dtype=torch.int32, device=device)
-        torch.accelerator.synchronize()
-        torch.distributed.barrier(group=group.cpu_group)
+    @classmethod
+    def create(
+        cls, speculator: DSparkSpeculator
+    ) -> tuple[TPMarkovSampler | None, str | None]:
+        """The speculator's vocab-parallel sampler, or None and the reason it
+        cannot run. Collective over the TP group; every rank gets the same
+        outcome."""
+        reason = cls.unsupported_reason(speculator)
+        if reason is not None:
+            return None, reason
+        sampler = cls(speculator)
+        reason = sampler._inexact_projection_reason() or sampler._init_exchange()
+        return (None, reason) if reason is not None else (sampler, None)
 
     @staticmethod
     def unsupported_reason(speculator: DSparkSpeculator) -> str | None:
@@ -376,7 +385,8 @@ class TPMarkovSampler:
         model = speculator.model
         tp_size = get_tp_group().world_size
         head = getattr(getattr(model, "model", None), "markov_head", None)
-        w2 = getattr(getattr(head, "markov_w2", None), "weight", None)
+        w2_layer = getattr(head, "markov_w2", None)
+        w2 = getattr(w2_layer, "weight", None)
         processor = getattr(model, "logits_processor", None)
         if not current_platform.is_cuda():
             return "it needs CUDA"
@@ -385,18 +395,18 @@ class TPMarkovSampler:
         if w2 is None or w2.dtype != torch.bfloat16 or w2.dim() != 2:
             return "markov_w2 is not an unquantized bf16 projection"
         if not isinstance(
-            getattr(head.markov_w2, "quant_method", None),
+            getattr(w2_layer, "quant_method", None),
             (UnquantizedEmbeddingMethod, UnquantizedLinearMethod),
         ):
             return "markov_w2 is quantized"
+        if getattr(w2_layer, "use_skinny_gemm", False):
+            return "markov_w2 uses the skinny GEMM"
         if processor is None or processor.scale != 1.0 or processor.soft_cap:
             return "the logits processor scales or caps the Markov bias"
         if processor.head_dtype not in (None, torch.bfloat16):
             return "the logits processor changes the head dtype"
         if envs.VLLM_BATCH_INVARIANT:
             return "batch-invariant mode is enabled"
-        if processor.org_vocab_size > (1 << _TOKEN_BITS):
-            return "the draft vocabulary is too large"
         if speculator._draft_topk is not None:
             return "top-k drafting is enabled"
         if speculator.draft_logits is None:
@@ -421,72 +431,147 @@ class TPMarkovSampler:
             return "the draft logits cache is not bf16"
         return None
 
-    @staticmethod
-    @torch.inference_mode()
-    def inexact_projection_reason(speculator: DSparkSpeculator) -> str | None:
-        """Why this rank's sliced and batched Markov projections would differ
-        from the replicated loop's, or None if they match bitwise.
-
-        The loop computes its columns' bias with ``markov_w2``'s row slice, and
-        the recompute path all steps' bias at once, while the replicated loop
-        projects every step separately onto the full vocabulary. Bitwise equal
-        results depend on the GEMM library picking kernels with the same
-        reduction order (it does for the usual, 64-aligned vocabularies), so
-        check them on the real weight for every batch size; all TP ranks agree
-        on the result.
-        """
-        group = get_tp_group()
-        w2 = speculator.model.model.markov_head.markov_w2.weight
-        vocab = min(w2.shape[0], speculator.model.logits_processor.org_vocab_size)
-        w2 = w2[:vocab]
-        num_blocks = triton.cdiv(vocab, _BLOCK_SIZE)
-        per = triton.cdiv(num_blocks, group.world_size)
-        c0 = min(vocab, group.rank_in_group * per * _BLOCK_SIZE)
-        c1 = min(vocab, (group.rank_in_group + 1) * per * _BLOCK_SIZE)
-        n_spec = speculator.num_speculative_steps
-        gen = torch.Generator(device=w2.device).manual_seed(0)
-        bad = None
-        for num_reqs in range(1, min(speculator.max_num_reqs, _MAX_REQS) + 1):
-            x = torch.randn(
-                n_spec * num_reqs, w2.shape[1], device=w2.device, generator=gen
-            ).to(w2.dtype)
-            steps = [F.linear(x[i::n_spec].contiguous(), w2) for i in range(n_spec)]
-            batched = F.linear(x, w2)
-            sliced = F.linear(x[0::n_spec].contiguous(), w2[c0:c1])
-            if not torch.equal(sliced, steps[0][:, c0:c1]) or not all(
-                torch.equal(batched[i::n_spec], steps[i]) for i in range(n_spec)
-            ):
-                bad = num_reqs
-                break
-        flag = torch.tensor([bad or 0], dtype=torch.int64)
+    def _any_rank(self, failed: bool) -> bool:
+        flag = torch.tensor([int(failed)], dtype=torch.int64)
         torch.distributed.all_reduce(
-            flag, op=torch.distributed.ReduceOp.MAX, group=group.cpu_group
+            flag, op=torch.distributed.ReduceOp.MAX, group=self.group.cpu_group
         )
-        if flag.item():
+        return bool(flag.item())
+
+    def _project_peers(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """The peers' columns of the bias of x, left and right of this rank's."""
+        lo, hi = (F.linear(x, w) for w in self.w2_peers)
+        return lo, hi
+
+    @torch.inference_mode()
+    def _inexact_projection_reason(self) -> str | None:
+        """Why the sliced and batched projections would differ from the
+        replicated loop's ``model.markov_bias``, or None if they match bitwise
+        (agreed across the TP group).
+
+        A step's own columns come from a row slice of ``markov_w2``, and the
+        recompute path projects the peers' rows for all steps at once. They
+        match the stock projection only if the GEMM library reduces in the
+        same order for these shapes (it does for 64-aligned vocabularies), so
+        check on the real weight, for every batch size the sampler runs.
+        """
+        model = self.speculator.model
+        n_spec = self.n_spec
+        c0, c1 = self.col_start, self.col_end
+        gen = torch.Generator(device=self.w2.device).manual_seed(0)
+        x = torch.randn(
+            n_spec * self.max_reqs,
+            self.w2.shape[1],
+            device=self.w2.device,
+            generator=gen,
+        ).to(self.w2.dtype)
+        bad = torch.zeros((), dtype=torch.bool, device=self.w2.device)
+        for num_reqs in range(1, self.max_reqs + 1):
+            # Rows are (request, step), as in the recompute path.
+            xs = x[: num_reqs * n_spec]
+            lo, hi = self._project_peers(xs)
+            for i in range(n_spec):
+                step_x = xs[i::n_spec].contiguous()
+                ref = model.markov_bias(step_x)
+                bad |= (lo[i::n_spec] != ref[:, :c0]).any()
+                bad |= (hi[i::n_spec] != ref[:, c1:]).any()
+                if i == 0:
+                    own = F.linear(step_x, self.w2_shard)
+                    bad |= (own != ref[:, c0:c1]).any()
+            del lo, hi, ref
+        failed = bool(bad.item())
+        del x
+        torch.accelerator.empty_cache()
+        if self._any_rank(failed):
             return (
-                "the sliced Markov projection is not bitwise equal to the full "
-                f"one (batch of {flag.item()} requests)"
+                "the sliced Markov projection is not bitwise equal to the "
+                "full one on some TP rank"
             )
         return None
 
+    def _init_exchange(self) -> str | None:
+        """Allocate the exchange buffers in symmetric memory, or return why
+        that failed on some TP rank."""
+        device = self.w2.device
+        half = _BLOCK_SIZE // 2
+        error: Exception | None = None
+        try:
+            import torch.distributed._symmetric_memory as symm_mem
+
+            buffers = (
+                symm_mem.empty(
+                    2 * self.max_reqs * self.num_blocks,
+                    dtype=torch.int64,
+                    device=device,
+                ),
+                symm_mem.empty(
+                    2 * self.world * self.push_max_reqs * self.n_spec * self.per * half,
+                    dtype=torch.int64,
+                    device=device,
+                ),
+            )
+        except Exception as e:  # e.g. no symmetric memory on this platform
+            error = e
+        if not self._any_rank(error is not None):
+            # Collective; agreed on above so that no rank waits for a peer
+            # that failed to allocate.
+            try:
+                name = self.group.device_group.group_name
+                handles = [symm_mem.rendezvous(t, name) for t in buffers]
+            except Exception as e:  # e.g. the peers are not P2P reachable
+                error = e
+        if self._any_rank(error is not None):
+            return f"symmetric memory is unavailable ({error or 'on a peer rank'})"
+
+        self.words, self.stage = buffers
+        # A zeroed word matches no tag.
+        self.words.zero_()
+        self.stage.zero_()
+        self._handles = handles
+        self.word_ptrs, self.stage_ptrs = (
+            torch.tensor(list(h.buffer_ptrs), dtype=torch.int64, device=device)
+            for h in handles
+        )
+        # Device-side step counter: tags must change on every graph replay.
+        self.epoch = torch.zeros(1, dtype=torch.int64, device=device)
+        # Exchange timeouts, copied to the host after every sample.
+        self.errors = torch.zeros(1, dtype=torch.int32, device=device)
+        self._errors_host = torch.zeros(
+            1, dtype=torch.int32, device="cpu", pin_memory=True
+        )
+        torch.accelerator.synchronize()
+        torch.distributed.barrier(group=self.group.cpu_group)
+        return None
+
+    def check_exchange(self) -> None:
+        """Raise if an exchange of an earlier step timed out waiting for a
+        peer. Reads the host copy, so it does not synchronize."""
+        if self._errors_host.item():
+            raise RuntimeError(
+                "DSpark vocab-parallel Markov sampling timed out waiting for a "
+                "TP peer; the drafts of that step are invalid. Disable "
+                "speculative_config.dspark_tp_markov_sampling if this recurs."
+            )
+
     def sample(
         self,
-        speculator: DSparkSpeculator,
         num_reqs: int,
         base_logits: torch.Tensor,  # [num_reqs, n_spec, vocab]
         idx_map: torch.Tensor,  # [num_reqs, n_spec]
         sample_pos: torch.Tensor,  # [num_reqs, n_spec]
     ) -> None:
-        model = speculator.model
+        spc = self.speculator
+        model = spc.model
         n_spec = self.n_spec
-        cache = speculator.draft_logits.values
-        assert cache is not None
-        vocab_size = base_logits.shape[-1]
+        vocab_size = self.vocab_size
+        assert base_logits.shape[-1] == vocab_size
+        assert spc.draft_logits is not None
+        cache = spc.draft_logits.values
         push = num_reqs <= self.push_max_reqs
         idx_map_steps = idx_map.t().contiguous()
         draw_pos_steps = (sample_pos.t() - 1).contiguous()
-        draft_tokens = speculator.draft_tokens
-        anchor = speculator.input_buffers.input_ids[speculator._anchor_idx[:num_reqs]]
+        draft_tokens = spc.draft_tokens
+        anchor = spc.input_buffers.input_ids[spc._anchor_idx[:num_reqs]]
         prev = anchor
         padded = triton.next_power_of_2(self.num_blocks)
         for i in range(n_spec):
@@ -503,9 +588,9 @@ class TPMarkovSampler:
                 bias,
                 bias.stride(0),
                 idx_map_steps[i],
-                speculator.seeds,
+                spc.seeds,
                 draw_pos_steps[i],
-                speculator.temperature,
+                spc.temperature,
                 self.epoch,
                 i,
                 n_spec,
@@ -562,18 +647,21 @@ class TPMarkovSampler:
             prevs = torch.cat(
                 [anchor.unsqueeze(1), draft_tokens[:num_reqs, : n_spec - 1]], dim=1
             )
-            bias = F.linear(model.markov_embed(prevs.reshape(-1)), self.w2)
+            lo, hi = self._project_peers(model.markov_embed(prevs.reshape(-1)))
+            # An empty side is never read; pass a valid pointer.
+            lo = lo if lo.numel() else hi
+            hi = hi if hi.numel() else lo
             flat = base_logits.reshape(num_reqs * n_spec, vocab_size)
-            _tp_markov_fill_kernel[
-                (num_reqs * n_spec, triton.cdiv(vocab_size, _BLOCK_SIZE))
-            ](
+            _tp_markov_fill_kernel[(num_reqs * n_spec, self.num_blocks)](
                 cache,
                 cache.stride(0),
                 cache.stride(1),
                 flat,
                 flat.stride(0),
-                bias,
-                bias.stride(0),
+                lo,
+                lo.stride(0),
+                hi,
+                hi.stride(0),
                 rows,
                 rows.stride(0),
                 n_spec,
@@ -584,3 +672,4 @@ class TPMarkovSampler:
                 num_warps=4,
             )
         self.epoch.add_(n_spec)
+        self._errors_host.copy_(self.errors, non_blocking=True)
