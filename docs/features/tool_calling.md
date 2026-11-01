@@ -515,6 +515,12 @@ FunctionGemma uses a unique output format with `<start_function_call>` and `<end
 
 The model is designed to be fine-tuned for specific function-calling tasks for best results.
 
+Values enclosed in `<escape>` are string literals. The parser preserves their
+contents, including numeric-looking text, `true`, `null`, and literal quotes,
+as strings rather than interpreting them as JSON values, unless the tool's
+parameter schema declares a non-string type for that argument. See Google's
+[FunctionGemma formatting specification](https://ai.google.dev/gemma/docs/functiongemma/formatting-and-best-practices#delimiter_for_string_values_escape).
+
 Flags: `--tool-call-parser functiongemma --chat-template examples/tool_chat_template_functiongemma.jinja`
 
 !!! note
