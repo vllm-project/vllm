@@ -544,10 +544,11 @@ def _validate_aiter_mega_moe_config(vllm_config: VllmConfig) -> None:
     if parallel_config.all2all_backend not in (
         "mori_high_throughput",
         "mori_low_latency",
-    ):
+        "mori",
+    ) or (parallel_config.all2all_backend == "mori" and parallel_config.mori_ep_v2):
         raise ValueError(
-            "AITER MegaMoE runs on MoRI shmem; add "
-            "--all2all-backend mori_high_throughput."
+            "AITER MegaMoE runs on MoRI EPv1 shmem; add --all2all-backend mori "
+            "(without VLLM_MORI_EP_V2=1)."
         )
     if parallel_config.enable_eplb:
         raise NotImplementedError("AITER MegaMoE does not support EPLB.")
@@ -1497,7 +1498,6 @@ def _make_deepseek_v4_weights_mapper(
 
 class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
     model_cls = DeepseekV4Model
-    finalizes_weights_during_load = False
 
     # Default mapper assumes the original FP4-expert checkpoint layout.
     # Overridden per-instance in __init__ when expert_dtype != "fp4".
