@@ -27,6 +27,7 @@ def parser():
     )
     parser.add_argument("--model-name")
     parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--presence-penalty", type=float)
     parser.add_argument("--enable-feature", action="store_true")
     parser.add_argument("--hf-overrides", type=json.loads)
     parser.add_argument("-cc", "--compilation-config", type=json.loads)
@@ -271,6 +272,19 @@ def test_dict_args(parser):
         "backend": "custom",
         "custom_ops": ["-quant_fp8", "+silu_mul", "-rms_norm"],
     }
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--presence-penalty", "-0.5", "--batch-size", "1"],
+        ["--batch-size", "1", "--presence-penalty", "-0.5"],
+    ],
+)
+def test_negative_decimal_is_value_not_dict_arg(parser, args):
+    parsed_args = parser.parse_args(args)
+    assert parsed_args.presence_penalty == -0.5
+    assert parsed_args.batch_size == 1
 
 
 def test_duplicate_dict_args(caplog_vllm, parser):
