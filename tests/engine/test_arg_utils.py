@@ -66,11 +66,13 @@ def test_optional_type():
     ],
 )
 @pytest.mark.parametrize("enable_eplb", [False, True])
-def test_expert_load_stats_cli(options, enable_eplb):
+def test_expert_load_stats_cli(options, enable_eplb, tmp_path):
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     if enable_eplb:
         options = [*options, "--enable-expert-parallel", "--enable-eplb"]
-    args = EngineArgs.from_cli_args(parser.parse_args(options))
+    args = EngineArgs.from_cli_args(
+        parser.parse_args(["--model", str(tmp_path), *options])
+    )
     assert args.expert_load_stats_config.enabled
     assert args.expert_load_stats_config.log_interval == 17
     assert args.enable_eplb == enable_eplb
