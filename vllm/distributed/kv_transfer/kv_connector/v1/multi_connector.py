@@ -135,7 +135,10 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
 
     The current logic is:
     - Load KV from the first connector that advertises available tokens from
-      get_num_new_matched_tokens(), based on the order in the config.
+      get_num_new_matched_tokens(), based on the order in the config. Tokens
+      it does not cover are computed locally, even if a later connector
+      advertised them; a warning is logged once per connector pair when that
+      happens.
     - Save to all connectors.
     """
 
@@ -199,6 +202,9 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         # A mapping from request id to the index of the connector chosen to
         # load the request from (if any).
         self._requests_to_connector: dict[str, int] = {}
+        # (chosen, larger) connector index pairs already reported by
+        # _warn_first_hit_leaves_tokens.
+        self._warned_connector_pairs: set[tuple[int, int]] = set()
 
         # Keeps track of *additional* remaining async saves (beyond 1) to be
         # finished per request. Not needed for async loads since we only allow
@@ -454,6 +460,8 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         num_computed_tokens: int,
     ) -> tuple[int | None, bool]:
         to_return = (0, False)
+        chosen = -1
+        matched: list[int] = []
         for i, c in enumerate(self._connectors):
             toks, load_async = c.get_num_new_matched_tokens(
                 request, num_computed_tokens
@@ -462,12 +470,41 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             # we return None to indicate that we are not done yet.
             if toks is None:
                 return (None, False)
+            matched.append(toks)
             # The first connector that has new matched tokens will be assigned
             # to this request.
             if to_return[0] == 0 and toks > 0:
                 self._requests_to_connector[request.request_id] = i
                 to_return = (toks, load_async)
+                chosen = i
+        if chosen >= 0 and max(matched) > to_return[0]:
+            self._warn_first_hit_leaves_tokens(request, chosen, matched)
         return to_return
+
+    def _warn_first_hit_leaves_tokens(
+        self, request: "Request", chosen: int, matched: list[int]
+    ) -> None:
+        best = max(range(len(matched)), key=matched.__getitem__)
+        if (chosen, best) in self._warned_connector_pairs:
+            return
+        self._warned_connector_pairs.add((chosen, best))
+        names = [type(c).__name__ for c in self._connectors]
+        logger.warning(
+            "MultiConnector loads request %s from connector %d (%s), the first "
+            "one reporting a hit, with %d new tokens, although connector %d "
+            "(%s) reported %d. Only one connector loads a request, so the "
+            "remaining %d tokens are computed locally. If this is not "
+            "intended, list the connector expected to cover the most tokens "
+            "first. Logged once per connector pair.",
+            request.request_id,
+            chosen,
+            names[chosen],
+            matched[chosen],
+            best,
+            names[best],
+            matched[best],
+            matched[best] - matched[chosen],
+        )
 
     def get_external_cache_hit_sources(
         self,
