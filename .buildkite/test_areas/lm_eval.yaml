@@ -386,6 +386,32 @@ steps:
       commands:
       - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-spec-decode-rocm.txt
 
+- label: ":nvidia: (B200) [Nightly] LM Eval ReplaySSM"
+  key: lm-eval-replayssm-2xb200
+  timeout_in_minutes: 60
+  device: b200-k8s
+  optional: true
+  num_devices: 2
+  source_file_dependencies:
+  - .buildkite/test_areas/lm_eval.yaml
+  - tests/evals/gsm8k/configs/models-replayssm.txt
+  - tests/evals/gsm8k/configs/Nemotron-3-Super-120B-A12B-NVFP4-ReplaySSM-align.yaml
+  - tests/evals/gsm8k/test_gsm8k_correctness.py
+  - tests/evals/gsm8k/gsm8k_eval.py
+  - tests/evals/gsm8k/conftest.py
+  - vllm/model_executor/layers/mamba/abstract.py
+  - vllm/model_executor/layers/mamba/mamba_mixer2.py
+  - vllm/model_executor/layers/mamba/ops/ssu_dispatch.py
+  - vllm/model_executor/layers/mamba/ops/replayssm_config.py
+  - vllm/model_executor/warmup/kernel_warmup.py
+  - vllm/model_executor/warmup/replayssm_warmup.py
+  - vllm/v1/attention/backends/mamba_attn.py
+  - vllm/v1/worker/mamba_utils.py
+  - vllm/v1/worker/replayssm_utils.py
+  - vllm/v1/worker/gpu/model_states/mamba_hybrid.py
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-replayssm.txt
+
 - label: ":nvidia: (B200) [Nightly] LM Eval Large Models EP"
   key: lm-eval-large-models-ep-2xb200
   automatic_shard: true
