@@ -2,11 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import torch
 
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.shared_expert_fusion import (
+        SharedExpertFusion,
+    )
 
 
 class FusedMoERouter(ABC):
@@ -21,6 +27,10 @@ class FusedMoERouter(ABC):
         # bias for image sentinel tokens; attached by model code when present.
         self.bias_vl: torch.Tensor | None = None
         self.image_sentinel_lo: int = 0
+        # EP-dispatched shared-expert layout, attached by FusedMoEFactory when
+        # VLLM_FUSE_SHARED_EXPERTS (or a policy that needs it) is on; None
+        # otherwise. Consumed by BaseRouter after the EPLB mapping.
+        self.shared_expert_fusion: SharedExpertFusion | None = None
 
     @abstractmethod
     def set_capture_fn(
