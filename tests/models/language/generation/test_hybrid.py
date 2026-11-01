@@ -11,6 +11,7 @@ from tests.utils import multi_gpu_test
 from vllm import LLM
 from vllm.config import CUDAGraphMode
 from vllm.engine.arg_utils import EngineArgs
+from vllm.model_executor.layers.mamba.abstract import use_mamba_fixed_state_slots
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
@@ -926,3 +927,57 @@ def test_apc_common_prefix_same_batch(
     outputs = llm.generate(prompts, sampling_params)
     for output in outputs:
         assert "two" in output.outputs[0].text
+
+
+@pytest.mark.parametrize("model", ["tiiuae/Falcon-H1-0.5B-Base"])
+def test_apc_short_suffix_after_mid_block_hit(
+    vllm_runner,
+    example_prompts,
+    monkeypatch,
+    model: str,
+) -> None:
+    """Each follow-up request hits the prefix cache inside a Mamba block and
+    adds fewer than two Mamba blocks of tokens, so its prompt-tail checkpoint
+    cannot get a block-table column of its own in the positional layout.
+    Model Runner V2 keeps the state in fixed slots and exports it in the same
+    prefill; requests resuming from it match a run without prefix caching."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    max_tokens, num_logprobs, prefix_match_unit = 16, 5, 16
+    # About 2k tokens, within the model's 16k positions.
+    prompts = [100 * example_prompts[0]]
+    for suffix in example_prompts[1:3]:
+        prompts.append(prompts[-1] + suffix)
+    max_model_len = len(prompts[-1]) + max_tokens
+    kwargs = _get_vllm_runner_params(model, max_model_len)
+    kwargs["mamba_ssm_cache_dtype"] = "float32"
+    vllm_outputs_no_cache, _ = _get_vLLM_output(
+        vllm_runner, kwargs, prompts, max_tokens, num_logprobs
+    )
+
+    kwargs["enable_prefix_caching"] = True
+    kwargs["prefix_match_unit"] = prefix_match_unit
+    sampling_params = SamplingParams(
+        temperature=0.0, max_tokens=max_tokens, logprobs=num_logprobs
+    )
+    vllm_outputs_cache = []
+    with _owned_vllm_runner(vllm_runner, kwargs) as vllm_model:
+        assert use_mamba_fixed_state_slots(vllm_model.llm.llm_engine.vllm_config)
+        # One request at a time, so each one hits the previous one's state.
+        prev_prompt_len = 0
+        for prompt in prompts:
+            (req_output,) = vllm_model.llm.generate(prompt, sampling_params)
+            assert req_output.num_cached_tokens > (
+                prev_prompt_len - 2 * prefix_match_unit
+            )
+            prev_prompt_len = len(req_output.prompt_token_ids)
+            output = req_output.outputs[0]
+            vllm_outputs_cache.append(
+                (list(output.token_ids), output.text, output.logprobs)
+            )
+
+    check_logprobs_close(
+        outputs_0_lst=vllm_outputs_no_cache[0],
+        outputs_1_lst=vllm_outputs_cache,
+        name_0="vllm_no_cache",
+        name_1="vllm_cache",
+    )

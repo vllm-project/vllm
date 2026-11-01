@@ -41,6 +41,7 @@ def test_prepare_attn_forwards_positions(monkeypatch: pytest.MonkeyPatch) -> Non
     state.vllm_config = SimpleNamespace(num_speculative_tokens=0)
     state.model_config = SimpleNamespace(max_model_len=8192)
     state._align_mode = False
+    state.fixed_state_slots = False
     state.recoverssm = None
 
     positions = torch.tensor([1536], dtype=torch.int64)
@@ -84,6 +85,7 @@ def test_add_request_seeds_state_idx_in_mamba_blocks() -> None:
     state = object.__new__(MambaHybridModelState)
     state.cache_config = SimpleNamespace(block_size=16, mamba_block_size=880)
     state._align_mode = True
+    state.fixed_state_slots = False
     state.rope_state = None
     state.prompt_embeds_state = None
     state.num_accepted_tokens_gpu = torch.ones(2, dtype=torch.int32)
@@ -107,6 +109,7 @@ def test_padded_prompt_tail_builds_as_spec_decode(
     state.vllm_config = SimpleNamespace(num_speculative_tokens=k)
     state.model_config = SimpleNamespace(max_model_len=8192)
     state._align_mode = False
+    state.fixed_state_slots = False
     state.recoverssm = None
     state.num_accepted_tokens_gpu = torch.ones(4, dtype=torch.int32)
 
@@ -172,6 +175,7 @@ def _mamba_hybrid_state(num_speculative_tokens: int) -> MambaHybridModelState:
     state.vllm_config = SimpleNamespace(num_speculative_tokens=num_speculative_tokens)
     state.model_config = SimpleNamespace(max_model_len=8192)
     state._align_mode = False
+    state.fixed_state_slots = False
     state.recoverssm = None
     # A request that accepted 3 drafts (plus the bonus token) on the previous
     # step; the others have never had a draft accepted.
@@ -359,6 +363,7 @@ def test_postprocess_state_scalar_with_int32_mapping(
         (4,), 9, dtype=torch.int32, device=GPU_DEVICE
     )
     state._align_mode = False
+    state.fixed_state_slots = False
     state.recoverssm = None
     state._mamba_ctx = None
     idx_mapping = torch.tensor([2, -1, 0], dtype=torch.int32, device=GPU_DEVICE)
@@ -407,6 +412,7 @@ def test_recoverssm_align_tracks_mixed_batch_state_and_neutralizes_copy_bias(
 ) -> None:
     state = object.__new__(MambaHybridModelState)
     state._align_mode = True
+    state.fixed_state_slots = False
     state._mamba_ctx = None
     state._mamba_state_idx_gpu = torch.full(
         (5,), -1, dtype=torch.int32, device=GPU_DEVICE

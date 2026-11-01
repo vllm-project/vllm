@@ -58,6 +58,8 @@ def _reserved_block_count(
         # MambaManager appends speculative running-state blocks in every cache
         # mode; align mode sizes from the uncapped, lookahead-free token range.
         num_speculative_blocks = kvcache_spec.num_speculative_blocks
+        if kvcache_spec.fixed_state_slots:
+            return kvcache_spec.boundary_slot + 1
         if kvcache_spec.mamba_cache_mode == "align":
             return cdiv(num_tokens, kvcache_spec.block_size) + num_speculative_blocks
     num_tokens = min(num_tokens + num_lookahead_tokens, max_model_len)
@@ -376,6 +378,10 @@ def _warmup_kernels(
     prefill_output.scheduled_new_reqs = new_reqs
     prefill_output.num_scheduled_tokens = {rid: prompt_len for rid in req_ids}
     prefill_output.total_num_scheduled_tokens = prompt_len * num_reqs
+    if block_tables is not None and any(block_tables.fixed_rows):
+        # Mamba fixed state slots run the export kernel only for scheduled
+        # exports: export each prompt's final state.
+        prefill_output.mamba_state_exports = {rid: (0, prompt_len) for rid in req_ids}
 
     # Disable KV connector for warmup run.
     model_runner.kv_connector.set_disabled(True)

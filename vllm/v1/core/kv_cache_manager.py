@@ -526,6 +526,9 @@ class KVCacheManager:
         # Matches the scheduler's own prefill boundary: `num_tokens - 1`
         # extends it to resumed requests replaying their output tokens.
         prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
+        self.coordinator.plan_state_exports(
+            request, total_computed_tokens, total_computed_tokens + num_new_tokens
+        )
 
         if full_sequence_must_fit:
             # First check and fail if the full request sequence won't fit.
@@ -858,6 +861,11 @@ class KVCacheManager:
                 start_idx = start_token // mgr.block_size
                 blocks = mgr.req_to_blocks[request_id]
                 mgr.new_block_ids.extend(blk.block_id for blk in blocks[start_idx:])
+
+    def take_mamba_state_exports(self) -> dict[str, tuple[int, int]]:
+        """Drain the (checkpoint, boundary) positions whose Mamba states the
+        worker exports this step into the fixed state slots."""
+        return self.coordinator.take_mamba_state_exports()
 
     def take_kv_cache_block_copies(
         self,
