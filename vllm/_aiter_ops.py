@@ -723,6 +723,35 @@ def _rocm_aiter_gather_kv_b_proj_fake(
     pass
 
 
+# aiter.mla.get_meta_param tensors that captured CUDA graphs point at.
+_graph_mla_meta_params: dict[int, torch.Tensor] = {}
+
+
+@functools.cache
+def _keep_graph_mla_meta_params_alive() -> None:
+    """Hold the aiter.mla.get_meta_param tensors that CUDA graphs capture.
+
+    get_meta_param is an lru_cache that returns a device tensor, and a captured
+    graph keeps only its address, so a later eviction lets replays read freed
+    memory. Workaround for ROCm/aiter#5193; remove once the AITER pin includes
+    ROCm/aiter#5194.
+    """
+    import aiter.mla as aiter_mla
+
+    get_meta_param = aiter_mla.get_meta_param
+    if not hasattr(get_meta_param, "cache_info"):
+        return  # This AITER no longer caches the tensor.
+
+    @functools.wraps(get_meta_param)
+    def get_meta_param_graph_safe(*args: Any, **kwargs: Any) -> Any:
+        num_kv_splits, indptr = get_meta_param(*args, **kwargs)
+        if torch.cuda.is_current_stream_capturing():
+            _graph_mla_meta_params[id(indptr)] = indptr
+        return num_kv_splits, indptr
+
+    aiter_mla.get_meta_param = get_meta_param_graph_safe
+
+
 def _rocm_aiter_mla_decode_fwd_impl(
     q: torch.Tensor,
     kv_buffer: torch.Tensor,
@@ -744,6 +773,7 @@ def _rocm_aiter_mla_decode_fwd_impl(
     reduce_partial_map: torch.Tensor | None = None,
     causal: bool = True,
 ) -> None:
+    _keep_graph_mla_meta_params_alive()
     from aiter.mla import mla_decode_fwd
 
     kwargs: dict[str, float | torch.Tensor | None | bool] = {
@@ -814,6 +844,7 @@ def _rocm_aiter_mla_decode_fwd_lse_impl(
     this as a separate op makes that constraint structural: callers that need
     LSE cannot accidentally forward persistent work metadata.
     """
+    _keep_graph_mla_meta_params_alive()
     from aiter.mla import get_meta_param, mla_decode_fwd
 
     kwargs: dict[str, float | int | torch.Tensor | None | bool] = {
