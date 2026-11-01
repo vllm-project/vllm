@@ -55,14 +55,13 @@ def _topk(scores: torch.Tensor, k: int) -> tuple[torch.Tensor, torch.Tensor]:
     return impl(scores, k, sorted=True, deterministic=True)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_rows"])
 def _vocab_gather_layout_kernel(
     gathered_ptr,  # [world, num_rows, shard_size], rank-major
     out_ptr,  # [num_rows, vocab_size]
     num_rows,
     shard_size,
     vocab_size,
-    out_stride,
     BLOCK_SIZE: tl.constexpr,
 ):
     # grid: (world * num_rows, cdiv(shard_size, BLOCK_SIZE))
@@ -74,7 +73,7 @@ def _vocab_gather_layout_kernel(
     mask = (cols < shard_size) & (out_cols < vocab_size)
     values = tl.load(gathered_ptr + rank_row * shard_size + cols, mask=mask)
     tl.store(
-        out_ptr + row * out_stride + out_cols,
+        out_ptr + row * vocab_size + out_cols,
         values.to(out_ptr.dtype.element_ty),
         mask=mask,
     )
@@ -92,19 +91,27 @@ def all_gather_vocab_parallel_logits(
     slice and any later cast; casting up is exact.
     """
     num_rows, shard_size = logits.shape
-    gathered = get_tp_group().all_gather(logits.contiguous(), dim=0)
+    tp_group = get_tp_group()
+    if vocab_size > tp_group.world_size * shard_size:
+        raise ValueError(
+            f"vocab_size {vocab_size} exceeds the {tp_group.world_size} "
+            f"gathered shards of {shard_size} columns"
+        )
+    # Gathering dim 1 of [1, rows, shard] gives the same rank-major layout as
+    # a dim-0 gather, but stays off the dim-0 symmetric-memory route, which
+    # gathers into a scratch buffer and returns a full-size clone of it.
+    gathered = tp_group.all_gather(logits.contiguous().unsqueeze(0), dim=1)
     out = torch.empty((num_rows, vocab_size), dtype=out_dtype, device=logits.device)
     if num_rows == 0:
         return out
     BLOCK_SIZE = 2048
-    grid = (gathered.shape[0], triton.cdiv(shard_size, BLOCK_SIZE))
+    grid = (gathered.shape[1], triton.cdiv(shard_size, BLOCK_SIZE))
     _vocab_gather_layout_kernel[grid](
         gathered,
         out,
         num_rows,
         shard_size,
         vocab_size,
-        out.stride(0),
         BLOCK_SIZE=BLOCK_SIZE,
         num_warps=8,
     )
