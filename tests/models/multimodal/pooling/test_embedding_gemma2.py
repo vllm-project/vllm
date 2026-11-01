@@ -92,6 +92,25 @@ def test_text_parity(vllm_runner, st_model, prompt):
 
 
 @needs_model
+def test_matryoshka_parity(vllm_runner, st_model):
+    from vllm import PoolingParams
+
+    prompt = "task: search result | query: what is vllm"
+    # 768 also needs embedding_size to report the 768-d output (#60978).
+    dims = [128, 256, 512]
+    with vllm_runner(MODEL, runner="pooling", max_model_len=8192) as vm:
+        outs = vm.embed(
+            [prompt] * len(dims),
+            pooling_params=[PoolingParams(dimensions=d) for d in dims],
+        )
+    for d, out in zip(dims, outs):
+        ref = st_model.encode([prompt], truncate_dim=d, normalize_embeddings=True)
+        assert len(out) == d
+        sim = _cos([out], ref).min().item()
+        assert sim >= TEXT_COS, f"Matryoshka {d}d cosine {sim} < {TEXT_COS}"
+
+
+@needs_model
 def test_mm_recipe(vllm_runner, st_model):
     from PIL import Image
 
