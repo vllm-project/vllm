@@ -316,6 +316,13 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
 
         minimax_m3_msa_warmup(worker)
 
+    from vllm.model_executor.warmup.rocm_gemm_jit_warmup import rocm_gemm_jit_warmup
+
+    try:
+        rocm_gemm_jit_warmup(worker)
+    except Exception:
+        logger.exception("ROCm GEMM JIT warmup failed; serving without it.")
+
     # Allocate the exact decode-sized workspace, autotune cache misses, and
     # resolve every CUDA Graph bucket before capture begins.
     # Lazy import: flashinfer_pcie_ipc_all_reduce imports flashinfer.comm,

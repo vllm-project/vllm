@@ -162,6 +162,7 @@ if TYPE_CHECKING:
     VLLM_MINIMAX_M3_FUSE_NORM_FP8: bool = False
     VLLM_MINIMAX_M3_MSA_DENSE_PREFILL: int = 0
     VLLM_MINIMAX_M3_MSA_DENSE_PREFILL_CHECK: int = 0
+    VLLM_ROCM_GEMM_JIT_WARMUP: bool = False
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
@@ -1453,6 +1454,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # first N calls per process and step kind (synchronizes). 0 = off.
     "VLLM_MINIMAX_M3_MSA_DENSE_PREFILL_CHECK": lambda: int(
         os.getenv("VLLM_MINIMAX_M3_MSA_DENSE_PREFILL_CHECK", "0") or 0
+    ),
+    # Compile, before serving, the Triton variants that ROCm's unquantized GEMM
+    # dispatch and the bf16x3 MoE router would otherwise JIT-compile inside the
+    # first requests (token counts on both sides of each specialization boundary).
+    "VLLM_ROCM_GEMM_JIT_WARMUP": lambda: (
+        os.getenv("VLLM_ROCM_GEMM_JIT_WARMUP", "False").lower() in ("true", "1")
     ),
     # use rocm skinny gemms
     "VLLM_ROCM_USE_SKINNY_GEMM": lambda: (
