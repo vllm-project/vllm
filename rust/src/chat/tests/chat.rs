@@ -24,7 +24,7 @@ use vllm_engine_core_client::protocol::output::{
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
-use vllm_llm::Llm;
+use vllm_llm::EngineCoreLlm;
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{
     DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs, DecodedTokenLogprob, Prompt,
@@ -148,7 +148,7 @@ async fn connect_chat_llm_with_ipc(
     .await
     .unwrap();
     ChatLlm::from_shared_backend(
-        Llm::new(client).with_request_id_randomization(false),
+        EngineCoreLlm::new(client).with_request_id_randomization(false),
         backend,
     )
 }

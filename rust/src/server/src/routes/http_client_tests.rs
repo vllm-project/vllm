@@ -27,7 +27,7 @@ use vllm_engine_core_client::protocol::output::{
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId};
-use vllm_llm::Llm;
+use vllm_llm::EngineCoreLlm;
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{Prompt, TextBackend};
 use vllm_tokenizer::test_utils::TestTokenizer;
@@ -135,8 +135,8 @@ async fn recv_engine_message(dealer: &mut DealerSocket) -> Vec<bytes::Bytes> {
     dealer.recv().await.expect("recv engine message").into_vec()
 }
 
-fn test_llm(client: EngineCoreClient) -> Llm {
-    Llm::new(client).with_request_id_randomization(false)
+fn test_llm(client: EngineCoreClient) -> EngineCoreLlm {
+    EngineCoreLlm::new(client).with_request_id_randomization(false)
 }
 
 #[derive(Clone, Debug)]

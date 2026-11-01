@@ -86,7 +86,7 @@ pub async fn completions(
     if let Err(error) = validate_max_output_tokens(
         "max_tokens",
         prepared.text_request.sampling_params.max_tokens,
-        state.chat.engine_core_client().max_model_len(),
+        state.llm().info().max_model_len,
     ) {
         return error.into_response();
     }
