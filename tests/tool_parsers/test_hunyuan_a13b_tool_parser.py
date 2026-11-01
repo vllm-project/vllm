@@ -200,10 +200,11 @@ def test_hunyuan_a13b_tool_parser_streaming(model_deltas, expected_tool_calls):
         ),
     ],
 )
-def test_hunyuan_a13b_tool_parser_streaming_matches_non_streaming(calls):
-    mock_tokenizer = MagicMock()
+def test_hunyuan_a13b_tool_parser_streaming_matches_non_streaming(
+    calls, default_tokenizer
+):
     tool_parser: ToolParser = ToolParserManager.get_tool_parser("hunyuan_a13b")(
-        mock_tokenizer
+        default_tokenizer
     )
     body = ", ".join(json.dumps({"name": n, "arguments": a}) for n, a in calls)
     model_output = f"<tool_calls>[{body}]</tool_calls>"
