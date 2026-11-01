@@ -28,6 +28,7 @@
 It supports page size >= 1.
 """
 
+import functools
 import logging
 
 import torch
@@ -466,6 +467,13 @@ def _fwd_grouped_kernel_stage1(
         )
 
 
+@functools.cache
+def _max_shared_mem(device_index: int) -> int:
+    return triton.runtime.driver.active.utils.get_device_properties(device_index)[
+        "max_shared_mem"
+    ]
+
+
 def _decode_grouped_att_m_fwd(
     q,
     k_buffer,
@@ -524,10 +532,15 @@ def _decode_grouped_att_m_fwd(
         # https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
         extra_kargs = {"waves_per_eu": 1, "matrix_instr_nonkdim": 16, "kpack": 2}
         num_stages = 1
-    elif not is_hip_ and BLOCK_DMODEL >= 1024:
-        # Avoid shared memory overflow on NVIDIA when BLOCK_DMODEL is large
-        # like non-MLA D_QK=576, BLOCK_DMODEL=1024, BLOCK_H=16
-        # exceeds 101376 bytes limit
+    elif not is_hip_ and (
+        BLOCK_DMODEL >= 1024 or _max_shared_mem(q.device.index) < 128 * 1024
+    ):
+        # Avoid shared memory overflow on NVIDIA:
+        # - non-MLA D_QK=576 gives BLOCK_DMODEL=1024, which needs more than
+        #   101376 bytes with BLOCK_H=16.
+        # - MLA (BLOCK_DMODEL=512, BLOCK_DPE=64, BLOCK_N=32, BLOCK_H=16) needs
+        #   102400 bytes with two stages, above the 101376-byte per-block
+        #   limit of sm_86/sm_89/sm_120 GPUs.
         num_stages = 1
 
     _fwd_grouped_kernel_stage1[grid](
