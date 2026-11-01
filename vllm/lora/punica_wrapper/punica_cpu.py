@@ -187,9 +187,46 @@ class PunicaWrapperCPU(PunicaWrapperBase):
 
         """
         x = x.view(-1, x.shape[-1])
-        # TODO fuse these kernels
-        for slice_idx in range(len(lora_a_stacked)):
-            self._apply_shrink(y[slice_idx], x, lora_a_stacked[slice_idx], scale)
+        if len(lora_a_stacked) == 1:
+            self._apply_shrink(y[0], x, lora_a_stacked[0], scale)
+            return
+
+        # Every slice shares the same input x, so run one GEMM per active
+        # LoRA against its concatenated A slices rather than gathering a
+        # per-token copy of the weights for each slice. Rows with no LoRA
+        # (-1) are left untouched, matching bgmv_shrink.
+        sorted_indices, order = torch.sort(self.token_lora_indices)
+        lora_ids, counts = torch.unique_consecutive(sorted_indices, return_counts=True)
+        lora_ids, counts = lora_ids.tolist(), counts.tolist()
+        num_skipped = counts[0] if lora_ids and lora_ids[0] < 0 else 0
+        if num_skipped == len(order):
+            return
+
+        out_dtype = y[0].dtype
+        ranks = [t.shape[-1] for t in y]
+        rows = order[num_skipped:]
+        x_sorted = x[rows].to(out_dtype)
+        out = torch.empty((len(rows), sum(ranks)), dtype=out_dtype, device=x.device)
+        lora_a = torch.empty(
+            (sum(ranks), x.shape[-1]), dtype=out_dtype, device=x.device
+        )
+        start = 0
+        for lora_idx, count in zip(lora_ids, counts):
+            if lora_idx < 0:
+                continue
+            offset = 0
+            for w, r in zip(lora_a_stacked, ranks):
+                lora_a[offset : offset + r].copy_(w[lora_idx, 0])
+                offset += r
+            end = start + count
+            torch.matmul(x_sorted[start:end], lora_a.T, out=out[start:end])
+            start = end
+        out.mul_(scale)
+        offset = 0
+        for y_slice in y:
+            r = y_slice.shape[-1]
+            y_slice.view(-1, r)[rows] = out[:, offset : offset + r]
+            offset += r
 
     def add_expand(
         self,
