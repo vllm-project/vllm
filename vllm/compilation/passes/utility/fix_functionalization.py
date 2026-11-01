@@ -5,7 +5,12 @@ import operator
 from collections.abc import Iterable
 
 import torch
-from torch._higher_order_ops.auto_functionalize import auto_functionalized
+from torch._higher_order_ops.auto_functionalize import (
+    auto_functionalized,
+    get_mutable_args,
+)
+from torch._inductor.fx_passes.control_dependencies import control_deps
+from torch.utils._pytree import tree_leaves
 
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -37,6 +42,7 @@ class FixFunctionalizationPass(VllmInductorPass):
         self.nodes_to_remove: list[torch.fx.Node] = []
         count = 0
 
+        protected = self.get_protected_nodes(graph)
         rope_targets = [torch.ops._C.rotary_embedding.default]
 
         if hasattr(torch.ops.vllm, "rocm_aiter_triton_rotary_embedding"):
@@ -47,6 +53,9 @@ class FixFunctionalizationPass(VllmInductorPass):
         for node in graph.nodes:
             if not is_func(node, auto_functionalized):
                 continue  # Avoid deep if-elif nesting
+
+            if node in protected:
+                continue
 
             kwargs = node.kwargs
             at_target = node.args[0]
@@ -258,6 +267,34 @@ class FixFunctionalizationPass(VllmInductorPass):
         )
         self.nodes_to_remove.clear()
 
+    def get_protected_nodes(self, graph: torch.fx.Graph) -> set[torch.fx.Node]:
+        """Conservatively preserve data descendants of unsupported wrapper uses."""
+        protected: set[torch.fx.Node] = set()
+        for node in graph.nodes:
+            # Scheduling dependencies do not imply shared tensor storage.
+            inputs = (
+                tree_leaves((node.args[1:], node.kwargs))
+                if is_func(node, control_deps)
+                else node.all_input_nodes
+            )
+            if any(
+                isinstance(arg, torch.fx.Node) and arg in protected for arg in inputs
+            ) or (
+                is_func(node, auto_functionalized)
+                and any(
+                    not is_func(user, operator.getitem)
+                    and (
+                        not is_func(user, control_deps)
+                        or node in tree_leaves((user.args[1:], user.kwargs))
+                    )
+                    for user in node.users
+                )
+            ):
+                # Analyze before rewriting: downstream reinplacing can otherwise
+                # overwrite an observable output, including through views.
+                protected.add(node)
+        return protected
+
     def _remove(self, node_or_nodes: torch.fx.Node | Iterable[torch.fx.Node]) -> None:
         """Stage a node (or nodes) for removal at the end of the pass."""
         if isinstance(node_or_nodes, torch.fx.Node):
@@ -349,6 +386,23 @@ class FixFunctionalizationPass(VllmInductorPass):
                     node.kwargs[arg] if isinstance(arg, str) else arg for arg in args
                 )
                 fn_node = graph.call_function(function, args=args)
+
+        for user in list(node.users):
+            if is_func(user, control_deps):
+                # Keep dependencies on mutated buffers even when the op returns None.
+                mutable_args, _ = get_mutable_args(function)
+                dependencies = (
+                    fn_node,
+                    *(node.kwargs[name] for name in mutable_args),
+                )
+                dependencies = torch.fx.map_arg(
+                    user.args[0],
+                    lambda dep, replacement=dependencies: (
+                        replacement if dep is node else dep
+                    ),
+                )
+                # Older PyTorch lowerings only recognize flat dependency lists.
+                user.update_arg(0, tuple(tree_leaves(dependencies)))
 
         # If the function returns a value as well as mutating args inplace,
         # the functionalized node will have a getitem[0] user that holds this value
