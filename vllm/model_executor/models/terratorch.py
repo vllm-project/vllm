@@ -249,6 +249,18 @@ class Terratorch(nn.Module, IsAttentionFree, SupportsMultiModal):
     is_pooling_model = True
 
     @classmethod
+    def get_model_state_cls(cls):
+        from terratorch.vllm import TerratorchModelState
+
+        return TerratorchModelState
+
+    def get_language_model(self) -> "Terratorch":
+        # Terratorch is a pure pooling model with no inner language model.
+        # Returning self satisfies the SupportsMultiModal contract without
+        # requiring a separate subclass workaround.
+        return self
+
+    @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
             return None
