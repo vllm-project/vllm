@@ -367,6 +367,10 @@ class KernelConfig:
     a full FP32 logits copy. Cooperative still requires FP32 logits.
     """
 
+    enable_rtx6000d_fp8_tail: bool = False
+    """Allow the measured 3392x4096 MiMo FP8 projection on RTX 6000D to
+    use B12X by padding its output width. Does not force backend selection."""
+
     linear_backend: LinearBackend = "auto"
     """Backend for linear layer GEMM kernels. Available options:
 
