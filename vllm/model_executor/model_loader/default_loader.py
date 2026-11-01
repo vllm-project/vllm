@@ -530,6 +530,12 @@ class DefaultModelLoader(BaseModelLoader):
     ) -> None:
         weights_to_load = {name for name, _ in model.named_parameters()}
         if loaded_weights is not None:
+            # A loader that fills another parameter loads that one as well.
+            for name, param in model.named_parameters():
+                target = getattr(param, "weight_loader_target", None)
+                if target is not None and name in loaded_weights:
+                    prefix = name.rpartition(".")[0]
+                    loaded_weights.add(f"{prefix}.{target}" if prefix else target)
             # ignore online quantization scales
             for name, module in model.named_modules():
                 quant_method = getattr(module, "quant_method", None)
