@@ -19,6 +19,7 @@ import torch
 from tests.v1.attention.utils import dense_kv_cache_views
 from vllm.config import set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
+    BlockTransferRequest,
     KVConnectorRole,
     MooncakeConnector,
     MooncakeConnectorScheduler,
@@ -26,6 +27,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     MooncakeXferMetadata,
     SendBlockMeta,
     TransferRegion,
+    _kernel_block_ids,
+    plan_block_descriptors,
 )
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
@@ -338,7 +341,7 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages(block_o
         lengths,
         err_reqs,
         err_msg,
-    ) = await worker._build_transfer_params(
+    ) = worker._build_transfer_params(
         [("d-physical-attention-pages", send_meta)],
         xfer_meta,
         local_regions,
@@ -369,7 +372,7 @@ async def test_build_transfer_params_uses_non_overlapping_physical_pages(block_o
             lengths,
             err_reqs,
             err_msg,
-        ) = await worker._build_transfer_params(
+        ) = worker._build_transfer_params(
             [("d-physical-attention-pages", send_meta)],
             xfer_meta,
             local_regions,
@@ -474,7 +477,7 @@ def test_hybrid_gdn_transfer_params_preserve_group_identity(monkeypatch):
         block_len = 0x100
         transfer_id = "xfer-hybrid-gdn"
 
-        async def build_transfer_params():
+        def build_transfer_params():
             send_meta = SendBlockMeta(
                 p_req_id="p-hybrid-gdn",
                 transfer_id=transfer_id,
@@ -484,7 +487,7 @@ def test_hybrid_gdn_transfer_params_preserve_group_identity(monkeypatch):
                 ],
                 ready=asyncio.Event(),
             )
-            return await worker._build_transfer_params(
+            return worker._build_transfer_params(
                 [("d-hybrid-gdn", send_meta)],
                 xfer_meta,
                 local_regions,
@@ -547,9 +550,7 @@ def test_hybrid_gdn_transfer_params_preserve_group_identity(monkeypatch):
             ),
         ]
 
-        src_ptrs, dst_ptrs, lengths, err_reqs, err_msg = asyncio.run(
-            build_transfer_params()
-        )
+        src_ptrs, dst_ptrs, lengths, err_reqs, err_msg = build_transfer_params()
 
         assert err_reqs == []
         assert err_msg is None
@@ -568,16 +569,43 @@ def test_hybrid_gdn_transfer_params_preserve_group_identity(monkeypatch):
         connector.connector_worker = None
 
 
-def test_logical_to_kernel_block_ids_expands_fa_not_gdn():
-    worker = object.__new__(MooncakeConnectorWorker)
-    worker.shutdown = noop_shutdown
-    worker._physical_blocks_per_logical_kv_block = 17
-    worker.kv_cache_config = make_hybrid_gdn_kv_cache_config(block_size=544)
+def test_kernel_block_ids_expands_fa_not_gdn():
+    group_specs = make_hybrid_gdn_kv_cache_config(block_size=544).transfer_groups
 
     block_ids = [[2], [2]]
-    kernel_block_ids = worker._logical_to_kernel_block_ids(block_ids)
+    kernel_block_ids = _kernel_block_ids(block_ids, group_specs, 17)
 
     assert kernel_block_ids == [list(range(34, 51)), [2]]
+
+
+def test_plan_block_descriptors_reports_empty_source():
+    group_specs = make_hybrid_gdn_kv_cache_config(block_size=544).transfer_groups
+    planned: list[tuple[TransferRegion, TransferRegion]] = []
+
+    def plan(src_region: TransferRegion, dst_region: TransferRegion):
+        planned.append((src_region, dst_region))
+        return False, 0, 0, 0
+
+    requests = [
+        BlockTransferRequest(
+            key="d-req-1",
+            src_block_ids=[[], []],
+            dst_block_ids=[[5], [6]],
+        )
+    ]
+    src_ptrs, dst_ptrs, lengths, err_reqs, err_msg = plan_block_descriptors(
+        requests,
+        src_regions=[],
+        dst_regions=[],
+        group_specs=group_specs,
+        blocks_per_logical=1,
+        plan=plan,
+    )
+
+    assert (src_ptrs, dst_ptrs, lengths) == ([], [], [])
+    assert err_reqs == ["d-req-1"]
+    assert err_msg == "P num blocks less than D"
+    assert planned == []
 
 
 def test_hybrid_gdn_keeps_packed_fa_and_gdn_regions_whole(
