@@ -1630,6 +1630,38 @@ def test_token_logprobs_large_batch_int64_row_offset():
     )
 
 
+@pytest.mark.parametrize("num_prompt_logprobs", [-1, 3])
+def test_chunked_prompt_logprobs_match_unchunked(num_prompt_logprobs: int):
+    """Chunks written into preallocated outputs must match one unchunked pass."""
+    if not current_platform.is_cuda_alike():
+        pytest.skip("the logprob kernels are Triton")
+    from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
+    from vllm.v1.worker.gpu.sample.prompt_logprob import (
+        CHUNK_SIZE,
+        compute_prompt_logprobs_with_chunking,
+    )
+
+    device = torch.device(current_platform.device_type)
+    vocab_size = 512
+    num_tokens = 2 * CHUNK_SIZE + 3
+    logits = torch.randn(num_tokens, vocab_size, device=device)
+    prompt_token_ids = torch.randint(vocab_size, (num_tokens,), device=device)
+
+    token_ids, logprobs, ranks = compute_prompt_logprobs_with_chunking(
+        prompt_token_ids,
+        logits,
+        lambda hidden_states: hidden_states,
+        num_prompt_logprobs,
+    )
+
+    num_logprobs = vocab_size if num_prompt_logprobs == -1 else num_prompt_logprobs
+    expected = compute_topk_scores(logits, num_logprobs, prompt_token_ids)
+    assert token_ids.dtype == torch.int32
+    torch.testing.assert_close(token_ids, expected.logprob_token_ids.to(torch.int32))
+    torch.testing.assert_close(logprobs, expected.logprobs)
+    torch.testing.assert_close(ranks, expected.selected_token_ranks)
+
+
 def test_trace_replay_with_spec_decode(monkeypatch):
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
 
