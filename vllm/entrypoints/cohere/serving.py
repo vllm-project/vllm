@@ -695,6 +695,11 @@ class CohereServingChatV2(OpenAIServingChat):
                     )
             kwargs.setdefault("documents", documents)
 
+        if request.response_format is not None:
+            kwargs.setdefault(
+                "response_format",
+                request.response_format.model_dump(exclude_none=True),
+            )
         if request.safety_mode is not None:
             kwargs.setdefault("safety_mode", str(request.safety_mode).lower())
         if request.citation_options is not None:
