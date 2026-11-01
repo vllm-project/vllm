@@ -560,6 +560,8 @@ steps:
   - csrc/moe/
   - tests/kernels/moe
   - vllm/model_executor/layers/fused_moe/
+  - vllm/models/muse_spark/common/
+  - vllm/models/muse_spark/nvidia/
   - vllm/distributed/device_communicators/
   - vllm/envs.py
   - vllm/config
@@ -578,6 +580,8 @@ steps:
       - csrc/moe/
       - tests/kernels/moe
       - vllm/model_executor/layers/fused_moe/
+      - vllm/models/muse_spark/common/
+      - vllm/models/muse_spark/nvidia/
       - vllm/distributed/device_communicators/
       - vllm/envs.py
       - vllm/config
@@ -737,6 +741,8 @@ steps:
   - tests/kernels/mamba/test_gdn_prefill_cutedsl.py
   - tests/kernels/test_bf16x3_router_gemm_cutedsl.py
   - tests/kernels/test_top_k_per_row.py
+  - csrc/fused_mqa_topk/
+  - tests/kernels/attention/test_fused_mqa_topk.py
   - tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
   - tests/kernels/quantization/test_block_fp8.py
   - tests/models/quantization/test_nvfp4.py
@@ -748,6 +754,7 @@ steps:
     - pytest -v -s tests/kernels/attention/test_flashinfer_trtllm_attention.py
     - pytest -v -s tests/kernels/attention/test_flashinfer_mla_decode.py
     - pytest -v -s tests/kernels/test_top_k_per_row.py
+    - pytest -v -s tests/kernels/attention/test_fused_mqa_topk.py
     - pytest -v -s tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
     - pytest -v -s tests/kernels/quantization/test_flashinfer_scaled_mm.py
     - pytest -v -s tests/kernels/moe/test_nvfp4_moe.py
