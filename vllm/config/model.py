@@ -425,6 +425,11 @@ class ModelConfig:
     template rendering, and multimodal preprocessing across concurrent
     requests.
 
+    For generative models, multimodal preprocessing runs on its own
+    executor, which uses this many workers only when the multimodal
+    processor cache is disabled (`mm_processor_cache_gb=0`); with the cache
+    enabled it stays single-threaded to keep the cache order.
+
     The offline `LLM` entrypoint uses the synchronous renderer path and
     processes prompts (including multimodal preprocessing) serially, so
     this setting has no effect there."""
