@@ -54,7 +54,16 @@ def test_flashinfer_bf16_cutedsl_correctness(
 
 
 @pytest.mark.parametrize(
-    "m,n,k", [(1, 1024, 1024), (64, 2048, 3072), (512, 1024, 1000)]
+    "m,n,k",
+    [
+        (1, 1024, 1024),
+        (64, 2048, 3072),
+        (512, 1024, 1000),
+        # N not a multiple of 8 (MoE shared_expert_gate, in_proj_ba at TP8) must
+        # fall back to F.linear instead of aborting FlashInfer's autotuning.
+        (64, 1, 2048),
+        (64, 12, 2048),
+    ],
 )
 @pytest.mark.parametrize("tune", [False, True])
 def test_flashinfer_bf16_auto_correctness(m: int, n: int, k: int, tune: bool) -> None:

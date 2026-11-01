@@ -153,11 +153,26 @@ def _can_use_flashinfer_cutedsl_bf16(
     )
 
 
+def _can_use_flashinfer_auto_bf16(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> bool:
+    # Until flashinfer-ai/flashinfer#8226, auto keeps CUTLASS as a candidate when
+    # N or K is not a multiple of 8 (e.g. N=1 shared_expert_gate), and
+    # autotuning then aborts in its can_implement().
+    return (
+        _can_use_flashinfer_bf16(x, weight, bias)
+        and x.shape[-1] % 8 == 0
+        and weight.shape[0] % 8 == 0
+    )
+
+
 _FLASHINFER_BF16_BACKENDS = {
     "flashinfer": _FlashInferBf16Backend(
         flashinfer_backend="auto",
         is_supported=is_flashinfer_auto_bf16_gemm_supported,
-        can_implement=_can_use_flashinfer_bf16,
+        can_implement=_can_use_flashinfer_auto_bf16,
         pass_pdl=False,
     ),
     "flashinfer_cutedsl": _FlashInferBf16Backend(
