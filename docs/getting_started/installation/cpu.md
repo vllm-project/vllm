@@ -165,6 +165,8 @@ VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_VARIANT=cpu VLLM_TARGET_DEVICE=cpu
 
 The RISC-V CPU backend supports both exact GELU (`approximate="none"`) and the tanh approximation (`approximate="tanh"`) for fused GELU-and-multiply operations. On RVV builds, the exact variant uses an error-function approximation that preserves every active lane, including nonnegative inputs, without depending on the processor's mask-agnostic fill policy.
 
+The model or operator selects the approximation; `GeluAndMul` defaults to `approximate="none"`. This fix preserves each model's existing selection and requires no new RISC-V CLI option or environment variable.
+
 ### How to launch a vLLM service on CPU?
 
 - When using the online serving, it is recommended to reserve 1-2 CPU cores for the serving framework to avoid CPU oversubscription. For example, on a platform with 32 physical CPU cores, reserving CPU 31 for the framework and using CPU 0-30 for inference threads:
