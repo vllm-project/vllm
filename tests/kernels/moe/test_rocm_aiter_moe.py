@@ -31,8 +31,9 @@ import torch.nn.functional as F
 
 from tests.kernels.moe.utils import _interleave_gate_up_rows
 from tests.kernels.utils import _assert_deterministic
+from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_cdna, on_gfx942, on_gfx950
+from vllm.platforms.rocm import on_gfx942, on_gfx950
 from vllm.utils.torch_utils import set_random_seed
 
 pytestmark = pytest.mark.skipif(
@@ -1648,8 +1649,8 @@ def _aiter_accepts_intermediate(intermediate: int, num_tokens: int) -> bool:
 
 
 @pytest.mark.skipif(
-    not on_cdna(),
-    reason="CDNA ROCm only",
+    not is_aiter_found_and_supported(),
+    reason="Only test on ROCm with AITER installed and supported",
 )
 @pytest.mark.parametrize("intermediate", [192, 224, 256])
 # With topk=2 and 8 experts, these token counts select block_m 32 / 64 / 128
