@@ -3125,7 +3125,8 @@ class EngineArgs:
         model_config: ModelConfig,
     ) -> tuple[int, str] | None:
         """Get the minimum max_num_batched_tokens needed for a multimodal
-        prefix-LM model to process at least one item of any supported modality.
+        model that disables chunked MM input (prefix-LM or encoder-decoder)
+        to process at least one item of any supported modality.
 
         Returns (token_count, modality_name) for the most expensive modality,
         or None if the value cannot be determined at this stage.
@@ -3152,6 +3153,29 @@ class EngineArgs:
         except Exception as e:
             logger.warning("Failed to determine min multimodal batched tokens: %s", e)
         return None
+
+    def _raise_batched_tokens_to_mm_floor(self, model_config: ModelConfig) -> None:
+        """Raise max_num_batched_tokens so that one multimodal item fits.
+
+        Args:
+            model_config: Config of a multimodal model that disables chunked
+                MM input.
+
+        """
+        assert self.max_num_batched_tokens is not None  # For type checking
+        result = self._get_min_mm_batched_tokens(model_config)
+        if result is None or result[0] <= self.max_num_batched_tokens:
+            return
+        mm_min, modality = result
+        logger.info(
+            "Raising max_num_batched_tokens from %d to %d to "
+            "accommodate '%s' input for model %s.",
+            self.max_num_batched_tokens,
+            mm_min,
+            modality,
+            model_config.model,
+        )
+        self.max_num_batched_tokens = mm_min
 
     def _set_default_max_num_seqs_and_batched_tokens_args(
         self,
@@ -3207,18 +3231,7 @@ class EngineArgs:
             # chunked MM input, a single multimodal item must fit in one batch.
             # Raise the floor to accommodate the largest per-item token count.
             if model_config.is_multimodal_model and model_config.is_mm_prefix_lm:
-                result = self._get_min_mm_batched_tokens(model_config)
-                if result is not None and result[0] > self.max_num_batched_tokens:
-                    mm_min, modality = result
-                    logger.info(
-                        "Raising max_num_batched_tokens from %d to %d to "
-                        "accommodate '%s' input for prefix-LM model %s.",
-                        self.max_num_batched_tokens,
-                        mm_min,
-                        modality,
-                        model_config.model,
-                    )
-                    self.max_num_batched_tokens = mm_min
+                self._raise_batched_tokens_to_mm_floor(model_config)
 
             # When using default settings,
             # Ensure max_num_batched_tokens does not exceed model limit.
@@ -3227,6 +3240,12 @@ class EngineArgs:
                 self.max_num_seqs * model_config.max_model_len,
                 self.max_num_batched_tokens,
             )
+
+            # Encoder-decoder models (e.g., Whisper) also disable chunked MM
+            # input, and an encoder input is not bounded by the decoder's
+            # max_model_len, so the clamp above can leave no room for one.
+            if model_config.is_multimodal_model and model_config.is_encoder_decoder:
+                self._raise_batched_tokens_to_mm_floor(model_config)
 
             logger.debug(
                 "Defaulting max_num_batched_tokens to %d for %s usage context.",
