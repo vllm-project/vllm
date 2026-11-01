@@ -1339,6 +1339,19 @@ class BaseRenderer(ABC, Generic[_T]):
             )
         )
 
+    @staticmethod
+    def _check_conversations_not_empty(
+        conversations: Sequence[list["ChatCompletionMessageParam"]],
+    ) -> None:
+        # the HF tokenizer refuses an empty conversation in apply_chat_template,
+        # but renderers with their own chat encoding render it to a bare BOS
+        # prompt. Refuse it here so every renderer answers the same way.
+        if any(not conversation for conversation in conversations):
+            raise VLLMValidationError(
+                "Cannot apply chat template to an empty conversation. "
+                "Provide at least one message."
+            )
+
     def render_chat(
         self,
         conversations: Sequence[list["ChatCompletionMessageParam"]],
@@ -1348,6 +1361,7 @@ class BaseRenderer(ABC, Generic[_T]):
         prompt_extras: dict[str, Any] | None = None,
         skip_mm_cache: bool = False,
     ):
+        self._check_conversations_not_empty(conversations)
         arrival_time = time.time()
 
         if tok_params is None:
@@ -1388,6 +1402,7 @@ class BaseRenderer(ABC, Generic[_T]):
         prompt_extras: dict[str, Any] | None = None,
         skip_mm_cache: bool = False,
     ):
+        self._check_conversations_not_empty(conversations)
         arrival_time = time.time()
 
         if tok_params is None:
