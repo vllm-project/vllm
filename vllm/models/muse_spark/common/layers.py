@@ -264,16 +264,14 @@ class MuseSpark1xNormPreservingResidualConnection(MuseSpark1xResidualConnection)
         return alpha, beta
 
     def materialize_coefficients(self) -> None:
-        """Cache alpha/beta as fp32 buffers, refilled in place on reload."""
+        """Cache alpha/beta as fp32 tensors, refilled in place on reload."""
         w = self.gate.detach().float() / self.temperature
         alpha, beta = self.coefficients(w)
-        for name, value in (("beta", beta), ("alpha", alpha)):
-            if not isinstance(value, torch.Tensor):
-                setattr(self, name, value)
-            elif name in self._buffers:
-                refill_derived(self, name, value.contiguous())
-            else:
-                self.register_buffer(name, value.contiguous(), persistent=False)
+        refill_derived(self, "beta", beta.contiguous())
+        if isinstance(alpha, torch.Tensor):
+            refill_derived(self, "alpha", alpha.contiguous())
+        else:
+            self.alpha = alpha
         self._coefficients_ready = True
 
     def forward(self, stream: torch.Tensor, branch: torch.Tensor) -> torch.Tensor:

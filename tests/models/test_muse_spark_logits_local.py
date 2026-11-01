@@ -26,7 +26,7 @@ def test_compute_logits_local_applies_output_transform() -> None:
 
 
 def test_residual_coefficients_refilled_in_place() -> None:
-    """Every load rebuilds the gated-residual coefficients in their buffers."""
+    """Every load rebuilds the gated-residual coefficients in place."""
     connection = MuseSpark1xNormPreservingResidualConnection(4)
     buffers = []
     for gate in (0.1, 0.5):  # cold start, reload
