@@ -1,11 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import sys
+from types import ModuleType
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from vllm.utils.import_utils import PlaceholderModule, _has_module, import_plugin
+from vllm.utils.import_utils import (
+    PlaceholderModule,
+    _has_module,
+    import_from_path,
+    import_plugin,
+)
 
 
 def _raises_module_not_found():
@@ -135,3 +141,31 @@ class TestImportPlugin:
         ):
             result = import_plugin("nonexistent_plugin_xyz")
             assert result is None
+
+    def test_failed_file_import_is_not_reused_as_a_loaded_plugin(self, tmp_path):
+        name = "vllm_test_failed_plugin"
+        plugin_file = tmp_path / f"{name}.py"
+        plugin_file.write_text("PARTIAL = True\nraise RuntimeError('broken plugin')\n")
+
+        try:
+            assert import_plugin(str(plugin_file)) is None
+            assert name not in sys.modules
+            assert import_plugin(name) is None
+        finally:
+            sys.modules.pop(name, None)
+
+
+@pytest.mark.parametrize("previous", [ModuleType("vllm_test_existing_plugin"), None])
+@pytest.mark.parametrize("error", [RuntimeError, KeyboardInterrupt])
+def test_failed_path_import_restores_existing_module(
+    tmp_path, monkeypatch, previous, error
+):
+    name = "vllm_test_existing_plugin"
+    monkeypatch.setitem(sys.modules, name, previous)
+    plugin_file = tmp_path / f"{name}.py"
+    plugin_file.write_text(f"raise {error.__name__}('broken plugin')\n")
+
+    with pytest.raises(error, match="broken plugin"):
+        import_from_path(name, plugin_file)
+
+    assert sys.modules[name] is previous
