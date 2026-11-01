@@ -6,7 +6,7 @@ meta:
   provider: "RecursiveSI"
   description: "39.8B-parameter (2.5B active) MoE with hybrid sliding-window / full attention, reasoning and tool calling; BF16 and NVFP4 checkpoints on a single Blackwell GPU."
   date_added: 2026-10-18
-  date_updated: 2026-10-21
+  date_updated: 2026-10-27
   tasks:
     - text
   performance_headline: "Single GB200, NVFP4: ~2.0 ms per output token at batch 1 with 100K context"
@@ -33,11 +33,11 @@ model:
 
 features:
   tool_calling:
-    description: "Automatic tool choice with the GLM-4.7 XML tool-call parser (Flint's chat template emits <tool_call>/<arg_key>/<arg_value>); tools are dropped from the prompt when tool_choice is none, as in the reference runtime."
-    args: ["--enable-auto-tool-choice", "--tool-call-parser", "glm47", "--exclude-tools-when-tool-choice-none"]
+    description: "Automatic tool choice with the Flint parser (XML tool calls: <tool_call>/<arg_key>/<arg_value>); tools are dropped from the prompt when tool_choice is none, as in the reference runtime."
+    args: ["--enable-auto-tool-choice", "--tool-call-parser", "flint", "--exclude-tools-when-tool-choice-none"]
   reasoning:
-    description: "Return the <think>…</think> block in the reasoning field; the model decides per turn whether to reason."
-    args: ["--reasoning-parser", "glm47"]
+    description: "Return the <think>…</think> block in the reasoning field; the model decides per turn whether to reason, and a reply without it is content. Flint has no thinking switch or effort levels: requests that set enable_thinking, thinking or reasoning_effort behave the same as requests that don't."
+    args: ["--reasoning-parser", "flint"]
 
 opt_in_features: []
 
@@ -86,7 +86,7 @@ guide: |
 
   ```bash
   vllm serve RecursiveSI/flint --served-model-name flint \
-    --enable-auto-tool-choice --tool-call-parser glm47 --reasoning-parser glm47 \
+    --enable-auto-tool-choice --tool-call-parser flint --reasoning-parser flint \
     --exclude-tools-when-tool-choice-none
   ```
 
@@ -96,7 +96,7 @@ guide: |
   vllm serve RecursiveSI/flint-nvfp4-gguf \
     --hf-config-path RecursiveSI/flint --tokenizer RecursiveSI/flint \
     --served-model-name flint \
-    --enable-auto-tool-choice --tool-call-parser glm47 --reasoning-parser glm47 \
+    --enable-auto-tool-choice --tool-call-parser flint --reasoning-parser flint \
     --exclude-tools-when-tool-choice-none
   ```
 
@@ -141,7 +141,8 @@ guide: |
     and for NVFP4 also `--hf-config-path` / `--tokenizer`; keep the default Python frontend.
   - Reasoning parser: the reference runtime's `deepseek-v3` name maps to vLLM's `deepseek_v3`
     parser, which only extracts reasoning when the request enables `thinking`; with Flint the
-    reasoning then stays in `content`. Use `glm47`.
+    reasoning then stays in `content`. Use `flint`. `glm47` assumes every reply starts inside
+    `<think>`, so a Flint reply that skips reasoning comes back in `reasoning` with empty `content`.
   - If `content` contains literal `<think>` or `<tool_call>` text, the server was started without
     the parsers above.
   - Batch-1 decode time varies by ~3-4% between sessions (a GPU-side state, not configuration).
