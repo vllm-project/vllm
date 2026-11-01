@@ -8,6 +8,7 @@ session is active. These tests verify that delegation and the session guard.
 """
 
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import Mock
 
 import pytest
@@ -96,6 +97,10 @@ def _make_worker(engine: _RecordingEngine | None) -> Worker:
     return worker
 
 
+def _recording_runner(worker: Worker) -> _RecordingModelRunner:
+    return cast(_RecordingModelRunner, worker.model_runner)
+
+
 def test_reload_weights_sets_current_config():
     worker = _make_worker(None)
     model_runner = _RecordingModelRunner()
@@ -137,7 +142,7 @@ def test_reload_rejects_eplb_before_delegating(is_checkpoint_format):
     with pytest.raises(RuntimeError, match="models managed by EPLB"):
         worker.reload_weights(is_checkpoint_format=is_checkpoint_format)
 
-    assert worker.model_runner.seen_config is None
+    assert _recording_runner(worker).seen_config is None
 
 
 @pytest.mark.parametrize("is_draft", [True, False])
@@ -154,7 +159,7 @@ def test_eplb_update_rejected_before_session_starts(is_draft, pending_rebalance)
             "model": SimpleNamespace(model=model, rebalanced=pending_rebalance)
         }
     )
-    worker._set_draft_weight_update_target = Mock()
+    worker._set_draft_weight_update_target = Mock()  # type: ignore[method-assign]
 
     with pytest.raises(RuntimeError, match="models managed by EPLB"):
         if is_draft:
@@ -175,11 +180,11 @@ def test_dense_update_allowed_when_other_model_uses_eplb(is_draft):
     worker = _make_worker(engine)
     model = Mock(spec=MixtureOfExperts, num_moe_layers=1)
     worker.model_runner.model = model if is_draft else nn.Module()
-    worker.model_runner.draft_model = nn.Module() if is_draft else model
+    _recording_runner(worker).draft_model = nn.Module() if is_draft else model
     worker.model_runner.eplb_state = SimpleNamespace(
         model_states={"model": SimpleNamespace(model=model, rebalanced=True)}
     )
-    worker._set_draft_weight_update_target = Mock()
+    worker._set_draft_weight_update_target = Mock()  # type: ignore[method-assign]
 
     if is_draft:
         worker.start_draft_weight_update()
