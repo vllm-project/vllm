@@ -1,0 +1,93 @@
+{
+    "triton_version": "3.8.0",
+    "1": {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 16,
+        "BLOCK_SIZE_K": 64,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 1,
+        "num_stages": 2,
+        "waves_per_eu": 4,
+        "SPLIT_K": 1
+    },
+    "2": {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 16,
+        "BLOCK_SIZE_K": 64,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 1,
+        "num_stages": 2,
+        "waves_per_eu": 2,
+        "SPLIT_K": 1
+    },
+    "4": {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 16,
+        "BLOCK_SIZE_K": 64,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 1,
+        "num_stages": 2,
+        "waves_per_eu": 2,
+        "SPLIT_K": 1
+    },
+    "8": {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 16,
+        "BLOCK_SIZE_K": 64,
+        "GROUP_SIZE_M": 4,
+        "num_warps": 1,
+        "num_stages": 2,
+        "waves_per_eu": 4,
+        "SPLIT_K": 1
+    },
+    "12": {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 16,
+        "BLOCK_SIZE_K": 64,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 1,
+        "num_stages": 2,
+        "waves_per_eu": 2,
+        "SPLIT_K": 1
+    },
+    "16": {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 16,
+        "BLOCK_SIZE_K": 64,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 1,
+        "num_stages": 2,
+        "waves_per_eu": 4,
+        "SPLIT_K": 1
+    },
+    "256": {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 16,
+        "BLOCK_SIZE_K": 64,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 1,
+        "num_stages": 2,
+        "waves_per_eu": 4,
+        "SPLIT_K": 1
+    },
+    "1024": {
+        "BLOCK_SIZE_M": 64,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 32,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 8,
+        "num_stages": 2,
+        "waves_per_eu": 0,
+        "SPLIT_K": 1
+    },
+    "2048": {
+        "BLOCK_SIZE_M": 128,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 32,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 8,
+        "num_stages": 2,
+        "waves_per_eu": 0,
+        "SPLIT_K": 1
+    }
+}
