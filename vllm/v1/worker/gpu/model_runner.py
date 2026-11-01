@@ -19,7 +19,7 @@ instead of embedding feature-specific logic directly.
 import functools
 import gc
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from contextlib import AbstractContextManager, nullcontext
 from copy import deepcopy
 from dataclasses import replace
@@ -210,6 +210,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             and self.speculative_config.uses_separate_workspace_lane
         )
         self.observability_config = vllm_config.observability_config
+        self.dp_profiler_is_ready: Callable[[], bool] | None = None
+        self.dp_profiler_advance: Callable[[bool], None] | None = None
         self.jit_warmup_registry = JitWarmupRegistry(vllm_config)
 
         self.device = device
@@ -1872,7 +1874,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             ),
             uniform_decode=uniform_tok_count == self.decode_query_len,
             allow_skip_drafts=scheduler_output.skip_drafts,
+            profiler_ready=(
+                self.dp_profiler_is_ready() if self.dp_profiler_is_ready else None
+            ),
         )
+
+        if (
+            self.dp_profiler_advance is not None
+            and dp_sync_state is not None
+            and dp_sync_state.profiler_ready is not None
+        ):
+            self.dp_profiler_advance(dp_sync_state.profiler_ready)
 
         if batch_desc.num_tokens == 0:
             # All DP ranks have zero tokens to run.

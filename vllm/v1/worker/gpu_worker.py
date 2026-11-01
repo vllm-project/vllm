@@ -249,6 +249,7 @@ class Worker(WorkerBase):
         self.profiler: Any | None = None
         self.profiler_config = vllm_config.profiler_config
         validate_worker_profiler_config(self.profiler_config)
+        self._dp_profiler_requested = False
 
         # Device handles of the previous step's PP intermediate-tensor send.
         self._pp_send_work: list[Handle] = []
@@ -577,6 +578,8 @@ class Worker(WorkerBase):
             alloc_context=lambda: self._maybe_get_memory_pool_context("workspace"),
         )
         self.model_runner: GPUModelRunner = self._make_model_runner()
+        self._configure_dp_synchronized_profiler()
+
         if self.rank == 0:
             # If usage stat is enabled, collect relevant info.
             report_usage_stats(self.vllm_config)
@@ -1219,6 +1222,39 @@ class Worker(WorkerBase):
         """Get encoder timing stats from model runner."""
         return self.model_runner.get_encoder_timing_stats()
 
+    def _configure_dp_synchronized_profiler(self) -> None:
+        if self._use_dp_synchronized_profiler_iterations():
+            self.model_runner.dp_profiler_is_ready = self._dp_profiler_is_ready
+            self.model_runner.dp_profiler_advance = (
+                self._advance_dp_synchronized_profiler
+            )
+
+    def _use_dp_synchronized_profiler_iterations(self) -> bool:
+        return (
+            self.profiler_config.synchronize_iterations_across_dp
+            and self.parallel_config.data_parallel_size > 1
+        )
+
+    def _dp_profiler_is_ready(self) -> bool:
+        return self._dp_profiler_requested
+
+    def _advance_dp_synchronized_profiler(self, all_ranks_ready: bool) -> None:
+        """Advance once when all DP ranks have armed the same profile session."""
+        profiler = self.profiler
+        if not all_ranks_ready:
+            if profiler is not None and profiler.is_armed:
+                profiler.stop()
+                self._dp_profiler_requested = False
+            return
+
+        assert profiler is not None
+        if not profiler.is_armed:
+            profiler.start()
+
+        profiler.step()
+        if not profiler.is_armed:
+            self._dp_profiler_requested = False
+
     def annotate_profile(self, scheduler_output):
         # add trace annotation so that we can easily distinguish
         # context/generation request numbers in each iteration.
@@ -1226,7 +1262,8 @@ class Worker(WorkerBase):
         if not self.profiler:
             return nullcontext()
 
-        self.profiler.step()
+        if not self._use_dp_synchronized_profiler_iterations():
+            self.profiler.step()
         if not self.profiler.should_annotate:
             return nullcontext()
 
@@ -1447,14 +1484,29 @@ class Worker(WorkerBase):
 
             self.profiler.set_output_name(trace_name)
             self.profiler.set_profiler_kwargs(profiler_kwargs)
-            self.profiler.start(
-                delay_iterations=delay_iterations,
-                max_iterations=max_iterations,
-            )
+            if self._use_dp_synchronized_profiler_iterations():
+                self._dp_profiler_requested = True
+                logger.info(
+                    "DP-synchronized profiler armed; capture will follow the "
+                    "next execution boundary agreed by all DP ranks."
+                )
+            else:
+                if self.profiler_config.synchronize_iterations_across_dp:
+                    logger.info_once(
+                        "synchronize_iterations_across_dp has no effect with "
+                        "data_parallel_size=1; using rank-local profiler iterations."
+                    )
+                self.profiler.start(
+                    delay_iterations=delay_iterations,
+                    max_iterations=max_iterations,
+                )
         else:
             if self.profiler is None:
                 logger.warning("Profiler was not started, nothing to stop.")
                 return
+            # Keep the explicit stop synchronous. Other DP ranks observe the
+            # de-armed state at their next existing execution agreement.
+            self._dp_profiler_requested = False
             try:
                 self.profiler.stop()
             finally:
