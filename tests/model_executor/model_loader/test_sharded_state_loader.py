@@ -403,6 +403,40 @@ def test_save_model_rejects_bad_pattern_before_overwrite(monkeypatch, tmp_path):
     assert sorted(p.name for p in tmp_path.iterdir()) == before
 
 
+def _write_shard(tmp_path, tensors):
+    from safetensors.torch import save_file
+
+    save_file(tensors, os.path.join(tmp_path, "model-rank-0-part-0.safetensors"))
+    return SimpleNamespace(model=str(tmp_path), model_weights=None)
+
+
+def test_load_weights_rejects_smaller_shard(monkeypatch, tmp_path):
+    """A shard smaller than its parameter (e.g. a vision tower saved TP-sharded
+    with --mm-encoder-tp-mode weights, loaded with data) must not be loaded
+    into a narrowed view, which would leave part of the parameter
+    uninitialized."""
+    _mock_pp_group(monkeypatch, 1, tp_rank=0)
+    model_config = _write_shard(tmp_path, {"w": torch.ones(2, 4)})
+    model = torch.nn.Module()
+    model.w = torch.nn.Parameter(torch.zeros(4, 4), requires_grad=False)
+
+    loader = ShardedStateLoader(LoadConfig(load_format="sharded_state"))
+    with pytest.raises(ValueError, match="Shape mismatch for 'w'"):
+        loader.load_weights(model, model_config)
+
+
+def test_load_weights_matching_shapes(monkeypatch, tmp_path):
+    """Tensors whose shapes match their parameters load as before."""
+    _mock_pp_group(monkeypatch, 1, tp_rank=0)
+    model_config = _write_shard(tmp_path, {"w": torch.full((4, 4), 3.0)})
+    model = torch.nn.Module()
+    model.w = torch.nn.Parameter(torch.zeros(4, 4), requires_grad=False)
+
+    loader = ShardedStateLoader(LoadConfig(load_format="sharded_state"))
+    loader.load_weights(model, model_config)
+    assert torch.equal(model.w, torch.full((4, 4), 3.0))
+
+
 @pytest.fixture(scope="module")
 def llama_3p2_1b_files():
     input_dir = hf_api().snapshot_download(
