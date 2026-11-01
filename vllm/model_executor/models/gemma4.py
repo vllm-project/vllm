@@ -1423,6 +1423,8 @@ class Gemma4ForCausalLM(
 ):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
+            # Older ModelOpt exports nest individual experts under moe.
+            ".moe.experts.": ".experts.",
             # Multimodal weights are handled by the multimodal wrapper.
             "audio_tower.": None,
             "vision_tower.": None,
