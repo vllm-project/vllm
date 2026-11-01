@@ -53,7 +53,7 @@ def test_cpu_gemm_wna16_3d_input():
 
 
 MODELS = [
-    "TheBloke/TinyLlama-1.1B-Chat-v1.0-AWQ",
+    "vllm-project/TinyLlama-1.1B-Chat-v1.0-AWQ",
     "Qwen/Qwen1.5-0.5B-Chat-GPTQ-Int4",  # without g_idx
     "RedHatAI/Qwen3-1.7B-quantized.w4a16",  # with zp
     "OPEA/Qwen2.5-0.5B-Instruct-int4-sym-inc",

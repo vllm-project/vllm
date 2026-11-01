@@ -5,7 +5,7 @@
 Every draft except an independent ``draft_model`` (EAGLE, DFlash, DSpark,
 MTP, ...) shares the target's positional space, but a
 draft checkpoint can ship a ``max_position_embeddings`` smaller than the
-context the target is served with: ``yuhuili/EAGLE3-LLaMA3.1-Instruct-8B`` has
+context the target is served with: ``vllm-project/EAGLE3-LLaMA3.1-Instruct-8B`` has
 2048, and any DFlash or DSpark draft falls short once the target's context is
 extended past the draft's training length. That value sizes the draft's rotary
 ``cos_sin_cache`` while the proposer feeds positions up to the target's
@@ -28,9 +28,11 @@ from vllm.config.parallel import ParallelConfig
 from vllm.config.speculative import SpeculativeConfig
 
 # All repos are public; only config/tokenizer-config files are fetched.
-EAGLE3_DRAFT = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"  # max_position_embeddings=2048
+EAGLE3_DRAFT = (
+    "vllm-project/EAGLE3-LLaMA3.1-Instruct-8B"  # max_position_embeddings=2048
+)
 LLAMA3_TARGET = "unsloth/Meta-Llama-3.1-8B-Instruct"  # max_position_embeddings=131072
-AR_MODEL = "JackFram/llama-68m"  # max_position_embeddings=2048
+AR_MODEL = "vllm-project/llama-68m"  # max_position_embeddings=2048
 DFLASH_DRAFT = "z-lab/Qwen3-4B-DFlash-b16"  # max_position_embeddings=40960
 DFLASH_TARGET = "Qwen/Qwen3-4B"  # max_position_embeddings=40960
 DSPARK_DRAFT = "deepseek-ai/dspark_qwen3_8b_block7"  # max_position_embeddings=40960

@@ -8,7 +8,7 @@ from transformers import Idefics3ImageProcessor
 from vllm.entrypoints.pooling.scoring.utils import compute_maxsim_score
 from vllm.model_executor.models.colultravbert import get_capped_longest_edge
 
-MODEL_NAME = "athrael-soju/ColUltraVBERT"
+MODEL_NAME = "vllm-project/ColUltraVBERT"
 # Later revisions declare the UltraVBertModel architecture instead.
 REVISION = "509adbab61b71da0484b20f3baf718e15219d761"
 DTYPE = "bfloat16"

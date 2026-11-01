@@ -33,7 +33,7 @@ SLEEP_MODEL_CASES = (
     SleepModelCase(
         name="fireredasr2",
         architecture="FireRedASR2ForConditionalGeneration",
-        model="allendou/FireRedASR2-LLM-vllm",
+        model="vllm-project/FireRedASR2-LLM-vllm",
         tensor_names=("pe",),
         trust_remote_code=True,
     ),

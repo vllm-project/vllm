@@ -15,8 +15,8 @@ import requests
 from tests.models.kimi_k3.amd_specialized_decode.test_numerics import needs_gfx950
 from tests.utils import RemoteOpenAIServer, multi_gpu_test
 
-MODEL = "riverclouds/Kimi-K3-8L-dummy"
-DRAFT = "riverclouds/Kimi-K3-DSpark-for-8L-dummy"
+MODEL = "vllm-project/Kimi-K3-8L-dummy"
+DRAFT = "vllm-project/Kimi-K3-DSpark-for-8L-dummy"
 STALLED = 3
 FAULT_EPOCH = 256  # a mono decode step well past warm-up and capture
 STARTUP_TIMEOUT = 1800

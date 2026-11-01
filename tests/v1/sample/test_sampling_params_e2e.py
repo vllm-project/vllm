@@ -6,7 +6,7 @@ import pytest
 from vllm import LLM, SamplingParams
 from vllm.exceptions import VLLMValidationError
 
-MODEL = "hmellor/tiny-random-LlamaForCausalLM"
+MODEL = "vllm-project/tiny-random-LlamaForCausalLM"
 PROMPT = "Hello my name is Robert and I"
 
 

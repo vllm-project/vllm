@@ -31,7 +31,7 @@ models_4bit_to_test = [
 ]
 
 models_4bit_to_embedding_test = [
-    ("intfloat/e5-mistral-7b-instruct", "quantize embedding model inflight"),
+    ("vllm-project/e5-mistral-7b-instruct", "quantize embedding model inflight"),
 ]
 
 models_4bit_to_moe_test = [
@@ -44,12 +44,12 @@ models_pre_quant_4bit_to_test = [
         "PrunaAI/Einstein-v6.1-Llama3-8B-bnb-4bit-smashed",
         "read pre-quantized 4-bit FP4 model",
     ),
-    ("poedator/opt-125m-bnb-4bit", "read pre-quantized 4-bit NF4 opt model"),
+    ("vllm-project/opt-125m-bnb-4bit", "read pre-quantized 4-bit NF4 opt model"),
 ]
 
 models_pre_quant_8bit_to_test = [
     ("meta-llama/Llama-Guard-3-8B-INT8", "read pre-quantized llama 8-bit model"),
-    ("yec019/fbopt-350m-8bit", "read pre-quantized 8-bit opt model"),
+    ("vllm-project/fbopt-350m-8bit", "read pre-quantized 8-bit opt model"),
 ]
 
 

@@ -48,8 +48,8 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import MiB_bytes
 from vllm.v1.engine.exceptions import EngineDeadError
 
-CHAT_MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
-EMBEDDING_MODEL_NAME = "intfloat/multilingual-e5-small"
+CHAT_MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
+EMBEDDING_MODEL_NAME = "vllm-project/multilingual-e5-small"
 RERANKER_MODEL_NAME = "BAAI/bge-reranker-v2-m3"
 REASONING_MODEL_NAME = "Qwen/Qwen3-0.6B"
 SPEECH_LARGE_MODEL_NAME = "openai/whisper-large-v3"

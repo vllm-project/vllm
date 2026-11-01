@@ -13,7 +13,7 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.llm_engine import LLMEngine
 
 MODEL_PATH = "Qwen/Qwen3-0.6B"
-LORA_MODULE_PATH = "charent/self_cognition_Alice"
+LORA_MODULE_PATH = "vllm-project/self_cognition_Alice"
 LORA_RANK = 8
 
 

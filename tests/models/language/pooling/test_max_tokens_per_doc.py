@@ -69,7 +69,7 @@ RERANK_CONFIGS = [
     ),
     # 3. bi-encoder
     TestConfig(
-        model="intfloat/multilingual-e5-small",
+        model="vllm-project/multilingual-e5-small",
         args=[
             "--enforce-eager",
             "--max-model-len",

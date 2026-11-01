@@ -31,4 +31,4 @@ steps:
       pytest -v -s
       basic_correctness/memory
       --deselect="tests/basic_correctness/memory/cumem/test_cumem.py::test_basic_cumem"
-      --deselect="tests/basic_correctness/memory/sleep_mode/test_sleep_mode.py::test_deep_sleep[yujiepan/mamba2-codestral-v0.1-tiny-random]"'
+      --deselect="tests/basic_correctness/memory/sleep_mode/test_sleep_mode.py::test_deep_sleep[vllm-project/mamba2-codestral-v0.1-tiny-random]"'
