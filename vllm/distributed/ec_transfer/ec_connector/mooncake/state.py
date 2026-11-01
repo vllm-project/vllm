@@ -333,7 +333,10 @@ class SchedulerTransferTable:
                     now=now,
                 )
                 expired.append(record)
-            elif record.state is SchedulerTransferState.LOADING:
+            elif record.state in (
+                SchedulerTransferState.WAITING_EVENT,
+                SchedulerTransferState.LOADING,
+            ):
                 self._transition(
                     record,
                     SchedulerTransferState.UNAVAILABLE,

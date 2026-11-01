@@ -530,7 +530,7 @@ class ECMooncakeScheduler:
                 transfer_id = self._request_transfer_id(request, index)
                 if transfer_id is None:
                     self._warn_unresolved_transfer_id(request, index, "request finish")
-                    continue
+                    transfer_id = f"{request.request_id}:{index}"
                 self._queue_cancel(
                     transfer_id,
                     mm_hash=request.mm_features[index].identifier,
