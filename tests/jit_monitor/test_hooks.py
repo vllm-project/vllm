@@ -338,6 +338,26 @@ def test_cutedsl_error_mode_raises():
             cute.compile(lambda: None, "arg", option=True)
 
 
+def test_cutedsl_aot_hit_export_compile_is_monitored():
+    """Exporting a VLLM_CUTE_DSL_AOT_CACHE hit compiles the kernel without
+    going through ``cute.compile``; strict mode must still reject it."""
+    from vllm.utils.cute_dsl_aot_cache import _LoadedKernel
+
+    compiles = []
+    kernel = _LoadedKernel(
+        "double", lambda x: 2 * x, None, lambda: compiles.append("double")
+    )
+    with (
+        mock.patch.dict(sys.modules, _fake_cute_import_modules(_fake_cute_compile)),
+        mock.patch.object(jit_monitor, "HAS_TRITON", False),
+    ):
+        jit_monitor.activate(mode="error")
+        assert kernel(3) == 6
+        with pytest.raises(RuntimeError, match="CuTeDSL JIT compilation"):
+            kernel.export_to_c("kernel.o", function_name="double")
+    assert compiles == []
+
+
 def test_cutedsl_subscripted_compile_is_monitored():
     """``cute.compile[options](...)`` (flashinfer >= 0.6.14) must work."""
 

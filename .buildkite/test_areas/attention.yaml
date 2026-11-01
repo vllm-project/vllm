@@ -49,8 +49,18 @@ steps:
     - vllm/model_executor/layers/attention
     - vllm/v1/attention
     - tests/v1/attention
+    - vllm/utils/cute_dsl_aot_cache.py
+    - vllm/utils/cute_dsl_compile_cache.py
+    - vllm/v1/worker/gpu_worker.py
+    - vllm/envs.py
+    - tests/conftest.py
+    - tests/models/utils.py
+    - tests/utils_/test_cute_dsl_aot_cache.py
   commands:
-    - pytest -v -s v1/attention
+    - >-
+      pytest -v -s
+      v1/attention
+      utils_/test_cute_dsl_aot_cache.py::test_restarted_engine_serves_from_saved_entries
   mirror:
     amd:
       label: ":amd: (MI355 DPX) V1 Attention"

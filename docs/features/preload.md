@@ -119,6 +119,62 @@ further daemon state (e.g. Triton warmup caches or weight manifests) plugs in
 as additional kinds — small JSON payloads travel inline, while large binary
 state rides the data plane.
 
+## Caching CuTe DSL kernels
+
+`cute.compile` does not cache its results, so every engine traces and compiles
+each CuTe DSL kernel it uses again. Two opt-in caches, both off by default and
+installed on each GPU worker before its first compile, avoid that work:
+
+- `VLLM_CUTE_DSL_COMPILE_CACHE=1` sends compiles through CuTe DSL's own
+  in-memory and file caches (`CUTE_DSL_CACHE_DIR`, default
+  `<VLLM_CACHE_ROOT>/cute_dsl`). CuTe DSL still traces every kernel to compute
+  its key and skips only the compilation. Its key includes the paths of the CuTe
+  DSL runtime libraries, so it only hits for the same installation location.
+- `VLLM_CUTE_DSL_AOT_CACHE=1` also skips tracing. It keys each compile, before
+  tracing, on the content of the installed vLLM, FlashInfer, QuACK, CuTe DSL
+  and TVM FFI code and binaries, the host, the GPU, the CUDA driver and
+  runtime, the compile-affecting environment, the compile options and the
+  kernel and its arguments. Kernels from other packages are keyed by the
+  content of their whole package. A miss compiles as usual and stores the
+  kernel as an object file in `<VLLM_CACHE_ROOT>/cute_dsl_aot`; a hit loads it.
+  Installation prefixes, file modification times and the cache locations are
+  not part of the key, so the directory can be shared between nodes with
+  identical software, GPUs and settings. Every `CUTE_*`, `CUTLASS_*` and
+  `FLASHINFER_*` variable other than the CuTe DSL cache, dump and library
+  locations is part of the key, including FlashInfer's workspace and cubin
+  directories, so nodes must also set those to the same values.
+
+`CUTE_DSL_NO_CACHE`, `CUTE_DSL_KEEP` and `CUTE_DSL_DISABLE_FILE_CACHING` keep
+their meaning for CuTe DSL's caches. The AOT cache also compiles as usual under
+`CUTE_DSL_NO_CACHE`, `CUTE_DSL_KEEP` and with dump, device-function or
+link-library compile options. A compile the AOT cache cannot key exactly (for
+example one with a `torch.Tensor` argument or code that cannot be
+fingerprinted), that has no CUDA device, or whose result cannot be exported is
+compiled as usual. A missing, damaged, older-format or unloadable entry is a
+miss, and the recompiled kernel replaces a damaged or unloadable entry unless
+another process already has. A cache directory that is read-only still serves
+hits, and one that cannot be created disables the cache. A kernel loaded from
+the AOT cache is called like the compiled one; code that uses other attributes
+of the result (such as `export_to_c`) gets the kernel compiled as usual on
+first use, which the JIT monitor treats like a `cute.compile` call.
+
+Each GPU worker logs its counters after warmup (`CuTe DSL caches: ...`): AOT
+hits, misses, uncacheable compiles with their most common reasons, invalid
+entries, load and export failures, and the time spent computing keys, loading,
+compiling and exporting; with the compile cache on, also CuTe DSL traces,
+file-cache hits and misses and compiler backend time. A hit counts only an
+actual load; entering `cute.compile` is not a hit. With
+`--jit-monitor-mode=error`, a `cute.compile` call after warmup still fails even
+if the AOT cache would have served it, so warmup must cover every kernel.
+
+!!! warning
+    Cache entries are executable code and pickled metadata. Only let processes
+    you trust to run code in the deployment write `<VLLM_CACHE_ROOT>/cute_dsl_aot`
+    and `CUTE_DSL_CACHE_DIR`. The AOT cache ignores entries that are
+    world-writable or owned by a user other than the current one, root or the
+    directory's owner, so it is not meant to be shared between users, and
+    checksums detect damaged entries, not deliberate tampering.
+
 ## How it works
 
 1. `vllm preload` spawns one daemon process per GPU. Each daemon loads its
