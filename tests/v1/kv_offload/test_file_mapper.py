@@ -220,8 +220,12 @@ def test_canonical_layout_changes_storage_namespace():
     direct = make_mapper_from_offloading_spec()
     canonical = make_mapper_from_offloading_spec(canonical_layout=True)
     assert "canonical_format" not in direct.fields
-    assert canonical.fields["canonical_format"] == "v1-nhd"
-    assert direct.base_path != canonical.base_path
+    assert canonical.fields["canonical_format"] == "v2-nhd"
+    hnd = make_mapper_from_offloading_spec(
+        canonical_layout=True, kv_cache_layout="LBHNC"
+    )
+    assert hnd.fields["canonical_format"] == "v2-hnd"
+    assert len({direct.base_path, canonical.base_path, hnd.base_path}) == 3
 
 
 # ---------------------------------------------------------------------------
