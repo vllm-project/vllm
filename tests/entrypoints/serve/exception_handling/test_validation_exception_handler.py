@@ -14,8 +14,14 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
+from fastapi.testclient import TestClient
 
+from vllm.entrypoints.anthropic.protocol import (
+    AnthropicCountTokensRequest,
+    AnthropicMessagesRequest,
+)
 from vllm.entrypoints.serve.exception_handling.handlers.validation import (
     clean_loc_for_param,
     validation_exception_handler,
@@ -30,7 +36,81 @@ def _fake_request(log_error_stack: bool = False) -> SimpleNamespace:
             state=SimpleNamespace(args=SimpleNamespace(log_error_stack=log_error_stack))
         ),
         state=SimpleNamespace(),  # no request_metadata -> hasattr(...) is False
+        scope={},
     )
+
+
+@pytest.mark.parametrize("root_path", ["", "/proxy"])
+@pytest.mark.parametrize(
+    "path,payload,expected_message",
+    [
+        (
+            "/v1/messages",
+            {
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "max_tokens": 0,
+            },
+            "max_tokens must be positive",
+        ),
+        ("/v1/messages", {"model": "test-model", "max_tokens": 8}, "Field required"),
+        ("/v1/messages/count_tokens", {"model": "test-model"}, "Field required"),
+        (
+            "/v1/messages/count_tokens",
+            {"model": "test-model", "messages": [{"role": "wizard", "content": "Hi"}]},
+            "role",
+        ),
+    ],
+)
+def test_anthropic_validation_error_uses_anthropic_envelope(
+    root_path, path, payload, expected_message
+):
+    """Invalid Anthropic requests must retain the Anthropic error envelope."""
+    app = FastAPI(root_path=root_path)
+    app.state.args = SimpleNamespace(log_error_stack=False)
+    app.exception_handler(RequestValidationError)(validation_exception_handler)
+
+    @app.post("/v1/messages")
+    async def messages(request: AnthropicMessagesRequest):
+        pytest.fail("Invalid requests must be rejected before the route runs")
+
+    @app.post("/v1/messages/count_tokens")
+    async def count_tokens(request: AnthropicCountTokensRequest):
+        pytest.fail("Invalid requests must be rejected before the route runs")
+
+    with TestClient(app) as client:
+        response = client.post(root_path + path, json=payload)
+
+    assert response.status_code == 400
+    body = response.json()
+    assert expected_message in body["error"]["message"]
+    assert body.get("type") == "error", body
+    assert set(body["error"]) == {"type", "message"}
+    assert body["error"]["type"] == "invalid_request_error"
+    assert "ValueError(" not in body["error"]["message"]
+    assert "'ctx':" not in body["error"]["message"]
+
+
+@pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/messages/other"])
+def test_other_routes_keep_openai_validation_error_envelope(path):
+    """Anthropic error formatting must not affect other routes."""
+    app = FastAPI()
+    app.state.args = SimpleNamespace(log_error_stack=False)
+    app.exception_handler(RequestValidationError)(validation_exception_handler)
+
+    @app.post(path)
+    async def endpoint(value: int):
+        pytest.fail("Invalid requests must be rejected before the route runs")
+
+    with TestClient(app) as client:
+        response = client.post(path)
+
+    assert response.status_code == 400
+    body = response.json()
+    assert set(body) == {"error"}
+    assert body["error"]["type"] == "Bad Request"
+    assert body["error"]["param"] == "query.value"
+    assert body["error"]["code"] == 400
 
 
 class TestValidationErrorParamFallback:
