@@ -56,6 +56,22 @@ def test_non_diffusion_models_unaffected():
     params.verify(MockModelConfig(), None, None, None)
 
 
+class _SmallVocab(MockModelConfig):
+    def get_vocab_size(self) -> int:
+        return 10
+
+
+def test_logprobs_above_vocab_size_are_rejected():
+    # max_logprobs can be larger than the vocab. torch.topk then crashes
+    # in the worker, so validation has to reject the request first.
+    cfg = _SmallVocab(max_logprobs=20)
+    with pytest.raises(VLLMValidationError, match="vocab"):
+        SamplingParams(logprobs=20)._validate_logprobs(cfg)
+    with pytest.raises(VLLMValidationError, match="vocab"):
+        SamplingParams(prompt_logprobs=20)._validate_logprobs(cfg)
+    SamplingParams(logprobs=10)._validate_logprobs(cfg)
+
+
 def test_verify_leaves_logits_processors_to_admission():
     """verify() is runner-agnostic; LP validation lives in the admission
     layer, so an unimportable FQCN must not fail verify()."""
