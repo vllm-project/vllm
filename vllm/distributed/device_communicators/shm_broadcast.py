@@ -69,6 +69,9 @@ VLLM_RINGBUFFER_WARNING_INTERVAL = envs.VLLM_RINGBUFFER_WARNING_INTERVAL
 # written-flag. Bounds lost-notify recovery latency to ~5s while the periodic
 # wakeup stays negligible (one flag check per reader every 5s).
 SHM_READER_RECHECK_INTERVAL_MS = 5000
+# Keep payload waits below the worker exit grace period while avoiding a busy
+# poll when a remote or overflow reader has no data.
+ZMQ_PAYLOAD_RECHECK_INTERVAL_MS = 100
 # How often a busy reader polls its notify socket. CONFLATE keeps one message,
 # but libzmq still queues an internal command per notification until the socket
 # is polled, so a reader that never goes idle would grow without bound.
@@ -76,6 +79,10 @@ SHM_NOTIFY_POLL_INTERVAL_S = 2.0
 
 
 from_bytes_big = functools.partial(int.from_bytes, byteorder="big")
+
+
+class _SocketPollTimeout(TimeoutError):
+    """No message became readable before the socket poll expired."""
 
 
 # Memory fence for cross-process shared memory visibility.
@@ -1002,19 +1009,40 @@ class MessageQueue:
                         all_buffers.append(buffer if i == 0 else bytearray(buffer))
                     obj = pickle.loads(all_buffers[0], buffers=all_buffers[1:])
             if overflow:
-                obj = MessageQueue.recv(self.local_socket, timeout)
+                obj = self._recv_interruptible(self.local_socket, timeout)
         elif self._is_remote_reader:
-            obj = MessageQueue.recv(self.remote_socket, timeout)
+            obj = self._recv_interruptible(self.remote_socket, timeout)
         else:
             raise RuntimeError("Only readers can dequeue")
         return obj
+
+    def _recv_interruptible(self, socket: zmq.Socket, timeout: float | None) -> Any:
+        read_timeout = self.ReadTimeoutWithWarnings(timeout, should_warn=False)
+        first_poll = True
+        while not self.shutting_down:
+            poll_timeout = (
+                min(timeout, ZMQ_PAYLOAD_RECHECK_INTERVAL_MS / 1000)
+                if first_poll and timeout is not None
+                else min(read_timeout.timeout_ms(), ZMQ_PAYLOAD_RECHECK_INTERVAL_MS)
+                / 1000
+            )
+            first_poll = False
+            try:
+                obj = MessageQueue.recv(socket, poll_timeout)
+            except _SocketPollTimeout:
+                pass
+            else:
+                if self.shutting_down:
+                    raise RuntimeError("cancelled")
+                return obj
+        raise RuntimeError("cancelled")
 
     @staticmethod
     def recv(socket: zmq.Socket, timeout: float | None) -> Any:
         # Ensure non-negative timeout passed to zmq poll.
         timeout_ms = None if timeout is None else max(0, int(timeout * 1000))
         if not socket.poll(timeout=timeout_ms):
-            raise TimeoutError
+            raise _SocketPollTimeout
         recv, *recv_oob = socket.recv_multipart(copy=False)
         return pickle.loads(recv, buffers=recv_oob)
 
