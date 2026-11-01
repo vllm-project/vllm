@@ -4,6 +4,7 @@
 
 import pytest
 
+from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.entrypoints.launchers.api_server.entry import (
     build_async_engine_client_from_engine_args,
@@ -116,3 +117,41 @@ async def test_lora_functions_async():
         await run_check(llm.remove_lora, 12, [10, 11])
         await run_check(llm.remove_lora, 11, [10])
         await run_check(llm.remove_lora, 10, [])
+
+
+@pytest.mark.parametrize("enforce_eager", [True, False])
+@pytest.mark.parametrize("use_v2_model_runner", ["0", "1"])
+def test_dummy_batch_keeps_loras(monkeypatch, use_v2_model_runner, enforce_eager):
+    """Idle data parallel ranks run dummy batches between steps. Those must
+    not unload adapters, including ones whose ids match the dummy LoRA ids."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", use_v2_model_runner)
+    engine_args = EngineArgs(
+        model=MODEL_PATH,
+        enable_lora=True,
+        max_loras=2,
+        max_cpu_loras=3,
+        max_lora_rank=LORA_RANK,
+        max_model_len=128,
+        max_num_seqs=8,
+        gpu_memory_utilization=0.8,
+        enforce_eager=enforce_eager,
+    )
+    llm = LLMEngine.from_engine_args(engine_args)
+
+    llm.add_lora(make_lora_request(1))
+    llm.add_lora(make_lora_request(3))
+    assert set(llm.list_loras()) == {1, 3}
+
+    for _ in range(3):
+        llm.engine_core.execute_dummy_batch()
+    assert set(llm.list_loras()) == {1, 3}
+
+    llm.add_request(
+        "req-1",
+        "Who are you?",
+        SamplingParams(max_tokens=4),
+        lora_request=make_lora_request(1),
+    )
+    while llm.has_unfinished_requests():
+        llm.step()
+    assert set(llm.list_loras()) == {1, 3}
