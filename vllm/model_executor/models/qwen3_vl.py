@@ -120,6 +120,7 @@ from vllm.utils.cache import LRUCache
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
 
 from ...utils.gpu_sync_debug import gpu_sync_allowed
@@ -144,6 +145,7 @@ from .qwen2_5_vl import (
     Qwen2_5_VLVideoEmbeddingInputs,
     Qwen2_5_VLVideoInputs,
     Qwen2_5_VLVideoPixelInputs,
+    _pad_flashinfer_cu_seqlens_buffer,
 )
 from .qwen2_vl import (
     Qwen2VLMultiModalDataParser,
@@ -2146,6 +2148,15 @@ class Qwen3VLForConditionalGeneration(
                 "max_seqlen",
                 "sequence_lengths",
             ],
+            # FlashInfer packs the q/k/o and v offsets into one cu_seqlens
+            # tensor, split at its midpoint. Replays usually pad to a smaller
+            # batch bucket than capture, so each half has to be copied into
+            # its own half of the capture buffer.
+            padding_logics=(
+                {"cu_seqlens": _pad_flashinfer_cu_seqlens_buffer}
+                if self.visual.attn_backend == AttentionBackendEnum.FLASHINFER
+                else {}
+            ),
             out_hidden_size=self.visual.out_hidden_size,
             max_frames_per_video=max_frames,
         )

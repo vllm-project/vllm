@@ -1522,3 +1522,106 @@ class TestInitInvariantValidation:
 
         with pytest.raises(ValueError, match="must be positive"):
             CompilationConfig(encoder_cudagraph_token_budgets=[-1, 64])
+
+
+# ---------------------------------------------------------------------------
+# FlashInfer cu_seqlens replay padding (no GPU required)
+# ---------------------------------------------------------------------------
+
+
+class TestFlashInferCuSeqlensPadding:
+    """FlashInfer packs the q/k/o and v offsets into one cu_seqlens tensor and
+    splits it at its midpoint. A replay padded to a smaller batch bucket than
+    the capture must keep each half in its own half of the capture buffer."""
+
+    HIDDEN_SIZE = 16
+
+    def _flashinfer_cu_seqlens(self, seq_lens: list[int], pad_to: int):
+        import numpy as np
+
+        from vllm.model_executor.layers.attention.mm_encoder_attention import (
+            MMEncoderAttention,
+        )
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        cu_seqlens = np.concatenate([[0], np.cumsum(seq_lens)]).astype(np.int32)
+        cu_seqlens = np.concatenate(
+            [cu_seqlens, np.full(pad_to - len(seq_lens), cu_seqlens[-1], np.int32)]
+        )
+        return MMEncoderAttention.maybe_recompute_cu_seqlens(
+            AttentionBackendEnum.FLASHINFER,
+            cu_seqlens,
+            self.HIDDEN_SIZE,
+            1,
+            torch.device("cpu"),
+        )
+
+    @staticmethod
+    def _halves(cu_seqlens: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        # Same split as flashinfer_wrapper in vit_attn_wrappers.py.
+        mid = len(cu_seqlens) // 2
+        return cu_seqlens[:mid], cu_seqlens[mid:]
+
+    def test_replay_keeps_qko_and_v_offsets(self):
+        from vllm.model_executor.models.qwen2_5_vl import (
+            _pad_flashinfer_cu_seqlens_buffer,
+        )
+
+        # Capture is sized for 16 frames (bucket 16); one 49-token image
+        # replayed with a max batch size of 2 pads to bucket 8.
+        capture = self._flashinfer_cu_seqlens([49] * 16, pad_to=16)
+        replay = self._flashinfer_cu_seqlens([49], pad_to=2)
+        assert len(capture) > len(replay)
+
+        buf = torch.full_like(capture, -1)
+        _pad_flashinfer_cu_seqlens_buffer(buf, replay)
+
+        want_qko, want_v = self._halves(replay)
+        got_qko, got_v = self._halves(buf)
+        n = len(want_qko)
+        assert torch.equal(got_qko[:n], want_qko)
+        assert torch.equal(got_v[:n], want_v)
+        # Padded sequences have zero length in both halves.
+        assert torch.all(got_qko[n:] == want_qko[-1])
+        assert torch.all(got_v[n:] == want_v[-1])
+
+    def test_default_copy_misaligns_v_offsets(self):
+        capture = self._flashinfer_cu_seqlens([49] * 16, pad_to=16)
+        replay = self._flashinfer_cu_seqlens([49], pad_to=2)
+
+        buf = torch.full_like(capture, -1)
+        EncoderCudaGraphManager._copy_padded_buffer(buf, replay)
+
+        _, want_v = self._halves(replay)
+        _, got_v = self._halves(buf)
+        assert not torch.equal(got_v[: len(want_v)], want_v)
+
+    @pytest.mark.parametrize("flashinfer", [True, False])
+    def test_qwen3_vl_registers_flashinfer_padding(self, flashinfer: bool):
+        from vllm.model_executor.models.qwen2_5_vl import (
+            _pad_flashinfer_cu_seqlens_buffer,
+        )
+        from vllm.model_executor.models.qwen3_vl import (
+            Qwen3VLForConditionalGeneration,
+        )
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        backend = (
+            AttentionBackendEnum.FLASHINFER
+            if flashinfer
+            else AttentionBackendEnum.FLASH_ATTN
+        )
+        model = SimpleNamespace(
+            is_multimodal_pruning_enabled=False,
+            get_max_frames_per_video=lambda: 16,
+            visual=SimpleNamespace(attn_backend=backend, out_hidden_size=8),
+        )
+        config = Qwen3VLForConditionalGeneration.get_encoder_cudagraph_config(
+            cast(Any, model)
+        )
+        if flashinfer:
+            assert config.padding_logics == {
+                "cu_seqlens": _pad_flashinfer_cu_seqlens_buffer
+            }
+        else:
+            assert config.padding_logics == {}
