@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import enum
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -18,6 +19,7 @@ class MockModelConfig:
     max_logprobs: int = 20
     logits_processors: list | None = None
     return_sampling_mask: bool = False
+    max_model_len: int = 2048
 
     def get_vocab_size(self) -> int:
         return 1024
@@ -280,3 +282,57 @@ def test_extra_args_preserves_custom_objects_and_shared_containers():
     params = SamplingParams(extra_args=extra_args)
     assert params.extra_args["first"][0] is custom
     assert params.extra_args["first"] is params.extra_args["second"]
+
+
+def _admit(params: SamplingParams) -> None:
+    processor = SimpleNamespace(
+        model_config=MockModelConfig(),
+        vllm_config=SimpleNamespace(
+            watermark_config=None,
+            use_v2_model_runner=True,
+            cache_config=SimpleNamespace(kv_sharing_fast_prefill=False),
+        ),
+        speculative_config=None,
+        structured_outputs_config=None,
+        tokenizer=None,
+        validate_logits_processors_params=lambda params: None,
+        resolve_watermarking=lambda params: False,
+    )
+    InputProcessor._validate_params(processor, params, ("generate",))
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"n": True},
+        {"max_tokens": 2.5},
+        {"max_tokens": True},
+        {"seed": 1.5},
+        {"stop_token_ids": [True]},
+        {"routed_experts_prompt_start": 1.5},
+    ],
+)
+def test_params_the_engine_cannot_decode_are_rejected(kwargs: dict):
+    """The engine decodes params with msgspec, so a value that passed
+    construction but fails that decode made LLM.generate() hang (#60998)."""
+    with pytest.raises(VLLMValidationError, match="Expected `int"):
+        _admit(SamplingParams(**kwargs))
+
+
+def test_int_enum_values_are_accepted():
+    class Limit(enum.IntEnum):
+        TOKENS = 8
+
+    _admit(SamplingParams(max_tokens=Limit.TOKENS, top_k=Limit.TOKENS))
+
+
+def test_prompt_logprob_token_ids_as_nested_lists_are_accepted():
+    # verify() converts the documented list form to the ndarray the engine
+    # decodes, so the round trip must run after it.
+    _admit(SamplingParams(prompt_logprob_token_ids=[[1, 2], [3, -1]]))
+
+
+def test_unserializable_extra_args_are_left_to_the_engine_client():
+    # An in-process engine never encodes params, so a custom object in
+    # extra_args must not fail admission.
+    _admit(SamplingParams(extra_args={"custom": object()}))
