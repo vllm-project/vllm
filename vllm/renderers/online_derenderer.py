@@ -436,7 +436,12 @@ class OnlineDerenderer:
 
         """
         if self.parser is None or chat_request is None:
-            return ChatStreamProcessor(ParseContext().to_chat_request(), None)
+            return ChatStreamProcessor(
+                ParseContext().to_chat_request(),
+                None,
+                enable_auto_tools=self.enable_auto_tools,
+                parser_cls=None,
+            )
         parser = self.parser(
             self.renderer.get_tokenizer(),
             chat_request.tools,
@@ -444,7 +449,12 @@ class OnlineDerenderer:
             model_config=self.model_config,
         )
         parser.set_history_tool_call_count(history_tool_call_cnt)
-        return ChatStreamProcessor(chat_request, parser)
+        return ChatStreamProcessor(
+            chat_request,
+            parser,
+            enable_auto_tools=self.enable_auto_tools,
+            parser_cls=self.parser,
+        )
 
     def _resolve_chat_template_kwargs(
         self, chat_request: ChatCompletionRequest
