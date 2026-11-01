@@ -163,7 +163,7 @@ RUN --mount=type=bind,source=.git,target=.git \
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=.git,target=.git \
-    VLLM_TARGET_DEVICE=xpu python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
+    VLLM_TARGET_DEVICE=xpu python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp311
 
 FROM vllm-base AS ucx-nixl-build
 

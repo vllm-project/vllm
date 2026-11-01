@@ -438,7 +438,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         && export VLLM_DOCKER_BUILD_CONTEXT=1 \
         && export DEEPGEMM_PYTHON_INTERPRETERS=$(cat /tmp/dg_pythons.txt) \
         && sccache --show-stats \
-        && python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38 \
+        && python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp311 \
         && sccache --show-stats; \
     fi
 
@@ -455,7 +455,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
         export VLLM_PRECOMPILED_WHEEL_COMMIT="${VLLM_MERGE_BASE_COMMIT}" && \
         export VLLM_DOCKER_BUILD_CONTEXT=1 && \
         export DEEPGEMM_PYTHON_INTERPRETERS=$(cat /tmp/dg_pythons.txt) && \
-        python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38; \
+        python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp311; \
     fi
 
 #################### CSRC BUILD IMAGE ####################
@@ -665,7 +665,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         export VLLM_USE_PRECOMPILED=1; \
         export VLLM_PRECOMPILED_WHEEL_LOCATION=$(ls /precompiled-wheels/*.whl); \
     fi && \
-    python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
+    python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp311
 
 # Record the wheel checksum so downstream stages can bust their layer cache
 # when the wheel changes, without copying the wheel itself into the image.
