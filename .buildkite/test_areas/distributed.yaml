@@ -707,6 +707,7 @@ steps:
   - tests/benchmarks/test_forward_cli.py
   commands:
   - pytest -v -s distributed/test_pp_cudagraph.py
+  - pytest -v -s distributed/test_pp_encoder_cudagraph.py
   - pytest -v -s distributed/test_pipeline_parallel.py
   - pytest -v -s v1/distributed/test_pp_dp_v2.py
   - pytest -v -s benchmarks/test_forward_cli.py::test_bench_forward_pipeline
