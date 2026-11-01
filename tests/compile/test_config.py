@@ -1273,3 +1273,85 @@ def test_combo_kernel_defaults_without_inductor_deterministic_setting():
 
     assert config.inductor_compile_config["combo_kernels"] is True
     assert config.inductor_compile_config["benchmark_combo_kernel"] is True
+
+
+def _pdl_platform(supports_pdl: bool):
+    """Pretend to be a CUDA platform that does / does not support PDL, using the
+    NVML-style capability check that must not initialize CUDA."""
+    return (
+        patch.object(current_platform, "is_cuda", return_value=True),
+        patch.object(
+            current_platform, "has_device_capability", return_value=supports_pdl
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "performance_mode,supports_pdl,expected",
+    [
+        ("interactivity", True, True),
+        ("interactivity", False, None),
+        ("balanced", True, None),
+        ("throughput", True, None),
+    ],
+)
+def test_interactivity_mode_enables_inductor_pdl(
+    monkeypatch: pytest.MonkeyPatch,
+    performance_mode: str,
+    supports_pdl: bool,
+    expected: bool | None,
+):
+    """'interactivity' turns on PDL for Inductor's Triton kernels only on
+    GPUs that support it; the other modes leave the option untouched. The
+    default CompilationConfig (mode resolved from the optimization level)
+    is the path users hit."""
+    monkeypatch.delenv("TORCHINDUCTOR_ENABLE_PDL", raising=False)
+    cuda, cap = _pdl_platform(supports_pdl)
+    with cuda, cap:
+        config = VllmConfig(performance_mode=performance_mode)
+    assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
+    assert (
+        config.compilation_config.inductor_compile_config.get("triton.enable_pdl")
+        is expected
+    )
+
+
+def test_interactivity_mode_keeps_explicit_inductor_pdl(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """An explicit inductor_compile_config value is not overridden."""
+    monkeypatch.delenv("TORCHINDUCTOR_ENABLE_PDL", raising=False)
+    cuda, cap = _pdl_platform(True)
+    with cuda, cap:
+        config = VllmConfig(
+            performance_mode="interactivity",
+            compilation_config=CompilationConfig(
+                inductor_compile_config={"triton.enable_pdl": False},
+            ),
+        )
+    assert (
+        config.compilation_config.inductor_compile_config["triton.enable_pdl"] is False
+    )
+
+
+def test_interactivity_mode_keeps_inductor_pdl_env(monkeypatch: pytest.MonkeyPatch):
+    """TORCHINDUCTOR_ENABLE_PDL, Inductor's own switch, is left in charge."""
+    monkeypatch.setenv("TORCHINDUCTOR_ENABLE_PDL", "0")
+    cuda, cap = _pdl_platform(True)
+    with cuda, cap:
+        config = VllmConfig(performance_mode="interactivity")
+    assert "triton.enable_pdl" not in config.compilation_config.inductor_compile_config
+
+
+def test_interactivity_mode_no_inductor_pdl_without_inductor(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Eager / non-VLLM_COMPILE modes do not get the Inductor option."""
+    monkeypatch.delenv("TORCHINDUCTOR_ENABLE_PDL", raising=False)
+    cuda, cap = _pdl_platform(True)
+    with cuda, cap:
+        config = VllmConfig(
+            performance_mode="interactivity",
+            compilation_config=CompilationConfig(mode=CompilationMode.NONE),
+        )
+    assert "triton.enable_pdl" not in config.compilation_config.inductor_compile_config
