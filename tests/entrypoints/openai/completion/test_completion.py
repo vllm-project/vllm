@@ -892,9 +892,18 @@ async def test_windowed_hidden_capture_http(capture_server):
                 dtype=getattr(torch, payload["dtype"]),
             ).reshape(payload["shape"])
 
-        hidden = decode(result["hidden_states"])
-        logprobs = decode(result["logprobs"])
-        token_ids = decode(result["logprob_token_ids"])
+        tensors = result["tensors"]
+        hidden = decode(tensors["hidden_states"])
+        logprobs = decode(tensors["logprobs"])
+        token_ids = decode(tensors["logprob_token_ids"])
+        assert result["segments"] == [
+            {
+                "kind": "output",
+                "start": plain.usage.prompt_tokens,
+                "end": plain.usage.prompt_tokens + 4,
+            }
+        ]
+        assert result["logits_contract"]["vocab_size"] > 0
         assert hidden.shape[0] == 4
         assert logprobs.shape == token_ids.shape == (4, 3)
         assert torch.isfinite(hidden).all()
@@ -913,3 +922,50 @@ async def test_windowed_hidden_capture_http(capture_server):
         common["extra_body"]["hidden_state_capture"]["end"] = 24
         with pytest.raises(BadRequestError):
             await client.completions.create(**common, stream=True)
+
+
+@pytest.mark.asyncio
+async def test_prompt_segment_hidden_capture_http(capture_server):
+    """Teacher scoring returns every scored prompt row, even on a cache hit."""
+    async with capture_server.get_async_client() as client:
+        plain = await client.completions.create(
+            model=MODEL_NAME,
+            prompt="Explain GPUs briefly.",
+            max_tokens=8,
+            temperature=0,
+            extra_body={"ignore_eos": True, "return_token_ids": True},
+        )
+        prompt_ids = list(plain.choices[0].prompt_token_ids)
+        response_ids = list(plain.choices[0].token_ids)
+        start = len(prompt_ids) - 1
+        end = start + len(response_ids)
+        scoring: dict[str, Any] = dict(
+            model=MODEL_NAME,
+            prompt=prompt_ids + response_ids,
+            max_tokens=1,
+            temperature=0,
+            extra_body={
+                "hidden_state_capture": {
+                    "start": start,
+                    "end": end,
+                    "coordinate": "absolute",
+                    "min_rows": end - start,
+                    "collection_id": "teacher",
+                }
+            },
+        )
+        results = []
+        for _ in range(2):
+            choice = (await client.completions.create(**scoring)).choices[0]
+            assert choice.hidden_capture_skip_reason is None
+            results.append(choice.hidden_state_capture)
+        for result in results:
+            assert result["hidden_positions"] == list(range(start, end))
+            assert result["segments"] == [
+                {"kind": "prompt", "start": start, "end": end}
+            ]
+            assert set(result["tensors"]) == {"hidden_states"}
+            assert result["tensors"]["hidden_states"]["shape"][0] == end - start
+        scoring["extra_body"]["hidden_state_capture"]["logprob_topk"] = 2
+        with pytest.raises(BadRequestError):
+            await client.completions.create(**scoring)

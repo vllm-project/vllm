@@ -20,6 +20,16 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 
+def hidden_result(output):
+    aux = output.aux_outputs
+    return None if aux is None else aux.hidden_state_capture
+
+
+def skip_reason(output):
+    aux = output.aux_outputs
+    return None if aux is None else aux.hidden_capture_skip_reason
+
+
 class HiddenCaptureReferenceExtension:
     model_runner: "GPUModelRunner"
 
@@ -69,7 +79,7 @@ def test_recomputed_history_is_excluded_before_logprob_capture():
         hidden,
         logits=logits,
         cu_num_logits=np.array([0, 1]),
-        accepted_ends={"r": 8},
+        settled_ends={"r": 8},
     )["r"]
     np.testing.assert_array_equal(chunk.positions, [8])
     torch.testing.assert_close(chunk.hidden_states, hidden[8:9])
@@ -119,8 +129,8 @@ def test_hidden_logprobs_survive_kv_pressure_preemption(vllm_runner, monkeypatch
             > 0
         )
         for output in outputs:
-            result = output.hidden_state_capture
-            assert output.hidden_capture_skip_reason is None
+            result = hidden_result(output)
+            assert skip_reason(output) is None
             np.testing.assert_array_equal(result.hidden_positions, np.arange(3, 131))
             assert result.logprobs.shape == (128, 2)
             assert torch.isfinite(result.logprobs).all()
@@ -191,10 +201,10 @@ def test_hidden_windows_match_full_capture_and_raw_logits(
             "hidden_state_capture": {"start": 4, "end": 8, "collection_id": "mixed"}
         }
         mixed = llm.generate(prompts, [params, mixed_params], use_tqdm=False)
-        assert mixed[0].hidden_state_capture is None
+        assert hidden_result(mixed[0]) is None
         torch.testing.assert_close(
-            mixed[1].hidden_state_capture.hidden_states,
-            full[1].hidden_state_capture.hidden_states[4:8],
+            hidden_result(mixed[1]).hidden_states,
+            hidden_result(full[1]).hidden_states[4:8],
             atol=0,
             rtol=0,
         )
@@ -202,14 +212,51 @@ def test_hidden_windows_match_full_capture_and_raw_logits(
             window = generate(4, 8)
             for disabled, before, after in zip(off, full, window):
                 assert after.outputs[0].token_ids == disabled.outputs[0].token_ids
-                result = after.hidden_state_capture
+                result = hidden_result(after)
                 np.testing.assert_array_equal(result.hidden_positions, [7, 8, 9, 10])
                 torch.testing.assert_close(
                     result.hidden_states,
-                    before.hidden_state_capture.hidden_states[4:8],
+                    hidden_result(before).hidden_states[4:8],
                     atol=0,
                     rtol=0,
                 )
+        # Teacher scoring: prompt-segment rows of prompt + response match the
+        # rows captured while generating that response.
+        scoring_params = SamplingParams(
+            temperature=0,
+            max_tokens=1,
+            extra_args={
+                "hidden_state_capture": {
+                    "start": 3,
+                    "end": 11,
+                    "coordinate": "absolute",
+                    "min_rows": 8,
+                    "collection_id": "teacher-scoring",
+                }
+            },
+        )
+        scored = llm.generate(
+            [
+                {
+                    "prompt_token_ids": prompt["prompt_token_ids"]
+                    + list(out.outputs[0].token_ids[:8])
+                }
+                for prompt, out in zip(prompts, off)
+            ],
+            scoring_params,
+            use_tqdm=False,
+        )
+        for teacher, original in zip(scored, full):
+            result = hidden_result(teacher)
+            np.testing.assert_array_equal(result.hidden_positions, np.arange(3, 11))
+            assert [s.kind for s in result.segments] == ["prompt"]
+            assert result.logits_contract["vocab_size"] > 0
+            torch.testing.assert_close(
+                result.hidden_states,
+                hidden_result(original).hidden_states[:8],
+                atol=0,
+                rtol=0,
+            )
         # Recompute each accepted prefix as prefill, independently of decode slicing.
         for response_index in range(4, 8):
             prefixes = [
@@ -237,12 +284,12 @@ def test_hidden_windows_match_full_capture_and_raw_logits(
                     == original.outputs[0].token_ids[response_index]
                 )
                 torch.testing.assert_close(
-                    reference.hidden_state_capture.hidden_states[0],
-                    original.hidden_state_capture.hidden_states[response_index],
+                    hidden_result(reference).hidden_states[0],
+                    hidden_result(original).hidden_states[response_index],
                     atol=0,
                     rtol=0,
                 )
-        states = torch.stack([o.hidden_state_capture.hidden_states[5] for o in full])
+        states = torch.stack([hidden_result(o).hidden_states[5] for o in full])
 
         values, ids = llm.collective_rpc(
             "capture_reference_logits", args=(states.tolist(),)
@@ -250,7 +297,7 @@ def test_hidden_windows_match_full_capture_and_raw_logits(
         values = torch.tensor(values)
         ids = torch.tensor(ids)
         for index, output in enumerate(full):
-            captured = output.hidden_state_capture
+            captured = hidden_result(output)
             torch.testing.assert_close(
                 values[index], captured.logprobs[5], atol=2e-5, rtol=1e-5
             )
@@ -259,7 +306,42 @@ def test_hidden_windows_match_full_capture_and_raw_logits(
             )
         never = generate(32, 40)
         assert all(
-            o.hidden_state_capture is None
-            and o.hidden_capture_skip_reason == "ended_before_window"
+            hidden_result(o) is None and skip_reason(o) == "ended_before_window"
             for o in never
         )
+
+
+def test_prompt_capture_spans_chunked_prefill(vllm_runner, monkeypatch):
+    """Rows from prefill chunks that sample nothing are delivered at the end."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.delenv("VLLM_ALLOW_INSECURE_SERIALIZATION", raising=False)
+    with vllm_runner(
+        os.getenv("VLLM_TEST_MODEL", "Qwen/Qwen3-0.6B"),
+        dtype="bfloat16",
+        enforce_eager=True,
+        max_model_len=128,
+        max_num_seqs=2,
+        max_num_batched_tokens=16,
+        enable_chunked_prefill=True,
+        async_scheduling=False,
+        aux_output_config={"enable_hidden_states": True},
+    ) as runner:
+        params = SamplingParams(
+            temperature=0,
+            max_tokens=1,
+            extra_args={
+                "hidden_state_capture": {
+                    "start": 2,
+                    "end": 47,
+                    "coordinate": "absolute",
+                    "min_rows": 45,
+                    "collection_id": "chunked",
+                }
+            },
+        )
+        prompt = {"prompt_token_ids": list(range(100, 148))}
+        for output in runner.llm.generate([prompt] * 2, params, use_tqdm=False):
+            result = hidden_result(output)
+            assert skip_reason(output) is None
+            np.testing.assert_array_equal(result.hidden_positions, np.arange(2, 47))
+            assert torch.isfinite(result.hidden_states).all()

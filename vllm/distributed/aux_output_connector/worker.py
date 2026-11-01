@@ -426,15 +426,14 @@ class PendingCombinedAuxOutput:
         if self.routed is not None:
             self.routed.enqueue_cpu_copy(num_sampled, num_rejected)
         if self.hidden is not None:
-            self.hidden.enqueue_cpu_copy()
+            self.hidden.enqueue_cpu_copy(num_sampled)
 
     def process_output(self) -> dict[str, AuxRequestOutput]:
         outputs = {} if self.routed is None else self.routed.process_output()
         if self.hidden is not None:
-            for request_id, chunk in self.hidden.chunks.items():
-                outputs.setdefault(request_id, AuxRequestOutput()).hidden_chunk = chunk
-            for request_id, error in self.hidden.errors.items():
-                outputs.setdefault(request_id, AuxRequestOutput()).hidden_error = error
+            for request_id, (chunk, error) in self.hidden.process_output().items():
+                output = outputs.setdefault(request_id, AuxRequestOutput())
+                output.hidden_chunk, output.hidden_error = chunk, error
         return outputs
 
 
@@ -478,7 +477,7 @@ class AuxOutputWorkerConnector:
         self, input_batch: InputBatch
     ) -> PendingCombinedAuxOutput | None:
         routed = self._routing.prepare_output(input_batch) if self._routing else None
-        hidden = None if self._hidden is None else self._hidden.pending
+        hidden = None if self._hidden is None else self._hidden.take_pending()
         if routed is None and hidden is None:
             return None
         return PendingCombinedAuxOutput(routed, hidden)

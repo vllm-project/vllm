@@ -83,7 +83,7 @@ def test_async_capture_admission_with_real_engine(monkeypatch):
 
             inputs = stream()
             try:
-                with pytest.raises(VLLMValidationError, match="streaming input"):
+                with pytest.raises(VLLMValidationError, match="Input streaming"):
                     await engine.add_request(
                         "capture", inputs, invalid_request("stop").params
                     )
@@ -119,9 +119,9 @@ def test_async_capture_admission_with_real_engine(monkeypatch):
                     )
                 ]
                 captures = [
-                    output.hidden_state_capture
+                    output.aux_outputs.hidden_state_capture
                     for output in outputs
-                    if output.hidden_state_capture is not None
+                    if output.aux_outputs is not None
                 ]
                 assert len(captures) == 1
                 assert captures[0].hidden_states.shape[0] == 2

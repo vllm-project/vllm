@@ -1,8 +1,18 @@
 # Windowed hidden-state capture
 
-The AuxOutput Connector can return hidden rows for a request-local response window.
-It captures selected rows during generation and skips capture copies outside the
-window. It does not allocate a full-response GPU hidden-state cache.
+The AuxOutput Connector can return hidden rows for a request-local position range.
+It captures selected rows while the request runs and skips capture copies outside
+the range. It does not allocate a full-response GPU hidden-state cache.
+
+Two workloads use the same primitive:
+
+- **Drafter training data**: capture a window of generated tokens (for example,
+  response tokens 1000 to 2000) during rollout, optionally with the auxiliary
+  layers used by EAGLE3, DSpark or DFlash.
+- **Full-vocabulary on-policy distillation**: a teacher server scores a student
+  trajectory in one prefill and returns the final hidden rows of the trajectory.
+  The trainer rebuilds the teacher's full-vocabulary logits with the teacher's
+  output head instead of transferring dense logits.
 
 ```python
 import os
@@ -28,12 +38,16 @@ params = SamplingParams(
     }},
 )
 output = llm.generate({"prompt_token_ids": prompt_ids}, params)[0]
-if output.hidden_state_capture is not None:
-    result = output.hidden_state_capture
+aux = output.aux_outputs
+if aux is not None and aux.hidden_state_capture is not None:
+    result = aux.hidden_state_capture
     print(result.hidden_positions, result.hidden_states.shape)
-else:
-    print(output.hidden_capture_skip_reason)
+elif aux is not None:
+    print(aux.hidden_capture_skip_reason)
 ```
+
+`RequestOutput.aux_outputs` is the single container for settled AuxOutput
+Connector results; it is `None` when nothing was settled for that output.
 
 Windows use zero-based, half-open response coordinates. `[1000, 2000)` contains
 1000 rows. The engine binds these offsets after tokenization, so text prompts do
@@ -45,8 +59,10 @@ including when speculative proposals are rejected or the request stops early.
 If generation ends before the window, the skip reason is `ended_before_window`.
 If fewer than `min_rows` are available, the reason is `insufficient_rows`.
 
-`hidden_states` is a CPU tensor. `hidden_positions`, layout, auxiliary layer IDs,
-request ID, collection ID, copy bytes and `copy_ms` accompany the result.
+`result.tensors` holds CPU tensors keyed by name: `hidden_states`, plus
+`logprobs` and `logprob_token_ids` when `logprob_topk` is set (also available as
+attributes). `hidden_positions`, layout, auxiliary layer IDs, `segments`,
+collection ID, copy bytes and `copy_ms` accompany the result.
 `copy_ms` measures CPU allocation and asynchronous-copy submission time,
 not completed GPU-to-CPU transfer time.
 The connector settles and releases its capture state when the window completes;
@@ -73,6 +89,47 @@ device assertion.
 After preemption, recomputed positions already delivered to the caller are excluded
 before hidden rows and logits are selected. Rejected speculative positions remain
 eligible for capture when they are computed again.
+
+## Prompt rows for teacher scoring
+
+Set `"coordinate": "absolute"` to address rows from the start of the prompt.
+Rows before `prompt_len - 1` form the `prompt` segment; later rows form the
+`output` segment, and a range crossing the boundary returns both (see
+`result.segments`). To score a student trajectory `x + y` with a teacher:
+
+```python
+scoring = SamplingParams(
+    max_tokens=1,
+    extra_args={"hidden_state_capture": {
+        "coordinate": "absolute",
+        "start": len(x) - 1,
+        "end": len(x) + len(y) - 1,
+        "min_rows": len(y),
+        "collection_id": "opd-step-1",
+    }},
+)
+output = llm.generate({"prompt_token_ids": x + y}, scoring)[0]
+teacher_hidden = output.aux_outputs.hidden_state_capture.hidden_states
+```
+
+Row `p` predicts token `p + 1`, so these rows give the teacher distribution for
+every token of `y`. Prompt rows settle as soon as they are computed; rows from
+intermediate chunked-prefill steps are held in the connector and delivered with
+the step that samples. Prefix-cache hits are limited to the rows before `start`
+(and external KV-connector hits are skipped), because cached rows are not
+recomputed. `logprob_topk` is rejected for prompt rows because prefill only
+computes logits for the last row; use `prompt_logprob_token_ids` for prompt
+top-k scores.
+
+For layouts that include the final layer, `result.logits_contract` describes how
+the sampler turns the final hidden rows into logits:
+`vocab_size` (logit columns kept), `logit_scale`, `soft_cap`, and
+`tie_word_embeddings` (whether the output head shares the input embedding).
+The logits are `soft_cap(h @ W_head.T)[:, :vocab_size] * logit_scale`, with
+soft-capping skipped when `soft_cap` is `None`. Models that override
+`compute_logits` beyond `LogitsProcessor` are not covered by this contract.
+Reconstruction is numerically equivalent but not guaranteed bitwise identical,
+because the trainer may accumulate in a different precision.
 
 Supported execution uses CUDA Model Runner V2, synchronous scheduling, a causal
 decoder, one completion per request, and TP with PP=CP=1. Stop strings, streaming
@@ -109,9 +166,11 @@ Send the capture window to `POST /v1/completions` (or through the OpenAI client'
 }
 ```
 
+Add `"coordinate": "absolute"` to capture prompt rows for teacher scoring.
 Each choice contains `hidden_state_capture` or `hidden_capture_skip_reason`.
-The capture contains window/position metadata, layout, layer IDs, collection ID,
-and `hidden_states`, with optional `logprobs` and `logprob_token_ids`. Each tensor
+The capture contains window/position metadata, `segments`, layout, layer IDs,
+request ID, collection ID, `logits_contract`, and a `tensors` map with
+`hidden_states` and optional `logprobs` and `logprob_token_ids`. Each tensor
 contains `data` (Base64-encoded contiguous native-endian bytes), `dtype` (PyTorch
 name without `torch.`), and `shape`. Decode without losing BF16 precision:
 
