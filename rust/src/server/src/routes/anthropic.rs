@@ -59,7 +59,15 @@ impl From<Message> for ChatMessage {
     fn from(message: Message) -> Self {
         match message {
             Message::User { content } => Self::user(content.into_content()),
-            Message::Assistant { content } => Self::assistant_text(content.into_text(false)),
+            Message::Assistant { content } => match content {
+                TextContent::Text(text) => Self::assistant_text(text),
+                TextContent::Blocks(blocks) => Self::assistant_blocks(
+                    blocks
+                        .into_iter()
+                        .map(|TextBlock::Text { text }| AssistantContentBlock::Text { text })
+                        .collect(),
+                ),
+            },
         }
     }
 }
@@ -97,17 +105,6 @@ impl TextContent {
             }
         }
     }
-
-    fn into_text(self, strip_billing: bool) -> String {
-        match self {
-            Self::Text(text) => text,
-            Self::Blocks(blocks) => blocks
-                .into_iter()
-                .map(|TextBlock::Text { text }| text)
-                .filter(|text| !strip_billing || !text.starts_with("x-anthropic-billing-header"))
-                .collect(),
-        }
-    }
 }
 
 impl MessagesRequest {
@@ -133,7 +130,14 @@ impl MessagesRequest {
             .transpose()?;
         let mut messages = Vec::new();
         if let Some(system) = self.system {
-            let text = system.into_text(true);
+            let text = match system {
+                TextContent::Text(text) => text,
+                TextContent::Blocks(blocks) => blocks
+                    .into_iter()
+                    .map(|TextBlock::Text { text }| text)
+                    .filter(|text| !text.starts_with("x-anthropic-billing-header"))
+                    .collect(),
+            };
             if !text.is_empty() {
                 messages.push(ChatMessage::system(text));
             }

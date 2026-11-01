@@ -10782,7 +10782,9 @@ async fn anthropic_assistant_prefix_count_matches_generation_without_echo() {
     .await;
     let input = json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "messages": [
         {"role": "user", "content": "Complete"},
-        {"role": "assistant", "content": "prefix"}
+        {"role": "assistant", "content": [
+            {"type": "text", "text": "pre"}, {"type": "text", "text": "fix"}
+        ]}
     ]});
     let (status, response) = post_json(&mut app, "/v1/messages", input.clone()).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
