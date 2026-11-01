@@ -554,6 +554,28 @@ Flags: `--tool-call-parser step3p5 --reasoning-parser step3p5 --enable-auto-tool
 
 The parser supports `auto`, `required`, and named tools.
 
+### LFM2.5 Models (`lfm2`)
+
+Supported models:
+
+* `LiquidAI/LFM2.5-2.6B`
+* `LiquidAI/LFM2.5-24B-A2B`
+* `LiquidAI/LFM2.5-8B-A1B`
+* `LiquidAI/LFM2.5-1.2B-Instruct`, `LiquidAI/LFM2.5-1.2B-Thinking`, `LiquidAI/LFM2.5-1.2B-JP`
+* `LiquidAI/LFM2.5-350M`, `LiquidAI/LFM2.5-230M`
+* `LiquidAI/LFM2.5-VL-3B`, `LiquidAI/LFM2.5-VL-450M`
+* Other LFM2.5 checkpoints whose chat template emits pythonic tool calls
+
+The model writes tool calls as a pythonic list between special tokens:
+
+```text
+<|tool_call_start|>[get_weather(city='Paris')]<|tool_call_end|>
+```
+
+Flags: `--tool-call-parser lfm2 --enable-auto-tool-choice`. Add `--reasoning-parser qwen3` for checkpoints that think before answering (e.g. `LiquidAI/LFM2.5-2.6B`, `LiquidAI/LFM2.5-1.2B-Thinking`), so reasoning stays out of `content` and `required`/named calls are constrained only after `</think>`.
+
+The parser supports `auto`, `required`, and named tools. Required and named calls are constrained to this native block rather than to a JSON tool-call list. The grammar fixes the name of the first call only, and arguments are not checked against the tool's parameter schema.
+
 ### Olmo 3 Models (`olmo3`)
 
 Olmo 3 models output tool calls in a format that is very similar to the one expected by the `pythonic` parser (see below), with a few differences. Each tool call is a pythonic string, but the parallel tool calls are newline-delimited, and the calls are wrapped within XML tags as `<function_calls>..</function_calls>`. In addition, the parser also allows JSON boolean and null literals (`true`, `false`, and `null`) in addition to the pythonic ones (`True`, `False`, and `None`).
