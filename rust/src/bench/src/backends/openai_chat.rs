@@ -105,12 +105,13 @@ impl OpenAIChatBackend {
 
                             update_server_metrics(&mut output, data.metrics.as_ref());
 
-                            if !data.choices.is_empty() {
-                                let content = data.choices[0]
-                                    .delta
-                                    .as_ref()
-                                    .and_then(|d| d.content.as_deref())
-                                    .unwrap_or("");
+                            if let Some(delta) = data
+                                .choices
+                                .first()
+                                .and_then(|choice| choice.delta.as_ref())
+                                .filter(|delta| delta.has_streamed_output())
+                            {
+                                let content = delta.content.as_deref().unwrap_or("");
 
                                 if !first_token_received {
                                     first_token_received = true;
@@ -358,13 +359,15 @@ mod tests {
         assert_eq!(a, b);
     }
 
-    /// Serve one streaming chat response over a raw socket: `num_tokens`
-    /// content chunks back-to-back, then `usage_delay` of silence, then the
-    /// choice-less usage chunk and `[DONE]`. Returns the endpoint URL.
+    /// Serve one streaming chat response over a raw socket: optionally an
+    /// opening role chunk, then `num_tokens` content chunks back-to-back,
+    /// `usage_delay` of silence, the choice-less usage chunk, and `[DONE]`.
+    /// Returns the endpoint URL.
     fn spawn_sse_server(
         num_tokens: usize,
         usage_delay: std::time::Duration,
         prompt_tokens: Option<u64>,
+        include_role_chunk: bool,
     ) -> String {
         use std::io::{BufRead, BufReader, Read, Write};
 
@@ -391,6 +394,11 @@ mod tests {
                 stream.flush().unwrap();
             };
             send("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n");
+            if include_role_chunk {
+                send(
+                    "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n",
+                );
+            }
             for _ in 0..num_tokens {
                 send("data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n");
             }
@@ -415,7 +423,7 @@ mod tests {
         // real delay is needed here; there is no observable event to wait on.
         let usage_delay = std::time::Duration::from_millis(150);
         let input = RequestFuncInput {
-            api_url: spawn_sse_server(3, usage_delay, None),
+            api_url: spawn_sse_server(3, usage_delay, None, false),
             model: "test-model".to_string(),
             output_len: 3,
             ..Default::default()
@@ -432,6 +440,22 @@ mod tests {
             (decode_time - itl_sum).abs() < 1e-6,
             "latency - ttft ({decode_time}s) != sum(itl) ({itl_sum}s)"
         );
+    }
+
+    #[tokio::test]
+    async fn test_role_chunk_is_not_counted_as_output() {
+        let input = RequestFuncInput {
+            api_url: spawn_sse_server(3, std::time::Duration::ZERO, None, true),
+            model: "test-model".to_string(),
+            output_len: 3,
+            ..Default::default()
+        };
+
+        let output = OpenAIChatBackend.send_request(&input, &reqwest::Client::new()).await.unwrap();
+
+        assert!(output.success, "{}", output.error);
+        assert_eq!(output.generated_text, "aaa");
+        assert_eq!(output.itl.len(), 2);
     }
 
     /// ignore_eos and extra_body must survive the raw-splice path.
@@ -453,7 +477,7 @@ mod tests {
     #[tokio::test]
     async fn test_usage_prompt_tokens_override_prompt_len() {
         let input = RequestFuncInput {
-            api_url: spawn_sse_server(3, std::time::Duration::ZERO, Some(128)),
+            api_url: spawn_sse_server(3, std::time::Duration::ZERO, Some(128), false),
             model: "test-model".to_string(),
             prompt_len: 100,
             output_len: 3,
@@ -471,7 +495,7 @@ mod tests {
     #[tokio::test]
     async fn test_missing_prompt_tokens_keeps_client_prompt_len() {
         let input = RequestFuncInput {
-            api_url: spawn_sse_server(3, std::time::Duration::ZERO, None),
+            api_url: spawn_sse_server(3, std::time::Duration::ZERO, None, false),
             model: "test-model".to_string(),
             prompt_len: 100,
             output_len: 3,
