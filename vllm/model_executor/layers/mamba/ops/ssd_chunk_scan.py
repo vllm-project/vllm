@@ -234,6 +234,7 @@ def _chunk_scan_fwd_kernel(
     BLOCK_SIZE_DSTATE: tl.constexpr,
     IS_TRITON_22: tl.constexpr,
     HAS_INITSTATES: tl.constexpr,
+    STATES_ARE_EXCLUSIVE: tl.constexpr,
 ):
     pid_c = tl.program_id(axis=1).to(tl.int64)
     pid_h = tl.program_id(axis=2)
@@ -261,7 +262,13 @@ def _chunk_scan_fwd_kernel(
         seq_idx_ptr - stride_seq_idx_chunk, mask=pid_c >= 1, other=-1
     )
 
-    if HAS_INITSTATES and (seq_idx != seq_idx_prev):
+    if STATES_ARE_EXCLUSIVE:
+        prev_states_ptr = (
+            states_ptr + pid_c * stride_states_chunk + pid_h * stride_states_head
+        )
+        prev_states_hdim = stride_states_hdim
+        prev_states_dstate = stride_states_dstate
+    elif HAS_INITSTATES and (seq_idx != seq_idx_prev):
         prev_states_ptr = (
             initstates_ptr
             + seq_idx * stride_init_states_batch
@@ -454,6 +461,7 @@ def _chunk_scan_fwd(
     D=None,
     z=None,
     initial_states=None,
+    states_are_exclusive=False,
 ):
     assert seq_idx is not None, "this implementation requires seq_idx"
 
@@ -549,5 +557,6 @@ def _chunk_scan_fwd(
         BLOCK_SIZE_DSTATE=max(triton.next_power_of_2(dstate), 16),
         IS_TRITON_22=TRITON_22,
         HAS_INITSTATES=initial_states is not None,
+        STATES_ARE_EXCLUSIVE=states_are_exclusive,
     )
     return
