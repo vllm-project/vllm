@@ -633,6 +633,22 @@ steps:
   - pytest -v -s distributed/test_custom_all_reduce.py -k all_reduce_mhc
   - pytest -v -s kernels/test_engram.py
 
+- label: ":nvidia: (4xB200) MiniMax-M3 Fused MoE Finalize"
+  key: minimax-m3-fused-moe-finalize-4xb200
+  # Nightly only, like the other 4-GPU B200 steps.
+  optional: true
+  timeout_in_minutes: 20
+  device: b200-k8s
+  num_devices: 4
+  source_file_dependencies:
+  - vllm/models/minimax_m3/nvidia/model.py
+  - vllm/models/minimax_m3/nvidia/ops/finalize_allreduce_norm.py
+  - vllm/models/common/ops/moe_tail_fusion/
+  - vllm/models/deepseek_v41/nvidia/ops/cute_dsl/all_reduce_mhc.py
+  - tests/distributed/test_custom_all_reduce.py
+  commands:
+  - pytest -v -s distributed/test_custom_all_reduce.py -k finalize_all_reduce_gemma_norm
+
 - label: ':amd: (MI355) Kimi-K3 Specialized Decode'
   key: kimi-k3-specialized-decode-amd
   automatic_shard: true
