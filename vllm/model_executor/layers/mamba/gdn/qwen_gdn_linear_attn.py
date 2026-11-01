@@ -57,7 +57,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 from vllm.model_executor.layers.quantization.inc import INCConfig
-from vllm.model_executor.layers.utils import default_unquantized_gemm
+from vllm.model_executor.layers.utils import cuda_unquantized_gemm
 from vllm.model_executor.model_loader.weight_utils import (
     sharded_weight_loader,
 )
@@ -653,7 +653,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             overlap_ba_proj
             and current_platform.is_cuda()
             and isinstance(ba_method, UnquantizedLinearMethod)
-            and ba_method._gemm_impl is default_unquantized_gemm
+            and ba_method._gemm_impl is cuda_unquantized_gemm
             and not vllm_config.parallel_config.use_ubatching
             and vllm_config.lora_config is None
         ):

@@ -419,6 +419,9 @@ steps:
   timeout_in_minutes: 20
   device: b200-k8s
   source_file_dependencies:
+  - vllm/model_executor/layers/linear.py
+  - vllm/model_executor/layers/mamba/gdn
+  - vllm/model_executor/layers/utils.py
   - vllm/models/qwen3_5/
   - vllm/model_executor/models/qwen3_next.py
   - tests/models/qwen3_5/
