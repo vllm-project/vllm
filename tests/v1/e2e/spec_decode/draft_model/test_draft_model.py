@@ -105,6 +105,85 @@ def test_draft_model_correctness(args: ArgsTest, enforce_eager: bool, vllm_runne
     assert_draft_model_correctness(args, vllm_runner)
 
 
+def _profile_moe_routes(worker):
+    import torch
+
+    from vllm.forward_context import set_forward_context
+    from vllm.model_executor.layers.fused_moe.router.fused_topk_router import (
+        vllm_topk_softmax,
+    )
+
+    runner = worker.model_runner
+    manager = runner.adaptive_verification
+    assert manager is not None
+    capture_sizes = runner.cudagraph_manager.captured_token_counts()
+    assert capture_sizes
+    batches = list(manager.batches_to_profile(capture_sizes))
+    graph_batch = next(b for b in batches if b["num_tokens"] == capture_sizes[0])
+    eager_batch = next(b for b in batches if b["num_tokens"] > max(capture_sizes))
+    results = []
+    with torch.inference_mode():
+        for batch in (graph_batch, eager_batch, {"num_tokens": capture_sizes[0]}):
+            with runner.step_timing.collect() as timings:
+                runner._dummy_run(**batch)
+            assert len(timings) == 1
+            sample = timings[0]
+            mask = runner.input_buffers.is_padding[: sample.num_target_tokens]
+            weights = torch.empty(
+                (mask.numel(), 8), dtype=torch.float32, device=mask.device
+            )
+            expert_ids = torch.empty_like(weights, dtype=torch.int32)
+            token_indices = torch.empty_like(expert_ids)
+            logits = torch.arange(32, device=mask.device, dtype=torch.float32)
+            logits = logits.expand(mask.numel(), -1).contiguous()
+            with set_forward_context(None, runner.vllm_config, is_padding=mask):
+                vllm_topk_softmax(weights, expert_ids, token_indices, logits)
+            results.append(
+                (
+                    sample.full_cudagraph,
+                    bool((expert_ids >= 0).all()),
+                    bool((expert_ids == -1).all()),
+                )
+            )
+    return results
+
+
+@single_gpu_only
+def test_adaptive_verification_profiles_moe_routes(vllm_runner, monkeypatch):
+    """Cost calibration includes experts without forcing FULL steps to eager."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setenv("VLLM_MOE_SKIP_PADDING", "1")
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    monkeypatch.setenv("VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN", "16")
+    model = "ibm-granite/granite-3.1-1b-a400m-instruct"
+    revision = "0da7a48b0276d500ce5922fd2b33944091fc6c09"
+    with vllm_runner(
+        model,
+        revision=revision,
+        max_model_len=128,
+        max_num_batched_tokens=32,
+        enable_chunked_prefill=True,
+        max_num_seqs=4,
+        gpu_memory_utilization=0.5,
+        enforce_eager=False,
+        compilation_config={
+            "cudagraph_mode": "FULL",
+            "cudagraph_capture_sizes": [4, 8],
+        },
+        speculative_config={
+            "method": "draft_model",
+            "model": model,
+            "revision": revision,
+            "num_speculative_tokens": 2,
+            "enable_adaptive_verification": True,
+        },
+    ) as llm:
+        results = llm.get_llm().llm_engine.collective_rpc(_profile_moe_routes)
+        assert results == [
+            [(True, True, False), (False, True, False), (True, False, True)]
+        ]
+
+
 @single_gpu_only
 def test_draft_model_realistic_example(vllm_runner):
     args = ArgsTest(
